@@ -37,6 +37,11 @@ CARRIER_VARIABLES = 4
 TOTAL_VARIABLES = PRIMARY_VARIABLES + CARRIER_VARIABLES
 PRIMARY_NAMES = ("xi", "eta", "rho0", "rho1", "rho2", "rho3")
 CARRIER_NAMES = ("sigma0", "sigma1", "sigma2", "sigma3")
+SOURCE_FACES = {
+    "SUPPORT": None,
+    "LEFT": Fraction(-1),
+    "RIGHT": Fraction(1),
+}
 
 
 @dataclass
@@ -668,18 +673,38 @@ def frozen_witness_state(
     return state
 
 
-def require_six_primary_weights(record: dict[str, object]) -> dict[str, object]:
-    """Re-evaluate symbolic preservation without treating carrier axes as sources."""
+def restrict_component(
+    component: base.TM2R, variable: int, value: Fraction
+) -> base.TM2R:
+    """Restrict one normalized primary variable before extending the carrier."""
+    coefficients: dict[tuple[int, ...], arb] = {}
+    value_ball = base.rational_ball(value)
+    for monomial, coefficient in component.coefficients.items():
+        exponent = monomial[variable]
+        restricted = list(monomial)
+        restricted[variable] = 0
+        key = tuple(restricted)
+        coefficients[key] = (
+            coefficients.get(key, arb(0))
+            + coefficient * value_ball**exponent
+        )
+    return base.TM2R(coefficients, component.remainder)
+
+
+def require_primary_weights(
+    record: dict[str, object], required: tuple[int, ...]
+) -> dict[str, object]:
+    """Re-evaluate symbolic preservation on the requested primary variables."""
     carriers = record.get("carriers")
     if not isinstance(carriers, list) or not carriers:
         return record
-    all_primary_present = True
+    required_present = True
     for carrier in carriers:
         if not isinstance(carrier, dict):
-            all_primary_present = False
+            required_present = False
             continue
         weights = carrier.get("variable_weights")
-        present = (
+        all_six = (
             isinstance(weights, list)
             and len(weights) >= PRIMARY_VARIABLES
             and all(
@@ -689,17 +714,40 @@ def require_six_primary_weights(record: dict[str, object]) -> dict[str, object]:
                 for weight in weights[:PRIMARY_VARIABLES]
             )
         )
-        carrier["all_six_variable_weights_present"] = present
-        all_primary_present = all_primary_present and present
-    record["all_six_variable_weights_present"] = all_primary_present
-    record["accepted"] = all_primary_present
+        present = (
+            isinstance(weights, list)
+            and len(weights) >= PRIMARY_VARIABLES
+            and all(
+                isinstance(weights[index], list)
+                and len(weights[index]) == 2
+                and Fraction(str(weights[index][1])) > 0
+                for index in required
+            )
+        )
+        carrier["all_six_variable_weights_present"] = all_six
+        carrier["required_primary_variable_weights_present"] = present
+        required_present = required_present and present
+    record["all_six_variable_weights_present"] = all(
+        carrier.get("all_six_variable_weights_present") is True
+        for carrier in carriers
+        if isinstance(carrier, dict)
+    )
+    record["required_primary_variable_weights_present"] = required_present
+    record["accepted"] = required_present
     record["status"] = (
-        "ACCEPTED" if all_primary_present else "EVENT_SYMBOLIC_DEPENDENCE_UNRESOLVED"
+        "ACCEPTED" if required_present else "EVENT_SYMBOLIC_DEPENDENCE_UNRESOLVED"
     )
     return record
 
 
-def promote_early_projection(diagnostic: dict[str, object]) -> dict[str, object]:
+def require_six_primary_weights(record: dict[str, object]) -> dict[str, object]:
+    """Compatibility wrapper for the unrestricted support transport."""
+    return require_primary_weights(record, tuple(range(PRIMARY_VARIABLES)))
+
+
+def promote_early_projection(
+    diagnostic: dict[str, object], required: tuple[int, ...]
+) -> dict[str, object]:
     """Accept a rigorous projection that precedes the obsolete frozen refusal."""
     if diagnostic.get("status") != "EARLY_ACCEPTANCE_BEFORE_FROZEN_REFUSAL":
         return diagnostic
@@ -726,8 +774,8 @@ def promote_early_projection(diagnostic: dict[str, object]) -> dict[str, object]
             and Fraction(str(normal[0])) > 0
             and isinstance(weights, list)
             and len(weights) >= PRIMARY_VARIABLES
-            and all(Fraction(str(weight[1])) > 0 for weight in weights[:PRIMARY_VARIABLES])
-            and carrier.get("all_six_variable_weights_present") is True
+            and all(Fraction(str(weights[index][1])) > 0 for index in required)
+            and carrier.get("required_primary_variable_weights_present") is True
         ):
             return diagnostic
     promoted = dict(diagnostic)
@@ -741,7 +789,9 @@ def promote_early_projection(diagnostic: dict[str, object]) -> dict[str, object]
     return promoted
 
 
-def continue_to_second_passage(projections: list[object]) -> dict[str, object]:
+def continue_to_second_passage(
+    projections: list[object], required: tuple[int, ...]
+) -> dict[str, object]:
     """Continue accepted upward section carriers to the next downward section."""
     branches: list[dict[str, object]] = []
     for index, projection in enumerate(projections):
@@ -762,9 +812,8 @@ def continue_to_second_passage(projections: list[object]) -> dict[str, object]:
         weights = witness.centered.variable_weights(
             second.carrier, rows=SECTION_ROWS
         )
-        six_present = all(
-            value.upper() > 0 for value in weights[:PRIMARY_VARIABLES]
-        )
+        six_present = all(value.upper() > 0 for value in weights[:PRIMARY_VARIABLES])
+        required_present = all(weights[index].upper() > 0 for index in required)
         branches.append(
             {
                 "branch": index,
@@ -777,6 +826,7 @@ def continue_to_second_passage(projections: list[object]) -> dict[str, object]:
                 "slab_radius_q": str(second.slab_radius),
                 "variable_weights": [interval_json(value) for value in weights],
                 "all_six_variable_weights_present": six_present,
+                "required_primary_variable_weights_present": required_present,
                 "accepted_substeps": phase.accepted_substeps,
                 "time_bisections": phase.time_bisections,
                 "downward_section_tubes": phase.downward_section_tubes,
@@ -790,17 +840,22 @@ def continue_to_second_passage(projections: list[object]) -> dict[str, object]:
         branch["all_six_variable_weights_present"] is True
         for branch in branches
     )
+    all_required = bool(branches) and all(
+        branch["required_primary_variable_weights_present"] is True
+        for branch in branches
+    )
     return {
         "attempted": True,
-        "accepted": all_six,
+        "accepted": all_required,
         "status": (
             "SECOND_PASSAGE_ACCEPTED"
-            if all_six
+            if all_required
             else "SECOND_PASSAGE_SYMBOLIC_DEPENDENCE_UNRESOLVED"
         ),
         "source_projected_leaves": len(projections),
         "completed_branches": branches,
         "all_six_variable_weights_present": all_six,
+        "required_primary_variable_weights_present": all_required,
     }
 
 
@@ -998,6 +1053,7 @@ def run_transport(
     mode: str,
     checks: list[dict[str, object]],
     witness_payload: dict[str, object],
+    source_face: str = "SUPPORT",
 ) -> dict[str, object]:
     global ACTIVE_MODE
     ACTIVE_MODE = mode
@@ -1006,9 +1062,32 @@ def run_transport(
     # projection, then install the new carrier before any new flow step.
     witness_state = frozen_witness_state(witness_payload, checks)
     witness_domain = witness_payload["witness_domain"]
+    face_value = SOURCE_FACES[source_face]
+    required_primary = (
+        tuple(range(PRIMARY_VARIABLES))
+        if face_value is None
+        else tuple(range(1, PRIMARY_VARIABLES))
+    )
+    global_face: Fraction | None = None
+    if face_value is not None:
+        witness_state = [
+            restrict_component(component, 0, face_value)
+            for component in witness_state
+        ]
+        xi_bounds = witness_domain["bounds"]["xi"]
+        global_face = Fraction(
+            xi_bounds[0] if source_face == "LEFT" else xi_bounds[1]
+        )
     reconstruction = {
         "source": "hash_bound_serialized_raw_projection",
         "witness_path": list(witness.WITNESS_PATH),
+        "source_face": source_face,
+        "source_face_normalized_xi_q": (
+            None if face_value is None else str(face_value)
+        ),
+        "source_face_global_xi_q": (
+            None if global_face is None else str(global_face)
+        ),
     }
     base.recondition = event_normal_recondition
     witness_state = extend_state(witness_state)
@@ -1016,11 +1095,18 @@ def run_transport(
     initial_weights = witness.centered.variable_weights(
         witness_state, rows=SECTION_ROWS
     )
-    bool_check(
-        checks,
-        "initial_xi_eta_preserved",
-        initial_weights[0].upper() > 0 and initial_weights[1].upper() > 0,
-    )
+    if face_value is None:
+        bool_check(
+            checks,
+            "initial_xi_eta_preserved",
+            initial_weights[0].upper() > 0 and initial_weights[1].upper() > 0,
+        )
+    else:
+        bool_check(
+            checks,
+            "initial_xi_face_exact_and_eta_preserved",
+            initial_weights[0].upper() == 0 and initial_weights[1].upper() > 0,
+        )
     original_try_projection = witness.try_projection
     original_project_upward_cover = witness.chain.project_upward_cover
     retained_projections: list[object] = []
@@ -1038,30 +1124,32 @@ def run_transport(
     def try_projection_with_primary_scope(
         state: list[base.TM2R], reference_time: Fraction, label: str
     ) -> dict[str, object]:
-        return require_six_primary_weights(
-            original_try_projection(state, reference_time, label)
+        return require_primary_weights(
+            original_try_projection(state, reference_time, label), required_primary
         )
 
     witness.chain.project_upward_cover = project_upward_cover_with_retention
     witness.try_projection = try_projection_with_primary_scope
     try:
         diagnostic = promote_early_projection(
-            witness.diagnose_upward_event(witness_state)
+            witness.diagnose_upward_event(witness_state), required_primary
         )
     finally:
         witness.try_projection = original_try_projection
         witness.chain.project_upward_cover = original_project_upward_cover
-    xi_eta_preserved: bool | None = None
+    required_primary_preserved: bool | None = None
     accepted = diagnostic.get("accepted_projection")
     if isinstance(accepted, dict):
-        xi_eta_preserved = True
+        required_primary_preserved = True
         for carrier in accepted.get("carriers", []):
             weights = carrier.get("variable_weights", [])
-            xi_eta_preserved = (
-                xi_eta_preserved
-                and len(weights) >= 2
-                and Fraction(str(weights[0][1])) > 0
-                and Fraction(str(weights[1][1])) > 0
+            required_primary_preserved = (
+                required_primary_preserved
+                and len(weights) >= PRIMARY_VARIABLES
+                and all(
+                    Fraction(str(weights[index][1])) > 0
+                    for index in required_primary
+                )
             )
     bool_check(checks, "event_normal_reconditioner_active", base.recondition is event_normal_recondition)
     if diagnostic.get("accepted_before_production_boundary") is True:
@@ -1073,17 +1161,21 @@ def run_transport(
         )
     bool_check(
         checks,
-        "symbolic_acceptance_scoped_to_six_primary_variables",
+        "symbolic_acceptance_scoped_to_required_primary_variables",
         all(
-            carrier.get("all_six_variable_weights_present") is True
+            carrier.get("required_primary_variable_weights_present") is True
             for attempt in diagnostic.get("projection_attempts", [])
             if isinstance(attempt, dict) and attempt.get("accepted") is True
             for carrier in attempt.get("carriers", [])
             if isinstance(carrier, dict)
         ),
     )
-    if xi_eta_preserved is not None:
-        bool_check(checks, "terminal_xi_eta_coordinates_retained", xi_eta_preserved)
+    if required_primary_preserved is not None:
+        bool_check(
+            checks,
+            "terminal_required_primary_coordinates_retained",
+            required_primary_preserved,
+        )
     second_passage: dict[str, object] = {
         "attempted": False,
         "accepted": False,
@@ -1101,7 +1193,9 @@ def run_transport(
             retained_match,
         )
         if retained_match:
-            second_passage = continue_to_second_passage(retained_projections)
+            second_passage = continue_to_second_passage(
+                retained_projections, required_primary
+            )
     transport_stats = stats_json()
     if diagnostic.get("accepted") is True:
         bool_check(
@@ -1117,12 +1211,24 @@ def run_transport(
     return {
         "execution_mode": "TRANSPORT",
         "mode": mode,
+        "source_face": source_face,
+        "source_face_normalized_xi_q": (
+            None if face_value is None else str(face_value)
+        ),
+        "source_face_global_xi_q": (
+            None if global_face is None else str(global_face)
+        ),
+        "required_primary_variables": [
+            PRIMARY_NAMES[index] for index in required_primary
+        ],
         "witness_domain": witness_domain,
         "reconstruction": reconstruction,
         "diagnostic": diagnostic,
         "second_passage": second_passage,
         "carrier_stats": transport_stats,
-        "terminal_xi_eta_preserved": xi_eta_preserved,
+        "terminal_required_primary_coordinates_retained": (
+            required_primary_preserved
+        ),
         "full_transport_attempted": True,
         "implementation_checks_passed": implementation_ok,
         "classification": (
@@ -1150,6 +1256,11 @@ def main() -> None:
     carrier_mode = os.environ.get("CS6_CARRIER_MODE", "EVENT_NORMAL_TRIPLETON")
     if carrier_mode not in MODES:
         raise SystemExit(f"CS6_CARRIER_MODE must be one of {MODES}")
+    source_face = os.environ.get("CS6_SOURCE_FACE", "SUPPORT")
+    if source_face not in SOURCE_FACES:
+        raise SystemExit("CS6_SOURCE_FACE must be SUPPORT, LEFT, or RIGHT")
+    if execution_mode != "TRANSPORT" and source_face != "SUPPORT":
+        raise SystemExit("source-face restriction is only valid in TRANSPORT mode")
     base.SOURCE_DEGREE = 2
     base.TIME_TAYLOR_ORDER = 12
     event.MAX_PHASE_STEPS = composability.MAX_FIRST_RETURN_STEPS
@@ -1216,7 +1327,8 @@ def main() -> None:
             "accepted": False,
             "early_projection": early_control_projection,
             "production_boundary_reproduced": False,
-        }
+        },
+        tuple(range(PRIMARY_VARIABLES)),
     )
     bool_check(
         checks,
@@ -1229,7 +1341,7 @@ def main() -> None:
     result = (
         run_preflight(witness_payload, baseline, checks)
         if execution_mode == "PREFLIGHT"
-        else run_transport(carrier_mode, checks, witness_payload)
+        else run_transport(carrier_mode, checks, witness_payload, source_face)
     )
     implementation_ok = all(item["passed"] is True for item in checks)
     payload = {
@@ -1250,6 +1362,7 @@ def main() -> None:
         "carrier_policy": "preserve_six_primary_tm2_variables_append_event_normal_qr_carrier",
         "primary_variables": list(PRIMARY_NAMES),
         "carrier_variables": list(CARRIER_NAMES),
+        "source_face": source_face,
         "target_improvement_factor_q": str(TARGET_IMPROVEMENT),
         "implementation_checks": checks,
         "implementation_checks_passed": implementation_ok,

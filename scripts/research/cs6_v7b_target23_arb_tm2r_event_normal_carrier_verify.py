@@ -16,6 +16,11 @@ EXPECTED_BUDGET_SHA256 = "f5b0f3ac5936c7814b20194bd13dc24e10408d4e9f9139a8c4c07c
 MODES = ("EVENT_NORMAL_DOUBLETON", "EVENT_NORMAL_TRIPLETON")
 PRIMARY = ("xi", "eta", "rho0", "rho1", "rho2", "rho3")
 CARRIER = ("sigma0", "sigma1", "sigma2", "sigma3")
+SOURCE_FACES = {
+    "SUPPORT": None,
+    "LEFT": Fraction(-1),
+    "RIGHT": Fraction(1),
+}
 
 
 def fail(message: str) -> None:
@@ -361,7 +366,10 @@ def validate_mode(
 
 
 def validate_second_passage(
-    value: object, accepted_projection: dict[str, object]
+    value: object,
+    accepted_projection: dict[str, object],
+    required_primary: tuple[int, ...],
+    source_face: str,
 ) -> bool:
     if not isinstance(value, dict) or value.get("attempted") is not True:
         fail("accepted first passage did not attempt the second passage")
@@ -393,10 +401,15 @@ def validate_second_passage(
         weights = branch.get("variable_weights")
         if not isinstance(weights, list) or len(weights) < 6:
             fail("second-passage branch lacks six primary weights")
-        if not all(interval(weight, "second-passage primary weight")[1] > 0 for weight in weights[:6]):
-            fail("second-passage branch lost a primary symbolic variable")
-        if branch.get("all_six_variable_weights_present") is not True:
-            fail("second-passage branch primary-weight flag is false")
+        parsed_weights = [
+            interval(weight, "second-passage primary weight") for weight in weights
+        ]
+        if not all(parsed_weights[index][1] > 0 for index in required_primary):
+            fail("second-passage branch lost a required primary variable")
+        if source_face != "SUPPORT" and parsed_weights[0] != (Fraction(0), Fraction(0)):
+            fail("second-passage face branch does not keep xi exact")
+        if branch.get("required_primary_variable_weights_present") is not True:
+            fail("second-passage required-primary flag is false")
         for key in ("accepted_substeps", "downward_section_tubes"):
             if not isinstance(branch.get(key), int) or branch[key] <= 0:
                 fail(f"second-passage branch has invalid {key}")
@@ -411,8 +424,8 @@ def validate_second_passage(
             fail("second-passage source-leaf count is inconsistent")
         if len(branches) != expected_leaves or not branches:
             fail("accepted second passage is not a complete source-leaf cover")
-        if value.get("all_six_variable_weights_present") is not True:
-            fail("accepted second passage aggregate primary-weight flag is false")
+        if value.get("required_primary_variable_weights_present") is not True:
+            fail("accepted second passage aggregate required-primary flag is false")
     else:
         status = value.get("status")
         if not isinstance(status, str) or status == "SECOND_PASSAGE_ACCEPTED":
@@ -452,6 +465,9 @@ def main() -> None:
     require(payload, "time_taylor_order", 12)
     require(payload, "primary_variables", list(PRIMARY))
     require(payload, "carrier_variables", list(CARRIER))
+    source_face = payload.get("source_face")
+    if source_face not in SOURCE_FACES:
+        fail("source face is invalid")
     require(payload, "target_improvement_factor_q", "18")
     require(payload, "covering_relation_certified", False)
     require(payload, "recurrent_graph_certified", False)
@@ -490,6 +506,40 @@ def main() -> None:
         require(result, "classification", expected)
     elif execution_mode == "TRANSPORT":
         require(result, "full_transport_attempted", True)
+        require(result, "source_face", source_face)
+        face_value = SOURCE_FACES[source_face]
+        required_primary = (
+            tuple(range(len(PRIMARY)))
+            if face_value is None
+            else tuple(range(1, len(PRIMARY)))
+        )
+        require(
+            result,
+            "required_primary_variables",
+            [PRIMARY[index] for index in required_primary],
+        )
+        witness_domain = result.get("witness_domain")
+        if not isinstance(witness_domain, dict):
+            fail("transport witness domain is absent")
+        bounds = witness_domain.get("bounds")
+        if not isinstance(bounds, dict) or "xi" not in bounds:
+            fail("transport witness xi domain is absent")
+        xi_bounds = interval(bounds["xi"], "transport witness xi domain")
+        expected_global_face = (
+            None
+            if source_face == "SUPPORT"
+            else xi_bounds[0] if source_face == "LEFT" else xi_bounds[1]
+        )
+        require(
+            result,
+            "source_face_normalized_xi_q",
+            None if face_value is None else str(face_value),
+        )
+        require(
+            result,
+            "source_face_global_xi_q",
+            None if expected_global_face is None else str(expected_global_face),
+        )
         if result.get("mode") not in MODES:
             fail("transport mode is invalid")
         validate_stats(result.get("carrier_stats"), "transport", False)
@@ -514,10 +564,18 @@ def main() -> None:
                 weights = carrier.get("variable_weights")
                 if not isinstance(weights, list) or len(weights) < 6:
                     fail("accepted projection lacks six primary weights")
-                if not all(interval(weight, "accepted primary weight")[1] > 0 for weight in weights[:6]):
-                    fail("accepted projection lost a primary symbolic variable")
-                if carrier.get("all_six_variable_weights_present") is not True:
-                    fail("accepted projection primary-weight flag is false")
+                parsed_weights = [
+                    interval(weight, "accepted primary weight") for weight in weights
+                ]
+                if not all(parsed_weights[index][1] > 0 for index in required_primary):
+                    fail("accepted projection lost a required primary variable")
+                if source_face != "SUPPORT" and parsed_weights[0] != (
+                    Fraction(0),
+                    Fraction(0),
+                ):
+                    fail("accepted face projection does not keep xi exact")
+                if carrier.get("required_primary_variable_weights_present") is not True:
+                    fail("accepted projection required-primary flag is false")
                 derivative = interval(carrier.get("event_derivative"), "accepted derivative")
                 normal = interval(carrier.get("event_normal"), "accepted normal")
                 if derivative[0] <= 0 or normal[0] <= 0:
@@ -539,7 +597,10 @@ def main() -> None:
             elif diagnostic.get("production_boundary_reproduced") is not True:
                 fail("ordinary accepted projection lacks the frozen control boundary")
             second_accepted = validate_second_passage(
-                result.get("second_passage"), accepted
+                result.get("second_passage"),
+                accepted,
+                required_primary,
+                source_face,
             )
         else:
             second_accepted = False

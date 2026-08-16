@@ -16,6 +16,7 @@ OUT_DIR="${CS6_OUTPUT_DIR:-$DEFAULT_OUT}"
 DEPS="${CS6_PYTHONPATH:-/tmp/sounio-cs6-arb-full-leaf-deps}"
 EXECUTION_MODE="${CS6_EXECUTION_MODE:-PREFLIGHT}"
 CARRIER_MODE="${CS6_CARRIER_MODE:-EVENT_NORMAL_TRIPLETON}"
+SOURCE_FACE="${CS6_SOURCE_FACE:-SUPPORT}"
 
 [[ -d "$DEPS/flint" ]] || { echo "python-flint dependency directory is unavailable: $DEPS" >&2; exit 2; }
 [[ -f "$WITNESS_RECEIPT" ]] || { echo "frozen witness receipt is unavailable" >&2; exit 2; }
@@ -24,9 +25,15 @@ CARRIER_MODE="${CS6_CARRIER_MODE:-EVENT_NORMAL_TRIPLETON}"
 case "$EXECUTION_MODE" in
   PREFLIGHT) stem="preflight" ;;
   TRANSPORT)
+    case "$SOURCE_FACE" in
+      SUPPORT) face_stem="support" ;;
+      LEFT) face_stem="left" ;;
+      RIGHT) face_stem="right" ;;
+      *) echo "invalid CS6_SOURCE_FACE=$SOURCE_FACE" >&2; exit 2 ;;
+    esac
     case "$CARRIER_MODE" in
-      EVENT_NORMAL_DOUBLETON) stem="transport_doubleton" ;;
-      EVENT_NORMAL_TRIPLETON) stem="transport_tripleton" ;;
+      EVENT_NORMAL_DOUBLETON) stem="transport_doubleton_$face_stem" ;;
+      EVENT_NORMAL_TRIPLETON) stem="transport_tripleton_$face_stem" ;;
       *) echo "invalid CS6_CARRIER_MODE=$CARRIER_MODE" >&2; exit 2 ;;
     esac
     ;;
@@ -47,6 +54,7 @@ trap 'rm -f "$tmp_result" "$tmp_stderr" "$tmp_verified" "$tmp_mutations"' EXIT
 set +e
 PYTHONPATH="$DEPS:$ROOT/scripts/research" PYTHONDONTWRITEBYTECODE=1 \
   CS6_EXECUTION_MODE="$EXECUTION_MODE" CS6_CARRIER_MODE="$CARRIER_MODE" \
+  CS6_SOURCE_FACE="$SOURCE_FACE" \
   python3 -B "$WORKER" > "$tmp_result" 2> "$tmp_stderr"
 worker_rc=$?
 set -e
@@ -86,4 +94,4 @@ if [[ "$EXECUTION_MODE" == "PREFLIGHT" ]]; then
 fi
 
 trap - EXIT
-echo "CS6_EVENT_NORMAL_CARRIER_COMPLETE=true mode=$EXECUTION_MODE carrier=$CARRIER_MODE"
+echo "CS6_EVENT_NORMAL_CARRIER_COMPLETE=true mode=$EXECUTION_MODE carrier=$CARRIER_MODE face=$SOURCE_FACE"
