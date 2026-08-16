@@ -57,56 +57,21 @@ pub fn items_reset_pure_fn_reg() with Mut {
     pure_fn_local_reset()
 }
 
-// #1547: an `extern "C" { ... }` block declares N functions but
-// parse_extern_fn_item returns a single Item. Decls 2..N queue on this
-// module-global side channel (same pattern as TPLET_PENDING in stmts.sio and
-// the AST claim registry — the Parser struct is copied by value and must not
-// grow) and are drained by parse_program_loop / parse_items_loop in
-// parser::mod right after each parse_item call.
+// The extern-block pending queue (#1547) was REMOVED here, 2026-08-23, in the
+// same change that deleted its last caller.
 //
-// The queue is intentionally self-clearing with NO per-parse reset fn: under
-// the pinned source-bootstrap stage2 chain, a reset write to this global from
-// parse_items_preloaded corrupts parser state for subsequent tokens and every
-// --check parse fails (CI job "Source-Bootstrap Self-Host (Linux x86_64)",
-// step "Source-bootstrap modular typecheck proof"). items_drain_extern_pending
-// empties the queue after every parse_item call, and both top-level loops run
-// to EOF, so no reset is needed. Do not re-add one without re-running that CI
-// step against a stage2-built lean check-out.
-var EXTERN_PENDING_ITEMS: Option<Box<ItemList>> = None
-
-fn items_push_extern_pending(item: Item) with Mut, Alloc {
-    EXTERN_PENDING_ITEMS = Some(Box::new(ItemList { head: item, tail: EXTERN_PENDING_ITEMS }))
-}
-
-// Drain queued extern decls onto rev_items_opt preserving source order, and
-// clear the queue. Safe to call when the queue is empty (returns input).
-pub fn items_drain_extern_pending(rev_items_opt: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
-    var out = rev_items_opt
-    var pend = EXTERN_PENDING_ITEMS
-    EXTERN_PENDING_ITEMS = None
-    // Queue head is the LAST parsed decl (cons order); reverse once so decls
-    // land on the item stream in source order after the caller's final reverse.
-    var fwd: Option<Box<ItemList>> = None
-    while true {
-        match pend {
-            Some(node) => {
-                fwd = Some(Box::new(ItemList { head: (*node).head, tail: fwd }))
-                pend = (*node).tail
-            },
-            None => break,
-        }
-    }
-    while true {
-        match fwd {
-            Some(node) => {
-                out = Some(Box::new(ItemList { head: (*node).head, tail: out }))
-                fwd = (*node).tail
-            },
-            None => break,
-        }
-    }
-    out
-}
+// It queued declarations 2..N of an `extern "C" { .. }` block on a
+// module-global side channel for parse_program_loop to drain. The re-entrant
+// parser in this file replaces it: one wrapper item per parse_item() call, so
+// nothing is dropped and no aggregate crosses a module-global queue -- which
+// is the defect that motivated the rewrite, since the gen seed corrupts large
+// Item aggregates stored in module globals.
+//
+// Deleting the definition and not only the callers is deliberate. A `pub fn`
+// with zero callers is an inert surface, and this repository landed a ratchet
+// against exactly that on the same day: a thing that exists must mean
+// something or be refused. Leaving a dead queue behind would have been the
+// disease the rewrite was curing.
 
 fn pure_fn_local_bind(name: Name, value: i64) with Mut, Div {
     if PURE_FN_LOCAL_N < 32 {
@@ -991,12 +956,116 @@ fn items_reverse_item_list_loop(
     }
 }
 
+// ── Track A: extern "C" declarations become wrapper fns ────────────
+// MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16: the bodyless FnDef
+// this parser used to emit for an `extern "C"` declaration lowers (under
+// Madaros) as a real function whose body returns 0, shadowing the by-name
+// builtin resolution — proven with extern-declared str_len/sqrt returning
+// 0 while the undeclared calls resolve and work. lean_single solves the
+// same problem with strip_extern_blocks() stub-rewriting; the Madaros
+// equivalent lives here: each declaration becomes an ordinary Sounio fn
+// (declared signature preserved for callers) whose body forwards to a
+// ffi_<name> intrinsic, resolved by the checker's runtime builtin table
+// and emitted by the native builtin registry. Unimplemented externs fail
+// at the wrapper's inner call with a clear E137 instead of silently
+// returning 0 at runtime.
+
+// Brace-form extern "C" blocks yield ONE wrapper item per parse_item() call:
+// parse_extern_fn_item consumes only the first declaration and leaves the
+// parser positioned inside the block with EXTERN_BLOCK_ACTIVE set; the item
+// loops' next parse_item() call re-enters via parse_extern_block_decl until
+// the closing brace. Every wrapper therefore flows through the ordinary
+// parse_item return path, and no aggregate is ever stored in a global.
+// (Earlier Track A drafts queued built Items — or their small components —
+// through a module-global list and rebuilt them at drain time; every variant
+// of that heap round-trip corrupted the stored aggregate under the gen seed:
+// name.len read back as 0x0100000000000000, E017 on the wrapper body, or a
+// native-checker segfault. Only scalar flags survive in globals here.)
+var EXTERN_BLOCK_ACTIVE: i64 = 0
+var EXTERN_BLOCK_VIS_KIND: i64 = 0
+
+fn ffi_name_path(name: Name, span: Span) -> Expr with Panic {
+    var seg = StringList { head_buf: [0; 128], head_len: 0, tail: None }
+    seg.head_buf[0] = 102 as i8   // 'f'
+    seg.head_buf[1] = 102 as i8   // 'f'
+    seg.head_buf[2] = 105 as i8   // 'i'
+    seg.head_buf[3] = 95 as i8    // '_'
+    var bi: i64 = 0
+    while bi < name.len && bi < 123 {
+        seg.head_buf[(4 + bi) as usize] = name.buf[bi as usize]
+        bi = bi + 1
+    }
+    seg.head_len = 4 + name.len
+    var e = mk_expr(ExprKind::ExprPath, span)
+    e.path = AstPath { segments: seg, seg_count: 1 }
+    e
+}
+
+fn param_name_path(pl: ParamList, span: Span) -> Expr with Panic {
+    var seg = StringList { head_buf: [0; 128], head_len: 0, tail: None }
+    var bi: i64 = 0
+    while bi < pl.head.name.len && bi < 128 {
+        seg.head_buf[bi as usize] = pl.head.name.buf[bi as usize]
+        bi = bi + 1
+    }
+    seg.head_len = pl.head.name.len
+    var e = mk_expr(ExprKind::ExprPath, span)
+    e.path = AstPath { segments: seg, seg_count: 1 }
+    e
+}
+
+fn extern_forward_args_list(pl: ParamList, span: Span) -> ExprList with Panic, Alloc {
+    ExprList {
+        label: empty_name(),
+        head: param_name_path(pl, span),
+        tail: match pl.tail {
+            None => None
+            Some(rest) => Some(Box::new(extern_forward_args_list(*rest, span)))
+        }
+    }
+}
+
+fn extern_wrapper_fn_def(name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> FnDef with Panic, Alloc {
+    var call = mk_expr(ExprKind::ExprCall, span)
+    call.left = Some(Box::new(ffi_name_path(name, span)))
+    match params_opt {
+        None => {}
+        Some(first) => { call.args = Some(Box::new(extern_forward_args_list(*first, span))) }
+    }
+    let stmt = Stmt { kind: StmtKind::StmtExpr, span: span, name: empty_name(), ty: None, expr: Some(Box::new(call)), target: None, assign_op: AssignOp::AssignEq }
+    FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: Some(Box::new(StmtList { head: stmt, tail: None })), span: span }, span: span, is_kernel: false,
+        // is_extern is FALSE on purpose. main gained this field via #1547,
+        // after this branch forked, and the wrapper is not an extern
+        // declaration -- it is an ordinary Sounio fn whose body forwards to the
+        // ffi_<name> intrinsic. Marking it true would make the checker treat it
+        // as the bodyless stub this whole change exists to stop emitting.
+        is_extern: false }
+}
+
+fn extern_wrapper_item(visibility: Visibility, name: Name, params_opt: Option<Box<ParamList>>, ret_ty: Option<Box<TypeExpr>>, span: Span) -> Item with Panic, Alloc {
+    let fn_def = extern_wrapper_fn_def(name, params_opt, ret_ty, span)
+    Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None }
+}
+
+// Called at the top of each item-collection loop in parser::mod so an
+// unterminated extern block in one file can never leak into the next parse.
+pub fn parser_reset_extern_block_state() with Mut {
+    EXTERN_BLOCK_ACTIVE = 0
+    EXTERN_BLOCK_VIS_KIND = 0
+}
+
+
 impl Parser {
     // ============================================================
     // Parse a single item
     // ============================================================
 
     fn parse_item(self) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        // Re-entry: mid-extern-block, every call yields the next declaration's
+        // ffi wrapper (or closes the block). See EXTERN_BLOCK_ACTIVE above.
+        if EXTERN_BLOCK_ACTIVE == 1 {
+            return self.parse_extern_block_decl(Visibility { kind: EXTERN_BLOCK_VIS_KIND, path: empty_path() })
+        }
         let k = self.peek()
 
         // Handle optional 'pub' visibility
@@ -4166,72 +4235,78 @@ impl Parser {
         })
     }
 
+    // One extern-"C"-block declaration per call (re-entrant; see the
+    // EXTERN_BLOCK_ACTIVE note above). Emits the ffi-forwarding wrapper for
+    // the next declaration; on '}' closes the block and returns an empty
+    // filler item (the same shape an empty extern block always produced).
+    fn parse_extern_block_decl(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self
+        while parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
+            p = p.advance()
+        }
+        if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
+            p = p.expect(TokenKind::RBrace)
+            parser_reset_extern_block_state()
+            let span = p.span_from(start)
+            return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+        }
+        if parser_peek(p) != TokenKind::Fn {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            if p.error_count <= 20 {
+                print("parse error: expected fn declaration in extern block [items.sio extern-block]\n")
+            }
+            p = p.advance()
+            let span = p.span_from(start)
+            return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+        }
+        p = p.advance()  // skip 'fn'
+        let name = p.current_name()
+        p = p.expect_ident()
+        p = p.expect(TokenKind::LParen)
+        let pair = p.parse_param_list()
+        p = pair.0
+        let params_opt = pair.1
+        p = p.expect(TokenKind::RParen)
+        let pair2 = p.parse_optional_return_type()
+        p = pair2.0
+        let ret_ty = pair2.1
+        while parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Semi {
+            p = p.advance()
+        }
+        if parser_peek(p) == TokenKind::RBrace {
+            p = p.advance()
+            parser_reset_extern_block_state()
+        }
+        let span = p.span_from(start)
+        // Track A: the declaration becomes an ffi-forwarding wrapper; the
+        // bodyless FnDef this used to build lowered as a shadow fn whose
+        // body returned a fabricated 0.
+        let fn_def = extern_wrapper_fn_def(name, params_opt, ret_ty, span)
+        return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+    }
+
     // Sprint 108: extern "C" fn name(params) -> RetType (no body)
-    // Brace-form extern blocks retain ALL declarations: the first is returned
-    // as the Item, decls 2..N queue on EXTERN_PENDING_ITEMS for the top-level
-    // loops to drain (#1547). All extern decls carry is_extern: true.
+    // Also accept brace-form extern blocks. Track A: every declaration is
+    // rewritten into an ffi-forwarding wrapper fn (see above); brace-form
+    // blocks are handled re-entrantly, one declaration per parse_item()
+    // call, so nothing is dropped (dispatch M1) and no aggregate crosses a
+    // module-global queue.
     fn parse_extern_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
         if parser_peek(p) == TokenKind::LBrace {
+            // Re-entrant brace form: consume '{', arm the block state, and
+            // return the FIRST declaration's wrapper via the shared
+            // continuation. The item loop's subsequent parse_item() calls
+            // re-enter the continuation for the remaining declarations (M1:
+            // they used to be silently dropped here).
             p = p.advance()
-            var first_name = empty_name()
-            var first_params_opt: Option<Box<ParamList>> = None
-            var first_ret_ty: Option<Box<TypeExpr>> = None
-            var have_first = false
-
-            while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
-                while parser_peek(p) == TokenKind::Semi || tk_is_doc_comment(parser_peek(p)) {
-                    p = p.advance()
-                }
-                if parser_peek(p) == TokenKind::RBrace || parser_peek(p) == TokenKind::Eof {
-                    break
-                }
-                if parser_peek(p) != TokenKind::Fn {
-                    p.had_error = true
-                    p.error_count = p.error_count + 1
-                    p = p.advance()
-                } else {
-                    p = p.advance()  // skip 'fn'
-                    let name = p.current_name()
-                    p = p.expect_ident()
-                    p = p.expect(TokenKind::LParen)
-                    let pair = p.parse_param_list()
-                    p = pair.0
-                    let params_opt = pair.1
-                    p = p.expect(TokenKind::RParen)
-                    let pair2 = p.parse_optional_return_type()
-                    p = pair2.0
-                    let ret_ty = pair2.1
-                    if !have_first {
-                        first_name = name
-                        first_params_opt = params_opt
-                        first_ret_ty = ret_ty
-                        have_first = true
-                    } else {
-                        // #1547: retain decls 2..N (previously dropped, then
-                        // re-created as name-only stubs only for builtin names —
-                        // non-builtin externs vanished entirely). Queue each as a
-                        // full ItemFn; parse_program_loop/parse_items_loop drain
-                        // EXTERN_PENDING_ITEMS right after parse_item returns.
-                        let decl_span = p.span_from(start)
-                        let decl_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: decl_span }, span: decl_span, is_kernel: false, is_extern: true }
-                        items_push_extern_pending(Item { kind: ItemKind::ItemFn, span: decl_span, visibility: visibility, name: name, fn_def: Some(Box::new(decl_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
-                    }
-                    while parser_peek(p) == TokenKind::Semi {
-                        p = p.advance()
-                    }
-                }
-            }
-
-            p = p.expect(TokenKind::RBrace)
-            let span = p.span_from(start)
-            if have_first {
-                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
-                return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: first_name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
-            }
-            return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
+            EXTERN_BLOCK_ACTIVE = 1
+            EXTERN_BLOCK_VIS_KIND = visibility.kind
+            return p.parse_extern_block_decl(visibility)
         }
         if parser_peek(p) != TokenKind::Fn {
             let span = p.current_span()
