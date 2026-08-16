@@ -3,8 +3,8 @@
 The Proof-Carrying Weaning / opioid–α2 occupancy study no longer lives in
 this stdlib. Canonical source:
 
-**Sibling repository:** `../sounio-pbpk-sedation-weaning`
-(absolute: `/Users/demetriosagourakis/Documents/sounio-pbpk-sedation-weaning`)
+**Sibling repository:** https://github.com/Sounio-lang/sounio-pbpk-sedation-weaning  
+Local checkout: `../sounio-pbpk-sedation-weaning`
 
 ## What left this tree
 
