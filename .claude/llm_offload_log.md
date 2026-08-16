@@ -2,6 +2,12 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
+| 2026-08-16 | xai/grok-4.5 | math-review | sibling src/pd/opioid_alpha2_occupancy.sio (weaning split) | REVIEWED_WITH_FINDINGS | Algebra OK; FAIL on clonidine AFE→SD prior (not log-normal); FAIL overclaim coverage⇔W≡0 structural theorem; tighten to conditional lemma. Raw: remote /tmp/weaning-offload-results/math_occ (from /tmp/llm-offload-46zY6v). |
+| 2026-08-16 | xai/grok-4.5 | math-review | sibling src/proof_carrying_weaning.sio | REVIEWED_WITH_FINDINGS | F5c algebra + Lean bridge OK; FAIL overclaim “re-derives evidence” / static C1–C6 literals; C1 coverage>1 semantics dubious. Raw: /tmp/weaning-offload-results/math_pcw. |
+| 2026-08-16 | xai/grok-4.5 | math-review | sibling formal/lean4/SounioOpioidWeaningSafety.lean | REVIEWED_WITH_FINDINGS | Core ℚ F5c lemmas OK (lake build green); FAIL unverified empirical attachments (61/61, 1.37) and p-box→certificate glue in comments. Raw: /tmp/weaning-offload-results/math_lean. |
+| 2026-08-16 | deepseek | review | sibling drugs/{fentanyl,morphine,clonidine}.sio + clinical tests | FAIL_HONEST | DEEPSEEK_API_KEY present on remote but Authentication Fails (invalid key ****8cec). No clinical review content from DeepSeek. |
+| 2026-08-16 | xai/grok-4.5 (fallback per offload-routing) | review | sibling drugs + test_morphine/clonidine_validation | REVIEWED_WITH_FINDINGS | Fallback after DeepSeek auth failure. Multiple BLOCKERs logged (fentanyl CL 55 vs 61.3; morphine renal×hepatic ontogeny; clonidine single Potts curve on dual elimination; test flow ΣQ≈2×CO). Findings recorded; no code fix in this extraction-only split. Raw: /tmp/weaning-offload-results/clin_xai_*. |
+| 2026-08-16 | local Mac | math-review/review | (attempt before remote) | FAIL_HONEST | Local `bin/llm-offload --status`: Keys file NOT FOUND; empty /tmp/llm-offload-* dirs. Re-ran on sounio-ws with keys. |
 | 2026-08-06 | cursor | math-review | xai | SounioNonUnitaryNWA.lean | OK interaction §4; DISAGREE WARN4 — discharge_interaction explicit | docs/research/particle_handler_interaction_math_review_offload.txt |
 | 2026-08-06 | cursor | math-review | xai | SounioEffects.lean | OK 1+3; DISAGREE WARN 2 (mask_comm all pairs) + WARN 4 (discharge_interaction is explicit) | docs/research/particle_handler_interaction_math_review_offload.txt |
 | 2026-08-06 | cursor | math-review | xai | SounioNonUnitaryNWA.lean | OK 1+3; DISAGREE 2 (identity handlers like ApproxCausal) | docs/research/particle_nunwa_lean_math_review_offload.txt |
