@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.papers.main.cayley-dickson-hierarchy-paper-2026-08-13
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.main.cayley-dickson-hierarchy-paper-2026-08-13
+-->
+
 # The Cayley-Dickson Hierarchy as a Language for Structural Complexity: From RNA Folding to Neural Dynamics
 
 **Authors:** Demetrios Chiuratto Agourakis et al.
