@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-08-16
+validated_by: cursor-agent
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16
 -->
 
