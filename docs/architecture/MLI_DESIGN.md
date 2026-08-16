@@ -1,22 +1,27 @@
 <!-- docs:meta
 topic_id: repo.docs.architecture.mli-design
-authority: repo_only
+authority: draft_amended_pending_land
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-08-16
+validated_by: WS-D grok-cli2 + preflight fable-1
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.mli-design
 -->
 
 # MLI Design — Machine-Level IR
 
-**Status:** draft for approval (WS-D Phase 1). **No `self-hosted/` edits** until this
-document is approved.
+**Status:** Option C **founder-approved** (2026-08-16). Preflight amendments D1–D4
+from [`WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md`](WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md)
+folded in (this revision). **No `self-hosted/` MLI code** until implementation
+dispatch after this amended design is accepted.
 
 **Authority:** Founder objectives 2026-08-16 (“Madaros E2E operacional, SOIR, MIR,
-MLI, HLIR EISA, f128 e f256 implantados e verificados”) and the binding design
-principle in
-[`docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md`](../internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md)
-§WS-D.
+MLI, HLIR EISA, f128 e f256 implantados e verificados”); binding design principle
+in [`MADAROS_FOCUS_PLAN_2026-08-16.md`](../internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md)
+§WS-D; Route B for WS-C (`MIR_PORT_PLAN.md`) is **settled** — do not re-litigate
+Route B or Option C here.
+
+**Adversarial preflight:** fable-1 reviewed Option C; it **survived**. Amendments
+below close input-contract and kind-model gaps only.
 
 ---
 
@@ -46,8 +51,9 @@ silently defaulting to “just another GPR IR.”
 register/stack discipline, verification story, staged ladder, named open
 decisions blocked on WS-C/WS-G.
 
-**Phase-2 exit (wave 3+, not this doc):** one function lowered MIR→MLI→x86
-**bit-identical** to the current direct native path.
+**Phase-2 exit (wave 3+, not this doc):** one function lowered **IR→MLI→x86**
+(see §3.2 feed choice) **bit-identical** to a **pinned** direct native path
+(see §10 O5 — resolved). Not expressible from Route-B EMIR alone.
 
 ---
 
@@ -57,12 +63,17 @@ decisions blocked on WS-C/WS-G.
 |---|---|---|
 | **SIR / HIR / IR** (`self-hosted/ir/`) | SSA-ish compiler IR with hypercomplex and epistemic opcodes | **Above** MIR/MLI; rich but not machine-level |
 | **`native::machine_ir`** (`self-hosted/native/machine_ir.sio`) | Native-v2 **legalize substrate** for x86-64 (MIR_* opcodes, GPR64 + stack slots + SSE2 float) | **Not** MLI. Today’s end-stage pseudo-ISA. MLI **feeds** this path or **replaces its pseudo layer** over time |
-| **MIR** (WS-C) | Frontier ENIR→MIR pipeline on `origin/canon/madaros-v2-sota` (not fully on `main` yet) | **Input** to MLI (pending WS-C route) |
-| **ENIR** | Epistemic numeric IR on the frontier branch; contract docs under `docs/internal/coordination/enir-*.md` | Source of MIR; verification pattern to mirror |
-| **MLI** (this doc) | **New** Machine-Level IR | Between MIR and native emit |
+| **MIR / EMIR** (WS-C Route B) | Frontier `self-hosted/enir/` → EMIR (`enir/mir.sio`): **epistemic-bundle** machine IR | **Not** a general scalar machine IR; see §3.2 gap |
+| **ENIR** | Epistemic numeric IR on `origin/canon/madaros-v2-sota`; contract docs under `docs/internal/coordination/enir-*.md` | Upstream of EMIR; verification pattern to mirror |
+| **MLI** (this doc) | **New** Machine-Level IR | Between **IR and/or EMIR** and native emit |
 
-If “MIR” is used without qualifier in this document, it means **WS-C portable MIR**
-(the MLI *input*), not `native::machine_ir`.
+**Disambiguation rule:** `native::machine_ir` constants use the historical
+`MIR_*` prefix on main — **not** the same object as Route-B EMIR. See §5.4 /
+preflight D4: renaming those constants to `X86_*` (or a header note) is a
+**precondition of WS-C PR1**, not optional later cleanup.
+
+If “MIR” is used without qualifier below, prefer **EMIR** when Route B is meant,
+and **never** mean `native::machine_ir`.
 
 ---
 
@@ -135,7 +146,8 @@ subset until “later.”
 
 ### 2.4 Recommendation and tradeoff (explicit)
 
-**Recommend Option C.**
+**Option C is founder-approved (2026-08-16).** Preflight re-affirmed it; this
+document does **not** re-open A vs B vs C.
 
 - **Scope/schedule cost:** +1–2 weeks design/fixtures for kind tags and expand
   rules; R1 emit is multi-week *after* Phase-2 (wave 3+).
@@ -143,7 +155,8 @@ subset until “later.”
   **uncertainty-aware and algebra-aware instruction selection** are *expressible*
   without pretending they are structs.
 - **Risk control:** Phase-2 success criterion remains bit-identity on a pure
-  scalar function; R1 is separately gated.
+  scalar function fed by the **IR→MLI side door** (§3.2); R1 is separately gated
+  and is the natural home for **Route-B EMIR epistemic bundles**.
 
 **Not recommended:** Option A as the *architecture* (even if R0 code looks like
 A). Documenting only A would violate the binding principle.
@@ -159,34 +172,97 @@ A). Documenting only A would violate the binding principle.
     → lexer/parser/check
     → IR / HLIR  (self-hosted/ir, self-hosted/hlir)
     → [WS-B] SOIR  (serial / durable form)
-    → [WS-C] ENIR → MIR   (portable machine IR; route TBD)
-    → [WS-D] MLI          ← THIS LAYER
-    → self-hosted/native/  (legalize / regalloc / encode / ELF)
+         │
+         ├─[WS-C Route B] ENIR → EMIR (epistemic bundles only)
+         │                      └─ emir_to_mli ──► MLI R1 Knowledge …
+         │
+         └─ ir_to_mli (S2–S3 primary) ──────────► MLI R0 scalar …
+                                                    │
+  [WS-D] MLI  ◄─────────────────────────────────────┘
+    → legalize_x86 → self-hosted/native/ (encode / ELF)
     → x86-64 ELF (today)
 ```
 
 Optional later consumers of the same MLI:
 
 - GPU path: MLI → existing KAXI/GPU IR (share kind tags; different expand).
-- Softfloat (WS-G): MLI `f128`/`f256` ops expand to routine calls or wide slots.
+- Softfloat (WS-G): MLI IEEE `f128`/`f256` ops expand to routine calls or wide slots
+  (**not** qd128 — see §4.1).
 
-### 3.2 Input contract (depends on WS-C)
+### 3.2 Input contract — Route B gap and chosen S2/S3 feed (preflight D1)
 
-**Assumed MIR properties** (must be confirmed or adapted by WS-C route decision):
+#### 3.2.1 What Route-B EMIR actually is (measured, not assumed)
 
-| Property | Requirement for MLI |
+WS-C **Route B** lands frontier `enir/mir.sio` (EMIR). It is **not** a general
+scalar machine IR. Against that source (preflight fable-1, 2026-08-16):
+
+| Fact | Consequence for MLI |
 |---|---|
-| SSA or near-SSA values | MLI may use virtual registers; φ-nodes resolved at MIR or early MLI |
-| Explicit control flow | Blocks + terminators; no unstructured IR exceptions in R0 |
-| Typed operands | MIR types map injectively into MLI kinds (see §4) |
-| Side effects | Calls, stores, foreign ABI marked; pure arith free of hidden IO |
-| Epistemic / Hyper | Either preserved as MIR types **or** already expanded with **explicit**
-  “discharged epistemic” markers (never silent drop) |
+| **10 opcodes only:** `CONST ADD SUB MUL DIV SQRT OBSERVE LOAD STORE MOVE` | **No** integer ops, **no** `call`, **no** `ret`, **no** compare/branch |
+| Module verify: `type_count == 1` and that type is an **epistemic bundle** `{value_kind: f64, error_kind: qd128, uncertainty_kind: gum1, status_tracked, provenance_tracked}` | **Every** EMIR value is a bundle, never a bare scalar |
+| Post-E3D non-claims include general N-way SSA, alias, **ABI**, **MachineIR** | Exactly the pieces a naive `mir_to_mli` for R0 would need |
 
-**If WS-C chooses a scalar-only MIR:** MLI still defines R1 kinds; expand occurs
-**at MIR→MLI** for epistemic/Hyper remaining in higher IR, or MLI accepts only
-scalar and R1 is fed from IR→MLI side door. Prefer **one choke point**:
-`mir_to_mli`.
+**Named gap:** ladder stages that assumed “MIR has functions, integers, control
+flow, and scalar f64” **cannot be fed from Route-B EMIR as shipped**. In
+particular the Phase-2 golden `add1(x: f64) -> f64` is **not expressible** in
+EMIR (no function ABI, no `ret`).
+
+This is **not** a re-litigation of Route B — EMIR is correctly scoped as an
+**epistemic numeric** machine IR. The design error was MLI assuming a
+*general* MIR that Route B does not claim to deliver.
+
+#### 3.2.2 Chosen feed for S2/S3 (decision)
+
+**Decision: re-anchor S2/S3 on the IR→MLI side door** (option (b) from
+preflight). Do **not** block Phase-2 on a post-E3D EMIR generalisation tranche.
+
+| Feed | What it carries | MLI track |
+|---|---|---|
+| **`ir_to_mli` (primary for S2–S3)** | `self-hosted/ir/` (and/or HLIR) scalar + full language surface | **R0** integers, f64, call/ret, branches |
+| **`emir_to_mli` (primary for R1 epistemic)** | Route-B EMIR epistemic bundles | **R1 `Knowledge`** — maps naturally onto Gpu4-like shape (`val`/`error≈qd`/`uncertainty`/`status`/`prov`) |
+| Optional later | Post-E3D EMIR generalisation (WS-C follow-on, **costed separately**) | Could eventually feed R0 if ABI+control land; **not** required for S2 |
+
+**Why this is correct (not a gap only):**
+
+1. Route-B EMIR’s single-type epistemic bundles are an **argument for** MLI’s
+   first-class `Knowledge` kind (R1), not a failure of Option C.
+2. EMIR `error_kind: qd128` is **double-double family**, not IEEE f128 — see
+   §4.1 exclusion (D2).
+3. Phase-2 bit-identity needs call/ret/f64 that **already exist** on the IR →
+   native path; that is the golden surface to mimic (§6.4, O5).
+
+**Choke points (two, not one):**
+
+```text
+  ir_to_mli   → R0 scalar MLI → legalize_x86 → encode   (S2–S3)
+  emir_to_mli → R1 Knowledge MLI → expand or native k_*  (S5+, parallel)
+```
+
+A single `mir_to_mli` name is **retired** for the scalar path to avoid
+implying EMIR can host `add1`.
+
+#### 3.2.3 Optional WS-C follow-on (not on S2 critical path)
+
+If product owners later want EMIR to host general functions:
+
+| Item | Rough cost | Notes |
+|---|---|---|
+| Integer + compare + branch ops | multi-week | breaks `type_count==1` or adds second type |
+| Function ABI + `call`/`ret` | multi-week | currently post-E3D non-claim |
+| N-way SSA / MachineIR claims | large | full MIR generalisation |
+
+**Do not** schedule this as a silent dependency of S2. If pursued, open a
+**costed WS-C follow-on** with its own gates.
+
+#### 3.2.4 Properties MLI itself still requires (from whatever feed)
+
+| Property | Requirement |
+|---|---|
+| Explicit control (R0) | Blocks + terminators on **IR-fed** MLI |
+| Typed operands | Map into MLI kinds (§4); EMIR→ always `Knowledge` shape |
+| Side effects | Loads/stores/calls marked; pure arith free of hidden IO |
+| No silent discharge | Epistemic lanes never dropped without `k_discharge` |
+
 
 ### 3.3 Output contract (what `native/` consumes)
 
@@ -200,8 +276,11 @@ today’s `native_v2` machine_ir consumers:
 - no unresolved virtual regs (post-regalloc) **or** a single documented
   “pre-regalloc MLI” form only used by the interpreter.
 
-**Bit-identity Phase-2:** for a golden function, `encode(mli_legalize(mli))`
-bytes equal `encode(current_direct_path)`.
+**Bit-identity Phase-2 (pinned — O5):** for a golden function,
+`encode(mli_legalize(mli))` bytes equal `encode(direct_path)` where
+`direct_path` is the **session-built** engine pinned in §10 O5 — not “any
+checked-in ELF”, and not an unspecified lean_single vs Madaros mix. See also
+§6.4: S3 is **emitter mimicry** for one function.
 
 ### 3.4 What MLI is *not*
 
@@ -221,29 +300,42 @@ Kinds are **part of the type**, not comments.
 ```text
 Kind =
   | Void
-  | Int { bits: 8|16|32|64, signed: bool }
+  | Int { bits: 8|16|32|64, signed: bool }   // NOT 128 — see exclusions
   | Ptr { aspace: flat }          // R0: single flat address space
-  | Float { fmt: f32|f64|f128|f256 }
-  | Flags                         // condition codes abstractly
+  | Float { fmt: f32|f64|f128|f256 }  // IEEE binary formats only
+  | QD128                         // double-double error lane (NOT IEEE f128)
+  | Bool                          // i1 logical; R0 branches consume this
   | VecF64 { lanes: 2|4|8 }       // XMM/YMM/ZMM geometric view (optional sugar)
-  | Knowledge { base: Float|Int, lanes: KnowledgeLanes }
+  | Knowledge { base: Float|Int, lanes: KnowledgeLanes, shape: … }
   | CD { dim: 1|2|4|8|16, coeff: Float }   // R,C,H,O,S over coeff format
   | Bundle { fields: [Kind; N] }  // rare; prefer Knowledge/CD tags
 ```
 
-**KnowledgeLanes (R1, aligned with GPU):**
+**Exclusions and non-identities (preflight D2 — freeze in S1):**
 
-| Lane | Role | GPU analogue (`epistemic_spirv.sio`) |
-|---|---|---|
-| `val` | point estimate | `val_id` |
-| `var` / `eps` | GUM variance or epsilon bound | `eps_id` |
-| `conf` or `valid` | confidence 0–1000 **or** boolean validity | `valid_id` |
-| `prov` | bit-packed provenance (optional in R0 expand) | `prov_id` |
+| Topic | Rule |
+|---|---|
+| **qd128 ≠ IEEE f128** | Frontier EMIR `error_kind: qd128` is **double-double family** (`stdlib/math/qd128.sio`). MLI `Float{f128}` is **IEEE binary128** (WS-G). **Forbidden:** silent `f128 := qd128`. Use kind **`QD128`** (or Knowledge error lane typed `QD128`) for EMIR error components. Mapping either way without an explicit conversion op is a **semantic miscompile by construction**. |
+| **No `Int{bits:128}` in R0 MLI** | Language `i128`/`u128` already reaches ELF on the **direct** wide-int path (2026-06). MLI R0 kinds intentionally list 8/16/32/64 only. **Until** an S4+ wide-int tranche: `ir_to_mli` must either (a) **reject** i128/u128 functions for the MLI path with a clear diagnostic, or (b) expand to multi-limb `i64` pairs under an explicit `WideInt` expand — never pretend coverage. Document which; default **(a) fail closed** for Phase-2 goldens (scalar i64/f64 only). |
+| **Flags** | **Retired as a first-class long-lived kind.** See §4.3 R0 control: branches consume **`Bool` vregs**; legalize may fuse `fcmp+br` into x86 flag use. Transient eflags are an **x86 legalize detail**, not an MLI value that can be stored across arbitrary ops. |
 
-Stdlib `Epistemic { val, variance, confidence }` is the **minimal CPU** shape;
-full four-lane is the **GPU-compatible** shape. MLI should tag which shape is
-active (`KnowledgeShape::Minimal3` vs `KnowledgeShape::Gpu4`) so expand rules
-do not invent lanes.
+**KnowledgeLanes (R1, aligned with GPU + EMIR):**
+
+| Lane | Role | GPU analogue | EMIR Route-B analogue |
+|---|---|---|---|
+| `val` | point estimate | `val_id` | `value_kind: f64` |
+| `var` / `eps` | GUM variance **or** epsilon | `eps_id` | uncertainty / GUM lane |
+| `err` | **qd128** arithmetic error lane when present | — | `error_kind: qd128` |
+| `conf` or `valid` | confidence 0–1000 **or** boolean validity | `valid_id` | `status_tracked` |
+| `prov` | bit-packed provenance | `prov_id` | `provenance_tracked` |
+
+Stdlib `Epistemic { val, variance, confidence }` is the **minimal CPU** shape
+(`KnowledgeShape::Minimal3`). Full GPU four-lane is `Gpu4`. EMIR bundles map
+to **`KnowledgeShape::EmirBundle`** (val + **QD128** err + gum uncertainty +
+status + provenance) — this is a **positive** Route-B → R1 argument, not only
+a feed gap.
+
+MLI must tag which shape is active so expand rules do not invent or drop lanes.
 
 **CD dimension:**
 
@@ -281,13 +373,21 @@ an explicit conversion op is a verify error.
 | Class | Examples | Notes |
 |---|---|---|
 | Transfer | `mov`, `load`, `store`, `lea` | typed by kind |
-| Integer arith | `add/sub/mul/div/rem`, shifts, logic | trapping policy flag |
-| Float arith | `fadd/fsub/fmul/fdiv`, compares | IEEE fmt on kind |
-| Convert | `i2f`, `f2i`, `fcast` (f32↔f64; f128/f256 when WS-G ready) | |
-| Control | `jmp`, `br_cc`, `ret`, `call` | call ABI attrs |
-| Compare | `cmp`, `fcmp` → Flags or bool vreg | |
+| Integer arith | `add/sub/mul/div/rem`, shifts, logic | **i8–i64 only** (no i128) |
+| Float arith | `fadd/fsub/fmul/fdiv` | IEEE fmt on kind; **not** qd128 |
+| Convert | `i2f`, `f2i`, `fcast` (f32↔f64; IEEE f128/f256 when WS-G ready) | explicit `qd_from_*` if ever needed |
+| Compare | `icmp`, `fcmp` → **`Bool` vreg** (not Flags) | |
+| Control | `jmp`, `br` (cond: **Bool**), `ret`, `call` | call ABI attrs |
 | Stack | `alloca` / frame adjust (or precomputed frame) | |
-| Pseudo | `copy`, `phi` (if not eliminated), `keep_alive` | |
+| Pseudo | `copy`, `keep_alive` | **no φ in MLI** — see §4.4 |
+
+**Flags / eflags (D2):** R0 MLI **does not** model live `Flags` values. A
+compare produces a `Bool`; `br` consumes that `Bool`. On x86, `legalize_x86`
+may fuse `fcmp`+`br` into `ucomisd`+`jcc` and must treat eflags as
+**clobbered by nearly every ALU op** — V-struct cannot catch a separated
+cmp/br pair if Flags were first-class. Optional verify rule if a future
+lowering ever reintroduces flag temps: **flags def must be adjacent to its
+sole consumer** (no intervening ops). Default for S1–S3: **Bool only**.
 
 #### R1 epistemic (first-class ops — design now, emit staged)
 
@@ -330,10 +430,22 @@ products (the historic “drift to mean” of IEEE thinking).
 ```text
 MliModule  { funcs, data, relocs, target_hint }
 MliFunction { name, args: [Kind], ret: Kind, blocks, frame_info, attrs }
-MliBlock    { id, params?, instrs, term }
+MliBlock    { id, instrs, term }   // NO block params
 ```
 
-**R0 constraint (Phase-2):** single return, no exception edges, SysV x86-64 only.
+**φ / block-params decision (D2 — pick one for S1):**
+
+| Choice | Decision |
+|---|---|
+| Representation | **No block parameters and no φ nodes in MLI.** |
+| Where SSA join is resolved | **Before** MLI: in IR / EMIR / `ir_to_mli` (copy insertion or already-straight-line). |
+| Rationale | Frontier EMIR has no general N-way SSA; Phase-2 goldens are straight-line or simple CFG with explicit moves. Avoids builder churn at S5 if both forms were half-specified. |
+
+If a future feed needs SSA joins inside MLI, that is a **versioned extension**
+(`MliBlock.params`), not the S1 default.
+
+**R0 constraint (Phase-2):** single return, no exception edges, SysV x86-64 only;
+function must come from **`ir_to_mli`** (or hand-built MLI fixture), **not** raw EMIR.
 
 ---
 
@@ -348,7 +460,7 @@ MliBlock    { id, params?, instrs, term }
 | `V256` | f64×4 / partial CD | ymm |
 | `V512` | f64×8 / O | zmm (needs EVEX path; already sketched in IR) |
 | `KMASK` | predicates | k0–k7 |
-| `FLAG` | conditions | eflags (transient) |
+| `FLAG` | **not a long-lived MLI class** | eflags only inside `legalize_x86` fusion |
 | `KNOW` | Knowledge multi-lane (R1) | **home**: consecutive stack slots or multi-phys bundle |
 | `CD` | CD multi-lane (R1) | **home**: ymm/zmm pairs or stack blob |
 
@@ -381,13 +493,28 @@ MliBlock    { id, params?, instrs, term }
 **Frame metadata** for GC/stack maps stays out of R0 unless a function already
 uses them on the direct path.
 
-### 5.4 Interaction with existing `machine_ir.sio`
+### 5.4 Interaction with existing `machine_ir.sio` (preflight D4)
 
-Proposed migration (post-approval, not in Phase 1 code):
+**Name collision is imminent:** on main, `native/machine_ir.sio` already owns
+the `MIR_*` constant prefix (`MIR_OPERAND_GPR64`, `MIR_MAX_INSTRS`, …) while
+WS-C Route B lands a different “MIR” (EMIR) under `enir/`. This plan cycle
+already produced a swapped-wording incident. Leaving the collision optional
+is insufficient.
 
-1. Treat current `MachineInstr` as **post-legalize x86 pseudo** (keep MIR_* names
-   or rename to `X86_*` later).
-2. New modules: `self-hosted/mli/{ir,builder,verify,interp,lower_from_mir,legalize_x86}.sio`.
+**Precondition of WS-C PR1 (required, not optional-later):**
+
+1. **Either** rename `MIR_*` symbols in `native/machine_ir.sio` (and call sites
+   in `codegen.sio` / regalloc) to **`X86_*`** / `NATIVE_MIR_*`, **or**
+2. At **minimum**, add a **naming-disambiguation note in the file header** of
+   `native/machine_ir.sio` stating: “These `MIR_*` constants are the **x86
+   native-v2 legalize substrate**, not Route-B EMIR / `enir/mir.sio`.”
+
+Prefer (1) when a native-touching PR is open; (2) is the floor for PR1 merge.
+
+**Migration (post-MLI approval, implementation phases):**
+
+1. Treat current `MachineInstr` as **post-legalize x86 pseudo** only.
+2. New modules: `self-hosted/mli/{ir,builder,verify,interp,ir_to_mli,emir_to_mli,legalize_x86}.sio`.
 3. `legalize_x86`: MLI → today’s machine_ir ops (R0) or EVEX sequences (R1 CD).
 4. Do **not** grow `machine_ir.sio` with Knowledge kinds ad hoc — that recreates
    erasure under a new name.
@@ -405,13 +532,13 @@ tree** (frontier / WS-C port).
 
 | Layer | What | Pass criterion |
 |---|---|---|
-| **V-struct** | Kind well-formedness, opcode arity, dominance, no raw cross-kind moves | pure static |
+| **V-struct** | Kind well-formedness, opcode arity, dominance, no raw cross-kind moves; **Bool** (not live Flags) for branches | pure static |
 | **V-interp** | MLI interpreter executes a function on concrete inputs | matches reference oracle |
 | **V-parity** | For R0 functions: shadow-exec MLI vs current native binary / direct path | bit-identical or value-identical per policy |
 
 ### 6.2 Interpreter (`mli_interp`)
 
-- State: vreg file + stack memory + flags.
+- State: vreg file + stack memory + **Bool** temps (no live Flags).
 - Knowledge ops: implement **exact GUM rules** used by GPU emitters (document the
   formula table next to `epistemic_spirv.sio` so CPU/GPU cannot diverge silently).
 - CD ops: implement **f64 component algebra** matching `stdlib/algebra` /
@@ -428,13 +555,24 @@ tree** (frontier / WS-C port).
 3. Roundtrip: text or binary dump → parse → structural equality (like IR
    serialize/normalize).
 
-### 6.4 Phase-2 golden
+### 6.4 Phase-2 golden (preflight D3 — pin before S3)
 
-- Fixture: pure function `f(x: f64, y: f64) -> f64` (e.g. `x*y + 1.0`).
-- Pipeline A: today’s native compile.
-- Pipeline B: MIR→MLI→legalize→encode.
-- **Pass:** identical `.text` bytes (or identical post-link function body under a
-  fixed seed of nops). Prefer **bytes** to avoid “same math, different spills.”
+**S3 is not a generic legaliser.** It is: *mimic the existing emitter for one
+function* — register choices, constant materialisation, and scheduling included.
+
+| Pin | Decision (O5 resolved) |
+|---|---|
+| **Golden engine** | **Madaros native-v2** via default `bin/souc` / `bin/madaros` after a **session-local rebuild** (`make build-madaros` or project equivalent under `souc-build-lock`). **Not** lean_single (different bytes). **Not** a checked-in ELF from `bin/` alone without rebuild receipt. |
+| **Provenance receipt** | Record: git SHA, engine path, `souc --version`, build command, UTC timestamp of the binary used as golden. |
+| **Fixture** | Pure scalar function expressible on IR→native today, e.g. `fn add1(x: f64) -> f64 { x + 1.0 }`. **Not** an EMIR program. |
+| **Pipeline A** | Direct path: IR → current native legalize/encode (pinned engine). |
+| **Pipeline B** | `ir_to_mli` → MLI V-struct → `legalize_x86` → same encode surface. |
+| **Pass** | **Bit-identical** `.text` (or whole function body) for that fixture. |
+| **`imm f64`** | No native x86 encoding for immediate f64 in arithmetic. Legalize **must** reproduce the **existing** emitter’s constant strategy (constant pool / `movsd` from rip-relative / `movabs`+`movq` — whichever the pinned path uses). Do not invent a cleaner constant path and call it “equivalent.” |
+
+**Estimate S3 as emitter-mimic work**, not as proof that general legalisation is
+cheap. Value-identity is a **fallback diagnostic** only if bit-identity fails;
+it is not the pass criterion once O5 is pinned to bytes.
 
 ### 6.5 R1 goldens (later)
 
@@ -449,32 +587,38 @@ tree** (frontier / WS-C port).
 
 | Stage | Deliverable | Gate |
 |---|---|---|
-| **S0** | This design approved | human sign-off |
-| **S1** | `mli` module: kinds, builder, text dump, V-struct verify | unit tests on fixtures (no full compile) |
-| **S2** | `mir_to_mli` for **scalar R0 only** (integers + f64) | interpreter tests |
-| **S3** | `legalize_x86` → existing encode path | Phase-2 **bit-identical** vertical slice |
-| **S4** | f32 + conversions; align with WS-G for f128/f256 **slots** (arith may libcall) | WS-G coordination |
-| **S5** | Knowledge kinds + `k_*` ops + expand-to-R0 | parity vs `ep_*` free functions |
+| **S0** | This design (as amended) accepted | human / orchestrator |
+| **S1** | `mli` module: kinds (**incl. QD128, no i128, Bool not Flags**), builder (**no φ**), text dump, V-struct verify | unit tests on fixtures |
+| **S2** | **`ir_to_mli`** for **scalar R0** (i64 + f64 + call/ret); **not** `emir_to_mli` | interpreter tests on IR-derived MLI |
+| **S3** | `legalize_x86` **mimicking** pinned Madaros native-v2 emitter for **one** golden | Phase-2 **bit-identical** vs session-built golden (O5) |
+| **S4** | f32 + conversions; IEEE f128/f256 **slots** (WS-G arith may libcall); still **no** qd≡f128 | WS-G coordination |
+| **S5** | Knowledge kinds + `k_*` + expand-to-R0; start **`emir_to_mli`** for Route-B bundles → `KnowledgeShape::EmirBundle` | parity vs `ep_*` and EMIR oracle lanes |
 | **S6** | CD kinds dim≤8 + `cd_mul` select (EVEX or stack loop) | parity vs stdlib / IR hyper tests |
 | **S7** | dim=16, associator, Door-β, zd_probe policy | GPU formula alignment checklist |
 | **S8** | Optional: MLI→GPU kind-preserving bridge | reuses KAXI epistemic markers |
 
-**Hard rule:** S3 does not require S5–S7, but S1 **must** define Knowledge/CD
-kinds so S5 is not a breaking rewrite.
+**Hard rules:**
+
+- S3 does **not** require S5–S7, but S1 **must** define Knowledge/CD/**QD128**
+  kinds so S5 is not a breaking rewrite.
+- **S2/S3 are not fed by Route-B EMIR.** EMIR feeds S5+ via `emir_to_mli`.
+- Optional post-E3D EMIR generalisation (WS-C follow-on) is **out of band** for
+  S2; see §3.2.3.
 
 **Parallelism:**
 
-- WS-C must freeze MIR type mapping before S2 lands on main.
-- WS-G owns f128/f256 **arithmetic**; MLI only owns **kind + expand hooks**.
+- WS-C PR1: EMIR land + **D4 naming precondition** (§5.4).
+- WS-G owns IEEE f128/f256 **arithmetic**; MLI owns kind + expand hooks + **QD128**
+  as a distinct kind for EMIR error lanes.
 - WS-F EISA remains a separate conformance consumer; may later golden MLI dumps.
 
 ---
 
 ## 8. Worked examples
 
-### 8.1 R0 scalar (Phase-2 target)
+### 8.1 R0 scalar (Phase-2 target — IR feed only)
 
-Source:
+Source (Sounio / IR — **not** EMIR):
 
 ```sounio
 fn add1(x: f64) -> f64 { x + 1.0 }
@@ -485,12 +629,14 @@ MLI sketch:
 ```text
 func @add1(v0: f64) -> f64 {
   b0:
-    v1: f64 = fadd v0, imm f64 1.0
+    v1: f64 = fadd v0, imm f64 1.0   // imm is MLI-level; x86 has no f64 imm
     ret v1
 }
 ```
 
-Legalize → `machine_ir` float binop / movsd path → ELF.
+Legalize must materialise `1.0` **exactly as the pinned Madaros native-v2
+emitter does** (pool / rip-relative / etc.), then emit the same float binop
+path. This fixture is **out of scope for `emir_to_mli`**.
 
 ### 8.2 R1 Knowledge (design now)
 
@@ -551,7 +697,7 @@ Select:
 
 | Risk | Mitigation |
 |---|---|
-| WS-C MIR shape changes | Keep `mir_to_mli` adapter thin; freeze kind enum early |
+| Route-B EMIR ≠ general MIR | S2/S3 use `ir_to_mli`; EMIR → R1 only (§3.2) |
 | R1 never funded | CI checklist items for S5/S6 as explicit unpaid debt in MADAROS status |
 | Kind explosion | No open-ended user algebras in MLI; CD dim ∈ {1,2,4,8,16} only |
 | Exact ZD vs float MLI confusion | Exact Core stays separate; MLI float CD never claims `Proved` |
@@ -568,13 +714,13 @@ Select:
 
 ## 10. Open decisions (blockers)
 
-| ID | Decision | Owner |
+| ID | Decision | Status / resolution |
 |---|---|---|
-| O1 | Final MIR type → MLI kind mapping table | WS-C + WS-D |
-| O2 | Knowledge shape default: Min3 vs Gpu4 on CPU | design review |
-| O3 | Whether `native::machine_ir` renames or remains post-legalize only | native maintainers |
-| O4 | f128/f256: softfloat libcall vs hardware when present | WS-G |
-| O5 | Bit-identity vs value-identity if encoding noise unavoidable | Phase-2 gate owners |
+| O1 | EMIR bundle → `KnowledgeShape::EmirBundle` (+ QD128 err lane); IR scalars → R0 kinds | **Draft mapping in §3.2 / §4.1**; freeze at S1 |
+| O2 | Knowledge shape default on CPU: Min3 vs Gpu4 vs EmirBundle | **Open** — default Min3 for stdlib path; EmirBundle for `emir_to_mli` |
+| O3 | `native::machine_ir` `MIR_*` → `X86_*` (or header note) | **Resolved as WS-C PR1 precondition** (§5.4 / D4) — not optional |
+| O4 | IEEE f128/f256: softfloat libcall vs hardware | **Open** — WS-G; independent of QD128 |
+| O5 | Phase-2 identity criterion + golden engine | **Resolved (D3):** **bit-identical** vs **session-built Madaros native-v2**; not lean_single; not unchecked `bin/` ELF. Value-identity is diagnostic only. |
 
 ---
 
@@ -587,14 +733,21 @@ Select:
 - [x] Verification story (struct + interp + parity), ENIR-pattern mirror
 - [x] Staged ladder with Phase-2 bit-identity isolated from R1
 - [x] Naming disambiguation vs existing `machine_ir.sio`
-- [ ] Human approval (founder / orchestrator) — **pending**
-- [ ] No `self-hosted/` MLI code until approval
+- [x] Option C founder-approved; preflight D1–D4 folded in
+- [x] Route-B EMIR gap named; S2/S3 re-anchored on `ir_to_mli`
+- [x] QD128 ≠ f128; i128 excluded; Bool not Flags; no φ in MLI
+- [x] O5 pinned before S3; S3 scoped as emitter mimicry
+- [x] D4 rename/note as WS-C PR1 precondition
+- [ ] Implementation dispatch (S1) after amended design accepted
+- [ ] No `self-hosted/` MLI code until S1 dispatch
 
 ---
 
 ## 12. References (repo-local)
 
 - Plan: `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` (WS-D)
+- Preflight: `docs/architecture/WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md`
+- WS-C route: `docs/architecture/MIR_PORT_PLAN.md` (Route B)
 - Concepts: `docs/internal/concepts/epistemic-numeric-value.md`
 - Exact vs measured: `docs/EXACT_CORE.md`
 - ENIR contract lineage: `docs/internal/coordination/enir-semantic-interface-contract-2026-07-12.md`
@@ -612,6 +765,18 @@ Select:
 | Field | Value |
 |---|---|
 | Draft author | grok-cli2 (WS-D) |
-| Claim | `bin/sounio-coord` lane `ws-d-mli-design` |
-| Branch context | working tree may be research/*; doc is integration-agnostic |
-| Next action | Reviewer approval → open S1 implementation dispatch (still no silent R1 drop) |
+| Option C | Founder-approved 2026-08-16 (not re-litigated) |
+| Preflight | fable-1 `WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md`; amendments D1–D4 |
+| Amend author | grok-cli2 lane `amend-mli-design` |
+| Worktree | `/workspace/.wt/amend-mli` branch `amend/mli-design-20260816` |
+| Next action | Land this amended doc; S1 may open; S2 = `ir_to_mli` not EMIR |
+
+### 13.1 Amendment log
+
+| Date | Change |
+|---|---|
+| 2026-08-16 | Initial WS-D draft (Option C recommended) |
+| 2026-08-16 | D1: name Route-B EMIR gap; S2/S3 feed = `ir_to_mli`; EMIR → R1 Knowledge |
+| 2026-08-16 | D2: QD128 kind; no Int128; Bool not Flags; no block-params/φ in MLI |
+| 2026-08-16 | D3: O5 pin Madaros native-v2 session binary; S3 = emitter mimic |
+| 2026-08-16 | D4: `X86_*` rename or header note = WS-C PR1 precondition |
