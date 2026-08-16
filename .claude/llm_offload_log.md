@@ -3569,3 +3569,5 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 - Raw review directory: `/tmp/llm-offload-r36LVT/`.
 
 | 2026-07-15 | xai/grok-4.3; deepseek/gemini attempted | math-review + external artifact review | categorical.sio; causal_canvas.sio; causal_intervention_frontier.sio; viz_causal_intervention_receipt.sio | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted the fixed DAG, native do(X) graph surgery, {Z} open-backdoor witness, structural {Z,U} witness, latent-U observed-data refusal, deterministic visual receipt, and explicit no-effect-estimate/no-general-ID boundary. DeepSeek and Gemini provider calls failed; no fallback claim was made. Raw: `/tmp/llm-offload-xnaK1b/`, `/tmp/llm-offload-Er8SK2/`. |
+
+| 2026-08-17 | N/A | fan-out | STATUS_AUDIT_2026-08-16.md | WAIVED | AI-authored status snapshot listing the absence of chapter prose at the 2026-09-22 master's defense; readers should weigh it as an AI-generated artefact inventory and verify any specific claim against the underlying files before relying on it. |
