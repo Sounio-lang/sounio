@@ -1,101 +1,73 @@
 <!-- docs:meta
-topic_id: repo.docs.audit.madaros-imported-pbpk28-cn-segfault-2026-08-16
+topic_id: repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16
 authority: repo_only
 audience: users
-last_validated: 2026-08-16
-validated_by: cursor-agent
-source_of_truth: docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16
 -->
 
-# Madaros imported PBPK28 CN: native run SIGSEGV
+# Madaros imported PBPK28 CN: native run SIGSEGV (+ silent zeros)
 
 **Date:** 2026-08-16  
 **Scope:** `bin/souc` default Madaros engine — **native run** of a multi-module
-program that imports `darwin_pbpk::tsit5_pbpk28::pbpk28_full_cn_step` (Crank–
-Nicolson stepper; filename is historical).  
-**Status:** OPEN — workaround mandatory for sedation-weaning sibling package.  
+program that imports `darwin_pbpk::tsit5_pbpk28::pbpk28_full_cn_step`.  
+**Status:** MITIGATED in stdlib (numerically verified under Madaros). Compiler
+root causes remain OPEN.  
 **Related:** `MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30.md`,
 `MADAROS_MULTIMODULE_NATIVE_SEED_SEGFAULT_2026-06-22.md`,
 epistemic trust / imported-module native path escalation (2026-07-14).
 
-## Symptom
+## Two bugs, one smoke
 
-`souc check` of a caller that `use`s `pbpk28_full_cn_step` **passes**.  
-`souc run` under default Madaros (native-v2) **SIGSEGV** even for a minimal
-smoke that builds Params28 locally and takes one CN step.
-
-`SOUNIO_SOUC_ENGINE=lean_single souc run …` completes with correct CL_obs gates
-(sibling `scripts/check.sh` parity morphine / clonidine / fentanyl / weaning_e2e).
-
-## Minimal repro (landed)
-
-Path: [`docs/audit/repro/smoke_pbpk28_cn_imported.sio`](repro/smoke_pbpk28_cn_imported.sio)
-
-Evidence 2026-08-16 (workspace control pod, `bin/souc` Madaros default):
-
-| Engine | Program | `check` | `run` |
+| # | Symptom under Madaros | lean_single | Stdlib mitigation |
 |---|---|---|---|
-| Madaros | `smoke_pbpk28_cn_imported.sio` | OK | ELF merges, prints `cv0=`, then **SIGSEGV** |
-| lean_single | same | OK | **PASS** |
-| Madaros | import `pbpk28_state_zero` + print `cv[0]` only | OK | **PASS** (`cv0=1.000000`) |
+| A | Call imported CN, then load a field of the returned `PBPKState28` → **SIGSEGV** | PASS | In-place `pbpk28_full_cn_step_mut` + thin by-value wrapper that `return`s a local copy |
+| B | Same-frame second `while` reading local `a_v[i]` after Schur fill → **all-zero** reconstruct (silent wrong science) | PASS | Move reconstruct to `pbpk28_cn_apply_schur(..., &a_v, &b_v, &a_t, &b_t)` |
 
-Bisect: crash is **not** generic multimodule print/import. It is specific to
-calling imported `pbpk28_full_cn_step` (post-lower, post-ELF write). Suspect
-CN return struct / array field load (D3 exclusive-ref / aggregate return).
+Bug A alone (mut + same-frame reconstruct loop) stops the crash but still ships
+zeros. Both mitigations are required for Madaros `souc run` parity with lean.
 
-## Workaround (production for sibling)
+## Bisect highlights (workspace control pod, 2026-08-16)
 
-Sibling repo `sounio-pbpk-sedation-weaning`:
+| Case | Madaros |
+|---|---|
+| Import `pbpk28_state_zero` + print | PASS |
+| Call CN, discard return | PASS (likely DCE) |
+| Call CN, then `st2.cv[0]` | **SIGSEGV** (bug A) |
+| Local large-struct return / large by-value args | PASS |
+| `return PBPKState28 { cv, ct }` from CN frame | still **SIGSEGV** |
+| Exclusive-ref stores / local-array fill probes | PASS |
+| Schur math + stash scalars with constant indices | PASS (correct `cv1≈0.351`) |
+| Same Schur + same-frame reconstruct `while` on `a_v[i]` | zeros (bug B) |
+| Schur + `pbpk28_cn_apply_schur` in another fn | **PASS** `cv1=0.351214` (lean `0.351215`) |
+| Thin by-value wrapper after mut+apply | **PASS** |
 
-```bash
-export SOUNIO_STDLIB_PATH=/path/to/sounio/stdlib
-(cd sibling && SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run src/scenarios/parity_fentanyl.sio)
-```
+## Mitigation (stdlib)
 
-Do **not** treat Madaros native run green as a gate until this dispatch closes.
+`stdlib/darwin_pbpk/tsit5_pbpk28.sio`:
 
-## Minimal repro sketch (forensic next step)
+- `pbpk28_cn_apply_schur` — reconstruct behind `&[f64;14]` (defined before mut)
+- `pbpk28_full_cn_step_mut` — Schur fill, then apply
+- `pbpk28_full_cn_step` — `var st = state; mut(&!st); return st`
 
-Keep both files under one CWD with stdlib resolution; prefer a **local** Params28
-literal (no drug module) + one imported CN call:
-
-```sounio
-// smoke_pbpk28_cn.sio  (illustrative — flesh out with pbpk28_state_zero + params)
-use darwin_pbpk::core::pbpk28_params::{pbpk28_state_zero, PBPKParams28}
-use darwin_pbpk::tsit5_pbpk28::{pbpk28_full_cn_step}
-
-fn main() -> i64 with Mut, Div, IO, Panic {
-    let pa = /* minimal PBPKParams28 with positive v,q,cl */
-    var st = pbpk28_state_zero()
-    let st2 = pbpk28_full_cn_step(st, pa, 0.0, 0.05)
-    println(st2.cv[0])
-    return 0
-}
-```
-
-Bisect order (do not skip):
-
-1. Same smoke **without** `use` — inline a trivial local stub of `pbpk28_full_cn_step`
-   (if crash disappears → imported-module native path).
-2. Import only `pbpk28_state_zero` (no CN) — isolate Params28 / array returns.
-3. Confirm `with Mut` on `main` and on CN (prior D3 exclusive-ref fragility).
-4. Compare `souc compile -o` ELF under Madaros vs lean_single; `nm`/`objdump` only
-   after crash is reproducible under a locked Madaros build
-   (`scripts/dev/souc-build-lock.sh` if rebuilding).
+Acceptance: [`docs/audit/repro/smoke_pbpk28_cn_imported.sio`](repro/smoke_pbpk28_cn_imported.sio)
+plus numerical gate `cv1 ∈ (0.35, 0.36)` under **default Madaros**.
 
 ## Classification (blocker contract)
 
 | Field | Value |
 |---|---|
-| Class | compiler / imported-module native path |
-| Severity | S2 (science gates blocked on default engine; lean_single is correct) |
-| Evidence | sibling check.sh lean_single ALL PASSED; Madaros run SIGSEGV on same sources |
-| Owner | Madaros multimodule native lane |
-| Acceptance | minimal multimodule PBPK28 CN smoke `souc run` exit 0 under default Madaros |
-| Next | land minimal repro under `tests/run-pass/` or `docs/audit/repro/` + CI note |
+| Class | compiler / imported-module native (SRET + same-frame dynamic local-array reload) |
+| Severity | S2 mitigated for PBPK28 CN callers; compiler bugs still open |
+| Evidence | bisect table; Madaros/lean cv1 parity after mitigation |
+| Owner | Madaros native lane (compiler); stdlib mitigation darwin_pbpk |
+| Acceptance (stdlib) | smoke + cv1 gate under default Madaros |
+| Acceptance (compiler) | pre-mitigation reconstruct-into-`out` + same-frame loop also PASS |
+| Next | keep mitigation; file/keep Madaros dispatches for A and B separately |
 
 ## Non-goals
 
-- Do not rename `tsit5_pbpk28.sio` in this dispatch (historical name; CN-only).
-- Do not re-inline CN copies into the sibling (architecture already corrected).
-- Do not claim Tsit5-14 fix closes this path (separate segfault family).
+- Do not rename `tsit5_pbpk28.sio` in this dispatch.
+- Do not claim general Madaros SRET / local-array families are closed.
+- Sibling may still prefer `lean_single` until broader multimodule trust gates expand.
