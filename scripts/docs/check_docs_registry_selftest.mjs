@@ -260,7 +260,35 @@ async function main() {
       'malformed provenance record detection'
     );
 
-    console.log('Docs registry selftest passed (5 failure scenarios + baseline + 3 provenance-preserve scenarios).');
+    // A date that is SHAPED like YYYY-MM-DD but is not a calendar day must be
+    // rejected too: '2026-13-45' passed the regex the inversion started with
+    // and was found by the inverted R22 instrument on its first run. An
+    // impossible date carries no more information than the placeholder did.
+    const impossibleDir = await cloneFixture(baseDir, 'impossible-date');
+    cleanupPaths.push(impossibleDir);
+    const impossiblePath = path.join(impossibleDir, 'docs/features/GPU_RUNTIME.md');
+    const impossibleContent = (await readFile(impossiblePath, 'utf8'))
+      .replace(/^last_validated: .*$/m, 'last_validated: 2026-13-45');
+    await writeFile(impossiblePath, impossibleContent, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, impossibleDir),
+      'expected a YYYY-MM-DD date',
+      'impossible-calendar-date detection'
+    );
+    const impossibleSync = await runNode(syncScript, impossibleDir);
+    assert(impossibleSync.ok, `Impossible-date sync failed:\n${impossibleSync.stderr || impossibleSync.stdout}`);
+    const impossibleAfterSync = await readFile(impossiblePath, 'utf8');
+    assert(
+      impossibleAfterSync.includes('last_validated: 2026-03-07'),
+      'the sync PRESERVED an impossible date instead of falling back to the default'
+    );
+    const impossibleCheckAfterSync = await runNode(registryCheckScript, impossibleDir);
+    assert(
+      impossibleCheckAfterSync.ok,
+      `Checker rejected the fallback-stamped doc:\n${impossibleCheckAfterSync.stderr || impossibleCheckAfterSync.stdout}`
+    );
+
+    console.log('Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios).');
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));
   }

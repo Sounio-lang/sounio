@@ -7,6 +7,7 @@ import {
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
   formatAcceptanceReport,
+  isRealValidationDate,
   metadataFieldsForTopic,
   parseFrontmatter,
   parseRepoMetadata,
@@ -134,18 +135,17 @@ function metadataMismatch(expectedFields, actualFields, context, errors) {
 // The provenance pair is preserve-per-document (a real record survives the
 // sync), so equality against a generator constant is no longer the contract
 // for these two fields. The contract that REPLACES it is shape: a real
-// YYYY-MM-DD date and a non-empty validator. This keeps the gate meaningful
-// for the pair -- it still rejects a malformed or blanked record -- without
-// rejecting the true values the old constant-equality enforcement used to
-// fail on (the defect the self-falsifying lineage recorded as R22/R23).
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-
+// YYYY-MM-DD calendar date (isRealValidationDate -- '2026-13-45' is shaped
+// like one and is not a day) and a non-empty validator. This keeps the gate
+// meaningful for the pair -- it still rejects a malformed or blanked record --
+// without rejecting the true values the old constant-equality enforcement used
+// to fail on (the defect the self-falsifying lineage recorded as R22/R23).
 function provenanceFormatErrors(actualFields, context, errors) {
   if (!actualFields) {
     return;
   }
   const date = String(actualFields.last_validated ?? '').trim();
-  if (!ISO_DATE.test(date)) {
+  if (!isRealValidationDate(date)) {
     errors.push(`${context} metadata mismatch for last_validated: expected a YYYY-MM-DD date, got "${date}"`);
   }
   const validator = String(actualFields.validated_by ?? '').trim();
