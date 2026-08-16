@@ -1089,6 +1089,21 @@ fn name_is_ffi_free(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_ffi_system(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 10 { return false }               // "ffi_system"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 115 as i8 { return false }     // 's'
+    if n.buf[5] != 121 as i8 { return false }     // 'y'
+    if n.buf[6] != 115 as i8 { return false }     // 's'
+    if n.buf[7] != 116 as i8 { return false }     // 't'
+    if n.buf[8] != 101 as i8 { return false }     // 'e'
+    if n.buf[9] != 109 as i8 { return false }     // 'm'
+    true
+}
+
 fn name_is_heap_free(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 9 { return false }
     if n.buf[0] != 104 as i8 { return false }     // 'h'
@@ -1236,6 +1251,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_ffi_abort((*func).name) { return 35 }
     if name_is_ffi_malloc((*func).name) { return 36 }
     if name_is_ffi_free((*func).name) { return 37 }
+    if name_is_ffi_system((*func).name) { return 33 }
     0
 }
 
@@ -6704,6 +6720,82 @@ fn emit_builtin_ffi_abort_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_ret(nc)
 }
 
+// system(cmd): fork/execve("/bin/sh","-c",cmd)/wait4, returning the raw
+// wait status word in rax (libc's system() convention). cmd arrives in rdi
+// already NUL-terminated (Sounio strings are C strings here), so no data
+// relocation is needed — only "/bin/sh\0" and "-c\0" are materialised, and
+// both fit in a single 64-bit immediate pushed to the stack.
+//
+// Register discipline: the ONLY path that returns to the Sounio caller is
+// the parent branch, and it touches only caller-saved rax/rdi/rsi/rdx/r10 —
+// rbx/rcx and the child-only rdx-holds-cmd trick live entirely after the
+// fork's child branch, which either execve's (image replaced) or exits, so
+// clobbering callee-saved state there is unobservable. Nothing callee-saved
+// (rbx, r12-r15) is written on the returning path. cmd is kept in rdx (a
+// low register, so nc_emit_mov_reg_reg's REX.W-only encoding suffices) from
+// child entry until it is pushed into argv.
+fn emit_builtin_ffi_system_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // fork()
+    nc_emit_mov_rax_imm(nc, 57)
+    nc_emit_syscall(nc)
+    nc_emit_test_rax_rax(nc)
+    // jz child (patched once the child offset is known)
+    let child_patch = (*nc).code.len + 2
+    nc_emit_jz_rel32(nc)
+
+    // --- parent: rax = child pid; wait4(pid, &status, 0, 0) ---
+    // Reserve the status slot with a push of a zeroed rax rather than
+    // `sub rsp, imm`: an explicit rsp subtraction gets a stack-clash probe
+    // injected that reads rbp, which a prologue-less builtin never sets up.
+    // A push needs no probe and the zeroed slot keeps the high 32 bits clean
+    // (wait4 writes only the low 32-bit status word).
+    nc_emit_mov_reg_reg(nc, 7, 0)          // mov rdi, rax   (pid)
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_push_rax(nc)                   // status slot (zeroed, 8 bytes)
+    nc_emit_mov_reg_reg(nc, 6, 4)          // mov rsi, rsp   (&status)
+    nc_emit_xor_rdx_rdx(nc)                // options = 0
+    nc_emit_byte(nc, 0x4d)                 // xor r10, r10   (rusage = NULL)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xd2)
+    nc_emit_mov_rax_imm(nc, 61)            // wait4
+    nc_emit_syscall(nc)
+    nc_emit_byte(nc, 0x48)                 // mov rax, [rsp] (status word)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_add_rsp_8(nc)                  // pop status slot
+    nc_emit_ret(nc)
+
+    // --- child ---
+    let child_offset = (*nc).code.len
+    nc_patch_u32_le(nc, child_patch, child_offset - (child_patch + 4))
+    nc_emit_mov_reg_reg(nc, 2, 7)          // mov rdx, rdi   (rdx = cmd, held to argv)
+    // "/bin/sh\0" = little-endian 0x0068732f6e69622f
+    nc_emit_mov_reg_imm64(nc, 0, 29400045130965551)
+    nc_emit_push_rax(nc)                   // [rsp] = "/bin/sh"
+    nc_emit_mov_reg_reg(nc, 3, 4)          // mov rbx, rsp   (path)
+    // "-c\0" = 0x632d
+    nc_emit_mov_reg_imm64(nc, 0, 25389)
+    nc_emit_push_rax(nc)                   // [rsp] = "-c"
+    nc_emit_mov_reg_reg(nc, 1, 4)          // mov rcx, rsp   ("-c")
+    // argv = [path, "-c", cmd, NULL], pushed in reverse
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_push_rax(nc)                   // NULL
+    nc_emit_byte(nc, 0x52)                 // push rdx       (cmd)
+    nc_emit_byte(nc, 0x51)                 // push rcx       ("-c")
+    nc_emit_byte(nc, 0x53)                 // push rbx       (path)
+    nc_emit_mov_reg_reg(nc, 6, 4)          // mov rsi, rsp   (argv)
+    nc_emit_mov_reg_reg(nc, 7, 3)          // mov rdi, rbx   (path)
+    nc_emit_xor_rdx_rdx(nc)                // envp = NULL
+    nc_emit_mov_rax_imm(nc, 59)            // execve
+    nc_emit_syscall(nc)
+    // execve only returns on failure: exit(127)
+    nc_emit_mov_reg_imm(nc, 7, 127)
+    nc_emit_mov_rax_imm(nc, 60)            // exit
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
 pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
     if name_is_print_char(name) { return 2 }
@@ -6739,6 +6831,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_ffi_abort(name) { return 35 }
     if name_is_ffi_malloc(name) { return 36 }
     if name_is_ffi_free(name) { return 37 }
+    if name_is_ffi_system(name) { return 33 }
     0
 }
 
@@ -6772,6 +6865,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     // recovers the mapping length heap_alloc stores at ptr-8.
     if builtin_id == 36 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 37 { emit_builtin_heap_free_into(nc); return }
+    if builtin_id == 33 { emit_builtin_ffi_system_into(nc); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
     if builtin_id == 2 { emit_builtin_print_char_into(nc); return }
     if builtin_id == 3 {

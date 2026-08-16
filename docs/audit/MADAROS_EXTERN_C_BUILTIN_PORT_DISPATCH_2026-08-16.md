@@ -13,7 +13,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 **Engine:** Madaros v0.80.0 (default `bin/souc`), modular pipeline (`self-hosted/compiler/main.sio` + `self-hosted/{parser,check,ir,native}/`)
 **Parent:** `docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md` — Track A, explicitly left open by the Track B commit (`e1109c4773`: "Track A (porting the fix to Madaros) remains open"). Both repros re-verified live under default `bin/souc` on 2026-08-15/16: `getpid()` fabricates `0`; `system()` prints rc=0 without executing.
 **Owner:** lane `glm-cli1` (this dispatch is executed by that lane in three sequenced steps, below)
-**Status:** OPEN — executing. `self-hosted/` edits are confined to `self-hosted/native/codegen_x86_linux.sio` + `self-hosted/parser/{items,mod}.sio`; `lean_single.sio` and `main.sio`/`lower.sio` are untouched (claimed or contested by other lanes).
+**Status:** LANDED on `lane/fable-1/p0f-ffi-takeover` (2026-08-16, fable-1 takeover from glm-cli1) — see the Close-out section below. `self-hosted/` edits are confined to `self-hosted/native/codegen_x86_linux.sio`, `self-hosted/parser/{items,mod}.sio`, and `self-hosted/check/check.sio`; `lean_single.sio` and `main.sio`/`lower.sio` are untouched. One documented residual (reference-to-aggregate extern args).
 
 ## Why this dispatch
 
@@ -81,6 +81,61 @@ The registry already carries `heap_alloc`/`heap_free` (ids 23/24) and the float 
 2. `ffi_integer_return.sio`, `ffi_getppid_return.sio`, `ffi_extern_block_multi_decl.sio` green under the default suite; `ffi_system_exec.sio`'s `//@ ignore` removed (engine-forcing no longer needed) and green.
 3. The four stdlib baselines above re-run: the extern-name E137s are gone; remaining errors reported honestly (expected: the `null_mut` family).
 4. `make madaros-full-gate` PASS (the only valid Madaros proof gate), plus `scripts/ci/madaros_operational_contract_gate.sh`.
+
+## Close-out (fable-1 takeover, 2026-08-16)
+
+P0-F was reallocated from glm-cli1 (5-hour API limit) to lane `fable-1`. The
+inherited WIP (`9498c533a8`) was verified, corrected, and completed. Landed on
+`lane/fable-1/p0f-ffi-takeover`:
+
+- **`7a871288ec` — M1 fix via re-entrant parsing (replaces the WIP queue).**
+  The WIP's pending-queue approach for multi-decl blocks was unbuildable: a
+  parsed `Item` aggregate stored in a module-global list is corrupted by the
+  gen seed (measured three ways — `name.len` reads back `0x0100000000000000`,
+  a native-checker SIGSEGV when rebuilt from components, E017 on a
+  relink-splice variant; a ~570 B plain-field standalone repro does *not*
+  trigger it — repros under `docs/audit/p0f_repros/`). Brace-form blocks now
+  parse re-entrantly: one ffi-forwarding wrapper item per `parse_item()` call
+  via `parse_extern_block_decl`, two scalar flag globals, no aggregate in any
+  global. **This supersedes plan step PR-A3.** Worth its own forensic dispatch:
+  the large-aggregate-in-global gen-seed miscompile.
+
+- **`637dbf751c` — fail-closed (Fase 3.4) + exit/abort/malloc/free.** The
+  wrapper's inner call and forwarded args are now `ExprIdent`-shaped (were
+  `ExprPath`), so they resolve through the checker's ordinary name path — an
+  extern whose `ffi_<name>` intrinsic has no checker/registry entry now fails
+  at check time with E137 instead of compiling to a silent no-op returning 0.
+  (Before this, `exit(7)` fell through and kept executing.) New intrinsics:
+  `ffi_exit` (id 34, `exit_group`), `ffi_abort` (id 35, `exit_group(134)`),
+  `ffi_malloc`/`ffi_free` (ids 36/37, dispatching to the existing mmap-backed
+  `heap_alloc`/`heap_free`). Also fixed a latent use-after-move of `params_opt`
+  in `extern_wrapper_fn_def`.
+
+- **`system()` (Fase 3.2) — id 33, real fork/execve(`/bin/sh`,`-c`,cmd)/wait4.**
+  **Route correction to plan PR-A2:** no data-reloc for string literals was
+  needed — Sounio strings are already NUL-terminated C strings, so `cmd`
+  arrives in `rdi` as a valid `char*`, and only `"/bin/sh\0"` (one 64-bit
+  immediate) and `"-c\0"` are materialised, pushed to the stack. Register
+  discipline audited against the SysV callee-saved set (rbx, r12–r15): the
+  only path returning to Sounio is the parent branch, which touches only
+  caller-saved regs; `cmd` is held in `rdx` (a low register) through the
+  child. The status slot is reserved with a `push` rather than `sub rsp,imm`
+  to avoid the stack-clash probe that reads an unset `rbp` in a prologue-less
+  builtin. Verified by disassembly (capstone) and by the side-effect file plus
+  a `/bin/true`(0)+`/bin/false`(nonzero) anti-fabrication pair.
+
+### Residual: reference-to-aggregate extern args (documented known-failure)
+
+The idiomatic C binding `fn system(cmd: string)` works end-to-end. The
+historical `fn system(cmd: &[i8; 1024])` binding does **not**: the aggregate
+reference forwards an empty pointer through the *signatureless* `ffi_` builtin
+call. This is **not** a general ABI bug — a `&[i8;1024]` param forwards
+correctly both to a plain callee and through a wrapper to a *typed* callee
+(controls in `docs/audit/p0f_repros/`). It is specific to the untyped builtin
+call site, which cannot lower an aggregate-reference argument without callee
+parameter types. Captured as `tests/run-pass/ffi_system_array_arg.sio`
+(`//@ known-failure`). A proper fix (giving `ffi_` builtins real parameter
+types) is a separate dispatch, out of P0-F scope.
 
 ## Impact if unaddressed
 
