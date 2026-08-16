@@ -1,0 +1,161 @@
+//@ run-pass
+// graded_compose_needs_witness.sio
+//
+// Companion to gum_independence_required.sio. That test proved quadrature is
+// WRONG without independence; this one proves the composition law in
+// stdlib/epistemic/graded_effects.sio now REFUSES to apply it without evidence.
+//
+// The inversion under test:
+//   - graded_compose(a, b)              -> conservative additive bound
+//   - graded_compose_indep(a, b, w)     -> tight bound ONLY if w is usable
+//
+// "Usable" means structurally proven (d-separation) or measured over enough
+// paired samples. Declaring independence buys nothing, because computation
+// cannot create trust.
+//
+// Helpers and the composition law are inlined because tests cannot import.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 0.5
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 2.0
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y * scale_back
+}
+
+fn close_enough(a: f64, b: f64) -> bool {
+    return abs_f64(a - b) < 0.0000001
+}
+
+// The law under test is IMPORTED, not mirrored. A local copy would pass even if
+// stdlib were still applying quadrature blindly — which is the exact failure
+// mode this whole change exists to eliminate.
+use epistemic::graded_effects::{
+    GradedProb, Independence,
+    graded_epistemic, graded_aleatoric,
+    graded_compose, graded_compose_indep,
+    indep_unknown, indep_proven, indep_measured,
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var falhas = 0
+
+    // Two epistemic quantities with equal uncertainty, so every bound below is
+    // a clean multiple of 0.3 and the arithmetic is easy to check by hand.
+    let a = graded_epistemic(10.0, 0.3)
+    let b = graded_epistemic(4.0, 0.3)
+
+    let aditivo = 0.6                    // 0.3 + 0.3
+    let quadratura = sqrt_f64(0.18)      // sqrt(0.09 + 0.09) ~= 0.4243
+
+    // 1. No witness at all: the conservative bound, NOT quadrature.
+    //    This is the behaviour change. Before, this call silently returned
+    //    0.4243 while asserting nothing about independence.
+    let r1 = graded_compose(a, b)
+    if !close_enough(r1.epsilon, aditivo) {
+        println("FALHA 1: sem testemunha deveria dar o limite aditivo")
+        falhas = falhas + 1
+    }
+    if r1.epsilon <= quadratura {
+        println("FALHA 1b: o limite sem prova tem de ser mais LARGO que a quadratura")
+        falhas = falhas + 1
+    }
+
+    // 2. Structurally proven independent: quadrature is licensed.
+    let r2 = graded_compose_indep(a, b, indep_proven())
+    if !close_enough(r2.epsilon, quadratura) {
+        println("FALHA 2: d-separacao deveria licenciar a quadratura")
+        falhas = falhas + 1
+    }
+
+    // 3. An UNKNOWN witness passed explicitly must behave exactly like no
+    //    witness. Negative control: if this ever returns quadrature, the guard
+    //    is decorative and every test above is vacuous.
+    let r3 = graded_compose_indep(a, b, indep_unknown())
+    if !close_enough(r3.epsilon, aditivo) {
+        println("FALHA 3: testemunha vazia nao pode comprar limite apertado")
+        falhas = falhas + 1
+    }
+
+    // 4. Measured rho = 0.7 over 200 pairs: eq. (13), strictly WIDER than
+    //    quadrature. This is precisely the understatement the old law emitted,
+    //    and the case the physiological domain actually produces.
+    let r4 = graded_compose_indep(a, b, indep_measured(0.7, 200))
+    if r4.epsilon <= quadratura {
+        println("FALHA 4: com rho positivo o limite tem de exceder a quadratura")
+        falhas = falhas + 1
+    }
+    if r4.epsilon >= aditivo {
+        println("FALHA 4b: rho = 0.7 ainda deve ser mais apertado que o aditivo")
+        falhas = falhas + 1
+    }
+
+    // 5. The SAME rho, measured over only 10 pairs, is below the sample floor
+    //    and therefore buys nothing. A correlation estimated from a handful of
+    //    points is not evidence about independence, and the law says so.
+    let r5 = graded_compose_indep(a, b, indep_measured(0.7, 10))
+    if !close_enough(r5.epsilon, aditivo) {
+        println("FALHA 5: rho medido com n abaixo do piso nao pode ser usado")
+        falhas = falhas + 1
+    }
+
+    // 6. The conservative fallback is never a lie: at rho = 1 the exact eq. (13)
+    //    result IS the additive bound, so additive is the supremum over all rho.
+    let r6 = graded_compose_indep(a, b, indep_measured(1.0, 200))
+    if !close_enough(r6.epsilon, aditivo) {
+        println("FALHA 6: em rho = 1 a eq. 13 tem de coincidir com o aditivo")
+        falhas = falhas + 1
+    }
+
+    // 7. Aleatoric dominates and ignores the witness entirely: irreducible
+    //    noise does not become reducible because the inputs are independent.
+    let ale = graded_aleatoric(4.0, 0.3)
+    let r7 = graded_compose_indep(a, ale, indep_proven())
+    if !close_enough(r7.epsilon, aditivo) {
+        println("FALHA 7: prova de independencia nao muda composicao aleatoria")
+        falhas = falhas + 1
+    }
+    if !r7.is_aleatoric {
+        println("FALHA 7b: o resultado deveria continuar aleatorio")
+        falhas = falhas + 1
+    }
+
+    // 8. What the proof is worth, stated as a number: quadrature is ~29% tighter
+    //    than the conservative bound. That gap is exactly the price of evidence.
+    let ganho = (aditivo - quadratura) / aditivo
+    if ganho <= 0.2 {
+        println("FALHA 8: o ganho da prova deveria ser substancial")
+        falhas = falhas + 1
+    }
+
+    if falhas == 0 {
+        println("OK: a quadratura agora custa uma prova")
+        println("  sem testemunha  -> 0.6")
+        println("  d-separado      -> 0.4243")
+        println("  rho=0.7  n=200  -> 0.5533")
+        println("  rho=0.7  n=10   -> 0.6 (abaixo do piso amostral)")
+        return 0
+    }
+    println("FALHAS:")
+    println(falhas)
+    return 1
+}
