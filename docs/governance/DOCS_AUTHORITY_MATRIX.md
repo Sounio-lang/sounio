@@ -158,6 +158,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-closures-step2-capture-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP2_CAPTURE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-dual-gum-knowledge-import-2026-07-19 | repo_only | docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-enum-variant-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_ENUM_VARIANT_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-extern-c-builtin-port-dispatch-2026-08-16 | repo_only | docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-fo-gum-stack-2026-07-27 | repo_only | docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-method-two-roots-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHOD_TWO_ROOTS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
