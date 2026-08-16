@@ -1,9 +1,9 @@
 <!-- docs:meta
 topic_id: repo.docs.architecture.mli-design
-authority: draft_amended_pending_land
+authority: repo_only
 audience: users
-last_validated: 2026-08-16
-validated_by: WS-D grok-cli2 + preflight fable-1
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.mli-design
 -->
 
