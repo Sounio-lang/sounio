@@ -2,12 +2,21 @@
 /-!
 # Sounio.Weaning — Opioid Weaning Safety (F5c) — Lean 4 Discharge
 
-Formal core of the **P3 proof-carrying weaning protocol** (UTIp ed cohort,
+Formal core of the **P3 proof-carrying weaning protocol** (UTIped cohort,
 N = 61, Campinas-SP). This file discharges, in **pure ℚ** (Lean 4 core
 `Rat`, Mathlib-free, no `sorry`, no `native_decide`, no IEEE-754 axioms),
-the structural theorem behind the E5 counterfactual arm:
+the structural theorem behind the E5/E6 counterfactual arms.
 
-    taper −20 %/day + methadone PCC from day 1  ⇒  W(t) = 0 ∀ t
+**Claim scope (do not overclaim):** W(t) = 0 holds **only while** the
+per-step bounded-drop certificate holds. Empirically the E5 schedule
+(taper −20 %/day + methadone PCC from day 1, then methadone −10 %/day
+geometric after a 5-day hold) certifies the **conversion window**
+(~120 h after fentanyl stop) but **not** the methadone geometric tail:
+cohort replay shows certificate violations and W_global > 0 in 61/61
+patients once the constant-percentage methadone taper begins. The
+geometric-tail corollaries below prove that constant-% taper is
+*structurally* unsafe once the adaptation gap has closed (fully adapted
+state after a hold) — motivating the E6 certificate-clipped taper.
 
 ## Model (mirrors `prontuarios/gen_replay_tol_e5.py`, TMDD-lite)
 
@@ -28,20 +37,31 @@ quantified — the theorems are timestep- and parameter-independent.
    and initially A(0) ≤ occ(0), then A(t) ≤ occ(t) for **all** t.
    Note: no sign hypothesis on `k` is needed — the per-step certificate
    alone is sufficient.
-2. `f5c_withdrawal_zero` — corollary: W(t) = 0 for all t.
+2. `f5c_withdrawal_zero` — corollary: W(t) = 0 for all t **under the
+   certificate** (not an unconditional claim about any particular
+   clinical schedule).
 3. `gap_neg_of_large_drop` — **F5c, tightness (impossibility direction)**.
    If at step t the drop exceeds the contracted gap,
        (1 − k) · (occ(t) − A(t)) < occ(t) − occ(t+1),
    then A(t+1) > occ(t+1): withdrawal pressure appears at the next step.
    Together with (1) this shows the per-step certificate is the *exact*
-   boundary between zero and positive withdrawal pressure — the
-   mechanistic explanation of why abrupt interruption causes abstinence
-   and why the E5 schedule (bounded hourly drop + methadone PCC) does not.
+   boundary between zero and positive withdrawal pressure.
 4. `wpress_pos_of_inverted` — positive pressure whenever the gap inverts.
 5. `pbox_floor_sound` / `pbox_ceiling_sound` — Knightian gate transfer:
    a p-box whose mean-band floor clears the threshold certifies every
    contained point (links the E5-GUM coverage p-box, lo ≥ 1.37 > 1, to
    per-realization coverage ≥ 1 in every Knightian corner).
+6. **Geometric-tail corollaries (E6 motivation):**
+   - `geometric_drop_eq`: under `occ(t+1) = r · occ(t)`, the drop equals
+     `(1 − r) · occ(t)`.
+   - `geometric_violates_small_gap`: if the contracted gap is strictly
+     smaller than that geometric drop, tightness forces W at the next
+     step.
+   - `fully_adapted_geometric_withdraws`: after a hold that closes the
+     gap (`A(0) = occ(0)`), any geometric factor `r < 1` with `occ > 0`
+     immediately violates the certificate and produces W(1) > 0 —
+     constant-% methadone taper is structurally unsafe at the start of
+     the tail.
 
 ## Trust boundary
 
@@ -55,9 +75,10 @@ file proves that wherever the certificate holds, W = 0 follows — for
 any τ_adapt > 0 and any EC50_μ > 0 (both enter only through the
 universally quantified `k` and `occ`).
 
-Provenance: síntese-mestra §6c (F5c GUM argument), E5 arm 61/61 W_max = 0,
-E5-GUM coverage p-box ≥ 1.37 in all corners; cohort data local-only
-(CEP/CAAE pending).
+Provenance: síntese-mestra §6c/§12 (F5c + P3), E5 arm W≈0 in the 120 h
+window but W_global > 0 in 61/61 on the geometric methadone tail;
+E5-GUM coverage p-box ≥ 1.37 in conversion corners; cohort data
+local-only (CEP/CAAE pending).
 -/
 
 namespace Sounio.Weaning
@@ -234,6 +255,79 @@ theorem pbox_ceiling_sound (hi x thresh : Rat)
   Rat.le_trans hx_hi hceil
 
 -- ================================================================
+-- §5. Geometric-tail corollaries (constant-% taper is unsafe at gap=0)
+-- ================================================================
+
+/-- Geometric occupancy schedule: `occ(t+1) = r · occ(t)`.
+    Models a constant-percentage dose reduction (E5 methadone −10 %/day
+    after the hold), discretised at the adaptation timestep. -/
+def geo_occ (r o0 : Rat) : Nat → Rat
+  | 0 => o0
+  | t + 1 => r * geo_occ r o0 t
+
+/-- Under a geometric schedule the occupancy drop factors cleanly:
+    `occ − r·occ = (1 − r)·occ`. -/
+theorem geometric_drop_eq (r o : Rat) :
+    o - r * o = (1 - r) * o := by
+  calc o - r * o = o + -(r * o) := by rw [Rat.sub_eq_add_neg]
+    _ = 1 * o + -(r * o) := by rw [Rat.one_mul]
+    _ = 1 * o + (-r) * o := by rw [← Rat.neg_mul]
+    _ = (1 + -r) * o := by rw [← Rat.add_mul]
+    _ = (1 - r) * o := by rw [← Rat.sub_eq_add_neg]
+
+/-- If the contracted gap is strictly smaller than the geometric drop,
+    tightness forces withdrawal at the next step.
+    Hypothesis form avoids division: `(1−k)·gap < (1−r)·occ`. -/
+theorem geometric_violates_small_gap
+    (r k o0 a0 : Rat) (t : Nat)
+    (h : (1 - k) * (geo_occ r o0 t - aseq (geo_occ r o0) k a0 t)
+          < (1 - r) * geo_occ r o0 t) :
+    geo_occ r o0 (t + 1) < aseq (geo_occ r o0) k a0 (t + 1) := by
+  have hdrop :
+      (1 - k) * (geo_occ r o0 t - aseq (geo_occ r o0) k a0 t)
+        < geo_occ r o0 t - geo_occ r o0 (t + 1) := by
+    -- geo_occ (t+1) = r * geo_occ t, so RHS = (1-r)*geo_occ t
+    show (1 - k) * (geo_occ r o0 t - aseq (geo_occ r o0) k a0 t)
+          < geo_occ r o0 t - r * geo_occ r o0 t
+    rw [geometric_drop_eq]
+    exact h
+  exact gap_neg_of_large_drop (geo_occ r o0) k a0 t hdrop
+
+/-- **Fully-adapted geometric taper withdraws immediately.**
+    After a hold that closes the adaptation gap (`A(0) = occ(0)`), any
+    geometric factor `r < 1` with positive occupancy produces a positive
+    drop against a zero contracted gap, so the certificate fails at step 0
+    and `W(1) > 0`. This is the formal reason the E5 methadone −10 %/day
+    tail (constant %) is unsafe once the patient is adapted — motivating
+    the E6 certificate-clipped schedule. -/
+theorem fully_adapted_geometric_withdraws
+    (r k o0 : Rat)
+    (hr : r < 1) (ho : 0 < o0) :
+    geo_occ r o0 1 < aseq (geo_occ r o0) k o0 1 := by
+  have hgap0 : geo_occ r o0 0 - aseq (geo_occ r o0) k o0 0 = 0 := by
+    simp [geo_occ, aseq, Rat.sub_self]
+  have hbound0 : (1 - k) * (geo_occ r o0 0 - aseq (geo_occ r o0) k o0 0) = 0 := by
+    rw [hgap0, Rat.mul_zero]
+  have hpos : 0 < (1 - r) * o0 := by
+    have hr' : 0 < 1 - r := (Rat.lt_iff_sub_pos r 1).mp hr
+    exact Rat.mul_pos hr' ho
+  have h : (1 - k) * (geo_occ r o0 0 - aseq (geo_occ r o0) k o0 0)
+            < (1 - r) * geo_occ r o0 0 := by
+    rw [hbound0]
+    simp [geo_occ]
+    exact hpos
+  exact geometric_violates_small_gap r k o0 o0 0 h
+
+/-- Positive withdrawal pressure one step after a fully-adapted geometric
+    cut — packages the previous theorem with `wpress_pos_of_inverted`. -/
+theorem fully_adapted_geometric_wpress_pos
+    (r k o0 : Rat)
+    (hr : r < 1) (ho : 0 < o0) :
+    0 < wpress (geo_occ r o0) k o0 1 :=
+  wpress_pos_of_inverted (geo_occ r o0) k o0 1
+    (fully_adapted_geometric_withdraws r k o0 hr ho)
+
+-- ================================================================
 -- §5. Axiom audit (build-log evidence)
 -- ================================================================
 
@@ -244,5 +338,9 @@ theorem pbox_ceiling_sound (hi x thresh : Rat)
 #print axioms wpress_pos_of_inverted
 #print axioms pbox_floor_sound
 #print axioms pbox_ceiling_sound
+#print axioms geometric_drop_eq
+#print axioms geometric_violates_small_gap
+#print axioms fully_adapted_geometric_withdraws
+#print axioms fully_adapted_geometric_wpress_pos
 
 end Sounio.Weaning
