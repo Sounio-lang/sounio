@@ -534,6 +534,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.rebracketing-authority | repo_only | docs/internal/concepts/rebracketing-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.reflexive-inquiry | repo_only | docs/internal/concepts/reflexive-inquiry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.relational-associator | repo_only | docs/internal/concepts/relational-associator.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.rna-cayley-dickson-inductive-bias | repo_only | docs/internal/concepts/rna-cayley-dickson-inductive-bias.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.science-research-boundary | repo_only | docs/internal/concepts/science-research-boundary.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.second-order-compilation | repo_only | docs/internal/concepts/second-order-compilation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.semantic-lane-contract | repo_only | docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -982,6 +983,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.relational-annihilation-geometry | historical | docs/research/relational-annihilation-geometry.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.research-validation-summary | repo_only | docs/research/RESEARCH_VALIDATION_SUMMARY.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.river-variational-and-the-ordering-null | historical | docs/research/river-variational-and-the-ordering-null.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.rna-cayley-dickson-confirmatory-preregistration-2026-08-09 | repo_only | docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.routon-zd-falsifiers-2026-07-26 | historical | docs/research/routon_zd_falsifiers_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.routon-zd-spec-2026-07-26 | historical | docs/research/routon_zd_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.runtime-abi-gate-blocker-2026-06-23 | historical | docs/research/runtime-abi-gate-blocker-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1174,6 +1176,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.examples.neuroreceptor-pet.results.readme | repo_only | examples/neuroreceptor_pet/results/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.pbpk.readme | repo_only | examples/pbpk/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.real-world.readme | repo_only | examples/real_world/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.examples.research.rna-cd-confirmatory.readme | repo_only | examples/research/rna_cd_confirmatory/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.semantic-orc.readme | repo_only | examples/semantic_orc/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.showcase.readme | repo_only | examples/showcase/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.examples.sounio-science-flex.readme | repo_only | examples/sounio_science_flex/README.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
