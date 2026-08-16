@@ -1,10 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.audit.madaros-imported-pbpk28-cn-segfault-2026-08-16
+topic_id: repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16
 authority: repo_only
 audience: users
 last_validated: 2026-08-16
 validated_by: cursor-agent
-source_of_truth: docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16
 -->
 
 # Madaros imported PBPK28 CN: native run SIGSEGV
