@@ -70,6 +70,17 @@ Measured 2026-07-31; the contract re-measures on every run.
 | `V3_CORPUS_IS_LINEAGE_DEFAULT` | 320 research topics: historical 317, repo_only 2, dual 1; 317/317 historical pages carry the lineage note; all 317 non-whitelist paths are historical | almost everything is lineage by default |
 | `V4_GATE_REJECTS_CURRENT` | hermetic synced farm; unmodified → rc=0; R24's page given `authority: repo_only` → rc=1 with `expected "historical"` | claiming currency fails |
 
+**Update 2026-08-15**: `ACTIVE_RESEARCH_DOCS` grew from three paths to four
+when `rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md` was
+whitelisted (cherry-picked from a branch-audit finding, see
+`docs/audit/BRANCH_AUDIT_2026-08-15.md`). `V1_WHITELIST_IS_THREE` and
+`V3_CORPUS_IS_LINEAGE_DEFAULT` now check against a `WHITELIST_SIZE = 4`
+constant in the contract script instead of a bare `3` literal, so the next
+legitimate whitelist change updates one named constant instead of re-deriving
+which of several `== 3` checks needs to move. The clause ID keeps the name
+`V1_WHITELIST_IS_THREE` for rung continuity even though the count is now 4 --
+it is a label, not a live assertion of the number three.
+
 ## 4. Why this rung belongs to this line
 
 R22 and R23 showed fields that answer the wrong question under measurement names.
