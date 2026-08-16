@@ -1,4 +1,4 @@
-.PHONY: build check test test-stdlib clean fmt install help lint lint-fix lint-docs \
+.PHONY: build lean-seed-gate check test test-stdlib clean fmt install help lint lint-fix lint-docs \
          docs-gen generated-ontology test-generated-ontology \
          test-generated-ontology-manifest test-generated-ontology-fresh \
          test-ontology-bundle-directive-native-scan \
@@ -49,6 +49,10 @@ build:               ## Bootstrap compile: JIT → gen1 → gen2 → gen3 (fixed
 	   echo "  gen3: $$MD5_GEN3"; \
 	   exit 1; \
 	 fi
+
+lean-seed-gate:      ## Guard the committed lean_single seed (identity + extern "C" freshness, #725)
+	@echo "→ Checking committed lean_single seed freshness"
+	@bash scripts/ci/lean_single_seed_freshness_gate.sh
 
 check:               ## Type-check self-hosted compiler and run lint gates
 	@echo "→ Type-checking self-hosted/compiler/lean_single.sio"
