@@ -39,7 +39,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.mir-cranelift-integration-report | historical | docs/architecture/MIR_CRANELIFT_INTEGRATION_REPORT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-optimization-pases-documentation | historical | docs/architecture/MIR_OPTIMIZATION_PASES_DOCUMENTATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-optimization-strategy | historical | docs/architecture/MIR_OPTIMIZATION_STRATEGY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.mir-port-plan | repo_only | docs/architecture/MIR_PORT_PLAN.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.mir-research-strategy | historical | docs/architecture/MIR_RESEARCH_STRATEGY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.mli-design | repo_only | docs/architecture/MLI_DESIGN.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.module-closure-truth | repo_only | docs/architecture/module-closure-truth.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.phase2-hir-generation | repo_only | docs/architecture/PHASE2_HIR_GENERATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.science-research-boundary | repo_only | docs/architecture/science-research-boundary.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -49,6 +51,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.soir-reference | repo_only | docs/architecture/SOIR_REFERENCE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.truth-frontier | repo_only | docs/architecture/truth-frontier.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.truth-layers | repo_only | docs/architecture/truth-layers.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.ws-c-d-preflight-review-2026-08-16 | repo_only | docs/architecture/WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.ws-c-pr1-payload-census | repo_only | docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.announcement | archived | docs/archived/ANNOUNCEMENT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.architecture | archived | docs/archived/ARCHITECTURE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.compiler-roadmap | archived | docs/archived/COMPILER_ROADMAP.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -542,6 +546,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.coordination.ci-watch-contract | repo_only | docs/internal/coordination/CI_WATCH_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.compiler-lane-contract | repo_only | docs/internal/coordination/COMPILER_LANE_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.enir-semantic-interface-contract-2026-07-12 | repo_only | docs/internal/coordination/enir-semantic-interface-contract-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.coordination.madaros-focus-plan-2026-08-16 | repo_only | docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.semantic-hotspot-triage-2026-07-12 | repo_only | docs/internal/coordination/semantic-hotspot-triage-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.e175-triage-2026-08-02 | repo_only | docs/internal/E175_TRIAGE_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.readme | repo_only | docs/internal/garden/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
