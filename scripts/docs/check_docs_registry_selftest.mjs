@@ -200,7 +200,67 @@ async function main() {
       'missing evidence artifact detection'
     );
 
-    console.log('Docs registry selftest passed (5 failure scenarios + baseline).');
+    // 2026-08-16 regression scenarios: the sync must PRESERVE a real
+    // provenance record instead of regressing it to the placeholder
+    // (.claude/llm_offload_log.md 2026-08-16 WAIVED row), a headerless doc
+    // must still GET a header, and the checker must still reject a malformed
+    // record now that it no longer enforces the generator constant.
+    const preserveDir = await cloneFixture(baseDir, 'preserve-header');
+    cleanupPaths.push(preserveDir);
+    const preservePath = path.join(preserveDir, 'docs/features/GPU_RUNTIME.md');
+    const realHeaderContent = (await readFile(preservePath, 'utf8'))
+      .replace(/^last_validated: .*$/m, 'last_validated: 2026-08-13')
+      .replace(/^validated_by: .*$/m, 'validated_by: claude');
+    await writeFile(preservePath, realHeaderContent, 'utf8');
+    const preserveSync = await runNode(syncScript, preserveDir);
+    assert(preserveSync.ok, `Preserve-scenario sync failed:\n${preserveSync.stderr || preserveSync.stdout}`);
+    const afterSync = await readFile(preservePath, 'utf8');
+    assert(
+      afterSync === realHeaderContent,
+      'sync rewrote a real provenance header -- the 2026-08-16 regression is back'
+    );
+    assert(
+      afterSync.includes('last_validated: 2026-08-13') && afterSync.includes('validated_by: claude'),
+      'sync dropped the preserved provenance values'
+    );
+    const preserveCheck = await runNode(registryCheckScript, preserveDir);
+    assert(preserveCheck.ok, `Checker rejected a preserved real header:\n${preserveCheck.stderr || preserveCheck.stdout}`);
+    const preserveResync = await runNode(syncScript, preserveDir);
+    assert(preserveResync.ok, `Preserve-scenario re-sync failed:\n${preserveResync.stderr || preserveResync.stdout}`);
+    assert(
+      (await readFile(preservePath, 'utf8')) === realHeaderContent,
+      'second sync was not idempotent on a preserved header'
+    );
+
+    const headerlessDir = await cloneFixture(baseDir, 'headerless-stamped');
+    cleanupPaths.push(headerlessDir);
+    const headerlessPath = path.join(headerlessDir, 'docs/guide/getting-started.md');
+    const stripped = (await readFile(headerlessPath, 'utf8')).replace(/^<!-- docs:meta\n[\s\S]*?\n-->\n\n/m, '');
+    await writeFile(headerlessPath, stripped, 'utf8');
+    const headerlessSync = await runNode(syncScript, headerlessDir);
+    assert(headerlessSync.ok, `Headerless-scenario sync failed:\n${headerlessSync.stderr || headerlessSync.stdout}`);
+    const restamped = await readFile(headerlessPath, 'utf8');
+    assert(restamped.startsWith('<!-- docs:meta\n'), 'a genuinely headerless doc was not given a header');
+    assert(
+      restamped.includes('last_validated: 2026-03-07'),
+      'a headerless doc was not stamped with the default provenance placeholder'
+    );
+    const headerlessCheck = await runNode(registryCheckScript, headerlessDir);
+    assert(headerlessCheck.ok, `Checker rejected a freshly stamped headerless doc:\n${headerlessCheck.stderr || headerlessCheck.stdout}`);
+
+    const malformedDir = await cloneFixture(baseDir, 'malformed-provenance');
+    cleanupPaths.push(malformedDir);
+    const malformedPath = path.join(malformedDir, 'docs/features/GPU_RUNTIME.md');
+    const malformedContent = (await readFile(malformedPath, 'utf8'))
+      .replace(/^last_validated: .*$/m, 'last_validated: yesterday');
+    await writeFile(malformedPath, malformedContent, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, malformedDir),
+      'metadata mismatch for last_validated: expected a YYYY-MM-DD date, got "yesterday"',
+      'malformed provenance record detection'
+    );
+
+    console.log('Docs registry selftest passed (5 failure scenarios + baseline + 3 provenance-preserve scenarios).');
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));
   }

@@ -641,8 +641,8 @@ export function topicSourceOfTruth(topicId) {
   return `${REGISTRY_RELATIVE_PATH}#${topicId}`;
 }
 
-export function formatRepoMetadataBlock(topic) {
-  return [
+export function formatRepoMetadataBlock(topic, existingMeta = null) {
+  const lines = [
     '<!-- docs:meta',
     `topic_id: ${topic.topic_id}`,
     `authority: ${topic.authority}`,
@@ -651,7 +651,15 @@ export function formatRepoMetadataBlock(topic) {
     `validated_by: ${topic.owner_agent}`,
     `source_of_truth: ${topicSourceOfTruth(topic.topic_id)}`,
     '-->',
-  ].join('\n');
+  ];
+  const provenance = preservedProvenance(existingMeta);
+  if (provenance.last_validated) {
+    lines[4] = `last_validated: ${provenance.last_validated}`;
+  }
+  if (provenance.validated_by) {
+    lines[5] = `validated_by: ${provenance.validated_by}`;
+  }
+  return lines.join('\n');
 }
 
 export function parseRepoMetadata(content) {
@@ -675,6 +683,41 @@ export function parseRepoMetadata(content) {
     data[key] = value;
   }
   return data;
+}
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// The provenance pair (last_validated, validated_by) is a RECORD of a real
+// validation event, and the only place that record lives is the document (or
+// its author's commit). The registry has no validation-event data, so it
+// cannot be authoritative for these two fields -- only for the structural
+// four (topic_id, authority, audience, source_of_truth).
+//
+// Preserve an existing record when it is well-formed: a real date and, when
+// present, a non-empty validator. When the document carries no record (or a
+// malformed one), the generator's defaults apply exactly as before -- a doc
+// genuinely missing a header still gets one, stamped with the placeholder.
+//
+// History: before 2026-08-16 the sync REPLACED the whole docs:meta block with
+// freshly generated fields, so any document outside the curated owner table
+// had a real, newer header (e.g. 2026-08-13/claude) regressed to the generic
+// placeholder on every mandatory sync. That regression also made byte-level
+// doc gates see phantom content changes. Recorded in
+// .claude/llm_offload_log.md 2026-08-16 WAIVED row.
+export function preservedProvenance(existingMeta) {
+  if (!existingMeta) {
+    return {};
+  }
+  const date = String(existingMeta.last_validated ?? '').trim();
+  if (!ISO_DATE.test(date)) {
+    return {};
+  }
+  const fields = { last_validated: date };
+  const validator = String(existingMeta.validated_by ?? '').trim();
+  if (validator) {
+    fields.validated_by = validator;
+  }
+  return fields;
 }
 
 export function formatHistoricalStatusNote(topic, relPath) {
@@ -723,8 +766,8 @@ export function parseFrontmatter(content) {
   return data;
 }
 
-export function metadataFieldsForTopic(topic) {
-  return {
+export function metadataFieldsForTopic(topic, existingMeta = null) {
+  const fields = {
     topic_id: topic.topic_id,
     authority: topic.authority,
     audience: topic.audience,
@@ -732,6 +775,7 @@ export function metadataFieldsForTopic(topic) {
     validated_by: topic.owner_agent,
     source_of_truth: topicSourceOfTruth(topic.topic_id),
   };
+  return { ...fields, ...preservedProvenance(existingMeta) };
 }
 
 export function formatAuthorityMatrix(registry) {

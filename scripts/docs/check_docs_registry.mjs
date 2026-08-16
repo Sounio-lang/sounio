@@ -131,6 +131,29 @@ function metadataMismatch(expectedFields, actualFields, context, errors) {
   }
 }
 
+// The provenance pair is preserve-per-document (a real record survives the
+// sync), so equality against a generator constant is no longer the contract
+// for these two fields. The contract that REPLACES it is shape: a real
+// YYYY-MM-DD date and a non-empty validator. This keeps the gate meaningful
+// for the pair -- it still rejects a malformed or blanked record -- without
+// rejecting the true values the old constant-equality enforcement used to
+// fail on (the defect the self-falsifying lineage recorded as R22/R23).
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function provenanceFormatErrors(actualFields, context, errors) {
+  if (!actualFields) {
+    return;
+  }
+  const date = String(actualFields.last_validated ?? '').trim();
+  if (!ISO_DATE.test(date)) {
+    errors.push(`${context} metadata mismatch for last_validated: expected a YYYY-MM-DD date, got "${date}"`);
+  }
+  const validator = String(actualFields.validated_by ?? '').trim();
+  if (!validator) {
+    errors.push(`${context} metadata mismatch for validated_by: expected a non-empty validator, got ""`);
+  }
+}
+
 async function main() {
   const errors = [];
   const expectedRegistry = await buildGovernedTopicRegistry(rootDir);
@@ -156,7 +179,12 @@ async function main() {
       try {
         const content = await readFile(absPath, 'utf8');
         const actualMeta = parseRepoMetadata(content);
-        metadataMismatch(metadataFieldsForTopic(topic), actualMeta, topic.repo_doc_path, errors);
+        // Provenance (last_validated / validated_by) is the document's own
+        // record and is preserve-by-default (see preservedProvenance); the
+        // structural four fields remain registry-authoritative. A document
+        // with NO header still fails against the full default field set.
+        metadataMismatch(metadataFieldsForTopic(topic, actualMeta), actualMeta, topic.repo_doc_path, errors);
+        provenanceFormatErrors(actualMeta, topic.repo_doc_path, errors);
         if ((topic.authority === 'historical' || topic.authority === 'archived') && !content.includes('Docs status:')) {
           errors.push(`${topic.repo_doc_path} is missing a visible ${topic.authority} status note`);
         }
@@ -169,7 +197,8 @@ async function main() {
       try {
         const content = await readFile(path.join(rootDir, relPath), 'utf8');
         const actualMeta = parseFrontmatter(content);
-        metadataMismatch(metadataFieldsForTopic(topic), actualMeta, relPath, errors);
+        metadataMismatch(metadataFieldsForTopic(topic, actualMeta), actualMeta, relPath, errors);
+        provenanceFormatErrors(actualMeta, relPath, errors);
         if (topic.collection === 'docs' && topic.locale_status?.[locale] !== 'present') {
           errors.push(`${relPath} exists but registry locale status for ${locale} is ${topic.locale_status?.[locale]}`);
         }
