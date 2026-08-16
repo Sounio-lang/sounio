@@ -28,6 +28,7 @@ Source of truth:
 
 - `artifacts/omega/selfhost_compiler_progress.v1.json`
 - `artifacts/omega/parallel_cutover_status.v1.json`
+- `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` — active operational plan (wave dispatch, sequencing)
 
 Attention governance (`5 = 1 + 2`):
 
@@ -40,15 +41,24 @@ Parallel blocker discipline:
 
 - `.claude/PARALLEL_BLOCKER_CONTRACT.md`
 
-## Track B Execution Order (locked)
+## Track B Execution Order (retired 2026-08-16)
 
-1. `data_structures.md`
-2. `gpu_ir_expansion.md`
-3. `hlir_lowering.md`
-4. `metal_msl_codegen.md`
-5. `ptx_regalloc_expansion.md`
+Status: **retired — superseded by `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md`.**
 
-No reorder and no scope drift.
+The five `.claude/prompts/*.md` files this section referenced
+(`data_structures.md`, `gpu_ir_expansion.md`, `hlir_lowering.md`,
+`metal_msl_codegen.md`, `ptx_regalloc_expansion.md`) no longer exist in
+`.claude/prompts/`. That directory now carries a different work-breakdown
+scheme (`door1_break_array_wall.md`, `door2_gpu_compute.md`,
+`door3_octonion_ssm.md`, `garden.md`) unrelated to the historical Track B
+ordering.
+
+All current multi-agent execution sequencing, workstream decomposition,
+writer-ceiling rules, and wave dispatch live in the Madaros Focus Plan,
+which is the active operational plan under the same governance
+(`.claude/ATTENTION_CHARTER.md`, `CLAUDE.md §4`,
+`docs/internal/coordination/COMPILER_LANE_CONTRACT.md`). This index does
+not duplicate the plan; refer agents there for sequencing.
 
 ## Operational Rules
 
