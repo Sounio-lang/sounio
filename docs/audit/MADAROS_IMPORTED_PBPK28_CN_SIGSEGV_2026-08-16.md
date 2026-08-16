@@ -27,6 +27,22 @@ smoke that builds Params28 locally and takes one CN step.
 `SOUNIO_SOUC_ENGINE=lean_single souc run …` completes with correct CL_obs gates
 (sibling `scripts/check.sh` parity morphine / clonidine / fentanyl / weaning_e2e).
 
+## Minimal repro (landed)
+
+Path: [`docs/audit/repro/smoke_pbpk28_cn_imported.sio`](repro/smoke_pbpk28_cn_imported.sio)
+
+Evidence 2026-08-16 (workspace control pod, `bin/souc` Madaros default):
+
+| Engine | Program | `check` | `run` |
+|---|---|---|---|
+| Madaros | `smoke_pbpk28_cn_imported.sio` | OK | ELF merges, prints `cv0=`, then **SIGSEGV** |
+| lean_single | same | OK | **PASS** |
+| Madaros | import `pbpk28_state_zero` + print `cv[0]` only | OK | **PASS** (`cv0=1.000000`) |
+
+Bisect: crash is **not** generic multimodule print/import. It is specific to
+calling imported `pbpk28_full_cn_step` (post-lower, post-ELF write). Suspect
+CN return struct / array field load (D3 exclusive-ref / aggregate return).
+
 ## Workaround (production for sibling)
 
 Sibling repo `sounio-pbpk-sedation-weaning`:
