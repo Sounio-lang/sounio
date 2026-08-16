@@ -1,0 +1,162 @@
+//@ run-pass
+// gum_independence_required.sio
+//
+// Proves the claim that motivates tying quadrature to a proof of independence:
+// the quadrature law UNDERSTATES combined uncertainty whenever the inputs are
+// positively correlated.
+//
+// JCGM 100:2008 eq. (13):
+//     u_c(y)^2 = c1^2 u1^2 + c2^2 u2^2 + 2 c1 c2 rho u1 u2
+// Eq. (10) — plain quadrature — is the rho = 0 special case, not the general law.
+//
+// SEMANTICS.md Invariant 2 (Uncertainty Non-Contraction) says a bound that can
+// shrink under transformation is a lie. Assuming independence when rho > 0 does
+// exactly that, and physiological series are positively correlated through
+// shared drivers (time of day, activity) — so the unsafe direction is the
+// common one, not the exotic one.
+//
+// Helpers are inlined because tests cannot import.
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 {
+        scaled = scaled * 4.0
+        scale_back = scale_back * 2.0
+    }
+    while scaled > 4.0 {
+        scaled = scaled * 0.25
+        scale_back = scale_back * 0.5
+    }
+    var y = 1.5
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    y = 0.5 * (y + scaled / y)
+    return y / scale_back
+}
+
+// ============================================================================
+// THE TWO LAWS
+// ============================================================================
+
+// JCGM 100 eq. (10). Valid ONLY under independence.
+fn gum_independent(u1: f64, u2: f64, c1: f64, c2: f64) -> f64 with Mut, Panic, Div {
+    return sqrt_f64(c1*c1*u1*u1 + c2*c2*u2*u2)
+}
+
+// JCGM 100 eq. (13). The general law.
+fn gum_correlated(u1: f64, u2: f64, c1: f64, c2: f64, rho: f64) -> f64 with Mut, Panic, Div {
+    let var_indep = c1*c1*u1*u1 + c2*c2*u2*u2
+    let cov_term = 2.0 * c1 * c2 * rho * u1 * u2
+    let total = var_indep + cov_term
+    if total <= 0.0 { return 0.0 }
+    return sqrt_f64(total)
+}
+
+fn close(a: f64, b: f64, tol: f64) -> bool {
+    return abs_f64(a - b) < tol
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// rho = 0: the general law collapses to quadrature. The independent law is not
+// wrong — it is a special case, and the test pins which one.
+fn test_rho_zero_agrees() -> bool with Mut, Panic, Div {
+    let ind = gum_independent(3.0, 4.0, 1.0, 1.0)
+    let cor = gum_correlated(3.0, 4.0, 1.0, 1.0, 0.0)
+    return close(ind, cor, 0.000001) && close(ind, 5.0, 0.000001)
+}
+
+// THE POINT. rho > 0 makes the truth LARGER than quadrature: assuming
+// independence emits a bound tighter than reality.
+fn test_positive_correlation_understated() -> bool with Mut, Panic, Div {
+    let ind = gum_independent(3.0, 4.0, 1.0, 1.0)
+    let cor = gum_correlated(3.0, 4.0, 1.0, 1.0, 0.5)
+    return cor > ind
+}
+
+// Full positive correlation collapses to LINEAR addition — which is precisely
+// why quadrature is the independence law and nothing else.
+fn test_rho_one_is_linear_sum() -> bool with Mut, Panic, Div {
+    let cor = gum_correlated(3.0, 4.0, 1.0, 1.0, 1.0)
+    return close(cor, 7.0, 0.000001)
+}
+
+// rho < 0 is the safe direction: quadrature overstates, which never lies about
+// a bound. The asymmetry is the reason independence cannot just be assumed.
+fn test_negative_correlation_is_safe() -> bool with Mut, Panic, Div {
+    let ind = gum_independent(3.0, 4.0, 1.0, 1.0)
+    let cor = gum_correlated(3.0, 4.0, 1.0, 1.0, -0.5)
+    return cor < ind
+}
+
+// Full anti-correlation cancels to |u1 - u2|.
+fn test_rho_minus_one_cancels() -> bool with Mut, Panic, Div {
+    let cor = gum_correlated(3.0, 4.0, 1.0, 1.0, -1.0)
+    return close(cor, 1.0, 0.000001)
+}
+
+// The size of the lie is not academic. With equal uncertainties and rho = 0.7,
+// quadrature emits a bound ~29% tighter than the truth.
+fn test_error_magnitude_is_material() -> bool with Mut, Panic, Div {
+    let ind = gum_independent(1.0, 1.0, 1.0, 1.0)
+    let cor = gum_correlated(1.0, 1.0, 1.0, 1.0, 0.7)
+    let ratio = ind / cor
+    return ratio < 0.78 && ratio > 0.75
+}
+
+fn main() -> i32 with Mut, Panic, Div {
+    var passed = 0
+    var failed = 0
+
+    print("rho=0 collapses to quadrature....... ")
+    if test_rho_zero_agrees() { println("PASS") passed = passed + 1 } else { println("FAIL") failed = failed + 1 }
+
+    print("rho>0 understated by quadrature..... ")
+    if test_positive_correlation_understated() { println("PASS") passed = passed + 1 } else { println("FAIL") failed = failed + 1 }
+
+    print("rho=1 is the linear sum............. ")
+    if test_rho_one_is_linear_sum() { println("PASS") passed = passed + 1 } else { println("FAIL") failed = failed + 1 }
+
+    print("rho<0 is the safe direction......... ")
+    if test_negative_correlation_is_safe() { println("PASS") passed = passed + 1 } else { println("FAIL") failed = failed + 1 }
+
+    print("rho=-1 cancels to |u1-u2|........... ")
+    if test_rho_minus_one_cancels() { println("PASS") passed = passed + 1 } else { println("FAIL") failed = failed + 1 }
+
+    print("the understatement is material...... ")
+    if test_error_magnitude_is_material() { println("PASS") passed = passed + 1 } else { println("FAIL") failed = failed + 1 }
+
+    println("")
+    print("Passed: ")
+    println(passed)
+    print("Failed: ")
+    println(failed)
+
+    if failed == 0 {
+        println("ALL 6 TESTS PASSED")
+        return 0
+    }
+    println("SOME TESTS FAILED")
+    return 1
+}
