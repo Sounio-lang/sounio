@@ -582,8 +582,8 @@ def main() -> None:
                     fail("accepted projection is not strictly upward-transversal")
             if accepted.get("projected_leaves") != len(carriers):
                 fail("accepted projection leaf count is inconsistent")
-            if accepted.get("all_six_variable_weights_present") is not True:
-                fail("accepted projection aggregate primary-weight flag is false")
+            if accepted.get("required_primary_variable_weights_present") is not True:
+                fail("accepted projection aggregate required-primary flag is false")
             early = diagnostic.get("accepted_before_production_boundary") is True
             if early:
                 if diagnostic.get("status") != "LOCAL_INTERVAL_NEWTON_ACCEPTED_BEFORE_FROZEN_CONTROL":
