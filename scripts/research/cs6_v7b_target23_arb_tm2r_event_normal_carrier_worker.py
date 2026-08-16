@@ -741,6 +741,69 @@ def promote_early_projection(diagnostic: dict[str, object]) -> dict[str, object]
     return promoted
 
 
+def continue_to_second_passage(projections: list[object]) -> dict[str, object]:
+    """Continue accepted upward section carriers to the next downward section."""
+    branches: list[dict[str, object]] = []
+    for index, projection in enumerate(projections):
+        try:
+            phase = witness.chain.integrate_downward_return(projection.carrier)
+            second = witness.chain.project_downward_event(
+                phase.endpoint, phase.reference_time
+            )
+        except base.Refusal as refusal:
+            return {
+                "attempted": True,
+                "accepted": False,
+                "status": refusal.failure_class,
+                "detail": refusal.detail,
+                "failed_branch": index,
+                "completed_branches": branches,
+            }
+        weights = witness.centered.variable_weights(
+            second.carrier, rows=SECTION_ROWS
+        )
+        six_present = all(
+            value.upper() > 0 for value in weights[:PRIMARY_VARIABLES]
+        )
+        branches.append(
+            {
+                "branch": index,
+                "carrier": serialized_state(second.carrier),
+                "event_time": interval_json(second.event_time),
+                "event_derivative": interval_json(second.derivative),
+                "event_normal": interval_json(second.normal),
+                "event_delta": interval_json(second.delta),
+                "reference_time_q": str(second.reference_time),
+                "slab_radius_q": str(second.slab_radius),
+                "variable_weights": [interval_json(value) for value in weights],
+                "all_six_variable_weights_present": six_present,
+                "accepted_substeps": phase.accepted_substeps,
+                "time_bisections": phase.time_bisections,
+                "downward_section_tubes": phase.downward_section_tubes,
+                "pure_source_monomials": second.pure_source_monomials,
+                "event_time_pure_source_monomials": (
+                    second.event_time_pure_source_monomials
+                ),
+            }
+        )
+    all_six = bool(branches) and all(
+        branch["all_six_variable_weights_present"] is True
+        for branch in branches
+    )
+    return {
+        "attempted": True,
+        "accepted": all_six,
+        "status": (
+            "SECOND_PASSAGE_ACCEPTED"
+            if all_six
+            else "SECOND_PASSAGE_SYMBOLIC_DEPENDENCE_UNRESOLVED"
+        ),
+        "source_projected_leaves": len(projections),
+        "completed_branches": branches,
+        "all_six_variable_weights_present": all_six,
+    }
+
+
 def lineage_one_step(state: list[base.TM2R]) -> tuple[list[base.TM2R], list[arb]]:
     original = base.recondition
     base.recondition = witness.prior.lineage_preserving_recondition
@@ -959,6 +1022,18 @@ def run_transport(
         initial_weights[0].upper() > 0 and initial_weights[1].upper() > 0,
     )
     original_try_projection = witness.try_projection
+    original_project_upward_cover = witness.chain.project_upward_cover
+    retained_projections: list[object] = []
+
+    def project_upward_cover_with_retention(
+        state: list[base.TM2R], reference_time: Fraction
+    ) -> tuple[list[object], int, int]:
+        projections, split_nodes, split_reconstructions = (
+            original_project_upward_cover(state, reference_time)
+        )
+        retained_projections.clear()
+        retained_projections.extend(projections)
+        return projections, split_nodes, split_reconstructions
 
     def try_projection_with_primary_scope(
         state: list[base.TM2R], reference_time: Fraction, label: str
@@ -967,6 +1042,7 @@ def run_transport(
             original_try_projection(state, reference_time, label)
         )
 
+    witness.chain.project_upward_cover = project_upward_cover_with_retention
     witness.try_projection = try_projection_with_primary_scope
     try:
         diagnostic = promote_early_projection(
@@ -974,6 +1050,7 @@ def run_transport(
         )
     finally:
         witness.try_projection = original_try_projection
+        witness.chain.project_upward_cover = original_project_upward_cover
     xi_eta_preserved: bool | None = None
     accepted = diagnostic.get("accepted_projection")
     if isinstance(accepted, dict):
@@ -1007,6 +1084,24 @@ def run_transport(
     )
     if xi_eta_preserved is not None:
         bool_check(checks, "terminal_xi_eta_coordinates_retained", xi_eta_preserved)
+    second_passage: dict[str, object] = {
+        "attempted": False,
+        "accepted": False,
+        "status": "FIRST_PASSAGE_NOT_ACCEPTED",
+    }
+    if diagnostic.get("accepted") is True:
+        retained_match = (
+            isinstance(accepted, dict)
+            and accepted.get("projected_leaves") == len(retained_projections)
+            and len(retained_projections) > 0
+        )
+        bool_check(
+            checks,
+            "accepted_projection_objects_retained_for_second_passage",
+            retained_match,
+        )
+        if retained_match:
+            second_passage = continue_to_second_passage(retained_projections)
     transport_stats = stats_json()
     if diagnostic.get("accepted") is True:
         bool_check(
@@ -1025,6 +1120,7 @@ def run_transport(
         "witness_domain": witness_domain,
         "reconstruction": reconstruction,
         "diagnostic": diagnostic,
+        "second_passage": second_passage,
         "carrier_stats": transport_stats,
         "terminal_xi_eta_preserved": xi_eta_preserved,
         "full_transport_attempted": True,
@@ -1033,9 +1129,13 @@ def run_transport(
             "IMPLEMENTATION_INCONSISTENCY"
             if not implementation_ok
             else (
-                "EVENT_NORMAL_TRANSPORT_ACCEPTED"
-                if diagnostic.get("accepted") is True
-                else str(diagnostic.get("status"))
+                "EVENT_NORMAL_SECOND_PASSAGE_ACCEPTED"
+                if second_passage.get("accepted") is True
+                else (
+                    str(second_passage.get("status"))
+                    if diagnostic.get("accepted") is True
+                    else str(diagnostic.get("status"))
+                )
             )
         ),
     }

@@ -360,6 +360,66 @@ def validate_mode(
     return mode, expected_class == "EVENT_NORMAL_PREFLIGHT_ONE_STEP_IMPROVED"
 
 
+def validate_second_passage(
+    value: object, accepted_projection: dict[str, object]
+) -> bool:
+    if not isinstance(value, dict) or value.get("attempted") is not True:
+        fail("accepted first passage did not attempt the second passage")
+    branches = value.get("completed_branches")
+    if not isinstance(branches, list):
+        fail("second-passage branch list is absent")
+    for index, branch in enumerate(branches):
+        if not isinstance(branch, dict) or branch.get("branch") != index:
+            fail("second-passage branch ordering is malformed")
+        carrier = branch.get("carrier")
+        validate_components(carrier, f"second passage branch {index}")
+        if not isinstance(carrier, list):
+            fail("second-passage carrier is malformed")
+        w_component = carrier[2]
+        if not isinstance(w_component, dict):
+            fail("second-passage w component is malformed")
+        for coefficient in w_component.get("coefficients", []):
+            if interval(coefficient.get("interval"), "second-passage w coefficient") != (
+                Fraction(0),
+                Fraction(0),
+            ):
+                fail("second-passage carrier does not have exact w=0")
+        if interval(branch.get("event_derivative"), "second-passage derivative")[1] >= 0:
+            fail("second-passage derivative is not strictly negative")
+        if interval(branch.get("event_normal"), "second-passage normal")[1] >= 0:
+            fail("second-passage normal is not strictly negative")
+        interval(branch.get("event_time"), "second-passage event time")
+        interval(branch.get("event_delta"), "second-passage event delta")
+        weights = branch.get("variable_weights")
+        if not isinstance(weights, list) or len(weights) < 6:
+            fail("second-passage branch lacks six primary weights")
+        if not all(interval(weight, "second-passage primary weight")[1] > 0 for weight in weights[:6]):
+            fail("second-passage branch lost a primary symbolic variable")
+        if branch.get("all_six_variable_weights_present") is not True:
+            fail("second-passage branch primary-weight flag is false")
+        for key in ("accepted_substeps", "downward_section_tubes"):
+            if not isinstance(branch.get(key), int) or branch[key] <= 0:
+                fail(f"second-passage branch has invalid {key}")
+        if not isinstance(branch.get("time_bisections"), int) or branch["time_bisections"] < 0:
+            fail("second-passage branch has invalid time-bisection count")
+    accepted = value.get("accepted") is True
+    if accepted:
+        expected_leaves = accepted_projection.get("projected_leaves")
+        if value.get("status") != "SECOND_PASSAGE_ACCEPTED":
+            fail("accepted second passage has wrong status")
+        if value.get("source_projected_leaves") != expected_leaves:
+            fail("second-passage source-leaf count is inconsistent")
+        if len(branches) != expected_leaves or not branches:
+            fail("accepted second passage is not a complete source-leaf cover")
+        if value.get("all_six_variable_weights_present") is not True:
+            fail("accepted second passage aggregate primary-weight flag is false")
+    else:
+        status = value.get("status")
+        if not isinstance(status, str) or status == "SECOND_PASSAGE_ACCEPTED":
+            fail("refused second passage has invalid status")
+    return accepted
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("receipt", type=Path)
@@ -478,13 +538,25 @@ def main() -> None:
                     fail("early accepted projection changed during promotion")
             elif diagnostic.get("production_boundary_reproduced") is not True:
                 fail("ordinary accepted projection lacks the frozen control boundary")
+            second_accepted = validate_second_passage(
+                result.get("second_passage"), accepted
+            )
+        else:
+            second_accepted = False
+            second = result.get("second_passage")
+            if not isinstance(second, dict) or second.get("attempted") is not False:
+                fail("second passage was attempted without an accepted first passage")
         expected = (
             "IMPLEMENTATION_INCONSISTENCY"
             if result.get("implementation_checks_passed") is not True
             else (
-                "EVENT_NORMAL_TRANSPORT_ACCEPTED"
-                if diagnostic.get("accepted") is True
-                else diagnostic.get("status")
+                "EVENT_NORMAL_SECOND_PASSAGE_ACCEPTED"
+                if second_accepted
+                else (
+                    result.get("second_passage", {}).get("status")
+                    if diagnostic.get("accepted") is True
+                    else diagnostic.get("status")
+                )
             )
         )
         require(result, "classification", expected)
