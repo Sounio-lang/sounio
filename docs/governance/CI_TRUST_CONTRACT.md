@@ -11,7 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.governance.ci-
 
 Date: 2026-08-17
 Authoring lane: codex-2 / ci-trust-contract
-Current anchor: `ed9dd2b903` (`origin/main` after #1773)
+Original authoring anchor: `ed9dd2b903` (`origin/main` after #1773)
+Current merged-main anchor: `f6d2188d46` (`origin/main` after #1794)
 
 ## Contract
 
@@ -175,8 +176,8 @@ was changed to refuse with `INSTRUMENT UNAVAILABLE`. The general rule is:
 
 ## Selected Jobs
 
-As of `ed9dd2b903`, `scripts/ci/evaluate_ci_decision.py` treats these jobs as
-authoritative:
+As of merged-main anchor `f6d2188d46`, `scripts/ci/evaluate_ci_decision.py`
+treats these jobs as authoritative:
 
 - Always selected: `contracts`
 - Selected for `compiler`, `runtime`, `stdlib`, `tests`, or `full`:
