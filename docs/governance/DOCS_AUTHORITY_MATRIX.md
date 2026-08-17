@@ -113,6 +113,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.equivalence-theory-lean-autoemit-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_AUTOEMIT_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-lean-obligations-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_OBLIGATIONS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-lean-persite-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_PERSITE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.extern-c-ffi-silent-noop-dispatch-2026-08-13 | repo_only | docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-7fa3c3524-dead-code-2026-06-16 | repo_only | docs/audit/FRAME_FIX_7fa3c3524_DEAD_CODE_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-full-selfhosted-2026-06-16 | repo_only | docs/audit/FRAME_FIX_FULL_SELFHOSTED_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-validation-2026-06-16 | repo_only | docs/audit/FRAME_FIX_VALIDATION_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -557,6 +558,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.coordination.enir-semantic-interface-contract-2026-07-12 | repo_only | docs/internal/coordination/enir-semantic-interface-contract-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.madaros-focus-plan-2026-08-16 | repo_only | docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.semantic-hotspot-triage-2026-07-12 | repo_only | docs/internal/coordination/semantic-hotspot-triage-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.coordination.state-of-the-compiler-2026-08-17 | repo_only | docs/internal/coordination/STATE_OF_THE_COMPILER_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.e175-triage-2026-08-02 | repo_only | docs/internal/E175_TRIAGE_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.readme | repo_only | docs/internal/garden/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-09-above-the-stars | repo_only | docs/internal/garden/seeds/2026-05-09-above-the-stars.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -670,6 +672,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.papers.main.168-dual-pathway-correction | repo_only | docs/papers/main/168-dual-pathway-correction.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.168-revision-notes | repo_only | docs/papers/main/168-revision-notes.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.168-theorem-preprint | repo_only | docs/papers/main/168-theorem-preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.papers.main.cayley-dickson-hierarchy-paper-2026-08-13 | repo_only | docs/papers/main/cayley_dickson_hierarchy_paper_2026-08-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.cpt-psp.outline | repo_only | docs/papers/main/cpt-psp/outline.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.epistemic-types.benchmarks.external-baselines-summary | repo_only | docs/papers/main/epistemic-types/benchmarks/external_baselines_summary.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.main.epistemic-types.benchmarks.l4-gemm-summary | repo_only | docs/papers/main/epistemic-types/benchmarks/l4_gemm_summary.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
