@@ -54,6 +54,20 @@ Counts: 1 RE-AUTHOR (Madaros CD-Rational test), 3 RE-AUTHOR (Place/Receipt/Regis
 
 **Net effect if recommendations are accepted: 14 closed, 4 re-authored, 0 force-rebased.**
 
+## Closure reason taxonomy (four distinct kinds — not one stamp)
+
+A future reader needs to know *which* kind of closure was applied, because each carries different evidence and a different lesson. The triage uses four distinct reasons, not a single "stale" stamp:
+
+- **CLOSE-SUPERSEDED** — the work landed in `origin/main` under the same names (or near-equivalents), but via a different commit path than this PR. The branch's actual content was duplicated or absorbed. *Evidence: file-existence check + symbol search.* Used for #817, #1195, #1220, #1243, #1758. This is **not** the same as a "vacuous gate" — the work DID reach main, just through a different door.
+
+- **CLOSE-BLOCKED** — the PR was marked `[BLOCKED]` at the time, and the underlying goal was later achieved through a substantially-evolved successor iteration in `origin/main`. *Evidence: the new successor files exist in main with v5/v6 or later versioning; the v1/v2 files the PR would have created never existed anywhere; symbols not present.* Used for #869, #870, #881, #883, #885. The lesson: when the era is different, the answer is *what replaced it*, not *what was in it*.
+
+- **CLOSE-NOT-CODE** — the diff is operational meta-files (CI configs, attention files, offload task logs, agent session logs, beagle context, agent-bus artefacts) accumulated during a research session, not source or research papers. *Evidence: file-type breakdown, content not examined.* Used for #1580. The lesson: research lane branches should be archived as session logs, not merged as PRs.
+
+- **RE-AUTHOR** — the unique science in this PR is not redundant with anything in `origin/main`, and rebase is dishonest because the diff would conflict with current main's much-later evolution. *Evidence: file path and symbol both absent in main; OR the existing main file does not cover the same guarantee.* Used for #816, #979, #991, #998. The lesson: closure would lose real coverage that no one would notice from the outside, because the unique contribution is structurally similar to a sibling test but semantically stronger.
+
+**The distinction matters because "vacuous gate" (#1702) and "superseded by v5/v6" (#869-#885) are different claims.** A vacuous gate means the test the PR claimed to gate never tested what it was supposed to. A v5/v6 supersession means the underlying goal was met by a later iteration. Conflating them would lose the lesson.
+
 ## Per-PR findings
 
 ### #816 — RE-AUTHOR
@@ -69,7 +83,15 @@ Counts: 1 RE-AUTHOR (Madaros CD-Rational test), 3 RE-AUTHOR (Place/Receipt/Regis
 
 **Recommendation: RE-AUTHOR.** The Rational-based CD-zero-divisor science is unique in main and worth keeping. Open a fresh branch on `origin/main`, port both `.sio` files verbatim, drop `//@ requires: madaros` (main's analogous tests don't carry it), confirm the `math::rational` import path is still correct (it is), and run them against current main's Madaros. If they pass, both files become part of the regression suite and the original PR is closed with a reference to the new PR.
 
-**Why not close-as-superseded.** The PR's specific Rational-arithmetic witness is not redundant with `cd_exact_generic_i64.sio` — Rational gives decidable equality without f64 tolerance, which is a stronger guarantee than i64. Closing without preserving it loses real coverage.
+**Why not close-as-superseded.** The PR's specific Rational-arithmetic witness is **not** redundant with `cd_exact_generic_i64.sio`, and closing it would have lost real coverage that no one would have noticed from the outside, because the two tests look like the same test:
+
+- `cd_exact_generic_i64.sio` proves the same zero-divisor science `(e₃+e₁₀)(e₆−e₁₅)=0` at k=4 over **`i64` arithmetic**. Component values are integers; equality is decidable but the *ring* is ℤ — overflow at large component magnitudes is possible, and the test only proves zero-divisor annihilation, not arbitrary rational identities.
+
+- `cd_exact_rational_concrete.sio` proves the same science over **`Rational` arithmetic** (`stdlib/math/rational.sio`). Every component is a pair `(num: i64, den: i64)`; equality `rat_eq(a, b)` is **decidable exactly** — no f64 tolerance, no integer overflow at any magnitude that fits in a rational pair. The test additionally proves `e₁² = −1/1` with a non-zero component, which requires rational arithmetic to express as an *exact* equality rather than an approximate one.
+
+The Rational witness is **strictly stronger** than the i64 witness: decidable exact equality over a wider ring, with a stronger sub-claim (`e₁² = −1/1` exactly). A reader skimming the two filenames would assume the i64 version subsumes the Rational version; it does not. Closing #816 as "superseded by `cd_exact_generic_i64.sio`" would have been a false supersession — the i64 file proves a weaker claim and would have left the Rational-identity coverage unmonitored.
+
+This is the precise mechanism by which a triage can lose coverage without anyone noticing: the two tests look structurally identical, but the underlying arithmetic ring is different and one proves strictly more than the other. Re-authoring is required.
 
 ### #817 — CLOSE-SUPERSEDED
 
