@@ -7,74 +7,77 @@ validated_by: minimax-cli1
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.coordination.pr-backlog-triage-2026-08-16
 -->
 
-# PR Backlog Triage — 2026-08-16 (Wave 3, coverage-redo 2026-08-17)
+# PR Backlog Triage — 2026-08-16 (Wave 3, round-4 coverage-redo 2026-08-17)
 
 Status: wave-3 fleet hygiene. Read-only classification; no PRs merged or closed here.
 Author: `minimax-cli1` (tmux fleet window 19), lane `pr-triage-wave3` (extension of
 `pr-triage-wave2`). Claim: `bin/sounio-coord claim --agent minimax-cli1 --lane pr-triage-wave3`.
-Inputs: `gh pr list --state open --limit 200` (**52** open PRs at 2026-08-17),
+Inputs: `gh pr list --state open --limit 200` (**50** open PRs at 2026-08-17),
 per-PR `gh pr view` for file lists + CI rollups, `bin/sounio-coord status` for
 active claims, `git log --first-parent main` for merge activity since the trap
 cutoff (2026-08-04).
 
-This is a coverage redo. The first version's heading counts (`MERGE 8 / REBASE 8 /
-CLOSE 17 / BLOCKED 20`) were assertions, not derived from rows — only 29 of 53
-PRs were listed, with 13 merged-commit/issue numbers cited as if they were
-triaged rows. The counts below are derived from row tables; if a heading and
-its table disagree, the table is authoritative and the heading is stale.
+**As-of commit:** `03416657fa` (`fix(madaros): #1678 aggregate-array-element
+mutable-borrow miscompile (#1749)`). Three PRs previously classified were merged
+by glm-cli2 between 2026-08-17T02:09Z and 02:43Z — see "Recently merged" below.
+One new PR (#1758) was opened after the round-3 write.
+
+This is the round-4 coverage redo. Round 3 fixed the heading-vs-rows defect for
+MERGE/REBASE/CLOSE but introduced two new ones: (a) a "stale-trap appendix"
+re-listed seven MERGE-eligible PRs as if they were additional BLOCKED rows, so a
+row-extraction audit counted 60 rows over 52 distinct PRs (8 duplicates); (b) the
+same appendix lifted BLOCKED's effective row count to 28 while the heading still
+read 20. Both are fixed here: the stale-trap appendix is removed and its risk
+notes are folded into each MERGE row's reason, and all four bucket counts are
+derived from row tables after write.
 
 ## The trap, internalized
 
 **CLEAN (or MERGEABLE) ≠ still-correct-against-current-main.**
 
-The dispatch's example: #1641 is MERGEABLE per GitHub, its CI was all-green on
-**2026-08-04**, and its diff is one fixture file. Between 2026-08-04 and
-2026-08-17, `main` (now at `03416657fa`) accumulated **97 first-parent commits
-and 72 merge commits**, including #1737 (witness matrix), #1738 (witness matrix
-follow-up), #1749 (aggregate-array mutable-borrow miscompile), #1745/#1747 (Mut
-effects, env strings), #1748 (viz stdlib), #1751 (plan tranche),
-#1752 (registry provenance header fix), #1753 (WS-C PR1 ENIR/MIR shadow lane) and
-#1754 (MLI S1 kind model + verifier). The "remaining self-parse failures"
-#1641 set out to classify are almost certainly no longer the right list; the
-fixture is stale by construction. → CLOSE, not MERGE.
+The dispatch's example: #1641 was MERGEABLE per GitHub, its CI was all-green on
+2026-08-04, and its diff was one fixture file. Between 2026-08-04 and 2026-08-17
+(atop `03416657fa`), `main` accumulated 97 first-parent commits and 72 merge
+commits. The fixture was stale by construction — the founder classified #1641
+as CLOSE on the round-3 dispatch, and glm-cli2 actually merged it on 2026-08-17T02:25Z
+(commit `9812200496`) once the docs-registry hazard cleared. That outcome is
+recorded under "Recently merged" below, not as an open bucket.
 
-The same logic applies to every PR whose last green CI run is older than
-today's `03416657fa` — including most of the dispatch's pre-bucketed CLEAN/READY
-set.
+The same hazard still applies to every PR whose last green CI run is older than
+`03416657fa` — most of the dispatch's pre-bucketed CLEAN/READY set. MERGE
+candidates in this document carry a "re-run CI" note where the trap is live.
 
-**Sub-trap: docs-registry third-party drift.** The Contracts + CI Decision
-checks fail for #1641 and #1756 with no doc edits in the diff. Per the wave-2
-hazard, this gate goes red from external drift, not from the diff under test —
-verify WHY before treating the failure as the PR's fault.
+**Sub-trap: docs-registry third-party drift.** The `Contracts` + `CI Decision`
+checks fail for several open PRs (#1756, #1758, …) with no doc edits in the
+diff. Per the wave-2 hazard, this gate goes red from external drift, not from
+the diff under test — verify WHY before treating the failure as the PR's fault.
 
 ## Active claims (cross-check before any MERGE)
 
-Per `bin/sounio-coord status` at capture (2026-08-17T01:29Z):
+Per `bin/sounio-coord status` at capture (2026-08-17 capture window):
 
 | Claim | State | Lane | Files |
 |---|---|---|---|
 | `claude--session-51d7b0cc-…` | ACTIVE | session-51d7b0cc (claude-1) | `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md`, `.claude/attention_p0.v1.json` (docs only) |
-| `codex--session-019fff99-…` | ACTIVE | session-019fff99 (codex-2) | (none — codex-2 released `ws-c-pr2-open` after PR #1756 opened) |
-| `claude--session-c89fe8c8-…` | STALE | P0-F (extern "C" FFI) | `check.sio` / `codegen_x86_linux.sio` (was active, now stale) |
+| `claude--session-c89fe8c8-…` | STALE | (was P0-F, now `wsg-v0b` lane) | `self-hosted/check/check.sio`, `self-hosted/parser/types.sio`, `self-hosted/parser/items.sio`, `self-hosted/parser/mod.sio` (changed since round 3) |
 | `minimax-cli1--pr-triage-wave3` | STALE | this lane | `docs/internal/coordination/PR_BACKLOG_TRIAGE_2026-08-16.md` (this doc) |
 | (others) | STALE | various | various |
 
-**Consequence:** at capture, no code file is under an ACTIVE claim. PRs that
-were BLOCKED under the prior capture by the P0-F claim (#867, #1290, #1339,
-#1421, #1527, #1604, #1605, #1729) are **no longer claim-blocked**, but they
-still touch files that were actively developed and are likely to move again;
-they are classified below as BLOCKED-by-chain or BLOCKED-by-stale-P0-F-claim
-so the founder sees the hazard rather than merging into a moving target.
+**Consequence:** no ACTIVE claim blocks a MERGE. The P0-F stale claim now covers
+`check.sio` + three parser files; PRs touching those files (round 3: 867, 1290,
+1339, 1421, 1527, 1729; round 4 additions: 1758) are listed under
+"BLOCKED-by-stale-claim" so the founder sees the collision risk before any merge
+attempt.
 
 ## Bucket counts (derived from row tables)
 
 | Bucket | Count |
 |---|---:|
-| **MERGE** | 8 |
+| **MERGE** | 6 |
 | **REBASE** | 7 |
-| **CLOSE** | 17 |
-| **BLOCKED** | 20 |
-| **Total** | **52** |
+| **CLOSE** | 16 |
+| **BLOCKED** | 21 |
+| **Total** | **50** |
 
 ---
 
@@ -84,18 +87,16 @@ Every PR below has a one-line reason (per the dispatch). Stale means last
 substantive activity >14 days ago. Path collisions are against current `main`
 (atop `03416657fa`).
 
-### MERGE (8)
+### MERGE (6)
 
 | # | Title (short) | Head | One-line reason |
 |---|---|---|---|
 | 1063 | ci(octonion): wire O-SSM probes gate | `research/octonion-probes-ci-gate` | math-impact CI gate; CONFLICTING but docs/infra only, no claim collision, no P0-F touch. |
-| 1376 | docs(governance): branch policy | `docs/branch-policy` | docs-only, 4 files; directly supports cursor-1's auto-delete decision item. |
-| 1420 | docs(handoff): units dispatch | `docs/units-dispatch` | docs-only handoff dispatch, no claim collision, narrow scope. |
-| 1505 | dev(build): Madaros on idle SLURM nodes | `dev/remote-build-slurm-20260726` | addresses plan §5 risk #5 (CPU-saturation pod eviction); MERGEABLE, last green 2026-07-26, no claim collision. |
-| 1506 | docs(claude): build lock carveout | `docs/build-lock-carveout-20260726` | docs-only carveout warning, MERGEABLE, no-risk. |
-| 1554 | fix(stdlib): correlated cov | `fix/madaros-parity-ab-20260729` | narrow stdlib + gate, Madaros ALL PASS per author, no claim collision. |
-| 1720 | darwin_pbpk: Knightian pharmacometrics | `darwin-pbpk/knightian-utiped-p1` | orthogonal darwin-pbpk workstream, MERGEABLE + CI all GREEN 2026-08-13, 2 files, no claim collision. |
-| 1730 | stdlib: insertion-sort break | `darwin-pbpk/stdlib-sort-fix` | narrow stdlib fix, CI all GREEN 2026-08-13, 3 files, no claim collision. |
+| 1376 | docs(governance): branch policy | `docs/branch-policy` | docs-only, 4 files; directly supports cursor-1's auto-delete decision item; re-run CI (last green 2026-07-26) before merge. |
+| 1420 | docs(handoff): units dispatch | `docs/units-dispatch` | docs-only handoff dispatch, no claim collision, narrow scope; re-run CI (last green 2026-07-26) before merge. |
+| 1505 | dev(build): Madaros on idle SLURM nodes | `dev/remote-build-slurm-20260726` | addresses plan §5 risk #5 (CPU-saturation pod eviction); MERGEABLE, last green 2026-07-26, no claim collision; re-run CI before merge. |
+| 1506 | docs(claude): build lock carveout | `docs/build-lock-carveout-20260726` | docs-only carveout warning, MERGEABLE, no-risk; re-run CI (last green 2026-07-26) before merge. |
+| 1554 | fix(stdlib): correlated cov | `fix/madaros-parity-ab-20260729` | narrow stdlib + gate, Madaros ALL PASS per author, no claim collision; re-run CI (last green 2026-07-29) before merge. |
 
 ### REBASE (7)
 
@@ -109,7 +110,7 @@ substantive activity >14 days ago. Path collisions are against current `main`
 | 1750 | [backend] CUDA ABI launch packing | `cherry/gpu-cuda-fixes-20260815` | CONFLICTING vs main; CI green on substantive checks; touches `bin/souc-lean-single-x86_64` (prebuilt-binary staleness risk, plan §5 risk #6); verify rebuild before merge. |
 | 1756 | WS-C PR2: wire Madaros v2 ENIR gate stack | `lane/codex-2/ws-c-pr2-20260816` | MERGEABLE; `Contracts` + `CI Decision` FAIL looks like docs-registry third-party drift (no doc edits in 51-file diff), all substantive checks SUCCESS — re-run; if still red on Contracts, run `scripts/docs/sync_governance_metadata.mjs` and re-verify. |
 
-### CLOSE (17)
+### CLOSE (16)
 
 | # | Title (short) | Head | One-line reason |
 |---|---|---|---|
@@ -128,26 +129,26 @@ substantive activity >14 days ago. Path collisions are against current `main`
 | 1538 | docs(audit): module_frontend segfault | `claude/module-frontend-seed-crash-dispatch` | DRAFT, untouched since 2026-07-27; the segfault is documented elsewhere; superseded by #1737's witness matrix. |
 | 1604 | feat(wasm): deontic v3 | `codex/madaros-wasm-deontic-v3-20260802` | DRAFT, untouched since 2026-08-02; duplicate of #1605 (same head branch, same diff); close as duplicate. |
 | 1605 | feat(wasm): deontic v3 | `codex/madaros-wasm-deontic-v3-20260802` | DRAFT, untouched since 2026-08-02; duplicate of #1604. |
-| 1641 | docs(ci): self-parse baseline classified | `docs/self-parse-baseline-classified` | **TRAP — CLOSE despite MERGEABLE.** Single fixture file, last green CI 2026-08-04, but main has moved 97 first-parent + 72 merge commits since then including #1753 (ENIR/MIR shadow) + #1754 (MLI S1); fixture is stale by construction — purpose obsolete. (The current `Contracts` + `CI Decision` FAIL is docs-registry drift on the registry itself; #1752 already fixed the header-preservation bug for that.) |
 | 1659 | feat(san-fpga): SAN-v3 curriculum | `research/san-fpga-san-v3-20260805` | CONFLICTING; research-grade SAN, not in active scope; no founder "let finish" hold. |
 
-### BLOCKED (20)
+### BLOCKED (21)
 
-#### BLOCKED by stale P0-F claim on `self-hosted/check/check.sio` and/or `self-hosted/native/codegen_x86_linux.sio`
+#### BLOCKED by stale P0-F / wsg-v0b claim on `self-hosted/check/check.sio` / `self-hosted/parser/{types,items,mod}.sio`
 
-Note: the P0-F claim (`claude--session-c89fe8c8-…`) is STALE at capture.
-Not technically claim-blocked right now, but the files were under active
-development and are likely to move again. Listed here so the founder sees
-the collision risk; merge requires explicit P0-F release/refresh coordination.
+Note: the claim (`claude--session-c89fe8c8-…`) is STALE at capture but the
+listed files were under active development as recently as 2026-08-17T02:06Z and
+are likely to move again. Listed here so the founder sees the collision risk;
+merge requires explicit refresh/release coordination.
 
 | # | Title (short) | Head | Claimed files touched |
 |---|---|---|---|
 | 867 | checker: contextual function lookup | `agent/issue854-contextual-checker-partial-20260713` | `self-hosted/check/check.sio` |
 | 1290 | [checker] affine ownership | `codex/madaros-affine-semantics-20260720` | `self-hosted/check/check.sio` |
-| 1339 | fix(madaros): capacity/slicing/wide-call | `agent/madaros-declared-builtin-precedence-20260720` | `self-hosted/check/check.sio`, `self-hosted/native/codegen_x86_linux.sio` |
+| 1339 | fix(madaros): capacity/slicing/wide-call | `agent/madaros-declared-builtin-precedence-20260720` | `self-hosted/check/check.sio`, `self-hosted/native/codegen_x86_linux.sio` (codegen not in claim) |
 | 1421 | fix(madaros): preserve imported layouts | `codex/issue901-layout-current-20260724` | `self-hosted/check/check.sio` |
 | 1527 | fix(madaros): self-parse/Box::new/W044 | `madaros/self-parse-visibility-box-w44-20260727` | `self-hosted/check/check.sio`, `self-hosted/native/codegen_x86_linux.sio` |
 | 1729 | fix(madaros): B3 IrModule BSS | `fix/lane-b3-ir-module-heap-20260813` | `self-hosted/check/check.sio`, `self-hosted/native/codegen_x86_linux.sio` |
+| 1758 | Independência na composição: quadratura exige prova de d-separação | `feat/independencia-na-composicao` | `self-hosted/check/check.sio`, `self-hosted/parser/types.sio` |
 
 #### BLOCKED by chain ordering (no active owner — chain must be sequenced)
 
@@ -175,25 +176,21 @@ the collision risk; merge requires explicit P0-F release/refresh coordination.
 
 ---
 
-## Stale-trap appendix: PRs with green CI but old (the #1641 hazard generalized)
+## Recently merged (no longer in the live queue)
 
-For every PR with last green CI before today's `03416657fa`, the green tick is
-evidence about a tree that no longer exists. These are not MERGE without
-explicit founder sign-off, even if the API says MERGEABLE.
+These PRs appeared in round-3 tables but landed via glm-cli2 while round 4 was
+being written. They are listed here so a reader who saw them in round 3 can
+confirm disposition without grepping git log. They are NOT in any bucket above.
 
-| PR | Last green CI | Risk class |
-|---|---|---|
-| 1641 | 2026-08-04 | fixture stale by construction (see header). **CLOSE.** |
-| 1554 | 2026-07-29 | narrow stdlib fix, low risk. MERGE-eligible but re-run CI before merge. |
-| 1376 | 2026-07-26 | docs-only, no-risk. MERGE-eligible. |
-| 1420 | 2026-07-26 | docs-only, no-risk. MERGE-eligible. |
-| 1505 | 2026-07-26 | infra shell script, low risk. MERGE-eligible. |
-| 1506 | 2026-07-26 | docs-only, no-risk. MERGE-eligible. |
-| 1730 | 2026-08-13 | fresh, narrow stdlib fix. **MERGE-eligible.** |
-| 1720 | 2026-08-13 | fresh, narrow workstream. **MERGE-eligible.** |
+| PR | Title (short) | Merged | Merge commit |
+|---|---|---|---|
+| 1641 | docs(ci): self-parse baseline classified | 2026-08-17T02:25:07Z | `9812200496` |
+| 1720 | darwin_pbpk: Knightian pharmacometrics | 2026-08-17T02:43:41Z | `16c45b866c` |
+| 1730 | stdlib: insertion-sort break (prob/conformal index-0 corruption) | 2026-08-17T02:09:36Z | `3a636c66bf` |
 
-The 2026-08-13 green ticks were against a `main` closer to current than the
-2026-07-26 to 2026-08-04 set; those are the safer MERGE candidates.
+`#1730` in particular was a real bug fix (insertion-sort index-0 corruption in
+`prob/conformal`); the round-3 trap appendix correctly identified it as
+"MERGE-eligible", and the founder's MERGE call was right in retrospect.
 
 ## Context references (NOT triage rows — do not double-count)
 
@@ -207,10 +204,12 @@ none of them were mis-classified as triage rows.
 |---|---|
 | 09adb0f773 | Merge #1737 — worktree witness matrix (D-series gate) |
 | bddfe19fad | Merge #1738 — worktree witness matrix follow-up |
-| 8c7300c0b7 | Merge #1741 — (per wave-2 audit; subject TBD) |
+| 8c7300c0b7 | Merge #1741 — (per wave-2 audit) |
 | 6f2c4e2461 | Merge #1751 — wave-1 planning tranche |
-| 16573d73e0 / e7d33719e9 / fab45306a5 / 16573d73e0 / e6d2dbee02 | Lane-A / Lane-B lowerer / module-functions / gri30 / UI-error hotfixes |
-| 6b2198e314 / 725beb5bc7 / 911a2770fa / d9d56436ee / 6d84b8d19b / ea65acc50d | Cap-22 / linear-branch-merge / visibility-preflight / aggregate-deep-copy / handle-table / tuple-f64-slot-classification (#1490, #1493, #1500, #1501, #1508, #1697) |
+| 3a636c66bf | Merge #1730 — stdlib insertion-sort break (prob/conformal) |
+| 16c45b866c | Merge #1720 — darwin-pbpk Knightian pharmacometrics |
+| 9812200496 | Merge #1641 — self-parse baseline classified |
+| (various) | #1745/#1747 (Mut effects, env strings), #1748 (viz stdlib), #1749 (aggregate-array mutable-borrow), #1752 (registry provenance header fix), #1753 (WS-C PR1 ENIR/MIR shadow), #1754 (MLI S1) |
 
 **Issues cited as closure targets or chain roots:**
 
@@ -228,10 +227,13 @@ complementary — wave-2 listed 5 specifically-named PRs with the trap caveat on
 
 - Lane: `minimax-cli1--pr-triage-wave3`. Active (claim STALE per registry; will
   be refreshed on next heartbeat).
-- Active claims honoured: at capture, no code file is under an ACTIVE claim,
-  so no MERGE recommendation collides with a current claim.
+- Active claims honoured: no ACTIVE claim on a code file at capture, so no
+  MERGE recommendation collides with a current claim; stale-claim file touches
+  are isolated under BLOCKED-by-stale-claim for visibility.
 - No PRs merged or closed by this triage. Self-hosted/ untouched.
-- Coverage redo on 2026-08-17: heading counts derived from rows; merged-commit
-  and issue references isolated to "Context references" section.
+- Round-4 fixes: stale-trap appendix removed (was being mis-counted as BLOCKED
+  rows); MERGE 8→6, CLOSE 17→16 reflect three PRs merged by glm-cli2 since
+  round 3; BLOCKED 20→21 reflects #1758 added.
+- As-of commit: `03416657fa`. Re-derive at write time before acting.
 - Commit hash for this file's commit on `lane/minimax-cli1/20260815` recorded
   in the PR description if this triage triggers a docs-registry sync.
