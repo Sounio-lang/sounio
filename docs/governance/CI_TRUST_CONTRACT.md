@@ -12,7 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.governance.ci-
 Date: 2026-08-17
 Authoring lane: codex-2 / ci-trust-contract
 Original authoring anchor: `ed9dd2b903` (`origin/main` after #1773)
-Current merged-main anchor: `f6d2188d46` (`origin/main` after #1794)
+Current merged-main anchor: `cc42f5d10b` (`origin/main` after #1798)
 
 ## Contract
 
@@ -162,9 +162,9 @@ A reader may conclude:
 - Nothing authoritative.
 
 An empty `statusCheckRollup`, an empty check-run list, a missing head SHA, a
-missing workflow run, or a failed GitHub API read is not the same thing as "no
-pending checks" or "the head moved". It means the observer has not obtained a
-verdict.
+missing workflow run, `mergeStateStatus=UNKNOWN`, or a failed GitHub API read is
+not the same thing as "no pending checks", "the head moved", or "this branch is
+conflicting". It means the observer has not obtained a verdict.
 
 This was not hypothetical on 2026-08-17. During the same GitHub incident, a
 merge guard saw an empty `statusCheckRollup` and computed `pending=0` from an
@@ -178,10 +178,13 @@ was changed to refuse with `INSTRUMENT UNAVAILABLE`. The general rule is:
 - If the expected surface is absent, unreadable, or internally inconsistent,
   the correct state is blocked/instrument-unavailable, not pass, fail, or
   head-moved.
+- `UNKNOWN` mergeability means GitHub has not computed mergeability yet. Treat
+  it as pending/instrument-unavailable until a later read says `CLEAN`,
+  `DIRTY`, `BLOCKED`, or another concrete state.
 
 ## Selected Jobs
 
-As of merged-main anchor `f6d2188d46`, `scripts/ci/evaluate_ci_decision.py`
+As of merged-main anchor `cc42f5d10b`, `scripts/ci/evaluate_ci_decision.py`
 treats these jobs as authoritative:
 
 - Always selected: `contracts`
