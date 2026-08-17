@@ -56,6 +56,7 @@ pub let MLI_VERR_QD128_ARITH: i64 = 20
 pub let MLI_VERR_IMM_KIND: i64 = 21
 pub let MLI_VERR_BLOCK_ID: i64 = 22
 pub let MLI_VERR_ARG_PREFIX: i64 = 23
+pub let MLI_VERR_CALL_UNSPECIFIED: i64 = 24
 
 pub struct MliVerifyResult {
     pub ok: bool,
@@ -266,14 +267,14 @@ fn body_inst_code(op: i64, cc: i64, assoc: i64, zd: i64, d: MliOperand, s1: MliO
     }
 
     if op == MLI_OP_ICMP {
-        if cc == MLI_CC_NONE { return MLI_VERR_OPERAND_RULE }
+        if !mli_cc_known(cc) { return MLI_VERR_OPERAND_RULE }
         if !is_int_kind(s1.kind) || !is_int_kind(s2.kind) { return MLI_VERR_OPERAND_RULE }
         if !mli_kind_eq(s1.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
         if d.kind.tag != MLI_KIND_BOOL { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_FCMP {
-        if cc == MLI_CC_NONE { return MLI_VERR_OPERAND_RULE }
+        if !mli_cc_known(cc) { return MLI_VERR_OPERAND_RULE }
         var g = scalar_guard_code(s1.kind)
         if g != MLI_VERR_OK { return g }
         g = scalar_guard_code(s2.kind)
@@ -284,7 +285,10 @@ fn body_inst_code(op: i64, cc: i64, assoc: i64, zd: i64, d: MliOperand, s1: MliO
         return MLI_VERR_OK
     }
 
-    if op == MLI_OP_CALL { return MLI_VERR_OK }
+    // Calling convention is unpinned (no ABI, no arg-marshalling rule).
+    // Stamping OK here was the same default-guess as E219 / #1784 / #1788:
+    // a well-typed hole must refuse, not pretend the site is well-formed.
+    if op == MLI_OP_CALL { return MLI_VERR_CALL_UNSPECIFIED }
 
     if op == MLI_OP_ALLOCA {
         if d.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
@@ -372,6 +376,14 @@ fn body_inst_code(op: i64, cc: i64, assoc: i64, zd: i64, d: MliOperand, s1: MliO
     if op == MLI_OP_CD_ZD_PROBE {
         if !is_cd_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
         if d.kind.tag != MLI_KIND_BOOL && !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
+        return MLI_VERR_OK
+    }
+    if op == MLI_OP_CD_EXTRACT {
+        // The ONLY legal CD → scalar path. Lane index lives in src2.aux.
+        if !is_cd_kind(s1.kind) || !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.bits != s1.kind.bits { return MLI_VERR_OPERAND_RULE }
+        if s2.tag != MLI_OPD_IMM { return MLI_VERR_OPERAND_RULE }
+        if s2.aux < 0 || s2.aux >= s1.kind.dim { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
