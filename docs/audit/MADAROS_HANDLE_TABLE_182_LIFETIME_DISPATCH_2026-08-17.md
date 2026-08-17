@@ -169,3 +169,46 @@ build with `MADAROS_RAW_BIN=<out> ./bin/souc run <file>`.
 - Do not claim a ceiling raise fixes it.
 - Do not present fix C (source discipline) as closing the compiler bug — it is a
   caller-side avoidance; the runtime still has no reclamation.
+
+## 8. Fix B prototype attempt (fable-1, 2026-08-17) — design landed, demo blocked
+
+I attempted a working prototype of **fix B (function-scoped watermark
+reclamation)**. The design is sound and advisor-vetted; it did **not** reach a
+demonstrated reclamation, and the honest reason is an **observability wall**, not
+a design flaw. Recording both so the next owner (codex-2) starts ahead.
+
+**Design implemented (WIP patch: `.scratch/fixB_prototype_wip.patch`):**
+- `runtime_context.sio`: two global watermark scratch fields (offsets 248/256),
+  `runtime_context_size()` 248→264 (leaf-only ⇒ a single global slot pair cannot
+  nest; no hardcoded 248 anywhere, all 9 consumers call the function).
+- `codegen_x86_linux.sio`: `native_v2_frame_reclaim_safe_leaf(&IrFunction)` — a
+  conservative sound predicate (f64 scalar return only; not sret; no by-ref
+  param; LEAF = no `IrCall*`; no `IrStoreGlobal`/`IrStorePtr`/`IrReturnSret`/
+  `IrIndexSet`; every `IrFieldSet` base is a fresh in-frame `IrAlloc` dst). Save
+  after `spill_ir_params_ref_mut`, restore at the single `epilogue_offset`
+  (preserve rax = return value; rbx is scratch/epilogue-restored).
+
+**Two findings that reframe fix B (both verified):**
+1. **Function-scoped is defeated by inlining.** The inliner (`ir/inline.sio`)
+   always inlines <10-instr functions and gives leaves a 3× bonus; only >500-instr
+   leaves survive as frames. The small allocating helpers that dominate the real
+   hot loops get folded into their caller, so there is no leaf frame to reclaim.
+   **Loop-scoped reclamation (reset at the loop back-edge when the body's
+   allocations don't escape the iteration) is the version that lands the real
+   dissertation churn** — same watermark machinery, different insertion point.
+2. **The backend has no accessible compile-path observability.** Madaros has ≥4
+   parallel function-compile implementations (`compile_ir_function`,
+   `compile_ir_function_v2_into` [the streaming path `module_loader.sio:1845` uses
+   for `souc run`], `compile_ir_function_v2_core_ir_into`, plus a non-streaming
+   fallback in `compile_multimodule_native_maybe_streaming`). Env-gated `print`
+   diagnostics added to three of these produced **no output** for a test program,
+   and the **pre-existing** `native_streaming` diagnostic also produced none — so
+   the actual path a given program takes could not be traced, and the emitted ELF
+   is not `objdump`-parseable. Debugging the emit therefore requires **building
+   backend observability first** (a traceable compile-path log / a raw-code
+   dump), which is itself a prerequisite task.
+
+**Handoff recommendation:** (a) land a small compile-path trace facility first;
+(b) target **loop-scoped** reclamation, not function-scoped; (c) reuse the
+predicate and watermark save/restore in the WIP patch. Prototype code is **not
+for merge** as-is (unverified).
