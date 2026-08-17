@@ -1,9 +1,8 @@
 import EpistemicEffects
 namespace Sounio.EpistemicEffects
 
--- a valid cell
-def k0 : KCell := ⟨0, 0, 1000⟩
-theorem k0_valid : kvalid k0 := by unfold kvalid k0; decide
+-- `k0` / `k0_valid` were moved into `EpistemicEffects.lean` (§9.3) on
+-- 2026-08-16; this file now imports them.
 
 -- measure of a NAT literal is well-typed at Knowledge<Nat>
 theorem meas_nat_typed : HasTy [] (.measure (.lit_nat 0) k0) (.tknow .tnat) (singleE .eObserve) :=

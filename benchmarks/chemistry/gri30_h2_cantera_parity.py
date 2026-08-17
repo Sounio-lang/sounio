@@ -67,19 +67,21 @@ def initial_state(gas, T):
 def integrate(gas, T, t_end, dt=DT):
     """Isothermal constant-density integration; returns conc in mol/cm^3."""
     initial_state(gas, T)
-    r = ct.IdealGasReactor(gas, energy="off")
+    r = ct.IdealGasReactor(gas, energy="off", clone=False)
     net = ct.ReactorNet([r])
-    t = 0.0
-    while t < t_end - 1e-18:
-        t = net.advance(t + dt)
+    net.rtol = 1e-12
+    net.atol = 1e-22
+    net.advance(t_end)
     return gas.concentrations * 1e-3  # kmol/m^3 -> mol/cm^3
 
 
 def ignition_delay(gas, T, t_max=5e-3, dt=DT):
     """Delay = time of max d[H2O]/dt (isothermal, seeded)."""
     initial_state(gas, T)
-    r = ct.IdealGasReactor(gas, energy="off")
+    r = ct.IdealGasReactor(gas, energy="off", clone=False)
     net = ct.ReactorNet([r])
+    net.rtol = 1e-12
+    net.atol = 1e-22
     ih2o = gas.species_index("H2O")
     t, prev, prev_c = 0.0, 0.0, None
     best_rate, best_t, rate = 0.0, None, 0.0

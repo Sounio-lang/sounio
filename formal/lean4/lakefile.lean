@@ -73,6 +73,12 @@ lean_lib «SounioHydrogenReceipt» where
 @[default_target]
 lean_lib «SounioHydrogenVanthoff» where
 
+-- Valley-chain composition: corner-exactness of the composed
+-- subsurface·compressor·capacity-factor p-box (explicit premises,
+-- exact-rational receipt for the demo's constants).
+@[default_target]
+lean_lib «SounioHydrogenValleyPbox» where
+
 @[default_target]
 lean_lib «SounioProofObligation» where
 
@@ -451,6 +457,11 @@ lean_lib «SounioDeGreyChi529Exact» where
 @[default_target]
 lean_lib «SounioApproxCausalKnowledge» where
 
+-- Physical approximation effects: NonUnitary × NarrowWidthApproximation composition
+-- (particle amp→σ honesty leaves). Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioNonUnitaryNWA» where
+
 -- M2: Vancomycin-Knightian thrust — Ferson p-box operator
 @[default_target]
 lean_lib «SounioKnightian» where
@@ -631,6 +642,13 @@ lean_lib «EpistemicEffects» where
 @[default_target]
 lean_lib «EpistemicEffectsV2» where
 
+-- Refusal as a first-class compilation outcome (E219 / P0-F). A well-typed
+-- program in the extern-call fragment produces a value or refuses; it never
+-- fabricates a zero. Models the historical stub-to-zero backend as a second
+-- relation and proves they disagree on `abs + 1`. Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioRefusalHonesty» where
+
 -- Cayley–Dickson erasure ladder: the native-erasure law ker = 2^(n-1) − 4.
 -- Algebra-level exact ℤ-rank of the verified cdSigma product certifies the
 -- kernel dimensions L4–L8 (native_decide), matching the runtime float-Gauss
@@ -646,3 +664,36 @@ lean_lib «SounioCayleyDicksonErasure» where
 -- the sedenion S³-fiber ker=4. Manifold homeomorphism / V₂(ℝ⁷) cited only.
 @[default_target]
 lean_lib «SounioG2Derivations» where
+
+@[default_target]
+lean_lib «SounioMercyfulScheduler» where
+
+@[default_target]
+lean_lib «SounioFoCssSurfaceParity» where
+
+@[default_target]
+lean_lib «SounioFoSurfaceTransfer» where
+
+@[default_target]
+lean_lib «SounioFoBytecodeFragment» where
+
+@[default_target]
+lean_lib «SounioFoEmitPure» where
+
+@[default_target]
+lean_lib «SounioFoRegistrationFragment» where
+
+@[default_target]
+lean_lib «SounioFoEngineInstallFragment» where
+
+@[default_target]
+lean_lib «SounioFoMethodXferFragment» where
+
+@[default_target]
+lean_lib «SounioFoMultimodFragment» where
+
+
+-- P3: Opioid weaning safety (F5c) — MOVED to sibling repo
+-- ../sounio-pbpk-sedation-weaning/formal/lean4/SounioOpioidWeaningSafety.lean
+-- (see stdlib/darwin_pbpk/WEANING_MOVED.md). Build there:
+--   cd ../sounio-pbpk-sedation-weaning/formal/lean4 && lake build SounioOpioidWeaningSafety

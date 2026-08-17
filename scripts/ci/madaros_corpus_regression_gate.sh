@@ -59,9 +59,32 @@ echo "[madaros-corpus] compiler: $MADAROS"
 
 # Only run-pass programs. compile-fail and typecheck-fail tests have their own
 # gates and their verdicts are engine-specific by design.
-mapfile -t PROGRAMS < <(ls tests/run-pass/*.sio 2>/dev/null | sort)
+# Exclude files that are not programs. Library leaves and `//@ ignore` files
+# compile fine and then die with SIGSEGV because the ELF has no entry point --
+# 11 of them sat in the baseline as `run` failures, saying nothing about the
+# compiler. Same blind spot the parity gate had (#1601, #1593).
+#
+# Only these two exclusions. `//@ check-only` is deliberately NOT one: measured
+# on the parity side, 15 check-only files also declare //@ run-pass and have a
+# main, and one check-only file with no run-pass executes and agrees across both
+# engines. The marker says which harness checks the file, not whether it runs.
+#
+# Filtered HERE rather than inside run_one.sh so the count below is the number
+# actually exercised. Reporting 1699 while skipping 11 of them is the kind of
+# misleading instrument this gate exists to catch.
+corpus_is_program() {
+    local f="$1"
+    head -n 8 "$f" | grep -qE '^//@[[:space:]]*ignore\b' && return 1
+    grep -qE '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]+main[[:space:]]*\(' "$f"
+}
+mapfile -t ALL_SIO < <(ls tests/run-pass/*.sio 2>/dev/null | sort)
+PROGRAMS=()
+skipped=0
+for f in "${ALL_SIO[@]}"; do
+    if corpus_is_program "$f"; then PROGRAMS+=("$f"); else skipped=$((skipped + 1)); fi
+done
 [[ ${#PROGRAMS[@]} -gt 0 ]] || fail "no programs found under tests/run-pass"
-echo "[madaros-corpus] programs: ${#PROGRAMS[@]}"
+echo "[madaros-corpus] programs: ${#PROGRAMS[@]} (skipped $skipped: //@ ignore or no fn main)"
 
 cat > "$WORK/run_one.sh" <<'INNER'
 #!/usr/bin/env bash

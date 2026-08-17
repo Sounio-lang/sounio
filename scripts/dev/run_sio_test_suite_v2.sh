@@ -144,6 +144,8 @@ FAIL=0
 SKIP=0
 KNOWN_FAILURE=0
 FLAKY=0
+VACUOUS_KNOWN=0
+VACUOUS_STALE=""
 ERRORS=""
 
 # Repo-level blocker manifest. This lets CI stay strict about new failures while
@@ -161,6 +163,35 @@ if [[ -n "$KNOWN_FAILURES_FILE" && -f "$KNOWN_FAILURES_FILE" ]]; then
         [[ -z "$line" ]] && continue
         KNOWN_FAILURE_MAP["$line"]=1
     done < "$KNOWN_FAILURES_FILE"
+fi
+
+# Vacuous-expect-stdout/error-pattern baseline. The //@ expect-stdout: / //@
+# error-pattern: extraction below used to quote the whole `=~` pattern, which
+# makes bash treat it as a literal string instead of a regex, so the capture
+# group never captured and every such assertion matched vacuously (an empty
+# expected string always matches). Fixing the extraction (see the comment at
+# the expect_stdout/error_patterns parse loop) makes every test whose
+# annotation was actually wrong fail for real, for the first time -- these are
+# PRE-EXISTING wrong annotations, not regressions caused by the fix. Mirrors
+# scripts/ci/madaros_corpus_regression_gate.sh: compare the failure LIST
+# against a checked-in baseline (tests/vacuous_expect_baseline.txt) and
+# tolerate only entries already listed there, so the fix can land without
+# turning the required `full-test-suite` CI job red. Unlike
+# KNOWN_FAILURES_FILE above, this baseline is always active (not gated to
+# --format junit with no filter) so it also covers local/manual runs.
+#
+# Regenerate: SOUNIO_VACUOUS_BASELINE_REFRESH=1 bash scripts/run_sio_test_suite.sh
+VACUOUS_BASELINE_FILE="$ROOT_DIR/tests/vacuous_expect_baseline.txt"
+VACUOUS_REFRESH="${SOUNIO_VACUOUS_BASELINE_REFRESH:-0}"
+declare -A VACUOUS_BASELINE_MAP=()
+if [[ "$VACUOUS_REFRESH" != "1" && -f "$VACUOUS_BASELINE_FILE" ]]; then
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" ]] && continue
+        VACUOUS_BASELINE_MAP["$line"]=1
+    done < "$VACUOUS_BASELINE_FILE"
 fi
 
 # JUnit XML output file
@@ -211,6 +242,7 @@ run_test() {
     local is_check_only=false
     local is_known_failure=false
     local is_flaky=false
+    local is_vacuous_baseline=false
     local timeout_val=30
     local skip_if=""
     local requires=""
@@ -256,7 +288,15 @@ run_test() {
         is_known_failure=true
         known_reason="${known_reason:-hardened diagnostics blocker manifest}"
     fi
-    
+
+    # See the VACUOUS_BASELINE_MAP loading comment above. Membership is
+    # recorded regardless of exit code, same as is_known_failure -- whether it
+    # counts as a tolerated failure (vxfail) or a "now passes, shrink the
+    # baseline" notice (vxpas) is decided once exit_code is known below.
+    if [[ "$VACUOUS_REFRESH" != "1" && -n "${VACUOUS_BASELINE_MAP[$rel_file]:-}" ]]; then
+        is_vacuous_baseline=true
+    fi
+
     # Check filter
     if ! test_matches_filter "$basename"; then
         return
@@ -274,9 +314,17 @@ run_test() {
             no-gpu) [[ -z "${SOUNIO_GPU_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"skip-if:no-gpu\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             no-llvm) [[ -z "${SOUNIO_LLVM_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"skip-if:no-llvm\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             ci-only) [[ -n "${CI:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"skip-if:ci-only\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # An unrecognized skip-if value must not fall through silently: that
+            # would let a typo (e.g. `no-gpu` misspelled) run the test unguarded
+            # while the annotation reads as if it were gating something -- the
+            # same "guard that asserts nothing" defect this file exists to remove.
+            *)
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown skip-if: $skip_if (expected: no-gpu|no-llvm|ci-only)\",\"idx\":$idx}" > "$output_file"
+                return
+                ;;
         esac
     fi
-    
+
     # Check requires
     if [[ -n "$requires" ]]; then
         case "$requires" in
@@ -287,6 +335,15 @@ run_test() {
             # stage2 binary. Skipped unless SOUNIO_MADAROS_AVAILABLE is set (a future
             # Madaros-based test job sets it). Tracked: Madaros-official migration.
             madaros) [[ -z "${SOUNIO_MADAROS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:madaros\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # An unrecognized requires value must not fall through silently: a typo
+            # (e.g. `requires: madros`) would otherwise run the test against
+            # whatever engine is present instead of being gated as intended, with
+            # the annotation asserting nothing -- indistinguishable from the
+            # vacuous-match defect this PR exists to remove.
+            *)
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros)\",\"idx\":$idx}" > "$output_file"
+                return
+                ;;
         esac
     fi
     
@@ -303,17 +360,19 @@ run_test() {
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
         fi
-        # NOTE: these two `=~` extractions capture EMPTY on real patterns
-        # (esp. ones with regex metachars like `[`), so existing error-pattern/
-        # expect-stdout tests match vacuously. Fixing it here is out of scope —
-        # it flips ~305 latent vacuous passes repo-wide. The `typecheck-fail`
-        # mode below therefore parses its own pattern robustly and does NOT rely
-        # on `error_patterns`. Tracked as a separate harness finding.
-        if [[ "$line" =~ "//@ expect-stdout:\ "(.*) ]]; then
-            expect_stdout+=("${BASH_REMATCH[1]}")
+        # Extraction by parameter expansion, not regex: the pattern that
+        # follows "//@ expect-stdout: " / "//@ error-pattern: " often contains
+        # regex metacharacters (`[`, `(`, ...), and quoting the whole =~
+        # pattern (as this used to) makes bash treat it as a literal string
+        # instead of a regex, so the capture group never captures and
+        # BASH_REMATCH[1] is always empty -- every expect-stdout/error-pattern
+        # assertion then matched vacuously. Parameter expansion has no
+        # metacharacter class to get this wrong for either annotation.
+        if [[ "$line" == "//@ expect-stdout: "* ]]; then
+            expect_stdout+=("${line#*//@ expect-stdout: }")
         fi
-        if [[ "$line" =~ "//@ error-pattern:\ "(.*) ]]; then
-            error_patterns+=("${BASH_REMATCH[1]}")
+        if [[ "$line" == "//@ error-pattern: "* ]]; then
+            error_patterns+=("${line#*//@ error-pattern: }")
         fi
     done < "$file"
     
@@ -342,10 +401,20 @@ run_test() {
             fi
         fi
         
-        # Check expected stdout patterns
+        # Check expected stdout patterns.
+        #
+        # PIPEFAIL RULE (2026-08-17): never feed a captured string to a
+        # verdict-carrying `grep -q` through `echo "$x" | grep -q ...`.
+        # `grep -q` exits on first match and closes the pipe; under
+        # `set -o pipefail` an `echo` still flushing a large output then
+        # fails the whole pipeline (CI log 2026-08-16 21:40:49: "line 434:
+        # echo: write error: Broken pipe", in the same run as a "missing
+        # error" flake), and `if ! ...` reads that as the pattern being
+        # absent. The here-string form has no writer process to lose writes.
+        # Guarded by scripts/ci/sigpipe_hygiene_gate.sh.
         if [[ $exit_code -eq 0 ]]; then
             for pattern in "${expect_stdout[@]}"; do
-                if ! echo "$output" | grep -qF "$pattern"; then
+                if ! grep -qF -- "$pattern" <<<"$output"; then
                     exit_code=1
                     test_output="missing stdout: $pattern"
                     break
@@ -361,7 +430,7 @@ run_test() {
         
         if [[ $exit_code -eq 124 ]]; then
             test_output="compile timed out after ${timeout_val}s"
-        elif [[ $exit_code -eq 0 ]] && echo "$output" | grep -qF "typecheck: failed"; then
+        elif [[ $exit_code -eq 0 ]] && grep -qF "typecheck: failed" <<<"$output"; then
             exit_code=1
         elif [[ $exit_code -eq 0 ]]; then
             test_output="expected compile failure but passed"
@@ -372,7 +441,7 @@ run_test() {
 
         if [[ $exit_code -ne 124 && $test_output != "expected compile failure but passed" ]]; then
             for pattern in "${error_patterns[@]}"; do
-                if ! echo "$output" | grep -qiF "$pattern"; then
+                if ! grep -qiF -- "$pattern" <<<"$output"; then
                     exit_code=1
                     test_output="missing error: $pattern"
                     break
@@ -389,9 +458,11 @@ run_test() {
         # `check` runs the boundary-preserving visibility/type pass, whereas
         # `compile` can "pass" on unrelated backend / missing-main failures
         # without ever exercising the guarantee (see audit 2026-07-24).
-        # Parse the pinned pattern(s) locally & robustly (see note above: the
-        # shared error_patterns parse captures empty and is left as-is to avoid
-        # flipping ~305 latent vacuous tests repo-wide).
+        # Parse the pinned pattern(s) locally rather than reusing the shared
+        # error_patterns array above: this path runs `check`, not `compile`,
+        # a distinct contract (see the audit 2026-07-24 note above) that
+        # deserves its own local list rather than sharing state with the
+        # compile-fail path.
         local tf_patterns=()
         local pline
         while IFS= read -r pline; do
@@ -414,7 +485,7 @@ run_test() {
                 test_output="typecheck-fail requires //@ error-pattern to pin the diagnostic"
             else
                 for pattern in "${tf_patterns[@]}"; do
-                    if ! echo "$output" | grep -qiF "$pattern"; then
+                    if ! grep -qiF -- "$pattern" <<<"$output"; then
                         exit_code=1
                         test_output="missing error: $pattern"
                         break
@@ -435,6 +506,9 @@ run_test() {
         if $is_known_failure; then
             status="xpas"
             category="known-failure"
+        elif $is_vacuous_baseline; then
+            status="vxpas"
+            category="vacuous-baseline"
         elif $is_flaky; then
             status="pass"
             category="flaky"
@@ -446,6 +520,9 @@ run_test() {
         if $is_known_failure; then
             status="xfail"
             category="known-failure"
+        elif $is_vacuous_baseline; then
+            status="vxfail"
+            category="vacuous-baseline"
         elif $is_flaky; then
             status="fail"
             category="flaky"
@@ -454,16 +531,16 @@ run_test() {
             category="fail"
         fi
     fi
-    
+
     # Parse agent witness from raw output (if present)
     local agent_witness=""
     agent_witness=$(echo "$output" | sed -n 's/^agent_witness=//p' | head -n 1)
-    
+
     # Escape output for JSON
     local escaped_output
     escaped_output=$(echo "$test_output" | sed 's/"/\\"/g' | tr '\n' ' ' | sed 's/  */ /g' | head -c 200)
-    
-    local json="{\"status\":\"$status\",\"category\":\"$category\",\"name\":\"$basename\",\"time\":$duration,\"output\":\"$escaped_output\",\"idx\":$idx"
+
+    local json="{\"status\":\"$status\",\"category\":\"$category\",\"name\":\"$basename\",\"relfile\":\"$rel_file\",\"time\":$duration,\"output\":\"$escaped_output\",\"idx\":$idx"
     if [[ -n "$agent_witness" ]]; then
         json="$json,\"agent_witness\":$agent_witness"
     fi
@@ -607,6 +684,25 @@ for f in "$TEST_TMP"/result_*.json; do
                 echo "  XPAS  $name (known failure now passes)"
             fi
             ;;
+        vxfail)
+            # Tolerated because it is listed in tests/vacuous_expect_baseline.txt.
+            # Counted and reported, never silently dropped: a tolerated failure
+            # that does not appear in the summary is indistinguishable from a
+            # test that never ran.
+            ((VACUOUS_KNOWN++))
+            if [[ "$VERBOSE" == "1" ]]; then
+                echo "  VXFAIL  $name (vacuous-annotation baseline)"
+            fi
+            ;;
+        vxpas)
+            # Listed in the baseline but now passing. Always announced, not only
+            # under --verbose: the baseline must shrink as annotations are fixed,
+            # and a stale entry silently absorbing a pass is how a baseline rots
+            # into a permanent mute.
+            ((PASS++))
+            VACUOUS_STALE="${VACUOUS_STALE}    $name
+"
+            ;;
         skip)
             ((SKIP++))
             reason=$(echo "$result" | grep -o '"reason":"[^"]*"' | cut -d'"' -f4)
@@ -623,9 +719,20 @@ echo "=== Results ==="
 echo "  Pass: $PASS"
 echo "  Fail: $FAIL"
 [[ $KNOWN_FAILURE -gt 0 ]] && echo "  Known failures: $KNOWN_FAILURE"
+[[ $VACUOUS_KNOWN -gt 0 ]] && echo "  Vacuous-annotation baseline (tolerated): $VACUOUS_KNOWN"
 [[ $FLAKY -gt 0 ]] && echo "  Flaky: $FLAKY"
 echo "  Skip: $SKIP"
-echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE))"
+echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN))"
+
+if [[ -n "$VACUOUS_STALE" ]]; then
+    echo ""
+    echo "=== Vacuous-annotation baseline entries that passed in THIS run ==="
+    printf '%s' "$VACUOUS_STALE"
+    echo "  The baseline is calibrated against the CI engine (souc-stage2 /"
+    echo "  lean_single, via SOUNIO_TEST_SOUC_BIN). Under a different engine most"
+    echo "  entries pass, so this list is only a removal instruction when the run"
+    echo "  used the CI engine. Confirm there before deleting an entry."
+fi
 
 # Generate JUnit XML if requested
 if [[ "$FORMAT" == "junit" ]]; then
@@ -662,6 +769,16 @@ XMLEOF
             xfail)
                 echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
                 echo "      <skipped message=\"Known failure\"/>" >> "$JUNIT_FILE"
+                echo "    </testcase>" >> "$JUNIT_FILE"
+                ;;
+            vxfail)
+                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
+                echo "      <skipped message=\"Vacuous-annotation baseline: $output\"/>" >> "$JUNIT_FILE"
+                echo "    </testcase>" >> "$JUNIT_FILE"
+                ;;
+            vxpas)
+                echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
+                echo "      <system-out>Vacuous-annotation baseline entry now passes; remove it</system-out>" >> "$JUNIT_FILE"
                 echo "    </testcase>" >> "$JUNIT_FILE"
                 ;;
             skip)

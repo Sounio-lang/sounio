@@ -1,0 +1,77 @@
+// #1649: publication must actually seal, and a write after it must be refused.
+//
+// This witness exists because the first wiring of ir_module_seal_functions
+// sealed ZERO of seven regions and said nothing. Every compile looked clean,
+// every test matched, and the guard was inert; only the sealed=N receipt caught
+// it.
+//
+// HONEST LIMIT: this witness does NOT reproduce that failure. It passes with
+// both the hoisted and the direct `&(*module).functions[i].region` form, so the
+// mechanism is still unexplained -- see the comment on ir_module_seal_functions.
+// The compiler's module is a Box and a Box'd IrModule SIGSEGVs here, so the
+// failing shape has no isolated reproduction. What this witness DOES pin is the
+// count and the refusal, which is what stops the guard rotting back into a
+// no-op.
+//
+// So this asserts BOTH halves:
+//   1. sealing a module seals every live region -- the count, not just "no error"
+//   2. a write through a sealed region is refused, quarantined and latched
+//
+// Half 2 is what the guard is for; half 1 is what stops it rotting into a no-op.
+
+use ir::ir::*
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if ir_instr_arena_init() != IR_ARENA_OK { print("INIT_FAIL\n")  return 10 }
+
+    // Three functions, each with a region of its own.
+    var f0 = ir_empty_function()
+    var f1 = ir_empty_function()
+    var f2 = ir_empty_function()
+    if ir_function_alloc_region(&! f0) != IR_ARENA_OK { print("ALLOC0_FAIL\n")  return 11 }
+    if ir_function_alloc_region(&! f1) != IR_ARENA_OK { print("ALLOC1_FAIL\n")  return 12 }
+    if ir_function_alloc_region(&! f2) != IR_ARENA_OK { print("ALLOC2_FAIL\n")  return 13 }
+
+    // Write one instruction into each while they are still live.
+    ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_nop())
+    ir_arena_store(ir_region_slot_w(f1.region, (0)), ir_nop())
+    ir_arena_store(ir_region_slot_w(f2.region, (0)), ir_nop())
+    if ir_instr_arena_violation() { print("PREMATURE_VIOLATION\n")  return 14 }
+
+    var m = ir_empty_module()
+    m.functions[0] = f0
+    m.functions[1] = f1
+    m.functions[2] = f2
+    m.fn_count = 3
+
+    // ---- half 1: it seals, and it seals ALL of them ------------------------
+    let sealed = ir_module_seal_functions(&m)
+    print("SEALED ")
+    print_int(sealed)
+    print(" of 3\n")
+    if sealed != 3 { print("SEAL_COUNT_WRONG\n")  return 15 }
+    if ir_instr_arena_violation() { print("SEALING_ITSELF_VIOLATED\n")  return 16 }
+
+    // Reads must stay legal after publication -- codegen does nothing else.
+    let probe = ir_region_slot_r(m.functions[1].region, (0))
+    if probe < 0 { print("READ_AFTER_SEAL_REFUSED\n")  return 17 }
+    if ir_instr_arena_violation() { print("READ_LATCHED\n")  return 18 }
+
+    // ---- half 2: a write after publication is refused ----------------------
+    var w = m.functions[1].region
+    let slot = ir_region_slot_w(w, (0))
+    if !ir_instr_arena_violation() { print("SEALED_WRITE_NOT_LATCHED\n")  return 19 }
+    if IR_ARENA_VIOLATION_KIND != IR_ARENA_VIOLATION_SEALED {
+        print("SEALED_WRITE_WRONG_KIND\n")
+        return 20
+    }
+    // ... and it is routed to quarantine, not into someone else's instructions.
+    if slot < IR_QUARANTINE_BASE || slot >= IR_QUARANTINE_BASE + ir_quarantine_slots() {
+        print("SEALED_WRITE_NOT_QUARANTINED\n")
+        return 21
+    }
+    if !ir_arena_report_violation() { print("REPORT_SILENT\n")  return 22 }
+
+    print("IR_MODULE_SEAL_WITNESS_PASS\n")
+    0
+}

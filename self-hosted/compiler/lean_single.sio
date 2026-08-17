@@ -3857,6 +3857,29 @@ fn tc_error(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     return 0
 }
 
+// Unbalanced braces in a module (#1634).
+//
+// Sets TYPECHECK_FAILED DIRECTLY rather than going through tc_mark_failed or
+// note_limit_error. Both of those early-return for functions carrying
+// FN_EFFECTS & 2048 (imported), which is how an unbalanced brace in an imported
+// module used to fail the build while printing no `error:` line at all -- the
+// only symptom was a scatter of E200s hundreds of tokens later, in a different
+// file, naming a parameter that had nothing to do with it.
+fn tc_unbalanced_braces(tok: i64, d: i64) with IO, Mut, Panic {
+    print("error: unbalanced braces in module (")
+    if d > 0 {
+        print_int(d)
+        print(" unclosed `{`")
+    } else {
+        print_int(0 - d)
+        print(" extra `}`")
+    }
+    print(") near ")
+    print_src_loc_for_tok(tok)
+    print("\n")
+    TYPECHECK_FAILED = 1
+}
+
 fn tc_error_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
     print("error: ")
     print(msg)
@@ -7963,7 +7986,20 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
     while p < TC {
         let tk = TK[p as usize]
         if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634).
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 { depth = 0; p = p + 1; continue }
         if depth > 0 { p = p + 1; continue }
         if tk == 12 {
             p = p + 1
@@ -8045,7 +8081,20 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
     while p < TC {
         let tk = TK[p as usize]
         if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634).
+            if depth > 0 { depth = depth - 1 }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 { depth = 0; p = p + 1; continue }
         if depth > 0 { p = p + 1; continue }
         if tk == 12 {
             p = p + 1
@@ -9013,8 +9062,11 @@ fn emit_print_int() with Mut {
     // lea rsi, [rcx+1]; mov rdx, rsp+32-rsi; write(1, rsi, rdx); add rsp, 32
     em(0x48); em(0x83); em(0xec); em(32)  // sub rsp, 32
     em(0x48); em(0x8d); em(0x4c); em(0x24); em(31)  // lea rcx, [rsp+31]
-    em(0xc6); em(0x01); em(10)  // mov byte [rcx], '\n'
-    em(0x48); em(0xff); em(0xc9)  // dec rcx
+    // No baked-in '\n'. It used to be written here, which made print(x) and
+    // print_int(x) emit a newline nobody asked for and made println(x) correct
+    // only by accident. println now appends it explicitly. Same buffer shape as
+    // emit_print_u64_no_nl_x86 below: digits start at [rsp+31], end stays
+    // rsp+32, so the length math is unchanged. (#1573)
     // Handle negative: if rax < 0, negate, set r8=1
     em(0x4d); em(0x31); em(0xc0)  // xor r8, r8
     em(0x48); em(0x85); em(0xc0)  // test rax, rax
@@ -12833,11 +12885,13 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     // (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64()
+                        emit_print_nl()
                     } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr()
                         emit_print_nl()
                     } else {
                         emit_print_int()
+                        emit_print_nl()
                     }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -15823,11 +15877,14 @@ fn compile_primary() with IO, Mut, Panic, Div {
                         return
                     }
                     // True undefined variable: not local, not global, not fn, not const
-                    print("E200 `")
+                    // #1634: was `E200 \`x\` at line N` -- no `error:` prefix, so
+                    // grep '^error' missed it, and a bare bundle line number with
+                    // no file to resolve it against.
+                    print("error[E200]: undefined identifier `")
                     var e200_i: i64 = ns
                     while e200_i < ne { print_char(SRC[e200_i as usize] as i64); e200_i = e200_i + 1 }
-                    print("` at line ")
-                    print_int(TL[name_tok as usize])
+                    print("` at ")
+                    print_src_loc_for_tok(name_tok)
                     print("\n")
                     tc_mark_failed()
                     em(0x31); em(0xc0)
@@ -15985,7 +16042,21 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
                 let elem_hash = arr_hash_elem_hash(inner_hash)
                 LAST_ALEN = arr_hash_alen(inner_hash)
                 if esiz == 8 {
-                    em(0x48); em(0x8d); em(0x04); em(0xd1)  // lea rax, [rcx + rdx*8]
+                    // #1678: array elements of AGGREGATE type are stored
+                    // pointer-per-slot, not inline -- see the store-path comments
+                    // in this file. The value path already LOADS the element
+                    // pointer here; this borrow path handed back the address of
+                    // the pointer CELL, so the callee read the pointer bits as the
+                    // first field. One opcode: 0x8b, not 0x8d.
+                    //
+                    // This is the unfinished half of #740, which corrected the
+                    // TYPE of &!module.functions[i] -- ref rather than value --
+                    // and left the address arithmetic alone.
+                    if (elem_ty == 6 || elem_ty == 7 || elem_ty == 8) && elem_hash != 0 {
+                        em(0x48); em(0x8b); em(0x04); em(0xd1)  // mov rax, [rcx + rdx*8] (element ptr)
+                    } else {
+                        em(0x48); em(0x8d); em(0x04); em(0xd1)  // lea rax, [rcx + rdx*8]
+                    }
                 } else {
                     em(0x48); em(0x8d); em(0x04); em(0x11)  // lea rax, [rcx + rdx] (esiz=1)
                 }
@@ -28764,10 +28835,44 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     p = 0
     // Pass 0b: register global variables
     var depth: i64 = 0
+    var open_tok: i64 = 0       // the `{` that took depth 0 -> 1 in this module
+    var reported: i64 = 0       // at most one brace diagnostic per module
     while p < TC {
         let tk = TK[p as usize]
-        if tk == 8 { depth = depth + 1; p = p + 1; continue }
-        if tk == 9 { depth = depth - 1; p = p + 1; continue }
+        if tk == 8 {
+            if depth == 0 { open_tok = p }
+            depth = depth + 1
+            p = p + 1
+            continue
+        }
+        if tk == 9 {
+            // Clamped, matching Pass 0a. Unclamped, one stray `}` pins depth
+            // negative for the whole remaining token stream, and every later
+            // function-body `var` is treated as a global (#1634). Clamping
+            // alone would make the stray `}` invisible, so it is reported here
+            // -- at the offending token, which is the useful place.
+            if depth > 0 {
+                depth = depth - 1
+            } else {
+                if reported == 0 { tc_unbalanced_braces(p, 0 - 1)  reported = 1 }
+            }
+            p = p + 1
+            continue
+        }
+        // File boundary (TK==77). Modules are independently balanced, so depth
+        // must not carry across one. Pass 0a already resets here; these three
+        // scanners did not, which is what let one file's imbalance poison the
+        // rest of the bundle -- and made the three disagree about which `var`s
+        // are global, between registration and initializer emission.
+        if tk == 77 {
+            if depth > 0 {
+                if reported == 0 { tc_unbalanced_braces(open_tok, depth) }
+            }
+            depth = 0
+            reported = 0
+            p = p + 1
+            continue
+        }
         if depth > 0 { p = p + 1; continue }
         // Top-level var
         if tk == 12 {
@@ -28821,11 +28926,27 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                     p = SCAN_TY_NEXT
                 }
             }
-            // Skip = initializer until next var or fn or EOF
-            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 { p = p + 1 }
+            // Skip = initializer until next var or fn or file boundary or EOF. This
+            // walks past arbitrary tokens INCLUDING braces, so it has to carry the
+            // depth with it -- otherwise a top-level `var` followed by an
+            // `impl Foo { ... }` swallows the opening brace and stops at the `fn`
+            // inside the impl with depth still 0 (#1634).
+            while p < TC && TK[p as usize] != 12 && TK[p as usize] != 1 && TK[p as usize] != 0 && TK[p as usize] != 77 {
+                if TK[p as usize] == 8 { depth = depth + 1 }
+                if TK[p as usize] == 9 {
+                    if depth > 0 { depth = depth - 1 }
+                }
+                p = p + 1
+            }
             continue
         }
         p = p + 1
+    }
+    // The last module has no trailing boundary marker. Report at the unmatched
+    // `{` rather than at the end of the stream: the tail of the bundle is the
+    // appended native prelude, whose line numbers mean nothing to the author.
+    if depth > 0 {
+        if reported == 0 { tc_unbalanced_braces(open_tok, depth) }
     }
     p = 0
 
@@ -30964,11 +31085,9 @@ fn emit_print_int_a64() with Mut {
     // x0 = value to print
     // sub sp, sp, #64 for scratch buffer
     em32(0xD1000000 | (64 << 10) | (31 << 5) | 31)  // sub sp, sp, #64
-    // store '\n' at sp+63
-    em32(0xD2800140 | 10)  // movz x10, #10
-    em32(0x39000000 | (63 << 10) | (31 << 5) | 10)  // strb w10, [sp, #63]
-    // x9 = sp + 62 (current write position)
-    em32(0x91000000 | (62 << 10) | (31 << 5) | 9)   // add x9, sp, #62
+    // No baked-in '\n' -- see the x86-64 twin. x9 starts at sp+63 and the
+    // length stays (sp+64) - x1, exactly as in emit_print_u64_no_nl_a64.
+    em32(0x91000000 | (63 << 10) | (31 << 5) | 9)   // add x9, sp, #63
     // x11 = 0 (negative flag)
     em32(0xD2800000 | 11)  // movz x11, #0
     // Check if negative: cmp x0, #0; b.ge skip_neg
@@ -33263,11 +33382,13 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     // reference for dispatch only (issue #633).
                     if EXPR_IS_F64 == 1 || EXPR_TY == 2 {
                         emit_print_f64_a64()
+                        emit_print_nl_a64()
                     } else if EXPR_TY == 3 || (EXPR_TY == 10 && ref_hash_inner_ty(EXPR_TY_HASH) == 3) {
                         emit_print_cstr_a64()
                         emit_print_nl_a64()
                     } else {
                         emit_print_int_a64()
+                        emit_print_nl_a64()
                     }
                 }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
@@ -39530,6 +39651,47 @@ fn append_extern_c_stubs() with Mut, Panic, Div {
         if extern_stub_name_eq(si, "pow") == 1 {
             // pow(x, y) = exp(y * ln(x)) — approximation using native functions
             append_src_lit("fn pow(x: f64, y: f64) -> f64 with Mut, Div, Panic { __native_exp_f64(y * __native_ln_f64(x)) }\n")
+            si = si + 1
+            continue
+        }
+        // ── system(cmd) — real fork+execve("/bin/sh","-c",cmd)+wait4.
+        // Same syscall pattern as self-hosted/lsp/server.sio's run_souc_check
+        // (fork=57, execve=59, wait4=61, exit=60), which is the only other
+        // proven-working fork/exec call site in this tree. Fixes the
+        // no-op documented in docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md:
+        // previously `system` fell through to the generic single-arg
+        // fallback, which declares its parameter as bare `i64` — a type
+        // mismatch against any real caller's `cmd: &[i8;N]`, so every
+        // caller failed to type-check (not a silent no-op under
+        // lean_single specifically; the no-op was Madaros's separate,
+        // undocumented gap, still open per that dispatch's Track A).
+        // Callers must declare `extern "C" { fn system(cmd: &[i8;1024]) -> i32 }`
+        // (this exact size) to match this stub's parameter type — Sounio
+        // has no size-generic array params, so the size is fixed, matching
+        // the convention already used by self-hosted/compiler/pkg/registry_client.sio.
+        // envp carries a minimal fixed PATH (not the real caller's
+        // environment, which isn't otherwise available to this stub) so
+        // `sh -c "somecmd"` can still resolve `somecmd` via PATH lookup.
+        if extern_stub_name_eq(si, "system") == 1 {
+            append_src_lit("fn system(cmd: &[i8; 1024]) -> i64 with IO, Mut, Panic {\n")
+            append_src_lit("    var argv: [i64; 4] = [0; 4]\n")
+            append_src_lit("    var envp: [i64; 2] = [0; 2]\n")
+            append_src_lit("    argv[0] = \"/bin/sh\" as i64\n")
+            append_src_lit("    argv[1] = \"-c\" as i64\n")
+            append_src_lit("    argv[2] = cmd as i64\n")
+            append_src_lit("    argv[3] = 0\n")
+            append_src_lit("    envp[0] = \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\" as i64\n")
+            append_src_lit("    envp[1] = 0\n")
+            append_src_lit("    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)\n")
+            append_src_lit("    if pid < 0 { return 0 - 1 }\n")
+            append_src_lit("    if pid == 0 {\n")
+            append_src_lit("        syscall6(59, \"/bin/sh\" as i64, &!argv, &!envp, 0, 0, 0)\n")
+            append_src_lit("        syscall6(60, 127, 0, 0, 0, 0, 0)\n")
+            append_src_lit("    }\n")
+            append_src_lit("    var status: [i64; 1] = [0; 1]\n")
+            append_src_lit("    syscall6(61, pid, &!status, 0, 0, 0, 0)\n")
+            append_src_lit("    status[0]\n")
+            append_src_lit("}\n")
             si = si + 1
             continue
         }
