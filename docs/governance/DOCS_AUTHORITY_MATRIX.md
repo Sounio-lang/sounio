@@ -96,6 +96,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.codegen-dead-body-deletion-2026-08-18 | repo_only | docs/audit/CODEGEN_DEAD_BODY_DELETION_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.concept-corpus-cross-check-2026-08-19 | repo_only | docs/audit/CONCEPT_CORPUS_CROSS_CHECK_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.concept-status-gate-2026-08-19 | repo_only | docs/audit/CONCEPT_STATUS_GATE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.context-dependent-red-gates-2026-08-17 | repo_only | docs/audit/CONTEXT_DEPENDENT_RED_GATES_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.cross-concepts-2026-08-19 | repo_only | docs/audit/CROSS_CONCEPTS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.cross-engine-runpass-census-2026-08-17 | repo_only | docs/audit/CROSS_ENGINE_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
