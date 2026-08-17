@@ -401,10 +401,20 @@ run_test() {
             fi
         fi
         
-        # Check expected stdout patterns
+        # Check expected stdout patterns.
+        #
+        # PIPEFAIL RULE (2026-08-17): never feed a captured string to a
+        # verdict-carrying `grep -q` through `echo "$x" | grep -q ...`.
+        # `grep -q` exits on first match and closes the pipe; under
+        # `set -o pipefail` an `echo` still flushing a large output then
+        # fails the whole pipeline (CI log 2026-08-16 21:40:49: "line 434:
+        # echo: write error: Broken pipe", in the same run as a "missing
+        # error" flake), and `if ! ...` reads that as the pattern being
+        # absent. The here-string form has no writer process to lose writes.
+        # Guarded by scripts/ci/sigpipe_hygiene_gate.sh.
         if [[ $exit_code -eq 0 ]]; then
             for pattern in "${expect_stdout[@]}"; do
-                if ! echo "$output" | grep -qF -- "$pattern"; then
+                if ! grep -qF -- "$pattern" <<<"$output"; then
                     exit_code=1
                     test_output="missing stdout: $pattern"
                     break
@@ -420,7 +430,7 @@ run_test() {
         
         if [[ $exit_code -eq 124 ]]; then
             test_output="compile timed out after ${timeout_val}s"
-        elif [[ $exit_code -eq 0 ]] && echo "$output" | grep -qF "typecheck: failed"; then
+        elif [[ $exit_code -eq 0 ]] && grep -qF "typecheck: failed" <<<"$output"; then
             exit_code=1
         elif [[ $exit_code -eq 0 ]]; then
             test_output="expected compile failure but passed"
@@ -431,7 +441,7 @@ run_test() {
 
         if [[ $exit_code -ne 124 && $test_output != "expected compile failure but passed" ]]; then
             for pattern in "${error_patterns[@]}"; do
-                if ! echo "$output" | grep -qiF -- "$pattern"; then
+                if ! grep -qiF -- "$pattern" <<<"$output"; then
                     exit_code=1
                     test_output="missing error: $pattern"
                     break
@@ -475,7 +485,7 @@ run_test() {
                 test_output="typecheck-fail requires //@ error-pattern to pin the diagnostic"
             else
                 for pattern in "${tf_patterns[@]}"; do
-                    if ! echo "$output" | grep -qiF -- "$pattern"; then
+                    if ! grep -qiF -- "$pattern" <<<"$output"; then
                         exit_code=1
                         test_output="missing error: $pattern"
                         break

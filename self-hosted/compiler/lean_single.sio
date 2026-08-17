@@ -39654,6 +39654,47 @@ fn append_extern_c_stubs() with Mut, Panic, Div {
             si = si + 1
             continue
         }
+        // ── system(cmd) — real fork+execve("/bin/sh","-c",cmd)+wait4.
+        // Same syscall pattern as self-hosted/lsp/server.sio's run_souc_check
+        // (fork=57, execve=59, wait4=61, exit=60), which is the only other
+        // proven-working fork/exec call site in this tree. Fixes the
+        // no-op documented in docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md:
+        // previously `system` fell through to the generic single-arg
+        // fallback, which declares its parameter as bare `i64` — a type
+        // mismatch against any real caller's `cmd: &[i8;N]`, so every
+        // caller failed to type-check (not a silent no-op under
+        // lean_single specifically; the no-op was Madaros's separate,
+        // undocumented gap, still open per that dispatch's Track A).
+        // Callers must declare `extern "C" { fn system(cmd: &[i8;1024]) -> i32 }`
+        // (this exact size) to match this stub's parameter type — Sounio
+        // has no size-generic array params, so the size is fixed, matching
+        // the convention already used by self-hosted/compiler/pkg/registry_client.sio.
+        // envp carries a minimal fixed PATH (not the real caller's
+        // environment, which isn't otherwise available to this stub) so
+        // `sh -c "somecmd"` can still resolve `somecmd` via PATH lookup.
+        if extern_stub_name_eq(si, "system") == 1 {
+            append_src_lit("fn system(cmd: &[i8; 1024]) -> i64 with IO, Mut, Panic {\n")
+            append_src_lit("    var argv: [i64; 4] = [0; 4]\n")
+            append_src_lit("    var envp: [i64; 2] = [0; 2]\n")
+            append_src_lit("    argv[0] = \"/bin/sh\" as i64\n")
+            append_src_lit("    argv[1] = \"-c\" as i64\n")
+            append_src_lit("    argv[2] = cmd as i64\n")
+            append_src_lit("    argv[3] = 0\n")
+            append_src_lit("    envp[0] = \"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\" as i64\n")
+            append_src_lit("    envp[1] = 0\n")
+            append_src_lit("    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)\n")
+            append_src_lit("    if pid < 0 { return 0 - 1 }\n")
+            append_src_lit("    if pid == 0 {\n")
+            append_src_lit("        syscall6(59, \"/bin/sh\" as i64, &!argv, &!envp, 0, 0, 0)\n")
+            append_src_lit("        syscall6(60, 127, 0, 0, 0, 0, 0)\n")
+            append_src_lit("    }\n")
+            append_src_lit("    var status: [i64; 1] = [0; 1]\n")
+            append_src_lit("    syscall6(61, pid, &!status, 0, 0, 0, 0)\n")
+            append_src_lit("    status[0]\n")
+            append_src_lit("}\n")
+            si = si + 1
+            continue
+        }
         // ── malloc/free — map to heap_alloc/heap_free ──
         if extern_stub_name_eq(si, "malloc") == 1 {
             append_src_lit("fn malloc(size: i64) -> i64 with IO, Alloc { heap_alloc(size) as i64 }\n")

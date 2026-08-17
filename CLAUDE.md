@@ -102,7 +102,7 @@ $SOUC --version                           # verify toolchain
 $SOUC check file.sio                      # type-check only
 $SOUC run file.sio                        # compile + execute + clean up
 $SOUC compile file.sio -o output.elf      # emit named ELF binary
-$SOUC info                                # compiler status
+$SOUC info                                # compiler status (Madaros only -- SOUNIO_SOUC_ENGINE=lean_single has no `info` subcommand)
 
 # Bootstrap chain
 make build    # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
@@ -256,7 +256,7 @@ Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR
 | `self-hosted/ir/` | IR lowering, e-graph optimization (1000+ rewrite rules) |
 | `self-hosted/native/` | x86-64 ELF emission |
 | `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
-| `self-hosted/gpu/` | PTX/GPU codegen (exists; no end-to-end CLI path) |
+| `self-hosted/gpu/` | PTX/GPU codegen; end-to-end CLI path exists under default Madaros (`souc build --backend gpu`, see §13) -- no GPU CLI surface under `SOUNIO_SOUC_ENGINE=lean_single`, which rejects the invocation outright |
 | `stdlib/epistemic/` | `Knowledge<T>`, uncertainty (GUM), provenance |
 | `stdlib/units/` | Dimensional analysis |
 | `bootstrap/` | stage0 (C) → boot2g → boot3 → boot4 → self-hosted |
@@ -330,9 +330,12 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 - **Imported-module native path — partial closeout.** Historical D1 (`f64→i64` param cast bitcast → GUM k95 stuck at 1.960) and much of D2 (`&local_array`→builtin) are **closed** (D1: #983/#1252 + Wave10 trust gate; D2: #933/#1247 family). Residuals remain: multi-module memory-wall / exclusive-ref fragile chains (D3 family), named-import/`print_f64` papercuts (D4/#862). Finite-dof `gum_k95` is **TRUSTWORTHY** under default Madaros (`scripts/epistemic_trust_gate.sh` → k95i=2776). Map: [`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md`](docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md). Escalation: [`docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md`](docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md).
 - `Knowledge<T>` supports struct-level generics (`f64`, `bool`, struct types)
 - No unary minus — write `0 - x`
-- No REPL / `--show-ast` / `--show-types` in native mode
+- `--show-ast` / `--show-types` are unavailable under the default Madaros engine (`bin/souc compile ... --show-ast` -> `error: madaros build: unsupported option`); both work under `SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64` (they're in that engine's own usage string). A REPL does exist (`souc repl` -> `tools/repl.sh`, shipped 2026-05-28 per `docs/compiler/KNOWN_LIMITATIONS.md`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator; "no REPL" itself is stale and superseded by that entry.
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
-- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible**. The default `bin/souc` **does** emit PTX now — `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
+- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible under default Madaros**. `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). This is Madaros-only: `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc build ... --backend gpu ...` has no GPU CLI surface at all and fails to parse the invocation (verified 2026-08-17). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
+- **Dual-engine divergence is not a tilde curiosity.** Default Madaros and `SOUNIO_SOUC_ENGINE=lean_single` disagree on more than f128/f256 parse refusal (E218 / V0-A). Two measured cases from 2026-08-17:
+  - **#1798 (CLOSED):** Madaros *accepted* a forward ontology `inverse_of` target that lean_single rejected with **E158**. Source-current Madaros was aligned to lean_single declaration-order semantics; gate `scripts/ci/madaros_ontology_enforcement_gate.sh`.
+  - **#1792 (OPEN, thesis-critical):** Madaros prints `var(...)=0.000000` on dissertation surfaces (e.g. `rapamycin_epistemic_adaptive`) where lean_single shows ~1e-5 / ~1e-9; related ep28 confidence can emit an IEEE bit-pattern as a huge decimal. Fail-closed detection: `scripts/ci/epistemic_fabrication_detect_gate.sh` / `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`. Do not treat Madaros green prints as science until variance is non-zero under the default engine or the fabrication gate is green without lean pin.
 
 ---
 

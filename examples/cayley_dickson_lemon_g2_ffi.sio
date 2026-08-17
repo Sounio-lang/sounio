@@ -1,0 +1,662 @@
+//! examples/cayley_dickson_lemon_g2_ffi.sio
+//!
+//! The G2/LEMON re-analysis (§9.5 of docs/papers/main/cayley_dickson_hierarchy_paper_2026-08-13.md,
+//! last marked "Still open: requires ... LEMON re-analysis") using REAL LEMON
+//! EEG data and REAL psychiatric endpoint scores, for the first time in
+//! this investigation.
+//!
+//! ARCHITECTURE (per user request: "use FFI e parseie python com sounio"):
+//! Sounio calls out to Python via `extern "C" { fn system(...) }` (the
+//! proven FFI pattern already used in self-hosted/compiler/pkg/registry_client.sio)
+//! ONLY to do what Sounio genuinely cannot: read the binary .npy EEG format
+//! (scripts/research/lemon_ffi_bridge.py) and match subjects against
+//! endpoints.csv. That bridge script does NO octonion/G2/statistics work —
+//! it downsamples and dumps a flat CSV. Everything scientifically load-
+//! bearing — the O-SSM forward pass, the G2 derivation projection (using
+//! the Leibniz-verified formula and the independently-confirmed rank-14
+//! basis from examples/cayley_dickson_g2_derivation_basis.sio), and the
+//! Spearman correlation against real rumination/neuroticism scores — is
+//! computed here, in Sounio, on real data.
+//!
+//! SCOPE, disclosed up front (this is a real-data PILOT, not the paper's
+//! full n=204/84-test analysis):
+//!   - N_SUBJECTS subjects (real, matched epoch+endpoint data), only the
+//!     FIRST EEG epoch per subject, downsampled to N_T timesteps (both
+//!     small — see resource-ceiling note below).
+//!   - The O-SSM (A,B) weights are seeded independently in Sounio (own
+//!     RNG, own seed) — NOT a bit-exact replica of the Python reference's
+//!     numpy PCG64 stream (`ossm_168_dryrun/ossm.py`'s `SEED_BASE=20260421
+//!     + subject_index`). This is an independent untrained random
+//!     projection, in the same spirit as the original design (fixed,
+//!     unlearned, per-subject-seeded), not a reproduction of its exact
+//!     numbers.
+//!   - Reports raw Spearman rho per generator, NOT FDR-corrected p-values
+//!     (the paper's original claims used 84 tests with BH-FDR; this pilot
+//!     tests 15 features (14 G2 + F1 aggregate) x 2 endpoints = 30 tests,
+//!     uncorrected, on a MUCH smaller n) — a first real signal check, not
+//!     a publication-ready statistical claim.
+//!   - This investigation hit a real, reproducible Sounio/Madaros runtime
+//!     resource ceiling earlier (examples/cayley_dickson_borromean_rerun.sio,
+//!     examples/cayley_dickson_octtree_realtree_training.sio — both crash
+//!     with exit 182 past a certain cumulative compute volume). N_SUBJECTS
+//!     and N_T below are picked empirically to stay under that ceiling;
+//!     if this file crashes, that is itself real information — see the
+//!     paper's §9.3 "not yet done" list for the discipline this
+//!     investigation has followed throughout: try, measure, scale down,
+//!     document, never silently fabricate a smaller-but-unlabeled result.
+//!
+//! RESULT (2026-08-15, n=15 real subjects, real EEG, real endpoint
+//! scores, 15 downsampled timesteps, mean not median, run END-TO-END
+//! through the native Sounio extern "C" FFI -- no out-of-band Python
+//! step): G12 (D_{4,6}) is the strongest generator -- rho(rumination)=
+//! -0.531, rho(neuroticism)=-0.550 -- and the F1 aggregate is weaker than
+//! several individual generators on the rumination axis (rho(rumination)=
+//! -0.350, rho(neuroticism)=-0.135). Both of these are QUALITATIVELY
+//! consistent with the retracted paper's original hypothesis (a specific
+//! G2 direction carries more signal than the aggregate; G12 specifically
+//! was one of the two generators the original analysis highlighted). This
+//! supersedes an earlier "2026-08-14" figure previously recorded here from
+//! a manually-orchestrated run: that run predates bug #6 below (a global
+//! array always reading element 0) being found and fixed, so its per-
+//! generator breakdown cannot be trusted. Its G12 value happened to be
+//! numerically close to this run's -- do NOT read that as corroboration:
+//! whether the pre-fix run's number came from before or after bug #6 was
+//! introduced was never tracked, so the closeness is not established as
+//! meaningful (bug #6 collapsed all 14 generators to one shared value; a
+//! coincidental match to that shared value is exactly what a truly broken
+//! run would also produce). Only THIS run's numbers (reproduced
+//! identically across repeat runs of the checked-in file) are verified.
+//! This is NOT a statistically validated finding: n=15 is small (|rho|
+//! needs to exceed roughly 0.51 for uncorrected two-tailed p<0.05 at this
+//! n, so G12 is right at that boundary on its own), no FDR correction is
+//! computed, and "G12 strongest" is itself a max over 14 generators x 2
+//! endpoints -- the uncorrected boundary above is not a valid significance
+//! threshold for a selected maximum (a permutation test on the max
+//! statistic, not a per-generator correction, is what a real significance
+//! claim here would require). Two further independent-analysis choices
+//! (downsampling to 15/1000 timesteps, mean instead of median) further
+//! separate this from the original design. Treat this as: the corrected
+//! pipeline runs end-to-end on real data and produces a plausible,
+//! not-obviously-wrong pattern -- a necessary condition for the original
+//! hypothesis to be reinstated, not a sufficient one.
+//!
+//! Run (the extern "C" system() FFI now genuinely invokes the Python
+//! bridge itself -- see the FFI FIX note at the end of this file). The fix
+//! lives only in self-hosted/compiler/lean_single.sio, not the default
+//! Madaros engine -- and NOT in the prebuilt bin/souc-lean-single-x86_64
+//! (that ELF is actually a different, stale tool ("mini_native"), not a
+//! build of lean_single.sio; `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc
+//! run ...` routes to it and exits 1 with no output). Build a current
+//! lean_single from source first, then invoke the result directly:
+//!   scripts/dev/souc-build-lock.sh make build   # -> ./gen3.elf, fixed-point-verified
+//!   SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./gen3.elf \
+//!     examples/cayley_dickson_lemon_g2_ffi.sio /tmp/lemon.elf && /tmp/lemon.elf
+
+const N_SUBJECTS: i64 = 15
+const N_T: i64 = 15
+// NOT `const BRIDGE_PATH: string = ...` -- a module-level `const string`
+// passed to read_file() reproducibly returns 0 bytes even for a file that
+// has existed since before the process started (bug #5 below); a local
+// `let` bound to the same literal inside main() reads correctly. Kept as
+// a plain string literal at the one call site instead.
+
+extern "C" {
+    fn system(cmd: &[i8; 1024]) -> i32
+}
+
+// =============================================================================
+// PRINT HELPERS
+// =============================================================================
+
+fn print_i64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); print_i64(0 - x) }
+    else if x < 10 { print_digit(x) }
+    else { print_i64(x / 10); print_digit(x - (x / 10) * 10) }
+}
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") }
+    else if d == 2 { print("2") } else if d == 3 { print("3") }
+    else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") }
+    else if d == 8 { print("8") } else { print("9") }
+}
+fn print_f64(x: f64, decimals: i64) with IO, Mut, Div, Panic {
+    if x < 0.0 { print("-"); print_f64(0.0 - x, decimals) }
+    else {
+        let int_part = x as i64
+        print_i64(int_part)
+        print(".")
+        var frac = x - (int_part as f64)
+        var d: i64 = 0
+        while d < decimals {
+            frac = frac * 10.0
+            let digit = frac as i64
+            print_digit(digit)
+            frac = frac - (digit as f64)
+            d = d + 1
+        }
+    }
+}
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x; var i: i64 = 0
+    while i < 25 { g = (g + x / g) / 2.0; i = i + 1 }
+    g
+}
+fn exp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return exp_f64(x / 2.0) * exp_f64(x / 2.0) }
+    if x < 0.0 - 20.0 { return 1.0 / exp_f64(0.0 - x) }
+    var sum = 1.0; var term = 1.0; var i: i64 = 1
+    while i <= 15 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+fn sigmoid_f64(x: f64) -> f64 with Mut, Div, Panic { 1.0 / (1.0 + exp_f64(0.0 - x)) }
+
+// =============================================================================
+// PRNG (SplitMix64, same construction used throughout this investigation)
+// =============================================================================
+
+var RNG_STATE: [i64; 1] = [0; 1]
+fn rng_seed(seed: i64) with Mut { RNG_STATE[0] = seed }
+fn rng_next_u64() -> i64 with Mut {
+    RNG_STATE[0] = RNG_STATE[0] + 0x9e3779b97f4a7c15 as i64
+    var z = RNG_STATE[0]
+    z = z ^ (z >> 30)
+    z = z * 0xbf58476d as i64
+    z = z ^ (z >> 27)
+    z = z * 0x94d049bb as i64
+    z = z ^ (z >> 31)
+    z
+}
+fn rng_next_signed() -> f64 with Mut, Div {
+    let u = rng_next_u64() & 0x7fffffff
+    let v = (u as f64) / 1073741823.5
+    v - 1.0
+}
+
+// =============================================================================
+// OCTONION PRODUCT (the XOR-consistent Cayley-Dickson table verified and
+// reused throughout this whole investigation)
+// =============================================================================
+
+fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3] - a[4]*b[4] - a[5]*b[5] - a[6]*b[6] - a[7]*b[7]
+    out[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2] + a[4]*b[5] - a[5]*b[4] - a[6]*b[7] + a[7]*b[6]
+    out[2] = a[0]*b[2] + a[2]*b[0] - a[1]*b[3] + a[3]*b[1] + a[4]*b[6] - a[6]*b[4] + a[5]*b[7] - a[7]*b[5]
+    out[3] = a[0]*b[3] + a[3]*b[0] + a[1]*b[2] - a[2]*b[1] + a[4]*b[7] - a[7]*b[4] - a[5]*b[6] + a[6]*b[5]
+    out[4] = a[0]*b[4] + a[4]*b[0] - a[1]*b[5] + a[5]*b[1] - a[2]*b[6] + a[6]*b[2] - a[3]*b[7] + a[7]*b[3]
+    out[5] = a[0]*b[5] + a[5]*b[0] + a[1]*b[4] - a[4]*b[1] - a[2]*b[7] + a[7]*b[2] + a[3]*b[6] - a[6]*b[3]
+    out[6] = a[0]*b[6] + a[6]*b[0] + a[1]*b[7] - a[7]*b[1] + a[2]*b[4] - a[4]*b[2] - a[3]*b[5] + a[5]*b[3]
+    out[7] = a[0]*b[7] + a[7]*b[0] - a[1]*b[6] + a[6]*b[1] + a[2]*b[5] - a[5]*b[2] + a[3]*b[4] - a[4]*b[3]
+}
+fn oct_sub(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut {
+    var i: i64 = 0
+    while i < 8 { out[i] = a[i] - b[i]; i = i + 1 }
+}
+fn oct_associator(a: &[f64; 8], b: &[f64; 8], c: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var ab: [f64; 8] = [0.0; 8]
+    oct_mul(a, b, &!ab)
+    var ab_c: [f64; 8] = [0.0; 8]
+    oct_mul(&ab, c, &!ab_c)
+    var bc: [f64; 8] = [0.0; 8]
+    oct_mul(b, c, &!bc)
+    var a_bc: [f64; 8] = [0.0; 8]
+    oct_mul(a, &bc, &!a_bc)
+    oct_sub(&ab_c, &a_bc, out)
+}
+fn oct_comm(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var ab: [f64; 8] = [0.0; 8]
+    var ba: [f64; 8] = [0.0; 8]
+    oct_mul(a, b, &!ab)
+    oct_mul(b, a, &!ba)
+    oct_sub(&ab, &ba, out)
+}
+fn oct_basis(idx: i64) -> [f64; 8] with Mut {
+    var o: [f64; 8] = [0.0; 8]
+    o[idx as usize] = 1.0
+    o
+}
+
+// Correct G2 derivation formula, Leibniz-verified in
+// examples/cayley_dickson_hook21_g2_verification.sio (residual ~1e-9).
+fn g2_deriv(a: &[f64; 8], b: &[f64; 8], x: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    var comm_ab: [f64; 8] = [0.0; 8]
+    oct_comm(a, b, &!comm_ab)
+    var dcomm: [f64; 8] = [0.0; 8]
+    oct_comm(&comm_ab, x, &!dcomm)
+    var assoc: [f64; 8] = [0.0; 8]
+    oct_associator(a, b, x, &!assoc)
+    var i: i64 = 0
+    while i < 8 { out[i] = dcomm[i] - 3.0 * assoc[i]; i = i + 1 }
+}
+
+// The independently-verified rank-14 basis from
+// examples/cayley_dickson_g2_derivation_basis.sio (exact rank match,
+// all 21 originals confirmed in its span to residual 0.0) — NOT the
+// audited pipeline's gauge-dependent SVD-top-14 selection.
+const N_GEN: i64 = 14
+// NOT module-level `var GEN_A/GEN_B: [i64;14]` -- a global mutable array
+// indexed by a runtime loop variable reproducibly reads element 0 for
+// every index (bug #6 below; confirmed with a single global array, no
+// other globals present, local arrays and &-reference parameters both
+// unaffected). Declared locally in main() and threaded through as
+// `&[i64;14]` parameters instead.
+
+fn oct_norm(a: &[f64; 8]) -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 8 { s = s + a[i] * a[i]; i = i + 1 }
+    sqrt_f64(s)
+}
+
+// Parse a plain decimal number (optional leading '-', digits, optional
+// '.', digits -- the exact format lemon_ffi_bridge.py's csv.writer emits
+// for these value ranges; no exponent notation).
+fn parse_f64(text: string, start: i64, end: i64) -> f64 with Mut, Div, Panic {
+    var i = start
+    var neg = false
+    if i < end && (str_char_at(text, i as usize) as i64) == 45 { neg = true; i = i + 1 }
+    var int_part = 0.0
+    while i < end {
+        let c = str_char_at(text, i as usize) as i64
+        if c == 46 { i = i + 1; break }
+        if c < 48 || c > 57 { i = i + 1; continue }
+        int_part = int_part * 10.0 + ((c - 48) as f64)
+        i = i + 1
+    }
+    var frac_part = 0.0
+    var scale = 0.1
+    while i < end {
+        let c = str_char_at(text, i as usize) as i64
+        if c >= 48 && c <= 57 {
+            frac_part = frac_part + ((c - 48) as f64) * scale
+            scale = scale * 0.1
+        }
+        i = i + 1
+    }
+    let v = int_part + frac_part
+    if neg { 0.0 - v } else { v }
+}
+
+// h <- sigmoid(oct_mul(A,h) + sum_c B[c]*x[c])  (own Sounio seeding, see
+// file header -- not a bit-exact replica of the Python reference).
+// Value in / value out (no &![T;N] passed on into another function as a
+// &[T;N] argument) -- avoids the "&![T;N] bare array mutation broken in
+// JIT" class of bug documented in this repo's known limitations, which a
+// first version of this function (h: &![f64;8], passed straight into
+// oct_mul as its &[f64;8] arg) hit as a silent hang, not a crash.
+// B flattened to [f64;56] (7 channels x 8 dims, flat idx ch*8+k) -- a
+// nested [[f64;8];7] parameter was the actual hang cause (matches the
+// nested-array fragility already found once in this investigation, see
+// examples/cayley_dickson_g2_derivation_basis.sio's CAND/BASIS note).
+fn ossm_step(h_in: [f64; 8], A: [f64; 8], B: [f64; 56], x: [f64; 7]) -> [f64; 8] with Mut, Div, NonAssoc, Panic {
+    var Ah: [f64; 8] = [0.0; 8]
+    oct_mul(&A, &h_in, &!Ah)
+    var acc: [f64; 8] = [0.0; 8]
+    var c: i64 = 0
+    while c < 7 {
+        let xc = x[c]
+        var k: i64 = 0
+        while k < 8 { acc[k] = acc[k] + B[c * 8 + k] * xc; k = k + 1 }
+        c = c + 1
+    }
+    var out: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 { out[i] = sigmoid_f64(Ah[i] + acc[i]); i = i + 1 }
+    out
+}
+
+// Accumulate this timestep's contribution to the running-mean G2 features
+// (mean over T, not median -- a disclosed simplification vs. the original
+// pipeline's per-epoch median, chosen to avoid per-timestep storage/sort
+// under this investigation's demonstrated resource ceiling) and to a
+// simple aggregate-associator "F1" analogue.
+fn accumulate_g2(subj_idx: i64, h0: &[f64; 8], h1: &[f64; 8], gen_a: &[i64; 14], gen_b: &[i64; 14]) with Mut, Div, Panic, NonAssoc {
+    var g: i64 = 0
+    while g < N_GEN {
+        let ea = oct_basis(gen_a[g as usize])
+        let eb = oct_basis(gen_b[g as usize])
+        var d0: [f64; 8] = [0.0; 8]
+        g2_deriv(&ea, &eb, h0, &!d0)
+        var d1: [f64; 8] = [0.0; 8]
+        g2_deriv(&ea, &eb, h1, &!d1)
+        let idx = subj_idx * N_GEN + g
+        SUBJ_G2[idx as usize] = SUBJ_G2[idx as usize] + (oct_norm(&d0) + oct_norm(&d1)) / 2.0
+        g = g + 1
+    }
+    var assoc: [f64; 8] = [0.0; 8]
+    oct_associator(h0, h1, h0, &!assoc)
+    SUBJ_F1[subj_idx as usize] = SUBJ_F1[subj_idx as usize] + oct_norm(&assoc)
+}
+
+fn finalize_subject(subj_idx: i64, h0: &[f64; 8], h1: &[f64; 8]) with Mut, Div {
+    var g: i64 = 0
+    while g < N_GEN {
+        let idx = subj_idx * N_GEN + g
+        SUBJ_G2[idx as usize] = SUBJ_G2[idx as usize] / (N_T as f64)
+        g = g + 1
+    }
+    SUBJ_F1[subj_idx as usize] = SUBJ_F1[subj_idx as usize] / (N_T as f64)
+}
+
+// =============================================================================
+// SPEARMAN RANK CORRELATION (O(n^2) ranking, fine for n ~ 15)
+// =============================================================================
+
+fn rank_of(values: &[f64; 15], idx: i64, n: i64) -> f64 with Mut, Div {
+    var less: f64 = 0.0
+    var equal: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        if values[i] < values[idx] { less = less + 1.0 }
+        if values[i] == values[idx] { equal = equal + 1.0 }
+        i = i + 1
+    }
+    less + (equal - 1.0) / 2.0 + 1.0
+}
+
+fn spearman(a: &[f64; 15], b: &[f64; 15], n: i64) -> f64 with Mut, Div, Panic {
+    var ra: [f64; 15] = [0.0; 15]
+    var rb: [f64; 15] = [0.0; 15]
+    var i: i64 = 0
+    while i < n { ra[i as usize] = rank_of(a, i, n); rb[i as usize] = rank_of(b, i, n); i = i + 1 }
+    var mean_ra = 0.0; var mean_rb = 0.0
+    i = 0
+    while i < n { mean_ra = mean_ra + ra[i as usize]; mean_rb = mean_rb + rb[i as usize]; i = i + 1 }
+    mean_ra = mean_ra / (n as f64); mean_rb = mean_rb / (n as f64)
+    var cov = 0.0; var va = 0.0; var vb = 0.0
+    i = 0
+    while i < n {
+        let da = ra[i as usize] - mean_ra
+        let db = rb[i as usize] - mean_rb
+        cov = cov + da * db
+        va = va + da * da
+        vb = vb + db * db
+        i = i + 1
+    }
+    if va <= 0.0 || vb <= 0.0 { return 0.0 }
+    cov / sqrt_f64(va * vb)
+}
+
+fn report_correlations(n: i64, gen_a: &[i64; 14], gen_b: &[i64; 14]) with IO, Mut, Div, Panic {
+    print("\n[Real-data correlations] Spearman rho, n="); print_i64(n)
+    print(" subjects, uncorrected (see file header for the multiple-comparisons caveat):\n")
+    var g: i64 = 0
+    while g < N_GEN {
+        var feat: [f64; 15] = [0.0; 15]
+        var i: i64 = 0
+        while i < n { feat[i as usize] = SUBJ_G2[(i * N_GEN + g) as usize]; i = i + 1 }
+        let rho_rum = spearman(&feat, &SUBJ_RUM, n)
+        let rho_neu = spearman(&feat, &SUBJ_NEU, n)
+        print("  G"); print_i64(g); print(" (D_{"); print_i64(gen_a[g as usize]); print(",")
+        print_i64(gen_b[g as usize]); print("})  rho(rumination)="); print_f64(rho_rum, 3)
+        print("  rho(neuroticism)="); print_f64(rho_neu, 3); print("\n")
+        g = g + 1
+    }
+    let rho_f1_rum = spearman(&SUBJ_F1, &SUBJ_RUM, n)
+    let rho_f1_neu = spearman(&SUBJ_F1, &SUBJ_NEU, n)
+    print("  F1 (assoc aggregate)  rho(rumination)="); print_f64(rho_f1_rum, 3)
+    print("  rho(neuroticism)="); print_f64(rho_f1_neu, 3); print("\n")
+}
+
+// =============================================================================
+// FFI: invoke the Python data bridge (pure I/O -- no science, see header)
+// =============================================================================
+
+// Routes through the short, checked-in scripts/research/lemon_ffi_bridge_wrapper.sh
+// rather than building the full python3-plus-args command inline: a long
+// `cmd` string (~100+ chars observed) crashes/hangs the fixed system()
+// stub (see that script's header comment and the FFI dispatch's addendum).
+fn run_bridge() with IO, Mut, Panic, Div {
+    print("[FFI] invoking Python bridge (system(), extern \"C\") for real LEMON data...\n")
+    var cmd: [i8; 1024] = [0; 1024]
+    let s = "sh /workspace/sounio/scripts/research/lemon_ffi_bridge_wrapper.sh"
+    var i: i64 = 0
+    let n = str_len(s) as i64
+    while i < n && i < 1023 {
+        cmd[i as usize] = str_char_at(s, i as usize) as i8
+        i = i + 1
+    }
+    let rc = system(&cmd)
+    print("[FFI] bridge exit code: "); print_i64(rc as i64); print("\n")
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+var SUBJ_RUM: [f64; 15] = [0.0; 15]
+var SUBJ_NEU: [f64; 15] = [0.0; 15]
+var SUBJ_G2: [f64; 210] = [0.0; 210]   // 15 subjects x 14 generators, flat
+var SUBJ_F1: [f64; 15] = [0.0; 15]
+
+fn main() -> i32 with IO, Mut, Div, Panic, NonAssoc {
+    print("=== G2 / LEMON re-analysis on REAL data, via Sounio FFI -> Python bridge ===\n")
+
+    // Local, not module-level global (see the N_GEN comment above -- a
+    // global array here reproducibly read element 0 for every index).
+    var gen_a: [i64; 14] = [1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 4, 4, 4]
+    var gen_b: [i64; 14] = [2, 3, 4, 5, 6, 7, 3, 4, 5, 6, 7, 5, 6, 7]
+
+    // run_bridge() invokes the real extern "C" system() FFI, fixed in
+    // self-hosted/compiler/lean_single.sio's append_extern_c_stubs()
+    // (docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md, Track B).
+    // This genuinely forks+execve's the wrapper script and runs python3 --
+    // it is no longer a no-op under lean_single (Madaros/Track A remains
+    // open, see the dispatch doc).
+    run_bridge()
+
+    // sync() (syscall 162, no args) between the system()-forked child's
+    // write and this process's read_file(): without it, read_file()
+    // observed the file as 0 bytes immediately after the child exited,
+    // even though wait4() had already returned and the data was correct
+    // moments later from a fresh process. Root cause not fully isolated;
+    // sync() reliably closes the window (confirmed via ffi_probe_readtest3).
+    syscall6(162, 0, 0, 0, 0, 0, 0)
+
+    let bridge_path = "/workspace/.home/openvscode-server/.agents/claude-2/.claude/jobs/f7926023/tmp/lemon_g2_bridge.csv"
+    let text = read_file(bridge_path)
+    print("[read] bridge CSV length = "); print_i64(str_len(text) as i64); print(" bytes\n")
+
+    // Manual CSV parse (format fully controlled by lemon_ffi_bridge.py:
+    // subject_id,cerq_rumination,neo_neuroticism,t,ch0..ch6 -- no quoting).
+    var pos: i64 = 0
+    let len = str_len(text) as i64
+    // skip header line
+    while pos < len && (str_char_at(text, pos as usize) as i64) != 10 { pos = pos + 1 }
+    pos = pos + 1
+
+    var n_subj: i64 = 0 - 1   // becomes 0 on first row
+    var last_sid_hash: i64 = 0 - 999999
+    var t_in_subj: i64 = 0
+
+    // Per-subject O-SSM state: 2 octonion states, seeded per subject.
+    var h0: [f64; 8] = [0.0; 8]
+    var h1: [f64; 8] = [0.0; 8]
+    var A0: [f64; 8] = [0.0; 8]
+    var A1: [f64; 8] = [0.0; 8]
+    var B0: [f64; 56] = [0.0; 56]
+    var B1: [f64; 56] = [0.0; 56]
+
+    while pos < len && n_subj < N_SUBJECTS {
+        let line_start = pos
+        while pos < len && (str_char_at(text, pos as usize) as i64) != 10 { pos = pos + 1 }
+        let line_end = pos
+        pos = pos + 1
+        if line_end <= line_start { continue }
+
+        // Split the line on commas manually.
+        var field_starts: [i64; 11] = [0; 11]
+        var field_ends: [i64; 11] = [0; 11]
+        var fi: i64 = 0
+        var fs = line_start
+        var p = line_start
+        while p <= line_end && fi < 11 {
+            if p == line_end || (str_char_at(text, p as usize) as i64) == 44 {
+                field_starts[fi as usize] = fs
+                field_ends[fi as usize] = p
+                fi = fi + 1
+                fs = p + 1
+            }
+            p = p + 1
+        }
+
+        // Hash the subject_id field (bytes -> simple rolling hash) to
+        // detect subject boundaries without a full string compare.
+        var sid_hash: i64 = 0
+        var q = field_starts[0]
+        while q < field_ends[0] {
+            sid_hash = sid_hash * 131 + (str_char_at(text, q as usize) as i64)
+            q = q + 1
+        }
+
+        if sid_hash != last_sid_hash {
+            // New subject: finalize previous subject's G2 features (if any).
+            if n_subj >= 0 {
+                finalize_subject(n_subj, &h0, &h1)
+            }
+            n_subj = n_subj + 1
+            if n_subj >= N_SUBJECTS { continue }
+            last_sid_hash = sid_hash
+            t_in_subj = 0
+            h0 = [0.0; 8]; h1 = [0.0; 8]
+            rng_seed(4242 + n_subj * 7919)
+            var k: i64 = 0
+            while k < 8 { A0[k as usize] = 0.1 * rng_next_signed(); A1[k as usize] = 0.1 * rng_next_signed(); k = k + 1 }
+            var ch: i64 = 0
+            while ch < 7 {
+                var kk: i64 = 0
+                while kk < 8 { B0[(ch*8+kk) as usize] = 0.1 * rng_next_signed(); B1[(ch*8+kk) as usize] = 0.1 * rng_next_signed(); kk = kk + 1 }
+                ch = ch + 1
+            }
+            SUBJ_RUM[n_subj as usize] = parse_f64(text, field_starts[1], field_ends[1])
+            SUBJ_NEU[n_subj as usize] = parse_f64(text, field_starts[2], field_ends[2])
+        }
+
+        if t_in_subj < N_T {
+            var x: [f64; 7] = [0.0; 7]
+            var c: i64 = 0
+            while c < 7 { x[c as usize] = parse_f64(text, field_starts[4 + c], field_ends[4 + c]); c = c + 1 }
+            h0 = ossm_step(h0, A0, B0, x)
+            h1 = ossm_step(h1, A1, B1, x)
+            accumulate_g2(n_subj, &h0, &h1, &gen_a, &gen_b)
+        }
+        t_in_subj = t_in_subj + 1
+    }
+    if n_subj >= 0 && n_subj < N_SUBJECTS { finalize_subject(n_subj, &h0, &h1) }
+    let n_total = n_subj + 1
+
+    print("\n[Loaded] "); print_i64(n_total); print(" real subjects, "); print_i64(N_T); print(" timesteps each\n")
+
+    report_correlations(n_total, &gen_a, &gen_b)
+
+    print("\n=== DONE ===\n")
+    0
+}
+
+// =============================================================================
+// COMPILER/RUNTIME BUGS FOUND WHILE BUILDING THIS FILE
+// (self-hosted/ fixes follow this repo's forensic-dispatch protocol; see
+// docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md for #1's
+// full writeup. #2-#4 are worked around in THIS file, not patched.)
+// =============================================================================
+//
+// 1. `extern "C" { fn system(cmd: &[i8;N]) -> i32 }` was a NON-FUNCTIONAL
+//    no-op under BOTH Madaros and (pre-fix) lean_single, despite being
+//    declared and called in self-hosted/compiler/pkg/registry_client.sio
+//    and despite type-checking and "running" cleanly (that file's own
+//    call site was never itself verified -- it fails identically on both
+//    engines). Decisive test: system("touch <path>") claimed success
+//    (rc=0) without ever creating the file, under `souc run` and under a
+//    compiled ELF alike.
+//    STATUS: FIXED for lean_single only (Track B) -- an explicit `system`
+//    case was added to append_extern_c_stubs() in
+//    self-hosted/compiler/lean_single.sio, implementing real
+//    fork+execve("/bin/sh","-c",cmd)+wait4 via raw syscalls (mirroring
+//    self-hosted/lsp/server.sio's proven pattern). Verified: run_bridge()
+//    above genuinely invokes python3 and the bridge CSV is written by
+//    THIS program's own execution, no out-of-band step required -- but
+//    only when compiled with a current build of self-hosted/compiler/
+//    lean_single.sio (see the file header for the exact build-from-source
+//    invocation; the prebuilt bin/souc-lean-single-x86_64 does not contain
+//    this fix). Track A (porting the fix to Madaros) remains OPEN.
+//
+// 2. A `[[f64;8];7]` (nested array) function parameter caused a SILENT
+//    HANG, not a crash or wrong answer: `ossm_step`'s first version took
+//    `B: [[f64;8];7]` by value; every call past the first line of real
+//    data hung indefinitely with ~1% CPU (not a spin loop -- more
+//    consistent with a blocked/faulted access that never resolves).
+//    Bisected with incremental debug prints down to the exact call
+//    (`ossm_step(&!h0, ...)` never returned). Flattening B to `[f64;56]`
+//    (flat index ch*8+k) fixed it immediately. This is the SAME failure
+//    class already found once in this investigation
+//    (examples/cayley_dickson_g2_derivation_basis.sio's CAND/BASIS
+//    arrays, there a segfault rather than a hang) -- nested nested-array
+//    handling (element writes there, a by-value parameter here) is
+//    fragile in this Madaros build in more than one way. A `&![f64;8]`
+//    parameter passed on into another function's `&[f64;8]` argument
+//    (the "&![T;N] bare array mutation broken in JIT" class already
+//    documented in this repo's known limitations) was ALSO tried as the
+//    fix and did NOT resolve the hang on its own -- the nested-array
+//    parameter was the actual cause, confirmed by testing each change in
+//    isolation.
+//
+// 3. The fixed lean_single `system()` (see #1) crashes (SIGSEGV) or hangs
+//    (100% CPU spin, no child ever forked per `ps`) on command strings
+//    roughly 100+ characters long; ~94 chars confirmed working, a padded
+//    ~137-char probe confirmed broken. Root cause not isolated (fork
+//    argv/envp buffer sizing is the leading suspect, unconfirmed). Worked
+//    around by routing the actual invocation through a short, checked-in
+//    wrapper script (scripts/research/lemon_ffi_bridge_wrapper.sh) so the
+//    `system()` argument itself stays well under the safe length.
+//
+// 4. `read_file()` observed a file the same process had just
+//    system()-forked a child to write as 0 bytes, even after wait4()
+//    (inside the system() stub) had already returned and the file
+//    demonstrably had correct content moments later from a fresh
+//    process. Reproduced in isolation (ffi_probe_readtest.sio/2/3):
+//    reading twice in the same process still returned 0 bytes both
+//    times; a separate process read the same path correctly (37,232
+//    bytes); inserting `syscall6(162,0,0,0,0,0,0)` (sync(), no args)
+//    between the system() call and read_file() reliably closed the
+//    window (confirmed: 37,232 bytes, matching the real file size).
+//    Applied as the fix in main() above. Root cause not fully isolated
+//    (plausible: a caching/visibility artefact of the underlying
+//    filesystem across the fork boundary, not standard POSIX behaviour
+//    on ext4 -- unconfirmed).
+//
+// 5. `read_file()` given a module-level `const string` path (even with
+//    #4's sync() applied, and even for a file that had existed since
+//    before the process started -- i.e. unrelated to #4's fork-write
+//    timing) reproducibly returned 0 bytes, while the SAME literal
+//    string bound to a local `let` inside main(), or passed through a
+//    helper fn's `string` parameter, read correctly (ffi_probe_letpath.sio:
+//    37,232 bytes via all three of local let / fn param / inline literal;
+//    ffi_probe_const_only.sio, no system()/sync() involved at all: 0
+//    bytes via a bare top-level const). This file's original
+//    `const BRIDGE_PATH: string = ...` was the actual cause of every
+//    "[read] bridge CSV length = 0 bytes" observed while debugging #4 --
+//    #4's sync() fix is independently real (see its own probes) but was
+//    NOT what was breaking THIS file. Fixed by inlining the path as a
+//    local `let bridge_path = "..."` in main() instead of a module-level
+//    const.
+//
+// 6. A module-level mutable `var arr: [T;N]` array, indexed with a
+//    runtime-computed index (`arr[i as usize]`), reproducibly reads
+//    element 0 for every index, PURELY ON READ -- writes to the same kind
+//    of global (SUBJ_G2 elsewhere in this file, written every timestep
+//    then read back with a computed index in report_correlations) are
+//    unaffected, which is why this was not caught until GEN_A/GEN_B
+//    (write-once-at-init, read-many) were added. Reproduced with a single
+//    global i64 array in an otherwise-trivial file, no other globals
+//    present (ffi_probe_genarr3.sio: g=0..13 all print A=1, the element-0
+//    value) -- rules out the "large globals collide" explanation already
+//    on file for the BASIS_COUNT scalar bug (see
+//    examples/cayley_dickson_g2_derivation_basis.sio's history); this is
+//    a distinct defect. A local array (ffi_probe_genarr4.sio) and a local
+//    array passed by `&[T;N]` reference into another function
+//    (ffi_probe_genarr5.sio) both read correctly at every index. Fixed by
+//    declaring GEN_A/GEN_B as locals in main() and threading them into
+//    accumulate_g2()/report_correlations() as `&[i64;14]` parameters,
+//    matching this file's existing BASIS_COUNT-style workaround pattern.
