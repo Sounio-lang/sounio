@@ -12,7 +12,8 @@ source_of_truth: tests/vectors/f128_f256/V0B_PROBE_CONSUMPTION.json
 **Date**: 2026-08-17  
 **Emitter**: `scripts/dev/ws_g_v0b_emit_literal_probes.py`  
 **Gate**: `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b`  
-**Oracle branch source**: `docs/ws-g-ref-vectors-20260816` (grok-cli1)
+**Oracle**: [PR #1761](https://github.com/Sounio-lang/sounio/pull/1761) / branch `docs/ws-g-ref-vectors-20260816` (MPFR external; **not** Sounio-derived).  
+In-tree `literal_boundary_*.jsonl` and generators are **byte-identical** to that PR head (verified 2026-08-17).
 
 ## Consumed (wired into V0-B probes)
 
@@ -60,6 +61,18 @@ Probes:
 6. Negatives (arith/cast/implicit) → must not `check: OK`.
 
 Under current Madaros V0-A, step 5 fails with E218 — **correct**.
+
+### Ladder contract for implementers (fable-1)
+
+**Required for gate green (V0-B only):** steps 4–6 above — literals/types through `check`, no E218; arithmetic/casts/implicit still rejected.
+
+**Not required by the ladder / this gate for green today:**
+
+- `souc run` / codegen / printing wide values  
+- Runtime bit-identity of a literal against `ORACLE_*_EXPECTED` limbs (tables are embedded so a widen-f64 shortcut is *detectable* once limb extract exists; they are **not** a current pass condition)  
+- Consuming arithmetic corpora `f128.jsonl` / `f256.jsonl` (that is **V0-D**)
+
+Do **not** loosen probes or hashes to fit a partial implementation. Correct literal bits for `double_rounds_differs=true` rows must match `expected`, not `via_f64`, when bit-level checking becomes possible.
 
 ## Regenerate probes after vector updates
 
