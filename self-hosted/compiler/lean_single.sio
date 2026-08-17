@@ -2739,6 +2739,18 @@ fn emit_lea_var_a64(slot: i64) with Mut, Panic {
     }
 }
 
+fn tok_text_same(a: i64, b: i64) -> bool with Panic, Mut {
+    let la = TE[a as usize] - TS[a as usize]
+    let lb = TE[b as usize] - TS[b as usize]
+    if la != lb { return false }
+    var i: i64 = 0
+    while i < la {
+        if sb(TS[a as usize] + i) != sb(TS[b as usize] + i) { return false }
+        i = i + 1
+    }
+    true
+}
+
 fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
     if l != str_len(kw) { return false }
     var i: i64 = 0
@@ -4295,6 +4307,20 @@ fn tc_kernel_nonvoid_return(tok: i64) with IO, Mut, Panic {
 }
 
 // Epistemic enforcement (E170/E171)
+// scan_type runs over the same annotation more than once, so the same claim
+// would be reported twice. Suppress a repeat on the identical token; two
+// distinct degenerate claims still report separately.
+var INDEP_LAST_ERR_TOK: i64 = 0 - 1
+
+fn tc_indep_degenerate(tok: i64) with IO, Mut, Panic {
+    if tok == INDEP_LAST_ERR_TOK { return }
+    INDEP_LAST_ERR_TOK = tok
+    print("error[E072]: IndepKnowledge declares a variable independent of itself at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: A and B must name two different variables; a variable is never independent of itself, so the claim asserts nothing\n")
+    tc_mark_failed()
+}
+
 fn tc_epistemic_value_access(tok: i64) with IO, Mut, Panic {
     print("error[E170]: accessing .value on Knowledge<T> requires `with Epistemic` effect at line ")
     print_int(TL[tok as usize])
@@ -6132,6 +6158,52 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             }
             SCAN_TY = 11
             SCAN_TY_HASH = box_hash_make(inner_ty, inner_hash)
+            SCAN_TY_NEXT = p
+            return
+        }
+        // IndepKnowledge<T, A, B | Z> — conditional independence as a type.
+        //
+        // Transparent to T at runtime: the claim is checked, not represented.
+        // Without a causal graph declared in source there is no d-separation to
+        // discharge it, so this compiler enforces the one rule it can actually
+        // know — A and B must be different variables. A variable is never
+        // independent of itself, so the degenerate claim asserts nothing while
+        // still licensing the tighter uncertainty bound. That is precisely the
+        // shape of an unfounded quadrature.
+        if src_match(ns, ne - ns, "IndepKnowledge") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_type(p)
+            let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == 28 { p = p + 1 }
+            let a_tok = p
+            if TK[p as usize] == 3 { p = p + 1 }
+            if TK[p as usize] == 28 { p = p + 1 }
+            let b_tok = p
+            if TK[p as usize] == 3 { p = p + 1 }
+            if TK[a_tok as usize] == 3 && TK[b_tok as usize] == 3 {
+                if tok_text_same(a_tok, b_tok) { tc_indep_degenerate(b_tok) }
+            }
+            // Conditioning set: `| Z`, `| {Z1, Z2}`, or `| {}` (all optional).
+            if TK[p as usize] == 45 {
+                p = p + 1
+                var braced: i64 = 0
+                if TK[p as usize] == 8 { braced = 1  p = p + 1 }
+                while TK[p as usize] == 3 {
+                    p = p + 1
+                    if TK[p as usize] == 28 { p = p + 1 }
+                }
+                if braced == 1 && TK[p as usize] == 9 { p = p + 1 }
+            }
+            if TK[p as usize] == 24 { p = p + 1 }
+            else if TK[p as usize] == 39 {
+                TK[p as usize] = 24
+                TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
+            }
+            SCAN_TY = inner_ty
+            SCAN_TY_HASH = inner_hash
             SCAN_TY_NEXT = p
             return
         }
