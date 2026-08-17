@@ -1,0 +1,435 @@
+// MLI S3 — expand_k: the SANCTIONED route from Knowledge kinds to scalar
+// MLI (Option C's "expand" track, design §2.3/§8.2). This pass is the
+// anti-erasure mechanism made executable: a Knowledge<f64, Min3> value
+// becomes THREE live scalar lanes (val f64, var f64, conf i64) and every
+// k_* op becomes real computation over ALL of them — the variance is added,
+// the confidence is min'd, decayed and clamped, exactly the stdlib ep_add
+// oracle (stdlib/epistemic/knowledge.sio):
+//
+//   val  = a.val + b.val
+//   var  = a.variance + b.variance          (GUM: Var(X+Y) = Var+Var)
+//   conf = clamp_0_1000(min(a.conf, b.conf) * 99 / 100)
+//
+// MEASURED COST (the honest number S3 was asked for):
+//   k_add val+var : 2 fadds. THE named temptation is the second fadd —
+//                   `addsd` of the variance slots. Emitting only the first
+//                   `addsd` (val) and returning is one instruction; that is
+//                   exactly what LLVM/GCC/Cranelift do. Keeping the variance
+//                   is one more `addsd` (encoding `f2 0f 58 c1`, 4 bytes)
+//                   plus the load/store of the var slots.
+//   k_mul val+var : 1 fmul (val) + 4 fmul + 1 fadd (GUM delta method,
+//                   JCGM 100:2008 §5.1.2 / stdlib ep_mul):
+//                     Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
+//                   THE named temptation is the first `mulsd` of a.val*b.val.
+//                   Four more `mulsd` and one `addsd` are the cost of not
+//                   erasing. The σx²σy² Gaussian-product term is NOT added
+//                   — that is the stdlib oracle, not a guess (knightian.sio
+//                   documents the omission as a GUM convention).
+//   conf lane     : 4–5 constant materialisations, 1 icmp + 1 mul + 1 div +
+//                   2 more icmps, THREE branch diamonds (min, clamp-low,
+//                   clamp-high) = 9 extra blocks per k_op, because MLI R0
+//                   has no select and Bool does not do integer arithmetic.
+//                   Decay is *99/100 for add (ep_add) and *98/100 for mul
+//                   (ep_mul). One k_op fits the S1 walls (1+9 of 16 blocks);
+//                   a second overflows fail-closed — the arena trigger.
+//
+// Refusals (never partial-drop a lane):
+//   X_UNSUPPORTED_OP   k_div/k_fma/k_measure/k_cast/cd_* (division by an
+//                      uncertain Y needs a documented GUM derivation of its
+//                      own; not guessed here)
+//   X_CFG_INPUT        multi-block input (expansion INSERTS blocks)
+//   X_KNOWLEDGE_RET    returning a Knowledge value (ABI by-ref is S5)
+//   X_SHAPE            Knowledge shapes other than Min3/f64
+
+module mli::expand_k
+
+use mli::ir::*
+use mli::builder::*
+
+pub let MLI_X_OK: i64 = 0
+pub let MLI_X_UNSUPPORTED_OP: i64 = 1
+pub let MLI_X_CFG_INPUT: i64 = 2
+pub let MLI_X_KNOWLEDGE_RET: i64 = 3
+pub let MLI_X_SHAPE: i64 = 4
+pub let MLI_X_BUILDER_OVERFLOW: i64 = 5
+pub let MLI_X_OPERAND: i64 = 6
+
+pub struct MliExpandStatus {
+    pub ok: bool,
+    pub code: i64,
+    pub at_index: i64,
+}
+
+fn x_ok() -> MliExpandStatus {
+    MliExpandStatus { ok: true, code: MLI_X_OK, at_index: 0 - 1 }
+}
+
+fn x_err(code: i64, at: i64) -> MliExpandStatus {
+    MliExpandStatus { ok: false, code: code, at_index: at }
+}
+
+// Lane maps: src vreg id -> out vreg ids. Scalar SoA columns only.
+pub struct S3KMap {
+    pub kv_val: [i64; 128],
+    pub kv_var: [i64; 128],
+    pub kv_conf: [i64; 128],
+    pub scalar: [i64; 128],
+}
+
+fn kmap_empty() -> S3KMap {
+    S3KMap {
+        kv_val: [0 - 1; 128],
+        kv_var: [0 - 1; 128],
+        kv_conf: [0 - 1; 128],
+        scalar: [0 - 1; 128],
+    }
+}
+
+fn is_min3_f64(k: MliKind) -> bool {
+    k.tag == MLI_KIND_KNOWLEDGE && k.base_tag == MLI_KIND_FLOAT && k.bits == 64 && k.shape == MLI_KSHAPE_MIN3
+}
+
+// Remap a source operand of a SCALAR op into the output function.
+// Knowledge vregs are illegal here (the verifier would refuse the input
+// anyway); immediates pass through.
+// Conf-lane diamonds: min -> *decay/100 -> clamp_0_1000. Shared by k_add
+// (decay=99) and k_mul (decay=98) so the two ops cannot drift.
+pub struct ConfLaneEmit {
+    pub ok: bool,
+    pub cur: i64,
+    pub dest: i64,
+}
+
+fn conf_lane_fail() -> ConfLaneEmit {
+    ConfLaneEmit { ok: false, cur: 0 - 1, dest: 0 - 1 }
+}
+
+fn emit_conf_lane(out: &!MliFunction, cur0: i64, ac: i64, bc: i64, c_decay: i64, c100: i64, c0: i64, c1000: i64) -> ConfLaneEmit with Mut, Panic {
+    let ik = mli_kind_int(64, 1)
+    let bk = mli_kind_bool()
+    var cur = cur0
+    var okv = true
+
+    let cnd1 = mli_new_vreg(out, bk)
+    let cm = mli_new_vreg(out, ik)
+    if cnd1 < 0 || cm < 0 { return conf_lane_fail() }
+    okv = okv && mli_emit(out, cur, mli_inst_icmp(MLI_CC_LT, mli_opd_vreg(cnd1, bk), mli_opd_vreg(ac, ik), mli_opd_vreg(bc, ik)))
+    let bt1 = mli_new_block(out)
+    let be1 = mli_new_block(out)
+    let bj1 = mli_new_block(out)
+    if bt1 < 0 || be1 < 0 || bj1 < 0 { return conf_lane_fail() }
+    okv = okv && mli_set_term(out, cur, mli_term_br(mli_opd_vreg(cnd1, bk), bt1, be1))
+    okv = okv && mli_emit(out, bt1, mli_inst2(MLI_OP_MOV, mli_opd_vreg(cm, ik), mli_opd_vreg(ac, ik)))
+    okv = okv && mli_set_term(out, bt1, mli_term_jmp(bj1))
+    okv = okv && mli_emit(out, be1, mli_inst2(MLI_OP_MOV, mli_opd_vreg(cm, ik), mli_opd_vreg(bc, ik)))
+    okv = okv && mli_set_term(out, be1, mli_term_jmp(bj1))
+    cur = bj1
+
+    let cx = mli_new_vreg(out, ik)
+    let cy = mli_new_vreg(out, ik)
+    if cx < 0 || cy < 0 { return conf_lane_fail() }
+    okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_MUL, mli_opd_vreg(cx, ik), mli_opd_vreg(cm, ik), mli_opd_vreg(c_decay, ik)))
+    okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_DIV, mli_opd_vreg(cy, ik), mli_opd_vreg(cx, ik), mli_opd_vreg(c100, ik)))
+
+    let cnd2 = mli_new_vreg(out, bk)
+    let cz = mli_new_vreg(out, ik)
+    if cnd2 < 0 || cz < 0 { return conf_lane_fail() }
+    okv = okv && mli_emit(out, cur, mli_inst_icmp(MLI_CC_LT, mli_opd_vreg(cnd2, bk), mli_opd_vreg(cy, ik), mli_opd_vreg(c0, ik)))
+    let bt2 = mli_new_block(out)
+    let be2 = mli_new_block(out)
+    let bj2 = mli_new_block(out)
+    if bt2 < 0 || be2 < 0 || bj2 < 0 { return conf_lane_fail() }
+    okv = okv && mli_set_term(out, cur, mli_term_br(mli_opd_vreg(cnd2, bk), bt2, be2))
+    okv = okv && mli_emit(out, bt2, mli_inst2(MLI_OP_MOV, mli_opd_vreg(cz, ik), mli_opd_vreg(c0, ik)))
+    okv = okv && mli_set_term(out, bt2, mli_term_jmp(bj2))
+    okv = okv && mli_emit(out, be2, mli_inst2(MLI_OP_MOV, mli_opd_vreg(cz, ik), mli_opd_vreg(cy, ik)))
+    okv = okv && mli_set_term(out, be2, mli_term_jmp(bj2))
+    cur = bj2
+
+    let cnd3 = mli_new_vreg(out, bk)
+    let cf = mli_new_vreg(out, ik)
+    if cnd3 < 0 || cf < 0 { return conf_lane_fail() }
+    okv = okv && mli_emit(out, cur, mli_inst_icmp(MLI_CC_GT, mli_opd_vreg(cnd3, bk), mli_opd_vreg(cz, ik), mli_opd_vreg(c1000, ik)))
+    let bt3 = mli_new_block(out)
+    let be3 = mli_new_block(out)
+    let bj3 = mli_new_block(out)
+    if bt3 < 0 || be3 < 0 || bj3 < 0 { return conf_lane_fail() }
+    okv = okv && mli_set_term(out, cur, mli_term_br(mli_opd_vreg(cnd3, bk), bt3, be3))
+    okv = okv && mli_emit(out, bt3, mli_inst2(MLI_OP_MOV, mli_opd_vreg(cf, ik), mli_opd_vreg(c1000, ik)))
+    okv = okv && mli_set_term(out, bt3, mli_term_jmp(bj3))
+    okv = okv && mli_emit(out, be3, mli_inst2(MLI_OP_MOV, mli_opd_vreg(cf, ik), mli_opd_vreg(cz, ik)))
+    okv = okv && mli_set_term(out, be3, mli_term_jmp(bj3))
+    cur = bj3
+
+    if !okv || out.overflowed { return conf_lane_fail() }
+    ConfLaneEmit { ok: true, cur: cur, dest: cf }
+}
+
+fn remap_scalar_opd(m: &S3KMap, out: &MliFunction, o: MliOperand) -> MliOperand with Panic {
+    if o.tag == MLI_OPD_IMM || o.tag == MLI_OPD_NONE { return o }
+    if o.tag == MLI_OPD_VREG {
+        if o.id >= 0 && o.id < 128 {
+            let mv = m.scalar[o.id]
+            if mv >= 0 { return mli_opd_vreg(mv, out.vreg_kinds[mv]) }
+        }
+        return mli_opd_none()
+    }
+    mli_opd_none()
+}
+
+// ---------------------------------------------------------------------------
+// Entry point. `out` MUST be a fresh mli_func_empty(). Input must be a
+// verified single-block MLI function.
+// ---------------------------------------------------------------------------
+
+pub fn mli_expand_min3(src: &MliFunction, out: &!MliFunction) -> MliExpandStatus with Mut, Panic, Div {
+    if src.block_count != 1 { return x_err(MLI_X_CFG_INPUT, 0 - 1) }
+    if src.blk_has_term[0] != 1 { return x_err(MLI_X_CFG_INPUT, 0 - 1) }
+    if src.ret.tag == MLI_KIND_KNOWLEDGE { return x_err(MLI_X_KNOWLEDGE_RET, 0 - 1) }
+
+    out.name = "expand_min3"
+    out.ret = src.ret
+
+    var m = kmap_empty()
+
+    // Arguments: Knowledge args explode into (val f64, var f64, conf i64);
+    // scalar args map 1:1. Order is preserved lane-major per argument.
+    var a: i64 = 0
+    while a < src.arg_count {
+        let ak = src.arg_kinds[a]
+        if ak.tag == MLI_KIND_KNOWLEDGE {
+            if !is_min3_f64(ak) { return x_err(MLI_X_SHAPE, 0 - 1) }
+            let v_val = mli_add_arg(out, mli_kind_float(64))
+            let v_var = mli_add_arg(out, mli_kind_float(64))
+            let v_conf = mli_add_arg(out, mli_kind_int(64, 1))
+            if v_val < 0 || v_var < 0 || v_conf < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, 0 - 1) }
+            m.kv_val[a] = v_val
+            m.kv_var[a] = v_var
+            m.kv_conf[a] = v_conf
+        } else {
+            let v = mli_add_arg(out, ak)
+            if v < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, 0 - 1) }
+            m.scalar[a] = v
+        }
+        a = a + 1
+    }
+
+    var cur = mli_new_block(out)
+    if cur < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, 0 - 1) }
+
+    // Conf-arithmetic constants, materialised on first k_add / k_mul.
+    var consts_done = false
+    var c99: i64 = 0 - 1
+    var c98: i64 = 0 - 1
+    var c100: i64 = 0 - 1
+    var c0: i64 = 0 - 1
+    var c1000: i64 = 0 - 1
+
+    var j: i64 = 0
+    while j < src.blk_instr_count[0] {
+        let slot = mli_slot(0, j)
+        let op = mli_slot_opcode(src, slot)
+        let d = mli_slot_dst(src, slot)
+        let s1 = mli_slot_src1(src, slot)
+        let s2 = mli_slot_src2(src, slot)
+
+        if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE {
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_K_ADD {
+            if d.tag != MLI_OPD_VREG || s1.tag != MLI_OPD_VREG || s2.tag != MLI_OPD_VREG {
+                return x_err(MLI_X_OPERAND, j)
+            }
+            if !is_min3_f64(d.kind) { return x_err(MLI_X_SHAPE, j) }
+            let av = m.kv_val[s1.id]
+            let ar = m.kv_var[s1.id]
+            let ac = m.kv_conf[s1.id]
+            let bv = m.kv_val[s2.id]
+            let br = m.kv_var[s2.id]
+            let bc = m.kv_conf[s2.id]
+            if av < 0 || bv < 0 { return x_err(MLI_X_OPERAND, j) }
+
+            // val lane: one fadd.
+            let dv = mli_new_vreg(out, mli_kind_float(64))
+            if dv < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            var okv = mli_emit(out, cur, mli_inst3(MLI_OP_FADD, mli_opd_vreg(dv, mli_kind_float(64)), mli_opd_vreg(av, mli_kind_float(64)), mli_opd_vreg(bv, mli_kind_float(64))))
+
+            // var lane: one fadd — THE lane erasure would drop. GUM:
+            // Var(X+Y) = Var(X) + Var(Y).
+            let dr = mli_new_vreg(out, mli_kind_float(64))
+            if dr < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_FADD, mli_opd_vreg(dr, mli_kind_float(64)), mli_opd_vreg(ar, mli_kind_float(64)), mli_opd_vreg(br, mli_kind_float(64))))
+
+            // conf lane: min -> *99/100 -> clamp. THIS is the second
+            // temptation (after the var addsd) — see module header.
+            if !consts_done {
+                c99 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c98 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c100 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c0 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c1000 = mli_new_vreg(out, mli_kind_int(64, 1))
+                if c99 < 0 || c98 < 0 || c100 < 0 || c0 < 0 || c1000 < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+                let ik = mli_kind_int(64, 1)
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c99, ik), mli_opd_imm_int(99, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c98, ik), mli_opd_imm_int(98, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c100, ik), mli_opd_imm_int(100, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c0, ik), mli_opd_imm_int(0, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c1000, ik), mli_opd_imm_int(1000, ik)))
+                consts_done = true
+            }
+            if !okv { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            let ce = emit_conf_lane(out, cur, ac, bc, c99, c100, c0, c1000)
+            if !ce.ok { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            cur = ce.cur
+            m.kv_val[d.id] = dv
+            m.kv_var[d.id] = dr
+            m.kv_conf[d.id] = ce.dest
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_K_MUL {
+            if d.tag != MLI_OPD_VREG || s1.tag != MLI_OPD_VREG || s2.tag != MLI_OPD_VREG {
+                return x_err(MLI_X_OPERAND, j)
+            }
+            if !is_min3_f64(d.kind) { return x_err(MLI_X_SHAPE, j) }
+            let av = m.kv_val[s1.id]
+            let ar = m.kv_var[s1.id]
+            let ac = m.kv_conf[s1.id]
+            let bv = m.kv_val[s2.id]
+            let br = m.kv_var[s2.id]
+            let bc = m.kv_conf[s2.id]
+            if av < 0 || bv < 0 { return x_err(MLI_X_OPERAND, j) }
+            let fk = mli_kind_float(64)
+
+            // val lane: one fmul. THE named temptation for products —
+            // emitting only this mulsd and dropping the four that follow
+            // is how every production backend erases Var(XY).
+            let dv = mli_new_vreg(out, fk)
+            if dv < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            var okv = mli_emit(out, cur, mli_inst3(MLI_OP_FMUL, mli_opd_vreg(dv, fk), mli_opd_vreg(av, fk), mli_opd_vreg(bv, fk)))
+
+            // var lane: GUM delta method, stdlib ep_mul / JCGM 100:2008 §5.1.2
+            //   Var(XY) ≈ Y²·Var(X) + X²·Var(Y)
+            let y2 = mli_new_vreg(out, fk)
+            let x2 = mli_new_vreg(out, fk)
+            let t1 = mli_new_vreg(out, fk)
+            let t2 = mli_new_vreg(out, fk)
+            let dr = mli_new_vreg(out, fk)
+            if y2 < 0 || x2 < 0 || t1 < 0 || t2 < 0 || dr < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_FMUL, mli_opd_vreg(y2, fk), mli_opd_vreg(bv, fk), mli_opd_vreg(bv, fk)))
+            okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_FMUL, mli_opd_vreg(x2, fk), mli_opd_vreg(av, fk), mli_opd_vreg(av, fk)))
+            okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_FMUL, mli_opd_vreg(t1, fk), mli_opd_vreg(y2, fk), mli_opd_vreg(ar, fk)))
+            okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_FMUL, mli_opd_vreg(t2, fk), mli_opd_vreg(x2, fk), mli_opd_vreg(br, fk)))
+            okv = okv && mli_emit(out, cur, mli_inst3(MLI_OP_FADD, mli_opd_vreg(dr, fk), mli_opd_vreg(t1, fk), mli_opd_vreg(t2, fk)))
+
+            if !consts_done {
+                c99 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c98 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c100 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c0 = mli_new_vreg(out, mli_kind_int(64, 1))
+                c1000 = mli_new_vreg(out, mli_kind_int(64, 1))
+                if c99 < 0 || c98 < 0 || c100 < 0 || c0 < 0 || c1000 < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+                let ik = mli_kind_int(64, 1)
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c99, ik), mli_opd_imm_int(99, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c98, ik), mli_opd_imm_int(98, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c100, ik), mli_opd_imm_int(100, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c0, ik), mli_opd_imm_int(0, ik)))
+                okv = okv && mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(c1000, ik), mli_opd_imm_int(1000, ik)))
+                consts_done = true
+            }
+            if !okv { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            let ce = emit_conf_lane(out, cur, ac, bc, c98, c100, c0, c1000)
+            if !ce.ok { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            cur = ce.cur
+            m.kv_val[d.id] = dv
+            m.kv_var[d.id] = dr
+            m.kv_conf[d.id] = ce.dest
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_K_DISCHARGE || op == MLI_OP_K_EXTRACT_VAL || op == MLI_OP_K_EXTRACT_VAR {
+            if d.tag != MLI_OPD_VREG || s1.tag != MLI_OPD_VREG { return x_err(MLI_X_OPERAND, j) }
+            var lane = m.kv_val[s1.id]
+            if op == MLI_OP_K_EXTRACT_VAR { lane = m.kv_var[s1.id] }
+            if lane < 0 { return x_err(MLI_X_OPERAND, j) }
+            let nd = mli_new_vreg(out, mli_kind_float(64))
+            if nd < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(nd, mli_kind_float(64)), mli_opd_vreg(lane, mli_kind_float(64)))) {
+                return x_err(MLI_X_BUILDER_OVERFLOW, j)
+            }
+            m.scalar[d.id] = nd
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_K_EXTRACT_CONF {
+            if d.tag != MLI_OPD_VREG || s1.tag != MLI_OPD_VREG { return x_err(MLI_X_OPERAND, j) }
+            let lane = m.kv_conf[s1.id]
+            if lane < 0 { return x_err(MLI_X_OPERAND, j) }
+            let nd = mli_new_vreg(out, mli_kind_int(64, 1))
+            if nd < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(nd, mli_kind_int(64, 1)), mli_opd_vreg(lane, mli_kind_int(64, 1))))
+            {
+                return x_err(MLI_X_BUILDER_OVERFLOW, j)
+            }
+            m.scalar[d.id] = nd
+            j = j + 1
+            continue
+        }
+
+        // Scalar passthrough surface: mov + f64 arithmetic (what k-functions
+        // legitimately mix in). Anything else is refused rather than
+        // half-translated.
+        if op == MLI_OP_MOV || op == MLI_OP_COPY {
+            if d.tag != MLI_OPD_VREG { return x_err(MLI_X_OPERAND, j) }
+            let rs = remap_scalar_opd(&m, out, s1)
+            if rs.tag == MLI_OPD_NONE && s1.tag != MLI_OPD_NONE { return x_err(MLI_X_OPERAND, j) }
+            let nd = mli_new_vreg(out, d.kind)
+            if nd < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(nd, d.kind), rs)) {
+                return x_err(MLI_X_BUILDER_OVERFLOW, j)
+            }
+            m.scalar[d.id] = nd
+            j = j + 1
+            continue
+        }
+
+        if op >= MLI_OP_FADD && op <= MLI_OP_FDIV {
+            if d.tag != MLI_OPD_VREG { return x_err(MLI_X_OPERAND, j) }
+            let ra = remap_scalar_opd(&m, out, s1)
+            let rb = remap_scalar_opd(&m, out, s2)
+            if ra.tag == MLI_OPD_NONE || rb.tag == MLI_OPD_NONE { return x_err(MLI_X_OPERAND, j) }
+            let nd = mli_new_vreg(out, d.kind)
+            if nd < 0 { return x_err(MLI_X_BUILDER_OVERFLOW, j) }
+            if !mli_emit(out, cur, mli_inst3(op, mli_opd_vreg(nd, d.kind), ra, rb)) {
+                return x_err(MLI_X_BUILDER_OVERFLOW, j)
+            }
+            m.scalar[d.id] = nd
+            j = j + 1
+            continue
+        }
+
+        return x_err(MLI_X_UNSUPPORTED_OP, j)
+    }
+
+    // Terminator: scalar ret only.
+    let ts = mli_term_slot(0)
+    let top = mli_slot_opcode(src, ts)
+    if top != MLI_OP_RET { return x_err(MLI_X_CFG_INPUT, 0 - 1) }
+    let rv = mli_slot_src1(src, ts)
+    if src.ret.tag == MLI_KIND_VOID {
+        if !mli_set_term(out, cur, mli_term_ret_void()) { return x_err(MLI_X_BUILDER_OVERFLOW, 0 - 1) }
+        return x_ok()
+    }
+    if rv.tag != MLI_OPD_VREG { return x_err(MLI_X_OPERAND, 0 - 1) }
+    if rv.kind.tag == MLI_KIND_KNOWLEDGE { return x_err(MLI_X_KNOWLEDGE_RET, 0 - 1) }
+    let rs = remap_scalar_opd(&m, out, rv)
+    if rs.tag == MLI_OPD_NONE { return x_err(MLI_X_OPERAND, 0 - 1) }
+    if !mli_set_term(out, cur, mli_term_ret(rs)) { return x_err(MLI_X_BUILDER_OVERFLOW, 0 - 1) }
+    if out.overflowed { return x_err(MLI_X_BUILDER_OVERFLOW, 0 - 1) }
+    x_ok()
+}

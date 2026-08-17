@@ -209,6 +209,13 @@ def evaluate_l2(sass: dict[str, Any], expected_kernels: list[str]) -> dict[str, 
 
 
 def evaluate_l3(fpga: dict[str, Any]) -> dict[str, Any]:
+    if fpga.get("stale"):
+        reason = fpga.get("stale_reason", "fpga report marked stale")
+        return {
+            "pass": False,
+            "checks": {},
+            "reasons": [f"fpga report is stale: {reason}"],
+        }
     required_status = (
         "sim_status",
         "synth_status",
