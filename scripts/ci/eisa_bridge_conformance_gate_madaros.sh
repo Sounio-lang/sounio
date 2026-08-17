@@ -6,7 +6,11 @@ set -euo pipefail
 # and the lean_single-only eisa_bridge_conformance_gate.sh.
 # Does NOT touch tools/eisa/ or stdlib/eisa/ sources. Script/report only.
 # See dispatch in docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md §WS-F.
-# P0-F glm-cli1 FFI dispatch is in flight (active claim by claude/glm-cli1).
+#
+# Stack (#1760): this gate does NOT set its own ulimit. Default Madaros path is
+# ./bin/souc → bin/madaros, which reserves MADAROS_STACK_KB=524288 (512 MiB).
+# Bisected floor for the EISA v1 bridge lowering path: fails through 384 MiB,
+# passes at 448 MiB; 512 MiB is the shipped default. Do not lower that here.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -26,10 +30,20 @@ fail() {
   exit 1
 }
 
+# Refuse an undersized override that would re-introduce the #1760 false red.
+# 0 means unlimited (allowed). Non-zero must be >= 448 MiB (bisected pass floor).
+_EISA_STACK_FLOOR_KB=$((448 * 1024))
+if [[ -n "${MADAROS_STACK_KB:-}" && "${MADAROS_STACK_KB}" != "0" ]]; then
+  if [[ "${MADAROS_STACK_KB}" =~ ^[0-9]+$ ]] && [[ "${MADAROS_STACK_KB}" -lt "${_EISA_STACK_FLOOR_KB}" ]]; then
+    fail "MADAROS_STACK_KB=${MADAROS_STACK_KB} is below the EISA lowering floor ${_EISA_STACK_FLOOR_KB} KB (448 MiB); see #1760 (default 512 MiB)"
+  fi
+fi
+
 echo "[eisa-bridge-madaros] Starting Madaros-aware EISA bridge conformance gate (WS-F)"
 echo "ROOT_DIR=$ROOT_DIR"
 echo "TMP_DIR=$TMP_DIR"
 echo "Compiler: $(./bin/souc --version 2>&1 | head -1)"
+echo "MADAROS_STACK_KB=${MADAROS_STACK_KB:-<unset; bin/madaros default 524288=512MiB>}"
 
 # 1. Build reference EVM receipts (lean_single as in original gate; EVM path is engine-agnostic)
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tools/eisa/eisa_evm_run.sio > "$A_OUT" 2>&1 || {
