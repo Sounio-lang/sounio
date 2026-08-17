@@ -37,7 +37,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.partic
 | `ep_gate` field-if | stdlib `ep_i64_ge` (still needs native fix) |
 | `pb_is_credible` / `ck_is_credible` | same call-arg pattern |
 | Thin EXP10 physics vertical | remains (IR size) |
-| Vertex/amplitude on full EXP123 | remains (SEGV residual) |
+| Vertex/amplitude on full EXP123 | **closed** EXP13 dual-engine (2026-08-05) — drop private `extern "C" sqrt/sinh/cosh` in `lorentz`/`vertex` (false E175 vs `complex` builtins); see `docs/research/particle_e175_amp_import_2026-08-05.md` |
+
 
 Compiler residual: i64 field-if mis-branch in imported native codegen.
 
@@ -67,3 +68,54 @@ Madaros imported multimodule:
 
 Native fix blocked this session by active claims on `self-hosted/native/**` and
 `self-hosted/ir/lower.sio`. Stdlib workarounds remain until `MADAROS_FIELD_IF_I64_FIXED`.
+
+## Field-if closeout
+
+**CLOSED** #1511 + workaround drop (direct `e.confidence >= k` restored).
+
+## 5 — E175 trilogy (2026-08-06)
+
+- **stdlib:** remaining private `extern "C"` sqrt/exp/log/… stubs removed from
+  `particle_physics/*.sio` (detector/fitting use `math::libm` for pow/fabs).
+- **checker (#1627):** `prefer_module` skips foreign private extern stubs;
+  visibility treats native-builtin externs as always visible (needs Madaros rebuild
+  to take effect in the shipped ELF).
+- **EXP14:** restores `eemm_z_amplitude_nu` import; dual-engine green.
+- Gate: `scripts/research/particle_e175_amp_import_gate.sh` → `PARTICLE_E175_TRILOGY_GATE_OK`.
+- Note: `docs/research/particle_e175_trilogy_2026-08-06.md`.
+
+## 6 — #1627 verify + EXP17 amp (2026-08-06)
+
+- Tip Madaros rebuild verifies #1627 fixture green.
+- EXP17 Z continuum uses `eemm_z_amplitude_nu` (shipped Madaros dual-engine OK).
+
+## 6b — #1627 promote (2026-08-06)
+
+- Root cause of promote E035: `sm_params` thin `Epistemic::measured` accessors
+  lacked `with Mut, Div, Panic`. Fixed in `sm_params.sio`.
+- Promoted tip ELF → `bin/madaros-linux-x86_64` (sha256 `f9ddba96…5189e`).
+- Gates green: #1627 shipped, E175 trilogy, EXP17/18/19.
+- Issue #1627 closable.
+
+## 7 — EXP18 W vertex amp (2026-08-06)
+
+- `nonunitary_amp::cc_w_leptonic_amplitude_nu` — `(g⁴/4)·|D_W|²` via `coupling_g`.
+- `examples/particle_physics/exp18_w_vertex_amp_to_xsec.sio` dual-engine green
+  (ratio ≈ 3.4866, band (2, 6)).
+- Gate: `scripts/research/particle_exp18_w_vertex_amp_gate.sh`.
+
+## 8 — EXP19 H Yukawa amp (2026-08-06)
+
+- `nonunitary_amp::h_bb_yukawa_amplitude_nu` — `y_b⁴·|D_H|²`, `y_b=√2 m_b/v`
+  via `mass_bottom` + `higgs_vev`.
+- Ratio **0.652209**, band (0.3, 2); matches EXP16. Shared vector `12π`
+  kept (math-review noted scalar `4π`; twin ratio preserved — see EXP19 doc).
+- Gate: `scripts/research/particle_exp19_h_yukawa_amp_gate.sh` (Madaros retry×3).
+- Completes stdlib amp restore trio Z/W/H (EXP14/18/19); thin EXP14–16 stay.
+
+## 9 — EXP17 stdlib ZWH ledger (2026-08-06)
+
+- EXP17 W/H now use `cc_w_leptonic_amplitude_nu` + `h_bb_yukawa_amplitude_nu`
+  (schema v2). Ratios Z/W/H: 13.952395 / 3.486637 / 0.652209.
+- Thin EXP14–16 remain witnesses. Gate: `particle_exp17_zwh_ledger_gate.sh`.
+

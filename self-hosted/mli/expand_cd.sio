@@ -1,0 +1,329 @@
+// MLI S3 — expand_cd: the SANCTIONED route from Cayley-Dickson kinds to
+// scalar MLI. Associator-aware at TWO layers:
+//   - V-struct (S1): cd_associator with dim<8 is MLI_VERR_OPERAND_RULE —
+//     an identically-zero associator is not an instruction.
+//   - this pass: dim>=8 (octonion / sedenion) is where the associator is
+//     a positive graded invariant; expanding it is refused with a
+//     measured wall, not a silent real-part multiply. A dim<8 associator
+//     that somehow reaches this pass (unverified input) still lowers to
+//     zero without reading the operands — defense in depth, not the
+//     primary gate.
+//
+// NAMED TEMPTATION (cd_mul): the first `mulsd` of a0*b0 — the real
+// component. A production backend that treated the algebra as a real
+// would emit that one multiply and return. Keeping the product costs:
+//   dim=2 (complex)     : 4 fmul + 1 fsub + 1 fadd     (fits; 4 args)
+//   dim=4 (quaternion)  : 16 fmul + 12 fadd/fsub       (fits 32-instr
+//                         wall; 8 args — legalize_x86 then refuses
+//                         because the measured GPR convention is 6)
+//   dim=8 (octonion)    : 64 fmul + 56 fadd/fsub, 16 exploded args.
+//                         MAX_ARGS=8 and MAX_INSTRS=32 both fire.
+//                         That overflow IS the named octonion wall.
+//
+// NAMED TEMPTATION (cd_associator): treating [a,b,c] as zero at dim=8.
+// For dim<8 the zero lowering is a theorem (associative algebras). For
+// dim>=8 it would be a semantic miscompile of this project's own
+// invariant. Refuse, do not emit a0*b0*c0.
+
+module mli::expand_cd
+
+use mli::ir::*
+use mli::builder::*
+
+pub let MLI_XC_OK: i64 = 0
+pub let MLI_XC_UNSUPPORTED_OP: i64 = 1
+pub let MLI_XC_CFG_INPUT: i64 = 2
+pub let MLI_XC_CD_RET: i64 = 3
+pub let MLI_XC_SHAPE: i64 = 4
+pub let MLI_XC_BUILDER_OVERFLOW: i64 = 5
+pub let MLI_XC_OPERAND: i64 = 6
+pub let MLI_XC_OCTONION_WALL: i64 = 7
+pub let MLI_XC_ASSOCIATOR_WALL: i64 = 8
+pub let MLI_XC_POLICY: i64 = 9
+
+pub struct MliCdExpandStatus {
+    pub ok: bool,
+    pub code: i64,
+    pub at_index: i64,
+}
+
+fn xc_ok() -> MliCdExpandStatus {
+    MliCdExpandStatus { ok: true, code: MLI_XC_OK, at_index: 0 - 1 }
+}
+
+fn xc_err(code: i64, at: i64) -> MliCdExpandStatus {
+    MliCdExpandStatus { ok: false, code: code, at_index: at }
+}
+
+pub struct S3CMap {
+    pub c0: [i64; 128],
+    pub c1: [i64; 128],
+    pub c2: [i64; 128],
+    pub c3: [i64; 128],
+    pub scalar: [i64; 128],
+}
+
+fn cmap_empty() -> S3CMap {
+    S3CMap {
+        c0: [0 - 1; 128],
+        c1: [0 - 1; 128],
+        c2: [0 - 1; 128],
+        c3: [0 - 1; 128],
+        scalar: [0 - 1; 128],
+    }
+}
+
+fn is_cd_f64(k: MliKind, dim: i64) -> bool {
+    k.tag == MLI_KIND_CD && k.bits == 64 && k.dim == dim
+}
+
+fn emit_fbinop(out: &!MliFunction, cur: i64, op: i64, a: i64, b: i64) -> i64 with Mut, Panic {
+    let fk = mli_kind_float(64)
+    let d = mli_new_vreg(out, fk)
+    if d < 0 { return 0 - 1 }
+    if !mli_emit(out, cur, mli_inst3(op, mli_opd_vreg(d, fk), mli_opd_vreg(a, fk), mli_opd_vreg(b, fk))) {
+        return 0 - 1
+    }
+    d
+}
+
+fn emit_fzero(out: &!MliFunction, cur: i64) -> i64 with Mut, Panic {
+    let fk = mli_kind_float(64)
+    let d = mli_new_vreg(out, fk)
+    if d < 0 { return 0 - 1 }
+    if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(d, fk), mli_opd_imm_f64(0.0))) {
+        return 0 - 1
+    }
+    d
+}
+
+fn lane_of(m: &S3CMap, id: i64, lane: i64) -> i64 with Panic {
+    if lane == 0 { return m.c0[id] }
+    if lane == 1 { return m.c1[id] }
+    if lane == 2 { return m.c2[id] }
+    if lane == 3 { return m.c3[id] }
+    0 - 1
+}
+
+fn set_lane(m: &!S3CMap, id: i64, lane: i64, v: i64) with Mut, Panic {
+    if lane == 0 { m.c0[id] = v }
+    if lane == 1 { m.c1[id] = v }
+    if lane == 2 { m.c2[id] = v }
+    if lane == 3 { m.c3[id] = v }
+}
+
+fn explode_cd_arg(out: &!MliFunction, m: &!S3CMap, arg_id: i64, dim: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < dim {
+        let v = mli_add_arg(out, mli_kind_float(64))
+        if v < 0 { return false }
+        set_lane(m, arg_id, i, v)
+        i = i + 1
+    }
+    true
+}
+
+// Complex product (a0+a1 i)(b0+b1 i) = (a0 b0 − a1 b1) + (a0 b1 + a1 b0) i
+fn emit_complex_mul(out: &!MliFunction, cur: i64, m: &!S3CMap, did: i64, a: i64, b: i64) -> bool with Mut, Panic {
+    let a0 = m.c0[a]
+    let a1 = m.c1[a]
+    let b0 = m.c0[b]
+    let b1 = m.c1[b]
+    let p00 = emit_fbinop(out, cur, MLI_OP_FMUL, a0, b0)
+    let p11 = emit_fbinop(out, cur, MLI_OP_FMUL, a1, b1)
+    let r0 = emit_fbinop(out, cur, MLI_OP_FSUB, p00, p11)
+    let p01 = emit_fbinop(out, cur, MLI_OP_FMUL, a0, b1)
+    let p10 = emit_fbinop(out, cur, MLI_OP_FMUL, a1, b0)
+    let r1 = emit_fbinop(out, cur, MLI_OP_FADD, p01, p10)
+    if r0 < 0 || r1 < 0 { return false }
+    m.c0[did] = r0
+    m.c1[did] = r1
+    true
+}
+
+// Hamilton product. 16 fmul + 12 fadd/fsub. Fits MLI_MAX_INSTRS=32 when
+// followed by a single extract.
+fn emit_quat_mul(out: &!MliFunction, cur: i64, m: &!S3CMap, did: i64, a: i64, b: i64) -> bool with Mut, Panic {
+    let a0 = m.c0[a]
+    let a1 = m.c1[a]
+    let a2 = m.c2[a]
+    let a3 = m.c3[a]
+    let b0 = m.c0[b]
+    let b1 = m.c1[b]
+    let b2 = m.c2[b]
+    let b3 = m.c3[b]
+
+    let a0b0 = emit_fbinop(out, cur, MLI_OP_FMUL, a0, b0)
+    let a1b1 = emit_fbinop(out, cur, MLI_OP_FMUL, a1, b1)
+    let a2b2 = emit_fbinop(out, cur, MLI_OP_FMUL, a2, b2)
+    let a3b3 = emit_fbinop(out, cur, MLI_OP_FMUL, a3, b3)
+    let t0 = emit_fbinop(out, cur, MLI_OP_FSUB, a0b0, a1b1)
+    let t1 = emit_fbinop(out, cur, MLI_OP_FSUB, t0, a2b2)
+    let r0 = emit_fbinop(out, cur, MLI_OP_FSUB, t1, a3b3)
+
+    let a0b1 = emit_fbinop(out, cur, MLI_OP_FMUL, a0, b1)
+    let a1b0 = emit_fbinop(out, cur, MLI_OP_FMUL, a1, b0)
+    let a2b3 = emit_fbinop(out, cur, MLI_OP_FMUL, a2, b3)
+    let a3b2 = emit_fbinop(out, cur, MLI_OP_FMUL, a3, b2)
+    let u0 = emit_fbinop(out, cur, MLI_OP_FADD, a0b1, a1b0)
+    let u1 = emit_fbinop(out, cur, MLI_OP_FADD, u0, a2b3)
+    let r1 = emit_fbinop(out, cur, MLI_OP_FSUB, u1, a3b2)
+
+    let a0b2 = emit_fbinop(out, cur, MLI_OP_FMUL, a0, b2)
+    let a1b3 = emit_fbinop(out, cur, MLI_OP_FMUL, a1, b3)
+    let a2b0 = emit_fbinop(out, cur, MLI_OP_FMUL, a2, b0)
+    let a3b1 = emit_fbinop(out, cur, MLI_OP_FMUL, a3, b1)
+    let v0 = emit_fbinop(out, cur, MLI_OP_FSUB, a0b2, a1b3)
+    let v1 = emit_fbinop(out, cur, MLI_OP_FADD, v0, a2b0)
+    let r2 = emit_fbinop(out, cur, MLI_OP_FADD, v1, a3b1)
+
+    let a0b3 = emit_fbinop(out, cur, MLI_OP_FMUL, a0, b3)
+    let a1b2 = emit_fbinop(out, cur, MLI_OP_FMUL, a1, b2)
+    let a2b1 = emit_fbinop(out, cur, MLI_OP_FMUL, a2, b1)
+    let a3b0 = emit_fbinop(out, cur, MLI_OP_FMUL, a3, b0)
+    let w0 = emit_fbinop(out, cur, MLI_OP_FADD, a0b3, a1b2)
+    let w1 = emit_fbinop(out, cur, MLI_OP_FSUB, w0, a2b1)
+    let r3 = emit_fbinop(out, cur, MLI_OP_FADD, w1, a3b0)
+
+    if r0 < 0 || r1 < 0 || r2 < 0 || r3 < 0 { return false }
+    m.c0[did] = r0
+    m.c1[did] = r1
+    m.c2[did] = r2
+    m.c3[did] = r3
+    true
+}
+
+pub fn mli_expand_cd(src: &MliFunction, out: &!MliFunction) -> MliCdExpandStatus with Mut, Panic, Div {
+    if src.block_count != 1 { return xc_err(MLI_XC_CFG_INPUT, 0 - 1) }
+    if src.blk_has_term[0] != 1 { return xc_err(MLI_XC_CFG_INPUT, 0 - 1) }
+    if src.ret.tag == MLI_KIND_CD { return xc_err(MLI_XC_CD_RET, 0 - 1) }
+
+    // Name the wall BEFORE exploding args, so an octonion associator is
+    // not reported as a generic arg overflow.
+    var pj: i64 = 0
+    while pj < src.blk_instr_count[0] {
+        let pop = mli_slot_opcode(src, mli_slot(0, pj))
+        let pd = mli_slot_dst(src, mli_slot(0, pj))
+        if pop == MLI_OP_CD_ASSOCIATOR && pd.kind.dim >= 8 {
+            return xc_err(MLI_XC_ASSOCIATOR_WALL, pj)
+        }
+        if pop == MLI_OP_CD_MUL && pd.kind.dim >= 8 {
+            return xc_err(MLI_XC_OCTONION_WALL, pj)
+        }
+        pj = pj + 1
+    }
+
+    out.name = "expand_cd"
+    out.ret = src.ret
+
+    var m = cmap_empty()
+
+    var a: i64 = 0
+    while a < src.arg_count {
+        let ak = src.arg_kinds[a]
+        if ak.tag == MLI_KIND_CD {
+            if ak.bits != 64 { return xc_err(MLI_XC_SHAPE, 0 - 1) }
+            if ak.dim >= 8 { return xc_err(MLI_XC_OCTONION_WALL, 0 - 1) }
+            if ak.dim != 2 && ak.dim != 4 { return xc_err(MLI_XC_SHAPE, 0 - 1) }
+            if !explode_cd_arg(out, &!m, a, ak.dim) { return xc_err(MLI_XC_BUILDER_OVERFLOW, 0 - 1) }
+        } else {
+            let v = mli_add_arg(out, ak)
+            if v < 0 { return xc_err(MLI_XC_BUILDER_OVERFLOW, 0 - 1) }
+            m.scalar[a] = v
+        }
+        a = a + 1
+    }
+
+    var cur = mli_new_block(out)
+    if cur < 0 { return xc_err(MLI_XC_BUILDER_OVERFLOW, 0 - 1) }
+
+    var j: i64 = 0
+    while j < src.blk_instr_count[0] {
+        let slot = mli_slot(0, j)
+        let op = mli_slot_opcode(src, slot)
+        let d = mli_slot_dst(src, slot)
+        let s1 = mli_slot_src1(src, slot)
+        let s2 = mli_slot_src2(src, slot)
+        let assoc = mli_slot_assoc(src, slot)
+        let zd = mli_slot_zd(src, slot)
+
+        if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE {
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_CD_MUL {
+            if assoc == MLI_ASSOC_NONE || zd == MLI_ZD_NONE { return xc_err(MLI_XC_POLICY, j) }
+            if d.tag != MLI_OPD_VREG || s1.tag != MLI_OPD_VREG || s2.tag != MLI_OPD_VREG {
+                return xc_err(MLI_XC_OPERAND, j)
+            }
+            if d.kind.dim >= 8 { return xc_err(MLI_XC_OCTONION_WALL, j) }
+            var okm = false
+            if is_cd_f64(d.kind, 2) {
+                okm = emit_complex_mul(out, cur, &!m, d.id, s1.id, s2.id)
+            } else {
+                if is_cd_f64(d.kind, 4) {
+                    okm = emit_quat_mul(out, cur, &!m, d.id, s1.id, s2.id)
+                } else {
+                    return xc_err(MLI_XC_SHAPE, j)
+                }
+            }
+            if !okm || out.overflowed { return xc_err(MLI_XC_BUILDER_OVERFLOW, j) }
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_CD_ASSOCIATOR {
+            if assoc == MLI_ASSOC_NONE || zd == MLI_ZD_NONE { return xc_err(MLI_XC_POLICY, j) }
+            if d.tag != MLI_OPD_VREG { return xc_err(MLI_XC_OPERAND, j) }
+            if d.kind.dim >= 8 { return xc_err(MLI_XC_ASSOCIATOR_WALL, j) }
+            if d.kind.dim != 2 && d.kind.dim != 4 { return xc_err(MLI_XC_SHAPE, j) }
+            // Associative algebras: [a,b,c] ≡ 0. Do not read s1/s2/s3.
+            var li: i64 = 0
+            while li < d.kind.dim {
+                let z = emit_fzero(out, cur)
+                if z < 0 { return xc_err(MLI_XC_BUILDER_OVERFLOW, j) }
+                set_lane(&!m, d.id, li, z)
+                li = li + 1
+            }
+            if out.overflowed { return xc_err(MLI_XC_BUILDER_OVERFLOW, j) }
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_CD_EXTRACT {
+            if d.tag != MLI_OPD_VREG || s1.tag != MLI_OPD_VREG { return xc_err(MLI_XC_OPERAND, j) }
+            if s2.tag != MLI_OPD_IMM { return xc_err(MLI_XC_OPERAND, j) }
+            let lane = lane_of(&m, s1.id, s2.aux)
+            if lane < 0 { return xc_err(MLI_XC_OPERAND, j) }
+            let nd = mli_new_vreg(out, mli_kind_float(64))
+            if nd < 0 { return xc_err(MLI_XC_BUILDER_OVERFLOW, j) }
+            if !mli_emit(out, cur, mli_inst2(MLI_OP_MOV, mli_opd_vreg(nd, mli_kind_float(64)), mli_opd_vreg(lane, mli_kind_float(64)))) {
+                return xc_err(MLI_XC_BUILDER_OVERFLOW, j)
+            }
+            m.scalar[d.id] = nd
+            j = j + 1
+            continue
+        }
+
+        return xc_err(MLI_XC_UNSUPPORTED_OP, j)
+    }
+
+    let ts = mli_term_slot(0)
+    let top = mli_slot_opcode(src, ts)
+    if top != MLI_OP_RET { return xc_err(MLI_XC_CFG_INPUT, 0 - 1) }
+    let rv = mli_slot_src1(src, ts)
+    if src.ret.tag == MLI_KIND_VOID {
+        if !mli_set_term(out, cur, mli_term_ret_void()) { return xc_err(MLI_XC_BUILDER_OVERFLOW, 0 - 1) }
+        return xc_ok()
+    }
+    if rv.tag != MLI_OPD_VREG { return xc_err(MLI_XC_OPERAND, 0 - 1) }
+    if rv.kind.tag == MLI_KIND_CD { return xc_err(MLI_XC_CD_RET, 0 - 1) }
+    let sid = m.scalar[rv.id]
+    if sid < 0 { return xc_err(MLI_XC_OPERAND, 0 - 1) }
+    if !mli_set_term(out, cur, mli_term_ret(mli_opd_vreg(sid, out.vreg_kinds[sid]))) {
+        return xc_err(MLI_XC_BUILDER_OVERFLOW, 0 - 1)
+    }
+    if out.overflowed { return xc_err(MLI_XC_BUILDER_OVERFLOW, 0 - 1) }
+    xc_ok()
+}

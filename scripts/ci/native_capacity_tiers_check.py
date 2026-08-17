@@ -17,6 +17,7 @@ SOURCES = [
     ("frame", "self-hosted/native/frame.sio"),
     ("cgx", "self-hosted/native/codegen_x86_linux.sio"),
     ("cg", "self-hosted/native/codegen.sio"),
+    ("ir", "self-hosted/ir/ir.sio"),
 ]
 
 
@@ -51,6 +52,7 @@ def main():
     exp_elf = int(sys.argv[4])
     exp_legacy_elf = int(sys.argv[5])
     base_addr = int(sys.argv[6])
+    exp_label = int(sys.argv[7])
 
     loaded = []
     for _key, rel in SOURCES:
@@ -58,7 +60,7 @@ def main():
         if not path.is_file():
             fail("source_missing_%s" % rel.replace("/", "_"))
         loaded.append(path.read_text(encoding="utf-8"))
-    encode, frame, cgx, cg = loaded
+    encode, frame, cgx, cg, irsrc = loaded
 
     # Tier 1: NC_BIG_CODE. Declarations stay literals; bound checks use the
     # accessor. Pinned together so a half-applied bump cannot ship.
@@ -96,6 +98,36 @@ def main():
          only(accessor("native_elf_buf_capacity_bytes", ""), cgx,
               "native_elf_buf_accessor"),
          exp_legacy_elf)
+
+    # Tier 5: the three NC_V2_LABEL_* arrays, the per-function label/jump-patch
+    # tier. Both of its bounds used to be silent (no else, no sentinel), which is
+    # what made a function with more than ~128 `if`s miscompile at rc=0.
+    label_decls = re.findall(
+        r"^pub var NC_V2_LABEL_(?:OFFSETS|PATCH_OFFSETS|PATCH_IDS): "
+        r"\[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$", frame, re.MULTILINE)
+    if len(label_decls) != 3:
+        fail("nc_v2_label_decl_count_%d" % len(label_decls))
+    label_acc = only(accessor("nc_v2_label_capacity", "pub "), frame,
+                     "nc_v2_label_accessor")
+    vals = set(int(v) for pair in label_decls for v in pair)
+    vals.add(int(label_acc.group(1)))
+    if vals != set([exp_label]):
+        fail("label_tier_expected_%d_got_%s" % (exp_label, sorted(vals)))
+
+    # The tier is only PROVABLY non-overflowing while it is at least as large as
+    # IR_MAX_INSTRS: every label and every patch originates from an IR instruction
+    # read by the one emit loop, and that loop is bounded by IR_MAX_INSTRS. Pinned
+    # as >=, not ==, so raising IR_MAX_INSTRS is caught here instead of silently
+    # invalidating the argument.
+    ir_max = only(r"^pub let IR_MAX_INSTRS: i64 = ([0-9]+)\s*$", irsrc,
+                  "ir_max_instrs_decl")
+    if exp_label < int(ir_max.group(1)):
+        fail("label_tier_%d_below_ir_max_instrs_%s" % (exp_label, ir_max.group(1)))
+
+    # Past 65536 the full per-function reset stops being free and needs a dirty
+    # cursor. Force that decision here rather than letting it be discovered.
+    if exp_label > 65536 and "NC_V2_LABEL_DIRTY_LEN" not in frame:
+        fail("label_tier_%d_needs_dirty_cursor" % exp_label)
 
     # -- 2. no surviving duplicate literal bound checks --------------------
     # A comparison against a tier literal anywhere outside a declaration means a
@@ -148,6 +180,35 @@ def main():
     if not re.search(rc20, cgx):
         fail("rc20_reloc_overflow_check_missing")
 
+    # -- label overflow is fail-closed with its own distinct rc=22 ---------
+    if not re.search(r"pub label_overflow: bool,", frame):
+        fail("label_overflow_field_missing")
+    if not re.search(r"out\.label_overflow = false", frame):
+        fail("label_overflow_not_initialised")
+    for fn_name in ("nc_add_label_patch", "nc_define_label"):
+        fn_body = only(r"^fn %s\(.*?\n\%s$" % (fn_name, RB), cgx,
+                       fn_name, re.MULTILINE | re.DOTALL).group(0)
+        if "nc_v2_label_capacity()" not in fn_body:
+            fail("%s_not_using_accessor" % fn_name)
+        label_sentinel = (r"\%s\s*else\s*\%s(?:.|\n)*?nc_note_label_overflow\(nc\)"
+                          % (RB, LB))
+        if not re.search(label_sentinel, fn_body):
+            fail("%s_missing_sentinel" % fn_name)
+    # The reset must clear the WHOLE tier, not a per-function extent: a partial
+    # reset leaves the previous function's real code offsets live above the bound,
+    # which is the same wrong-target defect in a different shape.
+    only(r"^\s*while i < nc_v2_label_capacity\(\) \%s$" % LB, cgx,
+         "label_reset_full_bound")
+    # patch_lid must be bounded before it indexes NC_V2_LABEL_OFFSETS. Unchecked,
+    # it read past the end of the array into the adjacent globals -- code offsets,
+    # always >= 0, so they passed the `target >= 0` guard and patched a plausible
+    # but WRONG branch target.
+    only(r"^\s*if patch_lid >= 0 && patch_lid < nc_v2_label_capacity\(\) \%s$" % LB,
+         frame, "label_patch_lid_bounded")
+    rc22 = r"if nc\.label_overflow \%s(?:.|\n)*?return 22\s*\n\s*\%s" % (LB, RB)
+    if not re.search(rc22, cgx):
+        fail("rc22_label_overflow_check_missing")
+
     # -- 5. the legacy NATIVE_ELF_BUF writer is no longer unguarded --------
     putu8 = only(r"^fn nc_elf_put_u8\(val: i64\) with Mut, Panic \%s(?:.|\n)*?^\%s$"
                  % (LB, RB), cgx, "nc_elf_put_u8", re.MULTILINE).group(0)
@@ -163,7 +224,9 @@ def main():
                (r"NATIVE_ELF_OVERFLOW != 0", "legacy_ignores_elf_overflow"),
                (r"return 19", "legacy_missing_rc19"),
                (r"return 20", "legacy_missing_rc20"),
-               (r"return 21", "legacy_missing_rc21")]
+               (r"return 21", "legacy_missing_rc21"),
+               (r"\(\*nc\)\.label_overflow", "legacy_ignores_label_overflow"),
+               (r"return 22", "legacy_missing_rc22")]
     for needle, reason in needles:
         if not re.search(needle, legacy):
             fail(reason)
@@ -189,9 +252,9 @@ def main():
             fail("elf_base_addr_unexpected_form")
 
     print("NATIVE_CAPACITY_TIERS_CHECK "
-          "code=%d reloc=%d elf=%d legacy_elf=%d base_addr_literals=%d "
-          "fail_closed=rc19/rc20/rc21 coherent=pass"
-          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, len(occ)))
+          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d base_addr_literals=%d "
+          "fail_closed=rc19/rc20/rc21/rc22 coherent=pass"
+          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, len(occ)))
 
 
 if __name__ == "__main__":
