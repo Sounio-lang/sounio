@@ -48,14 +48,28 @@ so the process still exited 0 — silent to any gate that only reads rc.
 | Madaros | **4604219396932172800.000000** | FAIL |
 
 Decode: integer `4604219396932172800` = `0x3fe57925b61afc00` = IEEE bits of
-**≈0.671038** (the lean value). So Madaros is treating a correct-looking
-confidence’s **bit pattern as an integer magnitude** (cast/bitcast class;
-adjacent to known f64→i64 param bitcast / print dispatch defects). `print_f64`
-then prints that huge float. This is **lying about type**, not a clinical miss.
+**≈0.671038** (the lean value). Madaros **holds / compares** a magnitude
+`~4.6e18` (TEST 6 range check fails), and `print_f64` prints that huge float
+as `4604219396932172800.000000`.
 
-Plain `print_f64(0.4)` and simple struct-field prints are fine on Madaros —
-corruption is on the **multi-module / EpResult28 return path** for
-`auc_blood_conf`.
+### Print-path check (fable-1 prior — do not mis-attribute)
+
+fable-1 / known Madaros print defects:
+
+| Defect | Symptom |
+|---|---|
+| Unclassified scalar → **char\*** printer | **SIGSEGV** (strlen on small integer as pointer) — `MADAROS_PRINT_INT_DISPATCH` |
+| `println` kind 0 on index/computed locals | same char\* class or wrong printer |
+| `print_f64` of a **live f64** | decimal float text |
+
+**F2 is not the char\* family.** A char\* misroute on this bit pattern would
+fault, not print a tidy `….000000` decimal. F2 matches **f64 bits reinterpreted
+as integer then converted back to f64** (bitcast/sitofp), so both the
+**comparison** and **print_f64** see ~4.6e18. Adjacent: historical f64→i64
+param bitcast (GUM k95). Plain `print_f64(0.4)` and a minimal `ConfBox{conf}`
+return probe print `0.671038` correctly — corruption is on the
+**EpResult28 / multi-module return path** for `auc_blood_conf`, not global
+`print_f64` death.
 
 ---
 
@@ -63,15 +77,16 @@ corruption is on the **multi-module / EpResult28 return path** for
 
 | Adjacent known | Relation |
 |---|---|
-| f64→i64 param cast bitcast (GUM k95 stuck 1.960) | Same family: bits re-read as int |
-| `print_int` garbled after f64 print | Print dispatch / kind confusion |
-| `variance_of` overflow 2^63 on deep chains | Variance slot / depth; here collapse to **0** under Madaros adaptive |
-| E170 / E035 Epistemic effect | Separate surface; not the silent zero |
+| f64→i64 param cast bitcast (GUM k95 stuck 1.960) | **Best match for F2** — bits become integer magnitude |
+| Unclassified scalar → char\* (fable-1) | **Ruled out for F2** — would SEGV, not print 4.6e18 |
+| `print_int` garbled after f64 print | Related kind confusion; not the F2 print shape |
+| `variance_of` overflow 2^63 on deep chains | Variance slot / depth; F1 is **collapse to 0** under Madaros adaptive |
+| E170 / E035 Epistemic effect | Separate surface |
 
-**Root fix** for F1/F2 proper is in **Madaros lowering / variance slots / f64
-return ABI** (`self-hosted/`), not dissertation math. This lane does **not**
-rebuild Madaros (fleet CPU lock / writer slots). It makes fabrication
-**detectable and fail-closed** at the science surface.
+**Root fix** for F1/F2 proper is in **Madaros variance slots + f64 return/ABI
+bitcast** (`self-hosted/`), not dissertation math. This lane does **not**
+rebuild Madaros (fleet CPU lock). It makes fabrication **detectable and
+fail-closed** at the science surface so dissertation CI cannot green-wash it.
 
 ---
 
