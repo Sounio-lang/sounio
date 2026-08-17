@@ -18,6 +18,36 @@
 >    (`souc main.sio` / `lean_single.sio` / `make build`). Bare full builds are
 >    what saturate CPU and trip the probe. Cheap `souc check` is exempt.
 
+> **⚠️ SOUNIO_STDLIB_PATH in a worktree (2026-08-15).** CLAUDE.md's own dev
+> instructions export `SOUNIO_STDLIB_PATH` globally in the interactive pod. If
+> your worktree session inherits that export, every `souc`/`madaros`/gate-script
+> invocation in your worktree silently resolves the stdlib from the SHARED
+> checkout (`/workspace/sounio/stdlib`), not your own worktree's copy — a
+> worktree edit to `stdlib/` then measures as absent no matter what you change.
+> Bit this session twice independently (a false "pub not honored in mod.sio"
+> conclusion, retracted in `f0e7869765`, and the same confound hit a parallel
+> lane separately). This is NOT a real CI bug — GitHub Actions runners are
+> ephemeral checkouts and only set the var locally per-step
+> (`madaros-prebuilt-refresh.yml`) — it is purely a worktree/dev-pod trap.
+> Before trusting any `souc check`/gate result from a worktree, run
+> `echo $SOUNIO_STDLIB_PATH` and confirm it points at *this* worktree's
+> `stdlib/`, or `unset SOUNIO_STDLIB_PATH` and pass it explicitly per-command.
+
+> **⚠️ SOUC_BIN does the SAME thing, for the compiler binary itself
+> (2026-08-15).** The pod also exports `SOUC_BIN=/workspace/sounio/bin/souc`
+> globally. `scripts/lib/resolve_souc.sh`'s `_sounio_resolve_bin()` honors a
+> pre-set `SOUC_BIN` before it ever tries `$ROOT_DIR/bin/souc` relative to the
+> script's own location — so `scripts/run_sio_test_suite.sh` (and anything
+> else that sources `resolve_souc.sh`) silently runs against the SHARED
+> checkout's compiler from a worktree, regardless of `MADAROS_RAW_BIN`. This
+> one is more dangerous than the stdlib-path trap because it fails silently
+> with plausible-looking numbers rather than an obvious "file not found": a
+> regression check can report "identical results before/after" while never
+> having touched your build at all (caught this session — see
+> `CAMINHO_CRITICO_CORTADO_2026-08-14.md`'s 2026-08-15 update, which corrects
+> an already-landed commit's unsupported claim). `unset SOUC_BIN` before any
+> regression check in a worktree, alongside `SOUNIO_STDLIB_PATH`.
+
 ---
 
 ## LANE CLAIM + ownership-conflict — 2026-08-06

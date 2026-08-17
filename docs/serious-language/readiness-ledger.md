@@ -9,6 +9,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.serious-langua
 
 # Serious-Language Readiness Ledger
 
+> **Superseded 2026-08-15**: the current critical-path assessment for launch
+> readiness is [`CAMINHO_CRITICO_CORTADO_2026-08-14.md`](CAMINHO_CRITICO_CORTADO_2026-08-14.md),
+> not this ledger. This file's per-claim table is still useful as a reference
+> for wording individual claims, but its overall "current status" framing and
+> the specific compiler-binary-source claim below are stale (this ledger
+> predates `bin/souc` routing to Madaros by default; see the correction inline).
+
 > **Status**: Research readiness | **Operational check**: 2026-05-11 | **Source**: checked commands and current repository docs
 
 This ledger maps public-facing claims to evidence and safe wording. Use it before talks, papers, abstracts, or website updates.
@@ -33,7 +40,7 @@ This ledger maps public-facing claims to evidence and safe wording. Use it befor
 | Spec/evidence drift gate | `prototype` | `docs/serious-language/spec-evidence-matrix.v1.tsv`; `scripts/ci/serious_language_spec_drift_gate.sh`; generated bundle `spec-drift/RESULTS.md` | "Executable spec claims are tracked in a v1 spec/evidence matrix. The drift gate requires tracked executable rows to cite live repo evidence and requires cited conformance cases to pass." |
 | Public claim closure gate | `prototype` | `docs/serious-language/public-claim-registry.v1.tsv`; `docs/serious-language/doc-claim-surface.v1.tsv`; `docs/serious-language/claim-line-annotations.v1.tsv`; `scripts/ci/serious_language_claim_closure_gate.sh`; generated bundle `claim-closure/RESULTS.md` | "Public PL claims are registry-backed. A repo doc claim must either cite closed evidence or remain explicitly downgraded, internal, or historical." |
 | Self-hosted compiler | `validated research` | `scripts/ci/selfhost_host_gate.sh`; CI `native-selfhost-*` jobs; `docs/compiler/KNOWN_LIMITATIONS.md` | "Sounio has a self-hosted checked compiler path with host gates; it is a serious research compiler, not a finished general-purpose production toolchain." |
-| Binary source of truth | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` single-source build path section | "The shipped binary is still built from `self-hosted/compiler/lean_single.sio`; the modular tree is the maintained future target until parity gates prove source-swap readiness." |
+| Binary source of truth | `stable` | `./bin/souc --version` prints `Madaros`; CLAUDE.md §4; `.github/workflows/ci.yml`'s `madaros-witness-gate` (PR #1739) builds and tests Madaros from `self-hosted/compiler/main.sio` directly | "`bin/souc` routes to Madaros, the modular self-hosted compiler built from `self-hosted/compiler/main.sio` (`make build-madaros`), not from `lean_single.sio`. `lean_single.sio` remains the bootstrap seed and the fixed-point-verified ELF (`make build`), but is no longer the default user-facing engine; force it with `SOUNIO_SOUC_ENGINE=lean_single`." (STALE CLAIM CORRECTED 2026-08-15 — see superseding note above) |
 | Linux x86-64 native compile/run | `stable` | `bin/souc info`; `examples/hello.sio`; `scripts/run_sio_test_suite.sh` | "Linux x86-64 is the primary serious lane for live compiler demonstrations." |
 | macOS artifact support | `validated research` | CI `native-selfhost-macos-arm64`; `docs/guide/MINIMUM_VIABLE_SOUNIO.md` | "macOS has checked artifact lanes, but Apple support should not be described as JIT or native-v2 parity." |
 | Windows target | `prototype` | `docs/compiler/KNOWN_LIMITATIONS.md` platform table | "The repository contains PE/COFF target support, but no public Windows binary should be promised from this checkout." |

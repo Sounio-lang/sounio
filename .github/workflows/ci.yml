@@ -51,6 +51,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -179,8 +181,34 @@ jobs:
         run: python3 scripts/ci/ci_watch_receipt_selftest.py
       - name: Madaros changed-test selector self-test
         run: bash scripts/ci/madaros_changed_tests_selftest.sh
+      - name: Madaros v2 ENIR gate stack
+        run: |
+          for g in scripts/dev/madaros_v2_e1_enir_shadow_gate.sh \
+                   scripts/dev/madaros_v2_e2_enir_lowering_gate.sh \
+                   scripts/dev/madaros_v2_e2b_enir_cfg_gate.sh \
+                   scripts/dev/madaros_v2_e2c_enir_fuel_blockargs_gate.sh \
+                   scripts/dev/madaros_v2_e2d_enir_rump_dd_gate.sh \
+                   scripts/dev/madaros_v2_e2e_enir_qd128_gate.sh \
+                   scripts/dev/madaros_v2_e2f_enir_rump_qd_gate.sh \
+                   scripts/dev/madaros_v2_e2g_enir_fuel_control_frail_gate.sh \
+                   scripts/dev/madaros_v2_e2h_enir_memory_move_poison_gate.sh \
+                   scripts/dev/madaros_v2_e3a_enir_mir_qd128_gate.sh \
+                   scripts/dev/madaros_v2_e3b_enir_mir_memory_gate.sh \
+                   scripts/dev/madaros_v2_e3c_cfg_memory_ssa_gate.sh \
+                   scripts/dev/madaros_v2_e3d_multipred_scalar_memory_ssa_gate.sh \
+                   scripts/dev/madaros_v2_e3e_equal_value_distinct_event_gate.sh; do
+            echo "--- $g"
+            bash "$g"
+          done
       - name: Executable payload comparator self-test
         run: bash scripts/ci/executable_payload_compare_selftest.sh
+      # A harness that can lose writes to a broken pipe is a harness whose
+      # green is unverifiable: under pipefail, an early-exiting reader
+      # (grep -q, head) fails the pipeline and `if !` reads the verdict
+      # inside-out. Two CI incidents on 2026-08-16/17. Canary + fixed-form
+      # + shape ban, so a regression is red, not noise.
+      - name: SIGPIPE hygiene gate
+        run: bash scripts/ci/sigpipe_hygiene_gate.sh
       # Arms 1-2 need no compiler and cost <1 s, so they run on every PR
       # including docs-only ones. That is what stops the self-parse gate rotting
       # into a no-op: `--science-boundary-closure` exits 0 even on `status
@@ -205,6 +233,8 @@ jobs:
       # from source was never run. ~2 s.
       - name: Canonical lean_single fixed point
         run: bash scripts/ci/canonical_compiler_gate.sh
+      - name: Sounio launcher BSD portability
+        run: bash scripts/ci/souc_launcher_portability_gate.sh
       - name: Output-path invariants
         run: bash scripts/dev/check_outpath_invariant.sh
       - name: Output-path leading-dash guard
@@ -565,6 +595,31 @@ jobs:
           path: test-results.xml
           retention-days: 30
 
+  madaros-witness-gate:
+    name: Madaros Witness Gate
+    needs: impact
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Madaros from this PR's own source
+        run: |
+          ulimit -s 1048576 2>/dev/null || true
+          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf
+      - name: Tier 0 witness matrix against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash tests/witness_matrix/run.sh ./bin/souc /tmp/madaros-ci.elf
+      - name: Madaros full gate against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/madaros_full_gate.sh
+      - name: Madaros source-to-ELF gate against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/madaros_source_to_elf_gate.sh
+
   sounio-lint:
     name: Sounio Lint
     needs: impact
@@ -653,6 +708,7 @@ jobs:
       - madaros-current-source-deref-f64
       - native-selfhost-macos-arm64
       - full-test-suite
+      - madaros-witness-gate
       - sounio-lint
       - lean-proofs
       - website

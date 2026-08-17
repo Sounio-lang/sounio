@@ -3158,6 +3158,9 @@ fn checker_is_linear_type_inplace(c: *mut Checker, ty: TypeEntry) -> bool with M
             return (*(*c).structs).entries[idx].is_linear
         }
     }
+    if ty.kind == TypeKind::TyFn && ty.fn_sig_id >= 0 {
+        return fn_sig_table_get((*c).fn_sigs, ty.fn_sig_id).is_linear_closure
+    }
     false
 }
 
@@ -4032,7 +4035,12 @@ fn checker_onto_check_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyR
                     if decl.has_range && !onto_class_list_has(classes, decl.range_name) {
                         checker_report_error_at_inplace(c, decl.span, 157, 0, 0, 0)
                     }
-                    if decl.has_inverse && !onto_role_list_has(roles, decl.inverse_name) {
+                    // Role lists are stored in reverse source order, so this
+                    // node's tail contains exactly the declarations that came
+                    // before it in the source. Match the canonical collector's
+                    // declaration-order boundary instead of searching the whole
+                    // list: lean_single rejects forward inverse targets with E158.
+                    if decl.has_inverse && !onto_role_list_has((*list).tail, decl.inverse_name) {
                         checker_report_error_at_inplace(c, decl.span, 158, 0, 0, 0)
                     }
                 }
@@ -4148,6 +4156,20 @@ fn checker_report_multitest_correction_required_inplace(c: *mut Checker, span: S
     print("   = note: functions with `with MultiTest` must record an explicit multiple-testing correction once they perform more than one statistical test\n")
 }
 
+// The caller must invoke this before popping the scope whose bindings it owns.
+fn checker_require_current_linear_scope_consumed_inplace(c: *mut Checker) with Mut, IO, Panic, Div {
+    let linear_check = (*c).borrows.check_linear_consumed()
+    (*c).borrows = linear_check.0
+    if linear_check.1 > 0 {
+        (*c).had_error = true
+        (*c).error_count = (*c).error_count + 1
+        (*c).diag_emitted = true
+        print("error[E040]: linear value not consumed (")
+        print_int(linear_check.1)
+        print(" unconsumed)\n")
+    }
+}
+
 // Dedicated leaf for the by-value check_impl_item bridge. Isolating it here
 // keeps its 8MB SRET frame OUT of checker_check_item_inplace (which else would
 // carry the frame at compile time even for impl-free programs like `fn main(){}`).
@@ -4205,6 +4227,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
             }
+            checker_require_current_linear_scope_consumed_inplace(c)
             checker_pop_const_scope_inplace(c)
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
@@ -4504,17 +4527,14 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             checker_warn_large_params_inplace(c, (*fd).name, (*fd).params)
             (*c).multitest_count = 0
             (*c).multitest_corrected = false
-            match (*fd).body.stmts {
-                None => {
-                    (*c).current_return_type = ty_unit()
-                    (*c).current_sig_id = 0 - 1
-                    (*c).current_effects = saved_effects
-                    (*c).current_effect_count = saved_effect_count
-                    (*c).multitest_count = saved_multitest_count
-                    (*c).multitest_corrected = saved_multitest_corrected
-                    return
-                }
-                Some(_) => {}
+            if (*fd).is_extern {
+                (*c).current_return_type = ty_unit()
+                (*c).current_sig_id = 0 - 1
+                (*c).current_effects = saved_effects
+                (*c).current_effect_count = saved_effect_count
+                (*c).multitest_count = saved_multitest_count
+                (*c).multitest_corrected = saved_multitest_corrected
+                return
             }
             (*c).env = (*c).env.push_scope()
             (*c).borrows = (*c).borrows.push_scope()
@@ -4536,6 +4556,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
             }
+            checker_require_current_linear_scope_consumed_inplace(c)
             checker_pop_const_scope_inplace(c)
             (*c).borrows = (*c).borrows.pop_scope()
             (*c).env = (*c).env.pop_scope()
@@ -4555,16 +4576,7 @@ fn checker_check_block_inplace(c: *mut Checker, blk: Block) -> TypeEntry with Mu
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
     let result_ty = checker_check_stmts_inplace(c, blk.stmts)
-    let linear_check = (*c).borrows.check_linear_consumed()
-    (*c).borrows = linear_check.0
-    if linear_check.1 > 0 {
-        (*c).had_error = true
-        (*c).error_count = (*c).error_count + 1
-        (*c).diag_emitted = true
-        print("error[E040]: linear value not consumed (")
-        print_int(linear_check.1)
-        print(" unconsumed)\n")
-    }
+    checker_require_current_linear_scope_consumed_inplace(c)
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
@@ -5095,6 +5107,25 @@ fn checker_narrow_literal_operand_ty(operand_ty: TypeEntry, operand_was_int_lit:
     operand_ty
 }
 
+// Float mirror of checker_narrow_literal_operand_ty. `i32 + 1` already worked
+// because an i64 literal operand adopts a non-i64 integer peer; `f32 + 1.0` did
+// not, because nothing adopted the float peer. Same asymmetry as the contextual
+// path, one level down.
+// The magnitude guard lives on the LET/ARG path (checker_expected_accepts_float_literal);
+// here the literal is already bounded by having a f32 peer that type-checked.
+fn checker_narrow_float_literal_operand_ty(operand_ty: TypeEntry, operand_was_float_lit: bool, peer_ty: TypeEntry) -> TypeEntry {
+    if !operand_was_float_lit {
+        return operand_ty
+    }
+    if operand_ty.kind != TypeKind::TyF64 {
+        return operand_ty
+    }
+    if is_float_type(peer_ty) && peer_ty.kind != TypeKind::TyF64 {
+        return peer_ty
+    }
+    operand_ty
+}
+
 // *mut ExprBinary handler (split-and-bridge): check the OPERANDS in place — so a nested
 // enum path-expr (e.g. `c == Color::Red`) reaches checker_check_path_expr_inplace and
 // dodges the by-value check_path_expr SRET crash — then bridge to the by-value op-typing
@@ -5103,16 +5134,20 @@ fn checker_narrow_literal_operand_ty(operand_ty: TypeEntry, operand_was_int_lit:
 fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_ty = checker_check_opt_expr_inplace(c, e.left)
     let left_was_int_lit = (*c).last_literal_kind == 1
+    let left_was_float_lit = (*c).last_literal_kind == 2
     (*c).last_literal_kind = 0
     let right_ty = checker_check_opt_expr_inplace(c, e.right)
     let right_was_int_lit = (*c).last_literal_kind == 1
+    let right_was_float_lit = (*c).last_literal_kind == 2
     (*c).last_literal_kind = 0
     let narrowed_left = checker_narrow_literal_operand_ty(left_ty, left_was_int_lit, right_ty)
     let narrowed_right = checker_narrow_literal_operand_ty(right_ty, right_was_int_lit, left_ty)
+    let narrowed_left_f = checker_narrow_float_literal_operand_ty(narrowed_left, left_was_float_lit, right_ty)
+    let narrowed_right_f = checker_narrow_float_literal_operand_ty(narrowed_right, right_was_float_lit, left_ty)
     // Call the *mut tail (returns only TypeEntry) — NOT the by-value bridge, whose
     // (Checker, TypeEntry) return became a 12MB local held across this fn's recursion
     // → N-deep stack overflow on deeply-nested exprs. The tail is non-recursive.
-    checker_check_binary_with_operand_types_inplace(c, e, narrowed_left, narrowed_right)
+    checker_check_binary_with_operand_types_inplace(c, e, narrowed_left_f, narrowed_right_f)
 }
 
 
@@ -5473,7 +5508,6 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
         }
     }
 }
-
 
 // *mut ExprWhile handler — FULL transcription of check_while_expr (16436), not a bridge:
 // the condition and the loop body block are both checked via the *mut spine so a nested
@@ -6353,6 +6387,8 @@ fn checker_bind_closure_param_inplace(c: *mut Checker, p: ClosureParam) with Mut
     let param_ty = checker_lower_type_expr_mut(c, p.ty)
     (*c).env = (*c).env.bind(p.name, param_ty, false)
     checker_const_int_bind_unknown_inplace(c, p.name)
+    let lin = checker_is_linear_type_inplace(c, param_ty)
+    (*c).borrows = (*c).borrows.track(p.name, lin)
 }
 
 fn checker_bind_closure_params_inplace(c: *mut Checker, opt: Option<Box<ClosureParamList> >) with Mut, Panic, Div, Alloc, IO {
@@ -6383,11 +6419,19 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).current_effects = [0; 8]
     (*c).current_effect_count = 0
 
+    let outer_borrow_count = (*c).borrows.count
     (*c).env = (*c).env.push_scope()
     (*c).borrows = (*c).borrows.push_scope()
     checker_push_const_scope_inplace(c)
 
     checker_bind_closure_params_inplace(c, e.closure_params)
+    var capture_candidates: [bool; 128] = [false; 128]
+    var capture_seed_i: i64 = 0
+    while capture_seed_i < outer_borrow_count {
+        let entry = (*c).borrows.entries[capture_seed_i as usize]
+        capture_candidates[capture_seed_i as usize] = entry.is_linear && !entry.consumed
+        capture_seed_i = capture_seed_i + 1
+    }
 
     // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
@@ -6406,6 +6450,21 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     var inferred_effects = (*c).current_effects
     var inferred_effect_count = (*c).current_effect_count
 
+    // An outer linear binding is captured exactly when checking the closure body
+    // transfers it from owned to consumed. Closure parameters start after this range.
+    var capture_linear = false
+    var capture_linear_count: i64 = 0
+    var capture_i: i64 = 0
+    while capture_i < outer_borrow_count {
+        let after = (*c).borrows.entries[capture_i as usize]
+        if capture_candidates[capture_i as usize] && after.consumed {
+            capture_linear = true
+            capture_linear_count = capture_linear_count + 1
+        }
+        capture_i = capture_i + 1
+    }
+
+    checker_require_current_linear_scope_consumed_inplace(c)
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
@@ -6413,18 +6472,12 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     (*c).current_effects = saved_effects
     (*c).current_effect_count = saved_effect_count
 
-    var capture_linear = false
-    var capture_linear_count: i64 = 0
     var capture_epsilon: f64 = 0.0 - 1.0
     var ci: i64 = 0
     let env_count = (*c).env.count
     while ci < env_count {
         let binding = (*c).env.bindings[ci as usize]
         let binding_ty = binding.ty
-        if checker_is_linear_type_inplace(c, binding_ty) {
-            capture_linear = true
-            capture_linear_count = capture_linear_count + 1
-        }
         if binding_ty.kind == TypeKind::TyKnowledge {
             let eps = binding_ty.knowledge_epsilon
             if eps >= 0.0 {
@@ -6488,6 +6541,10 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
     if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        match e.args {
+            Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+            None => {}
+        }
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
         return ty_i64()
     }
@@ -7926,6 +7983,7 @@ fn checker_check_match_arm_inplace(c: *mut Checker, arm: MatchArm, scrut_ty: Typ
         _ => {}
     }
     let body_ty = checker_check_expr_inplace(c, arm.body)
+    checker_require_current_linear_scope_consumed_inplace(c)
     checker_pop_const_scope_inplace(c)
     (*c).borrows = (*c).borrows.pop_scope()
     (*c).env = (*c).env.pop_scope()
@@ -13788,6 +13846,18 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("f64_to_bits")) { return true }      // id 25
     if name_eq(n, make_name("bits_to_f64")) { return true }      // id 26
     if name_eq(n, make_name("syscall6")) { return true }         // id 27
+    // P0-F allowlisted POSIX externs. Adding a name here REMOVES the E219
+    // fail-closed guard for it, so each MUST have a working native emitter in
+    // codegen_x86_linux.sio (native_v2_emit_builtin_by_id_into + the two
+    // name-based emit blocks) or it silently returns a fabricated 0. Per-name
+    // EXECUTION witnesses gate this in CI.
+    if name_eq(n, make_name("malloc")) { return true }           // id 23 (heap_alloc)
+    if name_eq(n, make_name("free")) { return true }             // id 24 (heap_free)
+    if name_eq(n, make_name("getpid")) { return true }           // id 28
+    if name_eq(n, make_name("getppid")) { return true }          // id 29
+    if name_eq(n, make_name("exit")) { return true }             // id 30
+    if name_eq(n, make_name("abort")) { return true }            // id 31
+    if name_eq(n, make_name("system")) { return true }           // id 32
     false
 }
 
@@ -15312,6 +15382,54 @@ fn checker_expected_accepts_int_literal(actual_ty: TypeEntry, expected_ty: TypeE
     actual_ty.kind == TypeKind::TyI64 && is_integer_type(expected_ty)
 }
 
+// Float-literal contextual coercion, the mirror of the int-literal path above.
+// Int literals are born i64 and adopt any integer type; float literals are born
+// f64 and adopted NOTHING, so `let x: f32 = 1.5` and passing 1.5 to an f32
+// parameter both rejected. That is what forced `as f32` everywhere -- and the
+// as-f32 lowering was silently truncating (see tests/witness_matrix w4b).
+fn checker_expr_is_float_literal_like(e: Expr) -> bool {
+    if e.kind == ExprKind::ExprFloatLit {
+        return true
+    }
+    if e.kind == ExprKind::ExprUnary && e.un_op == UnaryOp::OpNeg {
+        match e.left {
+            Some(inner) => (*inner).kind == ExprKind::ExprFloatLit
+            None => false
+        }
+    } else {
+        false
+    }
+}
+
+fn checker_float_literal_magnitude(e: Expr) -> f64 {
+    var v: f64 = 0.0
+    if e.kind == ExprKind::ExprFloatLit {
+        v = e.float_val
+    } else {
+        match e.left {
+            Some(inner) => { v = (*inner).float_val }
+            None => { v = 0.0 }
+        }
+    }
+    if v < 0.0 { 0.0 - v } else { v }
+}
+
+// CARDINAL: only LITERALS coerce, and never out of range. A float literal wider
+// than f32 max must still REJECT -- the literal-holes round found `let x: f32 =
+// 1e300` being accepted once the coercion was added without this guard.
+fn checker_expected_accepts_float_literal(e: Expr, actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
+    if actual_ty.kind != TypeKind::TyF64 {
+        return false
+    }
+    if !is_float_type(expected_ty) {
+        return false
+    }
+    if expected_ty.kind == TypeKind::TyF64 {
+        return true
+    }
+    checker_float_literal_magnitude(e) <= 3.4028235e38
+}
+
 fn checker_array_sizes_compatible(actual_ty: TypeEntry, expected_ty: TypeEntry) -> bool {
     if actual_ty.array_size == -1 || expected_ty.array_size == -1 {
         return true
@@ -15351,6 +15469,9 @@ fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected
         return true
     }
     if checker_expr_is_int_literal_like(expr) && checker_expected_accepts_int_literal(actual_ty, expected_ty) {
+        return true
+    }
+    if checker_expr_is_float_literal_like(expr) && checker_expected_accepts_float_literal(expr, actual_ty, expected_ty) {
         return true
     }
     checker_array_int_literal_compatible(expr, actual_ty, expected_ty)
@@ -19082,17 +19203,14 @@ impl Checker {
                 }
                 c.multitest_count = 0
                 c.multitest_corrected = false
-                match (*fd).body.stmts {
-                    None => {
-                        c.current_return_type = ty_unit()
-                        c.current_sig_id = 0 - 1
-                        c.current_effects = saved_effects
-                        c.current_effect_count = saved_effect_count
-                        c.multitest_count = saved_multitest_count
-                        c.multitest_corrected = saved_multitest_corrected
-                        return c
-                    }
-                    Some(_) => {}
+                if (*fd).is_extern {
+                    c.current_return_type = ty_unit()
+                    c.current_sig_id = 0 - 1
+                    c.current_effects = saved_effects
+                    c.current_effect_count = saved_effect_count
+                    c.multitest_count = saved_multitest_count
+                    c.multitest_corrected = saved_multitest_corrected
+                    return c
                 }
                 c.env = c.env.push_scope()
                 c.borrows = c.borrows.push_scope()
@@ -19120,6 +19238,7 @@ impl Checker {
                 if c.multitest_count > 1 && !c.multitest_corrected {
                     c = c.report_multitest_correction_required((*fd).span, c.multitest_count)
                 }
+                c = c.require_current_linear_scope_consumed()
                 c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
                 c.env = c.env.pop_scope()
@@ -19233,6 +19352,7 @@ impl Checker {
                 if c.multitest_count > 1 && !c.multitest_corrected {
                     c = c.report_multitest_correction_required((*fd).span, c.multitest_count)
                 }
+                c = c.require_current_linear_scope_consumed()
                 c = c.pop_const_scope()
                 c.borrows = c.borrows.pop_scope()
                 c.env = c.env.pop_scope()
@@ -19255,6 +19375,22 @@ impl Checker {
 // ============================================================
 
 impl Checker {
+    // The caller must invoke this before popping the scope whose bindings it owns.
+    fn require_current_linear_scope_consumed(self) -> Checker with Mut, Panic, Div, IO {
+        var c = self
+        let linear_check = c.borrows.check_linear_consumed()
+        c.borrows = linear_check.0
+        if linear_check.1 > 0 {
+            c.had_error = true
+            c.error_count = c.error_count + 1
+            c.diag_emitted = true
+            print("error[E040]: linear value not consumed (")
+            print_int(linear_check.1)
+            print(" unconsumed)\n")
+        }
+        c
+    }
+
     fn check_block(self, blk: Block) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         var c = self
         c.env = c.env.push_scope()
@@ -19264,15 +19400,7 @@ impl Checker {
         c = pair.0
         let result_ty = pair.1
         // Check that all linear variables in this scope have been consumed
-        let linear_check = c.borrows.check_linear_consumed()
-        c.borrows = linear_check.0
-        if linear_check.1 > 0 {
-            c.had_error = true
-            c.error_count = c.error_count + 1
-            print("error[E040]: linear value not consumed (")
-            print_int(linear_check.1)
-            print(" unconsumed)\n")
-        }
+        c = c.require_current_linear_scope_consumed()
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
@@ -19449,6 +19577,9 @@ impl Checker {
             if idx >= 0 {
                 return (*self.structs).entries[idx].is_linear
             }
+        }
+        if ty.kind == TypeKind::TyFn && ty.fn_sig_id >= 0 {
+            return fn_sig_table_get(self.fn_sigs, ty.fn_sig_id).is_linear_closure
         }
         false
     }
@@ -20327,6 +20458,10 @@ impl Checker {
         if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            match e.args {
+                Some(_) => { c = c.report_error_at(e.span, 10, 0, 0, 0) }
+                None => {}
+            }
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             return (c, ty_i64())
         }
@@ -20487,6 +20622,10 @@ impl Checker {
         if name_matches_str3(e.name, 108, 101, 110) && len_method_supported(base_ty) {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
+            match e.args {
+                Some(_) => { c = c.report_error_at(e.span, 10, 0, 0, 0) }
+                None => {}
+            }
             c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
             return (c, ty_i64())
         }
@@ -23324,7 +23463,6 @@ impl Checker {
             }
         }
     }
-
     fn check_opt_block(self, opt: Option<Box<Block> >) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(blk) => self.check_block(*blk)
@@ -23365,6 +23503,7 @@ impl Checker {
         let pair = c.check_expr(arm.body)
         c = pair.0
         let body_ty = pair.1
+        c = c.require_current_linear_scope_consumed()
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
@@ -24012,12 +24151,20 @@ impl Checker {
         c.current_effect_count = 0
 
         // Push scope for parameters
+        let outer_borrow_count = c.borrows.count
         c.env = c.env.push_scope()
         c.borrows = c.borrows.push_scope()
         c = c.push_const_scope()
 
         // Bind closure params in environment
         c = c.bind_closure_params(e.closure_params)
+        var capture_candidates: [bool; 128] = [false; 128]
+        var capture_seed_i: i64 = 0
+        while capture_seed_i < outer_borrow_count {
+            let entry = c.borrows.entries[capture_seed_i as usize]
+            capture_candidates[capture_seed_i as usize] = entry.is_linear && !entry.consumed
+            capture_seed_i = capture_seed_i + 1
+        }
 
         // Check body expression
         let body_pair = c.check_opt_expr(e.closure_body)
@@ -24042,7 +24189,22 @@ impl Checker {
         var inferred_effects = c.current_effects
         var inferred_effect_count = c.current_effect_count
 
+        // An outer linear binding is captured exactly when checking the closure body
+        // transfers it from owned to consumed. Closure parameters start after this range.
+        var capture_linear = false
+        var capture_linear_count: i64 = 0
+        var capture_i: i64 = 0
+        while capture_i < outer_borrow_count {
+            let after = c.borrows.entries[capture_i as usize]
+            if capture_candidates[capture_i as usize] && after.consumed {
+                capture_linear = true
+                capture_linear_count = capture_linear_count + 1
+            }
+            capture_i = capture_i + 1
+        }
+
         // Pop scope
+        c = c.require_current_linear_scope_consumed()
         c = c.pop_const_scope()
         c.borrows = c.borrows.pop_scope()
         c.env = c.env.pop_scope()
@@ -24052,22 +24214,13 @@ impl Checker {
         c.current_effects = saved_effects
         c.current_effect_count = saved_effect_count
 
-        // Sprint 231: Capture analysis — scan outer scope for linear + epistemic
-        var capture_linear = false
-        var capture_linear_count: i64 = 0
+        // Epistemic capture inference remains conservative over visible outer bindings.
         var capture_epsilon: f64 = 0.0 - 1.0
-        // Conservative: scan all bindings in the outer scope (below closure params)
-        // The closure scope was pushed above; outer bindings are those with
-        // scope_depth < current closure scope depth.
         var ci: i64 = 0
         let env_count = c.env.count
         while ci < env_count {
             let binding = c.env.bindings[ci as usize]
             let binding_ty = binding.ty
-            if c.is_linear_type(binding_ty) {
-                capture_linear = true
-                capture_linear_count = capture_linear_count + 1
-            }
             if binding_ty.kind == TypeKind::TyKnowledge {
                 let eps = binding_ty.knowledge_epsilon
                 if eps >= 0.0 {
@@ -24168,6 +24321,8 @@ impl Checker {
         let param_ty = pair.1
         c.env = c.env.bind(p.name, param_ty, false)
         c = c.const_int_bind_unknown(p.name)
+        let lin = c.is_linear_type(param_ty)
+        c.borrows = c.borrows.track(p.name, lin)
         c
     }
 
