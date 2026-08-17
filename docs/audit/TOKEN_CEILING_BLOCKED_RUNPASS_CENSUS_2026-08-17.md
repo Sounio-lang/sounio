@@ -328,3 +328,8 @@ Format: `path` — family slug — portfolio version in filename (if any).
 | Bisect the tests? | **No** — fix the module; if bisecting modules, complete items only |
 
 E229 makes the failure honest. **Splitting the generated portfolio catalog** makes the tests runnable. Raising 2 097 152 alone would only postpone the next lie.
+
+
+## Update 2026-08-17 — split landed (same lane)
+
+`stdlib/theorem/portfolio.sio` was split into a thin façade + `portfolio_*.sio` parts (path **A+C**). Measured: façade and sample of 30/30 former importers `check: OK`; `lorenz_i256_cert.sio` `check: OK`. Gate: `scripts/ci/stdlib_source_byte_ceiling_gate.sh`. Ceiling **not** raised. See `PORTFOLIO_SPLIT_SOURCE_CEILING_2026-08-17.md`.
