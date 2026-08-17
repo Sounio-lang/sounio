@@ -117,6 +117,48 @@ theorem witness_by_cases_ok (n : Nat) : n + 0 = n := by
   · rw [h]
   · omega
 
+-- ---------------------------------------------------------------------------
+-- `omega` is stronger than the `linarith` habit assumes.
+-- Probes by kimi-cli1, re-verified here rather than trusted.
+
+theorem witness_omega_min (a b : Int) : min a b ≤ a := by omega
+theorem witness_omega_max (a b : Int) : max a b ≥ b := by omega
+theorem witness_omega_sub_zero (a b : Nat) (h : a ≤ b) : a - b = 0 := by omega
+theorem witness_omega_sub_add (a b : Nat) (h : b ≤ a) : (a - b) + b = a := by omega
+
+/-- `omega` crosses `Nat → Int` unaided, truncated subtraction included, so the
+whole `push_cast` question usually does not arise for linear goals. -/
+theorem witness_omega_cast (a b : Nat) (h : a ≤ b) :
+    ((b - a : Nat) : Int) = (b : Int) - (a : Int) := by omega
+
+-- ---------------------------------------------------------------------------
+-- A REFUSAL IS NOT A LIMITATION.
+-- kimi-cli1 probed `0 ≤ a → 0 ≤ a * b / 2 + 1`; `omega` refused, and the first
+-- read was an `omega` limitation.  Checking the goal reversed that: the goal is
+-- FALSE for negative `b`, so the refusal was correct.  Witness the falsity with
+-- a concrete counterexample rather than asserting it.
+
+theorem witness_refusal_was_correct :
+    ¬ (∀ a b : Int, 0 ≤ a → 0 ≤ a * b / 2 + 1) := by
+  intro hall
+  have h := hall 2 (0 - 2) (by decide)   -- a = 2, b = -2:  2*(-2)/2 + 1 = -1
+  exact absurd h (by decide)
+
+/-- The repaired statement, which `omega` does prove once `b` is constrained. -/
+theorem witness_refusal_repaired (a b : Int) (ha : 0 ≤ a) (hb : 0 ≤ b) :
+    0 ≤ a * b / 2 + 1 := by
+  have : 0 ≤ a * b := Int.mul_nonneg ha hb
+  omega
+
+-- ---------------------------------------------------------------------------
+-- Core tactics kimi-cli1 probed and confirmed present (no `unknown tactic`).
+
+theorem witness_subst (a b : Int) (h : a = b) : b = a := by subst h; rfl
+
+theorem witness_generalize (a b : Nat) : (a + b) + 0 = a + b := by
+  generalize a + b = s
+  omega
+
 end TacticsCoreWitnesses
 
 -- NEGATIVE WITNESSES — each line below was actually compiled against core
@@ -124,11 +166,22 @@ end TacticsCoreWitnesses
 -- (it must stay exit-0); the failures were verified in a throwaway probe:
 --   `by_contra h`             → unknown tactic
 --   `set x := a + b with hx`  → unknown tactic
---   `push_cast`               → unknown tactic
 --   `nlinarith`               → unknown tactic
+--   `linarith`                → unknown tactic
+--   `push_neg`                → unknown tactic
+--   `tauto`                   → unknown tactic
 --   `positivity`              → unknown tactic
 --   `ring`                    → unknown tactic
 --   `field_simp`              → unknown tactic
 --   `norm_num`                → unknown tactic
+--   `interval_cases n`        → unknown tactic
 --   `Nat.cast_add`            → unknown constant (cast lemmas: simp only)
 --   `Int.ofNat_add`           → unknown constant (cast lemmas: simp only)
+--
+-- CORRECTED 2026-08-17: `push_cast` was listed here as `unknown tactic`.  That
+-- is FALSE.  `push_cast`, `norm_cast` and `exact_mod_cast` are all in core and
+-- all run under 4.33.0; so are `subst`, `generalize` and `exact?`.  The tell is
+-- the KIND of error: an absent tactic gives `unknown tactic`, whereas a present
+-- tactic that cannot finish gives `unsolved goals`.  A probe that only checks
+-- that something FAILS cannot tell those apart, which is how the row got in.
+-- Positive witnesses for all of the above: `CorePatternsWitnesses.lean` §P11.
