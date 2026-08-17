@@ -113,6 +113,7 @@ fn run_case_f64(name: string, src: &IrFunction, a0: f64, a1: f64, expect: f64) -
     args.af[1] = a1
     let res = mli_interp_run(&m, &args)
     if !res.ok { return report_fail(name, "interp", res.code, MLI_I_OK) }
+    if !res.has_value { return report_fail(name, "no-value", 0, 1) }
     if !res.ret_is_float { return report_fail(name, "ret-kind", 0, 1) }
     if res.ret_f != expect { return report_fail(name, "value", 0, 1) }
     report_pass(name)
@@ -129,6 +130,7 @@ fn run_case_i64(name: string, src: &IrFunction, a0: i64, a1: i64, expect: i64) -
     args.ai[1] = a1
     let res = mli_interp_run(&m, &args)
     if !res.ok { return report_fail(name, "interp", res.code, MLI_I_OK) }
+    if !res.has_value { return report_fail(name, "no-value", 0, 1) }
     if res.ret_is_float { return report_fail(name, "ret-kind", 1, 0) }
     if res.ret_i != expect { return report_fail(name, "value", res.ret_i, expect) }
     report_pass(name)
@@ -439,6 +441,45 @@ fn case_verify_refuses_call() -> i64 with IO, Mut, Panic, Div {
     report_pass("I6 CALL is a VERIFY error (ABI unpinned, not a silent OK)")
 }
 
+// I7: a never-written vreg must refuse, not return the register-file zero.
+// Same class as #1801 (empty stub / caller reads rax) and #1788 (no
+// fabricated zero). Poke is a scalar SoA column only — rewriting a whole
+// MliOperand in i_src1[] is the #1678/#1749 miscompile surface.
+// NOP the add after a green verify: dest is never defined, ret dest
+// must be UNDEF, not 0.
+fn case_interp_refuses_undef_vreg() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I7 undef", "pre-verify", vs.code, 0) }
+    f.i_op[mli_slot(0, 0)] = MLI_OP_NOP
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I7 undef", "guessed-zero", MLI_I_OK, MLI_I_UNDEF_VREG) }
+    if res.has_value { return report_fail("I7 undef", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_UNDEF_VREG {
+        return report_fail("I7 undef", "code", res.code, MLI_I_UNDEF_VREG)
+    }
+    report_pass("I7 unread vreg REFUSED by interp (no fabricated zero)")
+}
+
+// I8: void success is not integer 0. #1801's empty stub was prologue+ret
+// with the caller reading rax; has_value is the bit that forbids that.
+fn case_void_ret_has_no_value() -> i64 with IO, Mut, Panic, Div {
+    var f = mli_func_new("empty", mli_kind_void())
+    let b0 = mli_new_block(&!f)
+    if b0 < 0 { return report_fail("I8 void", "block", 0, 1) }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return report_fail("I8 void", "term", 0, 1) }
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I8 void", "verify", vs.code, 0) }
+    var args = mli_interp_args_empty()
+    let res = mli_interp_run(&f, &args)
+    if !res.ok { return report_fail("I8 void", "interp", res.code, MLI_I_OK) }
+    if res.has_value { return report_fail("I8 void", "claimed-int-zero", 1, 0) }
+    report_pass("I8 void return has no value (not a fabricated integer 0)")
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div {
     println("=== MLI S2a gate: ir_to_mli (straight-line i64/f64) + minimal interp ===")
     if ir_instr_arena_init() != IR_ARENA_OK {
@@ -469,6 +510,8 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     failures = failures + case_interp_refuses_unknown_cc()
     failures = failures + case_interp_refuses_unknown_opcode()
     failures = failures + case_verify_refuses_call()
+    failures = failures + case_interp_refuses_undef_vreg()
+    failures = failures + case_void_ret_has_no_value()
 
     if failures == 0 {
         println("=== MLI S2a: ALL CASES PASS ===")
