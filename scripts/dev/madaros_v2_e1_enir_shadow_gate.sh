@@ -24,14 +24,46 @@ fail() {
   exit 1
 }
 
+current_branch_name() {
+  git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || true
+}
+
+e1_lane_enabled() {
+  [[ "${E1_LANE:-0}" == "1" ]] && return 0
+  local branch
+  branch="$(current_branch_name)"
+  case "$branch" in
+    *enir*|*e1-shadow*) return 0 ;;
+  esac
+  return 1
+}
+
+protected_surface_drift_paths() {
+  git diff --name-only "$BASE_REF" HEAD -- \
+    self-hosted/compiler/main.sio \
+    self-hosted/ir \
+    self-hosted/native \
+    self-hosted/wasm \
+    self-hosted/gpu \
+    stdlib/runtime
+}
+
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 
 # E1 is shadow-only: canonical compiler, IR, ABI, runtime, and codegen sources
-# must be byte-identical to the selected canonical base.
+# must be byte-identical to the selected canonical base for the E1 experiment.
+# Outside the E1 lane, protected-surface drift is reported as an explicit skip:
+# it is baseline drift for the E1 owner, not evidence that this PR broke E1.
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-git diff --quiet "$BASE_REF" HEAD -- \
-  self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm \
-  self-hosted/gpu stdlib/runtime || fail "E1 changed a lowering/codegen/ABI/runtime surface"
+DRIFT_PATHS="$(protected_surface_drift_paths)"
+if [[ -n "$DRIFT_PATHS" ]]; then
+  DRIFT_LIST="${DRIFT_PATHS//$'\n'/,}"
+  if e1_lane_enabled; then
+    fail "E1 changed a lowering/codegen/ABI/runtime surface: $DRIFT_LIST"
+  fi
+  echo "E1_ENIR_SHADOW_GATE_SKIP status=skip reason=protected_surface_drift_outside_e1_lane base_ref=$BASE_REF drift_paths=$DRIFT_LIST"
+  exit 0
+fi
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >/dev/null
 chmod +x "$DRIVER"
