@@ -1,0 +1,623 @@
+// MLI S3 — legalize_x86: emitter MIMICRY for the Phase-2 golden (design
+// §6.4, pin O5). This is deliberately NOT a generic legaliser: it reproduces
+// the pinned Madaros native-v2 emitter's exact choices for the golden
+// surface — register choices, constant materialisation, scheduling, frame
+// layout — measured 2026-08-17 on this lane by disassembling a session
+// compile of `fn add1(x: f64) -> f64 { x + 1.0 }`:
+//
+//   - internal calling convention: arg 0 arrives in RDI as raw f64 BITS
+//     (not SysV xmm0); return value leaves in RAX as raw bits;
+//   - f64 constants materialise as `movabs rax, <ieee-bits>` + store to a
+//     stack slot — immediate-in-stream, NO rip-relative pool (this resolves
+//     the O5 constant question by measurement, not by choice);
+//   - float values live in [rbp - 8k] slots; each fadd loads via
+//     rax -> movq xmm, computes addsd xmm0,xmm1, stores back through rax;
+//   - prologue: push rbp; mov rbp,rsp; sub rsp,frame; then a 0x1000-page
+//     stack-probe loop; epilogue: mov rsp,rbp; pop rbp; ret;
+//   - displacements always disp32, frame rounded up to 16.
+//
+// THE COMMITMENT TEST (S3 dispatch): a Knowledge/CD/QD128 operand reaching
+// this stage UNEXPANDED is refused with a DEDICATED code
+// (MLI_L_KNOWLEDGE_UNEXPANDED) — never silently lowered to its base value.
+// Stripping the variance here would be one `if` cheaper than refusing; that
+// `if` is the entire difference between a first-class kind and decoration.
+// The sanctioned route to bytes for epistemic values is mli::expand_k
+// first (lanes become real scalar computation), then this legaliser.
+//
+// Fail-closed refusals (all named):
+//   MLI_L_KNOWLEDGE_UNEXPANDED  epistemic/CD/QD/vec/bundle kind at codegen
+//   MLI_L_BRANCH_UNSUPPORTED    multi-block / jmp / br (branch encoding is
+//                               the next mimicry tranche; today it BLOCKS
+//                               the expanded conf lane from reaching bytes)
+//   MLI_L_UNSUPPORTED_OP        anything outside {mov, fadd..fdiv, ret}
+//   MLI_L_UNSUPPORTED_SHAPE     arg counts/kinds outside the measured
+//                               surface (exactly one f64 arg today)
+//   MLI_L_CONST_UNSUPPORTED     NaN/inf/subnormal/-0.0 f64 immediates
+//   MLI_L_CAPACITY              byte buffer or slot table exhausted
+
+module mli::legalize_x86
+
+use mli::ir::*
+
+pub let MLI_L_OK: i64 = 0
+pub let MLI_L_KNOWLEDGE_UNEXPANDED: i64 = 1
+pub let MLI_L_BRANCH_UNSUPPORTED: i64 = 2
+pub let MLI_L_UNSUPPORTED_OP: i64 = 3
+pub let MLI_L_UNSUPPORTED_SHAPE: i64 = 4
+pub let MLI_L_CONST_UNSUPPORTED: i64 = 5
+pub let MLI_L_CAPACITY: i64 = 6
+pub let MLI_L_OPERAND: i64 = 7
+
+pub let MLI_L_MAX_BYTES: i64 = 1024
+
+pub struct MliCodeBuf {
+    pub bytes: [i64; 1024],
+    pub len: i64,
+    pub ok: bool,
+    pub code: i64,
+    pub at_block: i64,
+    pub at_index: i64,
+}
+
+pub fn mli_codebuf_empty() -> MliCodeBuf {
+    MliCodeBuf {
+        bytes: [0; 1024],
+        len: 0,
+        ok: true,
+        code: MLI_L_OK,
+        at_block: 0 - 1,
+        at_index: 0 - 1,
+    }
+}
+
+fn cb_fail(cb: &!MliCodeBuf, code: i64, b: i64, i: i64) with Mut, Panic {
+    if cb.ok {
+        cb.ok = false
+        cb.code = code
+        cb.at_block = b
+        cb.at_index = i
+    }
+}
+
+fn cb_u8(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    if !cb.ok { return }
+    if cb.len >= MLI_L_MAX_BYTES {
+        cb_fail(cb, MLI_L_CAPACITY, 0 - 1, 0 - 1)
+        return
+    }
+    cb.bytes[cb.len] = v % 256
+    cb.len = cb.len + 1
+}
+
+// Little-endian 32-bit immediate (two's complement for negatives).
+fn cb_i32le(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    var u = v
+    if u < 0 { u = u + 4294967296 }
+    cb_u8(cb, u % 256)
+    cb_u8(cb, (u / 256) % 256)
+    cb_u8(cb, (u / 65536) % 256)
+    cb_u8(cb, (u / 16777216) % 256)
+}
+
+// Little-endian 64-bit immediate from a bit pattern held in i64.
+fn cb_i64le(cb: &!MliCodeBuf, v: i64) with Mut, Panic {
+    var u = v
+    var k: i64 = 0
+    while k < 8 {
+        var byte = u % 256
+        if byte < 0 { byte = byte + 256 }
+        cb_u8(cb, byte)
+        // Arithmetic shift-right by 8 without shift ops: subtract the low
+        // byte then divide. Exact for negative values too.
+        u = (u - (u % 256)) / 256
+        k = k + 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// f64 -> IEEE-754 bits, by arithmetic decomposition (no bitcast primitive is
+// relied on). Exact for finite normal doubles; refuses NaN/inf/subnormal
+// and -0.0 (MLI_L_CONST_UNSUPPORTED) rather than guessing.
+// Returns the bit pattern in an i64; ok flag via the out-param struct.
+// ---------------------------------------------------------------------------
+
+pub struct F64Bits {
+    pub ok: bool,
+    pub bits: i64,
+}
+
+pub fn mli_f64_bits(v: f64) -> F64Bits with Mut, Panic, Div {
+    let two52: i64 = 4503599627370496
+    let min_i64 = (0 - 9223372036854775807) - 1
+
+    if v == 0.0 {
+        // +0.0 only; a negative zero cannot be distinguished without division
+        // tricks — the golden surface never carries one.
+        return F64Bits { ok: true, bits: 0 }
+    }
+    if v != v {
+        return F64Bits { ok: false, bits: 0 }
+    }
+
+    var m = v
+    var neg = false
+    if m < 0.0 {
+        neg = true
+        m = 0.0 - m
+    }
+
+    // Infinity check: doubling an infinite value keeps it equal to itself.
+    if m > 8.98846567431158e307 {
+        return F64Bits { ok: false, bits: 0 }
+    }
+
+    var e: i64 = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e = e + 1
+    }
+    while m < 1.0 {
+        m = m * 2.0
+        e = e - 1
+    }
+    let biased = e + 1023
+    if biased <= 0 || biased >= 2047 {
+        // Subnormal or out of range — refuse, never approximate a constant.
+        return F64Bits { ok: false, bits: 0 }
+    }
+
+    // 52 mantissa bits, exact: frac ops touch only powers of two.
+    var frac = m - 1.0
+    var mant: i64 = 0
+    var k: i64 = 0
+    while k < 52 {
+        frac = frac * 2.0
+        mant = mant * 2
+        if frac >= 1.0 {
+            mant = mant + 1
+            frac = frac - 1.0
+        }
+        k = k + 1
+    }
+
+    var bits = mant + biased * two52
+    if neg {
+        bits = bits + min_i64
+    }
+    F64Bits { ok: true, bits: bits }
+}
+
+// ---------------------------------------------------------------------------
+// Slot allocation (mimicry): slot k lives at [rbp - 8k]. Args claim slots
+// first in order; thereafter slots are claimed in EMISSION order — an f64
+// immediate claims its slot at the moment it is materialised, a dst vreg on
+// its first definition. This reproduces the pinned emitter's layout for the
+// golden (x @ -8, 1.0 @ -0x10, result @ -0x18).
+// ---------------------------------------------------------------------------
+
+pub struct MliSlotMap {
+    pub slot_of_vreg: [i64; 128],
+    pub next_slot: i64,
+}
+
+fn slots_empty() -> MliSlotMap {
+    MliSlotMap {
+        slot_of_vreg: [0; 128],
+        next_slot: 1,
+    }
+}
+
+fn slot_disp(slot: i64) -> i64 {
+    0 - (slot * 8)
+}
+
+fn slot_for_def(sm: &!MliSlotMap, vreg: i64) -> i64 with Mut, Panic {
+    if sm.slot_of_vreg[vreg] != 0 { return sm.slot_of_vreg[vreg] }
+    let s = sm.next_slot
+    sm.slot_of_vreg[vreg] = s
+    sm.next_slot = s + 1
+    s
+}
+
+fn slot_alloc_anon(sm: &!MliSlotMap) -> i64 with Mut, Panic {
+    let s = sm.next_slot
+    sm.next_slot = s + 1
+    s
+}
+
+// ---------------------------------------------------------------------------
+// Instruction encodings (bytes exactly as measured).
+// ---------------------------------------------------------------------------
+
+// mov [rbp+disp32], rdi      48 89 bd <disp32>
+fn emit_store_rdi(cb: &!MliCodeBuf, disp: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 189)
+    cb_i32le(cb, disp)
+}
+
+// movabs rax, imm64          48 b8 <imm64>
+fn emit_movabs_rax(cb: &!MliCodeBuf, bits: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 184)
+    cb_i64le(cb, bits)
+}
+
+// mov [rbp+disp32], rax      48 89 85 <disp32>
+fn emit_store_rax(cb: &!MliCodeBuf, disp: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 133)
+    cb_i32le(cb, disp)
+}
+
+// mov rax, [rbp+disp32]      48 8b 85 <disp32>
+fn emit_load_rax(cb: &!MliCodeBuf, disp: i64) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 139)
+    cb_u8(cb, 133)
+    cb_i32le(cb, disp)
+}
+
+// movq xmm0, rax             66 48 0f 6e c0
+fn emit_movq_xmm0_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 102)
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 110)
+    cb_u8(cb, 192)
+}
+
+// movq xmm1, rax             66 48 0f 6e c8
+fn emit_movq_xmm1_rax(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 102)
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 110)
+    cb_u8(cb, 200)
+}
+
+// movq rax, xmm0             66 48 0f 7e c0
+fn emit_movq_rax_xmm0(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 102)
+    cb_u8(cb, 72)
+    cb_u8(cb, 15)
+    cb_u8(cb, 126)
+    cb_u8(cb, 192)
+}
+
+// addsd/subsd/mulsd/divsd xmm0, xmm1     f2 0f <op> c1
+fn emit_f64_binop_xmm(cb: &!MliCodeBuf, opbyte: i64) with Mut, Panic {
+    cb_u8(cb, 242)
+    cb_u8(cb, 15)
+    cb_u8(cb, opbyte)
+    cb_u8(cb, 193)
+}
+
+// Prologue exactly as measured: push rbp; mov rbp,rsp; sub rsp,frame;
+// stack-probe loop; (arg spills appended by the caller).
+fn emit_prologue(cb: &!MliCodeBuf, frame: i64) with Mut, Panic {
+    cb_u8(cb, 85)
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 229)
+    cb_u8(cb, 72)
+    cb_u8(cb, 129)
+    cb_u8(cb, 236)
+    cb_i32le(cb, frame)
+    // mov rax, rbp
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 232)
+    // sub rax, 0x1000
+    cb_u8(cb, 72)
+    cb_u8(cb, 45)
+    cb_i32le(cb, 4096)
+    // cmp rax, rsp
+    cb_u8(cb, 72)
+    cb_u8(cb, 57)
+    cb_u8(cb, 224)
+    // jbe +5
+    cb_u8(cb, 118)
+    cb_u8(cb, 5)
+    // orb [rax], 0
+    cb_u8(cb, 128)
+    cb_u8(cb, 8)
+    cb_u8(cb, 0)
+    // jmp -16
+    cb_u8(cb, 235)
+    cb_u8(cb, 240)
+}
+
+// Epilogue: mov rsp,rbp; pop rbp; ret
+fn emit_epilogue(cb: &!MliCodeBuf) with Mut, Panic {
+    cb_u8(cb, 72)
+    cb_u8(cb, 137)
+    cb_u8(cb, 236)
+    cb_u8(cb, 93)
+    cb_u8(cb, 195)
+}
+
+fn kind_is_scalar_f64(k: MliKind) -> bool {
+    k.tag == MLI_KIND_FLOAT && k.bits == 64
+}
+
+// The commitment check: any kind that carries structure the scalar emitter
+// would have to throw away.
+fn kind_is_unexpanded_structure(k: MliKind) -> bool {
+    k.tag == MLI_KIND_KNOWLEDGE || k.tag == MLI_KIND_CD || k.tag == MLI_KIND_QD128
+        || k.tag == MLI_KIND_VECF64 || k.tag == MLI_KIND_BUNDLE
+}
+
+fn fadd_family_opbyte(op: i64) -> i64 {
+    if op == MLI_OP_FADD { return 88 }
+    if op == MLI_OP_FSUB { return 92 }
+    if op == MLI_OP_FMUL { return 89 }
+    if op == MLI_OP_FDIV { return 94 }
+    0 - 1
+}
+
+// Ensure a source operand is in a slot; materialise f64 immediates exactly
+// like the pinned emitter (movabs + store, slot claimed at this moment).
+// Returns the slot, or 0-1 with the buffer failed.
+fn ensure_src_slot(cb: &!MliCodeBuf, sm: &!MliSlotMap, o: MliOperand, b: i64, i: i64) -> i64 with Mut, Panic, Div {
+    if o.tag == MLI_OPD_VREG {
+        if kind_is_unexpanded_structure(o.kind) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, b, i)
+            return 0 - 1
+        }
+        if !kind_is_scalar_f64(o.kind) {
+            cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, b, i)
+            return 0 - 1
+        }
+        let s = sm.slot_of_vreg[o.id]
+        if s == 0 {
+            cb_fail(cb, MLI_L_OPERAND, b, i)
+            return 0 - 1
+        }
+        return s
+    }
+    if o.tag == MLI_OPD_IMM {
+        if kind_is_unexpanded_structure(o.kind) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, b, i)
+            return 0 - 1
+        }
+        if !kind_is_scalar_f64(o.kind) {
+            cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, b, i)
+            return 0 - 1
+        }
+        let fb = mli_f64_bits(o.fimm)
+        if !fb.ok {
+            cb_fail(cb, MLI_L_CONST_UNSUPPORTED, b, i)
+            return 0 - 1
+        }
+        let s = slot_alloc_anon(sm)
+        emit_movabs_rax(cb, fb.bits)
+        emit_store_rax(cb, slot_disp(s))
+        return s
+    }
+    cb_fail(cb, MLI_L_OPERAND, b, i)
+    0 - 1
+}
+
+// ---------------------------------------------------------------------------
+// Slot-count pre-pass: replicates the allocation order WITHOUT emitting, so
+// the frame size in the prologue matches the slots the body will claim
+// (mimics the pinned emitter's fixed frame). Kind/shape refusals fire here
+// first so the caller gets the earliest honest error.
+// ---------------------------------------------------------------------------
+
+fn count_slots(f: &MliFunction, cb: &!MliCodeBuf) -> i64 with Mut, Panic {
+    var n: i64 = 0
+
+    // The commitment check outranks shape checks: a Knowledge/CD/QD arg must
+    // fire ITS code even when the arity is also outside the golden surface.
+    var ai: i64 = 0
+    while ai < f.arg_count {
+        if kind_is_unexpanded_structure(f.arg_kinds[ai]) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, 0 - 1, ai)
+            return 0
+        }
+        ai = ai + 1
+    }
+    // Args (surface: exactly one f64 arg, measured; anything else refuses).
+    if f.arg_count != 1 {
+        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0 - 1, 0 - 1)
+        return 0
+    }
+    if !kind_is_scalar_f64(f.arg_kinds[0]) {
+        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0 - 1, 0 - 1)
+        return 0
+    }
+    n = 1
+
+    // Body walk mirrors the emission logic below: every f64 immediate claims
+    // a slot; every first dst definition claims a slot.
+    var seen: [i64; 128] = [0; 128]
+    seen[0] = 1
+
+    var j: i64 = 0
+    while j < f.blk_instr_count[0] {
+        let slot = mli_slot(0, j)
+        let op = mli_slot_opcode(f, slot)
+        let d = mli_slot_dst(f, slot)
+        let s1 = mli_slot_src1(f, slot)
+        let s2 = mli_slot_src2(f, slot)
+
+        if kind_is_unexpanded_structure(d.kind) || kind_is_unexpanded_structure(s1.kind) || kind_is_unexpanded_structure(s2.kind) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, 0, j)
+            return 0
+        }
+
+        if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE {
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_MOV || op == MLI_OP_COPY {
+            if s1.tag == MLI_OPD_IMM { n = n + 1 }
+            if d.tag == MLI_OPD_VREG && seen[d.id] == 0 {
+                seen[d.id] = 1
+                n = n + 1
+            }
+            j = j + 1
+            continue
+        }
+
+        if fadd_family_opbyte(op) > 0 {
+            if s1.tag == MLI_OPD_IMM { n = n + 1 }
+            if s2.tag == MLI_OPD_IMM { n = n + 1 }
+            if d.tag == MLI_OPD_VREG && seen[d.id] == 0 {
+                seen[d.id] = 1
+                n = n + 1
+            }
+            j = j + 1
+            continue
+        }
+
+        cb_fail(cb, MLI_L_UNSUPPORTED_OP, 0, j)
+        return 0
+    }
+    n
+}
+
+// ---------------------------------------------------------------------------
+// Entry point: legalize + encode one MLI function into x86-64 bytes,
+// mimicking the pinned emitter. Straight-line single-block functions only —
+// branches are the next mimicry tranche (MLI_L_BRANCH_UNSUPPORTED).
+// ---------------------------------------------------------------------------
+
+pub fn mli_legalize_x86(f: &MliFunction, cb: &!MliCodeBuf) -> bool with Mut, Panic, Div {
+    if f.block_count != 1 {
+        cb_fail(cb, MLI_L_BRANCH_UNSUPPORTED, 0 - 1, 0 - 1)
+        return false
+    }
+    if f.blk_has_term[0] != 1 {
+        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0, 0 - 1)
+        return false
+    }
+    if !kind_is_scalar_f64(f.ret) {
+        if kind_is_unexpanded_structure(f.ret) {
+            cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, 0 - 1, 0 - 1)
+        } else {
+            cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0 - 1, 0 - 1)
+        }
+        return false
+    }
+
+    let nslots = count_slots(f, cb)
+    if !cb.ok { return false }
+
+    // Frame: slots*8 rounded up to 16 (measured: 3 slots -> 0x20).
+    var frame = nslots * 8
+    if frame % 16 != 0 { frame = frame + (16 - frame % 16) }
+
+    var sm = slots_empty()
+
+    emit_prologue(cb, frame)
+
+    // Arg 0 arrives in RDI as raw f64 bits (measured convention).
+    let a0 = slot_for_def(&!sm, 0)
+    emit_store_rdi(cb, slot_disp(a0))
+
+    var j: i64 = 0
+    while j < f.blk_instr_count[0] {
+        let slot = mli_slot(0, j)
+        let op = mli_slot_opcode(f, slot)
+        let d = mli_slot_dst(f, slot)
+        let s1 = mli_slot_src1(f, slot)
+        let s2 = mli_slot_src2(f, slot)
+
+        if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE {
+            j = j + 1
+            continue
+        }
+
+        if op == MLI_OP_MOV || op == MLI_OP_COPY {
+            if d.tag != MLI_OPD_VREG {
+                cb_fail(cb, MLI_L_OPERAND, 0, j)
+                return false
+            }
+            if s1.tag == MLI_OPD_IMM {
+                // Pinned constant strategy: movabs + store into the CONST's
+                // own slot, then the dst slot is written from rax reload.
+                // For a direct `mov vreg, imm` the pinned emitter writes the
+                // constant straight into the dst slot (measured: 1.0 lands
+                // in its slot with a single movabs+store pair).
+                if kind_is_unexpanded_structure(s1.kind) || !kind_is_scalar_f64(s1.kind) {
+                    if kind_is_unexpanded_structure(s1.kind) {
+                        cb_fail(cb, MLI_L_KNOWLEDGE_UNEXPANDED, 0, j)
+                    } else {
+                        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0, j)
+                    }
+                    return false
+                }
+                let fb = mli_f64_bits(s1.fimm)
+                if !fb.ok {
+                    cb_fail(cb, MLI_L_CONST_UNSUPPORTED, 0, j)
+                    return false
+                }
+                let ds = slot_for_def(&!sm, d.id)
+                emit_movabs_rax(cb, fb.bits)
+                emit_store_rax(cb, slot_disp(ds))
+                j = j + 1
+                continue
+            }
+            // vreg -> vreg move through rax (store/load idiom).
+            let ss = ensure_src_slot(cb, &!sm, s1, 0, j)
+            if !cb.ok { return false }
+            let ds = slot_for_def(&!sm, d.id)
+            emit_load_rax(cb, slot_disp(ss))
+            emit_store_rax(cb, slot_disp(ds))
+            j = j + 1
+            continue
+        }
+
+        let opbyte = fadd_family_opbyte(op)
+        if opbyte > 0 {
+            if d.tag != MLI_OPD_VREG {
+                cb_fail(cb, MLI_L_OPERAND, 0, j)
+                return false
+            }
+            let s1s = ensure_src_slot(cb, &!sm, s1, 0, j)
+            if !cb.ok { return false }
+            let s2s = ensure_src_slot(cb, &!sm, s2, 0, j)
+            if !cb.ok { return false }
+            emit_load_rax(cb, slot_disp(s1s))
+            emit_movq_xmm0_rax(cb)
+            emit_load_rax(cb, slot_disp(s2s))
+            emit_movq_xmm1_rax(cb)
+            emit_f64_binop_xmm(cb, opbyte)
+            emit_movq_rax_xmm0(cb)
+            let ds = slot_for_def(&!sm, d.id)
+            emit_store_rax(cb, slot_disp(ds))
+            j = j + 1
+            continue
+        }
+
+        cb_fail(cb, MLI_L_UNSUPPORTED_OP, 0, j)
+        return false
+    }
+
+    // Terminator: ret <f64 vreg> only on this surface.
+    let ts = mli_term_slot(0)
+    let top = mli_slot_opcode(f, ts)
+    if top != MLI_OP_RET {
+        cb_fail(cb, MLI_L_BRANCH_UNSUPPORTED, 0, 0 - 1)
+        return false
+    }
+    let rv = mli_slot_src1(f, ts)
+    if rv.tag != MLI_OPD_VREG || !kind_is_scalar_f64(rv.kind) {
+        cb_fail(cb, MLI_L_UNSUPPORTED_SHAPE, 0, 0 - 1)
+        return false
+    }
+    let rs = sm.slot_of_vreg[rv.id]
+    if rs == 0 {
+        cb_fail(cb, MLI_L_OPERAND, 0, 0 - 1)
+        return false
+    }
+    emit_load_rax(cb, slot_disp(rs))
+    emit_epilogue(cb)
+    cb.ok
+}
