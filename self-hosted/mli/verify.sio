@@ -1,4 +1,5 @@
-// MLI V-struct verifier (S1) — static structural verification.
+// MLI V-struct verifier (S1, read path hardened in S2a) — static structural
+// verification.
 //
 // Checks (design §6.1 V-struct, amended by preflight D2):
 //   - construction canary + fail-closed overflow flags
@@ -15,9 +16,13 @@
 //   - cd_mul / associator require explicit assoc/zd policies
 //   - every block has exactly one terminator, in the term slot only
 //   - definite-assignment dataflow: every vreg use is preceded by a def on
-//     ALL paths from entry (block 0). This is the sound no-phi replacement
-//     for a dominance check: copy-inserted joins (same vreg defined in every
-//     predecessor) verify; a def on only one branch does not.
+//     ALL paths from entry (block 0) — the sound no-phi dominance surrogate.
+//
+// READ DISCIPLINE (S2a hardening, measured 2026-08-16): instructions are
+// read EXCLUSIVELY through the per-slot column accessors (mli_slot_opcode /
+// mli_slot_dst / ...) — materialising a full MliInst corrupts operand fields
+// in some module closures (landing hazard note in mli::ir). Rule checkers
+// take scalars and MliOperand values, never MliInst.
 
 module mli::verify
 
@@ -149,67 +154,65 @@ fn is_knowledge_kind(k: MliKind) -> bool { k.tag == MLI_KIND_KNOWLEDGE }
 fn is_cd_kind(k: MliKind) -> bool { k.tag == MLI_KIND_CD }
 
 // ---------------------------------------------------------------------------
-// Per-instruction rules (body instructions only; 0 = ok).
-// Operand well-formedness is checked by the caller before this dispatch.
+// Per-instruction rules (body instructions only; 0 = ok). Rule checkers take
+// scalars + operands — never MliInst (read discipline).
 // ---------------------------------------------------------------------------
 
-fn int_arith_code(inst: MliInst) -> i64 {
-    var g = scalar_guard_code(inst.dst.kind)
+fn int_arith_code(d: MliOperand, s1: MliOperand, s2: MliOperand) -> i64 {
+    var g = scalar_guard_code(d.kind)
     if g != MLI_VERR_OK { return g }
-    g = scalar_guard_code(inst.src1.kind)
+    g = scalar_guard_code(s1.kind)
     if g != MLI_VERR_OK { return g }
-    g = scalar_guard_code(inst.src2.kind)
+    g = scalar_guard_code(s2.kind)
     if g != MLI_VERR_OK { return g }
-    if !is_int_kind(inst.dst.kind) || !is_int_kind(inst.src1.kind) || !is_int_kind(inst.src2.kind) {
+    if !is_int_kind(d.kind) || !is_int_kind(s1.kind) || !is_int_kind(s2.kind) {
         return MLI_VERR_OPERAND_RULE
     }
-    if !mli_kind_eq(inst.dst.kind, inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-    if !mli_kind_eq(inst.dst.kind, inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s1.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
     MLI_VERR_OK
 }
 
-fn float_arith_code(inst: MliInst) -> i64 {
-    var g = scalar_guard_code(inst.dst.kind)
+fn float_arith_code(d: MliOperand, s1: MliOperand, s2: MliOperand) -> i64 {
+    var g = scalar_guard_code(d.kind)
     if g != MLI_VERR_OK { return g }
-    g = scalar_guard_code(inst.src1.kind)
+    g = scalar_guard_code(s1.kind)
     if g != MLI_VERR_OK { return g }
-    g = scalar_guard_code(inst.src2.kind)
+    g = scalar_guard_code(s2.kind)
     if g != MLI_VERR_OK { return g }
-    if !is_float_kind(inst.dst.kind) || !is_float_kind(inst.src1.kind) || !is_float_kind(inst.src2.kind) {
+    if !is_float_kind(d.kind) || !is_float_kind(s1.kind) || !is_float_kind(s2.kind) {
         return MLI_VERR_OPERAND_RULE
     }
-    if !mli_kind_eq(inst.dst.kind, inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-    if !mli_kind_eq(inst.dst.kind, inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s1.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
     MLI_VERR_OK
 }
 
-fn knowledge_arith_code(inst: MliInst) -> i64 {
-    if !is_knowledge_kind(inst.dst.kind) || !is_knowledge_kind(inst.src1.kind) || !is_knowledge_kind(inst.src2.kind) {
+fn knowledge_arith_code(d: MliOperand, s1: MliOperand, s2: MliOperand) -> i64 {
+    if !is_knowledge_kind(d.kind) || !is_knowledge_kind(s1.kind) || !is_knowledge_kind(s2.kind) {
         return MLI_VERR_OPERAND_RULE
     }
-    if !mli_kind_eq(inst.dst.kind, inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-    if !mli_kind_eq(inst.dst.kind, inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s1.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
     MLI_VERR_OK
 }
 
-fn cd_policy_code(inst: MliInst) -> i64 {
-    if inst.assoc_policy == MLI_ASSOC_NONE { return MLI_VERR_CD_POLICY_MISSING }
-    if inst.zd_policy == MLI_ZD_NONE { return MLI_VERR_CD_POLICY_MISSING }
+fn cd_policy_code(assoc: i64, zd: i64) -> i64 {
+    if assoc == MLI_ASSOC_NONE { return MLI_VERR_CD_POLICY_MISSING }
+    if zd == MLI_ZD_NONE { return MLI_VERR_CD_POLICY_MISSING }
     MLI_VERR_OK
 }
 
-fn cd_binop_code(inst: MliInst) -> i64 {
-    if !is_cd_kind(inst.dst.kind) || !is_cd_kind(inst.src1.kind) || !is_cd_kind(inst.src2.kind) {
+fn cd_binop_code(d: MliOperand, s1: MliOperand, s2: MliOperand) -> i64 {
+    if !is_cd_kind(d.kind) || !is_cd_kind(s1.kind) || !is_cd_kind(s2.kind) {
         return MLI_VERR_OPERAND_RULE
     }
-    if !mli_kind_eq(inst.dst.kind, inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-    if !mli_kind_eq(inst.dst.kind, inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s1.kind) { return MLI_VERR_OPERAND_RULE }
+    if !mli_kind_eq(d.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
     MLI_VERR_OK
 }
 
-fn body_inst_code(inst: MliInst) -> i64 {
-    let op = inst.opcode
-
+fn body_inst_code(op: i64, cc: i64, assoc: i64, zd: i64, d: MliOperand, s1: MliOperand, s2: MliOperand, s3: MliOperand) -> i64 {
     // Terminators may only live in the term slot.
     if op == MLI_OP_JMP || op == MLI_OP_BR || op == MLI_OP_RET {
         return MLI_VERR_CONTROL_IN_BODY
@@ -218,157 +221,157 @@ fn body_inst_code(inst: MliInst) -> i64 {
     if op == MLI_OP_NOP || op == MLI_OP_KEEP_ALIVE { return MLI_VERR_OK }
 
     if op == MLI_OP_MOV || op == MLI_OP_COPY {
-        if !is_value_operand(inst.dst) || !is_value_operand(inst.src1) { return MLI_VERR_OPERAND_RULE }
-        return move_code(inst.dst.kind, inst.src1.kind)
+        if !is_value_operand(d) || !is_value_operand(s1) { return MLI_VERR_OPERAND_RULE }
+        return move_code(d.kind, s1.kind)
     }
 
     if op == MLI_OP_LOAD {
-        if !is_value_operand(inst.dst) { return MLI_VERR_OPERAND_RULE }
-        if inst.src1.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
+        if !is_value_operand(d) { return MLI_VERR_OPERAND_RULE }
+        if s1.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
     if op == MLI_OP_STORE {
-        if inst.src1.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
-        if !is_value_operand(inst.src2) { return MLI_VERR_OPERAND_RULE }
+        if s1.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
+        if !is_value_operand(s2) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
     if op == MLI_OP_LEA {
-        if inst.dst.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
-        if inst.src1.tag != MLI_OPD_STACK && inst.src1.tag != MLI_OPD_RELOC { return MLI_VERR_OPERAND_RULE }
+        if d.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
+        if s1.tag != MLI_OPD_STACK && s1.tag != MLI_OPD_RELOC { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
-    if op >= MLI_OP_ADD && op <= MLI_OP_XOR { return int_arith_code(inst) }
-    if op >= MLI_OP_FADD && op <= MLI_OP_FDIV { return float_arith_code(inst) }
+    if op >= MLI_OP_ADD && op <= MLI_OP_XOR { return int_arith_code(d, s1, s2) }
+    if op >= MLI_OP_FADD && op <= MLI_OP_FDIV { return float_arith_code(d, s1, s2) }
 
     if op == MLI_OP_I2F {
-        if !is_int_kind(inst.src1.kind) || !is_float_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_int_kind(s1.kind) || !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_F2I {
-        if !is_float_kind(inst.src1.kind) || !is_int_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_float_kind(s1.kind) || !is_int_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_FCAST {
         // IEEE float widths only. There is deliberately NO fcast path in or
         // out of QD128 in R0 (no qd conversion op exists yet — fail closed).
-        var g = scalar_guard_code(inst.dst.kind)
+        var g = scalar_guard_code(d.kind)
         if g != MLI_VERR_OK { return g }
-        g = scalar_guard_code(inst.src1.kind)
+        g = scalar_guard_code(s1.kind)
         if g != MLI_VERR_OK { return g }
-        if !is_float_kind(inst.dst.kind) || !is_float_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_float_kind(d.kind) || !is_float_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
     if op == MLI_OP_ICMP {
-        if inst.cc == MLI_CC_NONE { return MLI_VERR_OPERAND_RULE }
-        if !is_int_kind(inst.src1.kind) || !is_int_kind(inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.src1.kind, inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.tag != MLI_KIND_BOOL { return MLI_VERR_OPERAND_RULE }
+        if cc == MLI_CC_NONE { return MLI_VERR_OPERAND_RULE }
+        if !is_int_kind(s1.kind) || !is_int_kind(s2.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(s1.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.tag != MLI_KIND_BOOL { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_FCMP {
-        if inst.cc == MLI_CC_NONE { return MLI_VERR_OPERAND_RULE }
-        var g = scalar_guard_code(inst.src1.kind)
+        if cc == MLI_CC_NONE { return MLI_VERR_OPERAND_RULE }
+        var g = scalar_guard_code(s1.kind)
         if g != MLI_VERR_OK { return g }
-        g = scalar_guard_code(inst.src2.kind)
+        g = scalar_guard_code(s2.kind)
         if g != MLI_VERR_OK { return g }
-        if !is_float_kind(inst.src1.kind) || !is_float_kind(inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.src1.kind, inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.tag != MLI_KIND_BOOL { return MLI_VERR_OPERAND_RULE }
+        if !is_float_kind(s1.kind) || !is_float_kind(s2.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(s1.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.tag != MLI_KIND_BOOL { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
     if op == MLI_OP_CALL { return MLI_VERR_OK }
 
     if op == MLI_OP_ALLOCA {
-        if inst.dst.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
-        if inst.src1.tag != MLI_OPD_IMM || !is_int_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.tag != MLI_KIND_PTR { return MLI_VERR_OPERAND_RULE }
+        if s1.tag != MLI_OPD_IMM || !is_int_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
     // R1 epistemic ops: legal MLI from S1, kind-checked now, emitted later.
     if op == MLI_OP_K_MEASURE {
-        if !is_knowledge_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
-        if !is_float_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.src1.kind.bits != inst.dst.kind.bits { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_float_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if s1.kind.bits != d.kind.bits { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
-    if op >= MLI_OP_K_ADD && op <= MLI_OP_K_DIV { return knowledge_arith_code(inst) }
+    if op >= MLI_OP_K_ADD && op <= MLI_OP_K_DIV { return knowledge_arith_code(d, s1, s2) }
     if op == MLI_OP_K_FMA {
-        let c = knowledge_arith_code(inst)
+        let c = knowledge_arith_code(d, s1, s2)
         if c != MLI_VERR_OK { return c }
-        if !is_knowledge_kind(inst.src3.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.dst.kind, inst.src3.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(s3.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(d.kind, s3.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_K_EXTRACT_VAL || op == MLI_OP_K_EXTRACT_VAR {
-        if !is_knowledge_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if !is_float_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.bits != inst.src1.kind.bits { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.bits != s1.kind.bits { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_K_EXTRACT_CONF {
-        if !is_knowledge_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if !is_int_kind(inst.dst.kind) && !is_float_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_int_kind(d.kind) && !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op >= MLI_OP_K_INSERT_VAL && op <= MLI_OP_K_INSERT_CONF {
-        if !is_knowledge_kind(inst.dst.kind) || !is_knowledge_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.dst.kind, inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if !is_value_operand(inst.src2) { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(d.kind) || !is_knowledge_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(d.kind, s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_value_operand(s2) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_K_CAST_BASE {
-        if !is_knowledge_kind(inst.dst.kind) || !is_knowledge_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.shape != inst.src1.kind.shape { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(d.kind) || !is_knowledge_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.shape != s1.kind.shape { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_K_LIFT {
-        if !is_knowledge_kind(inst.dst.kind) || !is_float_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.bits != inst.src1.kind.bits { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(d.kind) || !is_float_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.bits != s1.kind.bits { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_K_DISCHARGE {
         // The ONLY legal Knowledge -> scalar path ("no silent discharge").
-        if !is_knowledge_kind(inst.src1.kind) || !is_float_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.bits != inst.src1.kind.bits { return MLI_VERR_OPERAND_RULE }
+        if !is_knowledge_kind(s1.kind) || !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.bits != s1.kind.bits { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
     // R1 Cayley-Dickson ops.
-    if op == MLI_OP_CD_ADD || op == MLI_OP_CD_SUB { return cd_binop_code(inst) }
+    if op == MLI_OP_CD_ADD || op == MLI_OP_CD_SUB { return cd_binop_code(d, s1, s2) }
     if op == MLI_OP_CD_MUL {
-        let c = cd_policy_code(inst)
+        let c = cd_policy_code(assoc, zd)
         if c != MLI_VERR_OK { return c }
-        return cd_binop_code(inst)
+        return cd_binop_code(d, s1, s2)
     }
     if op == MLI_OP_CD_CONJ {
-        if !is_cd_kind(inst.dst.kind) || !is_cd_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.dst.kind, inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_cd_kind(d.kind) || !is_cd_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(d.kind, s1.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_CD_NORM2 {
-        if !is_cd_kind(inst.src1.kind) || !is_float_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.bits != inst.src1.kind.bits { return MLI_VERR_OPERAND_RULE }
+        if !is_cd_kind(s1.kind) || !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.bits != s1.kind.bits { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_CD_ASSOCIATOR || op == MLI_OP_CD_VAR_ASSOCIATOR {
-        let c = cd_policy_code(inst)
+        let c = cd_policy_code(assoc, zd)
         if c != MLI_VERR_OK { return c }
-        if !is_cd_kind(inst.dst.kind) || !is_cd_kind(inst.src1.kind) || !is_cd_kind(inst.src2.kind) || !is_cd_kind(inst.src3.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.dst.kind, inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.dst.kind, inst.src2.kind) { return MLI_VERR_OPERAND_RULE }
-        if !mli_kind_eq(inst.dst.kind, inst.src3.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_cd_kind(d.kind) || !is_cd_kind(s1.kind) || !is_cd_kind(s2.kind) || !is_cd_kind(s3.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(d.kind, s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(d.kind, s2.kind) { return MLI_VERR_OPERAND_RULE }
+        if !mli_kind_eq(d.kind, s3.kind) { return MLI_VERR_OPERAND_RULE }
         // Associator is only meaningful where associativity can fail.
-        if inst.dst.kind.dim < 8 { return MLI_VERR_OPERAND_RULE }
+        if d.kind.dim < 8 { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_CD_ZD_PROBE {
-        if !is_cd_kind(inst.src1.kind) { return MLI_VERR_OPERAND_RULE }
-        if inst.dst.kind.tag != MLI_KIND_BOOL && !is_float_kind(inst.dst.kind) { return MLI_VERR_OPERAND_RULE }
+        if !is_cd_kind(s1.kind) { return MLI_VERR_OPERAND_RULE }
+        if d.kind.tag != MLI_KIND_BOOL && !is_float_kind(d.kind) { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
 
@@ -377,26 +380,25 @@ fn body_inst_code(inst: MliInst) -> i64 {
 }
 
 // Terminator rules.
-fn term_code(f: &MliFunction, term: MliInst) -> i64 with Panic {
-    let op = term.opcode
+fn term_code(f: &MliFunction, op: i64, s1: MliOperand, s2: MliOperand, s3: MliOperand) -> i64 with Panic {
     if op == MLI_OP_JMP {
-        if term.src1.tag != MLI_OPD_BLOCKREF { return MLI_VERR_OPERAND_RULE }
+        if s1.tag != MLI_OPD_BLOCKREF { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_BR {
         // D2 rule 3: the condition is a Bool value, never Flags.
-        if !is_value_operand(term.src1) { return MLI_VERR_OPERAND_RULE }
-        if term.src1.kind.tag != MLI_KIND_BOOL { return MLI_VERR_BR_COND_NOT_BOOL }
-        if term.src2.tag != MLI_OPD_BLOCKREF || term.src3.tag != MLI_OPD_BLOCKREF { return MLI_VERR_OPERAND_RULE }
+        if !is_value_operand(s1) { return MLI_VERR_OPERAND_RULE }
+        if s1.kind.tag != MLI_KIND_BOOL { return MLI_VERR_BR_COND_NOT_BOOL }
+        if s2.tag != MLI_OPD_BLOCKREF || s3.tag != MLI_OPD_BLOCKREF { return MLI_VERR_OPERAND_RULE }
         return MLI_VERR_OK
     }
     if op == MLI_OP_RET {
         if f.ret.tag == MLI_KIND_VOID {
-            if term.src1.tag != MLI_OPD_NONE { return MLI_VERR_RET_KIND }
+            if s1.tag != MLI_OPD_NONE { return MLI_VERR_RET_KIND }
             return MLI_VERR_OK
         }
-        if !is_value_operand(term.src1) { return MLI_VERR_RET_KIND }
-        if !mli_kind_eq(term.src1.kind, f.ret) { return MLI_VERR_RET_KIND }
+        if !is_value_operand(s1) { return MLI_VERR_RET_KIND }
+        if !mli_kind_eq(s1.kind, f.ret) { return MLI_VERR_RET_KIND }
         return MLI_VERR_OK
     }
     MLI_VERR_TERM_OPCODE
@@ -432,19 +434,26 @@ fn vreg_set_empty() -> MliVregSet {
     MliVregSet { bits: [false; 128] }
 }
 
-fn vreg_set_full() -> MliVregSet {
-    MliVregSet { bits: [true; 128] }
-}
-
-// Terminator successor targets; 0-1 marks "none".
-fn term_target1(term: MliInst) -> i64 {
-    if term.opcode == MLI_OP_JMP { return term.src1.id }
-    if term.opcode == MLI_OP_BR { return term.src2.id }
+// Terminator successor targets read via slot accessors; 0-1 marks "none".
+fn term_target1_slot(f: &MliFunction, b: i64) -> i64 with Panic {
+    let op = mli_slot_opcode(f, mli_term_slot(b))
+    if op == MLI_OP_JMP {
+        let s = mli_slot_src1(f, mli_term_slot(b))
+        return s.id
+    }
+    if op == MLI_OP_BR {
+        let s = mli_slot_src2(f, mli_term_slot(b))
+        return s.id
+    }
     0 - 1
 }
 
-fn term_target2(term: MliInst) -> i64 {
-    if term.opcode == MLI_OP_BR { return term.src3.id }
+fn term_target2_slot(f: &MliFunction, b: i64) -> i64 with Panic {
+    let op = mli_slot_opcode(f, mli_term_slot(b))
+    if op == MLI_OP_BR {
+        let s = mli_slot_src3(f, mli_term_slot(b))
+        return s.id
+    }
     0 - 1
 }
 
@@ -467,9 +476,8 @@ fn compute_in(f: &MliFunction, out: &MliDefMatrix, b: i64, inset: &!MliVregSet) 
     }
     var p: i64 = 0
     while p < f.block_count {
-        let pterm = mli_inst_get(f, mli_term_slot(p))
-        let t1 = term_target1(pterm)
-        let t2 = term_target2(pterm)
+        let t1 = term_target1_slot(f, p)
+        let t2 = term_target2_slot(f, p)
         if t1 == b || t2 == b {
             has_pred = true
             var w: i64 = 0
@@ -506,8 +514,6 @@ fn record_def(running: &!MliVregSet, o: MliOperand) with Mut, Panic {
 fn verify_definite_assignment(f: &MliFunction) -> MliVerifyResult with Mut, Panic {
     var out = def_matrix_empty()
 
-    // Initialize OUT optimistically (universal) for the must-analysis, except
-    // via first iteration below which recomputes from IN.
     var b: i64 = 0
     while b < f.block_count {
         var v: i64 = 0
@@ -529,8 +535,7 @@ fn verify_definite_assignment(f: &MliFunction) -> MliVerifyResult with Mut, Pani
             // OUT[b] = IN[b] union defs(b)
             var j: i64 = 0
             while j < f.blk_instr_count[b] {
-                let inst = mli_inst_get(f, mli_slot(b, j))
-                record_def(&!inset, inst.dst)
+                record_def(&!inset, mli_slot_dst(f, mli_slot(b, j)))
                 j = j + 1
             }
             var v: i64 = 0
@@ -553,18 +558,18 @@ fn verify_definite_assignment(f: &MliFunction) -> MliVerifyResult with Mut, Pani
         compute_in(f, &out, b, &!running)
         var j: i64 = 0
         while j < f.blk_instr_count[b] {
-            let inst = mli_inst_get(f, mli_slot(b, j))
-            if !check_use(&running, inst.src1) { return verr(MLI_VERR_USE_BEFORE_DEF, b, j) }
-            if !check_use(&running, inst.src2) { return verr(MLI_VERR_USE_BEFORE_DEF, b, j) }
-            if !check_use(&running, inst.src3) { return verr(MLI_VERR_USE_BEFORE_DEF, b, j) }
-            record_def(&!running, inst.dst)
+            let slot = mli_slot(b, j)
+            if !check_use(&running, mli_slot_src1(f, slot)) { return verr(MLI_VERR_USE_BEFORE_DEF, b, j) }
+            if !check_use(&running, mli_slot_src2(f, slot)) { return verr(MLI_VERR_USE_BEFORE_DEF, b, j) }
+            if !check_use(&running, mli_slot_src3(f, slot)) { return verr(MLI_VERR_USE_BEFORE_DEF, b, j) }
+            record_def(&!running, mli_slot_dst(f, slot))
             j = j + 1
         }
         if f.blk_has_term[b] == 1 {
-            let t = mli_inst_get(f, mli_term_slot(b))
-            if !check_use(&running, t.src1) { return verr(MLI_VERR_USE_BEFORE_DEF, b, 0 - 1) }
-            if !check_use(&running, t.src2) { return verr(MLI_VERR_USE_BEFORE_DEF, b, 0 - 1) }
-            if !check_use(&running, t.src3) { return verr(MLI_VERR_USE_BEFORE_DEF, b, 0 - 1) }
+            let ts = mli_term_slot(b)
+            if !check_use(&running, mli_slot_src1(f, ts)) { return verr(MLI_VERR_USE_BEFORE_DEF, b, 0 - 1) }
+            if !check_use(&running, mli_slot_src2(f, ts)) { return verr(MLI_VERR_USE_BEFORE_DEF, b, 0 - 1) }
+            if !check_use(&running, mli_slot_src3(f, ts)) { return verr(MLI_VERR_USE_BEFORE_DEF, b, 0 - 1) }
         }
         b = b + 1
     }
@@ -607,7 +612,7 @@ pub fn mli_verify_function(f: &MliFunction) -> MliVerifyResult with Mut, Panic {
     }
 
     // 4. Blocks: ids, terminator presence, operand well-formedness, opcode
-    //    rules, terminator rules.
+    //    rules, terminator rules — all through slot accessors.
     var b: i64 = 0
     while b < f.block_count {
         if f.blk_id[b] != b { return verr(MLI_VERR_BLOCK_ID, b, 0 - 1) }
@@ -615,30 +620,38 @@ pub fn mli_verify_function(f: &MliFunction) -> MliVerifyResult with Mut, Panic {
 
         var j: i64 = 0
         while j < f.blk_instr_count[b] {
-            let inst = mli_inst_get(f, mli_slot(b, j))
-            var oc = operand_code(f, inst.dst)
+            let slot = mli_slot(b, j)
+            let d = mli_slot_dst(f, slot)
+            let s1 = mli_slot_src1(f, slot)
+            let s2 = mli_slot_src2(f, slot)
+            let s3 = mli_slot_src3(f, slot)
+            var oc = operand_code(f, d)
             if oc != MLI_VERR_OK { return verr(oc, b, j) }
-            oc = operand_code(f, inst.src1)
+            oc = operand_code(f, s1)
             if oc != MLI_VERR_OK { return verr(oc, b, j) }
-            oc = operand_code(f, inst.src2)
+            oc = operand_code(f, s2)
             if oc != MLI_VERR_OK { return verr(oc, b, j) }
-            oc = operand_code(f, inst.src3)
+            oc = operand_code(f, s3)
             if oc != MLI_VERR_OK { return verr(oc, b, j) }
-            let ic = body_inst_code(inst)
+            let ic = body_inst_code(mli_slot_opcode(f, slot), mli_slot_cc(f, slot), mli_slot_assoc(f, slot), mli_slot_zd(f, slot), d, s1, s2, s3)
             if ic != MLI_VERR_OK { return verr(ic, b, j) }
             j = j + 1
         }
 
-        let t = mli_inst_get(f, mli_term_slot(b))
-        var tc = operand_code(f, t.dst)
+        let ts = mli_term_slot(b)
+        let td = mli_slot_dst(f, ts)
+        let ts1 = mli_slot_src1(f, ts)
+        let ts2 = mli_slot_src2(f, ts)
+        let ts3 = mli_slot_src3(f, ts)
+        var tc = operand_code(f, td)
         if tc != MLI_VERR_OK { return verr(tc, b, 0 - 1) }
-        tc = operand_code(f, t.src1)
+        tc = operand_code(f, ts1)
         if tc != MLI_VERR_OK { return verr(tc, b, 0 - 1) }
-        tc = operand_code(f, t.src2)
+        tc = operand_code(f, ts2)
         if tc != MLI_VERR_OK { return verr(tc, b, 0 - 1) }
-        tc = operand_code(f, t.src3)
+        tc = operand_code(f, ts3)
         if tc != MLI_VERR_OK { return verr(tc, b, 0 - 1) }
-        tc = term_code(f, t)
+        tc = term_code(f, mli_slot_opcode(f, ts), ts1, ts2, ts3)
         if tc != MLI_VERR_OK { return verr(tc, b, 0 - 1) }
 
         b = b + 1

@@ -159,5 +159,48 @@ does not "simplify" back to AoS and re-import the crash.
 
 ---
 
+## 8. Addendum (S2a, 2026-08-16 evening) — two further shapes, same session
+
+Found while implementing MLI S2a (`ir_to_mli` + interpreter) in the 8-module
+closure (`ir::ir` + `mli::*`). Executable witness for both:
+`self-hosted/mli/inst_landing_diag.sio` (exit-0, `OBSERVED`/`NOT_OBSERVED`
+per shape; currently `OBSERVED` on both).
+
+**SHAPE 3 — struct-return landing corrupts nested operand fields,
+closure-dependently.** Binding the 392 B `mli_inst_get` return to a local
+(`let inst = mli_inst_get(f, slot)`) lands a copy whose operand `id` fields
+read as the sibling `tag` fields (one-slot shift), while per-slot column
+accessors returning scalars or one 88 B `MliOperand` read true data.
+Measured: `dst.id=1 src1.id=1 src2.id=1` for a `mul v2, v0, v1` whose pool
+columns hold `2 / 0 / 1` (accessor read confirms, and `mli::dump` — which
+forwards the same return directly as a call argument — printed the true
+program from the same pool). CRITICALLY: the S1 gate (5-module closure) ran
+the SAME `let`-landing code and read true data — the corruption appears only
+in the larger closure, placing this in the imported-module D3 residual
+family. Consequence taken: `mli::verify`, `mli::dump` and `mli::interp` read
+exclusively through per-slot accessors (`mli_slot_opcode` / `mli_slot_dst` /
+…); `mli_inst_get` carries a landing-hazard warning and has no in-tree
+consumers on the read path.
+
+**SHAPE 4 — enum values passed as function arguments collapse to
+discriminant 0.** `ir_binop(dst, lhs, BinaryOp::OpShl, rhs)` called from
+native-v2-compiled code stores `IR_A_BIN_OP == 0` (OpShl's declaration
+ordinal is 16). Enum equality also miscompiles, context-dependently: in
+main-file context `e == BinaryOp::OpShl` and `e == BinaryOp::OpAdd` BOTH
+return true for the same `e`; in imported-module context the translator's
+enum comparisons behaved as always-false. This is adjacent to the
+witness-matrix enum-discriminant residual. Consequence taken:
+`mli::ir_to_mli` never touches enum values — it reads raw i64 arena columns
+(`IR_A_OP`, `IR_A_BIN_OP`, …) and CALIBRATES IrOpcode ordinals at runtime
+against this binary's own constructors (`s2a_calibrate`), so an enum
+reordering cannot silently desynchronise the mapping; gate fixtures poke
+`IR_A_BIN_OP` ordinals directly because constructor enum arguments cannot
+carry them.
+
+Acceptance gate for this addendum: `inst_landing_diag.sio` prints
+`NOT_OBSERVED` for both shapes under a session-built Madaros.
+
+---
+
 *Reporter: cursor-2. Dispatch requested by fleet-orchestrator (claude-1)
-after the S1 handoff, 2026-08-16.*
+after the S1 handoff, 2026-08-16. Addendum added during the S2a tranche.*
