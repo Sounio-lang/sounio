@@ -81,11 +81,15 @@ Generator path recorded on every vector:
 |---|---:|---:|---|
 | halfway_tie_even | 6 | 6 | add, mul |
 | sticky_bit | 6 | 6 | add, mul, div, sub |
-| catastrophic_cancel | 5 | 5 | sub, mul |
+| **catastrophic_cancel** | **31** | **30** | sub, add, mul, div (expanded 2026-08-17) |
 | overflow_underflow | 3 | 2 | mul |
 | sqrt_hard | 6 | 5 | sqrt |
 | rump | 1 | 1 | closed-form expression |
-| **Total** | **27** | **25** | |
+| **Total** | **53** | **50** | |
+
+Cancellation expansion (2026-08-17): eps ladder `2^-k` for k∈{1,2,4,…,80},
+signed cancel, opposite-sign add, Sterbenz at exp 10/40/80/100/200, large
+integers past f32 span, product `(1±e)` forms, near-equal subnormals, div near-1.
 
 Spot checks (this generation):
 
@@ -94,18 +98,17 @@ Spot checks (this generation):
 | `1 + ulp/2` (f128 add) | RNE → exactly `1.0` (exp=16383, trail=0) | PASS |
 | Rump exact | negative, magnitude ~0.827… | sign=1, exp≈16382 |
 | Rump host double | magnitude ~1.18e21 (wrong) | `f64_bits_differ=true` |
-| Provenance fields | tool/version/rounding/invocation on all rows | 52/52 complete |
+| Provenance fields | tool/version/rounding/invocation on all rows | complete |
+| Cancel count parity | ≥20 per format | 31 / 30 |
 
-## Output hashes
+## Output hashes (post-cancellation expansion)
 
 ```
-arith_hard_f128.jsonl  27 lines
-  md5    = 06df4fb6501f0b893e4a0f8648dd8f70
-  sha256 = 602660813142b3ea5132080a9b159774ade11ebbace408947e17b21dda7238f6
+arith_hard_f128.jsonl  53 lines
+  md5    = 2daa40def9d6ba64bac9151332994293
 
-arith_hard_f256.jsonl  25 lines
-  md5    = 3cd811fc49db393a44b6a45e2d5c0b8d
-  sha256 = 3dc30cb13df7100fafcb2f445d2708fd2ffa2e02c60689b26a504154c128a5bc
+arith_hard_f256.jsonl  50 lines
+  md5    = b4026ca0fe4ef157fd90b486fb1a3149
 ```
 
 ```

@@ -43,8 +43,8 @@ be graded on cases chosen because of **IEEE structure**:
 tests/vectors/f128_f256_v0d/
 ├── README.md
 ├── GENERATION_RECEIPT.md
-├── arith_hard_f128.jsonl    # 27 vectors
-├── arith_hard_f256.jsonl    # 25 vectors
+├── arith_hard_f128.jsonl    # 53 vectors (31 cancellation)
+├── arith_hard_f256.jsonl    # 50 vectors (30 cancellation)
 └── gen/
     ├── arith_hard_gen.c
     ├── run.sh

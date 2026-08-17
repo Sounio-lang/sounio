@@ -595,34 +595,98 @@ static void emit_format(int is_f256) {
     emit_bin(fmt, is_f256, "sub", "sticky_bit", a, one,
              "(1+ulp/2+tiny) - 1: residual near half-ulp with sticky");
 
-    /* ---- catastrophic cancellation ---- */
-    set_pow2(eps, -20);
-    mpfr_add(a, one, eps, MPFR_RNDN);
-    emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, one,
-             "(1+2^-20)-1: leading digits cancel; result is eps");
-    set_pow2(eps, -(p - 10));
-    mpfr_add(a, one, eps, MPFR_RNDN);
-    emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, one,
-             "(1+2^-(p-10))-1: cancel near format precision");
-    /* large near-equal */
-    mpfr_set_ui_2exp(big, 1, 80, MPFR_RNDN);
-    set_pow2(eps, 80 - 40);
-    mpfr_add(a, big, eps, MPFR_RNDN);
-    emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, big,
-             "2^80+2^40 - 2^80");
-    /* (x+y)(x-y) vs x^2-y^2 structural */
-    mpfr_set_ui(a, 1000003, MPFR_RNDN);
-    mpfr_set_ui(b, 1000001, MPFR_RNDN);
-    emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, b,
-             "1000003-1000001: small difference of large ints");
-    mpfr_mul(a, a, a, MPFR_RNDN); /* reuse carefully below */
-
-    /* mul cancel path: (1+e)*(1-e) = 1 - e^2 */
-    set_pow2(eps, -30);
-    mpfr_add(a, one, eps, MPFR_RNDN);
-    mpfr_sub(b, one, eps, MPFR_RNDN);
-    emit_bin(fmt, is_f256, "mul", "catastrophic_cancel", a, b,
-             "(1+e)(1-e)=1-e^2 with e=2^-30");
+    /* ---- catastrophic cancellation (parity target ~20+ per format) ----
+     * Two nearly-equal operands destroy leading digits; a correct softfloat
+     * must retain enough guard bits for the residual. Ladder of eps scales,
+     * large-magnitude Sterbenz pairs, opposite-sign adds, and product forms.
+     */
+    {
+        /* (1 + 2^-k) - 1 for k in a ladder spanning coarse → near-p */
+        static const int k_ladder[] = {1, 2, 4, 8, 12, 16, 20, 24, 30, 40,
+                                       48, 52, 60, 80};
+        for (size_t i = 0; i < sizeof(k_ladder) / sizeof(k_ladder[0]); i++) {
+            int k = k_ladder[i];
+            if (k >= p - 2)
+                continue; /* residual must remain normal or at least nonzero */
+            set_pow2(eps, -k);
+            mpfr_add(a, one, eps, MPFR_RNDN);
+            char note[96];
+            snprintf(note, sizeof(note),
+                     "(1+2^-%d)-1: cancel leaves 2^-%d", k, k);
+            emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, one, note);
+        }
+        /* Negative nearly-equal: (-1 - 2^-k) - (-1) */
+        set_pow2(eps, -16);
+        mpfr_set_si(a, -1, MPFR_RNDN);
+        mpfr_sub(a, a, eps, MPFR_RNDN); /* -1 - eps */
+        mpfr_set_si(b, -1, MPFR_RNDN);
+        emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, b,
+                 "(-1-2^-16)-(-1): signed cancel");
+        /* Opposite-sign add that cancels: (1+e) + (-1) */
+        set_pow2(eps, -25);
+        mpfr_add(a, one, eps, MPFR_RNDN);
+        mpfr_set_si(b, -1, MPFR_RNDN);
+        emit_bin(fmt, is_f256, "add", "catastrophic_cancel", a, b,
+                 "(1+2^-25)+(-1): cancel via add of opposites");
+        /* Sterbenz large magnitude, several decades */
+        static const int e_big[] = {10, 40, 80, 100, 200};
+        for (size_t i = 0; i < sizeof(e_big) / sizeof(e_big[0]); i++) {
+            int eb = e_big[i];
+            if (is_f256 == 0 && eb > F128_EMAX - 2)
+                continue;
+            if (is_f256 && eb > 1000)
+                continue;
+            mpfr_set_ui_2exp(big, 1, eb, MPFR_RNDN);
+            set_pow2(eps, eb - 30);
+            mpfr_add(a, big, eps, MPFR_RNDN);
+            char note[96];
+            snprintf(note, sizeof(note), "2^%d+2^%d - 2^%d", eb, eb - 30, eb);
+            emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, big, note);
+        }
+        /* Adjacent integers around 1e6 */
+        mpfr_set_ui(a, 1000003, MPFR_RNDN);
+        mpfr_set_ui(b, 1000001, MPFR_RNDN);
+        emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, b,
+                 "1000003-1000001: small difference of large ints");
+        mpfr_set_ui(a, 16777217, MPFR_RNDN); /* past f32 exact int range */
+        mpfr_set_ui(b, 16777215, MPFR_RNDN);
+        emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, b,
+                 "2^24+1 - (2^24-1): cancel past binary32 integer span");
+        /* (1+e)-(1+e/2) residual e/2 */
+        set_pow2(eps, -18);
+        mpfr_add(a, one, eps, MPFR_RNDN);
+        mpfr_div_ui(b, eps, 2, MPFR_RNDN);
+        mpfr_add(b, one, b, MPFR_RNDN);
+        emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, b,
+                 "(1+2^-18)-(1+2^-19)");
+        /* Product cancellation: (1+e)(1-e)=1-e^2 for several e */
+        static const int e_prod[] = {8, 16, 24, 30, 40};
+        for (size_t i = 0; i < sizeof(e_prod) / sizeof(e_prod[0]); i++) {
+            set_pow2(eps, -e_prod[i]);
+            mpfr_add(a, one, eps, MPFR_RNDN);
+            mpfr_sub(b, one, eps, MPFR_RNDN);
+            char note[96];
+            snprintf(note, sizeof(note),
+                     "(1+2^-%d)(1-2^-%d)=1-2^-%d", e_prod[i], e_prod[i],
+                     2 * e_prod[i]);
+            emit_bin(fmt, is_f256, "mul", "catastrophic_cancel", a, b, note);
+        }
+        /* div cancel: (1+e)-1 then implicit; or (x-y)/x ≈ 0 */
+        set_pow2(eps, -22);
+        mpfr_add(a, one, eps, MPFR_RNDN);
+        mpfr_sub(b, a, one, MPFR_RNDN); /* b should be eps if a exact */
+        /* a/a - 1 style: compute (a - a) is trivial; use (a+eps)/a */
+        mpfr_add(a, one, eps, MPFR_RNDN);
+        emit_bin(fmt, is_f256, "div", "catastrophic_cancel", a, one,
+                 "(1+2^-22)/1: near-1 quotient; residual after -1 is cancel-class");
+        /* Nearly equal subnormals (if representable) */
+        if (!is_f256) {
+            set_pow2(a, -16400);
+            set_pow2(b, -16401);
+            emit_bin(fmt, is_f256, "sub", "catastrophic_cancel", a, b,
+                     "near-equal deep subnormals: 2^-16400 - 2^-16401");
+        }
+    }
 
     /* ---- overflow / underflow structural ---- */
     if (!is_f256) {

@@ -111,5 +111,6 @@ rounds to 53-bit precision first. Neither path uses Sounio.
 
 - Wave 1 arithmetic: `minimax-cli3` / `ws-g-mpfr-vectors` (`8ce767f33b`)
 - Wave 3 literal extension: `grok-cli1` / `ws-g-ref-vectors`
+- **V0-C wire/limbs (sibling dir):** `tests/vectors/f128_f256_v0c/` — accept/reject encodings
 - **V0-D hard-case arithmetic (sibling dir):** `tests/vectors/f128_f256_v0d/` —
   halfway / sticky / cancellation / Rump / sqrt; does not replace this tree
