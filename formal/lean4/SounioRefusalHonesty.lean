@@ -44,8 +44,7 @@
   says so is the formal statement of "refusal is not a zero".
 
   SCOPE — read before quoting.
-  (a) This is a MODEL of the E219 fragment, not a proof that
-      `check.sio` implements the model. The allow-list below is a
+  (a) This is a MODEL of the E219 fragment. The allow-list below is a
       snapshot of `name_is_native_backend_builtin` dated 2026-08-17
       (34 names: 27 original builtins + 7 P0-F POSIX). Drift is a CI
       concern (`scripts/ci/extern_builtin_mirror_gate.sh`), not a
@@ -62,6 +61,29 @@
       step. Honesty says value-or-refuse. A program that is well-typed
       and mentions an unimplemented extern does not get stuck at 0;
       it is refused.
+  (f) lean_single does not implement E219. The theorem is a statement
+      about the Madaros judgment, not the seed compiler.
+
+  IMPLEMENTATION CORRESPONDENCE (2026-08-17, after the measured gap).
+  An audit against `origin/main` found three divergences. Two are closed
+  in the compiler; one is named and left.
+
+  Closed:
+    · Expression infection. After E219 the checker now returns `ty_error()`
+      (`refused_unimplemented`) instead of the declared return type, so
+      `abs() + 1` is not typed as an integer. That is `add_refuse_l`.
+    · Live Legacy. An empty IR stub that is not a builtin and not BSS
+      used to compile as prologue+ret (call reads rax, usually 0).
+      `native_v2_empty_stub_would_fabricate` now emits `ud2` instead.
+      Declaration-without-call still has a symbol; a missed E219 cannot
+      return a fabricated 0. Gate:
+      `scripts/ci/e219_refusal_correspondence_gate.sh`.
+
+  Still open, stated plainly:
+    · lean_single has no E219. The seed compiler still compiles the
+      `extern_c_unimplemented_builtin.sio` counterexample with exit 0.
+      That is an engine-split, the same class as #1798, and is not
+      closed here.
 
   WHY NOT THE OTHER TWO CANDIDATES, STATED PLAINLY.
   GUM-through-MLI: `gum_conservativity` is already proved for a sketch

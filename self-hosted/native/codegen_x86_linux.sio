@@ -1179,6 +1179,16 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     0
 }
 
+// An empty IR body that is not a BSS slot and not a known builtin. The
+// historical backend compiled these as prologue+ret, so a call read rax
+// (usually 0). That is fabrication. Declaration-without-call still needs
+// a callable symbol — emit ud2 so a missed E219 cannot return a value.
+fn native_v2_empty_stub_would_fabricate(func: &IrFunction) -> bool with Mut, Panic, Div {
+    if (*func).compile_strategy == IR_STRATEGY_BSS_GLOBAL { return false }
+    if (*func).instr_count > 0 { return false }
+    native_v2_builtin_id_for_func_ref(func) == 0
+}
+
 // M4: argv and string builtins
 
 // syscall6(nr, a1..a6) raw Linux syscall builtin (id 27). Checker arm:
@@ -1500,6 +1510,11 @@ fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     } else {
         (*nc).code_overflow = true
     }
+}
+
+fn nc_emit_unimplemented_extern_trap_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x0b)
 }
 
 fn nc_emit_u32_le(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
@@ -5805,6 +5820,10 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         if name_is_sin(func.name) { return emit_builtin_sin(c) }
         if name_is_cos(func.name) { return emit_builtin_cos(c) }
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
+        if native_v2_empty_stub_would_fabricate(&func) {
+            nc_emit_unimplemented_extern_trap_into(&! c)
+            return c
+        }
     }
 
     // Sprint 38: Set compile strategy from IR function metadata
@@ -6693,6 +6712,10 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_exit(func.name) { emit_builtin_exit_into(&! c); return c }
         if name_is_abort(func.name) { emit_builtin_abort_into(&! c); return c }
         if name_is_system(func.name) { emit_builtin_system_into(&! c); return c }
+        if native_v2_empty_stub_would_fabricate(&func) {
+            nc_emit_unimplemented_extern_trap_into(&! c)
+            return c
+        }
     }
 
     c.current_strategy = func.compile_strategy
@@ -6825,6 +6848,10 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
             emit_builtin_heap_free_into(nc)
             return
         }
+        return
+    }
+    if native_v2_empty_stub_would_fabricate(func) {
+        nc_emit_unimplemented_extern_trap_into(nc)
         return
     }
 
@@ -8561,6 +8588,14 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
         native_v2_emit_builtin_by_id_into(nc, builtin_id)
         return true
     }
+    if native_v2_empty_stub_would_fabricate(func) {
+        reset_function_state_mut(nc)
+        let function_offset = (*nc).code.len
+        native_compiler_set_fn_offset(nc, fn_index, function_offset)
+        native_compiler_add_symbol_func_ref(nc, fn_index, func)
+        nc_emit_unimplemented_extern_trap_into(nc)
+        return true
+    }
     compile_ir_function_v2_core_ir_into(nc, func, fn_index)
 }
 
@@ -8911,6 +8946,10 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_exit(func.name) { emit_builtin_exit_into(nc); return }
         if name_is_abort(func.name) { emit_builtin_abort_into(nc); return }
         if name_is_system(func.name) { emit_builtin_system_into(nc); return }
+        if native_v2_empty_stub_would_fabricate(&func) {
+            nc_emit_unimplemented_extern_trap_into(nc)
+            return
+        }
     }
 
     (*nc).current_strategy = func.compile_strategy
