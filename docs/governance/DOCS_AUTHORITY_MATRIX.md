@@ -93,6 +93,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-dossier-resolution-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-hessian-e175-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_HESSIAN_E175_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.dissertation-parity-sounio-dual-2026-08-17 | repo_only | docs/audit/DISSERTATION_PARITY_SOUNIO_DUAL_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-pbpk-suite-residual-split-2026-08-17 | repo_only | docs/audit/DISSERTATION_PBPK_SUITE_RESIDUAL_SPLIT_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dossier-import-closure-2026-08-17 | repo_only | docs/audit/DOSSIER_IMPORT_CLOSURE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.e043-rust-macro-design-dispatch-2026-07-12 | repo_only | docs/audit/E043_RUST_MACRO_DESIGN_DISPATCH_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -243,6 +244,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.modular-compiler-audit-2026-06-10 | repo_only | docs/audit/MODULAR_COMPILER_AUDIT_2026-06-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-stack-clash-2026-05-29 | repo_only | docs/audit/MODULAR_COMPILER_STACK_CLASH_2026-05-29.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-pipe-coverage-map-2026-06-01 | repo_only | docs/audit/MODULAR_PIPE_COVERAGE_MAP_2026-06-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.module-frontend-lower-array-seed-crash-dispatch-2026-07-27 | repo_only | docs/audit/MODULE_FRONTEND_LOWER_ARRAY_SEED_CRASH_DISPATCH_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.mut-effect-enforcement-dispatch-2026-07-27 | repo_only | docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.mut-refactor-execution-plan-2026-05-31 | repo_only | docs/audit/MUT_REFACTOR_EXECUTION_PLAN_2026-05-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ode-epistemic-zero-params-2026-06-02 | repo_only | docs/audit/ODE_EPISTEMIC_ZERO_PARAMS_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
