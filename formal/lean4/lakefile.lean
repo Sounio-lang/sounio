@@ -642,6 +642,13 @@ lean_lib «EpistemicEffects» where
 @[default_target]
 lean_lib «EpistemicEffectsV2» where
 
+-- Refusal as a first-class compilation outcome (E219 / P0-F). A well-typed
+-- program in the extern-call fragment produces a value or refuses; it never
+-- fabricates a zero. Models the historical stub-to-zero backend as a second
+-- relation and proves they disagree on `abs + 1`. Mathlib-free, no sorry.
+@[default_target]
+lean_lib «SounioRefusalHonesty» where
+
 -- Cayley–Dickson erasure ladder: the native-erasure law ker = 2^(n-1) − 4.
 -- Algebra-level exact ℤ-rank of the verified cdSigma product certifies the
 -- kernel dimensions L4–L8 (native_decide), matching the runtime float-Gauss
