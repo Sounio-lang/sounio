@@ -73,6 +73,28 @@ False-red causes remain possible. Examples found on 2026-08-17:
   unavailable in a shallow checkout.
 - `compiler_lane_status_gate.sh` encoded the authoring PR's context as a
   universal invariant and failed when main legitimately touched compiler files.
+- A selected job can fail before it executes a line of Sounio. During the
+  GitHub incident that began at 2026-08-17 13:40 UTC, GitHub Status listed API
+  Requests, Issues, Pull Requests, and Actions under major outage, with archive
+  and raw repository downloads around 50% error rate. Concrete evidence:
+  #1782 CI run `32041868355`, `Full Test Suite` job `95422848448`, failed in
+  `Set up job` while downloading `actions/download-artifact@v4`: the log shows
+  codeload `503`, then codeload `429`, then "Failed to download archive" after
+  three attempts. The selected Sounio test suite never ran, but the aggregating
+  `CI Decision` job `95424195280` still failed because the selected
+  `full-test-suite` result was not success.
+- A PR automation job can also go red on the CI instrument itself rather than
+  repository logic. #1781 `Issue & PR Automation` run `32041028754`, `PR
+  Triage` job `95420242960`, completed checkout and then failed in
+  `actions/github-script` while calling the GitHub Issues labels API:
+  `POST /repos/Sounio-lang/sounio/issues/1781/labels` returned HTTP `503`
+  "No server is currently available to service your request." No Sounio gate
+  ran in that failing step.
+
+Before debugging a red check, open the job log and confirm the job actually
+reached the repository command or gate it is supposed to measure. A failure in
+runner setup, action download, GitHub API calls, artifact download, checkout, or
+other platform plumbing is an unavailable instrument, not a code verdict.
 
 ### `Impact` passes
 
@@ -127,6 +149,30 @@ Check count is a UI artifact. It changes with Impact selection, skipped jobs,
 GitHub rendering, external integrations, merge queue shape, and whether a
 workflow reached the decision job. It is not the repo's CI contract.
 
+### Empty or unreadable CI state
+
+A reader may conclude:
+
+- Nothing authoritative.
+
+An empty `statusCheckRollup`, an empty check-run list, a missing head SHA, a
+missing workflow run, or a failed GitHub API read is not the same thing as "no
+pending checks" or "the head moved". It means the observer has not obtained a
+verdict.
+
+This was not hypothetical on 2026-08-17. During the same GitHub incident, a
+merge guard saw an empty `statusCheckRollup` and computed `pending=0` from an
+empty list, which was indistinguishable from settled-and-green until the guard
+was changed to refuse with `INSTRUMENT UNAVAILABLE`. The general rule is:
+
+- CI-state readers must distinguish "the instrument did not answer" from "the
+  answer was an empty selected set".
+- A verdict reader must require a non-trivial expected check surface before it
+  treats "zero pending" as settled.
+- If the expected surface is absent, unreadable, or internally inconsistent,
+  the correct state is blocked/instrument-unavailable, not pass, fail, or
+  head-moved.
+
 ## Selected Jobs
 
 As of `ed9dd2b903`, `scripts/ci/evaluate_ci_decision.py` treats these jobs as
@@ -162,11 +208,16 @@ incomplete:
 - Impact under-selects the PR because a changed path is misclassified.
 - A job returns success after a gate passes on empty input, absent fixtures, or
   a skipped/failed probe that was converted into success.
+- A job returns failure before reaching the repository command or gate, and a
+  reader treats that platform failure as evidence about the PR's code.
 - A gate aborts before evaluating but the job masks that abort.
 - A job's workflow condition differs from the evaluator's required-map
   condition.
 - GitHub never creates the CI Decision job, for example because the workflow
   file is syntactically invalid before the evaluator can run.
+- The API or check-run reader returns an empty, partial, or errored response and
+  the merge guard treats that unreadable instrument as an empty successful
+  verdict.
 
 Mitigations already present:
 
@@ -190,6 +241,8 @@ Remaining hardening:
 - Keep the complementary censuses separate: abort-before-evaluation,
   missing-fixture, vacuous-green, and context-dependent-red are distinct
   failure modes.
+- Require CI-observer tools to fail closed on empty or unreadable API results:
+  "instrument unavailable" is its own state, never a synonym for green.
 
 ## Reading Rule
 
@@ -201,3 +254,10 @@ Use this rule when reviewing PRs or main:
 - Missing `CI Decision` means no authoritative CI verdict, regardless of how
   many other checks are green.
 - `CI Decision` fail means stop and classify before blaming the code.
+- Red check first step: open the failed job log and verify the measured command
+  ran. If the log dies in runner setup, action download, GitHub API, checkout,
+  or artifact plumbing, rerun or wait for platform recovery; do not edit code in
+  response to that red.
+- Empty CI API response first step: treat the observer as unavailable until a
+  non-trivial expected check surface is visible. Never compute "settled" from an
+  empty list.
