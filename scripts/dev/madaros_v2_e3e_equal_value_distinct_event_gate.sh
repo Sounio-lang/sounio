@@ -16,18 +16,14 @@ DRIVER="$TMP_DIR/madaros-enir"
 
 fail() { echo "E3E_EQUAL_VALUE_DISTINCT_EVENT_GATE_FAIL: $*" >&2; exit 1; }
 
-. scripts/dev/madaros_v2_enir_gate_scope.sh
-
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-E3E_PROTECTED=(
+git diff --quiet "$BASE_REF" HEAD -- \
   self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm \
   self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio \
   self-hosted/enir/qd.sio self-hosted/enir/mir_cfg.sio self-hosted/enir/mir_join.sio \
   tools/eisa/eisa_evm_run.sio \
-)
-madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E3E_EQUAL_VALUE_DISTINCT_EVENT_GATE" \
-  "E3E changed production codegen/ABI/runtime, pinned qd semantics, Join-MIR, or METRON oracle" "${E3E_PROTECTED[@]}"
+  || fail "E3E changed production codegen/ABI/runtime, pinned qd semantics, Join-MIR, or METRON oracle"
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "source-fresh ENIR driver build produced no ELF"
 chmod +x "$DRIVER"

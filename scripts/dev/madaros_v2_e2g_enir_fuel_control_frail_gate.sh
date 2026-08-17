@@ -23,13 +23,9 @@ fail() {
   exit 1
 }
 
-. scripts/dev/madaros_v2_enir_gate_scope.sh
-
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-E2G_PROTECTED=(self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio self-hosted/enir/qd.sio tools/eisa/eisa_evm_run.sio)
-madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E2G_ENIR_V2_FUEL_CONTROL_FRAIL_GATE" \
-  "E2G changed codegen/ABI/runtime, pinned qd semantics, or frozen METRON oracle" "${E2G_PROTECTED[@]}"
+git diff --quiet "$BASE_REF" HEAD -- self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio self-hosted/enir/qd.sio tools/eisa/eisa_evm_run.sio || fail "E2G changed codegen/ABI/runtime, pinned qd semantics, or frozen METRON oracle"
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "native ENIR driver build produced no ELF"

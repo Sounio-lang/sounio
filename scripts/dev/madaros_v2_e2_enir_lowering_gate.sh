@@ -23,16 +23,12 @@ fail() {
   exit 1
 }
 
-. scripts/dev/madaros_v2_enir_gate_scope.sh
-
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-E2_PROTECTED=(
+git diff --quiet "$BASE_REF" HEAD -- \
   self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm \
   self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio \
-)
-madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E2_ENIR_LOWERING_GATE" \
-  "E2 changed a compiler codegen/ABI/runtime or EVM-oracle surface" "${E2_PROTECTED[@]}"
+  || fail "E2 changed a compiler codegen/ABI/runtime or EVM-oracle surface"
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "native ENIR driver build produced no ELF"
