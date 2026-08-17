@@ -324,8 +324,9 @@ fn case_interp_div_zero() -> i64 with IO, Mut, Panic, Div {
     report_pass("I1 i64 div-by-zero REFUSED by interp")
 }
 
-// I2: the interp refuses a legal-but-unimplemented MLI op (cd_mul, verified
-// OK by V-struct) instead of guessing a semantics. Refuse, don't pick.
+// I2: a verified cd_mul must refuse AT THE OPCODE, not at arg-load and
+// not by writing a zero product. CD args have no value model — they are
+// not loaded as zeros (#1788); the body opcode is what must refuse.
 fn case_interp_refuses_cd() -> i64 with IO, Mut, Panic, Div {
     var m = mli_func_new("octmul", mli_kind_void())
     let ck = mli_kind_cd(8, 64)
@@ -346,11 +347,14 @@ fn case_interp_refuses_cd() -> i64 with IO, Mut, Panic, Div {
 
     var args = mli_interp_args_empty()
     let res = mli_interp_run(&m, &args)
-    if res.ok { return report_fail("I2 cd", "interp-accepted", MLI_I_OK, MLI_I_ARG_KIND) }
-    // CD args have no value model in the S2a interp: refusal fires at
-    // argument loading, before the op is even reached.
-    if res.code != MLI_I_ARG_KIND { return report_fail("I2 cd", "interp-code", res.code, MLI_I_ARG_KIND) }
-    report_pass("I2 CD function REFUSED by interp (no value model)")
+    if res.ok { return report_fail("I2 cd", "interp-accepted", MLI_I_OK, MLI_I_UNSUPPORTED_OP) }
+    if res.code != MLI_I_UNSUPPORTED_OP {
+        return report_fail("I2 cd", "interp-code", res.code, MLI_I_UNSUPPORTED_OP)
+    }
+    if res.block != 0 || res.index != 0 {
+        return report_fail("I2 cd", "refused-before-opcode", res.block, 0)
+    }
+    report_pass("I2 CD cd_mul REFUSED by interp at the opcode (no product, no arg-zero)")
 }
 
 // Tiny icmp so we can poke the SoA cc/op columns after a green verify.
@@ -423,6 +427,18 @@ fn case_interp_refuses_unknown_opcode() -> i64 with IO, Mut, Panic, Div {
     report_pass("I5 unknown opcode REFUSED by interp (no default-zero)")
 }
 
+// I6: CALL is a named opcode with no ABI. Verify must refuse it — stamping
+// OK was the same default-guess as E219 / #1784 / the char* printer.
+fn case_verify_refuses_call() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    f.i_op[mli_slot(0, 0)] = MLI_OP_CALL
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_CALL_UNSPECIFIED {
+        return report_fail("I6 call verify", "code", vs.code, MLI_VERR_CALL_UNSPECIFIED)
+    }
+    report_pass("I6 CALL is a VERIFY error (ABI unpinned, not a silent OK)")
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div {
     println("=== MLI S2a gate: ir_to_mli (straight-line i64/f64) + minimal interp ===")
     if ir_instr_arena_init() != IR_ARENA_OK {
@@ -452,6 +468,7 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     failures = failures + case_verify_refuses_unknown_cc()
     failures = failures + case_interp_refuses_unknown_cc()
     failures = failures + case_interp_refuses_unknown_opcode()
+    failures = failures + case_verify_refuses_call()
 
     if failures == 0 {
         println("=== MLI S2a: ALL CASES PASS ===")
