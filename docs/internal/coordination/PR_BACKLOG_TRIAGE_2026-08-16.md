@@ -11,7 +11,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.coord
 
 Status: wave-3 fleet hygiene. Read-only classification; no PRs merged or closed here.
 Author: `minimax-cli1` (tmux fleet window 19), lane `pr-triage-wave3` (extension of
-`pr-triage-wave2`). Claim: `bin/sounio-coord claim --agent minimax-cli1 --lane pr-triage-wave3`.
+`pr-triage-wave2`). Active branch: **`lane/minimax-cli1/20260815-clean`** (a
+fresh branch off `origin/main` at `c66014fda9`, holding the four cherry-picked
+triage commits — see "Branch migration" below).
+Claim: `bin/sounio-coord claim --agent minimax-cli1 --lane pr-triage-wave3-clean`.
+The previous lane `pr-triage-wave3` claim is STALE on a different worktree and
+cannot be released from here; do not reuse it.
 Inputs: `gh pr list --state open --limit 200` (**51** open PRs at 2026-08-17,
 capture window ~09:00Z), per-PR `gh pr view` for file lists + CI rollups,
 `bin/sounio-coord status` for active claims, `git log --first-parent origin/main`
@@ -276,10 +281,42 @@ none of them were mis-classified as triage rows.
 complementary — wave-2 listed 5 specifically-named PRs with the trap caveat on
 #1641; wave-3 widens to the full 52 and enforces the trap uniformly.
 
+## Branch migration (fleet-wide stale-checkpoint escape, 2026-08-17)
+
+The previous lane branch `lane/minimax-cli1/20260815` was a **stale
+checkpoint branch** — 625 commits ahead of `origin/main` at capture, well
+into the 606-623 range flagged by the fleet-wide warning. It was a
+history snapshot from before the lanes were isolated into worktrees, not a
+working branch. Per the warning's prescription:
+
+- A fresh branch `lane/minimax-cli1/20260815-clean` was created off
+  `origin/main` at `c66014fda9` (#1761 merge).
+- The four triage commits authored by this lane — `b223e94f61` (round-3 redo),
+  `851178467e` (round-4 redo), `6a18f48d0d` (round-5 redo), `292c83eb52`
+  (round-6 redo) — were cherry-picked onto the clean branch in chronological
+  order (clean-branch SHAs: `2841abc0f8`, `438f46c0fa`, `58ec5c69a5`,
+  `70a2208dae`). Conflicts in `docs/research/*.md` (files deleted on main)
+  were resolved by taking the deletion; the offload-log conflict was
+  resolved by taking main's version (the WAIVED row was re-appended locally
+  as audit). The `docs/internal/coordination/PR_BACKLOG_TRIAGE_2026-08-16.md`
+  conflict was resolved by taking the cherry-picked version (my content).
+- The clean branch now has exactly 4 commits ahead of `c66014fda9`, all
+  authored by `demetrios@agourakis.med.br` (`minimax-cli1`).
+- A new coord claim `minimax-cli1--pr-triage-wave3-clean` was registered on
+  the clean branch and the only file `docs/internal/coordination/PR_BACKLOG_TRIAGE_2026-08-16.md`.
+  The previous `minimax-cli1--pr-triage-wave3` claim is STALE on a different
+  worktree and cannot be released from here.
+
+**DO NOT open a PR from `lane/minimax-cli1/20260815`.** It carries 625
+commits of which only 4 are mine; the other 621 are history snapshots
+not candidates for landing. The fleet-wide warning was explicit:
+"the fix is a cherry-pick rather than a rebase, because those hundreds
+are not candidates for landing." The clean branch is the working branch.
+
 ## Coordination summary
 
-- Lane: `minimax-cli1--pr-triage-wave3`. Active (claim STALE per registry; will
-  be refreshed on next heartbeat).
+- Lane: `minimax-cli1--pr-triage-wave3-clean`. Active (registered at the
+  clean-branch escape above; heartbeat from the clean branch).
 - Active claims honoured: at capture, three ACTIVE claims (`cursor-2--mli-s3`,
   `grok-cli1--ws-g-v0d-arith-vectors`, `grok-cli3--ws-g-v0b-witnesses`) block
   #1759 and #1761; no other MERGE recommendation collides with a current claim.
