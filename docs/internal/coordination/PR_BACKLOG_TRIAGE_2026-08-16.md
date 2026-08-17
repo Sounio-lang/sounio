@@ -7,40 +7,40 @@ validated_by: minimax-cli1
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.coordination.pr-backlog-triage-2026-08-16
 -->
 
-# PR Backlog Triage — 2026-08-16 (Wave 3, round-5 coverage-redo 2026-08-17)
+# PR Backlog Triage — 2026-08-16 (Wave 3, round-6 coverage-redo 2026-08-17)
 
 Status: wave-3 fleet hygiene. Read-only classification; no PRs merged or closed here.
 Author: `minimax-cli1` (tmux fleet window 19), lane `pr-triage-wave3` (extension of
 `pr-triage-wave2`). Claim: `bin/sounio-coord claim --agent minimax-cli1 --lane pr-triage-wave3`.
-Inputs: `gh pr list --state open --limit 200` (**52** open PRs at 2026-08-17,
-capture window ~05:30Z), per-PR `gh pr view` for file lists + CI rollups,
+Inputs: `gh pr list --state open --limit 200` (**51** open PRs at 2026-08-17,
+capture window ~09:00Z), per-PR `gh pr view` for file lists + CI rollups,
 `bin/sounio-coord status` for active claims, `git log --first-parent origin/main`
 for merge activity since the trap cutoff (2026-08-04).
 
-**As-of commit:** `50be41791a` (`feat(ws-c): PR2 — the ENIR gate stack, 14/14
-green (#1756)`). Between round 4 (as-of `03416657fa`) and round 5,
-`origin/main` accumulated 21 commits: the merges of #1751 (wave-1 planning
-tranche), #1753 (WS-C PR1 ENIR/MIR shadow), #1754 (MLI S1), #1755 (P0-F
-allowlisted POSIX externs), #1752 (docs-registry provenance fix), #1757
-(PBPK28 CN SIGSEGV mitigation), #1756 (WS-C PR2 ENIR gate stack), #1732
-(proof-carrying weaning → sibling repo), #1720 (darwin-pbpk Knightian
-pharmacometrics), #1641 (self-parse classified baseline), #1730 (insertion-sort
-break), plus a `bin/madaros-linux-x86_64` prebuilt refresh. Five of those
-merges correspond to round-4 REBASE rows that landed (#1752, #1732, #1755,
-#1756, #1757); six correspond to items that were already merged before round 4
-and are unchanged here (#1751, #1753, #1754, #1720, #1641, #1730). The
-round-5 net open-queue delta vs round 4 is therefore: −5 (the REBASE rows that
-landed) + 3 (new PRs #1759, #1760, #1761) = −2, leaving 52 open PRs as
-confirmed by `gh pr list --state open`.
+**As-of commit:** `667930a5bd` (`fix(madaros): reserve 512 MiB stack for EISA
+lowering (bisected floor) + drift gate (#1760)`). Between round 5 (as-of
+`50be41791a`) and round 6, `origin/main` moved by exactly one commit: the
+merge of #1760 (stack-reservation E137 fix, lane `codex-1/ws-f-e137-fix-20260816`)
+at 2026-08-17T08:58:20Z. The round-5 net open-queue delta is therefore
+−1 (the merged PR), leaving 51 open PRs as confirmed by
+`gh pr list --state open`.
 
-This is the round-5 coverage-redo. Round 4 closed both round-3 defects (the
-stale-trap appendix was removed, so the seven "MERGE-and-BLOCKED" duplicates and
-the BLOCKED heading/row mismatch no longer exist — verified programmatically at
-write time: 50 unique PRs in 50 bucket rows, zero duplicates, every heading
-matches its row count). Round 5 re-derives against the live queue: three new
-PRs were opened (#1759 MLI S2a+S2b, #1760 the stack-reservation fix, #1761 the
-MPFR vectors) and five round-4 REBASE rows landed (#1752, #1732, #1755,
-#1756, #1757) — the latter group moved to "Recently merged" below.
+This is the round-6 coverage-redo. Round 5 closed both round-3 defects (the
+stale-trap appendix was removed in round 4; round 5 verified the fix held —
+52 unique PRs in 52 bucket rows, zero duplicates, zero multi-bucket entries).
+Round 6 re-derives against the live queue: one PR landed since round 5 (#1760
+→ MERGED), leaving #1760 entirely. **A note on the framing in this dispatch:**
+the round-3 defects the founder re-raised in this round-6 prompt — "eight PRs
+in two buckets (#1376 #1420 #1505 #1506 #1554 #1720 #1730 in MERGE and
+BLOCKED, #1641 in CLOSE and BLOCKED) and BLOCKED's heading says 20 above 28
+rows" — describe **round-3 state**, not the current document. Verified at
+write time: those eight PRs are in one bucket each (the five MERGEable
+docs-only/infra ones are MERGE only; #1720, #1730, #1641 are in no bucket —
+they appear only in "Recently merged" below); the BLOCKED heading reads 23
+and the BLOCKED table has 23 rows (7 stale-claim + 2 active-claim + 12 chain
++ 2 founder hold = 23). Round 6 does not need to "resolve eight PRs to one
+bucket" because they were already resolved in round 4; it only needs to drop
+#1760 and update the as-of commit.
 
 ## The trap, internalized
 
@@ -48,17 +48,18 @@ MPFR vectors) and five round-4 REBASE rows landed (#1752, #1732, #1755,
 
 The dispatch's example: #1641 was MERGEABLE per GitHub, its CI was all-green on
 2026-08-04, and its diff was one fixture file. Between 2026-08-04 and 2026-08-17
-(atop `50be41791a`), `main` accumulated 118 first-parent commits and 78 merge
+(atop `667930a5bd`), `main` accumulated 119 first-parent commits and 79 merge
 commits (cumulative since the round-3 audit's 302/97/72 figures; the increase
-includes the WS-C PR1, MLI S1, FFI POSIX-externs, WS-C PR2, and PBPK28 CN
-mitigation merges listed in the as-of block above). The fixture was stale by
+includes the WS-C PR1, MLI S1, FFI POSIX-externs, WS-C PR2, PBPK28 CN
+mitigation, and the round-6 #1760 stack-reservation E137 fix merges listed
+in the as-of block above). The fixture was stale by
 construction — the founder classified #1641 as CLOSE on the round-3 dispatch,
 and glm-cli2 actually merged it on 2026-08-17T02:25Z (commit `9812200496`) once
 the docs-registry hazard cleared. That outcome is recorded under "Recently
 merged" below, not as an open bucket.
 
 The same hazard still applies to every PR whose last green CI run is older than
-`50be41791a` — most of the dispatch's pre-bucketed CLEAN/READY set. MERGE
+`667930a5bd` — most of the dispatch's pre-bucketed CLEAN/READY set. MERGE
 candidates in this document carry a "re-run CI" note where the trap is live.
 
 **Sub-trap: docs-registry third-party drift.** The `Contracts` + `CI Decision`
@@ -91,11 +92,11 @@ The #1760 stack-reservation fix touches no claimed files and remains MERGEable.
 
 | Bucket | Count |
 |---|---:|
-| **MERGE** | 7 |
+| **MERGE** | 6 |
 | **REBASE** | 6 |
 | **CLOSE** | 16 |
 | **BLOCKED** | 23 |
-| **Total** | **52** |
+| **Total** | **51** |
 
 BLOCKED breakdown: 7 (stale claim) + 2 (active claim) + 12 (chain) + 2 (founder hold) = 23.
 
@@ -105,9 +106,9 @@ BLOCKED breakdown: 7 (stale claim) + 2 (active claim) + 12 (chain) + 2 (founder 
 
 Every PR below has a one-line reason (per the dispatch). Stale means last
 substantive activity >14 days ago. Path collisions are against current `main`
-(atop `50be41791a`).
+(atop `667930a5bd`).
 
-### MERGE (7)
+### MERGE (6)
 
 | # | Title (short) | Head | One-line reason |
 |---|---|---|---|
@@ -117,13 +118,12 @@ substantive activity >14 days ago. Path collisions are against current `main`
 | 1505 | dev(build): Madaros on idle SLURM nodes | `dev/remote-build-slurm-20260726` | addresses plan §5 risk #5 (CPU-saturation pod eviction); MERGEABLE, last green 2026-07-26, no claim collision; re-run CI before merge. |
 | 1506 | docs(claude): build lock carveout | `docs/build-lock-carveout-20260726` | docs-only carveout warning, MERGEABLE, no-risk; re-run CI (last green 2026-07-26) before merge. |
 | 1554 | fix(stdlib): correlated cov | `fix/madaros-parity-ab-20260729` | narrow stdlib + gate, Madaros ALL PASS per author, no claim collision; re-run CI (last green 2026-07-29) before merge. |
-| 1760 | fix(madaros): reserve 512 MiB stack for EISA lowering | `lane/codex-1/ws-f-e137-fix-20260816` | E137 bisected-floor fix; MERGEABLE, all substantive checks SUCCESS at 2026-08-17T08:43Z, touches `bin/madaros` + `scripts/ci/madaros_launcher_exit_status_gate.sh`, no claim collision; re-run CI immediately before merge. |
 
 ### REBASE (6)
 
 | # | Title (short) | Head | One-line reason |
 |---|---|---|---|
-| 816 | test(madaros): #651 array-of-struct | `work/sr651-madaros-witness` | base=`work/madaros-changed-ci` (not main); MERGEABLE per gh but `Madaros Changed Tests` + `CI Decision` FAIL on 2026-07-12; rebase onto `50be41791a` and re-run. |
+| 816 | test(madaros): #651 array-of-struct | `work/sr651-madaros-witness` | base=`work/madaros-changed-ci` (not main); MERGEABLE per gh but `Madaros Changed Tests` + `CI Decision` FAIL on 2026-07-12; rebase onto `667930a5bd` and re-run. |
 | 817 | test(madaros): generic struct-return | `work/structf-effect-witness` | base=`work/madaros-changed-ci`; `Madaros Changed Tests` + `CI Decision` FAIL on 2026-07-12; same rebase plan as #816. |
 | 840 | fix(parser): `study` soft keyword | `fix/parser-study-soft-keyword` | CONFLICTING vs main; closes #740 arm64 parity; small parser change — rebase path should be clean. |
 | 1603 | agent-bus realtime | `feat/agent-bus-realtime` | CONFLICTING vs main; touches MCP surface (`scripts/mcp/sounio_coord_mcp.py`) — verify against current `bin/sounio-coord` claim model before rebase. |
@@ -221,8 +221,9 @@ bucket above.
 | 1752 | fix(docs): registry sync preserves real provenance (R22/R23 inverted into guards) | 2026-08-16T22:47:35Z | `0b0c5cdd5b` |
 | 1732 | darwin_pbpk: Move Proof-Carrying Weaning to sibling repo (kernel keeps pointers) | 2026-08-16T20:45:02Z | `d8cb88841c` |
 | 1755 | feat(ffi): execute allowlisted POSIX externs + per-name execution gate (P0-F) | 2026-08-16T20:47:47Z | `1e8d48cdc8` |
-| 1756 | feat(ws-c): PR2 — the ENIR gate stack, 14/14 green | 2026-08-17T05:25:47Z | `50be41791a` (current main HEAD) |
+| 1756 | feat(ws-c): PR2 — the ENIR gate stack, 14/14 green | 2026-08-17T05:25:47Z | `50be41791a` |
 | 1757 | [darwin_pbpk] Mitigate Madaros PBPK28 CN SIGSEGV + silent-zero reconstruct | 2026-08-16T22:10:54Z | `4e98550769` |
+| 1760 | fix(madaros): reserve 512 MiB stack for EISA lowering (bisected floor) + drift gate | 2026-08-17T08:58:20Z | `667930a5bd` (current main HEAD) |
 
 `#1730` in particular was a real bug fix (insertion-sort index-0 corruption in
 `prob/conformal`); the round-3 trap appendix correctly identified it as
@@ -236,8 +237,13 @@ warranted.
 
 `#1756` was in round-4 REBASE with the note "re-run CI; if still red, sync docs
 metadata". The CI did not stay red — #1756 landed 14/14 green at 2026-08-17T05:25:47Z
-as `50be41791a` (current `main` HEAD). Round 4's REBASE-bucket disposition was
-right; the MERGE happened.
+as `50be41791a`. Round 4's REBASE-bucket disposition was right; the MERGE
+happened.
+
+`#1760` was in round-5 MERGE ("re-run CI immediately before merge"). The
+re-run happened — #1760 landed 14/14 green at 2026-08-17T08:58:20Z as
+`667930a5bd`, the current `main` HEAD. Round 5's MERGE-bucket disposition
+was right; the MERGE happened.
 
 ## Context references (NOT triage rows — do not double-count)
 
@@ -278,12 +284,16 @@ complementary — wave-2 listed 5 specifically-named PRs with the trap caveat on
   `grok-cli1--ws-g-v0d-arith-vectors`, `grok-cli3--ws-g-v0b-witnesses`) block
   #1759 and #1761; no other MERGE recommendation collides with a current claim.
 - No PRs merged or closed by this triage. Self-hosted/ untouched.
-- Round-5 fixes: three new PRs classified; #1756 moved to Recently-closed; new
-  BLOCKED-by-active-claim sub-section (2 PRs) added; MERGE 6→7, REBASE 7→6,
-  BLOCKED 21→23, CLOSE 16 unchanged. Bucket counts derived from row tables
-  after write (52 unique PRs in 52 rows, no duplicates).
-- As-of commit: `50be41791a` (main moved 21 commits between round 4 and round 5;
-  one merge of #1756 plus 20 others — see front-matter narrative for the full
-  enumeration). Re-derive at write time before acting.
+- Round-6 fixes: one PR dropped from MERGE (#1760, landed at 2026-08-17T08:58:20Z
+  as `667930a5bd`); added to "Recently merged". MERGE 7→6, other buckets
+  unchanged. Bucket counts derived from row tables after write (51 unique
+  PRs in 51 rows, no duplicates). Coverage check at write time confirmed:
+  the round-3 defects this dispatch re-raised describe round-3 state, not
+  the current doc — round-4 commit `851178467e` removed the stale-trap
+  appendix that caused the eight-PRs-in-two-buckets and the BLOCKED
+  heading/row drift; round 5 (`6a18f48d0d`) and round 6 verified the
+  properties still hold.
+- As-of commit: `667930a5bd` (main moved one commit between round 5 and
+  round 6 — the merge of #1760). Re-derive at write time before acting.
 - Commit hash for this file's commit on `lane/minimax-cli1/20260815` recorded
   in the PR description if this triage triggers a docs-registry sync.
