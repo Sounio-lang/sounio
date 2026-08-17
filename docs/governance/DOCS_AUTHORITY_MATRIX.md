@@ -93,7 +93,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.dissertation-dossier-resolution-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-hessian-e175-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_HESSIAN_E175_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dossier-import-closure-2026-08-17 | repo_only | docs/audit/DOSSIER_IMPORT_CLOSURE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.e008-e137-family-per-case-verdict-2026-08-17 | repo_only | docs/audit/E008_E137_FAMILY_PER_CASE_VERDICT_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.e043-rust-macro-design-dispatch-2026-07-12 | repo_only | docs/audit/E043_RUST_MACRO_DESIGN_DISPATCH_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.e175-family-per-case-verdict-2026-08-17 | repo_only | docs/audit/E175_FAMILY_PER_CASE_VERDICT_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.engine-parity-adjudication-2026-08-02 | repo_only | docs/audit/ENGINE_PARITY_ADJUDICATION_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-calculus-spec-divergence.dispatch | repo_only | docs/audit/epistemic_calculus_spec_divergence/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-demo-sweep-2026-06-02 | repo_only | docs/audit/EPISTEMIC_DEMO_SWEEP_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
