@@ -15,7 +15,7 @@ This directory is the witness corpus for the verification of [issue #1702](https
 
 ## Critical caveat — instrument not built from current source
 
-All witnesses in this directory were run against the prebuilt `bin/madaros-linux-x86_64` (sha256 `437bdd8f96a205906d53ca50a2a29ccf5f03a71c2e98e020b54d01351a0bff44`, identity `Madaros v0.80.0`). The blob was committed at `3d1f143e7a` (2026-08-17 07:09:56 UTC). Current `origin/main` is `db750980b4` — roughly 7 hours later, with ~14 commits past the prebuilt's source. Per the FLEET-WIDE WARNING, `./bin/souc` is prebuilt and editing compiler source does not change it; a stale binary caused one prior false investigation (#1689). The proper path is build-from-current-source, but Slurm is currently broken (`launch failed requeued held`) and a full self-compile trips the pod's CPU-saturation liveness probe.
+All witnesses in this directory were run against the prebuilt `bin/madaros-linux-x86_64` (sha256 `437bdd8f96a205906d53ca50a2a29ccf5f03a71c2e98e020b54d01351a0bff44`, identity `Madaros v0.80.0`). The blob's source commit is `3d1f143e7a` (2026-08-17 07:09:56 UTC). Current `origin/main` is `db750980b4` (2026-08-17 14:48:31 UTC), with this branch and `origin/main` having diverged 10-and-10. The prebuilt's source is roughly 7–8 hours stale and the working branch sits 10 commits off `origin/main` in each direction. Per the FLEET-WIDE WARNING, `./bin/souc` is prebuilt and editing compiler source does not change it; a stale binary caused one prior false investigation (#1689). The proper path is build-from-current-source, but Slurm is currently broken (`launch failed requeued held`) and a full self-compile trips the pod's CPU-saturation liveness probe.
 
 **All findings below are conditional on the prebuilt being representative of current main.** A CI-bound rerun against a current-source Madaros is required before any port lands.
 
@@ -105,6 +105,7 @@ Stronger witnesses I tried:
 - `ambiguous/strong.sio` — `as` aliases not supported by the parser (token 185 vs actual 30).
 - `ambiguous/strong2.sio` — bare `use module` (no braces) parses but does not bind names; same E137 downstream.
 - `ambiguous/strong3.sio` — `use a::{same_public_name}; use b::{same_public_name};` parses; **type-check passes**; `run_check_mode` reports `nodes=1 unresolved=2` (one call node, two ambiguous candidates) but **no ambiguity-specific error** is emitted. The closure walk detects the situation but does not surface it as a distinct diagnostic.
+- `ambiguous/strong5.sio` — the non-vacuous positive control. Demands `error-pattern: E014` (the documented `ambiguous_name` error code). Against current main: type-check passes (no E014 raised); compile fails downstream with `unresolved=2`. **The witness FAILS as expected** — the ambiguity check is absent.
 
 Three possible states for the defect:
 
@@ -112,7 +113,16 @@ Three possible states for the defect:
 2. The defect is still present but the test infrastructure does not surface it.
 3. The compiler never had an ambiguity check; the PR's gate was always vacuous.
 
-**Without a non-vacuous positive control, these three are indistinguishable.** This is why the fix is not ported.
+Strong5 narrows this. Tracing `E014` (defined in `self-hosted/diagnostics/mod.sio:45` as `ambiguous_name`) against current main's checker:
+
+- The only `report_error_at(.., 14, ..)` callsites are in `self-hosted/check/check.sio` at lines 20421 and 21013. Both are inside `check_index_expr` and emit error 14 when an array index is not i64 / not an integer type.
+- There is no `report_error_at` (or equivalent) callsite in any name-resolution path that emits error 14 for ambiguous-name resolution.
+
+**E014 has been repurposed.** The error code is still defined with the comment `// ambiguous_name` in `diagnostics/mod.sio`, but the name-resolution callsite for it does not exist in current main. The checker has an internal `state.ambiguous` flag in `checker_collect_hyper_alg_from_type`, but that flag is consumed by the hyper-algebra disambiguator (intersection strategy for mixed-kind types) — it never produces a user-facing diagnostic.
+
+This collapses the three hypotheses above: **state 3 is the correct reading.** The compiler never had an ambiguity check at the name-resolution layer in current main. The PR's gate was always vacuous because the feature it was supposed to gate does not exist.
+
+`ambiguous/strong5.sio` is the non-vacuous control that proves this. If a future fix adds the ambiguity check (raising E014 at the call site when two same-named publics are imported without aliasing), strong5 must transition from "type-check passes, no E014" to "type-check fails with E014". A gate runner that calls `bin/souc check strong5.sio` and asserts the output contains `error[E014]` would be the corresponding test.
 
 ---
 
@@ -170,6 +180,8 @@ Ambiguous-public (vacuous-pass investigation):
 - `ambiguous/strong.sio` — `as`-alias attempt (parser rejects).
 - `ambiguous/strong2.sio` — bare-`use` attempt (does not bind).
 - `ambiguous/strong3.sio` — both-imports attempt; type-check passes but no ambiguity diagnostic.
+- `ambiguous/strong4.sio` — `as`-alias variant with both imports and `let a = name_a(); let b = name_b(); a + b`. Parser rejects the `as` keyword; same conclusion as `strong.sio`, retained for completeness.
+- `ambiguous/strong5.sio` — non-vacuous positive control. Demands `error-pattern: E014`. Currently FAILS to fire E014, proving the ambiguity check is absent in current main.
 
 ---
 
@@ -190,4 +202,10 @@ cd docs/audit/pr1702_ref_deref_verification/reference/ambiguous
 SOUNIO_STDLIB_PATH="<repo>/stdlib" <repo>/bin/souc compile main.sio -o main.elf
 ```
 
+For the strong5 positive control, the relevant assertion is that the compiler's output contains `error[E014]`. The witness currently fails this assertion (E014 does not fire for name ambiguity in current main). If a future fix adds the ambiguity check, the assertion will succeed.
+
 A current-source Madaros build would replace the prebuilt with one whose source matches `origin/main`'s tree, after which every witness in this corpus should be re-run before any decision about whether the defects still survive.
+
+## Open follow-up: build from current source
+
+The prebuilt `bin/madaros-linux-x86_64` is ~7 hours stale relative to `origin/main` (14 commits past the prebuilt's source). Per the FLEET-WIDE WARNING, `./bin/souc` is prebuilt and editing compiler source does not change it; a stale binary caused one prior false investigation (#1689). The proper path is build-from-current-source. Slurm is currently broken (`launch failed requeued held`) and a full self-compile trips the pod's CPU-saturation liveness probe, so this was not attempted in this session. **Every finding here is conditional on the prebuilt being representative of current main** and must be re-verified against a current-source Madaros before any port lands.
