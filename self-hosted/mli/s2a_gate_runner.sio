@@ -353,6 +353,76 @@ fn case_interp_refuses_cd() -> i64 with IO, Mut, Panic, Div {
     report_pass("I2 CD function REFUSED by interp (no value model)")
 }
 
+// Tiny icmp so we can poke the SoA cc/op columns after a green verify.
+// Writing i_cc / i_op is the sanctioned SoA path — do not land a MliInst.
+fn build_icmp_lt() -> MliFunction with Mut, Panic {
+    var f = mli_func_new("icmp_lt", mli_kind_bool())
+    let a = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!f)
+    let d = mli_new_vreg(&!f, mli_kind_bool())
+    if a < 0 || b < 0 || b0 < 0 || d < 0 { return f }
+    var ok = mli_emit(&!f, b0, mli_inst_icmp(MLI_CC_LT, mli_opd_vreg(d, mli_kind_bool()), mli_opd_vreg(a, mli_kind_int(64, 1)), mli_opd_vreg(b, mli_kind_int(64, 1))))
+    ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, mli_kind_bool())))
+    f
+}
+
+fn build_add_i64() -> MliFunction with Mut, Panic {
+    var f = mli_func_new("add2", mli_kind_int(64, 1))
+    let a = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!f)
+    let d = mli_new_vreg(&!f, mli_kind_int(64, 1))
+    if a < 0 || b < 0 || b0 < 0 || d < 0 { return f }
+    var ok = mli_emit(&!f, b0, mli_inst3(MLI_OP_ADD, mli_opd_vreg(d, mli_kind_int(64, 1)), mli_opd_vreg(a, mli_kind_int(64, 1)), mli_opd_vreg(b, mli_kind_int(64, 1))))
+    ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, mli_kind_int(64, 1))))
+    f
+}
+
+// I3: V-struct refuses an unclassified compare-code. cc=7 is not "false".
+fn case_verify_refuses_unknown_cc() -> i64 with IO, Mut, Panic, Div {
+    var f = build_icmp_lt()
+    f.i_cc[mli_slot(0, 0)] = 7
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OPERAND_RULE {
+        return report_fail("I3 unknown cc verify", "code", vs.code, MLI_VERR_OPERAND_RULE)
+    }
+    report_pass("I3 unclassified icmp cc is a VERIFY error (not a silent false)")
+}
+
+// I4: interp refuses the same poke even if verify ran first on the clean fn.
+// The defect class: hold stayed false and the interp returned OK.
+fn case_interp_refuses_unknown_cc() -> i64 with IO, Mut, Panic, Div {
+    var f = build_icmp_lt()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I4 unknown cc interp", "pre-verify", vs.code, 0) }
+    f.i_cc[mli_slot(0, 0)] = 7
+    var args = mli_interp_args_empty()
+    args.ai[0] = 1
+    args.ai[1] = 2
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I4 unknown cc interp", "guessed-false", MLI_I_OK, MLI_I_BAD_CC) }
+    if res.code != MLI_I_BAD_CC { return report_fail("I4 unknown cc interp", "code", res.code, MLI_I_BAD_CC) }
+    report_pass("I4 unclassified icmp cc REFUSED by interp (not evaluated as false)")
+}
+
+// I5: an opcode with no case must refuse, not fall through to r=0 / OK.
+fn case_interp_refuses_unknown_opcode() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I5 unknown op interp", "pre-verify", vs.code, 0) }
+    f.i_op[mli_slot(0, 0)] = 77
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I5 unknown op interp", "guessed-zero", MLI_I_OK, MLI_I_UNSUPPORTED_OP) }
+    if res.code != MLI_I_UNSUPPORTED_OP {
+        return report_fail("I5 unknown op interp", "code", res.code, MLI_I_UNSUPPORTED_OP)
+    }
+    report_pass("I5 unknown opcode REFUSED by interp (no default-zero)")
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div {
     println("=== MLI S2a gate: ir_to_mli (straight-line i64/f64) + minimal interp ===")
     if ir_instr_arena_init() != IR_ARENA_OK {
@@ -379,6 +449,9 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     failures = failures + case_refuse_shift()
     failures = failures + case_interp_div_zero()
     failures = failures + case_interp_refuses_cd()
+    failures = failures + case_verify_refuses_unknown_cc()
+    failures = failures + case_interp_refuses_unknown_cc()
+    failures = failures + case_interp_refuses_unknown_opcode()
 
     if failures == 0 {
         println("=== MLI S2a: ALL CASES PASS ===")

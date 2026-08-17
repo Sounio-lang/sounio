@@ -9,7 +9,8 @@
 //      (width/mask semantics unpinned), memory ops (no MLI memory model yet:
 //      load/store/lea/alloca), calls, fcast, every k_* and cd_* op, f32/
 //      f128/f256/qd128/Knowledge/CD/vec/ptr VALUES, phys/stack/reloc
-//      operands, control flow (S2b), i64 div-by-zero and INT_MIN/-1.
+//      operands, unclassified compare-codes (not "false"), i64 div-by-zero
+//      and INT_MIN/-1. Control flow is implemented (S2b) with a fuel cap.
 //   2. Where behaviour IS defined, the interp delegates to the host — and
 //      the host is the claim oracle itself (Sounio under Madaros, ADR-008
 //      single semantic clock). i64 two's-complement arithmetic, IEEE f64
@@ -164,14 +165,16 @@ fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, 
             if x == min_i64 && y == 0 - 1 { return MLI_I_DIV_OVERFLOW }
         }
         var r: i64 = 0
-        if op == MLI_OP_ADD { r = x + y }
-        if op == MLI_OP_SUB { r = x - y }
-        if op == MLI_OP_MUL { r = x * y }
-        if op == MLI_OP_DIV { r = x / y }
-        if op == MLI_OP_REM { r = x % y }
-        if op == MLI_OP_AND { r = x & y }
-        if op == MLI_OP_OR { r = x | y }
-        if op == MLI_OP_XOR { r = x ^ y }
+        var matched = false
+        if op == MLI_OP_ADD { r = x + y; matched = true }
+        if op == MLI_OP_SUB { r = x - y; matched = true }
+        if op == MLI_OP_MUL { r = x * y; matched = true }
+        if op == MLI_OP_DIV { r = x / y; matched = true }
+        if op == MLI_OP_REM { r = x % y; matched = true }
+        if op == MLI_OP_AND { r = x & y; matched = true }
+        if op == MLI_OP_OR { r = x | y; matched = true }
+        if op == MLI_OP_XOR { r = x ^ y; matched = true }
+        if !matched { return MLI_I_UNSUPPORTED_OP }
         rf.vi[d.id] = r
         return MLI_I_OK
     }
@@ -186,10 +189,12 @@ fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, 
         var y: f64 = 0.0
         if s2.tag == MLI_OPD_IMM { y = s2.fimm } else { y = rf.vf[s2.id] }
         var r: f64 = 0.0
-        if op == MLI_OP_FADD { r = x + y }
-        if op == MLI_OP_FSUB { r = x - y }
-        if op == MLI_OP_FMUL { r = x * y }
-        if op == MLI_OP_FDIV { r = x / y }
+        var matched = false
+        if op == MLI_OP_FADD { r = x + y; matched = true }
+        if op == MLI_OP_FSUB { r = x - y; matched = true }
+        if op == MLI_OP_FMUL { r = x * y; matched = true }
+        if op == MLI_OP_FDIV { r = x / y; matched = true }
+        if !matched { return MLI_I_UNSUPPORTED_OP }
         rf.vf[d.id] = r
         return MLI_I_OK
     }
@@ -217,7 +222,7 @@ fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, 
     }
 
     if op == MLI_OP_ICMP {
-        if cc == MLI_CC_NONE { return MLI_I_BAD_CC }
+        if !mli_cc_known(cc) { return MLI_I_BAD_CC }
         if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
         if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
         if !opd_runnable_tag(s1.tag) || !opd_runnable_tag(s2.tag) { return MLI_I_UNSUPPORTED_OPERAND }
@@ -237,7 +242,7 @@ fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, 
     }
 
     if op == MLI_OP_FCMP {
-        if cc == MLI_CC_NONE { return MLI_I_BAD_CC }
+        if !mli_cc_known(cc) { return MLI_I_BAD_CC }
         if d.tag != MLI_OPD_VREG { return MLI_I_UNSUPPORTED_OPERAND }
         if d.id < 0 || d.id >= 128 { return MLI_I_VREG_RANGE }
         if !opd_runnable_tag(s1.tag) || !opd_runnable_tag(s2.tag) { return MLI_I_UNSUPPORTED_OPERAND }
