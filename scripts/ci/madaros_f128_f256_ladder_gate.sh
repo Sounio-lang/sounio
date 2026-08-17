@@ -12,6 +12,12 @@
 # cannot pass — the positive control must fire, and positives must reach
 # `check: OK` without error[E218].
 #
+# External oracle (not Sounio): tests/vectors/f128_f256/literal_boundary_*.jsonl
+# from MPFR via gen/literal_boundary_gen.c (GENERATION_RECEIPT.md). Probes embed
+# those source_literal strings and expected/via_f64 limb tables so a widen-f64
+# shortcut cannot green-wash against self-consistency. Arithmetic corpora
+# f128.jsonl/f256.jsonl are intentionally NOT consumed at V0-B (V0-D only).
+#
 # Note: Madaros may exit 0 while still printing E218 (diagnostic muting).
 # The gate judges stdout/stderr content, not exit code alone.
 #
@@ -119,6 +125,125 @@ echo "root=$ROOT_DIR"
 echo "souc=$SOUC"
 echo "stdlib=$SOUNIO_STDLIB_PATH"
 echo "souc_version=$("$SOUC" --version 2>/dev/null | head -1 || echo unknown)"
+
+# ---------------------------------------------------------------------------
+# MPFR external oracle — vectors + probe embedding (not Sounio-derived).
+# ---------------------------------------------------------------------------
+VEC_DIR="$ROOT_DIR/tests/vectors/f128_f256"
+F128_LIT="$VEC_DIR/literal_boundary_f128.jsonl"
+F256_LIT="$VEC_DIR/literal_boundary_f256.jsonl"
+# sha256 from GENERATION_RECEIPT.md Wave 3 section (grok-cli1 / docs/ws-g-ref-vectors)
+F128_LIT_SHA256="4b7804f0d70016770fb8bda4b67beb9226be1cebf9dc02f3771a4a7fcdbfa52d"
+F256_LIT_SHA256="574161d42fe10379d42198c03474a7b0b1daa39235111c45c2e8e28a7017a4c3"
+
+if [[ ! -f "$F128_LIT" || ! -f "$F256_LIT" ]]; then
+  note_fail "mpfr_literal_boundary_corpus_missing under tests/vectors/f128_f256/"
+else
+  got128="$(sha256sum "$F128_LIT" | awk '{print $1}')"
+  got256="$(sha256sum "$F256_LIT" | awk '{print $1}')"
+  if [[ "$got128" != "$F128_LIT_SHA256" ]]; then
+    note_fail "mpfr_f128_literal_boundary_hash_mismatch got=$got128 expected=$F128_LIT_SHA256"
+  else
+    note_pass "mpfr_f128_literal_boundary_hash_ok"
+  fi
+  if [[ "$got256" != "$F256_LIT_SHA256" ]]; then
+    note_fail "mpfr_f256_literal_boundary_hash_mismatch got=$got256 expected=$F256_LIT_SHA256"
+  else
+    note_pass "mpfr_f256_literal_boundary_hash_ok"
+  fi
+fi
+
+# Corpus integrity: every double_rounds_differs row must have expected != via_f64
+# (proves the trap set is real external ground truth, independent of Sounio).
+ORACLE_PY="$TMP_DIR/oracle_embed_check.py"
+cat >"$ORACLE_PY" <<'PY'
+import json, sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+pairs = [
+    ("f128", root / "tests/vectors/f128_f256/literal_boundary_f128.jsonl",
+     root / "tests/run-pass/f128_v0b_literal_smoke.sio"),
+    ("f256", root / "tests/vectors/f128_f256/literal_boundary_f256.jsonl",
+     root / "tests/run-pass/f256_v0b_literal_forms.sio"),
+]
+rc = 0
+for fmt, corpus, probe in pairs:
+    if not corpus.is_file() or not probe.is_file():
+        print(f"FAIL missing corpus or probe for {fmt}")
+        rc = 1
+        continue
+    rows = [json.loads(l) for l in corpus.read_text().splitlines() if l.strip()]
+    text = probe.read_text()
+    dr = [r for r in rows if r.get("double_rounds_differs")]
+    # expected limbs must differ from via_f64 on every trap
+    bad_eq = []
+    for r in dr:
+        if r["expected"]["limbs"] == r["via_f64"]["limbs"]:
+            bad_eq.append(r["id"])
+    if bad_eq:
+        print(f"FAIL {fmt} double_rounds_differs but limbs equal: {bad_eq}")
+        rc = 1
+    else:
+        print(f"PASS {fmt}_double_round_traps_distinct n={len(dr)}")
+
+    # Every embeddable (no leading '-') double-round source_literal must appear
+    # as a typed binding in the probe source.
+    missing = []
+    for r in dr:
+        lit = r["source_literal"]
+        if lit.startswith("-"):
+            # Sounio has no unary minus — limb-oracle only; still require table.
+            if f"ORACLE_{r['id']}_EXPECTED" not in text:
+                missing.append(f"limb_table:{r['id']}")
+            continue
+        # binding form: let v_N: fXXX = <lit>
+        if lit not in text:
+            missing.append(f"source:{r['id']}:{lit}")
+        if f"ORACLE_{r['id']}_EXPECTED" not in text:
+            missing.append(f"expected_table:{r['id']}")
+        if f"ORACLE_{r['id']}_VIA_F64" not in text:
+            missing.append(f"via_f64_table:{r['id']}")
+    if missing:
+        print(f"FAIL {fmt}_probe_missing_oracle_embed count={len(missing)}")
+        for m in missing[:12]:
+            print(f"  missing {m}")
+        rc = 1
+    else:
+        embeddable = sum(1 for r in dr if not r["source_literal"].startswith("-"))
+        print(f"PASS {fmt}_probe_embeds_double_round_sources n={embeddable}")
+
+    # Must NOT claim Sounio as oracle
+    if "oracle: tests/vectors/f128_f256/literal_boundary_" not in text:
+        print(f"FAIL {fmt}_probe_missing_oracle_header")
+        rc = 1
+    else:
+        print(f"PASS {fmt}_probe_declares_mpfr_oracle")
+
+# Arithmetic corpora present but explicitly unused at V0-B
+arith = list((root / "tests/vectors/f128_f256").glob("f128.jsonl")) + \
+        list((root / "tests/vectors/f128_f256").glob("f256.jsonl"))
+if len(arith) == 2:
+    print("NOTE arithmetic_corpora_present_but_not_consumed_at_v0b files=f128.jsonl,f256.jsonl (V0-D)")
+else:
+    print("NOTE arithmetic_corpora_absent_or_partial (ok for V0-B; required at V0-D)")
+
+sys.exit(rc)
+PY
+
+ORACLE_LOG="$TMP_DIR/oracle_embed.log"
+if ! python3 "$ORACLE_PY" "$ROOT_DIR" >"$ORACLE_LOG" 2>&1; then
+  note_fail "mpfr_oracle_probe_embedding_check"
+  cat "$ORACLE_LOG" >&2 || true
+else
+  while IFS= read -r line; do
+    case "$line" in
+      PASS\ *) note_pass "${line#PASS }" ;;
+      NOTE\ *) echo "$line" ;;
+      *) echo "$line" ;;
+    esac
+  done <"$ORACLE_LOG"
+fi
 
 # ---------------------------------------------------------------------------
 # Positive control — MUST fire. Proves the compiler check path is live and
