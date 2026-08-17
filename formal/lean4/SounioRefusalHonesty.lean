@@ -80,10 +80,22 @@
       `scripts/ci/e219_refusal_correspondence_gate.sh`.
 
   Still open, stated plainly:
-    · lean_single has no E219. The seed compiler still compiles the
-      `extern_c_unimplemented_builtin.sio` counterexample with exit 0.
-      That is an engine-split, the same class as #1798, and is not
-      closed here.
+    · lean_single has no E219, and a seed E219 written in house
+      style would be ornament. `strip_extern_blocks` rewrites
+      `extern "C"` into ordinary `fn` stubs before check, so the
+      Madaros predicate (`is_extern && !allowlisted`) has no object.
+      The distinguishing name of this file, `abs`, is a first-class
+      stub (`__native_abs_i64`). Measured 2026-08-17:
+      `bin/souc-lean-single-x86_64` emits an ELF for
+      `extern_c_unimplemented_builtin.sio` (compile exit 0) and
+      `abs(-7)` returns 7. `tc_error` is a warning (253 sites) and
+      never sets `TYPECHECK_FAILED`; `tc_error_hard` goes through
+      `tc_mark_failed`, which swallows `from_import` (bit 2048).
+      Only arity and unbalanced braces punch through. A real refuse
+      would need a surviving unresolved-extern bit, a CALL-site
+      check, an unconditional `TYPECHECK_FAILED`, and a second
+      allow-list — a different judgment, not this one. Left open
+      as the #1798 engine-split.
 
   WHY NOT THE OTHER TWO CANDIDATES, STATED PLAINLY.
   GUM-through-MLI: `gum_conservativity` is already proved for a sketch
