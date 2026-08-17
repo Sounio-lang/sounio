@@ -170,6 +170,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-builtin-emission-2026-06-24 | repo_only | docs/audit/MADAROS_BUILTIN_EMISSION_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step1-fix-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP1_FIX_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-closures-step2-capture-2026-06-24 | repo_only | docs/audit/MADAROS_CLOSURES_STEP2_CAPTURE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-correlated-eq-identity-2026-07-29 | repo_only | docs/audit/MADAROS_CORRELATED_EQ_IDENTITY_2026-07-29.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-d3-openslice-len-2026-08-06 | repo_only | docs/audit/MADAROS_D3_OPENSLICE_LEN_2026-08-06.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-d6-const-nonmain-2026-08-06 | repo_only | docs/audit/MADAROS_D6_CONST_NONMAIN_2026-08-06.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-dual-gum-knowledge-import-2026-07-19 | repo_only | docs/audit/MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
