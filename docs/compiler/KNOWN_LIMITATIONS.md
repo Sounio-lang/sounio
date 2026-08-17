@@ -179,6 +179,11 @@ This file previously claimed several rows as "Production" that the public-claim 
 
 **Engine split (verified 2026-08-17).** This entry names no engine, but `strip_extern_blocks()` is lean_single-specific. Under the default Madaros engine, this surface had a *separate, later* history: `docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md` found `system()`/`getpid()` calls under Madaros were **silently non-functional** — they claimed success (returned 0) while doing nothing, with no diagnostic — and recorded Track A (Madaros) as open and unpatched. That gap is now closed for a specific, allowlisted set of names by P0-F (#1755, commit `1e8d48cdc8`, merged to `main` 2026-08-17): `getpid`, `getppid`, `malloc`, `free`, `exit`, `abort`, `system` now have real emitters in `self-hosted/native/codegen_x86_linux.sio`, each backed by a per-name execution witness (not just a clean `check`) in `scripts/ci/ffi_posix_builtin_gate.sh`. Any `extern "C"` name outside that allowlist still fails closed under Madaros with `error[E219]` rather than silently fabricating a result — see `name_is_native_backend_builtin` in `self-hosted/check/check.sio`.
 
+**Beyond FFI / f128–f256 (same day, not the tilde alone).** Dual-engine disagreement is load-bearing for enforcement and for science values:
+
+- **#1798 (CLOSED):** Madaros accepted a forward ontology `inverse_of` that lean_single rejected with **E158**; Madaros was aligned to lean_single declaration-order (`scripts/ci/madaros_ontology_enforcement_gate.sh`).
+- **#1792 (OPEN):** Madaros prints `var=0.000000` where lean_single shows ~1e-5 on dissertation adaptive witnesses (plus ep28 confidence bit-pattern fabrication). Detect-only gate: `scripts/ci/epistemic_fabrication_detect_gate.sh`. Full variance-slot / multi-module f64 ABI repair is a separate compiler lane.
+
 **Observation boundary coverage** (fixed): `Observe` now enforced for comparison, IO-arg, FFI-arg, and pattern-match scrutinee in both x86-64 and ARM64 codepaths. Self-hosted compiler and multi-file checker are now aligned. Test: `tests/compile-fail/observe_io_boundary.sio`.
 
 ### Fixed in Self-Hosted Compiler (live in current binary)
