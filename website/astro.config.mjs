@@ -46,7 +46,7 @@ const sounioSiteTheme = {
     'editor.background': 'var(--color-code-bg)',
     'editor.foreground': 'var(--color-text-primary)',
   },
-  tokenColors: [...githubDarkTheme.tokenColors, ...sounioTokenColors],
+  tokenColors: [...(githubDarkTheme.tokenColors ?? []), ...sounioTokenColors],
 };
 
 // https://astro.build/config
