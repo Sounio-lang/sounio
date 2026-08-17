@@ -10,7 +10,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 # Madaros multimodule: imported f64 prints OK, raw f64*f64 wrong
 
 **Date:** 2026-07-26  
-**Status:** residual open (stdlib workarounds in nonunitary_amp via ep_square)  
+**Status:** **CLOSED** — `lower.sio` marks all-f64 TypeTuple as `returns_float=2`  
+  and float-element FieldGet for tuple unpack (`.0`/`.1`).  
+  Verified: `MADAROS_IMPORTED_F64_MUL_FIXED` (ga*ga=0.25, gv*gv≈0.001412).  
 **Witness:** `tests/multimodule/madaros_imported_f64_mul_{leaf,main}.sio`  
 **Gate:** `scripts/ci/madaros_imported_f64_mul_gate.sh`
 

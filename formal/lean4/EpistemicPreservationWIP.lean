@@ -130,13 +130,8 @@ theorem lookup_append_eq {Δ Γ' : TyCtx} {σ : Ty} :
   | nil => simp [lookupCtx]
   | cons hd tl ih => simp [lookupCtx, List.length]; exact ih
 
-theorem invLam {Γ e T E} (h : HasTy Γ e T E) {S F b} (he : e = .lam S F b) :
-    ∃ T₂, T = .tarrow S F T₂ ∧ HasTy (S :: Γ) b T₂ F := by
-  induction h with
-  | t_lam Γ' T₁ T₂ E' body hb ihb =>
-    injection he with h1 h2 h3; subst h1; subst h2; subst h3; exact ⟨T₂, rfl, hb⟩
-  | t_sub Γ' e' T' E1 E2 h0 hsub ih => exact ih he
-  | _ => exact Expr.noConfusion he
+-- `invLam` was moved into `EpistemicEffects.lean` (§9.3) on 2026-08-16;
+-- this file now imports it.
 
 theorem invKraw {Γ e T E} (h : HasTy Γ e T E) {k} (he : e = .kraw k) :
     kvalid k ∧ T = .tknow .treal := by

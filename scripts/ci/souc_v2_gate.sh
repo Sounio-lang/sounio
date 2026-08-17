@@ -228,7 +228,12 @@ fn main() -> i64 with IO { let x = unknown_var; return 0 }
 EOF
 TOTAL=$((TOTAL+1))
 err_out=$($S /tmp/gate_t8.sio /tmp/gate_err.elf 2>&1 || true)
-if echo "$err_out" | grep -q "line"; then
+# #1634: the assertion used to be `grep -q "line"`, which the old vague
+# `E200 \`x\` at line N` satisfied while carrying no file and no `error:`
+# prefix -- so `grep '^error'` on a failing build returned nothing. The
+# contract this test is really for is "a diagnostic names a location and is
+# greppable as an error", so assert that instead of the word "line".
+if echo "$err_out" | grep -q "^error" && echo "$err_out" | grep -qE ":[0-9]+"; then
     echo "PASS: error_line_numbers"
     PASS=$((PASS+1))
 else

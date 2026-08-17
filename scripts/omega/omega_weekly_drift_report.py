@@ -266,8 +266,12 @@ def summarize_canonical_bootstrap(attestation: dict, freeze: dict) -> dict:
 def summarize_sprint3_hardware(hw_live: dict, fpga_report: dict) -> dict:
     variance = hw_live.get("hardware_epistemic_power_variance_q32_32", 0)
     overhead_us = hw_live.get("poll_overhead_us", 0)
-    bidir_sim = fpga_report.get("k_axi_return_sim_status", "unknown")
-    bidir_synth = fpga_report.get("k_axi_return_synth_status", "unknown")
+    fpga_stale = bool(fpga_report.get("stale"))
+    # hardware/** has never been versioned in this repository -- a stale
+    # report's status fields describe an environment this checkout doesn't
+    # have. Report "stale" plainly rather than deriving a pass from them.
+    bidir_sim = "stale" if fpga_stale else fpga_report.get("k_axi_return_sim_status", "unknown")
+    bidir_synth = "stale" if fpga_stale else fpga_report.get("k_axi_return_synth_status", "unknown")
     return {
         "live_read_conformant": bool(hw_live.get("live_read_conformant", False)),
         "hardware_epistemic_power_log_q32_32": int(
