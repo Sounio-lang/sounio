@@ -24,14 +24,25 @@ fail() {
   exit 1
 }
 
+. scripts/dev/madaros_v2_enir_gate_scope.sh
+
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 
 # E1 is shadow-only: canonical compiler, IR, ABI, runtime, and codegen sources
-# must be byte-identical to the selected canonical base.
+# must be byte-identical to the selected canonical base when this PR is carrying
+# ENIR payload/gate changes. For unrelated compiler PRs, the gate is not the
+# right witness: the compiler/native/full-suite gates measure those changes.
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-git diff --quiet "$BASE_REF" HEAD -- \
-  self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm \
-  self-hosted/gpu stdlib/runtime || fail "E1 changed a lowering/codegen/ABI/runtime surface"
+PROTECTED_PATHS=(
+  self-hosted/compiler/main.sio
+  self-hosted/ir
+  self-hosted/native
+  self-hosted/wasm
+  self-hosted/gpu
+  stdlib/runtime
+)
+madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E1_ENIR_SHADOW_GATE" \
+  "E1 changed a lowering/codegen/ABI/runtime surface" "${PROTECTED_PATHS[@]}"
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >/dev/null
 chmod +x "$DRIVER"
