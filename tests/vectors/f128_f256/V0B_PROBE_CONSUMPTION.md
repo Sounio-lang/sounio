@@ -1,0 +1,69 @@
+<!-- docs:meta
+topic_id: repo.tests.vectors.f128-f256.v0b-probe-consumption
+authority: repo_only
+audience: internal+codex
+last_validated: 2026-08-17
+validated_by: grok-cli3
+source_of_truth: tests/vectors/f128_f256/V0B_PROBE_CONSUMPTION.json
+-->
+
+# V0-B probe consumption of MPFR literal_boundary corpora
+
+**Date**: 2026-08-17  
+**Emitter**: `scripts/dev/ws_g_v0b_emit_literal_probes.py`  
+**Gate**: `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b`  
+**Oracle branch source**: `docs/ws-g-ref-vectors-20260816` (grok-cli1)
+
+## Consumed (wired into V0-B probes)
+
+| Corpus | Role | Rows | Embedded as source literals | Limb-oracle only |
+|---|---|---:|---:|---:|
+| `literal_boundary_f128.jsonl` | V0-B source → bits | 53 | 48 | 5 (unary `-`) |
+| `literal_boundary_f256.jsonl` | V0-B source → bits | 49 | 45 | 4 (unary `-`) |
+
+**Double-rounding traps** (`double_rounds_differs=true`):
+
+| Format | Total traps | Embedded as source | Limb-only (unary minus) |
+|---|---:|---:|---:|
+| f128 | 18 | 17 | 1 (`-0x1.f…p+16383`) |
+| f256 | 16 | 16 | 0 |
+
+Every embedded trap appears as `let v_N: fXXX = <source_literal>` plus
+`ORACLE_<id>_EXPECTED` / `ORACLE_<id>_VIA_F64` limb tables (LSW-first i64)
+copied from the JSONL — **MPFR ground truth, not Sounio**.
+
+Notable embedded traps: `0.1`, `0.2`, `0.3`, `1.1`, long π/e digit strings,
+`1e-20`, `1.0000000000000002`, hexfloat midpoints
+`0x1.00000000000008p+0` / `…01p+0` / `…001p+0`, `9.999999999999999e-1`.
+
+Probes:
+
+- `tests/run-pass/f128_v0b_literal_smoke.sio`
+- `tests/run-pass/f256_v0b_literal_forms.sio`
+
+## Not consumed at V0-B (and why)
+
+| Asset | Why unused at V0-B |
+|---|---|
+| `f128.jsonl` / `f256.jsonl` (4414 + 4411 rows) | **Arithmetic** ops (add/sub/mul/div/cmp). Ladder defers ops to **V0-D** softfloat. Embedding them now would either require arithmetic (out of scope) or only re-state payloads without testing literals. |
+| `gen/mpfr_vector_gen.c` + `run.sh` | Generator for the arithmetic corpora — V0-D. |
+| Source spellings with leading `-` (e.g. `-0`, `-1`, `-0x1p-16494`) | **Sounio has no unary minus** (`0 - x` only). Rows remain in the JSONL and as `ORACLE_*` limb tables in the probe, but are **not** emitted as source literals. |
+| Live bit-identity assert (`literal bits == expected.limbs`) | Requires limb extraction / run path after E218 lifts. Tables are embedded now so a widen-f64 implementer has the external expected vs via_f64 pair in-tree; gate today only checks embedding + E218. |
+
+## Gate behaviour (must remain FAIL on V0-A)
+
+1. Verify sha256 of both literal_boundary JSONL files against `GENERATION_RECEIPT.md`.
+2. Verify every `double_rounds_differs` row has `expected.limbs != via_f64.limbs`.
+3. Verify probes embed those source strings + oracle tables.
+4. Positive control `hello.sio` → `check: OK`.
+5. Positive probes → must be `check: OK` without `error[E218]` to pass stage.
+6. Negatives (arith/cast/implicit) → must not `check: OK`.
+
+Under current Madaros V0-A, step 5 fails with E218 — **correct**.
+
+## Regenerate probes after vector updates
+
+```bash
+python3 scripts/dev/ws_g_v0b_emit_literal_probes.py
+bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b
+```
