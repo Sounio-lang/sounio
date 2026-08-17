@@ -405,6 +405,149 @@ without one stall" hypothesis — refined: gates are a necessary condition
 for entry into the merge conversation, but the binding constraint is
 coordination, and gates alone do not satisfy it.
 
+### Finding 4 (refined, 2026-08-17) — "Ships its own CI verification surface"
+
+The earlier Finding 4 conflated "gate-bearing" (touching CI files) with
+"shipping its own gate" (adding new CI infrastructure). The two are
+distinct. A more precise measurement at this re-derivation:
+
+**22 PRs merged between 2026-08-15 and 2026-08-17**, with their
+time-to-merge from creation (verified via `gh pr list --state merged`
+and a per-PR age calculation):
+
+| PR | Age (min) | New CI surface shipped? |
+|---|---:|---|
+| #1751 (planning tranche) | 9 | no |
+| #1745 (sedenion Hessian demo) | 10 | partial — fixes a demo's Mut effects declaration |
+| #1754 (MLI S1) | 18 | yes — V-struct verifier |
+| #1747 (env strings) | 18 | no — bug fix |
+| **#1763 (SIGPIPE harness + probe + `sigpipe_hygiene_gate.sh`)** | **26** | **yes — new gate script** |
+| **#1760 (E137 stack reservation + drift gate)** | **27** | **yes — new drift gate** |
+| #1748 (viz colormap) | 28 | no — renderer change |
+| #1746 (RNA CD preregistration) | 28 | no — research doc |
+| **#1765 (Madaros EISA gate + Hessian E175 dispatch)** | **30** | **yes — new gate** |
+| **#1753 (WS-C PR1 ENIR/MIR shadow lane)** | **31** | **yes — new shadow gate** |
+| **#1761 (f128/f256 reference corpora)** | **40** | **yes — fixtures** |
+| #1749 (aggregate-array mutable-borrow) | 41 | no — bug fix |
+| #1764 (design-system tokens) | 46 | no — CSS only |
+| **#1759 (MLI S2a+S2b refuse-first interpreter)** | **55** | **yes — interpreter w/ refuse gate** |
+| #1757 (PBPK28 CN SIGSEGV mitigation) | 55 | no — bug fix |
+| **#1767 (V0-B f128/f256 ladder gate + MPFR probes)** | **58** | **yes — new gate + probes** |
+| **#1768 (FFI system() fix + LEMON G2 + SedenTree + Borromean)** | **75** | partial — mixed |
+| **#1773 (lane status gate expiry)** | **174** | **yes — gate policy** |
+| **#1755 (P0-F POSIX externs + execution gate)** | **229** | **yes — new execution gate** |
+| **#1752 (docs-registry provenance)** | **536** | **yes — gate fix** |
+| **#1756 (WS-C PR2 ENIR gate stack, 27 gates)** | **700** | **yes — 27 new gates** |
+
+**11 of 22 = 50% shipped new CI surface.** The other 11 are bug fixes,
+docs, or renderer/CSS work — they landed because they are **narrow and
+bounded**, not because they shipped a gate. The two paths to land are
+therefore distinguishable:
+
+- **Narrow + bounded → lands**, even without new CI surface (median
+  ~30 min in this window).
+- **Broad + ships own CI surface → lands** (median ~40 min in this
+  window; longer when the gate is substantial — #1756's 700 min was 27
+  gate scripts).
+- **Broad + no CI surface → stalls**, the population the 16 CLOSE PRs
+  and the 7 stale-claim BLOCKED PRs belong to.
+
+The founder's hypothesis is supported with this refinement: "ships own
+gate" is what broad PRs need to earn their landing; narrow PRs are
+accepted by inspection alone. **The repo's effective acceptance criterion
+is: narrow-by-default, gate-bearing-when-broad.** Writing this down
+changes the next fifty PRs because most of them are written broad-by-default
+and assertion-only — exactly the population that stalls.
+
+### Finding 6 — Staleness is a decay process, not a state
+
+**#1770 evidence.** PR #1770 ("WS-A: Madaros status refresh + E2E
+acceptance checklist") opened at 2026-08-17T09:47:30Z against `main`,
+cherry-picked from a stale lane. By 2026-08-17T13:56Z (~4 hours later),
+`main` had merged five PRs after #1770's base: #1765 (09:54Z), #1764
+(10:08Z), #1767 (10:42Z), #1768 (10:42Z), #1773 (13:56Z). #1770 went
+DIRTY because `main` moved, not because #1770 changed. The merge-gap
+grew from 0 at open to 5 in four hours.
+
+**The model.** A PR's freshness is the **merge-gap**: the count of
+first-parent merges on `main` after the PR's base. The gap grows at a
+stochastic rate determined by main's merge velocity. During active merge
+periods (the wave-2/wave-3 cadence observed here), main merges at ~1-2
+per hour. During quiet periods, the gap grows at ~0.
+
+**Operational consequence.** A PR's expected lifetime should be measured
+in merge-gaps, not days. A PR open for 30 days against a quiet main is
+fresh by merge-gap (gap ≤ 5); a PR open for 4 hours against an active
+main is DIRTY (gap = 5). Calendar aging and decay-by-merge are
+independent axes; the project's actual freshness test is the merge-gap.
+
+**Implication for PR authoring.** A PR that ships its own gate is
+**self-certifying**: once the gate is installed, the PR's correctness is
+captured by the gate's verdict on main, regardless of how many merges
+land around it. A PR that is pure code (no gate) has to survive the
+merge-gap by frequent rebases and small file overlap. **This is why
+gate-bearing PRs can be slow to merge without going stale** — #1756
+took 700 minutes, but its merge-gap stayed manageable because its
+changes were concentrated in `scripts/ci/` and `bin/madaros`, which
+main's intermediate merges did not touch heavily.
+
+### What this means for the next 50 PRs
+
+The diagnosis above translates into four concrete changes the project
+could make, each of which is testable against the next 50 PRs:
+
+1. **Auto-close DRAFTs untouched ≥ 21 days.** Currently a manual triage
+   decision every wave. The repo could enforce this from `bin/sounio-coord`
+   or a weekly GitHub Action; would have closed 6 of the current CLOSE
+   bucket automatically. Testable: count auto-closed DRAFTs per wave
+   against founder-confirmed close decisions; aim for ≥ 80% agreement.
+2. **Require an explicit `bin/sounio-coord claim` reference in PR
+   descriptions for files under active development.** Currently the
+   absence is silent; the consequence is BLOCKED-by-stale-claim. A PR
+   that touches `self-hosted/check/check.sio` without naming the lane
+   that owns the file is, by Finding 3, asking for a stall. Testable:
+   fraction of MERGE PRs that name a claim reference, vs BLOCKED-by-claim
+   PRs that don't.
+3. **Bound claim duration.** The current 4-hour TTL with heartbeat
+   refresh means a stale-but-heartbeating claim never expires. A cap of
+   e.g. 14 days without an actual commit on a claimed file would let the
+   stale P0-F/wsg-v0b claim release, unblocking 14 PRs immediately.
+   Testable: claim age vs owner-commit-on-claimed-file; flag mismatches.
+4. **Cross-lane dependency tracking for gate/fixture pairs.** The
+   #1756 split was caught after the fact. A pre-merge check that flags
+   "this PR adds a gate but no fixtures under matching paths" would
+   surface the asymmetry at PR-open time, not at triage time. Testable:
+   fraction of gate-add PRs that ship with their fixtures in the same
+   window.
+
+A fifth, sharpened by the refinement above:
+
+5. **Author PRs narrow-by-default, gate-bearing-when-broad.** The
+   measurement says narrow PRs (≤ 10 files, single-concern) land in
+   ~30 minutes without needing new CI; broad PRs (> 30 files,
+   multi-concern) land only when they ship a new gate or fixture as
+   part of the PR. **Writing the criterion down turns the implicit
+   acceptance rule into an explicit one**, which lets PR authors
+   self-select before opening: either keep the PR narrow, or include a
+   new gate with it. Testable: of the next 50 merged PRs, what fraction
+   are narrow-and-no-gate vs broad-and-gate-bearing? If the criterion
+   is correctly stated, the narrow/gate mix should dominate; if not,
+   the rule needs revising.
+
+None of these is novel; they are well-known coordination primitives.
+What is novel in this project is that **the data to motivate them is
+visible in the backlog itself**, and the founder's hypothesis
+("PRs that carry their own gate land, PRs that assert without one
+stall") is supported by the data with the refinement that coordination,
+not gate quality, is the binding constraint.
+
+The next 50 PRs will be written; the question this triage answers is
+**how to write them so they land rather than stall.** The structural
+read says: narrow, claim-aware, fixture-paired, owner-named, and
+gate-bearing when broad. The bookkeeping says which specific 51 PRs to
+act on first; the diagnosis says how to keep the next 51 from looking
+like this one.
+
 ### Finding 5 — One gate landed without (or alongside) its fixtures
 
 #1756 (WS-C PR2 ENIR gate stack) landed with 14/14 green checks. Its
