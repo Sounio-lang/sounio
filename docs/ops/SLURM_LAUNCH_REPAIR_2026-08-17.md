@@ -15,6 +15,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.ops.slurm-laun
 **Partition used for proof:** `cpu-ops` (1 node, idle)  
 **Refute control:** a broken recipe must fail or show missing `/workspace` paths; a working recipe must reach `status=pass` with `workspace_visible=no` and a receipt under `/orangefs/...`.
 
+## Supported path today (read this first)
+
+| Path | Status | Who can fix it |
+|---|---|---|
+| **`srun`** with scrubbed env + absolute `/bin/bash` + `--chdir=/tmp` | **Supported.** Proven COMPLETED (job **10113**). Use `scripts/dev/slurm_srun_minimal.sh`. | Lane / agent |
+| **`sbatch`** for submitter `openvscode-server` | **Not repaired.** Still fails with `user_env_retrieval_failed_requeued_held` even under `--export=NONE` and `--chdir=/tmp` (jobs 10106, 10108; same class as held 9668). | **Admin / Slurm controller** — out of reach from an agent lane |
+
+**Plain statement:** this deliverable did **not** repair `sbatch`. The `user_env_retrieval` failure is a controller-side issue for this submitter (uid / home resolution on the batch path). From a fleet lane the only honest supported path today is **`srun`** via the recipe and helper below. Do not tell downstream agents (e.g. grok-cli2 dissertation-gate re-runs) that batch is fixed.
+
 ## Held jobs (pre-existing)
 
 | Job | Partition | Reason |
@@ -40,7 +49,7 @@ Reproduced: jobs **10106**, **10108**. Never left PENDING in 40s of polling; no 
 
 **srun** of the same logical command on the same partition **succeeds**.
 
-**Conclusion:** batch launch path tries to retrieve a user environment for the submitter and fails (uid mapping / no real shell home on the cluster). This is independent of scrubbing `/workspace` vars once `--export=NONE` is set. Fleet heavy jobs should use **`srun`** until sbatch user-env is fixed on the controller, or submit as a user slurmd can resolve.
+**Conclusion:** the batch launch path tries to retrieve a user environment for the submitter and fails (uid mapping / no real shell home on the cluster). This is **independent** of scrubbing `/workspace` vars once `--export=NONE` is set. It is an **admin/controller problem**, not something a lane can patch in-repo. Fleet heavy jobs **must use `srun`** until an admin fixes sbatch user-env for this submitter (or until jobs are submitted as a principal slurmd can resolve).
 
 ### B. `--export=ALL` (or default inheritance) pulls ~40 `/workspace/*` paths onto the node
 
@@ -206,8 +215,8 @@ Helper script: `scripts/dev/slurm_srun_minimal.sh`
 
 A recipe that only “worked” without a demonstrated fail would not identify the culprit. Here: **sbatch user-env retrieval** is the fleet hold; **export=ALL + workspace paths** is the srun footgun; **absolute bash + chdir + export=NONE** is the pass.
 
-## What we did not fix
+## What we did not fix (and will not claim)
 
-- Controller-side sbatch user environment for `openvscode-server` / root (needs Slurm/admin).
+- **`sbatch` was not repaired.** Controller-side user-env retrieval for `openvscode-server` remains broken. Only an admin can fix that. This PR documents the failure and routes traffic to `srun`.
 - Releasing historical held jobs 9635–9668 (left for owners; `scancel` if desired).
 - GPU partition smoke (cpu-ops was sufficient to prove launch; GPU adds gres, same env rules).

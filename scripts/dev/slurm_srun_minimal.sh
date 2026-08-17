@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Minimal WORKING Slurm launch for the Beagle pilot from the workspace login.
-# Proven 2026-08-17: srun COMPLETED with receipt on /orangefs.
-# Do NOT use sbatch from this submitter until user_env_retrieval is fixed.
+# Proven 2026-08-17: srun COMPLETED (job 10113) with receipt on /orangefs.
+#
+# Supported path today: srun (this script). sbatch is NOT repaired —
+# user_env_retrieval_failed is an admin/controller issue for openvscode-server;
+# lanes cannot fix it. See docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md.
 #
 # Usage:
 #   scripts/dev/slurm_srun_minimal.sh 'echo hello'
