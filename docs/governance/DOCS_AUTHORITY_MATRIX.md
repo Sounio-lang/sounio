@@ -284,6 +284,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.stats-ols-diag-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_OLS_DIAG_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-scipy-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SCIPY_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.stats-shapiro-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SHAPIRO_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.vec-new-path-call-fabrication-census-2026-08-17 | repo_only | docs/audit/VEC_NEW_PATH_CALL_FABRICATION_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.wave14d-thinlink-921-residual-2026-07-21 | repo_only | docs/audit/WAVE14D_THINLINK_921_RESIDUAL_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-diagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_DIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-offdiagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_OFFDIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
