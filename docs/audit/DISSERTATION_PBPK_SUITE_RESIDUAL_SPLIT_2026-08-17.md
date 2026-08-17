@@ -17,6 +17,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.disserta
 
 Parent triage filed these four under **toolchain_defect — preflight** because job-9908 kept only 5-line tails. This note re-runs `souc check` and splits each failure into **test/stdlib source** vs **Madaros** (opposite owners).
 
+**The deliverable is the owner split, not a single “fix the four fails” ticket.** Anyone who reads only the failure list will treat it as one pile. It is two disjoint fixes:
+
+| Fix family | What it greens | What it does **not** green | Owner |
+|------------|----------------|----------------------------|-------|
+| **Madaros Seq** (`seq_new`, Seq methods, `acknowledge` wiring) | `rapamycin_kaxi_fuse_prior`; clinical’s `chemistry::ontology` → `ontology/model.sio` import | `pbpk28_sobol_pce`; `halo_pgx_gate_pass`; clinical’s plot / digit-literal slice | Madaros / Seq surface |
+| **Test + stdlib edits** (Saltelli fn effects; halo `with Epistemic`; clinical plot API + `1000000.0`; optional `pub` on plot helpers) | `pbpk28_sobol_pce`; `halo_pgx_gate_pass`; clinical’s plot / scale_for_plot slice | `rapamycin_kaxi_fuse_prior`; clinical’s ontology import under Madaros | test authors + stdlib plot/sobol |
+
+Shipping a Seq fix labelled “ontology enforcement” would leave both defects half-owned: kaxi still open if only plot were fixed, clinical still red under Madaros if only enforcement policy moved, sobol/halo untouched either way.
+
 ---
 
 ## 0. Dossier branch hygiene (same session)
@@ -121,104 +130,124 @@ Same root breaks `stdlib/epistemic/kaxi.sio` and (below) `stdlib/ontology/model.
 
 ---
 
-### 2.3 `pbpk28_rapamycin_clinical` — **SPLIT: test/stdlib first; ontology leg = Seq (not codex-3 enforcement)**
+### 2.3 `pbpk28_rapamycin_clinical` — **LOOKS like ontology-enforcement; is not**
 
-Never reaches `PBPK28_RAPAMYCIN_CLINICAL_PENDING_OBSERVED`. Dies in check. **Both engines fail**, for overlapping but not identical reasons.
+Never reaches `PBPK28_RAPAMYCIN_CLINICAL_PENDING_OBSERVED`. Dies in check. **Both engines fail.**
 
-#### 2.3.1 Test / stdlib defects (both engines — fix without Madaros)
+#### Why the wrong owner is the obvious trap
+
+Madaros error mass is dominated by paths under `ontology/model` and `chemistry/ontology`:
+
+| Where (Madaros, this worktree) | Approx. count |
+|--------------------------------|--------------:|
+| `error[E011]` in `ontology/model` | 48 |
+| `error[E137]` in `ontology/model` | 33 |
+| `error[E004]` in `chemistry/ontology` | 32 |
+| `error[E013]` in `ontology/model` | 10 |
+| errors in `validation/pbpk28_rapamycin_clinical` itself | ~14 (plot + scale) |
+
+The **directory of the loudest diagnostics** (`stdlib/ontology/model.sio`) makes the wrong owner look obvious: “hand clinical to whoever owns ontology enforcement.” Checking instead of assuming is the value of this pass.
+
+**Plain statement for codex-3 / backlog readers:**
+
+> `pbpk28_rapamycin_clinical` **LOOKS** like codex-3’s ontology-enforcement gap because it dies inside `ontology/model.sio`. **It is not.** It is **Madaros missing Seq** (the same infrastructure hole as `rapamycin_kaxi_fuse_prior`) **plus test/plot defects that lean_single also hits**. That is infrastructure and test authorship, not enforcement policy. A Seq fix labelled “enforcement” would leave both defects half-owned.
+
+Ontology **enforcement** would mean: does the checker apply nominal ChEBI / `@ ontology-bundle` / subsumption rules. Clinical never gets that far. `ontology/model.sio` fails earlier because it calls `seq_new()` and Seq methods that Madaros does not resolve.
+
+#### 2.3.1 Test / stdlib defects (both engines — independent of Seq)
+
+lean_single never reaches ontology: it dies on the clinical file itself.
 
 | Symptom | Evidence | Owner |
 |---------|----------|-------|
-| `1_000_000.0` in `scale_for_plot` | Both: `E137`/`E200` name `_000_000`. Spec claims digit separators (`docs/spec/LANGUAGE_SPECIFICATION.md`); Madaros lexer has an underscore path in `lexer/mod.sio` / `numparse.sio`, but the live tokenisation still splits `1_000_000.0` → `1` + `_000_000`. | **Toolchain gap (both engines)** on separators; **immediate clinical unblock = test** write `1000000.0` |
-| `error_bar_entry(2.0, scale..., ...)` | API is `error_bar_entry(label: string, value, uncertainty, confidence)` (`stdlib/plot/epistemic.sio`). Call site passes **f64 first** (time), not a string label. | **TEST SOURCE** |
-| `error_bar_chart(&ebs, "title")` | API is `error_bar_chart(entries, n: i64, title)` — arity 3. | **TEST SOURCE** |
-| E175 `error_bar_entry` / `error_bar_chart` private | Callees are non-`pub` in `plot/epistemic.sio`. Madaros enforces module privacy. | **STDLIB** (`pub` the helpers) **and/or** test stop calling private plot demos |
+| `1_000_000.0` in `scale_for_plot` | Both engines: `E137`/`E200` name `_000_000`. Live tokenisation splits `1_000_000.0` → `1` + `_000_000` (spec claims separators; neither engine accepts this form here). | Immediate unblock: **test** write `1000000.0`. Root: digit-separator gap on both engines. |
+| `error_bar_entry(2.0, scale..., u, conf)` | API is `error_bar_entry(label: string, value, uncertainty, confidence)` (`stdlib/plot/epistemic.sio`). Call site passes **f64 time first**, not a string label. lean: `E001` type mismatch at the four call sites. | **TEST SOURCE** |
+| `error_bar_chart(&ebs, "title")` | API is `error_bar_chart(entries, n: i64, title)` — arity 3. lean: `arity mismatch expected 3 got 2`. | **TEST SOURCE** |
+| E175 private plot helpers (Madaros) | `error_bar_entry` / `error_bar_chart` are non-`pub` in `plot/epistemic.sio`. | **STDLIB** (`pub`) and/or test stop using private demos |
 
-These alone prevent PENDING emission even if ontology were deleted from the file.
+These alone block `…_CLINICAL_PENDING_OBSERVED` even if the ontology import were deleted from the file. **Seq-on-Madaros does not green this slice.**
 
-#### 2.3.2 Ontology import cascade (Madaros-only; lean_single OK)
+#### 2.3.2 Ontology import cascade (Madaros-only; same Seq root as kaxi)
 
 ```text
 use chemistry::ontology;
 → ontology/model.sio uses seq_new() / Seq methods throughout
 → Madaros: E137 seq_new, E011 no method, E013 index, E004 cascades
-→ lean_single: chemistry::ontology import probe compiles
+→ lean_single: isolated chemistry::ontology import probe compiles
 ```
 
-Isolated probe `use chemistry::ontology` reproduces the Seq cascade under Madaros; lean_single compiles.
+| Slice | Owner | Greens with Seq-only? | Greens with test/plot-only? |
+|-------|-------|----------------------|------------------------------|
+| plot + `scale_for_plot` | test + stdlib | no | **yes** (lean can then emit PENDING if obs still empty) |
+| `chemistry::ontology` → Seq | **Madaros Seq** (shared with §2.2 kaxi) | **yes** (import checks) | no |
+| ontology-enforcement policy | **not this case** | n/a | n/a |
 
-**Is this codex-3’s “ontology-enforcement gap in the checker”?**
+**Handoff:** do **not** assign clinical to codex-3 as an enforcement twin. Seq is the Madaros/Seq owner (same as kaxi). Clinical’s plot slice is a separate test/stdlib ticket. Two owners; two fixes; neither is “enforcement.”
 
-**No — not the same root.**  
-
-- This clinical failure is **Seq infrastructure missing under Madaros**, which happens to live inside `ontology/model.sio` because that module is Seq-heavy.  
-- An “ontology-enforcement” checker gap would be about **whether Madaros enforces ontology/typed-bundle rules** (nominal ChEBI, `@ ontology-bundle`, subsumption). That is a different defect class.  
-- **Do not double-fix Seq under an ontology-enforcement label.**  
-- **Handoff:** the Seq/Madaros hole is shared with §2.2 (kaxi). If codex-3’s lane is only enforcement policy in the checker, **leave Seq to the Seq/Madaros owner**; clinical remains blocked on §2.3.1 even after Seq lands.  
-- If codex-3 has expanded to “make ontology modules check under Madaros”, then **ontology/model Seq is their consumer surface** — same physical files, still the Seq root, not enforcement.
-
-**Judgement summary for clinical:**
-
-| Slice | Owner | Blocks PENDING? |
-|-------|-------|-----------------|
-| digit separator / scale_for_plot | toolchain + easy test workaround | yes |
-| plot epistemic call shape + privacy | **test + stdlib** | yes |
-| chemistry::ontology → Seq | **Madaros Seq** (same as kaxi) | yes under Madaros |
-| “ontology enforcement” checker policy | **not this case** — do not assign as codex-3 enforcement twin |
-
-**Recommended order:** (1) test/stdlib plot + `1000000.0` so lean path can emit PENDING; (2) Madaros Seq unblocks ontology import and kaxi together.
+**Recommended order:** (1) test/stdlib plot + `1000000.0` so lean path can emit PENDING; (2) Madaros Seq unblocks ontology import **and** kaxi together.
 
 ---
 
-### 2.4 `halo_pgx_gate_pass` — **TEST SOURCE (Madaros correct); lean under-enforces**
+### 2.4 `halo_pgx_gate_pass` — **TEST SOURCE only (Madaros correct on E170)**
 
-**Diagnostics (Madaros):** `E170` — accessing `.value` on epistemic type requires `with Epistemic` or `acknowledge`.
+**Continued classification (plain):** this is **not** a Madaros defect and **not** related to Seq or ontology. One diagnostic, one owner.
 
-**Source:**
+**Diagnostics (Madaros):** sole hard error `E170` — accessing `.value` on epistemic type requires `with Epistemic` or `acknowledge`.
+
+**lean_single:** **check PASS** (compile completes). So the suite failure under default Madaros is engine-strictness the test was never updated for.
+
+**Source (the whole defect):**
 
 ```sounio
 fn main() with IO, Mut, Div, Panic, Confidence(750) {
     let k_cl: Knowledge<f64> = measure(40.0, uncertainty: 1.6)
-    let cl = k_cl.value   // E170 under Madaros
+    let cl = k_cl.value   // Madaros E170 — Confidence ≠ Epistemic unwrap
     ...
 }
 ```
 
-**Probes:**
+**Probes (same worktree):**
 
 | Surface | Madaros | lean_single |
 |---------|---------|-------------|
 | bare `.value` (no Epistemic) | E170 | E170 |
 | `Confidence(750)` + `.value` | **E170** | **PASS** |
 | `Confidence(750)` + `Epistemic` + `.value` | ok | ok |
-| `Confidence(750)` + `acknowledge` | E137 `acknowledge` undeclared | PASS |
+| `Confidence(750)` + `acknowledge(...)` | E137 `acknowledge` undeclared | PASS |
 
 **Judgement:**
 
 | Layer | Owner | Why |
 |-------|-------|-----|
-| Primary | **TEST SOURCE** | Add `Epistemic` to `main` (and keep `Confidence(750)` for the PGx gate story). Madaros E170 is the honesty rule. |
-| Secondary | lean_single **under-enforcement** | Treats `Confidence(N)` as enough to open `.value`; Madaros does not. Design/help text pairs `.value` with `Epistemic` / `acknowledge`, not Confidence alone. |
-| acknowledge path on Madaros | **Madaros** | `acknowledge` not resolved as builtin (same family as §2.2) — but **not required** if the test uses `.value` under `with Epistemic`. |
+| Primary | **TEST SOURCE** | One-line fix class: add `Epistemic` to `main` (keep `Confidence(750)` for the PGx gate narrative). Madaros E170 is the honesty rule the help text states. |
+| Secondary observation | lean_single **under-enforces** | Treats `Confidence(N)` as enough to open `.value`. Design pairs `.value` with `Epistemic` / `acknowledge`, not Confidence alone. Do **not** “fix” Madaros by weakening E170 to match lean. |
+| `acknowledge` on Madaros | Madaros Seq/epistemic builtin family | Optional path only; **not required** if the test uses `.value` under `with Epistemic`. |
 
-**Not science.** Compile-time gate witness only.
+**Disjointness:** Madaros Seq does **not** green halo. Test Epistemic edit does **not** green kaxi. Halo is entirely on the test-edit side of the split table in the intro.
+
+**Not science.** Compile-time PGx confidence-gate witness only.
 
 ---
 
 ## 3. Owner matrix (the deliverable)
 
+### 3.1 Per case
+
 | # | Case | Primary owner | Secondary | Hand off? |
 |---|------|---------------|-----------|-----------|
 | 19 | `pbpk28_sobol_pce` | **stdlib/test** — effectful model vs bare `fn` in `saltelli_run` | Madaros multi-module E035 noise | No |
 | 20 | `rapamycin_kaxi_fuse_prior` | **Madaros** — Seq + acknowledge | — | Seq/Madaros lane |
-| 22 | `pbpk28_rapamycin_clinical` | **test+stdlib** first (plot API, digit literal workaround) | **Madaros Seq** via ontology import | **Not** codex-3 ontology-**enforcement**; Seq shared with kaxi |
-| 18 | `halo_pgx_gate_pass` | **test** — add `with Epistemic` | lean_single Confidence/E170 laxity | No |
+| 22 | `pbpk28_rapamycin_clinical` | **two owners** — test/stdlib plot slice **and** Madaros Seq (ontology import) | — | **Not** codex-3 ontology-**enforcement** |
+| 18 | `halo_pgx_gate_pass` | **test** — add `with Epistemic` | lean_single Confidence/E170 laxity (do not weaken Madaros) | No |
 
-Opposite owners matter:
+### 3.2 Disjoint fix coverage (read this before filing one ticket)
 
-- Fixing Madaros does **not** green sobol or halo without source/API edits.  
-- Fixing tests does **not** green kaxi without Seq on Madaros.  
-- Clinical needs **both** slices; ontology-enforcement work alone does not clear it.
+| Fix | Greens | Does not green |
+|-----|--------|----------------|
+| **Madaros Seq** | kaxi; clinical ontology import | sobol; halo; clinical plot/digit slice |
+| **Test + stdlib edits** | sobol; halo; clinical plot/digit slice | kaxi; clinical ontology import under Madaros |
+
+Two disjoint fixes, two different owners. The failure list alone looks like one problem; the directory of clinical’s loudest errors (`ontology/model.sio`) steers the wrong owner toward “enforcement.” The checked split is the deliverable.
 
 ---
 
