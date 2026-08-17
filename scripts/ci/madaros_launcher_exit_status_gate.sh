@@ -22,6 +22,10 @@ if ! grep -q 'MADAROS_STACK_KB' "$ROOT_DIR/bin/madaros"; then
   echo "FAIL: MADAROS_STACK_KB not present in launcher" >&2
   exit 1
 fi
+if ! grep -Fq 'MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"' "$ROOT_DIR/bin/madaros"; then
+  echo "FAIL: Madaros default stack reservation must remain 524288 KiB" >&2
+  exit 1
+fi
 # Must not have unconditional unlimited without the named reservation branch.
 if grep -n 'ulimit -s unlimited' "$ROOT_DIR/bin/madaros" | grep -v MADAROS_STACK_KB >/dev/null 2>&1; then
   # Allowed only inside MADAROS_STACK_KB==0 branch — check that unlimited is gated.
