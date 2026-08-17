@@ -220,13 +220,20 @@ for fmt, corpus, probe in pairs:
     else:
         print(f"PASS {fmt}_probe_declares_mpfr_oracle")
 
-# Arithmetic corpora present but explicitly unused at V0-B
+# Arithmetic corpora present but explicitly unused at V0-B (V0-D only).
 arith = list((root / "tests/vectors/f128_f256").glob("f128.jsonl")) + \
         list((root / "tests/vectors/f128_f256").glob("f256.jsonl"))
+hard = list((root / "tests/vectors/f128_f256_v0d").glob("arith_hard_*.jsonl")) \
+    if (root / "tests/vectors/f128_f256_v0d").is_dir() else []
 if len(arith) == 2:
     print("NOTE arithmetic_corpora_present_but_not_consumed_at_v0b files=f128.jsonl,f256.jsonl (V0-D)")
 else:
     print("NOTE arithmetic_corpora_absent_or_partial (ok for V0-B; required at V0-D)")
+if hard:
+    names = ",".join(p.name for p in sorted(hard))
+    print(f"NOTE v0d_hard_case_corpora_present_but_not_consumed_at_v0b files={names} (V0-D)")
+else:
+    print("NOTE v0d_hard_case_corpora_absent (ok for V0-B; see PR #1761 f128_f256_v0d)")
 
 sys.exit(rc)
 PY
