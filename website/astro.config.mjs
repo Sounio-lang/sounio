@@ -5,7 +5,20 @@ import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from '@astrojs/mdx';
 import sitemap from '@astrojs/sitemap';
-import remarkSioAsRust from './src/remark/remark-sio-as-rust.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+// Real Shiki grammar for Sounio (`sio` code fences). Previously ```sio blocks
+// were relabeled as ```rust before highlighting (see git history of
+// src/remark/remark-sio-as-rust.mjs) — that tokenized every &!, ++, `var`
+// and `with`-clause on the site using Rust's keywords, on a language whose
+// own CLAUDE.md opens by listing those as compile errors. This is a
+// targeted grammar, not a full port: it covers the tokens that actively
+// mislead plus a minimal keyword/comment/string/number baseline. See
+// src/shiki/sounio.tmLanguage.json for scope.
+const sounioGrammar = JSON.parse(
+  readFileSync(fileURLToPath(new URL('./src/shiki/sounio.tmLanguage.json', import.meta.url)), 'utf-8')
+);
 
 // https://astro.build/config
 export default defineConfig({
@@ -28,19 +41,19 @@ export default defineConfig({
       },
     }),
     mdx({
-      remarkPlugins: [remarkSioAsRust],
       syntaxHighlight: 'shiki',
       shikiConfig: {
         theme: 'github-dark',
+        langs: [sounioGrammar],
       },
     }),
   ],
 
   markdown: {
-    remarkPlugins: [remarkSioAsRust],
     syntaxHighlight: 'shiki',
     shikiConfig: {
       theme: 'github-dark',
+      langs: [sounioGrammar],
     },
   },
 
