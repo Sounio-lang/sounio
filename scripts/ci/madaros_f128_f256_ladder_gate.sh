@@ -42,12 +42,16 @@ elif [[ "${1:-}" == --stage=* ]]; then
   STAGE="${1#--stage=}"
   shift || true
 elif [[ $# -gt 0 ]]; then
-  echo "usage: $0 --stage v0b" >&2
+  echo "usage: $0 --stage v0b|v0d" >&2
   exit 64
 fi
 
+if [[ "$STAGE" == "v0d" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0d_softfloat_gate.sh" "$@"
+fi
+
 if [[ "$STAGE" != "v0b" ]]; then
-  echo "FAIL unsupported stage='$STAGE' (only v0b is implemented in this gate)" >&2
+  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0d; v0c lands separately)" >&2
   exit 64
 fi
 

@@ -24,12 +24,16 @@ fail() {
   exit 1
 }
 
+. scripts/dev/madaros_v2_enir_gate_scope.sh
+
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-git diff --quiet "$BASE_REF" HEAD -- \
+E2E_PROTECTED=(
   self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm \
   self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio "$CORPUS" \
-  || fail "E2E changed compiler codegen/ABI/runtime, shared qd128, or the frozen METRON oracle"
+)
+madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E2E_ENIR_QD128_GATE" \
+  "E2E changed compiler codegen/ABI/runtime, shared qd128, or the frozen METRON oracle" "${E2E_PROTECTED[@]}"
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "native ENIR driver build produced no ELF"

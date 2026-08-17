@@ -186,6 +186,14 @@ sha256 = 3cbea2b475e79737046f8ccf463c07d22cd5fb678fd479a032ee04bd8e19da93
 
 ## 6. New Canonical Numbers
 
+> **Engine dependency (verified 2026-08-17).** This section is dated 2026-05-14, a month
+> before `bin/souc` switched its default engine to Madaros (2026-06-14). The command below was
+> accurate when written and is silently wrong today: under default Madaros, this file compiles
+> clean but **crashes at runtime with `rc=182`** (`madaros: handles full`, a resource-ceiling
+> abort) partway through the N=2000 Monte Carlo loop. It still runs to completion (`rc=0`,
+> `PASS`) under `SOUNIO_SOUC_ENGINE=lean_single`. The numbers below have not been reproduced
+> under the project's current default engine.
+
 Command:
 
 ```bash
