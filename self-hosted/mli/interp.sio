@@ -50,6 +50,12 @@ pub let MLI_I_RET_KIND: i64 = 7
 pub let MLI_I_NO_TERM: i64 = 8
 pub let MLI_I_VREG_RANGE: i64 = 9
 pub let MLI_I_BAD_CC: i64 = 10
+pub let MLI_I_FUEL: i64 = 11
+pub let MLI_I_BAD_TARGET: i64 = 12
+
+// Execution budget: control flow means loops, and a non-terminating program
+// must fail LOUDLY rather than hang (refuse-first applied to termination).
+pub let MLI_INTERP_FUEL: i64 = 65536
 
 pub struct MliInterpArgs {
     pub ai: [i64; 8],
@@ -256,9 +262,7 @@ fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, 
 }
 
 pub fn mli_interp_run(f: &MliFunction, args: &MliInterpArgs) -> MliInterpResult with Mut, Panic, Div {
-    // S2a executes exactly one straight-line block. Control flow is S2b.
-    if f.block_count != 1 { return i_err(MLI_I_CONTROL_UNSUPPORTED, 0 - 1, 0 - 1) }
-    if f.blk_has_term[0] != 1 { return i_err(MLI_I_NO_TERM, 0, 0 - 1) }
+    if f.block_count < 1 { return i_err(MLI_I_CONTROL_UNSUPPORTED, 0 - 1, 0 - 1) }
 
     var rf = MliRegFile {
         vi: [0; 128],
@@ -281,39 +285,77 @@ pub fn mli_interp_run(f: &MliFunction, args: &MliInterpArgs) -> MliInterpResult 
         a = a + 1
     }
 
-    var j: i64 = 0
-    while j < f.blk_instr_count[0] {
-        // Arg-forwarding: the MliInst return is consumed directly as an
-        // argument (see the landing hazard note on mli_inst_get).
-        let code = mli_exec_slot(&!rf, f, mli_slot(0, j))
-        if code != MLI_I_OK {
-            return i_err(code, 0, j)
+    // CFG execution (S2b): fuel-bounded; jmp/br switch blocks, ret exits.
+    var cur: i64 = 0
+    var fuel: i64 = MLI_INTERP_FUEL
+    while fuel > 0 {
+        if cur < 0 || cur >= f.block_count { return i_err(MLI_I_BAD_TARGET, cur, 0 - 1) }
+        if f.blk_has_term[cur] != 1 { return i_err(MLI_I_NO_TERM, cur, 0 - 1) }
+
+        var j: i64 = 0
+        while j < f.blk_instr_count[cur] {
+            if fuel <= 0 { return i_err(MLI_I_FUEL, cur, j) }
+            fuel = fuel - 1
+            // Arg-forwarding read discipline (see mli::ir landing hazard).
+            let code = mli_exec_slot(&!rf, f, mli_slot(cur, j))
+            if code != MLI_I_OK {
+                return i_err(code, cur, j)
+            }
+            j = j + 1
         }
-        j = j + 1
-    }
 
-    // Terminator — accessor reads only.
-    if mli_slot_opcode(f, mli_term_slot(0)) != MLI_OP_RET {
-        return i_err(MLI_I_CONTROL_UNSUPPORTED, 0, 0 - 1)
+        fuel = fuel - 1
+        let ts = mli_term_slot(cur)
+        let top = mli_slot_opcode(f, ts)
+
+        if top == MLI_OP_RET {
+            let rk = f.ret
+            if rk.tag == MLI_KIND_VOID {
+                return i_ok_int(0)
+            }
+            let ts1 = mli_slot_src1(f, ts)
+            if !opd_runnable_tag(ts1.tag) {
+                return i_err(MLI_I_RET_KIND, cur, 0 - 1)
+            }
+            if krun_f64(rk.tag, rk.bits) {
+                var rfv: f64 = 0.0
+                if ts1.tag == MLI_OPD_IMM { rfv = ts1.fimm } else { rfv = rf.vf[ts1.id] }
+                return i_ok_float(rfv)
+            }
+            if krun_int(rk.tag, rk.bits) {
+                var ri: i64 = 0
+                if ts1.tag == MLI_OPD_IMM { ri = ts1.aux } else { ri = rf.vi[ts1.id] }
+                return i_ok_int(ri)
+            }
+            return i_err(MLI_I_RET_KIND, cur, 0 - 1)
+        }
+
+        if top == MLI_OP_JMP {
+            let tgt = mli_slot_src1(f, ts)
+            cur = tgt.id
+            continue
+        }
+
+        if top == MLI_OP_BR {
+            let c = mli_slot_src1(f, ts)
+            var cv: i64 = 0
+            if c.tag == MLI_OPD_IMM {
+                cv = c.aux
+            } else {
+                if c.tag != MLI_OPD_VREG { return i_err(MLI_I_UNSUPPORTED_OPERAND, cur, 0 - 1) }
+                cv = rf.vi[c.id]
+            }
+            if cv != 0 {
+                let t2 = mli_slot_src2(f, ts)
+                cur = t2.id
+            } else {
+                let t3 = mli_slot_src3(f, ts)
+                cur = t3.id
+            }
+            continue
+        }
+
+        return i_err(MLI_I_CONTROL_UNSUPPORTED, cur, 0 - 1)
     }
-    let rk = f.ret
-    if rk.tag == MLI_KIND_VOID {
-        return i_ok_int(0)
-    }
-    let ts1 = mli_slot_src1(f, mli_term_slot(0))
-    if !opd_runnable_tag(ts1.tag) {
-        return i_err(MLI_I_RET_KIND, 0, 0 - 1)
-    }
-    if krun_f64(rk.tag, rk.bits) {
-        var rfv: f64 = 0.0
-        if ts1.tag == MLI_OPD_IMM { rfv = ts1.fimm } else { rfv = rf.vf[ts1.id] }
-        return i_ok_float(rfv)
-    }
-    if krun_int(rk.tag, rk.bits) {
-        var ri: i64 = 0
-        if ts1.tag == MLI_OPD_IMM { ri = ts1.aux } else { ri = rf.vi[ts1.id] }
-        return i_ok_int(ri)
-    }
-    i_err(MLI_I_RET_KIND, 0, 0 - 1)
+    i_err(MLI_I_FUEL, 0 - 1, 0 - 1)
 }
-

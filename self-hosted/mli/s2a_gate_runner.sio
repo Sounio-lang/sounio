@@ -13,6 +13,11 @@
 // Negative cases are positive CONTROLS: the translator or the interp MUST
 // refuse with the exact named code.
 //
+// S2b update: control flow (IrJump/branches) and compares now TRANSLATE —
+// their refusal controls moved to positives in s2b_gate_runner.sio. This
+// runner keeps the still-refused surface: wide ints, CD, epistemic, kind
+// conflicts, shifts, plus the interpreter refusal controls.
+//
 // Fixture note: BinaryOp enum arguments collapse to 0 under native-v2
 // (measured 2026-08-16, this lane), so every binop fixture pushes a skeleton
 // and pokes the true ordinal via s2a_poke_bin_op. The translator reads only
@@ -99,7 +104,7 @@ fn gate_param(f: &!IrFunction, reg: i64, is_float: bool) with Mut, Panic, Div {
 
 fn run_case_f64(name: string, src: &IrFunction, a0: f64, a1: f64, expect: f64) -> i64 with IO, Mut, Panic, Div {
     var m = mli_func_empty()
-    let st = ir_to_mli_s2a(src, &!m)
+    let st = ir_to_mli_scalar(src, &!m)
     if !st.ok { return report_fail(name, "lower", st.code, MLI_T_OK) }
     let vr = mli_verify_function(&m)
     if vr.code != MLI_VERR_OK { return report_fail(name, "verify", vr.code, MLI_VERR_OK) }
@@ -115,7 +120,7 @@ fn run_case_f64(name: string, src: &IrFunction, a0: f64, a1: f64, expect: f64) -
 
 fn run_case_i64(name: string, src: &IrFunction, a0: i64, a1: i64, expect: i64) -> i64 with IO, Mut, Panic, Div {
     var m = mli_func_empty()
-    let st = ir_to_mli_s2a(src, &!m)
+    let st = ir_to_mli_scalar(src, &!m)
     if !st.ok { return report_fail(name, "lower", st.code, MLI_T_OK) }
     let vr = mli_verify_function(&m)
     if vr.code != MLI_VERR_OK { return report_fail(name, "verify", vr.code, MLI_VERR_OK) }
@@ -131,7 +136,7 @@ fn run_case_i64(name: string, src: &IrFunction, a0: i64, a1: i64, expect: i64) -
 
 fn expect_lower_code(name: string, src: &IrFunction, want: i64) -> i64 with IO, Mut, Panic, Div {
     var m = mli_func_empty()
-    let st = ir_to_mli_s2a(src, &!m)
+    let st = ir_to_mli_scalar(src, &!m)
     if st.ok { return report_fail(name, "lower-accepted", MLI_T_OK, want) }
     if st.code != want { return report_fail(name, "lower-code", st.code, want) }
     report_pass(name)
@@ -270,16 +275,6 @@ fn case_refuse_epistemic() -> i64 with IO, Mut, Panic, Div {
     expect_lower_code("N3 IrLiftKnowledge refused (Knowledge is R1)", &f, MLI_T_R1_EPISTEMIC)
 }
 
-fn case_refuse_control() -> i64 with IO, Mut, Panic, Div {
-    var f = gate_func_begin(3)
-    gate_param(&!f, 0, false)
-    f.reg_count = 2
-    var ok = gate_push(&!f, ir_jump(1))
-    ok = ok && gate_push(&!f, ir_return(0))
-    if !ok { return report_fail("N4 control", "build", 0, 1) }
-    expect_lower_code("N4 IrJump refused (control is S2b)", &f, MLI_T_CONTROL_S2B)
-}
-
 fn case_refuse_kind_conflict() -> i64 with IO, Mut, Panic, Div {
     var f = gate_func_begin(4)
     f.reg_count = 2
@@ -301,17 +296,6 @@ fn case_refuse_shift() -> i64 with IO, Mut, Panic, Div {
     expect_lower_code("N6 OpShl refused (shift unpinned)", &f, MLI_T_SHIFT_UNPINNED)
 }
 
-fn case_refuse_compare() -> i64 with IO, Mut, Panic, Div {
-    var f = gate_func_begin(3)
-    gate_param(&!f, 0, false)
-    gate_param(&!f, 1, false)
-    f.reg_count = 3
-    var ok = gate_push_binop(&!f, 2, 0, S2A_B_LT, 1)
-    ok = ok && gate_push(&!f, ir_return(2))
-    if !ok { return report_fail("N7 compare", "build", 0, 1) }
-    expect_lower_code("N7 OpLt refused (compares are S2b)", &f, MLI_T_COMPARE_S2B)
-}
-
 // ---------------------------------------------------------------------------
 // Interpreter refusal controls.
 // ---------------------------------------------------------------------------
@@ -327,7 +311,7 @@ fn case_interp_div_zero() -> i64 with IO, Mut, Panic, Div {
     if !ok { return report_fail("I1 divzero", "build", 0, 1) }
 
     var m = mli_func_empty()
-    let st = ir_to_mli_s2a(&f, &!m)
+    let st = ir_to_mli_scalar(&f, &!m)
     if !st.ok { return report_fail("I1 divzero", "lower", st.code, MLI_T_OK) }
     let vr = mli_verify_function(&m)
     if vr.code != MLI_VERR_OK { return report_fail("I1 divzero", "verify", vr.code, MLI_VERR_OK) }
@@ -391,10 +375,8 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     failures = failures + case_refuse_wide()
     failures = failures + case_refuse_hyper()
     failures = failures + case_refuse_epistemic()
-    failures = failures + case_refuse_control()
     failures = failures + case_refuse_kind_conflict()
     failures = failures + case_refuse_shift()
-    failures = failures + case_refuse_compare()
     failures = failures + case_interp_div_zero()
     failures = failures + case_interp_refuses_cd()
 
