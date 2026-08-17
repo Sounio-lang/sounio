@@ -196,10 +196,10 @@ run_test() {
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
         fi
-        if [[ "$line" =~ "//@ expect-stdout:\ "(.*) ]]; then
+        if [[ "$line" =~ //@[[:space:]]+expect-stdout:[[:space:]]*(.*) ]]; then
             expect_stdout+=("${BASH_REMATCH[1]}")
         fi
-        if [[ "$line" =~ "//@ error-pattern:\ "(.*) ]]; then
+        if [[ "$line" =~ //@[[:space:]]+error-pattern:[[:space:]]*(.*) ]]; then
             error_patterns+=("${BASH_REMATCH[1]}")
         fi
     done < "$file"
