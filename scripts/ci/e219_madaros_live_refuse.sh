@@ -109,17 +109,8 @@ else
   fi
 fi
 
-# Observation only — not a pass/fail arm.
-SEED="$ROOT_DIR/bin/souc-lean-single-x86_64"
-if [[ -x "$SEED" ]]; then
-  seed_elf="$WORK/seed.elf"
-  rm -f "$seed_elf"
-  "$SEED" "$FIXTURE" "$seed_elf" >"$WORK/seed.out" 2>&1
-  seed_rc=$?
-  seed_elf_exists=0
-  [[ -e "$seed_elf" ]] && seed_elf_exists=1
-  echo "[e219-live-refuse] seed_observation compile_rc=$seed_rc elf_exists=$seed_elf_exists (not scored)"
-fi
+# Seed disagreement is scored by e219_engine_oracle_gate.sh, not here.
+# Printing it without a verdict was the same hole as the suite skip.
 
 STATUS="pass"
 if [[ "$FAILED" -gt 0 || "$NOT_RUN" -gt 0 ]]; then
