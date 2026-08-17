@@ -77,15 +77,22 @@ return probe print `0.671038` correctly — corruption is on the
 
 | Adjacent known | Relation |
 |---|---|
-| f64→i64 param cast bitcast (GUM k95 stuck 1.960) | **Best match for F2** — bits become integer magnitude |
+| **`KCONF-BITCAST-SITOFP`** — Knowledge.confidence f64 payload / i64 layout | **F2 closed as named mechanism** — see `MADAROS_F64_BITCAST_SITOFP_BOUNDARY_2026-08-17.md` |
+| f64→i64 param cast bitcast (GUM k95 stuck 1.960) | Same **family** (D1); F2 is the dual sitofp edge on Knowledge.confidence |
 | Unclassified scalar → char\* (fable-1) | **Ruled out for F2** — would SEGV, not print 4.6e18 |
 | `print_int` garbled after f64 print | Related kind confusion; not the F2 print shape |
 | `variance_of` overflow 2^63 on deep chains | Variance slot / depth; F1 is **collapse to 0** under Madaros adaptive |
 | E170 / E035 Epistemic effect | Separate surface |
 
-**Root fix** for F1/F2 proper is in **Madaros variance slots + f64 return/ABI
-bitcast** (`self-hosted/`), not dissertation math. This lane does **not**
-rebuild Madaros (fleet CPU lock). It makes fabrication **detectable and
+**F2 root (measured 2026-08-17):** `ir_register_knowledge_layout` marks
+`confidence` as `is_float=3` (i64) while constructors store f64 epsilon bits;
+`pk.confidence * sensitivity` emits sitofp → ~4e18. Minimal witness:
+`tests/run-pass/f64_bitcast_boundary_knowledge_conf.sio` (R21/R25). Gate:
+`scripts/ci/f64_bitcast_sitofp_boundary_gate.sh`.
+
+**Root fix** for F1/F2 proper is in **Madaros variance slots + Knowledge
+confidence field kind** (`self-hosted/`), not dissertation math. This lane does
+**not** rebuild Madaros (fleet CPU lock). It makes fabrication **detectable and
 fail-closed** at the science surface so dissertation CI cannot green-wash it.
 
 ---
@@ -134,7 +141,7 @@ bash scripts/ci/epistemic_fabrication_detect_gate.sh
 | ID | Owner suggestion | Acceptance |
 |---|---|---|
 | F1 variance slots / adaptive GUM under Madaros | compiler lane | adaptive PASS on Madaros with var≈lean |
-| F2 f64 field return / print_f64 kind on EpResult28 | compiler lane | TEST 6 prints 0.671038 and PASSes |
+| F2 `KCONF-BITCAST-SITOFP` (Knowledge.confidence kind) | compiler lane | R21/R25 `KCONF_ALL_OK`; ep28 TEST 6 probability-scale; preserve user i64 `confidence` (#1496) |
 
 Until then, dissertation CI must treat Madaros F1/F2 as **red toolchain**, not
 science fail — which this detection gate enforces.
