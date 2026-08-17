@@ -22,18 +22,20 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ci-absen
 **Absence of signal must never read as positive signal.**
 
 A CI system that reports success for work it did not do is not “flaky green”; it is
-a category error. The three faces seen in this fleet today are one defect:
+a category error. Four faces confirmed live in this fleet in one day are **one
+defect**:
 
 | Face | What happened | How it reads |
 |------|----------------|--------------|
-| **Abort before measure** | ENIR / stack exit 128 on missing `origin/main` | Ordinary **red** (looks like a real fail) |
+| **Abort before measure** | Gate/stack aborts (e.g. exit 128 on missing `origin/main`) before evaluating product work | Ordinary **red** (looks like a real product fail) |
 | **Empty input green** | Glob/list/dir empty → exit 0 (census **N=6**) | Ordinary **green** |
 | **Suite absent, not red** | PR conflict / path missing → job skipped or matrix hole | **Not red** (looks like “nothing wrong”) |
+| **Observer heuristic misfire** | A human or meta-check uses the wrong scope (check-count, job count, file count) and treats a correctly-scoped run as incomplete — or an incomplete run as complete | **False red or false green** about *whether measurement happened* |
 
-Only the middle face is “pass on empty.” All three share: **the system did not
-obtain a measurement, yet the dashboard did not force a distinguished “unmeasured”
-state.** Red-without-measure and green-without-measure are symmetric lies with
-different colours.
+Faces 1–3 are producer-side. Face 4 is consumer-side: the **observer’s criterion**
+for “enough signal” is not the same as the gate’s work set \(W\), so absence or
+presence of the *observer’s* preferred tokens is misread as (un)measured work.
+All four share: **no distinguished unmeasured state tied to the actual work set.**
 
 ---
 
@@ -62,16 +64,19 @@ Formally: if \(M\) is the set of executed assertions and the UI maps
 \(\mathrm{exit}=0 \Rightarrow \text{success}\), then SWW occurs whenever
 \(\mathrm{exit}=0 \land |M|=0\).
 
-### 1.3 Three faces (same equation)
+### 1.3 Four faces (same equation)
 
-| Face | \(W\) | Exit / UI | Why it fools |
-|------|--------|-----------|--------------|
-| Die before measure | never built | ≠0 (red) | Looks like product failure; often **infra** |
-| Empty input green | built empty | 0 (green) | Looks like product pass |
-| Absent suite | job not scheduled / path missing | missing check | Looks like “no news” |
+| Face | \(W\) / \(M\) | Exit / UI | Why it fools |
+|------|----------------|-----------|--------------|
+| Die before measure | \(W\) never executed | ≠0 (red) | Looks like product failure; often **infra** |
+| Empty input green | \(W=\emptyset\), loop runs zero times | 0 (green) | Looks like product pass |
+| Absent suite | job not in the graph | missing check | Looks like “no news” |
+| Observer heuristic misfire | True \(M\) fine or empty; observer counts the wrong thing | wrong colour | e.g. expects 16 checks, sees 4, calls run “incomplete” when scope was intentional — or sees many checks and misses empty \(W\) inside one green job |
 
 The ambitious fix is not “more red.” It is **making unmeasured unrepresentable as
-success** (and, where possible, unrepresentable as a silent hole).
+success**, binding success to a **receipt of \(|M|\ge 1\)** over the declared work
+set (and, for face 4, binding observer expectations to that same receipt rather
+than to ambient job counts).
 
 ### 1.4 What does *not* fix it
 
@@ -108,13 +113,14 @@ success** (and, where possible, unrepresentable as a silent hole).
 Under MRC-1, \(\mathrm{exit}=0 \land |M|=0\) cannot be produced by a conforming
 gate: the emitter blocks it; the meta-gate blocks non-conforming greens.
 
-### 2.1 Relation to the three faces
+### 2.1 Relation to the four faces
 
-| Face | MRC-1 effect |
-|------|----------------|
-| Empty input green | Gate must `require_min_count` / fail before emit, or emit is refused |
-| Abort before measure | Still red; receipt optional on fail. Separate: distinguish infra vs product in wrappers (exit class / reason) |
-| Suite absent | Workflow must require the meta-gate job; missing required check ≠ mergeable “success” |
+| Face | What forecloses it |
+|------|---------------------|
+| Empty input green | `require_min_count` / existence before success; **MRC-1** refuses `pass` with \(N=0\) |
+| Abort before measure | Still red; receipt optional on fail. Wrappers should tag **infra vs product** (`reason=`) so red is not misread as measured product fail |
+| Suite absent | Required-check set must include measurement meta-gate (or receipt aggregator); **missing required check ≠ merge success** |
+| Observer heuristic misfire | Observers (humans, dashboards, meta-scripts) must key off **`GATE_MEASURED assertions=N`** (and declared `gate=`), not ambient “how many GitHub checks” or ad-hoc line counts. A correctly-scoped run with \(N\ge 1\) is complete; a green job with no receipt is not |
 
 ### 2.2 Why “assertions exercised” not “tests passed”
 
