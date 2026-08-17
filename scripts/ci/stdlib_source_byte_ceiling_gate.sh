@@ -50,5 +50,13 @@ psz=$(wc -c <stdlib/theorem/portfolio.sio)
 [[ -f stdlib/theorem/portfolio_kinds.sio ]] || fail "missing portfolio_kinds.sio split part"
 [[ -f stdlib/theorem/portfolio_core.sio ]] || fail "missing portfolio_core.sio split part"
 
-pass "no stdlib .sio over hard cap $HARD; portfolio façade=${psz}B"
+# Positive control: lorenz cert façade (pre-split; was 2095899, 1253 under CAP)
+[[ -f stdlib/systems/lorenz_i256_cert.sio ]] || fail "missing lorenz_i256_cert façade"
+lsz=$(wc -c <stdlib/systems/lorenz_i256_cert.sio)
+(( lsz < 65536 )) || fail "lorenz_i256_cert.sio looks monolithic again ($lsz bytes) — expected thin façade"
+[[ -f stdlib/systems/lorenz_i256_cert_core.sio ]] || fail "missing lorenz_i256_cert_core.sio split part"
+[[ -f stdlib/systems/lorenz_i256_cert_step1.sio ]] || fail "missing lorenz_i256_cert_step1.sio split part"
+[[ -f stdlib/systems/lorenz_i256_cert_cover_child0.sio ]] || fail "missing lorenz_i256_cert_cover_child0.sio split part"
+
+pass "no stdlib .sio over hard cap $HARD; portfolio façade=${psz}B lorenz façade=${lsz}B"
 echo "PASS stdlib_source_byte_ceiling_gate"

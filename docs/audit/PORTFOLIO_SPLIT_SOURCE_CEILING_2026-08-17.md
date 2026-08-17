@@ -42,6 +42,20 @@ Importers keep `use theorem::portfolio::*` unchanged.
 bash scripts/ci/stdlib_source_byte_ceiling_gate.sh     → PASS
 ```
 
+## Follow-up 2026-08-17 — `lorenz_i256_cert` pre-split
+
+Same path **A+C**. The companion catalog sat at **2 095 899** bytes (1 253 under CAP). Split on complete `fn` items (brace/paren/bracket balanced; reconstruct of the monolith was byte-identical before the façade write). `lorenz_i256_cert_mix` is now `pub` so sibling parts can call it.
+
+| Part | Role |
+|------|------|
+| `lorenz_i256_cert.sio` | Thin façade (~1 KB) |
+| `lorenz_i256_cert_core.sio` | mix / ready / five-step / global / finite / ball / projection / taylor |
+| `lorenz_i256_cert_step1.sio` … `step6.sio` | Per-step certificate catalogs |
+| `lorenz_i256_cert_trajectory5.sio` | trajectory5 + two callers of it (avoids a core↔trajectory cycle) |
+| `lorenz_i256_cert_cover_child0.sio` / `child1.sio` / `cover_refinement.sio` | Cover catalogs |
+
+Largest part: `cover_child0` ~345 KB. Importers keep `use systems::lorenz_i256_cert::*`.
+
 ## Do not
 
 - Re-concatenate parts into one file over CAP  

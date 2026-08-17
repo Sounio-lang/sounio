@@ -333,3 +333,7 @@ E229 makes the failure honest. **Splitting the generated portfolio catalog** mak
 ## Update 2026-08-17 — split landed (same lane)
 
 `stdlib/theorem/portfolio.sio` was split into a thin façade + `portfolio_*.sio` parts (path **A+C**). Measured: façade and sample of 30/30 former importers `check: OK`; `lorenz_i256_cert.sio` `check: OK`. Gate: `scripts/ci/stdlib_source_byte_ceiling_gate.sh`. Ceiling **not** raised. See `PORTFOLIO_SPLIT_SOURCE_CEILING_2026-08-17.md`.
+
+## Update 2026-08-17 — lorenz cert pre-split (same lane)
+
+`stdlib/systems/lorenz_i256_cert.sio` (2 095 899 B, 1 253 under CAP) was split the same way: thin façade + `lorenz_i256_cert_{core,step1..step6,trajectory5,cover_child0,cover_child1,cover_refinement}.sio`. Largest part ~345 KB. Sequence item 3 is done. Ceiling still not raised.
