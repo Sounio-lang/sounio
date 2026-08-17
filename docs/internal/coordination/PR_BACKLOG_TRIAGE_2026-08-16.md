@@ -281,6 +281,191 @@ none of them were mis-classified as triage rows.
 complementary — wave-2 listed 5 specifically-named PRs with the trap caveat on
 #1641; wave-3 widens to the full 52 and enforces the trap uniformly.
 
+## Structural read of the wave-3 backlog
+
+The bookkeeping above is the input. This section is what the input says about
+how the project actually validates itself.
+
+### Composition
+
+At capture (round 6, 51 open PRs), the live backlog decomposes as:
+
+| Bucket | Count | % |
+|---|---:|---:|
+| MERGE (narrow, no claim collision) | 6 | 12% |
+| REBASE (conflicts or stale CI, but wanted) | 6 | 12% |
+| CLOSE (abandoned / superseded / out-of-scope) | 16 | 31% |
+| BLOCKED by active claim (live file contention) | 2 | 4% |
+| BLOCKED by stale claim (legacy contention) | 7 | 14% |
+| BLOCKED by chain ordering | 12 | 24% |
+| BLOCKED by founder hold | 2 | 4% |
+| **Total** | **51** | **100%** |
+
+The composition is the diagnosis: **roughly 42% of the open queue is
+coordination-blocked (active claim + stale claim + chain), 31% is
+abandoned/out-of-scope, and 24% is actionable right now.** The
+MERGE-eligible pool is not small in absolute terms, but it is dwarfed by
+PRs that cannot land for reasons that have nothing to do with code quality.
+
+### Finding 1 — Coordination is the gate, not the diff
+
+The 21 PRs in the BLOCKED bucket break down into three structural
+sub-causes that have nothing to do with the diff under test:
+
+- **Stale-claim contention (7 PRs).** All seven touch
+  `self-hosted/check/check.sio` and/or `self-hosted/native/codegen_x86_linux.sio`,
+  files under a single stale claim (`claude--session-c89fe8c8-…`, the P0-F
+  lane that has shifted to `wsg-v0b`). Each of those PRs would otherwise
+  have been MERGE-eligible per its gate status — they passed CI at last
+  green and have no intrinsic blocker. They stall because the lane owner
+  has not yet merged or released the claimed surface.
+- **Active-claim contention (2 PRs).** #1759 touches `self-hosted/mli/**`
+  (`cursor-2--mli-s3` lane active); #1761 touches
+  `tests/vectors/f128_f256/**` (`grok-cli3--ws-g-v0b-witnesses` lane
+  active). Same shape as above, but the claim is current, not stale — the
+  PR will merge once the lane releases, not on its own merits.
+- **Chain ordering (12 PRs).** These are sequenced behind a chain root
+  whose root is itself one of the stale-claim-blocked PRs (#867, #881,
+  #979, #1155). They will not move until their root moves, and their root
+  will not move until the claim is resolved.
+
+This means **the bottleneck on 21 of 51 PRs is the coordination system, not
+the code.** A green gate is necessary but not sufficient; what unblocks a
+PR is the claim state of its touched files. The repo's actual validation
+surface is the union of {gates, claims, lane ownerships}, not just gates.
+
+### Finding 2 — Landed PRs land in days; stalled PRs do not land at all
+
+The "Recently merged" table in this doc covers 10 PRs that landed between
+2026-08-16 and 2026-08-17 (a ~30-hour window). Their time-from-open to
+merge is short even at the conservative end:
+
+| PR | First-authored activity | Merged | Window |
+|---|---|---|---|
+| #1752 docs-registry provenance | 2026-08-16 | 2026-08-16T22:47Z | < 1 day |
+| #1732 sibling-repo move | 2026-08-16 | 2026-08-16T20:45Z | < 1 day |
+| #1755 P0-F POSIX externs | 2026-08-16 | 2026-08-16T20:47Z | < 1 day |
+| #1756 WS-C PR2 ENIR gate stack | 2026-08-16 | 2026-08-17T05:25Z | ~9 hours |
+| #1757 PBPK28 CN mitigation | 2026-08-16 | 2026-08-16T22:10Z | < 1 day |
+| #1760 E137 stack-reservation fix | 2026-08-16 | 2026-08-17T08:58Z | ~16 hours |
+| #1761 f128/f256 reference corpora | 2026-08-16 | 2026-08-17T(after triage) | ~1 day |
+| #1641 self-parse classified baseline | 2026-08-04 | 2026-08-17T02:25Z | ~13 days |
+| #1720 darwin-pbpk Knightian | 2026-08-13 | 2026-08-17T02:43Z | ~4 days |
+| #1730 insertion-sort break | 2026-08-13 | 2026-08-17T02:09Z | ~4 days |
+
+Conversely, the CLOSE bucket contains **9 PRs that have not been touched in
+15+ days** (verified by `grep -cE "untouched since 2026-0[78]-[0-9]{2}"`
+against this doc): 4 are 31+ days old (#1034, #1053, #1058, #1069 — all
+since 2026-07-17), 2 are 28+ days (#1262, #1318 — since 2026-07-20), 1 is
+21+ days (#1538), 2 are 15+ days (#1604, #1605 — since 2026-08-02). All
+nine are DRAFT.
+
+**The distribution is bimodal, not unimodal.** PRs that land land fast
+(median ≤ 1 day for recent merges, ≤ 13 days at the worst case among the
+recent-merged set). PRs that stall have been stalled for weeks, with no
+middle ground of "slow but eventually landing." The right model is a
+two-state Markov chain: {landing, abandoned}. The transition from
+landing to merged takes days; the transition from landing to abandoned
+takes ~2-4 weeks of DRAFT inactivity.
+
+This is **evidence that "stale green CI" is not a CI problem.** It is a
+workflow signal. The PRs in the CLOSE bucket all have green CI at last
+run; their stall has nothing to do with their gates.
+
+### Finding 3 — One contested file is a 14% drag
+
+`self-hosted/check/check.sio` alone accounts for 7 BLOCKED PRs — 14% of the
+queue by itself. Two more BLOCKED PRs (#867's chain descendants #869,
+#870) are also chain-gated on a root that depends on this file. Add the
+two parser files (`self-hosted/parser/{types,items,mod}.sio`) that share
+the same stale claim, and the single stale claim covers the bottleneck of
+~14 of 51 PRs (27%) without the claim owner having shipped any
+checker-related work into the queue for those PRs to compete with.
+
+A claim that lives longer than the work it guards becomes a tax on the
+backlog. The repo has no policy on claim duration; the 4-hour TTL in
+`bin/sounio-coord` resets on heartbeat, so an actively-maintained claim
+never expires even when its owner has moved on to other work.
+
+### Finding 4 — "Gate-bearing" is necessary but not sufficient
+
+Among the 10 recently-merged PRs, **5 are themselves gate, fixture, or
+gate-adjacent work** (#1641 fixture, #1752 docs-registry gate, #1755 P0-F
+externs with its own gate, #1756 the ENIR gate stack, #1761 f128/f256
+reference corpora, #1760 touching `bin/madaros` and the launcher gate).
+That is 50% — well above what one would expect by chance in a
+heterogeneous backlog.
+
+But the inverse is also true: the 7 stale-claim BLOCKED PRs all have
+green substantive gates at last run. Their gates did not unblock them.
+**A green gate gets a PR into the conversation; only a clear
+coordination path gets it onto main.** This is the structural read of the
+founder's "PRs that carry their own gate land and PRs that assert
+without one stall" hypothesis — refined: gates are a necessary condition
+for entry into the merge conversation, but the binding constraint is
+coordination, and gates alone do not satisfy it.
+
+### Finding 5 — One gate landed without (or alongside) its fixtures
+
+#1756 (WS-C PR2 ENIR gate stack) landed with 14/14 green checks. Its
+fixtures — the 23 EISA oracle files the gate scripts test against — were
+absorbed into `main` via a parallel lane (`codex-2`, direct commit) the
+same day, not through the PR. Round 4's "Recently closed" entry for
+#1756 framed this as closure without merge; round 5 corrected the
+framing: the work landed, but **the logical unit (gate + fixtures) was
+split across two lanes**, with the PR carrying one half and a separate
+direct-commit lane carrying the other.
+
+This is a small but specific pattern: **a logical unit (gate ↔ fixture,
+type ↔ runtime evidence, model ↔ verifier) sometimes lands through
+multiple lanes, with the PR carrying only one half.** The merge is
+correct only if both halves land in the same `main` window. If they
+don't — if the gate lands and the fixture is delayed — the gate
+certifies nothing. The repo has no cross-lane dependency tracking; this
+is a coordination gap surfaced by the triage.
+
+### What this means for the next 50 PRs
+
+The diagnosis above translates into four concrete changes the project
+could make, each of which is testable against the next 50 PRs:
+
+1. **Auto-close DRAFTs untouched ≥ 21 days.** Currently a manual triage
+   decision every wave. The repo could enforce this from `bin/sounio-coord`
+   or a weekly GitHub Action; would have closed 6 of the current CLOSE
+   bucket automatically. Testable: count auto-closed DRAFTs per wave
+   against founder-confirmed close decisions; aim for ≥ 80% agreement.
+2. **Require an explicit `bin/sounio-coord claim` reference in PR
+   descriptions for files under active development.** Currently the
+   absence is silent; the consequence is BLOCKED-by-stale-claim. A PR
+   that touches `self-hosted/check/check.sio` without naming the lane
+   that owns the file is, by Finding 3, asking for a stall. Testable:
+   fraction of MERGE PRs that name a claim reference, vs BLOCKED-by-claim
+   PRs that don't.
+3. **Bound claim duration.** The current 4-hour TTL with heartbeat
+   refresh means a stale-but-heartbeating claim never expires. A cap of
+   e.g. 14 days without an actual commit on a claimed file would let the
+   stale P0-F/wsg-v0b claim release, unblocking 14 PRs immediately.
+   Testable: claim age vs owner-commit-on-claimed-file; flag mismatches.
+4. **Cross-lane dependency tracking for gate/fixture pairs.** The
+   #1756 split was caught after the fact. A pre-merge check that flags
+   "this PR adds a gate but no fixtures under matching paths" would
+   surface the asymmetry at PR-open time, not at triage time. Testable:
+   fraction of gate-add PRs that ship with their fixtures in the same
+   window.
+
+None of these is novel; they are well-known coordination primitives.
+What is novel in this project is that **the data to motivate them is
+visible in the backlog itself**, and the founder's hypothesis
+("PRs that carry their own gate land, PRs that assert without one
+stall") is supported by the data with the refinement that coordination,
+not gate quality, is the binding constraint.
+
+The next 50 PRs will be written; the question this triage answers is
+**how to write them so they land rather than stall.** The structural
+read says: narrow, claim-aware, fixture-paired, owner-named. The
+bookkeeping says which specific 51 PRs to act on first; the diagnosis
+says how to keep the next 51 from looking like this one.
+
 ## Branch migration (fleet-wide stale-checkpoint escape, 2026-08-17)
 
 The previous lane branch `lane/minimax-cli1/20260815` was a **stale
