@@ -160,6 +160,14 @@ const MANUAL_REPO_TOPIC_OVERRIDES = {
     authority: 'repo_only',
     related_artifacts: [],
   },
+  'docs/internal/coordination/PR_BACKLOG_TRIAGE_2026-08-16.md': {
+    topic_id: 'repo.docs.internal.coordination.pr-backlog-triage-2026-08-16',
+    audience: 'users',
+    owner_agent: 'minimax-cli1',
+    last_validated: '2026-08-17',
+    authority: 'repo_only',
+    related_artifacts: [],
+  },
   // --- Retired Rust/LLVM/Cranelift/MIR architecture (2026-07-11 doc-reality audit).
   // These describe a Rust codebase (crates/, compiler/src/*.rs, inkwell, Cranelift
   // JIT, MIR) that no longer exists; the compiler is self-hosted Madaros emitting
@@ -314,6 +322,7 @@ function inferRepoTopicDetails(relPath) {
       topic_id: override.topic_id,
       audience: override.audience,
       owner_agent: override.owner_agent,
+      last_validated: override.last_validated ?? null,
       authority: override.authority,
       related_artifacts: override.related_artifacts ?? [],
     };
@@ -483,11 +492,12 @@ function buildTopicRecord({
   audience,
   authority,
   ownerAgent,
+  lastValidated = null,
   localeStatus,
   validationCommands,
   relatedArtifacts,
 }) {
-  return {
+  const record = {
     topic_id: topicId,
     collection,
     repo_doc_path: repoDocPath,
@@ -500,6 +510,10 @@ function buildTopicRecord({
     validation_commands: validationCommands,
     related_artifacts: relatedArtifacts,
   };
+  if (lastValidated !== null) {
+    record.last_validated = lastValidated;
+  }
+  return record;
 }
 
 async function scanWebsiteDocTopics(rootDir) {
@@ -613,6 +627,7 @@ async function scanRepoTopics(rootDir, claimedRepoPaths) {
         audience: details.audience,
         authority: details.authority,
         ownerAgent: details.owner_agent,
+        lastValidated: details.last_validated ?? null,
         localeStatus: Object.fromEntries(LOCALES.map((locale) => [locale, 'n/a'])),
         validationCommands: defaultRepoValidation(relPath, details.owner_agent, details.authority),
         relatedArtifacts: details.related_artifacts,
@@ -647,7 +662,7 @@ export function formatRepoMetadataBlock(topic, existingMeta = null) {
     `topic_id: ${topic.topic_id}`,
     `authority: ${topic.authority}`,
     `audience: ${topic.audience}`,
-    'last_validated: 2026-03-07',
+    `last_validated: ${topic.last_validated ?? '2026-03-07'}`,
     `validated_by: ${topic.owner_agent}`,
     `source_of_truth: ${topicSourceOfTruth(topic.topic_id)}`,
     '-->',
@@ -793,7 +808,7 @@ export function metadataFieldsForTopic(topic, existingMeta = null) {
     topic_id: topic.topic_id,
     authority: topic.authority,
     audience: topic.audience,
-    last_validated: '2026-03-07',
+    last_validated: topic.last_validated ?? '2026-03-07',
     validated_by: topic.owner_agent,
     source_of_truth: topicSourceOfTruth(topic.topic_id),
   };
