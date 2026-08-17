@@ -51,13 +51,27 @@ SIO
 "$SOUC" compile "$TMP/golden.sio" -o "$TMP/golden.elf" > "$TMP/compile.log" 2>&1 \
     || fail "pipeline A compile failed (see $TMP/compile.log)"
 
-# Executable LOAD segment: offset + filesize from readelf -lW (hex fields;
-# converted with shell arithmetic — mawk has no strtonum).
-read -r TOFF_HEX TSIZE_HEX < <(readelf -lW "$TMP/golden.elf" \
-    | awk '$1=="LOAD" && / R E /{print $2, $5; exit}')
-[ -n "${TOFF_HEX:-}" ] && [ -n "${TSIZE_HEX:-}" ] || fail "could not locate executable LOAD segment"
-TOFF=$((TOFF_HEX))
-TSIZE=$((TSIZE_HEX))
+# Executable LOAD segment, parsed straight from the ELF64 program headers
+# with od (compute nodes lack binutils; x86-64 hosts are little-endian, so
+# od's native u2/u4/u8 reads are the wire format).
+rdu() { od -An -tu"$1" -j "$2" -N "$1" "$TMP/golden.elf" | tr -d ' '; }
+PHOFF=$(rdu 8 32)     # e_phoff
+PHNUM=$(rdu 2 56)     # e_phnum
+TOFF=""
+TSIZE=""
+i=0
+while [ "$i" -lt "$PHNUM" ]; do
+    BASE=$((PHOFF + i * 56))
+    PTYPE=$(rdu 4 "$BASE")
+    PFLAGS=$(rdu 4 $((BASE + 4)))
+    if [ "$PTYPE" = "1" ] && [ $((PFLAGS & 1)) = "1" ]; then
+        TOFF=$(rdu 8 $((BASE + 8)))      # p_offset
+        TSIZE=$(rdu 8 $((BASE + 32)))    # p_filesz
+        break
+    fi
+    i=$((i + 1))
+done
+[ -n "${TOFF:-}" ] && [ -n "${TSIZE:-}" ] || fail "could not locate executable LOAD segment"
 
 # add1 is the first function; its end is the byte before the SECOND
 # `55 48 89 e5` prologue in the segment.
