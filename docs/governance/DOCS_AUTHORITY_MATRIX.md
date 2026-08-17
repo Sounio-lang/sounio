@@ -506,7 +506,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.coordination.ci-watch-contract | repo_only | docs/internal/coordination/CI_WATCH_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.compiler-lane-contract | repo_only | docs/internal/coordination/COMPILER_LANE_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.enir-semantic-interface-contract-2026-07-12 | repo_only | docs/internal/coordination/enir-semantic-interface-contract-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.internal.coordination.pr-backlog-triage-2026-08-16 | repo_only | docs/internal/coordination/PR_BACKLOG_TRIAGE_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.coordination.pr-backlog-triage-2026-08-16 | repo_only | docs/internal/coordination/PR_BACKLOG_TRIAGE_2026-08-16.md | - | minimax-cli1 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.coordination.semantic-hotspot-triage-2026-07-12 | repo_only | docs/internal/coordination/semantic-hotspot-triage-2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.readme | repo_only | docs/internal/garden/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-05-09-above-the-stars | repo_only | docs/internal/garden/seeds/2026-05-09-above-the-stars.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

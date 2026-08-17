@@ -33,12 +33,13 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 
 - A0: 1 topics
 - A1: 1 topics
-- A2: 717 topics
+- A2: 716 topics
 - A3: 10 topics
 - A4: 31 topics
 - A5: 35 topics
 - A6: 420 topics
 - A7: 57 topics
+- minimax-cli1: 1 topics
 
 ## Locale Acceptance
 
