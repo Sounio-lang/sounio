@@ -44,8 +44,7 @@
   says so is the formal statement of "refusal is not a zero".
 
   SCOPE — read before quoting.
-  (a) This is a MODEL of the E219 fragment, not a proof that
-      `check.sio` implements the model. The allow-list below is a
+  (a) This is a MODEL of the E219 fragment. The allow-list below is a
       snapshot of `name_is_native_backend_builtin` dated 2026-08-17
       (34 names: 27 original builtins + 7 P0-F POSIX). Drift is a CI
       concern (`scripts/ci/extern_builtin_mirror_gate.sh`), not a
@@ -62,6 +61,41 @@
       step. Honesty says value-or-refuse. A program that is well-typed
       and mentions an unimplemented extern does not get stuck at 0;
       it is refused.
+  (f) lean_single does not implement E219. The theorem is a statement
+      about the Madaros judgment, not the seed compiler.
+
+  IMPLEMENTATION CORRESPONDENCE (2026-08-17, after the measured gap).
+  An audit against `origin/main` found three divergences. Two are closed
+  in the compiler; one is named and left.
+
+  Closed:
+    · Expression infection. After E219 the checker now returns `ty_error()`
+      (`refused_unimplemented`) instead of the declared return type, so
+      `abs() + 1` is not typed as an integer. That is `add_refuse_l`.
+    · Live Legacy. An empty IR stub that is not a builtin and not BSS
+      used to compile as prologue+ret (call reads rax, usually 0).
+      `native_v2_empty_stub_would_fabricate` now emits `ud2` instead.
+      Declaration-without-call still has a symbol; a missed E219 cannot
+      return a fabricated 0. Gate:
+      `scripts/ci/e219_refusal_correspondence_gate.sh`.
+
+  Still open, stated plainly:
+    · lean_single has no E219, and a seed E219 written in house
+      style would be ornament. `strip_extern_blocks` rewrites
+      `extern "C"` into ordinary `fn` stubs before check, so the
+      Madaros predicate (`is_extern && !allowlisted`) has no object.
+      The distinguishing name of this file, `abs`, is a first-class
+      stub (`__native_abs_i64`). Measured 2026-08-17:
+      `bin/souc-lean-single-x86_64` emits an ELF for
+      `extern_c_unimplemented_builtin.sio` (compile exit 0) and
+      `abs(-7)` returns 7. `tc_error` is a warning (253 sites) and
+      never sets `TYPECHECK_FAILED`; `tc_error_hard` goes through
+      `tc_mark_failed`, which swallows `from_import` (bit 2048).
+      Only arity and unbalanced braces punch through. A real refuse
+      would need a surviving unresolved-extern bit, a CALL-site
+      check, an unconditional `TYPECHECK_FAILED`, and a second
+      allow-list — a different judgment, not this one. Left open
+      as the #1798 engine-split.
 
   WHY NOT THE OTHER TWO CANDIDATES, STATED PLAINLY.
   GUM-through-MLI: `gum_conservativity` is already proved for a sketch
