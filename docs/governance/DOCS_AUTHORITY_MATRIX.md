@@ -88,6 +88,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.clinical-drug-switch-vanco-validation-2026-07-19 | repo_only | docs/audit/CLINICAL_DRUG_SWITCH_VANCO_VALIDATION_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-midazolam-ddi-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_MIDAZOLAM_DDI_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-vanco-tdm-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_VANCO_TDM_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.cross-engine-runpass-census-2026-08-17 | repo_only | docs/audit/CROSS_ENGINE_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-dossier-resolution-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -235,6 +236,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-wave15a-global-list-multistmt-paramful-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15A_GLOBAL_LIST_MULTISTMT_PARAMFUL_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave15c-issue901-scale-closeout-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave15e-global-string-bss-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15E_GLOBAL_STRING_BSS_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.mli-s3-uncertainty-to-bytes-2026-08-17 | repo_only | docs/audit/MLI_S3_UNCERTAINTY_TO_BYTES_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-audit-2026-06-10 | repo_only | docs/audit/MODULAR_COMPILER_AUDIT_2026-06-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-stack-clash-2026-05-29 | repo_only | docs/audit/MODULAR_COMPILER_STACK_CLASH_2026-05-29.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-pipe-coverage-map-2026-06-01 | repo_only | docs/audit/MODULAR_PIPE_COVERAGE_MAP_2026-06-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
