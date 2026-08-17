@@ -16,6 +16,21 @@ artifacts. **No `self-hosted/` edits.**
 **Prior failure:** a previous claim on this path reported the audit written;  
 `ls` proved the file did not exist. This note is the real deliverable.
 
+### Measurement mode (plain)
+
+**INSPECTED + producer dry-run only — NOT a full re-derivation of the artefacts.**
+
+| Done | Not done |
+|------|----------|
+| Read both JSON files and `generated_at_utc` | Re-run `scripts/archive/omega_sprint1_gate.sh` on Slurm |
+| Read `omega_parallel_cutover_status.py` end-to-end | Emit new committed `*.v1.json` with a real gate log |
+| Confirm gate log missing; archive-only producer | Hand-edit JSON to look current (**refused**) |
+| Dry-run producer to `/tmp` only → **status=fail** | Treat dry-run fail as a fresh green snapshot |
+
+Inspection alone cannot prove an on-disk green is still true; the dry-run shows an
+honest re-emit **without** inventing a gate log would be **fail**. Disposition is
+still **RETIRE as operational source of truth**, not “regenerate until green.”
+
 ---
 
 ## 0. Recommendation (plain)

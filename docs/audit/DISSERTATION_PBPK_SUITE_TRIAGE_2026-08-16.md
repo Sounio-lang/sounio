@@ -18,6 +18,24 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.disserta
 `env SLURM_CONF=/tmp/slurm-direct.conf srun --partition=cpu-ops --chdir=/tmp bash -lc '...'`)  
 **Status:** classification only. **No `self-hosted/` edits.** No science parameters changed.
 
+### Real defect vs stale instrument (plain)
+
+Job 9908 A/B on `main@6f2c4e2461`: **identical 24/53 FAIL** on checked-in Madaros
+and Madaros built from source. This is a **real multi-engine defect surface**, not
+a stale-binary / stale-instrument artefact.
+
+### Cause vs symptoms (plain)
+
+| Depth | What triage reached |
+|-------|---------------------|
+| **Named causes** | (1) `rc=182` / `madaros: handles full` on two MC N=2000 paths — **resource ceiling**. (2) `rapamycin_epistemic_adaptive` ran with **`mech=no`** (epistemic step signals never fired) — **science/model oracle fail**. |
+| **Symptom clusters only** | 10× multi-module SIGSEGV-139 during `lower_array`; 10× preflight status 1 without retained E-codes — **toolchain**, not root-caused to a single bug ID. |
+| **Unknown within science** | `epistemic_pbpk28` 8/9 pass, 1 fail — **which** of nine checks failed not in gate tail. |
+| **Not reached** | A single root cause for all 24; a patch; re-run on this worktree’s older SHA. |
+
+**Science/model defect count that actually ran and failed: 2 of 24.**  
+**22 of 24 are capacity or toolchain symptoms.**
+
 ---
 
 ## 0. Honesty about prior work on this lane
