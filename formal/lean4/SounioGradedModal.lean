@@ -61,9 +61,12 @@ theorem graded_weakening (c c' : Nat) (h : c' ≤ c) : gradedSubtype c c' := h
     The result confidence is at most the minimum of c1, c2. -/
 theorem graded_app_rule (c1 c2 : Nat) (h1 : c1 ≤ 1000) (h2 : c2 ≤ 1000) :
     conf_product c1 c2 ≤ min c1 c2 := by
-  -- TODO: needs Nat division lemmas (mul_div_cancel, mul_div_cancel_left) from Mathlib.
-  -- Core Lean 4 does not provide these cancellation lemmas.
-  sorry
+  -- Mathlib-free: c1*c2 ≤ c1*1000 and ≤ 1000*c2 (monotone multiply), then
+  -- the ≤-side of truncated division is linear arithmetic (`omega`).
+  simp only [conf_product]
+  have ha : c1 * c2 ≤ c1 * 1000 := Nat.mul_le_mul_left _ h2
+  have hb : c1 * c2 ≤ 1000 * c2 := Nat.mul_le_mul_right _ h1
+  omega
 
 /-- Rule 4: Transitivity of subtyping -/
 theorem graded_trans (c1 c2 c3 : Nat) (h12 : gradedSubtype c1 c2) (h23 : gradedSubtype c2 c3) :
@@ -123,16 +126,38 @@ def conf_decay (base_conf : Nat) (age half_life : Nat) : Nat :=
   if half_life = 0 then 0
   else base_conf / 2 ^ (age / half_life)
 
+/-- Divisor anti-monotonicity for Nat truncated division, Mathlib-free:
+    a larger (positive) divisor yields a smaller-or-equal quotient. -/
+theorem div_le_of_divisor_le {a b c : Nat} (hc : 0 < c) (hcb : c ≤ b) :
+    a / b ≤ a / c := by
+  cases Nat.lt_or_ge (a / c) (a / b) with
+  | inl hlt =>
+    exfalso
+    have h1 : a / c + 1 ≤ a / b := by omega
+    have h2 : c * (a / c + 1) ≤ c * (a / b) := Nat.mul_le_mul_left _ h1
+    have h3 : c * (a / b) ≤ b * (a / b) := Nat.mul_le_mul_right _ hcb
+    have h4 : c * (a / c + 1) = c * (a / c) + c := by rw [Nat.mul_add, Nat.mul_one]
+    rw [h4] at h2
+    have hdmc : c * (a / c) + a % c = a := Nat.div_add_mod a c
+    have hdmb : b * (a / b) + a % b = a := Nat.div_add_mod a b
+    have hmodlt : a % c < c := Nat.mod_lt a hc
+    omega
+  | inr hge => exact hge
+
 /-- Decay is monotonically non-increasing in age -/
 theorem conf_decay_nonincreasing (base : Nat) (half_life : Nat) (h : half_life > 0)
     (age1 age2 : Nat) (hle : age1 ≤ age2) :
     conf_decay base age2 half_life ≤ conf_decay base age1 half_life := by
-  -- TODO: Proof strategy: base / 2^(age2/hl) ≤ base / 2^(age1/hl)
-  -- because age1/hl ≤ age2/hl (Nat division is monotone), so 2^(age1/hl) ≤ 2^(age2/hl)
-  -- and dividing by a larger number gives a smaller result.
-  -- Core Lean 4 lacks Nat.div_le_div_left, Nat.pow_le_pow_right, Nat.div_le_div_right,
-  -- and Nat.pos_pow_of_pos. Needs Mathlib Nat lemmas.
-  sorry
+  -- Mathlib-free chain: age1/hl ≤ age2/hl (`Nat.div_le_div_right`),
+  -- so 2^(age1/hl) ≤ 2^(age2/hl) (`Nat.pow_le_pow_right`),
+  -- so dividing base by the larger power gives a smaller quotient
+  -- (`div_le_of_divisor_le` above — core Lean has only the ≤-monotone-in-
+  -- numerator direction, the anti-monotone-in-divisor direction is derived).
+  simp only [conf_decay, if_neg (Nat.ne_of_gt h)]
+  have hdiv : age1 / half_life ≤ age2 / half_life := Nat.div_le_div_right hle
+  have hpow : 2 ^ (age1 / half_life) ≤ 2 ^ (age2 / half_life) :=
+    Nat.pow_le_pow_right (by omega) hdiv
+  exact div_le_of_divisor_le (Nat.two_pow_pos _) hpow
 
 /-- A fresh measurement is maximally confident -/
 theorem conf_decay_fresh (base : Nat) (half_life : Nat) (h : half_life > 0) :

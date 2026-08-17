@@ -99,7 +99,7 @@ require_nonempty "$NODES" "node count"
 require_min_count "$NODES" 2 "closure nodes"
 
 IR_MAX_FUNCS="$(grep -E '^pub let IR_MAX_FUNCS: i64 = [0-9]+' self-hosted/ir/ir.sio \
-                 | grep -oE '[0-9]+$' | head -1)"
+                 | grep -oE '[0-9]+$' | sed -n 1p)"
 require_nonempty "$IR_MAX_FUNCS" "IR_MAX_FUNCS — it is no longer declared where this gate looks"
 
 FN_RE='^[[:space:]]*(pub[[:space:]]+|pub\(crate\)[[:space:]]+)?fn[[:space:]]'
@@ -128,7 +128,7 @@ fi
 FOREIGN="$(grep '^node' "$CLOSURE" | awk '{print $2}' | grep '^/' | grep -v "^$ROOT_DIR/" || true)"
 if [[ -n "$FOREIGN" ]]; then
   gate_fail "closure nodes resolve outside the tree under test ($ROOT_DIR); this census would be partly about another checkout:
-$(printf '%s' "$FOREIGN" | head -5)"
+$(printf '%s' "$FOREIGN" | sed -n '1,5p')"
 fi
 
 # A census that finds almost no functions is broken, not empty. main.sio alone
@@ -142,7 +142,12 @@ echo "fn_declarations  $TOTAL"
 echo "ir_max_funcs     $IR_MAX_FUNCS"
 echo "headroom         $((IR_MAX_FUNCS - TOTAL))"
 echo "top_contributors"
-sort -rn "$CENSUS" | head -10 | sed 's/^/  /'
+# No early-exiting reader in a pipefail pipeline: `| head -10` closes the
+# pipe after ten lines and `sort` can die on the flush (observed in CI on
+# 2026-08-17: "sort: fflush failed: Broken pipe" killed this REPORT_ONLY
+# probe before its exit 0). sed -n '1,10{...p}' reads everything and prints
+# ten. Guarded by scripts/ci/sigpipe_hygiene_gate.sh.
+sort -rn "$CENSUS" | sed -n '1,10{s/^/  /p}'
 
 if [[ "${SOUNIO_IR_CAPACITY_PROBE_REPORT_ONLY:-0}" == "1" ]]; then
   echo "MADAROS_IR_CAPACITY_REPORT_ONLY: not enforcing the cap"
