@@ -89,6 +89,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.clinical-vanco-tdm-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_VANCO_TDM_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.dissertation-pbpk-suite-triage-2026-08-16 | repo_only | docs/audit/DISSERTATION_PBPK_SUITE_TRIAGE_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.e043-rust-macro-design-dispatch-2026-07-12 | repo_only | docs/audit/E043_RUST_MACRO_DESIGN_DISPATCH_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.engine-parity-adjudication-2026-08-02 | repo_only | docs/audit/ENGINE_PARITY_ADJUDICATION_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-demo-sweep-2026-06-02 | repo_only | docs/audit/EPISTEMIC_DEMO_SWEEP_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -138,6 +139,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.g1-wip.verdict-parity-2026-06-02 | repo_only | docs/audit/g1_wip/VERDICT_PARITY_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30 | repo_only | docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gum-fo-propagation-hidden-by-main-vacuous-harness-dispatch-2026-08-10 | repo_only | docs/audit/GUM_FO_PROPAGATION_HIDDEN_BY_MAIN_VACUOUS_HARNESS_DISPATCH_2026-08-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.hlir-reverify-2026-08-16 | repo_only | docs/audit/HLIR_REVERIFY_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-651-rootcause-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_651_ROOTCAUSE_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-algebra-audit-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_ALGEBRA_AUDIT_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17 | repo_only | docs/audit/KAXI_PTX_TARGET_SM_AUDIT_2026-06-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -233,6 +235,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.mut-effect-enforcement-dispatch-2026-07-27 | repo_only | docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.mut-refactor-execution-plan-2026-05-31 | repo_only | docs/audit/MUT_REFACTOR_EXECUTION_PLAN_2026-05-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ode-epistemic-zero-params-2026-06-02 | repo_only | docs/audit/ODE_EPISTEMIC_ZERO_PARAMS_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.omega-stale-artifact-audit-2026-08-16 | repo_only | docs/audit/OMEGA_STALE_ARTIFACT_AUDIT_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ousadia-epistemic-method-rx-madaros-2026-07-19 | repo_only | docs/audit/OUSADIA_EPISTEMIC_METHOD_RX_MADAROS_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk-dissertation-session-notes-2026-06-28 | repo_only | docs/audit/PBPK_DISSERTATION_SESSION_NOTES_2026-06-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk-rapamycin-triage-2026-06-02 | repo_only | docs/audit/PBPK_RAPAMYCIN_TRIAGE_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
