@@ -13,8 +13,28 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 **Scope:** `bin/souc` default Madaros engine — **native run** SIGSEGV (rc=139) at
 `println`/`print` of a scalar whose lowering-time scalar-kind is not positively
 resolved. **Compile/typecheck pass; the generated ELF faults at runtime.**
-**Status:** mechanism CONFIRMED with a minimal import-free witness; compiler root
-cause OPEN. Not yet fixed.
+**Status:** mechanism CONFIRMED with a minimal import-free witness. **Fixes 1
+and 2 LANDED and verified from source** (commits on lane/fable-1/println-scalarkind-segv-20260817);
+fix 3 deferred as a follow-up recommendation (§5). One residual (if-expr) named
+in §5.
+
+## 0a. Fix status (2026-08-17)
+
+Fixes 1 and 2 are implemented in `self-hosted/ir/lower.sio` and **built from
+source and verified control-first** (never on the prebuilt wrapper):
+
+- **Control** (parent, no fix, source-built): `biomaterial_release` and the
+  minimal witness both SIGSEGV (rc=139) — the bug is real on a from-source
+  binary, not a prebuilt artefact.
+- **Fix** (source-built): `biomaterial_release` runs clean (rc=0, completes
+  through TEST 8); the whole §3 witness set for bool call/field/param and
+  int/bool ident-copy passes. String / int / f64 / int-param **positive controls
+  unchanged** (a `println("string")` still prints TEXT — the fix never reroutes
+  strings to print_int). A 70-test struct/bool/print/enum/generic control-vs-fix
+  sweep shows **zero differences**; three generic-struct fails
+  (`generic_struct_instantiate`/`_nested` = 139, `_return_structf` = 1) are
+  **pre-existing** — identical on control. Full-suite regression still pends
+  CI/Slurm. Merge owner: codex-2 (compiler).
 **Engine split:** Madaros only (the dissertation triage records lean_single PASS
 on the same programs).
 **Related:** `project_scalar_kind_param_bug_2026-07-01` (the f64-param twin of
@@ -117,26 +137,51 @@ The copy gap is orthogonal: `let b = a` does not record `b`'s
 `lookup_local_scalar_kind` from `a`'s, so the `Ident` path returns 0 even for a
 provably-int `a`.
 
-## 5. Proposed fix (positive classification; safe default as backstop)
+## 5. Fix (positive classification; safe default deferred)
 
 Scoped to `self-hosted/ir/lower.sio`; behaviour-preserving (bool already prints
-`1`/`0` on the literal path):
+`1`/`0` on the literal path).
 
-1. **Classify bool as print_int kind (1)** everywhere int is classified — add a
-   `lower_name_is_bool_type` companion and return 1 for a bool callee return, a
-   bool field, and a bool-typed local/param ident. This matches the existing
-   literal output and removes the char\* misroute for every bool shape.
-2. **Propagate scalar-kind through ident copies** — when lowering `let b = a`,
-   seed `b`'s local scalar-kind from `a`'s (covers the int-copy `z_cint` axis).
-3. **(Defensive, optional) make the kind-0 default safe** — routing an
-   unresolved scalar to `print_int` instead of `print` turns a guaranteed
-   SIGSEGV into an at-worst-wrong-but-safe number. Only genuine `str`/`&str`
-   (`StringLit`→3, or a positively-resolved string type) should reach the char\*
-   printer. This is the architectural inversion the whole "println i64-segfault
-   fix" comment series has been chasing one expression-kind at a time.
+**Fix 1 — classify bool as print_int kind (1) everywhere int is classified
+(LANDED).** Added `lower_type_expr_is_bool` / `lower_name_is_bool_type` (mirror
+the i64 pair) and returned kind 1 for bool at every site int is:
+- `register_struct_fields` — **all six** field-registration paths mark a bool
+  field with the scalar-int marker `3` (consumed only by `field_is_int_*`, inert
+  for float/array/store). *Only patching one path is a trap:* the layout consumed
+  at the println site comes from a different registration path, so the field case
+  stays broken until all six carry the marker.
+- `expr_result_scalar_kind_ref` Call/MethodCall — a bool-returning callee → 1.
+- `lower_fn_params` **path-A** (`lowerer_mark_local_scalar_kind_mut`) — a bool
+  param → 1. Path-A is the load-bearing param path; the `_ref` param table alone
+  does not reach println dispatch.
 
-Fix 1 alone unblocks the dissertation crashers whose fault is a bool
-field/return (`biomaterial_release`); fixes 1+2 close the measured witness set.
+**Fix 2 — propagate scalar-kind through ident copies (LANDED).** The let-binding
+classifier had no Ident case, so `let b = a` left `b` at kind 0. Propagate `a`'s
+recorded kind, guarded `!= 0`. Covers the int-copy `z_cint` axis too (not just
+bool).
+
+**Residual (NOT fixed here) — if-expr / other unclassified expression kinds.**
+`let v = if c { … } else { … }; println(v)` still SIGSEGVs, and it does so for an
+**int** if-expr too (`ife` = 139), so this is not a bool gap — it is the same
+class as the char\*-default problem, one more expression-kind
+(`expr_result_scalar_kind_ref` has no `ExprIf` case). Left for the follow-up
+below rather than special-cased here.
+
+**Fix 3 — follow-up recommendation: make the kind-0 default safe (SEPARATE PR).**
+The durable closure is to invert the `println_dispatch_name` default: an
+unresolved scalar should route to `print_int`, not the char\* printer. Only a
+**positively-resolved** string (`StringLit`, or a type proven `str`/`&str`)
+should reach `print` (strlen+write). Today the default assumes "unclassified ==
+string", so every expression-kind the classifier does not yet recognise
+(if-expr, and whatever is added next) is a latent SIGSEGV that must be closed one
+at a time — fixes 1 and 2 are two such patches, and the residual above is the
+next. Inverting the default converts that open-ended SIGSEGV surface into an
+at-worst-wrong-but-safe number and makes the classifier's job "detect strings"
+(a closed, small set) instead of "detect every scalar" (open-ended). It is
+deliberately **not** bundled here: it is a semantics change to the default
+branch and deserves its own PR and its own argument, with a positive control
+proving a genuine `println(string_variable)` — not a literal — still prints text,
+since that is the one case the inversion must not break.
 
 ## 6. Verification obligation before landing
 
