@@ -4035,7 +4035,12 @@ fn checker_onto_check_roles_inplace(c: *mut Checker, roles: Option<Box<OntologyR
                     if decl.has_range && !onto_class_list_has(classes, decl.range_name) {
                         checker_report_error_at_inplace(c, decl.span, 157, 0, 0, 0)
                     }
-                    if decl.has_inverse && !onto_role_list_has(roles, decl.inverse_name) {
+                    // Role lists are stored in reverse source order, so this
+                    // node's tail contains exactly the declarations that came
+                    // before it in the source. Match the canonical collector's
+                    // declaration-order boundary instead of searching the whole
+                    // list: lean_single rejects forward inverse targets with E158.
+                    if decl.has_inverse && !onto_role_list_has((*list).tail, decl.inverse_name) {
                         checker_report_error_at_inplace(c, decl.span, 158, 0, 0, 0)
                     }
                 }
@@ -7331,8 +7336,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // #1622: calling an `extern "C"` name the native backend does not
         // implement. This is the live arm -- a plain ident callee resolves via
         // direct_sig_id and returns below, never reaching the TyFn fallback.
+        var refused_unimplemented = false
         if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) {
             checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+            refused_unimplemented = true
         }
         var effective_params = fn_param_list_clone(&direct_sig.params)
         var effective_return_type = direct_sig.return_type
@@ -7361,6 +7368,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         )
         checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        if refused_unimplemented {
+            return ty_error()
+        }
         return effective_return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
@@ -7419,8 +7429,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // parser_card_a_raw_pointer_types.sio declares malloc and never calls
         // it -- both compile and pass today, and a declaration-site refusal
         // would break them for no gain.
+        var refused_unimplemented = false
         if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
             checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+            refused_unimplemented = true
         }
         let call_start_borrows = (*c).borrows
         var effective_params = fn_param_list_clone(&sig.params)
@@ -7444,7 +7456,11 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
         checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
-        effective_return_type
+        if refused_unimplemented {
+            ty_error()
+        } else {
+            effective_return_type
+        }
     } else if is_error_or_unknown(callee_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
@@ -13097,7 +13113,7 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
     }
     else if code == 219 {
-        print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6\n")
+        print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system\n")
     }
     else {
         // No help available for unknown errors
@@ -21050,8 +21066,10 @@ impl Checker {
             // parser_card_a_raw_pointer_types.sio declares malloc and never
             // calls it — both compile and pass today, and a declaration-site
             // refusal would break them for no gain.
+            var refused_unimplemented = false
             if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
                 c = c.report_error_at(e.span, 219, 0, 0, 0)
+                refused_unimplemented = true
             }
             let call_start_borrows = c.borrows
             var effective_params = fn_param_list_clone(&sig.params)
@@ -21080,7 +21098,11 @@ impl Checker {
             // Release borrows taken for call arguments — the call has returned,
             // so exclusive/shared borrows on arguments are no longer active.
             c = c.release_call_arg_borrows(e.args, effective_params, call_start_borrows)
-            (c, effective_return_type)
+            if refused_unimplemented {
+                (c, ty_error())
+            } else {
+                (c, effective_return_type)
+            }
         } else if is_error_or_unknown(callee_ty) {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)

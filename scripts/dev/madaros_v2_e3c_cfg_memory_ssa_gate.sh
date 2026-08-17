@@ -19,12 +19,14 @@ RECEIPT="$TMP_DIR/e3c-cfg-memory-ssa.receipt.json"
 
 fail(){ echo "E3C_CFG_MEMORY_SSA_GATE_FAIL: $*" >&2; exit 1; }
 
+. scripts/dev/madaros_v2_enir_gate_scope.sh
+
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
 E3C_PROTECTED=(self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio stdlib/math/qd128.sio self-hosted/enir/qd.sio tools/eisa/eisa_evm_run.sio)
 if [[ "${E3C_ALLOW_DOWNSTREAM_ENIR_EXTENSION:-0}" != 1 ]]; then E3C_PROTECTED+=(self-hosted/enir/ir.sio self-hosted/enir/interpreter.sio); fi
-git diff --quiet "$BASE_REF" HEAD -- "${E3C_PROTECTED[@]}" \
-  || fail "E3C changed production codegen/ABI/runtime, protected ENIR surfaces, pinned qd semantics, or frozen METRON oracle"
+madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E3C_CFG_MEMORY_SSA_GATE" \
+  "E3C changed production codegen/ABI/runtime, protected ENIR surfaces, pinned qd semantics, or frozen METRON oracle" "${E3C_PROTECTED[@]}"
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "ENIR/CFG-MIR driver build produced no ELF"
