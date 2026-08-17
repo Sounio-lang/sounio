@@ -78,12 +78,17 @@ False-red causes remain possible. Examples found on 2026-08-17:
   GitHub incident that began at 2026-08-17 13:40 UTC, GitHub Status listed API
   Requests, Issues, Pull Requests, and Actions under major outage, with archive
   and raw repository downloads around 50% error rate. Concrete evidence:
-  #1782 CI run `32041868355`, `Full Test Suite` job `95422848448`, failed in
-  `Set up job` while downloading `actions/download-artifact@v4`: the log shows
-  codeload `503`, then codeload `429`, then "Failed to download archive" after
-  three attempts. The selected Sounio test suite never ran, but the aggregating
-  `CI Decision` job `95424195280` still failed because the selected
-  `full-test-suite` result was not success.
+  #1780 CI run `32040019980` attempt 1, `Native Self-Host (macOS arm64)` job
+  `95418131605`, failed in `Set up job` while downloading
+  `actions/download-artifact@v4`: the log shows codeload `429` twice, then
+  "Failed to download archive" after three attempts. The macOS self-host gate
+  never ran, but `CI Decision` job `95419747881` failed. #1782 CI run
+  `32041868355`, `Full Test Suite` job `95422848448`, failed in `Set up job`
+  while downloading the same action: the log shows codeload `503`, then
+  codeload `429`, then "Failed to download archive" after three attempts. The
+  selected Sounio test suite never ran, but the aggregating `CI Decision` job
+  `95424195280` still failed because the selected `full-test-suite` result was
+  not success.
 - A PR automation job can also go red on the CI instrument itself rather than
   repository logic. #1781 `Issue & PR Automation` run `32041028754`, `PR
   Triage` job `95420242960`, completed checkout and then failed in
