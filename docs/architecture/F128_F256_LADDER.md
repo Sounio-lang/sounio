@@ -39,11 +39,22 @@ let b = a + 1.0f128                       // compile-fail
 - No literals, no user-visible operations, no stdlib surface, no `print_f128`/`Knowledge<f128>` interaction.
 - All `tests/compile-fail/f128_f256_*.sio` and `tests/native-v2/f128_format_identity_*` remain authoritative negatives.
 
-This boundary is **structural-only** and enforced before type checking or IR lowering. The ladder below progressively relaxes it while preserving auditability.
+This boundary is **structural-only** and enforced **on Madaros** before type checking or IR lowering.
+
+### Engine split (FINDING 2026-08-17, PR #1767 Full Test Suite)
+
+| Engine | `f128`/`f256` type spellings + arithmetic/casts |
+|---|---|
+| **Madaros** (default `bin/souc`) | Rejects at parser with **`error[E218]`** and the reserved-message note. Matches this ladder's V0-A claim. |
+| **lean_single** (bootstrap seed; CI Full Test Suite stage2) | **Does not emit E218.** Compiles `fn add(a: f128, b: f128) -> f128 { a + b }` and `x as f128` to an ELF (`rc=0`, no diagnostic). Implicit `f128`→`f256` still fails lean_single typecheck (`tail type mismatch` / `typecheck: failed`). |
+
+So the V0-A boundary in this document is **Madaros-owned**, not universal. The CI Full Test Suite runs lean_single: compile-fail fixtures that only see Madaros E218 must carry `//@ known-failure: lean_single-only gap…` and `//@ error-pattern: error[E218]` (same pattern as `tests/compile-fail/f128_f256_arithmetic_unimplemented.sio`). That is documentation of an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
+
+The authoritative V0-B contract remains `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b` under default Madaros.
 
 ## The V0-B..E Ladder
 
-Each stage has a **gate definition** (CI command, positive/negative witnesses, success receipt, semantic-lane ID, acceptance criteria). Gates are additive; later stages subsume earlier ones. All gates run under both `lean_single` (bootstrap seed) and current Madaros where applicable. Success receipts must be exact-string matched in gate scripts.
+Each stage has a **gate definition** (CI command, positive/negative witnesses, success receipt, semantic-lane ID, acceptance criteria). Gates are additive; later stages subsume earlier ones. **V0-B green is judged on Madaros** (`madaros_f128_f256_ladder_gate.sh`); lean_single suite participation uses known-failure annotations until the seed gains E218 or is retired from this surface. Success receipts must be exact-string matched in gate scripts.
 
 ### V0-B: Literals Accepted End-to-End Through Check
 

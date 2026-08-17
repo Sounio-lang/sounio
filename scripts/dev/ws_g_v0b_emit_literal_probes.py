@@ -94,6 +94,13 @@ def emit_probe(
 
     lines: list[str] = []
     lines.append("//@ run-pass")
+    lines.append("//@ check-only")
+    lines.append(
+        "//@ known-failure: V0-B not implemented yet — Madaros parser E218 on "
+        "f128/f256; contract is scripts/ci/madaros_f128_f256_ladder_gate.sh "
+        "--stage v0b (must FAIL until fable-1 lands literals through check). "
+        "lean_single does not enforce E218 (see ladder V0-A engine split)."
+    )
     lines.append(
         f"//@ description: V0-B — {ty} literals from MPFR literal_boundary corpus "
         "(external oracle, not Sounio)"
