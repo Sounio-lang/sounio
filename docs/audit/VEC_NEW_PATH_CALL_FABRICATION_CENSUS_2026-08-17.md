@@ -29,6 +29,8 @@ export MADAROS_RAW_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PW
 
 Same result on prebuilt `bin/madaros-linux-x86_64`.
 
+**Engine split (CI, 2026-08-17):** the Full Test Suite job runs `souc-stage2` via `scripts/ci/souc-native-wrapper.sh` (lean_single). On that engine the same witness exits 1 with empty stdout — so `tests/run-pass/vec_new_nonexistent_type_eval_zero.sio` is `//@ known-failure` until both engines refuse, or the suite engine is Madaros and refuse has landed. The 19-site census above is a Madaros measurement and is unchanged.
+
 ### Checker path
 
 In `self-hosted/check/check.sio` associated-function handling (`Type::method`):
