@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.architecture.cei-implementation-spec-2026-08-18
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.cei-implementation-spec-2026-08-18
+-->
+
 # CEI — Consolidated Implementation Spec (workflow-synthesised, adversarially verified)
 
 _Produced by the `cei-program-advance` workflow (fan-out survey → opus adversarial-verify → opus synthesis), run `wf_12e329df-b89`, 2026-08-18. Model routing: sonnet survey / opus verify+synthesis; WS-C re-routed to opus/high after a StructuredOutput failure. Read-only design; no source edited._
@@ -460,3 +469,43 @@ Notes on the deliverable above (not part of the appendable Markdown):
 - WS-D contributed nothing (stub); I integrated it as an explicit UNSTARTED gap rather than inventing content.
 - WS-B's "stub probe" framing was fatally wrong per its verifier; the spec propagates the inversion (item-5 is sound-but-ineffective, not a fabricated pass) and carries the ~70-line coordinate corrections.
 - WS-C's three fixable flaws (missing `pn_add`, wrong anchors, unpinned coeff) are all folded in as corrections that rescue the design.
+
+---
+
+## P0 — turnkey implementation state (Option A, re-anchored on lane/fable-1/handle-table-182-dispatch)
+
+Base validated + set up this session (branch `lane/fable-1/cei-p0-handler-lowering` @ its HEAD; P0 files
+claimed on lane `fable-1-cei-p0-handler`). GPU precedent confirmed present AS NAMED. All coordinates below are
+re-anchored to `lower.sio`=17819 / `check.sio` on this tree — trust names, re-grep before editing.
+
+**Resolved design decision (settled the two workflow runs' disagreement):** `loop_labels` is
+`Box<LowerLoopLabels>` with only `loop_depth: i64` inline (lower.sio:723 struct). => **BOX the handler stack.**
+Add `struct LowerHandlerStack { effects: [Name;4], blocks: [Option<Box<Block>>;4] }`, and to `struct Lowerer`
+add `handler_stack: Box<LowerHandlerStack>` + `handler_depth: i64` (do NOT add inline `[Name;4]` — the Lowerer
+is by-value-copied and multi-MiB per the @913 comment). Mirror on `struct Checker`.
+
+**Exact edit sites (re-anchored):**
+- `lower.sio` struct Lowerer @723; **~5 `Lowerer{}` init literals** to extend: @991 (`lowerer_new`), @1455,
+  @1519, @1587, @2015 — each gets `handler_stack: Box::new(LowerHandlerStack{ effects:[empty_name();4],
+  blocks:[None;4] }), handler_depth: 0`.
+- `lower.sio` **ExprHandle dispatch arm**: insert `else if e.kind == ExprKind::ExprHandle {
+  self.lower_handle_expr_ref(e) }` in the chain at ~16496 (beside `ExprBlock`→`lower_block_expr_ref`).
+  New `lower_handle_expr_ref`: push effect(`e.name`)+block(`e.handler_block`) at `handler_depth` (cap 4,
+  `report_error_at` beyond), lower `e.block` via `lower_block_expr_ref` shape, pop on every exit.
+- `lower.sio` **perform hook** in `lower_method_call_expr_ref` @15677: add `expr_is_active_handler_perform_ref`
+  (mirror `expr_is_gpu_sync_call_ref` @15664 shape: ExprMethodCall + `left` ExprIdent==active effect; walk
+  `handler_depth-1..0`) FIRST, before `.len()`. On match: find `StmtLet{name==op, expr:ExprClosure}` in the
+  block; scope-push; per-arg `lower_expr_ref`+`bind_local(param,reg)` then **re-bind scalar-kind from
+  `ClosureParam.ty`** (f64→2,i64→1) [avoids the println kind-0 char* SIGSEGV]; lower clause body; restore scope;
+  result reg = body reg. No clause/arity: `lowerer_mark_error`+`IR_INVALID_REG` — never fall through.
+- `check.sio` **check_method_call bypass** @20438 (the load-bearing edit): add an arm parallel to the existing
+  `checker_expr_is_gpu_sync_call(e)` bypass @20439 — `checker_expr_is_active_handler_perform` matches the bare-
+  Ident-receiver shape against the live handler-effect stack BEFORE `check_opt_expr(e.left)` (which otherwise
+  fails Epistemic as undeclared-identifier). Type args vs clause `ClosureParam` types; return the clause body's
+  type. Needs Checker handler-stack fields + push/pop in `check_handle_expr` @24078 (push effect+block before
+  checking body, pop after; keep the existing standalone `check_block(handler_block)`).
+
+**Smoke test written:** `examples/effect_uncertainty_smoke.sio` (int-only, `//@ expect-stdout: SMOKE 5`).
+**Next increment:** make the struct + 4 code-site edits, build from source (needs an unthrottled slot), run the
+smoke test, then the P1 GUM-vs-MC demonstrator. Honesty gate unchanged (GUM conditional; p-box/interval the
+unconditional certified result).
