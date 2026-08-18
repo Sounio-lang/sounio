@@ -120,3 +120,85 @@ require_rejects() {
     gate_fail "the check accepted $why — it is not measuring that"
   fi
 }
+
+# ---------------------------------------------------------------------------
+# 2026-08-18 — ELF / engine / rc. Census in
+# docs/audit/GATE_INSTRUMENT_CENSUS_2026-08-18.md
+#
+# Pattern 2 (rc through a pipe) is empty in scripts/ci. Patterns 1 and 3 are
+# not: 98 compile-invoking gates never check \x7fELF; 72 never record which
+# engine compiled. That is a helper, not 98 patches. New gates source this
+# file and call require_elf / classify_compile_log / gate_capture_rc.
+# ---------------------------------------------------------------------------
+
+# require_elf <path> [why]
+# Exists, non-empty, first four bytes are \x7fELF. A compile that exits 0
+# and writes a file named `-o` (the wrapper swallow, #1885) is the case
+# this refuses. `[[ -s ]]` alone is not enough: a non-empty `-o` is still
+# not the named ELF.
+require_elf() {
+  local path="$1" why="${2:-$1 is not a native ELF}"
+  [[ -e "$path" ]] || gate_fail "$why (missing: $path)"
+  [[ -s "$path" ]] || gate_fail "$why (empty: $path)"
+  local magic
+  magic="$(od -An -tx1 -N4 "$path" | tr -d ' \n')"
+  [[ "$magic" == "7f454c46" ]] \
+    || gate_fail "$why (magic=$magic, want 7f454c46; $path)"
+}
+
+# classify_compile_log <compile-log>
+# Prints madaros | lean_single | unknown.
+#
+# MUST read the compile log, not `souc --version`. The wrapper prints
+# Madaros on --version even when `souc src.sio -o dest` routed to
+# lean_single and wrote a file named `-o`.
+classify_compile_log() {
+  local log="$1"
+  require_file "$log" "classify_compile_log: no compile log: $log"
+  if grep -qE '(^Madaros |Compilation successful)' "$log"; then
+    printf 'madaros'
+  elif grep -qE '(^source: |^tokens:|^elf: )' "$log"; then
+    printf 'lean_single'
+  else
+    printf 'unknown'
+  fi
+}
+
+# require_compile_engine <compile-log> <expected>
+require_compile_engine() {
+  local log="$1" expected="$2" got
+  got="$(classify_compile_log "$log")"
+  require_nonempty "$got" "classify_compile_log returned empty"
+  [[ "$got" == "$expected" ]] \
+    || gate_fail "compile log named engine=$got (want $expected) — $log"
+}
+
+# gate_capture_rc <dest-file> -- <cmd...>
+# Writes the child's rc to dest-file. Never read rc through a pipe: the
+# last command in the pipe is grep/tee/awk, and that gate is always green.
+gate_capture_rc() {
+  local dest="$1"
+  shift
+  [[ "${1:-}" == "--" ]] && shift
+  [[ $# -ge 1 ]] || gate_fail "gate_capture_rc: no command"
+  local rc=0
+  set +e
+  "$@"
+  rc=$?
+  set -e
+  printf '%s\n' "$rc" > "$dest"
+}
+
+# require_rc_file <dest-file> [expected]
+# The file must exist and hold a decimal integer. If expected is set, it
+# must match. An empty file is the pipe-grep miss from E230 round 3.
+require_rc_file() {
+  local dest="$1" expected="${2:-}"
+  require_nonempty_file "$dest" "run_rc file missing/empty: $dest (rc was not captured — do not grep it out of a pipe)"
+  local got
+  got="$(cat "$dest")"
+  [[ "$got" =~ ^[0-9]+$ ]] || gate_fail "run_rc file is not a number: $dest ($got)"
+  if [[ -n "$expected" && "$got" != "$expected" ]]; then
+    gate_fail "run_rc=$got (want $expected) from $dest"
+  fi
+}
