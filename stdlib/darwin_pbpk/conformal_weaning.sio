@@ -1,0 +1,136 @@
+// darwin_pbpk/conformal_weaning.sio — Conformal Weaning (P2).
+//
+// Distribution-free, label-conditional (Mondrian) conformal prediction for
+// sedative-weaning risk stratification in pediatric ICU. Converts the E1
+// load-at-stop score (load0) into prediction SETS with PROVEN finite-sample
+// coverage — no distributional assumption, only exchangeability.
+//
+// Why Mondrian: the cohort is imbalanced (45/61 abstinence) and the clinical
+// costs of the two errors differ — a missed withdrawal (false negative) is
+// far costlier than a false alarm. Label-conditional conformal guarantees
+// coverage WITHIN each class, which a pooled (non-Mondrian) rule cannot.
+//
+// Theory: Vovk et al. (2005) ALRW; Angelopoulos & Bates (2023);
+//         Romano, Sesia & Candes (2020) "Classification with Valid and
+//         Adaptive Coverage" (NeurIPS 2019 / AoS).
+// Complement to the Knightian layer (knightian_pbpk.sio, PR #1720):
+// conformal handles the DATA-side (finite n), Knightian handles the
+// MODEL-side (parameter ignorance). A protocol needs both.
+//
+// RUNTIME NOTE (issue #1715 bug #5): on the 2026-08-11 Madaros toolchain a
+// pub fn calling another fn of the same module segfaults the ELF at runtime
+// when called cross-module — so every pub fn below is a FLATTENED LEAF
+// (no fn-to-fn calls). Sorting/counting loops live in the caller (driver),
+// which also owns the fixed-size arrays (bug #2: keep literals <= 64).
+//
+// Study: Agourakis DC (2026) — Phase P2, "Conformal Weaning".
+
+// ============================================================================
+// CONFORMAL PRIMITIVES (label-conditional / Mondrian, full-conformal p-values)
+// ============================================================================
+
+// Conformal p-value with the finite-sample (+1) correction:
+//   p = (k + 1) / (n_cal + 1)
+// k = #{calibration scores at least as nonconforming as the candidate}.
+pub fn cw_pvalue(k: i64, n_cal: i64) -> f64 with Div {
+    let num = (k + 1) as f64
+    let den = (n_cal + 1) as f64
+    return num / den
+}
+
+// Prediction set as a 2-bit mask: bit0 = include "no withdrawal" (label 0),
+// bit1 = include "withdrawal" (label 1). A label enters iff p_label > alpha.
+// mask 0 = empty set (flag: model too uncertain — escalate, do NOT guess),
+// mask 3 = both labels (uninformative for this patient),
+// masks 1/2 = informative singletons.
+pub fn cw_mask(p0: f64, p1: f64, alpha: f64) -> i64 with Mut {
+    var m: i64 = 0
+    if p0 > alpha { m = m + 1 }
+    if p1 > alpha { m = m + 2 }
+    return m
+}
+
+// Is the true label inside the prediction set?
+pub fn cw_covered(mask: i64, y: i64) -> i64 {
+    if y == 0 {
+        if mask == 1 || mask == 3 { return 1 }
+        return 0
+    }
+    if mask == 2 || mask == 3 { return 1 }
+    return 0
+}
+
+// Set size (0, 1 or 2).
+pub fn cw_size(mask: i64) -> i64 {
+    if mask == 0 { return 0 }
+    if mask == 3 { return 2 }
+    return 1
+}
+
+// ============================================================================
+// PROTOCOL THRESHOLDS (class-conditional, finite-sample ranks)
+// ============================================================================
+
+// Lower threshold rank for the WITHDRAWAL class (label 1):
+// sort the n1 calibration scores of label-1 patients ascending; the rule
+// "flag withdrawal risk iff load0 >= s_(m1)" has guaranteed sensitivity
+// >= 1 - alpha, where m1 = floor(alpha * (n1 + 1)).
+// m1 = 0 means: with this little label-1 data the guarantee is vacuous
+// (threshold would be -inf — flag everyone). Caller must check.
+pub fn cw_rank_lower(n1: i64, alpha: f64) -> i64 {
+    let x = alpha * ((n1 + 1) as f64)
+    let m = x as i64   // truncation == floor for x >= 0
+    return m
+}
+
+// Upper threshold rank for the NO-WITHDRAWAL class (label 0):
+// sort the n0 calibration scores of label-0 patients ascending; the rule
+// "clear as low risk iff load0 <= s_(m0)" has guaranteed specificity
+// >= 1 - alpha, where m0 = ceil((1 - alpha) * (n0 + 1)).
+// If m0 > n0 the guarantee is vacuous (insufficient label-0 data);
+// caller must check and emit an honest vacuous output.
+pub fn cw_rank_upper(n0: i64, alpha: f64) -> i64 with Mut {
+    let x = (1.0 - alpha) * ((n0 + 1) as f64)
+    var m = x as i64
+    if (m as f64) < x { m = m + 1 }   // ceil for x >= 0
+    return m
+}
+
+// ============================================================================
+// TESTS (toy gates; full clinical driver is tests/run-pass/cw_utiped_driver)
+// ============================================================================
+
+fn test_cw_pvalue() -> bool with Div {
+    // (4+1)/(45+1) = 5/46 = 0.10869565...
+    let p = cw_pvalue(4, 45)
+    let d = p - 0.1086956522
+    if d < 0.000001 && d > 0.0 - 0.000001 { return true }
+    return false
+}
+fn test_cw_mask() -> bool with Mut {
+    // alpha = 0.10: only label 0 (p0=0.5, p1=0.05) -> mask 1
+    if cw_mask(0.5, 0.05, 0.10) != 1 { return false }
+    // only label 1 -> mask 2
+    if cw_mask(0.05, 0.5, 0.10) != 2 { return false }
+    // both -> 3, none -> 0
+    if cw_mask(0.5, 0.5, 0.10) != 3 { return false }
+    if cw_mask(0.05, 0.05, 0.10) != 0 { return false }
+    return true
+}
+fn test_cw_covered() -> bool {
+    if cw_covered(3, 0) != 1 || cw_covered(3, 1) != 1 { return false }
+    if cw_covered(1, 0) != 1 || cw_covered(1, 1) != 0 { return false }
+    if cw_covered(2, 1) != 1 || cw_covered(2, 0) != 0 { return false }
+    if cw_covered(0, 0) != 0 || cw_covered(0, 1) != 0 { return false }
+    return true
+}
+fn test_cw_ranks() -> bool with Mut {
+    // cohort: n1 = 45 -> floor(0.1*46) = 4 ; n0 = 16 -> ceil(0.9*17) = 16
+    if cw_rank_lower(45, 0.10) != 4 { return false }
+    if cw_rank_upper(16, 0.10) != 16 { return false }
+    // honesty on tiny cells: n0 = 3 -> ceil(0.9*4) = 4 > 3 (vacuous)
+    if cw_rank_upper(3, 0.10) <= 3 { return false }
+    // tiny label-1 cell: n1 = 4 -> floor(0.1*5) = 0 (vacuous flag)
+    if cw_rank_lower(4, 0.10) != 0 { return false }
+    return true
+}

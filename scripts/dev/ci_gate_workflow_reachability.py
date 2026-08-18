@@ -7,9 +7,9 @@ invocations (bash/sh/source), not comments and not inventory globs.
 
 Positive control (must be non-zero on this repo): at least one gate is
 reachable (ci.yml names several) AND at least one named leftover is not
-(epistemic_fabrication_detect_gate.sh). A census that reports 0 leftovers,
-or 0 reachable, has not measured. Correspondence was the third named
-orphan; it is wired in ci.yml Contracts as of the 2026-08-18 one-gate PR.
+(f64_bitcast_sitofp_boundary_gate.sh). A census that reports 0 leftovers,
+or 0 reachable, has not measured. The original three named orphans
+(correspondence, fabrication-detect, ontology enforcement) are wired.
 
 Usage:
   python3 scripts/dev/ci_gate_workflow_reachability.py
@@ -66,12 +66,17 @@ INVENTORY_MARKERS = (
     "rglob",
 )
 
-# Remaining named forgotten leftovers. Correspondence left this list when
-# it was wired in Contracts (one gate per PR). Do not add a newly wired
-# name back here — that would REFUTE the instrument.
+# Remaining forgotten leftovers after the 2026-08-18 named-three landing
+# (#1845 correspondence, #1836 fabrication + ontology). Wiring one of
+# these without removing it here is a REFUTE, not a silent pass.
 NAMED_DIRECT_ORPHANS = (
-    "epistemic_fabrication_detect_gate.sh",
-    "madaros_ontology_enforcement_gate.sh",
+    "f64_bitcast_sitofp_boundary_gate.sh",
+    "madaros_f128_f256_ladder_gate.sh",
+    "madaros_f128_f256_v0c_wire_gate.sh",
+    "madaros_f128_f256_v0d_softfloat_gate.sh",
+    "madaros_print_f64_negative_gate.sh",
+    "mli_s3_bit_identity_gate.sh",
+    "stdlib_source_byte_ceiling_gate.sh",
 )
 
 DISSERTATION_GATES = (
@@ -326,8 +331,8 @@ def main() -> int:
         else:
             pass
     missing_named = [o for o in NAMED_DIRECT_ORPHANS if o in reach_names]
-    # Remaining named leftovers must stay unreachable. Wiring one without
-    # removing it from NAMED_DIRECT_ORPHANS is a REFUTE, not a silent pass.
+    # Remaining forgotten leftovers must stay unreachable. Wiring one
+    # without removing it from NAMED_DIRECT_ORPHANS is a REFUTE.
     if missing_named:
         print(
             f"REFUTE: named direct orphans resolved as reachable: {missing_named}",
