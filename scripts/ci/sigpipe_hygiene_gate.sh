@@ -65,18 +65,62 @@ echo "fixed forms: here-string grep and sed top-10 decide correctly on 200 KiB+ 
 # Executable lines only: comments may name the forbidden shape while
 # documenting why it is forbidden, and that is not a regression.
 executable() { grep -v '^[[:space:]]*#' "$1"; }
-# No `echo "$captured" | grep -q` in the harness (the false-"missing" shape).
-if executable "$HARNESS" | grep -n 'echo "$output" | grep -q\|echo "$test_output" | grep -q' >/dev/null; then
-    executable "$HARNESS" | grep -n 'echo "$output" | grep -q\|echo "$test_output" | grep -q' | sed 's/^/  /'
-    fail "verdict-carrying echo|grep -q pipeline is back in $HARNESS"
-fi
-# No `| head` in the probe's executable lines: it runs under set -euo
-# pipefail, and any early-exiting reader there can kill the step before its
-# own exit path.
-if executable "$PROBE" | grep -n '| head' >/dev/null; then
-    executable "$PROBE" | grep -n '| head' | sed 's/^/  /'
-    fail "early-exiting '| head' reader is back in $PROBE"
-fi
-echo "shape ban: no echo|grep -q in $HARNESS, no | head in $PROBE"
+
+# Every file below carried a verdict-deciding `echo ... | grep -q` (or a
+# printf writer) that #1763 exiled from the harness and the wired-presence
+# change exiled from the gates: `grep -q` exits at first match, the flushing
+# writer fails under pipefail, and a present needle reads as absent.
+SHAPE_BAN_GREPQ_FILES=(
+    "$HARNESS"
+    "$PROBE"
+    scripts/ci/ontology_cli_smoke_gate.sh
+    scripts/ci/self_falsifying_compiler_gate.sh
+    scripts/ci/semantic_orc_depression_orc_gate.sh
+    scripts/ci/sedenion_phi_injectivity_gate.sh
+    scripts/ci/sedenion_cd_qbig_gate.sh
+    scripts/ci/cd_tower_seam_gate.sh
+    scripts/ci/sounio_validation.sh
+    scripts/ci/mli_s3_bit_identity_gate.sh
+    scripts/ci/kretikos_kaxi_phase_y_gate.sh
+    scripts/ci/claim_ast_gate.sh
+    scripts/ci/native_v2_frontend_convergence_gate.sh
+)
+# Same mechanism, reader side: `| head` exits after its window and any writer
+# still flushing fails under pipefail before its own exit path runs. The
+# harness is not listed here: its two `| head` uses are display-only and were
+# reviewed as noise-free in #1763.
+SHAPE_BAN_HEAD_FILES=(
+    "$PROBE"
+    scripts/ci/ontology_cli_smoke_gate.sh
+    scripts/ci/self_falsifying_compiler_gate.sh
+    scripts/ci/semantic_orc_depression_orc_gate.sh
+    scripts/ci/sedenion_phi_injectivity_gate.sh
+    scripts/ci/sedenion_cd_qbig_gate.sh
+    scripts/ci/cd_tower_seam_gate.sh
+    scripts/ci/sounio_validation.sh
+    scripts/ci/mli_s3_bit_identity_gate.sh
+    scripts/ci/kretikos_kaxi_phase_y_gate.sh
+    scripts/ci/claim_ast_gate.sh
+    scripts/ci/native_v2_frontend_convergence_gate.sh
+)
+# The ban greps capture whole and assert on the capture: `executable | grep -q`
+# here would recreate the banned mechanism inside the gate that bans it.
+for f in "${SHAPE_BAN_GREPQ_FILES[@]}"; do
+    [[ -f "$f" ]] || fail "guarded file absent: $f (nothing to scan)"
+    viol="$(executable "$f" | grep -nE '(echo|printf) [^|]*\| *grep -q' || true)"
+    if [[ -n "$viol" ]]; then
+        printf '%s\n' "$viol" | sed "s|^|$f:|"
+        fail "verdict-carrying echo|grep -q pipeline is back in $f"
+    fi
+done
+for f in "${SHAPE_BAN_HEAD_FILES[@]}"; do
+    [[ -f "$f" ]] || fail "guarded file absent: $f (nothing to scan)"
+    viol="$(executable "$f" | grep -nE '\| *head\b' || true)"
+    if [[ -n "$viol" ]]; then
+        printf '%s\n' "$viol" | sed "s|^|$f:|"
+        fail "early-exiting '| head' reader is back in $f"
+    fi
+done
+echo "shape ban: no echo|grep -q in ${#SHAPE_BAN_GREPQ_FILES[@]} files, no | head in ${#SHAPE_BAN_HEAD_FILES[@]} files"
 
 echo "SIGPIPE_HYGIENE_GATE_OK"
