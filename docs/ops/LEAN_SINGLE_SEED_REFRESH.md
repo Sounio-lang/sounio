@@ -31,6 +31,19 @@ on the latest completed CI run for that branch (gate wired `ed2cd88bf8`, 2026-08
 
 **The number: `folklore_cost_open_prs_blocked_only_by_canonical_md5 = 1`.**
 
+**One PR. Not a queue.** Do not misread the 1 as “the recipe was not worth writing.”
+The value is **not** clearing a multi-PR backlog (a claim of “unlocks 12 PRs”
+would be more impressive and false). The cost of unwritten folklore is
+**repeated discovery time** — the next author who touches `lean_single.sio`
+spending hours re-learning what three commits already knew. That tax does not
+appear in any open-PR count. The single stalled PR is a symptom, not the
+denominator.
+
+**#1750 is not unblocked by this document alone.** The recipe tells how to
+satisfy the gate; someone must still run the resync on that branch and commit
+`bin/souc-lean-single-x86_64` (~5–15 min idle srun; accept only M1
+`g_k == g_{k+1}`). Author of #1750 is the founder (`agourakis82`).
+
 ### Category C — hole or rebuild author?
 
 **Neither, for #1729.** Learning:

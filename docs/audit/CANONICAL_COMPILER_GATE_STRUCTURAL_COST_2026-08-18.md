@@ -29,6 +29,12 @@ Live Canonical = Contracts step present on latest completed CI (gate since 2026-
 
 **`folklore_cost_open_prs_blocked_only_by_canonical_md5 = 1`**
 
+**One PR. Not a queue.** The recipe’s value is not “unblocks a backlog” — that
+would inflate the 1 into a false multi-PR story. The real cost of unwritten
+folklore is **repeated discovery time**, which no PR count captures. #1750
+still needs a founder resync (~5–15 min idle srun, M1 required); the recipe
+alone does not green it. Author of #1750: founder `agourakis82`.
+
 Category C is not a hole and not a rebuild author: comments preserve the fixed
 point. The in-era rebuild author among open PRs is #1034 (ships ELF), pre-gate.
 
