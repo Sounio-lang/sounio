@@ -85,6 +85,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.bucket-d-script-hardening-2026-06-21 | repo_only | docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.checker-guard-wiring-dispatch-2026-07-11 | repo_only | docs/audit/CHECKER_GUARD_WIRING_DISPATCH_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.chi5-real-axiom-audit-2026-05-30 | repo_only | docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.ci-gate-workflow-reachability-census-2026-08-18 | repo_only | docs/audit/CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-drug-switch-vanco-validation-2026-07-19 | repo_only | docs/audit/CLINICAL_DRUG_SWITCH_VANCO_VALIDATION_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-midazolam-ddi-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_MIDAZOLAM_DDI_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-vanco-tdm-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_VANCO_TDM_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -291,6 +292,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.r3-1-tup-cache-collision-fix.dispatch | repo_only | docs/audit/r3_1_tup_cache_collision_fix/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r3-1-tup-cache-collision-fix.synthesis | repo_only | docs/audit/r3_1_tup_cache_collision_fix/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.readme | repo_only | docs/audit/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.runtime-context-unwritten-fields-census-2026-08-18 | repo_only | docs/audit/RUNTIME_CONTEXT_UNWRITTEN_FIELDS_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-general-lvalue-deref-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_GENERAL_LVALUE_DEREF_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-value-nested-field-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_VALUE_NESTED_FIELD_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02 | repo_only | docs/audit/SIGSEGV_PBPK28_PRIVATE_STRUCT_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
