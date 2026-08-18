@@ -923,8 +923,279 @@ fn call_expr_type_args(e: Expr) -> Option<Box<TypeExprList> > with Mut, Panic, D
     }
 }
 
+// setup_intrinsics — pre-register codegen intrinsics in fn_sig_table.
+//
+// Codegen-only intrinsics (measure, acknowledge, uncertainty_of,
+// require_confidence, variance_of, seq_new) have dispatch sites in
+// self-hosted/compiler/lean_single.sio (compile_measure_call_x86 at
+// 10142, compile_acknowledge_call_x86 at 10249, compile_require_confidence_
+// call_x86 at 10322, compile_uncertainty_of_call_x86 at 10301, etc.) but
+// no source-level function definitions. The typechecker at check.sio:19734
+// looks the name up in env (miss), then in fn_sigs (miss), and emits E137.
+// Pre-registering them here makes the typechecker find them by name and
+// pass the lookup, so the call site fails at codegen only if codegen has
+// no handler.
+//
+// observe() is NOT registered here: it has neither a source definition nor
+// a compile_observe_call_* handler in lean_single.sio. Adding observe
+// codegen is a separate task for the lane that owns lean_single.sio.
+//
+// See docs/audit/E137_TWO_CAUSES_DIAGNOSIS_2026-08-18.md (Cause B).
+fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
+    // measure(value: T, uncertainty: f64) -> Knowledge<T>
+    var measure_name = Name { buf: [0; 128], len: 7 }
+    measure_name.buf[0] = 109   // 'm'
+    measure_name.buf[1] = 101   // 'e'
+    measure_name.buf[2] = 97    // 'a'
+    measure_name.buf[3] = 115   // 's'
+    measure_name.buf[4] = 117   // 'u'
+    measure_name.buf[5] = 114   // 'r'
+    measure_name.buf[6] = 101   // 'e'
+    // T remains inferred, but the result must retain the Knowledge wrapper. A
+    // top-level TyUnknown here erases the information lowering needs to treat
+    // the value as the three-word epistemic payload.
+    let measure_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_unknown() }
+    let measure_p2 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_f64() }
+    let measure_pl = FnParamList {
+        head: measure_p1,
+        tail: Some(Box::new(FnParamList { head: measure_p2, tail: None }))
+    }
+    let measure_sig = FnSig {
+        name: measure_name,
+        params: Some(Box::new(measure_pl)),
+        param_count: 2,
+        return_type: ty_knowledge(ty_unknown(), 0.0 - 1.0),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, measure_sig)
+
+    // acknowledge(k: Knowledge<T>, reason: String) -> T
+    // Common call shape: `let v: f64 = acknowledge(k, "reason")`.
+    var ack_name = Name { buf: [0; 128], len: 11 }
+    ack_name.buf[0] = 97     // 'a'
+    ack_name.buf[1] = 99     // 'c'
+    ack_name.buf[2] = 107    // 'k'
+    ack_name.buf[3] = 110    // 'n'
+    ack_name.buf[4] = 111    // 'o'
+    ack_name.buf[5] = 119    // 'w'
+    ack_name.buf[6] = 108    // 'l'
+    ack_name.buf[7] = 101    // 'e'
+    ack_name.buf[8] = 100    // 'd'
+    ack_name.buf[9] = 103    // 'g'
+    ack_name.buf[10] = 101   // 'e'
+    let ack_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_knowledge(ty_unknown(), 0.0 - 1.0) }
+    let ack_p2 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_string() }
+    let ack_pl = FnParamList {
+        head: ack_p1,
+        tail: Some(Box::new(FnParamList { head: ack_p2, tail: None }))
+    }
+    let ack_sig = FnSig {
+        name: ack_name,
+        params: Some(Box::new(ack_pl)),
+        param_count: 2,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, ack_sig)
+
+    // uncertainty_of(k: Knowledge<T>) -> f64
+    var unc_name = Name { buf: [0; 128], len: 14 }
+    unc_name.buf[0] = 117    // 'u'
+    unc_name.buf[1] = 110    // 'n'
+    unc_name.buf[2] = 99     // 'c'
+    unc_name.buf[3] = 101    // 'e'
+    unc_name.buf[4] = 114    // 'r'
+    unc_name.buf[5] = 116    // 't'
+    unc_name.buf[6] = 97     // 'a'
+    unc_name.buf[7] = 105    // 'i'
+    unc_name.buf[8] = 110    // 'n'
+    unc_name.buf[9] = 116    // 't'
+    unc_name.buf[10] = 121   // 'y'
+    unc_name.buf[11] = 95    // '_'
+    unc_name.buf[12] = 111   // 'o'
+    unc_name.buf[13] = 102   // 'f'
+    let unc_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_knowledge(ty_unknown(), 0.0 - 1.0) }
+    let unc_pl = FnParamList { head: unc_p1, tail: None }
+    let unc_sig = FnSig {
+        name: unc_name,
+        params: Some(Box::new(unc_pl)),
+        param_count: 1,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, unc_sig)
+
+    // require_confidence(k: Knowledge<T>, min: f64) -> T
+    // Common call shape: `let v: f64 = require_confidence(k, 0.95)`.
+    var rc_name = Name { buf: [0; 128], len: 18 }
+    rc_name.buf[0] = 114     // 'r'
+    rc_name.buf[1] = 101     // 'e'
+    rc_name.buf[2] = 113     // 'q'
+    rc_name.buf[3] = 117     // 'u'
+    rc_name.buf[4] = 105     // 'i'
+    rc_name.buf[5] = 114     // 'r'
+    rc_name.buf[6] = 101     // 'e'
+    rc_name.buf[7] = 95      // '_'
+    rc_name.buf[8] = 99      // 'c'
+    rc_name.buf[9] = 111     // 'o'
+    rc_name.buf[10] = 110    // 'n'
+    rc_name.buf[11] = 102    // 'f'
+    rc_name.buf[12] = 105    // 'i'
+    rc_name.buf[13] = 100    // 'd'
+    rc_name.buf[14] = 101    // 'e'
+    rc_name.buf[15] = 110    // 'n'
+    rc_name.buf[16] = 99     // 'c'
+    rc_name.buf[17] = 101    // 'e'
+    let rc_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_knowledge(ty_unknown(), 0.0 - 1.0) }
+    let rc_p2 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_f64() }
+    let rc_pl = FnParamList {
+        head: rc_p1,
+        tail: Some(Box::new(FnParamList { head: rc_p2, tail: None }))
+    }
+    let rc_sig = FnSig {
+        name: rc_name,
+        params: Some(Box::new(rc_pl)),
+        param_count: 2,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, rc_sig)
+
+    // variance_of(x: f64) -> f64
+    var var_name = Name { buf: [0; 128], len: 11 }
+    var_name.buf[0] = 118    // 'v'
+    var_name.buf[1] = 97     // 'a'
+    var_name.buf[2] = 114    // 'r'
+    var_name.buf[3] = 105    // 'i'
+    var_name.buf[4] = 97     // 'a'
+    var_name.buf[5] = 110    // 'n'
+    var_name.buf[6] = 99     // 'c'
+    var_name.buf[7] = 101    // 'e'
+    var_name.buf[8] = 95     // '_'
+    var_name.buf[9] = 111    // 'o'
+    var_name.buf[10] = 102   // 'f'
+    let var_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_f64() }
+    let var_pl = FnParamList { head: var_p1, tail: None }
+    let var_sig = FnSig {
+        name: var_name,
+        params: Some(Box::new(var_pl)),
+        param_count: 1,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, var_sig)
+
+    // seq_new() -> Seq<T>
+    var seq_name = Name { buf: [0; 128], len: 7 }
+    seq_name.buf[0] = 115    // 's'
+    seq_name.buf[1] = 101    // 'e'
+    seq_name.buf[2] = 113    // 'q'
+    seq_name.buf[3] = 95     // '_'
+    seq_name.buf[4] = 110    // 'n'
+    seq_name.buf[5] = 101    // 'e'
+    seq_name.buf[6] = 119    // 'w'
+    let seq_sig = FnSig {
+        name: seq_name,
+        params: None,
+        param_count: 0,
+        return_type: ty_unknown(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, seq_sig)
+}
+
 pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
-    Checker {
+    let c = Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
         units: register_builtin_units(unit_registry_new()),
@@ -1025,6 +1296,8 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         refine_cond_env: refine_static_env_new(),
         ontology_items: None,
     }
+    let _ = setup_intrinsics(c.fn_sigs)
+    c
 }
 
 pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
@@ -1035,6 +1308,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).structs = struct_table_alloc()
     (*raw).enums = enum_table_alloc()
     (*raw).fn_sigs = fn_sig_table_alloc()
+    let _ = setup_intrinsics((*raw).fn_sigs)
     (*raw).algebras = empty_algebra_table()
     (*raw).studies = empty_study_table()
     (*raw).ontologies = empty_ontology_table()
@@ -7136,11 +7410,8 @@ fn checker_check_acknowledge_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
         Some(_) => {}
     }
-    // Epistemic effect required (same honesty gate as .value / E170).
-    let epistemic_id: i64 = 8
-    if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
-        checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
-    }
+    // acknowledge is the explicit discharge operation. Requiring Epistemic
+    // here would make the E170 help ("use acknowledge") self-contradictory.
     if k_ty.kind == TypeKind::TyKnowledge {
         return knowledge_inner(k_ty)
     }
@@ -8137,6 +8408,13 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
     }
     if provided_ty.kind != expected_ty.kind {
         checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+        return
+    }
+    // Knowledge<_> with unspecified epsilon is a generic wrapper constraint,
+    // not a concrete confidence contract. Intrinsic signatures use this shape
+    // to retain the operand kind without inventing a confidence bound.
+    if knowledge_inner(expected_ty).kind == TypeKind::TyUnknown &&
+       knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
         return
     }
     if !knowledge_call_boundary_compatible(provided_ty, expected_ty) {
@@ -14217,6 +14495,8 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("write_i64")) { return true }        // id 34
     if name_eq(n, make_name("read_f64")) { return true }         // id 35
     if name_eq(n, make_name("write_f64")) { return true }        // id 36
+    if name_eq(n, make_name("acknowledge")) { return true }      // id 37
+    if name_eq(n, make_name("require_confidence")) { return true } // id 38
     false
 }
 
@@ -23645,6 +23925,10 @@ impl Checker {
         }
         if provided_ty.kind != expected_ty.kind {
             return self.report_error_at(call_span, 36, 0, 0, 0)
+        }
+        if knowledge_inner(expected_ty).kind == TypeKind::TyUnknown &&
+           knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
+            return self
         }
         if knowledge_call_boundary_compatible(provided_ty, expected_ty) {
             self
