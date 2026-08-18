@@ -292,6 +292,14 @@ var IR_INSTR_CENSUS_TOTAL: i64 = 0
 var IR_INSTR_CENSUS_MAX: i64 = 0
 var IR_INSTR_CENSUS_OVER: i64 = 0
 
+// CEI WS-A P0 (handled effects): > 0 while lowering inside a handle<E> block.
+// The perform hook (in lower_method_call_expr_ref) dispatches a call E.op(args)
+// to a bound handler clause fn only while this is set. A module global (not a
+// struct field) mirrors the LAST_EXPR / EXTERN_BLOCK precedent; lowering is
+// single-threaded so a global depth counter is a safe stack discipline.
+// See docs/architecture/CEI_IMPLEMENTATION_SPEC_2026-08-18.md.
+var LOWER_HANDLER_DEPTH: i64 = 0
+
 // Memoised: read_env allocates and the runtime allocator never reclaims,
 // so a gate evaluated at every call site leaks on every call. CHECKED is
 // separate from the value because "off" and "not yet read" are different.
@@ -15675,6 +15683,29 @@ impl Lowerer {
     }
 
     fn lower_method_call_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // CEI WS-A: effect-handler perform dispatch. Inside a handle<E> block, a
+        // call E.op(args) whose op names a bound handler clause is lowered as an
+        // ordinary call to that clause's synthetic fn (tail-resumptive; no CPS).
+        // Mirrors the bound-closure call path in lower_call_expr_ref (@14906).
+        if LOWER_HANDLER_DEPTH > 0 {
+            match (*e).left {
+                Some(base) => {
+                    if (*base).kind == ExprKind::ExprIdent {
+                        let clause_fn = self.lookup_local_closure_fn_id((*e).name)
+                        if clause_fn >= 0 {
+                            let pair_pa: LowerExprArgsResult = self.lower_expr_args_ref(&(*e).args)
+                            let lo_pa = pair_pa.lowerer
+                            let args_pa: Option<Box<IrRegList>> = if pair_pa.count <= 0 { None } else { Some(Box::new(pair_pa.regs)) }
+                            let pair_pd = lo_pa.fresh_reg()
+                            let lo_pd = pair_pd.0
+                            let dst_pd = pair_pd.1
+                            return (lo_pd.emit(ir_call(dst_pd, clause_fn, (*e).name, args_pa, pair_pa.count)), dst_pd)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         if self.expr_is_gpu_sync_call_ref(e) {
             // Unit. A plain integer zero -- emit_f64_const would mark the
             // register as float for a value that is never read.
@@ -16116,6 +16147,48 @@ impl Lowerer {
         }
     }
 
+    // CEI WS-A P0: lower `handle<E> { body } with { let op = |..| {..} ... }`.
+    // Lower each clause `let op = closure` as a normal let-statement in an enclosing
+    // scope (this registers op's synthetic closure fn_id via bind_local_closure_fn_id),
+    // then lower the body with LOWER_HANDLER_DEPTH raised so a `perform E.op(args)`
+    // (parsed as the call E.op(args)) dispatches to the clause fn. Clause bindings are
+    // discarded when the scope closes. Tail-resumptive; multi-shot resume is out of scope.
+    fn lower_handle_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        lo.scope_depth = lo.scope_depth + 1
+        let saved_local_count = lo.locals.count
+        let hb_opt: Option<Box<Block>> = (*e).handler_block
+        match hb_opt {
+            Some(hb) => {
+                var current = &(*hb).stmts
+                while true {
+                    match *current {
+                        Some(list) => {
+                            let stmt_ref = &(*list).head
+                            if (*stmt_ref).kind == StmtKind::StmtLet {
+                                let cp = lo.lower_let_stmt_ref(stmt_ref, false)
+                                lo = cp.0
+                            }
+                            current = &(*list).tail
+                        }
+                        _ => break
+                    }
+                }
+            }
+            None => {}
+        }
+        LOWER_HANDLER_DEPTH = LOWER_HANDLER_DEPTH + 1
+        let body_pair = lo.lower_block_expr_ref(e)
+        lo = body_pair.0
+        let result = body_pair.1
+        LOWER_HANDLER_DEPTH = LOWER_HANDLER_DEPTH - 1
+        if lo.scope_depth > 0 {
+            lo.scope_depth = lo.scope_depth - 1
+        }
+        lo.locals.count = saved_local_count
+        (lo, result)
+    }
+
     fn lower_return_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair = self.lower_opt_expr_ref(&e.left)
         let lo = pair.0
@@ -16493,6 +16566,8 @@ impl Lowerer {
             self.lower_loop_expr_ref(e)
         } else if e.kind == ExprKind::ExprForIn {
             self.lower_for_in_expr_ref(e)
+        } else if e.kind == ExprKind::ExprHandle {
+            self.lower_handle_expr_ref(e)
         } else if e.kind == ExprKind::ExprBlock {
             self.lower_block_expr_ref(e)
         } else if e.kind == ExprKind::ExprReturn {

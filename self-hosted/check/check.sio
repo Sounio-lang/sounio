@@ -7514,6 +7514,11 @@ fn checker_widen_current_effects_inplace(c: *mut Checker, extra: [i64; 8], extra
 var CHECKER_EFFECT_INFERENCE_ENABLED_ON: i64 = 0
 var CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED: i64 = 0
 
+// CEI WS-A P0: > 0 while checking the body of a handle<E> block. The check_method_call
+// perform bypass uses this to type E.op(args) as a handler operation rather than
+// failing the effect name as an undeclared identifier. Twin of lower.sio LOWER_HANDLER_DEPTH.
+var CHECK_HANDLER_DEPTH: i64 = 0
+
 fn checker_effect_inference_enabled() -> bool with IO, Mut, Panic, Div {
     if CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED == 0 {
         CHECKER_EFFECT_INFERENCE_ENABLED_CHECKED = 1
@@ -13941,6 +13946,29 @@ fn checker_expr_is_gpu_sync_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, I
     }
     match e.left {
         Some(callee) => checker_expr_is_gpu_effect_field(*callee, make_name("sync")),
+        None => false,
+    }
+}
+
+// CEI WS-A: is this a handler perform — `E.op(args)` whose receiver is a bare
+// identifier naming a known effect (Epistemic, ...)? Such a call is not a method on
+// a value; inside a handle<E> block it dispatches to a handler clause.
+fn checker_expr_is_handler_perform(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind != ExprKind::ExprMethodCall { return false }
+    match e.left {
+        Some(base) => {
+            if (*base).kind != ExprKind::ExprIdent {
+                false
+            } else {
+                var buf: [i8; 64] = [0; 64]
+                var i: i64 = 0
+                while i < (*base).name.len && i < 64 {
+                    buf[i as usize] = (*base).name.buf[i as usize]
+                    i = i + 1
+                }
+                effect_name_to_id(buf, (*base).name.len) >= 0
+            }
+        }
         None => false,
     }
 }
@@ -20440,6 +20468,15 @@ impl Checker {
             let c_gpu = self.check_expr_list_no_type_no_linear_consume(e.args)
             return (c_gpu, ty_unit())
         }
+        // CEI WS-A: effect-handler perform. Inside a handle<E> block, `E.op(args)`
+        // (bare-Ident effect receiver) is a perform, not a method on a value. Type
+        // its args and yield the operation result type. P0 types it as i64; P1 will
+        // infer the clause's declared return type. Runs BEFORE the receiver is
+        // type-checked, which would otherwise fail the effect name as undeclared.
+        if CHECK_HANDLER_DEPTH > 0 && checker_expr_is_handler_perform(e) {
+            let c_perf = self.check_expr_list_no_type_no_linear_consume(e.args)
+            return (c_perf, ty_i64())
+        }
         // Method receiver evaluation should not eagerly consume linear values,
         // because receiver passing mode is method-signature dependent.
         var checker_for_base = self
@@ -24099,10 +24136,14 @@ impl Checker {
             }
         }
 
-        // Check the body block
+        // Check the body block (CEI WS-A: raise handler depth so performs inside it
+        // type through the check_method_call perform bypass instead of failing the
+        // effect name as an undeclared identifier).
+        CHECK_HANDLER_DEPTH = CHECK_HANDLER_DEPTH + 1
         let body_pair = c.check_opt_block(e.block)
         c = body_pair.0
         let body_ty = body_pair.1
+        CHECK_HANDLER_DEPTH = CHECK_HANDLER_DEPTH - 1
 
         // Restore original effects (handler discharges the effect)
         c.current_sig_id = 0 - 1
