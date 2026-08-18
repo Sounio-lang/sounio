@@ -139,9 +139,22 @@ with `--partition=all`, `--chdir=/tmp`, and `/bin/bash`.
 
 The node had no readable CA bundle at the standard Linux paths, so the clone
 step required an explicit, one-command `git -c http.sslVerify=false` transfer
-of the public branch. This is recorded as node plumbing, not as compiler
-evidence. The clone identified the validation input as
-`f1c94bd1a0526cd2c7c9345abcbb23df5346e206`. Building
+of the public branch. This was done because the compute node had no CA file,
+not because repository verification was intentionally waived. The disabled
+TLS verification is a provenance caveat on the transport and is recorded
+here explicitly; it is not compiler evidence. The source input was anchored
+by the commit SHA: immediately before the clone, GitHub reported
+`f1c94bd1a0526cd2c7c9345abcbb23df5346e206` for
+`refs/heads/lane/codex-2/e009-pbpk28-sobol-20260818`, and the clone printed the
+same value as `CLONED_SHA`. The verification result was:
+
+```text
+GITHUB_REF_SHA_AT_CLONE=f1c94bd1a0526cd2c7c9345abcbb23df5346e206
+CLONED_SHA=f1c94bd1a0526cd2c7c9345abcbb23df5346e206
+SHA_MATCH=PASS
+```
+
+Building
 `self-hosted/compiler/main.sio` from that tree completed and produced a
 `100084269` byte Madaros ELF at
 `artifacts/self-hosted/madaros`. Running that ELF on
@@ -155,9 +168,18 @@ error[E035] ... effect not declared in function signature (missing: Epistemic)
 The source-built output contained no E009. Thus the repaired Sobol callback
 contract is accepted by the current-source compiler; the remaining E035 is
 an independent imported-module effect-inference issue and is not evidence of
-a resolver collision. The remote `origin/main` subsequently moved to
-`743be30b260f44dc557de94ecf94fff1ab6921e5`; this receipt names the exact
-published repair branch and SHA actually built, rather than attributing the
-run to a later main commit it did not contain.
+a resolver collision. After the source run, the branch advanced only through
+the two documentation commits that produced receipt tip
+`350715b808768c9b2ca77b382ea915dad47d4401`; the full source SHA
+`f1c94bd1a0526cd2c7c9345abcbb23df5346e206` remains its ancestor. The current
+`git ls-remote` check reports that receipt tip, while the source-built
+measurement remains explicitly tied to the SHA-matched clone above. The current
+`origin/main` observed during this receipt update
+was `529aaaaa24fd7dc6a61f7d3c7a21ce8c9ea5ef5d`.
+
+For future cluster clones, the preferred structural fix is to provide a
+valid bundle through `GIT_SSL_CAINFO` or `SSL_CERT_FILE`, or to carry the pod
+bundle into the `srun` environment. That was not used to alter this
+measurement and remains an infrastructure follow-up.
 
 No compiler, IR, native-codegen, or name-pool file was changed in this lane.
