@@ -1,18 +1,15 @@
 //@ run-pass
 // examples/particle_physics/mass_claim_gevp_plateau.sio
 //
-// EARN PLATEAU — multi-τ GEVP (only path back to mass-gap claim)
-// ==============================================================
-// Single-operator C(τ) had only m_eff(0). Try variational 3-smear GEVP:
-//   (A) fixed t0=0: m(τ) = −ln λ(τ)/(τ−t0) for τ=1,2[,3]
-//   (B) local:      m(τ) from GEVP C(τ+1) vs C(τ), τ=0,1[,2]
-//   (C) 2×2 GEVP fixed t0 (often more stable)
-// Then glueball_mass_claim — status 2 only earns MASS_GAP m/√σ.
+// EARN PLATEAU — multi-τ GEVP (HARDENED min_pairs=2)
+// ==================================================
+// Variational 3-smear GEVP channels; glueball_mass_claim requires
+// THREE sinks with TWO consecutive pairs within tol (not two-sink loophole).
 //
-// Success = PLATEAU_MASS. Anything else = still KILLED (no drift).
+// Success = PLATEAU_MASS under min_pairs=2 only. Else KILLED.
 //
-// CLAIM: attempt multi-τ GEVP plateau; hard gate unchanged.
-// NOT CLAIMED: continuum; Clay; that attempt implies success.
+// CLAIM: attempt 3-sink multi-τ GEVP plateau.
+// NOT CLAIMED: continuum; Clay; lit ratio; that prior 2-sink still counts.
 //
 // Run:
 //   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
@@ -121,10 +118,11 @@ fn claim_from_meff(
     vok: &[i64; 8],
     n_tau: i64,
     tol: f64,
+    min_pairs: i64,
     srt: f64
 ) -> (i64, f64, f64, f64, f64) with IO, Mut, Div, Panic {
     print_meff(tag, meff, vok, n_tau)
-    let (st, m_gap) = glueball_mass_claim(meff, vok, n_tau, tol)
+    let (st, m_gap) = glueball_mass_claim(meff, vok, n_tau, tol, min_pairs)
     let (r_gap, okg) = mass_gap_ratio_or_kill(st, m_gap, srt)
     var m_ct: f64 = 0.0
     if vok[0] == 1 && meff[0] > 0.0 { m_ct = meff[0] }
@@ -133,6 +131,7 @@ fn claim_from_meff(
     let nv = glueball_n_valid_meff(vok, meff, n_tau)
     println("  → " ++ status_name(st)
         ++ "  n_valid=" ++ i64s(nv)
+        ++ "  min_pairs=" ++ i64s(min_pairs)
         ++ "  m_gap=" ++ fp6(m_gap))
     if okg == 1 {
         println("  MASS_GAP m/sqrt(sig) = " ++ fp6(r_gap))
@@ -154,7 +153,8 @@ fn run_volume(
     n_meas: i64,
     n_sep: i64,
     seed: i64,
-    tol: f64
+    tol: f64,
+    min_pairs: i64
 ) -> (i64, f64, f64) with IO, Mut, Div, Panic {
     let okL = lg_set_L(L_set)
     if okL == 0 {
@@ -163,15 +163,16 @@ fn run_volume(
     }
     let L = lat_l()
     var n_sink: i64 = L / 2
-    if n_sink > 3 { n_sink = 3 }
-    if n_sink < 2 { n_sink = 2 }
+    if n_sink > 4 { n_sink = 4 }
+    if n_sink < 3 { n_sink = 3 }
     println("L=" ++ i64s(L) ++ " sites=" ++ i64s(lat_nsites())
         ++ " β=" ++ fp6(beta) ++ " n_sink=" ++ i64s(n_sink)
-        ++ " meas=" ++ i64s(n_meas))
+        ++ " meas=" ++ i64s(n_meas)
+        ++ " min_pairs=" ++ i64s(min_pairs))
     lg_seed(seed)
     lattice_cold(lat)
     let pth = heatbath_thermalize(lat, beta, n_therm)
-    println("⟨P⟩=" ++ fp6(pth))
+    println("P=" ++ fp6(pth))
 
     var c00: [f64; 8] = [0.0; 8]
     var c01: [f64; 8] = [0.0; 8]
@@ -184,39 +185,36 @@ fn run_volume(
         beta, n_meas, n_sep, 0.4, 1, 2, 4,
         &!c00, &!c01, &!c02, &!c11, &!c12, &!c22
     )
-    println("C00(τ): " ++ fp6(c00[0]) ++ " " ++ fp6(c00[1]) ++ " " ++ fp6(c00[2])
+    println("C00(t): " ++ fp6(c00[0]) ++ " " ++ fp6(c00[1]) ++ " " ++ fp6(c00[2])
         ++ " " ++ fp6(c00[3]))
-    println("C11(τ): " ++ fp6(c11[0]) ++ " " ++ fp6(c11[1]) ++ " " ++ fp6(c11[2]))
-    println("C22(τ): " ++ fp6(c22[0]) ++ " " ++ fp6(c22[1]) ++ " " ++ fp6(c22[2]))
+    println("C11(t): " ++ fp6(c11[0]) ++ " " ++ fp6(c11[1]) ++ " " ++ fp6(c11[2]))
+    println("C22(t): " ++ fp6(c22[0]) ++ " " ++ fp6(c22[1]) ++ " " ++ fp6(c22[2]))
 
     var pl: [f64; 256] = [0.0; 256]
     var ch: [f64; 256] = [0.0; 256]
     var cv: [i64; 256] = [0; 256]
-    let n_ctx: i64 = 16
+    let n_ctx: i64 = 18
     let _nc = measure_ensemble_hb(lat, beta, n_ctx, n_sep, &!pl, &!ch, &!cv)
     let sep = string_tension_ep(&ch, &cv, n_ctx)
     let srt = sqrt_q(ep_val(&sep))
-    println("√σ=" ++ fp6(srt) ++ "  (scale only)")
+    println("sqrt(sig)=" ++ fp6(srt) ++ "  (scale only)")
 
-    // (0) single-op reference — expected CONTACT_UV
+    // (0) single-op reference
     var me_d: [f64; 8] = [0.0; 8]
     var vo_d: [i64; 8] = [0; 8]
     glueball_meff_scan(&c00, n_sink, &!me_d, &!vo_d)
     println("--- (0) single-op C00 m_eff (control) ---")
     let (st0, _g0, _rg0, _ct0, _rct0) = claim_from_meff(
-        "diag_C00", &me_d, &vo_d, n_sink, tol, srt
+        "diag_C00", &me_d, &vo_d, n_sink, tol, min_pairs, srt
     )
 
-    // (A) 3×3 GEVP fixed t0=0
+    // (A) 3×3 GEVP fixed t0=0 — densify valid sinks for consecutive claim
     var me_a: [f64; 8] = [0.0; 8]
     var vo_a: [i64; 8] = [0; 8]
     let nok_a = gevp3_meff_scan(
         &c00, &c01, &c02, &c11, &c12, &c22, 0, n_sink, &!me_a, &!vo_a
     )
     println("--- (A) GEVP3 fixed t0=0  n_ok=" ++ i64s(nok_a) ++ " ---")
-    // claim uses indices as consecutive; for fixed-t0, valid at 1,2,3 —
-    // glueball_mass_claim pairs (0,1),(1,2),... so need valid consecutive.
-    // Remap: pack valid sinks into dense meff[0], meff[1], ... for claim.
     var md: [f64; 8] = [0.0; 8]
     var vd: [i64; 8] = [0; 8]
     var nd: i64 = 0
@@ -230,7 +228,7 @@ fn run_volume(
         t = t + 1
     }
     let (st_a, mg_a, rg_a, _c, _rc) = claim_from_meff(
-        "GEVP3_t0=0_dense", &md, &vd, nd, tol, srt
+        "GEVP3_t0=0_dense", &md, &vd, nd, tol, min_pairs, srt
     )
 
     // (B) 3×3 local consecutive GEVP
@@ -241,7 +239,7 @@ fn run_volume(
     )
     println("--- (B) GEVP3 local consecutive  n_ok=" ++ i64s(nok_b) ++ " ---")
     let (st_b, mg_b, rg_b, _cb, _rcb) = claim_from_meff(
-        "GEVP3_local", &me_b, &vo_b, n_sink, tol, srt
+        "GEVP3_local", &me_b, &vo_b, n_sink, tol, min_pairs, srt
     )
 
     // (C) 2×2 GEVP fixed t0=0
@@ -262,10 +260,10 @@ fn run_volume(
         t = t + 1
     }
     let (st_c, mg_c, rg_c, _cc, _rcc) = claim_from_meff(
-        "GEVP2_t0=0_dense", &md2, &vd2, nd2, tol, srt
+        "GEVP2_t0=0_dense", &md2, &vd2, nd2, tol, min_pairs, srt
     )
 
-    // (D) 3×3 fixed t0=1 if L allows n_sink>=3
+    // (D) 3×3 fixed t0=1
     var st_d: i64 = 0
     var mg_d: f64 = 0.0
     var rg_d: f64 = 0.0
@@ -289,7 +287,7 @@ fn run_volume(
             t = t + 1
         }
         let (s, mg, rg, _x, _y) = claim_from_meff(
-            "GEVP3_t0=1_dense", &md3, &vd3, nd3, tol, srt
+            "GEVP3_t0=1_dense", &md3, &vd3, nd3, tol, min_pairs, srt
         )
         st_d = s
         mg_d = mg
@@ -325,15 +323,16 @@ fn run_volume(
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     println("================================================================")
-    println(" EARN PLATEAU — multi-τ GEVP mass-gap attempt")
+    println(" EARN PLATEAU — multi-tau GEVP (HARDENED min_pairs=2)")
     println("================================================================")
-    println("RULE unchanged: only PLATEAU_MASS ⇒ legal MASS_GAP m/√σ")
-    println("NOT CLAIMED: success; continuum; Clay")
+    println("RULE: PLATEAU_MASS needs 3 sinks, 2 consecutive pairs within tol")
+    println("NOT CLAIMED: continuum; Clay; lit ratio")
     println("")
 
     let tol: f64 = 0.20
+    let min_pairs: i64 = 2
     let seed0: i64 = 20260813
-    println("plateau tol=" ++ fp6(tol))
+    println("plateau tol=" ++ fp6(tol) ++ "  min_pairs=" ++ i64s(min_pairs))
     println("")
 
     var lat: [f64; 65536] = [0.0; 65536]
@@ -342,17 +341,17 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var sm2: [f64; 65536] = [0.0; 65536]
     var tmp: [f64; 65536] = [0.0; 65536]
 
-    println("======== SU(2) L=6 β=2.3 ========")
+    println("======== SU(2) L=6 beta=2.3 ========")
     let (st6, mg6, rg6) = run_volume(
         &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
-        6, 2.3, 40, 40, 2, seed0, tol
+        6, 2.3, 44, 48, 2, seed0, tol, min_pairs
     )
 
     println("")
-    println("======== SU(2) L=8 β=2.3 ========")
+    println("======== SU(2) L=8 beta=2.3 ========")
     let (st8, mg8, rg8) = run_volume(
         &!lat, &!sm0, &!sm1, &!sm2, &!tmp,
-        8, 2.3, 44, 36, 2, seed0 + 80, tol
+        8, 2.3, 48, 44, 2, seed0 + 80, tol, min_pairs
     )
 
     println("")
@@ -368,31 +367,28 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let earned8 = st8 == 2
     let any_earned = earned6 || earned8
 
-    if earned6 { println("GATE L6_gevp_plateau: PASS  ★") }
-    else { println("GATE L6_gevp_plateau: FAIL_HONEST  (gap still killed)") }
-    if earned8 { println("GATE L8_gevp_plateau: PASS  ★") }
-    else { println("GATE L8_gevp_plateau: FAIL_HONEST  (gap still killed)") }
+    if earned6 { println("GATE L6_gevp_3sink_plateau: PASS") }
+    else { println("GATE L6_gevp_3sink_plateau: FAIL_HONEST") }
+    if earned8 { println("GATE L8_gevp_3sink_plateau: PASS") }
+    else { println("GATE L8_gevp_3sink_plateau: FAIL_HONEST") }
     if any_earned {
         println("GATE mass_gap_claim_restored: PASS")
     } else {
         println("GATE mass_gap_claim_restored: FAIL_HONEST")
-        println("  multi-τ GEVP did not earn plateau — claim remains KILLED")
+        println("  3-sink multi-tau GEVP plateau not earned — gap remains KILLED")
+        println("  prior 2-sink PLATEAU under min_pairs=1 is SUPERSEDED as too weak")
     }
 
     println("")
     println("VERDICT:")
     if any_earned {
-        println("  Plateau earned via multi-τ GEVP — report only status=2 channels.")
-        if earned6 {
-            println("  L6 MASS_GAP m/√σ = " ++ fp6(rg6))
-        }
-        if earned8 {
-            println("  L8 MASS_GAP m/√σ = " ++ fp6(rg8))
-        }
+        println("  3-sink plateau earned — report only status=2 channels.")
+        if earned6 { println("  L6 MASS_GAP m/sqrt(sig) = " ++ fp6(rg6)) }
+        if earned8 { println("  L8 MASS_GAP m/sqrt(sig) = " ++ fp6(rg8)) }
     } else {
-        println("  ATATEAU NOT EARNED. Mass-gap claim remains KILLED.")
-        println("  Variational GEVP did not produce τ-stable m on L∈{6,8}.")
-        println("  Next real step would be larger T or far more stats — not multi-β averages.")
+        println("  3-SINK PLATEAU NOT EARNED. Mass-gap claim remains KILLED.")
+        println("  Two-sink GEVP2 plateau (prior run) does not survive min_pairs=2.")
+        println("  Next: larger T or more stats — not multi-beta averages.")
     }
     println("================================================================")
     0

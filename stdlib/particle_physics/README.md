@@ -46,8 +46,8 @@ Quantum Field Theory and Standard Model foundations for Sounio.
   `su3_jackknife_continuum.sio` (SU(3) L=6 multi-β; honest SEM floors),
   `dual_ym_scoreboard.sio` (dual multi-β engineering; ratios are **not** gap claims),
   `mass_claim_plateau.sio` (**HARD GATE**: single-op multi-τ ⇒ MASS_GAP KILLED),
-  `mass_claim_gevp_plateau.sio` (multi-τ GEVP2 earns PLATEAU_MASS on L6/L8;
-  legal m/√σ≈2.49 / 1.91 — below lit; fragile two-sink).
+  `mass_claim_gevp_plateau.sio` (GEVP multi-τ; **min_pairs=2** 3-sink band
+  FAIL_HONEST on L6/L8 — prior 2-sink plateau superseded; gap remains KILLED).
 
 ## Modules
 

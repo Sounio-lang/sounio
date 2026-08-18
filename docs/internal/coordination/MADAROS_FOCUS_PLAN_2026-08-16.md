@@ -55,24 +55,48 @@ during the port is caught mechanically.
 (`self-hosted/enir/{ir,mir,mir_cfg,mir_join,canonical,hash,interpreter,parser,
 qd,shadow_fixture,source_lower,verify,driver,mod}.sio`, 4 architecture docs
 `docs/architecture/MIR_*`) exists only on frontier branch
-`canon/madaros-v2-sota`, stalled at `97b525949` (2026-07-12). Divergence:
-frontier carries 2084 commits main lacks, main carries 189 commits the
-frontier lacks. Was mid-stream on a lettered plan (E2D→E2H qd128
-arithmetic/CFG/fuel-control, then E3A→E3D semantic MIR memory/CFG/multipred
-SSA), not abandoned mid-bug. **Route undecided** — produce
-`docs/architecture/MIR_PORT_PLAN.md` costing three routes (wholesale rebase,
-`enir/` subtree cherry-pick + resume the lettered plan, fresh re-derivation
-from the 4 `MIR_*` docs against current main) with a file-level conflict
-census against the 189 main-side commits, before any port work lands.
+`canon/madaros-v2-sota`, stalled at `97b525949` (2026-07-12). **Correction
+(grok-cli1, `MIR_PORT_PLAN.md`, 2026-08-16): the divergence direction in the
+original draft of this plan was backwards.** Measured:
+`origin/main..frontier` = **189** commits (frontier-only), `frontier..origin/main`
+= **2086** commits (main-only) — main is the long tip, the frontier is a short
+189-commit divergent lobe carrying the ENIR lane. 115 files touched on both
+sides since merge-base (41 under `self-hosted/`); the ENIR tree itself
+(14 files, 7310 LOC) has **zero** main-side counterpart and imports only
+`enir::*`, so it is not on the conflict surface.
+
+**Route decision: Route B — `enir/` subtree cherry-pick + resume the lettered
+plan — APPROVED by founder 2026-08-16**, per the costed recommendation in
+`docs/architecture/MIR_PORT_PLAN.md` (Route A wholesale rebase rejected —
+3–6+ engineer-weeks of conflict surgery on the worst IR/compiler/native
+hotspots; Route C fresh re-derivation kept only as a fallback if Route B's
+enir sources fail to typecheck under main within a bounded repair budget).
+Suggested PR stack: PR1 add `self-hosted/enir/**` + `bin/madaros-enir` + docs
+only (driver check/compile under seed) → PR2 E1 gate green on main → PR3
+E2A–E2H → PR4 E3A–E3D(+E3E) → PR5 optional umbrella gate. No production
+`use enir::` from `compiler/main.sio` until a later explicit integration
+tranche, post-WS-D MLI design.
 
 **WS-D · MLI design** — greenfield, multi-week.
 Phase 1 done = an approved `docs/architecture/MLI_DESIGN.md`: layer contract
-(input = MIR pending WS-C's route decision; output = what
-`self-hosted/native/` consumes), instruction/operand model, register/stack
+(input = MIR, WS-C route now B), instruction/operand model, register/stack
 discipline, verification story (interpreter or shadow-execution parity,
 mirroring `enir/interpreter.sio` / `verify.sio`), staged implementation
 ladder. Phase 2 (wave 3+) = a first vertical slice, one function lowered
 MIR→MLI→x86 bit-identical to the existing direct path.
+
+**Design option: Option C — dual-track (kinds first-class in the type
+system; R0 scalar-only emit first, R1 epistemic/CD emit staged) — APPROVED
+by founder 2026-08-16**, per `docs/architecture/MLI_DESIGN.md` §2.4 (Option A
+scalar-only rejected as sole architecture — would forfeit the plan's one
+"beyond any existing language" bet; Option B full-first-class-from-day-one
+rejected — blocks Phase-2 bit-identity for months). Implementation ladder
+S0 (this approval) → S1 `mli` module/kinds/builder/V-struct verify → S2
+`mir_to_mli` scalar R0 → S3 `legalize_x86`, Phase-2 bit-identical vertical
+slice → S4 f32/f128/f256 slots (WS-G coordination) → S5–S7 Knowledge/CD
+kinds staged. **S1 implementation dispatch (touches `self-hosted/`) HELD
+pending P0-F close**, same 1-active-P0 discipline the founder set for WS-C
+— not re-asked separately, applying the precedent.
 
 > **Design principle, binding for the design doc** (founder + orchestrator,
 > 2026-08-16): Sounio already has two features no mainstream compiler backend

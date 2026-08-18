@@ -1,253 +1,208 @@
-# Claude Code Agent Handoff
+# Agent Handoff — the Sounio fleet
 
-> **⚠️ MADAROS STATUS (current):** Madaros is green on `origin/main`.
-> Do not judge checker issues from stale worktrees or prebuilt raw artifacts.
-> See [`docs/MADAROS_STATUS.md`](../docs/MADAROS_STATUS.md) for sync/rebuild
-> instructions and the valid proof gate (`make madaros-full-gate`).
+> **Rewritten 2026-08-16** (glm-cli1, lane `agent-handoff-refresh`). The previous
+> edition described a six-lane activation from 2026-05-10 with worktrees that no
+> longer exist; it had already declared itself stale. This edition describes the
+> fleet as it actually is, grounded in the 2026-08-15→16 session, and carries the
+> operational lessons that session paid for. It is **durable orientation** — live
+> state always lives in `bin/sounio-coord` and `.claude/attention_p0.v1.json`,
+> never here. When this file disagrees with those, those win and this file gets
+> updated in the same change-set (Charter §8).
 
-> **⚠️ WORKSPACE STABILITY (2026-05-29).** The pod was recycled twice by the k8s
-> liveness probe under CPU saturation — four agents were running directly on the
-> shared `/workspace/sounio` checkout, each firing a full `souc main.sio` bundle
-> build (15-min load ~153 on 64 cores). Two non-negotiable rules:
->
-> 1. **One worktree per agent.** Never run a second agent on `/workspace/sounio`
->    directly — that checkout is the integration-shepherd lane only. Each worker
->    gets its own worktree (lane table below). Ceiling: **≤2 agents doing
->    compiler work at once** on this pod.
-> 2. **Serialize heavy builds** through `scripts/dev/souc-build-lock.sh`
->    (`souc main.sio` / `lean_single.sio` / `make build`). Bare full builds are
->    what saturate CPU and trip the probe. Cheap `souc check` is exempt.
+## 1. Cold start — the 60-second version
 
-## 6-Agent Lane Activation — 2026-05-10T13:35Z
-
-**Authority**: human-approved at 2026-05-10 (this commit).
-**Companion docs**: `.agent-orchestration/coordination/6_lane_assignment.md`
-(full matrix), `.claude/PARALLEL_BLOCKER_CONTRACT.md` (blocker shape).
-**Canonical live log**: `artifacts/omega/agent_handoff.log.md`.
-
-**Active lanes** (see companion doc for file-set + build target details):
-
-| # | Lane                          | Owner       | Branch                              | Worktree                                  |
-|---|-------------------------------|-------------|-------------------------------------|-------------------------------------------|
-| 1 | golden-recapture              | Claude #1   | `coord/lane-1-golden-recapture`     | `/workspace/sounio-lane-1-goldens`        |
-| 2 | dissertation-evidence         | Codex #1    | `coord/lane-2-dissertation-evidence`| `/workspace/sounio-lane-2-dissertation`   |
-| 3 | paper-168-cohomological       | Claude #2   | `coord/lane-3-paper-168`            | `/workspace/sounio-lane-3-paper168`       |
-| 4 | nv2-compiler-hardening        | Codex #2    | `coord/lane-4-nv2-hardening`        | `/workspace/sounio-lane-4-nv2`            |
-| 5 | python-extermination phase 5  | Codex #3    | `coord/lane-5-phase5-recognizer`    | `/workspace/sounio-lane-5-phase5`         |
-| 6 | integration-shepherd (merge)  | Claude A    | `main`                              | `/workspace/sounio` (canonical)           |
-
-**Out-of-scope lanes** (continue independent, NOT part of the 6):
-- `garden/above-stars` (existing, separate)
-- `cursor/quaternionic-ssm-88c0` (existing remote, Cursor agent)
-- `worktree-agent-a04d29d914b22568f` (locked Claude worker, imported else-if folding)
-
-**Merge order when multiple lanes are PR-ready**: 1 → 4 → 5 → 2 → 3.
-Lane 4 must serialize against Lane 1 on `bin/souc-linux-x86_64`.
-Lanes 2/3/5 are file-disjoint and may land in any order.
-
-**Live CLAIMs / RELEASEs** (most recent first):
-
-```text
-LANE-1 RELEASE 2026-05-10T13:48Z claude-1 tests/golden/kaxi_ptx/**
-  blocker: BLK-20260510-lane1-golden-drift closed by PR #95
-  evidence: kaxi_ptx_golden_gate.sh = 318 PASS / 0 FAIL / 0 MISSING
-  binary-token: bin/souc-linux-x86_64 NOT consumed; Lane 4 may claim next if needed
-
-LANE-1 CLAIM 2026-05-10T13:35Z claude-1 tests/golden/kaxi_ptx/** bin/souc-linux-x86_64{,.sha256,.sig}
-  blocker: BLK-20260510-lane1-golden-drift  severity:B1  class:gate-regression
-  evidence: kaxi_ptx_golden_gate.sh = 209/52 FAIL/57 MISSING vs 318 nominal
-  next-command: bash scripts/ci/kaxi_ptx_capture.sh && bash scripts/ci/kaxi_ptx_golden_gate.sh
+```bash
+cd /workspace/.wt/<your-worktree>        # one worktree per agent; never work on /workspace/sounio
+./sounio-whereami --quick                # orient
+bin/sounio-coord status                  # active claims, conflicts, worktree heads
+bin/sounio-coord inbox --agent <you> --lane <your-lane>   # unread messages — act, then ack
+bash scripts/dev/attention_brief.sh      # P0 slots, STALE claims, freeze state
+cat .claude/ATTENTION_CHARTER.md         # binding: 5 = 1 + 2, ≤1 active P0
 ```
 
-**Closed Blocker (lane 1)**:
+Read order for a cold agent: this file → `CLAUDE.md` → `.claude/ATTENTION_CHARTER.md`
+→ `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` (the active plan)
+→ `.claude/MEMORY_LANES.md` (pick **only** your lane's memory files).
 
-```text
-Blocker-ID: BLK-20260510-lane1-golden-drift
-Status: closed by PR #95
-Severity: B1
-Class: gate-regression
-Owner: Claude #1
-Lane: 1 (golden-recapture)
-Worktree: /workspace/sounio-lane-1-goldens
-Branch: coord/lane-1-golden-recapture
-Evidence: tests/golden/kaxi_ptx/default/exit_only.ptx golden last touched
-  3f3af0cd (Phase L, 2026-05-08) declares `.reg .b32 %r<8>`, but current
-  `bin/souc` against current `self-hosted/gpu/kaxi_to_ptx.sio` produces
-  `.reg .b32 %r<260>` and `.reg .f32 %f<260>`. 38 commits to
-  kaxi_to_ptx.sio between Phase L and HEAD did not regenerate goldens.
-Reproduction: bash scripts/ci/kaxi_ptx_golden_gate.sh in any worktree
-  off origin/main HEAD (8a1a6fa2). Result: PASS=209 FAIL=52 MISSING=57.
-Resolution: PR #95 regenerated tests/golden/kaxi_ptx/**. Post-merge
-  kaxi_ptx_golden_gate.sh reports PASS=318, FAIL=0, MISSING=0.
-Acceptance: satisfied.
-Evidence-Level: E3 (gate-bound)
-```
+## 2. The fleet as it is (verified 2026-08-16T12:07Z)
 
-**Per-lane init**: each agent runs the checklist in
-`.agent-orchestration/coordination/6_lane_assignment.md#per-lane-initialization-checklist`
-on session start. Branch flips to verify via
-`git branch --show-current` before any edit.
+**23 tmux windows** in session `fleet`, one per agent, mixed backends:
 
----
+| Windows | Backend | Notes |
+|---|---|---|
+| 0 | GLM (glm-cli1, glm-cli2 at 18) | this lane's family |
+| 1–3 | Claude (claude-1/2/3) | claude-1 = `fleet-orchestrator` coordination lane |
+| 4–6 | Codex (codex-1/2/3) | |
+| 7–9 | Cursor (cursor-1/2/3) | |
+| 10–14 | Grok (grok-cli1..5) | |
+| 15–16 | Kimi (kimi-cli1/2) | |
+| 19–21 | MiniMax (minimax-cli1..3) | |
+| 17 | `repo` | the canonical `/workspace/sounio` control checkout |
+| 22 | fable-1 | Claude-family takeover lane (see §5) |
 
-## Session summary (2026-05-10, Claude #1)
+- **One worktree per agent** under `/workspace/.wt/<name>`; window 17's
+  `/workspace/sounio` is the control/shepherd checkout — merge, brief, inbox.
+  **Not** a compile bench and never a second agent's workspace.
+- **Coordination bus**: `bin/sounio-coord` (`claim` / `scope` / `heartbeat` /
+  `release` / `send` / `inbox` / `ack` / `status` / `prune`), state in
+  `/workspace/.tmp/sounio-coord/2493585255/`. Claims carry a TTL — **heartbeat
+  every working session** or your files silently free up. Same bus over MCP for
+  Cursor/Claude (`scripts/mcp/sounio_coord_mcp.py`).
+- **Ceilings that are binding, not advice**: ≤1 active P0 slot (Charter),
+  ≤2 agents editing `self-hosted/` at once (CLAUDE.md §4). Heavy builds
+  (`make build`, `souc main.sio`, bundle checks) go through
+  `scripts/dev/souc-build-lock.sh` — the pod has been k8s-evicted under
+  CPU stampede before (2026-05-29, load ~153). Cheap `souc check` is exempt.
+  `make madaros-full-gate` / `make build-madaros` self-lock internally — do
+  **not** wrap them again (nested `exec 9>` deadlocks).
+- Legacy lane tables, the 2026-05 collision resolutions and merge orders that
+  used to live here are history; `git log` and `artifacts/omega/agent_handoff.log.md`
+  remain the archive. `integration/sounio-dev-ready-base` is stale — do not
+  broad-merge it.
 
-- Phase J wired into umbrella as `cbe6716e` (compile-time confidence gate,
-  dissertation contribution #2). CPU-only gate, ~1s. rc=0 confirmed.
-- Phase Y wired into umbrella as `2b6b5b1a` (GUM variance propagation,
-  dissertation contribution #1). Self-skips without libcuda. rc=0 confirmed.
-- Shell fallback added to `emit_summary_json` (`4def6b5e`) for aggregator
-  SRET Heisenbug — umbrella now ships pass/fail signal regardless.
-- **Native-compiler 5-gate FAIL — root cause found and fixed.** After
-  `dfe0894a` (S-A defensive backstop), parse_stmt_ir's call to
-  `refuse_let_array_lit` added 7 IR ops, pushing the per-function
-  `V2_UFN_OPS[2048]` buffer over its silent-drop threshold during
-  self-compile. Dropped IR ops produced incomplete x86-64 → SIGSEGV in
-  stage1's `compile_user_fn` for the first user fn. Bisected: pre-`dfe0894a`
-  source self-compiles (md5=ccfbf10a…), post-`dfe0894a` source
-  self-compiles to a binary that crashes on its own self-compile
-  (md5=f821f5…, rc=139). Fix: bumped V2_UFN buffers 2048→4096 (12 arrays
-  + 26 bounds checks). Self-host fixed-point restored: stage1==stage2==stage3
-  (md5=c54005c7…, 405,968 bytes).
+## 3. Attention Charter — P0 slots
 
-Start here for parallel Sounio work:
+The Charter (`5 = 1 + 2`: attention governance *is* compiler sovereignty plus
+epistemic honesty) is binding on every lane. Only work that closes **1** or **2**
+with a named gate ≥ E3 may hold P0. Machine truth:
+`.claude/attention_p0.v1.json` (updated by the orchestrator; **do not hand-edit
+without claiming it** — claude-1 holds it).
 
-1. Read `CLAUDE_HANDOFF.md`.
-2. Read `AGENTS.md`.
-3. Read `.claude/PARALLEL_BLOCKER_CONTRACT.md`.
-4. Read `.agent-orchestration/HANDOFF.md`.
-5. Use `.claude/MEMORY_LANES.md` to pick only the memory lane needed.
+State at rewrite time (2026-08-16T11:15Z snapshot):
 
-Current operational notes:
+- **Slots A–E: done** (2026-08-04, D3 residual / native-v2 zero-event /
+  trust-map / claim registry / hygiene — see the machine file for receipts).
+- **Slot F — `extern "C"` FFI silent-noop under Madaros: done 2026-08-16T04:50Z**,
+  owner fable-1 (see §5 for the full arc, including why the owner changed
+  mid-flight).
+- **Slot G — WS-C PR1 (MIR port, Route B): queued**, owner fable-1, blocked on
+  the founder-ordered sequence *"amendments first, then WS-C PR1"*: grok-cli1
+  amending `MIR_PORT_PLAN.md` (`amend/mir-port-plan-20260816`), grok-cli2
+  amending `MLI_DESIGN.md` (`amend/mli-design-20260816`), codex-2 producing the
+  payload census. Constraint C3: WS-F owns `tools/eisa` + `stdlib/eisa` sources —
+  PR1 may add frontier files but must not modify main-side eisa files unclaimed.
 
-- Active workspace: `/workspace/sounio`.
-- Current upstream merge target: `origin/main`.
-- Historical safe branch: `integration/sounio-dev-ready-base`. Treat it as
-  stale/divergent unless the human explicitly revives it; do not broad-merge
-  it into current work.
-- Do not trust stale Beagle branch metadata without checking `git status -sb`
-  and `git rev-parse --short HEAD origin/main`.
-- Three-agent coordination for this window:
-  - Claude A is the integration shepherd. Claude A owns final merge authority,
-    branch race checks, blocker classification, and pushes to `main`.
-  - Claude B is the implementation worker. Claude B owns one compiler lane at a
-    time; current candidate lane is the locked worktree commit
-    `93ddd0e5 compiler: fold imported else-if chains at import time`.
-  - Codex is support implementer/reviewer. Codex may inspect, validate, prepare
-    handoffs, or implement explicitly assigned scoped tasks, but should not push
-    `main` unless Claude A or the human delegates that merge step.
-- Coordination protocol:
-  - Before editing, announce `CLAIM <files>`.
-  - After committing, aborting, or handing off, announce `RELEASE <files>`.
-  - If two agents need the same file, Claude A decides the order.
-  - Treat `self-hosted/compiler/module_frontend.sio`,
-    `self-hosted/compiler/native_compile_driver.sio`, compiler resolver
-    scripts, `bin/souc`, `.claude/settings.local.json`, and CI workflow files
-    as serialized surfaces even under soft coordination.
-- Current known worktree posture:
-  - `/workspace/sounio` is the active main worktree. Leave any existing local
-    dirt alone unless explicitly assigned.
-  - `/workspace/sounio-native-v2-fnref-calls`,
-    `/workspace/sounio-native-v2-hof-lock`, and
-    `/workspace/sounio-native-v2-imported-hof-abi` are stale/read-only evidence
-    worktrees. `git cherry -v origin/main <branch>` showed only `-` entries
-    for these branches on 2026-05-08, so their patches appear represented on
-    `origin/main`; Claude A should approve any worktree/branch deletion.
-  - `/workspace/sounio/.claude/worktrees/agent-a04d29d914b22568f` is the locked
-    Claude worker lane for imported else-if folding. `git cherry -v origin/main
-    worktree-agent-a04d29d914b22568f` showed one live `+` commit:
-    `93ddd0e5 compiler: fold imported else-if chains at import time`.
-- Current dirty-state warning:
-  - `.claude/settings.local.json` is locally modified; do not touch it.
-  - `scripts/ci/kretikos_kaxi_lowering_gate.sh` is locally modified in the main
-    worktree as of 2026-05-08; classify ownership before touching KAXI gate
-    files.
-  - `scripts/ci/kretikos_f64_runtime_gate.sh` is locally modified in the main
-    worktree as of 2026-05-08; classify ownership before touching Kretikos
-    runtime gate files.
-- During orchestration setup, a local modification was observed in
-  `self-hosted/compiler/lean_single.sio`. Verify current `git status` before
-  touching it; if modified, do not overwrite or revert it without explicit user
-  direction.
-- `self-hosted/check/check.sio` has a serialized window declared in
-  `.claude/check_sio_integration_window.v1.json`.
-- Any blocker left for another agent must use the severity, failure class,
-  evidence level, ownership, and `Next-Command` shape from
-  `.claude/PARALLEL_BLOCKER_CONTRACT.md`.
-- Apple native-v2 lane: Codex added `scripts/apple/apple_native_v2_ssh_gate.sh`
-  as the SSH orchestration entrypoint. It runs the maintained Apple/Mach-O
-  `selfhost_host_gate.sh` first. Current AArch64 native-v2 runtime attestation
-  is intentionally `not_run` because full `native::codegen.sio`
-  import/typecheck is dirty in this checkout; review this lane read-only unless
-  coordinating ownership through `artifacts/omega/agent_handoff.log.md`.
+Before any write-bearing dispatch, fill the Charter §4 contract (Lane / Owner /
+Closes / Worktree / Branch / Write-Set / Required-Gates / Merge-Target /
+Known-Blockers). "Explore and fix" without it is drift; halt with a Blocker-ID or
+a `Next-Command` handoff is a deliverable.
 
-Claude's preferred role in the parallel flow:
+## 4. Where the work is — the focus plan
 
-- read-only repository surveys
-- memory lookup and synthesis
-- secondary review of diffs
-- documentation lookup when external docs are needed
-- architectural/context mapping before Codex or another implementation agent edits
+`docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` (authored by
+Fable 5 at founder request, orchestrated by claude-1) is the active operational
+plan. Founder objectives, verbatim: *"Madaros E2E operacional, SOIR, MIR, MLI,
+HLIR EISA, f128 e f256 implantados e verificados."* Seven workstreams:
 
-When Claude needs to hand off implementation, write the exact target files,
-current branch, relevant memory lane files, and required validation commands.
+| WS | Scope | Status at rewrite |
+|---|---|---|
+| A | Madaros E2E operational — fresh dated full gate, residual disposition, status regen | P0-F closed its headline defect; `MADAROS_STATUS.md` regen still owed (WS-A owns the gate marker; see slot F's owed followups) |
+| B | SOIR — roundtrip gate + coverage census | planned |
+| C | **MIR port — Route B** (add `self-hosted/enir/**` as a self-contained subtree, 14 files / 7310 LOC) | **founder-approved; PR1 = P0 slot G, queued behind amendments** |
+| D | **MLI design** — greenfield Machine-Level IR between MIR and codegen | **Option C founder-approved**; design doc in the wave-1 tranche |
+| E | HLIR re-verify | grok-cli5 writing the HLIR dispatches |
+| F | EISA Madaros port (owns `tools/eisa` + `stdlib/eisa`) | grok-cli4 on close-prep (`WS_F_CLOSE_ACCEPTANCE_2026-08-16.md`) |
+| G | f128/f256 from V0-A — largest single workstream | grok-cli3 on V0-B witnesses |
 
----
+Dispatch runs in waves under the ≤2 self-hosted-writer ceiling; **wave 1 is out**.
+The wave-1 planning tranche landed as **`6f2c4e2461` (PR #1751)**: the focus
+plan, `MIR_PORT_PLAN.md` (the costed three-route study behind Route B),
+`MLI_DESIGN.md`, the adversarial preflight review, and the payload census —
+previously untracked files in a shared checkout, landed precisely so they could
+not be lost (see lesson 4).
 
-## Collision Resolution — 2026-05-20 (post-cluster-maintenance lane recovery)
+## 5. Grounding session — the P0-F arc (2026-08-13 → 08-16)
 
-Context: cluster maintenance + new instructions caused several Claude lanes to
-drop and resume in a degraded state ("zuadas"). Two branch collisions were
-identified and resolved. This section is the current truth; the 6-lane matrix
-above (dated 05-10) is STALE — do not treat it as live.
+The event this file is anchored to, kept here because it is the fleet's clearest
+recent demonstration of how reallocation, preservation and closure are supposed
+to work:
 
-### Collision 1 — GPU SPIR-V/Vulkan: `kretikos/top-tier-runtime` vs `sounio-pure/python-extermination-phase7`
+1. **2026-08-13** — forensic dispatch
+   `docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md`: `extern "C"`
+   calls under default Madaros return a fabricated `0` without invoking the
+   function (`getpid()`, `system()`). Root causes later located: the parser keeps
+   only the first declaration of a multi-decl extern block; lowering never
+   assigns the extern strategy, so calls lower into empty bodies.
+2. **2026-08-15 → 08-16T00:43Z** — glm-cli1 executes Track B's leftovers and
+   Track A: refreshes the stale seed from the fixed-point build (#725, with a
+   freshness drift-guard), adds the engine-forced `system()` regression gate,
+   dispatches the four secondary defects (one root-caused to `jmp rel8`
+   saturation at string literals ≥127 bytes; one proven unreproducible in 11
+   attempts and recorded as such), and builds the four-layer Track A port
+   (parser wrapper rewrite, checker `ffi_*` binds, native registry emitters).
+3. **~00:43Z** — glm-cli1 hits a **5-hour API usage limit** mid-task (8/12
+   subtasks done). The slot's reset was ~8.5h away with WS-C PR1 and WS-D S1
+   both held behind P0-F.
+4. **01:12–01:13Z** — the orchestrator **preserves the WIP verbatim as
+   `9498c533a8`** (attributed to glm-cli1, explicitly unreviewed and unmeasured)
+   and the founder **reallocates the slot to fable-1** — availability handoff,
+   not a quality judgement. This is the protocol working: work is preserved,
+   attributed, and transferred; the replacement verifies rather than assumes.
+5. **→ 04:50Z** — fable-1 closes P0-F with a four-commit stack on
+   `lane/fable-1/p0f-ffi-takeover`: `7a871288ec` re-entrant extern blocks (the
+   core defect — replaced the inherited aggregate-global design after measuring
+   three failed variants), `637dbf751c` fail-closed externs +
+   exit/abort/malloc/free intrinsics, `e2d20025c5` `system()` via
+   fork/execve/wait4 + dispatch close-out, `433715ff7a` the KNOWN_LIMITATIONS
+   correction. `make madaros-full-gate` PASS **against a Madaros built from
+   branch tip that session, not the checked-in ELF**; suite 983 pass / 563
+   baseline-fail / 103 known with **zero attributable regressions**, verified
+   against a parent-commit control build. Residual:
+   `tests/run-pass/ffi_system_array_arg.sio` checked in as known-failure
+   (`&[i8;N]` extern args forward an empty pointer through the signatureless
+   `ffi_` path — needs a follow-on dispatch giving `ffi_` builtins real
+   parameter types). Owed: a forensic dispatch for the large-aggregate-in-global
+   seed miscompile (repros preserved under `docs/audit/p0f_repros/`, not yet
+   minimised).
 
-Both branch from merge-base `982963e09`. Both create
-`self-hosted/gpu/kretikos_emit_spirv.sio`,
-`scripts/gpu/kretikos_spirv_vulkan_storage_vec_add.c`, and
-`scripts/ci/kretikos_spirv_vulkan_storage_semantic_baseline_gate.sh`
-with DIVERGENT content (`kretikos_emit_spirv.sio` differs 356/323 lines).
+## 6. Operational lessons this fleet paid for (2026-08-15/16)
 
-Evidence (reflog, not file-count):
-- `kretikos/top-tier-runtime`: clean lineage, no reset, comprehensive superset
-  (+27 commits, 93 files: SPIR-V emitter + Vulkan dispatch + cross-backend
-  CUDA/Metal + MultiPL-E + audit). Last commit 05-19 20:07. No upstream, not
-  checked out in any worktree.
-- `sounio-pure/python-extermination-phase7`: reflog shows
-  `reset: moving to origin/main` then cherry-picks, originally
-  `Created from HEAD` at `50e0ebfe5` (a kretikos commit). This is the
-  POST-CRASH PARTIAL REBUILD — it re-did a SPIR-V subset divergently 6h later
-  (05-20 01:58). Pushed to origin; checked out at /workspace/sounio.
+These are the reusable part of the session. Each cost real hours.
 
-RESOLUTION:
-- **`kretikos/top-tier-runtime` is the canonical GPU lane** (stable superset).
-- phase7's 3 GPU commits (`a576a4ac0`, `63b9bda7e`, `dde3a8ac4`) are a
-  post-crash divergent reimplementation — DO NOT merge them to main; they are
-  superseded by kretikos. NOT deleted/force-pushed (branch is pushed to origin;
-  rewriting would disrupt origin trackers per feedback_workspace_branch_flips).
-- phase7's one UNIQUE non-GPU commit `e869515c4` (heredoc-kill in
-  sinkhorn16 gate, disjoint from the GPU conflict) is PRESERVED on new branch
-  **`chore/sinkhorn16-heredoc-kill`** (off main, 1 clean commit) — land as a
-  tiny standalone PR.
-- PENDING VERIFICATION: the deciding gate
-  `scripts/ci/kretikos_spirv_vulkan_storage_vec_add_gate.sh` could NOT be run
-  here — `spirv-dis` is missing in this environment (cluster maintenance).
-  Re-run on a spirv-tools-equipped node to confirm kretikos's gate passes
-  before retiring phase7's GPU work permanently. Canonical call is reflog-based,
-  not execution-based.
+1. **Build your instrument from source; never trust the checked-in ELF.** A
+   stale `bin/souc-lean-single-x86_64` (three weeks old, #725) cost a full false
+   investigation — including a confident misdiagnosis that the binary was "a
+   different tool entirely" when it was merely stale. Worse, a Madaros built on
+   a stale base produced **phantom parse failures in a file that was pristine**.
+   Before believing any anomalous compiler behaviour: rebuild from the branch
+   tip (`make build-madaros`, self-locking; `scripts/dev/souc-build-lock.sh make
+   build` for the seed) and re-run against the fresh binary. The seed now has a
+   freshness drift-guard (`make lean-seed-gate`); the habit is still yours to
+   keep. Gate receipts must name the binary they ran against.
+2. **Never give a module global an aggregate type.** The self-hosted seed
+   miscompiles large aggregates in globals — **two independent lanes hit it the
+   same night**. Parallel primitive arrays (the `parser.sio` house style) are
+   the safe shape. The forensic dispatch is still owed; until it lands, treat
+   any `var X: SomeStruct[…]` / `Option<Box<…>>` at module scope in
+   `self-hosted/` as suspect when behaviour makes no sense.
+3. **`&`-launched background jobs do not reliably fire their completion
+   waiters — poll.** Ampersand-detached work has silently stranded lanes this
+   session: the waiter never fires, the lane waits forever on a notification
+   that will not come. Poll the output file / process state on a cadence instead
+   of blocking on a promised wake-up.
+4. **Uncommitted work in a worktree is one accident from loss.** The approved
+   wave-1 architecture docs sat untracked in a shared checkout until the
+   preflight review flagged it (finding C7) and the tranche was landed as
+   `6f2c4e2461`; P0-F's mid-flight WIP survived *only* because the orchestrator
+   preserved it as a commit at reallocation. Commit WIP before you run low on
+   context, before a takeover, and before anything touches a shared checkout.
+   A `wip(...)` commit with an honest "unreviewed, not claimed green" message
+   is cheap insurance; `git clean` is not.
 
-### Collision 2 — Park-Miller/CUDA duplicate: `claude-2/wip-2026-05-19` vs `sounio-pure/r2-1-park-miller`
+## 7. Durable pointers
 
-BYTE-IDENTICAL: same 11 SHAs, empty diff, shared tip `10d69fc4`
-(Merge PR #165 from `sounio-pure/r2-1-park-miller`).
+| Source of truth | For |
+|---|---|
+| `bin/sounio-coord` (+ `/workspace/.tmp/sounio-coord/…`) | live claims, heartbeats, messages |
+| `.claude/attention_p0.v1.json` | P0 slot state — machine-readable, orchestrator-updated |
+| `.claude/ATTENTION_CHARTER.md` | the ranking everything else obeys |
+| `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` | workstreams, waves, founder decisions |
+| `docs/internal/coordination/COMPILER_LANE_CONTRACT.md` | compiler lane states |
+| `.claude/PARALLEL_BLOCKER_CONTRACT.md` | blocker shape, merge contract |
+| `docs/MADAROS_STATUS.md` | status — **verify its date before trusting it**; regenerating it is WS-A work |
+| `.claude/MEMORY_LANES.md` | per-lane memory files (token hygiene: read only your lane) |
+| `artifacts/omega/agent_handoff.log.md` | durable CLAIM/RELEASE archive |
+| `docs/audit/` | forensic dispatches — the protocol before any `self-hosted/` fix |
 
-RESOLUTION:
-- **PR #165 is the single canonical landing path** for this 11-commit
-  Park-Miller RNG + epistemic-CUDA-runtime work. Do NOT double-merge.
-- `sounio-pure/r2-1-park-miller` is canonical (PR source).
-- `claude-2/wip-2026-05-19` is a redundant alias at the identical SHA, checked
-  out LIVE at /workspace/sounio-claude-2 (tracks origin/main). NOT deleted
-  (checked out by a live agent; git would refuse, and removal would disrupt
-  that agent). It will retire naturally when that agent advances; until then it
-  carries no unique commits.
+— end of rewrite; next revision owed when the fleet shape or the P0 queue
+materially changes, not on a calendar.
