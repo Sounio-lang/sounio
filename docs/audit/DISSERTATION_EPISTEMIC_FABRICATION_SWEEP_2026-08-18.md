@@ -40,15 +40,27 @@ Mechanism: `Knowledge.confidence` was `is_float:3` with f64 store → sitofp. Fi
 
 ### Family A — **GUM / Knowledge variance collapse** (Madaros-only zeros)
 
-Lean shows real variance; Madaros prints exact `0.000000` and/or `std(Knowledge)=0`.
+Lean shows real variance; Madaros printed exact `0.000000` / `std(Knowledge)=0` on multi-RHS surfaces.
 
-| # | Surface | Madaros | lean_single | Notes |
+| # | Surface | Before (Madaros) | lean_single | After contour (Madaros) |
 |---:|---|---|---|---|
-| A1 | `rapamycin_epistemic_adaptive` | `var(blood/brain/periph)=0.000000`; rc≠0; `FABRICATED_ZERO` | `var(blood)=0.000009` …; **PASS** | Canonical F1 from `#1792` / fabrication gate |
-| A2 | `rapamycin_rk4_budget` | `var(*)=0`; `std(Knowledge)=0` for all 3 comps; rc=0 (**silent** on vars) | `var(blood)=0.452e-3`; `std(Knowledge)>0` | Same disease as A1; Budget64 std still healthy on both |
+| A1 | `rapamycin_epistemic_adaptive` | `var=0` + `FABRICATED_ZERO` | non-zero; PASS | **non-zero + PASS** (RHS inlined) |
+| A2 | `rapamycin_rk4_budget` | `var=0`; silent | non-zero; PASS | **non-zero + PASS** (main-loop RHS inlined) |
 
-**Count:** **2** measured dissertation surfaces (same cause class: Knowledge/GUM variance pipeline under Madaros).  
-**Not closed by #1882.** Detectors catch A1; A2 still prints zeros without always failing the suite.
+#### Root (discriminated 2026-08-18) — **not** the April ζ slot OOB alone
+
+| Probe | Madaros `variance_of` | lean |
+|---|---|---|
+| Inline Euler-like, 3 channels (iso mini) | **non-zero** | non-zero |
+| Same math via **user `fn rhs(...)`** (CALL3) | **`0`** | non-zero |
+| `rapamycin_iso_budget` (RHS **inlined** in `main`) | non-zero historically | non-zero |
+| adaptive / rk4 (RHS behind **calls**) | `0` before contour | non-zero |
+
+**Cause:** Madaros first-order GUM / FO variance **does not survive user function call boundaries**. lean_single does. The `#1706` 1024 `variance_base_reg` silent-drop → `0.0` remains a related honesty hazard but is **not** required to explain A1/A2: a one-call, 20-step probe already zeros.
+
+**Contour (thesis surfaces):** inline `rhs_*` at call sites (same shape as iso). Compiler follow-up: interprocedural FO transfer. Regression: `tests/run-pass/gum_fo_across_call.sio` (to land with this wave).
+
+**Not closed by #1882.** Contour closes A1/A2 science surfaces; compiler FO-across-call remains open.
 
 ### Family B — **large-f64 print saturation → `2^63`** (Madaros-only)
 
