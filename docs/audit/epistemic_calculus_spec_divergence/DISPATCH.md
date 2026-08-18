@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.epistemic-calculus-spec-divergence.dispatch
 authority: repo_only
 audience: users
-last_validated: 2026-08-17
+last_validated: 2026-08-18
 validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemic-calculus-spec-divergence.dispatch
 -->
@@ -178,9 +178,22 @@ imports V1 for shared definitions (`Effect`, `Ty`, `EffectSet`, `emptyE_sub`,
 but it means the module a newcomer imports by name is the unsound one, and no
 mechanism nudges them elsewhere.
 
-**Wanted.** Either extract the shared spine into a third module both import, or
-add a header banner to V1 that a reader cannot miss. Prefer the extraction only
-if it costs no proof; a banner that works beats a refactor that risks 694 lines.
+**Landed (banner).** V1's header now says `REFUTED MODEL — USE EpistemicEffectsV2`.
+That closes the dispatch wording of R1. It does not close the fact: a banner
+is not an import edge.
+
+**Landed (consumer).** `EpistemicEffectsV2_measure_nat.lean` imports V2 and
+proves `measure_nat_reduct_stays_know_nat` — the V1 counterexample inverted.
+The correspondence gate's `--lean-consume` arm builds that module only after
+the V1 mutant (`v1_imports_measure_nat.lean`) fails to elaborate. A grep of
+`import EpistemicEffectsV2` without that mutant would measure mention, not use.
+
+**Deferred — extract the shared spine.** A third module holding `Effect`, `Ty`,
+`EffectSet`, `TyCtx` would stop V2 from being a *client* of the refuted file.
+It would not give V2 a *consumer*. Doing the extraction now would trade
+orphanhood for orphanhood, with fewer visible edges: V2 would import the
+spine instead of V1, and still have no importer of its own. Revisit only
+after the consumer above has been the import edge for a measured stretch.
 
 ### R2 — The correspondence is prose, not a gate
 
@@ -219,9 +232,13 @@ do not attempt to close it under this dispatch.
 ## §6 — Acceptance criteria
 
 1. R1 and R2 landed. R3 recorded and explicitly deferred, not silently dropped.
-2. `Lean Proofs` green, with V1 and V2 both still `@[default_target]`. Deleting
-   V1 to make the problem disappear is **out of scope** — the refutation is a
-   result worth keeping, and §1's theorems are its statement.
+   R1's remaining *fact* (V2 had no importer) is closed by
+   `EpistemicEffectsV2_measure_nat.lean`, not by the banner. Spine extraction
+   stays deferred — see §5 R1.
+2. `Lean Proofs` green, with V1, V2, and `EpistemicEffectsV2_measure_nat` all
+   `@[default_target]`. Deleting V1 to make the problem disappear is **out of
+   scope** — the refutation is a result worth keeping, and §1's theorems are
+   its statement.
 3. The new gate's positive control demonstrated firing, with the output pasted
    into the PR body. A green gate whose control was never shown to fail is not
    evidence.
