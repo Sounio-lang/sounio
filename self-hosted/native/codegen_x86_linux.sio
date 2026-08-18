@@ -1095,6 +1095,8 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_write_i64(*name) { return 34 }
     if name_is_read_f64(*name) { return 35 }
     if name_is_write_f64(*name) { return 36 }
+    if name_is_acknowledge(*name) { return 37 }
+    if name_is_require_confidence(*name) { return 38 }
     0
 }
 
@@ -1184,6 +1186,8 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_write_i64((*func).name) { return 34 }
     if name_is_read_f64((*func).name) { return 35 }
     if name_is_write_f64((*func).name) { return 36 }
+    if name_is_acknowledge((*func).name) { return 37 }
+    if name_is_require_confidence((*func).name) { return 38 }
     0
 }
 
@@ -3809,6 +3813,33 @@ fn name_is_write_f64(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is_acknowledge(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 11 { return false }
+    if n.buf[0] != 97 as i8 { return false }
+    if n.buf[1] != 99 as i8 { return false }
+    if n.buf[2] != 107 as i8 { return false }
+    if n.buf[3] != 110 as i8 { return false }
+    if n.buf[4] != 111 as i8 { return false }
+    if n.buf[5] != 119 as i8 { return false }
+    if n.buf[6] != 108 as i8 { return false }
+    if n.buf[7] != 101 as i8 { return false }
+    if n.buf[8] != 100 as i8 { return false }
+    if n.buf[9] != 103 as i8 { return false }
+    if n.buf[10] != 101 as i8 { return false }
+    true
+}
+
+fn name_is_require_confidence(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 18 { return false }
+    let expected: [i64; 18] = [114, 101, 113, 117, 105, 114, 101, 95, 99, 111, 110, 102, 105, 100, 101, 110, 99, 101]
+    var i: i64 = 0
+    while i < 18 {
+        if n.buf[i as usize] != expected[i as usize] as i8 { return false }
+        i = i + 1
+    }
+    true
+}
+
 // read_i64(buf: *mut i64, idx: i64) -> i64 / read_f64(buf: *mut f64, idx: i64) -> f64.
 // Sounio's internal call ABI passes ALL argument and return values as raw
 // 64-bit values through the general-purpose registers (confirmed against
@@ -4736,6 +4767,22 @@ fn emit_builtin_f64_bits_identity(nc: NativeCompiler) -> NativeCompiler with Mut
     c.code = emit_push_rbp(c.code)
     c.code = emit_mov_rbp_rsp(c.code)
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// acknowledge / require_confidence receive the Knowledge object handle in rdi
+// and return its field-0 payload. They must not be empty stubs: the fail-closed
+// backend deliberately emits ud2 for an unimplemented declaration.
+fn emit_builtin_knowledge_value(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7) // rax = Knowledge handle
+    c = native_v2_resolve_handle_to_object_base_rax(c)
+    c.code = emit_mov_reg_imm(c.code, 3, native_v2_object_header_size() / 8)
+    c.code = emit_mov_rax_mem_rax_rbx8(c.code)
     c.code = emit_pop_rbp(c.code)
     c.code = emit_ret(c.code)
     c
@@ -5918,6 +5965,8 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         if name_is_sin(func.name) { return emit_builtin_sin(c) }
         if name_is_cos(func.name) { return emit_builtin_cos(c) }
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
+        if name_is_acknowledge(func.name) { return emit_builtin_knowledge_value(c) }
+        if name_is_require_confidence(func.name) { return emit_builtin_knowledge_value(c) }
         if native_v2_empty_stub_would_fabricate(&func) {
             nc_emit_unimplemented_extern_trap_into(&! c)
             return c
@@ -6705,6 +6754,8 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
     if builtin_id == 19 { return true }
     if builtin_id == 26 { return true }
     if builtin_id == 35 { return true }  // read_f64 (Defect A)
+    if builtin_id == 37 { return true }  // acknowledge(Knowledge<f64>, reason)
+    if builtin_id == 38 { return true }  // require_confidence(Knowledge<f64>, min)
     false
 }
 
@@ -6754,6 +6805,8 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 34 { emit_builtin_write_offset64_into(nc); return }
     if builtin_id == 35 { emit_builtin_read_offset64_into(nc); return }
     if builtin_id == 36 { emit_builtin_write_offset64_into(nc); return }
+    if builtin_id == 37 { native_v2_persist_builtin_emit_into(nc, emit_builtin_knowledge_value((*nc))); return }
+    if builtin_id == 38 { native_v2_persist_builtin_emit_into(nc, emit_builtin_knowledge_value((*nc))); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -6824,6 +6877,8 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_write_i64(func.name) { emit_builtin_write_offset64_into(&! c); return c }
         if name_is_read_f64(func.name) { emit_builtin_read_offset64_into(&! c); return c }
         if name_is_write_f64(func.name) { emit_builtin_write_offset64_into(&! c); return c }
+        if name_is_acknowledge(func.name) { return emit_builtin_knowledge_value(c) }
+        if name_is_require_confidence(func.name) { return emit_builtin_knowledge_value(c) }
         if native_v2_empty_stub_would_fabricate(&func) {
             nc_emit_unimplemented_extern_trap_into(&! c)
             return c
@@ -9064,6 +9119,8 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_write_i64(func.name) { emit_builtin_write_offset64_into(nc); return }
         if name_is_read_f64(func.name) { emit_builtin_read_offset64_into(nc); return }
         if name_is_write_f64(func.name) { emit_builtin_write_offset64_into(nc); return }
+        if name_is_acknowledge(func.name) { (*nc) = emit_builtin_knowledge_value((*nc)); return }
+        if name_is_require_confidence(func.name) { (*nc) = emit_builtin_knowledge_value((*nc)); return }
         if native_v2_empty_stub_would_fabricate(&func) {
             nc_emit_unimplemented_extern_trap_into(nc)
             return
