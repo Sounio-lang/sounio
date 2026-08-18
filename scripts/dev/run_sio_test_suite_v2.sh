@@ -8,7 +8,7 @@
 #
 # Annotations:
 #   //@ run-pass              — expect exit 0
-#   //@ compile-fail          — expect exit != 0
+#   //@ compile-fail          — expect a compiler diagnostic, not a timeout or signal
 #   //@ ignore                — skip this test
 #   //@ check-only            — compile only, do not execute
 #   //@ expect-stdout: X      — stdout must contain X (run-pass only)
@@ -424,22 +424,36 @@ run_test() {
         
     elif $is_compile_fail; then
         local tmp_out
+        local compile_exit_code=0
+        local check_error_patterns=false
         tmp_out="$(mktemp /tmp/sounio-cf-XXXXXX.elf)"
-        output=$(timeout "$timeout_val" "$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || exit_code=$?
+        output=$(timeout "$timeout_val" "$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || compile_exit_code=$?
         rm -f "$tmp_out"
-        
-        if [[ $exit_code -eq 124 ]]; then
+
+        if [[ $compile_exit_code -eq 124 ]]; then
             test_output="compile timed out after ${timeout_val}s"
-        elif [[ $exit_code -eq 0 ]] && grep -qF "typecheck: failed" <<<"$output"; then
             exit_code=1
-        elif [[ $exit_code -eq 0 ]]; then
+        # Shells encode signal termination as 128 + signal. A crash is never
+        # a valid compile-fail rejection, even when its output matches.
+        elif [[ $compile_exit_code -ge 128 && $compile_exit_code -le 192 ]]; then
+            local signal_num=$((compile_exit_code - 128))
+            test_output="compile terminated by signal ${signal_num} (exit ${compile_exit_code})"
+            exit_code=1
+        elif [[ $compile_exit_code -ge 125 && $compile_exit_code -le 127 ]]; then
+            test_output="compile harness exited ${compile_exit_code}"
+            exit_code=1
+        elif [[ $compile_exit_code -eq 0 ]] && grep -qF "typecheck: failed" <<<"$output"; then
+            check_error_patterns=true
+            exit_code=0
+        elif [[ $compile_exit_code -eq 0 ]]; then
             test_output="expected compile failure but passed"
             exit_code=1
         else
-            exit_code=0  # Reset - compile failure is expected
+            check_error_patterns=true
+            exit_code=0
         fi
 
-        if [[ $exit_code -ne 124 && $test_output != "expected compile failure but passed" ]]; then
+        if $check_error_patterns; then
             for pattern in "${error_patterns[@]}"; do
                 if ! grep -qiF -- "$pattern" <<<"$output"; then
                     exit_code=1
@@ -447,9 +461,6 @@ run_test() {
                     break
                 fi
             done
-            if [[ -z "$test_output" ]]; then
-                exit_code=0  # Reset - compile failure is expected
-            fi
         fi
     elif $is_typecheck_fail; then
         # Proof-carrying tests: the illegal inference must be rejected by the
