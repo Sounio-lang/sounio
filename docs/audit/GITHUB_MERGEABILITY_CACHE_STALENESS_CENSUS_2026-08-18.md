@@ -68,29 +68,33 @@ were not.
 
 ### The 18 real conflicts (for completeness — not touched, not this dispatch's job)
 
-| PR | Branch | Base | Files in conflict |
-|---|---|---|---:|
-| #795 | `lean/cd-seamflip-forall-n` | `main` | 2 |
-| #867 | `agent/issue854-contextual-checker-partial-20260713` | `main` | 2 |
-| #978 | `codex/renderer-quality-20260715` | `main` | 1 |
-| #1034 | `codex/propagate-runtime-abi-20260716` | `main` | 1 |
-| #1053 | `codex/compile-fail-contract-20260717` | `main` | 2 |
-| #1058 | `codex/ssm-exp-tail-20260717` | `main` | 1 |
-| #1063 | `research/octonion-probes-ci-gate` | `main` | 1 |
-| #1262 | `agent/r3-examples-proposal-refresh-20260720` | `main` | 1 |
-| #1290 | `codex/madaros-affine-semantics-20260720` | `main` | 5 |
-| #1318 | `agent/r3-complete-examples-source-20260720` | `main` | 1 |
-| #1339 | `agent/madaros-declared-builtin-precedence-20260720` | `main` | 14 |
-| #1421 | `codex/issue901-layout-current-20260724` | `main` | 12 |
-| #1527 | `madaros/self-parse-visibility-box-w44-20260727` | `main` | 41 |
-| #1580 | `research/zd-fiber-antisymmetry-lemma-20260731` | `research/self-falsifying-compilation-line-20260726` | 3 |
-| #1603 | `feat/agent-bus-realtime` | `main` | 2 |
-| #1605 | `codex/madaros-wasm-deontic-v3-20260802` | `main` | 5 |
-| #1659 | `research/san-fpga-san-v3-20260805` | `main` | 1 |
-| #1729 | `fix/lane-b3-ir-module-heap-20260813` | `main` | 1 |
+| PR | Branch | Base | Files in conflict | Status (as of 2026-08-18 ~10:00 UTC) |
+|---|---|---|---:|---|
+| #795 | `lean/cd-seamflip-forall-n` | `main` | 2 | open, unresolved |
+| #867 | `agent/issue854-contextual-checker-partial-20260713` | `main` | 2 | open, unresolved |
+| #978 | `codex/renderer-quality-20260715` | `main` | 1 | closed, not merged (closed 08:59, before this census's PR comments went out at 09:27 -- unrelated to the notice) |
+| #1034 | `codex/propagate-runtime-abi-20260716` | `main` | 1 | open, unresolved |
+| #1053 | `codex/compile-fail-contract-20260717` | `main` | 2 | **closed, not merged** (closed 09:42, after the PR comment at 09:27 -- head SHA unchanged from the pre-comment census, so this is abandonment, not resolution) |
+| #1058 | `codex/ssm-exp-tail-20260717` | `main` | 1 | open, unresolved |
+| #1063 | `research/octonion-probes-ci-gate` | `main` | 1 | **closed, not merged** (closed 09:42, after the PR comment at 09:27 -- head SHA unchanged from the pre-comment census, so this is abandonment, not resolution) |
+| #1262 | `agent/r3-examples-proposal-refresh-20260720` | `main` | 1 | open, unresolved |
+| #1290 | `codex/madaros-affine-semantics-20260720` | `main` | 5 | open, unresolved |
+| #1318 | `agent/r3-complete-examples-source-20260720` | `main` | 1 | open, unresolved |
+| #1339 | `agent/madaros-declared-builtin-precedence-20260720` | `main` | 14 | open, unresolved |
+| #1421 | `codex/issue901-layout-current-20260724` | `main` | 12 | open, unresolved |
+| #1527 | `madaros/self-parse-visibility-box-w44-20260727` | `main` | 41 | open, unresolved |
+| #1580 | `research/zd-fiber-antisymmetry-lemma-20260731` | `research/self-falsifying-compilation-line-20260726` | 3 | open, unresolved (head has advanced twice since the census -- shared-worktree churn, not a fix; re-verified conflicting on the same 3 files both times) |
+| #1603 | `feat/agent-bus-realtime` | `main` | 2 | open, unresolved |
+| #1605 | `codex/madaros-wasm-deontic-v3-20260802` | `main` | 5 | open, unresolved |
+| #1659 | `research/san-fpga-san-v3-20260805` | `main` | 1 | open, unresolved |
+| #1729 | `fix/lane-b3-ir-module-heap-20260813` | `main` | 1 | open, unresolved |
 
 These need their authors, not a head refresh — a forced merge here would just make the same
-conflict visible inside the PR branch instead of at the API boundary.
+conflict visible inside the PR branch instead of at the API boundary. All 18 were notified via a
+PR comment naming the exact conflicting files (2026-08-18 ~09:27 UTC); as of the status column
+above, none have been resolved with new commits. Two (#1053, #1063) closed shortly after the
+notice without a head-SHA change and without merging -- read as abandonment, not fixed, since a
+real resolution would show up as a new commit, not a close on an unchanged branch.
 
 ## The procedure that works, and its actual reliability
 
