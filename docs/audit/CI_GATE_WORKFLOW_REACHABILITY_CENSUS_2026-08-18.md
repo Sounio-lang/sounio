@@ -134,3 +134,65 @@ Start with the three already shown to fire their positive controls and to be abs
 3. `madaros_ontology_enforcement_gate.sh`
 
 One gate per pull request. Re-run this instrument after each wire; the forgotten count must fall by exactly one, and the reachable count must rise by exactly one.
+
+---
+
+## Pass 2 — leftover class (measured 2026-08-18, SHA `64924d371a`)
+
+**Instrument:** `python3 scripts/dev/ci_gate_leftover_class_pass2.py`  
+**Table:** [`CI_GATE_LEFTOVER_CLASS_PASS2_2026-08-18.tsv`](CI_GATE_LEFTOVER_CLASS_PASS2_2026-08-18.tsv)
+
+Pass 1 counted leftovers. This pass classifies them. Filename prefixes are not a class. A quoted historical phrase is not a class.
+
+Population on this SHA: **470** `*_gate.sh`, **88** workflow-reachable, **382** leftover. (Pass 1 was 468 / 85 / 383 on `465008a76b`. Wires since then, plus two new gates, plus a scan-list false-positive removed — see below.)
+
+### Instrument corrections before the class count
+
+| Control | What would refute it | Result |
+|---|---|---|
+| Leftover non-empty | leftover = 0 | **382** |
+| Six dissertation gates leftover | any of the six in the invoke graph | all six **unreachable** |
+| Six unmentioned in `.github/` | any dissertation `*_gate.sh` string under `.github/` | **zero** mentions; `git log -S dissertation_pbpk_suite_gate -- .github/` is empty for the whole history |
+| Scan-list is not an invoke | `mli_s3_bit_identity_gate.sh` reachable because `sigpipe_hygiene_gate.sh` lists it | leftover (listed for `grep -q` hygiene, never executed) |
+| Quoted SUPERSEDED is not obsolete | `lean_single_fixed_point_gate.sh` class = obsolete | **not** obsolete — the header quotes a *wrong* old line |
+
+`BARE_GATE_RE` now applies only to workflow YAML. Applying it to `.sh` files counted scan-lists as execution. Pass 1 did not hit that on `465008a76b` because `mli_s3` was not yet in the sigpipe list.
+
+### Leftover classes (382)
+
+| Class | N | Rule |
+|---|---:|---|
+| `forgotten` | **36** | Header is a measurement contract (`GATE_CONTRACT`, “positive control”, “evidence gate”, “Acceptance:”, “HARD GATE/PATH”) and there is no live operator entry |
+| `manual-by-design` | **29** | Makefile recipe, `native_v2_cpu_compiler_umbrella_gate.sh` child, `bootstrap_chain_gate.sh`, or header says hand/Slurm/operator |
+| `obsolete` | **0** | Current header *asserts* the gate is obsolete / do-not-use. Quoted “old header said SUPERSEDED” does not count |
+| `unclassified` | **317** | Leftover, no evidence for the three buckets. Same size as pass 1 — the extra forgotten came out of the old filename-`dissertation_*` / coarse manual bucket, not from inventing a class for 317 names |
+
+Do not call the 317 obsolete. A third pass that reads every body (not just the header) can split them; doing it from `madaros_*` / `fo_*` would fabricate a class.
+
+Pass 1 put all six dissertation gates in `manual-by-design` because the name started with `dissertation_`. That was a filename rule. Pass 2 drops it.
+
+### The six dissertation gates — CI never ran them
+
+| Gate | Pass-2 class | Workflow-reachable | Named in `.github/` | Other invoker |
+|---|---|---|---|---|
+| `dissertation_confidence_gate_gate.sh` | forgotten | no | no | none |
+| `dissertation_dossier_gate.sh` | forgotten | no | no | none |
+| `dissertation_frontend_parity_gate.sh` | forgotten | no | no | none |
+| `dissertation_pbpk28_parity_gate.sh` | forgotten | no | no | none |
+| `dissertation_pbpk_hessian_gate.sh` | forgotten | no | no | none |
+| `dissertation_pbpk_suite_gate.sh` | manual-by-design | no | no | `native_v2_cpu_compiler_umbrella_gate.sh` only |
+
+The umbrella is itself leftover (not in any workflow). So the suite is operator-reachable if someone runs the umbrella by hand, and still **not** a GitHub Actions signal.
+
+`git grep` on `HEAD:.github` finds no `dissertation_*_gate`. A `-S` history walk of `.github/` for `dissertation_pbpk_suite_gate` is empty: the suite was never added to a workflow and later removed. It was never there.
+
+June qualification prose called these “6/6 dissertation CI gates green”. The 2026-08-16 remasure (`docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md`) on `6f2c4e2461` via **Slurm** (job 9908) was 1 pass / 3 fail / 2 unmeasured — not Actions. The 2026-08-17 suite remasure is 19 fail / 53 (`docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md`): twelve toolchain, seven rc=182, zero science. Actions never saw either number.
+
+Two further vacuous-green paths, unused by CI only because CI never calls them:
+
+- `SOUNIO_DPS_GATE_SKIP=1` makes `dissertation_pbpk_suite_gate.sh` exit 0
+- `dissertation_confidence_gate_gate.sh` exits 0 on non-Linux / non-x86_64
+
+**Verdict:** yes. The dissertation state was never an automatic CI signal. A 6/6 that survives two months while the suite is 19/53 red is the expected outcome of a gate that no workflow runs. That is the same class as #1778: a green (or a remembered green) that does not mean the surface ran.
+
+This pass does **not** authorise wiring the six, the 36 forgotten, or the 317 unclassified. The suite is a 53-entry compile/run forest; putting it in Contracts without a measured budget would redden every PR the way a V0-A-red f128 ladder would.
