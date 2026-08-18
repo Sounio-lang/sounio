@@ -356,8 +356,8 @@ pub fn ir_instr_census_report() with IO, Mut, Panic, Div {
 // "ir_summary_failed: lowering reported an error" and NOTHING anywhere named
 // the cause, because the message that would name it lives at the end of
 // lowerer_lower_fn_item_mut and this path does not go through that function.
-// Exactly one site in the compiler raises the flag, so recording its reason
-// there costs two stores and removes the anonymity for good.
+// Capacity was originally the only site raising the flag. Unresolved print ABI
+// dispatch is now the second; both record an explicit reason before refusing.
 // PARALLEL FLAT ARRAYS, NOT `Name`. Storing a Name into a global OVERRUNS INTO
 // THE NEXT GLOBALS. Reproduced 2026-08-05 with a probe replicating this exact
 // declaration order, compiled by the seed that builds this compiler:
@@ -378,6 +378,8 @@ pub fn ir_instr_census_report() with IO, Mut, Panic, Div {
 var IR_LOWER_HARD_ERROR_FN_BUF: [i8; 128]
 var IR_LOWER_HARD_ERROR_FN_LEN: i64 = 0
 var IR_LOWER_HARD_ERROR_NEEDED: i64 = 0
+// 0=unspecified, 1=instruction capacity, 2=unresolved print ABI.
+var IR_LOWER_HARD_ERROR_REASON: i64 = 0
 // Same flat-array treatment, same reason.
 var IR_LOWER_ERROR_FIRST_FN_BUF: [i8; 128]
 var IR_LOWER_ERROR_FIRST_FN_LEN: i64 = 0
@@ -532,7 +534,11 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
     if IR_LOWER_HARD_ERROR == 0 {
         return
     }
-    if IR_LOWER_HARD_ERROR_NEEDED > 0 {
+    if IR_LOWER_HARD_ERROR_REASON == 2 {
+        print("  cause: cannot safely lower print/println argument with unresolved scalar kind in function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("`\n")
+    } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("` needs at least ")
@@ -550,6 +556,7 @@ pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_HARD_ERROR = 0
     IR_LOWER_HARD_ERROR_NEEDED = 0
     IR_LOWER_HARD_ERROR_LIMIT = 0
+    IR_LOWER_HARD_ERROR_REASON = 0
     IR_LOWER_HARD_ERROR_FN_LEN = 0
     IR_LOWER_ERROR_TOTAL = 0
     IR_LOWER_ERROR_FIRST_FN_LEN = 0
@@ -9683,13 +9690,9 @@ impl Lowerer {
         }
     }
 
-    // Returns the print builtin name for println's first argument.
-    //   int literal / i64 var (scalar_kind=1) → print_int
-    //   f64-valued expression                 → print_f64
-    //   everything else                       → print
-    // Routing f64 through print treats the IEEE bits as a char* and segfaults.
-    // The native backend's print_f64 builtin consumes the lowered f64 payload
-    // through the same integer slot convention used by emitted call arguments.
+    // Returns a print builtin only from positive operand evidence. Kind 0 is
+    // not a string classification: routing its word through print's strlen
+    // path turns values such as integer 1 into address 0x1 and SIGSEGVs.
     fn println_dispatch_name(self, args: &Option<Box<ExprList>>) -> Name with Mut, Panic, Div, Alloc {
         match *args {
             Some(list) => {
@@ -9698,8 +9701,24 @@ impl Lowerer {
                     make_name("print_int")
                 } else if sk == 2 {
                     make_name("print_f64")
-                } else {
+                } else if self.expr_result_is_string_ref(&(*list).head) {
                     make_name("print")
+                } else {
+                    // The name is deliberately numeric as a poison-safe fallback:
+                    // the durable hard error below prevents publication of the ELF,
+                    // while an accidentally bypassed barrier still cannot dereference
+                    // the unresolved word as a char pointer.
+                    if !self.probe_mode {
+                        if IR_LOWER_HARD_ERROR == 0 {
+                            IR_LOWER_HARD_ERROR_REASON = 2
+                            IR_LOWER_HARD_ERROR_NEEDED = 0
+                            IR_LOWER_HARD_ERROR_LIMIT = 0
+                            ir_copy_name_to_flat(&(*self.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+                        }
+                        IR_LOWER_HARD_ERROR = 1
+                        lower_note_error(9712, (*self.current_func).name)
+                    }
+                    make_name("print_int")
                 }
             }
             _ => make_name("print"),
@@ -9984,8 +10003,9 @@ impl Lowerer {
             // needs to have.
             if !lo.probe_mode {
                 IR_LOWER_HARD_ERROR = 1
-                // Record WHICH function and HOW MANY, here, at the only site
-                // that raises the flag. The end-of-body report in
+                IR_LOWER_HARD_ERROR_REASON = 1
+                // Record WHICH function and HOW MANY at the capacity site. The
+                // end-of-body report in
                 // lowerer_lower_fn_item_mut is richer but only runs on the path
                 // that goes through it; this runs on every path.
                 ir_copy_name_to_flat(&(*current_func_box).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
@@ -10613,7 +10633,13 @@ impl Lowerer {
             return true
         }
         if (*e).kind == ExprKind::ExprIdent {
-            return self.lookup_local_scalar_kind((*e).name) == 3
+            if self.lookup_local_scalar_kind((*e).name) == 3 {
+                return true
+            }
+            // Parameter binding records its declared named type even on paths
+            // where scalar_kind is reserved for numeric dispatch. `string` and
+            // `&string` therefore remain positive evidence, not kind-0 guesses.
+            return lower_name_is_string_type(self.lookup_local_struct_type((*e).name))
         }
         if (*e).kind == ExprKind::ExprBinary {
             if (*e).bin_op == BinaryOp::OpAdd || (*e).bin_op == BinaryOp::OpConcat {
