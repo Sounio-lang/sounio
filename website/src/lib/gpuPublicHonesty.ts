@@ -10,6 +10,7 @@
  */
 
 import {
+  assertReachabilityComplete,
   claimFace,
   claimMayPrint,
   claimRefusal,
@@ -54,3 +55,5 @@ export function gpuShortRefusal(): string {
 export function copyLeaksGpuNumeral(text: string): boolean {
   return /\b13\s*\/\s*13\b/.test(text);
 }
+
+assertReachabilityComplete(GPU_PUBLIC, GPU_PUBLIC.id);
