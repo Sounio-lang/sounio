@@ -52,6 +52,15 @@ Committed at `scripts/audit/rc182_diagnose.py`.
 All five tests exit rc=182. handle_capacity = 4,194,304 (2^22) for every
 test, as expected from `gc.sio:64`. t_total ≈ 1.5–1.65 s for all five.
 
+**Polling precision caveat:** the instrument polls `/proc/<pid>/mem` at
+5 ms cadence and tracks the highest `handle_count` it sees. Run-to-run
+values vary by ±10K because the runtime allocates handles in tight
+bursts during init and the exact polling phase shifts which burst the
+probe catches. The pattern (peak near capacity, peak_pin = 0) is
+robust across runs; the exact peak value is not.
+
+**Run A (instrument from `/tmp/handle-instrument/rc182_diagnose.py`):**
+
 | Test | peak_handle | delta_to_wall | % of capacity | peak_pin | wall hit by |
 |---|---|---|---|---|---|
 | rapamycin_clinical | 4,186,515 | 7,789 | 99.81% | 0 | allocation |
@@ -59,6 +68,20 @@ test, as expected from `gc.sio:64`. t_total ≈ 1.5–1.65 s for all five.
 | pop_sim           | 4,185,474 | 8,830 | 99.79% | 0 | allocation |
 | d2_gum            | 4,189,539 | 4,765 | 99.89% | 0 | allocation |
 | d2_voi            | 4,191,233 | 3,071 | 99.93% | 0 | allocation |
+
+**Run B (instrument from repo path `scripts/audit/rc182_diagnose.py`):**
+
+| Test | peak_handle | delta_to_wall | % of capacity | peak_pin | wall hit by |
+|---|---|---|---|---|---|
+| rapamycin_clinical | 4,181,352 | 12,952 | 99.69% | 0 | allocation |
+| gum_vs_mc         | 4,185,734 | 8,570 | 99.80% | 0 | allocation |
+| pop_sim           | 4,191,769 | 2,535 | 99.94% | 0 | allocation |
+| d2_gum            | 4,183,791 | 10,513 | 99.75% | 0 | allocation |
+| d2_voi            | 4,184,358 | 9,946 | 99.76% | 0 | allocation |
+
+Run-to-run agreement: peak_handle values agree within ±0.24% of
+capacity across the two runs. Both runs place every test within 1.5% of
+the wall. peak_pin = 0 in every measurement.
 
 ## What this changes in the diagnostic verdict
 

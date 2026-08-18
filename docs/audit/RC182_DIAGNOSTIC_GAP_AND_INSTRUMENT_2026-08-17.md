@@ -80,17 +80,39 @@ corrected measurements are in
 traceability only.
 
 Source files (read-only) in `/workspace/.wt/grok-cli2/stdlib/darwin_pbpk/`.
-Built with `/workspace/.wt/minimax-cli3/bin/souc`, run via the diagnostic:
+Built with `/workspace/.wt/minimax-cli3/bin/souc`, run via the diagnostic.
 
-| Test | Source | peak_handle_count | peak_pin_count | ratio pin/handle |
+**Polling precision caveat:** the instrument polls `/proc/<pid>/mem` at
+5 ms cadence and tracks the highest `handle_count` it sees. Run-to-run
+values vary by ±10K because the runtime allocates handles in tight
+bursts during init and the exact polling phase shifts which burst the
+probe catches. The pattern (peak near capacity, peak_pin = 0) is
+robust across runs; the exact peak value is not.
+
+**Re-run 2026-08-18 (instrument from repo path):**
+
+| Test | Source | peak_handle_count | delta_to_wall | % used | peak_pin_count |
+|---|---|---|---|---|---|
+| rapamycin_clinical | validation/rapamycin_clinical.sio | 4,181,352 | 12,952 | 99.69% | 0 |
+| gum_vs_mc | validation/gum_vs_mc.sio | 4,185,734 | 8,570 | 99.80% | 0 |
+| rapamycin_pop_sim | population/pop_sim.sio | 4,191,769 | 2,535 | 99.94% | 0 |
+| d2_gum | pd/d2_gum.sio | 4,183,791 | 10,513 | 99.75% | 0 |
+| d2_voi | pd/d2_voi.sio | 4,184,358 | 9,946 | 99.76% | 0 |
+
+**Earlier corrected run 2026-08-18 (instrument from `/tmp`):**
+
+| Test | peak_handle_count | delta_to_wall | % used | peak_pin_count |
 |---|---|---|---|---|
-| rapamycin_clinical | validation/rapamycin_clinical.sio | 4,186,515 | 0 | 0.0% |
-| gum_vs_mc | validation/gum_vs_mc.sio | 4,192,947 | 0 | 0.0% |
-| rapamycin_pop_sim | population/pop_sim.sio | 4,185,474 | 0 | 0.0% |
-| d2_gum | pd/d2_gum.sio | 4,189,539 | 0 | 0.0% |
-| d2_voi | pd/d2_voi.sio | 4,191,233 | 0 | 0.0% |
+| rapamycin_clinical | 4,186,515 | 7,789 | 99.81% | 0 |
+| gum_vs_mc | 4,192,947 | 1,357 | 99.97% | 0 |
+| pop_sim | 4,185,474 | 8,830 | 99.79% | 0 |
+| d2_gum | 4,189,539 | 4,765 | 99.89% | 0 |
+| d2_voi | 4,191,233 | 3,071 | 99.93% | 0 |
 
 handle_capacity = 4,194,304 (2^22) for every test, as expected from `gc.sio:64`.
+The two runs' peak_handle values agree within ±0.24% of capacity; both
+find peak_pin = 0 on every test; both place every test within 1.5% of
+the wall.
 
 ## Interpretation — the load-bearing data point
 
