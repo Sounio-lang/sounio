@@ -540,3 +540,37 @@ this needs, and it is the pattern already used for P0-F extern-block parsing.
    receiver against CHECK_HANDLER_EFFECT before check_opt_expr(e.left).
 3. Verify loop: `souc check self-hosted/compiler/main.sio` after each file (cheap, no 4-min build); final
    from-source build + run `examples/effect_uncertainty_smoke.sio` (expect `SMOKE 5`).
+
+---
+
+## P0 CORRECTION — the clause-storage step in the spec is UNSOUND; use op→fn_id dispatch (2026-08-18)
+
+Implementation attempt uncovered a design hole BOTH workflow runs missed: the spec (and my module-global
+revision) says "store `e.handler_block` (Option<Box<Block>>) per depth and re-walk it at each perform site."
+**This does not typecheck.** In `lower_expr_ref(self, e: &Expr)` the handler block is **borrowed from the AST**;
+it cannot be moved into a module global (globals need ownership, as `parser_store_expr_box` takes an owned
+`Box<Expr>`) nor stored as a borrow in the by-value `Lowerer`, and Sounio exposes no address-of-reference→i64
+to stash a raw pointer (TypeRawPtr exists as a type but there is no clean `&Block`→i64→`&Block` round trip in
+lower.sio). No AST-clone/rewrite infra exists for blocks either.
+
+**Correct approach (owned IR, copyable dispatch map):**
+1. In `lower_handle_expr_ref`, BEFORE lowering the body, iterate the handler block's `StmtList`; for each clause
+   `Stmt{StmtLet, name:op, expr:Some(ExprClosure{closure_params, closure_body})}`, **lower the clause closure to
+   an owned IR function** (reuse the closure-lowering path — verify non-capturing closures reduce to a plain
+   callable fn_id) and record `(op_name: Name, fn_id: i64)` in a **module-global scalar map**:
+   `var LOWER_HANDLER_OP_NAMES: [Name;16]`, `var LOWER_HANDLER_OP_FNIDS: [i64;16]`,
+   `var LOWER_HANDLER_OP_COUNT: i64`, with a `[i64;4] LOWER_HANDLER_SCOPE_MARK` for push/pop by depth. Names +
+   i64 are copyable — no borrow, global-safe. (Verify `[Name;16]` as a *global* lowers; it works as a Lowerer
+   FIELD `fo_bind_names:[Name;128]`, so likely fine.)
+2. Lower the body. The perform hook (`expr_is_active_handler_perform_ref`, still mirroring the
+   `expr_is_gpu_sync_call_ref` bare-Ident-receiver shape while `LOWER_HANDLER_OP_COUNT>0`) resolves `op` to its
+   `fn_id` and emits an **ordinary `ir_call(dst, fn_id, op_name, args)`** — no clause-body re-walk, no borrow.
+   The scalar-kind re-bind concern disappears (args are real call arguments through the normal call path).
+3. Pop the scope mark on every exit.
+4. Checker side: the load-bearing `check_method_call` bypass @20438 still stands (type args against the clause
+   closure's `ClosureParam` types, return the clause body type), and `check_handle_expr` @24078 registers clause
+   op-names before checking the body — but it stores op NAMES only (copyable), never the borrowed block.
+
+**Open verification (first thing in the code pass):** confirm a non-capturing `ExprClosure` lowers to a directly
+callable `fn_id` via the existing closure path, and that a global `[Name;16]` lowers. This is the crux the two
+workflow runs did not reach; it is genuine compiler design, not mechanical wiring.
