@@ -115,6 +115,65 @@ else
 fi
 
 ###############################################################################
+# W2: 90% drift warning positive control — dynamic count crosses 90% but
+# stays below 100%. Isolated from W3 (which crosses all three bands and
+# exits non-zero). W2 must fire `warning[E230] drift 90% of capacity`
+# exactly once and exit 0.
+#
+# Iteration budget = floor(capacity * 9 / 10) + 100 = 3774873 + 100 = 3774973.
+# - Iteration 3774874: handle_count = 3774873, ≥ 90% capacity → warning fires,
+#   runtime_context_field_e230_90_warning_fired := 1
+# - Iterations 3774875..3774973: warning already fired, skip
+# - Loop ends with handle_count = 3774972, still < capacity → no refusal
+# - Program exits rc=0 (success)
+#
+# This is the CLEAN positive control: a fix that breaks the 90% band but
+# keeps the 100% refusal would not be caught by W3 alone. W2 isolates the
+# band.
+###############################################################################
+W2_ITERS=$((CAPACITY * 9 / 10 + 100))   # = 3774973
+W2_TMP="$TMP/w2.sio"
+cat > "$W2_TMP" <<EOF
+// W2: 90% drift warning positive control — dynamic crosses 90%, not 100%.
+struct W2 { x: i64 }
+fn alloc_one() -> W2 with Alloc { W2 { x: 1 } }
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var i: i64 = 0
+    while i < $W2_ITERS {
+        let _x = alloc_one()
+        i = i + 1
+    }
+    print("done\n")
+    0
+}
+EOF
+
+echo
+echo "--- W2: loop with $W2_ITERS allocs (90% boundary at iteration 3774874) ---"
+set +e
+timeout 60 "$SOUC" "$W2_TMP" -o "$TMP/w2.elf" > "$TMP/w2.out" 2>&1
+rc=$?
+set -e
+echo "rc=$rc"
+echo "stdout/stderr (last 20 lines):"
+tail -20 "$TMP/w2.out" | sed 's/^/    /'
+if [[ $rc -eq 0 ]] && grep -qE "warning\[E230\].*drift.*90|count=3774873.*of.*4194304" "$TMP/w2.out"; then
+    # Count occurrences: must fire exactly once.
+    W2_FIRE_COUNT=$(grep -cE "warning\[E230\]" "$TMP/w2.out" || true)
+    if [[ $W2_FIRE_COUNT -eq 1 ]]; then
+        pass "W2 90% drift warning: fires once with count=3774873 of 4194304, rc=0"
+    else
+        fail "W2 warning fired $W2_FIRE_COUNT times (expected exactly 1; runtime flag not gated)"
+    fi
+elif [[ $rc -eq 0 ]] && grep -q "warning\[E230\]" "$TMP/w2.out"; then
+    fail "W2 warning present but message format unexpected (expected 'drift 90% of capacity: count=3774873 of 4194304')"
+elif [[ $rc -ne 0 ]]; then
+    fail "W2 expected rc=0 (program should NOT exceed ceiling); got rc=$rc — patch may have broken the warning gate"
+else
+    fail "W2 expected warning[E230] in output; rc=0 but no warning printed — 90% drift detector missing"
+fi
+
+###############################################################################
 # W3: hot-loop drift detector — small static count, large dynamic count.
 #
 # A program that allocates one struct inside a tight loop that iterates more

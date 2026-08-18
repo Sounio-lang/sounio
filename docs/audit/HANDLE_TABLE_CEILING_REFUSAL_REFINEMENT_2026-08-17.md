@@ -253,11 +253,12 @@ refusal (W3). v2 tightens both against measured evidence:
 
 - **W1 budget** = 4,194,304 + 1 sites, matches `native_v2_handle_table_capacity_default()` at `gc.sio:64` (v1 already had this).
 - **W3 budget** = 4,194,304 + 16 iterations, simulates d2_gum-class workloads that cross the wall mid-loop (v1 already had this; v2 documents that d2_gum's measured count is `> 3,000,001`, so the W3 budget is conservative — a smaller iteration count still triggers the refusal).
-- **W2 (NEW)** = a program whose compiled static count is in the 90% warning band but does not exceed the ceiling — must print `warning[E230] drift detected at 90%` at runtime if the loop drives it past 90% (positive control for the warning band, not just the refusal).
+- **W2 (NEW, isolated)** = a loop-driven program whose **dynamic** count crosses 90% of capacity but stays below 100%. Iteration count = `floor(capacity * 9 / 10) + 100` = 3,774,973 — fires the warning on iteration 3,774,874 (handle_count = 3,774,873, ≥ 90%) and continues to iteration 3,774,972 (handle_count = 3,774,972, still < 100%), then exits 0. Expected output (one line): `madaros: warning[E230] drift 90% of capacity: count=3774873 of 4194304\n`. Expected rc=0.
+  - This is the **clean** positive control for the 90% drift warning. W3 conflates 50/90/100% testing; a regression that breaks 90% but keeps 100% would not be caught by W3 alone. W2 isolates the band.
+  - The iteration count is **not** "static count in the 90% band" (which is a contradiction — a static count at 90% of capacity is at the ceiling and would hit Layer 1's compile-time refusal, not the runtime drift warning). W2 is a *loop-driven* program whose runtime count crosses the band.
 - **W4** = negative control, unchanged.
 
-The witness gate stays in `scripts/ci/handle_table_ceiling_gate.sh` from the v1 commit. The v2 doc only updates the witness list and the
-gate's commentary; no source change.
+The v2 gate separates W2 from W3: W2 fires only the warning and exits 0; W3 fires both warning and error and exits nonzero. Both use the same alloc pattern but different iteration counts. The gate's W3 stays as in v1; W2 is added as a fifth witness in the v2 gate update.
 
 ---
 
