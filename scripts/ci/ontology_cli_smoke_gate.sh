@@ -82,7 +82,13 @@ compile_test_binary() {
         exit 1
     fi
     patch_source
-    if "$SOUC_BIN" --help 2>/dev/null | grep -q "compile <file.sio>"; then
+    # Capture, don't pipe: through the pipe it is grep's match that decides,
+    # so a failing `--help` whose stdout happens to contain the flag would
+    # still select the new interface, and an early-exiting `grep -q` can
+    # EPIPE the writer under pipefail. The rc decides; the match only refines.
+    help_rc=0
+    help_out="$("$SOUC_BIN" --help 2>/dev/null)" || help_rc=$?
+    if [[ "$help_rc" -eq 0 ]] && grep -q "compile <file.sio>" <<<"$help_out"; then
         compile_cmd=( "$SOUC_BIN" compile "$PATCHED_SRC" -o "$TEST_BIN" )
     else
         compile_cmd=( "$SOUC_BIN" "$PATCHED_SRC" "$TEST_BIN" )
@@ -99,7 +105,7 @@ compile_test_binary() {
 test_resolve_curie() {
     local out
     out="$(run_ont resolve ALG:0000001)"
-    if echo "$out" | grep -q 'curie: ALG:0000001'; then
+    if grep -q 'curie: ALG:0000001' <<<"$out"; then
         ok "resolve CURIE"
     else
         fail "resolve CURIE"
@@ -109,7 +115,7 @@ test_resolve_curie() {
 test_resolve_label() {
     local out
     out="$(run_ont resolve "Ring")"
-    if echo "$out" | grep -q 'curie: ALG:0000005'; then
+    if grep -q 'curie: ALG:0000005' <<<"$out"; then
         ok "resolve by label"
     else
         fail "resolve by label"
@@ -119,7 +125,7 @@ test_resolve_label() {
 test_resolve_synonym() {
     local out
     out="$(run_ont resolve "Algebraic group")"
-    if echo "$out" | grep -q 'curie: ALG:0000002'; then
+    if grep -q 'curie: ALG:0000002' <<<"$out"; then
         ok "resolve by synonym"
     else
         fail "resolve by synonym"
@@ -173,7 +179,7 @@ test_fuzzy_limit() {
 test_count_prefix() {
     local out
     out="$(run_ont count GO:)"
-    if echo "$out" | grep -q '112'; then
+    if grep -q '112' <<<"$out"; then
         ok "count prefix"
     else
         fail "count prefix"
@@ -183,7 +189,7 @@ test_count_prefix() {
 test_count_total() {
     local out
     out="$(run_ont count)"
-    if echo "$out" | grep -q '1008'; then
+    if grep -q '1008' <<<"$out"; then
         ok "count total"
     else
         fail "count total"
@@ -193,7 +199,7 @@ test_count_total() {
 test_is_subclass() {
     local out
     out="$(run_ont is-subclass ALG:0000003 ALG:0000001)"
-    if echo "$out" | grep -q 'yes'; then
+    if grep -q 'yes' <<<"$out"; then
         ok "is-subclass true"
     else
         fail "is-subclass true"
@@ -203,7 +209,7 @@ test_is_subclass() {
 test_ancestors() {
     local out
     out="$(run_ont ancestors ALG:0000003)"
-    if echo "$out" | grep -q 'ALG:0000002' && echo "$out" | grep -q 'ALG:0000001'; then
+    if grep -q 'ALG:0000002' <<<"$out" && grep -q 'ALG:0000001' <<<"$out"; then
         ok "ancestors"
     else
         fail "ancestors"
@@ -213,7 +219,7 @@ test_ancestors() {
 test_validate() {
     local out rc=0
     out="$(run_ont validate)" || rc=$?
-    if [[ "$rc" -eq 0 ]] && echo "$out" | grep -q 'VALID'; then
+    if [[ "$rc" -eq 0 ]] && grep -q 'VALID' <<<"$out"; then
         ok "validate"
     else
         fail "validate"
@@ -223,7 +229,7 @@ test_validate() {
 test_stats() {
     local out
     out="$(run_ont stats)"
-    if echo "$out" | grep -q 'ALG:' && echo "$out" | grep -q 'Max depth:' && echo "$out" | grep -q 'Root terms:'; then
+    if grep -q 'ALG:' <<<"$out" && grep -q 'Max depth:' <<<"$out" && grep -q 'Root terms:' <<<"$out"; then
         ok "stats"
     else
         fail "stats"
@@ -233,7 +239,7 @@ test_stats() {
 test_format_json() {
     local out
     out="$(run_ont --format json resolve ALG:0000001)"
-    if echo "$out" | grep -q '"curie": "ALG:0000001"'; then
+    if grep -q '"curie": "ALG:0000001"' <<<"$out"; then
         ok "--format json"
     else
         fail "--format json"
@@ -243,7 +249,7 @@ test_format_json() {
 test_format_tsv() {
     local out
     out="$(run_ont --format tsv resolve ALG:0000001)"
-    if echo "$out" | grep -q $'ALG:0000001\tAlgebra'; then
+    if grep -q $'ALG:0000001\tAlgebra' <<<"$out"; then
         ok "--format tsv"
     else
         fail "--format tsv"
@@ -275,7 +281,7 @@ validate
 EOF
     local out
     out="$(run_ont batch "$batch_file")"
-    if echo "$out" | grep -q 'ALG:0000001' && echo "$out" | grep -q '112' && echo "$out" | grep -q 'ALG:0000002' && echo "$out" | grep -q 'ALG:' && echo "$out" | grep -q 'VALID'; then
+    if grep -q 'ALG:0000001' <<<"$out" && grep -q '112' <<<"$out" && grep -q 'ALG:0000002' <<<"$out" && grep -q 'ALG:' <<<"$out" && grep -q 'VALID' <<<"$out"; then
         ok "batch mode"
     else
         fail "batch mode"
@@ -285,7 +291,7 @@ EOF
 test_unresolved() {
     local out
     out="$(run_ont resolve NONEXISTENT:999)"
-    if echo "$out" | grep -q 'unresolved'; then
+    if grep -q 'unresolved' <<<"$out"; then
         ok "unresolved CURIE"
     else
         fail "unresolved CURIE"
