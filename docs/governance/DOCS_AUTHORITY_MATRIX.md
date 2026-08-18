@@ -25,6 +25,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.contributor.codebase-overview | repo_only | docs/codebase_overview.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architects-guide | repo_only | docs/ARCHITECTS_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.async-runtime | historical | docs/architecture/ASYNC_RUNTIME.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.cei-implementation-spec-2026-08-18 | repo_only | docs/architecture/CEI_IMPLEMENTATION_SPEC_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.compiler-maturity-blueprint | repo_only | docs/architecture/compiler-maturity-blueprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.cps-pipeline-integration | historical | docs/architecture/CPS_PIPELINE_INTEGRATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.cybernetics-api-reference | repo_only | docs/architecture/CYBERNETICS_API_REFERENCE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
