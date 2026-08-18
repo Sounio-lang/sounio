@@ -173,9 +173,10 @@ three documentation commits, `069f87a3439d281e4eda750136e168df36f4ca5a`,
 `350715b808768c9b2ca77b382ea915dad47d4401`, and
 `e02243876565d8922cd4cae0a77f34ed9cf5b848`; the full source SHA
 `f1c94bd1a0526cd2c7c9345abcbb23df5346e206` remains their ancestor. The final
-`git ls-remote` check reports `e02243876565d8922cd4cae0a77f34ed9cf5b848`
-for the receipt tip, while the source-built measurement remains explicitly
-tied to the SHA-matched clone above. `origin/main` was
+`git ls-remote` check before this last receipt correction reported
+`e02243876565d8922cd4cae0a77f34ed9cf5b848`; the receipt correction itself is
+`e8d82bac31fcf85bb1de40071a04e76fbea8098a`. The source-built measurement
+remains explicitly tied to the SHA-matched clone above. `origin/main` was
 `529aaaaa24fd7dc6a61f7d3c7a21ce8c9ea5ef5d` during the provenance edit and
 `550c764b155d21626486fdd2f8161a0c1f0817e6` at final verification.
 
