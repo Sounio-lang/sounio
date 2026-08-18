@@ -4,6 +4,11 @@
 #     . "$(dirname "${BASH_SOURCE[0]}")/../lib/gate_assert.sh"
 #     gate_name "my_gate"
 #
+# BEFORE YOU ASSERT ANYTHING: the file you compiled exists and starts with
+# \x7fELF; the compile log names the engine that actually ran; the rc you
+# hold was written by that process to a file. An empty or wrong artefact
+# read as success is not a measurement.
+#
 # WHY THIS EXISTS. A census on 2026-08-04 over the 417 *_gate.{sh,py} in
 # scripts/ci and scripts/dev found:
 #

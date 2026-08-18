@@ -18,10 +18,24 @@ share the first three of those.
 **Scope.** `scripts/ci/*.sh`, 537 files. One pattern at a time. Not a
 rewrite of 468 gates.
 
-**Answer in one line.** Pattern 2 (rc-through-pipe) is empty. Patterns 1
-and 3 are large. That is a helper, not 98 patches. The helper is
-`scripts/lib/gate_assert.sh` (`require_elf`, `classify_compile_log`,
-`gate_capture_rc`). Its own gate is
+**The three numbers** (`scripts/ci/*_gate.sh`, compile-invoking = 110;
+workflow-reachable universe = 85 from
+`CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv`):
+
+| pattern | raw | of which workflow-reachable |
+|---|---:|---:|
+| 1. compile, then talk about the artefact without `\x7fELF` | **91** | **19** |
+| 2. rc read through a pipe | **0** | **0** |
+| 3. never record which engine compiled | **67** | **12** |
+
+Raw 91 and 67 are over twenty → helper, not a hand sweep. The order that
+matters is the reachable column: 19 gates on `ci.yml` / prebuilt-refresh
+can print a green that did not compile an ELF. 72 unreachable copies of
+the same hole are debt. Fix the 19 by calling `require_elf`, not by
+rewriting 91.
+
+**Answer in one line.** Pattern 2 is empty. Patterns 1 and 3 are design.
+The helper is `scripts/lib/gate_assert.sh`. Its selftest is
 `scripts/ci/gate_assert_instrument_selftest.sh`.
 
 ## Pattern 2 — rc through a pipe (done first)
@@ -42,27 +56,40 @@ No cleanup. No helper for this pattern. Do not reopen it as a sweep.
 
 ## Pattern 1 — compile, then talk about the artefact without `\x7fELF`
 
-Compile-invoking gates: **120**.
+Compile-invoking `*_gate.sh`: **110**. Never check `\x7fELF`: **91**.
+Of those, **19** are workflow-reachable (false greens on a PR):
 
-| | n |
-|---|---:|
-| compile, never check `\x7fELF` | **98** |
-| of those, no `[[ -s ]]` / `-x` either | **56** |
-| compile and *do* check magic | 22 |
+| depth | gate | workflow |
+|---|---|---|
+| 1 | `canonical_compiler_gate.sh` | ci.yml |
+| 1 | `epistemic_egraph_rewrite_gate.sh` | ci.yml |
+| 1 | `madaros_current_source_f64_lowering_gate.sh` | ci.yml |
+| 1 | `madaros_dce_reachability_gate.sh` | ci.yml |
+| 1 | `madaros_fixed_point_gate.sh` | ci.yml |
+| 1 | `madaros_self_parse_gate.sh` | ci.yml |
+| 1 | `ontology_cli_smoke_gate.sh` | ci.yml |
+| 1 | `package_pbpk_gum_gate.sh` | ci.yml |
+| 1 | `self_falsifying_compilation_line_r1_gate.sh` | ci.yml |
+| 1 | `self_falsifying_compilation_line_r29_gate.sh` | ci.yml |
+| 1 | `souc_v2_gate.sh` | ci.yml |
+| 1 | `sounio_package_support_gate.sh` | ci.yml |
+| 1 | `madaros_enum_gate.sh` | madaros-prebuilt-refresh.yml |
+| 1 | `madaros_loop_gate.sh` | madaros-prebuilt-refresh.yml |
+| 2 | `madaros_global_capacity_gate.sh` | via f64-lowering |
+| 2 | `madaros_global_f64_scratch_gate.sh` | via f64-lowering |
+| 2 | `madaros_imported_call_arity_13_gate.sh` | via f64-lowering |
+| 2 | `madaros_imported_capacity_gate.sh` | via f64-lowering |
+| 2 | `madaros_imported_deref_f64_array_gate.sh` | via f64-lowering / full |
 
-98 is design. A compile that exits 0 and writes a file named `-o` is
-non-empty; `[[ -s ]]` would have passed the E230 trap. Magic is the
-check that would have refused it.
-
-Do not patch 98 files in this PR. New compile gates call `require_elf`.
-Existing copies of the four-line `od -An -tx1 -N4` / `7f454c46` test
-(native_v2_*, exact_bitwise_*, madaros_full_gate) can switch when
-touched.
+A compile that exits 0 and writes a file named `-o` is non-empty;
+`[[ -s ]]` would have passed that trap. Magic is the check that refuses
+it. Do not patch 91 files. Adopt `require_elf` on the 19 first.
 
 ## Pattern 3 — never record which engine compiled
 
-Of the 120 compile invokers, **72** never mention `--version`,
-`compile_engine`, `lean_single`, or `Madaros v`.
+Of 110 compile-invoking gates, **67** never mention `--version`,
+`compile_engine`, `lean_single`, or `Madaros v`. **12** of those are
+workflow-reachable (11 of them also fail pattern 1).
 
 `--version` is not enough. `bin/souc --version` prints Madaros while
 `souc src.sio -o dest` routes to lean_single. Classify the **compile
@@ -88,6 +115,11 @@ all three lies on purpose (text file as ELF, lean_single log claimed as
 Madaros, pipe extraction empty) and must go red on each.
 
 First consumer: `scripts/ci/handle_table_ceiling_gate.sh`.
+
+The sentence for the next gate is the comment at the top of
+`gate_assert.sh`: before you assert anything, the file exists and
+starts with `\\x7fELF`, the compile log names the engine, and the rc
+is in a file that process wrote.
 
 ## Ratchet
 
