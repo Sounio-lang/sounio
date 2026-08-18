@@ -89,9 +89,9 @@ PINNED="$(od -An -v -tu1 -j "$TOFF" -N "$TSIZE" "$TMP/golden.elf" | tr -s ' \n' 
 }')" || fail "could not find the second prologue (function boundary)"
 
 # Positive controls on the extraction itself.
-echo "$PINNED" | grep -q "72 184 0 0 0 0 0 0 240 63" \
+grep -q "72 184 0 0 0 0 0 0 240 63" <<<"$PINNED" \
     || fail "extracted bytes lack the movabs(1.0) pattern — wrong boundary?"
-[ "$(echo "$PINNED" | awk '{print $NF}')" = "195" ] \
+[ "$(awk '{print $NF}' <<<"$PINNED")" = "195" ] \
     || fail "extracted bytes do not end in ret — wrong boundary?"
 
 # ---------------------------------------------------------------- pipeline B
