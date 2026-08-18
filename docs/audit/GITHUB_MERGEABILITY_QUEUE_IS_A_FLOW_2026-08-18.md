@@ -93,3 +93,45 @@ outrunning GitHub's recomputation queue) is unchanged and still unconfirmed from
 infrastructure. This dispatch only changes the operational model from "run the fix once" to "run
 the fix on a cadence, and let the printed ratio say when to stop trusting automation and go look
 for authors instead."
+
+## Appendix: how long does a real conflict live before its author resolves it
+
+The refresh side of this problem (phantom PRs) has a measured fix with a real, if imperfect,
+duration (10–60s to clear, ~15–25min before the API cache can drift back). The other side of the
+queue — the 19 real conflicts — was never timed. This appendix does that, using the 19 as the
+sample, re-checked fresh against `main`@`d3ea284caf` (2026-08-18, evening).
+
+**Result: 0 of 19 have resolved.** Every one of the 19 still shows `git merge-tree --write-tree`
+conflict against current `main`. This includes the 15 that carried over from the first census and
+were notified by name, with the exact conflicting file(s), via a PR comment at **09:27 UTC** — over
+**6.5 hours** before this re-check, with zero follow-up commits on any of the 15 in that window.
+
+Because zero resolution events occurred, there is no meaningful way to compute a median
+*time-to-resolve* from direct observation — the data is right-censored with an empty event set.
+What can be measured instead is how long each conflict has already survived unattended, using time
+since the branch's last commit as the floor (the conflict cannot have been fixed more recently than
+the last time a human touched the branch):
+
+| Metric (days since last commit on the branch) | Value |
+|---|---:|
+| Minimum (PR #1841, created and last touched the same morning) | 0.01 |
+| Median | **21.05** |
+| Mean | 17.93 |
+| Maximum (PR #795) | 37.03 |
+
+Eleven of the 19 have not been touched in more than two weeks; five have not been touched in over a
+month. Only four (#1790, #1831, #1841, #1842 — all under 1 day old) are recent enough that "not yet
+resolved" could plausibly mean "not yet noticed" rather than "abandoned." One (#1580) shows a
+last-commit 0.26 days ago (shared-worktree churn already noted in the base census) but the touch did
+not address the conflicting files — still conflicting on the same 3 files it had at the first
+census, so recent activity on a branch is not itself evidence of engagement with its conflict.
+
+**Answer to the question this appendix was written to settle:** the flow does not drain itself. A
+short median would have meant the phantom-refresh automation was sufficient — real conflicts would
+clear on their own timescale and the only thing worth automating was clearing the API cache noise
+around them. A median above three weeks, with a 0/19 resolution rate even 6.5 hours after being
+personally notified with the exact file names, means most of this queue's real-conflict PRs do not
+have an actively engaged owner right now. That is a staffing/triage problem, not a tooling one —
+`scripts/dev/pr_mergeability_refresh.sh` (this dispatch, above) correctly refuses to touch any of
+these 19, and it should keep refusing; the fix for this half of the queue is finding or reassigning
+owners, not writing another script.
