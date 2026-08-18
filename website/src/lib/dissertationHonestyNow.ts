@@ -28,6 +28,8 @@
  * PEND is its own category. It is not a pass. Hiding it would make
  * 19 + 33 look like 53.
  * Do not treat #1874 (wire two leftover greens) as current main.
+ * Reachability and engine live in measurementClaim.ts — this file
+ * is the pbpk_suite instance, not a second kernel.
  */
 
 export const MS_HOUR = 3_600_000;
@@ -38,25 +40,45 @@ export type FailFamily = {
   id: 'toolchain' | 'resource-ceiling' | 'science';
 };
 
-/**
- * Machine label from the cursor-2 reachability census.
- * Face is `not in CI`. Do not print `manual-by-design` — that sounds
- * like a choice. Nobody chose this. The chain is dead.
- */
-export const REACHABILITIES = ['WORKFLOW-UNREACHABLE'] as const;
-export type Reachability = (typeof REACHABILITIES)[number];
+import {
+  COMPILER_ENGINES,
+  REACHABILITIES,
+  isCompilerEngine,
+  isReachability,
+  reachabilityComplete,
+  reachabilityFace,
+  type CompilerEngine,
+  type Reachability,
+  type ReachabilityBinding,
+} from './measurementClaim';
 
+export {
+  COMPILER_ENGINES,
+  REACHABILITIES,
+  isCompilerEngine,
+  isReachability,
+  reachabilityFace,
+};
+export type { CompilerEngine, Reachability };
+
+/**
+ * Face of a reachability binding. `not in CI` is the unreachable
+ * gloss. A reachable claim must carry the workflow line or it is
+ * incomplete — a label that can only say "no" is a constant.
+ */
+export function REACHABILITY_FACE_OF(b: ReachabilityBinding): string {
+  return reachabilityFace(b);
+}
+
+/** @deprecated use reachabilityFace — kept so existing gloss sites compile */
 export const REACHABILITY_FACE = {
   'WORKFLOW-UNREACHABLE': 'not in CI',
+  'WORKFLOW-REACHABLE': 'in CI',
 } as const;
-
-export const COMPILER_ENGINES = ['Madaros', 'lean_single'] as const;
-export type CompilerEngine = (typeof COMPILER_ENGINES)[number];
 
 export type MeasureProvenance = {
   engine: CompilerEngine;
-  reachability: Reachability;
-};
+} & ReachabilityBinding;
 
 export type SuiteMeasure = {
   gate: string;
@@ -68,6 +90,8 @@ export type SuiteMeasure = {
   pr: number;
   engine: CompilerEngine;
   reachability: Reachability;
+  workflow?: string;
+  line?: number;
   registered: number;
   pass: number;
   fail: number;
@@ -82,6 +106,8 @@ export type SuiteMeasure = {
     sourceSha: string;
     engine: CompilerEngine;
     reachability: Reachability;
+    workflow?: string;
+    line?: number;
     pass: number;
     fail: number;
     pend: number;
@@ -134,16 +160,28 @@ export function ledgerCloses(m: SuiteMeasure): boolean {
   return outcomesSum(m) === m.registered && familiesSum(m) === m.fail;
 }
 
-export function isCompilerEngine(value: string): value is CompilerEngine {
-  return (COMPILER_ENGINES as readonly string[]).includes(value);
+export function bindingOf(m: {
+  reachability: Reachability;
+  workflow?: string;
+  line?: number;
+}): ReachabilityBinding {
+  if (m.reachability === 'WORKFLOW-REACHABLE') {
+    return {
+      reachability: 'WORKFLOW-REACHABLE',
+      workflow: m.workflow ?? '',
+      line: m.line ?? 0,
+    };
+  }
+  return { reachability: 'WORKFLOW-UNREACHABLE' };
 }
 
-export function isReachability(value: string): value is Reachability {
-  return (REACHABILITIES as readonly string[]).includes(value);
-}
-
-export function provenanceComplete(m: MeasureProvenance): boolean {
-  return isCompilerEngine(m.engine) && isReachability(m.reachability);
+export function provenanceComplete(m: {
+  engine: string;
+  reachability: Reachability;
+  workflow?: string;
+  line?: number;
+}): boolean {
+  return isCompilerEngine(m.engine) && reachabilityComplete(bindingOf(m));
 }
 
 export function measureMayPrint(m: SuiteMeasure): boolean {
@@ -185,7 +223,7 @@ export function suiteFaceParts(m: SuiteMeasure): SuiteFaceParts {
     );
   }
   const numeral = `${m.fail} FAIL / ${m.registered}`;
-  const gloss = `${m.engine} · ${REACHABILITY_FACE[m.reachability]} · operator remeasure ${m.measuredAt} · #${m.pr}`;
+  const gloss = `${m.engine} · ${reachabilityFace(bindingOf(m))} · operator remeasure ${m.measuredAt} · #${m.pr}`;
   return { numeral, gloss, face: `${numeral} · ${gloss}` };
 }
 
@@ -199,7 +237,7 @@ export function priorFace(m: SuiteMeasure): string {
       'dissertationHonestyNow: refuse to print the prior pbpk_suite numeral without reachability and engine',
     );
   }
-  return `${m.prior.fail} FAIL / ${m.prior.pass} PASS / ${m.prior.pend} PEND · ${m.prior.engine} · ${REACHABILITY_FACE[m.prior.reachability]} · ${m.prior.measuredOn} · job ${m.prior.job}`;
+  return `${m.prior.fail} FAIL / ${m.prior.pass} PASS / ${m.prior.pend} PEND · ${m.prior.engine} · ${reachabilityFace(bindingOf(m.prior))} · ${m.prior.measuredOn} · job ${m.prior.job}`;
 }
 
 if (!measureMayPrint(PBPK_SUITE_NOW)) {
