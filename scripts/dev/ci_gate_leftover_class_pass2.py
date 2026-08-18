@@ -12,9 +12,16 @@ gates (sigpipe hygiene) is not an invoke.
 Positive controls (must fire or the instrument is dead):
 
   * leftover set non-empty
-  * all six dissertation_* gates leftover and unmentioned in .github/
+  * the four still-unwired dissertation leftovers stay leftover
+    (dossier, hessian, pbpk28, suite)
+  * the two #1880 wires stay reachable
+    (confidence, frontend_parity) — they were leftover on 64924d371a
   * mli_s3_bit_identity_gate.sh leftover (listed by sigpipe, never executed)
   * lean_single_fixed_point_gate.sh is NOT obsolete (it quotes a dead header)
+
+The 6/6 leftover fact is SHA-bound: true on 64924d371a, false as a
+present-tense claim after 12ebda238d (#1880). Do not re-introduce a
+control that REFUTEs because those two are now in Contracts.
 
 Usage:
   python3 scripts/dev/ci_gate_leftover_class_pass2.py
@@ -53,6 +60,20 @@ DISSERTATION_GATES = (
     "dissertation_confidence_gate_gate.sh",
     "dissertation_dossier_gate.sh",
     "dissertation_frontend_parity_gate.sh",
+    "dissertation_pbpk28_parity_gate.sh",
+    "dissertation_pbpk_hessian_gate.sh",
+    "dissertation_pbpk_suite_gate.sh",
+)
+# 6/6 leftover was measured on this SHA. After #1880 (12ebda238d) the
+# first and third names are in Contracts. A control that demands all
+# six leftover expires the moment that wire lands.
+DISSERTATION_SIX_ALL_LEFTOVER_SHA = "64924d371a"
+DISSERTATION_WIRED_AS_OF_1880 = (
+    "dissertation_confidence_gate_gate.sh",
+    "dissertation_frontend_parity_gate.sh",
+)
+DISSERTATION_STILL_LEFTOVER = (
+    "dissertation_dossier_gate.sh",
     "dissertation_pbpk28_parity_gate.sh",
     "dissertation_pbpk_hessian_gate.sh",
     "dissertation_pbpk_suite_gate.sh",
@@ -287,12 +308,40 @@ def main() -> int:
     if len(diss_rows) != 6:
         print(f"REFUTE: expected 6 dissertation gates, got {len(diss_rows)}", file=sys.stderr)
         return 2
-    if any(r["reachable"] == "yes" for r in diss_rows):
-        print("REFUTE: a dissertation gate is workflow-reachable", file=sys.stderr)
-        return 2
-    if any(r["direct_github_mention"] == "yes" for r in diss_rows):
-        print("REFUTE: a dissertation gate is named in .github/", file=sys.stderr)
-        return 2
+    by_name = {r["gate"]: r for r in diss_rows}
+    ci_yml = (REPO / ".github/workflows/ci.yml").read_text(errors="replace")
+    # Dual-era control: the 6/6 leftover fact is true on 64924d371a and
+    # false as a present-tense claim after 12ebda238d. Detect which era
+    # this tree is in by whether the #1880 run: lines exist.
+    wired_in_this_tree = all(
+        f"scripts/ci/{n}" in ci_yml for n in DISSERTATION_WIRED_AS_OF_1880
+    )
+    if wired_in_this_tree:
+        missing_wires = [
+            n for n in DISSERTATION_WIRED_AS_OF_1880 if by_name[n]["reachable"] != "yes"
+        ]
+        if missing_wires:
+            print(
+                f"REFUTE: #1880 wires missing from invoke graph: {missing_wires}",
+                file=sys.stderr,
+            )
+            return 2
+        leaked_reds = [
+            n for n in DISSERTATION_STILL_LEFTOVER if by_name[n]["reachable"] == "yes"
+        ]
+        if leaked_reds:
+            print(
+                f"REFUTE: still-red dissertation leftover is now reachable: {leaked_reds}",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        if any(r["reachable"] == "yes" for r in diss_rows):
+            print("REFUTE: a dissertation gate is workflow-reachable", file=sys.stderr)
+            return 2
+        if any(r["direct_github_mention"] == "yes" for r in diss_rows):
+            print("REFUTE: a dissertation gate is named in .github/", file=sys.stderr)
+            return 2
 
     mli = next(r for r in rows if r["gate"] == "mli_s3_bit_identity_gate.sh")
     if mli["reachable"] == "yes":
@@ -324,6 +373,12 @@ def main() -> int:
         "dissertation_six",
     ]
     with tsv_path.open("w") as f:
+        f.write(
+            "# leftover class pass-2. 6/6 leftover measured on "
+            f"{DISSERTATION_SIX_ALL_LEFTOVER_SHA}; "
+            "at 12ebda238d (#1880) two of the six are in Contracts "
+            "(confidence, frontend_parity).\n"
+        )
         f.write("\t".join(cols) + "\n")
         for r in rows:
             f.write("\t".join(str(r[c]) for c in cols) + "\n")
@@ -348,12 +403,20 @@ def main() -> int:
         },
         "positive_control": {
             "leftover_nonzero": leftover > 0,
-            "dissertation_six_all_leftover": True,
-            "dissertation_six_unmentioned_in_github": True,
+            "dissertation_six_all_leftover_on": DISSERTATION_SIX_ALL_LEFTOVER_SHA,
+            "dissertation_era": (
+                "post-12ebda238d" if wired_in_this_tree else "pre-12ebda238d"
+            ),
+            "dissertation_1880_wires_reachable": wired_in_this_tree,
+            "dissertation_still_leftover_unreachable": True,
             "mli_s3_not_reachable_via_scan_list": True,
             "lean_single_fixed_point_not_obsolete": True,
         },
-        "tsv": str(tsv_path.relative_to(REPO)),
+        "tsv": (
+            str(tsv_path.relative_to(REPO))
+            if tsv_path.is_relative_to(REPO)
+            else str(tsv_path)
+        ),
     }
     if args.json:
         jp = Path(args.json)
