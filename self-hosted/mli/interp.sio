@@ -21,7 +21,9 @@
 //      Int≠64, Float≠64) refuse at load with MLI_I_ARG_KIND. Skipping
 //      them and continuing was #1801: the checker returned the declared
 //      type after a refuse, and the caller read a fabricated inhabitant.
-//      They are not loaded as zero.
+//      They are not loaded as zero. Unwritten pool slots refuse with
+//      MLI_I_UNWIRED_SLOT — i_op zero-inits to NOP, which is #1830
+//      (a field returning 0 with nobody writing it).
 //   2. Where behaviour IS defined, the interp delegates to the host — and
 //      the host is the claim oracle itself (Sounio under Madaros, ADR-008
 //      single semantic clock). i64 two's-complement arithmetic, IEEE f64
@@ -66,6 +68,7 @@ pub let MLI_I_FUEL: i64 = 11
 pub let MLI_I_BAD_TARGET: i64 = 12
 pub let MLI_I_UNDEF_VREG: i64 = 13
 pub let MLI_I_CALL_UNSPECIFIED: i64 = 14
+pub let MLI_I_UNWIRED_SLOT: i64 = 15
 
 // Execution budget: control flow means loops, and a non-terminating program
 // must fail LOUDLY rather than hang (refuse-first applied to termination).
@@ -151,6 +154,10 @@ fn rf_mark(rf: &!MliRegFile, id: i64) with Mut, Panic {
 // fields in some closures; see the landing hazard in mli::ir). Returns
 // MLI_I_OK or an error code; NOP/KEEP_ALIVE are OK no-ops.
 fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, Panic, Div {
+    // Opcode 0 is NOP. An unwritten slot also reads as 0. Executing that
+    // as a successful no-op is #1830 (pin_count returned 0 with nobody
+    // writing it). Presence is the i_live column, not the opcode.
+    if mli_slot_live(f, slot) != 1 { return MLI_I_UNWIRED_SLOT }
     let op = mli_slot_opcode(f, slot)
     let cc = mli_slot_cc(f, slot)
     let d = mli_slot_dst(f, slot)
@@ -430,6 +437,7 @@ pub fn mli_interp_run(f: &MliFunction, args: &MliInterpArgs) -> MliInterpResult 
 
         fuel = fuel - 1
         let ts = mli_term_slot(cur)
+        if mli_slot_live(f, ts) != 1 { return i_err(MLI_I_UNWIRED_SLOT, cur, 0 - 1) }
         let top = mli_slot_opcode(f, ts)
 
         if top == MLI_OP_RET {

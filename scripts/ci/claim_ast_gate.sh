@@ -27,8 +27,12 @@ echo "A2_PREPROCESSOR_IDENTITY PASS"
 python3 "${PREPROCESSOR}" --test || fail "preprocessor roundtrip failed"
 echo "A3_A4_PREPROCESSOR_ROUNDTRIP PASS"
 
-# A5: no parser files modified in this diff
-if git diff --name-only HEAD | grep -q '^self-hosted/parser/'; then
+# A5: no parser files modified in this diff. Capture first: through the pipe
+# a failing `git diff` reads as "no parser files" (grep's empty result
+# decides), which is a silent pass on a broken instrument; the capture keeps
+# git's own status visible.
+changed_paths="$(git diff --name-only HEAD)"
+if grep -q '^self-hosted/parser/' <<<"$changed_paths"; then
     fail "parser files modified"
 fi
 echo "A5_NO_PARSER_TOUCH PASS"
