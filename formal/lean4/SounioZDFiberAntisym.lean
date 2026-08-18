@@ -28829,4 +28829,75 @@ theorem s3_deviation_scales (j i W V : Nat) (hW : W < 2^(j+1)) (hW0 : W ≠ 0)
       rw [hpow, hstep, ihc, hX]
       grind
 
+/-! ### Tier 163 — the deviation law at **every** `j ≥ 1`
+
+    Tier 161 proved the law for `j ≥ 3`, the bound inherited from Tier 166's
+    `s3_reference_closed7` (stated at level `k+3`).  The two missing labels cost nothing:
+
+    **The statement needs no change.**  `[j,3]₂ = 0` for `j < 3` — there is no 3-dimensional
+    subspace of an `F₂`-space of dimension below 3 — and the `7`-cleared right-hand side already
+    says so on its own, since `(H−2)(H−4)(H−8)` vanishes at `H = 4` (`j = 1`) and `H = 8`
+    (`j = 2`).  So the law predicts `D = 0` there, and the only thing to supply is the base case.
+
+    **The base case at `j = 1, 2` is closed arithmetic.**  Bounds `4` and `8`, so `decide`
+    evaluates both sides from the definition of `P3` in under a second — `[propext]` alone on the
+    two finite equalities.  Measured first: `s3(2,1) = s3(1,1) = −32` and
+    `s3(4,2) = s3(1,2) = −48`, so `D = 0` at `j = 1, 2` as the law requires, and `D = 0` persists
+    at levels 2 and 3 for `j = 1`.
+
+    The induction step is Tier 161's, unchanged and already generic in the label. -/
+
+set_option maxRecDepth 400000 in
+/-- **THE BASE CASE, EVERY `j ≥ 1`.**  `j ≥ 3` is Tier 161's `dev_base`; `j = 1` and `j = 2` are
+    closed arithmetic and fall to `decide` (bounds `4` and `8`, sub-second).  No case is special:
+    the SAME right-hand side serves, because `(H−2)(H−4)(H−8)` vanishes at `H = 4` and `H = 8`. -/
+theorem dev_base_all (j : Nat) (hj : 1 ≤ j) :
+    7 * (tri3 (2^(j+1)) (fun x y => P3 x y (2^j) j)
+          - tri3 (2^(j+1)) (fun x y => P3 x y 1 j))
+      = 9 * ((((2^(j+1) : Nat) : Int) - 2) * ((((2^(j+1) : Nat) : Int) - 4)
+          * (((2^(j+1) : Nat) : Int) - 8))) := by
+  by_cases h1 : j = 1
+  · subst h1; decide
+  by_cases h2 : j = 2
+  · subst h2; decide
+  obtain ⟨k, hk⟩ : ∃ k, j = k + 3 := ⟨j - 3, by omega⟩
+  subst hk
+  exact dev_base k
+
+
+/-- **★ THE DEVIATION LAW, EVERY `j ≥ 1`.**  `7·D = 8^(m−j)·9(H_j−2)(H_j−4)(H_j−8)` with
+    `H_j = 2^(j+1)`, for reference labels `W = 2^j` against `W = 1`, every level `m = j+i ≥ j`.
+    Generalises Tier 161's `deviation_law`, which is this at `j = k+3`. -/
+theorem deviation_law_all (j i : Nat) (hj : 1 ≤ j) :
+    7 * (tri3 (2^(j+i+1)) (fun x y => P3 x y (2^j) (j+i))
+          - tri3 (2^(j+i+1)) (fun x y => P3 x y 1 (j+i)))
+      = (((2^i : Nat) : Int) * ((2^i : Nat) : Int) * ((2^i : Nat) : Int))
+        * (9 * ((((2^(j+1) : Nat) : Int) - 2) * ((((2^(j+1) : Nat) : Int) - 4)
+            * (((2^(j+1) : Nat) : Int) - 8)))) := by
+  induction i with
+  | zero =>
+      have h0 : ((2^0 : Nat) : Int) = 1 := by decide
+      rw [h0]
+      have hb := dev_base_all j hj
+      grind
+  | succ i ih =>
+      have hWlt : (2:Nat)^j < 2^(j+i+1) := Nat.pow_lt_pow_right (by omega) (by omega)
+      have hW0 : (2:Nat)^j ≠ 0 := Nat.ne_of_gt (Nat.two_pow_pos j)
+      have h1lt : (1:Nat) < 2^(j+i+1) := by
+        have h2 : (2:Nat)^(j+i+1) = 2^(j+i) * 2 := Nat.pow_succ _ _
+        have := Nat.two_pow_pos (j+i)
+        omega
+      have hrs := s3_level_recursion (j+i) (2^j) hWlt hW0
+      have hrr := s3_level_recursion (j+i) 1 h1lt (by omega)
+      have hcp := cp2_ref_eq j i
+      have hpow : (2:Nat)^(j+(i+1)+1) = 2^(j+i+1) + 2^(j+i+1) := by
+        rw [show j+(i+1)+1 = (j+i+1)+1 from by omega, Nat.pow_succ]; omega
+      have hX : ((2^(i+1) : Nat) : Int) = 2 * ((2^i : Nat) : Int) := by
+        rw [Nat.pow_succ]; push_cast; grind
+      rw [hpow]
+      show 7 * (tri3 (2^(j+i+1) + 2^(j+i+1)) (fun x y => P3 x y (2^j) (j+i+1))
+            - tri3 (2^(j+i+1) + 2^(j+i+1)) (fun x y => P3 x y 1 (j+i+1))) = _
+      rw [hrs, hrr, hX, hcp]
+      grind
+
 end SounioZDFiberAntisym
