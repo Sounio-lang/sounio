@@ -129,6 +129,56 @@ Both files literally carry the same line: e.g. `pub fn ARCH_X86_64() -> i64 { na
 
 The 13-character `"get_arg_count"` byte-cascade is identical in both files. The x86_linux copy **also** matches a 9-character `"arg_count"` alias (with explicit comment: *"Source-level spelling is `arg_count`; retain the older `get_arg_count` backend alias for hand-built IR witnesses."*). The codegen copy **does not** include the 9-char alias. So `name_is_get_arg_count("arg_count")` returns `false` from `codegen.sio`'s version but `true` from `codegen_x86_linux.sio`'s version — runtime divergence depending on which module the call resolves through. This is the user-framed "bug à espera".
 
+## Step 5 — Sync `name_is_get_arg_count` (the SUBSTANTIVE-DIVERGENT residual) — direction analysis first
+
+User follow-up directive: *"sincroniza o name_is_get_arg_count entre os dois ficheiros… se este símbolo diverge, diz COMO diverge antes de sincronizares, porque a diferença pode ser um fix que só entrou numa das cópias — e nesse caso a sincronização tem uma direcção certa e uma errada."*
+
+### How it diverges (forensic evidence from `git blame`)
+
+| | codegen_x86_linux.sio (L1217–L1247) | codegen.sio (L948–L965) |
+|---|---|---|
+| Original commit | `781b11a780b`, 2026-04-18 (Demetrios) | same |
+| Subsequent edit | **`f664766e134`, 2026-07-11** (Demetrios) | **none** (`git log -S'arg_count' -- codegen.sio` returns zero) |
+| State today | 31 lines, **two branches**: `arg_count` (9 chars) + `get_arg_count` (13 chars) | 18 lines, **one branch**: only `get_arg_count` (13 chars) |
+
+The x86_linux copy carries an explicit inline comment (L1218–1219):
+
+```
+// Source-level spelling is "arg_count"; retain the older
+// "get_arg_count" backend alias for hand-built IR witnesses.
+```
+
+This comment disambiguates the sync direction: the 9-char alias was a **deliberate, documented extension** introduced on 2026-07-11 to recognize the source-level spelling `arg_count`. The 13-char `get_arg_count` was **retained** as a backend alias for hand-built IR witnesses — not deprecated. codegen.sio was missed in that propagation.
+
+### Sync direction
+
+**x86_linux → codegen.sio.** The opposite direction (codegen → x86_linux, removing the 9-char branch) would **delete a feature that was deliberately introduced** and break any source code that uses `arg_count`. The directional git-blame check on the inline comment is what resolves the otherwise-symmetric-looking divergence.
+
+### Impact (what the sync fixes)
+
+The 4 call sites of `name_is_get_arg_count` in codegen.sio (L3266, L3980, L4054, L4205) currently return `false` for `"arg_count"`. The 6 call sites in codegen_x86_linux.sio (L5899, L6655, L6794, L9035, plus the local dispatch at L6655 / 6794) return `true`. After the sync, all 10 call sites resolve consistently — dispatch is no longer split depending on which module the call resolves through.
+
+### Verification (before commit)
+
+- `souc-stage2 check self-hosted/native/codegen.sio` → `gate_pass=1375`, `gate=950/1000`, 21 functions refined. The new 9-char branch typechecks cleanly. (The "error: no main" tail is the standard noise for library files — it appears identically for `codegen_x86_linux.sio` which already has the 9-char branch.)
+- `souc-stage2 check self-hosted/native/codegen_x86_linux.sio` → identical econf stats, confirms no regression.
+
+Commit: `fix(native): sync name_is_get_arg_count in codegen.sio with codegen_x86_linux.sio` (1 file, +18/-0).
+
+## Re-census after sync — how many of the 25 residuals fell?
+
+**1 of 25 fell.** The SUBSTANTIVE-DIVERGENT pair (`name_is_get_arg_count`) is now byte-identical (modulo the `pub` visibility, which falls under the 23 PUB-SWAP-ONLY bucket of the original census). The byte-diff re-classification after the sync:
+
+```
+IDENTICAL (debt): 24 + 1 (just-synced, modulo pub) = 25
+PUB_SWAP_ONLY (debt+vis): 23
+SUBSTANTIVE_DIVERGENT (bug): 0
+```
+
+**24 of the 25 residuals remain as pure debt; the 1 bug (SUBSTANTIVE-DIVERGENT) is closed.**
+
+The remaining 24 IDENTICAL pairs are still the user-named "dívida" — same name in two files, byte-equal bodies, glob-importable. Their consolidation direction analysis is recorded in `CODEGEN_BODY_DIFF_GLOB_HOMONYMS_2026-08-17.md` and was the prior doc's scope; this doc only records the closure of the one divergence.
+
 ## Halt per FLEET_CONSTRAINTS
 
 The user's directive also asked for a measurement of how many of the 25 residuals fall from this deletion. I have done that measurement in the form available on this pod:
@@ -153,11 +203,13 @@ This is the precisely-bounded refutation the protocol asks for: the deletions we
 
 ## Branch
 
-`codegen/v2-ref-deletion-20260818` at `/tmp/wt-codegen-deletion`. Two commits:
+`codegen/v2-ref-deletion-20260818` at `/tmp/wt-codegen-deletion`. Four commits (all pushed to origin, PR #1837):
 
 ```
-838e250 dead-code(codegen_x86_linux): delete compile_ir_function_v2_ref from codegen_x86_linux.sio
-3bbcb56 dead-code(codegen): delete compile_ir_function_v2_ref from codegen.sio
+f81031a968 fix(native): sync name_is_get_arg_count in codegen.sio with codegen_x86_linux.sio
+705722f701 docs(audit): codegen dead-body deletion — option-3 result (0/25 residual fell)
+a869385512 dead-code(codegen_x86_linux): delete compile_ir_function_v2_ref from codegen_x86_linux.sio
+4ca16b3b26 dead-code(codegen): delete compile_ir_function_v2_ref from codegen.sio
 ```
 
-Not pushed. Awaiting user direction (push / iterate / close).
+The "0/25 residual fell" headline in commit 705722f701 was true at the time it was written (the deletion in steps 1–2 doesn't touch any of the 25 names); commit f81031a968 updates the score to **1/25 fell** by closing the SUBSTANTIVE-DIVERGENT pair. See "Re-census after sync" above for the breakdown.
