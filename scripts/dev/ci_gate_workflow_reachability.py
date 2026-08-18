@@ -6,9 +6,10 @@ workflow execute this gate, at any call depth, by following real
 invocations (bash/sh/source), not comments and not inventory globs.
 
 Positive control (must be non-zero on this repo): at least one gate is
-reachable (ci.yml names several) AND at least one named orphan is not
-(epistemic_measure_correspondence_gate.sh). A census that reports 0
-orphans, or 0 reachable, has not measured.
+reachable (ci.yml names several) AND at least one named leftover is not
+(epistemic_fabrication_detect_gate.sh). A census that reports 0 leftovers,
+or 0 reachable, has not measured. Correspondence was the third named
+orphan; it is wired in ci.yml Contracts as of the 2026-08-18 one-gate PR.
 
 Usage:
   python3 scripts/dev/ci_gate_workflow_reachability.py
@@ -65,8 +66,10 @@ INVENTORY_MARKERS = (
     "rglob",
 )
 
+# Remaining named forgotten leftovers. Correspondence left this list when
+# it was wired in Contracts (one gate per PR). Do not add a newly wired
+# name back here — that would REFUTE the instrument.
 NAMED_DIRECT_ORPHANS = (
-    "epistemic_measure_correspondence_gate.sh",
     "epistemic_fabrication_detect_gate.sh",
     "madaros_ontology_enforcement_gate.sh",
 )
@@ -186,7 +189,11 @@ def classify_leftover(name: str, gate_path: Path, makefile_hit: bool, umbrella_h
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tsv", default="docs/audit/CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv")
+    ap.add_argument(
+        "--tsv",
+        default="",
+        help="Write the per-gate table here. Default: do not overwrite the 2026-08-18 snapshot.",
+    )
     ap.add_argument("--json", default="")
     args = ap.parse_args()
 
@@ -319,29 +326,14 @@ def main() -> int:
         else:
             pass
     missing_named = [o for o in NAMED_DIRECT_ORPHANS if o in reach_names]
-    # The named three must stay unreachable for the instrument to match today's measurement.
+    # Remaining named leftovers must stay unreachable. Wiring one without
+    # removing it from NAMED_DIRECT_ORPHANS is a REFUTE, not a silent pass.
     if missing_named:
         print(
             f"REFUTE: named direct orphans resolved as reachable: {missing_named}",
             file=sys.stderr,
         )
         return 2
-
-    tsv_path = REPO / args.tsv
-    tsv_path.parent.mkdir(parents=True, exist_ok=True)
-    cols = [
-        "gate",
-        "reachable",
-        "class",
-        "depth",
-        "origin_workflow",
-        "via",
-        "direct_github_mention",
-    ]
-    with tsv_path.open("w") as f:
-        f.write("\t".join(cols) + "\n")
-        for r in rows:
-            f.write("\t".join(str(r[c]) for c in cols) + "\n")
 
     leftover = len(gates) - n_reach
     summary = {
@@ -363,8 +355,30 @@ def main() -> int:
                 o not in reach_names for o in NAMED_DIRECT_ORPHANS
             ),
         },
-        "tsv": str(tsv_path.relative_to(REPO)),
+        "tsv": "",
     }
+    if args.tsv:
+        tsv_path = Path(args.tsv)
+        if not tsv_path.is_absolute():
+            tsv_path = REPO / tsv_path
+        tsv_path.parent.mkdir(parents=True, exist_ok=True)
+        cols = [
+            "gate",
+            "reachable",
+            "class",
+            "depth",
+            "origin_workflow",
+            "via",
+            "direct_github_mention",
+        ]
+        with tsv_path.open("w") as f:
+            f.write("\t".join(cols) + "\n")
+            for r in rows:
+                f.write("\t".join(str(r[c]) for c in cols) + "\n")
+        try:
+            summary["tsv"] = str(tsv_path.relative_to(REPO))
+        except ValueError:
+            summary["tsv"] = str(tsv_path)
     if args.json:
         jp = REPO / args.json
         jp.parent.mkdir(parents=True, exist_ok=True)
