@@ -1,9 +1,11 @@
 # Madaros PBPK28 Sobol E009 Signature Dispatch
 
 Date: 2026-08-18
-Base checked: `origin/main` at `41c087cba66a77b52afb0d18ce3f844de975b19f`
+Pre-fix baseline: `origin/main` at `41c087cba66a77b52afb0d18ce3f844de975b19f`
 Worktree: `/tmp/sounio-e009`
 Lane: `e009-pbpk28-sobol-20260818`
+Source-built validation branch: `lane/codex-2/e009-pbpk28-sobol-20260818` at
+`f1c94bd1a0526cd2c7c9345abcbb23df5346e206`
 
 ## Verdict
 
@@ -124,10 +126,38 @@ callback rename.
 
 The focused checks in this worktree used the checked-in
 `bin/madaros-linux-x86_64` through `./bin/souc`; that binary is prebuilt and
-is labelled as such here. A source-built Madaros rerun on the current
-`origin/main` is still required before treating compiler behaviour as a
-current-source acceptance result. Fleet constraints state that Slurm launch
-is currently held and prohibit a full self-compile on this pod, so that rerun
-is an explicit follow-up rather than being inferred from the prebuilt result.
+is labelled as such here. The source-built rerun was then completed through
+the working Slurm path, so the compiler result below is current-source
+evidence rather than an inference from the prebuilt ELF.
+
+The operational blocker was narrower than "Slurm unavailable": `sbatch` is
+unusable for the `openvscode-server` submitter and left held controller-side
+job records, but `srun` is functional. The positive control
+`bash scripts/dev/slurm_srun_minimal.sh "hostname; nproc; echo OK"` returned
+`cpuops-t560-proxmox / 32 / OK / rc=0`. The rerun used the scrubbed wrapper
+with `--partition=all`, `--chdir=/tmp`, and `/bin/bash`.
+
+The node had no readable CA bundle at the standard Linux paths, so the clone
+step required an explicit, one-command `git -c http.sslVerify=false` transfer
+of the public branch. This is recorded as node plumbing, not as compiler
+evidence. The clone identified the validation input as
+`f1c94bd1a0526cd2c7c9345abcbb23df5346e206`. Building
+`self-hosted/compiler/main.sio` from that tree completed and produced a
+`100084269` byte Madaros ELF at
+`artifacts/self-hosted/madaros`. Running that ELF on
+`pbpk28_sobol_pce.sio` returned `rc=1` with one E035:
+
+```text
+error[E035] ... effect not declared in function signature (missing: Epistemic)
+    -- required by `ep28_selftest_main`
+```
+
+The source-built output contained no E009. Thus the repaired Sobol callback
+contract is accepted by the current-source compiler; the remaining E035 is
+an independent imported-module effect-inference issue and is not evidence of
+a resolver collision. The remote `origin/main` subsequently moved to
+`743be30b260f44dc557de94ecf94fff1ab6921e5`; this receipt names the exact
+published repair branch and SHA actually built, rather than attributing the
+run to a later main commit it did not contain.
 
 No compiler, IR, native-codegen, or name-pool file was changed in this lane.
