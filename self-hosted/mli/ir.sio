@@ -184,6 +184,10 @@ pub let MLI_OP_CD_NORM2: i64 = 154
 pub let MLI_OP_CD_ASSOCIATOR: i64 = 155
 pub let MLI_OP_CD_VAR_ASSOCIATOR: i64 = 156
 pub let MLI_OP_CD_ZD_PROBE: i64 = 157
+// Scalar projection: the ONLY legal CD → float path (lane index in src2.aux).
+// Analogous to k_discharge / k_extract_*. Without this, a CD value can never
+// leave the kind and S3 cannot witness a component in the instruction stream.
+pub let MLI_OP_CD_EXTRACT: i64 = 158
 
 // Compare condition codes (icmp/fcmp produce a Bool vreg — rule 3).
 pub let MLI_CC_NONE: i64 = 0
@@ -193,6 +197,12 @@ pub let MLI_CC_LT: i64 = 3
 pub let MLI_CC_LE: i64 = 4
 pub let MLI_CC_GT: i64 = 5
 pub let MLI_CC_GE: i64 = 6
+
+// Closed set. Anything else (including NONE) is not a runnable compare —
+// verify and interp must refuse, not treat it as "false".
+pub fn mli_cc_known(cc: i64) -> bool {
+    cc == MLI_CC_EQ || cc == MLI_CC_NE || cc == MLI_CC_LT || cc == MLI_CC_LE || cc == MLI_CC_GT || cc == MLI_CC_GE
+}
 
 // Instruction attributes (design §4.3): associativity / zero-divisor policy.
 pub let MLI_ASSOC_NONE: i64 = 0
@@ -445,6 +455,10 @@ pub struct MliFunction {
     pub overflowed: bool,
     pub overflow_detail: string,
     // Instruction pool (SoA columns; see storage layout note above).
+    // i_live is the #1830 bit: i_op zero-inits to NOP (0), so an unwritten
+    // slot is a plausible successful no-op unless presence is separate.
+    // 0 = nobody wrote this slot; 1 = mli_inst_put ran. Scalar column only.
+    pub i_live: [i64; 528],
     pub i_op: [i64; 528],
     pub i_cc: [i64; 528],
     pub i_assoc: [i64; 528],
@@ -471,6 +485,7 @@ pub fn mli_func_empty() -> MliFunction {
         vreg_count: 0,
         overflowed: false,
         overflow_detail: "",
+        i_live: [0; 528],
         i_op: [0; 528],
         i_cc: [0; 528],
         i_assoc: [0; 528],
@@ -486,6 +501,7 @@ pub fn mli_func_empty() -> MliFunction {
 // Store an instruction value into a pool slot (column-wise scalar and
 // MliOperand stores only — the verified-safe shapes).
 pub fn mli_inst_put(f: &!MliFunction, slot: i64, inst: MliInst) with Mut, Panic {
+    f.i_live[slot] = 1
     f.i_op[slot] = inst.opcode
     f.i_cc[slot] = inst.cc
     f.i_assoc[slot] = inst.assoc_policy
@@ -517,6 +533,10 @@ pub fn mli_inst_dst(inst: MliInst) -> MliOperand {
 // or a single MliOperand (88 B), whose local landings are S1-proven, and
 // never materialise a full MliInst (see the landing hazard below).
 // ---------------------------------------------------------------------------
+
+pub fn mli_slot_live(f: &MliFunction, slot: i64) -> i64 with Panic {
+    f.i_live[slot]
+}
 
 pub fn mli_slot_opcode(f: &MliFunction, slot: i64) -> i64 with Panic {
     f.i_op[slot]

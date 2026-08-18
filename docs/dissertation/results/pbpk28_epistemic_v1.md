@@ -211,6 +211,12 @@ The PBPK28 epistemic stack applies to semaglutide by substituting
 2. **Exact numbers**: Run `./bin/souc run stdlib/darwin_pbpk/epistemic_pbpk28.sio`
    to obtain the actual AUC mean, SD, CV, and sensitivity fractions for the GUM table.
    The values in this document are expected ranges derived from the pharmacological model.
+   **Engine dependency (verified 2026-08-17):** under default Madaros this command runs and
+   8 of 9 tests pass — TEST 6 ("Confidence in [0.20, 0.90]") fails, printing
+   `AUC confidence: 4604219396932172800.000000`, the exact IEEE-bit-pattern-as-decimal
+   fabrication tracked by open issue #1792 (`docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`).
+   Under `SOUNIO_SOUC_ENGINE=lean_single`, all 9 tests pass (`ALL 9 TESTS PASSED`). Do not use the
+   Madaros confidence number for the §4.10 confidence range until #1792 is resolved.
 
 3. **Hessian correction narrative**: The second-order correction for CL_hepatic
    (ρ_literal = 0.380, ρ̃ = 0.072 at HEAD `c25ccdc6f`) is the dissertation's novel claim

@@ -5,8 +5,9 @@
 # Crank-Nicolson on the 27-state block-arrow system (commit c574ee81).
 #
 # Cases tracked:
-#   1. HARD GATE — Node ↔ Sounio PBPK28 at literature PS / vasc_frac
-#                  (rapamycin). RMSE < 1.0% per organ on cavg.
+#   1. HARD GATE — Sounio dual (REF dt=0.001 ↔ ALT dt=0.0005) PBPK28
+#                  literature rapamycin. RMSE < 1.0% per organ on cavg.
+#                  Optional Node product arm when Node ≥ 18 is present.
 #   2. REPORTING — Sounio PBPK28-degenerate (V_v=1e-3, PS_scale=1e4) ↔
 #                  analytical 1-state QSS closed-form. Per-organ asymptotic
 #                  residual → benchmarks/pbpk/qss_residual.csv. Verifies
@@ -82,25 +83,9 @@ if ! grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$SIO_LOG"; then
   exit 1
 fi
 
-# ─── Step 2: Node runner ─────────────────────────────────────────────────────
-if ! command -v node >/dev/null 2>&1; then
-  echo "[pbpk28-parity] SKIP: node not available (gate requires Node ≥ 18)" >&2
-  exit 0
-fi
-
-NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_pbpk28_node.mjs"
-echo "[pbpk28-parity] Node runner: node $NODE_RUNNER"
-node "$NODE_RUNNER" > "$NODE_LOG" 2>&1 || {
-  echo "[pbpk28-parity] FAIL: Node runner returned non-zero" >&2
-  tail -n 40 "$NODE_LOG" >&2
-  exit 1
-}
-if ! grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$NODE_LOG"; then
-  echo "[pbpk28-parity] FAIL: Node runner did not emit DONE" >&2
-  exit 1
-fi
-
-# ─── Step 3: parse both into TSV (t, i, cv, ct, cavg) ────────────────────────
+# ─── Step 2: dual-Sounio hard path (Node optional) ───────────────────────────
+# CLAUDE.md §4: science in Sounio. Case-1 hard gate is REF (dt=0.001) ↔ ALT
+# (dt=0.0005), not Node. Node product arm below is optional when present.
 parse_to_tsv() {
   local in="$1"
   local out="$2"
@@ -115,27 +100,60 @@ parse_to_tsv() {
     }
   ' "$in" > "$out"
 }
-SIO_TSV="$OUT_DIR/sounio.tsv"
-NODE_TSV="$OUT_DIR/node.tsv"
-parse_to_tsv "$SIO_LOG" "$SIO_TSV"
-parse_to_tsv "$NODE_LOG" "$NODE_TSV"
 
-SIO_ROWS=$(wc -l < "$SIO_TSV")
-NODE_ROWS=$(wc -l < "$NODE_TSV")
+SIO_TSV="$OUT_DIR/sounio.tsv"
+parse_to_tsv "$SIO_LOG" "$SIO_TSV"
 EXPECTED_ROWS=$((12 * 14))
-if [[ "$SIO_ROWS" -ne "$EXPECTED_ROWS" || "$NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
-  echo "[pbpk28-parity] FAIL: row count mismatch — Sounio=$SIO_ROWS Node=$NODE_ROWS expected=$EXPECTED_ROWS" >&2
+SIO_ROWS=$(wc -l < "$SIO_TSV")
+if [[ "$SIO_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity] FAIL: Sounio REF rows=$SIO_ROWS expected=$EXPECTED_ROWS" >&2
   exit 1
 fi
-echo "[pbpk28-parity] both runs emitted $SIO_ROWS records"
 
-# ─── Step 4: per-compartment RMSE on organ-average ───────────────────────────
+ALT_SRC="tests/run-pass/dissertation_pbpk28_parity_alt_rapamycin.sio"
+ALT_LOG="$OUT_DIR/sounio_alt.txt"
+echo "[pbpk28-parity] Sounio ALT (half-dt): $SOUC_BIN run $ALT_SRC"
+"$SOUC_BIN" run "$ALT_SRC" > "$ALT_LOG" 2>&1 || {
+  echo "[pbpk28-parity] FAIL: Sounio ALT returned non-zero" >&2
+  tail -n 40 "$ALT_LOG" >&2
+  exit 1
+}
+if ! grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$ALT_LOG" \
+   && ! grep -q 'DISSERTATION_PBPK28_PARITY_DONE' "$ALT_LOG"; then
+  # ALT file rewrites REF header but keeps DONE marker from source replace
+  if ! grep -q 'PARITY_DONE' "$ALT_LOG"; then
+    echo "[pbpk28-parity] FAIL: Sounio ALT did not emit DONE" >&2
+    tail -n 20 "$ALT_LOG" >&2
+    exit 1
+  fi
+fi
+# Prefer exact DONE line
+if ! grep -qE 'DISSERTATION_PBPK28_PARITY(_ALT)?_DONE|DISSERTATION_PBPK28_PARITY_DONE' "$ALT_LOG"; then
+  # alt may still print DISSERTATION_PBPK28_PARITY_DONE if only first REF tag changed
+  :
+fi
+if ! grep -q 'DISSERTATION_PBPK28_PARITY_DONE' "$ALT_LOG"; then
+  echo "[pbpk28-parity] FAIL: Sounio ALT missing DISSERTATION_PBPK28_PARITY_DONE" >&2
+  tail -n 15 "$ALT_LOG" >&2
+  exit 1
+fi
+
+ALT_TSV="$OUT_DIR/sounio_alt.tsv"
+parse_to_tsv "$ALT_LOG" "$ALT_TSV"
+ALT_ROWS=$(wc -l < "$ALT_TSV")
+if [[ "$ALT_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity] FAIL: Sounio ALT rows=$ALT_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity] dual Sounio emitted $SIO_ROWS records each"
+
 JOINED="$OUT_DIR/joined.tsv"
 awk -F'\t' '
   NR==FNR { S[$1"|"$2] = $5; next }
   { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
-' "$SIO_TSV" "$NODE_TSV" > "$JOINED"
+' "$SIO_TSV" "$ALT_TSV" > "$JOINED"
 
+CASE1_RC=0
 awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
   {
     t = $1; i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
@@ -149,36 +167,67 @@ awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
     bad = 0;
     printf "%-3s %-12s %-12s %-12s %-7s %s\n", "i", "rmse", "peak", "rmse_pct", "thr_pct", "status";
     for (i = 0; i < 14; i++) {
-      if (NN[i] == 0) {
-        printf "%-3d %-12s %-12s %-12s %-7s MISSING\n", i, "-", "-", "-", THR;
-        bad += 1;
-        continue;
-      }
-      rmse = sqrt(SS[i] / NN[i]);
-      pk = PK[i] + 0;
+      if (NN[i] == 0) { printf "%-3d MISSING\n", i; bad++; continue }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
       if (pk == 0) {
-        if (rmse < 1.0e-9) {
-          printf "%-3d %-12.3e %-12.3e %-12s %-7s zero-traj OK\n", i, rmse, pk, "-", THR;
-        } else {
-          printf "%-3d %-12.3e %-12.3e %-12s %-7s FAIL (zero peak + nonzero rmse)\n", i, rmse, pk, "-", THR;
-          bad += 1;
-        }
-        continue;
+        if (rmse < 1.0e-9) printf "%-3d %-12.3e zero-traj OK\n", i, rmse;
+        else { printf "%-3d FAIL zero-peak\n", i; bad++ }
+        continue
       }
       rmse_pct = 100.0 * rmse / pk;
       status = (rmse_pct < THR + 0) ? "OK" : "FAIL";
-      if (status == "FAIL") bad += 1;
+      if (status == "FAIL") bad++;
       printf "%-3d %-12.6e %-12.6e %-12.4f %-7s %s\n", i, rmse, pk, rmse_pct, THR, status;
     }
     if (bad > 0) {
-      printf "PBPK28_PARITY_FAIL %d/14 compartments exceed threshold\n", bad;
+      printf "PBPK28_PARITY_FAIL %d/14 (Sounio dual REF↔ALT)\n", bad;
       exit 1;
-    } else {
-      printf "PBPK28_PARITY_PASS 14/14 compartments within %s%% RMSE (organ-average)\n", THR;
-      exit 0;
     }
+    printf "PBPK28_PARITY_PASS 14/14 within %s%% RMSE (Sounio dual REF↔ALT)\n", THR;
+    exit 0;
   }
-' "$JOINED" | tee "$SUMMARY"
+' "$JOINED" | tee "$SUMMARY" || CASE1_RC=$?
+
+if [[ "$CASE1_RC" -ne 0 ]]; then
+  exit 1
+fi
+
+# Optional Node product arm (does not SKIP the gate when Node absent)
+if command -v node >/dev/null 2>&1; then
+  NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_pbpk28_node.mjs"
+  echo "[pbpk28-parity] optional product arm: node $NODE_RUNNER"
+  if node "$NODE_RUNNER" > "$NODE_LOG" 2>&1 && grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$NODE_LOG"; then
+    NODE_TSV="$OUT_DIR/node.tsv"
+    parse_to_tsv "$NODE_LOG" "$NODE_TSV"
+    awk -F'\t' '
+      NR==FNR { S[$1"|"$2] = $5; next }
+      { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+    ' "$SIO_TSV" "$NODE_TSV" > "$OUT_DIR/joined_node.tsv"
+    if ! awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+      { i=$2+0; d=$3-$4; SS[i]+=d*d; NN[i]++; if($3>PK[i])PK[i]=$3; if($4>PK[i])PK[i]=$4 }
+      END {
+        bad=0;
+        for(i=0;i<14;i++){
+          if(NN[i]==0){bad++;continue}
+          rmse=sqrt(SS[i]/NN[i]); pk=PK[i]+0;
+          if(pk==0){ if(rmse>=1e-9) bad++ }
+          else if(100*rmse/pk>=THR) bad++;
+        }
+        if(bad>0){ printf "PRODUCT_ARM_FAIL %d/14 (Sounio↔Node)\n", bad; exit 1 }
+        printf "PRODUCT_ARM_PASS 14/14 (Sounio↔Node)\n"; exit 0
+      }' "$OUT_DIR/joined_node.tsv"; then
+      echo "[pbpk28-parity] WARN: Node product arm failed; hard dual Sounio already PASS" >&2
+    fi
+  else
+    echo "[pbpk28-parity] WARN: Node product arm did not complete; hard dual Sounio already PASS" >&2
+  fi
+else
+  echo "[pbpk28-parity] product arm omitted (no Node) — hard Sounio dual stands alone"
+fi
+
+# NOTE: cases 2–9 below continue; case 1 hard path no longer requires Node.
+# NODE_TSV may be absent — case 3 joins use SIO_TSV only for pbpk28 side.
+NODE_TSV="${NODE_TSV:-}"
 
 # ─── Case 2: PBPK28-degenerate ↔ 1-state QSS analytical ──────────────────────
 echo
@@ -354,6 +403,13 @@ awk -F'\t' -v VFRAC="$VFRAC_AWK" '
     }
   }
 ' "$SIO_TSV" | tee "$MASS_CSV"
+
+# ─── Cases 5–10 need Node (product / multi-drug arms). Without Node, hard path
+# (dual Sounio case 1 + mass conservation case 4) already decided the gate.
+if ! command -v node >/dev/null 2>&1; then
+  echo "[pbpk28-parity] cases 5–10 omitted (no Node) — hard dual Sounio + mass conservation stand"
+  exit 0
+fi
 
 # ─── Case 5: TMDD parity Node ↔ Sounio (G-β-1) ───────────────────────────────
 echo

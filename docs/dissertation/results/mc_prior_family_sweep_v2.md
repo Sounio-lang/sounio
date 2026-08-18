@@ -13,6 +13,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.r
 **Replaces:** `mc_prior_family_sweep_v1.md`  
 **Determinism verified:** Yes — `determinism_audit_v1.md`; probe gate `MC_PBPK28_DETERMINISTIC_RESULTS_PASS`.  
 **Harness:** `stdlib/darwin_pbpk/validation/pbpk28_mc_prior_family_sweep.sio`  
+
+> **Engine dependency (verified 2026-08-17).** `pbpk28_mc_prior_family_sweep.sio` runs to
+> completion under `SOUNIO_SOUC_ENGINE=lean_single` (`rc=0`, `PASS`). Under default Madaros
+> (`bin/souc`), the same file compiles clean but **crashes at runtime with `rc=182`**
+> (`madaros: handles full`) partway through the N=2000 Monte Carlo loop — a resource-ceiling
+> abort, not a numerical disagreement. Every number and gate marker on this page was produced
+> under lean_single; it has not been reproduced under the project's default engine.
+
 **Configuration:** Drug = rapamycin, N = 2000, seed = 1729, dose = 5 mg, t = 168 h
 
 **IMPORTANT CORRECTION:** The v1 sweep reported LogNormal as "winner"

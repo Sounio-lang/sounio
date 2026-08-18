@@ -23,12 +23,16 @@ fail() {
   exit 1
 }
 
+. scripts/dev/madaros_v2_enir_gate_scope.sh
+
 [[ -x "$SEED" ]] || fail "missing executable Stage0 seed: $SEED"
 git rev-parse --verify "$BASE_REF" >/dev/null 2>&1 || fail "base ref not found: $BASE_REF"
-git diff --quiet "$BASE_REF" HEAD -- \
+E2C_PROTECTED=(
   self-hosted/compiler/main.sio self-hosted/ir self-hosted/native self-hosted/wasm \
   self-hosted/gpu stdlib/runtime stdlib/eisa stdlib/math/dd64.sio \
-  || fail "E2C changed compiler codegen/ABI/runtime or canonical EISA implementation"
+)
+madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E2C_ENIR_FUEL_BLOCKARGS_GATE" \
+  "E2C changed compiler codegen/ABI/runtime or canonical EISA implementation" "${E2C_PROTECTED[@]}"
 
 if [[ -n "${E2C_PREBUILT_DRIVER:-}" ]]; then
   cp "$E2C_PREBUILT_DRIVER" "$DRIVER"
