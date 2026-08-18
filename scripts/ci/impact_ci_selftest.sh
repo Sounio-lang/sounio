@@ -50,6 +50,29 @@ non_pr="$(CI_EVENT_NAME=push $CLASSIFIER)"
 expect "$non_pr" full true
 expect "$non_pr" compiler true
 
+# A failed `git diff` used to be invisible through process substitution:
+# paths=(), every output false, exit 0 -- a run downstream reads identically
+# to "no jobs needed" (silent skip of the whole matrix). Same for an empty
+# PR diff. Both must now refuse. Regression guards for the diff-status
+# capture in classify_ci_impact.sh.
+if (cd "$ROOT_DIR" && CI_EVENT_NAME=pull_request \
+      CI_BASE_SHA=0000000000000000000000000000000000000000 \
+      CI_HEAD_SHA=HEAD "$CLASSIFIER" >/dev/null 2>&1); then
+  echo "impact-ci-selftest: classifier accepted a failing git diff (all-false matrix, exit 0)" >&2
+  exit 1
+fi
+if (cd "$ROOT_DIR" && CI_EVENT_NAME=pull_request \
+      CI_BASE_SHA=HEAD CI_HEAD_SHA=HEAD "$CLASSIFIER" >/dev/null 2>&1); then
+  echo "impact-ci-selftest: classifier accepted an empty PR diff (every job would silently skip)" >&2
+  exit 1
+fi
+# Positive control: the guards must not over-fire -- a real, non-empty diff
+# still classifies through the guarded path.
+root_commit="$(cd "$ROOT_DIR" && git rev-list --max-parents=0 HEAD | tail -1)"
+live="$(cd "$ROOT_DIR" && CI_EVENT_NAME=pull_request \
+      CI_BASE_SHA="$root_commit" CI_HEAD_SHA=HEAD "$CLASSIFIER")"
+expect "$live" full true
+
 good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"}}'
 NEEDS_JSON="$good_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
