@@ -326,39 +326,6 @@ fn case_interp_div_zero() -> i64 with IO, Mut, Panic, Div {
     report_pass("I1 i64 div-by-zero REFUSED by interp")
 }
 
-// I2: a verified cd_mul must refuse AT THE OPCODE, not at arg-load and
-// not by writing a zero product. CD args have no value model — they are
-// not loaded as zeros (#1788); the body opcode is what must refuse.
-fn case_interp_refuses_cd() -> i64 with IO, Mut, Panic, Div {
-    var m = mli_func_new("octmul", mli_kind_void())
-    let ck = mli_kind_cd(8, 64)
-    let a = mli_add_arg(&!m, ck)
-    let b = mli_add_arg(&!m, ck)
-    let b0 = mli_new_block(&!m)
-    let r = mli_new_vreg(&!m, ck)
-    if a < 0 || b < 0 || b0 < 0 || r < 0 { return report_fail("I2 cd", "build", 0, 1) }
-    let dst = mli_vreg_opd(&m, r)
-    let s1 = mli_vreg_opd(&m, a)
-    let s2 = mli_vreg_opd(&m, b)
-    if !mli_emit(&!m, b0, mli_inst_cd_mul(dst, s1, s2, MLI_ASSOC_STRICT, MLI_ZD_FLAG)) {
-        return report_fail("I2 cd", "emit", 0, 1)
-    }
-    if !mli_set_term(&!m, b0, mli_term_ret_void()) { return report_fail("I2 cd", "term", 0, 1) }
-    let vr = mli_verify_function(&m)
-    if vr.code != MLI_VERR_OK { return report_fail("I2 cd", "verify", vr.code, MLI_VERR_OK) }
-
-    var args = mli_interp_args_empty()
-    let res = mli_interp_run(&m, &args)
-    if res.ok { return report_fail("I2 cd", "interp-accepted", MLI_I_OK, MLI_I_UNSUPPORTED_OP) }
-    if res.code != MLI_I_UNSUPPORTED_OP {
-        return report_fail("I2 cd", "interp-code", res.code, MLI_I_UNSUPPORTED_OP)
-    }
-    if res.block != 0 || res.index != 0 {
-        return report_fail("I2 cd", "refused-before-opcode", res.block, 0)
-    }
-    report_pass("I2 CD cd_mul REFUSED by interp at the opcode (no product, no arg-zero)")
-}
-
 // Tiny icmp so we can poke the SoA cc/op columns after a green verify.
 // Writing i_cc / i_op is the sanctioned SoA path — do not land a MliInst.
 fn build_icmp_lt() -> MliFunction with Mut, Panic {
@@ -383,6 +350,30 @@ fn build_add_i64() -> MliFunction with Mut, Panic {
     var ok = mli_emit(&!f, b0, mli_inst3(MLI_OP_ADD, mli_opd_vreg(d, mli_kind_int(64, 1)), mli_opd_vreg(a, mli_kind_int(64, 1)), mli_opd_vreg(b, mli_kind_int(64, 1))))
     ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, mli_kind_int(64, 1))))
     f
+}
+
+// I2: a named R1 opcode must refuse AT THE OPCODE, not by writing a
+// zero product. After #1801, unimplemented arg kinds refuse at load
+// (I9), so this witness pokes CD_MUL onto a green i64 add — SoA
+// i_op only, never a whole MliInst (#1678/#1749).
+fn case_interp_refuses_cd() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vr = mli_verify_function(&f)
+    if vr.code != MLI_VERR_OK { return report_fail("I2 cd", "pre-verify", vr.code, MLI_VERR_OK) }
+    f.i_op[mli_slot(0, 0)] = MLI_OP_CD_MUL
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I2 cd", "interp-accepted", MLI_I_OK, MLI_I_UNSUPPORTED_OP) }
+    if res.has_value { return report_fail("I2 cd", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_UNSUPPORTED_OP {
+        return report_fail("I2 cd", "interp-code", res.code, MLI_I_UNSUPPORTED_OP)
+    }
+    if res.block != 0 || res.index != 0 {
+        return report_fail("I2 cd", "refused-before-opcode", res.block, 0)
+    }
+    report_pass("I2 CD cd_mul REFUSED by interp at the opcode (no product)")
 }
 
 // I3: V-struct refuses an unclassified compare-code. cc=7 is not "false".
@@ -480,6 +471,106 @@ fn case_void_ret_has_no_value() -> i64 with IO, Mut, Panic, Div {
     report_pass("I8 void return has no value (not a fabricated integer 0)")
 }
 
+// I9: #1801 site 1 — declared type after refuse. Knowledge is a legal
+// S1 kind (verify OK) but the interp has no inhabitant. Skipping the
+// arg and returning void success would fabricate "I handled this".
+fn case_interp_refuses_uninhabited_arg() -> i64 with IO, Mut, Panic, Div {
+    var f = mli_func_new("kvoid", mli_kind_void())
+    let kk = mli_kind_knowledge(MLI_KIND_FLOAT, 64, MLI_KSHAPE_MIN3)
+    let ka = mli_add_arg(&!f, kk)
+    let b0 = mli_new_block(&!f)
+    if ka < 0 || b0 < 0 { return report_fail("I9 arg-kind", "build", 0, 1) }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return report_fail("I9 arg-kind", "term", 0, 1) }
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I9 arg-kind", "verify", vs.code, 0) }
+    var args = mli_interp_args_empty()
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I9 arg-kind", "accepted-declared-type", MLI_I_OK, MLI_I_ARG_KIND) }
+    if res.has_value { return report_fail("I9 arg-kind", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_ARG_KIND {
+        return report_fail("I9 arg-kind", "code", res.code, MLI_I_ARG_KIND)
+    }
+    if res.index != 0 { return report_fail("I9 arg-kind", "arg-index", res.index, 0) }
+    report_pass("I9 unimplemented arg kind REFUSED at load (no declared-type inhabitant)")
+}
+
+// I10: same hole with a narrow int. Int{32} is a legal kind; only i64
+// is runnable. `fn f(x: i32) -> i64 { 1 }` used to succeed with 1.
+fn case_interp_refuses_narrow_int_arg() -> i64 with IO, Mut, Panic, Div {
+    var f = mli_func_new("i32arg", mli_kind_int(64, 1))
+    let a = mli_add_arg(&!f, mli_kind_int(32, 1))
+    let b0 = mli_new_block(&!f)
+    if a < 0 || b0 < 0 { return report_fail("I10 i32-arg", "build", 0, 1) }
+    if !mli_set_term(&!f, b0, mli_term_ret(mli_opd_imm_int(1, mli_kind_int(64, 1)))) {
+        return report_fail("I10 i32-arg", "term", 0, 1)
+    }
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I10 i32-arg", "verify", vs.code, 0) }
+    var args = mli_interp_args_empty()
+    args.ai[0] = 99
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I10 i32-arg", "fabricated-one", MLI_I_OK, MLI_I_ARG_KIND) }
+    if res.has_value { return report_fail("I10 i32-arg", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_ARG_KIND {
+        return report_fail("I10 i32-arg", "code", res.code, MLI_I_ARG_KIND)
+    }
+    report_pass("I10 i32 arg REFUSED at load (not a silent i64 1)")
+}
+
+// I11: #1801 site 2 twin — CALL is a named hole. Poke after green
+// verify (SoA i_op only). Interp must refuse with the named code, not
+// the unknown-op catch-all; has_value must stay false so a caller
+// cannot read rax as the dest.
+fn case_interp_refuses_call() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I11 call interp", "pre-verify", vs.code, 0) }
+    f.i_op[mli_slot(0, 0)] = MLI_OP_CALL
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I11 call interp", "guessed-rax", MLI_I_OK, MLI_I_CALL_UNSPECIFIED) }
+    if res.has_value { return report_fail("I11 call interp", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_CALL_UNSPECIFIED {
+        return report_fail("I11 call interp", "code", res.code, MLI_I_CALL_UNSPECIFIED)
+    }
+    report_pass("I11 CALL REFUSED by interp with named code (no rax after empty stub)")
+}
+
+// I12: #1830 class — opcode 0 is NOP. Bumping blk_instr_count after a
+// green verify walks a slot nobody wrote; that used to execute as a
+// successful no-op. Poke is the SoA count column only.
+fn case_interp_refuses_unwired_slot() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I12 unwired", "pre-verify", vs.code, 0) }
+    f.blk_instr_count[0] = f.blk_instr_count[0] + 1
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I12 unwired", "silent-nop", MLI_I_OK, MLI_I_UNWIRED_SLOT) }
+    if res.has_value { return report_fail("I12 unwired", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_UNWIRED_SLOT {
+        return report_fail("I12 unwired", "code", res.code, MLI_I_UNWIRED_SLOT)
+    }
+    if res.index != 1 { return report_fail("I12 unwired", "slot", res.index, 1) }
+    report_pass("I12 unwritten slot REFUSED by interp (not a silent NOP)")
+}
+
+// I13: verify must not stamp OK on the same ghost slot. #1801: returning
+// the declared well-formedness after reading a zero nobody wrote.
+fn case_verify_refuses_unwired_slot() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    f.blk_instr_count[0] = f.blk_instr_count[0] + 1
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_UNWIRED_SLOT {
+        return report_fail("I13 unwired verify", "code", vs.code, MLI_VERR_UNWIRED_SLOT)
+    }
+    report_pass("I13 unwritten slot is a VERIFY error (not a silent NOP)")
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div {
     println("=== MLI S2a gate: ir_to_mli (straight-line i64/f64) + minimal interp ===")
     if ir_instr_arena_init() != IR_ARENA_OK {
@@ -512,6 +603,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     failures = failures + case_verify_refuses_call()
     failures = failures + case_interp_refuses_undef_vreg()
     failures = failures + case_void_ret_has_no_value()
+    failures = failures + case_interp_refuses_uninhabited_arg()
+    failures = failures + case_interp_refuses_narrow_int_arg()
+    failures = failures + case_interp_refuses_call()
+    failures = failures + case_interp_refuses_unwired_slot()
+    failures = failures + case_verify_refuses_unwired_slot()
 
     if failures == 0 {
         println("=== MLI S2a: ALL CASES PASS ===")

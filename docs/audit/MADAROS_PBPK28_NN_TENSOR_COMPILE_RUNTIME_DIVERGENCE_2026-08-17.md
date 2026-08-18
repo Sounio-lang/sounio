@@ -11,10 +11,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 
 **Date:** 2026-08-17
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default engine); cross-checked against `SOUNIO_SOUC_ENGINE=lean_single`
-**Owner:** unassigned
-**Status:** open, unpatched. Dispatch only — no `self-hosted/` files touched, per this repo's forensic
-dispatch protocol (CLAUDE.md §8: "Do not patch `self-hosted/` ad hoc; record evidence and proposed
-fix as a dispatch first.")
+**Owner:** claude (Defect A only, fixed 2026-08-17); Defects B and C unassigned
+**Status:** Defect A **fixed and merged** (see its section for the commit and verification). Defects
+B and C remain open, unpatched, dispatch only. Originally filed with no `self-hosted/` changes per
+this repo's forensic dispatch protocol (CLAUDE.md §8); Defect A's fix followed as an explicit,
+separately-authorized implementation pass on top of this same dispatch, not an ad hoc patch.
 
 ## Why this dispatch
 
@@ -28,7 +29,7 @@ default, user-facing engine. All three are independently reproduced below.
 
 ---
 
-## Defect A — `read_f64`/`write_f64` are undeclared under Madaris; they are a lean_single-only special-cased builtin
+## Defect A — `read_f64`/`write_f64` are undeclared under Madaris; they are a lean_single-only special-cased builtin — **FIXED 2026-08-17**
 
 ### Repro
 
@@ -104,27 +105,60 @@ span the second argument's evaluation, or is this an overly conservative Madaros
 rule vs. lean_single's more permissive one?) is a real language-semantics question, not obviously
 a "which engine is right" call.
 
-### Proposed fix locus
+### Fix (landed 2026-08-17)
 
-Port `read_f64`/`write_f64` (the array-offset-accessor variant, matching lean_single's
-`emit_read_f64`/`emit_write_f64`) into Madaros's builtin surface: add both names to
-`name_is_native_backend_builtin` in `self-hosted/check/check.sio` and implement matching emitters
-in `self-hosted/native/codegen_x86_linux.sio`, following the exact pattern P0-F (#1755) used for
-the POSIX allowlist — each new name needs a working emitter or it silently returns a fabricated
-value (E219 fail-closed only protects *undeclared* names; the E137 seen here is arguably the
-*correct* current behavior given no builtin exists — the fix is adding the builtin, not loosening
-the check).
+Ported the full `read_i64`/`write_i64`/`read_f64`/`write_f64` family (builtin ids 33-36) into
+Madaros: `name_is_read_i64`/`name_is_write_i64`/`name_is_read_f64`/`name_is_write_f64` plus two
+new emitters (`emit_builtin_read_offset64_into`, `emit_builtin_write_offset64_into`) in
+`self-hosted/native/codegen_x86_linux.sio`, wired at all 6 dispatch sites
+(`native_v2_builtin_id_for_name_ref`, `native_v2_builtin_id_for_func_ref`, the third
+id-lookup-by-name function, `native_v2_builtin_returns_float` (id 35 only), `native_v2_emit_builtin_by_id_into`,
+and both name-based emit blocks), following the exact pattern P0-F (#1755) established. Added the
+matching allowlist entries to `name_is_native_backend_builtin` in `self-hosted/check/check.sio`,
+plus `write_i64`/`read_f64`/`write_f64` to `checker_collect_runtime_builtins_inplace` (`read_i64`
+was already bound there — the sole entry present before this fix, which is why it alone never
+E137'd).
 
-### Acceptance gate (proposed)
+Read and write share one emitter body each (`read_i64`/`read_f64` both compile to `mov
+rax,[rdi+rsi*8]`; `write_i64`/`write_f64` both to `mov [rdi+rsi*8],rdx`) because Sounio's internal
+call ABI passes every argument and return value as a raw 64-bit value through the general-purpose
+registers regardless of Sounio-level type — confirmed against `emit_builtin_sqrt`, whose f64
+argument arrives in `rdi` as bits and whose f64 result leaves in `rax` as bits, never touching
+`xmm0` at the call boundary. They still need separate builtin ids: `read_f64`'s id had to be added
+to `native_v2_builtin_returns_float` (drives `IR_FLOAT_REG_MARKER_FLAG` for correct downstream f64
+arithmetic) while `read_i64`'s must not be, so a shared id across the two would have been wrong.
 
-1. `tests/stdlib/nn/test_pinn_training_d6.sio` and `tests/stdlib/nn/test_pinn_caputo_residual_d6.sio`
-   both `check` and `run` clean under default Madaros, matching current lean_single behavior
-   (`D6_PINN_TRAINING_LOOP_PASS`, `rc=0`).
-2. A regression test alongside `tests/run-pass/ffi_integer_return.sio`'s pattern that exercises
-   `read_f64`/`write_f64` directly (buffer array, in-bounds and out-of-bounds offset) under both
-   engines.
-3. `docs/dissertation/results/d6_pinn_training_v1.md`'s engine-dependency note (added in #1809)
-   updated once this closes.
+Also fixed, found while validating this fix against a real consumer test rather than only the
+minimal repro: `heap_realloc` (used by `stdlib/data/bigframe.sio`, `stdlib/collections/heap_vec.sio`,
+`stdlib/mem/box.sio`) was hitting the identical E137, but it is **not** part of this builtin
+family — `stdlib/mem/box.sio` already has a real, portable implementation via `extern "C" realloc`.
+It simply needed the same `checker_collect_runtime_builtins_inplace` registration `heap_alloc`/
+`heap_free` already had. One-line fix, no codegen change, added to the same commit since it was
+found validating this exact defect.
+
+### Verification (built from source, off-pod on Slurm, `scripts/ci/build_modular_madaros.sh`)
+
+- `scripts/ci/extern_builtin_mirror_gate.sh`: PASS, 38 builtin names, checker and backend agree.
+- A minimal round-trip probe (`heap_alloc` an `f64`/`i64` buffer, `write_*`/`read_*` 10 elements
+  each, compare): `DEFECT_A_ROUNDTRIP_PASS`, `rc=0`.
+- `tests/stdlib/nn/test_pinn_training_d6.sio`: all 40+ `read_f64`/`write_f64` `error[E137]` sites
+  gone. `check`/`run` still fail — but now *only* on the 4 `error[E037]` borrow-checker sites in
+  `stdlib/tensor/ops.sio` documented above as a separate, unrelated defect. Not fixed by this
+  change; that borrow-checker question is still open.
+- `tests/stdlib/data/test_bigframe_ops_stdlib.sio`: `check` now passes cleanly (`verdict=0`,
+  `check: OK`) — the `read_f64`/`write_f64`/`heap_realloc` E137s are gone. `run` still fails, on a
+  **third, unrelated, pre-existing** limit: `error: function main needs 30937 IR instructions but
+  IR_MAX_INSTRS is 16384` — a fixed per-function IR instruction cap this specific test's `main`
+  exceeds, nothing to do with this fix. Not investigated further here.
+- `self-hosted/compiler/main.sio` self-check: still passes (`self-check rc=0`) — the fix does not
+  break Madaros's own self-hosting.
+
+### Follow-up
+
+`docs/dissertation/results/d6_pinn_training_v1.md`'s engine-dependency note (added in #1809)
+should be revisited: the underlying `read_f64`/`write_f64` gap it described is closed, but the file
+still does not check/run clean under Madaros because of the separate E037 borrow-checker defect —
+the note needs re-wording, not removal.
 
 ---
 
