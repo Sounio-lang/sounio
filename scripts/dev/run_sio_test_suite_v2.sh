@@ -143,6 +143,8 @@ PASS=0
 FAIL=0
 SKIP=0
 KNOWN_FAILURE=0
+XPAS=0
+XPAS_LIST=""
 FLAKY=0
 VACUOUS_KNOWN=0
 VACUOUS_STALE=""
@@ -707,10 +709,15 @@ for f in "$TEST_TMP"/result_*.json; do
             ((KNOWN_FAILURE++))
             ;;
         xpas)
-            ((PASS++))
-            if [[ "$VERBOSE" == "1" ]]; then
-                echo "  XPAS  $name (known failure now passes)"
-            fi
+            # A known-failure that passes is a stale claim, not a green test.
+            # Counted separately and always announced: swallowing it as PASS
+            # is how 240 imported/native 139 tags sat green until a census
+            # (docs/audit/KNOWN_FAILURE_XPAS_SIGNAL_2026-08-18.md). Same
+            # lesson as vxpas below.
+            ((XPAS++))
+            XPAS_LIST="${XPAS_LIST}    $name
+"
+            echo "  XPAS  $name (known failure now passes)"
             ;;
         vxfail)
             # Tolerated because it is listed in tests/vacuous_expect_baseline.txt.
@@ -757,10 +764,11 @@ echo "=== Results ==="
 echo "  Pass: $PASS"
 echo "  Fail: $FAIL"
 [[ $KNOWN_FAILURE -gt 0 ]] && echo "  Known failures: $KNOWN_FAILURE"
+[[ $XPAS -gt 0 ]] && echo "  Unexpected passes (stale known-failure): $XPAS"
 [[ $VACUOUS_KNOWN -gt 0 ]] && echo "  Vacuous-annotation baseline (tolerated): $VACUOUS_KNOWN"
 [[ $FLAKY -gt 0 ]] && echo "  Flaky: $FLAKY"
 echo "  Skip: $SKIP"
-echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN))"
+echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN + XPAS))"
 [[ $UNPARSED -gt 0 ]] && echo "  Unparsed: $UNPARSED"
 
 # Completeness: the counts above must describe every filtered test exactly
@@ -788,6 +796,18 @@ if [[ $EXPECTED_RESULTS -eq 0 ]]; then
     echo "WARNING: no test files matched the active filter -- this run measured nothing" >&2
 fi
 
+if [[ -n "$XPAS_LIST" ]]; then
+    echo ""
+    echo "=== Known-failure tags that passed in THIS run ==="
+    printf '%s' "$XPAS_LIST"
+    echo "  A known-failure that passes is a stale claim about this engine,"
+    echo "  not a green test. Drop the tag, or add //@ requires: <engine> if"
+    echo "  the claim is about a different engine than the one that just ran."
+    echo "  Madaros decides a Madaros-named tag; lean_single decides whether"
+    echo "  the file needs requires: madaros. Zeros on one engine do not"
+    echo "  license dropping a tag about the other."
+fi
+
 if [[ -n "$VACUOUS_STALE" ]]; then
     echo ""
     echo "=== Vacuous-annotation baseline entries that passed in THIS run ==="
@@ -805,7 +825,7 @@ if [[ "$FORMAT" == "junit" ]]; then
 <testsuites>
 XMLEOF
     
-    echo "  <testsuite name=\"sounio-test-suite\" tests=\"$((PASS + FAIL + KNOWN_FAILURE))\" failures=\"$FAIL\" skipped=\"$SKIP\" errors=\"0\">" >> "$JUNIT_FILE"
+    echo "  <testsuite name=\"sounio-test-suite\" tests=\"$((PASS + FAIL + KNOWN_FAILURE + XPAS))\" failures=\"$((FAIL + XPAS))\" skipped=\"$SKIP\" errors=\"0\">" >> "$JUNIT_FILE"
     
     for f in "$TEST_TMP"/result_*.json; do
         [[ -f "$f" ]] || continue
@@ -822,7 +842,7 @@ XMLEOF
                 ;;
             xpas)
                 echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <system-out>Known failure now passes</system-out>" >> "$JUNIT_FILE"
+                echo "      <failure message=\"stale known-failure: test now passes on this engine\"/>" >> "$JUNIT_FILE"
                 echo "    </testcase>" >> "$JUNIT_FILE"
                 ;;
             fail)
@@ -867,5 +887,20 @@ if [[ $FAIL -gt 0 ]]; then
     exit 1
 fi
 
+# SOUNIO_XPAS_FATAL=1 makes a stale known-failure tag fail the job.
+# Default off until the remaining seed XPASses owned by other lanes
+# (gum_fo_across_call, turbofish_concrete_type_mismatch) are classified.
+# The Madaros known-failure recheck sets this so compiler-only PRs cannot
+# rot requires:madaros tags in silence.
+if [[ $XPAS -gt 0 && "${SOUNIO_XPAS_FATAL:-}" == "1" ]]; then
+    echo ""
+    echo "XPAS_FATAL: $XPAS known-failure tag(s) passed on this engine"
+    exit 1
+fi
+
 echo ""
-echo "All tests passed!"
+if [[ $XPAS -gt 0 ]]; then
+    echo "Suite finished with $XPAS stale known-failure tag(s) (not a silent pass)."
+else
+    echo "All tests passed!"
+fi
