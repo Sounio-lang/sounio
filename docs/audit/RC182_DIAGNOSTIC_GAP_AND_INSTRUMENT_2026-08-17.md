@@ -9,6 +9,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.rc182-di
 
 > **SUPERSEDED** by `RC182_DIAGNOSTIC_5_TESTS_FIXED_2026-08-18.md` (same directory).
 > The measurements table below has been replaced. The external instrument used here had a `hc < hcap` filter that discarded the real context the moment handle_count climbed near capacity — it produced phantom 1,835,008 readings for d2_gum/d2_voi (43.76% of capacity, "2.36M headroom") and inflated pin_count readings for the other three tests. The corrected instrument reads the runtime mmap base directly and finds all five tests at 99.79%–99.97% of capacity with peak_pin = 0. The gap analysis above (rc=182 slow-path emits no print) and the in-binary fix spec below remain valid and unchanged.
+>
+> **Methodological note — the same defect class that made the fleet cite an August table for two months** is recorded in a section near the bottom of this document. Read it before treating the corrected numbers as final.
+
+# rc=182 diagnostic — gap, external instrument, and measurements
 
 # rc=182 diagnostic — gap, external instrument, and measurements
 
@@ -210,6 +214,108 @@ adds numbers to the message.
   codegen path; that lane may already have work in flight on the same
   file, in which case this is a queue item not a hot patch.
 
+## Methodological note — when an instrument produces two artefacts, cross them
+
+This doc and its companion `CURVE_REPORT_5_TESTS.md` were both written
+in the same session, by the same lane, from the same instrument run.
+They were published on the same day. They contradicted each other and
+nobody noticed, including the author of both. The corrected measurements
+above were the result of finally crossing them.
+
+### What CURVE_REPORT actually said
+
+`CURVE_REPORT_5_TESTS.md` (transcript excerpt, line 29):
+
+> For d2_gum and d2_voi, the probe sees only the 1,835,008 stack
+> candidate because the other stack addresses are already at or above
+> capacity by the time the probe inspects them — the `hc < hcap`
+> filter (probe's line 34) rejects them, leaving a sparse read. The
+> fact that they exit rc=182 means the actual handle_count DID exceed
+> capacity on those candidates before the probe could record it.
+
+The probe, in other words, was *blind at the ceiling* — and the curve
+report said so in plain language. "sparse read" was a warning that the
+1,835,008 number was the only candidate the filter let through, not a
+measurement of anything physical.
+
+### What GAP actually said
+
+This document's measurements table (the SUPERSEDED one) listed:
+
+> | d2_gum  | pd/d2_gum.sio  | 1,835,008 | 0 | 0.0% |
+> | d2_voi  | pd/d2_voi.sio  | 1,835,008 | 0 | 0.0% |
+
+Same instrument. Same run. Same 1,835,008. But here it sat in the
+"peak_handle_count" column, formatted as if it were a measurement. The
+CURVE_REPORT warning had been written first; the GAP doc did not
+re-read it before publishing.
+
+### The defect class
+
+The four PRs that fixed today all addressed the same shape: a plausible
+value where a declared absence was needed. `pin_count` was silently
+returning `0` where `-1` (no pinning wired) was the honest answer.
+`CALL` refusal returned an unsigned flag where a named reason was
+needed. Fabrication returned a successful boolean where a visible
+component was needed. Reclamation was unmarked where a witness before
+the fix was needed. Each one looked like a value; each one was an
+absence dressed up.
+
+The CURVE_REPORT→GAP contradiction is the same shape, on the
+diagnostic side. The probe returned `1,835,008` where "blind at the
+ceiling, the value is unknown" was the honest answer. The CURVE_REPORT
+*named* the absence (sparse read, filter rejects); the GAP doc
+*published* the value as if the absence had not been named. The
+corrected measurements above (peak_handle 4.18M–4.19M, peak_pin = 0)
+came from an instrument that does not have that blind spot.
+
+### The fleet parallel
+
+The fleet cited an August table for two months before someone noticed
+the source had moved. The mechanism was identical: a number that
+*looked* like a measurement was carried forward into a citation
+without anyone re-checking the source's limitations. In the table
+case the limitation was "the August table was superseded"; in the
+GAP case the limitation was "the probe is blind at the ceiling on
+these two tests." Both numbers were publishable; neither should have
+been cited without checking the constraint their source named.
+
+### The rule, written so it can be followed
+
+When one instrument produces two artefacts, **someone has to cross
+them before either is cited.** Specifically:
+
+1. If artefact A says "X is the measurement" and artefact B says "the
+   measurement is unreliable in region X," artefact B wins and A is
+   re-measured before publication. B is not optional context; it is
+   the calibration of A.
+2. If two artefacts from the same instrument run disagree, both are
+   treated as suspect until the disagreement is resolved. Do not pick
+   the more flattering one and cite it; do not pick the more
+   pessimistic one and cite it; find the source of the disagreement.
+3. The cross-check belongs to the instrument's owner, not the reader.
+   A reader who sees two contradicting artefacts from the same author
+   should refuse to cite either until the author reconciles them.
+4. "Same author" and "same session" are not exonerating — they make the
+   contradiction more likely, not less, because the author's frame of
+   reference is the same in both.
+
+### What this changes going forward
+
+The corrected measurements above are now the published record. The
+GAP doc's table carries both runs with the polling-precision caveat
+(not just one snapshot) so future readers can see how much the
+peak_handle number can move run-to-run and judge whether they trust
+the pattern (yes) or the exact number (no). The CURVE_REPORT is
+unchanged and remains in `/tmp` for the session — it is the original
+warning; future instrument work that produces a curve and a table
+should diff the two before either is cited.
+
+This note is here so the next person who finds two artefacts from
+the same instrument run contradicting each other does not have to
+rediscover the lesson the hard way. The CURVE_REPORT warned. The GAP
+should have listened.
+
 ## Status
 
 - Gap documented (this file) ✓
@@ -221,3 +327,10 @@ adds numbers to the message.
   test. Reclamation verdict inverted (no pins → reclamation cannot help).
 - In-binary fix specified but not applied (lane discipline) —
   blocked on codegen_x86_linux.sio ownership
+- **2026-08-18:** methodological note added. The CURVE_REPORT (same
+  author, same session) had already named the probe's blind spot at the
+  ceiling; the GAP doc published the probe's output anyway. Same defect
+  class the four PRs named today (pin_count 0 vs -1, CALL refusal
+  unnamed, fabrication invisible, reclamation unwitnessed): a plausible
+  value where a declared absence was needed. The note prescribes the
+  cross-check before either artefact is cited.
