@@ -300,39 +300,3 @@ recorded, so its definition looks dead and the sweep deletes live code,
 silently, at rc=0). Raising `IR_MAX_INSTRS` without raising `DCE_MAX_INSTRS`
 and every per-instruction context that stops at its own cap converts an
 honest refusal into silent miscompilation. That is a separate, larger task.
-
-The lever was then PROVEN by the minimal coordinated slice (2026-08-18,
-branch `lane/empryo-1/gen2-raise-measure-20260818`, source build SHA-256
-`da172b4f…`). All eight coupled files were free of claims at the time
-(grok-cli2's `lower.sio` claim expired between 17:55Z and 17:58Z; fable-1's
-`codegen_x86_linux.sio` claim had cleared). The slice raised `IR_MAX_FUNCS`
-8192 → 16384 together with every array indexed by the IrModule.functions
-slot — `IrModule.functions`, `normalize.sio`'s two `[IrFunction; …]` sites,
-`lower.sio`'s `elem_kinds`, `fn_offsets` in `codegen_x86_linux`/`elf`/
-`elf_bulk`/`reloc`/`frame`, `elf.sio`'s `name_offsets` — and the region
-table (`IR_REGION_*` arrays + `ir_region_table_capacity()` 8448 → 16640,
-keeping the +256 margin). The specializer needed no change: reachable marks
-are 7029, already under `SPEC_DCE_MAX=8192`.
-
-Result, measured on the from-source raise build:
-
-    rung check   rc=0 errors=0          (gen1 typechecks main.sio)
-    rung gen2    rc=139 — but the slot-census wall is GONE. The failure is
-                 now a DIFFERENT wall: `run_compiler_main_self_tests` needs
-                 33829 IR instructions vs IR_MAX_INSTRS=16384, and the
-                 refusal path then segfaults.
-
-No regressions: `box_all_read_forms.sio` still prints `BOXMATRIX OK` rc=0,
-and the DCE reachability gate passes all three arms (keeps 602 live, drops
-300/303 dead, carries 6000 functions to a correct binary).
-
-SAFE STOP POINT, per the execution order: the coordinated `IR_MAX_FUNCS`
-raise is self-consistent and regression-free, and it is where this lane
-stops. The next wall is per-function `IR_MAX_INSTRS`, which is NOT a simple
-bump — `ir/dce.sio:31` caps liveness at `DCE_MAX_INSTRS=8192`, and the
-`irfunction_instr_capacity_coherence_gate.sh` header is explicit that a
-truncated liveness analysis is a WRONG analysis (a use past the cap is never
-recorded, so its definition looks dead and the sweep deletes live code,
-silently, at rc=0). Raising `IR_MAX_INSTRS` without raising `DCE_MAX_INSTRS`
-and every per-instruction context that stops at its own cap converts an
-honest refusal into silent miscompilation. That is a separate, larger task.
