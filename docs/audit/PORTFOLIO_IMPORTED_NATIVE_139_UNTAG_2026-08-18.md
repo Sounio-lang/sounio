@@ -57,6 +57,16 @@ That job sets `SOUNIO_MADAROS_AVAILABLE` and therefore **runs** the 168. Result:
 
 **Fix:** `//@ timeout: 90` on those 22 (house pattern already used by dissertation tests). Do **not** raise the global 30 s default. Same question as the token CAP and the handle table: the number is not the defect everywhere.
 
+### timeout: 90 receipt (run 32126585139, tip `3f9b49d864`)
+
+| job | result |
+|---|---|
+| Full Test Suite (souc-stage2) | success (the 169 are skipped or known) |
+| Madaros Current-Source f64 Lowering | **Pass 168 / Fail 0 / Known 1 / Skip 0** |
+| Contracts | fail — Docs registry on GitHub's merge commit vs a moving `main` |
+
+Zero timeouts. Zero 139s. The one known failure is still v168 (`rc=1` fingerprint), not a crash. Contracts is the generated-governance trio racing `origin/main`, not a test defect. Rematched `origin/main` locally (`a8921cd183`) with `governance-regen`; registry check passes here.
+
 ## What this is not
 
 - Not a CAP raise. Façades remain 1130 / 1127 bytes. E229 still off main.
