@@ -227,25 +227,29 @@ of the same defect round 1 caught on the *write* side.
 
 **Landed (consumer 2).** `EpistemicEffectsV2_kvalue_nat.lean` cites
 `preservation` and proves `kvalue_nat_reduct_stays_nat`. The
-`--lean-consume` arm (and `--lean-consume-kvalue`) builds that module
-only after `v1_imports_kvalue_nat.lean` fails.
+`--lean-consume-kvalue` arm builds that module only after
+`v1_imports_kvalue_nat.lean` fails. `--lean-consume` stays the
+measure-Nat pair only — one named step, one pair.
 
-**Acceptance for consumer 2 (written before the consumer is scored).**
-A green Lean Proofs *job* is not evidence. The consume step must appear
-`success` and not `skipped` on the PR head. Because
-`.github/workflows/ci.yml` is under an active foreign claim, this
-round extends the existing step `V2 measure-Nat consumer (V1 mutant
-must fail first)` rather than adding a second named step. That step's
-log on the PR head must contain both:
+**Acceptance for the named kvalue step (written before the step is
+scored).** A green Lean Proofs *job* is not evidence. The PR head must
+show this step as `success` and not `skipped`:
+
+```
+success  V2 kvalue-Nat consumer (V1 mutant must fail first)
+```
+
+and that step's log must contain:
 
 ```
 POSITIVE_CONTROL_FIRED: v1_imports_kvalue_nat rejected
 V2_CONSUMED: EpistemicEffectsV2_kvalue_nat built
 ```
 
-A dedicated step name (`V2 kvalue-Nat consumer (V1 mutant must fail
-first)`) is the next `ci.yml` hunk, not a substitute for those lines.
-If the kvalue mutant elaborates, the consumer must not be added.
+A job whose this step is skipped is the 390-gate class. The #1883
+verification (kvalue lines inside the measure-Nat step) does not
+transfer: that head did not have this step. If the kvalue mutant
+elaborates, the consumer must not be scored.
 
 **Deferred — extract the shared spine.** A third module holding `Effect`, `Ty`,
 `EffectSet`, `TyCtx` would stop V2 from being a *client* of the refuted file.
