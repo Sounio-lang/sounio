@@ -100,6 +100,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.dissertation-pbpk-suite-remeasure-2026-08-17 | repo_only | docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-pbpk-suite-residual-split-2026-08-17 | repo_only | docs/audit/DISSERTATION_PBPK_SUITE_RESIDUAL_SPLIT_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dossier-import-closure-2026-08-17 | repo_only | docs/audit/DOSSIER_IMPORT_CLOSURE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.e011-stale-prebuilt-phantom-2026-08-18 | repo_only | docs/audit/E011_STALE_PREBUILT_PHANTOM_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.e043-rust-macro-design-dispatch-2026-07-12 | repo_only | docs/audit/E043_RUST_MACRO_DESIGN_DISPATCH_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.engine-parity-adjudication-2026-08-02 | repo_only | docs/audit/ENGINE_PARITY_ADJUDICATION_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-calculus-spec-divergence.dispatch | repo_only | docs/audit/epistemic_calculus_spec_divergence/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -156,6 +157,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.handle-table-reclamation-design-2026-08-17 | repo_only | docs/audit/HANDLE_TABLE_RECLAMATION_DESIGN_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-651-rootcause-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_651_ROOTCAUSE_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-algebra-audit-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_ALGEBRA_AUDIT_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.imported-native-139-residual-census-2026-08-18 | repo_only | docs/audit/IMPORTED_NATIVE_139_RESIDUAL_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17 | repo_only | docs/audit/KAXI_PTX_TARGET_SM_AUDIT_2026-06-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kconf-bitcast-apply-package-2026-08-18 | repo_only | docs/audit/KCONF_BITCAST_APPLY_PACKAGE_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-knowledge-arithmetic-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_KNOWLEDGE_ARITHMETIC_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -242,6 +244,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-string-concat-2026-06-24 | repo_only | docs/audit/MADAROS_STRING_CONCAT_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-struct-field-index-fallback-2026-06-23 | repo_only | docs/audit/MADAROS_STRUCT_FIELD_INDEX_FALLBACK_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-trait-i64-cd-exact-2026-08-06 | repo_only | docs/audit/MADAROS_TRAIT_I64_CD_EXACT_2026-08-06.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-trivial-3i64-struct-alloc-139-dispatch-2026-08-18 | repo_only | docs/audit/MADAROS_TRIVIAL_3I64_STRUCT_ALLOC_139_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-tuple-f64-float-fix-recipe-2026-07-26 | repo_only | docs/audit/MADAROS_TUPLE_F64_FLOAT_FIX_RECIPE_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-tuple-let-desugar-2026-06-25 | repo_only | docs/audit/MADAROS_TUPLE_LET_DESUGAR_2026-06-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave11-tip-green-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE11_TIP_GREEN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
