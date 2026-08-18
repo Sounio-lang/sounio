@@ -4,6 +4,15 @@
  *
  * Closed: U1 251/251, U2 13/13, U3 7/7.
  * Archive and docs locales are not live faces.
+ *
+ * NEXT STEP — do not do it in this change. Invert the rule.
+ * A denylist of known numerals protects the past: it catches 7/7
+ * because we already named 7/7. A new page can still write `{n}/{n}`
+ * and ship. The step that closes that gap is a source rule: every
+ * numeral on a live page must come from a function that can refuse
+ * (`claimFace` / `claimRefusal` / `suiteFaceParts`). A list of
+ * forbidden strings is not that rule. Do not grow CLOSED_PATTERNS
+ * as if more entries were the invariant.
  */
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';

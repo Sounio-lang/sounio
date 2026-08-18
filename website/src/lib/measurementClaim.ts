@@ -14,6 +14,11 @@
  *
  * `bin/souc` and `souc-linux-x86_64-gpu` are launchers, not engines.
  * Do not invent Madaros or lean_single from a path.
+ *
+ * NEXT STEP — not this change. `check-unguarded-numerals.mjs` is a
+ * denylist of closed greens. That protects the past. The invariant
+ * is the inverse: a live page may print a numeral only by calling a
+ * function that can refuse. Growing the denylist is not that step.
  */
 
 export const COMPILER_ENGINES = ['Madaros', 'lean_single'] as const;
