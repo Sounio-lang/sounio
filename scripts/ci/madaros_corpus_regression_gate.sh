@@ -90,6 +90,11 @@ cat > "$WORK/run_one.sh" <<'INNER'
 #!/usr/bin/env bash
 src="$1"
 name="$(basename "$src")"
+# Heartbeat: written before the early exits below, so every selected program
+# answers exactly once regardless of verdict. The gate asserts on this file
+# because actual.txt only records failures -- an empty actual.txt must mean
+# "all passed", never "the instrument answered nothing".
+printf '%s\n' "$name" >> "$WORK/ran.txt"
 elf="$WORK/${name%.sio}.elf"
 
 # A test declaring an environment feature we are not providing is not a failure.
@@ -127,9 +132,21 @@ TR
 chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK
 
+: > "$WORK/ran.txt"
 printf '%s\n' "${PROGRAMS[@]}" \
   | xargs -P "$JOBS" -I{} "$WORK/run_one.sh" {} \
   | sort > "$WORK/actual.txt"
+
+# Completeness floor: every selected program must have heartbeated. A dead
+# xargs or a broken run_one leaves actual.txt empty, which the comparison
+# below would read as "no new failures" -- zero evidence reading green.
+sort -u -o "$WORK/ran.txt" "$WORK/ran.txt"
+RAN_COUNT="$(grep -c . "$WORK/ran.txt" || true)"
+if [[ "$RAN_COUNT" -ne "${#PROGRAMS[@]}" ]]; then
+  printf '%s\n' "${PROGRAMS[@]##*/}" | sort > "$WORK/expected.txt"
+  comm -13 "$WORK/ran.txt" "$WORK/expected.txt" > "$WORK/unanswered.txt"
+  fail "incomplete run: $RAN_COUNT of ${#PROGRAMS[@]} programs answered; $(wc -l < "$WORK/unanswered.txt" | tr -d ' ') silent (first 10): $(head -10 "$WORK/unanswered.txt" | tr '\n' ' ')"
+fi
 
 ACTUAL_COUNT="$(wc -l < "$WORK/actual.txt" | tr -d ' ')"
 echo "[madaros-corpus] failures observed: $ACTUAL_COUNT / ${#PROGRAMS[@]}"
