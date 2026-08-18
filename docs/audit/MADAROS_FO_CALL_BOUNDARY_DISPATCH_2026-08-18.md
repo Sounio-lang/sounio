@@ -135,11 +135,58 @@ Both are `//@ known-failure` with `expect-stdout: FO_CALL_BOUNDARY_LIVE` and exi
 
 Thesis RHS (`rhs(c, cl, fu)` + `0.0 - … / 5.0`) is arity 3 **and** OpSub **and** OpDiv. Triple miss **at the call**. The same `0.0 - k*C` written inline keeps FO (T2). `#1889` inlined it so adaptive/rk4 stay live; any new helper of that shape will under-report again.
 
+## 4b. Arity ceiling — why 2, what a raise costs, does it cover the thesis
+
+The skip is **not a regression**. It is the original line in `990168abc2` (2026-07-26), the commit that *created* the transfer table:
+
+```
+} else {
+    // >2 params: skip (unsupported transfer)
+    return lo
+}
+```
+
+That commit stored **two names** (`p0`, `p1`) and five kinds that only mention those two (`id / lit·x / x+y / x·y / forward`). The skip is the table width, written as “unsupported”, not “we tried 3 and it crashed”. Bisect will not find a later introducing commit (grok-cli5, independent).
+
+Call-site apply on **today’s main** still only reads arg0 (kinds 1, 2, 6) and arg1 (kinds 3, 4). There is no kind for `a+b+c` and no p2 in `fo_param_index`. Raising the skip without widening names + kinds + apply is a no-op for any body that is not already a 1- or 2-param catalog shape.
+
+Measured identity-of-first-arg (`docs/audit/repro/fo_arity_ceiling.sio`), peel var = 1:
+
+| Arity | Madaros | lean |
+|---|---|---|
+| 2 | **1 LIVE** | 1 LIVE |
+| 3 | **0** | 1 LIVE |
+| 4 | **0** | 1 LIVE |
+| 8 | **0** | 1 LIVE |
+
+grok-cli5’s additive matrix (do not restage): same-file `add3` expected 14 → Madaros 0; `add4` expected 14.25 → 0. Import/div stay on that lane (preserved branch `fix/fo-multimod-import-20260728` already has named commits for those two; this lane does not port them).
+
+What the FO programme itself did when it outgrew 2 — **read, not ported**: it did not bump the skip. It added bytecode for nested `+/−/·/÷` at ≤4 (`4f8e7dcf23`), then a hash-indexed param table 4→8 (`8f0291ef63`), then 8→16 (`0b94cdeb0f`). That branch no longer contains `>2 params: skip`. Titles claim the lifts; they are a trail, not a receipt (main is hundreds of commits ahead).
+
+### Does skip → 4 or → 8 cover the dissertation?
+
+**No.**
+
+| Thesis helper (Knowledge path vs plain) | Arity | Body | skip=4 | skip=8 |
+|---|---:|---|---|---|
+| adaptive `ep_*` / `cube_root` | 1–2 | catalog or unused for FO | already in | already in |
+| adaptive RHS | — | **inlined** in `main` (#1889) | n/a | n/a |
+| rk4 Knowledge loop | — | **inlined** in `main` (#1889) | n/a | n/a |
+| `rhs_brain` / `rhs_periph` (only called from plain finite-diff) | 4 | nest + OpSub + OpDiv | arity yes, body no | arity yes, body no |
+| `rhs_blood` (plain finite-diff only) | **11** | nest + OpSub + OpDiv | **still skipped** | **still skipped** (11>8) |
+| `gum_fo` `rhs(c,cl,fu)` | 3 | nest + OpSub + OpDiv | arity yes, body no | arity yes, body no |
+
+Today’s thesis **numbers** are live because of inline, not because of the ceiling. If the model is written as functions again: a ceiling of 4 or 8 still misses `rhs_blood` (11) and still misses every body that is not id/scale/add/mul. A small skip bump is **not** a small fix with large thesis value. The large value needs the bytecode path (≤4 then 8 then 16) that the preserved FO programme already named — grok-cli5’s viability triage, not this lane.
+
+Naive lift risk: changing `return lo` to “collect 2 names and classify anyway” would make `id3` look like `id1` (correct) and `add3` look like `add2` (silent **under**-estimate). Worse than an honest 0 if nobody is looking.
+
 ## 5. What this does to a thesis
 
-Any model whose right-hand side is a function — that is, every model written as a model — reports **less uncertainty than it has** under default `souc` (Madaros). The number is plausible. The only control is the other engine, which almost nobody runs.
+The unconditional reading — every uncertainty that crosses any function is underestimated — is **false**. Same-file 1- and 2-arg catalog helpers are live and often GUM-correct.
 
-`#1792` stays OPEN until CALL of a non-catalog shape is live. Do not close it with another inline.
+The conditional reading is not: every Madaros number that crosses a ≥3-arg helper, or a non-catalog body (`OpSub`/`OpDiv`/nest), or (on this instrument) any imported helper, can die, and the 0 looks like an exact measurement.
+
+`#1792` stays OPEN until CALL of a thesis-shaped helper is live. Do not close it with another inline or with a skip bump that leaves `rhs_blood` at 11.
 
 ## 6. Do not fix here
 
