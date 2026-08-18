@@ -7,7 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIXTURES="$ROOT_DIR/scripts/ci/fixtures/madaros_print_dispatch_refusal"
 KEEP_WORK="${SOUNIO_MADAROS_PRINT_DISPATCH_GATE_KEEP:-0}"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
-TOTAL=5
+TOTAL=6
 PASSED=0
 FAILED=0
 NOT_RUN=0
@@ -146,6 +146,10 @@ expect_madaros_refusal \
   unresolved-println-if \
   "$FIXTURES/unresolved_println_if.sio" \
   'LEAN_PRINTLN=41'
+expect_madaros_refusal \
+  unresolved-string-if \
+  "$FIXTURES/unresolved_string_if.sio" \
+  'LEAN_STRING=left'
 expect_madaros_run string-param "$FIXTURES/string_param.sio" 'PARAM=param-ok'
 expect_madaros_run string-return "$FIXTURES/string_return.sio" 'RETURN=return-ok'
 expect_madaros_run scalar-controls "$FIXTURES/scalar_controls.sio" 'INT<17>' 'F64<2.500000>'
