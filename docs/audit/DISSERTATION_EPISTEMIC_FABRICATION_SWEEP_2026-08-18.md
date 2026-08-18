@@ -11,8 +11,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.disserta
 
 **Date:** 2026-08-18  
 **Lane:** grok-cli2 / `fab-sweep-20260818`  
-**Main tip:** `ee5541421e` (includes #1882 KCONF layout fix)  
-**Instrument:** Madaros **rebuilt from this tip** (`artifacts/self-hosted/madaros`, ELF `\x7fELF`, 100 084 302 B) **and** `SOUNIO_SOUC_ENGINE=lean_single`. No E230 aggregate patch.  
+**Main tip at sweep:** `ee5541421e` (includes #1882 KCONF layout fix)  
+**Contour tip:** `9290117b7a` (#1889 Family A RHS inline + this Family B print close)  
+**Instrument:** Madaros **rebuilt from a #1882+ tip** (`artifacts/self-hosted/madaros`, ELF `\x7fELF`, 100 084 302 B) **and** `SOUNIO_SOUC_ENGINE=lean_single`. No E230 aggregate patch.  
 **Method:** dual-engine `souc run` on dissertation / GUM / Budget64 surfaces; classify **bit-pattern class** (~1e18 / 8+ digit floats) vs **suspicious zero** (`var(...)=0` / `std(Knowledge)=0` where lean is non-zero).
 
 Parent: `#1792` (MERGED) installed fail-closed detectors. `#1882` closed the F2 confidence sitofp instance. This note answers: **what else still fabricates on the thesis surface?**
@@ -66,10 +67,28 @@ Lean shows real variance; Madaros printed exact `0.000000` / `std(Knowledge)=0` 
 
 Budget64 Type-B / Welch fallback DOF is stored as `1.0e30`. lean_single prints `1.000000e30`. Madaros prints `9223372036854775808.000000` (`2^63` as f64) on iso/rk4 Effective DOF lines.
 
-| # | Surface | Madaros DOF print | lean DOF print | Expanded `k` / `U` |
+| # | Surface | Madaros DOF print (before) | After client close | lean |
 |---:|---|---|---|---|
-| B1 | `rapamycin_iso_budget` | `2^63` (×2) | `1e30` | `k=1.960`, `U` matches lean |
-| B2 | `rapamycin_rk4_budget` | `2^63` (×3) | `1e30` | `k=1.960`, Budget64 `std` OK |
+| B1 | `rapamycin_iso_budget` | `2^63` (×2) | **`inf`** | **`inf`** (same printer) |
+| B2 | `rapamycin_rk4_budget` | `2^63` (×3) | **`inf`** | **`inf`** |
+| B0 | `budget64_dof_sentinel_print` | n/a (new) | **`inf` + `FAMILY_B_DOF_INF`** | same |
+
+**Client close (this wave):** `budget64_print_report` prints `inf` when `effective_dof > 1e20`. The stored sentinel remains `1e30` so `coverage_factor` / `k=1.960` is unchanged. Thesis tables can no longer quote `9223372036854775808` as a degree of freedom.
+
+Measured 2026-08-18 on this worktree (`souc run`, source Madaros + lean_single):
+
+| Command | Effective DOF | `922337…` |
+|---|---|---|
+| Madaros `budget64_dof_sentinel_print` | `inf` + `FAMILY_B_DOF_INF` + PASS | none |
+| lean same | same | none |
+| Madaros `rapamycin_iso_budget` | `inf` ×2 + PASS | none |
+| lean iso | `inf` ×2 + PASS | none |
+| Madaros `rapamycin_rk4_budget` | `inf` ×3 + PASS | none |
+| lean rk4 | `inf` ×3 + PASS | none |
+| Madaros `print_f64(1e15/9e18/1e19/1e30)` | 1e15 and 9e18 OK; **1e19 and 1e30 → `2^63`** | yes |
+| lean same | `1.000000e15` … `1.000000e30` | none |
+
+**Emitter root still open:** `print_f64(1e30)` under Madaros still saturates. Pinned as `tests/run-pass/print_f64_large_magnitude.sio` (`//@ known-failure`, `expect-stdout: 1.000000e30`). Do not treat that pin as a Budget64 fix.
 
 #### `2^63` is ambiguous — two known diseases, same glyph
 
@@ -120,7 +139,7 @@ Among others, dual-engine clean on fabrication symptoms:
 
 | Question | Answer |
 |---|---|
-| How many **real** fabricating surfaces remain (post-#1882)? | **3 unique files**: adaptive (A1), rk4_budget (A1+B2), iso_budget (B1) |
+| How many **real** fabricating surfaces remain (post-#1882 / post-contour)? | **Thesis surfaces A1/A2/B1/B2 closed.** Residual compiler roots: FO-across-call (`gum_fo_across_call`) and Madaros `print_f64` ≥1e19. |
 | How many **causes**? | **Three named** if counting April ζ separately: (A) Knowledge/GUM variance **collapse to 0**; (B) Madaros **large-f64 print** ≥~1e19 → `2^63`; (ζ) historical deep-chain `variance_of` OOB → `2^63`. B ≠ ζ (discriminant above). |
 | Does one fix close several? | **Yes within each family:** A → adaptive + rk4 Knowledge zeros; B → all `print_f64` of ≥1e19 including Budget64 DOF `1e30` |
 | Is F2 (4.6e18 confidence) still open? | **No** on measured surfaces under source-built Madaros |
@@ -130,8 +149,8 @@ Among others, dual-engine clean on fabrication symptoms:
 
 ## 5. Next owners (do not conflate)
 
-1. **Family A (thesis-critical, #1792 name):** Madaros Knowledge variance / `variance_of` through ODE — start from A1 (`rapamycin_epistemic_adaptive`) with lean non-zero as control. May need `lower.sio` / GUM lowering; claim before edit.  
-2. **Family B (cheaper, less grave):** Madaros `print_f64`/`println` for `|x| ≳ 1e19` — fix once; Budget64 DOF is a client. Witness: one-stage `print_f64(1.0e30)`.  
+1. **Family A thesis surfaces:** closed by #1889 RHS inline. **Compiler root open:** Madaros FO does not cross user `fn` calls — `tests/run-pass/gum_fo_across_call.sio`. Needs interprocedural FO / `lower.sio`; claim before edit.  
+2. **Family B thesis surfaces:** closed by `budget64_print_report` → `inf`. **Emitter root open:** Madaros `print_f64`/`println` for `|x| ≳ 1e19` — `print_f64_large_magnitude.sio`. lean_single already routes through `__native_print_f64_n` scientific.  
 3. **April ζ** — if deep-chain `variance_of` still yields `2^63` under current Madaros, track separately from B; do not close ζ by fixing print.  
 4. **Do not** reopen KCONF / weaken E170 / treat rc=182 as fabrication.
 
@@ -144,8 +163,10 @@ export MADAROS_STACK_KB=524288 SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 # Madaros must be source-built at a tip containing #1882
 ./bin/souc run tests/run-pass/rapamycin_epistemic_adaptive.sio | rg 'var\(|FABRIC'
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/run-pass/rapamycin_epistemic_adaptive.sio | rg 'var\(|PASS'
-./bin/souc run tests/run-pass/rapamycin_iso_budget.sio | rg 'Effective DOF|922337|1e\+30'
-SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/run-pass/rapamycin_iso_budget.sio | rg 'Effective DOF|1e\+30'
+./bin/souc run tests/run-pass/budget64_dof_sentinel_print.sio | rg 'Effective DOF|inf|922337|FAMILY_B'
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/run-pass/budget64_dof_sentinel_print.sio | rg 'Effective DOF|inf|FAMILY_B'
+./bin/souc run tests/run-pass/rapamycin_iso_budget.sio | rg 'Effective DOF|922337|inf'
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/run-pass/print_f64_large_magnitude.sio | rg 'MAG1E30|922337|e30'
 ```
 
 Logs: `/tmp/fab-sweep/{madaros,lean_single}/`.
