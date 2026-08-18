@@ -18,7 +18,7 @@
  * finished 2026-08-17T22:21:35Z. Same ledger as PBPK_SUITE_NOW.
  */
 
-import { PBPK_SUITE_NOW, ledgerCloses } from './dissertationHonestyNow';
+import { PBPK_SUITE_NOW, measureMayPrint } from './dissertationHonestyNow';
 
 export const DEFENSE_STATES = [
   'verified',
@@ -245,7 +245,7 @@ export function countKinds(rows: readonly FailRow[]): Record<FailKind, number> {
 }
 
 export function mapCloses(rows: readonly FailRow[]): boolean {
-  if (!ledgerCloses(PBPK_SUITE_NOW)) return false;
+  if (!measureMayPrint(PBPK_SUITE_NOW)) return false;
   if (rows.length !== PBPK_SUITE_NOW.fail) return false;
   const fam = countFamilies(rows);
   const kinds = countKinds(rows);
