@@ -63,6 +63,28 @@ SPEC_TOKEN_RE = re.compile(
 # checked out. A guard scoped to today's data is a guard that decays.
 CITE_RE = re.compile(r"\|\s*(R[0-9]+)\s*\|\s*`([A-Za-z0-9_]+)`\s*\|")
 
+# A contribution may rest on more than one rung — C2 is measured at R1 and
+# closed at R29 — so a row may carry a rung LIST against a token LIST. The two
+# are zipped positionally; a length mismatch fails rather than truncating,
+# because dropping the tail is how an outline ends up citing a rung it no
+# longer supports.
+MULTI_CITE_RE = re.compile(
+    r"\|\s*(R[0-9]+(?:\s*,\s*R[0-9]+)+)\s*\|\s*((?:`[A-Za-z0-9_]+`\s*;?\s*)+)\|")
+
+
+def multi_citations(text: str) -> tuple[dict, bool]:
+    out, ok = {}, True
+    for rung_cell, token_cell in MULTI_CITE_RE.findall(text):
+        rungs = [r.strip() for r in rung_cell.split(",")]
+        tokens = re.findall(r"`([A-Za-z0-9_]+)`", token_cell)
+        if len(rungs) != len(tokens):
+            print(f"  row cites {len(rungs)} rungs ({', '.join(rungs)}) "
+                  f"against {len(tokens)} tokens — cannot be paired")
+            ok = False
+            continue
+        out.update(zip(rungs, tokens))
+    return out, ok
+
 
 def read(rel: str) -> str:
     try:
@@ -82,6 +104,8 @@ def clause_w1(paper: str) -> tuple[bool, dict]:
     # "spec declares no token" for rungs whose specs were sitting right there.
     known = discovered_rungs()
     cited = dict(CITE_RE.findall(paper))
+    _multi, _multi_ok = multi_citations(paper)
+    cited.update(_multi)
     ok = True
     if not cited:
         print("  no rung/token citations found in the paper's contribution table")
