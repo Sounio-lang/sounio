@@ -23,7 +23,7 @@ Transformation: none to language meaning. Adds a measured witness that kaxi_fuse
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: under independent Gaussian observations of one scalar, kaxi_fuse ≡ sequential conjugate update (measured |Δμ|=0, |Δσ|=1 ulp); permutation of the three synthetic individuals leaves the fused posterior unchanged at 1e-15; for the two synthetic individuals at the probe ρ=0.5, kaxi *reports* σ=1.920553, the true SD of those kaxi weights under Σ is 2.345752, and BLUE σ=2.333141. Reported-vs-BLUE relative gap is 0.214828. This instance, not a general law: unequal variances plus high ρ can make BLUE σ smaller than the independent formula.
+Claims-Introduced: under independent Gaussian observations of one scalar, kaxi_fuse ≡ sequential conjugate update (measured |Δμ|=0, |Δσ|=1 ulp); permutation of the three synthetic individuals leaves the fused posterior unchanged at 1e-15; pair probe ρ=0.5 reports 1.920553 vs BLUE 2.333141 vs true kaxi-weight SD 2.345752; dissertation 4-tuple with prior ⊥ individuals and individuals equicorrelated at ρ=0.5: kaxi reports σ=1.641761, BLUE4 σ=2.211221 (relative gap 0.346859), true kaxi-weight SD 2.277336. Instance, not a general inflation law.
 Claims-Forbidden: that rapamycin troughs are correlated at 0.5; that this individualizes a patient; that Madaros can run Seq; that order matters for independent normals; that kaxi_fuse is wrong (it is honest iff independence holds); that positive correlation always inflates the reported independent SD.
 Assumptions: normal-normal conjugate; two-observation BLUE of one scalar; ρ is a sensitivity probe; same illustrative numbers as rapamycin_kaxi_fuse_prior.sio (Ferron 1997 prior + synthetic individuals).
 Write-Set: tests/run-pass/seq_kaxi_order_independence.sio, docs/audit/SEQ_KAXI_ORDER_INDEPENDENCE_2026-08-18.md
@@ -70,6 +70,16 @@ w_1=\frac{v_2-\rho\sqrt{v_1 v_2}}{v_1+v_2-2\rho\sqrt{v_1 v_2}}
 
 At \(\rho=0\) this is inverse-variance. At \(\rho\to 1\) and \(v_1=v_2\) it refuses to pretend two copies of one measurement are two measurements.
 
+Three-observation equicorrelated GLS (pairwise \(\rho\)), then inverse-variance fuse with an independent prior \(v_0\):
+
+\[
+\Sigma_3[i,j]=\rho\sigma_i\sigma_j\ (i\neq j),\qquad
+\hat\mu_3=(1^\top\Sigma_3^{-1}1)^{-1}1^\top\Sigma_3^{-1}y,\qquad
+\sigma^2_4=\bigl(\sigma_3^{-2}+v_0^{-1}\bigr)^{-1}
+\]
+
+\(\rho=0\) recovers `kaxi_fuse` on the four-tuple (positive control).
+
 ---
 
 ## Measured 2026-08-18 (lean_single)
@@ -88,6 +98,8 @@ SOUNIO_SOUC_ENGINE=lean_single \
 | W2 kaxi(fwd) vs kaxi(prior + reversed individuals) | Δμ = −1.776357e-15, Δσ = 0 | permutation is disposable under independence |
 | W3 pair 10.8±3.0, 11.5±2.5 | reported independent σ = 1.920553; BLUE ρ=0.5 σ = 2.333141; Δσ = 0.412588; reported-vs-BLUE relative = 0.214828 | **if** ρ=0.5 on *these* variances, the number kaxi prints is 21.5% below BLUE. Not a general inflation law. |
 | W4 true var of kaxi weights under Σ | σ = 2.345752 ≥ BLUE 2.333141 > reported 1.920553 | GLS optimality holds; kaxi both reports too-small σ and uses slightly suboptimal weights |
+| W5 4-tuple (prior ⊥, individuals ρ=0.5) | BLUE4 μ=11.262710 σ=2.211221 vs kaxi μ=10.982609 σ=1.641761; relative gap 0.346859 | the number `rapamycin_kaxi_fuse_prior` prints is 34.7% below BLUE **if** that probe Σ is true |
+| W6 true var of kaxi-on-4 weights | σ = 2.277336 ≥ BLUE4 2.211221 > reported 1.641761 | same GLS split on the dissertation tuple |
 
 W3 ρ=0 recovers independent kaxi (positive control). Compact BLUE and explicit 2×2 inverse agree to 1e-9.
 

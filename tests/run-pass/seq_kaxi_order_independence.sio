@@ -36,7 +36,7 @@ fn update_var(pv: f64, yv: f64) -> f64 with Div {
 
 // Two-observation BLUE of one scalar, covariance ρ σ1 σ2.
 // var = (v1 v2 (1-ρ²)) / (v1 + v2 - 2ρ √(v1 v2))
-// denom == 0 only at |ρ|=1 and v1==v2; the removable limit is v1 (one measurement, not two).
+// denom == 0 only at ρ=+1 and v1==v2; the removable limit is v1 (one measurement, not two).
 fn blue2_var(v1: f64, v2: f64, rho: f64) -> f64 with Div {
     let s12: f64 = sqrt(v1 * v2)
     let denom: f64 = v1 + v2 - 2.0 * rho * s12
@@ -81,6 +81,103 @@ fn blue2_var_inv(v1: f64, v2: f64, rho: f64) -> f64 with Div {
     let s1: f64 = inv11 + inv12
     let s2: f64 = inv12 + inv22
     1.0 / (s1 + s2)
+}
+
+fn det3(
+    a00: f64, a01: f64, a02: f64,
+    a10: f64, a11: f64, a12: f64,
+    a20: f64, a21: f64, a22: f64
+) -> f64 {
+    let m00: f64 = a11 * a22 - a12 * a21
+    let m01: f64 = a10 * a22 - a12 * a20
+    let m02: f64 = a10 * a21 - a11 * a20
+    a00 * m00 - a01 * m01 + a02 * m02
+}
+
+// Three-observation GLS of one scalar, equicorrelated at ρ (pairwise).
+// Returns posterior variance (1' Σ^{-1} 1)^{-1}. det==0 → refuse as v1.
+fn blue3_var(v1: f64, v2: f64, v3: f64, rho: f64) -> f64 with Div {
+    let c12: f64 = rho * sqrt(v1 * v2)
+    let c13: f64 = rho * sqrt(v1 * v3)
+    let c23: f64 = rho * sqrt(v2 * v3)
+    let d: f64 = det3(v1, c12, c13, c12, v2, c23, c13, c23, v3)
+    if d == 0.0 {
+        return v1
+    }
+    let c00: f64 = v2 * v3 - c23 * c23
+    let c01: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c02: f64 = c12 * c23 - c13 * v2
+    let c10: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c11: f64 = v1 * v3 - c13 * c13
+    let c12t: f64 = 0.0 - (v1 * c23 - c13 * c12)
+    let c20: f64 = c12 * c23 - v2 * c13
+    let c21: f64 = 0.0 - (v1 * c23 - c12 * c13)
+    let c22: f64 = v1 * v2 - c12 * c12
+    let s0: f64 = (c00 + c10 + c20) / d
+    let s1: f64 = (c01 + c11 + c21) / d
+    let s2: f64 = (c02 + c12t + c22) / d
+    1.0 / (s0 + s1 + s2)
+}
+
+fn blue3_mean(
+    y1: f64, v1: f64,
+    y2: f64, v2: f64,
+    y3: f64, v3: f64,
+    rho: f64
+) -> f64 with Div {
+    let c12: f64 = rho * sqrt(v1 * v2)
+    let c13: f64 = rho * sqrt(v1 * v3)
+    let c23: f64 = rho * sqrt(v2 * v3)
+    let d: f64 = det3(v1, c12, c13, c12, v2, c23, c13, c23, v3)
+    if d == 0.0 {
+        return (y1 + y2 + y3) / 3.0
+    }
+    let c00: f64 = v2 * v3 - c23 * c23
+    let c01: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c02: f64 = c12 * c23 - c13 * v2
+    let c10: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c11: f64 = v1 * v3 - c13 * c13
+    let c12t: f64 = 0.0 - (v1 * c23 - c13 * c12)
+    let c20: f64 = c12 * c23 - v2 * c13
+    let c21: f64 = 0.0 - (v1 * c23 - c12 * c13)
+    let c22: f64 = v1 * v2 - c12 * c12
+    let s0: f64 = (c00 + c10 + c20) / d
+    let s1: f64 = (c01 + c11 + c21) / d
+    let s2: f64 = (c02 + c12t + c22) / d
+    (s0 * y1 + s1 * y2 + s2 * y3) / (s0 + s1 + s2)
+}
+
+// Inverse-variance fuse of two independent estimators (BLUE3 and the prior).
+fn fuse2_var(v_a: f64, v_b: f64) -> f64 with Div {
+    1.0 / (1.0 / v_a + 1.0 / v_b)
+}
+
+fn fuse2_mean(m_a: f64, v_a: f64, m_b: f64, v_b: f64) -> f64 with Div {
+    let p_a: f64 = 1.0 / v_a
+    let p_b: f64 = 1.0 / v_b
+    (m_a * p_a + m_b * p_b) / (p_a + p_b)
+}
+
+// True variance of kaxi-on-4 weights when prior ⊥ individuals and
+// the three individuals are equicorrelated at ρ.
+fn kaxi4_true_var(v0: f64, v1: f64, v2: f64, v3: f64, rho: f64) -> f64 with Div {
+    let p0: f64 = 1.0 / v0
+    let p1: f64 = 1.0 / v1
+    let p2: f64 = 1.0 / v2
+    let p3: f64 = 1.0 / v3
+    let pt: f64 = p0 + p1 + p2 + p3
+    let w0: f64 = p0 / pt
+    let w1: f64 = p1 / pt
+    let w2: f64 = p2 / pt
+    let w3: f64 = p3 / pt
+    let c12: f64 = rho * sqrt(v1 * v2)
+    let c13: f64 = rho * sqrt(v1 * v3)
+    let c23: f64 = rho * sqrt(v2 * v3)
+    w0 * w0 * v0
+        + w1 * w1 * v1 + w2 * w2 * v2 + w3 * w3 * v3
+        + 2.0 * w1 * w2 * c12
+        + 2.0 * w1 * w3 * c13
+        + 2.0 * w2 * w3 * c23
 }
 
 fn blue2_mean_inv(y1: f64, v1: f64, y2: f64, v2: f64, rho: f64) -> f64 with Div {
@@ -192,6 +289,36 @@ fn main() with IO, Alloc, Mut, Epistemic, Div, Panic {
     print(" reported_u="); print_f64(pu)
     print("\n")
 
+    // W5 — dissertation 4-tuple: prior ⊥ the three individuals; individuals
+    // equicorrelated at ρ. BLUE3 then inverse-variance fuse with the prior.
+    let v0: f64 = s0 * s0
+    let v3: f64 = s3 * s3
+    let b3v: f64 = blue3_var(v1, v2, v3, rho)
+    let b3m: f64 = blue3_mean(y1, v1, y2, v2, y3, v3, rho)
+    let b4v: f64 = fuse2_var(b3v, v0)
+    let b4m: f64 = fuse2_mean(b3m, b3v, y0, v0)
+    let b4u: f64 = sqrt(b4v)
+    let b3v0: f64 = blue3_var(v1, v2, v3, 0.0)
+    let b4v0: f64 = fuse2_var(b3v0, v0)
+    let b4u0: f64 = sqrt(b4v0)
+    let b3m0: f64 = blue3_mean(y1, v1, y2, v2, y3, v3, 0.0)
+    let b4m0: f64 = fuse2_mean(b3m0, b3v0, y0, v0)
+
+    // W6 — true SD of the kaxi-on-4 weights under that block Σ.
+    let k4t: f64 = sqrt(kaxi4_true_var(v0, v1, v2, v3, rho))
+    let rel4: f64 = (b4u / fu) - 1.0
+
+    print("W5_blue4_m="); print_f64(b4m)
+    print(" blue4_u="); print_f64(b4u)
+    print(" kaxi4_m="); print_f64(fm)
+    print(" kaxi4_u="); print_f64(fu)
+    print(" rel_over="); print_f64(rel4)
+    print("\n")
+    print("W6_kaxi4_true_u="); print_f64(k4t)
+    print(" blue4_u="); print_f64(b4u)
+    print(" reported_u="); print_f64(fu)
+    print("\n")
+
     var ok: i64 = 1
     // W1/W2: independence makes order disposable. Bound is numerical, not fitted.
     if !near(fm, sm, 0.000000001) { ok = 0 }
@@ -211,6 +338,14 @@ fn main() with IO, Alloc, Mut, Epistemic, Div, Panic {
     // W4: true var of kaxi weights under Σ ≥ BLUE (GLS), and > reported σ.
     if ku + 0.000000001 < bu { ok = 0 }
     if ku <= pu { ok = 0 }
+    // W5 positive control: ρ=0 recovers kaxi-on-4.
+    if !near(b4m0, fm, 0.000000001) { ok = 0 }
+    if !near(b4u0, fu, 0.000000001) { ok = 0 }
+    // W5 instance (these four variances, ρ=0.5): reported kaxi σ is below BLUE4.
+    if b4u <= fu { ok = 0 }
+    // W6: GLS optimality of BLUE4 vs kaxi weights under the same Σ.
+    if k4t + 0.000000001 < b4u { ok = 0 }
+    if k4t <= fu { ok = 0 }
 
     if ok == 1 {
         print("PASS\n")
