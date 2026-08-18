@@ -57,6 +57,18 @@ export function reachabilityComplete(b: ReachabilityBinding): boolean {
   );
 }
 
+/**
+ * Construction refusal. A REACHABLE claim missing the workflow line
+ * must not load — that is how a label that can only say "no" comes back.
+ */
+export function assertReachabilityComplete(b: ReachabilityBinding, id: string): void {
+  if (!reachabilityComplete(b)) {
+    throw new Error(
+      `measurementClaim: ${id} reachability incomplete — WORKFLOW-REACHABLE requires a .yml path and line > 0`,
+    );
+  }
+}
+
 export function reachabilityFace(b: ReachabilityBinding): string {
   if (b.reachability === 'WORKFLOW-UNREACHABLE') return 'not in CI';
   return `in CI · ${b.workflow}:${b.line}`;
