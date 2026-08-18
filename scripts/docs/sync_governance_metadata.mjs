@@ -5,7 +5,7 @@ import {
   MATRIX_RELATIVE_PATH,
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
-  formatAcceptanceReport,
+  formatAcceptanceReportStub,
   formatAuthorityMatrix,
   formatHistoricalStatusNote,
   formatRepoMetadataBlock,
@@ -91,7 +91,7 @@ async function main() {
 
   await writeFile(registryAbsPath, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
   await writeFile(matrixAbsPath, ensureTrailingNewline(formatAuthorityMatrix(registry)), 'utf8');
-  await writeFile(acceptanceAbsPath, ensureTrailingNewline(formatAcceptanceReport(registry)), 'utf8');
+  await writeFile(acceptanceAbsPath, ensureTrailingNewline(formatAcceptanceReportStub()), 'utf8');
 
   const repoTopics = registry.topics.filter((topic) => topic.repo_doc_path);
   const websiteTopics = registry.topics.filter((topic) => Object.keys(topic.website_paths ?? {}).length > 0);
