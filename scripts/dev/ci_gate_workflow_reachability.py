@@ -7,9 +7,9 @@ invocations (bash/sh/source), not comments and not inventory globs.
 
 Positive control (must be non-zero on this repo): at least one gate is
 reachable (ci.yml names several) AND at least one named leftover is not
-(f64_bitcast_sitofp_boundary_gate.sh). A census that reports 0 leftovers,
-or 0 reachable, has not measured. The original three named orphans
-(correspondence, fabrication-detect, ontology enforcement) are wired.
+(madaros_f128_f256_ladder_gate.sh). A census that reports 0 leftovers,
+or 0 reachable, has not measured. The 2026-08-18 named three plus the
+F2 bitcast/sitofp boundary gate are wired.
 
 Usage:
   python3 scripts/dev/ci_gate_workflow_reachability.py
@@ -67,10 +67,9 @@ INVENTORY_MARKERS = (
 )
 
 # Remaining forgotten leftovers after the 2026-08-18 named-three landing
-# (#1845 correspondence, #1836 fabrication + ontology). Wiring one of
-# these without removing it here is a REFUTE, not a silent pass.
+# plus the F2 bitcast/sitofp boundary wire. Wiring one of these without
+# removing it here is a REFUTE, not a silent pass.
 NAMED_DIRECT_ORPHANS = (
-    "f64_bitcast_sitofp_boundary_gate.sh",
     "madaros_f128_f256_ladder_gate.sh",
     "madaros_f128_f256_v0c_wire_gate.sh",
     "madaros_f128_f256_v0d_softfloat_gate.sh",
