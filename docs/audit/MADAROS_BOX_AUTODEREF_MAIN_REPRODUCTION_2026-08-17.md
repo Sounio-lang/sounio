@@ -219,37 +219,25 @@ auto-deref miscompile was never what stopped Madaros compiling itself — the
 merge-capacity overflow was, and is. The Box repair removes a real
 miscompile that corrupts any `Box<T>` read (including the 174 ident-base
 sites in the compiler's own source), but the fixed-point ladder's next rung
-is gated by cross-module DCE (`spec_dce_unreachable_item_fns`) not running
-on the merge path, which is a separate task. The gate's own header names
-this wall and the 5997-of-10705 reachability gap behind it.
+is gated by a capacity overflow that cross-module DCE already runs against
+and still loses.
 
-What this means: do not expect gen2 to turn green from the Box fix alone.
-The recorded rung stays `check`; the ladder is unchanged, and that is the
-correct, bounded result.
+Sharpened by an A/B on the post-repair build (2026-08-18, `ac82ead7…`):
 
-## Fixed-point ladder — attribution, not progress
+    SOUNIO_MM_SPEC_TRACE=1   dce marks=7029
+                             census 1891 + 7206 = 9097 (over by 906)
+    SOUNIO_DISABLE_MM_DCE=1  census 1891 + 10929 = 12820 (over by 4629)
 
-The Box repair was dispatched because it "blocks gen1 == gen2". Measured
-against the fixed-point ladder (`scripts/ci/madaros_fixed_point_gate.sh`),
-it neither advances nor regresses that ladder — and saying so precisely is
-the point.
-
-Both the pre-fix build (SHA-256 `2dcaf159…`) and the post-repair build
-(SHA-256 `ac82ead7…`) reach rung **check** (the recorded rung) and fail the
-same way at rung **gen2**:
-
-    IR slot census: globals 1891 + functions 7206 = 9097 (max 8191, over by 906)
-    IR lowering failed during merge: too many lowered items: combined globals
-    and functions exceed shared IR module capacity (max 8191 slots)
-
-The wall is identical byte-for-byte across the two builds. So the Box
-auto-deref miscompile was never what stopped Madaros compiling itself — the
-merge-capacity overflow was, and is. The Box repair removes a real
-miscompile that corrupts any `Box<T>` read (including the 174 ident-base
-sites in the compiler's own source), but the fixed-point ladder's next rung
-is gated by cross-module DCE (`spec_dce_unreachable_item_fns`) not running
-on the merge path, which is a separate task. The gate's own header names
-this wall and the 5997-of-10705 reachability gap behind it.
+Cross-module DCE (`spec_dce_mark_across_programs`, wired onto the ordinary
+path by `146f5b039f`, hardened by `541536f777` and `731aee7b6f`) IS running
+and removes ~3700 dead functions. It is not that the pruning is missing — it
+is that the surviving 7206 live functions plus 1891 BSS globals still total
+9097 slots against a cap of `IR_MAX_FUNCS - 1 = 8191`. The gate's header
+records a name-based reachability census of 5997 live declarations, which
+would fit; the lowering's own count is higher because it counts every
+surviving `ItemFn` slot (impl methods included) and every BSS global, not
+just top-level reachable names. Closing rung gen2 therefore needs either a
+larger IR slot budget or a tighter live-set, not the Box fix.
 
 What this means: do not expect gen2 to turn green from the Box fix alone.
 The recorded rung stays `check`; the ladder is unchanged, and that is the
