@@ -165,15 +165,20 @@ this dispatch.
 
 ### R1 — The dependency graph is inverted
 
-Measured on `main`:
+Measured on `main` before the consumer (still the citation risk if this
+PR is unread):
 
 | Module | Imported by |
 |---|---|
 | `EpistemicEffects` (refuted) | `EpistemicEffectsV2`, `EpistemicPreservationWIP`, `EpistemicPreservationWIP_counterexample` — 3 dependents |
 | `EpistemicEffectsV2` (proven) | **nothing** |
 
-The refuted calculus is the one with dependents; the proven one is a leaf. V2
-imports V1 for shared definitions (`Effect`, `Ty`, `EffectSet`, `emptyE_sub`,
+On this branch the second row is `EpistemicEffectsV2_measure_nat` — one
+importer. That is the minimum that stops V2 from being a leaf. It is not
+coverage. See the count under **Landed (consumer)**.
+
+The refuted calculus is still the one with more dependents. V2 imports V1
+for shared definitions (`Effect`, `Ty`, `EffectSet`, `emptyE_sub`,
 `TyCtx`), which is legitimate reuse of the parts that were never in question —
 but it means the module a newcomer imports by name is the unsound one, and no
 mechanism nudges them elsewhere.
@@ -187,6 +192,24 @@ proves `measure_nat_reduct_stays_know_nat` — the V1 counterexample inverted.
 The correspondence gate's `--lean-consume` arm builds that module only after
 the V1 mutant (`v1_imports_measure_nat.lean`) fails to elaborate. A grep of
 `import EpistemicEffectsV2` without that mutant would measure mention, not use.
+
+**Coverage (measured 2026-08-18 on this file).** One importer ≠ V2 covered.
+Re-derive with the names in `EpistemicEffectsV2.lean` against the consumer
+source, comments stripped:
+
+| Layer | Client use | Remainder without an external client |
+|---|---|---|
+| Named theorems (`theorem`, 28) | **0** | **28** — including `preservation` and `effect_progress` |
+| `HasTy` rules (14) | 3 (`t_lit_nat`, `t_measure`, `t_kraw`) | 11 |
+| `Step` rules (19) | 1 (`meas_red`) | 18 |
+| `IsValue` rules (4) | 1 (`v_nat`) | 3 |
+
+The consumer cites no V2 theorem by name. It reconstructs one path — the
+inverted V1 witness — from constructors. That is one fact of many. The
+gate is right at that grain: it scores use of the import edge, not
+coverage of the metatheory. The next target is a coverage map of the 28
+theorems and the unused rules, not a second banner and not spine
+extraction.
 
 **Deferred — extract the shared spine.** A third module holding `Effect`, `Ty`,
 `EffectSet`, `TyCtx` would stop V2 from being a *client* of the refuted file.
@@ -233,8 +256,10 @@ do not attempt to close it under this dispatch.
 
 1. R1 and R2 landed. R3 recorded and explicitly deferred, not silently dropped.
    R1's remaining *fact* (V2 had no importer) is closed by
-   `EpistemicEffectsV2_measure_nat.lean`, not by the banner. Spine extraction
-   stays deferred — see §5 R1.
+   `EpistemicEffectsV2_measure_nat.lean`, not by the banner. That close is
+   an import edge, not metatheory coverage: **0 of 28** V2 theorems have an
+   external client. Spine extraction stays deferred — see §5 R1. The
+   coverage map is the next residual, not a restatement of the consumer.
 2. `Lean Proofs` green, with V1, V2, and `EpistemicEffectsV2_measure_nat` all
    `@[default_target]`. Deleting V1 to make the problem disappear is **out of
    scope** — the refutation is a result worth keeping, and §1's theorems are

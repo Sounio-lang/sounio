@@ -4,6 +4,13 @@ import EpistemicEffectsV2
 # V2 consumer — `measure` of a Nat stays `Knowledge<Nat>`
 
 This is the first Lean module that *imports* `EpistemicEffectsV2`.
+One importer stops V2 from being a leaf. It does not cover V2:
+this file cites **0 of the 28** named theorems in
+`EpistemicEffectsV2.lean` (including `preservation` and
+`effect_progress`). It reconstructs one path from constructors
+(`t_lit_nat`, `t_measure`, `t_kraw`, `meas_red`, `v_nat`).
+Count lives in `docs/audit/epistemic_calculus_spec_divergence/DISPATCH.md` §5 R1.
+
 V1 proves the opposite statement (`preservation_is_false` /
 `kraw_not_nat`): `measure (lit_nat 0)` steps to a `kraw` that cannot
 be typed at `Knowledge<Nat>`. That is the payload-erasing calculus.
