@@ -83,7 +83,7 @@ W1_TMP="$TMP/w1.sio"
     echo 'struct W1 { x: i64 }'
     echo 'fn alloc_one() -> W1 with Alloc { W1 { x: 1 } }'
     echo 'fn main() -> i64 with IO, Mut, Panic, Div, Alloc {'
-    var i=0
+    i=0
     while (( i < W1_COUNT )); do
         echo "    let _x$i = alloc_one()"
         i=$((i + 1))
