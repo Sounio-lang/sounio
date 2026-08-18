@@ -379,7 +379,8 @@ consume `kadd` as if it were the next coverage target.
    or 4/4. Spine extraction stays deferred until one of the three end
    conditions in §5 R1, not until N consumers.
 2. `Lean Proofs` green, with V1, V2, `EpistemicEffectsV2_measure_nat`,
-   and `EpistemicEffectsV2_kvalue_nat` all `@[default_target]`. Deleting
+   `EpistemicEffectsV2_kvalue_nat`, and `EpistemicEffectsV2_invkraw_nat`
+   all `@[default_target]`. Deleting
    V1 to make the problem disappear is **out of scope** — the refutation
    is a result worth keeping, and §1's theorems are its statement.
 3. The new gate's positive control demonstrated firing, with the output pasted

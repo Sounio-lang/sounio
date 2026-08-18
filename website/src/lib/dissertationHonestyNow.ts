@@ -27,9 +27,11 @@
  *
  * PEND is its own category. It is not a pass. Hiding it would make
  * 19 + 33 look like 53.
- * Do not treat #1874 (wire two leftover greens) as current main.
- * Reachability and engine live in measurementClaim.ts — this file
- * is the pbpk_suite instance, not a second kernel.
+ * #1880 wired confidence + frontend_parity into ci.yml. Those two
+ * are REACHABLE instances in dissertationWiredHonesty.ts. This file
+ * is still the pbpk_suite instance. Do not copy their binding here.
+ * suiteFaceParts refuses through claimMayPrint — the same predicate
+ * as U2. A second throw path would be a second render path.
  */
 
 export const MS_HOUR = 3_600_000;
@@ -43,11 +45,13 @@ export type FailFamily = {
 import {
   COMPILER_ENGINES,
   REACHABILITIES,
+  claimMayPrint,
   isCompilerEngine,
   isReachability,
   reachabilityComplete,
   reachabilityFace,
   type CompilerEngine,
+  type MeasurementClaim,
   type Reachability,
   type ReachabilityBinding,
 } from './measurementClaim';
@@ -70,11 +74,50 @@ export function REACHABILITY_FACE_OF(b: ReachabilityBinding): string {
   return reachabilityFace(b);
 }
 
-/** @deprecated use reachabilityFace — kept so existing gloss sites compile */
-export const REACHABILITY_FACE = {
-  'WORKFLOW-UNREACHABLE': 'not in CI',
-  'WORKFLOW-REACHABLE': 'in CI',
-} as const;
+export function suiteAsClaim(m: SuiteMeasure): MeasurementClaim {
+  return {
+    id: 'pbpk-suite',
+    kind: 'outcome',
+    gate: m.gate,
+    engine: m.engine,
+    ...bindingOf(m),
+    measuredAt: m.measuredAt,
+    artifact: m.doc,
+    parts: {
+      pass: m.pass,
+      fail: m.fail,
+      pend: m.pend,
+      skip: m.skip,
+      unknown: m.unknown,
+      registered: m.registered,
+    },
+  };
+}
+
+export function priorAsClaim(m: SuiteMeasure): MeasurementClaim {
+  return {
+    id: 'pbpk-suite-prior',
+    kind: 'outcome',
+    gate: m.gate,
+    engine: m.prior.engine,
+    ...bindingOf(m.prior),
+    measuredAt: m.prior.measuredOn,
+    artifact: `job ${m.prior.job}`,
+    parts: {
+      pass: m.prior.pass,
+      fail: m.prior.fail,
+      pend: m.prior.pend,
+      registered: m.registered,
+    },
+  };
+}
+
+export function suitePartsClose(c: MeasurementClaim): boolean {
+  return (
+    c.parts.pass + c.parts.fail + c.parts.pend + (c.parts.skip || 0) + (c.parts.unknown || 0) ===
+    c.parts.registered
+  );
+}
 
 export type MeasureProvenance = {
   engine: CompilerEngine;
@@ -185,7 +228,11 @@ export function provenanceComplete(m: {
 }
 
 export function measureMayPrint(m: SuiteMeasure): boolean {
-  return ledgerCloses(m) && provenanceComplete(m) && provenanceComplete(m.prior);
+  return (
+    ledgerCloses(m) &&
+    claimMayPrint(suiteAsClaim(m), suitePartsClose) &&
+    claimMayPrint(priorAsClaim(m), suitePartsClose)
+  );
 }
 
 /**
@@ -219,7 +266,7 @@ export type SuiteFaceParts = {
 export function suiteFaceParts(m: SuiteMeasure): SuiteFaceParts {
   if (!measureMayPrint(m)) {
     throw new Error(
-      'dissertationHonestyNow: refuse to print a pbpk_suite numeral without reachability and engine',
+      'measurementClaim: refuse to print pbpk-suite without reachability and engine',
     );
   }
   const numeral = `${m.fail} FAIL / ${m.registered}`;

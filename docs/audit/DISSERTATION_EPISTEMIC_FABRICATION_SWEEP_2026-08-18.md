@@ -41,12 +41,20 @@ Mechanism: `Knowledge.confidence` was `is_float:3` with f64 store → sitofp. Fi
 
 ### Family A — **GUM / Knowledge variance collapse** (Madaros-only zeros)
 
-Lean shows real variance; Madaros printed exact `0.000000` / `std(Knowledge)=0` on multi-RHS surfaces.
+**Calc vs print (re-measured 2026-08-18, after #1896):** Family A is **not** the Family B emitter. A live GUM var on these surfaces is ~`1e-4` — visible at 6 decimal places. The CALL path is an **exact 0 in the value**, not a print that rounded a tiny number away.
+
+| Probe | Madaros **value** (`v > 0` / `v > 1e-12`) | Madaros print | lean value |
+|---|---|---|---|
+| `print_f64(1e-7)` | n/a (literal) | `0.000000` (6dp fixed; 1e-7 rounds) | `1.000000e-7` (scientific) |
+| CALL `rhs(...)` then `variance_of` | **`CALL_VALUE_EQ_ZERO`**; `v*1e12` still prints 0 | `0.000000` | `0.000013` (`CALL_VALUE_GT_1e-12`) |
+| INLINE same arithmetic | **`INLINE_VALUE_GT_1e-12`** (`v ≈ 0.002117`) | `0.002117` | `0.000159` |
+
+So: a `0.000000` on the CALL path is a **false scientific statement**. A `0.000000` on `print_f64(1e-7)` is format. Do not treat them as one bug.
 
 | # | Surface | Before (Madaros) | lean_single | After contour (Madaros) |
 |---:|---|---|---|---|
-| A1 | `rapamycin_epistemic_adaptive` | `var=0` + `FABRICATED_ZERO` | non-zero; PASS | **non-zero + PASS** (RHS inlined) |
-| A2 | `rapamycin_rk4_budget` | `var=0`; silent | non-zero; PASS | **non-zero + PASS** (main-loop RHS inlined) |
+| A1 | `rapamycin_epistemic_adaptive` | `var=0` + `FABRICATED_ZERO` | non-zero; PASS | **`0.000100` + `FAMILY_A_VAR_LIVE` + PASS** (RHS inlined; value detector) |
+| A2 | `rapamycin_rk4_budget` | `var=0`; silent PASS | non-zero; PASS | **`0.000100` + `FAMILY_A_VAR_LIVE` + PASS** (main-loop RHS inlined; now fail-closed) |
 
 #### Root (discriminated 2026-08-18) — **not** the April ζ slot OOB alone
 
@@ -59,7 +67,9 @@ Lean shows real variance; Madaros printed exact `0.000000` / `std(Knowledge)=0` 
 
 **Cause:** Madaros first-order GUM / FO variance **does not survive user function call boundaries**. lean_single does. The `#1706` 1024 `variance_base_reg` silent-drop → `0.0` remains a related honesty hazard but is **not** required to explain A1/A2: a one-call, 20-step probe already zeros.
 
-**Contour (thesis surfaces):** inline `rhs_*` at call sites (same shape as iso). Compiler follow-up: interprocedural FO transfer. Regression: `tests/run-pass/gum_fo_across_call.sio` (to land with this wave).
+**Contour (thesis surfaces):** inline `rhs_*` at call sites (same shape as iso). Compiler follow-up: interprocedural FO transfer.
+
+**Root pin (Family B pattern):** `tests/run-pass/gum_fo_across_call.sio` is `//@ known-failure` with `expect-stdout: GUM_FO_ACROSS_CALL_OK` and now **exits 1** on zero. That is a failing pin of the CALL disease, not a passing test tagged known-failure. A1/A2 print `FAMILY_A_VAR_LIVE` so a re-introduced call cannot hide behind `PASS`.
 
 **Not closed by #1882.** Contour closes A1/A2 science surfaces; compiler FO-across-call remains open.
 
@@ -149,7 +159,7 @@ Among others, dual-engine clean on fabrication symptoms:
 
 ## 5. Next owners (do not conflate)
 
-1. **Family A thesis surfaces:** closed by #1889 RHS inline. **Compiler root open:** Madaros FO does not cross user `fn` calls — `tests/run-pass/gum_fo_across_call.sio`. Needs interprocedural FO / `lower.sio`; claim before edit.  
+1. **Family A thesis surfaces:** closed by #1889 RHS inline; re-measured live (`0.000100` Madaros / lean non-zero). **This is CALC, not print.** **Compiler root open:** Madaros FO does not cross user `fn` calls — `gum_fo_across_call.sio` now fail-closed (exit 1 + `expect-stdout: GUM_FO_ACROSS_CALL_OK`). Needs interprocedural FO / `lower.sio`; claim before edit. `#1792` stays OPEN until CALL is live.  
 2. **Family B thesis surfaces:** closed by `budget64_print_report` → `inf`. **Emitter root open:** Madaros `print_f64`/`println` for `|x| ≳ 1e19` — `print_f64_large_magnitude.sio`. lean_single already routes through `__native_print_f64_n` scientific.  
 3. **April ζ** — if deep-chain `variance_of` still yields `2^63` under current Madaros, track separately from B; do not close ζ by fixing print.  
 4. **Do not** reopen KCONF / weaken E170 / treat rc=182 as fabrication.
