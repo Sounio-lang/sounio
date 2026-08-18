@@ -1443,6 +1443,28 @@ fn invariant_framed_named_type(rank: i64, frame: Name, inner_ty: TypeEntry) -> T
 
 fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
+    // Seq<T>: language-level growable sequence (lean_single TY_SEQ). Lower to
+    // ty_seq(elem) so methods/index see the element type. Without this, Seq is a
+    // bare TyNamed and kaxi/ontology/model fail under Madaros check.
+    // NOTE: checker_lower_type_expr_list_mut returns TypeEntryList (not Option).
+    if name_matches_str3(name, 83, 101, 113) {
+        match type_args {
+            Some(args) => {
+                let lowered = checker_lower_type_expr_list_mut(c, *args)
+                // One type argument only (Seq<T>).
+                match lowered.tail {
+                    None => {
+                        return ty_seq_named(make_name("Seq"), lowered.head)
+                    }
+                    Some(_) => {}
+                }
+            }
+            None => {
+                // Bare Seq — element unknown until annotation/use.
+                return ty_seq_named(make_name("Seq"), ty_unknown())
+            }
+        }
+    }
     // Hyper<Algebra, T> — first-class hypercomplex type (Octonion/Sedenion/…). The non-inplace
     // resolver lower_named_type_with_args handles this at :14322; the inplace resolver (the one
     // that actually runs during checking) was missing it, so `Hyper<Octonion, f64>` degraded to
@@ -3513,6 +3535,13 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("file_size"))
     checker_bind_import_unknown_inplace(c, make_name("read_file"))
     checker_bind_import_unknown_inplace(c, make_name("read_i64"))
+    // Defect A (docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md):
+    // read_i64 was bound here already; write_i64/read_f64/write_f64 were not,
+    // which is the exact E137 this dispatch reproduced (stdlib/nn/optimizer.sio,
+    // stdlib/tensor/tape.sio, stdlib/data/bigframe*.sio, stdlib/collections/heap_vec.sio).
+    checker_bind_import_unknown_inplace(c, make_name("write_i64"))
+    checker_bind_import_unknown_inplace(c, make_name("read_f64"))
+    checker_bind_import_unknown_inplace(c, make_name("write_f64"))
     checker_bind_import_unknown_inplace(c, make_name("write_file"))
     checker_bind_import_unknown_inplace(c, make_name("print"))
     checker_bind_import_unknown_inplace(c, make_name("print_int"))
@@ -3575,10 +3604,28 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     // surface as E137 undeclared (heap_free, f64_to_bits, ...).
     checker_bind_import_unknown_inplace(c, make_name("heap_alloc"))
     checker_bind_import_unknown_inplace(c, make_name("heap_free"))
+    // heap_realloc has a real definition (stdlib/mem/box.sio, extern "C" realloc)
+    // -- unlike read_f64 etc it is NOT a compiler-codegen builtin, it just needs
+    // the same implicit-global registration heap_alloc/heap_free already have,
+    // or callers that don't `use` it explicitly (stdlib/data/bigframe.sio,
+    // stdlib/collections/heap_vec.sio) trip E137. Found alongside Defect A
+    // while validating its fix against a real bigframe consumer test, not part
+    // of the read_i64/write_i64/read_f64/write_f64 family itself.
+    checker_bind_import_unknown_inplace(c, make_name("heap_realloc"))
     checker_bind_import_unknown_inplace(c, make_name("f64_to_bits"))
     checker_bind_import_unknown_inplace(c, make_name("bits_to_f64"))
     checker_bind_import_unknown_inplace(c, make_name("starts_with"))
     checker_bind_import_unknown_inplace(c, make_name("read_byte"))
+    // Seq / acknowledge language surface (lean_single builtins). Without these,
+    // multi-module and single-module check both E137 on seq_new / acknowledge —
+    // the residual that blocks rapamycin_kaxi_fuse_prior and ontology/model.sio.
+    checker_bind_import_unknown_inplace(c, make_name("seq_new"))
+    checker_bind_import_unknown_inplace(c, make_name("seq_push"))
+    checker_bind_import_unknown_inplace(c, make_name("seq_get"))
+    checker_bind_import_unknown_inplace(c, make_name("seq_set"))
+    checker_bind_import_unknown_inplace(c, make_name("seq_len"))
+    checker_bind_import_unknown_inplace(c, make_name("seq_count"))
+    checker_bind_import_unknown_inplace(c, make_name("acknowledge"))
 }
 
 // *mut declaration collectors — port of the by-value collect_struct_def /
@@ -6025,6 +6072,18 @@ fn checker_check_index_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, 
     if !is_error_or_unknown(idx_ty) && !is_integer_type(idx_ty) {
         checker_report_error_at_inplace(c, e.span, 14, 0, 0, 0)
     }
+    // Seq<T>[i] -> T. Inlined here (not only via indexable_elem_type) because the
+    // free-function path was observed to still E013 on TyNamed("Seq") while the
+    // method path's is_seq_type(base) succeeded on the same binding.
+    if base_ty.kind == TypeKind::TyNamed {
+        let bn = base_ty.name
+        if bn.len == 3 && (bn.buf[0] as i64) == 83 && (bn.buf[1] as i64) == 101 && (bn.buf[2] as i64) == 113 {
+            match base_ty.inner {
+                Some(elem) => return *elem
+                None => return ty_error()
+            }
+        }
+    }
     let elem_ty = indexable_elem_type(base_ty)
     if !is_error_or_unknown(base_ty) && elem_ty.kind == TypeKind::TyError {
         // base is a concrete-but-not-indexable type (E13).
@@ -6546,7 +6605,72 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             None => {}
         }
         checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        // Seq.len() returns Knowledge<i64> under lean_single; arrays/slices stay i64.
+        if is_seq_type(base_ty) {
+            return ty_knowledge(ty_i64(), 0.0 - 1.0)
+        }
         return ty_i64()
+    }
+    // Seq<T> methods: .push / .count / .get / .set / .push_uncertain (lean_single surface).
+    if is_seq_type(base_ty) {
+        let elem_ty = seq_elem_type(base_ty)
+        let call_start_borrows = (*c).borrows
+        // push(v) / push_uncertain(v, conf, var)
+        if name_matches_str4(e.name, 112, 117, 115, 104) {
+            let first = expr_list_head(e.args)
+            match first {
+                None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                Some(_) => {
+                    let arg_ty = checker_check_opt_expr_inplace(c, first)
+                    if !is_error_or_unknown(arg_ty) && !is_error_or_unknown(elem_ty) {
+                        if !checker_types_compatible_inplace(c, arg_ty, elem_ty) {
+                            checker_report_mismatch_inplace(c, e.span, 9, elem_ty, arg_ty)
+                        }
+                    }
+                }
+            }
+            // Consume remaining args (push_uncertain has conf/var) without re-typing first.
+            match e.args {
+                Some(list) => {
+                    checker_check_expr_list_no_type_no_linear_consume_inplace(c, (*list).tail)
+                }
+                None => {}
+            }
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_unit()
+        }
+        if name_matches_str14(e.name, 112, 117, 115, 104, 95, 117, 110, 99, 101, 114, 116, 97, 105, 110) {
+            // push_uncertain
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_unit()
+        }
+        if name_matches_str5(e.name, 99, 111, 117, 110, 116) {
+            // count() -> i64
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            match e.args {
+                Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                None => {}
+            }
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_i64()
+        }
+        if name_matches_str3(e.name, 103, 101, 116) {
+            // get(i) -> T
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return elem_ty
+        }
+        if name_matches_str3(e.name, 115, 101, 116) {
+            // set(i, v)
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_unit()
+        }
+        checker_report_error_at_inplace(c, e.span, 11, 0, 0, 0)
+        checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+        checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+        return ty_error()
     }
     if base_ty.kind == TypeKind::TyKnowledge {
         if name_matches_str6(e.name, 117, 110, 119, 114, 97, 112) {
@@ -6900,6 +7024,132 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     ty_knowledge(v_ty, 0.0 - 1.0)
 }
 
+// seq_new() -> Seq<_>. Element type comes from the binding annotation
+// (`var s: Seq<T> = seq_new()`): return ty_unknown so types_compatible accepts
+// any Seq annotation (compat treats bare/unknown Seq as wildcard).
+fn checker_check_seq_new_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match e.args {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    // Bare element; binding annotation `var s: Seq<T> = seq_new()` supplies T
+    // via types_compatible Seq wildcard (missing/unknown inners).
+    ty_seq_named(make_name("Seq"), ty_unknown())
+}
+
+fn checker_check_seq_push_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let seq_ty = checker_check_opt_expr_inplace(c, first_arg)
+    let v_ty = checker_check_opt_expr_inplace(c, second_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    if !is_error_or_unknown(seq_ty) && !is_seq_type(seq_ty) {
+        checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
+    }
+    if is_seq_type(seq_ty) {
+        let elem = seq_elem_type(seq_ty)
+        if !is_error_or_unknown(v_ty) && !is_error_or_unknown(elem) {
+            if !checker_types_compatible_inplace(c, v_ty, elem) {
+                checker_report_mismatch_inplace(c, e.span, 9, elem, v_ty)
+            }
+        }
+    }
+    ty_unit()
+}
+
+fn checker_check_seq_get_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let seq_ty = checker_check_opt_expr_inplace(c, first_arg)
+    let _idx_ty = checker_check_opt_expr_inplace(c, second_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    if is_seq_type(seq_ty) {
+        return seq_elem_type(seq_ty)
+    }
+    if !is_error_or_unknown(seq_ty) {
+        checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
+    }
+    ty_error()
+}
+
+fn checker_check_seq_set_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_unit()
+}
+
+fn checker_check_seq_len_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let _seq_ty = checker_check_opt_expr_inplace(c, first_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    // lean_single: seq_len -> Knowledge<i64>
+    ty_knowledge(ty_i64(), 0.0 - 1.0)
+}
+
+fn checker_check_seq_count_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let _seq_ty = checker_check_opt_expr_inplace(c, first_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        Some(_) => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        None => {}
+    }
+    ty_i64()
+}
+
+// acknowledge(k: Knowledge<T>, reason: string) -> T. lean_single builtin.
+fn checker_check_acknowledge_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let k_ty = checker_check_opt_expr_inplace(c, first_arg)
+    let _reason_ty = checker_check_opt_expr_inplace(c, second_arg)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    // Epistemic effect required (same honesty gate as .value / E170).
+    let epistemic_id: i64 = 8
+    if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
+        checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
+    }
+    if k_ty.kind == TypeKind::TyKnowledge {
+        return knowledge_inner(k_ty)
+    }
+    if !is_error_or_unknown(k_ty) {
+        checker_report_error_at_inplace(c, e.span, 9, 0, 0, 0)
+    }
+    ty_error()
+}
+
 fn checker_check_knowledge_ctor_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<T>.
     // Same shape as checker_check_measure_expr_inplace: T comes from the first argument,
@@ -7206,6 +7456,27 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     if call_expr_is_builtin_measure(e.left) {
         return checker_check_measure_expr_inplace(c, e)
     }
+    if call_expr_is_builtin_seq_new(e.left) {
+        return checker_check_seq_new_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_seq_push(e.left) {
+        return checker_check_seq_push_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_seq_get(e.left) {
+        return checker_check_seq_get_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_seq_set(e.left) {
+        return checker_check_seq_set_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_seq_len(e.left) {
+        return checker_check_seq_len_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_seq_count(e.left) {
+        return checker_check_seq_count_expr_inplace(c, e)
+    }
+    if call_expr_is_builtin_acknowledge(e.left) {
+        return checker_check_acknowledge_expr_inplace(c, e)
+    }
     if call_expr_is_builtin_knowledge_ctor(e.left) {
         return checker_check_knowledge_ctor_expr_inplace(c, e)
     }
@@ -7336,8 +7607,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // #1622: calling an `extern "C"` name the native backend does not
         // implement. This is the live arm -- a plain ident callee resolves via
         // direct_sig_id and returns below, never reaching the TyFn fallback.
+        var refused_unimplemented = false
         if direct_sig.is_extern && !name_is_native_backend_builtin(direct_sig.name) {
             checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+            refused_unimplemented = true
         }
         var effective_params = fn_param_list_clone(&direct_sig.params)
         var effective_return_type = direct_sig.return_type
@@ -7366,6 +7639,9 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         )
         checker_check_callee_effects_named_inplace(c, e.span, direct_sig.effects, direct_sig.effect_count, direct_sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
+        if refused_unimplemented {
+            return ty_error()
+        }
         return effective_return_type
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
@@ -7424,8 +7700,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         // parser_card_a_raw_pointer_types.sio declares malloc and never calls
         // it -- both compile and pass today, and a declaration-site refusal
         // would break them for no gain.
+        var refused_unimplemented = false
         if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
             checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
+            refused_unimplemented = true
         }
         let call_start_borrows = (*c).borrows
         var effective_params = fn_param_list_clone(&sig.params)
@@ -7449,7 +7727,11 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         checker_check_call_args_inplace(c, expr_list_handle(e.args), fn_param_list_handle(effective_params), sig.param_count, e.span)
         checker_check_callee_effects_named_inplace(c, e.span, sig.effects, sig.effect_count, sig.name)
         checker_release_call_arg_borrows_inplace(c, e.args, effective_params, call_start_borrows)
-        effective_return_type
+        if refused_unimplemented {
+            ty_error()
+        } else {
+            effective_return_type
+        }
     } else if is_error_or_unknown(callee_ty) {
         let call_start_borrows = (*c).borrows
         checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
@@ -13102,7 +13384,7 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("   |\n   = help: V0-A exposes binary128/binary256 descriptors internally but rejects every source-level use before IR\n")
     }
     else if code == 219 {
-        print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6\n")
+        print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system, read_i64, write_i64, read_f64, write_f64\n")
     }
     else {
         // No help available for unknown errors
@@ -13696,6 +13978,76 @@ fn call_expr_is_builtin_measure(opt: Option<Box<Expr> >) -> bool with Mut, Panic
     }
 }
 
+fn call_expr_is_builtin_seq_new(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_matches_str7((*expr).name, 115, 101, 113, 95, 110, 101, 119)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_seq_push(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_matches_str8((*expr).name, 115, 101, 113, 95, 112, 117, 115, 104)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_seq_get(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_matches_str7((*expr).name, 115, 101, 113, 95, 103, 101, 116)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_seq_set(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_matches_str7((*expr).name, 115, 101, 113, 95, 115, 101, 116)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_seq_len(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_matches_str7((*expr).name, 115, 101, 113, 95, 108, 101, 110)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_seq_count(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_matches_str9((*expr).name, 115, 101, 113, 95, 99, 111, 117, 110, 116)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_acknowledge(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent { return false }
+            name_matches_str11((*expr).name, 97, 99, 107, 110, 111, 119, 108, 101, 100, 103, 101)
+        }
+        None => false
+    }
+}
+
 // `Knowledge(v, e=<confidence>, prov=<provenance>)` — the constructor-CALL form of the
 // epistemic literal (the other form is the struct literal `Knowledge { .. }`). lean_single
 // accepts it; Madaros used to resolve the callee ident `Knowledge` through the ordinary
@@ -13858,6 +14210,13 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("exit")) { return true }             // id 30
     if name_eq(n, make_name("abort")) { return true }            // id 31
     if name_eq(n, make_name("system")) { return true }           // id 32
+    // Defect A: raw pointer-indexed accessor family (see check.sio's
+    // checker_collect_runtime_builtins_inplace and codegen_x86_linux.sio's
+    // emit_builtin_read_offset64_into / emit_builtin_write_offset64_into).
+    if name_eq(n, make_name("read_i64")) { return true }         // id 33
+    if name_eq(n, make_name("write_i64")) { return true }        // id 34
+    if name_eq(n, make_name("read_f64")) { return true }         // id 35
+    if name_eq(n, make_name("write_f64")) { return true }        // id 36
     false
 }
 
@@ -15142,6 +15501,10 @@ fn indexable_elem_type(base_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Al
     if base_ty.kind == TypeKind::TyString {
         return ty_i64()
     }
+    // Seq<T>[i] -> T (lean_single TY_SEQ index path).
+    if is_seq_type(base_ty) {
+        return seq_elem_type(base_ty)
+    }
     if base_ty.kind == TypeKind::TyArray
         || base_ty.kind == TypeKind::TySlice
         || base_ty.kind == TypeKind::TySliceMut {
@@ -15170,6 +15533,9 @@ fn indexable_elem_type(base_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Al
 }
 
 fn len_method_supported(base_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if is_seq_type(base_ty) {
+        return true
+    }
     if base_ty.kind == TypeKind::TyString
         || base_ty.kind == TypeKind::TyArray
         || base_ty.kind == TypeKind::TySlice
@@ -20425,6 +20791,16 @@ impl Checker {
         if !is_error_or_unknown(idx_ty) && idx_ty.kind != TypeKind::TyI64 {
             c = c.report_error_at(e.span, 14, 0, 0, 0)
         }
+        // Seq<T>[i] -> T (mirror of checker_check_index_inplace).
+        if base_ty.kind == TypeKind::TyNamed {
+            let bn = base_ty.name
+            if bn.len == 3 && (bn.buf[0] as i64) == 83 && (bn.buf[1] as i64) == 101 && (bn.buf[2] as i64) == 113 {
+                match base_ty.inner {
+                    Some(elem) => return (c, *elem)
+                    None => return (c, ty_error())
+                }
+            }
+        }
         let elem_ty = indexable_elem_type(base_ty)
         if !is_error_or_unknown(base_ty) && elem_ty.kind == TypeKind::TyError {
             c = c.report_error_at(e.span, 13, 0, 0, 0)
@@ -21055,8 +21431,10 @@ impl Checker {
             // parser_card_a_raw_pointer_types.sio declares malloc and never
             // calls it — both compile and pass today, and a declaration-site
             // refusal would break them for no gain.
+            var refused_unimplemented = false
             if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
                 c = c.report_error_at(e.span, 219, 0, 0, 0)
+                refused_unimplemented = true
             }
             let call_start_borrows = c.borrows
             var effective_params = fn_param_list_clone(&sig.params)
@@ -21085,7 +21463,11 @@ impl Checker {
             // Release borrows taken for call arguments — the call has returned,
             // so exclusive/shared borrows on arguments are no longer active.
             c = c.release_call_arg_borrows(e.args, effective_params, call_start_borrows)
-            (c, effective_return_type)
+            if refused_unimplemented {
+                (c, ty_error())
+            } else {
+                (c, effective_return_type)
+            }
         } else if is_error_or_unknown(callee_ty) {
             let call_start_borrows = c.borrows
             c = c.check_expr_list_no_type_no_linear_consume(e.args)
