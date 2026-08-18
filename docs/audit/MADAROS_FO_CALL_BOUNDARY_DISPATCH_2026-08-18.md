@@ -176,6 +176,8 @@ What the FO programme itself did when it outgrew 2 — **read, not ported**: it 
 | `rhs_blood` (plain finite-diff only) | **11** | nest + OpSub + OpDiv | **still skipped** | **still skipped** (11>8) |
 | `gum_fo` `rhs(c,cl,fu)` | 3 | nest + OpSub + OpDiv | arity yes, body no | arity yes, body no |
 
+Census of `fn` with arity > 2 in 41 thesis-ish `tests/run-pass` files (rapamycin / dissertation / gum_fo / pbpk / …): **58 helpers** (38×3, 15×4, 4×5–8, **1×11** = `rhs_blood`). None of those 58 have a catalog body (`id` / `p0+p1` / `p0*p1` / `ℓ·p0`). 37 contain `−` or `/`. A skip-only bump therefore **changes the behaviour of zero thesis helpers**. The 58 stay unregistered because of body shape (and `rhs_blood` also because 11 > 8).
+
 Today’s thesis **numbers** are live because of inline, not because of the ceiling. If the model is written as functions again: a ceiling of 4 or 8 still misses `rhs_blood` (11) and still misses every body that is not id/scale/add/mul. A small skip bump is **not** a small fix with large thesis value. The large value needs the bytecode path (≤4 then 8 then 16) that the preserved FO programme already named — grok-cli5’s viability triage, not this lane.
 
 Naive lift risk: changing `return lo` to “collect 2 names and classify anyway” would make `id3` look like `id1` (correct) and `add3` look like `add2` (silent **under**-estimate). Worse than an honest 0 if nobody is looking.
