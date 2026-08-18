@@ -45,7 +45,7 @@ run_madaros check "$FIXTURES/reject_nonknowledge.sio" >"$WORK/reject.check" 2>&1
 reject_rc=$?
 set -e
 [[ "$reject_rc" -ne 0 ]] || fail "non-Knowledge acknowledge argument was accepted"
-grep -q 'error\[E004\]' "$WORK/reject.check" || {
+grep -q 'error\[E009\]' "$WORK/reject.check" || {
   cat "$WORK/reject.check" >&2
   fail "non-Knowledge control was rejected for an unexpected reason"
 }
