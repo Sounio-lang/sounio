@@ -68,6 +68,52 @@ pass() { PASS=$((PASS+1)); echo "PASS $1"; }
 fail() { FAIL=$((FAIL+1)); echo "FAIL $1" >&2; }
 
 ###############################################################################
+# Gate self-control: assert a generated witness source has the expected shape.
+#
+# Args:
+#   $1     — label (W1..W4) for diagnostics
+#   $2     — path to the generated .sio file
+#   $3..N  — required string fragments (each must appear as a substring)
+#
+# Behaviour:
+#   - If file is missing or empty: FAIL with "source file missing or empty",
+#     print actual file path, exit 2 (distinct from witness pass/fail).
+#   - If file is missing any required fragment: FAIL with the missing fragment,
+#     dump the first 30 lines of the actual file so the caller can see why the
+#     generator aborted, exit 2.
+#   - Otherwise: return 0 and continue to the witness compile/run.
+#
+# Why this is the right control (not just [[ -s ]]):
+#   - The first failure of this gate (var i=0 leaking Sounio syntax into the
+#     W1 generator) aborted the heredoc BEFORE writing the expected content,
+#     but the file *was* created (bash opens the redirect before running the
+#     generator body). A size check alone would have missed it. The content
+#     shape check is what surfaces the abort.
+#   - Self-test failures exit 2 and tag the run as SELFTEST_FAIL, so a CI
+#     consumer can distinguish gate-broke-itself from witness-really-failed.
+###############################################################################
+gate_assert_witness_source() {
+    local label="$1"
+    local path="$2"
+    shift 2
+    if [[ ! -s "$path" ]]; then
+        echo "FAIL gate self-test [$label]: source file missing or empty: $path" >&2
+        echo "HANDLE_TABLE_CEILING_GATE_SELFTEST_FAIL [$label]" >&2
+        exit 2
+    fi
+    local frag
+    for frag in "$@"; do
+        if ! grep -qF -- "$frag" "$path"; then
+            echo "FAIL gate self-test [$label]: source missing expected fragment: $frag" >&2
+            echo "  actual file content (first 30 lines):" >&2
+            sed -n '1,30p' "$path" | sed 's/^/    /' >&2
+            echo "HANDLE_TABLE_CEILING_GATE_SELFTEST_FAIL [$label]" >&2
+            exit 2
+        fi
+    done
+}
+
+###############################################################################
 # W1: compile-time refusal on a program with > capacity MIR_OP_ALLOC sites.
 #
 # A naive source with `count` `let x = make_alloc()` lines generates one
@@ -92,6 +138,13 @@ W1_TMP="$TMP/w1.sio"
     echo '    0'
     echo '}'
 } > "$W1_TMP"
+
+gate_assert_witness_source W1 "$W1_TMP" \
+    '// W1:' \
+    'fn alloc_one()' \
+    'fn main() -> i64 with IO, Mut, Panic, Div, Alloc {' \
+    '    let _x0 = alloc_one()' \
+    '    print("hello\n")'
 
 echo
 echo "--- W1: program with $W1_COUNT MIR_OP_ALLOC sites (capacity is $CAPACITY) ---"
@@ -148,6 +201,13 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 }
 EOF
 
+gate_assert_witness_source W2 "$W2_TMP" \
+    '// W2:' \
+    'struct W2 { x: i64 }' \
+    'fn alloc_one()' \
+    'while i < '"$W2_ITERS" \
+    'print("done\n")'
+
 echo
 echo "--- W2: loop with $W2_ITERS allocs (90% boundary at iteration 3774874) ---"
 set +e
@@ -198,6 +258,13 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
 }
 EOF
 
+gate_assert_witness_source W3 "$W3_TMP" \
+    '// W3:' \
+    'struct W3 { x: i64 }' \
+    'fn alloc_one()' \
+    'while i < '"$W3_ITERS" \
+    'print("done\n")'
+
 echo
 echo "--- W3: loop with $W3_ITERS allocs (capacity is $CAPACITY) ---"
 set +e
@@ -231,6 +298,13 @@ fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     0
 }
 EOF
+
+gate_assert_witness_source W4 "$W4_TMP" \
+    '// W4:' \
+    'struct W4 { x: i64 }' \
+    'fn main() -> i64 with IO, Mut, Panic, Div, Alloc {' \
+    'let _x = W4 { x: 1 }' \
+    'print("hi\n")'
 
 echo
 echo "--- W4: negative control (1 alloc) ---"
