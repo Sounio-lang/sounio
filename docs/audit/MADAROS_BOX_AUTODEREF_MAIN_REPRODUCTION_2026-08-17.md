@@ -186,3 +186,15 @@ field-chain Box) still SIGSEGVs at runtime, and binding a Box field into a
 local reads 0. Both are outside the witness matrix; the 174 auto-deref sites
 that block gen1 == gen2 are ident-base reads, which now all resolve against
 T.
+
+Both residuals closed in `6ab8e0f2a1` (same branch, source build SHA-256
+`fdb8dd633782ba5937b9b9fb66b5986412eb6e46b51b511f6ac6b8b3122b491c`): a
+Box-only field predicate (`is_float == 4` AND `named_type_name_id == Box`,
+so a `&T` field keeps raw semantics), an explicit-deref route for field
+chains, a bind site narrowed to Box fields, and a read site that treats a
+Box-tagged local with layout −1 as "deref, then resolve by name" — the
+route the explicit `(*p).f` form already takes. The witness grew 12 → 14
+checks and prints `BOXMATRIX OK`; `let bi = hb.inner; bi.tag` reads 9 (was
+0) and `(*hb.inner).tag` reads 9 (was SIGSEGV). The Box surface measured in
+this audit is now closed: every read form — param, local, field chain,
+auto and explicit — resolves against T.
