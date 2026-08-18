@@ -4,7 +4,7 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, pt_read_start, pt_read_end, parser_peek_ahead, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_take_expr_box}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -55,6 +55,57 @@ pub fn items_reset_pure_fn_reg() with Mut {
     PURE_FN_CALL_DEPTH = 0
     PURE_FN_ACTIVE_SLOT = 0 - 1
     pure_fn_local_reset()
+}
+
+// #1547: an `extern "C" { ... }` block declares N functions but
+// parse_extern_fn_item returns a single Item. Decls 2..N queue on this
+// module-global side channel (same pattern as TPLET_PENDING in stmts.sio and
+// the AST claim registry — the Parser struct is copied by value and must not
+// grow) and are drained by parse_program_loop / parse_items_loop in
+// parser::mod right after each parse_item call.
+//
+// The queue is intentionally self-clearing with NO per-parse reset fn: under
+// the pinned source-bootstrap stage2 chain, a reset write to this global from
+// parse_items_preloaded corrupts parser state for subsequent tokens and every
+// --check parse fails (CI job "Source-Bootstrap Self-Host (Linux x86_64)",
+// step "Source-bootstrap modular typecheck proof"). items_drain_extern_pending
+// empties the queue after every parse_item call, and both top-level loops run
+// to EOF, so no reset is needed. Do not re-add one without re-running that CI
+// step against a stage2-built lean check-out.
+var EXTERN_PENDING_ITEMS: Option<Box<ItemList>> = None
+
+fn items_push_extern_pending(item: Item) with Mut, Alloc {
+    EXTERN_PENDING_ITEMS = Some(Box::new(ItemList { head: item, tail: EXTERN_PENDING_ITEMS }))
+}
+
+// Drain queued extern decls onto rev_items_opt preserving source order, and
+// clear the queue. Safe to call when the queue is empty (returns input).
+pub fn items_drain_extern_pending(rev_items_opt: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Alloc {
+    var out = rev_items_opt
+    var pend = EXTERN_PENDING_ITEMS
+    EXTERN_PENDING_ITEMS = None
+    // Queue head is the LAST parsed decl (cons order); reverse once so decls
+    // land on the item stream in source order after the caller's final reverse.
+    var fwd: Option<Box<ItemList>> = None
+    while true {
+        match pend {
+            Some(node) => {
+                fwd = Some(Box::new(ItemList { head: (*node).head, tail: fwd }))
+                pend = (*node).tail
+            },
+            None => break,
+        }
+    }
+    while true {
+        match fwd {
+            Some(node) => {
+                out = Some(Box::new(ItemList { head: (*node).head, tail: out }))
+                fwd = (*node).tail
+            },
+            None => break,
+        }
+    }
+    out
 }
 
 fn pure_fn_local_bind(name: Name, value: i64) with Mut, Div {
@@ -1018,8 +1069,30 @@ impl Parser {
             }
         }
 
+        // Detect "claim NAME {" declarations when claim is treated as an
+        // identifier (the boot4-safe lexer returns Ident for "claim", same as
+        // "module"). Requires both the name and the opening brace so ordinary
+        // uses of `claim` as an identifier fall through to error recovery.
+        var is_claim_decl = false
+        if item_kind == TokenKind::Ident {
+            let claim_probe = p.current_name()
+            if claim_probe.len == 5
+                && claim_probe.buf[0] == (99 as i8)
+                && claim_probe.buf[1] == (108 as i8)
+                && claim_probe.buf[2] == (97 as i8)
+                && claim_probe.buf[3] == (105 as i8)
+                && claim_probe.buf[4] == (109 as i8) {
+                if parser_peek_ahead(p, 1) == TokenKind::Ident
+                    && parser_peek_ahead(p, 2) == TokenKind::LBrace {
+                    is_claim_decl = true
+                }
+            }
+        }
+
         if is_module_decl {
             p.parse_module_item(visibility)
+        } else if is_claim_decl {
+            parse_claim_item(p, visibility)
         } else if item_kind == TokenKind::Fn {
             p.parse_fn_item(visibility, is_kernel)
         } else if item_kind == TokenKind::Struct {
@@ -1174,10 +1247,27 @@ impl Parser {
         // "consume until Newline" loop ran to EOF and swallowed the entire file as a
         // single item — leaving every subsequent fn/struct unparsed in multi-module
         // compilation (the imported typecheck then saw 0 functions for these modules).
-        while parser_peek(p) == TokenKind::Ident
-            || parser_peek(p) == TokenKind::ColonColon
-            || parser_peek(p) == TokenKind::Ontology {
+        // Consumed STRUCTURALLY -- one segment, then (:: segment)* -- rather than
+        // by a flat "keep taking tokens of these kinds" loop. A segment may be a
+        // keyword: `module resolve::scope` and `module interop::kernel` are real
+        // declarations in this tree, and the flat loop rejected them, stopping
+        // after `resolve::` so the item dispatch met `scope` where an item should
+        // start (items.sio:1115). The old loop had already been patched once with
+        // TokenKind::Ontology for exactly this reason, one word at a time.
+        //
+        // Blanket-accepting keywords in the FLAT loop would have been wrong: the
+        // token after the last segment is usually `struct` or `fn`, themselves
+        // keywords, and the loop would swallow the rest of the file -- the very
+        // failure the comment above records. Structure stops it: after the last
+        // segment the next token is not `::`, so the loop ends.
+        if parser_peek(p) == TokenKind::Ident || tk_is_keyword(parser_peek(p)) {
             p = p.advance_raw()
+            while parser_peek(p) == TokenKind::ColonColon {
+                p = p.advance_raw()
+                if parser_peek(p) == TokenKind::Ident || tk_is_keyword(parser_peek(p)) {
+                    p = p.advance_raw()
+                }
+            }
         }
         if parser_peek(p) == TokenKind::Newline {
             p = p.advance_raw()
@@ -1436,6 +1526,7 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: is_kernel,
+            is_extern: false,
         }
 
         (p, Item {
@@ -1987,6 +2078,7 @@ impl Parser {
             body: body,
             span: span,
             is_kernel: false,
+            is_extern: false,
         }
 
         (p, Item {
@@ -4075,8 +4167,9 @@ impl Parser {
     }
 
     // Sprint 108: extern "C" fn name(params) -> RetType (no body)
-    // Also accept brace-form extern blocks and conservatively retain only the
-    // first parsed declaration in the returned Item.
+    // Brace-form extern blocks retain ALL declarations: the first is returned
+    // as the Item, decls 2..N queue on EXTERN_PENDING_ITEMS for the top-level
+    // loops to drain (#1547). All extern decls carry is_extern: true.
     fn parse_extern_fn_item(self, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
@@ -4116,6 +4209,15 @@ impl Parser {
                         first_params_opt = params_opt
                         first_ret_ty = ret_ty
                         have_first = true
+                    } else {
+                        // #1547: retain decls 2..N (previously dropped, then
+                        // re-created as name-only stubs only for builtin names —
+                        // non-builtin externs vanished entirely). Queue each as a
+                        // full ItemFn; parse_program_loop/parse_items_loop drain
+                        // EXTERN_PENDING_ITEMS right after parse_item returns.
+                        let decl_span = p.span_from(start)
+                        let decl_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: decl_span }, span: decl_span, is_kernel: false, is_extern: true }
+                        items_push_extern_pending(Item { kind: ItemKind::ItemFn, span: decl_span, visibility: visibility, name: name, fn_def: Some(Box::new(decl_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
                     }
                     while parser_peek(p) == TokenKind::Semi {
                         p = p.advance()
@@ -4126,7 +4228,7 @@ impl Parser {
             p = p.expect(TokenKind::RBrace)
             let span = p.span_from(start)
             if have_first {
-                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false }
+                let fn_def = FnDef { name: first_name, params: first_params_opt, return_type: first_ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
                 return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: first_name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
             }
             return (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: empty_name(), fn_def: None, struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
@@ -4153,7 +4255,7 @@ impl Parser {
             p = p.advance()
         }
         let span = p.span_from(start)
-        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false }
+        let fn_def = FnDef { name: name, params: params_opt, return_type: ret_ty, effects: None, body: Block { stmts: None, span: span }, span: span, is_kernel: false, is_extern: true }
         (p, Item { kind: ItemKind::ItemFn, span: span, visibility: visibility, name: name, fn_def: Some(Box::new(fn_def)), struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None, acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None, transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None, alternative_frontier_def: None, models_def: None, validation_def: None, audit_def: None, use_path: empty_path(), use_glob: false, use_items: None, effect_def: None, session_decl: None, trait_def: None, algebra_def: None, study_def: None, ontology_def: None })
     }
 
@@ -5582,5 +5684,135 @@ fn parse_ontology_item(p: Parser, visibility: Visibility) -> (Parser, Item) with
         algebra_def: None,
         study_def: None,
         ontology_def: Some(Box::new(odef)),
+    })
+}
+
+// ============================================================
+// Claim declaration parser
+// ============================================================
+// Parses: claim name { field = value, ... }
+//   value ::= string-literal | int-literal | float-literal | ident | path
+// Fields may be separated by commas, semicolons, or newlines; a trailing
+// separator is allowed. The parsed ClaimDecl is recorded in the AST claim
+// registry (ast_record_claim). The returned Item carries
+// ItemKind::ItemClaim and is dropped from the item stream by the parse
+// driver (parser::mod), so claims never reach resolve/check/codegen.
+
+fn parse_claim_item(p: Parser, visibility: Visibility) -> (Parser, Item) with Mut, IO, Panic, Div, Alloc {
+    let start = p.current_span()
+    var pa = p.advance()  // skip 'claim'
+
+    var name = empty_name()
+    if parser_peek(pa) == TokenKind::Ident {
+        name = pa.current_name()
+        pa = pa.expect_ident()
+    }
+    pa = pa.expect(TokenKind::LBrace)
+
+    var decl = empty_claim_decl()
+    decl.name = name
+    // Feed the text-preserving registry directly from the parser local (the
+    // ClaimDecl storage path is lossy for nested Names; see
+    // ast_claim_note_field_text).
+    ast_claim_note_name_text(name)
+
+    while pa.peek() != TokenKind::RBrace && pa.peek() != TokenKind::Eof {
+        while pa.peek() == TokenKind::Semi || pa.peek() == TokenKind::Newline || pa.peek() == TokenKind::Comma {
+            pa = pa.advance()
+        }
+        if pa.peek() == TokenKind::RBrace || pa.peek() == TokenKind::Eof {
+            break
+        }
+
+        if parser_peek(pa) != TokenKind::Ident {
+            // Unknown token in claim body: skip it (error recovery, same as
+            // parse_study_item's fallthrough) without poisoning had_error.
+            pa = pa.advance()
+        } else {
+            let field_name = pa.current_name()
+            pa = pa.advance()
+            pa = pa.expect(TokenKind::Eq)
+            let vstart = pt_read_start(pa.pos)
+
+            var fv = empty_claim_field()
+            fv.name = field_name
+            var fv_ok = true
+            let vk = pa.peek()
+            if vk == TokenKind::StringLit {
+                fv.value = pa.current_name()
+                fv.kind = CLAIM_VALUE_STRING
+                pa = pa.advance()
+            } else if vk == TokenKind::IntLit {
+                fv.value = pa.current_name()
+                fv.kind = CLAIM_VALUE_INT
+                pa = pa.advance()
+            } else if vk == TokenKind::FloatLit {
+                fv.value = pa.current_name()
+                fv.kind = CLAIM_VALUE_FLOAT
+                pa = pa.advance()
+            } else if vk == TokenKind::Ident {
+                // Bare identifier or path (Evidence::InstrumentControlled).
+                let val_pair = pa.parse_audit_name_value()
+                pa = val_pair.0
+                fv.value = val_pair.1
+                fv.kind = CLAIM_VALUE_PATH
+            } else {
+                fv_ok = false
+                pa.had_error = true
+                pa.error_count = pa.error_count + 1
+                pa = pa.advance()
+            }
+            let vend = pt_read_end(pa.pos - 1)
+            if fv_ok && decl.n_fields < 16 {
+                // Text-preserving registry (self-falsifying compiler rung):
+                // feed the field name and the value's source span directly
+                // from parser state. Names nested in ClaimDecl do not survive
+                // the struct store path (values arrive truncated), so the
+                // value text is recovered by slicing the source file.
+                ast_claim_note_field_name(decl.n_fields as i64, field_name)
+                ast_claim_note_field_span(decl.n_fields as i64, vstart, vend)
+                decl.fields[decl.n_fields as usize] = fv
+                decl.n_fields = decl.n_fields + 1
+            }
+        }
+    }
+
+    pa = pa.expect(TokenKind::RBrace)
+    let span = pa.span_from(start)
+
+    ast_record_claim(decl)
+
+    (pa, Item {
+        kind: ItemKind::ItemClaim,
+        span: span,
+        visibility: visibility,
+        name: name,
+        fn_def: None,
+        struct_def: None,
+        enum_def: None,
+        impl_def: None,
+        type_alias_ty: None,
+        policy_def: None,
+        acquisition_policy_def: None,
+        recourse_policy_def: None,
+        decision_policy_def: None,
+        deferral_policy_def: None,
+        transition_policy_def: None,
+        transition_protocol_def: None,
+        monitoring_policy_def: None,
+        alternative_policy_def: None,
+        alternative_frontier_def: None,
+        models_def: None,
+        validation_def: None,
+        audit_def: None,
+        use_path: empty_path(),
+        use_glob: false,
+        use_items: None,
+        effect_def: None,
+        session_decl: None,
+        trait_def: None,
+        algebra_def: None,
+        study_def: None,
+        ontology_def: None,
     })
 }

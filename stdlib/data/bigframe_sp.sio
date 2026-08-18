@@ -1,0 +1,159 @@
+// data::bigframe_sp — the scipy.special package on BigFrame columns. Special functions built on a
+// verified core: Lanczos lgamma, Abramowitz-Stegun erf, asymptotic digamma/trigamma, erfinv by
+// Winitzki + Newton. Elementwise, pairwise, scalar-arg, and reduction engines; thin wrappers.
+use data::bigframe::*
+
+fn sp_sqrt(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let b = f64_to_bits(x); write_i64(sc, 0, (b + 4607182418800017408) >> 1)
+    var y = read_f64(sc as *mut f64, 0); if y < 0.0 { y = 0.0 - y }
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y
+}
+fn sp_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.5 { return 0.0 }
+    var a = 0.99999999999980993
+    a = a + 676.5203681218851 / x; a = a - 1259.1392167224028 / (x + 1.0); a = a + 771.32342877765313 / (x + 2.0)
+    a = a - 176.61502916214059 / (x + 3.0); a = a + 12.507343278686905 / (x + 4.0); a = a - 0.13857109526572012 / (x + 5.0)
+    a = a + 0.0000099843695780195716 / (x + 6.0); a = a + 0.00000015056327351493116 / (x + 7.0)
+    let t = x + 6.5
+    0.5 * ln(6.283185307179586) + (x - 0.5) * ln(t) - t + ln(a)
+}
+fn sp_erf(x: f64) -> f64 with Mut, Div, Panic {
+    var s = 1.0; var ax = x; if x < 0.0 { s = 0.0 - 1.0; ax = 0.0 - x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(0.0 - ax * ax)
+    s * y
+}
+fn sp_digamma(x: f64) -> f64 with Mut, Div, Panic {
+    var r = 0.0; var v = x
+    while v < 6.0 { r = r - 1.0 / v; v = v + 1.0 }
+    let f = 1.0 / (v * v)
+    r + ln(v) - 0.5 / v - f * (0.083333333333333333 - f * (0.008333333333333333 - f * 0.003968253968253968))
+}
+fn sp_trigamma(x: f64) -> f64 with Mut, Div, Panic {
+    var r = 0.0; var v = x
+    while v < 6.0 { r = r + 1.0 / (v * v); v = v + 1.0 }
+    let f = 1.0 / (v * v)
+    r + 1.0 / v + 0.5 * f + f / v * (0.16666666666666666 - f * (0.033333333333333333 - f * 0.023809523809523808))
+}
+fn sp_erfinv(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 - 1.0 || x >= 1.0 { return 0.0 }
+    let aa = 0.147
+    let l = ln(1.0 - x * x)
+    let t1 = 2.0 / (3.141592653589793 * aa) + l * 0.5
+    var y = sp_sqrt(sp_sqrt(t1 * t1 - l / aa, sc) - t1, sc)
+    if x < 0.0 { y = 0.0 - y }
+    // two Newton refinements against erf
+    let spi = 1.1283791670955126
+    var e = sp_erf(y) - x; y = y - e / (spi * exp(0.0 - y * y))
+    e = sp_erf(y) - x; y = y - e / (spi * exp(0.0 - y * y))
+    y
+}
+
+/// scipy.special ELEMENTWISE engine (col -> col). O(n).
+fn sp_map(src: &BigFrame, col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i); var v = 0.0
+        if mode == 0 { if x > 0.5 { v = exp(sp_lgamma(x)) } } else { if mode == 1 { v = sp_lgamma(x) } else { if mode == 2 { v = sp_lgamma(x) } else { if mode == 3 { if x > 0.5 { v = exp(0.0 - sp_lgamma(x)) } } else { if mode == 4 { if x > 0.0 { v = 1.0 } } else { if mode == 5 { v = sp_digamma(x) } else { if mode == 6 { v = sp_digamma(x) } else { if mode == 7 { v = sp_trigamma(x) } else { if mode == 8 { v = sp_erf(x) } else { if mode == 9 { v = 1.0 - sp_erf(x) } else { if mode == 10 { v = exp(x * x) * (1.0 - sp_erf(x)) } else { if mode == 11 { v = sp_erfinv(x, sc) } else { if mode == 12 { v = sp_erfinv(1.0 - x, sc) } else { if mode == 13 { v = 0.5 * (1.0 + sp_erf(x * 0.7071067811865476)) } else { if mode == 14 { v = ln(0.5 * (1.0 + sp_erf(x * 0.7071067811865476))) } else { if mode == 15 { v = 1.4142135623730951 * sp_erfinv(2.0 * x - 1.0, sc) } else { if mode == 16 { v = 1.0 / (1.0 + exp(0.0 - x)) } else { if mode == 17 { if x > 0.0 && x < 1.0 { v = ln(x / (1.0 - x)) } } else { if mode == 18 { v = 0.0 - ln(1.0 + exp(0.0 - x)) } else { if mode == 19 { v = exp(x * 0.6931471805599453) } else { if mode == 20 { v = exp(x * 2.302585092994046) } else { if mode == 21 { if x > 0.0 { v = exp(ln(x) / 3.0) } } else { if mode == 22 { v = ln(1.0 + exp(x)) } else { if mode == 23 { v = exp(x) - 1.0 } else { if mode == 24 { if x > -1.0 { v = ln(1.0 + x) } } else { if mode == 25 { if x > -0.5 { v = exp(sp_lgamma(x + 1.0)) } } else { if mode == 26 { v = sp_lgamma(1.0 + x) } else { if mode == 27 { if x > 0.0 { v = 0.0 - x * ln(x) } } else { if mode == 28 { if x > -1.0 { v = ln(1.0 + x) - x } } else { if mode == 29 { if x > 0.0 || x < 0.0 { v = (exp(x) - 1.0) / x } else { v = 1.0 } } else { if mode == 30 { v = exp(x) - 1.0 } else { if mode == 31 { v = 1.0 / (1.0 + exp(0.0 - x)) } else { v = exp(0.0 - x * x * 0.5) - 1.0 } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(sc as *mut i8); out
+}
+/// scipy.special PAIRWISE engine (col1,col2 -> col). O(n).
+fn sp_binmap(src: &BigFrame, c1: i64, c2: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n; let ncx = bf_ncols(src)
+    if c1 < 0 || c1 >= ncx || c2 < 0 || c2 >= ncx || n <= 0 { return out }
+    let p1 = bf_col_ptr(src, c1) as *mut f64; let p2 = bf_col_ptr(src, c2) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let a = read_f64(p1, i); let b = read_f64(p2, i); var ab = b; if ab < 0.0 { ab = 0.0 - ab }; var v = 0.0
+        if mode == 0 { v = exp(sp_lgamma(a) + sp_lgamma(b) - sp_lgamma(a + b)) } else { if mode == 1 { v = sp_lgamma(a) + sp_lgamma(b) - sp_lgamma(a + b) } else { if mode == 2 { if a >= b && b >= 0.0 { v = exp(sp_lgamma(a + 1.0) - sp_lgamma(b + 1.0) - sp_lgamma(a - b + 1.0)) } } else { if mode == 3 { if b > 0.0 { v = a * ln(b) } } else { if mode == 4 { if b > -1.0 { v = a * ln(1.0 + b) } } else { if mode == 5 { if a > 0.0 && b > 0.0 { v = a * ln(a / b) } } else { if mode == 6 { if a > 0.0 && b > 0.0 { v = a * ln(a / b) - a + b } } else { if mode == 7 { if a > 0.5 && (a + b) > 0.5 { v = exp(sp_lgamma(a + b) - sp_lgamma(a)) } } else { if mode == 8 { if ab <= a { v = 0.5 * b * b } else { v = a * (ab - 0.5 * a) } } else { if mode == 9 { v = a * a * (sp_sqrt(1.0 + b * b / (a * a), sc) - 1.0) } else { if mode == 10 { let m = if a > b { a } else { b }; v = m + ln(exp(a - m) + exp(b - m)) } else { v = sp_sqrt(a * a + b * b, sc) } } } } } } } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(sc as *mut i8); out
+}
+/// scipy.special SCALAR-ARG engine (col, s -> col). O(n).
+fn sp_smap(src: &BigFrame, col: i64, s: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i); var v = 0.0
+        if mode == 0 { if x > 0.0 { if s > 0.0 || s < 0.0 { v = (exp(s * ln(x)) - 1.0) / s } else { v = ln(x) } } } else { if mode == 1 { if x > -1.0 { let l = ln(1.0 + x); if s > 0.0 || s < 0.0 { v = (exp(s * l) - 1.0) / s } else { v = l } } } else { if x >= 0.0 { if s > 0.0 || s < 0.0 { v = (exp(s * ln(x + 1.0)) - 1.0) / s } else { v = ln(x + 1.0) } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    out
+}
+/// scipy.special REDUCTION engine (col -> scalar). Two passes where needed.
+fn sp_reduce(src: &BigFrame, col: i64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let cp = bf_col_ptr(src, col) as *mut f64
+    var mx = read_f64(cp, 0); var i: i64 = 0
+    while i < n { let x = read_f64(cp, i); if x > mx { mx = x }; i = i + 1 }
+    var se = 0.0; i = 0
+    while i < n { se = se + exp(read_f64(cp, i) - mx); i = i + 1 }
+    var r = 0.0
+    if mode == 0 { r = mx + ln(se) } else { if mode == 1 { r = se } else { r = mx + ln(se) } }
+    r
+}
+
+pub fn bf_sp_gamma(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 0) }
+pub fn bf_sp_gammaln(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 1) }
+pub fn bf_sp_loggamma(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 2) }
+pub fn bf_sp_rgamma(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 3) }
+pub fn bf_sp_gammasgn(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 4) }
+pub fn bf_sp_digamma(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 5) }
+pub fn bf_sp_psi(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 6) }
+pub fn bf_sp_trigamma(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 7) }
+pub fn bf_sp_erf(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 8) }
+pub fn bf_sp_erfc(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 9) }
+pub fn bf_sp_erfcx(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 10) }
+pub fn bf_sp_erfinv(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 11) }
+pub fn bf_sp_erfcinv(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 12) }
+pub fn bf_sp_ndtr(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 13) }
+pub fn bf_sp_log_ndtr(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 14) }
+pub fn bf_sp_ndtri(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 15) }
+pub fn bf_sp_expit(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 16) }
+pub fn bf_sp_logit(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 17) }
+pub fn bf_sp_log_expit(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 18) }
+pub fn bf_sp_exp2(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 19) }
+pub fn bf_sp_exp10(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 20) }
+pub fn bf_sp_cbrt(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 21) }
+pub fn bf_sp_softplus(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 22) }
+pub fn bf_sp_expm1(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 23) }
+pub fn bf_sp_log1p(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 24) }
+pub fn bf_sp_factorial(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 25) }
+pub fn bf_sp_gammaln1p(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 26) }
+pub fn bf_sp_entr(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 27) }
+pub fn bf_sp_log1pmx(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 28) }
+pub fn bf_sp_exprel(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 29) }
+pub fn bf_sp_exp_minus1(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 30) }
+pub fn bf_sp_sigmoid(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 31) }
+pub fn bf_sp_cosm1(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_map(src, col, 32) }
+pub fn bf_sp_beta(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 0) }
+pub fn bf_sp_betaln(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 1) }
+pub fn bf_sp_binom(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 2) }
+pub fn bf_sp_xlogy(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 3) }
+pub fn bf_sp_xlog1py(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 4) }
+pub fn bf_sp_rel_entr(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 5) }
+pub fn bf_sp_kl_div(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 6) }
+pub fn bf_sp_poch(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 7) }
+pub fn bf_sp_huber(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 8) }
+pub fn bf_sp_pseudo_huber(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 9) }
+pub fn bf_sp_logsumexp2(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 10) }
+pub fn bf_sp_hypot(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { sp_binmap(src, c1, c2, 11) }
+pub fn bf_sp_boxcox(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { sp_smap(src, col, s, 0) }
+pub fn bf_sp_boxcox1p(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { sp_smap(src, col, s, 1) }
+pub fn bf_sp_yeojohnson_pos(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { sp_smap(src, col, s, 2) }
+pub fn bf_sp_logsumexp(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { sp_reduce(src, col, 0) }
+pub fn bf_sp_softmax_denom(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { sp_reduce(src, col, 1) }
+pub fn bf_sp_log_softmax_shift(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { sp_reduce(src, col, 2) }

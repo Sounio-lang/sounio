@@ -2,9 +2,9 @@
 # scripts/ci/sounio_editor_tooling_support_gate.sh
 #
 # Bounded support gate for the Sounio editor-tooling preview. This proves the
-# public CLI hooks for formatter, REPL, and LSP preview, plus static editor
-# package wiring. It intentionally does not claim a mature IDE or a green
-# pure-Sounio LSP rebuild.
+# public CLI hooks for formatter, REPL, and LSP preview, static editor
+# package wiring, and a green pure-Sounio LSP rebuild under Madaros. It
+# intentionally does not claim a mature IDE.
 
 set -euo pipefail
 
@@ -137,12 +137,8 @@ assert "command = \"souc\"" in Path("tools/editors/helix/languages.toml").read_t
 assert "cmd = { 'souc', 'lsp', '--stdio' }" in Path("tools/editors/neovim/lspconfig.lua").read_text()
 PY
 
-if ./bin/souc compile self-hosted/lsp/server.sio -o "$ARTIFACT_DIR/pure-sounio-lsp.bin" \
-    >>"$LOG_PATH" 2>&1; then
-  warn_step "pure-sounio-lsp-rebuild" "unexpectedly passed; update docs to remove blocker"
-else
-  warn_step "pure-sounio-lsp-rebuild" "NOT PROVED: blocked under current Madaros; preview LSP uses tools/lsp/sounio-lsp.sh"
-fi
+run_step "pure-sounio-lsp-rebuild" ./bin/souc compile \
+  self-hosted/lsp/server.sio -o "$ARTIFACT_DIR/pure-sounio-lsp.bin"
 
 python3 - "$SUMMARY_JSON" "$pass" "$fail" "$warn" "${STEP_ROWS[@]}" -- "${WARN_ROWS[@]}" <<'PY'
 import json
@@ -185,12 +181,13 @@ summary = {
             "file-backed REPL eval gate",
             "bash LSP smoke and initialize capability smoke",
             "VS Code/Helix/Neovim static editor asset contract",
+            "pure-Sounio LSP rebuild under Madaros",
+            "semanticTokens/full/delta (probe-tested in tools/lsp/test_protocol.sh)",
+            "incremental text synchronization (probe-tested in tools/lsp/test_protocol.sh)",
+            "unopened-file workspace indexing (probe-tested in tools/lsp/test_protocol.sh)",
+            "type hierarchy prepare/supertypes/subtypes (probe-tested in tools/lsp/test_protocol.sh)",
         ],
         "not_proved": [
-        "pure-Sounio LSP rebuild under current Madaros (NOT PROVED)",
-            "semanticTokens/full/delta",
-            "incremental text synchronization",
-            "unopened-file workspace indexing",
             "marketplace-quality VS Code release",
             "notebook or AI assistant integration",
         ],

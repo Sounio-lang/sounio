@@ -1,0 +1,108 @@
+// stdlib/particle_physics/nonunitary_amp.sio
+//
+// Vertex-dependent NonUnitary amplitudes (split from nonunitary.sio).
+//
+// Why split: Madaros multimodule native lowering SEGVs when nonunitary pulls
+// vertex → spinor → complex (lower_array: dep_begin). Core propagators,
+// deficit, and peak xsec stay in nonunitary.sio (Madaros-runnable).
+//
+// Callers that need eemm_z_amplitude_nu import this module (or the re-export
+// from particle_physics::mod).
+
+module particle_physics::nonunitary_amp
+
+use epistemic::knowledge::{
+    Epistemic, ep_scale, ep_mul, ep_square, ep_val,
+}
+use particle_physics::sm_params::{coupling_g, sin2_theta_w, mass_bottom}
+use particle_physics::vertex::{neutral_current_gv_ep, higgs_vev}
+use particle_physics::nonunitary::{
+    NonUnitary, NU_Z, NU_W, NU_HIGGS, nu_z_propagator, nu_w_propagator,
+    nu_higgs_propagator,
+}
+
+// Madaros multimodule residual (2026-07-26): unpacking (f64, f64) from an
+// imported call leaves the elements not float-typed — ga*ga → 0 while a scalar
+// imported f64 return multiplies correctly. Avoid nc_coupling_* tuples; use
+// Epistemic g_V and exact g_A = T3 (local constant squares are fine).
+// Witness: tests/multimodule/madaros_imported_f64_mul_*.sio
+
+/// e⁺e⁻ → Z → μ⁺μ⁻ amplitude squared, wrapped in NonUnitary.
+///
+/// |M|² = [g⁴ · (g_V^e² + g_A^e²)(g_V^μ² + g_A^μ²) / cos⁴θ_W]
+///          / [(s − M_Z²)² + (M_Z Γ_Z)²]
+pub fn eemm_z_amplitude_nu(s: f64, gamma_z: f64) -> NonUnitary with Mut, Div, Panic {
+    let g = coupling_g()
+    let s2w = sin2_theta_w()
+    let cw_sq = 1.0 - ep_val(&s2w)
+    let cw4 = cw_sq * cw_sq
+    // Electron / muon: T3 = −1/2, Q = −1 → g_A = −1/2 exact, g_A² = 1/4.
+    let gv_e = neutral_current_gv_ep(0.0 - 0.5, 0.0 - 1.0)
+    let gv_m = neutral_current_gv_ep(0.0 - 0.5, 0.0 - 1.0)
+    let ga2 = 0.25
+    let gve2 = ep_square(&gv_e)
+    let gvm2 = ep_square(&gv_m)
+    let c_e = ep_val(&gve2) + ga2
+    let c_m = ep_val(&gvm2) + ga2
+    let g2 = ep_square(&g)
+    let g4 = ep_square(&g2)
+    let num = ep_scale(&g4, c_e * c_m / cw4)
+    let prop = nu_z_propagator(s, gamma_z)
+    let amp_sq = prop.amp_sq
+    let denom_re = prop.denom_re
+    let denom_im = prop.denom_im
+    let combined = ep_mul(&amp_sq, &num)
+    NonUnitary {
+        amp_sq: combined,
+        denom_re: denom_re,
+        denom_im: denom_im,
+        particle: NU_Z(),
+    }
+}
+
+/// Charged-current leptonic W amplitude squared (s-channel toy), NonUnitary.
+///
+/// |M|² = (g²/2)² · |D_W(s)|² = (g⁴/4) · |D_W(s)|²
+///
+/// Same numerator as EXP15's local construction; couplings from `coupling_g`
+/// (GUM) rather than an inlined PDG scalar. Angular / helicity structure omitted.
+pub fn cc_w_leptonic_amplitude_nu(s: f64, gamma_w: f64) -> NonUnitary with Mut, Div, Panic {
+    let g = coupling_g()
+    let g2 = ep_square(&g)
+    let g4 = ep_square(&g2)
+    // (g²/2)² = g⁴/4
+    let num = ep_scale(&g4, 0.25)
+    let prop = nu_w_propagator(s, gamma_w)
+    let combined = ep_mul(&prop.amp_sq, &num)
+    NonUnitary {
+        amp_sq: combined,
+        denom_re: prop.denom_re,
+        denom_im: prop.denom_im,
+        particle: NU_W(),
+    }
+}
+
+/// Higgs → bb̄ Yukawa amplitude squared (s-channel toy), NonUnitary.
+///
+/// |M|² = y_b⁴ · |D_H(s)|² ,   y_b = √2 m_b / v
+///
+/// Same numerator convention as EXP16's local construction; m_b from
+/// `mass_bottom()` (GUM) and v = `higgs_vev()`. Angular / colour / NLO
+/// structure omitted — not a full H→bb¯ matrix element.
+pub fn h_bb_yukawa_amplitude_nu(s: f64, gamma_h: f64) -> NonUnitary with Mut, Div, Panic {
+    let mb = mass_bottom()
+    let v = higgs_vev()
+    let sqrt2 = 1.4142135623730951
+    // y_b = √2 m_b / v
+    let yb = ep_scale(&mb, sqrt2 / v)
+    let yb2 = ep_square(&yb)
+    let yb4 = ep_square(&yb2)
+    let prop = nu_higgs_propagator(s, gamma_h)
+    let combined = ep_mul(&prop.amp_sq, &yb4)
+    NonUnitary {
+        amp_sq: combined,
+        denom_re: prop.denom_re,
+        denom_im: prop.denom_im,
+        particle: NU_HIGGS(),
+    }
+}

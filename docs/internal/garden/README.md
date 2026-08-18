@@ -69,7 +69,13 @@ Most seeds should start as `Garden` or `Hypothesis`. A seed becomes
 - [`The Zero of Encounter`](seeds/2026-07-11-the-zero-of-encounter.md) — the
   executable butterfly showing that absence, cancellation, annihilation,
   resolution, and rounding can remain distinct when their surface value is
-  zero; default native-v2 execution remains blocked.
+  zero; driven through the Garden-to-Claim pipeline to the ledger-scoped claim
+  `garden_zero_encounter_pipeline`; default native-v2 execution remains
+  blocked.
+- [`FPGA Acceleration Opportunity`](seeds/2026-07-26-fpga-acceleration-opportunity.md) —
+  two AMD U250 FPGAs planned for catastrophe scan, QEC simulation, exact
+  Cayley-Dickson arithmetic, and Mercyful Learning acceleration; records the
+  2026-07-25/26 session's 19 deliverables.
 
 ## Hard Boundaries
 

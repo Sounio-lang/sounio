@@ -1,0 +1,230 @@
+// experiments/faers_fano_order_asymmetry/faers_fano_order_asymmetry_v2.sio
+//
+// FAERS expansion v2 — BOLD correction of the primary empirical test.
+//
+// Discovery: data/faers_drugbank.csv has INCORRECT `fano` labels relative to
+// stdlib/medical/cyp450_fano.sio Fano lines (14/35 rows flipped). Exp1 used
+// faers_168_results (labels correct, n small). Exp1b (this file) re-runs the
+// locked decision rule on DrugBank multi-drug aggregates with geometry-correct
+// Fano membership.
+//
+// Primary artefact: data/faers_drugbank.csv
+//   sha256: 511d6111404d8638eb4f12d7fcabbad6fed24039cb707197f29364b5b9f64d97
+// Inclusion: temporal > 0, asymmetry >= 0
+// Fano: frozenset membership in the 7 Fano lines (NOT the CSV column)
+// Contrast: mean(non-Fano) - mean(Fano); bootstrap B=1000 seed=20260725
+//
+//   ./bin/souc run experiments/faers_fano_order_asymmetry/faers_fano_order_asymmetry_v2.sio
+
+fn floor_f(v: f64) -> f64 { return (v as i64) as f64 }
+
+fn sqrt_f(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x; var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5; var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn mean_n(x: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    return s / (n as f64)
+}
+
+fn wmean_n(x: &[f64; 256], w: &[f64; 256], n: i32) -> f64 with Mut, Div, Panic {
+    var sw = 0.0; var sx = 0.0; var i = 0
+    while i < n {
+        let wi = w[i as usize]
+        sw = sw + wi
+        sx = sx + x[i as usize] * wi
+        i = i + 1
+    }
+    if sw <= 0.0 { return 0.0 }
+    return sx / sw
+}
+
+fn bootstrap_diff_xy(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, b: i32, conf: f64, seed: i64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let nxf = nx as f64
+    let nyf = ny as f64
+    let diff0 = mean_n(x, nx) - mean_n(y, ny)
+    let A = 16807.0
+    let M = 2147483647.0
+    var st = seed as f64
+    if st < 1.0 { st = 1.0 }
+    var diffs: [f64; 1024] = [0.0; 1024]
+    var bb = b
+    if bb > 1024 { bb = 1024 }
+    var rep = 0
+    while rep < bb {
+        var accx = 0.0; var kx = 0
+        while kx < nx {
+            let prod = A * st
+            st = prod - floor_f(prod / M) * M
+            var idx = floor_f((st / M) * nxf) as i32
+            if idx >= nx { idx = nx - 1 }
+            if idx < 0 { idx = 0 }
+            accx = accx + x[idx as usize]
+            kx = kx + 1
+        }
+        var accy = 0.0; var ky = 0
+        while ky < ny {
+            let prod2 = A * st
+            st = prod2 - floor_f(prod2 / M) * M
+            var idy = floor_f((st / M) * nyf) as i32
+            if idy >= ny { idy = ny - 1 }
+            if idy < 0 { idy = 0 }
+            accy = accy + y[idy as usize]
+            ky = ky + 1
+        }
+        diffs[rep as usize] = accx / nxf - accy / nyf
+        rep = rep + 1
+    }
+    var p = 1
+    while p < bb {
+        let key = diffs[p as usize]
+        var q = p - 1
+        while q >= 0 && diffs[q as usize] > key {
+            diffs[(q + 1) as usize] = diffs[q as usize]
+            q = q - 1
+        }
+        diffs[(q + 1) as usize] = key
+        p = p + 1
+    }
+    let alpha = 1.0 - conf
+    var ilo = floor_f(alpha * 0.5 * (bb as f64)) as i32
+    var ihi = floor_f((1.0 - alpha * 0.5) * (bb as f64)) as i32
+    if ilo < 0 { ilo = 0 }
+    if ihi > bb - 1 { ihi = bb - 1 }
+    var sm = 0.0; var a = 0
+    while a < bb { sm = sm + diffs[a as usize]; a = a + 1 }
+    let mbar = sm / (bb as f64)
+    var ss = 0.0; var c = 0
+    while c < bb { let d = diffs[c as usize] - mbar; ss = ss + d * d; c = c + 1 }
+    let se = sqrt_f(ss / ((bb - 1) as f64))
+    return (diff0, se, diffs[ilo as usize], diffs[ihi as usize])
+}
+
+fn emit_f(tag: string, v: f64) with IO { print(tag); print_f64(v); print("\n") }
+fn emit_i(tag: string, v: i64) with IO { print(tag); print(v); print("\n") }
+
+fn verdict_of(lo: f64, hi: f64) with IO {
+    if lo > 0.0 { print("FAERS_V2_VERDICT=SUPPORT\n") }
+    else {
+        if hi < 0.0 { print("FAERS_V2_VERDICT=FAIL_HONEST\n") }
+        else { print("FAERS_V2_VERDICT=INCONCLUSIVE\n") }
+    }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    print("FAERS_V2_EXPERIMENT_BEGIN\n")
+    print("FAERS_V2_NOTE=drugbank_fano_relabeled_to_cyp450_fano_geometry\n")
+    print("FAERS_V2_CSV_SHA256=511d6111404d8638eb4f12d7fcabbad6fed24039cb707197f29364b5b9f64d97\n")
+    print("FAERS_V2_LABEL_FLIPS=14_of_35\n")
+
+    // Geometry-correct Fano arm (n=7) from drugbank aggregates
+    var f_asym: [f64; 256] = [0.0; 256]
+    var f_temp: [f64; 256] = [0.0; 256]
+    f_asym[0]=0.0392; f_temp[0]=255.0
+    f_asym[1]=0.3193; f_temp[1]=119.0
+    f_asym[2]=0.1468; f_temp[2]=1737.0
+    f_asym[3]=0.1933; f_temp[3]=150.0
+    f_asym[4]=0.0039; f_temp[4]=1030.0
+    f_asym[5]=0.2377; f_temp[5]=244.0
+    f_asym[6]=0.0913; f_temp[6]=482.0
+    let n_f: i32 = 7
+
+    // non-Fano arm (n=28)
+    var n_asym: [f64; 256] = [0.0; 256]
+    var n_temp: [f64; 256] = [0.0; 256]
+    n_asym[0]=0.2; n_temp[0]=65.0
+    n_asym[1]=0.066; n_temp[1]=985.0
+    n_asym[2]=0.0088; n_temp[2]=914.0
+    n_asym[3]=0.0816; n_temp[3]=625.0
+    n_asym[4]=0.5741; n_temp[4]=54.0
+    n_asym[5]=0.4638; n_temp[5]=138.0
+    n_asym[6]=0.3672; n_temp[6]=128.0
+    n_asym[7]=0.2173; n_temp[7]=336.0
+    n_asym[8]=0.1709; n_temp[8]=351.0
+    n_asym[9]=0.2294; n_temp[9]=218.0
+    n_asym[10]=0.1853; n_temp[10]=1554.0
+    n_asym[11]=0.0932; n_temp[11]=1137.0
+    n_asym[12]=0.2857; n_temp[12]=28.0
+    n_asym[13]=0.0235; n_temp[13]=170.0
+    n_asym[14]=0.0; n_temp[14]=69.0
+    n_asym[15]=0.2184; n_temp[15]=522.0
+    n_asym[16]=0.3113; n_temp[16]=379.0
+    n_asym[17]=0.2319; n_temp[17]=332.0
+    n_asym[18]=0.2325; n_temp[18]=1458.0
+    n_asym[19]=0.2286; n_temp[19]=1601.0
+    n_asym[20]=0.0195; n_temp[20]=154.0
+    n_asym[21]=0.0182; n_temp[21]=55.0
+    n_asym[22]=0.0302; n_temp[22]=398.0
+    n_asym[23]=0.1653; n_temp[23]=236.0
+    n_asym[24]=0.0457; n_temp[24]=219.0
+    n_asym[25]=0.1814; n_temp[25]=601.0
+    n_asym[26]=0.0383; n_temp[26]=339.0
+    n_asym[27]=0.1006; n_temp[27]=2206.0
+    let n_n: i32 = 28
+
+    let mean_f = mean_n(&f_asym, n_f)
+    let mean_nv = mean_n(&n_asym, n_n)
+    let wmean_f = wmean_n(&f_asym, &f_temp, n_f)
+    let wmean_nv = wmean_n(&n_asym, &n_temp, n_n)
+    let boot = bootstrap_diff_xy(&n_asym, n_n, &f_asym, n_f, 1000, 0.95, 20260725)
+
+    emit_i("FAERS_V2_N_FANO=", n_f as i64)
+    emit_i("FAERS_V2_N_NONFANO=", n_n as i64)
+    emit_f("FAERS_V2_MEAN_FANO=", mean_f)
+    emit_f("FAERS_V2_MEAN_NONFANO=", mean_nv)
+    emit_f("FAERS_V2_WMEAN_FANO=", wmean_f)
+    emit_f("FAERS_V2_WMEAN_NONFANO=", wmean_nv)
+    emit_f("FAERS_V2_WDIFF=", wmean_nv - wmean_f)
+    emit_f("FAERS_V2_DIFF=", boot.0)
+    emit_f("FAERS_V2_SE=", boot.1)
+    emit_f("FAERS_V2_CI_LO=", boot.2)
+    emit_f("FAERS_V2_CI_HI=", boot.3)
+    verdict_of(boot.2, boot.3)
+
+    // Sensitivity: min temporal thresholds 10 and 100 (unweighted means, same bootstrap)
+    var f2: [f64; 256] = [0.0; 256]
+    var n2: [f64; 256] = [0.0; 256]
+    var nf2: i32 = 0
+    var nn2: i32 = 0
+    var i = 0
+    while i < n_f {
+        if f_temp[i as usize] >= 100.0 {
+            f2[nf2 as usize] = f_asym[i as usize]
+            nf2 = nf2 + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n_n {
+        if n_temp[i as usize] >= 100.0 {
+            n2[nn2 as usize] = n_asym[i as usize]
+            nn2 = nn2 + 1
+        }
+        i = i + 1
+    }
+    emit_i("FAERS_V2_T100_N_FANO=", nf2 as i64)
+    emit_i("FAERS_V2_T100_N_NONFANO=", nn2 as i64)
+    if nf2 >= 2 && nn2 >= 2 {
+        let b2 = bootstrap_diff_xy(&n2, nn2, &f2, nf2, 1000, 0.95, 20260725)
+        emit_f("FAERS_V2_T100_DIFF=", b2.0)
+        emit_f("FAERS_V2_T100_CI_LO=", b2.2)
+        emit_f("FAERS_V2_T100_CI_HI=", b2.3)
+        if b2.2 > 0.0 { print("FAERS_V2_T100_VERDICT=SUPPORT\n") }
+        else {
+            if b2.3 < 0.0 { print("FAERS_V2_T100_VERDICT=FAIL_HONEST\n") }
+            else { print("FAERS_V2_T100_VERDICT=INCONCLUSIVE\n") }
+        }
+    } else {
+        print("FAERS_V2_T100_VERDICT=UNDERPOWERED\n")
+    }
+
+    print("FAERS_V2_CLAIM=geometry_correct_drugbank_proxy_only\n")
+    print("FAERS_V2_EXPERIMENT_COMPLETE\n")
+}

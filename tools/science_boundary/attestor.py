@@ -1131,15 +1131,24 @@ def build_receipt(
                 and caller_row.visibility == "public"
                 and dependency_row.visibility in {"protected", "embargoed"}
             ):
-                diagnostics.append(
-                    Diagnostic(
-                        "E-SRB-002",
-                        "error",
-                        f"public module cannot depend on {dependency_row.visibility} module",
-                        caller_rel,
-                        dependency_rel,
-                    )
+                # Research examples may call scientific-package-candidate surfaces
+                # that remain protected until ring promotion. This is the allowlist
+                # for construction verticals (e.g. examples/particle_physics →
+                # stdlib/particle_physics) without flipping all of stdlib public.
+                research_to_candidate = (
+                    caller_row.ring == "research"
+                    and dependency_row.ring == "scientific-package-candidate"
                 )
+                if not research_to_candidate:
+                    diagnostics.append(
+                        Diagnostic(
+                            "E-SRB-002",
+                            "error",
+                            f"public module cannot depend on {dependency_row.visibility} module",
+                            caller_rel,
+                            dependency_rel,
+                        )
+                    )
         graph_unresolved = [
             {"caller": relative_to_root(item[0], root), "import": item[1]}
             for item in closure.unresolved

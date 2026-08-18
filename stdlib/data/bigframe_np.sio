@@ -1,0 +1,248 @@
+// data::bigframe_np — the numpy-on-columns package at BigFrame scale. ~100 per-column verbs:
+// reductions, elementwise transforms, cumulative scans, pairwise ops. Six mode-dispatched engines;
+// every public verb is a thin wrapper. Arithmetic + accurate builtins (ln/exp) + Newton sqrt only.
+use data::bigframe::*
+
+fn np_sqrt(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let b = f64_to_bits(x)
+    write_i64(sc, 0, (b + 4607182418800017408) >> 1)
+    var y = read_f64(sc as *mut f64, 0)
+    if y < 0.0 { y = 0.0 - y }
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y
+}
+
+/// Column REDUCTION engine (col -> scalar). One pass.
+fn np_reduce(src: &BigFrame, col: i64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let cp = bf_col_ptr(src, col) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var sum = 0.0; var ssq = 0.0; var l1 = 0.0; var prod = 1.0
+    var mn = read_f64(cp, 0); var mx = read_f64(cp, 0); var mni = 0.0; var mxi = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i)
+        sum = sum + x; ssq = ssq + x * x; prod = prod * x
+        var ax = x; if ax < 0.0 { ax = 0.0 - ax }; l1 = l1 + ax
+        if x < mn { mn = x; mni = i as f64 }
+        if x > mx { mx = x; mxi = i as f64 }
+        i = i + 1
+    }
+    let nf = n as f64; let mean = sum / nf; let varp = ssq / nf - mean * mean
+    var vs = 0.0; if nf > 1.0 { vs = (ssq - sum * mean) / (nf - 1.0) }
+    var r = 0.0
+    if mode == 0 { r = sum } else { if mode == 1 { r = mean } else { if mode == 2 { r = mn } else { if mode == 3 { r = mx } else { if mode == 4 { r = prod } else { if mode == 5 { r = varp } else { if mode == 6 { r = np_sqrt(varp, sc) } else { if mode == 7 { r = mx - mn } else { if mode == 8 { r = nf } else { if mode == 9 { r = mni } else { if mode == 10 { r = mxi } else { if mode == 11 { r = read_f64(cp, 0) } else { if mode == 12 { r = read_f64(cp, n - 1) } else { if mode == 13 { r = ssq } else { if mode == 14 { r = np_sqrt(ssq, sc) } else { if mode == 15 { r = l1 } else { if mode == 16 { r = l1 / nf } else { if mode == 17 { r = np_sqrt(ssq / nf, sc) } else { if mode == 18 { r = vs } else { r = np_sqrt(vs, sc) } } } } } } } } } } } } } } } } } } }
+    heap_free(sc as *mut i8)
+    r
+}
+
+/// Column ELEMENTWISE engine (col -> col), with an optional scalar operand. O(n).
+fn np_map(src: &BigFrame, col: i64, s: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i)
+        var ax = x; if ax < 0.0 { ax = 0.0 - ax }
+        var v = 0.0
+        if mode == 0 { v = ax } else { if mode == 1 { v = 0.0 - x } else { if mode == 2 { v = x * x } else { if mode == 3 { v = x * x * x } else { if mode == 4 { if x > 0.0 { v = 1.0 } else { if x < 0.0 { v = 0.0 - 1.0 } } } else { if mode == 5 { if x != 0.0 { v = 1.0 / x } } else { if mode == 6 { v = x + s } else { if mode == 7 { v = x - s } else { if mode == 8 { v = x * s } else { if mode == 9 { if s != 0.0 { v = x / s } } else { if mode == 10 { v = s - x } else { if mode == 11 { if x != 0.0 { v = s / x } } else { if mode == 12 { if x < s { v = s } else { v = x } } else { if mode == 13 { if x > s { v = s } else { v = x } } else { if mode == 14 { if x > 0.0 { v = x } } else { if mode == 15 { if x >= 0.0 { v = 1.0 } } else { if mode == 16 { v = (x as i64) as f64 } else { if mode == 17 { if x > 0.0 { v = exp(s * ln(x)) } } else { if mode == 18 { v = exp(x) } else { if mode == 19 { if x > 0.0 { v = ln(x) } } else { if mode == 20 { if x > 0.0 { v = ln(x) / 0.6931471805599453 } } else { if mode == 21 { if x > 0.0 { v = ln(x) / 2.302585092994046 } } else { if mode == 22 { v = exp(x * 0.6931471805599453) } else { if mode == 23 { v = exp(x) - 1.0 } else { if mode == 24 { if x > -1.0 { v = ln(1.0 + x) } } else { if mode == 25 { v = np_sqrt(x, sc) } else { if mode == 26 { if x > 0.0 { v = exp(ln(x) / 3.0) } } else { if mode == 27 { v = 1.0 / (1.0 + exp(0.0 - x)) } else { if mode == 28 { if x > 0.0 && x < 1.0 { v = ln(x / (1.0 - x)) } } else { if mode == 29 { v = ln(1.0 + exp(x)) } else { if mode == 30 { let e = exp(2.0 * x); v = (e - 1.0) / (e + 1.0) } else { if mode == 31 { if x > s { v = 1.0 } } else { if mode == 32 { if x < s { v = 1.0 } } else { if mode == 33 { if x >= s { v = 1.0 } } else { if mode == 34 { if x <= s { v = 1.0 } } else { if mode == 35 { if x == s { v = 1.0 } } else { if mode == 36 { if x != s { v = 1.0 } } else { if mode == 37 { v = x * 0.017453292519943295 } else { if mode == 38 { v = x * 57.29577951308232 } else { if mode == 39 { v = 1.0 - x } else { v = x * s + s } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } } }
+        write_f64(op, i, v)
+        i = i + 1
+    }
+    heap_free(sc as *mut i8)
+    out
+}
+
+/// Column CUMULATIVE engine (col -> col). O(n).
+fn np_cum(src: &BigFrame, col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    var acc = 0.0; var prod = 1.0; var cmx = read_f64(cp, 0); var cmn = read_f64(cp, 0); var cnt = 0.0; var ssq = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i)
+        acc = acc + x; prod = prod * x; cnt = cnt + 1.0; ssq = ssq + x * x
+        if x > cmx { cmx = x }; if x < cmn { cmn = x }
+        var v = 0.0
+        if mode == 0 { v = acc } else { if mode == 1 { v = prod } else { if mode == 2 { v = cmx } else { if mode == 3 { v = cmn } else { if mode == 4 { v = cnt } else { if mode == 5 { v = acc / cnt } else { if mode == 6 { v = ssq } else { v = cmx - cmn } } } } } } }
+        write_f64(op, i, v)
+        i = i + 1
+    }
+    out
+}
+
+/// Pairwise ELEMENTWISE engine (col1,col2 -> col). O(n).
+fn np_binmap(src: &BigFrame, c1: i64, c2: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    var out = bf_new(1, n); out.n_rows = n
+    let nc = bf_ncols(src)
+    if c1 < 0 || c1 >= nc || c2 < 0 || c2 >= nc || n <= 0 { return out }
+    let p1 = bf_col_ptr(src, c1) as *mut f64
+    let p2 = bf_col_ptr(src, c2) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let a = read_f64(p1, i); let b = read_f64(p2, i)
+        var v = 0.0
+        if mode == 0 { v = a + b } else { if mode == 1 { v = a - b } else { if mode == 2 { v = a * b } else { if mode == 3 { if b != 0.0 { v = a / b } } else { if mode == 4 { if a > 0.0 { v = exp(b * ln(a)) } } else { if mode == 5 { v = np_sqrt(a * a + b * b, sc) } else { if mode == 6 { if a > b { v = a } else { v = b } } else { if mode == 7 { if a < b { v = a } else { v = b } } else { if mode == 8 { var d = a - b; if d < 0.0 { d = 0.0 - d }; v = d } else { if mode == 9 { v = (a + b) / 2.0 } else { if mode == 10 { if a > b { v = 1.0 } } else { if mode == 11 { v = a * a + b * b } else { v = a - 2.0 * b } } } } } } } } } } } }
+        write_f64(op, i, v)
+        i = i + 1
+    }
+    heap_free(sc as *mut i8)
+    out
+}
+
+/// Pairwise REDUCTION engine (col1,col2 -> scalar). One pass.
+fn np_binreduce(src: &BigFrame, c1: i64, c2: i64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    if c1 < 0 || c1 >= nc || c2 < 0 || c2 >= nc || n <= 0 { return 0.0 }
+    let p1 = bf_col_ptr(src, c1) as *mut f64
+    let p2 = bf_col_ptr(src, c2) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var dot = 0.0; var sa = 0.0; var sb = 0.0; var saa = 0.0; var sbb = 0.0
+    var sse = 0.0; var sae = 0.0
+    var i: i64 = 0
+    while i < n {
+        let a = read_f64(p1, i); let b = read_f64(p2, i); let d = a - b
+        dot = dot + a * b; sa = sa + a; sb = sb + b; saa = saa + a * a; sbb = sbb + b * b
+        sse = sse + d * d; var ad = d; if ad < 0.0 { ad = 0.0 - ad }; sae = sae + ad
+        i = i + 1
+    }
+    let nf = n as f64
+    let cov = dot / nf - (sa / nf) * (sb / nf)
+    let va = saa / nf - (sa / nf) * (sa / nf); let vb = sbb / nf - (sb / nf) * (sb / nf)
+    var r = 0.0
+    if mode == 0 { r = dot } else { if mode == 1 { r = cov } else { if mode == 2 { let de = np_sqrt(va, sc) * np_sqrt(vb, sc); if de > 0.0 { r = cov / de } } else { if mode == 3 { r = dot } else { if mode == 4 { r = sse / nf } else { if mode == 5 { r = sae / nf } else { if mode == 6 { r = np_sqrt(sse / nf, sc) } else { if mode == 7 { r = sse } else { r = sae } } } } } } } }
+    heap_free(sc as *mut i8)
+    r
+}
+
+/// Column COUNT-PREDICATE engine (col,threshold -> count). One pass.
+fn np_countpred(src: &BigFrame, col: i64, t: f64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let cp = bf_col_ptr(src, col) as *mut f64
+    var r = 0.0
+    var i: i64 = 0
+    while i < n {
+        let x = read_f64(cp, i)
+        var hit = 0
+        if mode == 0 { if x > t { hit = 1 } } else { if mode == 1 { if x >= t { hit = 1 } } else { if mode == 2 { if x < t { hit = 1 } } else { if mode == 3 { if x <= t { hit = 1 } } else { if mode == 4 { if x == t { hit = 1 } } else { if mode == 5 { if x != t { hit = 1 } } else { if mode == 6 { if x == 0.0 { hit = 1 } } else { if mode == 7 { if x != 0.0 { hit = 1 } } else { if mode == 8 { if x > 0.0 { hit = 1 } } else { if x < 0.0 { hit = 1 } } } } } } } } } }
+        if hit == 1 { r = r + 1.0 }
+        i = i + 1
+    }
+    r
+}
+
+pub fn bf_np_sum(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 0) }
+pub fn bf_np_mean(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 1) }
+pub fn bf_np_min(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 2) }
+pub fn bf_np_max(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 3) }
+pub fn bf_np_prod(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 4) }
+pub fn bf_np_var(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 5) }
+pub fn bf_np_std(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 6) }
+pub fn bf_np_ptp(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 7) }
+pub fn bf_np_count(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 8) }
+pub fn bf_np_argmin(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 9) }
+pub fn bf_np_argmax(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 10) }
+pub fn bf_np_first(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 11) }
+pub fn bf_np_last(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 12) }
+pub fn bf_np_sumsq(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 13) }
+pub fn bf_np_l2norm(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 14) }
+pub fn bf_np_l1norm(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 15) }
+pub fn bf_np_meanabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 16) }
+pub fn bf_np_rms(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 17) }
+pub fn bf_np_var_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 18) }
+pub fn bf_np_std_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { np_reduce(src, col, 19) }
+pub fn bf_np_abs(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 0) }
+pub fn bf_np_neg(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 1) }
+pub fn bf_np_square(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 2) }
+pub fn bf_np_cube(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 3) }
+pub fn bf_np_sign(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 4) }
+pub fn bf_np_recip(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 5) }
+pub fn bf_np_add_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 6) }
+pub fn bf_np_sub_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 7) }
+pub fn bf_np_mul_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 8) }
+pub fn bf_np_div_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 9) }
+pub fn bf_np_rsub_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 10) }
+pub fn bf_np_rdiv_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 11) }
+pub fn bf_np_clip_min(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 12) }
+pub fn bf_np_clip_max(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 13) }
+pub fn bf_np_relu(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 14) }
+pub fn bf_np_step(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 15) }
+pub fn bf_np_trunc(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 16) }
+pub fn bf_np_pow_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 17) }
+pub fn bf_np_exp(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 18) }
+pub fn bf_np_ln(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 19) }
+pub fn bf_np_log2(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 20) }
+pub fn bf_np_log10(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 21) }
+pub fn bf_np_exp2(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 22) }
+pub fn bf_np_expm1(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 23) }
+pub fn bf_np_log1p(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 24) }
+pub fn bf_np_sqrt(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 25) }
+pub fn bf_np_cbrt(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 26) }
+pub fn bf_np_sigmoid(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 27) }
+pub fn bf_np_logit(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 28) }
+pub fn bf_np_softplus(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 29) }
+pub fn bf_np_tanh(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 30) }
+pub fn bf_np_gt_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 31) }
+pub fn bf_np_lt_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 32) }
+pub fn bf_np_ge_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 33) }
+pub fn bf_np_le_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 34) }
+pub fn bf_np_eq_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 35) }
+pub fn bf_np_ne_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 36) }
+pub fn bf_np_deg2rad(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 37) }
+pub fn bf_np_rad2deg(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 38) }
+pub fn bf_np_logistic_not(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, 0.0, 39) }
+pub fn bf_np_scaleshift(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { np_map(src, col, s, 40) }
+pub fn bf_np_cumsum(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 0) }
+pub fn bf_np_cumprod(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 1) }
+pub fn bf_np_cummax(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 2) }
+pub fn bf_np_cummin(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 3) }
+pub fn bf_np_cumcount(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 4) }
+pub fn bf_np_cummean(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 5) }
+pub fn bf_np_cumsumsq(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 6) }
+pub fn bf_np_cumrange(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_cum(src, col, 7) }
+pub fn bf_np_add(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 0) }
+pub fn bf_np_sub(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 1) }
+pub fn bf_np_mul(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 2) }
+pub fn bf_np_div(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 3) }
+pub fn bf_np_pow(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 4) }
+pub fn bf_np_hypot(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 5) }
+pub fn bf_np_maximum(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 6) }
+pub fn bf_np_minimum(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 7) }
+pub fn bf_np_absdiff(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 8) }
+pub fn bf_np_mean2(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 9) }
+pub fn bf_np_gt(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 10) }
+pub fn bf_np_sumsq2(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 11) }
+pub fn bf_np_wdiff(src: &BigFrame, c1: i64, c2: i64) -> BigFrame with Alloc, Mut, Div, Panic { np_binmap(src, c1, c2, 12) }
+pub fn bf_np_dot(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 0) }
+pub fn bf_np_cov(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 1) }
+pub fn bf_np_corr(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 2) }
+pub fn bf_np_sumprod(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 3) }
+pub fn bf_np_mse(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 4) }
+pub fn bf_np_mae(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 5) }
+pub fn bf_np_rmse(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 6) }
+pub fn bf_np_sse(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 7) }
+pub fn bf_np_sae(src: &BigFrame, c1: i64, c2: i64) -> f64 with Alloc, Mut, Div, Panic { np_binreduce(src, c1, c2, 8) }
+pub fn bf_np_count_gt(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 0) }
+pub fn bf_np_count_ge(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 1) }
+pub fn bf_np_count_lt(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 2) }
+pub fn bf_np_count_le(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 3) }
+pub fn bf_np_count_eq(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 4) }
+pub fn bf_np_count_ne(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 5) }
+pub fn bf_np_count_zero(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 6) }
+pub fn bf_np_count_nonzero(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 7) }
+pub fn bf_np_count_positive(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 8) }
+pub fn bf_np_count_negative(src: &BigFrame, col: i64, t: f64) -> f64 with Alloc, Mut, Div, Panic { np_countpred(src, col, t, 9) }

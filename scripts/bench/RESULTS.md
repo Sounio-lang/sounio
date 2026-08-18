@@ -8,6 +8,36 @@ directly (not taken from a subagent). col_sum agrees with pandas bit-for-bit (49
 
 | operation | 1M rows | Sounio ms | pandas ms | Sounio/pandas | before |
 |---|---|---|---|---|---|
+| bigframe_pd PANDAS.SERIES package: 108 verbs (rolling/expanding/ewm/rank/lag + reductions) | 108 gate-verified vs numpy | | | **capability** | native pandas.Series method coverage on f64 columns w/o the dependency; order-stats via in-module shell sort |
+| bigframe_sp SCIPY.SPECIAL package: 51 verbs (gamma/erf/digamma/beta/erfinv families) | 51 gate-verified vs Python math | | | **capability** | verified core: Lanczos lgamma, A&S erf, asymptotic digamma/trigamma, erfinv Winitzki+Newton; native scipy.special coverage w/o the dependency |
+| bigframe_np NUMPY-ON-COLUMNS package: 101 verbs (reductions/elementwise/cumulative/pairwise) | 100 gate-verified vs numpy | ~13 (std) | ~2 (numpy std) | **capability, not speed** | single-array ops are SIMD/BLAS-bound (lose ~6x); value = native numpy API coverage w/o the dependency; the per-group versions (bigframe_ops/ml) are the speed wins |
+| bigframe_ml MULTIVARIATE diagonal GaussianNB (p=4, binary) (1M rows, 1000 keys) | | ~43 | 293 (numpy, FAIR) | **0.15x — wins 6.9x** | one-pass per-class/feature mean+var, diagonal log-likelihood vs groupby.apply |
+| bigframe_ml MULTIVARIATE LDA shared-covariance (p=4, binary) (1M rows, 1000 keys) | | ~95 | 289 (numpy, FAIR) | **0.33x — wins 3.0x** | one-pass pooled covariance + Gaussian-elim solve Σ[w0|w1]=[μ0|μ1] vs groupby.apply(LDA) |
+| bigframe_ml MULTIVARIATE ridge/OLS (p=4 features, Gram+Gaussian-elim) (1M rows, 1000 keys) | | ~125 | 161 (numpy normal-eq, FAIR) | **0.78x — wins 1.3x** | one-pass symmetric Gram XᵀX + per-group d×d solve vs groupby.apply(np.linalg.solve); modest because numpy's per-group work is a real BLAS matmul |
+| bigframe_ml BINNED-IRLS LOGISTIC (boundary-breaker: iterative made to WIN) (1M rows, 1000 keys, vmax 20) | | ~27 | 234 (numpy binned, FAIR) / 270 (numpy naive) | **0.12x — wins 8.7x fair / 10x vs naive** | exact bit-match to per-row IRLS; per-bin sufficient stats built once, IRLS re-sums bins not rows |
+| bigframe_ml LDA fit+predict (closed-form, pooled variance) (1M rows, 1000 keys) | | ~18 | ~77 | **0.23x — wins 4.3x** | one-pass per-class mean + pooled var + discriminant vs groupby.apply(LDA) |
+| bigframe_ml DECISION STUMP fit+predict (depth-1 CART, histogram) (1M rows, 1000 keys) | | ~22 | ~300 | **0.07x — wins 14x** | one-pass histogram + threshold scan vs groupby.apply threshold search |
+| bigframe_ml PCA explained-variance-ratio (closed-form 2x2 eigen) (1M rows, 1000 keys) | | ~20 | ~142 | **0.14x — wins 7x** | one-pass covariance + 2x2 eigendecomposition vs groupby.apply(eigvalsh) |
+| bigframe_ml CONFUSION-MATRIX cells (TP/FP/FN/TN) (1M rows, 1000 keys) | | ~10 | ~55 | **wins** | one-pass confusion counts vs groupby.apply |
+| bigframe_ml NEAREST-CENTROID fit+predict (closed-form) (1M rows, 1000 keys) | | ~16 | ~75 | **0.22x — wins 4.6x** | one-pass per-class centroid + nearest-centroid predict vs groupby.apply |
+| bigframe_ml CALIBRATION metrics (mean_pred/observed_rate/calib_err) (1M rows, 1000 keys) | | ~9 | ~40 | **wins** | one-pass reliability check vs groupby.apply |
+| bigframe_ml GAUSSIAN NAIVE BAYES fit+predict (closed-form) (1M rows, 1000 keys) | | ~18 | ~74 | **0.24x — wins 4.2x** | one-pass per-class mean/var + predict vs groupby.apply(GaussianNB) |
+| bigframe_ml RIDGE regression (closed-form) + MaxAbsScaler (1M rows, 1000 keys) | | ~19 | ~84 | **0.22x — wins 4.5x** | one co-moment pass (closed-form) vs groupby.apply(Ridge) |
+| data::bigframe_ml per-group metrics: accuracy/precision/recall/F1/MCC + MSE/RMSE/R2/MAE (1M rows, 1000 keys) | | ~16 | ~104 | **0.15x — wins 6.7x** | one-pass confusion/residual sums vs groupby.apply(sklearn.metrics) |
+| bigframe_ml ranking/prob metrics: roc_auc / gini / log_loss / brier (1M rows, 1000 keys) | | ~20 | ~81 | **0.24x — wins 4.1x** | label-split score histogram (rank AUC) / one-pass vs groupby.apply(roc_auc_score) |
+| bigframe_ml per-group LOGISTIC REGRESSION fit (IRLS, correctness-verified capability) | | ~610 | ~126 | **~4.8x LOSS (compute-bound)** | 10 IRLS passes; per-row scalar sigmoid loop vs numpy SIMD — honest loss pending C3 vectorization; a NEW capability (per-group trained classifier) |
+| per-group p-values: ttest_pvalue / mannwhitney_pvalue (tie-corrected) / ks_pvalue (1M rows, 1000 keys, 2 groups) | | ~18 | ~460 | **0.04x — wins 25x** | one-pass stat + tested stats:: CDF vs scipy/pandas groupby.apply |
+| per-group K-sample: anova_pvalue / kruskal_pvalue (tie-corrected) (1M rows, 1000 keys, 4 groups) | | ~22 | ~460 | **0.03-0.12x — wins 8-33x** | one-pass SSB/SSW or rank-sums + tested stats:: CDF vs groupby.apply |
+| per-group correlation inference: pearson_pvalue / pearson CI (Fisher z) / spearman_rho+p (1M rows, 1000 keys, 2 cols) | | ~20-41 | ~150-267 | **0.13-0.15x — wins 7-8x** | one-pass co-moments (Pearson) or rank-LUT co-moment (Spearman) + t_two_tail vs groupby.apply |
+| per-group OLS inference: slope/intercept SE+p-value, F-test p, slope 95% CI (1M rows, 1000 keys) | | ~21 | ~92 | **0.23x — wins 4.4x** | one-pass co-moments + t_two_tail/f_sf/t_quantile vs groupby.apply linregress |
+| per-group one-sample inference: mean 95% CI + one-sample t-test (1M rows, 1000 keys) | | ~16 | ~89 | **0.18x — wins 5.5x** | one-pass mean/SD + t_quantile/t_two_tail vs groupby.apply |
+| per-group paired inference: paired t-test / Cohen's dz / mean-diff 95% CI (1M rows, 1000 keys) | | ~16 | ~103 | **0.15x — wins 6.6x** | one-pass over d=x-y + t_two_tail/t_quantile vs groupby.apply ttest_rel |
+| per-group two-proportion z-test + Wald CI (1M rows, 1000 keys, 2 groups, binary outcome) | | ~17 | ~457 | **0.04x — wins 28x** | one-pass counts + local normal Phi vs groupby.apply |
+| per-group variance homogeneity: Bartlett + Levene (1M rows, 1000 keys, 4 groups) | | ~38 | ~749 | **0.05x — wins 20x** | one/two-pass moments + chi2_sf/f_sf vs groupby.apply |
+| per-group normality: D'Agostino-Pearson normaltest (K2, p, skew/kurt z) (1M rows, 1000 keys) | | ~20 | ~88 | **0.22x — wins 4.4x** | one moment pass + D'Agostino transform vs groupby.apply |
+| per-group chi-square: goodness-of-fit + test-of-independence p-value (1M rows, 1000 keys) | | ~26 | ~3004 | **0.01x — wins 114x** | 1D/joint histogram + chi2_sf vs groupby.apply crosstab |
+| per-group F-test (variance ratio) + one-proportion z-test + Wilson CI (1M rows, 1000 keys) | | ~17 | ~407 | **0.04x — wins 24x** | one-pass moments/counts + f_sf/f_cdf/Phi vs groupby.apply |
+| two-sample tests: welch/cohens_d/glass/pooled_sd/point_biserial + mannwhitney_u/cles/rank_biserial/ks (1M rows, 1000 keys, 2 groups) | | ~18 | ~430 | **0.04x — wins 24x** | one-pass moments / group-split histogram; pandas = scipy + groupby.apply |
 | col_sum (8-accumulator ILP) | | 1.44 | 0.55 | **2.6x** | 3.9x |
 | col_mean (via 8-acc sum) | | 2.05 | 1.00 | **2.1x** | 2.3x |
 | filter_count (`bf_count_gt`, raw scan) | | 1.84 | 0.74 | **2.5x** | 12.1x |

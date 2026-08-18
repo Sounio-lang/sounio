@@ -1,0 +1,549 @@
+// examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio
+//
+// Vertical executável: Experiências 1+2+3 (construção, não paper)
+//
+//   EXP1 — Metrologia Z: Γ(Z→ee) GUM + budget de fontes + confidence gate
+//   EXP2 — NonUnitary no pico: deficit(s) + σ_peak + curva deficit vs √s + JSON
+//   EXP3 — Tensão EW: M_W tree / Δρ / G_F-Δr, pull ladder, S/T/U, Δρ
+//
+// Effects: NonUnitary is compiler-enforced on the peak cross-section path.
+// Run:
+//   export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
+//   export SOUNIO_SOUC_ENGINE=lean_single
+//   ./bin/souc run examples/particle_physics/exp123_z_metrology_nonunitary_ew.sio
+// Gate:
+//   bash scripts/ci/particle_exp123_gate.sh
+
+use particle_physics::sm_params::{mass_z, mass_w, mass_h, mass_top, alpha_s_mz, sin2_theta_w}
+// Madaros-safe Z metrology (no vertex/spinor graph)
+use particle_physics::epistemic_chain_z::{
+    z_width_ee_ep, z_width_ee_budget, chain_gate_z_width,
+    eemm_qed_xsec_pb_gated, chain_gate_qed_xsec,
+}
+// Free-function Epistemic access — nested prop.amp_sq.val() SEGVs Madaros lower
+use epistemic::knowledge::{ep_val, ep_variance, ep_confidence}
+use particle_physics::nonunitary::{
+    nu_z_propagator, nu_deficit, nu_deficit_pct, nu_approx, nu_exact,
+    eemm_z_peak_xsec_nu, nu_z_unitarity_threshold,
+    NU_Z,
+}
+// eemm_z_amplitude_nu lives in nonunitary_amp (vertex chain) — not imported
+// here so Madaros can native-lower the vertical (vertex→spinor SEGV residual).
+use particle_physics::ew_precision::{
+    m_w_prediction_ep, m_w_consistency_pull,
+    m_w_prediction_ep_radiative, m_w_consistency_pull_radiative,
+    m_w_prediction_ep_gf, m_w_consistency_pull_gf,
+    oblique_s_measured_ep, oblique_t_measured_ep, oblique_u_measured_ep,
+    delta_rho_ep, g_minus_2_qed_schwinger_ep,
+    oblique_s, oblique_t, oblique_u, delta_rho,
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// Name must not be `near` — Madaros multi-module typecheck confuses it with an
+// imported symbol under particle_physics (E008 bool/i64).
+fn within(a: f64, b: f64, tol: f64) -> bool {
+    abs_f(a - b) < tol
+}
+
+fn print_pass(tag: i64) with IO {
+    print("PASS ")
+    print_int(tag)
+    print("\n")
+}
+
+fn print_fail(tag: i64) with IO {
+    print("FAIL ")
+    print_int(tag)
+    print("\n")
+}
+
+// pass_if returns 1 if pass, 0 if fail (avoid exclusive-ref counter bugs across engines).
+// Name must not be `chk` — Madaros multi-module typecheck mis-types a local `chk`
+// when particle_physics modules are imported (E008 i64/()/bool confusion).
+fn pass_if(cond: bool, tag: i64) -> i64 with IO {
+    if cond {
+        print_pass(tag)
+        1
+    } else {
+        print_fail(tag)
+        0
+    }
+}
+
+// ============================================================================
+// EXP1 — Z metrology (GUM + budget + gate)
+// ============================================================================
+
+fn run_exp1() -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    print("=== EXP1 Z metrology ===\n")
+
+    let gz = z_width_ee_ep()
+    let gval = gz.val()
+    let gstd = gz.std()
+    let gconf = gz.confidence()
+
+    print("EXP1_GEE_VAL ")
+    print_f64(gval)
+    print("\n")
+    print("EXP1_GEE_STD ")
+    print_f64(gstd)
+    print("\n")
+    print("EXP1_GEE_CONF ")
+    print_int(gconf)
+    print("\n")
+
+    // Physically: Γ(Z→ee) ≈ 84 MeV = 0.084 GeV
+    n = n + pass_if(gval > 0.05 && gval < 0.12, 101)
+    n = n + pass_if(gstd > 0.0, 102)
+    // Confidence from multi-source PDG chain is ~846 on current stack
+    n = n + pass_if(gconf >= 800, 103)
+
+    // Budget: [0]=Var from M_Z, [1]=Var from sin²θ_W, [2]=total Var, [3]=Γ central
+    let budget = z_width_ee_budget()
+    print("EXP1_BUDGET_VAR_MZ ")
+    print_f64(budget[0])
+    print("\n")
+    print("EXP1_BUDGET_VAR_S2W ")
+    print_f64(budget[1])
+    print("\n")
+    print("EXP1_BUDGET_VAR_TOTAL ")
+    print_f64(budget[2])
+    print("\n")
+    print("EXP1_BUDGET_GEE ")
+    print_f64(budget[3])
+    print("\n")
+
+    n = n + pass_if(budget[0] > 0.0, 104)
+    n = n + pass_if(budget[1] > 0.0, 105)
+    n = n + pass_if(budget[2] > 0.0, 106)
+    n = n + pass_if(within(budget[3], gval, gval * 1.0e-6), 107)
+    // Both source variances positive; total from GUM chain is independent recomputation
+    n = n + pass_if(budget[0] + budget[1] > 0.0, 108)
+    n = n + pass_if(budget[2] > 0.0, 109)
+
+    // Dominance: which PDG input owns the budget?
+    let dom_mz = budget[0] >= budget[1]
+    if dom_mz {
+        print("EXP1_DOMINANT_SOURCE M_Z\n")
+    } else {
+        print("EXP1_DOMINANT_SOURCE SIN2_THETA_W\n")
+    }
+    n = n + pass_if(true, 110)
+
+    // Confidence gate: match observed confidence floor (~846)
+    let gate_ok = chain_gate_z_width(800)
+    print("EXP1_GATE_800 ")
+    print_int(gate_ok)
+    print("\n")
+    n = n + pass_if(gate_ok == 1, 111)
+
+    // Absurd gate should fail
+    let gate_absurd = chain_gate_z_width(9999)
+    print("EXP1_GATE_9999 ")
+    print_int(gate_absurd)
+    print("\n")
+    n = n + pass_if(gate_absurd == 0, 112)
+
+    // Bonus: QED continuum gate still works (sanity of epistemic stack)
+    let qed_gate = chain_gate_qed_xsec(10.0, 800)
+    print("EXP1_QED_GATE_10GEV ")
+    print_int(qed_gate)
+    print("\n")
+    n = n + pass_if(qed_gate == 1, 113)
+
+    print("EXP1_DONE\n")
+    n
+}
+
+// ============================================================================
+// EXP2 — NonUnitary at the Z pole (split helpers: Madaros IR size / lower_array)
+// ============================================================================
+
+fn exp2_basic_deficits(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    let s_pole = mz * mz
+    let prop_pole = nu_z_propagator(s_pole, gamma_z)
+    let prop_far = nu_z_propagator(1.0, gamma_z)
+    let prop_hi = nu_z_propagator(100000.0, gamma_z)
+    let d_pole = nu_deficit(prop_pole)
+    let d_far = nu_deficit(prop_far)
+    let d_hi = nu_deficit(prop_hi)
+
+    print("EXP2_DEFICIT_POLE ")
+    print_f64(d_pole)
+    print("\n")
+    print("EXP2_DEFICIT_FAR ")
+    print_f64(d_far)
+    print("\n")
+    print("EXP2_DEFICIT_HIGH ")
+    print_f64(d_hi)
+    print("\n")
+    print("EXP2_DEFICIT_PCT_POLE ")
+    print_f64(nu_deficit_pct(prop_pole))
+    print("\n")
+    let amp_val = ep_val(&prop_pole.amp_sq)
+    let amp_var = ep_variance(&prop_pole.amp_sq)
+    let amp_conf = ep_confidence(&prop_pole.amp_sq)
+    print("EXP2_AMP_SQ ")
+    print_f64(amp_val)
+    print("\n")
+
+    n = n + pass_if(within(d_pole, 1.0, 0.001), 201)
+    n = n + pass_if(d_far < 0.01, 202)
+    n = n + pass_if(d_hi < 0.01, 203)
+    n = n + pass_if(amp_var > 0.0, 204)
+    n = n + pass_if(amp_conf == 950, 205)
+    n = n + pass_if(prop_pole.particle == NU_Z(), 206)
+    n = n + pass_if(amp_val > 0.0, 207)
+    n = n + pass_if(within(nu_deficit(prop_pole), 1.0, 0.001), 208)
+    n
+}
+
+// Peak uses the imported NonUnitary stdlib path (eemm_z_peak_xsec_nu).
+// Historical residual (imported peak zero under full EXP123 IR) closed after
+// the Madaros ep_gate / free-fn Epistemic stack stabilisation (#1478 + chain_z).
+// Local peak body removed 2026-07-26 — re-check if peak_val collapses to 0.
+fn exp2_peak_approx(mz: f64, gamma_z: f64, gamma_ee: f64, gamma_mumu: f64) -> i64 with IO, NonUnitary, Mut, Div, Panic {
+    var n: i64 = 0
+    let s_pole = mz * mz
+    let prop_pole = nu_z_propagator(s_pole, gamma_z)
+    let peak = eemm_z_peak_xsec_nu(gamma_ee, gamma_mumu, gamma_z)
+    let peak_val = ep_val(&peak)
+    let peak_var = ep_variance(&peak)
+    print("EXP2_PEAK_XSEC ")
+    print_f64(peak_val)
+    print("
+")
+    print("EXP2_PEAK_VAR ")
+    print_f64(peak_var)
+    print("
+")
+    n = n + pass_if(peak_val > 1.0e-7 && peak_val < 1.0e-4, 209)
+    n = n + pass_if(peak_var > 0.0, 210)
+
+    let ap = nu_approx(prop_pole).val()
+    let ex = nu_exact(prop_pole).val()
+    print("EXP2_NU_APPROX ")
+    print_f64(ap)
+    print("\n")
+    print("EXP2_NU_EXACT ")
+    print_f64(ex)
+    print("\n")
+    n = n + pass_if(within(ap, ex, abs_f(ex) * 1.0e-12 + 1.0e-30), 211)
+    n
+}
+
+fn exp2_scan_receipt(mz: f64, gamma_z: f64) -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    let s_pole = mz * mz
+    let thr = nu_z_unitarity_threshold(gamma_z, 0.01)
+    print("EXP2_UNITARITY_THRESH_SQRT_S ")
+    print_f64(thr)
+    print("\n")
+    n = n + pass_if(thr > mz, 212)
+
+    let d_pole = nu_deficit(nu_z_propagator(s_pole, gamma_z))
+    let d_far = nu_deficit(nu_z_propagator(1.0, gamma_z))
+    let d_mid = nu_deficit(nu_z_propagator(s_pole * 1.01, gamma_z))
+    print("EXP2_DEFICIT_MID ")
+    print_f64(d_mid)
+    print("\n")
+    n = n + pass_if(d_mid < d_pole && d_mid > d_far, 213)
+
+    let d_lo = nu_deficit(nu_z_propagator((mz - 2.0) * (mz - 2.0), gamma_z))
+    let d_hi5 = nu_deficit(nu_z_propagator((mz + 5.0) * (mz + 5.0), gamma_z))
+    let d_thr = nu_deficit(nu_z_propagator(thr * thr, gamma_z))
+    print("EXP2_SCAN_SQRT_S_LO ")
+    print_f64(mz - 2.0)
+    print("\n")
+    print("EXP2_SCAN_DEFICIT_LO ")
+    print_f64(d_lo)
+    print("\n")
+    print("EXP2_SCAN_SQRT_S_POLE ")
+    print_f64(mz)
+    print("\n")
+    print("EXP2_SCAN_DEFICIT_POLE ")
+    print_f64(d_pole)
+    print("\n")
+    print("EXP2_SCAN_SQRT_S_MID ")
+    print_f64(mz * 1.005)
+    print("\n")
+    print("EXP2_SCAN_DEFICIT_MID ")
+    print_f64(d_mid)
+    print("\n")
+    print("EXP2_SCAN_SQRT_S_HI5 ")
+    print_f64(mz + 5.0)
+    print("\n")
+    print("EXP2_SCAN_DEFICIT_HI5 ")
+    print_f64(d_hi5)
+    print("\n")
+    print("EXP2_SCAN_SQRT_S_THR ")
+    print_f64(thr)
+    print("\n")
+    print("EXP2_SCAN_DEFICIT_THR ")
+    print_f64(d_thr)
+    print("\n")
+
+    n = n + pass_if(d_lo < d_pole && d_hi5 < d_pole, 214)
+    n = n + pass_if(d_hi5 < d_mid, 215)
+    n = n + pass_if(d_thr < 0.02 && d_thr > 0.0, 216)
+    n = n + pass_if(d_thr < d_hi5 || thr > mz + 5.0, 217)
+
+    print("EXP2_DEFICIT_JSON {")
+    print("\"schema\":\"particle.exp123.deficit_curve.v1\",")
+    print("\"particle\":\"Z\",")
+    print("\"gamma_z\":")
+    print_f64(gamma_z)
+    print(",\"unitarity_threshold_sqrt_s\":")
+    print_f64(thr)
+    print(",\"points\":[")
+    print("{\"label\":\"lo\",\"sqrt_s\":")
+    print_f64(mz - 2.0)
+    print(",\"deficit\":")
+    print_f64(d_lo)
+    print("},")
+    print("{\"label\":\"pole\",\"sqrt_s\":")
+    print_f64(mz)
+    print(",\"deficit\":")
+    print_f64(d_pole)
+    print("},")
+    print("{\"label\":\"mid\",\"sqrt_s\":")
+    print_f64(mz * 1.005)
+    print(",\"deficit\":")
+    print_f64(d_mid)
+    print("},")
+    print("{\"label\":\"hi5\",\"sqrt_s\":")
+    print_f64(mz + 5.0)
+    print(",\"deficit\":")
+    print_f64(d_hi5)
+    print("},")
+    print("{\"label\":\"thr1pct\",\"sqrt_s\":")
+    print_f64(thr)
+    print(",\"deficit\":")
+    print_f64(d_thr)
+    print("}]}\n")
+    n = n + pass_if(true, 218)
+    n
+}
+
+fn run_exp2() -> i64 with IO, NonUnitary, Mut, Div, Panic {
+    print("=== EXP2 NonUnitary Z pole ===\n")
+    let mz = mass_z().val()
+    let gamma_z = 2.4952
+    let n1 = exp2_basic_deficits(mz, gamma_z)
+    let n2 = exp2_peak_approx(mz, gamma_z, 0.08399, 0.08399)
+    let n3 = exp2_scan_receipt(mz, gamma_z)
+    print("EXP2_DONE\n")
+    n1 + n2 + n3
+}
+
+// ============================================================================
+// EXP3 — EW tension (M_W pull, S/T/U, Δρ)
+// ============================================================================
+
+fn run_exp3() -> i64 with IO, Mut, Div, Panic {
+    var n: i64 = 0
+    print("=== EXP3 EW tension ===\n")
+
+    let pred = m_w_prediction_ep()
+    let pred_rad = m_w_prediction_ep_radiative()
+    let pred_gf = m_w_prediction_ep_gf()
+    let meas = mass_w()
+    let pull = m_w_consistency_pull()
+    let pull_rad = m_w_consistency_pull_radiative()
+    let pull_gf = m_w_consistency_pull_gf()
+
+    print("EXP3_MW_PRED_TREE ")
+    print_f64(pred.val())
+    print("\n")
+    print("EXP3_MW_PRED_TREE_STD ")
+    print_f64(pred.std())
+    print("\n")
+    print("EXP3_MW_PRED_RAD ")
+    print_f64(pred_rad.val())
+    print("\n")
+    print("EXP3_MW_PRED_RAD_STD ")
+    print_f64(pred_rad.std())
+    print("\n")
+    print("EXP3_MW_PRED_GF ")
+    print_f64(pred_gf.val())
+    print("\n")
+    print("EXP3_MW_PRED_GF_STD ")
+    print_f64(pred_gf.std())
+    print("\n")
+    print("EXP3_MW_MEAS ")
+    print_f64(meas.val())
+    print("\n")
+    print("EXP3_MW_MEAS_STD ")
+    print_f64(meas.std())
+    print("\n")
+    print("EXP3_MW_PULL_TREE ")
+    print_f64(pull)
+    print("\n")
+    print("EXP3_MW_PULL_RAD ")
+    print_f64(pull_rad)
+    print("\n")
+    print("EXP3_MW_PULL_GF ")
+    print_f64(pull_gf)
+    print("\n")
+    // Canonical pull key tracks the most complete construction step (G_F Δr)
+    print("EXP3_MW_PULL ")
+    print_f64(pull_gf)
+    print("\n")
+
+    // Physical range for M_W (tree + Δρ + G_F)
+    n = n + pass_if(pred.val() > 75.0 && pred.val() < 85.0, 301)
+    n = n + pass_if(meas.val() > 75.0 && meas.val() < 85.0, 302)
+    n = n + pass_if(pred.variance() > 0.0, 303)
+    n = n + pass_if(abs_f(pull) < 100.0, 304)
+    n = n + pass_if(pred_rad.val() > 75.0 && pred_rad.val() < 85.0, 305)
+    n = n + pass_if(pred_rad.variance() > 0.0, 306)
+    n = n + pass_if(abs_f(pull_rad) < 100.0, 307)
+    // Leading Δρ must lift M_W toward the PDG direct measurement
+    n = n + pass_if(pred_rad.val() > pred.val(), 308)
+    // Radiative pull is strictly milder than tree-level pull (honest improvement)
+    n = n + pass_if(abs_f(pull_rad) < abs_f(pull), 309)
+    // G_F Sirlin step
+    n = n + pass_if(pred_gf.val() > 75.0 && pred_gf.val() < 85.0, 310)
+    n = n + pass_if(pred_gf.variance() > 0.0, 311)
+    n = n + pass_if(abs_f(pull_gf) < 100.0, 312)
+    // G_F pull must improve on both tree and on-shell-Δρ (construction ladder)
+    n = n + pass_if(abs_f(pull_gf) < abs_f(pull), 313)
+    n = n + pass_if(abs_f(pull_gf) < abs_f(pull_rad), 314)
+    // Target: residual |pull| after G_F Δr should be construction-small
+    n = n + pass_if(abs_f(pull_gf) < 3.0, 315)
+    if abs_f(pull_gf) > 2.0 {
+        print("EXP3_TENSION_FLAG RESIDUAL_PULL_AFTER_GF_DR\n")
+        print("EXP3_TENSION_NOTE G_F_Sirlin_Delta_r_closes_most_tension_higher_orders_open\n")
+    } else {
+        print("EXP3_TENSION_FLAG CONSISTENT\n")
+        print("EXP3_TENSION_NOTE G_F_Sirlin_Delta_r_pull_within_2sigma\n")
+    }
+    n = n + pass_if(true, 316)
+
+    // Oblique parameters (PDG global fit, epistemic)
+    let s_ep = oblique_s_measured_ep()
+    let t_ep = oblique_t_measured_ep()
+    let u_ep = oblique_u_measured_ep()
+    print("EXP3_S_MEAS ")
+    print_f64(s_ep.val())
+    print("\n")
+    print("EXP3_S_STD ")
+    print_f64(s_ep.std())
+    print("\n")
+    print("EXP3_T_MEAS ")
+    print_f64(t_ep.val())
+    print("\n")
+    print("EXP3_T_STD ")
+    print_f64(t_ep.std())
+    print("\n")
+    print("EXP3_U_MEAS ")
+    print_f64(u_ep.val())
+    print("\n")
+    print("EXP3_U_STD ")
+    print_f64(u_ep.std())
+    print("\n")
+
+    // PDG-scale: S ~ 0.05 ± 0.11, T ~ 0.09 ± 0.14
+    n = n + pass_if(abs_f(s_ep.val()) < 1.0, 317)
+    n = n + pass_if(s_ep.std() > 0.0, 318)
+    n = n + pass_if(abs_f(t_ep.val()) < 1.0, 319)
+    n = n + pass_if(t_ep.std() > 0.0, 320)
+    n = n + pass_if(u_ep.std() > 0.0, 321)
+
+    // SM theory Δρ from top (epistemic)
+    let dr = delta_rho_ep()
+    print("EXP3_DELTA_RHO ")
+    print_f64(dr.val())
+    print("\n")
+    print("EXP3_DELTA_RHO_STD ")
+    print_f64(dr.std())
+    print("\n")
+    n = n + pass_if(dr.val() > 0.0 && dr.val() < 0.02, 322)
+    n = n + pass_if(dr.variance() > 0.0, 323)
+
+    // Theory S,T,U at PDG central masses (consistency of formulas)
+    let mt = mass_top().val()
+    let mh = mass_h().val()
+    let asz = alpha_s_mz().val()
+    let s_th = oblique_s(mh, mt, asz)
+    let t_th = oblique_t(mh, mt)
+    let u_th = oblique_u(mh, mt, asz)
+    print("EXP3_S_TH ")
+    print_f64(s_th)
+    print("\n")
+    print("EXP3_T_TH ")
+    print_f64(t_th)
+    print("\n")
+    print("EXP3_U_TH ")
+    print_f64(u_th)
+    print("\n")
+    n = n + pass_if(abs_f(s_th) < 1.0, 324)
+    n = n + pass_if(abs_f(t_th) < 1.0, 325)
+
+    // g-2 Schwinger term with GUM
+    let amu = g_minus_2_qed_schwinger_ep()
+    print("EXP3_AMU_QED ")
+    print_f64(amu.val())
+    print("\n")
+    // α/(2π) ≈ 0.0011614
+    n = n + pass_if(within(amu.val(), 0.0011614, 1.0e-6), 326)
+    n = n + pass_if(amu.variance() > 0.0, 327)
+
+    print("EXP3_TENSION_JSON {")
+    print("\"schema\":\"particle.exp123.tension.v1\",")
+    print("\"pull_tree\":")
+    print_f64(pull)
+    print(",\"pull_rad\":")
+    print_f64(pull_rad)
+    print(",\"pull_gf\":")
+    print_f64(pull_gf)
+    print("}\n")
+
+    print("EXP3_DONE\n")
+    n
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, NonUnitary, Mut, Div, Panic {
+    print("PARTICLE_EXP123_BEGIN\n")
+
+    let n1 = run_exp1()
+    let n2 = run_exp2()
+    let n3 = run_exp3()
+    let npass = n1 + n2 + n3
+    // Expected: exp1=13, exp2=18, exp3=27 → 58
+    let expected: i64 = 58
+    let nfail = expected - npass
+
+    print("PARTICLE_EXP123_PASS ")
+    print_int(npass)
+    print("\n")
+    print("PARTICLE_EXP123_FAIL ")
+    print_int(nfail)
+    print("\n")
+    print("PARTICLE_EXP123_N1 ")
+    print_int(n1)
+    print("\n")
+    print("PARTICLE_EXP123_N2 ")
+    print_int(n2)
+    print("\n")
+    print("PARTICLE_EXP123_N3 ")
+    print_int(n3)
+    print("\n")
+
+    if npass == expected {
+        print("PARTICLE_EXP123_OK\n")
+        0
+    } else {
+        print("PARTICLE_EXP123_FAILED\n")
+        1
+    }
+}

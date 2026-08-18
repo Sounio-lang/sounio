@@ -102,7 +102,7 @@ $SOUC --version                           # verify toolchain
 $SOUC check file.sio                      # type-check only
 $SOUC run file.sio                        # compile + execute + clean up
 $SOUC compile file.sio -o output.elf      # emit named ELF binary
-$SOUC info                                # compiler status
+$SOUC info                                # compiler status (Madaros only -- SOUNIO_SOUC_ENGINE=lean_single has no `info` subcommand)
 
 # Bootstrap chain
 make build    # boot4 → gen1 → gen2 → gen3, verifies gen2 == gen3
@@ -138,6 +138,19 @@ active:
    scripts/dev/souc-build-lock.sh ./bin/souc self-hosted/compiler/main.sio /tmp/out.elf
    ```
    Cheap `souc check <file>` does not need the lock.
+
+   > **Do NOT wrap `scripts/ci/build_modular_madaros.sh`** — it already takes the
+   > global lock itself (twice: for the seed derivation and for the main build).
+   > Wrapping it **self-deadlocks**, and the deadlock is silent: the outer wrapper
+   > waits for a lock its own child is waiting to acquire. Measured 2026-07-26 —
+   > one agent doing this blocked two others for ~27 minutes before the wedge was
+   > noticed. Call it directly:
+   > ```bash
+   > bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+   > ```
+   > Better still, when the cluster is reachable, keep the build off the pod
+   > entirely — see `scripts/dev/souc-build-remote.sh`, which runs it on an idle
+   > SLURM node and needs no lock at all, because it consumes no pod CPU.
 2. **One worktree per agent.** Do not run a second agent directly on
    `/workspace/sounio`. Use a dedicated worktree (see [`.claude/AGENT_HANDOFF.md`](.claude/AGENT_HANDOFF.md)).
    Recommended ceiling: **≤2 agents doing compiler work at once** on this pod.
@@ -256,7 +269,7 @@ Pipeline: Source → Lexer → Parser → AST → Check → HIR → SIR → HLIR
 | `self-hosted/ir/` | IR lowering, e-graph optimization (1000+ rewrite rules) |
 | `self-hosted/native/` | x86-64 ELF emission |
 | `self-hosted/compiler/` | Codegen drivers (lean, IR, GPU) |
-| `self-hosted/gpu/` | PTX/GPU codegen (exists; no end-to-end CLI path) |
+| `self-hosted/gpu/` | PTX/GPU codegen; end-to-end CLI path exists under default Madaros (`souc build --backend gpu`, see §13) -- no GPU CLI surface under `SOUNIO_SOUC_ENGINE=lean_single`, which rejects the invocation outright |
 | `stdlib/epistemic/` | `Knowledge<T>`, uncertainty (GUM), provenance |
 | `stdlib/units/` | Dimensional analysis |
 | `bootstrap/` | stage0 (C) → boot2g → boot3 → boot4 → self-hosted |
@@ -330,9 +343,12 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 - **Imported-module native path — partial closeout.** Historical D1 (`f64→i64` param cast bitcast → GUM k95 stuck at 1.960) and much of D2 (`&local_array`→builtin) are **closed** (D1: #983/#1252 + Wave10 trust gate; D2: #933/#1247 family). Residuals remain: multi-module memory-wall / exclusive-ref fragile chains (D3 family), named-import/`print_f64` papercuts (D4/#862). Finite-dof `gum_k95` is **TRUSTWORTHY** under default Madaros (`scripts/epistemic_trust_gate.sh` → k95i=2776). Map: [`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md`](docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md). Escalation: [`docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md`](docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md).
 - `Knowledge<T>` supports struct-level generics (`f64`, `bool`, struct types)
 - No unary minus — write `0 - x`
-- No REPL / `--show-ast` / `--show-types` in native mode
+- `--show-ast` / `--show-types` are unavailable under the default Madaros engine (`bin/souc compile ... --show-ast` -> `error: madaros build: unsupported option`); both work under `SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64` (they're in that engine's own usage string). A REPL does exist (`souc repl` -> `tools/repl.sh`, shipped 2026-05-28 per `docs/compiler/KNOWN_LIMITATIONS.md`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator; "no REPL" itself is stale and superseded by that entry.
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
-- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible**. The default `bin/souc` **does** emit PTX now — `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
+- GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible under default Madaros**. `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). This is Madaros-only: `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc build ... --backend gpu ...` has no GPU CLI surface at all and fails to parse the invocation (verified 2026-08-17). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
+- **Dual-engine divergence is not a tilde curiosity.** Default Madaros and `SOUNIO_SOUC_ENGINE=lean_single` disagree on more than f128/f256 parse refusal (E218 / V0-A). Two measured cases from 2026-08-17:
+  - **#1798 (CLOSED):** Madaros *accepted* a forward ontology `inverse_of` target that lean_single rejected with **E158**. Source-current Madaros was aligned to lean_single declaration-order semantics; gate `scripts/ci/madaros_ontology_enforcement_gate.sh`.
+  - **#1792 (OPEN, thesis-critical):** Madaros prints `var(...)=0.000000` on dissertation surfaces (e.g. `rapamycin_epistemic_adaptive`) where lean_single shows ~1e-5 / ~1e-9; related ep28 confidence can emit an IEEE bit-pattern as a huge decimal. Fail-closed detection: `scripts/ci/epistemic_fabrication_detect_gate.sh` / `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`. Do not treat Madaros green prints as science until variance is non-zero under the default engine or the fabrication gate is green without lean pin.
 
 ---
 
@@ -348,3 +364,34 @@ Prefer proven wrappers from `ops/lab-ops.sh` over ad hoc `sbatch` or `kubectl`.
 ---
 
 *This file is the AI-assistant entry-point. For the Codex-facing execution contract, see [`AGENTS.md`](AGENTS.md). For governance authority matrix, see [`docs/governance/DOCS_AUTHORITY_MATRIX.md`](docs/governance/DOCS_AUTHORITY_MATRIX.md). Last revised 17 May 2026; check `git log -1 CLAUDE.md` for current state.*
+
+## Agent coordination — read the bus before you start
+
+Ten agent slots share this pod (`claude-1..3`, `codex-1..3`, `grok-cli1..2`,
+`kimi-cli1..2`) and one filesystem. Coordination used to be a document that
+nobody wrote to. It is now a channel:
+
+```bash
+scripts/dev/agent-bus.sh brief          # FIRST THING. hazards, leases, recent events
+scripts/dev/agent-bus.sh claim <res>    # before a build lock, a shared file, a lane
+scripts/dev/agent-bus.sh post finding 'what you learned'
+scripts/dev/agent-bus.sh hazard add <slug> 'what will silently ruin others' measurements'
+```
+
+It is not push — nothing interrupts another agent's loop. You hear others when
+you read, so the whole protocol is: **`brief` before you start, `post` when your
+state changes.** Leases expire, so a crashed agent never parks a resource.
+
+For BeagleCockpit and anything else that has to know as things happen, the same
+bus is served over MCP (`scripts/mcp/agent_bus_mcp.py`, merge `scripts/mcp/agent-bus.mcp.json` into your gitignored `.mcp.json`).
+Subscribe to `bus://events` or `bus://hazards` and the server sends
+`notifications/resources/updated` the moment another agent posts — that is real
+push, not polling. Tools: `bus_post`, `bus_claim`, `bus_release`, `bus_hazard`,
+`bus_brief`. Both doors write the same storage, so an agent on the shell CLI and
+an agent on MCP are on one channel.
+
+Post a `hazard` for anything that makes a measurement lie rather than fail:
+a poisoned environment variable, a stale artifact, a checkout parked on another
+branch. Those cost hours precisely because the run still exits and prints a
+number. Storage is `/workspace/.agents/bus`, outside every checkout, because
+agents work in different worktrees.
