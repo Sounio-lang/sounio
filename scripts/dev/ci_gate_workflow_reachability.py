@@ -50,8 +50,13 @@ YAML_RUN_RE = re.compile(
     """
 )
 
-# for-loop bodies list paths on their own continuation lines, then
-# `bash "$g"`. A listed *_gate.sh on a non-comment line is an invoke.
+# YAML `run:` blocks sometimes list gate paths on their own continuation
+# lines, then `bash "$g"`. A listed *_gate.sh on a non-comment YAML line
+# is an invoke. Do NOT apply this to .sh files: scan-lists (sigpipe
+# hygiene SHAPE_BAN_* arrays, gate_vacuity `git ls-files`) name gates
+# without executing them. Treating those as invokes made
+# mli_s3_bit_identity_gate.sh look workflow-reachable and REFUTE'd the
+# leftover instrument after #1880. Pass-2 already drew this line.
 BARE_GATE_RE = re.compile(
     r"(?P<path>scripts/(?:ci|dev)/[A-Za-z0-9_./-]+_gate\.sh)"
 )
@@ -103,13 +108,18 @@ def is_comment_line(path: Path, line: str) -> bool:
 
 def extract_invokes(path: Path, text: str) -> set[str]:
     found: set[str] = set()
+    scanners = [INVOKE_RE, YAML_RUN_RE]
+    # Bare gate paths are invoke only in workflow YAML. In .sh they are
+    # almost always a scan-list or a comment-adjacent inventory.
+    if path.suffix in {".yml", ".yaml"}:
+        scanners.append(BARE_GATE_RE)
     for i, line in enumerate(text.splitlines(), 1):
         if is_comment_line(path, line):
             continue
         if any(m in line for m in INVENTORY_MARKERS) and "_gate.sh" in line:
             # Listing gates is not running them (gate_vacuity_gate.sh).
             continue
-        for rx in (INVOKE_RE, YAML_RUN_RE, BARE_GATE_RE):
+        for rx in scanners:
             for m in rx.finditer(line):
                 found.add(m.group("path"))
     return found
@@ -339,6 +349,20 @@ def main() -> int:
         )
         return 2
 
+    # #1880: these two are in Contracts. If they drop out of the invoke
+    # graph, the leftover census is lying the other way.
+    wired_must_reach = (
+        "dissertation_confidence_gate_gate.sh",
+        "dissertation_frontend_parity_gate.sh",
+    )
+    missing_wired = [n for n in wired_must_reach if n not in reach_names]
+    if missing_wired:
+        print(
+            f"REFUTE: #1880 wires missing from invoke graph: {missing_wired}",
+            file=sys.stderr,
+        )
+        return 2
+
     leftover = len(gates) - n_reach
     summary = {
         "gates_total": len(gates),
@@ -357,6 +381,11 @@ def main() -> int:
             "reachable_nonzero": n_reach > 0,
             "named_orphans_still_unreachable": all(
                 o not in reach_names for o in NAMED_DIRECT_ORPHANS
+            ),
+            "scan_list_not_invoke_mli_s3": "mli_s3_bit_identity_gate.sh"
+            not in reach_names,
+            "dissertation_1880_wires_reachable": all(
+                n in reach_names for n in wired_must_reach
             ),
         },
         "tsv": "",
