@@ -1035,6 +1035,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.variance-of-associator | historical | docs/research/variance_of_associator.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.while-loop-bug-investigation | historical | docs/research/WHILE_LOOP_BUG_INVESTIGATION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zd-completeness-pincer-dag-2026-08-10 | historical | docs/research/zd_completeness_pincer_dag_2026-08-10.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.zd-cp2-general-closed-form-2026-08-18 | historical | docs/research/zd_cp2_general_closed_form_2026-08-18.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zd-e5-qbinomial-mechanism-2026-08-10 | historical | docs/research/zd_e5_qbinomial_mechanism_2026-08-10.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zd-qec-prediction-falsifiers-2026-07-26 | historical | docs/research/zd_qec_prediction_falsifiers_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.zd-qec-prediction-spec-2026-07-26 | historical | docs/research/zd_qec_prediction_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
