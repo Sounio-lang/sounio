@@ -42,8 +42,12 @@ elif [[ "${1:-}" == --stage=* ]]; then
   STAGE="${1#--stage=}"
   shift || true
 elif [[ $# -gt 0 ]]; then
-  echo "usage: $0 --stage v0b|v0d" >&2
+  echo "usage: $0 --stage v0b|v0c|v0d" >&2
   exit 64
+fi
+
+if [[ "$STAGE" == "v0c" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0c_wire_gate.sh" "$@"
 fi
 
 if [[ "$STAGE" == "v0d" ]]; then
@@ -51,7 +55,7 @@ if [[ "$STAGE" == "v0d" ]]; then
 fi
 
 if [[ "$STAGE" != "v0b" ]]; then
-  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0d; v0c lands separately)" >&2
+  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d)" >&2
   exit 64
 fi
 
