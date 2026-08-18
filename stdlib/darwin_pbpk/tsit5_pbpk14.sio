@@ -376,7 +376,10 @@ pub fn pbpk_params_validate(prm: PBPKParams14) -> i32 with Mut, Div, Panic {
 // PBPK ODE SYSTEM
 // ============================================================================
 
-pub fn pbpk_ode(st: PBPKState14, t: f64, prm: PBPKParams14) -> PBPKState14 with Mut, Div, Panic {
+// The native handle table is monotonic today.  Keep the established by-value
+// API, but make the hot solver path write into caller-owned state so repeated
+// adaptive steps do not allocate a new PBPKState14 for every intermediate.
+fn pbpk_ode_into(st: &PBPKState14, t: f64, prm: PBPKParams14, out: &!PBPKState14) with Mut, Div, Panic {
     let c_blood = st.blood
     let c_plasma = c_blood / prm.rb_ratio
     let c_unbound = c_plasma * prm.fu_plasma
@@ -442,22 +445,26 @@ pub fn pbpk_ode(st: PBPKState14, t: f64, prm: PBPKParams14) -> PBPKState14 with 
     // Renal clearance (unbound drug)
     d_blood = d_blood - (prm.cl_renal / prm.v_blood) * c_unbound * prm.rb_ratio
 
-    return PBPKState14 {
-        blood: d_blood,
-        liver: d_liver,
-        kidney: d_kidney,
-        brain: d_brain,
-        heart: d_heart,
-        lung: d_lung,
-        muscle: d_muscle,
-        adipose: d_adipose,
-        gut: d_gut,
-        skin: d_skin,
-        bone: d_bone,
-        spleen: d_spleen,
-        pancreas: d_pancreas,
-        other: d_other
-    }
+    (*out).blood = d_blood
+    (*out).liver = d_liver
+    (*out).kidney = d_kidney
+    (*out).brain = d_brain
+    (*out).heart = d_heart
+    (*out).lung = d_lung
+    (*out).muscle = d_muscle
+    (*out).adipose = d_adipose
+    (*out).gut = d_gut
+    (*out).skin = d_skin
+    (*out).bone = d_bone
+    (*out).spleen = d_spleen
+    (*out).pancreas = d_pancreas
+    (*out).other = d_other
+}
+
+pub fn pbpk_ode(st: PBPKState14, t: f64, prm: PBPKParams14) -> PBPKState14 with Mut, Div, Panic {
+    var out = pbpk_state_zero()
+    pbpk_ode_into(&st, t, prm, &!out)
+    out
 }
 
 // ============================================================================
@@ -467,6 +474,129 @@ pub fn pbpk_ode(st: PBPKState14, t: f64, prm: PBPKParams14) -> PBPKState14 with 
 pub struct Tsit5StepResult14 {
     state_new: PBPKState14,
     err: PBPKState14
+}
+
+// These helpers deliberately accept top-level state references.  Madaros has
+// historically had fragile nested aggregate-field stores, so the long-running
+// path keeps each reusable state as a caller-owned slot rather than burying the
+// states inside another aggregate.
+pub fn pbpk_state_copy_into(src: &PBPKState14, dst: &!PBPKState14) with Mut {
+    (*dst).blood = src.blood
+    (*dst).liver = src.liver
+    (*dst).kidney = src.kidney
+    (*dst).brain = src.brain
+    (*dst).heart = src.heart
+    (*dst).lung = src.lung
+    (*dst).muscle = src.muscle
+    (*dst).adipose = src.adipose
+    (*dst).gut = src.gut
+    (*dst).skin = src.skin
+    (*dst).bone = src.bone
+    (*dst).spleen = src.spleen
+    (*dst).pancreas = src.pancreas
+    (*dst).other = src.other
+}
+
+fn pbpk_state_add_scaled_in_place(dst: &!PBPKState14, src: &PBPKState14, factor: f64) with Mut {
+    (*dst).blood = (*dst).blood + src.blood * factor
+    (*dst).liver = (*dst).liver + src.liver * factor
+    (*dst).kidney = (*dst).kidney + src.kidney * factor
+    (*dst).brain = (*dst).brain + src.brain * factor
+    (*dst).heart = (*dst).heart + src.heart * factor
+    (*dst).lung = (*dst).lung + src.lung * factor
+    (*dst).muscle = (*dst).muscle + src.muscle * factor
+    (*dst).adipose = (*dst).adipose + src.adipose * factor
+    (*dst).gut = (*dst).gut + src.gut * factor
+    (*dst).skin = (*dst).skin + src.skin * factor
+    (*dst).bone = (*dst).bone + src.bone * factor
+    (*dst).spleen = (*dst).spleen + src.spleen * factor
+    (*dst).pancreas = (*dst).pancreas + src.pancreas * factor
+    (*dst).other = (*dst).other + src.other * factor
+}
+
+fn pbpk_state_scale_in_place(dst: &!PBPKState14, factor: f64) with Mut {
+    (*dst).blood = (*dst).blood * factor
+    (*dst).liver = (*dst).liver * factor
+    (*dst).kidney = (*dst).kidney * factor
+    (*dst).brain = (*dst).brain * factor
+    (*dst).heart = (*dst).heart * factor
+    (*dst).lung = (*dst).lung * factor
+    (*dst).muscle = (*dst).muscle * factor
+    (*dst).adipose = (*dst).adipose * factor
+    (*dst).gut = (*dst).gut * factor
+    (*dst).skin = (*dst).skin * factor
+    (*dst).bone = (*dst).bone * factor
+    (*dst).spleen = (*dst).spleen * factor
+    (*dst).pancreas = (*dst).pancreas * factor
+    (*dst).other = (*dst).other * factor
+}
+
+pub fn tsit5_step_pbpk_into(
+    st_in: &PBPKState14,
+    t: f64,
+    dt: f64,
+    prm: PBPKParams14,
+    k1: &!PBPKState14,
+    k2: &!PBPKState14,
+    k3: &!PBPKState14,
+    k4: &!PBPKState14,
+    k5: &!PBPKState14,
+    k6: &!PBPKState14,
+    k7: &!PBPKState14,
+    stage: &!PBPKState14,
+    next: &!PBPKState14,
+    err: &!PBPKState14
+) with Mut, Div, Panic {
+    pbpk_ode_into(st_in, t, prm, k1)
+
+    pbpk_state_copy_into(st_in, stage)
+    pbpk_state_add_scaled_in_place(stage, k1, dt * tsit5_a21())
+    pbpk_ode_into(stage, t + tsit5_c2() * dt, prm, k2)
+
+    pbpk_state_copy_into(st_in, stage)
+    pbpk_state_add_scaled_in_place(stage, k1, dt * tsit5_a31())
+    pbpk_state_add_scaled_in_place(stage, k2, dt * tsit5_a32())
+    pbpk_ode_into(stage, t + tsit5_c3() * dt, prm, k3)
+
+    pbpk_state_copy_into(st_in, stage)
+    pbpk_state_add_scaled_in_place(stage, k1, dt * tsit5_a41())
+    pbpk_state_add_scaled_in_place(stage, k2, dt * tsit5_a42())
+    pbpk_state_add_scaled_in_place(stage, k3, dt * tsit5_a43())
+    pbpk_ode_into(stage, t + tsit5_c4() * dt, prm, k4)
+
+    pbpk_state_copy_into(st_in, stage)
+    pbpk_state_add_scaled_in_place(stage, k1, dt * tsit5_a51())
+    pbpk_state_add_scaled_in_place(stage, k2, dt * tsit5_a52())
+    pbpk_state_add_scaled_in_place(stage, k3, dt * tsit5_a53())
+    pbpk_state_add_scaled_in_place(stage, k4, dt * tsit5_a54())
+    pbpk_ode_into(stage, t + tsit5_c5() * dt, prm, k5)
+
+    pbpk_state_copy_into(st_in, stage)
+    pbpk_state_add_scaled_in_place(stage, k1, dt * tsit5_a61())
+    pbpk_state_add_scaled_in_place(stage, k2, dt * tsit5_a62())
+    pbpk_state_add_scaled_in_place(stage, k3, dt * tsit5_a63())
+    pbpk_state_add_scaled_in_place(stage, k4, dt * tsit5_a64())
+    pbpk_state_add_scaled_in_place(stage, k5, dt * tsit5_a65())
+    pbpk_ode_into(stage, t + tsit5_c6() * dt, prm, k6)
+
+    pbpk_state_copy_into(st_in, stage)
+    pbpk_state_add_scaled_in_place(stage, k1, dt * tsit5_a71())
+    pbpk_state_add_scaled_in_place(stage, k2, dt * tsit5_a72())
+    pbpk_state_add_scaled_in_place(stage, k3, dt * tsit5_a73())
+    pbpk_state_add_scaled_in_place(stage, k4, dt * tsit5_a74())
+    pbpk_state_add_scaled_in_place(stage, k5, dt * tsit5_a75())
+    pbpk_state_add_scaled_in_place(stage, k6, dt * tsit5_a76())
+    pbpk_ode_into(stage, t + tsit5_c7() * dt, prm, k7)
+    pbpk_state_copy_into(stage, next)
+
+    pbpk_state_copy_into(k1, err)
+    pbpk_state_scale_in_place(err, dt * tsit5_e1())
+    pbpk_state_add_scaled_in_place(err, k2, dt * tsit5_e2())
+    pbpk_state_add_scaled_in_place(err, k3, dt * tsit5_e3())
+    pbpk_state_add_scaled_in_place(err, k4, dt * tsit5_e4())
+    pbpk_state_add_scaled_in_place(err, k5, dt * tsit5_e5())
+    pbpk_state_add_scaled_in_place(err, k6, dt * tsit5_e6())
+    pbpk_state_add_scaled_in_place(err, k7, dt * tsit5_e7())
 }
 
 pub fn tsit5_step_pbpk(st_in: PBPKState14, t: f64, dt: f64, prm: PBPKParams14) -> Tsit5StepResult14 with Mut, Div, Panic {
