@@ -267,21 +267,80 @@ scripts/dev/souc-build-lock.sh make build                 # Makefile chain; md5 
 ```
 
 **Never sufficient alone:** "md5 changed", "binary is newer", "make build ran",
-"file size grew", "CI green on an unrelated job".
+"file size grew", "CI green on an unrelated job", "procedure exited 0".
+
+### 2.5b SeedReceipt — procedure vs proof
+
+`--execute` always writes a **SeedReceipt** (not optional):
+
+```
+artifacts/seed-refresh/SeedReceipt-<UTC>.json
+artifacts/seed-refresh/SeedReceipt-<UTC>.txt
+artifacts/seed-refresh/SeedReceipt.latest.json   # stable pointer
+```
+
+Schema: `docs/ops/SEED_RECEIPT.schema.json`  
+Emitter: `scripts/dev/write_seed_receipt.py`  
+Validate later:
+
+```bash
+bash scripts/dev/refresh_lean_seed.sh \
+  --verify-receipt artifacts/seed-refresh/SeedReceipt.latest.json
+```
+
+| field | purpose |
+|---|---|
+| `source.sha256` | exact `lean_single.sio` bytes that were compiled |
+| `input_seed.sha256` | g0 / starting ELF (before the chain) |
+| `generations[]` | g0…gN with md5 + sha256 each |
+| **`fixed_point`** | **FIELD**, not a step log — see below |
+| `output_seed.sha256` | installed / to-commit ELF |
+| `environment` | placement, hostname, `slurm_partition`, `slurm_job_id`, nodelist |
+| `checks` | canonical_compiler_gate / verify_lean_seed pass\|fail |
+| `limits.provenance_note` | what the receipt deliberately does **not** claim |
+
+**Fixed point as a field (must be confirmable by eye):**
+
+```text
+--- md5 side-by-side (must be identical) ---
+gk_md5:       <H>
+gk_plus1_md5: <H>
+md5_equal: true
+--- sha256 side-by-side (must be identical) ---
+gk_sha256:       <S>
+gk_plus1_sha256: <S>
+sha256_equal: true
+verified: true
+```
+
+If a reader cannot confirm `gk_md5 == gk_plus1_md5` without re-running the
+chain, the receipt proves nothing. `--verify-receipt` fails closed when the
+two lines differ or `verified` is not true.
+
+**What a green `canonical_compiler_gate` is not:** it checks
+`md5(committed ELF) == md5(that ELF compiling current source)` — self-repro
+stability. It does **not** prove the ELF was *derived from* that source rather
+than substituted from another generation that happens to self-reproduce it.
+The generation table + `input_seed` hashes are the provenance trail; a future
+gate should require a SeedReceipt, not only the self-repro equality. Tracked
+as the next trust-anchor step, not implemented in this recipe amendment.
 
 ### 2.6 Commit
 
 ```bash
 git add bin/souc-lean-single-x86_64
+# optional but recommended: commit the receipt next to the blob or under artifacts/
+git add artifacts/seed-refresh/SeedReceipt-<UTC>.json
 # if SRC changed in the same PR, add it in the same commit or the immediately
 # preceding one — never land SRC without the matching ELF on the merge tip.
 git commit -m "$(cat <<'EOF'
 build(seed): refresh bin/souc-lean-single-x86_64 to lean_single fixed point
 
-canonical md5=<H>
-settled generation=gK (g{K-1}==gK)
-placement=srun/cpu-ops
-verified=canonical_compiler_gate + verify_lean_seed
+settle: gK==g{K+1} md5=<H>
+receipt: artifacts/seed-refresh/SeedReceipt-<UTC>.json
+canonical: committed==self-compile==<H>
+placement: srun/cpu-ops
+verified: canonical_compiler_gate + verify_lean_seed
 EOF
 )"
 ```
@@ -360,14 +419,17 @@ binary path).
 
 | path | role |
 |---|---|
-| `scripts/dev/refresh_lean_seed.sh` | print / check / stage / execute driver |
+| `scripts/dev/refresh_lean_seed.sh` | print / check / stage / execute / verify-receipt driver |
+| `scripts/dev/write_seed_receipt.py` | emit + validate SeedReceipt (JSON + human .txt) |
+| `docs/ops/SEED_RECEIPT.schema.json` | SeedReceipt schema v1 |
 | `scripts/dev/slurm_srun_minimal.sh` | supported Slurm launch (`srun` only) |
 | `scripts/dev/souc-build-lock.sh` | pod serialisation if local-locked |
-| `scripts/ci/canonical_compiler_gate.sh` | CI FAIL/PASS on md5 match |
+| `scripts/ci/canonical_compiler_gate.sh` | CI FAIL/PASS on self-repro md5 match (not provenance) |
 | `scripts/ci/verify_lean_seed.sh` | FP + determinism (+ optional DDC) |
 | `bin/souc-lean-single-x86_64` | **the** committed seed ELF |
 | `self-hosted/compiler/lean_single.sio` | seed source |
-| `docs/audit/CANONICAL_COMPILER_GATE_STRUCTURAL_COST_2026-08-18.md` | why this page exists |
+| `artifacts/seed-refresh/` | default SeedReceipt output directory |
+| `docs/audit/CANONICAL_COMPILER_GATE_STRUCTURAL_COST_2026-08-18.md` | why the recipe exists |
 
 ---
 
