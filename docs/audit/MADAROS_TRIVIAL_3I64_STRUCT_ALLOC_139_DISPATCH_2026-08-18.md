@@ -138,6 +138,10 @@ mtime 2026-08-18 15:58:49Z. `runtime_context_size() = 256`,
 | arr4 | `let a: [i64; 4] = [1, 1, 1, 1]` | 12744 | **139** |
 | arri32_3 | `let a: [i32; 3] = [1, 1, 1]` | 12744 | **139** |
 | I | 3-field `f64`, N=3 | 12744 | **132** (SIGILL) |
+| I′ | 3-field `f64`, N=1, no loop | 12744 | **132** (SIGILL) |
+| arr3f64 | `let a: [f64; 3] = [1.0, 1.0, 1.0]` | 12744 | **139** |
+| arr2f64 | `let a: [f64; 2] = [1.0, 1.0]` | 12744 | **139** |
+| arr4f64 | `let a: [f64; 4] = [1.0, 1.0, 1.0, 1.0]` | 12744 | **139** |
 
 So:
 
@@ -148,19 +152,38 @@ So:
   `{ i64, i64 }` does not.
 - **It is not unique to named structs.** `[i64; 3]` and `[i32; 3]` crash;
   `[i64; 2]` does not.
-- Working description: **constructing a ≥3-slot aggregate** (struct or
-  array) under this patched compiler. 3×`f64` is a sibling SIGILL, not
-  a clean 139 — same width class, different fault.
+- Working description for the **139** family: **constructing a ≥3-slot
+  integer aggregate** (struct or array) under this patched compiler.
+
+### 4a. The 132 is a different site, not a noisy 139
+
+Same width class, two faults. The pair that closes it:
+
+| | 2-wide | 3-wide |
+|---|---|---|
+| `struct { f64, f64 }` / `struct { f64, f64, f64 }` | **0** (U) | **132** SIGILL (I / I′) |
+| `[f64; 2]` / `[f64; 3]` | **139** | **139** (not 132) |
+| `struct { i64, i64 }` / `struct { i64, i64, i64 }` | **0** | **139** |
+| `[i64; 2]` / `[i64; 3]` | **0** | **139** |
+
+`[f64; 3]` is **139**, not SIGILL. The 132 does **not** follow the array
+of the same width, so 3-field `f64` structs have their **own** emit
+path. Two faults from one patch is two sites, not one site with a
+flaky signal.
+
+`[f64; 2]` already 139 — while `{ f64, f64 }` is 0 and `[i64; 2]` is
+0 — is a third split: f64 **arrays** die one slot earlier than i64
+arrays. Recorded; not chased here.
 
 ## 5. Same source, other engines (engine divergence)
 
 Same files, same `souc compile` + `\x7fELF` check.
 
-| Engine | Binary | D (tiny W2 N=3) | B (N=1 3×i64) | Q (`[i64;3]`) | R (3×i32) |
-|---|---|---|---|---|---|
-| **Default Madaros** (this worktree) | `artifacts/self-hosted/madaros` 99964760 B, 2026-08-17 15:32Z | 12744, rc=0, prints `done` | 12744, rc=0 | rc=0 | rc=0 |
-| **lean_single** | `bin/souc-lean-single-x86_64` via `SOUNIO_SOUC_ENGINE=lean_single` | 36924, rc=0, prints `done` | 36676, rc=0 | (not re-run; family passes) | (family passes) |
-| **E230-v3 patched Madaros** | STAGE build above, 100088179 B | 12744, **139** | 12744, **139** | **139** | **139** |
+| Engine | Binary | D (tiny W2 N=3) | B (N=1 3×i64) | Q (`[i64;3]`) | R (3×i32) | I′ (3×f64 struct) | `[f64;3]` |
+|---|---|---|---|---|---|---|---|
+| **Default Madaros** (this worktree) | `artifacts/self-hosted/madaros` 99964760 B, 2026-08-17 15:32Z | 12744, rc=0, prints `done` | 12744, rc=0 | rc=0 | rc=0 | rc=0 | rc=0 |
+| **lean_single** | `bin/souc-lean-single-x86_64` via `SOUNIO_SOUC_ENGINE=lean_single` | 36924, rc=0, prints `done` | 36676, rc=0 | (family passes) | (family passes) | 36706, rc=0 | 36706, rc=0 |
+| **E230-v3 patched Madaros** | STAGE build above, 100088179 B | 12744, **139** | 12744, **139** | **139** | **139** | **132** | **139** |
 
 Default Madaros and lean_single **both pass** the original W2 and the
 minimised B. This is therefore **not** a latent default-Madaros bug and
@@ -190,8 +213,10 @@ aggregates that should be **unboxed** (3×i32 = 12 B). That does **not**
 fit "the new warning flag is written OOB on the handle-alloc slow path"
 as a complete story — unboxed values should not take a handle. It **does**
 fit "the hunk replacement disturbed neighbouring emit of 3-slot
-stores / SRET / aggregate copy", which would also explain the 3×`f64`
-SIGILL.
+stores / SRET / aggregate copy". It does **not** by itself explain the
+3×`f64` SIGILL: that fault is absent on `[f64; 3]` (139) and present
+only on the named 3-field `f64` struct, so the float-struct emit is a
+second site.
 
 Whoever picks this up should start with a control rebuild: same STAGE
 tree **without** the v3 patch, `souc compile` of B, expect rc=0 (already
@@ -253,3 +278,8 @@ Patched matrix: `scripts/dev/slurm_srun_minimal.sh --time=00:12:00`
 then two follow-ups, host `cpuops-t560-proxmox`,
 `MADAROS_RAW_BIN=$STAGE/build/madaros`, receipts under
 `$STAGE/g5-139`, `$STAGE/g5-139b`, `$STAGE/g5-139c`.
+
+f64-axis follow-up (same instrument, 2026-08-18T16:31Z): patched
+receipts under `$STAGE/g5-139-f64`; default + lean_single under
+`/tmp/g5-139-f64/`. `[f64;3]` is 139 on the patch, 0 on the other two
+engines; 3-field `f64` struct is 132 on the patch, 0 on the other two.
