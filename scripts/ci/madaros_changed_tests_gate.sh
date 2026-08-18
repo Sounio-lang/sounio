@@ -62,9 +62,10 @@ fi
 # DUAL_GUM_KNOWLEDGE_OK.
 #
 # 131072 was calibrated on THAT witness alone, and "leaves headroom" did not
-# hold. This gate runs tests through `$SOUC_BIN run <file>`
-# (scripts/dev/run_sio_test_suite_v1.sh:153), which executes the program on top
-# of the compiler's own frame rather than in a fresh process, so it needs
+# hold. This gate runs tests through `$SOUC_BIN run <file>`, which executes
+# the program on top of the compiler's own frame rather than in a fresh
+# process (the same in-process shape the retired scripts/dev/
+# run_sio_test_suite_v1.sh used at its :153), so it needs
 # materially more stack than `compile` + exec. Measured 2026-08-09 on a
 # current-source Madaros, six tests, unanimous:
 #
