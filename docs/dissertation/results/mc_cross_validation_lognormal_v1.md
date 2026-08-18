@@ -10,6 +10,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.r
 # §4.12 — Monte Carlo Cross-Validation (Lognormal Prior)
 
 **Source**: `stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio`
+
+> **Engine dependency (verified 2026-08-17).** `pbpk28_mc_cross_validation.sio` runs to
+> completion under `SOUNIO_SOUC_ENGINE=lean_single` (`rc=0`, `PASS`). Under default Madaros
+> (`bin/souc`), the same file compiles clean but **crashes at runtime with `rc=182`**
+> (`madaros: handles full`) partway through the N=2000 Monte Carlo loop — a resource-ceiling
+> abort, not a numerical disagreement. Every number and gate marker on this page was produced
+> under lean_single; it has not been reproduced under the project's default engine.
+
 **Parameters**: N=2000, seed=1729, rapamycin, 5 mg dose, 168 h.
 **Prior**: LogNormal for all 7 parameters (σ²_log = ln(1 + CV²), μ_log = ln(mean) − σ²_log/2).
 

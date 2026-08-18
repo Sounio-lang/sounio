@@ -1,5 +1,13 @@
 -- formal/lean4/EpistemicEffects.lean
 /-!
+# REFUTED MODEL — USE `EpistemicEffectsV2`
+
+This module is retained as a machine-checked counterexample and shared
+definition spine. Its payload-erasing `Knowledge` calculus does **not** satisfy
+subject reduction; see §9.1. Import `EpistemicEffectsV2` for the repaired,
+value-carrying calculus and its preservation and progress theorems. Do not cite
+this module as the metatheory of Sounio's implemented `Knowledge<T>` semantics.
+
 # Sounio Epistemic-Effect Calculus — Lean 4 Soundness Sketch
 
 The formal artifact behind the project's registered SOTA claim that
