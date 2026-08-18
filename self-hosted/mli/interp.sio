@@ -12,12 +12,16 @@
 //      REFUSES with a named code instead of picking — so the ambiguity fails
 //      loudly rather than getting frozen by accident. Refused today: shifts
 //      (width/mask semantics unpinned), memory ops (no MLI memory model yet:
-//      load/store/lea/alloca), calls, fcast, every k_* and cd_* op, f32/
+//      load/store/lea/alloca), calls (MLI_I_CALL_UNSPECIFIED — named, not
+//      the unknown-op catch-all), fcast, every k_* and cd_* op, f32/
 //      f128/f256/qd128/Knowledge/CD/vec/ptr VALUES, phys/stack/reloc
 //      operands, unclassified compare-codes (not "false"), i64 div-by-zero
 //      and INT_MIN/-1. Control flow is implemented (S2b) with a fuel cap.
-//      Unimplemented argument kinds are skipped (no register write) so the
-//      first consuming opcode can refuse; they are not loaded as zero.
+//      Argument kinds with no interp model (Knowledge/CD/ptr/vec/qd128,
+//      Int≠64, Float≠64) refuse at load with MLI_I_ARG_KIND. Skipping
+//      them and continuing was #1801: the checker returned the declared
+//      type after a refuse, and the caller read a fabricated inhabitant.
+//      They are not loaded as zero.
 //   2. Where behaviour IS defined, the interp delegates to the host — and
 //      the host is the claim oracle itself (Sounio under Madaros, ADR-008
 //      single semantic clock). i64 two's-complement arithmetic, IEEE f64
@@ -61,6 +65,7 @@ pub let MLI_I_BAD_CC: i64 = 10
 pub let MLI_I_FUEL: i64 = 11
 pub let MLI_I_BAD_TARGET: i64 = 12
 pub let MLI_I_UNDEF_VREG: i64 = 13
+pub let MLI_I_CALL_UNSPECIFIED: i64 = 14
 
 // Execution budget: control flow means loops, and a non-terminating program
 // must fail LOUDLY rather than hang (refuse-first applied to termination).
@@ -362,7 +367,13 @@ fn mli_exec_slot(rf: &!MliRegFile, f: &MliFunction, slot: i64) -> i64 with Mut, 
         return MLI_I_OK
     }
 
-    // Everything else — memory ops, calls, fcast, every k_* and cd_* — is
+    // CALL is a named hole (verify: MLI_VERR_CALL_UNSPECIFIED). Falling
+    // through to UNSUPPORTED_OP made a specified-but-unpinned ABI look
+    // like an unknown opcode — the empty-stub class (#1801): dest stays
+    // unread and a caller can treat "unknown" as "no dest".
+    if op == MLI_OP_CALL { return MLI_I_CALL_UNSPECIFIED }
+
+    // Everything else — memory ops, fcast, every k_* and cd_* — is
     // refused loudly. See the header: refuse, don't pick.
     MLI_I_UNSUPPORTED_OP
 }
@@ -377,8 +388,12 @@ pub fn mli_interp_run(f: &MliFunction, args: &MliInterpArgs) -> MliInterpResult 
     }
 
     // Arguments: arg a is vreg a (MLI invariant).
+    // Runnable kinds only. A declared Knowledge/CD/i32/ptr/… with no
+    // model here must refuse — not skip, not write 0, not run the body
+    // as if the type were inhabited (#1801 declared-type-after-refuse).
     var a: i64 = 0
     while a < f.arg_count {
+        if a < 0 || a >= 8 { return i_err(MLI_I_ARG_KIND, 0 - 1, a) }
         let ak = f.arg_kinds[a]
         if krun_int(ak.tag, ak.bits) {
             rf.vi[a] = args.ai[a]
@@ -387,11 +402,9 @@ pub fn mli_interp_run(f: &MliFunction, args: &MliInterpArgs) -> MliInterpResult 
             if krun_f64(ak.tag, ak.bits) {
                 rf.vf[a] = args.af[a]
                 rf_mark(&!rf, a)
+            } else {
+                return i_err(MLI_I_ARG_KIND, 0 - 1, a)
             }
-            // else: Knowledge/CD/ptr/vec/qd128 have no value model.
-            // Do not write a register and do not invent a zero payload
-            // (#1788 fabrication). def stays 0 so a later scalar read
-            // of this vreg is UNDEF, not a silent 0.
         }
         a = a + 1
     }
