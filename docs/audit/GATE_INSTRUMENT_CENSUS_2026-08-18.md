@@ -18,21 +18,21 @@ share the first three of those.
 **Scope.** `scripts/ci/*.sh`, 537 files. One pattern at a time. Not a
 rewrite of 468 gates.
 
-**The three numbers** (`scripts/ci/*_gate.sh`, compile-invoking = 110;
-workflow-reachable universe = 85 from
-`CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv`):
+**The three numbers** (remeasured on `origin/main` `ff5b9295ee`,
+`scripts/ci/*_gate.sh` = 474, compile-invoking = 112; workflow-reachable
+= **85** from `CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv` —
+not 91):
 
 | pattern | raw | of which workflow-reachable |
 |---|---:|---:|
-| 1. compile, then talk about the artefact without `\x7fELF` | **91** | **19** |
+| 1. compile, then talk about the artefact without `\x7fELF` | **93** | **19** |
 | 2. rc read through a pipe | **0** | **0** |
-| 3. never record which engine compiled | **67** | **12** |
+| 3. never record which engine compiled | **68** | **12** |
 
-Raw 91 and 67 are over twenty → helper, not a hand sweep. The order that
+Raw 93 and 68 are over twenty → helper, not a hand sweep. The order that
 matters is the reachable column: 19 gates on `ci.yml` / prebuilt-refresh
-can print a green that did not compile an ELF. 72 unreachable copies of
-the same hole are debt. Fix the 19 by calling `require_elf`, not by
-rewriting 91.
+can print a green that did not compile an ELF. The rest are debt. Fix
+the 19 by calling `require_elf`, not by rewriting 93.
 
 **Answer in one line.** Pattern 2 is empty. Patterns 1 and 3 are design.
 The helper is `scripts/lib/gate_assert.sh`. Its selftest is
