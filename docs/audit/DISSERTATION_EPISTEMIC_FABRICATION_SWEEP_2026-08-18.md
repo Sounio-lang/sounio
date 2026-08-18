@@ -50,19 +50,38 @@ Lean shows real variance; Madaros prints exact `0.000000` and/or `std(Knowledge)
 **Count:** **2** measured dissertation surfaces (same cause class: Knowledge/GUM variance pipeline under Madaros).  
 **Not closed by #1882.** Detectors catch A1; A2 still prints zeros without always failing the suite.
 
-### Family B — **Type-B infinite DOF sentinel print** (Madaros-only `2^63`)
+### Family B — **large-f64 print saturation → `2^63`** (Madaros-only)
 
-Budget64 stores Type-B / Welch fallback DOF as `1.0e30`. lean_single **prints** `1.000000e30`. Madaros **prints** `9223372036854775808.000000` (= `2^63` as f64).
+Budget64 Type-B / Welch fallback DOF is stored as `1.0e30`. lean_single prints `1.000000e30`. Madaros prints `9223372036854775808.000000` (`2^63` as f64) on iso/rk4 Effective DOF lines.
 
 | # | Surface | Madaros DOF print | lean DOF print | Expanded `k` / `U` |
 |---:|---|---|---|---|
-| B1 | `rapamycin_iso_budget` | `2^63` (×2 blood/brain) | `1e30` | `k=1.960`, `U` matches lean |
-| B2 | `rapamycin_rk4_budget` | `2^63` (×3 comps) | `1e30` | `k=1.960`, Budget64 `std` matches |
+| B1 | `rapamycin_iso_budget` | `2^63` (×2) | `1e30` | `k=1.960`, `U` matches lean |
+| B2 | `rapamycin_rk4_budget` | `2^63` (×3) | `1e30` | `k=1.960`, Budget64 `std` OK |
 
-**Count:** **2** surfaces (one shared printer: `stdlib/epistemic/budget64.sio` `println(b.effective_dof)`).  
-**Hypothesis (not yet root-fixed):** large f64 sentinel `1e30` hits an integer trunc/print path on Madaros (x86 `cvttsd2si` indefinite → `0x8000…` → printed as `2^63`), not the KCONF field-kind split (that would sitofp the IEEE bits of `1e30` → ~5.06e18, which we do **not** see).
+#### `2^63` is ambiguous — two known diseases, same glyph
 
-Coverage factor and expanded uncertainty remain numerically aligned with lean on these runs — the **lie is the DOF line**, not (yet) the `k×u_c` product. Still thesis-hostile if a panel quotes Effective DOF.
+Project memory already names a **`variance_of` → `2^63`** failure (2026-04-12, `docs/research/zeta_variance_fix_plan.md` / `zeta_variance_deep_investigation.md`): GUM variance slot buffer 1024 entries; deep while-loops (Bogacki adaptive) allocate past the bound; OOB / uninitialized BSS read appears as `0x8000…` = `2^63`. That disease is **depth-dependent** (1-stage ODE safe; adaptive ~10k slots overflows). Contours historically: in-place mutation, lookbehind.
+
+Family B as first written looked like “Budget64 DOF printer only.” A **single-stage discriminant** (no `variance_of`, no loop chain) decides otherwise:
+
+| Probe | Stages / depth | Madaros | lean_single |
+|---|---|---|---|
+| `print_f64(1.0e30)` / `println(1.0e30)` | **1**, no GUM | **`2^63`** | `1e30` |
+| local `effective_dof = 1e30` then `println` | **1** | **`2^63`** | `1e30` |
+| Magnitude scan | **1** | `1e15`/`1e18`/`9e18` OK; **`≥1e19` → `2^63`** | all correct |
+| KCONF sitofp of IEEE(`1e30`) | n/a | would be ~**5.06e18** | — |
+
+**Verdict: Family B ≠ April `variance_of` overflow.** Same observable (`2^63` in a log), **two causes**:
+
+1. **April / ζ** — variance slot OOB on deep chains (depth-dependent).  
+2. **B / print** — Madaros `print_f64`/`println` of magnitudes **above ~i64 max (~9.22e18)** saturates (consistent with `cvttsd2si` indefinite → print as `2^63`). **Deterministic, single-stage.** Budget64 DOF `1e30` is one consumer, not the root.
+
+**Operational rule:** a `2^63` in a log does **not** tell you which disease fired. Fixing the DOF/print path will not clear a deep-chain `variance_of` `2^63`, and fixing slot reset will not clear `print_f64(1e30)`. Anyone who sees a residual `2^63` after one fix must re-run the discriminant table above before concluding the fix failed.
+
+**Note on Family A vs April:** today’s A1/A2 show **collapse to `0.000000`**, not `2^63`. The fabrication-detect note already separates “`variance_of` overflow `2^63` on deep chains” from “F1 collapse to 0 under Madaros adaptive.” Collapse-to-zero may be a sibling of the slot-bound silent return (`slot >= 1024` → no write), but it is **not** the same observable as April’s garbage `2^63`. Do not merge A into the April note without a depth-controlled variance probe.
+
+Coverage `k` / `U` on iso/rk4 still match lean — the B lie is the **DOF print** (and any other ≥1e19 f64 print), not yet the expanded-uncertainty product.
 
 ### Family C — **false positives from naive `0.000000` grep** (not fabrication)
 
@@ -90,17 +109,19 @@ Among others, dual-engine clean on fabrication symptoms:
 | Question | Answer |
 |---|---|
 | How many **real** fabricating surfaces remain (post-#1882)? | **3 unique files**: adaptive (A1), rk4_budget (A1+B2), iso_budget (B1) |
-| How many **causes**? | **Two**: (A) Knowledge/GUM variance collapse; (B) Budget64 infinite-DOF print/`1e30`→`2^63` |
-| Does one fix close several? | **Yes within each family:** A likely one Madaros GUM/Knowledge lowering fix → adaptive + rk4 Knowledge zeros; B one Budget64 DOF print/cast fix → all Effective DOF lines |
+| How many **causes**? | **Three named** if counting April ζ separately: (A) Knowledge/GUM variance **collapse to 0**; (B) Madaros **large-f64 print** ≥~1e19 → `2^63`; (ζ) historical deep-chain `variance_of` OOB → `2^63`. B ≠ ζ (discriminant above). |
+| Does one fix close several? | **Yes within each family:** A → adaptive + rk4 Knowledge zeros; B → all `print_f64` of ≥1e19 including Budget64 DOF `1e30` |
 | Is F2 (4.6e18 confidence) still open? | **No** on measured surfaces under source-built Madaros |
+| Is every log `2^63` the same bug? | **No — ambiguous.** Re-run P1 `print_f64(1e30)` vs a deep `variance_of` chain before attributing. |
 
 ---
 
 ## 5. Next owners (do not conflate)
 
-1. **Family A (thesis-critical):** Madaros Knowledge variance / `variance_of` through ODE — start from A1 (`rapamycin_epistemic_adaptive`) with lean non-zero as control. May need `lower.sio` / GUM lowering; claim before edit.  
-2. **Family B:** `budget64` Effective DOF print path for `1e30` sentinel — prefer printing as `inf`/`1e30` without integer trunc; witness `budget64_test` T2 + iso/rk4 DOF lines.  
-3. **Do not** reopen KCONF / weaken E170 / treat rc=182 as fabrication.
+1. **Family A (thesis-critical, #1792 name):** Madaros Knowledge variance / `variance_of` through ODE — start from A1 (`rapamycin_epistemic_adaptive`) with lean non-zero as control. May need `lower.sio` / GUM lowering; claim before edit.  
+2. **Family B (cheaper, less grave):** Madaros `print_f64`/`println` for `|x| ≳ 1e19` — fix once; Budget64 DOF is a client. Witness: one-stage `print_f64(1.0e30)`.  
+3. **April ζ** — if deep-chain `variance_of` still yields `2^63` under current Madaros, track separately from B; do not close ζ by fixing print.  
+4. **Do not** reopen KCONF / weaken E170 / treat rc=182 as fabrication.
 
 ---
 
