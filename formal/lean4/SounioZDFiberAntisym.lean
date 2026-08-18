@@ -28900,4 +28900,128 @@ theorem deviation_law_all (j i : Nat) (hj : 1 ≤ j) :
       rw [hrs, hrr, hX, hcp]
       grind
 
+/-! ### Tier 165 — the `cp2` LEVEL TRANSFER: the `[0,4]` row's machinery
+
+    §57.49's transfer matrix has a second row, `cp2(m+1) = 4·cp2(m) + 36 − 16H`, which Tier 157
+    did not need — the deviation law rides the `s3` row alone.  This tier builds the level
+    transfer that row requires.  It is NOT the row yet; see OPEN below.
+
+    MEASURED FIRST (`#eval` of the raw sums, from `P3`'s definition):
+
+      * the row holds at EVERY valid label, not only the powers of two: residual
+        `cp2(m+1) − (4·cp2(m) + 36 − 16H)` is `0` for all `W = 1..7` at `m = 2` and all
+        `W = 1..15` at `m = 3`.  (A nonzero at `W = 8`, `m = 2` is out of domain — that level's
+        window is `W < 2^3 = 8`.)
+      * the four blocks are NOT individually label-independent.  At `m = 3` the off-diagonal and
+        high blocks read `(−224, −224, −192)` for `W = 1,2,3,8` but `(−32, −32, 0)` at `W = 15`.
+        Only their COMBINATION is label-free.
+      * ⚠ and the reason is worth recording on its own: **`cp2 = −(H−2)(H−6)` FAILS at
+        `W = 15`, level 3** — measured `+52` against the closed form's `−140`, while
+        `W = 1,2,3,7,8` all give `−140`.  Tier 95's `cp2_count` is conditional on the four-sign
+        law, discharged (Tier 108) only for `W = 2^p`; `W = 15` is outside that, and this is a
+        concrete witness that the closed form does not extend to every label.  Any statement that
+        `cp2` is label-constant must be scoped accordingly.
+
+    WHAT THIS TIER PROVES.
+
+    `cp2Split`: the four-block decomposition, the `cp2` twin of Tier 90's `tri3_level_transfer`.
+    The low-low block is level-stable and IS `cp2(m)`; the other three carry the `E01`/`E10`/`E11`
+    carriers exactly as the `tri3` orthants do.  The one new step over `quadSplit` is the coset
+    index: for a HIGH outer index, `(2^(m+1) + a) ⊕ W = 2^(m+1) + (a ⊕ W)` because `W < 2^(m+1)`
+    (`seam_add_xor` twice, then `Nat.xor_assoc`).
+
+    `cp2_block_weights`: the three carriers collapse, using `σ(a⊕W) = ε(a)` and `ε(a⊕W) = σ(a)`
+    (`epsZero_xor_eq_sigRow`), to
+
+      `E01(a,b)·E10(b,a⊕W) = ε(b)·τ(a,b)·τ(b,a⊕W)`
+      `E10(a,b)·E01(b,a⊕W) = ε(a)·τ(a,b)·τ(b,a⊕W)`
+      `E11(a,b)·E11(b,a⊕W) = ε(a)·ε(b)`
+
+    so the three blocks are `Σ (ε(a)+ε(b))·τ(a,b)τ(b,a⊕W)·P + Σ ε(a)ε(b)·P`, `P = P3(a,b)P3(b,a⊕W)`.
+    Since `ε(a)+ε(b) = 2 − 2[a=0] − 2[b=0]` and `ε(a)ε(b) = 1 − 2[a=0] − 2[b=0] + 4[a=0][b=0]`,
+    the leading term is `2·cp2 + cp2 = 3·cp2` — which is exactly what the row needs, `4 = 1 + 3`.
+
+    OPEN (this is the honest boundary).  What remains is the PIN ARITHMETIC: showing the
+    corrections total `36 − 16H`.  `τ(a,b)·τ(b,a⊕W) = 1 − 2[b=a] − 2[b=a⊕W]` (the two loci are
+    disjoint because `W ≠ 0`), so the residue is a fixed list of single sums — the two diagonals
+    `Σ_a P3(a,a)P3(a,a⊕W)` and `Σ_a P3(a,a⊕W)P3(a⊕W,a⊕W)`, the row/column pins at `0`, and their
+    `ε`-weighted variants.  Each is a Tier 125-style evaluation; none is new mathematics, and none
+    is done here. -/
+
+theorem cp2Split (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
+    sumLtI (2^(m+1) + 2^(m+1)) (fun a => sumLtI (2^(m+1) + 2^(m+1)) (fun b =>
+        P3 a b W (m+1) * P3 b (a ^^^ W) W (m+1)))
+      = sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            P3 a b W m * P3 b (a ^^^ W) W m))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m)))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m)))
+        + sumLtI (2^(m+1)) (fun a => sumLtI (2^(m+1)) (fun b =>
+            (E11 a b W * P3 a b W m) * (E11 b (a ^^^ W) W * P3 b (a ^^^ W) W m))) := by
+  have hp : (0:Nat) < 2^(m+1) := Nat.two_pow_pos (m+1)
+  -- inner split for a LOW outer index
+  have hlow : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1) + 2^(m+1)) (fun b => P3 a b W (m+1) * P3 b (a ^^^ W) W (m+1))
+      = sumLtI (2^(m+1)) (fun b => P3 a b W m * P3 b (a ^^^ W) W m)
+        + sumLtI (2^(m+1)) (fun b =>
+            (E01 a b W * P3 a b W m) * (E10 b (a ^^^ W) W * P3 b (a ^^^ W) W m)) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    rw [sumLtI_shift (2^(m+1)) (2^(m+1))]
+    congr 1
+    · exact sumLtI_congr _ _ _ (fun b hb => by
+        rw [P3_level_stable m a b W ha hb hW,
+            P3_level_stable m b (a ^^^ W) W hb haW hW])
+    · refine sumLtI_congr _ _ _ (fun b hb => ?_)
+      rw [Nat.add_comm (2^(m+1)) b,
+          P3_block01_total m a b W ha hb hW hW0,
+          P3_block10_total m b (a ^^^ W) W hb haW hW hW0]
+  -- inner split for a HIGH outer index
+  have hhigh : ∀ a, a < 2^(m+1) →
+      sumLtI (2^(m+1) + 2^(m+1)) (fun b =>
+        P3 (2^(m+1) + a) b W (m+1) * P3 b ((2^(m+1) + a) ^^^ W) W (m+1))
+      = sumLtI (2^(m+1)) (fun b =>
+            (E10 a b W * P3 a b W m) * (E01 b (a ^^^ W) W * P3 b (a ^^^ W) W m))
+        + sumLtI (2^(m+1)) (fun b =>
+            (E11 a b W * P3 a b W m) * (E11 b (a ^^^ W) W * P3 b (a ^^^ W) W m)) := by
+    intro a ha
+    have haW : a ^^^ W < 2^(m+1) := Nat.xor_lt_two_pow ha hW
+    have hxor : (2^(m+1) + a) ^^^ W = 2^(m+1) + (a ^^^ W) := by
+      rw [Nat.add_comm (2^(m+1)) a, seam_add_xor a m ha,
+          Nat.add_comm (2^(m+1)) (a ^^^ W), seam_add_xor (a ^^^ W) m haW,
+          Nat.xor_assoc, Nat.xor_assoc, Nat.xor_comm (2^(m+1)) W]
+    rw [hxor, sumLtI_shift (2^(m+1)) (2^(m+1))]
+    congr 1
+    · refine sumLtI_congr _ _ _ (fun b hb => ?_)
+      rw [Nat.add_comm (2^(m+1)) a, Nat.add_comm (2^(m+1)) (a ^^^ W),
+          P3_block10_total m a b W ha hb hW hW0,
+          P3_block01_total m b (a ^^^ W) W hb haW hW hW0]
+    · refine sumLtI_congr _ _ _ (fun b hb => ?_)
+      rw [Nat.add_comm (2^(m+1)) a, Nat.add_comm (2^(m+1)) b,
+          Nat.add_comm (2^(m+1)) (a ^^^ W),
+          P3_block11_total m a b W ha hb hW hW0,
+          P3_block11_total m b (a ^^^ W) W hb haW hW hW0]
+  rw [sumLtI_shift (2^(m+1)) (2^(m+1))]
+  rw [sumLtI_congr _ _ _ hlow, sumLtI_congr _ _ _ hhigh, sumLtI_add, sumLtI_add]
+  grind
+
+/-- The three off-diagonal blocks' weights, factored. -/
+theorem cp2_block_weights (a b W : Nat) (hW0 : W ≠ 0) :
+    E01 a b W * E10 b (a ^^^ W) W = epsZero b * (tauW a b W * tauW b (a ^^^ W) W)
+    ∧ E10 a b W * E01 b (a ^^^ W) W = epsZero a * (tauW a b W * tauW b (a ^^^ W) W)
+    ∧ E11 a b W * E11 b (a ^^^ W) W = epsZero a * epsZero b := by
+  have hs : sigRow (a ^^^ W) W = epsZero a := by
+    unfold sigRow epsZero
+    have h : (a ^^^ W) ^^^ W = a := by rw [Nat.xor_assoc, Nat.xor_self, Nat.xor_zero]
+    rw [h]
+  have he : epsZero (a ^^^ W) = sigRow a W := (epsZero_xor_eq_sigRow a W)
+  refine ⟨?_, ?_, ?_⟩
+  · rw [E01_split a b W hW0, E10_split b (a ^^^ W) W hW0, hs, he]
+    unfold epsZero sigRow tauW; grind
+  · rw [E10_split a b W hW0, E01_split b (a ^^^ W) W hW0]
+    unfold epsZero sigRow tauW; grind
+  · rw [E11_split a b W hW0, E11_split b (a ^^^ W) W hW0, hs, he]
+    unfold epsZero sigRow; grind
+
 end SounioZDFiberAntisym
