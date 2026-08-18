@@ -169,13 +169,15 @@ The source-built output contained no E009. Thus the repaired Sobol callback
 contract is accepted by the current-source compiler; the remaining E035 is
 an independent imported-module effect-inference issue and is not evidence of
 a resolver collision. After the source run, the branch advanced only through
-the two documentation commits that produced receipt tip
-`350715b808768c9b2ca77b382ea915dad47d4401`; the full source SHA
-`f1c94bd1a0526cd2c7c9345abcbb23df5346e206` remains its ancestor. The current
-`git ls-remote` check reports that receipt tip, while the source-built
-measurement remains explicitly tied to the SHA-matched clone above. The current
-`origin/main` observed during this receipt update
-was `529aaaaa24fd7dc6a61f7d3c7a21ce8c9ea5ef5d`.
+three documentation commits, `069f87a3439d281e4eda750136e168df36f4ca5a`,
+`350715b808768c9b2ca77b382ea915dad47d4401`, and
+`e02243876565d8922cd4cae0a77f34ed9cf5b848`; the full source SHA
+`f1c94bd1a0526cd2c7c9345abcbb23df5346e206` remains their ancestor. The final
+`git ls-remote` check reports `e02243876565d8922cd4cae0a77f34ed9cf5b848`
+for the receipt tip, while the source-built measurement remains explicitly
+tied to the SHA-matched clone above. `origin/main` was
+`529aaaaa24fd7dc6a61f7d3c7a21ce8c9ea5ef5d` during the provenance edit and
+`550c764b155d21626486fdd2f8161a0c1f0817e6` at final verification.
 
 For future cluster clones, the preferred structural fix is to provide a
 valid bundle through `GIT_SSL_CAINFO` or `SSL_CERT_FILE`, or to carry the pod
