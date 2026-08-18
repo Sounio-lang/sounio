@@ -1,8 +1,10 @@
-# Chemistry benchmarks: Sounio vs Cantera (GRI-Mech 3.0 H/O)
+# Chemistry benchmarks: Sounio vs Cantera (GRI-Mech 3.0)
 
-Cross-validation harness for `stdlib/chemistry/gri30_h2.sio` — the complete
-GRI-Mech 3.0 H/O sub-mechanism (10 species, 29 reactions) with NASA-7 detailed
-balance and native 1-sigma GUM uncertainty bands.
+Cross-validation harnesses for the 10-species/29-reaction H/O sub-mechanism in
+`stdlib/chemistry/gri30_h2.sio` and the 53-species/325-reaction mechanism in
+`stdlib/chemistry/gri30_full.sio`. Cantera 3.2.0 with its bundled `gri30.yaml`
+is the external reference; the in-repo Python replicas are diagnostics, not
+oracles.
 
 ## Files
 
@@ -12,9 +14,9 @@ balance and native 1-sigma GUM uncertainty bands.
 - `gri30_h2_mechanism.json` — the extracted H/O sub-mechanism (input to both
   the Sounio generator and the Python replica)
 - `gri30_full_mechanism.json` — the full GRI-Mech 3.0 (53 species, 325 reactions)
-- `gri30_h2_python_replica.py` — independent pure-Python recomputation of every
-  number the Sounio run-pass tests assert (rates, Kc, trajectory checkpoint,
-  epistemic band). No dependencies.
+- `gri30_h2_python_replica.py` and `gri30_full_python_replica.py` — pure-Python
+  diagnostic replicas of the generated Sounio math. They are useful for tracing
+  individual operations but must not supply regression reference values.
 - `gri30_h2_cantera_parity.py` — Cantera 3.2 reference: builds the same
   sub-mechanism from Cantera's own `gri30.yaml`, runs the identical isothermal
   protocol, prints the parity table and ignition delays.
@@ -29,37 +31,53 @@ balance and native 1-sigma GUM uncertainty bands.
   has no `IdealGasConstVolumeReactor`; `IdealGasReactor` IS the constant-V
   one), identical mixture/seed/horizon protocol.
   Run: `PYTHONPATH=/tmp/pylibs python3 gri30_h2_adiabatic_cantera.py`
+- `gri30_full_cantera_uq_reference.py` — independent full-mechanism UQ referee.
+  It central-differences all 325 persistent reaction-rate parameters and the H2
+  and O2 initial conditions, then assembles the first-order covariance.
 
-## Protocol (all three implementations)
+Install and run the pinned referee from this directory:
 
-2% H2 / 1% O2 / 97% N2, 1 atm, isothermal, H-atom seed 1e-11 mol/cm3
-(chain initiation — GRI-Mech has no thermal initiation at these temperatures).
-Epistemic runs add 1% standard uncertainty on initial H2/O2 and per-reaction
-1-sigma relative rate uncertainties (representative magnitudes from
-Baulch 2005 / Konnov 2008 / Hong 2011 — not a refit).
+```sh
+python3 -m pip install --target /tmp/sounio-cantera-py cantera==3.2.0
+PYTHONPATH=/tmp/sounio-cantera-py python3 gri30_full_cantera_uq_reference.py \
+  --jobs 4 --json-out /tmp/gri30_full_cantera_uq_reference.json
+```
 
-## Headline results (2026-07-27)
+## Shared reactor protocol
+
+2% H2 / 1% O2 / 97% N2 nominally at 1 atm and 1500 K, using exactly
+`1/(82.057*T)` mol/cm3 plus an additive H-atom seed of 1e-11 mol/cm3. The seed
+makes the actual initial pressure 101325.576758 Pa. Cantera is initialized
+through `TDY` so those concentrations are not renormalized. Epistemic runs add
+1% standard uncertainty on initial H2/O2 and one persistent multiplier per
+complete reaction. The multiplier scales the effective forward and reverse
+rates together, including falloff reactions; it does not separately model
+uncertainty in `k_inf`, `k_0`, or Troe parameters. The per-reaction standard
+uncertainties are representative magnitudes from Baulch 2005, Konnov 2008, and
+Hong 2011, not a refit.
+
+## Headline results
 
 Isothermal ignition delays, max d[H2O]/dt, microseconds:
 
 | T (K) | Sounio | Cantera 3.2 |
 |-------|--------|-------------|
-| 1400  | 169    | 169.66      |
-| 1500  | 126    | 126.34      |
-| 1600  | 98     | 98.29       |
-| 1700  | 79     | 79.00       |
-| 1800  | 65     | 65.08       |
+| 1400  | 169.665 | 169.66      |
+| 1500  | 126.345 | 126.34      |
+| 1600  | 98.295  | 98.29       |
+| 1700  | 79.015  | 79.00       |
+| 1800  | 65.085  | 65.08       |
 
-Pre-front checkpoint at t = 1e-4 s, T = 1500 K (Sounio fixed-step RK4
-dt = 1e-8 vs Cantera CVODE adaptive): major species within 0.2–2%, radical
-pools within ~3%, H2O2 (1e-13 level) within ~16% — solver-type difference,
-not mechanism difference (Python dt-convergence at 1e-8 vs 5e-9 is identical
-to 4 significant figures).
+At the H/O pre-front checkpoint, t=1e-4 s and T=1500 K, the deterministic
+Sounio trajectory agrees with Cantera to 2e-7 through 6e-6 relative for the
+major species and radicals; H2O2 agrees to 5.9e-3 relative.
 
-Native 1-sigma band at the same checkpoint (Sounio vs Python replica, same
-first-order diagonal GUM formula): u(H2) = 1.4484e-9 both; u(H2O), u(OH),
-u(H) agree to 3 significant figures. Cantera has no native equivalent —
-UQ there requires an external Monte Carlo driver.
+For the full mechanism at t=4e-7 s, Sounio's coherent forward-sensitivity
+band agrees with the independent Cantera central-difference referee in all
+eight H/O species. The largest relative sigma deviation is 8.724e-7 (H); the
+other seven range from 1.559e-7 to 7.171e-7. The Sounio H2 value at this
+checkpoint is 1.624886332731288e-7 mol/cm3 versus
+1.624886332731066e-7 mol/cm3 in Cantera.
 
 The Cantera cross-check caught a real bug: the first version of the Sounio
 module missed `2 O + M <=> O2 + M` (GRI-Mech Reaction 1) due to an
@@ -77,8 +95,14 @@ export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
 
 ## Notes
 
-- The ignition front itself is exponentially phase-sensitive; only pre-front
-  checkpoints are cross-language parity targets.
+- The ignition front itself is exponentially phase-sensitive; pre-front
+  checkpoints are the strict cross-language concentration targets.
+- The UQ implementation propagates persistent rate-parameter sensitivities
+  coherently. A quadrature source added independently at every time step would
+  incorrectly make radical uncertainties scale with the square root of `dt`.
+- First-order symmetric bands describe the covariance, not the full sampling
+  distribution. Near ignition, skewed species distributions can require
+  quantiles to describe asymmetric tails.
 - Sounio wall time is dominated by the fixed-step RK4 (10k steps at dt = 1e-8);
   Cantera's CVODE takes adaptive steps. This is a correctness/UQ benchmark,
   not a speed benchmark.

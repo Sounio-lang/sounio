@@ -120,7 +120,10 @@ grep -q '"descriptor_tables_embedded":true' "$CONTRACT_SELFTEST"
 grep -q '"gc_mark_compact_model":true' "$CONTRACT_SELFTEST"
 grep -q '"gc_precise_descriptor_scanning":true' "$CONTRACT_SELFTEST"
 grep -q '"gc_handle_relocation_model":true' "$CONTRACT_SELFTEST"
-grep -q '"ffi_pinning_model":true' "$CONTRACT_SELFTEST"
+# Pinning is UNWIRED on the live emitter (pin_count never incremented).
+# Honesty: advertise false until a reclaim lane wires real pins (#1792 class).
+grep -q '"ffi_pinning_model":false' "$CONTRACT_SELFTEST"
+grep -q '"pin_registry_ready":false' "$CONTRACT_SELFTEST"
 grep -q '"gc_runtime_retry_active":true' "$CONTRACT_SELFTEST"
 grep -q '"gc_current_frame_root_scan":true' "$CONTRACT_SELFTEST"
 
@@ -152,7 +155,8 @@ cat >"$OUT_DIR/native_backend_v2_gate.v1.json" <<'EOF'
   "gc_mark_compact_model": true,
   "gc_precise_descriptor_scanning": true,
   "gc_handle_relocation_model": true,
-  "ffi_pinning_model": true,
+  "ffi_pinning_model": false,
+  "pin_registry_ready": false,
   "gc_runtime_retry_active": true,
   "gc_current_frame_root_scan": true,
   "gc_retry_smoke_exit_code": 23

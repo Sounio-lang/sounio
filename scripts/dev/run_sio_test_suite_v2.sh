@@ -8,7 +8,7 @@
 #
 # Annotations:
 #   //@ run-pass              — expect exit 0
-#   //@ compile-fail          — expect exit != 0
+#   //@ compile-fail          — expect a compiler diagnostic, not a timeout or signal
 #   //@ ignore                — skip this test
 #   //@ check-only            — compile only, do not execute
 #   //@ expect-stdout: X      — stdout must contain X (run-pass only)
@@ -401,10 +401,20 @@ run_test() {
             fi
         fi
         
-        # Check expected stdout patterns
+        # Check expected stdout patterns.
+        #
+        # PIPEFAIL RULE (2026-08-17): never feed a captured string to a
+        # verdict-carrying `grep -q` through `echo "$x" | grep -q ...`.
+        # `grep -q` exits on first match and closes the pipe; under
+        # `set -o pipefail` an `echo` still flushing a large output then
+        # fails the whole pipeline (CI log 2026-08-16 21:40:49: "line 434:
+        # echo: write error: Broken pipe", in the same run as a "missing
+        # error" flake), and `if ! ...` reads that as the pattern being
+        # absent. The here-string form has no writer process to lose writes.
+        # Guarded by scripts/ci/sigpipe_hygiene_gate.sh.
         if [[ $exit_code -eq 0 ]]; then
             for pattern in "${expect_stdout[@]}"; do
-                if ! echo "$output" | grep -qF -- "$pattern"; then
+                if ! grep -qF -- "$pattern" <<<"$output"; then
                     exit_code=1
                     test_output="missing stdout: $pattern"
                     break
@@ -414,32 +424,43 @@ run_test() {
         
     elif $is_compile_fail; then
         local tmp_out
+        local compile_exit_code=0
+        local check_error_patterns=false
         tmp_out="$(mktemp /tmp/sounio-cf-XXXXXX.elf)"
-        output=$(timeout "$timeout_val" "$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || exit_code=$?
+        output=$(timeout "$timeout_val" "$SOUC_BIN" compile "$file" -o "$tmp_out" 2>&1) || compile_exit_code=$?
         rm -f "$tmp_out"
-        
-        if [[ $exit_code -eq 124 ]]; then
+
+        if [[ $compile_exit_code -eq 124 ]]; then
             test_output="compile timed out after ${timeout_val}s"
-        elif [[ $exit_code -eq 0 ]] && echo "$output" | grep -qF "typecheck: failed"; then
             exit_code=1
-        elif [[ $exit_code -eq 0 ]]; then
+        # Shells encode signal termination as 128 + signal. A crash is never
+        # a valid compile-fail rejection, even when its output matches.
+        elif [[ $compile_exit_code -ge 128 && $compile_exit_code -le 192 ]]; then
+            local signal_num=$((compile_exit_code - 128))
+            test_output="compile terminated by signal ${signal_num} (exit ${compile_exit_code})"
+            exit_code=1
+        elif [[ $compile_exit_code -ge 125 && $compile_exit_code -le 127 ]]; then
+            test_output="compile harness exited ${compile_exit_code}"
+            exit_code=1
+        elif [[ $compile_exit_code -eq 0 ]] && grep -qF "typecheck: failed" <<<"$output"; then
+            check_error_patterns=true
+            exit_code=0
+        elif [[ $compile_exit_code -eq 0 ]]; then
             test_output="expected compile failure but passed"
             exit_code=1
         else
-            exit_code=0  # Reset - compile failure is expected
+            check_error_patterns=true
+            exit_code=0
         fi
 
-        if [[ $exit_code -ne 124 && $test_output != "expected compile failure but passed" ]]; then
+        if $check_error_patterns; then
             for pattern in "${error_patterns[@]}"; do
-                if ! echo "$output" | grep -qiF -- "$pattern"; then
+                if ! grep -qiF -- "$pattern" <<<"$output"; then
                     exit_code=1
                     test_output="missing error: $pattern"
                     break
                 fi
             done
-            if [[ -z "$test_output" ]]; then
-                exit_code=0  # Reset - compile failure is expected
-            fi
         fi
     elif $is_typecheck_fail; then
         # Proof-carrying tests: the illegal inference must be rejected by the
@@ -475,7 +496,7 @@ run_test() {
                 test_output="typecheck-fail requires //@ error-pattern to pin the diagnostic"
             else
                 for pattern in "${tf_patterns[@]}"; do
-                    if ! echo "$output" | grep -qiF -- "$pattern"; then
+                    if ! grep -qiF -- "$pattern" <<<"$output"; then
                         exit_code=1
                         test_output="missing error: $pattern"
                         break
@@ -628,6 +649,20 @@ echo ""
 echo "Found ${#TEST_FILES[@]} test files"
 echo ""
 
+# Every test that passes the filter must produce exactly one result_*.json:
+# each path through run_test after the filter check writes one, and nothing
+# else in TEST_TMP does. Counting them here lets the collector prove below
+# that the summary is a measurement of this run -- a worker killed before its
+# write (OOM under the job cap is the realistic producer) otherwise vanishes
+# from the totals, and a dropped failing test is a silent green.
+EXPECTED_RESULTS=0
+for f in "${TEST_FILES[@]}"; do
+    basename="$(basename "$f")"
+    if test_matches_filter "$basename"; then
+        ((EXPECTED_RESULTS++))
+    fi
+done
+
 # Run tests in parallel with job limit
 job_count=0
 idx=0
@@ -643,8 +678,11 @@ done
 wait
 
 # Collect results
+RESULT_FILES=0
+UNPARSED=0
 for f in "$TEST_TMP"/result_*.json; do
     [[ -f "$f" ]] || continue
+    ((RESULT_FILES++))
     result=$(cat "$f")
     status=$(echo "$result" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
     category=$(echo "$result" | grep -o '"category":"[^"]*"' | cut -d'"' -f4)
@@ -700,6 +738,16 @@ for f in "$TEST_TMP"/result_*.json; do
                 echo "  SKIP  $name ($reason)"
             fi
             ;;
+        *)
+            # A result file whose status cannot be parsed -- truncated or
+            # malformed JSON, the realistic producer being a worker killed
+            # mid-write. Dropping it made the totals undercount: a failing
+            # test that vanishes is a silent green (the same reasoning as the
+            # vxfail comment above, applied to the parse-failure path).
+            # Count it and fail below instead of silently omitting it.
+            ((UNPARSED++))
+            echo "  UNPARSED  $f (status=[$status])" >&2
+            ;;
     esac
 done
 
@@ -713,6 +761,32 @@ echo "  Fail: $FAIL"
 [[ $FLAKY -gt 0 ]] && echo "  Flaky: $FLAKY"
 echo "  Skip: $SKIP"
 echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN))"
+[[ $UNPARSED -gt 0 ]] && echo "  Unparsed: $UNPARSED"
+
+# Completeness: the counts above must describe every filtered test exactly
+# once. Three ways to lose that, each previously silent:
+#   - a result file no parser branch recognizes (UNPARSED above);
+#   - a filtered test whose result file never appeared (worker died first);
+#   - a run that selected nothing at all (0 == 0 reading as "all tests
+#     passed" -- the vacuity failure mode; in CI an empty selection means the
+#     corpus or the glob broke, so it must fail, not report green).
+# CI-state readers must distinguish "the instrument did not answer" from "the
+# answer was an empty selected set" (docs/governance/CI_TRUST_CONTRACT.md).
+if [[ $UNPARSED -gt 0 ]]; then
+    echo "INCOMPLETE: $UNPARSED result file(s) had no readable status -- verdicts unknown, failing instead of dropping them" >&2
+    exit 1
+fi
+if [[ $RESULT_FILES -ne $EXPECTED_RESULTS ]]; then
+    echo "INCOMPLETE: $EXPECTED_RESULTS filtered test(s) ran but $RESULT_FILES result file(s) were found -- a worker exited before writing its result, so the totals above undercount" >&2
+    exit 1
+fi
+if [[ $EXPECTED_RESULTS -eq 0 ]]; then
+    if [[ -n "${CI:-}" ]]; then
+        echo "INCOMPLETE: zero test files matched (filter=${FILTER:-none}) -- this run measured nothing; refusing to report green on an empty suite" >&2
+        exit 1
+    fi
+    echo "WARNING: no test files matched the active filter -- this run measured nothing" >&2
+fi
 
 if [[ -n "$VACUOUS_STALE" ]]; then
     echo ""

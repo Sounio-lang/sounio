@@ -43,7 +43,7 @@ NSP = len(SP)
 RX = D["reactions"]
 NR = len(RX)
 R_SI = 8.314462618
-P0 = 1.0e5
+P0 = 101325.0  # CHEMKIN/GRI standard state: 1 atm
 
 nasa = {s: D["species"][s]["coeffs"] for s in SP}
 A = [r["fwd"][0] for r in RX]
