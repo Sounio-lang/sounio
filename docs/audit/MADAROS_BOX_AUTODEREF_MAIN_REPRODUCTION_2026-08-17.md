@@ -147,3 +147,42 @@ assertion is a `&T` case that fails identically on the pre-fix compiler.
    (`MADAROS_BOX_AUTODEREF_BACKEND_REFUTATION_2026-08-17.md`).
 6. **The E219 empty-stub trap as cause on main — refuted here: pre-E219
    rc=139 on the same witness, byte-identical IR trace.**
+
+## Resolution (same lane, later the same day)
+
+The repair landed on this branch (`lane/empryo-1/box-autoderef-20260817`,
+commits `08efd067b4`, `33eb2a314c`, `b553d1c2bc`, `eab77517b3`, rebased onto
+the refreshed branch head `e9f0010bd7`): the three Box fixes from the PR
+#1527 branch ported onto current main, plus three port-time repairs main's
+drift made necessary —
+
+1. `field_is_pointer_for_struct` read `StructFieldEntry.name`, which main
+   interned to `name_id`; it now reads `ir_name_at(name_id)`. Without this,
+   `let bi = hb.inner` segfaulted during lowering.
+2. The pointer class arm (`lower_type_expr_is_pointer_like` → 4) appended
+   after main's new bool arm at all six `is_float` construction sites.
+3. `box_inner_layout` reset to −1 at both local-bind sites. The locals stack
+   is reused across functions (count reset, arrays not), so a stale layout
+   from an earlier function's Box param leaked into an unrelated local at the
+   same slot — `let after_box_call = mk()` then `after_box_call.tag` lowered
+   through a phantom `field_get(0)` and SIGSEGVd. This is the no-field
+   control the witness was built around.
+
+Measured on the rebased source build, SHA-256
+`807ef05dfa2b456a82a701acda6e5b1dd2815a51c8e3fccf47d73be5e6520a3e`:
+
+- `box_all_read_forms.sio` — **BOXMATRIX OK, rc=0** (pre-port: rc=132).
+- param/local scalar and struct reads, auto and explicit: 9/9/111/111.
+- `hb.inner.tag` field chain: 9; inline control `hi.inner.tag`: 9.
+- `takes_box(Box::new(mk()))` then `mk().tag`: 7 then 9 — the no-field
+  control passes.
+- `door1_box_new_array_65536` PASS; `explicit_deref_field` PASS;
+  `deref_indexed_elem_field_store` ALL PASS; `imported_deref_f64_array`
+  PASS; `arm64_nested_deref_store` PASS; `recursive_struct_boxed` and
+  `epistemic_pbox_selftest` check OK.
+
+Residual, named rather than hidden: `(*hb.inner).tag` (explicit deref of a
+field-chain Box) still SIGSEGVs at runtime, and binding a Box field into a
+local reads 0. Both are outside the witness matrix; the 174 auto-deref sites
+that block gen1 == gen2 are ident-base reads, which now all resolve against
+T.
