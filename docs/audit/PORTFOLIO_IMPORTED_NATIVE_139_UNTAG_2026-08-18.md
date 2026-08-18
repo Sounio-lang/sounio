@@ -51,6 +51,12 @@ Local check: three of the 24 return **rc=1** under `SOUNIO_SOUC_ENGINE=lean_sing
 
 **Fix:** add `//@ requires: madaros` to those 24 — same annotation the other 145 already carry. Do **not** re-attach a 139 lie. Do **not** raise CAP. The seed suite will skip them; a Madaros job that sets `SOUNIO_MADAROS_AVAILABLE` will run them.
 
+### Current-source f64 job — 22 timeouts, not 139
+
+That job sets `SOUNIO_MADAROS_AVAILABLE` and therefore **runs** the 168. Result: Pass 146 / Fail 22 / Known 1. Every fail is `run timed out after 30s`. Those 22 are the cover-child0/1 + refinement-ledger importers; local `souc run` on the same files took **39–44 s**. The fingerprints match. The default 30 s harness wall is shorter than a legitimate imported-native compile of that catalog.
+
+**Fix:** `//@ timeout: 90` on those 22 (house pattern already used by dissertation tests). Do **not** raise the global 30 s default. Same question as the token CAP and the handle table: the number is not the defect everywhere.
+
 ## What this is not
 
 - Not a CAP raise. Façades remain 1130 / 1127 bytes. E229 still off main.
