@@ -1,0 +1,126 @@
+# E230 diagnostic — v3 patch SPLIT for bisection (grok-cli5 dispatch 2026-08-18)
+#
+# grok-cli5 measured that the full v3 patch produces a Madaros ELF that
+# SIGSEGVs (rc=139) on the FIRST construction of any >=3-slot aggregate.
+# Default Madaros and lean_single pass the same source. The crash is
+# patch-induced, not latent.
+#
+# Dispatch:
+#   docs/audit/MADAROS_TRIVIAL_3I64_STRUCT_ALLOC_139_DISPATCH_2026-08-18.md
+#   worktree /workspace/.wt/grok-cli5,
+#   branch lane/grok-cli5/trivial-139-dispatch-20260818 @ f28da3580d,
+#   pushed (no PR).
+#   Repro:  docs/audit/repro/trivial_3i64_alloc_139.sio
+#
+# The bisection that closes the loop runs in the build lane. This file is
+# HALF the v3 patch. The other half is a sibling in this dir. Apply ONLY
+# this half to origin/main, build, and report the matrix outcome against
+# the trivial 3-slot reproducer.
+#
+# Per FLEET_CONSTRAINTS, full self-compile is NOT allowed on the source pod.
+# The half-application, build, and matrix measurement happen on the build lane.
+#
+# ----------------------------------------------------------------------------
+# THIS FILE: patch_runtime_context_only.patch
+# HALF: hunk 1 ONLY — runtime_context.sio
+#       adds field at offset 248 (e230_90_warning_fired) and bumps
+#       runtime_context_size() from 248 to 256.
+# SIBLING:  patch_codegen_only.patch (in this same dir)
+#
+# Tested cell: applying ONLY this half should NOT introduce the 3-slot
+# SIGSEGV (the codegen half is the suspect — it reorganises the failure
+# diagnostic emit path and inserts a 90% warning block at the alloc join
+# site). Expected outcome on the 14-cell matrix:
+#
+#   - 1-/2-field structs, [i64;2]: rc=0 (no change)
+#   - 3-field structs, [i64;3], [i32;3]: rc=0 (no change from baseline)
+#   - 3-field f64: rc=0 (no change; the SIGILL only came with the codegen half)
+#
+# Build lane application:
+#   cd <staging-src>
+#   git apply <this-file>
+#   scripts/ci/build_modular_madaros.sh /tmp/madaros_ctx_bump.elf
+#   SOUNIO_STDLIB_PATH=$(pwd)/stdlib #     bash docs/audit/repro/run_matrix.sh /tmp/madaros_ctx_bump.elf
+#
+# If this half passes the matrix, the bug is in the codegen half and is
+# independent of the runtime_context_size bump. The patch as a whole
+# CANNOT land in this form regardless — the codegen half failed.
+# ----------------------------------------------------------------------------
+# E230 diagnostic — v3 patch (corrected after grok-cli1 measured defects)
+#
+# v2 had three patch defects and three gate defects. v3 fixes the three
+# patch defects:
+#
+#   (5) THRESHOLD: v2 used 9 * capacity (37,748,736), nine TIMES the
+#       ceiling, not 90% of it. v3 hardcodes 3,774,873 = floor(
+#       4194304 * 9 / 10) into the runtime check, and the relationship
+#       is documented in the comment block above the threshold load.
+#       If the capacity constant in gc.sio is ever changed, this
+#       threshold must change in lockstep.
+#
+#   (6) ITOA ASSIGNMENT: emit_inline_itoa_stderr is pass-by-value and
+#       returns NativeCompiler; v2 dropped the result at four call sites
+#       (two in the failure diagnostic, two in the 90% warning fire body).
+#       v3 captures the result with `nc = emit_inline_itoa_stderr(nc)`
+#       at every site. The drop was a silent-defect class: the function
+#       ran, but the new cursor state was never propagated to the rest
+#       of the emitter, leaving any code emitted after an itoa call
+#       working from a stale NativeCompiler. Confirmed by the same
+#       inspection that says `c = emit_inline_itoa_stderr(c)` is the
+#       only call pattern in the file today.
+#
+#   (structural boundary) v3 captures the WHOLE OLD function in hunk 2's
+#       OLD block (including the closing `}` and the trailing syscall
+#       sequence). v2's hunk 2 inserted the new helpers + new function
+#       between `let write_len = ...` and `let lea_pos = ...`, which
+#       left the OLD syscall tail orphaned inside the new function
+#       and produced a parse-broken `fn ... fn ... }` nested
+#       definition. v3 fixes that with a 1-for-1 function replacement.
+#
+# Two new helpers are introduced:
+#       nc_write_rodata_to_stderr_into and nc_append_rodata_bytes
+#       factor the sys_write emission and the byte-array rodata
+#       appends. Both are pure emitters — they take nc by `&!`
+#       reference so the caller never has the assignment problem the
+#       patched call sites do.
+#
+# Gate defects fixed in a SEPARATE atomic commit on the gate:
+#   (1) W2/W3 now run the produced ELF with timeout and check stderr.
+#   (2) Witness structs use 3 i64 fields (tag = 24) so the struct exceeds
+#       the unbox threshold (gc.sio: native_v2_is_small_value_struct_tag
+#       returns false for tag > 16). Each alloc therefore consumes a handle.
+#   (3) W1 dropped: Layer-1 compile-time refusal is a defence-in-depth path
+#       not yet present in the checker (defect 4), and the generated
+#       source file would exceed the 16 MB / 2048 locals IR ceiling. W2/W3
+#       cover the dynamic-count failure family that d2_gum belongs to.
+#       W1 is moved to docs/audit/HANDLE_TABLE_CEILING_REFUSAL_REFINEMENT_2026-08-17.md
+#       as the design-layer description of the path that will land when
+#       the checker grows the E230 arm.
+#
+# Build lane application notes:
+#   - Apply with: git apply .scratch/e230_diagnostic.patch
+#   - Hunk header line numbers below target origin/main HEAD
+#     (commit tested: 41c087cba6).
+#   - Build: scripts/ci/build_modular_madaros.sh /tmp/madaros_e230.elf
+#   - Verify: SOUNIO_STDLIB_PATH=$(pwd)/stdlib \
+#             bash scripts/ci/handle_table_ceiling_gate.sh
+#     W2 PASS: 3774973 allocs -> warning[E230] fires once, \
+#              count=3774873 of 4194304, rc=0
+#     W3 PASS: CAPACITY+16 allocs -> error[E230] at 100%, nonzero rc
+#     W4 PASS: trivial program -> rc=0, no E230
+
+--- a/self-hosted/native/runtime_context.sio
++++ b/self-hosted/native/runtime_context.sio
+@@ -49,5 +49,11 @@
+ pub fn runtime_context_field_win_close_handle_fn_ptr() -> i64 { 232 } // CloseHandle function pointer
+ pub fn runtime_context_field_win_get_file_attrs_fn_ptr() -> i64 { 240 } // GetFileAttributesExA function pointer
+ 
+-pub fn runtime_context_size() -> i64 { 248 }
++// E230 warning gate (offset 248): 1 once the 90% handle-table drift warning
++// has fired for this process, 0 before. Lives in the runtime context (not
++// the GC state) because it is mutated by hot-path alloc code, and the GC
++// state capture path runs only on the slow path.
++pub fn runtime_context_field_e230_90_warning_fired() -> i64 { 248 }
++
++pub fn runtime_context_size() -> i64 { 256 }
+ pub fn runtime_context_global_slot_size() -> i64 { 8 }
