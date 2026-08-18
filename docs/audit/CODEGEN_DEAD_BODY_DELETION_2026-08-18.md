@@ -174,15 +174,15 @@ What the sync *did* close is the **logic divergence**, not the byte divergence:
 - Pre-sync: `name_is_get_arg_count("arg_count")` returns `false` from `codegen.sio`, `true` from `codegen_x86_linux.sio` — runtime split depending on which module resolves the call. The user-named "bug à espera".
 - Post-sync: `name_is_get_arg_count("arg_count")` returns `true` from both files. No runtime divergence.
 
-The byte-diff re-classification after the sync, faithfully applied:
+The byte-diff re-classification after the sync, under the three-category scheme that was in force at the time:
 
 ```
 IDENTICAL (debt):              24
 PUB_SWAP_ONLY (debt+vis):      0
-SUBSTANTIVE_DIVERGENT (census): 1   <- #25: comment-only, not logic
+SUBSTANTIVE_DIVERGENT (census): 1   <- #25: comment-only, not logic (the methodology bug)
 ```
 
-**The previous "1 of 25 fell" headline in commit `a0da4d95b7` was true at the logic level but did not survive a strict byte-diff census.** Step 6 below re-measures on `origin/main` after PR #1837 merged, with the user's option-1 framing (keep the sync-provenance comment) and the methodology recommendation to introduce a `COMMENT_ONLY_DIVERGENT` category so that #25 stops being listed alongside real runtime bugs.
+**The previous "1 of 25 fell" headline in commit `a0da4d95b7` was true at the logic level but did not survive a strict byte-diff census.** Step 6 below re-measures on `origin/main` after PR #1837 merged, with the user's option-1 framing (keep the sync-provenance comment) and the methodology refinement that introduces a `COMMENT_ONLY_DIVERGENT` category so that #25 stops being listed alongside real runtime bugs. Under the four-category scheme (now shipped in `scripts/research/codegen_byte_diff_census.cjs`), the 25-residual set re-classifies to 24 IDENTICAL + 0 PUB_SWAP_ONLY + 1 COMMENT_ONLY_DIVERGENT + 0 SUBSTANTIVE_DIVERGENT — i.e. zero runtime-divergent pairs, exactly as the option-1 framing predicted.
 
 The remaining 24 IDENTICAL pairs are still the user-named "dívida" — same name in two files, byte-equal bodies, glob-importable. Their consolidation direction analysis is recorded in `CODEGEN_BODY_DIFF_GLOB_HOMONYMS_2026-08-17.md` and was the prior doc's scope; this doc only records the sync, its deliberate preservation, and the census refinement it motivates.
 
@@ -227,7 +227,7 @@ User follow-up directive: *"Agora que o v2_ref saiu, mede quantos caem. Por cada
 
 ### Re-measurement on origin/main
 
-`git show dde4b0b0d4:self-hosted/native/codegen.sio` and `git show dde4b0b0d4:self-hosted/native/codegen_x86_linux.sio` were extracted and re-classified with the byte-diff census (see `codegen-census/codegen_check_named_residuals.cjs` in the agents scratchpad). Both file snapshots are byte-identical between `dde4b0b0d4` and `64924d371a` (the merge commit `80cc1366a2` of #1837 is present in both).
+`git show dde4b0b0d4:self-hosted/native/codegen.sio` and `git show dde4b0b0d4:self-hosted/native/codegen_x86_linux.sio` were extracted and re-classified with the byte-diff census (see `scripts/research/codegen_check_named_residuals.cjs` in this repo). Both file snapshots are byte-identical between `dde4b0b0d4` and `64924d371a` (the merge commit `80cc1366a2` of #1837 is present in both).
 
 ### How many of the 25 fell with `v2_ref`'s removal?
 
@@ -261,7 +261,7 @@ User follow-up directive: *"Agora que o v2_ref saiu, mede quantos caem. Por cada
 | 22 | `OS_LINUX` | L48 | L88 | IDENTICAL |
 | 23 | `OS_UNKNOWN` | L47 | L87 | IDENTICAL |
 | 24 | `OS_WINDOWS` | L50 | L90 | IDENTICAL |
-| 25 | `name_is_get_arg_count` | L948 (36 lines) | L1217 (31 lines) | **see below** |
+| 25 | `name_is_get_arg_count` | L948 (36 lines) | L1217 (31 lines) | **COMMENT_ONLY_DIVERGENT** (post-refinement census; was SUBSTANTIVE_DIVERGENT under the three-category scheme; see "Census methodology refinement" below) |
 
 ### Reclassification of #25 — the byte-census mislabels this pair
 
@@ -292,20 +292,59 @@ User chose **option 1** with explicit reasoning:
 
 > *"A divergência é INTEIRAMENTE em comentários: a proveniência do sync e os marcadores dos 9 e 13 chars. Isso fecha a minha pergunta — não há fix numa cópia e ausente noutra, portanto não há direcção errada possível no código. E é precisamente por isso que a opção 3 é má. Ela apaga o comentário que regista de onde veio o ramo de 9 chars, para fechar um item de byte-diff num censo. Isso é optimizar a métrica em vez do código: o número 9 é mágico, e o comentário é a única coisa que diz porquê. Daqui a três meses alguém pergunta e a resposta terá desaparecido para satisfazer um contador. O #25 não é um defeito — é um FACTO sobre o par, e o censo devia registá-lo como diferem-só-em-comentários em vez de o listar ao lado de divergências reais. Se o censo não consegue exprimir essa distinção, o defeito é do censo."*
 
-### Census methodology recommendation (the actual fix)
+### Census methodology refinement (shipped in this commit)
 
-The current byte-diff census collapses three distinct phenomena into one category (SUBSTANTIVE-DIVERGENT). The user-identified gap is a methodology bug, not a code bug. The recommended categories:
+The previous byte-diff census collapsed three distinct phenomena into one category (SUBSTANTIVE-DIVERGENT). The user-identified gap was a methodology bug, not a code bug: the census was listing pairs whose bodies differed *only* in inline comments next to pairs whose byte cascades actually disagreed. The four-category scheme now in use:
 
 ```
 IDENTICAL                          bodies byte-equal (modulo `pub`)
 PUB_SWAP_ONLY                      bodies byte-equal after stripping `pub`
-LOGIC_DIVERGENT                     logic differs (e.g. extra byte-cascade branch)
-COMMENT_ONLY_DIVERGENT              bodies differ ONLY in comments — logic byte-equal
+LOGIC_DIVERGENT                    logic differs (e.g. extra byte-cascade branch)
+COMMENT_ONLY_DIVERGENT             bodies differ ONLY in comments — logic byte-equal
                                    (after stripPub AND stripComments)
 ```
 
-`name_is_get_arg_count` on `dde4b0b0d4` classifies as **COMMENT_ONLY_DIVERGENT** under this scheme. `v2_ref`-style runtime divergence is **LOGIC_DIVERGENT** (which is what the original census called SUBSTANTIVE_DIVERGENT). The 24 IDENTICAL pairs above stay IDENTICAL.
+`name_is_get_arg_count` on `dde4b0b0d4` (and on `64924d371a`, which is byte-identical post-`80cc1366a2`) classifies as **COMMENT_ONLY_DIVERGENT** under this scheme. `v2_ref`-style runtime divergence is **LOGIC_DIVERGENT** (which is what the original census called SUBSTANTIVE_DIVERGENT). The 24 IDENTICAL pairs above stay IDENTICAL.
 
 This refinement changes nothing about the action set on the 24 IDENTICAL pairs (they remain pure debt, consolidation direction analysis recorded in `CODEGEN_BODY_DIFF_GLOB_HOMONYMS_2026-08-17.md`). It changes the framing of #25 from "bug à espera" to "documented divergence, deliberately preserved". That is the precise status the user's option-1 choice encodes.
 
-A reference implementation of the refined census lives at `codegen-census/codegen_byte_diff_census.cjs` (agents scratchpad) and `codegen-census/codegen_check_named_residuals.cjs` — the latter accepts a hardcoded `RESIDUALS` list and produces the per-symbol classification table used in this step.
+#### Re-census of the 25 on the four-category scheme
+
+Run on `git show origin/main:self-hosted/native/codegen.sio` (currently `d3ea284caf`) and `git show origin/main:self-hosted/native/codegen_x86_linux.sio`:
+
+```
+Of the 25 residual names:
+  IDENTICAL: 24
+  PUB_SWAP_ONLY: 0
+  COMMENT_ONLY_DIVERGENT: 1   ← name_is_get_arg_count
+  SUBSTANTIVE_DIVERGENT: 0
+  MISSING: 0
+```
+
+`SUBSTANTIVE_DIVERGENT` went from 1 to 0. The single formerly-substantive pair is now correctly classified as `COMMENT_ONLY_DIVERGENT`, exactly as the option-1 framing predicted.
+
+#### Re-census of the full 267-pair homonym corpus
+
+Run on the same files at `origin/main@<current>`:
+
+```
+codegen.sio symbols: 293
+codegen_x86_linux.sio symbols: 585
+Common homonym symbols: 267
+
+IDENTICAL: 183
+PUB_SWAP_ONLY: 33
+COMMENT_ONLY_DIVERGENT: 1   ← name_is_get_arg_count (the only one in the full corpus)
+SUBSTANTIVE_DIVERGENT: 50
+```
+
+Only `name_is_get_arg_count` in the entire 267-pair corpus has a comment-only-but-logic-equal diff. The remaining 50 SUBSTANTIVE_DIVERGENT pairs are genuine logic divergence candidates and remain candidates for directional-sync analysis before any edit.
+
+#### Implementation
+
+The refined census now lives in the repo at:
+
+- `scripts/research/codegen_byte_diff_census.cjs` — the full 267-pair classifier (takes the two `.sio` files as argv).
+- `scripts/research/codegen_check_named_residuals.cjs` — the targeted 25-residual classifier (hardcoded `RESIDUALS` list).
+
+Both are pure-Node CommonJS (`#!/usr/bin/env node`) with zero external deps, so they run inside the prebuilt-toolchain pod without `npm install`. Each carries a header block explaining the four categories and pointing back at this audit doc.
