@@ -509,3 +509,34 @@ is by-value-copied and multi-MiB per the @913 comment). Mirror on `struct Checke
 **Next increment:** make the struct + 4 code-site edits, build from source (needs an unthrottled slot), run the
 smoke test, then the P1 GUM-vs-MC demonstrator. Honesty gate unchanged (GUM conditional; p-box/interval the
 unconditional certified result).
+
+---
+
+## P0 design REVISION — module globals instead of struct fields (de-risked, 2026-08-18)
+
+Investigation result that supersedes the "box the handler stack on struct Lowerer/Checker" step: **Sounio
+module-level `var` globals CAN hold boxed AST** — proven by `var LAST_EXPR: Option<Box<Expr>> = None`
+(`parser/parser.sio:26`). Therefore the handler stack is a set of **module globals**, not struct fields:
+
+- In `self-hosted/ir/lower.sio` (top-level, near the other `var IR_LOWER_*` globals):
+  `var LOWER_HANDLER_DEPTH: i64 = 0`, `var LOWER_HANDLER_EFFECT: [Name; 4] = [empty_name(); 4]`, and the handler
+  blocks as boxed globals mirroring LAST_EXPR — a `var LOWER_HANDLER_BLOCKS: [Option<Box<Block>>; 4]` if the
+  fixed-array-of-Option-Box lowers cleanly, else four scalar `LOWER_HANDLER_BLOCK_0..3: Option<Box<Block>>`.
+- In `self-hosted/check/check.sio`: the same as `CHECK_HANDLER_*` (separate pass, separate globals).
+
+**Why this is strictly better:** it removes the by-value struct-field blast radius (struct Lowerer @723 + ~5
+`Lowerer{}` init literals @991/1455/1519/1587/2015; struct Checker + its inits) — the exact nested-aggregate-by-
+value shape with a documented miscompile history here. Push/pop of a global stack is precisely the discipline
+this needs, and it is the pattern already used for P0-F extern-block parsing.
+
+**Revised P0 edit set (small):**
+1. lower.sio: declare the 3 globals; `lower_handle_expr_ref` = push `e.name`+`e.handler_block` at
+   LOWER_HANDLER_DEPTH (cap 4), lower `e.block` (via lower_block_expr_ref shape), pop; `else if ExprHandle`
+   dispatch arm @~16496; perform hook `expr_is_active_handler_perform_ref` in lower_method_call_expr_ref @15677
+   (mirror expr_is_gpu_sync_call_ref shape; on match find `StmtLet{name==op, ExprClosure}` in the active block,
+   inline tail-resumptively with the scalar-kind re-bind).
+2. check.sio: declare CHECK_HANDLER_* globals; push/pop in check_handle_expr @24078; the load-bearing
+   check_method_call bypass @20438 (mirror the checker_expr_is_gpu_sync_call arm @20439) matching bare-Ident
+   receiver against CHECK_HANDLER_EFFECT before check_opt_expr(e.left).
+3. Verify loop: `souc check self-hosted/compiler/main.sio` after each file (cheap, no 4-min build); final
+   from-source build + run `examples/effect_uncertainty_smoke.sio` (expect `SMOKE 5`).
