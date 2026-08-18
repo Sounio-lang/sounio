@@ -283,6 +283,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.r3-0-transitive-alias-chain.synthesis | repo_only | docs/audit/r3_0_transitive_alias_chain/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r3-1-tup-cache-collision-fix.dispatch | repo_only | docs/audit/r3_1_tup_cache_collision_fix/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r3-1-tup-cache-collision-fix.synthesis | repo_only | docs/audit/r3_1_tup_cache_collision_fix/SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.rc182-d2-headroom-contradiction-2026-08-18 | repo_only | docs/audit/RC182_D2_HEADROOM_CONTRADICTION_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.readme | repo_only | docs/audit/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-general-lvalue-deref-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_GENERAL_LVALUE_DEREF_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-value-nested-field-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_VALUE_NESTED_FIELD_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
