@@ -541,7 +541,7 @@ pub fn native_v2_write_contract(path: string, module: &IrModule, target_spec: Na
     buf = p18a.0; p = p18a.1
     let p18b = native_v2_append_named_json_bool(buf, p, "descriptor_tables", true, true)
     buf = p18b.0; p = p18b.1
-    let p18c = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", true, true)
+    let p18c = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", false, true)
     buf = p18c.0; p = p18c.1
     let p19 = native_v2_append_runtime_group_array(buf, p)
     buf = p19.0; p = p19.1
@@ -618,7 +618,7 @@ pub fn native_v2_write_contract(path: string, module: &IrModule, target_spec: Na
     buf = p33gd.0; p = p33gd.1
     let p33ge = native_v2_append_named_json_bool(buf, p, "descriptor_tables_embedded", runtime_metadata_active, true)
     buf = p33ge.0; p = p33ge.1
-    let p33gf = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", true, true)
+    let p33gf = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", false, true)
     buf = p33gf.0; p = p33gf.1
     let p33gg = native_v2_append_named_json_bool(buf, p, "gc_mark_compact_model", true, true)
     buf = p33gg.0; p = p33gg.1
@@ -626,7 +626,7 @@ pub fn native_v2_write_contract(path: string, module: &IrModule, target_spec: Na
     buf = p33gh.0; p = p33gh.1
     let p33gi = native_v2_append_named_json_bool(buf, p, "gc_handle_relocation_model", true, true)
     buf = p33gi.0; p = p33gi.1
-    let p33gj = native_v2_append_named_json_bool(buf, p, "ffi_pinning_model", true, true)
+    let p33gj = native_v2_append_named_json_bool(buf, p, "ffi_pinning_model", false, true)
     buf = p33gj.0; p = p33gj.1
     let p33gk = native_v2_append_named_json_bool(buf, p, "gc_runtime_retry_active", runtime_metadata_active, true)
     buf = p33gk.0; p = p33gk.1
@@ -1091,6 +1091,10 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_exit(*name) { return 30 }
     if name_is_abort(*name) { return 31 }
     if name_is_system(*name) { return 32 }
+    if name_is_read_i64(*name) { return 33 }
+    if name_is_write_i64(*name) { return 34 }
+    if name_is_read_f64(*name) { return 35 }
+    if name_is_write_f64(*name) { return 36 }
     0
 }
 
@@ -1176,7 +1180,21 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_exit((*func).name) { return 30 }
     if name_is_abort((*func).name) { return 31 }
     if name_is_system((*func).name) { return 32 }
+    if name_is_read_i64((*func).name) { return 33 }
+    if name_is_write_i64((*func).name) { return 34 }
+    if name_is_read_f64((*func).name) { return 35 }
+    if name_is_write_f64((*func).name) { return 36 }
     0
+}
+
+// An empty IR body that is not a BSS slot and not a known builtin. The
+// historical backend compiled these as prologue+ret, so a call read rax
+// (usually 0). That is fabrication. Declaration-without-call still needs
+// a callable symbol — emit ud2 so a missed E219 cannot return a value.
+fn native_v2_empty_stub_would_fabricate(func: &IrFunction) -> bool with Mut, Panic, Div {
+    if (*func).compile_strategy == IR_STRATEGY_BSS_GLOBAL { return false }
+    if (*func).instr_count > 0 { return false }
+    native_v2_builtin_id_for_func_ref(func) == 0
 }
 
 // M4: argv and string builtins
@@ -1500,6 +1518,11 @@ fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     } else {
         (*nc).code_overflow = true
     }
+}
+
+fn nc_emit_unimplemented_extern_trap_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x0b)
 }
 
 fn nc_emit_u32_le(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
@@ -3723,6 +3746,96 @@ fn name_is_system(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+// Defect A (docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md):
+// read_i64/write_i64/read_f64/write_f64 are the lean_single-only raw
+// pointer-indexed accessor family (self-hosted/compiler/lean_single.sio
+// emit_read_f64/emit_write_f64 etc.), used throughout stdlib/data/bigframe*,
+// stdlib/collections/heap_vec.sio, stdlib/nn/optimizer.sio, stdlib/tensor/tape.sio
+// on `*mut f64`/`*mut i64` pointers obtained from heap_alloc (a real mmap'd
+// address, never a handle-table index — see heap_alloc's own emitter). Callers
+// use `buf[idx]`-style element indexing (8-byte stride), matching lean_single's
+// `[reg + idx*8]` addressing exactly.
+fn name_is_read_i64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }
+    if n.buf[0] != 114 as i8 { return false }  // 'r'
+    if n.buf[1] != 101 as i8 { return false }  // 'e'
+    if n.buf[2] != 97 as i8 { return false }   // 'a'
+    if n.buf[3] != 100 as i8 { return false }  // 'd'
+    if n.buf[4] != 95 as i8 { return false }   // '_'
+    if n.buf[5] != 105 as i8 { return false }  // 'i'
+    if n.buf[6] != 54 as i8 { return false }   // '6'
+    if n.buf[7] != 52 as i8 { return false }   // '4'
+    true
+}
+
+fn name_is_write_i64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 119 as i8 { return false }  // 'w'
+    if n.buf[1] != 114 as i8 { return false }  // 'r'
+    if n.buf[2] != 105 as i8 { return false }  // 'i'
+    if n.buf[3] != 116 as i8 { return false }  // 't'
+    if n.buf[4] != 101 as i8 { return false }  // 'e'
+    if n.buf[5] != 95 as i8 { return false }   // '_'
+    if n.buf[6] != 105 as i8 { return false }  // 'i'
+    if n.buf[7] != 54 as i8 { return false }   // '6'
+    if n.buf[8] != 52 as i8 { return false }   // '4'
+    true
+}
+
+fn name_is_read_f64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }
+    if n.buf[0] != 114 as i8 { return false }  // 'r'
+    if n.buf[1] != 101 as i8 { return false }  // 'e'
+    if n.buf[2] != 97 as i8 { return false }   // 'a'
+    if n.buf[3] != 100 as i8 { return false }  // 'd'
+    if n.buf[4] != 95 as i8 { return false }   // '_'
+    if n.buf[5] != 102 as i8 { return false }  // 'f'
+    if n.buf[6] != 54 as i8 { return false }   // '6'
+    if n.buf[7] != 52 as i8 { return false }   // '4'
+    true
+}
+
+fn name_is_write_f64(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }
+    if n.buf[0] != 119 as i8 { return false }  // 'w'
+    if n.buf[1] != 114 as i8 { return false }  // 'r'
+    if n.buf[2] != 105 as i8 { return false }  // 'i'
+    if n.buf[3] != 116 as i8 { return false }  // 't'
+    if n.buf[4] != 101 as i8 { return false }  // 'e'
+    if n.buf[5] != 95 as i8 { return false }   // '_'
+    if n.buf[6] != 102 as i8 { return false }  // 'f'
+    if n.buf[7] != 54 as i8 { return false }   // '6'
+    if n.buf[8] != 52 as i8 { return false }   // '4'
+    true
+}
+
+// read_i64(buf: *mut i64, idx: i64) -> i64 / read_f64(buf: *mut f64, idx: i64) -> f64.
+// Sounio's internal call ABI passes ALL argument and return values as raw
+// 64-bit values through the general-purpose registers (confirmed against
+// emit_builtin_sqrt: its f64 arg arrives in rdi as bits and its f64 result
+// leaves in rax as bits, never touching xmm0 at the call boundary) -- so the
+// i64 and f64 forms are byte-identical: this one body serves both ids.
+// args: rdi=buf, rsi=idx (element index, 8-byte stride). result: rax.
+fn emit_builtin_read_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)  // REX.W
+    nc_emit_byte(nc, 0x8b)  // MOV r64, r/m64
+    nc_emit_byte(nc, 0x04)  // ModRM: mod=00 reg=rax(000) rm=100(SIB follows)
+    nc_emit_byte(nc, 0xf7)  // SIB: scale=8(11) index=rsi(110) base=rdi(111)
+    nc_emit_ret(nc)
+}
+
+// write_i64(buf: *mut i64, idx: i64, val: i64) / write_f64(buf: *mut f64, idx: i64, val: f64) -> void.
+// Same ABI note as read_offset64: val arrives in rdx (third GP arg slot) as
+// raw bits regardless of i64/f64, so one body serves both ids.
+// args: rdi=buf, rsi=idx, rdx=val. no return value.
+fn emit_builtin_write_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)  // REX.W
+    nc_emit_byte(nc, 0x89)  // MOV r/m64, r64
+    nc_emit_byte(nc, 0x14)  // ModRM: mod=00 reg=rdx(010) rm=100(SIB follows)
+    nc_emit_byte(nc, 0xf7)  // SIB: scale=8(11) index=rsi(110) base=rdi(111)
+    nc_emit_ret(nc)
+}
+
 // getpid()/getppid(): raw syscalls 39/110; result in rax per the Sounio
 // integer-return convention.
 fn emit_builtin_getpid_into(nc: &! NativeCompiler) with Mut, Panic, Div {
@@ -5805,6 +5918,10 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         if name_is_sin(func.name) { return emit_builtin_sin(c) }
         if name_is_cos(func.name) { return emit_builtin_cos(c) }
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
+        if native_v2_empty_stub_would_fabricate(&func) {
+            nc_emit_unimplemented_extern_trap_into(&! c)
+            return c
+        }
     }
 
     // Sprint 38: Set compile strategy from IR function metadata
@@ -6566,6 +6683,11 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_exit(name) { return 30 }
     if name_is_abort(name) { return 31 }
     if name_is_system(name) { return 32 }
+    // Defect A: read_i64/write_i64/read_f64/write_f64 raw pointer accessor family.
+    if name_is_read_i64(name) { return 33 }
+    if name_is_write_i64(name) { return 34 }
+    if name_is_read_f64(name) { return 35 }
+    if name_is_write_f64(name) { return 36 }
     0
 }
 
@@ -6582,6 +6704,7 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
     if builtin_id == 18 { return true }
     if builtin_id == 19 { return true }
     if builtin_id == 26 { return true }
+    if builtin_id == 35 { return true }  // read_f64 (Defect A)
     false
 }
 
@@ -6627,6 +6750,10 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 30 { emit_builtin_exit_into(nc); return }
     if builtin_id == 31 { emit_builtin_abort_into(nc); return }
     if builtin_id == 32 { emit_builtin_system_into(nc); return }
+    if builtin_id == 33 { emit_builtin_read_offset64_into(nc); return }
+    if builtin_id == 34 { emit_builtin_write_offset64_into(nc); return }
+    if builtin_id == 35 { emit_builtin_read_offset64_into(nc); return }
+    if builtin_id == 36 { emit_builtin_write_offset64_into(nc); return }
 }
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
@@ -6693,6 +6820,14 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_exit(func.name) { emit_builtin_exit_into(&! c); return c }
         if name_is_abort(func.name) { emit_builtin_abort_into(&! c); return c }
         if name_is_system(func.name) { emit_builtin_system_into(&! c); return c }
+        if name_is_read_i64(func.name) { emit_builtin_read_offset64_into(&! c); return c }
+        if name_is_write_i64(func.name) { emit_builtin_write_offset64_into(&! c); return c }
+        if name_is_read_f64(func.name) { emit_builtin_read_offset64_into(&! c); return c }
+        if name_is_write_f64(func.name) { emit_builtin_write_offset64_into(&! c); return c }
+        if native_v2_empty_stub_would_fabricate(&func) {
+            nc_emit_unimplemented_extern_trap_into(&! c)
+            return c
+        }
     }
 
     c.current_strategy = func.compile_strategy
@@ -6825,6 +6960,10 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
             emit_builtin_heap_free_into(nc)
             return
         }
+        return
+    }
+    if native_v2_empty_stub_would_fabricate(func) {
+        nc_emit_unimplemented_extern_trap_into(nc)
         return
     }
 
@@ -8561,6 +8700,14 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
         native_v2_emit_builtin_by_id_into(nc, builtin_id)
         return true
     }
+    if native_v2_empty_stub_would_fabricate(func) {
+        reset_function_state_mut(nc)
+        let function_offset = (*nc).code.len
+        native_compiler_set_fn_offset(nc, fn_index, function_offset)
+        native_compiler_add_symbol_func_ref(nc, fn_index, func)
+        nc_emit_unimplemented_extern_trap_into(nc)
+        return true
+    }
     compile_ir_function_v2_core_ir_into(nc, func, fn_index)
 }
 
@@ -8911,6 +9058,14 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_exit(func.name) { emit_builtin_exit_into(nc); return }
         if name_is_abort(func.name) { emit_builtin_abort_into(nc); return }
         if name_is_system(func.name) { emit_builtin_system_into(nc); return }
+        if name_is_read_i64(func.name) { emit_builtin_read_offset64_into(nc); return }
+        if name_is_write_i64(func.name) { emit_builtin_write_offset64_into(nc); return }
+        if name_is_read_f64(func.name) { emit_builtin_read_offset64_into(nc); return }
+        if name_is_write_f64(func.name) { emit_builtin_write_offset64_into(nc); return }
+        if native_v2_empty_stub_would_fabricate(&func) {
+            nc_emit_unimplemented_extern_trap_into(nc)
+            return
+        }
     }
 
     (*nc).current_strategy = func.compile_strategy
@@ -9904,7 +10059,7 @@ fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Di
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), 0)
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
@@ -10118,7 +10273,7 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), 0)
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
@@ -10263,7 +10418,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
 
@@ -10387,7 +10542,7 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
