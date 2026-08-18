@@ -10382,6 +10382,46 @@ impl Lowerer {
         }
     }
 
+    // Box-specific variant: pointer class (is_float == 4) AND the declared type
+    // name is the literal "Box". named_type_name_id holds "Box" for `f: Box<T>`
+    // (a TypeNamed whose path starts with Box) and stays 0-empty for &T / &!T /
+    // *mut T fields, which are not TypeNamed. This distinction is what lets an
+    // explicit deref of a FIELD (`(*h.inner)`) route to the handle-resolved
+    // field_get(0) only when the field really is a Box — routing a &T field
+    // there would read through a raw address as a handle.
+    fn field_is_box_for_struct(self, type_name: Name, field_name: Name) -> bool with Mut, Panic, Div {
+        if type_name.len <= 0 {
+            return false
+        }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 4 && ir_name_is_box(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id))
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        false
+    }
+
+    fn field_is_box_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    return self.field_is_box_for_struct(type_name, field_name)
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
@@ -13072,9 +13112,17 @@ impl Lowerer {
                     // struct's field is a pointer. The by-name variant answers with the first
                     // same-named field in any struct, which silently produced a wrong value
                     // when two structs shared a field name (see field_is_pointer_for_struct).
-                    if lo.field_is_pointer_for_base_ref(&(*expr_box).left, (*expr_box).name) {
+                    if lo.field_is_box_for_base_ref(&(*expr_box).left, (*expr_box).name) {
                         if lower_aggregate_diag_enabled() { print("lower_agg: BIND-BOX-FROM-FIELD fired\n") }
                         lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                        // expr_first_arg_struct_name_ref answers the inner T only
+                        // for call/struct-literal RHS (`Box::new(mk())`); a
+                        // FIELD-access RHS (`let p = h.inner`) carries no argument
+                        // list, so the layout stays -1 there. The read site treats
+                        // a Box-tagged local with layout -1 as "deref, then resolve
+                        // the index by name" — the same route the explicit `(*p).f`
+                        // form takes, and the only route the layout table can offer:
+                        // it stores the declared name "Box", not the inner T.
                         let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     } else {
@@ -15558,7 +15606,21 @@ impl Lowerer {
             }
             _ => 0 - 1,
         }
-        let base_ident_is_box = base_box_layout >= 0
+        // Box-tagged with a known inner layout (Box::new / param binds) OR
+        // Box-tagged with layout -1 (field-chain binds: `let p = h.inner`,
+        // where the layout table cannot name the inner T). Both need the
+        // payload read; only the first can resolve the index against T.
+        let base_ident_box_tagged = match e.left {
+            Some(base_expr_ref) => {
+                if (*base_expr_ref).kind == ExprKind::ExprIdent {
+                    ir_name_is_box(lo1_pre.lookup_local_struct_type((*base_expr_ref).name))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+        let base_ident_is_box = base_box_layout >= 0 || base_ident_box_tagged
         if str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
             print("boxtrace: READ field=")
             print(str_from_bytes(e.name.buf, e.name.len))
@@ -15573,8 +15635,15 @@ impl Lowerer {
             lo1 = lo_d.emit(ir_field_get(deref_dst, base_pre, 0, ir_empty_name()))
             base = deref_dst
         }
-        let fidx = if base_ident_is_box {
+        let fidx = if base_box_layout >= 0 {
             lo1.field_idx_from_name((*lo1.struct_layouts).entries[base_box_layout as usize].type_name, e.name)
+        } else if base_ident_box_tagged {
+            // Box-tagged with layout -1: field_idx_for_base_ref would resolve
+            // against the literal "Box" (no such struct) and fall through to
+            // the first-byte hash. Take the explicit `(*p).f` route instead —
+            // after the payload read the base is no longer an ident, so the
+            // by-name scan across registered structs resolves the field.
+            lo1.field_idx_from_name_simple(e.name)
         } else {
             lo1.field_idx_for_base_ref(&e.left, e.name)
         }
@@ -15896,6 +15965,12 @@ impl Lowerer {
                 Some(operand) => {
                     if (*operand).kind == ExprKind::ExprIdent {
                         ir_name_is_box(self.lookup_local_struct_type((*operand).name))
+                    } else if (*operand).kind == ExprKind::ExprFieldAccess {
+                        // `(*h.inner)` where inner: Box<T> — the ident arm cannot
+                        // see a field chain, and the generic pointer arm would
+                        // emit a raw load through the handle. Box-only predicate:
+                        // a &T field must keep the raw-pointer deref.
+                        self.field_is_box_for_base_ref(&(*operand).left, (*operand).name)
                     } else {
                         false
                     }
