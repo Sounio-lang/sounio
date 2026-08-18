@@ -173,9 +173,10 @@ PR is unread):
 | `EpistemicEffects` (refuted) | `EpistemicEffectsV2`, `EpistemicPreservationWIP`, `EpistemicPreservationWIP_counterexample` — 3 dependents |
 | `EpistemicEffectsV2` (proven) | **nothing** |
 
-On this branch the second row is `EpistemicEffectsV2_measure_nat` — one
-importer. That is the minimum that stops V2 from being a leaf. It is not
-coverage. See the count under **Landed (consumer)**.
+On this branch the second row is two importers:
+`EpistemicEffectsV2_measure_nat` and `EpistemicEffectsV2_kvalue_nat`.
+That stops V2 from being a leaf. It is not coverage. See the fraction
+under **Coverage**.
 
 The refuted calculus is still the one with more dependents. V2 imports V1
 for shared definitions (`Effect`, `Ty`, `EffectSet`, `emptyE_sub`,
@@ -193,23 +194,58 @@ The correspondence gate's `--lean-consume` arm builds that module only after
 the V1 mutant (`v1_imports_measure_nat.lean`) fails to elaborate. A grep of
 `import EpistemicEffectsV2` without that mutant would measure mention, not use.
 
-**Coverage (measured 2026-08-18 on this file).** One importer ≠ V2 covered.
-Re-derive with the names in `EpistemicEffectsV2.lean` against the consumer
-source, comments stripped:
+**Coverage (measured 2026-08-18, union of V2 importers).** One importer ≠ V2
+covered. Re-derive with the names in `EpistemicEffectsV2.lean` against every
+`EpistemicEffectsV2_*.lean` consumer, comments stripped:
 
 | Layer | Client use | Remainder without an external client |
 |---|---|---|
-| Named theorems (`theorem`, 28) | **0** | **28** — including `preservation` and `effect_progress` |
-| `HasTy` rules (14) | 3 (`t_lit_nat`, `t_measure`, `t_kraw`) | 11 |
-| `Step` rules (19) | 1 (`meas_red`) | 18 |
+| Named theorems (`theorem`, 28) | **1** (`preservation`) | **27** — including `effect_progress` |
+| `HasTy` rules (14) | 4 (`t_lit_nat`, `t_measure`, `t_kraw`, `t_kvalue`) | 10 |
+| `Step` rules (19) | 2 (`meas_red`, `kvalue_red`) | 17 |
 | `IsValue` rules (4) | 1 (`v_nat`) | 3 |
 
-The consumer cites no V2 theorem by name. It reconstructs one path — the
-inverted V1 witness — from constructors. That is one fact of many. The
-gate is right at that grain: it scores use of the import edge, not
-coverage of the metatheory. The next target is a coverage map of the 28
-theorems and the unused rules, not a second banner and not spine
-extraction.
+Round 1 reconstructed the inverted V1 witness from constructors and cited
+**0** theorems. Round 2 cites `preservation` on unwrap. The gate is right
+at import-edge grain; the fraction above is what a reader must see before
+saying "V2 is covered".
+
+**Which theorem first, and why not the obvious ones.** `preservation` and
+`effect_progress` are the headline pair. `effect_progress` is the wrong
+first client: V1 *proves* progress, so a mutant that imports V1 and
+states progress on a well-typed term would likely elaborate. A positive
+control that does not fail measures mention. `preservation` applied to
+the same measure-Nat path as round 1 is the wrong instance: it would
+cite a theorem without touching a new compiler surface.
+
+The instance that has contact with what Madaros actually does is
+`preservation` on `kvalue_red` of `Knowledge<Nat>`. The live checker
+path is `check_knowledge_unwrap` (`self-hosted/check/epistemic.sio`):
+`Knowledge<T>` unwraps to the inner `T`. V1's `kvalue_red` always
+yields `lit_real`. That is the payload-erasure bug on the *read* side
+of the same defect round 1 caught on the *write* side.
+
+**Landed (consumer 2).** `EpistemicEffectsV2_kvalue_nat.lean` cites
+`preservation` and proves `kvalue_nat_reduct_stays_nat`. The
+`--lean-consume` arm (and `--lean-consume-kvalue`) builds that module
+only after `v1_imports_kvalue_nat.lean` fails.
+
+**Acceptance for consumer 2 (written before the consumer is scored).**
+A green Lean Proofs *job* is not evidence. The consume step must appear
+`success` and not `skipped` on the PR head. Because
+`.github/workflows/ci.yml` is under an active foreign claim, this
+round extends the existing step `V2 measure-Nat consumer (V1 mutant
+must fail first)` rather than adding a second named step. That step's
+log on the PR head must contain both:
+
+```
+POSITIVE_CONTROL_FIRED: v1_imports_kvalue_nat rejected
+V2_CONSUMED: EpistemicEffectsV2_kvalue_nat built
+```
+
+A dedicated step name (`V2 kvalue-Nat consumer (V1 mutant must fail
+first)`) is the next `ci.yml` hunk, not a substitute for those lines.
+If the kvalue mutant elaborates, the consumer must not be added.
 
 **Deferred — extract the shared spine.** A third module holding `Effect`, `Ty`,
 `EffectSet`, `TyCtx` would stop V2 from being a *client* of the refuted file.
@@ -257,13 +293,16 @@ do not attempt to close it under this dispatch.
 1. R1 and R2 landed. R3 recorded and explicitly deferred, not silently dropped.
    R1's remaining *fact* (V2 had no importer) is closed by
    `EpistemicEffectsV2_measure_nat.lean`, not by the banner. That close is
-   an import edge, not metatheory coverage: **0 of 28** V2 theorems have an
-   external client. Spine extraction stays deferred — see §5 R1. The
-   coverage map is the next residual, not a restatement of the consumer.
-2. `Lean Proofs` green, with V1, V2, and `EpistemicEffectsV2_measure_nat` all
-   `@[default_target]`. Deleting V1 to make the problem disappear is **out of
-   scope** — the refutation is a result worth keeping, and §1's theorems are
-   its statement.
+   an import edge, not metatheory coverage. After consumer 2 the fraction
+   is **1 of 28** named theorems (`preservation` on `kvalue` of
+   `Knowledge<Nat>`), **4 of 14** `HasTy` rules, **2 of 19** `Step`
+   rules, **1 of 4** `IsValue` rules. Spine extraction stays deferred —
+   see §5 R1. The coverage *fraction* is the residual, updated each
+   round, not a restatement of "V2 has a consumer".
+2. `Lean Proofs` green, with V1, V2, `EpistemicEffectsV2_measure_nat`,
+   and `EpistemicEffectsV2_kvalue_nat` all `@[default_target]`. Deleting
+   V1 to make the problem disappear is **out of scope** — the refutation
+   is a result worth keeping, and §1's theorems are its statement.
 3. The new gate's positive control demonstrated firing, with the output pasted
    into the PR body. A green gate whose control was never shown to fail is not
    evidence.
