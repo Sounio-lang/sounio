@@ -652,6 +652,11 @@ lean_lib «EpistemicEffectsV2_measure_nat» where
 @[default_target]
 lean_lib «EpistemicEffectsV2_kvalue_nat» where
 
+-- Third V2 importer: cites `invKraw` on the V1 propagation witness.
+-- `f (kraw nat)` with `f : Knowledge<Nat> → Knowledge<Nat>` is typable.
+@[default_target]
+lean_lib «EpistemicEffectsV2_invkraw_nat» where
+
 -- Refusal as a first-class compilation outcome (E219 / P0-F). A well-typed
 -- program in the extern-call fragment produces a value or refuses; it never
 -- fabricates a zero. Models the historical stub-to-zero backend as a second
