@@ -82,6 +82,15 @@ if [[ ! -f "$MANIFEST_PATH" ]]; then
   echo "[native-v2-gum] FAIL: missing manifest $MANIFEST_PATH" >&2
   exit 1
 fi
+# Manifest row floor: the case loop appends exactly one results row per
+# non-comment data row. An empty manifest runs zero cases, case_count reads
+# 0, and 0 == 0 computes status "pass" -- an instrument that answered
+# nothing certifying itself.
+gum_manifest_rows="$(grep -vE '^[[:space:]]*(#|$)' "$MANIFEST_PATH" | grep -c . || true)"
+if [[ "$gum_manifest_rows" -lt 1 ]]; then
+  echo "[native-v2-gum] FAIL: manifest $MANIFEST_PATH has no data rows -- nothing to verify" >&2
+  exit 1
+fi
 
 bash scripts/ci/native_v2_driver_self_compile_gate.sh >"$SELF_GATE_LOG" 2>&1
 
@@ -214,6 +223,12 @@ fi
 gum_sse2_bool=false
 [[ "${GUM_SSE2_VERIFIED,,}" == "true" ]] && gum_sse2_bool=true
 case_count="$(awk 'NR>1 && NF>0' "$RESULTS_TSV" | wc -l | tr -d ' ')"
+# Every manifest data row must have answered exactly once; a shortfall is
+# lost rows, not a smaller corpus (0 == 0 would otherwise read "pass").
+if [[ "$case_count" -ne "$gum_manifest_rows" ]]; then
+  echo "[native-v2-gum] FAIL: $case_count of $gum_manifest_rows manifest cases produced results -- incomplete pass" >&2
+  exit 1
+fi
 pass_count_gum="$(awk -F'\t' 'NR>1 && $8=="ok"' "$RESULTS_TSV" | wc -l | tr -d ' ')"
 fail_count_gum=$(( case_count - pass_count_gum ))
 if [[ "$pass_count_gum" -eq "$case_count" ]]; then
