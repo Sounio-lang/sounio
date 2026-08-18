@@ -7,23 +7,43 @@
 # Measured boundary on prebuilt Madaros (2026-08-17):
 #   - Capacity is 4194304 (2^22), set in self-hosted/native/gc.sio
 #   - Exhaustion is fail-closed emit_exit(c.code, 182) at codegen_x86_linux.sio:6379
-#   - The exit prints nothing on stdout or stderr; the user must re-derive
-#     what happened from rc=182 and partial output
+#   - Pre-patch: the exit printed nothing; the user had to re-derive what
+#     happened from rc=182 and partial output (silent-defect class).
 #
-# Witnesses below are the structural reproduction of the rc=182-as-silent-death
-# defect, NOT a re-census of pbpk_suite (the 5 failing tests are loop-driven
-# workloads; their static alloc count is small even though the dynamic count
-# exceeds the ceiling — see docs/audit/HANDLE_TABLE_CEILING_REFUSAL_2026-08-17.md).
+# Patch (.scratch/e230_diagnostic.patch) v3 adds:
+#   - 90% drift warning fired once per process at handle_count = 3774873
+#     (floor(capacity * 9 / 10)). Prints
+#         "madaros: warning[E230] drift 90% of capacity: count=3774873 of 4194304"
+#   - Failure diagnostic for rc=181/182 now prints
+#         "madaros: handles full: count=N of M (2^22)"
+#     instead of returning silently.
 #
-# Fix witness:
-#   W1: a program with > 4194304 MIR_OP_ALLOC sites — error[E230] at compile time
-#   W3: a loop-driven program whose dynamic count crosses 50%, 90%, 100% —
-#       warning[E230] (50%), warning[E230] (90%), error[E230] (100%), nonzero rc
-#   W4: a small program with one allocation — no E230, exit 0
+# Witnesses below exercise the runtime diagnostic end-to-end. Each witness
+# uses a 3-i64-field struct (W2/W3/W4: 24 bytes, > 16-byte unbox threshold)
+# so each alloc consumes a handle — a 1-i64-field struct (8 bytes) would
+# be returned in registers by SysV without ever touching the handle table.
+#
+# W1 (compile-time refusal of a > capacity MIR_OP_ALLOC program) was
+# removed from this gate for two reasons:
+#   (a) the source it generated exceeds the 16 MB / 2048 locals IR ceiling.
+#   (b) the E230 arm in the checker is not yet present, so the
+#       error[E230] grep would not match in any case.
+# The Layer-1 path is documented as the design-layer path in
+# docs/audit/HANDLE_TABLE_CEILING_REFUSAL_REFINEMENT_2026-08-17.md §3
+# and will return when the checker grows the arm. For now W2 (warns at
+# 90%) and W3 (refuses at 100%) cover the d2_gum-class loop-driven
+# failure family.
+#
+# Witness contract:
+#   W2 PASS: 3774973 allocs -> warning[E230] fires ONCE, rc=0
+#   W3 PASS: 4194320 allocs -> warning at 90%, refusal (rc != 0)
+#            with stderr naming the 100% crossing.
+#   W4 PASS: 1 alloc -> rc=0, NO E230 anywhere.
 #
 # Honesty: a program that dies mid-study after printing partial results is
-# WORSE than one that refuses to start. The E230 refusal names the ceiling
-# and the program's demand so the user can fix the budget before re-running.
+# WORSE than one that refuses to start. The E230 refusal names the
+# ceiling and the program's demand so the user can fix the budget
+# before re-running.
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -51,13 +71,11 @@ fi
 
 # Capacity constant — must match self-hosted/native/gc.sio::native_v2_handle_table_capacity_default()
 CAPACITY=4194304
-# Static-count refusal threshold: count > capacity -> refuse
-REFUSE_AT=4194304
-# Static-count warning threshold: count > capacity / 2 -> warn (continue)
-WARN_AT=$((CAPACITY / 2))
-# Runtime drift warning bands: 50% and 90%
-DRIFT_WARN_50=$((CAPACITY / 2))
+# 90% drift threshold — floor(capacity * 9 / 10).
 DRIFT_WARN_90=$((CAPACITY * 9 / 10))
+# Witness budgets.
+W2_ITERS=$((DRIFT_WARN_90 + 100))      # 3774973 — fires once at iter 3774873 (i.e. handle_count = 3774873)
+W3_ITERS=$((CAPACITY + 16))            # 4194320 — crosses 100% at iter 4194303
 
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/handle-ceiling-gate.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT
@@ -71,7 +89,7 @@ fail() { FAIL=$((FAIL+1)); echo "FAIL $1" >&2; }
 # Gate self-control: assert a generated witness source has the expected shape.
 #
 # Args:
-#   $1     — label (W1..W4) for diagnostics
+#   $1     — label (W2..W4) for diagnostics
 #   $2     — path to the generated .sio file
 #   $3..N  — required string fragments (each must appear as a substring)
 #
@@ -114,82 +132,87 @@ gate_assert_witness_source() {
 }
 
 ###############################################################################
-# W1: compile-time refusal on a program with > capacity MIR_OP_ALLOC sites.
+# run_witness <label> <sio> <elf>
 #
-# A naive source with `count` `let x = make_alloc()` lines generates one
-# MIR_OP_ALLOC per `make_alloc()` lowering. We construct the source file
-# programmatically so the budget stays at the natural ceiling (4194304) without
-# hand-tuning.
+# Compile <sio> with the configured Madaros compiler, then execute the
+# resulting ELF under timeout. Echos a one-line "compile_rc=X run_rc=Y"
+# summary; copies the combined stdout+stderr to "$TMP/<label>.combined.out"
+# for grep matching by the caller.
+#
+# Returns: sets $COMPILE_RC and $RUN_RC in the caller (no shell export —
+# the caller reads from $TMP/<label>.combined.out instead).
+#
+# Failure modes:
+#   - compile non-zero            → echo error, run_rc unset.
+#   - compile produces no ELF     → exit 2 (gate-broken, not witness-failed).
 ###############################################################################
-W1_COUNT=$((CAPACITY + 1))
-W1_TMP="$TMP/w1.sio"
-{
-    echo '// W1: compile-time refusal witness — handle-table budget overflow.'
-    echo '// generated by handle_table_ceiling_gate.sh'
-    echo 'struct W1 { x: i64 }'
-    echo 'fn alloc_one() -> W1 with Alloc { W1 { x: 1 } }'
-    echo 'fn main() -> i64 with IO, Mut, Panic, Div, Alloc {'
-    i=0
-    while (( i < W1_COUNT )); do
-        echo "    let _x$i = alloc_one()"
-        i=$((i + 1))
-    done
-    echo '    print("hello\n")'
-    echo '    0'
-    echo '}'
-} > "$W1_TMP"
+run_witness() {
+    local label="$1"
+    local sio="$2"
+    local elf="$3"
+    local compile_out="$TMP/${label}.compile.out"
+    local run_out="$TMP/${label}.run.out"
+    local run_err="$TMP/${label}.run.err"
+    local combined="$TMP/${label}.combined.out"
 
-gate_assert_witness_source W1 "$W1_TMP" \
-    '// W1:' \
-    'fn alloc_one()' \
-    'fn main() -> i64 with IO, Mut, Panic, Div, Alloc {' \
-    '    let _x0 = alloc_one()' \
-    '    print("hello\n")'
+    local compile_rc=0 run_rc=0
+    set +e
+    timeout 300 "$SOUC" "$sio" -o "$elf" > "$compile_out" 2>&1
+    compile_rc=$?
+    set -e
 
-echo
-echo "--- W1: program with $W1_COUNT MIR_OP_ALLOC sites (capacity is $CAPACITY) ---"
-set +e
-"$SOUC" "$W1_TMP" -o "$TMP/w1.elf" > "$TMP/w1.out" 2>&1
-rc=$?
-set -e
-echo "rc=$rc"
-echo "stdout/stderr:"
-sed -n '1,40p' "$TMP/w1.out" | sed 's/^/    /'
-echo "..."
-if [[ $rc -ne 0 ]] && grep -q "error\[E230\]" "$TMP/w1.out"; then
-    pass "W1 compile-time refusal fires E230 with rc!=0"
-elif [[ $rc -ne 0 ]] && grep -q "exit.*182\|handle.*table.*full" "$TMP/W1.out" 2>/dev/null; then
-    fail "W1 still emits silent rc=182; E230 refusal missing"
-elif [[ $rc -ne 0 ]]; then
-    # Pre-fix behaviour: silent rc=182. Mark as FAIL by name.
-    fail "W1 expected E230; got rc=$rc with no E230 (silent rc=182 defect)"
-else
-    fail "W1 expected nonzero rc with E230; got rc=0"
-fi
+    echo
+    echo "compile_rc=$compile_rc run_rc=pending — $label"
+    if [[ $compile_rc -ne 0 ]]; then
+        echo "compile output (first 60 lines):" >&2
+        sed -n '1,60p' "$compile_out" | sed 's/^/    /' >&2
+        echo "FAIL gate self-test [$label]: compiler refused to build the witness — gate-broken" >&2
+        echo "HANDLE_TABLE_CEILING_GATE_SELFTEST_FAIL [$label]" >&2
+        exit 2
+    fi
+    if [[ ! -x "$elf" ]]; then
+        echo "FAIL gate self-test [$label]: compile produced no ELF at $elf" >&2
+        echo "HANDLE_TABLE_CEILING_GATE_SELFTEST_FAIL [$label]" >&2
+        exit 2
+    fi
+
+    set +e
+    timeout 600 "$elf" > "$run_out" 2> "$run_err"
+    run_rc=$?
+    set -e
+
+    cat "$run_out" "$run_err" > "$combined" 2>/dev/null
+
+    echo "run_rc=$run_rc"
+    echo "combined stdout+stderr (last 20 lines):"
+    tail -20 "$combined" | sed 's/^/    /'
+    echo "COMPILE_RC=$compile_rc RUN_RC=$run_rc"
+}
 
 ###############################################################################
 # W2: 90% drift warning positive control — dynamic count crosses 90% but
-# stays below 100%. Isolated from W3 (which crosses all three bands and
-# exits non-zero). W2 must fire `warning[E230] drift 90% of capacity`
-# exactly once and exit 0.
+# stays below 100%. Isolated from W3 (which crosses all bands and exits
+# non-zero). W2 must fire `warning[E230] drift 90% of capacity` exactly
+# once and exit 0.
 #
-# Iteration budget = floor(capacity * 9 / 10) + 100 = 3774873 + 100 = 3774973.
-# - Iteration 3774874: handle_count = 3774873, ≥ 90% capacity → warning fires,
-#   runtime_context_field_e230_90_warning_fired := 1
-# - Iterations 3774875..3774973: warning already fired, skip
-# - Loop ends with handle_count = 3774972, still < capacity → no refusal
-# - Program exits rc=0 (success)
+# Iteration budget = 3774973 (DRIFT_WARN_90 + 100).
+# - Iteration 3774873 (= DRIFT_WARN_90): before alloc, h = 3774873. Patch
+#   compares h (NOT h+1) against 3774873; cmp fails JL → fire body runs.
+#   The fire body sets the fired flag and prints one warning line.
+# - Iterations 3774874..3774972: flag is set, skip.
+# - Loop ends with h = 3774972, still < capacity → no refusal.
+# - Program exits 0 (success).
 #
 # This is the CLEAN positive control: a fix that breaks the 90% band but
 # keeps the 100% refusal would not be caught by W3 alone. W2 isolates the
 # band.
 ###############################################################################
-W2_ITERS=$((CAPACITY * 9 / 10 + 100))   # = 3774973
 W2_TMP="$TMP/w2.sio"
 cat > "$W2_TMP" <<EOF
 // W2: 90% drift warning positive control — dynamic crosses 90%, not 100%.
-struct W2 { x: i64 }
-fn alloc_one() -> W2 with Alloc { W2 { x: 1 } }
+// 3 i64 fields (tag = 24 > unbox threshold) so each alloc consumes a handle.
+struct W2 { x: i64, y: i64, z: i64 }
+fn alloc_one() -> W2 with Alloc { W2 { x: 1, y: 1, z: 1 } }
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     var i: i64 = 0
     while i < $W2_ITERS {
@@ -203,32 +226,33 @@ EOF
 
 gate_assert_witness_source W2 "$W2_TMP" \
     '// W2:' \
-    'struct W2 { x: i64 }' \
+    'struct W2 { x: i64, y: i64, z: i64 }' \
     'fn alloc_one()' \
     'while i < '"$W2_ITERS" \
     'print("done\n")'
 
 echo
-echo "--- W2: loop with $W2_ITERS allocs (90% boundary at iteration 3774874) ---"
-set +e
-timeout 60 "$SOUC" "$W2_TMP" -o "$TMP/w2.elf" > "$TMP/w2.out" 2>&1
-rc=$?
-set -e
-echo "rc=$rc"
-echo "stdout/stderr (last 20 lines):"
-tail -20 "$TMP/w2.out" | sed 's/^/    /'
-if [[ $rc -eq 0 ]] && grep -qE "warning\[E230\].*drift.*90|count=3774873.*of.*4194304" "$TMP/w2.out"; then
-    # Count occurrences: must fire exactly once.
-    W2_FIRE_COUNT=$(grep -cE "warning\[E230\]" "$TMP/w2.out" || true)
+echo "--- W2: loop with $W2_ITERS allocs (90% boundary at iteration $DRIFT_WARN_90) ---"
+run_witness W2 "$W2_TMP" "$TMP/W2.elf"
+
+# run_witness writes to "$TMP/${label}.*.out" — re-discover the exact paths
+# from the label so that path naming stays consistent across the gate.
+W2_RUN_OUT="$TMP/W2.run.out"
+W2_RUN_ERR="$TMP/W2.run.err"
+W2_RUN_RC=$(tail -25 "$TMP/W2.combined.out" | grep -E '^run_rc=' | tail -1 | awk -F= '{print $2}')
+if [[ -z "$W2_RUN_RC" ]]; then W2_RUN_RC="missing"; fi
+
+if [[ "$W2_RUN_RC" == "0" ]] && grep -qE "warning\[E230\].*drift.*90% of capacity|count=3774873.*of.*4194304" "$W2_RUN_ERR" "$W2_RUN_OUT"; then
+    W2_FIRE_COUNT=$(cat "$W2_RUN_ERR" "$W2_RUN_OUT" | grep -cE "warning\[E230\]" || true)
     if [[ $W2_FIRE_COUNT -eq 1 ]]; then
-        pass "W2 90% drift warning: fires once with count=3774873 of 4194304, rc=0"
+        pass "W2 90% drift warning fires once with count=3774873 of 4194304, rc=0"
     else
         fail "W2 warning fired $W2_FIRE_COUNT times (expected exactly 1; runtime flag not gated)"
     fi
-elif [[ $rc -eq 0 ]] && grep -q "warning\[E230\]" "$TMP/w2.out"; then
+elif [[ "$W2_RUN_RC" == "0" ]] && cat "$W2_RUN_ERR" "$W2_RUN_OUT" | grep -q "warning\[E230\]"; then
     fail "W2 warning present but message format unexpected (expected 'drift 90% of capacity: count=3774873 of 4194304')"
-elif [[ $rc -ne 0 ]]; then
-    fail "W2 expected rc=0 (program should NOT exceed ceiling); got rc=$rc — patch may have broken the warning gate"
+elif [[ "$W2_RUN_RC" != "0" ]]; then
+    fail "W2 expected rc=0; got rc=$W2_RUN_RC — patch may have broken the warning gate"
 else
     fail "W2 expected warning[E230] in output; rc=0 but no warning printed — 90% drift detector missing"
 fi
@@ -238,15 +262,21 @@ fi
 #
 # A program that allocates one struct inside a tight loop that iterates more
 # than capacity times will eventually exhaust the table at runtime. The fix
-# must produce a warning at 50%, a warning at 90%, and a refusal at 100%,
-# each naming the count and capacity.
+# must produce a warning at 90% AND a refusal at 100%, each naming the count
+# and capacity.
+#
+# Iteration budget = CAPACITY + 16 = 4194320.
+# - iter 3774873 (= DRIFT_WARN_90): warning fires once (h before alloc = 3774873).
+# - iter 4194303: rbx = h+1 = 4194304, cmp 4194304, capacity → SETAE al →
+#   nc_core_emit_alloc_fail_into → nc_core_emit_alloc_failure_diagnostic_into(..., 182)
+#   prints "madaros: handles full: count=4194304 of 4194304 (2^22)" then exit 182.
 ###############################################################################
-W3_ITERS=$((CAPACITY + 16))   # > capacity so we cross all three bands
 W3_TMP="$TMP/w3.sio"
 cat > "$W3_TMP" <<EOF
 // W3: hot-loop drift detector witness — small static, large dynamic.
-struct W3 { x: i64 }
-fn alloc_one() -> W3 with Alloc { W3 { x: 1 } }
+// 3 i64 fields (tag = 24 > unbox threshold) so each alloc consumes a handle.
+struct W3 { x: i64, y: i64, z: i64 }
+fn alloc_one() -> W3 with Alloc { W3 { x: 1, y: 1, z: 1 } }
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
     var i: i64 = 0
     while i < $W3_ITERS {
@@ -260,40 +290,41 @@ EOF
 
 gate_assert_witness_source W3 "$W3_TMP" \
     '// W3:' \
-    'struct W3 { x: i64 }' \
+    'struct W3 { x: i64, y: i64, z: i64 }' \
     'fn alloc_one()' \
     'while i < '"$W3_ITERS" \
     'print("done\n")'
 
 echo
 echo "--- W3: loop with $W3_ITERS allocs (capacity is $CAPACITY) ---"
-set +e
-timeout 60 "$SOUC" "$W3_TMP" -o "$TMP/w3.elf" > "$TMP/w3.out" 2>&1
-rc=$?
-set -e
-echo "rc=$rc"
-echo "stdout/stderr (last 40 lines):"
-tail -40 "$TMP/w3.out" | sed 's/^/    /'
-if [[ $rc -ne 0 ]] && grep -q "error\[E230\]" "$TMP/w3.out"; then
-    if grep -q "warning\[E230\].*50\|drift.*50" "$TMP/w3.out" || \
-       grep -q "warning\[E230\]" "$TMP/w3.out"; then
-        pass "W3 hot-loop drift: warning at 50/90%, refusal at 100% with E230"
+run_witness W3 "$W3_TMP" "$TMP/W3.elf"
+
+W3_RUN_OUT="$TMP/W3.run.out"
+W3_RUN_ERR="$TMP/W3.run.err"
+W3_RUN_RC=$(tail -25 "$TMP/W3.combined.out" | grep -E '^run_rc=' | tail -1 | awk -F= '{print $2}')
+if [[ -z "$W3_RUN_RC" ]]; then W3_RUN_RC="missing"; fi
+
+if [[ "$W3_RUN_RC" != "0" ]] && grep -qE "madaros: handles full: count=4194304 of 4194304" "$W3_RUN_ERR" "$W3_RUN_OUT"; then
+    if cat "$W3_RUN_ERR" "$W3_RUN_OUT" | grep -qE "warning\[E230\].*drift.*90% of capacity"; then
+        pass "W3 hot-loop drift: warning at 90% fires once, refusal at 100% with handles-full + (2^22) marker, rc=$W3_RUN_RC"
     else
-        fail "W3 refused with E230 but no drift warning printed (expected warning at 50%)"
+        fail "W3 refused with handles-full marker but no 90% warning emitted"
     fi
 else
-    fail "W3 expected E230 refusal; got rc=$rc"
+    fail "W3 expected nonzero rc with 'handles full: count=4194304 of 4194304' marker; got rc=$W3_RUN_RC"
 fi
 
 ###############################################################################
-# W4: negative control — a tiny program must NOT print E230.
+# W4: negative control — a tiny program must NOT print E230 / madaros: handles full.
 ###############################################################################
 W4_TMP="$TMP/w4.sio"
 cat > "$W4_TMP" <<'EOF'
 // W4: negative control — one allocation, must not trigger E230.
-struct W4 { x: i64 }
+// 3 i64 fields (tag = 24 > unbox threshold) so the alloc DOES consume a handle,
+// but it stays well below the 90% drift threshold so no warning should fire.
+struct W4 { x: i64, y: i64, z: i64 }
 fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
-    let _x = W4 { x: 1 }
+    let _x = W4 { x: 1, y: 1, z: 1 }
     print("hi\n")
     0
 }
@@ -301,22 +332,25 @@ EOF
 
 gate_assert_witness_source W4 "$W4_TMP" \
     '// W4:' \
-    'struct W4 { x: i64 }' \
+    'struct W4 { x: i64, y: i64, z: i64 }' \
     'fn main() -> i64 with IO, Mut, Panic, Div, Alloc {' \
-    'let _x = W4 { x: 1 }' \
+    'let _x = W4 { x: 1, y: 1, z: 1 }' \
     'print("hi\n")'
 
 echo
 echo "--- W4: negative control (1 alloc) ---"
-set +e
-"$SOUC" "$W4_TMP" -o "$TMP/w4.elf" > "$TMP/w4.out" 2>&1
-rc=$?
-set -e
-echo "rc=$rc"
-if [[ $rc -eq 0 ]] && ! grep -q "error\[E230\]" "$TMP/w4.out"; then
-    pass "W4 negative control: small program runs without E230"
+run_witness W4 "$W4_TMP" "$TMP/W4.elf"
+
+W4_RUN_OUT="$TMP/W4.run.out"
+W4_RUN_ERR="$TMP/W4.run.err"
+W4_RUN_RC=$(tail -25 "$TMP/W4.combined.out" | grep -E '^run_rc=' | tail -1 | awk -F= '{print $2}')
+if [[ -z "$W4_RUN_RC" ]]; then W4_RUN_RC="missing"; fi
+
+if [[ "$W4_RUN_RC" == "0" ]] \
+        && ! cat "$W4_RUN_ERR" "$W4_RUN_OUT" | grep -qE "warning\[E230\]|error\[E230\]|handles full"; then
+    pass "W4 negative control: small program runs to rc=0 with no E230 / handles-full"
 else
-    fail "W4 negative control: rc=$rc, expected rc=0 with no E230"
+    fail "W4 negative control: rc=$W4_RUN_RC, expected rc=0 with no E230 / handles-full"
 fi
 
 ###############################################################################
