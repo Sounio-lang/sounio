@@ -89,7 +89,7 @@ else
     case "$path" in tests/*|check_sounio.sh) mark tests; recognized=true ;; esac
     case "$path" in formal/lean4/*) mark lean; recognized=true ;; esac
     case "$path" in
-      formal/lean4/*|scripts/ci/sedenion_*|scripts/ci/cd_tower_*|scripts/ci/gresnigt_*|scripts/ci/furey_*|scripts/research/sedenion_*|scripts/research/cd_tower_*|scripts/ci/ade_wildgen_*|scripts/research/ade_wildgen_*)
+      formal/lean4/*|scripts/ci/sedenion_*|scripts/ci/cd_tower_*|scripts/ci/gresnigt_*|scripts/ci/furey_*|scripts/ci/octonion_probes_gate.sh|scripts/research/sedenion_*|scripts/research/cd_tower_*|scripts/research/oct_*|scripts/research/ossm_*|scripts/ci/ade_wildgen_*|scripts/research/ade_wildgen_*)
         mark math
         recognized=true
         ;;
