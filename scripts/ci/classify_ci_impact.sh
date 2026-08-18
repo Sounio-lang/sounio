@@ -36,7 +36,28 @@ else
     paths=("$@")
   else
     [[ -n "$BASE_SHA" ]] || { echo "error: CI_BASE_SHA is required for pull_request classification" >&2; exit 2; }
-    mapfile -t paths < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+    # The diff is this classifier's only evidence, and its failure used to be
+    # invisible: fed through process substitution, a failed `git diff` left
+    # paths=(), every output false, and the script exited 0 -- a run that
+    # downstream reads identically to "no jobs needed" and silently skips the
+    # whole matrix (CI_TRUST_CONTRACT: an instrument that did not answer is
+    # unavailable, not an empty selected set). Capture its status, and refuse
+    # an empty PR diff for the same reason.
+    diff_list="$(mktemp)"
+    diff_err="$(mktemp)"
+    if ! git diff --name-only "$BASE_SHA" "$HEAD_SHA" >"$diff_list" 2>"$diff_err"; then
+      echo "error: git diff --name-only $BASE_SHA $HEAD_SHA failed -- cannot classify impact:" >&2
+      sed 's/^/  git: /' "$diff_err" >&2
+      rm -f "$diff_list" "$diff_err"
+      exit 3
+    fi
+    if [[ ! -s "$diff_list" ]]; then
+      echo "error: git diff --name-only $BASE_SHA $HEAD_SHA is empty -- a pull request with no changed paths would silently skip every job" >&2
+      rm -f "$diff_list" "$diff_err"
+      exit 4
+    fi
+    mapfile -t paths <"$diff_list"
+    rm -f "$diff_list" "$diff_err"
   fi
 
   for path in "${paths[@]}"; do
