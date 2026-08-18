@@ -151,16 +151,46 @@ export function measureMayPrint(m: SuiteMeasure): boolean {
 }
 
 /**
- * Canonical face. The numeral is not allowed out without both
- * the engine and the reachability gloss.
+ * cursor-2 #1874, `docs/audit/CI_GATE_UMBRELLA_CLOSURE_2026-08-18.tsv`.
+ * Leftover hangers on the dead umbrella, including the node itself.
+ * Direct children stay 15; leftover closure is 25 of the 390
+ * mention-orphan upper bound. Not most. Do not recount 468 here.
  */
-export function suiteFace(m: SuiteMeasure): string {
+export const UMBRELLA_LEFTOVER_HANGERS = 25 as const;
+export const MENTION_ORPHAN_UPPER_BOUND = 390 as const;
+export const UMBRELLA_CLOSURE_DOC =
+  'docs/audit/CI_GATE_UMBRELLA_CLOSURE_2026-08-18.tsv';
+export const UMBRELLA_CLOSURE_SHA = '0ff0b39764';
+export const UMBRELLA_CLOSURE_PR = 1874;
+
+export function umbrellaFace(): string {
+  return `dead umbrella · ${UMBRELLA_LEFTOVER_HANGERS} leftover hangers of ${MENTION_ORPHAN_UPPER_BOUND} mention-orphans · not most`;
+}
+
+export type SuiteFaceParts = {
+  numeral: string;
+  gloss: string;
+  face: string;
+};
+
+/**
+ * Canonical face. The numeral is not allowed out without both
+ * the engine and the reachability gloss. Parts exist so the large
+ * 19 cannot render on its own.
+ */
+export function suiteFaceParts(m: SuiteMeasure): SuiteFaceParts {
   if (!measureMayPrint(m)) {
     throw new Error(
       'dissertationHonestyNow: refuse to print a pbpk_suite numeral without reachability and engine',
     );
   }
-  return `${m.fail} FAIL / ${m.registered} · ${m.engine} · ${REACHABILITY_FACE[m.reachability]} · operator remeasure ${m.measuredAt} · #${m.pr}`;
+  const numeral = `${m.fail} FAIL / ${m.registered}`;
+  const gloss = `${m.engine} · ${REACHABILITY_FACE[m.reachability]} · operator remeasure ${m.measuredAt} · #${m.pr}`;
+  return { numeral, gloss, face: `${numeral} · ${gloss}` };
+}
+
+export function suiteFace(m: SuiteMeasure): string {
+  return suiteFaceParts(m).face;
 }
 
 export function priorFace(m: SuiteMeasure): string {
