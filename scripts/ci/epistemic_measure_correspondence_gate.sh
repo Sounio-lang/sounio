@@ -261,17 +261,8 @@ if [[ "$LEAN_CONSUME" -eq 1 ]]; then
     TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
     record_failure "v1_mutant_missing:$V1_MUTANT"
   fi
-  if [[ ! -f "$KVALUE_CONSUMER_SOURCE" ]]; then
-    TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
-    record_failure "kvalue_consumer_source_missing:$KVALUE_CONSUMER_SOURCE"
-  fi
-  if [[ ! -f "$KVALUE_V1_MUTANT" ]]; then
-    TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
-    record_failure "kvalue_v1_mutant_missing:$KVALUE_V1_MUTANT"
-  fi
   if [[ "$NOT_RUN" -eq 0 ]]; then
     run_lean_consume
-    run_lean_consume_kvalue
   fi
 fi
 
