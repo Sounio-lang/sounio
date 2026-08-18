@@ -15,6 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ci-gate-
 **SHA measured (pass 1):** `465008a76b`  
 **SHA measured (pass 2 leftover class):** `64924d371a`  
 **SHA that expired the present-tense 6/6 leftover claim:** `12ebda238d` (#1880)  
+**Live leftover after #1880 + #1893 (this merge / `origin/main`):** reachable **91** / leftover **380** (population 471). The umbrella-closure **25** is unchanged — that walk starts at the umbrella, not at `sigpipe_hygiene_gate.sh`.  
 **Instrument:** `python3 scripts/dev/ci_gate_workflow_reachability.py`  
 **Table:** [`CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv`](CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv)
 
@@ -202,5 +203,7 @@ Two further vacuous-green paths, unused by CI only because CI never calls them:
 - `dissertation_confidence_gate_gate.sh` exits 0 on non-Linux / non-x86_64
 
 **Verdict:** yes, **on `64924d371a`**. 6/6 never was a CI signal (measured at `64924d371a`; at `12ebda238d` two of the six are already in Contracts — confidence and frontend_parity, both green, `SOUNIO_GATE_SOUC` pinned). The other four (dossier, hessian, pbpk28, suite) stay leftover and stay red. A numeral without a SHA expires the moment a later wire lands; this one will not.
+
+Live leftover after that wire and the #1893 scan-list fix: **91** reachable / **380** leftover. The umbrella-closure **25** does not move — that walk does not start at sigpipe.
 
 This pass does **not** authorise wiring the remaining four, the 36 forgotten, or the 317 unclassified. The suite is a 53-entry compile/run forest; putting it in Contracts while red would redden every PR the way a V0-A-red f128 ladder would.
