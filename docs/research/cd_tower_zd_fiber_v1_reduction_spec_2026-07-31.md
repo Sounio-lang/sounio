@@ -5816,9 +5816,26 @@ where `s3 = tr(M³)` (the unmasked tri3), `cp2 = tr(M²Π_W)`, `cp3 = tr(M³Π_W
 transitions (`m = 3..8`, `W = 1..15`); **out of sample on 92 transitions with labels never used in
 the fit (`W ≥ 16`, `m = 4..7`), 0 failures.**
 
+> **★ STATUS 2026-08-18: TWO OF THE THREE LINES ARE NOW LEAN THEOREMS, ∀ level and ∀ label `W ≠ 0`.**
+> The `s3` line is `s3_level_recursion` (Tier 157, `369e0c34cd`); the `cp2` line is
+> `cp2_level_recursion` (Tier 167, `57b6cb9918`). Both are unconditional — in particular the
+> `cp2` line is NOT restricted to the powers of two, which is worth stating separately because
+> `cp2`'s closed VALUE `−(H−2)(H−6)` **is** so restricted: measured `+52` at `W = 15`, level 3,
+> against the closed form's `−140` (Tier 165). The row is about the recursion, not the value.
+> **The `cp3` line remains fitted-only** — nothing in the deviation law needed it.
+
 **`cp3` does not feed `s3`.** So `tri3`'s own transfer is the 2×2 upper-triangular matrix
 `[[8, 24], [0, 4]]`, eigenvalues 8 and 4. The inhomogeneity is label-independent, so within-fibre
 DIFFERENCES obey the homogeneous system.
+
+> **★ STATUS 2026-08-18: THE 2×2 IS A THEOREM IN BOTH ROWS.** The two recursions above ARE the
+> matrix claim — the linear part acting on `(s3, cp2)`, with the inhomogeneous terms outside it —
+> so no further ingredient is required. Fitted on 75 transitions and checked out of sample on 92;
+> now proved. The pin arithmetic that closed the `[0, 4]` row is Tier 167: the coset-flip product
+> `τ(a,b)τ(b,a⊕W) = 1 − 2[b=a] − 2[b=a⊕W]` (the two loci are disjoint exactly because `W ≠ 0`),
+> then five label-free `H`-linear pins, `R₀ = C₀ = D₁ = H−2`, `κ = 1`, `D₂ = 2H−4`. The one place
+> a naive count goes wrong is `D₂`: its summand vanishes at BOTH exceptional points `a = 0` and
+> `a = W`, because `ε + σ = 0` there, so it is `2H−4` and not `2H−8`.
 
 **The deviation law follows.** On the reference pairs (`W = 2^j` against `W = 1`) the coset
 coordinate is fibre-blind — `Δcp2 = 0` at every `m` and `j` tested — so `Δs3(m+1) = 8·Δs3(m)`
@@ -5835,9 +5852,20 @@ exception; the masked object deviates by exactly `288·[m−1,2]₂` — both re
 numbers independently (2016, 10080, 44640 against `288·{7,35,155}`). The mask is the only
 `j = m`-sensitive operation in play, so the clean law is the native one.
 
+> **Confirmed independently 2026-08-13**, by `#eval` of the raw sums from `P3`'s definition:
+> at `j = m` the proved law holds with NO `288·[m−1,2]₂` correction — `D = 1728` at `(j,m) = (3,3)`
+> and `25920 = 1728·15` at `(4,4)`. Note the scope: this confirms the clean law on the UNMASKED
+> `tri3`, which is what Tier 161 proves; it does not prove the masked object's deviation, which
+> was never formalised.
+> (`docs/audit/ZD_DEVIATION_LAW_DEPENDENCY_AUDIT_2026-08-13.md`)
+
 **★ STATUS 2026-08-13: ALL THREE OBLIGATIONS ARE DISCHARGED — THE LAW IS A LEAN THEOREM.**
-`deviation_law` (`formal/lean4/SounioZDFiberAntisym.lean`, Tier 161, `f6676d1cab`), kernel-clean,
-scope `j ≥ 3` and levels `m ≥ j`. (i) is `s3_level_recursion` (Tier 157, `369e0c34cd`) — and note
+`deviation_law` (`formal/lean4/SounioZDFiberAntisym.lean`, Tier 161, `f6676d1cab`), kernel-clean.
+Scope was `j ≥ 3` (inherited from Tier 166's reference base case) and is now **every `j ≥ 1`** —
+`deviation_law_all`, Tier 163, `5e880953a5`. The statement needed no change at `j = 1, 2`:
+`[j,3]₂ = 0` below `j = 3`, and the `7`-cleared right-hand side already says so, since
+`(H−2)(H−4)(H−8)` vanishes at `H = 4` and `H = 8`; only the base case had to be supplied, and
+there it is closed arithmetic (`decide`, bounds 4 and 8). (i) is `s3_level_recursion` (Tier 157, `369e0c34cd`) — and note
 the `s3` row alone was enough, `cp2`'s and `cp3`'s rows were never needed for the law. (ii) is
 `cp2_ref_eq`, a corollary of `cp2_pow2_labels` (Tier 157b), which holds for every `p` including
 `p = 0`, i.e. the reference `W = 1` itself. (iii) is `dev_base` (Tier 161), the subtraction of
