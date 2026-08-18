@@ -38,6 +38,27 @@ Measured 2026-08-18, dual-engine, source Madaros ELF `127ebcc7…` (post-KCONF, 
 
 A live GUM var on the thesis surfaces is ~`1e-4` (visible at 6 decimal places). On the failing CALL path, `v == 0` and `v * 1e12` still prints 0. Family B’s emitter is not involved.
 
+## 1b. OpSub / negation — measured, not inferred (REFUTED as language-wide)
+
+Sounio has no unary minus. Every `-k*C` is written `0.0 - k*C`, so it was reasonable to ask: if OpSub is a catalog hole, does **every negation in the language** drop uncertainty?
+
+Deciding probe (`docs/audit/repro/fo_opsub_inline_vs_call.sio`): one pair of seeds (`measure(10,u=1)`, `measure(4,u=1)`), three expressions **side by side**, then the same three through a user `fn`.
+
+| # | Expression | Through | Madaros | lean | GUM want |
+|---|---|---|---|---|---|
+| T1 | `a - b` | **inline** | **2 LIVE** | 2 LIVE | 2 |
+| T2 | `0.0 - a` | **inline** | **1 LIVE** | 1 LIVE | 1 |
+| T3 | `a * b` | **inline** | **116 LIVE** | 116 LIVE | 116 |
+| T4 | `sub2(a, b)` | **call** | **0 ZERO** | 2 LIVE | 2 |
+| T5 | `neg1(a)` → `0.0 - a` | **call** | **0 ZERO** | 1 LIVE | 1 |
+| T6 | `mul2(a, b)` | **call** | **116 LIVE** | 2 LIVE | 116 |
+
+**Verdict:** `0.0 - a` does **not** have a private path that skips FO, and it does **not** die inline. Inline OpSub uses `fo_combine_sens_addsub` (the same combine as add). The only special-case in the inline lowerer is `a - a` (same ident) → variance 0, which is correct.
+
+So: **negation does not lose uncertainty**. Wrapping negation (or any OpSub) in a user `fn` does, because the **call catalog** has no OpSub. The title of this dispatch stays “FO dies at a user function boundary”. It does **not** become “negation loses uncertainty”. That claim is false and larger than the evidence.
+
+Pin: `tests/run-pass/fo_opsub_inline.sio` (`expect-stdout: OP_SUB_INLINE_LIVE`) so a later call-catalog patch cannot “fix” OpSub by breaking the inline combine. Madaros inline is GUM-correct (2 / 1 / 116). lean is LIVE on all three (magnitude may peel-forward; that is not this dispatch).
+
 ## 2. Boundary — not every call
 
 `fo_register_pure_fn_transfer` / `fo_classify_expr_transfer` in `self-hosted/ir/lower.sio` register only:
@@ -112,7 +133,7 @@ Op pin (same disease, other hole): `tests/run-pass/fo_call_boundary_neg.sio` (`f
 
 Both are `//@ known-failure` with `expect-stdout: FO_CALL_BOUNDARY_LIVE` and exit 1 on zero. Honest pins, not passing tests with a tag.
 
-Thesis RHS (`rhs(c, cl, fu)` + `0.0 - … / 5.0`) is arity 3 **and** OpSub **and** OpDiv. Triple miss. `#1889` inlined it so adaptive/rk4 stay live; any new helper of that shape will under-report again.
+Thesis RHS (`rhs(c, cl, fu)` + `0.0 - … / 5.0`) is arity 3 **and** OpSub **and** OpDiv. Triple miss **at the call**. The same `0.0 - k*C` written inline keeps FO (T2). `#1889` inlined it so adaptive/rk4 stay live; any new helper of that shape will under-report again.
 
 ## 5. What this does to a thesis
 
