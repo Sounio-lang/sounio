@@ -242,3 +242,25 @@ larger IR slot budget or a tighter live-set, not the Box fix.
 What this means: do not expect gen2 to turn green from the Box fix alone.
 The recorded rung stays `check`; the ladder is unchanged, and that is the
 correct, bounded result.
+
+Attempted the documented lever and found why it is not self-contained
+(2026-08-18, same lane). Raising `IR_MAX_FUNCS` 8192 → 16384 requires, in
+the same change:
+
+1. `ir_region_table_capacity()` (`self-hosted/ir/ir.sio:1141`, currently
+   8448) MUST exceed `IR_MAX_FUNCS` — its own comment records the bisect
+   ("8189 live slots compile, 8190 and 8191 do not"). At 16384 the region
+   table is the binding constraint and the contract check refuses.
+2. The coupled array literals: `IrModule.functions` (`[IrFunction; 8192]`),
+   `normalize.sio`'s two `[IrFunction; 8192]` sites, the four backends'
+   `fn_offsets: [i64; 8192]` (`codegen_x86_linux`, `elf`, `elf_bulk`,
+   `reloc`), and `SPEC_DCE_SLOTS`/`SPEC_DCE_MAX` plus the `[i64; 16384]`
+   mark arrays in `specializer.sio`.
+3. The fixture `tests/multimodule/ir_capacity/` raised past the old ceiling,
+   and the literal sweep the probe gate's header demands.
+
+A partial raise (constant + arrays, without the region table) was applied
+and reverted in this worktree; nothing shipped. The lever is real but it is
+a coordinated multi-file change with its own risk profile, not a one-line
+constant bump. That is the next task, named and scoped, and it is separate
+from the Box repair this audit is about.
