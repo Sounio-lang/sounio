@@ -538,6 +538,39 @@ fn case_interp_refuses_call() -> i64 with IO, Mut, Panic, Div {
     report_pass("I11 CALL REFUSED by interp with named code (no rax after empty stub)")
 }
 
+// I12: #1830 class — opcode 0 is NOP. Bumping blk_instr_count after a
+// green verify walks a slot nobody wrote; that used to execute as a
+// successful no-op. Poke is the SoA count column only.
+fn case_interp_refuses_unwired_slot() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_OK { return report_fail("I12 unwired", "pre-verify", vs.code, 0) }
+    f.blk_instr_count[0] = f.blk_instr_count[0] + 1
+    var args = mli_interp_args_empty()
+    args.ai[0] = 3
+    args.ai[1] = 4
+    let res = mli_interp_run(&f, &args)
+    if res.ok { return report_fail("I12 unwired", "silent-nop", MLI_I_OK, MLI_I_UNWIRED_SLOT) }
+    if res.has_value { return report_fail("I12 unwired", "value-after-refuse", 1, 0) }
+    if res.code != MLI_I_UNWIRED_SLOT {
+        return report_fail("I12 unwired", "code", res.code, MLI_I_UNWIRED_SLOT)
+    }
+    if res.index != 1 { return report_fail("I12 unwired", "slot", res.index, 1) }
+    report_pass("I12 unwritten slot REFUSED by interp (not a silent NOP)")
+}
+
+// I13: verify must not stamp OK on the same ghost slot. #1801: returning
+// the declared well-formedness after reading a zero nobody wrote.
+fn case_verify_refuses_unwired_slot() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add_i64()
+    f.blk_instr_count[0] = f.blk_instr_count[0] + 1
+    let vs = mli_verify_function(&f)
+    if vs.code != MLI_VERR_UNWIRED_SLOT {
+        return report_fail("I13 unwired verify", "code", vs.code, MLI_VERR_UNWIRED_SLOT)
+    }
+    report_pass("I13 unwritten slot is a VERIFY error (not a silent NOP)")
+}
+
 fn main() -> i64 with IO, Mut, Panic, Div {
     println("=== MLI S2a gate: ir_to_mli (straight-line i64/f64) + minimal interp ===")
     if ir_instr_arena_init() != IR_ARENA_OK {
@@ -573,6 +606,8 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     failures = failures + case_interp_refuses_uninhabited_arg()
     failures = failures + case_interp_refuses_narrow_int_arg()
     failures = failures + case_interp_refuses_call()
+    failures = failures + case_interp_refuses_unwired_slot()
+    failures = failures + case_verify_refuses_unwired_slot()
 
     if failures == 0 {
         println("=== MLI S2a: ALL CASES PASS ===")
