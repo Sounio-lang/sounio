@@ -10587,6 +10587,12 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprStringLit {
             return 3
         }
+        if (*e).kind == ExprKind::ExprHandle {
+            // CEI WS-A P0: a handle<E>{..} result is the operation result type, which
+            // P0 fixes as i64. Without this, `let r = handle{..}` leaves r at scalar-kind
+            // 0 and println(r) routes to the char* printer -> SIGSEGV (the #1799 family).
+            return 1
+        }
         if (*e).kind == ExprKind::ExprIdent {
             let local_sk = self.lookup_local_scalar_kind((*e).name)
             if local_sk != 0 {
@@ -15691,15 +15697,25 @@ impl Lowerer {
             match (*e).left {
                 Some(base) => {
                     if (*base).kind == ExprKind::ExprIdent {
-                        let clause_fn = self.lookup_local_closure_fn_id((*e).name)
-                        if clause_fn >= 0 {
+                        let op_reg = self.lookup_local((*e).name)
+                        if op_reg >= 0 {
+                            // A non-capturing clause `let op = |..| {..}` binds a fn-ref
+                            // register (ir_load_fn_ref); a capturing one sets closure_fn_id.
+                            // Dispatch the direct call for the latter, else indirect via
+                            // the fn-ref reg — mirroring lower_call_expr_ref's bound-closure
+                            // path (@14906 direct / @14900 indirect).
+                            let clause_fn = self.lookup_local_closure_fn_id((*e).name)
                             let pair_pa: LowerExprArgsResult = self.lower_expr_args_ref(&(*e).args)
                             let lo_pa = pair_pa.lowerer
                             let args_pa: Option<Box<IrRegList>> = if pair_pa.count <= 0 { None } else { Some(Box::new(pair_pa.regs)) }
                             let pair_pd = lo_pa.fresh_reg()
                             let lo_pd = pair_pd.0
                             let dst_pd = pair_pd.1
-                            return (lo_pd.emit(ir_call(dst_pd, clause_fn, (*e).name, args_pa, pair_pa.count)), dst_pd)
+                            if clause_fn >= 0 {
+                                return (lo_pd.emit(ir_call(dst_pd, clause_fn, (*e).name, args_pa, pair_pa.count)), dst_pd)
+                            } else {
+                                return (lo_pd.emit(ir_call_indirect(dst_pd, op_reg, args_pa, pair_pa.count)), dst_pd)
+                            }
                         }
                     }
                 }
