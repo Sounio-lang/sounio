@@ -206,10 +206,28 @@ The comment immediately above it states the arrangement plainly:
 > *"The f64 arrays above are their numeric projection for the GUM kernel."*
 
 So the numbers flow through plain `f64` arrays (`m`, `v`, `c`) and the
-`Knowledge` block sits beside them. **Whether that block is refused, accepted, or
-merely inert is under re-verification** and is not asserted here — an earlier
-draft of this correction cited an `E200` refusal from memory, which is exactly
-the kind of claim this section exists to forbid.
+`Knowledge` block sits beside them. **Re-verified, 2026-08-19** (`docs/audit/`, `#2024`, both engines on Slurm):
+
+- **The literal is ACCEPTED.** Both Madaros and lean_single `check` the file with
+  `rc=0` and an `E200` count of **zero**. An earlier draft of this correction
+  cited an `E200` refusal *from memory*; the memory was wrong, and it is recorded
+  here rather than quietly dropped.
+- **`Knowledge` here is the compiler builtin** (`TypeKind::TyKnowledge`), not any
+  of the five declared structs. That is why it resolves without an import.
+- **The block is the GUM carrier, not decoration.** Stripping the seven `kn[i] =`
+  assignments zeros `sens[0]` and fails TEST 5; the unmodified file passes 9/9
+  under lean_single. The numbers pass through it.
+
+Three further facts fall out of the same measurement, and each is a defect:
+
+- **The field written is not the field read.** The literal writes `epsilon:`;
+  under Madaros `.epsilon` reads **0.0** while `.confidence` reads 0.65. One of
+  the two names is silently inert.
+- **The engines disagree on a wrong-field literal.** Madaros refuses with
+  `E012`; **lean_single warns and emits an ELF anyway**.
+- **The gate that covers this file is unreachable.**
+  `scripts/ci/dissertation_pbpk_suite_gate.sh` lists it, and no workflow reaches
+  that gate.
 
 Other measured facts about shape 2, which is the shape the stdlib exposes:
 
