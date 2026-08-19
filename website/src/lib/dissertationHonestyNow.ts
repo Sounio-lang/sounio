@@ -20,13 +20,16 @@
  * The intermediate node was never wired; there was nowhere to notice.
  *
  * Source of truth (do not invent a later run):
- *   docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md
- *   author grok-cli2 · landed #1818 as 2016efb8e4
- *   measured on source-built Madaros at d0c798e4ed
- *   finished 2026-08-17T22:21:35Z
+ *   docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-18.md
+ *   author kimi-cli1 · landed #1914 as 7eced5d22d
+ *   measured on source-built Madaros at c240e848bf
+ *   main at 2026-08-18T18:27Z
+ * Supersedes the 19-FAIL photograph (#1818, d0c798e4ed,
+ * 2026-08-17T22:21:35Z). That face aged honestly — the date was
+ * visible — in under 24 hours. The panel still cannot notice aging.
  *
- * PEND is its own category. It is not a pass. Hiding it would make
- * 19 + 33 look like 53.
+ * PEND is its own category. This remasure closes 16 + 37 = 53
+ * with zero PEND. Do not hide a future PEND inside PASS.
  * #1880 wired confidence + frontend_parity into ci.yml. Those two
  * are REACHABLE instances in dissertationWiredHonesty.ts. This file
  * is still the pbpk_suite instance. Do not copy their binding here.
@@ -159,34 +162,34 @@ export type SuiteMeasure = {
 
 export const PBPK_SUITE_NOW: SuiteMeasure = {
   gate: 'scripts/ci/dissertation_pbpk_suite_gate.sh',
-  measuredAt: '2026-08-17T22:21:35Z',
-  sourceSha: 'd0c798e4ed',
-  docSha: '2016efb8e4',
-  author: 'grok-cli2',
-  doc: 'docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md',
-  pr: 1818,
+  measuredAt: '2026-08-18T18:27:00Z',
+  sourceSha: 'c240e848bf',
+  docSha: '7eced5d22d',
+  author: 'kimi-cli1',
+  doc: 'docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-18.md',
+  pr: 1914,
   engine: 'Madaros',
   reachability: 'WORKFLOW-UNREACHABLE',
   registered: 53,
-  pass: 33,
-  fail: 19,
-  pend: 1,
+  pass: 37,
+  fail: 16,
+  pend: 0,
   skip: 0,
   unknown: 0,
-  pendName: 'pbpk28_semaglutide_clinical',
+  pendName: 'none this remasure',
   families: [
-    { n: 12, id: 'toolchain' },
+    { n: 9, id: 'toolchain' },
     { n: 7, id: 'resource-ceiling' },
     { n: 0, id: 'science' },
   ],
   prior: {
-    measuredOn: '2026-08-16',
-    job: '9908',
-    sourceSha: '6f2c4e2461',
+    measuredOn: '2026-08-17T22:21:35Z',
+    job: '#1818',
+    sourceSha: 'd0c798e4ed',
     engine: 'Madaros',
     reachability: 'WORKFLOW-UNREACHABLE',
-    pass: 28,
-    fail: 24,
+    pass: 33,
+    fail: 19,
     pend: 1,
   },
 };
@@ -261,7 +264,7 @@ export type SuiteFaceParts = {
 /**
  * Canonical face. The numeral is not allowed out without both
  * the engine and the reachability gloss. Parts exist so the large
- * 19 cannot render on its own.
+ * fail count cannot render on its own.
  */
 export function suiteFaceParts(m: SuiteMeasure): SuiteFaceParts {
   if (!measureMayPrint(m)) {
