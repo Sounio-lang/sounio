@@ -155,6 +155,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.g1-wip.tuple-match-deref-bug-2026-06-03 | repo_only | docs/audit/g1_wip/TUPLE_MATCH_DEREF_BUG_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.g1-wip.tuple-match-feature-design-2026-06-03 | repo_only | docs/audit/g1_wip/TUPLE_MATCH_FEATURE_DESIGN_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.g1-wip.verdict-parity-2026-06-02 | repo_only | docs/audit/g1_wip/VERDICT_PARITY_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.gate-instrument-census-2026-08-18 | repo_only | docs/audit/GATE_INSTRUMENT_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.github-mergeability-cache-staleness-census-2026-08-18 | repo_only | docs/audit/GITHUB_MERGEABILITY_CACHE_STALENESS_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.github-mergeability-queue-is-a-flow-2026-08-18 | repo_only | docs/audit/GITHUB_MERGEABILITY_QUEUE_IS_A_FLOW_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30 | repo_only | docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
