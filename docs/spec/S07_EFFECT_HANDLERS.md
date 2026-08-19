@@ -117,6 +117,46 @@ The census records that `handler_discharge.sio` is green on both engines
 claims a discharge test; what it asserts is a string. Reclassifying it is a
 founder decision and the census did not touch it.
 
+### 7.3.4 Neither form the language specification documents is implemented
+
+`docs/spec/LANGUAGE_SPECIFICATION.md` §4.8 documents two effect expressions.
+Both were tested on both engines.
+
+**§4.8.1 — `with handler { ... perform E::op() ... }`**
+
+| engine | result |
+|---|---|
+| Madaros v0.80.0 | `module failed to parse` |
+| lean_single | `error[E200]: undefined identifier \`handler\``, `error[E200]: undefined identifier \`perform\`` |
+
+`perform` is listed as a keyword at `LANGUAGE_SPECIFICATION.md:114`. lean_single
+resolves it as an ordinary identifier and fails to find it, so on that engine it
+is not a keyword at all.
+
+**§4.8.2 — `handle name for Effect { on op(arg) -> { resume(v) } }`**
+
+| engine | result |
+|---|---|
+| Madaros v0.80.0 | `module failed to parse` |
+| lean_single | compiles, emits an ELF, no diagnostic |
+
+**The lean_single result is silence, not support.** Negative control: replacing
+the whole block with nonsense that keeps only its shape —
+
+    zorble qwertyuiop for MyEffect {
+        blargh operation(arg) -> { frobnicate(arg + 1) }
+    }
+
+— also compiles and emits an ELF. An unrecognised top-level item is skipped
+without a diagnostic, so a green here distinguishes nothing. Without that control
+the honest-looking conclusion is *"lean_single implements the documented handler
+syntax"*, and it is false.
+
+The form §7.3 measures — `handle<IO> { ... }` — is a third spelling, present in
+exactly one test. So the specification documents two forms neither engine
+implements, the corpus exercises a third, and §7.3 has already measured that
+`ExprHandle` reaches `ir/`, `native/` and `enir/` **zero** times.
+
 ## 7.4 Rulings owed
 
 - **Does `handle` exist?** Three answers are coherent and they are very
