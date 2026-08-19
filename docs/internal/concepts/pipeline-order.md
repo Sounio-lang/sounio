@@ -23,7 +23,7 @@ layer everything descends through; the backends hang below it.
 
 ```
 check → HLIR → ENIR → verify → native      mandatory route
-                    ↘ ir/ + e-graph        optional accelerator, translation-validated
+                    ↘ ir/ + e-graph        outside the trusted base, validated per run
              ↘ gpu                         route under T1-R below
 ```
 
