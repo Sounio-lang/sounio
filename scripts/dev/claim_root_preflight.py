@@ -203,6 +203,24 @@ def main() -> int:
             for c in claims
             if c["elapsed_sec"] is not None and c["measured"] == "no"
         ),
+        "of_the_11": {
+            "n": sum(1 for r in budget.values() if r.get("family") == "claim-numeric"),
+            "published_1915_measured_yes": 7,
+            "published_1915_empty": 4,
+            "after_kaxi_only_measured_yes": 6,
+            "after_kaxi_only_empty": 5,
+            "live_measured_yes": sum(
+                1
+                for r in budget.values()
+                if r.get("family") == "claim-numeric" and r.get("measured") == "yes"
+            ),
+            "live_empty": sum(
+                1
+                for r in budget.values()
+                if r.get("family") == "claim-numeric" and r.get("measured") == "no"
+            ),
+            "note": "kaxi 318/318 is DROP, not byte-diff. #1915 was 7/4; kaxi-only is 6/5; live column is 3/8 after functor/san/windows instrument-empty.",
+        },
         "positive_control": {
             "unprotected_nonzero": True,
             "skip_never_current_pass": True,
