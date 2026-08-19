@@ -3243,3 +3243,33 @@ notes: |
   Claims-Forbidden makes explicit: NO denominator is "the effects the founder drew" — all are substitutes; the true list remains unwritten. NO enum additions. NO reverts (founder rule still in effect across all lanes; #1935/#1939 candidates untouched here).
   Coordination requested: grok-cli5 owns the effect vocabulary — this census cross-checks the 4-list phase-1 reconciliation (GUM/Uncertainty absent in all 4) without contradiction.
   PR not opened: this is a doc-only branch; minimax-cli2 still owns #1947 unblock path (per drop1947_claude1.md handoff).
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:45:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY grok-cli5 + minimax-cli2 + minimax-cli4 + founder — PR #1968 opened. Census delivery now in PR form per abrir_pr_gum_claude1.md dispatch.
+checks:
+  - "gh pr view 1968 --json state  # OPEN"
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 --format='%h %s' | head -5  # dd3725dde4 / 0ec8ef8c50 / e0e972ba69 / 7d08b3e9af"
+commit: PR #1968 (base main, head lane/minimax-cli3/gum-uncertainty-tail-20260819-v2) — OPEN, NOT merged
+status: lock-released
+notes: |
+  Per abrir_pr_gum_claude1.md: founder authorised merge once main goes green. Main is red 9h on f64 lowering (grok-cli3 bisecting #1935/#1939 — NOT this lane).
+
+  Updates from PR-open dispatch:
+  1. Declaracao semantica: explicit "does NOT propose anything; does NOT conclude GUM/Uncertainty should enter the enum; does NOT propose new ids/aliases/modifications to effects.sio. Classification descriptive, not prescriptive."
+  2. Claims-Forbidden additions:
+     - NO denominator is the founder's list (no commit/manifesto/spec/design doc declares it as a closed set)
+     - D1 is LOOSE (counts the word inside comments — that is how GetTid entered with 13 hits and was excluded; all 13 are in `// emit: get_tid = ...` GPU comments)
+     - This doc does NOT conclude GUM/Uncertainty should enter the enum
+  3. Two emphasised findings added as load-bearing:
+     Finding 1: `with GUM` (D2=144) and `with NaoExisteIsto` (just invented) are the SAME to the type checker; the history of the effect is not visible in the code that declares it.
+     Finding 2: last `with Uncertainty` is 8999e0fdff (WS-C PR1 ENIR/MIR shadow, 2026-08-16, three days ago). NOT dead code from December. Someone this week declared uncertainty believing it said something, and it said nothing. Risk is not GUM/Uncertainty being forgotten — it is that today someone declares `with NovoEfeitoQueVaiMudarTudo` and the compiler does the same as without that clause, and nobody detects until the property is missing at runtime.
+
+  Registry synced via `node scripts/docs/sync_governance_metadata.mjs` (1276 repo docs + 163 website topics registered; topic-id `repo.docs.audit.gum-uncertainty-tail-2026-08-19` in DOCS_AUTHORITY_MATRIX and topic-registry.v1.json). Docs registry gate will not turn PR red.
+
+  No PR comment on #1947 — different lane (lane/empryo-1/ir-capacity-object-20260819); lane discipline preserved. Coordination via this bus only.
