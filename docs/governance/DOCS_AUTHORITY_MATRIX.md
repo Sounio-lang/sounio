@@ -602,6 +602,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.ordered-path-provenance | repo_only | docs/internal/concepts/ordered-path-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.path-conditioned-partial-identification | repo_only | docs/internal/concepts/path-conditioned-partial-identification.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.pipeline-order | repo_only | docs/internal/concepts/pipeline-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.policy-observation-associator | repo_only | docs/internal/concepts/policy-observation-associator.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.policy-state-feedback | repo_only | docs/internal/concepts/policy-state-feedback.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
