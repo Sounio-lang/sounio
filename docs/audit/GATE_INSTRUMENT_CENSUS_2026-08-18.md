@@ -38,6 +38,18 @@ the 19 by calling `require_elf`, not by rewriting 93.
 The helper is `scripts/lib/gate_assert.sh`. Its selftest is
 `scripts/ci/gate_assert_instrument_selftest.sh`.
 
+## Pattern 4 — skip as green (cursor-2 `measured=no`)
+
+A fourth lie, from the leftover budget: gates with published numbers
+that `exit 0` after `SKIPPED (no ptxas)` / `SKIPPED (libcuda not
+found)`. That is skip-vacuous. `require_tool` prints `SKIPPED` and
+exits **77**, with `measured=no`. Never 0.
+
+The helper's selftest runs two fixture gates: a skip must not be 0,
+and a compile-to-void must refuse. If either fixture is accepted, the
+selftest fails. One real consumer: `handle_table_ceiling_gate.sh`.
+Mass conversion of the 19 reachable P1 gates is a separate decision.
+
 ## Pattern 2 — rc through a pipe (done first)
 
 A status assigned from a pipeline is the last command's status

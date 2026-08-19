@@ -6,7 +6,8 @@
 #
 # BEFORE YOU ASSERT ANYTHING: the file you compiled exists and starts with
 # \x7fELF; the compile log names the engine that actually ran; the rc you
-# hold was written by that process to a file. An empty or wrong artefact
+# hold was written by that process to a file; a missing tool is SKIPPED
+# (rc!=0, measured=no), never a green 0. An empty or wrong artefact
 # read as success is not a measurement.
 #
 # WHY THIS EXISTS. A census on 2026-08-04 over the 417 *_gate.{sh,py} in
@@ -42,6 +43,25 @@ gate_fail() {
 
 gate_pass() {
   echo "$(printf '%s' "$_GATE_NAME" | tr '[:lower:]' '[:upper:]')_OK${1:+: $1}"
+}
+
+# Cursor-2's measured=no column: a gate that lacks ptxas/libcuda and
+# `exit 0` is skip-vacuous — published numbers, nothing measured.
+# SKIPPED is not green. 77 is GNU automake's skip; workflows that treat
+# 0 as pass will see this as a fail unless they handle 77 explicitly.
+GATE_SKIPPED_RC=77
+
+gate_skip() {
+  echo "$(printf '%s' "$_GATE_NAME" | tr '[:lower:]' '[:upper:]')_SKIPPED: $*"
+  echo "measured=no"
+  exit "$GATE_SKIPPED_RC"
+}
+
+# require_tool <cmd> [why]
+# Missing hardware/toolchain is a skip, not a pass.
+require_tool() {
+  local cmd="$1" why="${2:-missing tool: $1}"
+  command -v "$cmd" >/dev/null 2>&1 || gate_skip "$why"
 }
 
 require_file() {
@@ -206,4 +226,11 @@ require_rc_file() {
   if [[ -n "$expected" && "$got" != "$expected" ]]; then
     gate_fail "run_rc=$got (want $expected) from $dest"
   fi
+}
+
+# gate_measured_yes
+# Cursor-2's other half: only print measured=yes after the artefact,
+# engine, and rc checks have passed.
+gate_measured_yes() {
+  echo "measured=yes"
 }

@@ -18,6 +18,8 @@ gate_name "handle_table_ceiling_gate"
 unset SOUC_BIN SOUNIO_SOUC_BIN SOUNIO_SOUC_ENGINE || true
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT/stdlib}"
 SOUC="${SOUC:-$ROOT/bin/souc}"
+require_tool timeout "timeout(1) missing — cannot bound compile/run"
+require_tool od "od(1) missing — cannot check ELF magic"
 [[ -x "$SOUC" ]] || { echo "FAIL souc not executable: $SOUC" >&2; exit 2; }
 if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]]; then
     echo "FAIL this gate asserts the Madaros handle wall; refuse lean_single" >&2
@@ -115,9 +117,11 @@ echo
 echo "=== handle_table_ceiling_gate verdict ==="
 if [[ "$C_RC" == "182" ]] && grep -qF 'madaros: handles full' "$TMP/ceiling.run.err"; then
     echo "PASS ceiling rc=182 named 'madaros: handles full'"
+    gate_measured_yes
     echo "HANDLE_TABLE_CEILING_GATE_OK"
     exit 0
 fi
 echo "FAIL ceiling: want rc=182 and stderr 'madaros: handles full'; got rc=$C_RC" >&2
+echo "measured=no"
 echo "HANDLE_TABLE_CEILING_GATE_FAIL" >&2
 exit 1
