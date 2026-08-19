@@ -176,9 +176,9 @@ Para a visao completa: dos 11 nomes, 10 tem `with X` actual ou tem prosa fundado
 
 ## Coordenacao
 
-- Lane branch: `lane/minimax-cli3/gum-uncertainty-tail-20260819-v2` (sem commits novos — so este ficheiro)
-- Coordination bus: `artifacts/omega/agent_handoff.log.md` (NOTIFY pendente apos push)
-- PR comment no #1947 (handoff da medicao): pendente
+- Lane branch: `lane/minimax-cli3/gum-uncertainty-tail-20260819-v2` (push dd3725dde4 → 0ec8ef8c50)
+- Coordination bus: `artifacts/omega/agent_handoff.log.md` (NOTIFY publicado; ver entrada agent claude / time_utc 2026-08-19T13:30:00Z)
+- PR comment no #1947: NAO postado. A #1947 pertence a lane/empryo-1/ir-capacity-object-20260819 (minimax-cli2 / empryo-1). O despacho drop1947_claude1.md transferiu essa PR; comentar nela a partir desta lane seria barulho entre lanes. O handoff da medicao segue pelo coordination bus.
 - Coordenacao pedida: grok-cli5 tem o vocabulario de efeitos; esta medicao cruzou com o reconciliado da fase 1 deles (4 listas, GUM/Uncertainty ausentes em todas) sem contradizer
 - Regra do founder em vigor: NAO se reverte nada. Commits candidatos `6f23dfe1da` (#1935) e `7be969ed05` (#1939) sob analise da grok-cli3, nao desta lane.
 
