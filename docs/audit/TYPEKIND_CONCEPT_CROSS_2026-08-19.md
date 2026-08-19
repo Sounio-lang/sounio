@@ -11,10 +11,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.typekind
 
 **This is a census.** It does **not** reclassify `docs/internal/concepts/registry.tsv`. Rows below are observational. The founder decides whether a TypeKind is a missing Concept-ID, or a concept is a missing TypeKind.
 
-**SHA of `origin/main`:** `98eb2b4f41`  
-**Counts measured this turn:** TypeKind = **99** (`self-hosted/check/types.sio`). TypeExprKind = **54** (`self-hosted/parser/ast.sio`). Concept-IDs = **24** (`docs/internal/concepts/registry.tsv`).
+**SHA of `origin/main`:** `2b4d217a04` (v2 re-evaluation; v1 rows were at `98eb2b4f41`)  
+**Counts measured:** TypeKind = **99** (`self-hosted/check/types.sio`). TypeExprKind = **54** (`self-hosted/parser/ast.sio`). Concept-IDs on this worktree = **24**. `origin/main` at this SHA also carries `SOUNIO-EXACTNESS` (#1941) — a 25th row. This census does **not** add a cross for it and does **not** reclassify `registry.tsv`.
 
-Family G positions (run this turn): [`TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md`](TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md).  
+Family G positions (protocol v2, run this turn): [`TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md`](TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md).  
 Machine table: [`TYPEKIND_CONCEPT_CROSS_2026-08-19.tsv`](TYPEKIND_CONCEPT_CROSS_2026-08-19.tsv).
 
 ## The inversion
@@ -101,12 +101,12 @@ The 22 from the archaeology directive. "docs hits" this turn counted `docs/` exc
 
 **Family G kinds that are documented only as comments / lying tests, and still have no Concept-ID:**
 
-| TypeKind | family-G position | Concept-ID | note |
-|---|---|---|---|
-| DiffPrivate | Executable | **none** | Privacy is not in the registry. |
-| DPBudget | Executable | **none** | A budget that does not spend. No concept to under-represent; the kind is ahead of both docs and registry. |
-| FairPrediction | Garden | **none** | Justice is not in the registry. |
-| FairnessGap | Garden | **none** | In the 22. Zero docs. Zero concept. |
+| TypeKind | family-G v2 | deepest named layer | Concept-ID | note |
+|---|---|---|---|---|
+| DiffPrivate | Executable | checker (no HLIR) | **none** | Privacy is not in the registry. Certo=`as`+id passes; meaning-errado (compose) also passes. |
+| DPBudget | Executable | checker (no HLIR) | **none** | Two queries do not spend. No concept to under-represent; the kind is ahead of both docs and registry. |
+| FairPrediction | Garden | checker (no TypeExpr, no HLIR) | **none** | Justice is not in the registry. Ghost-identical to NoSuchType. |
+| FairnessGap | Garden | checker (no TypeExpr, no HLIR) | **none** | In the 22. Zero docs. Zero concept. |
 
 ## 3. Parser surface vs enum (why 99 ≠ 54)
 
@@ -117,12 +117,29 @@ TypeExpr present, relevant to the inversion (not a complete 54-list):
 - Present: Knowledge, DiffPrivate, DPBudget, Model, the Family B Policy/Plan cluster, Contest, Robust, Intervention, Counterfactual, Validated, Admissible, Deferred, Chan, Session, CausalEffect, Aleatoric, PotentialOutcome, Proof, Lemma, Axiom, RawPtr.
 - Absent (so the TypeKind is unreachable as itself): FairPrediction, FairnessGap, ModelFamily, GradedEffect, SessionEnd, CondIndep, Transportable, SelectionDiagram, Distribution, Sample, ConditionalDist, Entropic, MutualInfo, KLBounded, VecShaped, MatrixShaped, Broadcastable, ELBO, VariationalFamily, Differentiable, Gradient, Jacobian, MarkovChain, SDE, Martingale, StationaryDist, BigO, Amortized, Unobserved, plus most numeric aliases that share a primitive TypeExpr.
 
-A spec that listed the 99 would be listing the enum. A spec that listed the 24 would be listing the concepts the founder has claimed. Neither list is the language. The language is the intersection that survives the ladder: constructed, imposed, and — only then — refused.
+A spec that listed the 99 would be listing the enum. A spec that listed the 24 would be listing the concepts the founder has claimed. Neither list is the language. The language is the intersection that survives the ladder **and** still has a name in every layer.
+
+## 3b. Layer debt (founder rule 3) — measured this turn
+
+Directive: every type must exist in every layer. A checker kind the IR does not name is erasure.
+
+| measure | n |
+|---|---:|
+| TypeKind | 99 |
+| HlirTypeKind unique | 42 (`Contest`/`Robust` duplicated in source → 44 variants) |
+| same stem checker→HLIR | **19** (Array Bool Contest Counterfactual F32 F64 I128 I32 I64 I8 Intervention Knowledge Robust Tuple U128 U32 U64 U8 Validated) |
+| HLIR-only unique | **23** (founder brief said 24; measured 23) |
+| of which algebra-only (Octonion, Sedenion, Quat*, Dual, Vec*, Mat*) | **17** |
+
+Family G is checker-only in the first direction: four TypeKinds, zero `HlirTypeKind` names, zero IR/codegen names. The inverse debt is the 17 algebra kinds the backend names and the language does not. Both directions are debt. Neither is a Family G Concept-ID.
+
+Compile of `1.0 as DiffPrivate<f64>` / `as DPBudget<f64>` / `as FairPrediction<f64>` all emitted 8648-byte ELFs this turn. The program survives; the name does not.
 
 ## 4. What a spec may not say
 
-- That Sounio has differential privacy as a type. DiffPrivate is an Executable label. DPBudget does not spend.
+- That Sounio has differential privacy as a type. DiffPrivate is Executable under protocol v2 (certo passes, meaning-errado also passes). DPBudget does not spend.
 - That Sounio has fairness as a type. FairPrediction and FairnessGap are Garden.
+- That the (as, coerce) pair is Claim-ready. `NoSuchType` has the same pair.
 - That the 24 concepts cover the type system. Eleven concepts have no TypeKind; a cluster of privacy / justice / causal-transport / session / shape / process TypeKinds have no Concept-ID.
 - That `TyTransportable` is `SOUNIO-PROOF-CARRYING-SHIFT-ROBUST-RISK-TRANSPORT`. Same word, two objects.
 
