@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-indirect-call-argc-cap-2026-08-18
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-indirect-call-argc-cap-2026-08-18
+-->
+
 # Madaros — `IrCallIndirect` codegen capped indirect calls at 2 arguments — **RESOLVED**
 
 - **Date filed / fixed:** 2026-08-18
