@@ -17,10 +17,12 @@ lands, and are not started here.
 **base sha:** `cdea9d7eef` (rebased onto `origin/main` before commit).
 `self-hosted/check/effects.sio` on this tip is still the #1956 text
 (`e5715c547d`); the two intervening commits are docs/concept only.
-**Engine surface:** standalone dual-function test under the shipped Madaros
-ELF (`./bin/souc run`). The production source change is in
-`self-hosted/check/effects.sio`. The shipped ELF still contains the old
-handwritten arms until a rebuilt Madaros is used as the compiler.
+**Engine surface:** standalone dual-function test. CI Full Test Suite
+compiles it with `/tmp/souc-stage2` (native self-host, lean_single),
+not with shipped Madaros. Local `./bin/souc` defaults to Madaros and
+is the wrong compiler for that job. The production source change is in
+`self-hosted/check/effects.sio`. The shipped Madaros ELF still contains
+the old handwritten arms until a rebuilt Madaros is used as the compiler.
 **Test:** `tests/run-pass/effect_enum_equiv.sio`
 
 ---
@@ -195,6 +197,49 @@ Required by the dispatch (never on the pod; do not wrap
 - the ELF stays on the node; `souc-build-remote.sh` does not ship it back
 - this proves the new `check/effects.sio` compiles into Madaros. It is
   not a claim that the workspace `bin/souc` ELF was replaced.
+
+### CI #1960 first run (witness was the wrong measurement)
+
+PR #1960 Full Test Suite (job 96048482036, 2026-08-19T11:15–11:22Z)
+reported `FAIL effect_enum_equiv.sio (run exited 1)`. JUnit has no
+stdout. That string is the harness wrapping any non-zero `souc run`
+(`scripts/dev/run_sio_test_suite.sh` line 402). It is not an assertion
+failure.
+
+Measured, cost order:
+
+1. **Compile vs assertion.** `env -u SOUC_BIN ./bin/souc check` (Madaros)
+   is `check: OK`. The same file under
+   `SOUNIO_SOUC_ENGINE=lean_single` is `typecheck: failed`:
+   `tail type mismatch at <main>:11` and
+   `effect not declared in function signature` at lines 394/396/402.
+   Isolated probes: a bare `[0; 64]` tail of `-> [i8; 64]` is the
+   mismatch; `var buf: [i8; 64] = [0; 64]; buf` typechecks. `var`
+   assignment in `enum_effect_name_to_id` needs `with Mut` on
+   lean_single. Madaros accepts both. The test never reached
+   `check_pair` on CI.
+2. **Wrong compiler.** Full Test Suite sets
+   `SOUNIO_TEST_SOUC_BIN=/tmp/souc-stage2` (artifact of Native Self-Host).
+   The PR body measured shipped Madaros. The witness is standalone, so
+   the shipped-ELF-lacks-new-lookup claim is not this failure; the
+   engine dialect is.
+3. **Harness dialect.** `//@ run-pass` plus undeclared Mut / i8-array
+   tail. Not an import, not a missing effect on `main`.
+
+The witness was wrong. Equivalence was not disproven. Dialect-only
+fix: typed local in `empty_name`, `with Mut` on the enum lookup,
+`//@ expect-stdout` for both sentinels. Assertions and ids unchanged.
+
+### AFTER re-run (both engines, 2026-08-19T11:42Z)
+
+| engine | check | run sentinels | rc |
+|---|---|---|---|
+| Madaros `./bin/souc` | OK | `NEGATIVE_CONTROL_FIRED` + `EFFECT_ENUM_EQUIV_OK 23/23 + negative` | 0 |
+| lean_single `SOUNIO_SOUC_ENGINE=lean_single` | compiles (38 fns) | same two lines | 0 |
+| harness + `SOUNIO_TEST_SOUC_BIN=bin/souc-lean-single-x86_64` | — | `PASS effect_enum_equiv.sio` | 0 |
+
+21 unexpected passes in the same CI log (including
+`gum_fo_across_call.sio`) were not touched.
 
 ---
 
