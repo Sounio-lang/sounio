@@ -218,7 +218,7 @@ So the numbers flow through plain `f64` arrays (`m`, `v`, `c`) and the
   assignments zeros `sens[0]` and fails TEST 5; the unmodified file passes 9/9
   under lean_single. The numbers pass through it.
 
-Five further facts fall out of the same measurement, and each is a defect:
+Six further facts fall out of the same measurement, and each is a defect:
 
 - **The field written is not the field read.** The literal writes `epsilon:`;
   under Madaros `.epsilon` reads **0.0** while `.confidence` reads 0.65.
@@ -232,9 +232,17 @@ Five further facts fall out of the same measurement, and each is a defect:
   name `epsilom: 0.42` is accepted by Madaros with `check: OK`, rc=0, and **no
   diagnostic**; lean_single emits `warning: unknown field in Knowledge literal`
   and drops the write. An earlier draft of this section stated the opposite —
-  that *Madaros refuses with `E012`* — and that is **false for the builtin**,
-  re-measured on both engines. It is corrected here rather than quietly dropped,
-  because the error credited the silent engine with the rigour of the noisy one.
+  that *Madaros refuses with `E012`* — and that is **false for the builtin**.
+  `E012` is real, and it fires: on a **declared** struct, `P { a: 1.0, zz: 9.0 }`
+  gives `error[E012] ... this type has no field named`, rc=1, and lean_single
+  gives two errors. The claim was a true measurement quoted from the wrong path.
+  It is corrected here rather than quietly dropped, because it credited the
+  silent engine with the rigour of the noisy one.
+- **The builtin is exempt from the checker the language already has.** Field-name
+  validation exists, works, and is enforced on every declared struct. The one
+  type that carries the dissertation's numbers is the one that does not get it.
+  This is `SOUNIO-TYPE-INTERROGATION` failure type 3 in a new form: not a missing
+  check, but a **privileged type routed around an existing one**.
 - **The correctness is order-dependent and nothing records the dependence.**
   Under Madaros, moving `epsilon:` ahead of `variance:` — a reordering no
   diagnostic objects to — puts `c[i]` in the variance slot and zeroes
