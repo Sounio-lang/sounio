@@ -1,21 +1,21 @@
 /**
- * Defense map: each of the 19 pbpk_suite FAILs named onto one of
+ * Defense map: each of the 16 pbpk_suite FAILs named onto one of
  * the five epistemic states.
  *
  * The suite family (toolchain / resource-ceiling / science) lives in
- * dissertationHonestyNow.ts and is what grok-cli2 measured. This file
- * is the other axis — the one the defense needs and that until now
- * existed only as prose across six audit notes:
+ * dissertationHonestyNow.ts and is what kimi-cli1 measured. This file
+ * is the other axis — the one the defense needs:
  *
- *   12 toolchain ≠ 12 refusals.
- *   Ten never started science (compiler refused).
- *   Two started and printed a fabricated numeral (cluster C).
+ *   9 toolchain ≠ 9 refusals.
+ *   Seven never started science (compiler refused).
+ *   One started and printed a fabricated numeral (silent zero).
  *   Seven started science and were cut by rc=182.
+ *   One check-green run segfaults when stdout is a file (kaxi).
  *   Zero are a science or model defect.
  *
- * Source of the 19 names and evidence strings (do not invent a later
- * run): docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md
- * finished 2026-08-17T22:21:35Z. Same ledger as PBPK_SUITE_NOW.
+ * Source of the 16 names (do not invent a later run):
+ * docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-18.md
+ * measured 2026-08-18T18:27Z on c240e848bf. Same ledger as PBPK_SUITE_NOW.
  */
 
 import { PBPK_SUITE_NOW, measureMayPrint } from './dissertationHonestyNow';
@@ -30,7 +30,7 @@ export const DEFENSE_STATES = [
 
 export type DefenseState = (typeof DEFENSE_STATES)[number];
 
-export type FailKind = 'compile' | 'silent-zero' | 'bit-pattern' | 'interrupted';
+export type FailKind = 'compile' | 'silent-zero' | 'bit-pattern' | 'interrupted' | 'runtime';
 
 export type FailFamilyId = 'toolchain' | 'resource-ceiling';
 
@@ -130,30 +130,6 @@ export const PBPK_SUITE_FAILS: readonly FailRow[] = [
     evidence: 'E175 rapamycin_mean_params; E137 print_i64 in bbb_voi',
   },
   {
-    n: 35,
-    name: 'halo_pgx_gate',
-    family: 'toolchain',
-    state: 'refused',
-    kind: 'compile',
-    evidence: 'E175 private math/pure::sqrt from aggregate_confidence',
-  },
-  {
-    n: 36,
-    name: 'halo_pgx_gate_pass',
-    family: 'toolchain',
-    state: 'refused',
-    kind: 'compile',
-    evidence: 'E170 .value needs with Epistemic / acknowledge',
-  },
-  {
-    n: 39,
-    name: 'epistemic_pbpk28',
-    family: 'toolchain',
-    state: 'fabricated',
-    kind: 'bit-pattern',
-    evidence: '8/9 internal PASS; TEST 6 AUC confidence 4604219396932172800',
-  },
-  {
     n: 41,
     name: 'pbpk28_sobol_pce',
     family: 'toolchain',
@@ -182,8 +158,8 @@ export const PBPK_SUITE_FAILS: readonly FailRow[] = [
     name: 'rapamycin_kaxi_fuse_prior',
     family: 'toolchain',
     state: 'refused',
-    kind: 'compile',
-    evidence: 'E011/E013/E137 acknowledge on kaxi path',
+    kind: 'runtime',
+    evidence: 'check green; run rc=139 when stdout is a file, rc=0 on a pipe (10/10)',
   },
   {
     n: 48,
@@ -237,6 +213,7 @@ export function countKinds(rows: readonly FailRow[]): Record<FailKind, number> {
     'silent-zero': 0,
     'bit-pattern': 0,
     interrupted: 0,
+    runtime: 0,
   };
   for (const row of rows) {
     out[row.kind] += 1;
@@ -253,15 +230,16 @@ export function mapCloses(rows: readonly FailRow[]): boolean {
   const names = new Set(rows.map((r) => r.name));
   const nums = new Set(rows.map((r) => r.n));
   return (
-    fam.toolchain === 12 &&
+    fam.toolchain === 9 &&
     fam['resource-ceiling'] === 7 &&
     fam.science === 0 &&
-    kinds.compile === 10 &&
+    kinds.compile === 7 &&
     kinds['silent-zero'] === 1 &&
-    kinds['bit-pattern'] === 1 &&
+    kinds['bit-pattern'] === 0 &&
     kinds.interrupted === 7 &&
-    states.refused === 10 &&
-    states.fabricated === 9 &&
+    kinds.runtime === 1 &&
+    states.refused === 8 &&
+    states.fabricated === 8 &&
     states.verified === 0 &&
     states.uncertain === 0 &&
     states.unbounded === 0 &&
@@ -272,7 +250,7 @@ export function mapCloses(rows: readonly FailRow[]): boolean {
 
 if (!mapCloses(PBPK_SUITE_FAILS)) {
   throw new Error(
-    'dissertationHonestyMap: the 19 named fails do not close against the dated ledger — refuse to print a defense sentence the parts do not sum to',
+    'dissertationHonestyMap: the 16 named fails do not close against the dated ledger — refuse to print a defense sentence the parts do not sum to',
   );
 }
 

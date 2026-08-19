@@ -300,3 +300,31 @@ recorded, so its definition looks dead and the sweep deletes live code,
 silently, at rc=0). Raising `IR_MAX_INSTRS` without raising `DCE_MAX_INSTRS`
 and every per-instruction context that stops at its own cap converts an
 honest refusal into silent miscompilation. That is a separate, larger task.
+
+The `IR_MAX_INSTRS` wall was then cleared WITHOUT raising any capacity
+(2026-08-18, branch `lane/empryo-1/normalize-byref-20260818`, source build
+SHA-256 `7ffc6c82…`). The compiler's own error message prescribed the fix:
+"split it into smaller functions". `run_compiler_main_self_tests`
+(`self-hosted/compiler/main.sio`, 5839-line body, 1163 independent test
+blocks) lowered to 33829 IR instructions — past the 16384 cap. Splitting it
+into ten part-functions (`compiler_main_self_tests_part_01..10`, ~116 blocks
+each) keeps every part far under the IR cap AND under the DCE/const-prop
+8192 caps, so every analysis pass stays complete on every part — no refusal,
+no truncation, and no capacity constant touched. `DCE_MAX_INSTRS`,
+`CP_MAX_INSTRS`, and every lateral array stay exactly where they are.
+
+Measured on the from-source split build:
+
+    fixed-point gate   GATE_RC=0, reached `check` as recorded.
+                       The 33829/IR_MAX_INSTRS wall is GONE (0 occurrences in
+                       the gen2 log). gen2 now progresses past typecheck into
+                       lowering before hitting a deeper, different SIGSEGV —
+                       a separate wall, not this one.
+    box_all_read_forms BOXMATRIX OK rc=0 — no regression
+    dce_reachability   all three arms pass
+    typecheck main.sio 80 errors before == 80 after (all pre-existing
+                       ontology E175); the split adds ZERO
+
+This is the safe stop point for the capacity question: the instruction wall
+did not need a raise, it needed the function split. Raising `IR_MAX_INSTRS`
+remains the wrong lever here, for the liveness-capacity reason above.

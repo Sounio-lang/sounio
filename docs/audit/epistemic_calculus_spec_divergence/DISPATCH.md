@@ -194,45 +194,41 @@ The correspondence gate's `--lean-consume` arm builds that module only after
 the V1 mutant (`v1_imports_measure_nat.lean`) fails to elaborate. A grep of
 `import EpistemicEffectsV2` without that mutant would measure mention, not use.
 
-**Coverage (measured 2026-08-18, union of V2 importers, after #1883 /
-#1892).** One importer ≠ V2 covered. Re-derive with the names in
+**Coverage (measured 2026-08-18, union of V2 importers, after
+consumer 3).** One importer ≠ V2 covered. Re-derive with the names in
 `EpistemicEffectsV2.lean` against every `EpistemicEffectsV2_*.lean`
 consumer, comments stripped:
 
-| Layer | After measure-Nat | After + kvalue-Nat | Remainder |
-|---|---:|---:|---:|
-| Named theorems (28) | 0 | **1** (`preservation`) | 27 |
-| `HasTy` rules (14) | 3 | **4** (`+ t_kvalue`) | 10 |
-| `Step` rules (19) | 1 | **2** (`+ kvalue_red`) | 17 |
-| `IsValue` rules (4) | 1 (`v_nat`) | **1** (`v_nat`) | 3 |
+| Layer | After measure | After + kvalue | After + invKraw | Remainder |
+|---|---:|---:|---:|---:|
+| Named theorems (28) | 0 | 1 (`preservation`) | **2** (`+ invKraw`) | 26 |
+| `HasTy` rules (14) | 3 | 4 | **7** (`+ t_var, t_lam, t_app`) | 7 |
+| `Step` rules (19) | 1 | 2 | **2** | 17 |
+| `IsValue` rules (4) | 1 (`v_nat`) | 1 (`v_nat`) | **3** (`+ v_lam, v_kraw`) | 1 (`v_real`) |
 
-kvalue did **not** move `IsValue`. `t_kraw` needs the *payload* to be a
-value (`v_nat`); `kvalue_red` does not require proving the outer `kraw`
-is a value. `v_kraw`, `v_lam`, `v_real` still have no client. A reader
-who treats "V2 has a theorem client" as "4 of 4 values are covered" is
-repeating the mention/use error on a new noun.
+kvalue did **not** move `IsValue`. invKraw on the propagation witness
+does: the identity is `v_lam` and the reduct used as a CBV argument is
+`v_kraw`. `v_real` is still unused, and that is correct — it does not
+discriminate `Knowledge<T>`. 3 of 4 is not 4 of 4, and 4 of 4 is not
+the stop.
 
-**Next proposition (round 3) — `invKraw` on the V1 propagation witness.**
-Not the next name in the file. V1's second refutation
-(`effect_preservation_existential_is_false`) is the unused compiler
-surface: `f (kraw _)` with `f : Knowledge<Nat> → Knowledge<Nat>` is
-untypable after `meas_red` in argument position. Madaros users pass
-`Knowledge<T>` into functions. Consumers 1 and 2 show the reduct *is*
-`Knowledge<Nat>` and *unwraps* to `Nat`; they do not show it can be
-*used* as `Knowledge<Nat>`. That is the remaining payload bug that
-shows up as a type error (or a silent coerce-to-Real) on a call.
+**Why `invKraw` (round 3), not the next name in the file.** V1's
+second refutation (`effect_preservation_existential_is_false`) was
+the unused compiler surface: `f (kraw _)` with
+`f : Knowledge<Nat> → Knowledge<Nat>` is untypable after `meas_red`
+in argument position. Madaros users pass `Knowledge<T>` into
+functions. Consumers 1 and 2 showed the reduct *is* `Knowledge<Nat>`
+and *unwraps* to `Nat`; they did not show it can be *used* as
+`Knowledge<Nat>`.
 
-The named theorem to cite is `invKraw`, not a second application of
-`preservation` (already cited; the unique count would stay 1 of 28)
-and not `canon_know` (V1 has it; a V1 mutant would likely elaborate).
-`invKraw` is the V2 dual of V1's `genKraw`: recover `T` from a typed
-`kraw`, rather than pin `T = Real`. The instance is the identity
-applied to `kraw (.lit_nat 0) m` — the inverted existential. Expected
-new constructors if that consumer is written: `t_lam`, `t_app`,
-`t_var`, `v_lam`, and `v_kraw` if the reduct is used as a CBV value.
-That would move `IsValue` to 3 of 4 (`v_real` still unused) and
-theorems to 2 of 28. It would not make 4 of 4, and 4 of 4 is not the
-stop (see below).
+The named theorem is `invKraw`, not a second application of
+`preservation` (already cited; the unique count would have stayed
+1 of 28) and not `canon_know` (V1 has it; a V1 mutant would likely
+elaborate). `invKraw` is the V2 dual of V1's `genKraw`: recover `T`
+from a typed `kraw`, rather than pin `T = Real`. The instance is the
+identity applied to `kraw (.lit_nat 0) m`. That moved `IsValue` to
+3 of 4 and theorems to 2 of 28. It did not make 4 of 4, and 4 of 4
+is not the stop (see below).
 
 Rejected for round 3:
 
@@ -255,16 +251,41 @@ operation is either consumed or classified as a hole/glue.
 |---|---|---|---|
 | Introduce (`measure` / ctor) | `ty_knowledge(v_ty)` | Yes — V1 discards `v` | Consumed (round 1) |
 | Eliminate payload | `check_knowledge_unwrap` | Yes — V1 → `lit_real` | Consumed (round 2) |
-| Use as `Knowledge<T>` | pass / apply / let | Yes — V1 existential | Round 3 (`invKraw` on that witness) |
+| Use as `Knowledge<T>` | pass / apply / let | Yes — V1 existential | Consumed (round 3) |
 | Eliminate metadata | `.epsilon` / `.confidence` | No — both → `Real` | Do not consume |
 | GUM `+` `*` | `ty_knowledge(left_inner, …)` | Hole — V2 pins Real, checker keeps `T` | Do not consume; see R3-adjacent |
 | Progress, weakening, lookup, shift, `int_sq_nonneg`, `gAddMeta_valid` | none | Glue | Do not consume |
 
 After round 3 the discriminating set is empty. The leftover 26
-theorems and `v_real` are not a backlog. 4 of 4 `IsValue` is a
-possible *measurement*, not a stop. If a later consumer is proposed
+theorems and `v_real` are not a backlog. 3 of 4 `IsValue` is the
+measurement; 4 of 4 is not the stop. If a later consumer is proposed
 and its V1 mutant elaborates, that is the signal to stop, not to
 weaken the mutant.
+
+**Landed (consumer 3).** `EpistemicEffectsV2_invkraw_nat.lean` cites
+`invKraw` and proves `kraw_nat_inverts_and_is_usable`. The
+`--lean-consume-invkraw` arm builds that module only after
+`v1_imports_invkraw_nat.lean` fails.
+
+**Acceptance for the named invKraw step (written before the step is
+scored).** A green Lean Proofs *job* is not evidence. The PR head must
+show this step as `success` and not `skipped`:
+
+```
+success  V2 invKraw-Nat consumer (V1 mutant must fail first)
+```
+
+and that step's log must contain:
+
+```
+POSITIVE_CONTROL_FIRED: v1_imports_invkraw_nat rejected
+V2_CONSUMED: EpistemicEffectsV2_invkraw_nat built
+```
+
+A job whose this step is skipped is the 390-gate class. The #1892 /
+#1883 verifications do not transfer: those heads did not have this
+step. If the invKraw mutant elaborates, the consumer must not be
+scored.
 
 **Deferred — extract the shared spine (end condition).** A third
 module holding `Effect`, `Ty`, `EffectSet`, `TyCtx` would stop V2 from
@@ -351,14 +372,15 @@ consume `kadd` as if it were the next coverage target.
 1. R1 and R2 landed. R3 recorded and explicitly deferred, not silently dropped.
    R1's remaining *fact* (V2 had no importer) is closed by
    `EpistemicEffectsV2_measure_nat.lean`, not by the banner. That close is
-   an import edge, not metatheory coverage. After consumer 2 the
-   fraction is **1 of 28** named theorems, **4 of 14** `HasTy`,
-   **2 of 19** `Step`, **1 of 4** `IsValue` — kvalue did not move
-   `IsValue`. Stop when the discriminating set in §5 R1 is empty, not
-   when 28/28 or 4/4. Spine extraction stays deferred until one of the
-   three end conditions in §5 R1, not until N consumers.
+   an import edge, not metatheory coverage. After consumer 3 the
+   fraction is **2 of 28** named theorems (`preservation`, `invKraw`),
+   **7 of 14** `HasTy`, **2 of 19** `Step`, **3 of 4** `IsValue`.
+   The discriminating set in §5 R1 is empty. Stop there, not at 28/28
+   or 4/4. Spine extraction stays deferred until one of the three end
+   conditions in §5 R1, not until N consumers.
 2. `Lean Proofs` green, with V1, V2, `EpistemicEffectsV2_measure_nat`,
-   and `EpistemicEffectsV2_kvalue_nat` all `@[default_target]`. Deleting
+   `EpistemicEffectsV2_kvalue_nat`, and `EpistemicEffectsV2_invkraw_nat`
+   all `@[default_target]`. Deleting
    V1 to make the problem disappear is **out of scope** — the refutation
    is a result worth keeping, and §1's theorems are its statement.
 3. The new gate's positive control demonstrated firing, with the output pasted
