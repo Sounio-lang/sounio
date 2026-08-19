@@ -117,3 +117,8 @@ TyArray	Claim-ready	control OK+E001 length	types.sio:24	98eb2b4f41a3	ladder cont
 ```
 
 *Censo produz a tabela; a decisão de registo de conceitos é do founder.*
+
+
+---
+
+**Superseded for positions:** see `TYPEKIND_ARCHAEOLOGY_FH_V2_2026-08-19.md` (PROTOCOLO v2: F128/F256 → Reserva, not Claim-ready).
