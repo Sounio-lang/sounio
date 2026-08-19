@@ -69,7 +69,7 @@ must be annotated; here the boundary set is small and is itself the
 specification of what counts as a claim in Sounio.
 
 **Declassification is an act, not a coercion.** Returning knowledge to a bare
-number requires `attest(v, uncertainty: u, because: <provenance>)` — an
+number requires `attest(v, uncertainty: u, provenance: <provenance>)` — an
 assertion someone signs, never a cast. Every site where uncertainty was
 restored by hand is therefore visible.
 

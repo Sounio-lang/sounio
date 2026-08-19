@@ -59,7 +59,16 @@ language with a units table.
 
 ## The gap this document exists to record
 
-**Three of the seventeen gates are named by any workflow. Fourteen never run.**
+**Three of the seventeen gates are named by any workflow. What the other
+fourteen do is not established by that number.**
+
+The count measures **direct invocation** — whether a workflow names the script —
+not **coverage**, which would require establishing that no running parent invokes
+it. `SOUNIO-EFFORT-LOCATION` measured the difference elsewhere and found 45
+scripts that no workflow names but a running parent covers. Under its invariant
+— *a number carries how it was measured, or it is not evidence* — the earlier
+wording "fourteen never run" claimed more than the instrument supported and is
+withdrawn here. The coverage of the fourteen is **unmeasured**.
 
 Among the fourteen: the reasoner, the query compiler, the typed bridge, the
 cache, the generated-ontology manifest, and `ontology_unit_metadata_gate.sh`.
