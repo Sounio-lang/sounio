@@ -91,4 +91,13 @@ Wiring the red gate would paint `main` red and blame the wirer. The Chaotic fixt
 
 ## Negative proof
 
-Recorded after the fail-commit / revert pair. Empty until that pair exists.
+Not a grep. Two GitHub Actions runs on this PR, each red because of one named new step, then reverted.
+
+| step | run | job | step # | conclusion | what the log said | fail SHA | revert SHA |
+|---|---|---|---:|---|---|---|---|
+| TypeKind archaeology ladder | [32237891458](https://github.com/Sounio-lang/sounio/actions/runs/32237891458) | [96022381923](https://github.com/Sounio-lang/sounio/actions/runs/32237891458/job/96022381923) | 44 | **failure** | `TYPEKIND_ARCHAEOLOGY_PASS_REGRESSION kind=TyI64 fixture=tests/typekind/i64/pass.sio rc=1` | `128adca981` | `77e705ce12` |
+| TypeKind archaeology family C | [32238689476](https://github.com/Sounio-lang/sounio/actions/runs/32238689476) | [96025011882](https://github.com/Sounio-lang/sounio/actions/runs/32238689476/job/96025011882) | 45 | **failure** | `TYPEKIND_ARCHAEOLOGY_C_FAIL reason=layer_drift kind=Distribution indexed=parser computed=checker` | `3967e00d3d` | `be78863328` |
+
+On the ladder-proof run, family C was **skipped** by Actions fail-fast after step 44. That is why a second fail-commit existed: SKIP is not PASS. On the family-C-proof run, step 44 (ladder) was **success** and step 45 (family C) was **failure**.
+
+`effect_archaeology_gate.sh` has no row here. It was red on `origin/main` and was not wired.
