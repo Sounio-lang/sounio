@@ -92,10 +92,64 @@ annotated with which shipped kernel-clean file uses the same pattern
 (`EpistemicEffects.lean`, `SounioGradedModal.lean`). If you hit a new
 Mathlib-only tactic, add a row + a witness there first, then link it here.
 
+## The reverse direction: habit → core construction
+
+You usually don't *choose* `linarith` — you reach for it by habit. The table
+above says what fails; this one says what to write instead. Every row is
+witnessed in `TACTICS_CORE_WITNESSES_2.lean` (lean exit 0).
+
+| Habit (you reach for) | Core construction that does the same work |
+|---|---|
+| `linarith` / `nlinarith` | `omega` — it IS the linear solver; give it the atoms and hypotheses (for nonlinear, named monotonicity lemmas first, see table 1) |
+| `push_neg` | `Int.le_of_not_gt` / `Nat.lt_of_not_le` style conversions, or just `omega` on negated hypotheses |
+| `tauto` | `rcases` on the disjunction + explicit branches; de Morgan by hand (`intro hq; exact h ⟨hp, hq⟩`) |
+| `simp_all` | `simp only [named lemma] at h` + `subst` + `omega` — plain `simp_all` can hit maxRecDepth on arithmetic hypotheses |
+| `simp_arith` | arithmetic in simp is omega's job: `simp only [...]` then `omega` |
+| `norm_cast` / `push_cast` | **both are core** (see the 2026-08-17 correction above) — `norm_cast` closes a pure cast goal; for arithmetic across the cast, `omega` already handles Nat→Int natively |
+| `field_simp` / `ring` on division | carrier lemmas (`Rat.div_def`, `Rat.mul_pos`, `Rat.inv_pos`) + omega; `Rat.div_pos` is two lines (cursor-3's audit) |
+| `ring_nf` | `rw [Int.add_mul, Int.mul_add, ..., Int.mul_comm]` keeping products as omega atoms |
+| `interval_cases` | bounds as hypotheses + `omega` (bounded disjunction goals close too) |
+| `existsi` / witness construction | `refine ⟨w, ?_⟩` + `omega` for the residue |
+
+**Core-confirmed, use freely** (do NOT hand-roll these): `subst`,
+`generalize`, `exact?`, `simp_all` (when it works — see habit row),
+`constructor`, `refine`, `norm_cast`, `push_cast`, plus everything listed
+at the bottom of table 1.
+
+## omega: what it handles natively vs where it stops
+
+Witnessed in `TACTICS_CORE_WITNESSES_2.lean` Part B. The "does handle"
+side saves you from hand-rolling what omega already does; the stop-side
+is where the eight-attempt failures actually live.
+
+**Handles natively — don't hand-roll:** `min`/`max` (both bounds at
+once), truncated Nat `-` (with the ≤ side conditions), `/` and `%` by
+*numerals*, mixed Nat/Int goals with Nat→Int casts, bounded disjunction
+goals (`a = 3 ∨ a = 4 ∨ a = 5` from `3 ≤ a ≤ 5`).
+
+**Stops — needs a named lemma or restructure:**
+- products as unrelated atoms: `2*a*b` ≠ `a*b + a*b` to omega — state a
+  `have h2 : 2*(a*b) = a*b + a*b := by omega` and rewrite through it
+- division by a *variable* divisor: anti-monotonicity is not omega's —
+  see the shipped `SounioGradedModal.div_le_of_divisor_le`
+- equalities *between* products (`a*a = b*b`): `subst`/`rw` to make the
+  sides syntactically identical; omega proves nothing about atom relations
+
+Companion documents: `CORE_PROOF_PATTERNS.md` + `CorePatternsWitnesses.lean`
+(cursor-3, PR #1769) cover the structural/elaboration side — when the tactic
+name is not the problem. This README is the tactic-name authority; that doc
+is the pattern authority.
+
+Naming trap: `formal/omega_mathlib/` is an **epistemic-domain library**
+(EpistemicPower, GlycolysisEpistemic…), NOT omega-tactic support — do not
+send tactic-hunting authors there.
+
 ## Layout
 
 - `README.md` (this file) — start here
 - `TACTICS_CORE_WITNESSES.lean` — compile-verified tactic table witnesses
+- `TACTICS_CORE_WITNESSES_2.lean` — compile-verified habit→pattern and
+  omega-mode witnesses (the two sections above)
 - `lakefile.lean` — target list; new proof files should be registered
 - Proof modules: see the lakefile and `../README.md` for the Phase 8 map
   (ElfLinker, TypeChecker) and the newer lanes' file headers

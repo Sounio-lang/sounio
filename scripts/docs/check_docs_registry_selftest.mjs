@@ -288,7 +288,61 @@ async function main() {
       `Checker rejected the fallback-stamped doc:\n${impossibleCheckAfterSync.stderr || impossibleCheckAfterSync.stdout}`
     );
 
-    console.log('Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios).');
+    // 2026-08-18 corpus-race regression: DOCS_ACCEPTANCE_REPORT.md used to
+    // carry whole-corpus counts (total governed topics, per-authority/owner
+    // breakdowns, evidence-bearing topics, validation-surface union) that were
+    // a pure function of every governed doc present at scan time. Two PRs that
+    // each added an unrelated governed doc would both pass their own CI, then
+    // the moment the second one landed beside the first, whichever PR hadn't
+    // merged yet carried counts that were off by the topics the other one
+    // added -- and every PR open at that moment inherited the failure. This
+    // recurred same-day (#1804, then #1839 eight hours later).
+    //
+    // Arm 1 (the old gate sees the bug) is the historical record: both #1804
+    // and #1839 are exactly that failure, independently reproduced against a
+    // live two-branch merge before this fix (see the commit message). Arms 2
+    // and 3 below are the permanent regression control: growing the corpus
+    // must never touch the acceptance report (2), and a hand-corrupted stub
+    // must still be caught (3) -- proving the gate was narrowed, not deleted.
+    const corpusGrowthDir = await cloneFixture(baseDir, 'corpus-growth');
+    cleanupPaths.push(corpusGrowthDir);
+    const acceptanceReportPath = 'docs/governance/DOCS_ACCEPTANCE_REPORT.md';
+    const beforeGrowth = await readFile(path.join(corpusGrowthDir, acceptanceReportPath), 'utf8');
+    await writeFixtureFile(
+      corpusGrowthDir,
+      'docs/guide/second-unrelated-doc.md',
+      '# Second Unrelated Doc\n\nSimulates a concurrent PR landing an unrelated governed doc.\n'
+    );
+    const corpusGrowthSync = await runNode(syncScript, corpusGrowthDir);
+    assert(corpusGrowthSync.ok, `Corpus-growth sync failed:\n${corpusGrowthSync.stderr || corpusGrowthSync.stdout}`);
+    const afterGrowth = await readFile(path.join(corpusGrowthDir, acceptanceReportPath), 'utf8');
+    assert(
+      afterGrowth === beforeGrowth,
+      'adding an unrelated governed doc changed DOCS_ACCEPTANCE_REPORT.md -- the corpus-count race is back'
+    );
+    const corpusGrowthCheck = await runNode(registryCheckScript, corpusGrowthDir);
+    assert(
+      corpusGrowthCheck.ok,
+      `Registry check failed after adding an unrelated doc and resyncing:\n${corpusGrowthCheck.stderr || corpusGrowthCheck.stdout}`
+    );
+
+    const corruptedStubDir = await cloneFixture(baseDir, 'corrupted-stub');
+    cleanupPaths.push(corruptedStubDir);
+    const corruptedStubPath = path.join(corruptedStubDir, acceptanceReportPath);
+    const corruptedStubContent = (await readFile(corruptedStubPath, 'utf8')).replace(
+      '## Verdict',
+      '## Verdict (hand-edited, does not match the generator)'
+    );
+    await writeFile(corruptedStubPath, corruptedStubContent, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, corruptedStubDir),
+      `Checked-in ${acceptanceReportPath} is stale`,
+      'hand-corrupted acceptance-report stub detection'
+    );
+
+    console.log(
+      'Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios + 2 corpus-race scenarios).'
+    );
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));
   }

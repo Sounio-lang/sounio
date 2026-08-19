@@ -42,11 +42,13 @@
 #      skipped and not falsely marked FAIL -- they are real, separate,
 #      already-present defects this gate does not attempt to fix.
 #
-# This gate is therefore honest about three different states: the gate
+# This gate is therefore honest about four different states: the gate
 # logic verified working (T143b/c/d, live, in a freshly built Madaros),
 # the gate logic duplicated but not yet independently exercisable (T83-T85),
-# and a pre-existing crash class blocking further verification (both
-# crashes above) -- rather than reporting one number that blurs the three.
+# a pre-existing crash class blocking further verification (both crashes
+# above), and a run that produced no evidence at all (empty self-test log
+# or every subject absent -- FAIL, never green) -- rather than reporting
+# one number that blurs them.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -95,10 +97,19 @@ else
   L="$(mktemp)"
   # A pre-existing crash further into this same run is expected and is not
   # this gate's concern (see header) -- capture whatever prints before it.
-  timeout 60 "$MADAROS" --self-test > "$L" 2>&1 || true
+  # The rc is recorded, not `|| true`-discarded: a nonzero rc with a
+  # non-empty log is the documented mid-run crash class, but a run that
+  # printed NOTHING is an instrument that did not answer, and an
+  # instrument that did not answer cannot certify anything.
+  madaros_rc=0
+  timeout 60 "$MADAROS" --self-test > "$L" 2>&1 || madaros_rc=$?
+  live_log_bytes="$(wc -c <"$L" 2>/dev/null || echo 0)"
   for t in T143b T143c T143d; do
     TOTAL=$((TOTAL + 1))
-    if grep -q "$t OK" "$L"; then echo "PASS  live:$t"; PASS=$((PASS + 1))
+    if [ "$live_log_bytes" -eq 0 ]; then
+      echo "FAIL  live:$t (self-test log is empty: the instrument produced no evidence, rc=$madaros_rc)"
+      FAIL=$((FAIL + 1))
+    elif grep -q "$t OK" "$L"; then echo "PASS  live:$t"; PASS=$((PASS + 1))
     elif grep -q "FAIL: $t" "$L"; then echo "FAIL  live:$t"; FAIL=$((FAIL + 1))
     else echo "NOT_RUN  live:$t (not reached in self-test log)"; NOT_RUN=$((NOT_RUN + 1)); fi
   done
@@ -114,5 +125,12 @@ TOTAL=$((TOTAL + 2)); NOT_RUN=$((NOT_RUN + 2))
 echo ""
 echo "=== SUMMARY ==="
 echo "PASS=$PASS  FAIL=$FAIL  NOT_RUN=$NOT_RUN  TOTAL=$TOTAL"
-if [ "$FAIL" -eq 0 ]; then echo "GATE: PASS (structural + live checks clean; NOT_RUN entries are known, separately-tracked blockers, not silent passes)"; exit 0
+# Zero-evidence guard: FAIL==0 alone cannot certify green, because every
+# check can be NOT_RUN (subjects moved/renamed, instrument absent or dead).
+# "The instrument did not answer" and "the selected set is empty and clean"
+# are different states; only the second may read PASS (CI trust contract).
+if [ "$PASS" -eq 0 ]; then
+  echo "GATE: FAIL (zero evidence: no check produced a PASS -- all NOT_RUN is a dead or absent instrument, not a green run)"
+  exit 1
+elif [ "$FAIL" -eq 0 ]; then echo "GATE: PASS (structural + live checks clean; NOT_RUN entries are known, separately-tracked blockers, not silent passes)"; exit 0
 else echo "GATE: FAIL"; exit 1; fi

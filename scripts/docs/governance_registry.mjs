@@ -845,6 +845,63 @@ function countBy(values, keyFn) {
   return [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
 }
 
+// The committed, gated acceptance report. This is deliberately a CONSTANT, not
+// a function of the registry: it used to embed whole-corpus counts (total
+// governed topics, per-authority and per-owner breakdowns, evidence-bearing
+// topics, the validation-surface union), all derived by scanning every doc
+// file present at generation time. That made the committed snapshot a
+// function of the entire doc corpus rather than of the PR that touched it:
+// two PRs that each add an unrelated governed doc both pass their own CI
+// (each syncs cleanly against its own base), then the moment the second one
+// lands beside the first, the corpus-wide counts baked into whichever PR
+// hasn't merged yet are off by the topics the other one added -- and every
+// open PR inherits that failure and reads as broken, regardless of what it
+// actually touched. This recurred same-day (#1804, then #1839 eight hours
+// later) because resyncing the numbers again does not remove the race, it
+// just re-arms it for the next doc-adding merge.
+//
+// For the live corpus-wide numbers, generate them on demand instead of
+// trusting a committed snapshot: `node scripts/docs/report_acceptance.mjs`
+// (backed by formatAcceptanceReport below, which is unchanged and still a
+// pure function of the registry -- it is just no longer what gets committed
+// or gated).
+export function formatAcceptanceReportStub() {
+  return [
+    formatRepoMetadataBlock({
+      topic_id: 'repo.governance.acceptance-report',
+      authority: 'repo_only',
+      audience: 'maintainers',
+      owner_agent: 'A0',
+    }),
+    '',
+    '# Docs Acceptance Report',
+    '',
+    'This is the editor-in-chief acceptance snapshot for the documentation-governance wave.',
+    '',
+    '## Verdict',
+    '',
+    '- Status: accepted for the current documentation-governance wave when the listed validation surfaces pass.',
+    '- Dual-canon sync contract is active across repo docs, website docs, and localized docs metadata.',
+    '- Historical and archived repo docs are labeled and redirected back to the current canonical surface through the authority matrix.',
+    '',
+    '## Scope, ownership, locale and evidence numbers',
+    '',
+    'This file intentionally does not carry whole-corpus counts (total governed topics, per-authority',
+    'and per-owner breakdowns, evidence-bearing topics, the validation-surface list). Every one of',
+    'those numbers is a pure function of every governed doc present in the tree at scan time, so a',
+    'snapshot committed by one PR goes stale the instant any *other* PR adds or removes a governed doc',
+    "-- even though neither PR touched the other one's files. Get the live numbers on demand instead",
+    'of trusting a committed snapshot that races against concurrent merges:',
+    '',
+    '    node scripts/docs/report_acceptance.mjs',
+    '',
+    'Per-topic governance (metadata headers, locale coverage, evidence artifacts, broken links) stays',
+    `gated exactly as before, from \`${REGISTRY_RELATIVE_PATH}\`; only the aggregate corpus counters`,
+    'moved out of the committed, gated surface.',
+    '',
+  ].join('\n');
+}
+
 export function formatAcceptanceReport(registry) {
   const totalTopics = registry.topics.length;
   const repoTopics = registry.topics.filter((topic) => topic.repo_doc_path);
