@@ -140,20 +140,33 @@ pressure on `hypothesis` / `garden` when a pair exists. It does **not** waive
 `claim-ready` without a pair, `executable` without a witness, or `reserved`
 without a refuse surface.
 
-### Expiry decision
+### Expiry decision (founder closed 2026-08-19)
 
-**No automatic expiry in the gate.**
+**Declarations do not expire. The Date stays visible.**
 
-- The repo’s `last_validated` pattern carries a date without a TTL; the docs
-  registry does not expire it.
-- A date without a deadline already solves half the honesty problem: age is
-  **visible** to any reader (`CONCEPT_STATUS_INFO ednc_age_days=N`). Silence has
-  no age.
-- Inventing a TTL (30/90/180 days) would be an undervable number unless the
-  founder sets a reaffirmation cadence. The gate’s job is bidirectional truth
-  of Status↔evidence, not calendar policy.
-- If a reaffirmation SLA is wanted later, add it as an explicit founder rule
-  with a named interval — do not smuggle one in here.
+- No TTL, no age-based WARN, no RED for old age. A two-year declaration that
+  remains true is legitimate; what is not legitimate is nobody knowing it is
+  two years old.
+- Age is derived from the declared `Date` field only — **not** `git log` or
+  file mtime. Editing the concept for another reason must not reset the
+  declaration’s age.
+- Visibility is not “print on failure”. On **every** run (green or red) the
+  gate emits the active roster, **oldest first**:
+
+  ```text
+  CONCEPT_STATUS_EDNC_ACTIVE count=N ...
+  CONCEPT_STATUS_EDNC_ACTIVE [1/N] doc=... owner=... age_days=... date=...
+  ```
+
+- Same roster is written to two human surfaces (choice + justification):
+  1. **GitHub Job Summary** (`$GITHUB_STEP_SUMMARY`) when the gate runs in
+     Actions — appears on the job page without opening logs.
+  2. **`docs/internal/concepts/ednc_active.tsv`** regenerated beside the
+     contracts (gitignored so CI does not dirty the tree; local and runner
+     FS still hold the file next to the specs).
+
+  Logs alone fail the founder’s bar: a gate that only speaks when it fails
+  hides age on every green day.
 
 **Why not `tests/<concept-id>/` only:** many concepts already bind clinical/ontology/compile-fail globs in `bindings.tsv`. A path convention would orphan that map. bindings.tsv is the map.
 
@@ -210,7 +223,8 @@ Also backfilled `## Claims Forbidden` stubs on contracts that had Status but no 
 | D3 no Date | EDNC with Reason+Owner only | EXIT 1 `ednc_malformed missing=Date` |
 | D4 no Reason | EDNC with Owner+Date only | EXIT 1 `ednc_malformed missing=Reason` |
 | D5 vacuous Reason | Reason: `ainda nao` | EXIT 1 `Reason(vacuous)` |
-| D6 complete EDNC | `dyadic-nonreduction` → hypothesis + full EDNC | EXIT 0 (waiver holds; age printed) |
+| D6 complete EDNC | `dyadic-nonreduction` → hypothesis + full EDNC | EXIT 0 (waiver holds) |
+| D7 visibility | two well-formed EDNCs with dates 2026-06-01 and 2026-08-01 | green prints oldest-first; Job Summary table; `ednc_active.tsv` |
 
 Each case restored before the next. Final gate EXIT 0.
 

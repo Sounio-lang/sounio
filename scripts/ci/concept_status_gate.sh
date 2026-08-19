@@ -38,6 +38,9 @@ META_DOCS=$'README.md\nSEMANTIC_LANE_CONTRACT.md\nMATURITY_LADDER.md'
 
 fail_count=0
 declare -a FAILURES=()
+# Active (well-formed) EDNC declarations — printed always, oldest first.
+# Age from Date field only (not git log). No expiry, no age-based fail.
+declare -a EDNC_ROWS=()  # "age\tdoc\towner\tdate\treason"
 
 note_fail() {
   FAILURES+=("$1")
@@ -324,9 +327,12 @@ for doc in "$CONCEPTS_DIR"/*.md; do
   if ((EDNC_PRESENT == 1)); then
     if ((EDNC_OK == 1)); then
       override=1
-      if ((EDNC_AGE_DAYS >= 0)); then
-        echo "CONCEPT_STATUS_INFO ednc_age_days=$EDNC_AGE_DAYS doc=$base owner=$EDNC_OWNER date=$EDNC_DATE" >&2
-      fi
+      # Record for end-of-run visibility (always printed, green or red).
+      age="$EDNC_AGE_DAYS"
+      [[ "$age" -lt 0 ]] && age=0
+      # reason single-line for TSV
+      rflat="$(echo -n "$EDNC_REASON" | tr '\t\n' '  ')"
+      EDNC_ROWS+=("${age}"$'	'"${base}"$'	'"${EDNC_OWNER}"$'	'"${EDNC_DATE}"$'	'"${rflat}")
     else
       # Malformed EDNC is RED even when it would not have been needed — wider door closed.
       verdict=FAIL_EDNC_MALFORMED
@@ -410,7 +416,65 @@ for doc in "$CONCEPTS_DIR"/*.md; do
   echo -e "${cid:--}\t${base}\t${status}\t${reg_st:--}\t${HAS_POS}\t${HAS_NEG}\t${HAS_PAIR}\t${HAS_GATE}\t${verdict}"
 done
 
-echo "CONCEPT_STATUS_SUMMARY failures=$fail_count"
+# --- Always emit active EDNC list (visibility, not pressure) ---
+emit_ednc_visibility() {
+  local n=${#EDNC_ROWS[@]}
+  local out_tsv="$ROOT_DIR/docs/internal/concepts/ednc_active.tsv"
+  local sorted tmp line age doc owner date reason
+  tmp="$(mktemp)"
+  {
+    echo -e "age_days\tdoc\towner\tdate\treason"
+    if ((n > 0)); then
+      # oldest first (age descending); age is from Date field, not mtime/git
+      printf '%s\n' "${EDNC_ROWS[@]}" | sort -t$'\t' -k1,1nr
+    fi
+  } >"$tmp"
+
+  # 1) stdout/stderr — visible on every local and CI log line stream
+  echo "CONCEPT_STATUS_EDNC_ACTIVE count=$n (no expiry; age from declaration Date; oldest first)" 
+  if ((n == 0)); then
+    echo "CONCEPT_STATUS_EDNC_ACTIVE none"
+  else
+    local i=0
+    while IFS=$'\t' read -r age doc owner date reason; do
+      [[ "$age" == "age_days" ]] && continue
+      i=$((i + 1))
+      echo "CONCEPT_STATUS_EDNC_ACTIVE [$i/$n] doc=$doc owner=$owner age_days=$age date=$date"
+    done <"$tmp"
+  fi
+
+  # 2) committed-path TSV regenerated each run — humans open the concepts dir
+  #    and see the roster without grepping logs. Not a claim of truth beyond
+  #    what the gate just read; CI may show it as a dirty file if left unignored.
+  #    We write under docs/internal/concepts/ so it sits next to the contracts.
+  cp "$tmp" "$out_tsv"
+
+  # 3) GitHub Job Summary when present (Actions UI — no log dig)
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      echo "## Concept Evidence-Does-Not-Count (active)"
+      echo ""
+      echo "Declarations **do not expire**. Age is from the declared \`Date\` field (not git history)."
+      echo "Sorted oldest first. Count: **$n**."
+      echo ""
+      if ((n == 0)); then
+        echo "_No active Evidence-Does-Not-Count declarations._"
+      else
+        echo "| age_days | doc | owner | date |"
+        echo "|---:|---|---|---|"
+        while IFS=$'\t' read -r age doc owner date reason; do
+          [[ "$age" == "age_days" ]] && continue
+          echo "| $age | \`$doc\` | $owner | $date |"
+        done <"$tmp"
+      fi
+    } >>"$GITHUB_STEP_SUMMARY"
+  fi
+  rm -f "$tmp"
+}
+
+emit_ednc_visibility
+
+echo "CONCEPT_STATUS_SUMMARY failures=$fail_count ednc_active=${#EDNC_ROWS[@]}"
 if ((fail_count > 0)); then
   echo "CONCEPT_STATUS_GATE_RED count=$fail_count" >&2
   if [[ "$REPORT_ONLY" == "1" ]]; then
