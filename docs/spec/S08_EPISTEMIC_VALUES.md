@@ -138,6 +138,32 @@ The residue is one mapping decision — where an *asserted* value sits among
 dissertation. `label: 2` needs no image at all, because it never carried
 provenance to lose.
 
+### 8.2.3 Three of the six provenance kinds cannot be written
+
+`AstProvenanceKind` declares six kinds. `self-hosted/parser/types.sio:1107-1117`
+matches exactly three token kinds — `TokenKind::Derived`, `TokenKind::Computed`,
+`TokenKind::Measured` — and constructs the corresponding three. `AstProvSource`,
+`AstProvLiterature` and `AstProvInput` occur **once each** in the whole of
+`self-hosted/parser/`: their own declaration. They are declared and unwritable.
+
+This is not `Reserved` in the sense of `MATURITY_LADDER`. A reserved name is
+refused with a named diagnostic. These three are not refused — there is simply
+no syntax that reaches them, and nothing says so.
+
+**The parse loop's fallthrough makes it silent.** The same block ends:
+
+    } else {
+        // Unknown component — skip
+        p = p.advance()
+    }
+
+An unrecognised component inside a `Knowledge<...>` annotation is **discarded
+without a diagnostic**. Writing a provenance the compiler declares but cannot
+parse yields a value with *no* provenance and no error — which is
+`SOUNIO-NO-VERSUS-UNKNOWN` at the point where provenance is claimed. Silent,
+reachable, and ungated: the `SOUNIO-S-G-R` criterion is met in full and a gate is
+required regardless of any ruling in this section.
+
 Other measured facts about shape 2, which is the shape the stdlib exposes:
 
 - **Not linear.** Dropping one requires nothing.
@@ -214,8 +240,12 @@ A rule can be argued away one at a time. A definition has to be replaced whole.
 
 ## 8.5 Undefined — rulings owed
 
-- **(c) Withdrawal of the `label` vocabulary — cost measured, ruling owed.**
-  See 8.2.2. (a) and (b) are ruled in 8.3.6 and 8.3.7.
+- **(c) Withdrawal of the `label` vocabulary — ruled, and BLOCKED on a language
+  change.** Founder ruling, 2026-08-19: withdraw the vocabulary; `asserted`
+  becomes `Input`. The ruling is right and cannot be executed as written:
+  `AstProvInput` has **no surface syntax** (8.2.3). Executing it requires giving
+  `input` a keyword, which is a language change and a separate decision.
+  Blocked-On: provenance keyword coverage.
 
 - **Where "no confidence claim made" lives.** Ruled 2026-08-19: `1000` is
   **certainty** and `0` is **no confidence**, so the scale `0..1000` is fully
