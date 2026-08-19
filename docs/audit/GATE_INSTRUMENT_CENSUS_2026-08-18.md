@@ -97,6 +97,53 @@ A compile that exits 0 and writes a file named `-o` is non-empty;
 `[[ -s ]]` would have passed that trap. Magic is the check that refuses
 it. Do not patch 91 files. Adopt `require_elf` on the 19 first.
 
+## Contracts cut — of the 19, how many run on every PR?
+
+Measured against `.github/workflows/ci.yml` `jobs.contracts` (job
+name **Contracts**) on `origin/main` `e81b88f7bc`. Method: a gate is
+*in Contracts* if the job body names the script; it is *every PR* if
+that step has no YAML `if:`. Impact filters and the R6 nightly/schedule
+arm are not every PR.
+
+| cut | n / 19 | who |
+|---|---:|---|
+| named in `jobs.contracts` | **5** | `sounio_package_support_gate.sh`, `self_falsifying_compilation_line_r1_gate.sh`, `self_falsifying_compilation_line_r29_gate.sh`, `ontology_cli_smoke_gate.sh`, `package_pbpk_gum_gate.sh` |
+| every PR (no `if:`) | **3** | package-support, R1, R29 |
+| compile on the Contracts path | **1** | package-support |
+| compile when impact says so | **1** | ontology (`ontology \|\| full`) |
+| `souc run`, no named ELF | **1** | package-pbpk-gum (`clinical \|\| full`) |
+| compile arm not wired | **2** | R1, R29 (`SFCL_R*_RUN_COMPILE` is unset; contract arm only, documented) |
+
+The other 14 of 19 live in `madaros-current-source-deref-f64`,
+`native-selfhost-linux-x86_64`, or `madaros-prebuilt-refresh.yml`.
+They cost when those jobs run. They are not the false green on every
+merge.
+
+Five is few. Converted, one by one, the two that compile on a
+Contracts step: package-support (every PR) and ontology (impact).
+R1/R29 keep their contract-only skip — that skip is a two-arm gate,
+not a missing-ptxas green. PBPK stays on `souc run`.
+
+## Ceiling helper conversion — hygiene, not a finding
+
+Same unpatched Madaros (`bin/madaros-linux-x86_64` 99 964 676 B,
+STAGE `/orangefs/training/e230-close-20260818T221317Z`, host
+`cpuops-t560-proxmox`, 2026-08-19T00:44:50Z). PRE = `origin/main`
+inline `assert_elf`. POST = helper `require_elf`.
+
+| | PRE | POST |
+|---|---|---|
+| S1 compile_rc / engine / ELF / run_rc | 0 / madaros / 12 744 / 0 | same |
+| ceiling compile_rc / engine / ELF / run_rc | 0 / madaros / 12 744 / 182 | same |
+| stderr | `madaros: handles full` | same |
+| verdict | `HANDLE_TABLE_CEILING_GATE_OK` rc=0 | same |
+| extra | — | `measured=yes` |
+
+The main-line gate already checked `\x7fELF`, the compile log, and
+rc-in-a-file. The helper reprinted the same measurement. **Hygiene.**
+It did not catch a lie on this gate. The same may still hold for the
+other 18 — or not. That is why they convert one at a time.
+
 ## Pattern 3 — never record which engine compiled
 
 Of 110 compile-invoking gates, **67** never mention `--version`,

@@ -8,11 +8,15 @@
 #
 # Exit 0 = all tests passed.
 # Exit 1 = at least one test failed.
+# Exit 77 = SKIPPED (compiler could not build the patched CLI). Not a green 0.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+. "$ROOT_DIR/scripts/lib/gate_assert.sh"
+gate_name "ontology_cli_smoke_gate"
+require_tool od "od(1) missing — cannot check ELF magic"
 
 SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc-linux-x86_64}"
 SRC="$ROOT_DIR/self-hosted/compiler/lean_single.sio"
@@ -93,11 +97,18 @@ compile_test_binary() {
     else
         compile_cmd=( "$SOUC_BIN" "$PATCHED_SRC" "$TEST_BIN" )
     fi
-    if ! "${compile_cmd[@]}" >"$TMP_DIR/build.log" 2>&1; then
-        echo "[ontology-smoke] SKIP: selected compiler could not build patched ontology CLI source"
+    gate_capture_rc "$TMP_DIR/compile.rc" -- \
+        "${compile_cmd[@]}" >"$TMP_DIR/build.log" 2>&1
+    local crc engine
+    crc="$(cat "$TMP_DIR/compile.rc")"
+    engine="$(classify_compile_log "$TMP_DIR/build.log")"
+    echo "[ontology-smoke] compile_rc=$crc compile_engine=$engine"
+    if [[ "$crc" != "0" ]]; then
         tail -n 20 "$TMP_DIR/build.log" || true
-        exit 0
+        gate_skip "selected compiler could not build patched ontology CLI source (rc=$crc)"
     fi
+    require_elf "$TEST_BIN" "ontology CLI compile artefact"
+    echo "[ontology-smoke] elf_ok=$TEST_BIN bytes=$(stat -c%s "$TEST_BIN") magic=7f454c46"
     chmod +x "$TEST_BIN"
 }
 
@@ -329,6 +340,8 @@ test_unresolved
 printf '[ontology-smoke] results: %d passed, %d failed\n' "$PASS" "$FAIL"
 
 if [[ "$FAIL" -gt 0 ]]; then
+    echo "measured=no"
     exit 1
 fi
+gate_measured_yes
 exit 0

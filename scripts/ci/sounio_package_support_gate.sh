@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+. "$ROOT_DIR/scripts/lib/gate_assert.sh"
+gate_name "sounio_package_support_gate"
+require_tool od "od(1) missing — cannot check ELF magic"
 
 ARTIFACT_ROOT="${SOUNIO_PACKAGE_SUPPORT_ARTIFACT_ROOT:-$(mktemp -d /tmp/sounio-package-support.XXXXXX)}"
 mkdir -p "$ARTIFACT_ROOT"
@@ -43,9 +46,20 @@ run_compiled_fixture() {
     return 1
   fi
 
-  "$lean_souc" "$fixture" "$out_dir/main" >"$out_dir/compile.log" 2>&1
+  gate_capture_rc "$out_dir/compile.rc" -- \
+    "$lean_souc" "$fixture" "$out_dir/main" >"$out_dir/compile.log" 2>&1
+  local crc engine
+  crc="$(cat "$out_dir/compile.rc")"
+  engine="$(classify_compile_log "$out_dir/compile.log")"
+  echo "compile_rc=$crc compile_engine=$engine fixture=$name"
+  [[ "$crc" == "0" ]] || return "$crc"
+  require_elf "$out_dir/main" "$name compile artefact"
+  require_compile_engine "$out_dir/compile.log" "lean_single"
   chmod +x "$out_dir/main"
-  "$out_dir/main" >"$out_dir/run.log" 2>&1
+  echo "elf_ok=$out_dir/main bytes=$(stat -c%s "$out_dir/main") magic=7f454c46"
+  gate_capture_rc "$out_dir/run.rc" -- \
+    "$out_dir/main" >"$out_dir/run.log" 2>&1
+  require_rc_file "$out_dir/run.rc" "0"
   grep -qF "$expect" "$out_dir/run.log"
 }
 
@@ -225,4 +239,5 @@ run_step physical-extraction-canonical-production-gap \
 run_step physical-extraction-canonical-production-mapping-decision \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.py"
 
+gate_measured_yes
 echo 'SOUNIO_PACKAGE_SUPPORT_GATE_PASS'
