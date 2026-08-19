@@ -83,6 +83,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.affine-nonassoc-uncertainty-2026-06-13 | repo_only | docs/audit/AFFINE_NONASSOC_UNCERTAINTY_2026-06-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.branch-audit-2026-08-15 | repo_only | docs/audit/BRANCH_AUDIT_2026-08-15.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.bucket-d-script-hardening-2026-06-21 | repo_only | docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.canonical-compiler-gate-structural-cost-2026-08-18 | repo_only | docs/audit/CANONICAL_COMPILER_GATE_STRUCTURAL_COST_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.checker-guard-wiring-dispatch-2026-07-11 | repo_only | docs/audit/CHECKER_GUARD_WIRING_DISPATCH_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.chi5-real-axiom-audit-2026-05-30 | repo_only | docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ci-gate-workflow-reachability-census-2026-08-18 | repo_only | docs/audit/CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -94,11 +95,14 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-dossier-resolution-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.dissertation-epistemic-fabrication-sweep-2026-08-18 | repo_only | docs/audit/DISSERTATION_EPISTEMIC_FABRICATION_SWEEP_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-hessian-e175-dispatch-2026-08-16 | repo_only | docs/audit/DISSERTATION_HESSIAN_E175_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-parity-sounio-dual-2026-08-17 | repo_only | docs/audit/DISSERTATION_PARITY_SOUNIO_DUAL_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-pbpk-suite-remeasure-2026-08-17 | repo_only | docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.dissertation-pbpk-suite-remeasure-2026-08-18 | repo_only | docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dissertation-pbpk-suite-residual-split-2026-08-17 | repo_only | docs/audit/DISSERTATION_PBPK_SUITE_RESIDUAL_SPLIT_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dossier-import-closure-2026-08-17 | repo_only | docs/audit/DOSSIER_IMPORT_CLOSURE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.e011-stale-prebuilt-phantom-2026-08-18 | repo_only | docs/audit/E011_STALE_PREBUILT_PHANTOM_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.e043-rust-macro-design-dispatch-2026-07-12 | repo_only | docs/audit/E043_RUST_MACRO_DESIGN_DISPATCH_2026-07-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.engine-parity-adjudication-2026-08-02 | repo_only | docs/audit/ENGINE_PARITY_ADJUDICATION_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-calculus-spec-divergence.dispatch | repo_only | docs/audit/epistemic_calculus_spec_divergence/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -107,6 +111,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.epistemic-knowledge-madaros-d3-2026-07-19 | repo_only | docs/audit/EPISTEMIC_KNOWLEDGE_MADAROS_D3_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-nn-backward-e2e-2026-06-02 | repo_only | docs/audit/EPISTEMIC_NN_BACKWARD_E2E_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-ode-e2e-vertical-2026-07-19 | repo_only | docs/audit/EPISTEMIC_ODE_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.epistemic-pbpk28-test6-confidence-independent-verify-2026-08-18 | repo_only | docs/audit/EPISTEMIC_PBPK28_TEST6_CONFIDENCE_INDEPENDENT_VERIFY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-prescription-chain-madaros-2026-07-19 | repo_only | docs/audit/EPISTEMIC_PRESCRIPTION_CHAIN_MADAROS_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-self-application-audit-2026-06-03 | repo_only | docs/audit/EPISTEMIC_SELF_APPLICATION_AUDIT_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-trust-map-2026-07-14 | repo_only | docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -123,6 +128,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.equivalence-theory-lean-obligations-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_OBLIGATIONS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-lean-persite-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_PERSITE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.extern-c-ffi-silent-noop-dispatch-2026-08-13 | repo_only | docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.fo-variance-across-fn-independent-verify-2026-08-18 | repo_only | docs/audit/FO_VARIANCE_ACROSS_FN_INDEPENDENT_VERIFY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-7fa3c3524-dead-code-2026-06-16 | repo_only | docs/audit/FRAME_FIX_7fa3c3524_DEAD_CODE_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-full-selfhosted-2026-06-16 | repo_only | docs/audit/FRAME_FIX_FULL_SELFHOSTED_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-validation-2026-06-16 | repo_only | docs/audit/FRAME_FIX_VALIDATION_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -153,11 +159,14 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.github-mergeability-queue-is-a-flow-2026-08-18 | repo_only | docs/audit/GITHUB_MERGEABILITY_QUEUE_IS_A_FLOW_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gpu-pipeline-sota-assessment-2026-05-30 | repo_only | docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gum-fo-propagation-hidden-by-main-vacuous-harness-dispatch-2026-08-10 | repo_only | docs/audit/GUM_FO_PROPAGATION_HIDDEN_BY_MAIN_VACUOUS_HARNESS_DISPATCH_2026-08-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.handle-table-e230-refutation-2026-08-18 | repo_only | docs/audit/HANDLE_TABLE_E230_REFUTATION_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.handle-table-reclamation-design-2026-08-17 | repo_only | docs/audit/HANDLE_TABLE_RECLAMATION_DESIGN_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-651-rootcause-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_651_ROOTCAUSE_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hypercomplex-algebra-audit-2026-07-14 | repo_only | docs/audit/HYPERCOMPLEX_ALGEBRA_AUDIT_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.imported-native-139-residual-census-2026-08-18 | repo_only | docs/audit/IMPORTED_NATIVE_139_RESIDUAL_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kaxi-ptx-target-sm-audit-2026-06-17 | repo_only | docs/audit/KAXI_PTX_TARGET_SM_AUDIT_2026-06-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.kconf-bitcast-apply-package-2026-08-18 | repo_only | docs/audit/KCONF_BITCAST_APPLY_PACKAGE_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.known-failure-xpas-gate-dispatch-2026-08-18 | repo_only | docs/audit/KNOWN_FAILURE_XPAS_GATE_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-knowledge-arithmetic-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_KNOWLEDGE_ARITHMETIC_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-struct-field-aggregate-copy-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_STRUCT_FIELD_AGGREGATE_COPY_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-a64-two-level-field-store-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_TWO_LEVEL_FIELD_STORE_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -192,6 +201,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-enum-variant-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_ENUM_VARIANT_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-f64-bitcast-sitofp-boundary-2026-08-17 | repo_only | docs/audit/MADAROS_F64_BITCAST_SITOFP_BOUNDARY_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-field-if-i64-2026-07-26 | repo_only | docs/audit/MADAROS_FIELD_IF_I64_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-fo-call-boundary-dispatch-2026-08-18 | repo_only | docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-fo-cross-fn-return-2026-07-28 | repo_only | docs/audit/MADAROS_FO_CROSS_FN_RETURN_2026-07-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-fo-gum-stack-2026-07-27 | repo_only | docs/audit/MADAROS_FO_GUM_STACK_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-for-loop-lowering-2026-06-20 | repo_only | docs/audit/MADAROS_FOR_LOOP_LOWERING_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -208,6 +218,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-imported-module-f64-cast-bitcast-2026-07-14 | repo_only | docs/audit/MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-module-native-path-escalation-2026-07-14 | repo_only | docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16 | repo_only | docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-ir-capacity-object-design-dispatch-2026-08-18 | repo_only | docs/audit/MADAROS_IR_CAPACITY_OBJECT_DESIGN_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-match-guards-2026-06-24 | repo_only | docs/audit/MADAROS_MATCH_GUARDS_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-method-call-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_METHOD_CALL_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-multimodule-fallback-segfault-2026-06-30 | repo_only | docs/audit/MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -223,6 +234,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-option-box-deref-2026-06-24 | repo_only | docs/audit/MADAROS_OPTION_BOX_DEREF_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-pbpk28-nn-tensor-compile-runtime-divergence-2026-08-17 | repo_only | docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-post-merge-closeout-2026-06-22 | repo_only | docs/audit/MADAROS_POST_MERGE_CLOSEOUT_2026-06-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-print-dispatch-fail-closed-2026-08-17 | repo_only | docs/audit/MADAROS_PRINT_DISPATCH_FAIL_CLOSED_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-print-int-dispatch-2026-06-20 | repo_only | docs/audit/MADAROS_PRINT_INT_DISPATCH_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-print-negative-f64-2026-07-14 | repo_only | docs/audit/MADAROS_PRINT_NEGATIVE_F64_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-println-bool-scalarkind-segv-2026-08-17 | repo_only | docs/audit/MADAROS_PRINTLN_BOOL_SCALARKIND_SEGV_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -242,6 +254,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-string-concat-2026-06-24 | repo_only | docs/audit/MADAROS_STRING_CONCAT_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-struct-field-index-fallback-2026-06-23 | repo_only | docs/audit/MADAROS_STRUCT_FIELD_INDEX_FALLBACK_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-trait-i64-cd-exact-2026-08-06 | repo_only | docs/audit/MADAROS_TRAIT_I64_CD_EXACT_2026-08-06.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-trivial-3i64-struct-alloc-139-dispatch-2026-08-18 | repo_only | docs/audit/MADAROS_TRIVIAL_3I64_STRUCT_ALLOC_139_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-tuple-f64-float-fix-recipe-2026-07-26 | repo_only | docs/audit/MADAROS_TUPLE_F64_FLOAT_FIX_RECIPE_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-tuple-let-desugar-2026-06-25 | repo_only | docs/audit/MADAROS_TUPLE_LET_DESUGAR_2026-06-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave11-tip-green-2026-07-21 | repo_only | docs/audit/MADAROS_WAVE11_TIP_GREEN_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -302,9 +315,11 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.rc182-d2-headroom-contradiction-2026-08-18 | repo_only | docs/audit/RC182_D2_HEADROOM_CONTRADICTION_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.readme | repo_only | docs/audit/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.runtime-context-unwritten-fields-census-2026-08-18 | repo_only | docs/audit/RUNTIME_CONTEXT_UNWRITTEN_FIELDS_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.runtime-gc-capability-honesty-2026-08-18 | repo_only | docs/audit/RUNTIME_GC_CAPABILITY_HONESTY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-general-lvalue-deref-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_GENERAL_LVALUE_DEREF_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seed-fix-value-nested-field-store-2026-06-24 | repo_only | docs/audit/SEED_FIX_VALUE_NESTED_FIELD_STORE_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02 | repo_only | docs/audit/SIGSEGV_PBPK28_PRIVATE_STRUCT_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.souc-wrapper-bare-dash-o-swallow-dispatch-2026-08-18 | repo_only | docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-release-production-readiness-2026-06-22 | repo_only | docs/audit/SOUNIO_RELEASE_PRODUCTION_READINESS_2026-06-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-science-flex-2026-07-27 | repo_only | docs/audit/SOUNIO_SCIENCE_FLEX_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.spnn-quantnn-mod-export-2026-08-14 | repo_only | docs/audit/SPNN_QUANTNN_MOD_EXPORT_2026-08-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -689,6 +704,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.migration-guide | repo_only | docs/MIGRATION_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ops.dgx-spark-gpu-dev | repo_only | docs/ops/dgx_spark_gpu_dev.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ops.foundry-slurm-handoff | repo_only | docs/ops/foundry_slurm_handoff.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.ops.lean-single-seed-refresh | repo_only | docs/ops/LEAN_SINGLE_SEED_REFRESH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.ops.slurm-launch-repair-2026-08-17 | repo_only | docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.168-theorem-preprint | repo_only | docs/papers/168-theorem-preprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.papers.arxiv-abstract | repo_only | docs/papers/arxiv_abstract.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -879,6 +895,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.l9-zd-census-spec-2026-07-26 | historical | docs/research/l9_zd_census_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lean-falsification-ledger-spec-2026-07-25 | historical | docs/research/lean_falsification_ledger_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.lean-float-real-roadmap | historical | docs/research/lean_float_real_roadmap.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.lemon-associator-neuroticism-2026-08-09 | historical | docs/research/lemon_associator_neuroticism_2026-08-09.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-collaboration-brief | historical | docs/research/llm_collaboration_brief.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-collaboration-brief-claude | historical | docs/research/llm_collaboration_brief_claude.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.llm-collaboration-brief-gpt | historical | docs/research/llm_collaboration_brief_gpt.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -970,6 +987,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.neurodyn-algebra-c-continuous-associator-prereg-2026-07-07 | historical | docs/research/neurodyn_algebra_c_continuous_associator_prereg_2026-07-07.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.neurodyn-ossm-adhd-dimensional-prereg-2026-07-07 | historical | docs/research/neurodyn_ossm_adhd_dimensional_prereg_2026-07-07.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.neurodyn-ossm-sota-deep-research-2026-07-05 | historical | docs/research/neurodyn_ossm_sota_deep_research_2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.nma-algebraic-detector-validation-2026-08-06 | historical | docs/research/nma_algebraic_detector_validation_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.non-associative-programme-2026-08-13 | historical | docs/research/non_associative_programme_2026-08-13.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.nullity-histogram-law-falsifiers-2026-07-26 | historical | docs/research/nullity_histogram_law_falsifiers_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.nullity-histogram-law-spec-2026-07-26 | historical | docs/research/nullity_histogram_law_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-annotation-manual-v0 | historical | docs/research/ocssm_annotation_manual_v0.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -981,6 +1000,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.octonion-conversation-annotated-bibliography | historical | docs/research/octonion_conversation_annotated_bibliography.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.octonion-conversation-literature-review-framework | historical | docs/research/octonion_conversation_literature_review_framework.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.octonion-pbpk | historical | docs/research/octonion_pbpk.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.octonion-tree-fold-scaling-2026-08-06 | historical | docs/research/octonion_tree_fold_scaling_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-1627-close-2026-08-06 | historical | docs/research/particle_e175_1627_close_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
