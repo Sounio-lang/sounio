@@ -128,6 +128,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.equivalence-theory-lean-obligations-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_OBLIGATIONS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-lean-persite-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_PERSITE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.extern-c-ffi-silent-noop-dispatch-2026-08-13 | repo_only | docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.fo-import-boundary-port-2026-08-19 | repo_only | docs/audit/FO_IMPORT_BOUNDARY_PORT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.fo-variance-across-fn-independent-verify-2026-08-18 | repo_only | docs/audit/FO_VARIANCE_ACROSS_FN_INDEPENDENT_VERIFY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-7fa3c3524-dead-code-2026-06-16 | repo_only | docs/audit/FRAME_FIX_7fa3c3524_DEAD_CODE_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-full-selfhosted-2026-06-16 | repo_only | docs/audit/FRAME_FIX_FULL_SELFHOSTED_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

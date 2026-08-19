@@ -11,7 +11,7 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_S
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report}
+use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
@@ -5501,6 +5501,19 @@ fn module_frontend_lower_programs_array_direct_box(
     if module_frontend_loaded_ir_slot_capacity_exceeded(programs, loaded) {
         trace.last_stage = "lower_summary_error"
         return module_frontend_lower_direct_box_error(module_frontend_loaded_ir_slot_capacity_error(programs, loaded))
+    }
+    // FO multi-mod: register pure-fn transfers from *all* loaded modules before
+    // seed body lower, so user main FO-sees imported helpers (epistemic::fo, …).
+    // CRITICAL: copy Program to a local first. Nested field-address of large
+    // Program in a large array (&programs[i].items) is a lean_single residual
+    // that reads as Option::None (measured: fo_prereg none=1). Whole-Program
+    // by-value load then &prog.items is the proven A14-safe pattern.
+    fo_xfer_global_reset()
+    var fo_pi: i64 = 0
+    while fo_pi < loaded {
+        var prog = (*programs)[fo_pi as usize]
+        fo_preregister_program_items_multipass(&prog.items)
+        fo_pi = fo_pi + 1
     }
     print("lower_array: seed_begin\n")
     let seed_items = spec_dce_filter_with_global_marks((*programs)[0].items)
