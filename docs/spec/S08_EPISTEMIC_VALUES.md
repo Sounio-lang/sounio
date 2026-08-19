@@ -164,6 +164,71 @@ parse yields a value with *no* provenance and no error — which is
 reachable, and ungated: the `SOUNIO-S-G-R` criterion is met in full and a gate is
 required regardless of any ruling in this section.
 
+### 8.2.4 Correction: there are five declarations, not three, and the dissertation matches none
+
+Re-measured 2026-08-19, later the same day. The table in 8.2 lists three shapes
+plus a two-line fixture. **It is incomplete.**
+
+| # | site | members |
+|---|---|---|
+| 4 | `ecosystem/shared/epistemic_types.sio:9` `struct Knowledge[T]` | `value: T`, **`ε: f64`**, `prov: string`, `metadata: KnowledgeMetadata` |
+| 5 | `self-hosted/test_knowledge.sio` | a second `struct Knowledge[T]` |
+
+Shape 4 matters for two reasons.
+
+**It is the richest one, and `ε` means something else in it.** Its own comment
+reads `ε: f64  // Confidence (0.0 = no confidence, 1.0 = certain)`. So `ε` here
+is a **confidence in [0,1]**, while in the compiler `EpsilonBound` is a
+**predicate on the error**. The same symbol carries two unrelated meanings across
+two layers, and a third convention — the stdlib's integer 0–1000, whose endpoint
+was ruled to denote certainty in 8.3.5 — makes three.
+
+**The bracket form is widespread.** `Knowledge[...]` occurs in **49** versioned
+`.sio` files, against the angle-bracket form the earlier revision assumed.
+
+### 8.2.5 The dissertation surface writes a shape that is declared nowhere
+
+`stdlib/darwin_pbpk/epistemic_pbpk28.sio:292` contains, verified **not** inside a
+block comment:
+
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    kn[0] = Knowledge { value: m[0], variance: v[0], epsilon: c[0],
+                        provenance: "Jiao2009_popPK_CV38|CHEBI:9168" }
+
+The literal's members are `value, variance, epsilon, provenance`. **No declared
+shape has that set** — shape 4 has `value, ε, prov, metadata`. And the file
+imports only `darwin_pbpk::core::pbpk28_params` and `darwin_pbpk::tsit5_pbpk28`,
+so it imports no `Knowledge` declaration at all. Four versioned files write this
+literal.
+
+The comment immediately above it states the arrangement plainly:
+
+> *"The f64 arrays above are their numeric projection for the GUM kernel."*
+
+So the numbers flow through plain `f64` arrays (`m`, `v`, `c`) and the
+`Knowledge` block sits beside them. **Re-verified, 2026-08-19** (`docs/audit/`, `#2024`, both engines on Slurm):
+
+- **The literal is ACCEPTED.** Both Madaros and lean_single `check` the file with
+  `rc=0` and an `E200` count of **zero**. An earlier draft of this correction
+  cited an `E200` refusal *from memory*; the memory was wrong, and it is recorded
+  here rather than quietly dropped.
+- **`Knowledge` here is the compiler builtin** (`TypeKind::TyKnowledge`), not any
+  of the five declared structs. That is why it resolves without an import.
+- **The block is the GUM carrier, not decoration.** Stripping the seven `kn[i] =`
+  assignments zeros `sens[0]` and fails TEST 5; the unmodified file passes 9/9
+  under lean_single. The numbers pass through it.
+
+Three further facts fall out of the same measurement, and each is a defect:
+
+- **The field written is not the field read.** The literal writes `epsilon:`;
+  under Madaros `.epsilon` reads **0.0** while `.confidence` reads 0.65. One of
+  the two names is silently inert.
+- **The engines disagree on a wrong-field literal.** Madaros refuses with
+  `E012`; **lean_single warns and emits an ELF anyway**.
+- **The gate that covers this file is unreachable.**
+  `scripts/ci/dissertation_pbpk_suite_gate.sh` lists it, and no workflow reaches
+  that gate.
+
 Other measured facts about shape 2, which is the shape the stdlib exposes:
 
 - **Not linear.** Dropping one requires nothing.
