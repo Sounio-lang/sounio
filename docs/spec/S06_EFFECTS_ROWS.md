@@ -79,7 +79,31 @@ caller anywhere, internal or external.
 with the comment *"Confidence is an alias of Epistemic (id 8). Not a new
 variant."*
 
-## 6.2 The set is capped at eight, and the ninth is dropped in silence
+### 6.1.1 Four of the effects are bookkeeping with no consumer
+
+Measured 2026-08-19. Of the 23 names, the ones any `has_effect_id` **decision**
+consults are `ZD` (8 call sites), `Epistemic` (4), `Observe` (2), `Chaotic`,
+`MultiTest`, `Hypothesis`, `Witness`, `Temporal` and `NonAssoc`.
+
+**No decision consults `Mut`, `Alloc`, `Panic`, `Div` or `IO`.** As string
+literals in `self-hosted/check/` and `self-hosted/ir/` they occur 0, 1, 0, 1 and
+0 times respectively — positive control on the same command, `ZD` occurs 16.
+
+They participate only in the generic propagation: `effects_subset` /
+`find_missing_effects` require a caller to declare whatever its callee declares,
+for any effect alike. Nothing ever asks *"does this function divide?"*.
+
+`#1995` measured the other side: of **57,752** signatures, **46,219 — 80.03% —
+declare only `Mut`/`Div`/`Panic`/`Alloc`**. `stdlib/math/pure.sio:245` is
+`fn sin(x: f64) -> f64 with Mut, Div, Panic` — a mathematically pure function, in
+a file named `pure.sio`, carrying three effects because of its loop and its
+division. `Network`, `Sensor` and `Render` are recognised names with **zero**
+uses. Maximum arity measured is **6**, so the eight-slot cap does not bite today.
+
+So four fifths of all effect declarations are propagated up the call graph,
+consume slots against the cap, and are read by nothing. That is the measured
+shape of 6.6's "set or row" question, and it is why 6.6 now carries a third
+option., and the ninth is dropped in silence
 
 `self-hosted/check/check.sio:285` declares
 
@@ -152,6 +176,20 @@ Instrument: `^use effects::`, validated in the same command against
   not separate observable effect from implementation mechanism, so effectful
   numeric functions are the norm rather than the exception. Under 6.0 without
   abstraction, one `deriv` cannot serve both `sin` and `my_sin`.
+
+- **Are these one system or two?** 6.1.1 measures that `Mut`, `Div`, `Panic` and
+  `Alloc` gate no decision and account for 80% of declarations, while the effects
+  that *are* consulted are the observable ones. Separating the two axes would
+  make effect abstraction rare rather than mandatory. It is **not free**: the
+  four must then live somewhere (inferred — which costs interprocedural
+  inference; a second clause — which is two annotation surfaces forever, and
+  every future feature must choose a side; or removed — which loses their E035
+  propagation), and the boundary is not crisp (`Alloc` is plausibly *observable*
+  on a GPU) while being expensive to revise once assignments are made. The
+  measured cost of not deciding is currently low: max arity 6 against a cap of 8.
+  **Correction of an earlier claim in session:** splitting does *not* close the
+  silent-drop hole. Validating names against a closed list closes it, and that is
+  independent of any split.
 
 - **Is the effect annotation a set or a row?** A flat set with subset is what
   runs. A row discipline with an open tail is what `effects_row.sio` implements
