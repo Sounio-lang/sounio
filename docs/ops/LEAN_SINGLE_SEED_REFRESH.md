@@ -317,13 +317,40 @@ If a reader cannot confirm `gk_md5 == gk_plus1_md5` without re-running the
 chain, the receipt proves nothing. `--verify-receipt` fails closed when the
 two lines differ or `verified` is not true.
 
-**What a green `canonical_compiler_gate` is not:** it checks
-`md5(committed ELF) == md5(that ELF compiling current source)` — self-repro
-stability. It does **not** prove the ELF was *derived from* that source rather
-than substituted from another generation that happens to self-reproduce it.
-The generation table + `input_seed` hashes are the provenance trail; a future
-gate should require a SeedReceipt, not only the self-repro equality. Tracked
-as the next trust-anchor step, not implemented in this recipe amendment.
+**What a green `canonical_compiler_gate` self-repro leg is not:** it checks
+`md5(committed ELF) == md5(that ELF compiling current source)` — **stability**.
+It does **not** alone prove the ELF was *derived from* that source.
+
+**Provenance leg (now wired):** `scripts/ci/seed_receipt_provenance_gate.sh`
+runs after self-repro inside `canonical_compiler_gate.sh`.
+
+| tree / change set | gate result |
+|---|---|
+| receipt present, matches source+seed+FP | **PASS** |
+| receipt present, `source.sha256` ≠ live `lean_single.sio` | **FAIL** (mutant control proves this path every run) |
+| **no receipt**, PR does **not** touch seed surface | **PASS** (main and unrelated PRs stay green) |
+| **no receipt**, PR touches `lean_single.sio` / seed ELF / receipt path | **FAIL** — must land a receipt with the change |
+| `SOUNIO_SEED_RECEIPT_REQUIRED=1` and no receipt | **FAIL** (optional later global flip) |
+
+**Policy choice:** require receipt **only when the change set touches the seed
+surface**, not a fake bootstrap receipt and not permanent warn-only. Reason:
+limits force to the case the recipe exists for; never paints main red for
+absence alone; still hard-checks any receipt that *is* committed. Tradeoff:
+the committed ELF on main has no permanent paper trail until someone lands the
+first receipt — self-repro still runs; provenance is enforced at the moment of
+seed-surface change (#1750 class).
+
+Committed path (tracked, not under gitignored `artifacts/`):
+
+```
+bin/souc-lean-single-x86_64.SeedReceipt.json
+```
+
+After `--execute`, the driver copies the latest receipt there — commit it with
+the ELF on any seed-surface PR.
+
+Founder optional first-receipt on main (no rebuild in the gate PR itself):
+**~5–15 min** idle srun, same recipe as §2.4.
 
 ### 2.6 Commit
 

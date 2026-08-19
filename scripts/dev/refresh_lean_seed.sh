@@ -566,6 +566,14 @@ run_execute() {
     emit_seed_receipt "$out_meta" || true
   fi
 
+  # Tracked path the provenance gate reads (not under gitignored artifacts/).
+  local committed_receipt="$ROOT_DIR/bin/souc-lean-single-x86_64.SeedReceipt.json"
+  if [[ -f "$RECEIPT_OUT/SeedReceipt.latest.json" ]]; then
+    cp -f "$RECEIPT_OUT/SeedReceipt.latest.json" "$committed_receipt"
+    note "wrote committed receipt path $committed_receipt"
+    note "commit this file with the ELF so seed_receipt_provenance_gate.sh can hard-check"
+  fi
+
   note "EXECUTE PASS — commit $SEED + SeedReceipt when ready"
   note "md5=$(md5_of "$ROOT_DIR/$SEED")"
   note "receipt_dir=$RECEIPT_OUT (also see SeedReceipt.latest.json)"
