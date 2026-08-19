@@ -207,3 +207,10 @@ pending. A real adapter must bind detector custody, target labels, overlap,
 weight uncertainty, loss identity, subgroup plan, institutional competence,
 and a live epoch reference monitor. The standard library must not invent those
 facts.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.
