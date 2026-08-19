@@ -256,6 +256,13 @@ Coord: notified grok-cli5 (ci.yml claim) before edit.
 
 ## Reserved splits in two (founder 2026-08-19)
 
+### Relation to #1965
+
+Ladder prose for the split is owned by PR **#1965** (`MATURITY_LADDER.md`).
+This PR (#1959) owns **gate enforcement** + concept README vocabulary +
+Status backfill. Do not treat the two as competing ladder texts after merge.
+
+
 `reserved` is no longer a single state. A promise and a marker must not read the same.
 
 | status | means | required fields | refuse evidence |
@@ -285,8 +292,8 @@ Both are promises under precision-preservation science surface → **`reserved-o
 
 | kind | proposed Reserved-Blocked-On |
 |---|---|
-| TyF128 | Madaros/native x86-64 path where a *correct* `f128` bind constructs while a wrong program still refuses with a typed diagnostic — today E218 refuses all surface use including correct binds |
-| TyF256 | same class for `f256` (or explicit qd-family surface if that is the chosen representation) |
+| TyF128 | **Proposal for founder (not confirmed):** end-to-end constructible `f128` (correct bind passes; wrong still refuses typed). **Measured now:** parser `error[E218]` — "f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A" (`self-hosted/parser/types.sio`). Fixtures `tests/typekind/f128/{pass,refuse}.sio` both fail E218. The slogan "x86-64 backend emission" is **necessary but incomplete** — refuse is at V0-A surface before lowering. |
+| TyF256 | **Same proposal class** under the same E218 V0-A path. |
 
 Owner/Since: assign when Status is attached to a concept or typekind row. **Awaiting founder confirmation of Blocked-On wording.**
 
