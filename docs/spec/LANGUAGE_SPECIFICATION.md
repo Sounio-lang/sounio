@@ -168,6 +168,26 @@ f32       f64       bool      char      string
 IO        Mut       Alloc     Panic     Async     GPU       Prob      Div
 ```
 
+> **Measured 2026-08-19 — this list is a quarter of the table.** The compiler's
+> closed effect-name list holds **30** names
+> (`scripts/ci/effect_name_closed_list_gate.sh`, frozen at 2,845 sites). All
+> eight above are in it, so nothing here is wrong; **22 are missing**:
+>
+> `Approx  Audit  Causal  Chaotic  Confidence  Deterministic  Epistemic
+> Hypothesis  Learn  MultiTest  NarrowWidthApproximation  NaturalityG2  Network
+> NonAssoc  NonUnitary  Observe  Perturbative  Render  Sensor  Temporal  Witness
+> ZD`
+>
+> The omissions are not marginal: `ZD`, `Witness`, `Learn`, `Temporal` and
+> `Epistemic` carry the surgical-unlearning and epistemic-typing claims, and
+> `Observe` is named as a core effect in `CLAUDE.md` §7.
+>
+> **The list cannot be checked by writing one.** `fn g() -> i32 with Zorblex { 0 }`
+> gives `check: OK` under Madaros and an ELF under lean_single. An unknown effect
+> name is dropped in silence on both engines — §6.1 measures the same on the
+> declaration side — so membership of this table is unfalsifiable from outside
+> the compiler, and the closed-list gate exists because of that.
+
 ### 2.5 Operators
 
 **Arithmetic:**
