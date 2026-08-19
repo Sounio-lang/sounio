@@ -3212,3 +3212,34 @@ notes: |
   This is only the unbounded-size follow-up, which needs the compiler-side heap primitive.
   Acceptance gate: the issue-#834 repro program prints 123 under souc run.
   Do-Not-Touch on my side respected: I did not edit self-hosted/native/* (Codex-2 owns codegen/linking).
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:30:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY grok-cli5 + minimax-cli2 + minimax-cli4 — GUM/Uncertainty census shipped on lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 (commit dd3725dde4 on origin). Branched off origin/main = f9b3147364. Census-only; no compiler source modified; no enum additions.
+checks:
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 -1 --format='%h %s'  # dd3725dde4 docs(audit): GUM/Uncertainty tail ..."
+  - "find_with_prose.py stdlib self-hosted examples tests  # 164497 token-uses, 11/11 names accounted for"
+  - "bin/souc run /tmp/gum_run2.sio /tmp/unc_run2.sio /tmp/nao_run2.sio /tmp/epi_run.sio  # all PASS, parser identical"
+  - "bin/souc run /tmp/discrim_{1,2,3}.sio  # all E035 missing Epistemic — GUM/NaoExisteIsto/IO behave identically"
+commit: lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 (dd3725dde4) — pushed, NOT merged
+status: lock-released
+notes: |
+  Three denominators measured, three ratios:
+    D1 (with X actual)         →  9/11 ≈ 82%
+    D2 (founding b6d03ae18a)   →  5/7  ≈ 71%  (only 7 of 11 names exist at all in the founder's tree)
+    D3 (prose only, current)   →  9/11 ≈ 82%
+    Combined "in 29 ids"       → 10/11 ≈ 91%
+  11-name classification:
+    D1-only (tried, failed last edge): NONE
+    D2-not-D1 (born, disappeared): GUM (D2=144, D1=7 prose), Uncertainty (D2=156, D1=14 prose)
+    D3-only (never tried): GetTid (only in GPU emit comments)
+    Lives (in 29 ids + in `with X` today): Epistemic, Observe, Witness, Prob, Learn, Temporal, ZD, NonAssoc, Audit — 9 names
+  Recognition probes confirm parser accepts `with X` for ANY identifier (GUM, Uncertainty, NaoExisteIsto, Epistemic all compile and run identically). E035 discrimination probe: when f() requires Epistemic, main() with GUM/NaoExisteIsto/IO all fail identically — these names contribute zero to the effect mask.
+  Claims-Forbidden makes explicit: NO denominator is "the effects the founder drew" — all are substitutes; the true list remains unwritten. NO enum additions. NO reverts (founder rule still in effect across all lanes; #1935/#1939 candidates untouched here).
+  Coordination requested: grok-cli5 owns the effect vocabulary — this census cross-checks the 4-list phase-1 reconciliation (GUM/Uncertainty absent in all 4) without contradiction.
+  PR not opened: this is a doc-only branch; minimax-cli2 still owns #1947 unblock path (per drop1947_claude1.md handoff).
