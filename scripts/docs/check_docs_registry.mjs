@@ -6,7 +6,7 @@ import {
   LOCALES,
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
-  formatAcceptanceReport,
+  formatAcceptanceReportStub,
   isRealValidationDate,
   metadataFieldsForTopic,
   parseFrontmatter,
@@ -163,8 +163,13 @@ async function main() {
     errors.push(`Checked-in ${REGISTRY_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs`);
   }
 
+  // Deliberately NOT a function of expectedRegistry: the acceptance report is
+  // a static stub (see formatAcceptanceReportStub), so this check can never
+  // race against a concurrent PR that adds or removes an unrelated governed
+  // doc. It still catches real drift -- a hand-edited or bit-rotted stub --
+  // because the stub is a fixed string, not a corpus scan.
   try {
-    const expectedAcceptance = `${formatAcceptanceReport(expectedRegistry).trimEnd()}\n`;
+    const expectedAcceptance = `${formatAcceptanceReportStub().trimEnd()}\n`;
     const actualAcceptance = await readFile(path.join(rootDir, ACCEPTANCE_RELATIVE_PATH), 'utf8');
     if (actualAcceptance !== expectedAcceptance) {
       errors.push(`Checked-in ${ACCEPTANCE_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs`);
