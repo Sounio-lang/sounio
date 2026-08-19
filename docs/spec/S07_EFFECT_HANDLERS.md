@@ -79,12 +79,43 @@ decision.** One erases it silently, the other has never heard of it. The
 *Reserved* option below is therefore not the cheap one already half-present — it
 does not exist anywhere and must be built like the others.
 
-### 7.3.2 The corpus already contains programs this affects
+### 7.3.2 The corpus contains no live handler at all
 
-`examples/effects.sio`, `examples/effects/basic_handler_continuation.sio`,
-`examples/showcase/linear_file_server.sio` and `tests/run-pass/closure_linear.sio`
-use the construct. Under Madaros they compile, run, and their algebraic-effect
-parts do nothing, with no warning. Under lean_single none of them compiles.
+Census, 2026-08-19 (`docs/audit/HANDLE_GREEN_CENSUS_2026-08-19.md`): **zero**
+`tests/run-pass/` files contain a live algebraic-effect `handle` expression and
+pass under Madaros. The perverse cell — a green that is really an erased
+construct — is empty.
+
+The files that appear to use handlers are **name traps**:
+
+| site | what it actually is |
+|---|---|
+| `tests/run-pass/closure_linear.sio:14` | `let handle = open_file(42)` — a variable |
+| `tests/run-pass/linear_correct_consume.sio:13` | `let handle = FileHandle { fd: 42 }` |
+| `tests/run-pass/async_spawn.sio:11` | `let handle = spawn {` |
+| `examples/showcase/linear_file_server.sio` | `handle` as a field and a parameter of a linear `FileHandle` |
+| `self-hosted/ir/lower.sio:4810` | `lower_handle_buf_arg_index` — the runtime handle table, unrelated |
+
+In `examples/effects*.sio` the handler code sits **inside comments**; the live
+program below is a stub.
+
+> **Correction, 2026-08-19.** An earlier revision of this section listed four of
+> those files as programs whose algebraic-effect parts silently do nothing. That
+> was wrong: none contains a handler. The claim came from a pattern that matched
+> the identifier `handle` — the exact trap the census's own negative control was
+> written to exclude.
+
+**This narrows §7.4 rather than widening it.** Silent erasure has, today, no
+victims in the corpus: there is nothing to break by refusing `handle`, and
+nothing to fix by implementing it. Whichever way 7.4 is ruled, the cost of
+ruling is the lowest it will ever be.
+
+### 7.3.3 One green tests the message, not the mechanism
+
+The census records that `handler_discharge.sio` is green on both engines
+**because it was rewritten to `println("handler: PASS")`**. The file's name
+claims a discharge test; what it asserts is a string. Reclassifying it is a
+founder decision and the census did not touch it.
 
 ## 7.4 Rulings owed
 
