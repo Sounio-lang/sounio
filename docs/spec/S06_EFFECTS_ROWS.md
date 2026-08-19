@@ -23,15 +23,38 @@ rulings, not specification.
 Founder ruling, 2026-08-19. A function type is not merely its parameter and
 result types; the effects the function may perform are part of it.
 
-Measured state at the time of the ruling: **559 function types occur in live
-`.sio` source and not one of them declares an effect.** The ruling is therefore a
-change of kind, not a description. What it buys is that the question *"what does
-this function argument do?"* becomes **askable**; today it is not formulable at
-all, because the type has nowhere to say it.
+Measured state at the time of the ruling, corrected: in live `.sio` source
+**381 function types occur in parameter position; 165 carry an effect clause and
+216 do not** (`docs/audit/FN_TYPE_EFFECT_CLAUSE_CENSUS_2026-08-19.md`).
+
+The surface syntax already supports the ruling. `self-hosted/parser/types.sio:717`
+documents the grammar as `fn(T, U) -> V with E1, E2`, and it is used, e.g.
+
+    fn filter8(arr: [i64; 8], pred: fn(i64) -> bool with Div, Panic) -> ...
+
+So 6.0 is closer to **codifying existing practice** than to introducing a
+capability. What it makes normative is that the clause is not optional: the
+question *"what does this function argument do?"* must be answerable at every
+function type, not at 165 of 381.
+
+> **Correction, 2026-08-19.** An earlier revision of this section stated *"559
+> function types occur in live `.sio` source and not one of them declares an
+> effect"*. Both halves were wrong. 559 was a raw line count including
+> `archive/`, `bootstrap/`, comments and string literals; and the "not one" came
+> from a pattern whose return-type character class excluded the shapes that
+> actually occur. The ruling stands; the state it was ruled against was
+> misreported, by me, and the misreport made the ruling look more expensive than
+> it is.
 
 Two things follow immediately and are recorded in 6.6 rather than assumed here:
 what a function type with no effect clause means, and whether a function may
-abstract over the effects of its argument.
+abstract over the effects of its argument. The second is untouched by the
+correction above: **no effect variable occurs in live source.** The one apparent
+instance, `fn(T, U) -> V with E`, is the parser comment quoted above.
+
+`scripts/ci/fn_type_effect_ratchet_gate.sh` freezes the bare count at 216. It
+does not implement 6.0; it stops the gap from widening while 6.0 is
+unimplemented.
 
 ## 6.1 What runs
 
