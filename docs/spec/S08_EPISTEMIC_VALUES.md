@@ -62,6 +62,47 @@ observation:
   the third is the one carrying confidence. Whatever 8.5 decides about where
   provenance lives, the repository currently answers it two ways at once.
 
+### 8.2.1 The three are not three representations. They are two layers and a copy.
+
+Reading the compiler type's members closes the question the table appears to
+open. Every member of `KnowledgeTypeInfo` is `Option<...>`, and none is a
+number:
+
+| Member | What it is |
+|---|---|
+| `epsilon: Option<EpsilonBound>` | a **predicate**: `EpsilonBound { op: CompareOp, value: f64 }`, `op` ∈ {`<`, `≤`, `=`, `≥`, `>`} |
+| `validity: Option<ValidityCondition>` | a predicate with an optional expression |
+| `provenance: Option<AstProvenanceKind>` | a six-way enum: `Derived`, `Source`, `Computed`, `Literature`, `Measured`, `Input` |
+| `proof_constraints` | a list of constraints |
+
+So the compiler's `Knowledge<T>` is a **type-level claim** — predicates and
+provenance, discharged at compile time. The stdlib's `Epistemic` is a
+**value-level representation** — the numbers that flow at run time. They are not
+competing encodings of the same thing; they sit at different levels, and the
+relation between them is that `epsilon` is a **predicate the runtime variance
+must satisfy**. Bridging the two needs a coverage convention, which is what GUM
+already standardises and what `gum_k95` already computes.
+
+Two things follow, and they point in opposite directions.
+
+**In the compiler's favour.** Every member being `Option<...>` is
+`SOUNIO-NO-VERSUS-UNKNOWN` done correctly: *no epsilon was declared* is `None`,
+structurally distinct from every declared bound. The checker reinforces it with
+a sentinel outside the domain — `epistemic_epsilon: 0.0 - 1.0` (that is, `-1.0`)
+at six sites in `self-hosted/check/check.sio`. A negative epsilon is a value no
+correct bound can take, which is exactly the sentinel the concept sanctions. The
+compiler already solves for `epsilon` the problem the stdlib leaves open for
+`confidence`.
+
+**Against the examples.** Shape 3's `label: i64` is documented in-file as
+`0=measured, 1=asserted, 2=constant` — **three** tags. `AstProvenanceKind` has
+**six**, and two of the three names (`asserted`, `constant`) do not appear in it
+at all. Shape 3 is therefore not a simplification of the compiler's provenance;
+it is an **independent, smaller, differently-named provenance vocabulary**, and
+it is the vocabulary the dissertation surface uses. A value labelled `constant`
+in `darwin_epistemic_pbpk.sio` has no image in the provenance the compiler can
+reason about.
+
 Other measured facts about shape 2, which is the shape the stdlib exposes:
 
 - **Not linear.** Dropping one requires nothing.
@@ -124,11 +165,16 @@ A rule can be argued away one at a time. A definition has to be replaced whole.
 
 ## 8.5 Undefined — rulings owed
 
-- **Which of the three shapes is the epistemic value.** Measured in 8.2: the
-  compiler type, the stdlib struct and the example struct differ in members and
-  in the meaning of their third field. A specification cannot rule on the
-  invariants of a type that is declared three incompatible ways. This ruling is
-  **prior to every other ruling in 8.5** and is owed first.
+- **The layering, now that 8.2.1 has narrowed it.** The question is not "which
+  of three shapes wins" — the compiler type and the stdlib struct sit at
+  different levels and do not compete. What is owed is narrower and answerable:
+  (a) that `epsilon` is normatively a **predicate over** the runtime variance
+  rather than an alternative to it; (b) which coverage convention discharges the
+  predicate (GUM `k` is the candidate, and `gum_k95` already computes it); and
+  (c) that shape 3's three-tag `label` vocabulary is **withdrawn** in favour of
+  `AstProvenanceKind`, since two of its three tags name provenances the compiler
+  cannot represent. (c) touches the dissertation surface and is not a
+  documentation change.
 
 - **Where "no confidence claim made" lives.** Ruled 2026-08-19: `1000` is
   **certainty** and `0` is **no confidence**, so the scale `0..1000` is fully
