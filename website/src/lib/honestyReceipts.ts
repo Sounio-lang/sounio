@@ -1,7 +1,7 @@
 /**
  * Receipts for every numeral /honesty is allowed to show.
  *
- * A panel that asserts 19, or 33, or var=0.000000 without pointing at
+ * A panel that asserts 16, or 37, or var=0.000000 without pointing at
  * the measurement that produced it is the same class as an undated
  * 6/6 — only this time the lie is in HTML. This module is the index.
  * If a figure has no receipt here, it does not belong on the page.
@@ -22,12 +22,12 @@ const GH = 'https://github.com/Sounio-lang/sounio';
 export const RECEIPT = {
   pbpkSuite: {
     id: 'pbpk-suite',
-    pr: 1818,
-    sha: '2016efb8e4',
-    href: `${GH}/pull/1818`,
-    doc: 'docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md',
-    docHref: `${GH}/blob/2016efb8e4/docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md`,
-    measuredAt: '2026-08-17T22:21:35Z',
+    pr: 1914,
+    sha: '7eced5d22d',
+    href: `${GH}/pull/1914`,
+    doc: 'docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-18.md',
+    docHref: `${GH}/blob/7eced5d22d/docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-18.md`,
+    measuredAt: '2026-08-18T18:27:00Z',
   },
   /**
    * 24 FAIL / 28 PASS / 1 PEND on 2026-08-16 job 9908.
