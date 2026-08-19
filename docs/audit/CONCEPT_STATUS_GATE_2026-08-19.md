@@ -126,7 +126,7 @@ Date:   <ISO YYYY-MM-DD>
 
 | field | rule |
 |---|---|
-| **Reason** | non-empty; ≥12 chars; not vacuous (`ainda não`, `tbd`, `todo`, `n/a`, …). “The pair covers only the scalar case” is a reason. |
+| **Reason** | non-empty; ≥12 chars; not vacuous (`not yet`, `tbd`, `todo`, `n/a`, …). “The pair covers only the scalar case” is a reason. |
 | **Owner** | required signer |
 | **Date** | ISO `YYYY-MM-DD` |
 
@@ -222,7 +222,7 @@ Also backfilled `## Claims Forbidden` stubs on contracts that had Status but no 
 | D2 no Owner | EDNC with Reason+Date only | EXIT 1 `ednc_malformed missing=Owner` |
 | D3 no Date | EDNC with Reason+Owner only | EXIT 1 `ednc_malformed missing=Date` |
 | D4 no Reason | EDNC with Owner+Date only | EXIT 1 `ednc_malformed missing=Reason` |
-| D5 vacuous Reason | Reason: `ainda nao` | EXIT 1 `Reason(vacuous)` |
+| D5 vacuous Reason | Reason: `not yet` | EXIT 1 `Reason(vacuous)` |
 | D6 complete EDNC | `dyadic-nonreduction` → hypothesis + full EDNC | EXIT 0 (waiver holds) |
 | D7 visibility | two well-formed EDNCs with dates 2026-06-01 and 2026-08-01 | green prints oldest-first; Job Summary table; `ednc_active.tsv` |
 
