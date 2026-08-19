@@ -15,11 +15,14 @@ KVALUE_CONSUMER_SOURCE="formal/lean4/EpistemicEffectsV2_kvalue_nat.lean"
 KVALUE_V1_MUTANT="scripts/ci/fixtures/epistemic_measure_correspondence/v1_imports_kvalue_nat.lean"
 INKRAW_CONSUMER_SOURCE="formal/lean4/EpistemicEffectsV2_invkraw_nat.lean"
 INKRAW_V1_MUTANT="scripts/ci/fixtures/epistemic_measure_correspondence/v1_imports_invkraw_nat.lean"
+INKRAW_MG_CONSUMER_SOURCE="formal/lean4/EpistemicEffectsV2_invkraw_mg.lean"
+INKRAW_MG_V1_MUTANT="scripts/ci/fixtures/epistemic_measure_correspondence/v1_imports_invkraw_mg.lean"
 ARTIFACT="${TMPDIR:-/tmp}/epistemic_measure_correspondence_gate.v1.json"
 RUN_POSITIVE_CONTROLS=1
 LEAN_CONSUME=0
 LEAN_CONSUME_KVALUE=0
 LEAN_CONSUME_INKRAW=0
+LEAN_CONSUME_INKRAW_MG=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     --lean-consume) LEAN_CONSUME=1; shift ;;
     --lean-consume-kvalue) LEAN_CONSUME_KVALUE=1; shift ;;
     --lean-consume-invkraw) LEAN_CONSUME_INKRAW=1; shift ;;
+    --lean-consume-invkraw-mg) LEAN_CONSUME_INKRAW_MG=1; shift ;;
     *) echo "epistemic_measure_correspondence_gate: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -312,6 +316,66 @@ run_lean_consume_invkraw() {
   echo "[epistemic-correspondence] V2_CONSUMED: EpistemicEffectsV2_invkraw_nat built"
 }
 
+run_lean_consume_invkraw_mg() {
+  local lean_dir="$ROOT_DIR/formal/lean4"
+  if ! command -v lake >/dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
+    record_failure "lake_missing"
+    return
+  fi
+
+  check_grep "invkraw_mg_consumer_imports_v2" \
+    '^import EpistemicEffectsV2$' "$INKRAW_MG_CONSUMER_SOURCE"
+  check_absent "invkraw_mg_consumer_must_not_import_v1_directly" \
+    '^import EpistemicEffects$' "$INKRAW_MG_CONSUMER_SOURCE"
+  check_grep "invkraw_mg_consumer_cites_invKraw" \
+    'invKraw hk rfl' "$INKRAW_MG_CONSUMER_SOURCE"
+  check_grep "invkraw_mg_consumer_names_the_propagation_witness" \
+    '^theorem kraw_mg_inverts_and_is_usable$' "$INKRAW_MG_CONSUMER_SOURCE"
+  check_grep "invkraw_mg_consumer_uses_tmg" \
+    '\.tknow \.tmg' "$INKRAW_MG_CONSUMER_SOURCE"
+  check_grep "invkraw_mg_v1_mutant_imports_v1" \
+    '^import EpistemicEffects$' "$INKRAW_MG_V1_MUTANT"
+  check_absent "invkraw_mg_v1_mutant_must_not_import_v2" \
+    '^import EpistemicEffectsV2$' "$INKRAW_MG_V1_MUTANT"
+  check_grep "invkraw_mg_v1_mutant_attempts_the_same_theorem" \
+    '^theorem kraw_mg_inverts_and_is_usable$' "$INKRAW_MG_V1_MUTANT"
+  check_grep "invkraw_mg_v1_mutant_uses_tmg" \
+    '\.tknow \.tmg' "$INKRAW_MG_V1_MUTANT"
+
+  if ! (cd "$lean_dir" && lake build EpistemicEffects) \
+      >"$WORK/lake-v1-invkraw-mg.log" 2>&1; then
+    TOTAL=$((TOTAL + 1)); FAILED=$((FAILED + 1))
+    record_failure "lake_build_v1_failed"
+    sed 's/^/[lake-v1] /' "$WORK/lake-v1-invkraw-mg.log" >&2
+    return
+  fi
+
+  # Arm 3 FIRST. If this mutant elaborates, arm 2 is measuring mention.
+  TOTAL=$((TOTAL + 1))
+  if (cd "$lean_dir" && lake env lean "$ROOT_DIR/$INKRAW_MG_V1_MUTANT") \
+      >"$WORK/v1-invkraw-mg-mutant.log" 2>&1; then
+    FAILED=$((FAILED + 1))
+    record_failure "positive_control_v1_import_invkraw_mg_was_not_rejected"
+    sed 's/^/[v1-invkraw-mg-mutant] /' "$WORK/v1-invkraw-mg-mutant.log" >&2
+    return
+  fi
+  PASSED=$((PASSED + 1))
+  echo "[epistemic-correspondence] POSITIVE_CONTROL_FIRED: v1_imports_invkraw_mg rejected"
+  sed 's/^/[v1-invkraw-mg-mutant] /' "$WORK/v1-invkraw-mg-mutant.log"
+
+  TOTAL=$((TOTAL + 1))
+  if ! (cd "$lean_dir" && lake build EpistemicEffectsV2_invkraw_mg) \
+      >"$WORK/lake-invkraw-mg-consumer.log" 2>&1; then
+    FAILED=$((FAILED + 1))
+    record_failure "v2_invkraw_mg_consumer_failed_to_build"
+    sed 's/^/[lake-invkraw-mg-consumer] /' "$WORK/lake-invkraw-mg-consumer.log" >&2
+    return
+  fi
+  PASSED=$((PASSED + 1))
+  echo "[epistemic-correspondence] V2_CONSUMED: EpistemicEffectsV2_invkraw_mg built"
+}
+
 if [[ "$LEAN_CONSUME" -eq 1 ]]; then
   if [[ ! -f "$CONSUMER_SOURCE" ]]; then
     TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
@@ -340,7 +404,7 @@ if [[ "$LEAN_CONSUME_KVALUE" -eq 1 && "$LEAN_CONSUME" -eq 0 ]]; then
   fi
 fi
 
-if [[ "$LEAN_CONSUME_INKRAW" -eq 1 && "$LEAN_CONSUME" -eq 0 && "$LEAN_CONSUME_KVALUE" -eq 0 ]]; then
+if [[ "$LEAN_CONSUME_INKRAW" -eq 1 && "$LEAN_CONSUME" -eq 0 && "$LEAN_CONSUME_KVALUE" -eq 0 && "$LEAN_CONSUME_INKRAW_MG" -eq 0 ]]; then
   if [[ ! -f "$INKRAW_CONSUMER_SOURCE" ]]; then
     TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
     record_failure "invkraw_consumer_source_missing:$INKRAW_CONSUMER_SOURCE"
@@ -354,7 +418,21 @@ if [[ "$LEAN_CONSUME_INKRAW" -eq 1 && "$LEAN_CONSUME" -eq 0 && "$LEAN_CONSUME_KV
   fi
 fi
 
-if [[ "$RUN_POSITIVE_CONTROLS" -eq 1 && "$NOT_RUN" -eq 0 && "$LEAN_CONSUME" -eq 0 && "$LEAN_CONSUME_KVALUE" -eq 0 && "$LEAN_CONSUME_INKRAW" -eq 0 ]]; then
+if [[ "$LEAN_CONSUME_INKRAW_MG" -eq 1 && "$LEAN_CONSUME" -eq 0 && "$LEAN_CONSUME_KVALUE" -eq 0 && "$LEAN_CONSUME_INKRAW" -eq 0 ]]; then
+  if [[ ! -f "$INKRAW_MG_CONSUMER_SOURCE" ]]; then
+    TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
+    record_failure "invkraw_mg_consumer_source_missing:$INKRAW_MG_CONSUMER_SOURCE"
+  fi
+  if [[ ! -f "$INKRAW_MG_V1_MUTANT" ]]; then
+    TOTAL=$((TOTAL + 1)); NOT_RUN=$((NOT_RUN + 1))
+    record_failure "invkraw_mg_v1_mutant_missing:$INKRAW_MG_V1_MUTANT"
+  fi
+  if [[ "$NOT_RUN" -eq 0 ]]; then
+    run_lean_consume_invkraw_mg
+  fi
+fi
+
+if [[ "$RUN_POSITIVE_CONTROLS" -eq 1 && "$NOT_RUN" -eq 0 && "$LEAN_CONSUME" -eq 0 && "$LEAN_CONSUME_KVALUE" -eq 0 && "$LEAN_CONSUME_INKRAW" -eq 0 && "$LEAN_CONSUME_INKRAW_MG" -eq 0 ]]; then
   CHECKER_MUTANT="scripts/ci/fixtures/epistemic_measure_correspondence/checker_fixed_f64.sio"
   MODEL_MUTANT="scripts/ci/fixtures/epistemic_measure_correspondence/model_fixed_treal.lean"
 

@@ -36,6 +36,7 @@ def kvalid (m : KMeta) : Prop := 0 ≤ m.gumVar ∧ 0 ≤ m.conf ∧ m.conf ≤ 
 inductive Expr where
   | lit_nat  : Nat → Expr
   | lit_real : Int → Expr
+  | lit_mg   : Int → Expr    -- milligram quantity; integer scale, like lit_real
   | var      : Nat → Expr
   | lam      : Ty → EffectSet → Expr → Expr
   | app      : Expr → Expr → Expr
@@ -52,6 +53,7 @@ inductive Expr where
 inductive IsValue : Expr → Prop where
   | v_nat   : ∀ n, IsValue (.lit_nat n)
   | v_real  : ∀ z, IsValue (.lit_real z)
+  | v_mg    : ∀ z, IsValue (.lit_mg z)
   | v_lam   : ∀ T E e, IsValue (.lam T E e)
   | v_kraw  : ∀ {v} m, IsValue v → IsValue (.kraw v m)
 
@@ -59,6 +61,7 @@ inductive IsValue : Expr → Prop where
 inductive HasTy : TyCtx → Expr → Ty → EffectSet → Prop where
   | t_lit_nat  : ∀ Γ n, HasTy Γ (.lit_nat n) .tnat emptyE
   | t_lit_real : ∀ Γ z, HasTy Γ (.lit_real z) .treal emptyE
+  | t_lit_mg   : ∀ Γ z, HasTy Γ (.lit_mg z) .tmg emptyE
   | t_var      : ∀ Γ n T, lookupCtx Γ n = some T → HasTy Γ (.var n) T emptyE
   | t_lam      : ∀ Γ T₁ T₂ E body,
       HasTy (T₁ :: Γ) body T₂ E → HasTy Γ (.lam T₁ E body) (.tarrow T₁ E T₂) emptyE
@@ -104,6 +107,7 @@ def shift (cutoff : Nat) (d : Int) : Expr → Expr
         | .negSucc dn => .var (k - (dn + 1))
   | .lit_nat n => .lit_nat n
   | .lit_real z => .lit_real z
+  | .lit_mg z => .lit_mg z
   | .lam T E b => .lam T E (shift (cutoff + 1) d b)
   | .app f a => .app (shift cutoff d f) (shift cutoff d a)
   | .measure e m => .measure (shift cutoff d e) m
@@ -119,6 +123,7 @@ def subst (n : Nat) (w : Expr) : Expr → Expr
   | .var k => if k = n then w else if k > n then .var (k - 1) else .var k
   | .lit_nat m => .lit_nat m
   | .lit_real z => .lit_real z
+  | .lit_mg z => .lit_mg z
   | .lam T E b => .lam T E (subst (n + 1) (shift 0 1 w) b)
   | .app f a => .app (subst n w f) (subst n w a)
   | .measure e m => .measure (subst n w e) m
@@ -172,6 +177,12 @@ theorem genReal {Γ e T E} (h : HasTy Γ e T E) {z} (he : e = .lit_real z) : T =
   | t_sub _ _ _ _ _ _ _ ih => exact ih he
   | _ => exact Expr.noConfusion he
 
+theorem genMg {Γ e T E} (h : HasTy Γ e T E) {z} (he : e = .lit_mg z) : T = .tmg := by
+  induction h with
+  | t_lit_mg => rfl
+  | t_sub _ _ _ _ _ _ _ ih => exact ih he
+  | _ => exact Expr.noConfusion he
+
 theorem genLam {Γ e T E S F b} (h : HasTy Γ e T E) (he : e = .lam S F b) :
     ∃ T₂, T = .tarrow S F T₂ := by
   induction h with
@@ -201,6 +212,7 @@ theorem canon_arrow {v S F T₂ E} (hv : IsValue v) (ht : HasTy [] v (.tarrow S 
   cases hv with
   | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
   | v_real z => exact Ty.noConfusion (genReal ht rfl)
+  | v_mg z => exact Ty.noConfusion (genMg ht rfl)
   | v_lam T E0 e0 => exact ⟨T, E0, e0, rfl⟩
   | @v_kraw w m hp => rcases genKraw ht rfl with ⟨T', hT⟩; exact Ty.noConfusion hT
 
@@ -210,6 +222,7 @@ theorem canon_know {v T E} (hv : IsValue v) (ht : HasTy [] v (.tknow T) E) :
   | @v_kraw w m hp => exact ⟨w, m, rfl⟩
   | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
   | v_real z => exact Ty.noConfusion (genReal ht rfl)
+  | v_mg z => exact Ty.noConfusion (genMg ht rfl)
   | v_lam T0 E0 e0 => rcases genLam ht rfl with ⟨T₂, hT⟩; exact Ty.noConfusion hT
 
 theorem canon_real {v E} (hv : IsValue v) (ht : HasTy [] v .treal E) :
@@ -217,6 +230,7 @@ theorem canon_real {v E} (hv : IsValue v) (ht : HasTy [] v .treal E) :
   cases hv with
   | v_real z => exact ⟨z, rfl⟩
   | v_nat n  => exact Ty.noConfusion (genNat ht rfl)
+  | v_mg z => exact Ty.noConfusion (genMg ht rfl)
   | v_lam T0 E0 e0 => rcases genLam ht rfl with ⟨T₂, hT⟩; exact Ty.noConfusion hT
   | @v_kraw w m hp => rcases genKraw ht rfl with ⟨T', hT⟩; exact Ty.noConfusion hT
 
@@ -225,6 +239,7 @@ theorem progress' {Γ e T E} (h : HasTy Γ e T E) (hΓ : Γ = []) :
   induction h with
   | t_lit_nat Γ n => exact Or.inl (.v_nat n)
   | t_lit_real Γ z => exact Or.inl (.v_real z)
+  | t_lit_mg Γ z => exact Or.inl (.v_mg z)
   | t_var Γ n T hlk => subst hΓ; simp [lookupCtx] at hlk
   | t_lam Γ T₁ T₂ E body _ => exact Or.inl (.v_lam _ _ _)
   | t_app Γ T₁ T₂ Ef Ec Ecaller f a hf ha _ _ ihf iha =>
@@ -310,6 +325,7 @@ theorem shift_value {v} (hv : IsValue v) : ∀ c d, IsValue (shift c d v) := by
   induction hv with
   | v_nat n => intro c d; exact .v_nat n
   | v_real z => intro c d; exact .v_real z
+  | v_mg z => intro c d; exact .v_mg z
   | v_lam T E e => intro c d; exact .v_lam _ _ _
   | v_kraw m hp ih => intro c d; exact .v_kraw m (ih c d)
 
@@ -317,6 +333,7 @@ theorem subst_value {w} (hw : IsValue w) : ∀ n u, IsValue (subst n u w) := by
   induction hw with
   | v_nat n => intro n' u; exact .v_nat n
   | v_real z => intro n' u; exact .v_real z
+  | v_mg z => intro n' u; exact .v_mg z
   | v_lam T E e => intro n' u; exact .v_lam _ _ _
   | v_kraw m hp ih => intro n' u; exact .v_kraw m (ih n' u)
 
@@ -367,6 +384,7 @@ theorem wellScoped {Γ e T E} (h : HasTy Γ e T E) :
   induction h with
   | t_lit_nat => intro c d _; rfl
   | t_lit_real => intro c d _; rfl
+  | t_lit_mg => intro c d _; rfl
   | t_var Γ n T hlk =>
     intro c d hc
     have hn : n < Γ.length := lookup_some_lt hlk
@@ -422,6 +440,7 @@ theorem weakening {Γ e T E} (h : HasTy Γ e T E) :
   induction h with
   | t_lit_nat Γ n => intro k τ; exact .t_lit_nat _ _
   | t_lit_real Γ z => intro k τ; exact .t_lit_real _ _
+  | t_lit_mg Γ z => intro k τ; exact .t_lit_mg _ _
   | t_var Γ n T hlk =>
     intro k τ
     by_cases hnk : n < k
@@ -496,6 +515,7 @@ theorem value_emptyE {Γ v T E} (hv : IsValue v) (h : HasTy Γ v T E) :
   cases hv with
   | v_nat n => rw [genNat h rfl]; exact .t_lit_nat _ _
   | v_real z => rw [genReal h rfl]; exact .t_lit_real _ _
+  | v_mg z => rw [genMg h rfl]; exact .t_lit_mg _ _
   | v_lam S F b => rcases invLam h rfl with ⟨T₂, hT, hb⟩; subst hT; exact .t_lam _ _ _ _ _ hb
   | @v_kraw w m hp =>
     rcases invKraw h rfl with ⟨T', hT, hwty, hwval, hk⟩; subst hT
@@ -506,6 +526,7 @@ theorem substClosed {v σ} (hv : HasTy [] v σ emptyE) {Γ0 e T E} (h : HasTy Γ
   induction h with
   | t_lit_nat Γ' n => intro Δ hΓ; exact .t_lit_nat _ _
   | t_lit_real Γ' z => intro Δ hΓ; exact .t_lit_real _ _
+  | t_lit_mg Γ' z => intro Δ hΓ; exact .t_lit_mg _ _
   | t_var Γ' n T' hlk =>
     intro Δ hΓ; subst hΓ
     by_cases h1 : n = Δ.length
@@ -561,6 +582,7 @@ theorem preservation' {Γ e T E} (h : HasTy Γ e T E) :
   induction h with
   | t_lit_nat Γ n => intro e' hs hΓ; cases hs
   | t_lit_real Γ z => intro e' hs hΓ; cases hs
+  | t_lit_mg Γ z => intro e' hs hΓ; cases hs
   | t_var Γ n T hlk => intro e' hs hΓ; cases hs
   | t_lam Γ T₁ T₂ E body _ => intro e' hs hΓ; cases hs
   | t_app Γ T₁ T₂ Ef Ec Ecaller f a hf ha hEf hEc ihf iha =>
