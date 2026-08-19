@@ -114,6 +114,24 @@ mut       unsafe
 with      handle    on        resume    perform
 ```
 
+> **Measured 2026-08-19 — two of these tables are wrong, and one entry is
+> reserved against itself.** Each word was tested as an identifier
+> (`let <word> = 1`); a reserved word cannot be one. Both engines agree.
+>
+> | word | listed as | measured |
+> |---|---|---|
+> | `own` | type keyword | **not reserved** — compiles as an identifier |
+> | `handle` | effect keyword | **not reserved** — compiles as an identifier; it is *contextual*, recognised in the `handle<IO> { … }` position §7.3 measures |
+> | `mut` | type keyword | reserved, but refused **by design**: `error[E040]: Sounio uses \`var\` for mutable bindings, not \`let mut\`` |
+>
+> `mut` is reserved to teach against, not to use, so listing it beside `linear`
+> and `where` reads as an endorsement of a form the compiler exists to refuse.
+> The remaining ten refuse as parse failures and are reserved as documented.
+> `perform` is reserved on Madaros but resolves as an ordinary identifier under
+> `lean_single`, which reports `error[E200]: undefined identifier` — see
+> §7.3.4 in `S07_EFFECT_HANDLERS.md`.
+
+
 **Literal keywords:**
 ```
 true      false
