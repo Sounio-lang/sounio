@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.epistemic-calculus-spec-divergence.dispatch
 authority: repo_only
 audience: users
-last_validated: 2026-08-18
+last_validated: 2026-08-19
 validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemic-calculus-spec-divergence.dispatch
 -->
@@ -256,10 +256,30 @@ operation is either consumed or classified as a hole/glue.
 | GUM `+` `*` | `ty_knowledge(left_inner, …)` | Hole — V2 pins Real, checker keeps `T` | Do not consume; see R3-adjacent |
 | Progress, weakening, lookup, shift, `int_sq_nonneg`, `gAddMeta_valid` | none | Glue | Do not consume |
 
-After round 3 the discriminating set is empty. The leftover 26
-theorems and `v_real` are not a backlog. 3 of 4 `IsValue` is the
-measurement; 4 of 4 is not the stop. If a later consumer is proposed
-and its V1 mutant elaborates, that is the signal to stop, not to
+**Conclusion — discriminating set empty.** Fraction beside it:
+**2/28** theorems, **7/14** `HasTy`, **2/19** `Step`, **3/4**
+`IsValue`. Read 2/28 without that sentence and it looks like 93% is
+missing. The other 26 theorems are ones any implementation would
+satisfy. They do not separate V2 from V1. Three consumers exhausted
+the surfaces that do. This is a stop by measurement, not by fatigue,
+and it is not "V2 is covered": it is "the next Nat-shaped client
+would not discriminate".
+
+**What would make the discriminating set non-empty again.** Not a
+fourth `Knowledge<Nat>` consumer. Either:
+
+1. A **new proposition in V2** whose V1 mutant fails for a
+   payload/Real reason (a new rule, a new inversion, a new
+   operational clause). Glue added tomorrow is still glue.
+2. A **client that uses `Knowledge` at a type other than Nat.**
+   The checker is generic (`ty_knowledge(v_ty)`). We only consumed
+   Nat. That second case is the next round, and it already has a
+   name: `Knowledge<T>` for `T ≠ Nat` — the inverted V1 witness at a
+   payload the language actually ships (a unit type in the spec,
+   `Knowledge<mg>`, not another literal `0 : Nat`).
+
+Until one of those appears, do not add a consumer. If a proposed
+client's V1 mutant elaborates, that is the signal to stop, not to
 weaken the mutant.
 
 **Landed (consumer 3).** `EpistemicEffectsV2_invkraw_nat.lean` cites
@@ -375,9 +395,10 @@ consume `kadd` as if it were the next coverage target.
    an import edge, not metatheory coverage. After consumer 3 the
    fraction is **2 of 28** named theorems (`preservation`, `invKraw`),
    **7 of 14** `HasTy`, **2 of 19** `Step`, **3 of 4** `IsValue`.
-   The discriminating set in §5 R1 is empty. Stop there, not at 28/28
-   or 4/4. Spine extraction stays deferred until one of the three end
-   conditions in §5 R1, not until N consumers.
+   The discriminating set in §5 R1 is empty (2/28 is not "93% left").
+   It re-opens only on a new V2 proposition or a `Knowledge<T>` client
+   with `T ≠ Nat`. Spine extraction stays deferred until one of the
+   three end conditions in §5 R1 — none has fired.
 2. `Lean Proofs` green, with V1, V2, `EpistemicEffectsV2_measure_nat`,
    `EpistemicEffectsV2_kvalue_nat`, and `EpistemicEffectsV2_invkraw_nat`
    all `@[default_target]`. Deleting
