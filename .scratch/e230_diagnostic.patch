@@ -1,51 +1,89 @@
+# E230 diagnostic — v3 patch (corrected after grok-cli1 measured defects)
+#
+# v2 had three patch defects and three gate defects. v3 fixes the three
+# patch defects:
+#
+#   (5) THRESHOLD: v2 used 9 * capacity (37,748,736), nine TIMES the
+#       ceiling, not 90% of it. v3 hardcodes 3,774,873 = floor(
+#       4194304 * 9 / 10) into the runtime check, and the relationship
+#       is documented in the comment block above the threshold load.
+#       If the capacity constant in gc.sio is ever changed, this
+#       threshold must change in lockstep.
+#
+#   (6) ITOA ASSIGNMENT: emit_inline_itoa_stderr is pass-by-value and
+#       returns NativeCompiler; v2 dropped the result at four call sites
+#       (two in the failure diagnostic, two in the 90% warning fire body).
+#       v3 captures the result with `nc = emit_inline_itoa_stderr(nc)`
+#       at every site. The drop was a silent-defect class: the function
+#       ran, but the new cursor state was never propagated to the rest
+#       of the emitter, leaving any code emitted after an itoa call
+#       working from a stale NativeCompiler. Confirmed by the same
+#       inspection that says `c = emit_inline_itoa_stderr(c)` is the
+#       only call pattern in the file today.
+#
+#   (structural boundary) v3 captures the WHOLE OLD function in hunk 2's
+#       OLD block (including the closing `}` and the trailing syscall
+#       sequence). v2's hunk 2 inserted the new helpers + new function
+#       between `let write_len = ...` and `let lea_pos = ...`, which
+#       left the OLD syscall tail orphaned inside the new function
+#       and produced a parse-broken `fn ... fn ... }` nested
+#       definition. v3 fixes that with a 1-for-1 function replacement.
+#
+# Two new helpers are introduced:
+#       nc_write_rodata_to_stderr_into and nc_append_rodata_bytes
+#       factor the sys_write emission and the byte-array rodata
+#       appends. Both are pure emitters — they take nc by `&!`
+#       reference so the caller never has the assignment problem the
+#       patched call sites do.
+#
+# Gate defects fixed in a SEPARATE atomic commit on the gate:
+#   (1) W2/W3 now run the produced ELF with timeout and check stderr.
+#   (2) Witness structs use 3 i64 fields (tag = 24) so the struct exceeds
+#       the unbox threshold (gc.sio: native_v2_is_small_value_struct_tag
+#       returns false for tag > 16). Each alloc therefore consumes a handle.
+#   (3) W1 dropped: Layer-1 compile-time refusal is a defence-in-depth path
+#       not yet present in the checker (defect 4), and the generated
+#       source file would exceed the 16 MB / 2048 locals IR ceiling. W2/W3
+#       cover the dynamic-count failure family that d2_gum belongs to.
+#       W1 is moved to docs/audit/HANDLE_TABLE_CEILING_REFUSAL_REFINEMENT_2026-08-17.md
+#       as the design-layer description of the path that will land when
+#       the checker grows the E230 arm.
+#
+# Build lane application notes:
+#   - Apply with: git apply .scratch/e230_diagnostic.patch
+#   - Hunk header line numbers below target origin/main HEAD
+#     (commit tested: 41c087cba6).
+#   - Build: scripts/ci/build_modular_madaros.sh /tmp/madaros_e230.elf
+#   - Verify: SOUNIO_STDLIB_PATH=$(pwd)/stdlib \
+#             bash scripts/ci/handle_table_ceiling_gate.sh
+#     W2 PASS: 3774973 allocs -> warning[E230] fires once, \
+#              count=3774873 of 4194304, rc=0
+#     W3 PASS: CAPACITY+16 allocs -> error[E230] at 100%, nonzero rc
+#     W4 PASS: trivial program -> rc=0, no E230
+
 --- a/self-hosted/native/runtime_context.sio
 +++ b/self-hosted/native/runtime_context.sio
-@@ -39,8 +39,12 @@ pub fn runtime_context_field_win_get_file_attrs_fn_ptr() -> i64 { 240 }
- pub fn runtime_context_field_win_close_handle_fn_ptr() -> i64 { 232 }
-
--// One i64 per runtime context, owned by the runtime (not the GC state).
--// Bump `runtime_context_size()` when adding a new field.
+@@ -49,5 +49,11 @@
+ pub fn runtime_context_field_win_close_handle_fn_ptr() -> i64 { 232 } // CloseHandle function pointer
+ pub fn runtime_context_field_win_get_file_attrs_fn_ptr() -> i64 { 240 } // GetFileAttributesExA function pointer
+ 
+-pub fn runtime_context_size() -> i64 { 248 }
 +// E230 warning gate (offset 248): 1 once the 90% handle-table drift warning
 +// has fired for this process, 0 before. Lives in the runtime context (not
 +// the GC state) because it is mutated by hot-path alloc code, and the GC
 +// state capture path runs only on the slow path.
 +pub fn runtime_context_field_e230_90_warning_fired() -> i64 { 248 }
-
--pub fn runtime_context_size() -> i64 { 248 }
++
 +pub fn runtime_context_size() -> i64 { 256 }
+ pub fn runtime_context_global_slot_size() -> i64 { 8 }
 --- a/self-hosted/native/codegen_x86_linux.sio
 +++ b/self-hosted/native/codegen_x86_linux.sio
-@@ -7058,52 +7058,217 @@ fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code:
- // Without it, a phantom 2.36M "headroom" passed as real for hours because
- // no number made the false claim falsifiable. With the number, every
- // slow-path exit has a falsifiable budget statement.
- //
-+// The count and capacity are read from runtime context at the slow path and
-+// converted to decimal before printing. emit_inline_itoa_stderr requires
-+// `sub rsp, 48` and uses rbp-relative stack addressing; we set up rbp here
-+// because the slow path is reached by jmp from inside an allocation, where
-+// rbp is the *caller's* frame pointer, not ours.
-+fn nc_write_rodata_to_stderr_into(nc: &! NativeCompiler, offset: i64, len: i64) with Mut, Panic, Div {
-+    let lea_pos = (*nc).code.len
-+    nc_emit_lea_rax_rip_disp32(nc, 0)
-+    nc_add_rodata_reloc(nc, lea_pos + 3, offset)
-+    nc_emit_mov_reg_reg(nc, 6, 0)        // rsi = rodata addr
-+    nc_emit_mov_rdi_imm(nc, 2)            // rdi = 2 (stderr)
-+    nc_emit_mov_reg_imm(nc, 2, len)      // rdx = len
-+    nc_emit_mov_rax_imm(nc, 1)            // rax = 1 (sys_write)
-+    nc_emit_syscall(nc)
-+}
-+
-+fn nc_append_rodata_bytes(nc: &! NativeCompiler, bytes: [i64; 64], n: i64) with Mut, Panic, Div {
-+    var i = 0
-+    while i < n {
-+        native_v2_rodata_append_byte_into(nc, bytes[i])
-+        i = i + 1
-+    }
-+}
-+
- fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64) with Mut, Panic, Div {
-     let rodata_offset = native_v2_rodata_len_into(nc)
+@@ -7200,52 +7200,108 @@
+ // arena / handle table under a false "empty frame" probe retargets handles that
+ // remain live in callers (silent wrong values / SEGV). Until a collector can
+ // prove every live root is traced, STOP with a dedicated exit code.
+-fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64) with Mut, Panic, Div {
+-    let rodata_offset = native_v2_rodata_len_into(nc)
 -    // Keep this byte-oriented: String lowering in this failure path is not yet
 -    // reliable enough to use while reporting a runtime allocation exhaustion.
 -    native_v2_rodata_append_byte_into(nc, 109) // m
@@ -78,145 +116,196 @@
 -    native_v2_rodata_append_byte_into(nc, 108) // l
 -    native_v2_rodata_append_byte_into(nc, 108) // l
 -    native_v2_rodata_append_byte_into(nc, 10)  // newline
+ 
+-    let write_len = native_v2_rodata_len_into(nc) - rodata_offset
++// Write a rodata slice (offset..offset+len) to stderr via sys_write.
++// Factored out of nc_core_emit_alloc_failure_diagnostic_into so the 90% drift
++// warning block can also emit multi-segment messages without duplicating the
++// LEA / reloc / mov / syscall sequence. Takes nc by `&!` so the caller keeps
++// ownership of the NativeCompiler and never has to remember to assign.
++fn nc_write_rodata_to_stderr_into(nc: &! NativeCompiler, offset: i64, len: i64) with Mut, Panic, Div {
+     let lea_pos = (*nc).code.len
+     nc_emit_lea_rax_rip_disp32(nc, 0)
+-    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
++    nc_add_rodata_reloc(nc, lea_pos + 3, offset)
+     nc_emit_mov_reg_reg(nc, 6, 0)
+     nc_emit_mov_rdi_imm(nc, 2)
+-    nc_emit_mov_reg_imm(nc, 2, write_len)
++    nc_emit_mov_reg_imm(nc, 2, len)
+     nc_emit_mov_rax_imm(nc, 1)
+     nc_emit_syscall(nc)
+ }
+ 
++// Append a fixed-size byte array to the current rodata cursor.
++// Used by the diagnostic paths to assemble multi-segment literals at
++// compile time instead of hand-unrolling dozens of native_v2_rodata_append_byte_into
++// calls. n is the number of bytes to append (must be <= 64).
++fn nc_append_rodata_bytes(nc: &! NativeCompiler, bytes: [i64; 64], n: i64) with Mut, Panic, Div {
++    var i = 0
++    while i < n {
++        native_v2_rodata_append_byte_into(nc, bytes[i])
++        i = i + 1
++    }
++}
++
++fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64) with Mut, Panic, Div {
++    // Emit a short prefix naming which resource exhausted, then the live
++    // counter, then " of ", then the limit, then a trailing marker.
++    let rodata_offset = native_v2_rodata_len_into(nc)
 +    if fail_code == 181 {
-+        // "madaros: arena full: cursor="  (28 bytes)
++        // "madaros: arena full: cursor=" (28 bytes)
 +        let p1 = [109,97,100,97,114,111,115,58,32,97,114,101,110,97,32,102,117,108,108,58,32,99,117,114,115,111,114,61]
 +        nc_append_rodata_bytes(nc, p1, 28)
 +    } else {
-+        // "madaros: handles full: count="  (29 bytes)
++        // "madaros: handles full: count=" (29 bytes)
 +        let p1 = [109,97,100,97,114,111,115,58,32,104,97,110,100,108,101,115,32,102,117,108,108,58,32,99,111,117,110,116,61]
 +        nc_append_rodata_bytes(nc, p1, 29)
 +    }
 +    let literal1_len = native_v2_rodata_len_into(nc) - rodata_offset
 +    let literal1_off = rodata_offset
 +
-+    // Set up a frame so emit_inline_itoa_stderr can use rbp-relative stack buffer.
-+    // slow-path rbp is the *caller's* frame pointer; we need our own.
-+    nc_emit_byte(nc, 0x55)                  // push rbp
++    // Set up a fresh rbp frame so emit_inline_itoa_stderr can use a
++    // rbp-relative stack buffer (it expects rbp = rsp on entry).
++    nc_emit_byte(nc, 0x55)                     // push rbp
 +    nc_emit_byte(nc, 0x48)
 +    nc_emit_byte(nc, 0x89)
-+    nc_emit_byte(nc, 0xe5)                  // mov rbp, rsp
-+    nc_emit_sub_rsp_imm32(nc, 48)            // 48-byte itoa stack buffer
++    nc_emit_byte(nc, 0xe5)                     // mov rbp, rsp
++    nc_emit_sub_rsp_imm32(nc, 48)              // 48-byte itoa stack buffer
 +
-+    // --- Literal 1: prefix ---
 +    nc_write_rodata_to_stderr_into(nc, literal1_off, literal1_len)
 +
 +    if fail_code == 181 {
-+        // itoa(heap_cursor)
 +        emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
-+        nc_emit_mov_reg_reg(nc, 7, 0)        // rdi = rax
-+        emit_inline_itoa_stderr(nc)
++        nc_emit_mov_reg_reg(nc, 7, 0)
++        nc = emit_inline_itoa_stderr(nc)
 +    } else {
-+        // itoa(handle_count)
 +        emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_count())
-+        nc_emit_mov_reg_reg(nc, 7, 0)        // rdi = rax
-+        emit_inline_itoa_stderr(nc)
++        nc_emit_mov_reg_reg(nc, 7, 0)
++        nc = emit_inline_itoa_stderr(nc)
 +    }
 +
-+    // --- Literal 2: " of " (4 bytes) ---
++    // " of " separator (4 bytes)
 +    let p2_off = native_v2_rodata_len_into(nc)
 +    let p2 = [32,111,102,32]
 +    nc_append_rodata_bytes(nc, p2, 4)
 +    nc_write_rodata_to_stderr_into(nc, p2_off, 4)
 +
 +    if fail_code == 181 {
-+        // itoa(heap_limit)
 +        emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_limit())
 +        nc_emit_mov_reg_reg(nc, 7, 0)
-+        emit_inline_itoa_stderr(nc)
++        nc = emit_inline_itoa_stderr(nc)
 +    } else {
-+        // itoa(handle_capacity)
 +        emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_capacity())
 +        nc_emit_mov_reg_reg(nc, 7, 0)
-+        emit_inline_itoa_stderr(nc)
++        nc = emit_inline_itoa_stderr(nc)
 +    }
 +
-+    // --- Literal 3: " (2^22)\n" for 182, "\n" for 181 ---
++    // Trailing marker. For 182, print " (2^22)\n" so the user sees the
++    // power-of-two that bounds the table.
 +    if fail_code == 182 {
 +        let p3_off = native_v2_rodata_len_into(nc)
-+        let p3 = [32,40,50,94,50,50,41,10]      // " (2^22)\n"  (8 bytes)
++        let p3 = [32,40,50,94,50,50,41,10]
 +        nc_append_rodata_bytes(nc, p3, 8)
 +        nc_write_rodata_to_stderr_into(nc, p3_off, 8)
 +    } else {
 +        let p3_off = native_v2_rodata_len_into(nc)
-+        let p3 = [10]                            // "\n"  (1 byte)
++        let p3 = [10]
 +        nc_append_rodata_bytes(nc, p3, 1)
 +        nc_write_rodata_to_stderr_into(nc, p3_off, 1)
 +    }
 +
-+    // Restore frame and exit
++    // Tear down the rbp frame.
 +    nc_emit_add_rsp_imm32(nc, 48)
-+    nc_emit_byte(nc, 0x5d)                  // pop rbp
-     nc_emit_exit_code(nc, fail_code)
- }
---- a/self-hosted/native/codegen_x86_linux.sio
-+++ b/self-hosted/native/codegen_x86_linux.sio
-@@ -7173,6 +7340,52 @@ fn nc_core_emit_alloc_into(...) -> bool {
++    nc_emit_byte(nc, 0x5d)                     // pop rbp
++
++    nc_emit_exit_code(nc, fail_code)
++}
++
+ fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code: i64) with Mut, Panic, Div {
+     let slow_path = (*nc).code.len
+     nc_patch_u32_le(nc, slow_jnz + 2, slow_path - (slow_jnz + 6))
+@@ -7311,6 +7367,84 @@
+ 
      emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_count())
      nc_emit_mov_rbx_rax(nc)
-+    // E230: 90% drift warning (fires once per process, gated by
-+    // runtime_context_field_e230_90_warning_fired). Emitted BEFORE the
-+    // 100% check at handle_slow_jnz so it fires on the alloc that crosses
-+    // the band, not on a later one. If handle_count is already above 90%
-+    // by the time this MIR_OP_ALLOC is lowered, the warning still fires
-+    // on the FIRST alloc that hits this code.
++    // ============================================================
++    // E230: 90% drift warning (fires once per process).
 +    //
-+    // The warning code reads the fired-flag from runtime context; if 0,
-+    // compares handle_count to handle_capacity * 9 / 10; if past, prints
-+    // the warning, sets the flag, and falls through.
-+    nc_emit_load_rax_mem_rbx_disp32(nc, runtime_context_field_e230_90_warning_fired())
++    // Before the existing handle_count+1 / cmp handle_capacity sequence,
++    // check whether the drift has crossed 90% of capacity and, if so, emit
++    // a one-shot warning naming the live handle_count and the capacity.
++    // The fired-flag lives at runtime_context_field_e230_90_warning_fired
++    // (offset 248, set in runtime_context.sio).
++    //
++    // Threshold is hardcoded to floor(4194304 * 9 / 10) = 3774873. A
++    // dynamic 9/10 division would need integer division helpers that the
++    // x86 emitter does not currently expose, and the capacity constant
++    // itself is hardcoded at native_v2_handle_table_capacity_default()
++    // so the 9/10 ratio is a fixed property of this build. If the
++    // capacity ever changes, both values change together.
++    //
++    // Flow (clobbers rcx and rax freely):
++    //   1. Load fired-flag; jnz past this block if already fired.
++    //   2. Stash threshold in rcx so it survives subsequent loads.
++    //   3. Load handle_count into rax (rbx := context BASE as side effect).
++    //   4. mov rbx, rax (rbx = handle_count); mov rax, rcx (rax = threshold).
++    //   5. cmp rbx, rax; JL past fire body when handle_count < threshold.
++    //   6. Fire body: set fired-flag, print "warning[E230] ...", fall
++    //      through to the existing handle_count+1 sequence.
++    //   7. After fire body, restore rbx = handle_count for the existing
++    //      code below (cmp, increment, etc.).
++    // ============================================================
++    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_e230_90_warning_fired())
 +    nc_emit_test_rax_rax(nc)
-+    let e230_90_skip_jnz = (*nc).code.len
-+    nc_emit_jnz_rel32(nc)                                              // skip if fired
-+    // Load capacity into rcx for the comparison.
-+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_capacity())
-+    nc_emit_mov_reg_reg(nc, 1, 0)                                       // rcx = rax (capacity)
-+    nc_emit_mov_reg_imm(nc, 0, 9)                                       // rax = 9
-+    nc_emit_imul_rax_rcx(nc)                                            // rax = 9 * capacity (truncated)
-+    // Compare rbx (handle_count) to rax. Use unsigned cmp.
++    let e230_90_skip_if_fired_jnz = (*nc).code.len
++    nc_emit_jnz_rel32(nc)
++    nc_emit_mov_reg_imm(nc, 1, 3774873)
++    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_count())
++    nc_emit_mov_reg_reg(nc, 3, 0)
++    nc_emit_mov_reg_reg(nc, 0, 1)
 +    nc_emit_cmp_rbx_rax(nc)
-+    let e230_90_fire_jl = (*nc).code.len
-+    nc_emit_jl_rel32(nc)                                                // skip warning if count < 90%
-+    // Fire: print "madaros: warning[E230] drift 90% of capacity: count=N of M\n"
-+    // For brevity, inline the same rodata + itoa pattern as the slow path.
-+    // The full implementation is large; see .scratch/e230_diagnostic.patch
-+    // for the byte-by-byte emission. Patch is preserved at the lane handoff.
++    nc_emit_byte(nc, 0x0f)
++    nc_emit_byte(nc, 0x8c)
++    let e230_90_skip_if_below_jl_pos = (*nc).code.len
++    nc_emit_u32_le(nc, 0)
++    // === FIRE BODY (entered once per process) ===
++    nc_emit_mov_reg_imm(nc, 0, 1)
++    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_e230_90_warning_fired())
++    nc_emit_byte(nc, 0x55)
++    nc_emit_byte(nc, 0x48)
++    nc_emit_byte(nc, 0x89)
++    nc_emit_byte(nc, 0xe5)
++    nc_emit_sub_rsp_imm32(nc, 48)
++    let e230_90_prefix_off = native_v2_rodata_len_into(nc)
++    let e230_90_prefix = [109,97,100,97,114,111,115,58,32,119,97,114,110,105,110,103,91,69,50,51,48,93,32,100,114,105,102,116,32,57,48,37,32,111,102,32,99,97,112,97,99,105,116,121,58,32,99,111,117,110,116,61]
++    nc_append_rodata_bytes(nc, e230_90_prefix, 52)
++    let e230_90_prefix_len = native_v2_rodata_len_into(nc) - e230_90_prefix_off
++    nc_write_rodata_to_stderr_into(nc, e230_90_prefix_off, e230_90_prefix_len)
++    nc_emit_mov_reg_reg(nc, 0, 3)
++    nc_emit_mov_reg_reg(nc, 7, 0)
++    nc = emit_inline_itoa_stderr(nc)
++    let e230_90_of_off = native_v2_rodata_len_into(nc)
++    let e230_90_of = [32,111,102,32]
++    nc_append_rodata_bytes(nc, e230_90_of, 4)
++    nc_write_rodata_to_stderr_into(nc, e230_90_of_off, 4)
++    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_capacity())
++    nc_emit_mov_reg_reg(nc, 7, 0)
++    nc = emit_inline_itoa_stderr(nc)
++    let e230_90_nl_off = native_v2_rodata_len_into(nc)
++    let e230_90_nl = [10]
++    nc_append_rodata_bytes(nc, e230_90_nl, 1)
++    nc_write_rodata_to_stderr_into(nc, e230_90_nl_off, 1)
++    nc_emit_add_rsp_imm32(nc, 48)
++    nc_emit_byte(nc, 0x5d)
++    // === END FIRE BODY ===
 +    let e230_90_fire_end = (*nc).code.len
-+    nc_patch_u32_le(nc, e230_90_skip_jnz + 2, e230_90_fire_end - (e230_90_skip_jnz + 6))
-+    nc_patch_u32_le(nc, e230_90_fire_jl + 2, e230_90_fire_end - (e230_90_fire_jl + 6))
-+
-+    nc_emit_mov_reg_imm(nc, 1, 1)
++    nc_patch_u32_le(nc, e230_90_skip_if_fired_jnz + 2, e230_90_fire_end - (e230_90_skip_if_fired_jnz + 6))
++    nc_patch_u32_le(nc, e230_90_skip_if_below_jl_pos, e230_90_fire_end - (e230_90_skip_if_below_jl_pos + 4))
++    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_count())
++    nc_emit_mov_reg_reg(nc, 3, 0)
++    // ============================================================
++    // END E230 90% drift warning
++    // ============================================================
+     nc_emit_mov_reg_imm(nc, 1, 1)
      nc_emit_add_reg_reg(nc, 3, 1)
      nc_emit_mov_reg_reg(nc, 7, 3)
-     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_capacity())
-@@ -7234,3 +7447,4 @@ fn nc_core_emit_alloc_into(...) -> bool {
-     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
-     nc_core_store_rax_to_temp(nc, dst)
-     true
- }
-+// E230 patch end
---- a/scripts/ci/handle_table_ceiling_gate.sh
-+++ b/scripts/ci/handle_table_ceiling_gate.sh
-@@ -147,6 +147,18 @@
- # gate tests below.
-+#
-+# W2 — 90% drift warning positive control (TODO: requires E230 patch)
-+# Expected output once the patch lands:
-+#   warning[E230] drift 90% of capacity: count=3774873 of 4194304
-+# Fires ONCE per process (gated by runtime_context_field_e230_90_warning_fired).
-+# Until the source patch in .scratch/e230_diagnostic.patch is applied to
-+# self-hosted/native/codegen_x86_linux.sio, W2 SKIPS (not FAILs) with the
-+# note 'E230 patch not yet applied'. After application, W2 PASSES if the
-+# warning line appears in stderr at least once and the program continues
-+# past 90% without exiting.
-+#
---- a/.scratch/e230_diagnostic.patch
-+++ b/.scratch/e230_diagnostic.patch
-@@ -0,0 +1,5 @@
-+# This file IS the patch — it lives in .scratch/ so it is tracked but not
-+# applied. A build lane applies it with `git apply .scratch/e230_diagnostic.patch`
-+# after building from source and confirming the gate assertions. The actual
-+# patch contents are above (the hunks prefixed with `--- a/` and `+++ b/`).
-+# Keeping the patch in-tree (in .scratch/) means the design is reviewable
-+# alongside the audit doc — no separate attachment to chase.
-+
