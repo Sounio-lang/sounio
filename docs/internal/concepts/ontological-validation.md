@@ -19,8 +19,12 @@ a reader or a gate can find it.
 
 Stated in session, 2026-08-19:
 
-> **"praticamente tudo deve ser ontologicamente validado… isso faz parte da alma
-> do Sounio"**
+> **"Practically everything must be ontologically validated — that is part of
+> Sounio's soul."**
+>
+> <sub>Founder, in Portuguese: *"praticamente tudo deve ser ontologicamente
+> validado… isso faz parte da alma do Sounio"*. The English rendering above is
+> the normative text; the original is retained as attribution.</sub>
 
 Not a feature. A commitment about what it means for a Sounio program to be
 correct: a term is not merely well-typed, it is **answerable to a model of what
