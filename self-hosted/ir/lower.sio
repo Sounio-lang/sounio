@@ -1908,6 +1908,10 @@ fn lowerer_lower_program_bodies_dedup_mut(
     // and seeding from the reset produced zero effect — verified with an
     // unconditional print that never fired, and with SOUNIO_LOWER_LIVE_TRACE
     // showing `fo_xfer_miss name=sin count=0`, an empty table at lookup time.
+    // Multi-pass FO pre-register for this dep's pure fns (reverse-order expand).
+    // Do not reset FO_XFER here: the frontend multi-mod prepass may already
+    // hold imported helpers.
+    lowerer_fo_preregister_pure_fns_multipass_mut(lo, items)
     var current = items
     while true {
         match *current {
@@ -4469,11 +4473,93 @@ fn lowerer_lower_impl_methods_mut(
     }
 }
 
+// Multi-pass FO pure-fn transfer registration.
+// Nested helper expand needs callees already in FO_XFER. Source order may put
+// callers first — one pass leaves them without FO; re-register until nested
+// expands see leaf helpers. Does not lift the >2-param skip.
+fn lowerer_fo_preregister_pure_fns_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    let fn_def_opt_ref: &Option<Box<FnDef>> = &head.fn_def
+                    match *fn_def_opt_ref {
+                        Some(fd) => {
+                            let lo_x = (*lo).fo_register_pure_fn_transfer(head.name, &(*fd))
+                            (*lo) = lo_x
+                        }
+                        _ => {}
+                    }
+                } else if head.kind == ItemKind::ItemImpl {
+                    let impl_def_opt_ref: &Option<Box<ImplDef>> = &head.impl_def
+                    match *impl_def_opt_ref {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            let mfd_opt: &Option<Box<FnDef>> = &mhead.fn_def
+                                            match *mfd_opt {
+                                                Some(fd) => {
+                                                    let mangled = ir_mangle_method_name(head.name, mhead.name)
+                                                    let lo_x = (*lo).fo_register_pure_fn_transfer(mangled, &(*fd))
+                                                    (*lo) = lo_x
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+fn lowerer_fo_preregister_pure_fns_multipass_mut(
+    lo: &! Lowerer,
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    // 4 passes: reverse-order chains of depth 3 close by pass 4.
+    var pass: i64 = 0
+    while pass < 4 {
+        lowerer_fo_preregister_pure_fns_mut(lo, items)
+        pass = pass + 1
+    }
+}
+
+// Multi-mod FO: register pure transfers for one program's items without body lower.
+// FO_XFER is global — call once per loaded module *before* seed body lower so
+// imported helpers (e.g. epistemic::fo::fo_add2) FO-transfer into user main.
+pub fn fo_preregister_program_items_multipass(
+    items: &Option<Box<ItemList>>
+) with Mut, Panic, Div, Alloc, IO {
+    var lo = lowerer_new()
+    lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
+}
+
 fn lowerer_lower_program_items_mut(
     lo: &! Lowerer,
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
+    lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
     while true {
         match current {
@@ -11191,6 +11277,7 @@ impl Lowerer {
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         fo_xfer_global_reset()
         var lo = self
+        lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
         while true {
             match *current {
@@ -11400,6 +11487,9 @@ impl Lowerer {
 
     fn lower_program_bodies_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // Do NOT fo_xfer_global_reset here: multi-mod prepass may have already
+        // registered imported pure helpers into the global FO_XFER table.
+        lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
         while true {
             match *current {
