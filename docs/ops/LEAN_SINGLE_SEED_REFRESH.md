@@ -317,13 +317,32 @@ If a reader cannot confirm `gk_md5 == gk_plus1_md5` without re-running the
 chain, the receipt proves nothing. `--verify-receipt` fails closed when the
 two lines differ or `verified` is not true.
 
-**What a green `canonical_compiler_gate` is not:** it checks
-`md5(committed ELF) == md5(that ELF compiling current source)` — self-repro
-stability. It does **not** prove the ELF was *derived from* that source rather
-than substituted from another generation that happens to self-reproduce it.
-The generation table + `input_seed` hashes are the provenance trail; a future
-gate should require a SeedReceipt, not only the self-repro equality. Tracked
-as the next trust-anchor step, not implemented in this recipe amendment.
+**What a green `canonical_compiler_gate` self-repro leg is not:** it checks
+`md5(committed ELF) == md5(that ELF compiling current source)` — **stability**.
+It does **not** alone prove the ELF was *derived from* that source.
+
+**Provenance leg (now wired):** `scripts/ci/seed_receipt_provenance_gate.sh`
+runs after self-repro inside `canonical_compiler_gate.sh`.
+
+| tree state | gate result |
+|---|---|
+| no committed receipt | **WARN + PASS** (day-1; main stays green) |
+| receipt present, matches source+seed+FP | **PASS** |
+| receipt present, `source.sha256` ≠ live `lean_single.sio` | **FAIL** (positive control proves this path) |
+| `SOUNIO_SEED_RECEIPT_REQUIRED=1` and no receipt | **FAIL** |
+
+Committed path (tracked, not under gitignored `artifacts/`):
+
+```
+bin/souc-lean-single-x86_64.SeedReceipt.json
+```
+
+After `--execute`, copy the latest receipt there and commit it with the ELF.
+Flip `SOUNIO_SEED_RECEIPT_REQUIRED=1` in CI only after that first receipt lands
+— a gate that paints main red on day one gets disabled in week one.
+
+Founder first-receipt cost (no rebuild in the gate PR itself): **~5–15 min**
+idle srun, same recipe as §2.4.
 
 ### 2.6 Commit
 
