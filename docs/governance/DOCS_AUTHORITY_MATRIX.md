@@ -592,6 +592,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.explicit-discharge | repo_only | docs/internal/concepts/explicit-discharge.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.hypercomplex-zero-divisor-evidence | repo_only | docs/internal/concepts/hypercomplex-zero-divisor-evidence.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.maturity-ladder | repo_only | docs/internal/concepts/MATURITY_LADDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.no-implicit-degradation | repo_only | docs/internal/concepts/no-implicit-degradation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.nonassociative-order | repo_only | docs/internal/concepts/nonassociative-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.ordered-path-provenance | repo_only | docs/internal/concepts/ordered-path-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.path-conditioned-partial-identification | repo_only | docs/internal/concepts/path-conditioned-partial-identification.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -604,6 +605,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.proof-carrying-rebracketing-protocol | repo_only | docs/internal/concepts/proof-carrying-rebracketing-protocol.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-shift-robust-risk-transport | repo_only | docs/internal/concepts/proof-carrying-shift-robust-risk-transport.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.proof-carrying-statistical-coverage-empirical-binding | repo_only | docs/internal/concepts/proof-carrying-statistical-coverage-empirical-binding.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.provenance | repo_only | docs/internal/concepts/provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.rebracketing-authority | repo_only | docs/internal/concepts/rebracketing-authority.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.reflexive-inquiry | repo_only | docs/internal/concepts/reflexive-inquiry.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
