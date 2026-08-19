@@ -186,6 +186,66 @@ was ruled to denote certainty in 8.3.5 — makes three.
 **The bracket form is widespread.** `Knowledge[...]` occurs in **49** versioned
 `.sio` files, against the angle-bracket form the earlier revision assumed.
 
+### 8.2.4-bis Five was a floor, not a count: eighteen shapes over forty-six sites
+
+§8.2 lists five declarations. That list was assembled from the sites this section
+already had reason to visit, and it is **materially incomplete** — recorded here
+rather than silently widened, because the canonical-shape decision cannot be
+taken against a list missing most of its candidates.
+
+Census: versioned `.sio` outside `archive/`, `bootstrap/`, `docs/`; declarations
+whose *name* is the epistemic value itself (`Knowledge`, `Knowledge<T>`,
+`Knowledge[T]`, `KnowledgeF64`, `KnowledgeI64`, `Epistemic`, `Epistemic<T>`,
+`EpistemicValue`, `EpistemicVal`). Domain structs that merely begin with
+`Epistemic`/`Knowledge` — `EpistemicPtxConfig`, `KnowledgeARIMA`,
+`EpistemicMCTSNode` and 127 others — are **excluded**; counting them gives 173
+and is the same overcount this document has already made once.
+
+**46 declaration sites, 18 distinct field shapes:**
+
+| sites | members |
+|---:|---|
+| **14** | `value, uncertainty, confidence` |
+| 9 | `value, variance, conf_alpha, conf_beta` |
+| 4 | `value, variance, label` |
+| 2 | `value, uncertainty, confidence, provenance` |
+| 2 | `value, uncertainty` |
+| 2 | `val, variance, confidence` |
+| 1 | `value, variance, confidence, provenance` |
+| 1 | `value, variance, confidence` |
+| 1 | `value, variance, alpha, beta` |
+| 1 | `value, variance` |
+| 1 | `value, uncert, conf, source` |
+| 1 | `value, uncert, conf, provenance_id` |
+| 1 | `value, uncert, conf, provenance_count, debt_bits` |
+| 1 | `value, prov, metadata` |
+| 1 | `value, epsilon, reducible_by_n_samples` |
+| 1 | `value, confidence, provenance` |
+| 1 | `value, confidence, knightian` |
+| 1 | `provenance` |
+
+Two things fall out.
+
+**The plurality shape is not in §8.2's list.** `value, uncertainty, confidence`
+holds 14 of 46 sites — three times any other — and §8.2 names none of them. The
+shape §8.2 calls the one the stdlib exposes, `val, variance, confidence`, holds
+**2**.
+
+**The disagreement is lexical before it is structural.** The same slot is spelled
+`value`/`val`; the second is `uncertainty`/`variance`/`uncert`/`epsilon`; the
+third is `confidence`/`conf`/`label`/`knightian`, or split into
+`conf_alpha, conf_beta`. Several of these shapes are the same idea under
+different names, and a canonicalisation decision has to say which spelling wins
+before it can say which shape does.
+
+`docs/spec/LANGUAGE_SPECIFICATION.md:402` documents a sixth-and-different one —
+`struct Knowledge<T>` with `confidence: BetaConfidence` — and it is **not
+fictional**: `examples/alphageozero_final.sio:83` declares exactly that, and
+`BetaConfidence` is declared in three files. It appears in **zero** files under
+`self-hosted/`, so the compiler has never heard of it. The same document's
+`Knowledge::exact` (:422) has **one** call site tree-wide, and `ep_exact` — which
+§8.4 already records as non-existent — remains at **zero**.
+
 ### 8.2.5 The dissertation surface writes a shape that is declared nowhere
 
 `stdlib/darwin_pbpk/epistemic_pbpk28.sio:292` contains, verified **not** inside a
