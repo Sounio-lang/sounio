@@ -12,7 +12,12 @@
 # Roles that count as ladder evidence:
 #   positive-evidence, negative-evidence, evidence, acceptance-gate (path only)
 # Optional doc override (still an edit to the concept — no silent skip):
-#   Evidence-Does-Not-Count: <reason>
+#   Evidence-Does-Not-Count:   (founder-accepted escape — NOT a Status-Held)
+#     Reason: <non-empty, specific to the pair that does not count>
+#     Owner:  <who signs>
+#     Date:   <ISO YYYY-MM-DD>
+#     Missing any of the three = RED (malformed is stricter than absence).
+#     No automatic expiry (decision documented in audit doc).
 #   Evidence-Pass: <path>
 #   Evidence-Refuse: <path>
 #
@@ -135,10 +140,113 @@ extract_status() {
   echo ""
 }
 
-doc_has_override() {
-  # Evidence-Does-Not-Count: present
-  grep -qiE '^[[:space:]]*Evidence-Does-Not-Count[[:space:]]*:' "$1"
+# Parse Evidence-Does-Not-Count block.
+# Sets: EDNC_PRESENT (0/1), EDNC_OK (0/1), EDNC_REASON, EDNC_OWNER, EDNC_DATE,
+#       EDNC_MISS (comma list of missing fields), EDNC_AGE_DAYS (or -1)
+parse_ednc() {
+  local file="$1"
+  EDNC_PRESENT=0
+  EDNC_OK=0
+  EDNC_REASON=""
+  EDNC_OWNER=""
+  EDNC_DATE=""
+  EDNC_MISS=""
+  EDNC_AGE_DAYS=-1
+
+  if ! grep -qiE '^[[:space:]]*Evidence-Does-Not-Count[[:space:]]*:' "$file"; then
+    return 0
+  fi
+  EDNC_PRESENT=1
+
+  # Collect the block: from Evidence-Does-Not-Count: through blank line before next ## heading
+  # or next top-level field that is not Reason/Owner/Date.
+  local line in=0 same=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*[Ee]vidence-[Dd]oes-[Nn]ot-[Cc]ount[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      in=1
+      same="${BASH_REMATCH[1]}"
+      # allow inline "Evidence-Does-Not-Count: reason text" as Reason seed only if no Reason: field later
+      if [[ -n "$same" ]]; then
+        EDNC_REASON="$same"
+      fi
+      continue
+    fi
+    if ((in == 0)); then
+      continue
+    fi
+    # end of block
+    if [[ "$line" =~ ^#+[[:space:]] ]]; then
+      break
+    fi
+    if [[ -z "${line//[[:space:]]/}" ]]; then
+      # blank: end block unless we have not finished required fields yet — still end
+      break
+    fi
+    if [[ "$line" =~ ^[[:space:]]*[Rr]eason[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      EDNC_REASON="${BASH_REMATCH[1]}"
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*[Oo]wner[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      EDNC_OWNER="${BASH_REMATCH[1]}"
+      continue
+    fi
+    if [[ "$line" =~ ^[[:space:]]*[Dd]ate[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      EDNC_DATE="${BASH_REMATCH[1]}"
+      continue
+    fi
+    # unknown field inside block — stop (do not silently absorb)
+    break
+  done <"$file"
+
+  # trim
+  EDNC_REASON="$(echo -n "$EDNC_REASON" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  EDNC_OWNER="$(echo -n "$EDNC_OWNER" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  EDNC_DATE="$(echo -n "$EDNC_DATE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+  local miss=()
+  [[ -z "$EDNC_REASON" ]] && miss+=("Reason")
+  [[ -z "$EDNC_OWNER" ]] && miss+=("Owner")
+  [[ -z "$EDNC_DATE" ]] && miss+=("Date")
+
+  # vacuous reasons are not reasons
+  local rl
+  rl="$(echo "$EDNC_REASON" | tr '[:upper:]' '[:lower:]')"
+  case "$rl" in
+    ""|"ainda nao"|"ainda não"|"n/a"|"na"|"tbd"|"todo"|"fixme"|"later"|"wip"|"-"|"." )
+      if [[ -n "$EDNC_REASON" ]]; then
+        miss+=("Reason(vacuous)")
+      fi
+      ;;
+  esac
+  # reason must be specific enough (founder: "ainda nao" is not a reason)
+  if [[ -n "$EDNC_REASON" && ${#EDNC_REASON} -lt 12 ]]; then
+    miss+=("Reason(too_short)")
+  fi
+
+  # Date must be ISO YYYY-MM-DD
+  if [[ -n "$EDNC_DATE" ]]; then
+    if ! [[ "$EDNC_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+      miss+=("Date(not_ISO)")
+    else
+      # age in days for visibility (no expiry fail — see audit doc)
+      if date -d "$EDNC_DATE" >/dev/null 2>&1; then
+        local then now
+        then=$(date -d "$EDNC_DATE" +%s)
+        now=$(date +%s)
+        EDNC_AGE_DAYS=$(( (now - then) / 86400 ))
+      fi
+    fi
+  fi
+
+  if ((${#miss[@]} > 0)); then
+    local IFS=,
+    EDNC_MISS="${miss[*]}"
+    EDNC_OK=0
+  else
+    EDNC_OK=1
+  fi
 }
+
 
 extract_claims_forbidden() {
   # Print concrete forbidden claim strings (lines under ## Claims Forbidden)
@@ -212,7 +320,21 @@ for doc in "$CONCEPTS_DIR"/*.md; do
   if ((HAS_POS == 1 && HAS_NEG == 1)); then HAS_PAIR=1; fi
 
   override=0
-  doc_has_override "$doc" && override=1
+  parse_ednc "$doc"
+  if ((EDNC_PRESENT == 1)); then
+    if ((EDNC_OK == 1)); then
+      override=1
+      if ((EDNC_AGE_DAYS >= 0)); then
+        echo "CONCEPT_STATUS_INFO ednc_age_days=$EDNC_AGE_DAYS doc=$base owner=$EDNC_OWNER date=$EDNC_DATE" >&2
+      fi
+    else
+      # Malformed EDNC is RED even when it would not have been needed — wider door closed.
+      verdict=FAIL_EDNC_MALFORMED
+      note_fail "ednc_malformed doc=$base missing=$EDNC_MISS (Reason+Owner+Date ISO required; vacuous Reason rejected)"
+      echo -e "${cid:--}\t${base}\t${status}\t${reg_st:--}\t${HAS_POS}\t${HAS_NEG}\t${HAS_PAIR}\t${HAS_GATE}\t${verdict}"
+      continue
+    fi
+  fi
 
   verdict=OK
   # (2) bidirectional
@@ -220,7 +342,7 @@ for doc in "$CONCEPTS_DIR"/*.md; do
     hypothesis|garden)
       if ((HAS_PAIR == 1 && override == 0)); then
         verdict=FAIL_BEHIND_REALITY
-        note_fail "behind_reality doc=$base status=$status has_pair=1 (promote or Evidence-Does-Not-Count)"
+        note_fail "behind_reality doc=$base status=$status has_pair=1 (promote or complete Evidence-Does-Not-Count with Reason+Owner+Date)"
       fi
       ;;
     claim-ready)
@@ -230,22 +352,22 @@ for doc in "$CONCEPTS_DIR"/*.md; do
       fi
       ;;
     reserved)
-      # Reserved requires a refuse surface (negative evidence or refuse fixture)
-      if ((HAS_NEG == 0 && override == 0)); then
+      # Reserved requires a refuse surface. EDNC does not waive this.
+      if ((HAS_NEG == 0)); then
         verdict=FAIL_RESERVED_WITHOUT_REFUSE
         note_fail "reserved_without_refuse doc=$base"
       fi
       ;;
     executable)
-      # executable needs at least a positive witness path or acceptance gate
-      if ((HAS_POS == 0 && HAS_GATE == 0 && override == 0)); then
+      # executable needs a positive witness or gate. EDNC does not waive this
+      # (founder accepted EDNC only for "pair exists but must not promote").
+      if ((HAS_POS == 0 && HAS_GATE == 0)); then
         verdict=FAIL_EXECUTABLE_WITHOUT_WITNESS
         note_fail "executable_without_witness doc=$base"
       fi
       ;;
     integrated)
-      # integrated: require evidence on multiple surfaces (pos+neg or gate+canonical binding)
-      if ((HAS_PAIR == 0 && override == 0)); then
+      if ((HAS_PAIR == 0)); then
         verdict=FAIL_INTEGRATED_WITHOUT_PAIR
         note_fail "integrated_without_pair doc=$base"
       fi

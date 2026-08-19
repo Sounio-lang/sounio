@@ -29,7 +29,8 @@ Effects-Changed: none
 IR-Changed: none
 Claims-Introduced:
   - every concept contract declares Status ∈ README vocabulary
-  - hypothesis/garden + pass+refuse pair without Evidence-Does-Not-Count → RED (behind)
+  - hypothesis/garden + pair without complete EDNC (Reason+Owner+Date) → RED (behind)
+  - malformed Evidence-Does-Not-Count → RED naming missing field (stricter than absence)
   - claim-ready without pair → RED (ahead)
   - reserved without negative evidence → RED
   - executable without witness path in bindings → RED
@@ -73,7 +74,14 @@ Vocabulary (from `docs/internal/concepts/README.md`):
 12. `relational-associator.md`
 13. `zero-provenance.md`
 
-Founder count was **15** without Status among **33** markdown files. This gate’s contract scope is **30** contracts (33 − 3 meta). The two-file gap is the meta set: if README + MATURITY_LADDER are counted as needing Status, founder’s 15 = 13 + 2. They are **excluded** as index/ladder vocabulary, not concept contracts. SEMANTIC_LANE_CONTRACT declares `Status: active` (process vocabulary, not ladder).
+**Canonical count: 13 of 30 contracts** lacked Status on main at Phase A.
+
+Founder initially said fifteen of thirty-three markdown files. That counted every
+`.md` under `docs/internal/concepts/`. Three are meta (`README.md`,
+`MATURITY_LADDER.md`, `SEMANTIC_LANE_CONTRACT.md`) and are out of gate scope.
+Correction from the founder (dispatch 2026-08-19): use **13/30**, not 15/33 —
+so later readers do not find two denominators. SEMANTIC_LANE_CONTRACT’s
+`Status: active` is process vocabulary, not the maturity ladder.
 
 **Phase A command result (before backfill):**  
 `CONCEPT_STATUS_GATE_RED` with `FAIL_MISSING_STATUS` ×13 (+ additional Claims-Forbidden gaps). Exit **1**. A gate that passed here would be broken.
@@ -101,7 +109,51 @@ Founder count was **15** without Status among **33** markdown files. This gate�
 **Optional fields in the concept doc** (editing the concept is the only escape):
 
 - `Evidence-Pass:` / `Evidence-Refuse:` — explicit fixture paths  
-- `Evidence-Does-Not-Count:` — pair exists but must not promote (narrow case); **requires a reason in the concept**
+- `Evidence-Does-Not-Count:` — founder-**accepted** escape (2026-08-19), **not** a generic Status-Held
+
+### Evidence-Does-Not-Count — required shape
+
+The founder rejected a free Status-Held. What is accepted is a **signed
+declaration on the concept itself**, same honesty pattern as `last_validated` /
+`validated_by` in `docs:meta`.
+
+```text
+Evidence-Does-Not-Count:
+Reason: <non-empty, specific to the pair that does not count>
+Owner:  <who signs>
+Date:   <ISO YYYY-MM-DD>
+```
+
+| field | rule |
+|---|---|
+| **Reason** | non-empty; ≥12 chars; not vacuous (`ainda não`, `tbd`, `todo`, `n/a`, …). “The pair covers only the scalar case” is a reason. |
+| **Owner** | required signer |
+| **Date** | ISO `YYYY-MM-DD` |
+
+**Malformed EDNC is RED, and stricter than absence:** missing any of the three
+fields (or vacuous Reason / bad Date) fails with
+`FAIL_EDNC_MALFORMED missing=…` naming which field. Declaring badly must not be
+cheaper than promoting Status — otherwise every lane ships a broken escape.
+
+**Scope of the waiver:** EDNC only suppresses **behind-reality** promotion
+pressure on `hypothesis` / `garden` when a pair exists. It does **not** waive
+`claim-ready` without a pair, `executable` without a witness, or `reserved`
+without a refuse surface.
+
+### Expiry decision
+
+**No automatic expiry in the gate.**
+
+- The repo’s `last_validated` pattern carries a date without a TTL; the docs
+  registry does not expire it.
+- A date without a deadline already solves half the honesty problem: age is
+  **visible** to any reader (`CONCEPT_STATUS_INFO ednc_age_days=N`). Silence has
+  no age.
+- Inventing a TTL (30/90/180 days) would be an undervable number unless the
+  founder sets a reaffirmation cadence. The gate’s job is bidirectional truth
+  of Status↔evidence, not calendar policy.
+- If a reaffirmation SLA is wanted later, add it as an explicit founder rule
+  with a named interval — do not smuggle one in here.
 
 **Why not `tests/<concept-id>/` only:** many concepts already bind clinical/ontology/compile-fail globs in `bindings.tsv`. A path convention would orphan that map. bindings.tsv is the map.
 
@@ -151,16 +203,19 @@ Also backfilled `## Claims Forbidden` stubs on contracts that had Status but no 
 
 ## Phase D — negative proof (required before merge)
 
-```text
-1. Set zero-provenance.md Status: claim-ready (pair incomplete: pos without neg)
-2. bash scripts/ci/concept_status_gate.sh
-   → EXIT 1
-   → CONCEPT_STATUS_FAIL ahead_of_evidence doc=zero-provenance.md
-3. Revert file
-4. gate → EXIT 0
-```
+| case | mutation | expected |
+|---|---|---|
+| D1 ahead | `zero-provenance` Status → `claim-ready` | EXIT 1 `ahead_of_evidence` |
+| D2 no Owner | EDNC with Reason+Date only | EXIT 1 `ednc_malformed missing=Owner` |
+| D3 no Date | EDNC with Reason+Owner only | EXIT 1 `ednc_malformed missing=Date` |
+| D4 no Reason | EDNC with Owner+Date only | EXIT 1 `ednc_malformed missing=Reason` |
+| D5 vacuous Reason | Reason: `ainda nao` | EXIT 1 `Reason(vacuous)` |
+| D6 complete EDNC | `dyadic-nonreduction` → hypothesis + full EDNC | EXIT 0 (waiver holds; age printed) |
 
-Receipt: this session log. Without this step the gate could be a no-op.
+Each case restored before the next. Final gate EXIT 0.
+
+Without D2–D5 the EDNC escape would be untested — the exact class of defect
+this gate exists to catch.
 
 ---
 
