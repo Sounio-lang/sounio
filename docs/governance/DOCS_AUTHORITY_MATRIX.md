@@ -1211,6 +1211,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.sounio-vs-python | repo_only | docs/sounio_vs_python.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.e2e-specification-frame | repo_only | docs/spec/E2E_SPECIFICATION_FRAME.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.language-specification | repo_only | docs/spec/LANGUAGE_SPECIFICATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.spec.s08-epistemic-values | repo_only | docs/spec/S08_EPISTEMIC_VALUES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.status.madaros-main-proof-17d115 | repo_only | docs/status/madaros_main_proof_17d115.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.linalg.blas-ffi | repo_only | docs/stdlib/linalg/BLAS_FFI.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.stdlib-api-reference | repo_only | docs/stdlib/STDLIB_API_REFERENCE.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
