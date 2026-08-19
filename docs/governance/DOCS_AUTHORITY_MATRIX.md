@@ -87,6 +87,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.capacity-validator-positive-control-2026-08-19 | repo_only | docs/audit/CAPACITY_VALIDATOR_POSITIVE_CONTROL_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.checker-guard-wiring-dispatch-2026-07-11 | repo_only | docs/audit/CHECKER_GUARD_WIRING_DISPATCH_2026-07-11.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.chi5-real-axiom-audit-2026-05-30 | repo_only | docs/audit/CHI5_REAL_AXIOM_AUDIT_2026-05-30.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.ci-engine-per-job-census-2026-08-19 | repo_only | docs/audit/CI_ENGINE_PER_JOB_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ci-gate-workflow-reachability-census-2026-08-18 | repo_only | docs/audit/CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-drug-switch-vanco-validation-2026-07-19 | repo_only | docs/audit/CLINICAL_DRUG_SWITCH_VANCO_VALIDATION_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.clinical-midazolam-ddi-e2e-vertical-2026-07-19 | repo_only | docs/audit/CLINICAL_MIDAZOLAM_DDI_E2E_VERTICAL_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
