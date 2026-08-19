@@ -68,6 +68,57 @@ why a malformed `Evidence-Does-Not-Count` must be **redder than its absence**.
 Each of those looked like a separate severity choice. They are one choice, made
 repeatedly: **move the effort from the reader to the actor.**
 
+## The criterion — mechanical
+
+What decides whether something needs a gate is **asymmetry, not importance**. A
+critical thing that fails loudly does not need one; a small thing that fails
+silently does.
+
+Three yes/no questions about any invariant `I`:
+
+    S  SILENT     if I is violated, does the system continue and produce
+                  output that looks valid?
+    G  GROWING    does the cost of finding and repairing it grow with
+                  elapsed time or with accumulated work?
+    R  REACHABLE  is there a cheap mechanical check that would refuse?
+
+And the decision:
+
+| S | G | R | verdict |
+|---|---|---|---|
+| ✓ | ✓ | ✓ | **gate required** |
+| ✓ | ✓ | ✗ | **record, and name what would enforce it** — the honest gap |
+| ✓ | ✗ | — | record suffices: the cost is flat, someone finds it eventually |
+| ✗ | — | — | **no gate**: it announces itself. If the announcement is being *misread*, the defect is in the signal, not in the absence of a gate |
+
+Importance appears nowhere. It is not a term.
+
+### Worked against the day that produced it
+
+| finding | S | G | R | verdict | what was actually done |
+|---|:-:|:-:|:-:|---|---|
+| `with GUM` inert (8 months) | ✓ | ✓ | ✓ | gate | `SOUNIO-EFFECT-DECLARATION` — refuse undeclared names |
+| `serialize.sio` `[IrFunction; 1024]` vs 16384 | ✓ | ✓ | ✓ | gate | capacity coherence, wired to the constant |
+| shipped `bin/madaros` cannot build the tree | ✓ | ✓ | ✓ | gate | `shipped_compiler_selfhost_gate.sh` |
+| 14 ontology gates outside CI | ✓ | ✓ | ✓ | gate | reachability, one workflow line each |
+| concept status vs evidence | ✓ | ✓ | ✓ | gate | `concept_status_gate.sh`, both directions |
+| `main` red 9h on a stale label | **✗** | — | — | **no gate** | `SOUNIO-SIGNAL-DIRECTION` — the signal fired correctly and was misread |
+
+The last row is the test that matters. The criterion **declines** to prescribe a
+gate for the loudest, most expensive incident of the day, because nothing was
+silent: the log said `Fail: 0` on its first line. Adding a gate there would have
+been effort spent where the system was already working, and the real repair —
+making direction legible — is a different kind of fix. A criterion that
+prescribed a gate for every painful event would not be a criterion.
+
+### Where it refuses to answer
+
+`R` is the honest failure mode. When loss is silent and the cost grows but no
+cheap mechanical check exists, the verdict is **not** "build an expensive gate".
+It is: record it, and state in the record that nothing enforces it. That row is
+the reason `Claims-Forbidden` exists throughout this corpus — it is what a
+record does when it cannot become a gate yet.
+
 ## Required Invariants
 
 - A guarantee that depends on someone reading is not a guarantee. It is a hope
