@@ -134,6 +134,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.epistemic-self-application-audit-2026-06-03 | repo_only | docs/audit/EPISTEMIC_SELF_APPLICATION_AUDIT_2026-06-03.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-shape-ratchet-2026-08-19 | repo_only | docs/audit/EPISTEMIC_SHAPE_RATCHET_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.epistemic-trust-map-2026-07-14 | repo_only | docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.epsilon-write-read-mismatch-2026-08-19 | repo_only | docs/audit/EPSILON_WRITE_READ_MISMATCH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-a-layer2-benettin-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_A_LAYER2_BENETTIN_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-a-layer2-gate-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_A_LAYER2_GATE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-a-layer2-substrate-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_A_LAYER2_SUBSTRATE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
