@@ -31,21 +31,60 @@ stipulated beside it.
 
 ## 8.2 What is measured today
 
-`origin/main`, 2026-08-19:
+`origin/main`, 2026-08-19. **There is no single epistemic value.** The name
+denotes three structurally different objects, and they disagree about what an
+epistemic value even carries.
 
-    struct Knowledge<T> { value: T, variance: f64, confidence: i64 }
+| # | Definition site | Members | Provenance | Confidence |
+|---|---|---|---|---|
+| 1 | Compiler, `self-hosted/parser/ast.sio:492` (`KnowledgeTypeInfo`) | `inner_type`, `epsilon`, `validity`, `provenance`, `proof_constraints` | **member** | **absent** |
+| 2 | `stdlib/epistemic/knowledge.sio:63` (`Epistemic`) | `val: f64`, `variance: f64`, `confidence: i64` | absent | 0–1000 |
+| 3 | `examples/` ×4 (`Epistemic`) | `value: f64`, `variance: f64`, `label: i64` | **as a tag** | absent |
+
+Shape 3 is not a stray: it is what `examples/science/darwin_epistemic_pbpk.sio`
+uses — the dissertation surface. The four occurrences are independent
+re-declarations of the same name in separate files, not one imported type.
+
+Three consequences follow directly, and each is a defect rather than an
+observation:
+
+- **The same name, the same field position, opposite meanings.** In shape 3
+  `label: 0` annotates `measured` — the *strongest* provenance. In shape 2
+  `confidence: 0` denotes *no confidence* — the weakest possible claim. A value
+  moving between the two shapes by position, or a reader carrying a habit from
+  one file to another, inverts the epistemic claim without any diagnostic.
+- **`Knowledge<T>` as the compiler knows it has neither `variance` nor
+  `confidence`.** It carries `epsilon`, `validity`, `provenance` and
+  `proof_constraints`. The 0–1000 scale — including the endpoint ruled on in
+  8.3.5 — exists only in library and example code, and the compiler's own
+  epistemic type has no field for it to occupy.
+- **Provenance is a member in two of the three and absent from the third**, and
+  the third is the one carrying confidence. Whatever 8.5 decides about where
+  provenance lives, the repository currently answers it two ways at once.
+
+Other measured facts about shape 2, which is the shape the stdlib exposes:
 
 - **Not linear.** Dropping one requires nothing.
-- **No provenance field.** `stdlib/epistemic/README.md` draws
-  `└── provenance: Provenance`; the struct has no such member.
 - `confidence` is an integer **0–1000**, clamped at construction
   (`ep_clamp_conf`, `stdlib/epistemic/knowledge.sio:52`).
-- The scale already carries undocumented meaning: `ep_exact` constructs
-  `variance: 0.0, confidence: 1000`; `ep_measured` constructs `confidence: 900`.
-- `.value` occurs **2,278 times** across `stdlib/` and `examples/`.
+- The scale carries meaning nothing records: `ep_certain` (**not** `ep_exact`,
+  which does not exist) constructs `variance: 0.0, confidence: 1000`;
+  `ep_measured` constructs `confidence: 900`. Neither 1000 nor 900 is derived
+  anywhere — 900 is a chosen constant with no stated basis.
+- `.value` occurs **2,278 times** across `stdlib/` and `examples/` — but against
+  shape 3 and the compiler type, since shape 2 spells the member `val`.
 
-So the implementation is a record today, and the ruling is a change of kind, not
-a description of the present. That gap is the section's work.
+So the implementation is not merely "a record where the ruling wants a type".
+It is **three records that do not agree**, none of which is the ruled type. That
+gap is the section's work.
+
+> **Correction, 2026-08-19.** An earlier revision of this section stated the
+> measured type as `struct Knowledge<T> { value: T, variance: f64, confidence:
+> i64 }` and named its constructor `ep_exact`. Neither exists. The struct was a
+> merge of shapes 2 and 3 that is declared nowhere, and the constructor is
+> `ep_certain`. The error is recorded rather than silently overwritten because
+> this section's own subject is what happens when a claim is separated from what
+> justifies it.
 
 ## 8.3 Invariants entailed by the ruling
 
@@ -84,6 +123,12 @@ separately contestable and separately forgettable. After it they are
 A rule can be argued away one at a time. A definition has to be replaced whole.
 
 ## 8.5 Undefined — rulings owed
+
+- **Which of the three shapes is the epistemic value.** Measured in 8.2: the
+  compiler type, the stdlib struct and the example struct differ in members and
+  in the meaning of their third field. A specification cannot rule on the
+  invariants of a type that is declared three incompatible ways. This ruling is
+  **prior to every other ruling in 8.5** and is owed first.
 
 - **Where "no confidence claim made" lives.** Ruled 2026-08-19: `1000` is
   **certainty** and `0` is **no confidence**, so the scale `0..1000` is fully
