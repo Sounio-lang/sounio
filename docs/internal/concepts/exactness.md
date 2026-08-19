@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Exactness
 
+
+Status: **hypothesis**
+
 Concept-ID: `SOUNIO-EXACTNESS`
 
 ## Founder Intent
@@ -75,3 +78,10 @@ re-run against current Madaros.
 The generic prerequisites named as blockers in the `exact_i64` header —
 generic-struct-return, `impl Trait for Type`, trait-bounded dispatch — landed
 on 2026-07-06 (`2adb8f061`, PR #650) and are in `main`. That header is stale.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.

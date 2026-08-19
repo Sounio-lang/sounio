@@ -147,3 +147,10 @@ The D8 gate must:
 require a declared sampling process, estimator and coverage semantics, external
 data and custody, empirical model criticism, and sealed validation. None may be
 inferred from the D8 synthetic receipts.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.
