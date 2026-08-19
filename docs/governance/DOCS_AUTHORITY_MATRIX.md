@@ -114,6 +114,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.effect-archaeology-51-2026-08-19 | repo_only | docs/audit/EFFECT_ARCHAEOLOGY_51_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.effect-enum-2a-2026-08-19 | repo_only | docs/audit/EFFECT_ENUM_2A_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.effect-enum-2b-2026-08-19 | repo_only | docs/audit/EFFECT_ENUM_2B_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.effect-mod-hold-evidence-2026-08-19 | repo_only | docs/audit/EFFECT_MOD_HOLD_EVIDENCE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.effects-layer-cost-2026-08-19 | repo_only | docs/audit/EFFECTS_LAYER_COST_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.engine-parity-adjudication-2026-08-02 | repo_only | docs/audit/ENGINE_PARITY_ADJUDICATION_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.enir-mir-disconnect-cost-2026-08-19 | repo_only | docs/audit/ENIR_MIR_DISCONNECT_COST_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
