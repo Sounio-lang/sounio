@@ -16,15 +16,25 @@
 #       generations[] records the chain (g0…gN) including the settle pair
 #       fixed_point.gk_*          == committed seed hashes
 #
-# Day-1 policy (why main stays green without a receipt):
-#   DEFAULT = WARN + PASS when no committed receipt is found.
-#   SOUNIO_SEED_RECEIPT_REQUIRED=1 flips missing-receipt to FAIL (after the
-#   founder lands the first receipt from refresh_lean_seed.sh --execute).
-#   A gate that turns main red on day one gets disabled in week one.
+# Policy (main must stay green without a receipt on day one):
 #
-# Positive control (runs every invocation): a mutant receipt that lies about
-# source.sha256 MUST fail the checker. If the mutant passes, this gate is
-# broken and we exit 1 even when the tree is fine.
+#   1. Receipt PRESENT  → always hard-check against this tree (provenance).
+#   2. Receipt ABSENT   → require only when the change set touches the seed
+#      surface (lean_single.sio and/or the committed lean_single ELF /
+#      receipt path). Other PRs and plain main/push runs PASS without a
+#      receipt. Mutant control still runs every time.
+#   3. SOUNIO_SEED_RECEIPT_REQUIRED=1 → missing receipt always FAIL
+#      (optional later flip once a receipt is permanently on main).
+#
+# Why not "warn forever" or "bootstrap fake receipt":
+#   Warn forever re-accumulates silent ELF swaps on non-touching paths less
+#   than the seed surface, but still leaves seed-touching PRs unchecked if
+#   people ignore warnings. A fake bootstrap receipt is a lying instrument.
+#   Path-scoped require hits exactly the case the recipe exists for (#1750
+#   class) and never paints main red for absence alone.
+#
+# Positive control (every invocation): mutant receipt with wrong
+# source.sha256 MUST fail the checker.
 #
 # Committed receipt path (tracked; not under gitignored artifacts/):
 #   bin/souc-lean-single-x86_64.SeedReceipt.json
@@ -33,6 +43,7 @@
 #   SOUNIO_SEED_RECEIPT_PATH
 #   SOUNIO_SEED_RECEIPT_REQUIRED=0|1
 #   SOUNIO_CANONICAL_SOUC / SOUNIO_SEED_ELF
+#   CI_EVENT_NAME / CI_BASE_SHA / CI_HEAD_SHA  (PR path detection)
 #
 set -euo pipefail
 
@@ -52,6 +63,9 @@ RECEIPT_DEFAULT="$ROOT_DIR/bin/souc-lean-single-x86_64.SeedReceipt.json"
 RECEIPT="${SOUNIO_SEED_RECEIPT_PATH:-$RECEIPT_DEFAULT}"
 REQUIRED="${SOUNIO_SEED_RECEIPT_REQUIRED:-0}"
 CHECKER="$ROOT_DIR/scripts/dev/write_seed_receipt.py"
+EVENT_NAME="${CI_EVENT_NAME:-${GITHUB_EVENT_NAME:-}}"
+BASE_SHA="${CI_BASE_SHA:-}"
+HEAD_SHA="${CI_HEAD_SHA:-HEAD}"
 
 die() { echo "[seed-provenance] FAIL: $*" >&2; exit 1; }
 note() { echo "[seed-provenance] $*"; }
@@ -130,10 +144,46 @@ PY
 
 run_mutant_control
 
-# ── Missing receipt: WARN pass (default) or FAIL if required ───────────────
+# True when this change set touches the lean_single seed surface.
+seed_surface_touched() {
+  # Explicit override for local tests.
+  if [[ "${SOUNIO_SEED_SURFACE_TOUCHED:-}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "${SOUNIO_SEED_SURFACE_TOUCHED:-}" == "0" ]]; then
+    return 1
+  fi
+  if [[ "$EVENT_NAME" != "pull_request" ]]; then
+    # push/schedule/local: do not require a receipt for absence alone
+    return 1
+  fi
+  if [[ -z "$BASE_SHA" ]]; then
+    note "pull_request without CI_BASE_SHA — cannot classify seed-surface touch; treating as not-touched (main-safe)"
+    return 1
+  fi
+  local changed
+  if ! changed="$(git -C "$ROOT_DIR" diff --name-only --diff-filter=ACMR "$BASE_SHA...$HEAD_SHA" 2>/dev/null)"; then
+    note "git diff failed for seed-surface classify — treating as not-touched (main-safe)"
+    return 1
+  fi
+  local p
+  while IFS= read -r p; do
+    [[ -z "$p" ]] && continue
+    case "$p" in
+      self-hosted/compiler/lean_single.sio|\
+      bin/souc-lean-single-x86_64|\
+      bin/souc-lean-single-x86_64.SeedReceipt.json)
+        return 0
+        ;;
+    esac
+  done <<<"$changed"
+  return 1
+}
+
+# ── Missing receipt ────────────────────────────────────────────────────────
 if [[ ! -f "$RECEIPT" ]]; then
   note "no committed SeedReceipt at $RECEIPT"
-  note "self-repro (canonical_compiler_gate) still applies; provenance is UNCHECKED"
+  note "self-repro (canonical_compiler_gate) still applies; provenance paper trail absent"
   if [[ "$REQUIRED" == "1" ]]; then
     die "SOUNIO_SEED_RECEIPT_REQUIRED=1 and receipt missing.
   Founder: produce one with
@@ -141,8 +191,21 @@ if [[ ! -f "$RECEIPT" ]]; then
   then commit bin/souc-lean-single-x86_64.SeedReceipt.json next to the ELF
   (~5–15 min idle srun). docs/ops/LEAN_SINGLE_SEED_REFRESH.md"
   fi
-  note "WARN: provenance soft-pass (day-1 policy). Set SOUNIO_SEED_RECEIPT_REQUIRED=1 after first receipt lands."
-  note "PASS (no receipt to validate; mutant control still ran)"
+  if seed_surface_touched; then
+    die "this change set touches the lean_single seed surface but has no SeedReceipt.
+  Touched surface: lean_single.sio and/or bin/souc-lean-single-x86_64(+.SeedReceipt.json).
+  Self-repro alone does not prove the ELF came from this source.
+  Produce and commit a receipt:
+    SOUNIO_SEED_REFRESH_EXECUTE=1 \\
+      bash scripts/dev/refresh_lean_seed.sh --execute --via-slurm \\
+      --partition=cpu-ops --time=00:45:00
+  Success: receipt fixed_point field shows
+    gk_md5:       <H>
+    gk_plus1_md5: <H>
+  (identical by eye), then commit ELF + bin/souc-lean-single-x86_64.SeedReceipt.json
+  (~5–15 min idle srun). docs/ops/LEAN_SINGLE_SEED_REFRESH.md"
+  fi
+  note "PASS (no receipt; change set does not touch seed surface; mutant control still ran)"
   exit 0
 fi
 

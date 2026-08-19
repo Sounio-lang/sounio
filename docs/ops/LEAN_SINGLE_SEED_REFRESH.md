@@ -324,12 +324,21 @@ It does **not** alone prove the ELF was *derived from* that source.
 **Provenance leg (now wired):** `scripts/ci/seed_receipt_provenance_gate.sh`
 runs after self-repro inside `canonical_compiler_gate.sh`.
 
-| tree state | gate result |
+| tree / change set | gate result |
 |---|---|
-| no committed receipt | **WARN + PASS** (day-1; main stays green) |
 | receipt present, matches source+seed+FP | **PASS** |
-| receipt present, `source.sha256` ≠ live `lean_single.sio` | **FAIL** (positive control proves this path) |
-| `SOUNIO_SEED_RECEIPT_REQUIRED=1` and no receipt | **FAIL** |
+| receipt present, `source.sha256` ≠ live `lean_single.sio` | **FAIL** (mutant control proves this path every run) |
+| **no receipt**, PR does **not** touch seed surface | **PASS** (main and unrelated PRs stay green) |
+| **no receipt**, PR touches `lean_single.sio` / seed ELF / receipt path | **FAIL** — must land a receipt with the change |
+| `SOUNIO_SEED_RECEIPT_REQUIRED=1` and no receipt | **FAIL** (optional later global flip) |
+
+**Policy choice:** require receipt **only when the change set touches the seed
+surface**, not a fake bootstrap receipt and not permanent warn-only. Reason:
+limits force to the case the recipe exists for; never paints main red for
+absence alone; still hard-checks any receipt that *is* committed. Tradeoff:
+the committed ELF on main has no permanent paper trail until someone lands the
+first receipt — self-repro still runs; provenance is enforced at the moment of
+seed-surface change (#1750 class).
 
 Committed path (tracked, not under gitignored `artifacts/`):
 
@@ -337,12 +346,11 @@ Committed path (tracked, not under gitignored `artifacts/`):
 bin/souc-lean-single-x86_64.SeedReceipt.json
 ```
 
-After `--execute`, copy the latest receipt there and commit it with the ELF.
-Flip `SOUNIO_SEED_RECEIPT_REQUIRED=1` in CI only after that first receipt lands
-— a gate that paints main red on day one gets disabled in week one.
+After `--execute`, the driver copies the latest receipt there — commit it with
+the ELF on any seed-surface PR.
 
-Founder first-receipt cost (no rebuild in the gate PR itself): **~5–15 min**
-idle srun, same recipe as §2.4.
+Founder optional first-receipt on main (no rebuild in the gate PR itself):
+**~5–15 min** idle srun, same recipe as §2.4.
 
 ### 2.6 Commit
 
