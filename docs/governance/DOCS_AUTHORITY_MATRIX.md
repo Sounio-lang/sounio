@@ -140,6 +140,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.equivalence-theory-lean-autoemit-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_AUTOEMIT_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-lean-obligations-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_OBLIGATIONS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.equivalence-theory-lean-persite-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_PERSITE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.exactly-private-lean-bridge-dispatch-2026-08-19 | repo_only | docs/audit/EXACTLY_PRIVATE_LEAN_BRIDGE_DISPATCH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.extern-c-ffi-silent-noop-dispatch-2026-08-13 | repo_only | docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.fo-import-boundary-port-2026-08-19 | repo_only | docs/audit/FO_IMPORT_BOUNDARY_PORT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.fo-variance-across-fn-independent-verify-2026-08-18 | repo_only | docs/audit/FO_VARIANCE_ACROSS_FN_INDEPENDENT_VERIFY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
