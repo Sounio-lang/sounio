@@ -101,7 +101,13 @@ elif [ "$atual" -lt "$congelado" ]; then
 else
   echo "OK: unnamed gates hold at ${congelado}."
 fi
-nao_nomeados > "$REF.list.current"
+# The measured list is a diagnostic for humans; nothing here reads it back. It
+# used to be written next to the frozen list, inside scripts/ci/ — a critical
+# path — so every CI run left the checkout dirty and the worktree governance gate
+# later in the same job refused it (unallowed_critical_dirty=1 exceeds max=0).
+# A gate must not dirty the tree the next gate inspects.
+mkdir -p "$(dirname "$OUT")"
+nao_nomeados > "$(dirname "$OUT")/gate_workflow_reference.measured.list"
 
 cat > "$OUT" <<JSON
 {
