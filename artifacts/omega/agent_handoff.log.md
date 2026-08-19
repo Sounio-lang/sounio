@@ -3880,3 +3880,49 @@ notes: |
   the harder, "dangerous" piece: both natural closed routes are refuted (§54.2/§54.3), and the
   existing machinery's rank-one-at-the-maximal-seam argument is stated (in `InteriorMask`'s
   docstring) not to transfer. No claims active; lane `zd-e3-iii-general-fibre` released.
+
+agent: claude
+time_utc: 2026-08-19T10:15:00Z
+files:
+  - docs/audit/.VALUE_CENSUS_A_B_UNCERT_2026-08-19.md
+  - docs/governance/topic-registry.v1.json
+  - docs/governance/DOCS_AUTHORITY_MATRIX.md
+  - docs/governance/DOCS_ACCEPTANCE_REPORT.md
+intent: |
+  Measurement-only census of all `.value` operator uses in stdlib/ +
+  examples/. No lane contamination; no code touched. 14 parallel
+  general-purpose sub-agents classified each site; FO intersection
+  cross-check done; f64 → Knowledge back-door search done.
+checks:
+  - grep -rn '\.value\b' stdlib/ examples/ | grep -vE '\.values\b' | grep -vE '^\s*//' | wc -l  # 1372
+  - for f in /tmp/classification_{aa..an}.csv; do wc -l $f; done  # 1372 total line-by-line
+  - awk -F, '$2=="A"{a++}$2=="B"{b++}$2=="UNCERT"{u++}$2~/^EXCLUDE/{e++}END{print a,b,u,e}' over 14 CSVs  # 324 270 26 752
+  - head -1 /tmp/fo_intersection.csv && tail -1 /tmp/fo_intersection.csv  # SUMMARY total=251 yes=170 no=81 (matches 67.7%)
+commit: 8659165c12
+status: lock-released
+notes: |
+  Findings:
+    - Of 620 real Knowledge<T>.value ops: 52.3% canalized (A),
+      43.5% asserted (B), 4.2% UNCERT.
+    - B is the surprise. User's prior "300 B" undercounted by ~10%
+      but the A/B ratio is directionally right (43% B is the load-
+      bearing fact, not the absolute count).
+    - FO intersection (B ∩ {3+-arg fn or imported helper}) =
+      170 of 251 sites (67.7%). Mechanism: 9 via containing fn
+      with 3+ args; 165 via .value passes through an imported
+      helper (println, print, print_f64, abs_f64, mean, count,
+      min, sqrt); 4 meet both. The FN-boundary form of the bug is
+      large, and the user's prior framing was directionally right.
+      Variance loss is dominated by the everyday println/count/min
+      passes, not by the dramatic 6-arg-fn case.
+    - Back-door: 9 constructors in stdlib/epistemic/* take a bare
+      f64 and emit an Epistemic struct without enforcing a real
+      Provenance. knowledge.sio:68 ep_new is the canonical path.
+    - stdlib/quantum/vqe.sio Knowledge{...} literals DO include
+      Provenance and are NOT back-doors.
+
+  No code change. Doc is descriptive measurement. Lane discipline
+  preserved — did not touch any other lane's files except briefly
+  when recovering from a contaminated git amend (docs(zd) lane's
+  49-line change to zd_cp2_general_closed_form_2026-08-18.md was
+  correctly restored as commit 1c830a3a5a).
