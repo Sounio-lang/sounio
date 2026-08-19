@@ -101,10 +101,18 @@ refused. The claim is corrected here rather than quietly widened.
 | `med/vancomycin_low_conf_refusal.sio` | `error[P0003]` | refused, but **`module failed to parse`** |
 | `med/vancomycin_weak_evidence_refusal.sio` | `error[E001]` | refused, but **`module failed to parse`** |
 
-The last two are their own defect and are recorded here because the suite cannot
-tell them apart from a real refusal: a `compile-fail` test that fails because the
-file does not parse is green for a reason unrelated to what it claims to test.
-Only `knightian_mixed.sio` is refused by Madaros on a decision.
+Only `knightian_mixed.sio` is refused by Madaros on a decision. The two `med/`
+tests are refused because the module does not parse — a different thing, but
+**not** an undetected one, and an earlier revision of this section said it was.
+The harness (`scripts/dev/run_sio_test_suite.sh`, which
+`scripts/run_sio_test_suite.sh` is a five-line shim to) does read
+`//@ error-pattern:` and requires the diagnostic to contain it. Measured: the
+Madaros parse-failure output contains neither declared pattern (`ε` and
+`StrongEvidence`), so both tests would **fail** the suite under Madaros. They are
+green in CI because CI runs `lean_single`, where they refuse with the declared
+diagnostics. The correction is recorded because the retracted claim — that a
+harness cannot tell a parse failure from a refusal — was more damning than the
+truth and was not measured before it was written.
 
 The covid case is worth separating: `epsilon_subsumes_call_boundary` opens with
 `if !epsilon_is_valid(provided_eps) { return false }` — an explicit fail-closed
