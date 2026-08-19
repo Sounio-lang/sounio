@@ -9,10 +9,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.effect-e
 
 # Effect enum 2b — Chaotic exists; seven extras after 22
 
-Stacked on phase 2a (`f325084c32`, PR #1960). Founder: Chaotic must exist.
+Rebased onto `origin/main` after #1960 merged (`5f3cc9b296`).
+Founder: Chaotic must exist.
 
 **Date:** 2026-08-19
-**base:** `lane/grok-cli5/effect-enum-2a-20260819` @ `f325084c32`
+**base:** `origin/main` (contains #1960, including the lean_single
+dialect fix for `effect_enum_equiv.sio`)
 **Mod measured before any extra was added.**
 
 ---
@@ -175,7 +177,13 @@ After this source is in a rebuilt Madaros:
   + `EFFECT_ENUM_EQUIV_OK 23/23 + negative` rc=0 (file not edited).
 - Print cover: `EFFECT_PRINT_NAME_COVER_OK 0..=29 named, Chaotic exists`.
 - 2b ids: `EFFECT_ENUM_2B_IDS_OK extras 23-29 Confidence=8 EffVar=30`
-  + `NEGATIVE_CONTROL_FIRED -1`.
+  + `NEGATIVE_CONTROL_FIRED -1`. After rebase, lean_single `check`
+  failed (`[0;64]` tail + lookup missing `with Mut`) — compile, not
+  assertion. After that dialect fix, `expect(lookup(fill9(...)))` for
+  Epistemic returned -1 on lean_single in this file (isolated fill9
+  probe returned 8). In-place buffer + bound `epi_id`/`conf_id`.
+  Re-run 2026-08-19T12:12Z: lean_single and Madaros both print the
+  two sentinels, rc=0. Harness + `souc-lean-single-x86_64`: PASS.
 - #1944 pairs under `tests/effects/archaeology/` for the seven extras.
   Negative control `nosuch_drop.sio` must not produce E035. On the
   shipped ELF the extras' refuse fixtures still check-pass (old
