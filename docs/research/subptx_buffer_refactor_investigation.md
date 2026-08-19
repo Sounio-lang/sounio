@@ -11,6 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.subpt
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+>
+> **Live golden-gate (not this page):** on 2026-08-18 `kaxi_ptx_golden_gate.sh` measured **0/318** PASS, rc=1, 80 s (`docs/audit/CI_GATE_BUDGET_2026-08-18.tsv`, #1915). The 318/318 rows below are a 2026-05-11 receipt. They are not a current measurement.
 <!-- docs:status-note:end -->
 
 # Sub-PTX buffer refactor — investigation finding
@@ -52,7 +54,7 @@ sites unchanged.
 
 | Kernel | Emission outcome |
 |---|---|
-| 318 PTX golden gate | PASS 318/318 unchanged |
+| 318 PTX golden gate | PASS 318/318 unchanged **(2026-05-11 receipt; live 2026-08-18 is 0/318, #1915)** |
 | LSE-8 gate | PASS 7/7 unchanged |
 | Sinkhorn-16, 2 iters | PASS, 657 KB PTX in 37s (was 13s — 3× slower from larger buffer copies) |
 | Sinkhorn-16, 4 iters | **segfault** at ~52s |
@@ -123,7 +125,7 @@ without functional change. The cap stays at 262144 (256 KB), Sinkhorn-
 < 2` body comment), and all gates remain green at their
 previously-committed state:
 
-- `kaxi_ptx_golden_gate.sh` PASS 318/318
+- `kaxi_ptx_golden_gate.sh` PASS 318/318 **(2026-05-11 receipt; live 2026-08-18 is 0/318, #1915)**
 - `kretikos_kaxi_lse8_gate.sh` PASS 7/7
 - `kretikos_kaxi_sinkhorn16_gate.sh` PASS 7/7
 - `kretikos_kaxi_fmad_invariance_gate.sh` PASS 18/18

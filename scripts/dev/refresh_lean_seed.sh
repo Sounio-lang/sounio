@@ -34,6 +34,15 @@
 #   SOUNIO_SEED_REFRESH_EXECUTE=1 bash scripts/dev/refresh_lean_seed.sh --execute --via-slurm
 #   SOUNIO_SEED_REFRESH_EXECUTE=1 bash scripts/dev/refresh_lean_seed.sh --execute --local-locked
 #
+# OUTPUT
+# ------
+# --execute always emits a SeedReceipt (JSON + human .txt) under
+# artifacts/seed-refresh/ (and under the stage out/ dir). A procedure says work
+# ran; the receipt lets someone verify it was done *well* months later without
+# re-running. Fixed point is a FIELD (gk_md5 and gk_plus1_md5 side by side),
+# not a step log. See docs/ops/LEAN_SINGLE_SEED_REFRESH.md §2.5b and
+# docs/ops/SEED_RECEIPT.schema.json.
+#
 # DO NOT use sbatch. Use scripts/dev/slurm_srun_minimal.sh (srun). See
 # docs/ops/SLURM_LAUNCH_REPAIR_2026-08-17.md — sbatch is held for this submitter;
 # cluster hardware is up; held jobs are corpses, not capacity.
@@ -51,10 +60,14 @@ GATE="scripts/ci/canonical_compiler_gate.sh"
 VERIFY="scripts/ci/verify_lean_seed.sh"
 SRUN="scripts/dev/slurm_srun_minimal.sh"
 LOCK="scripts/dev/souc-build-lock.sh"
+RECEIPT_PY="scripts/dev/write_seed_receipt.py"
+RECEIPT_OUT_DEFAULT="artifacts/seed-refresh"
 
 # OrangeFS is visible on compute nodes; /workspace is not.
 ORANGEFS_ROOT="${SOUNIO_SEED_ORANGEFS_ROOT:-/orangefs/training/sounio/seed-refresh}"
 STAGE_DIR="${SOUNIO_SEED_STAGE_DIR:-}"
+RECEIPT_OUT="${SOUNIO_SEED_RECEIPT_OUT:-$RECEIPT_OUT_DEFAULT}"
+VERIFY_RECEIPT_PATH=""
 
 MODE="print"
 VIA="none"          # none | slurm | local-locked
@@ -68,7 +81,7 @@ SLURM_TIME="${SOUNIO_SEED_SLURM_TIME:-00:45:00}"
 FOLKLORE_COST_OPEN_PRS_MD5_ONLY=1
 
 usage() {
-  sed -n '2,45p' "$0" | sed 's/^# \?//'
+  sed -n '2,55p' "$0" | sed 's/^# \?//'
   cat <<EOF
 
 Modes:
@@ -76,6 +89,8 @@ Modes:
   --check            Run canonical_compiler_gate + verify_lean_seed on this tree.
   --stage            Stage SRC+SEED (+ optional linux bootstrap) onto OrangeFS.
   --execute          Run the derive chain. Requires SOUNIO_SEED_REFRESH_EXECUTE=1.
+                     Always writes a SeedReceipt (JSON + .txt).
+  --verify-receipt P Validate an existing SeedReceipt JSON (fixed_point by eye).
   --cost             Print the open-PR cost number of unwritten folklore and exit.
 
 Execute placement (with --execute):
@@ -86,6 +101,7 @@ Environment:
   SOUNIO_SEED_REFRESH_EXECUTE=1   required with --execute
   SOUNIO_SEED_STAGE_DIR=PATH      reuse an existing stage directory
   SOUNIO_SEED_ORANGEFS_ROOT=PATH  default $ORANGEFS_ROOT
+  SOUNIO_SEED_RECEIPT_OUT=PATH    default $RECEIPT_OUT_DEFAULT
   SOUNIO_SEED_MAX_GENS=N          default $MAX_GENS
   SOUNIO_SEED_SLURM_PARTITION=…   default $SLURM_PARTITION
   SOUNIO_SEED_SLURM_TIME=…        default $SLURM_TIME
@@ -95,6 +111,7 @@ Never:
   sbatch                          broken for openvscode-server (held corpses)
   cp … bin/souc                   bin/souc is the Madaros WRAPPER, not the seed
   commit generation 1             only genN where genN == genN+1 is shippable
+  claim success without SeedReceipt fixed_point.verified == true
 EOF
 }
 
@@ -102,6 +119,7 @@ die() { echo "[refresh-lean-seed] FAIL: $*" >&2; exit 1; }
 note() { echo "[refresh-lean-seed] $*"; }
 
 md5_of() { md5sum "$1" | awk '{print $1}'; }
+sha256_of() { sha256sum "$1" | awk '{print $1}'; }
 
 require_inputs() {
   [[ -f "$SRC" ]]  || die "missing $SRC"
@@ -178,14 +196,22 @@ EOF
 #     test -f out/SETTLED.md5 || exit 1
 #     cp -f out/gK.elf bin/souc-lean-single-x86_64 && chmod +x bin/souc-lean-single-x86_64
 
-## 7. Post-install M2+M3 (still required; DDC optional after)
+## 7. Post-install M2+M3 + SeedReceipt (still required; DDC optional after)
 #     bash scripts/ci/canonical_compiler_gate.sh     # M2
 #     bash scripts/ci/verify_lean_seed.sh            # M2+M3
+#     # --execute always writes:
+#     #   artifacts/seed-refresh/SeedReceipt-<utc>.json
+#     #   artifacts/seed-refresh/SeedReceipt-<utc>.txt
+#     # fixed_point is a FIELD — gk_md5 and gk_plus1_md5 side by side:
+#     #   gk_md5:       <H>
+#     #   gk_plus1_md5: <H>     # must match by eye or receipt proves nothing
+#     bash scripts/dev/refresh_lean_seed.sh --verify-receipt artifacts/seed-refresh/SeedReceipt.latest.json
 #   Commit message MUST contain:
 #     settle: gK==g{K+1} md5=<H>     # M1 — no line, no merge
+#     receipt: artifacts/seed-refresh/SeedReceipt-<utc>.json
 #     canonical: committed==self-compile==<H>
 #     placement: srun/cpu-ops
-#   NOT enough: "md5 changed" / "newer binary" / "make build ran"
+#   NOT enough: "md5 changed" / "newer binary" / "make build ran" / "procedure exited 0"
 
 ## 8. Commit + post-merge
 #     git add bin/souc-lean-single-x86_64 && git commit …
@@ -274,64 +300,9 @@ run_stage() {
   echo "$STAGE_DIR"
 }
 
-# ── derive loop (the actual folklore body) ──────────────────────────────────
-# Runs inside WORK_ROOT which must contain SRC and a starting ELF at SEED path.
-derive_fixed_point() {
-  local work_root="$1"
-  local start_elf="$2"   # absolute path to g0
-  local out_dir="$work_root/out"
-  mkdir -p "$out_dir"
-  ulimit -s "$STACK_KB" 2>/dev/null || true
-
-  local src="$work_root/$SRC"
-  [[ -f "$src" ]] || die "derive: missing $src"
-  [[ -x "$start_elf" ]] || die "derive: missing executable start $start_elf"
-
-  local prev="$start_elf"
-  local prev_md5
-  prev_md5="$(md5_of "$prev")"
-  note "g0 md5=$prev_md5  path=$prev"
-
-  local i=1
-  local cand=""
-  local cand_md5=""
-  while [[ "$i" -le "$MAX_GENS" ]]; do
-    cand="$out_dir/g${i}.elf"
-    note "compiling g${i}: $(basename "$prev") → $(basename "$cand")"
-    if ! "$prev" "$src" "$cand" >"$out_dir/g${i}.log" 2>&1; then
-      tail -20 "$out_dir/g${i}.log" >&2 || true
-      die "g${i} compile failed (see $out_dir/g${i}.log)"
-    fi
-    chmod +x "$cand"
-    cand_md5="$(md5_of "$cand")"
-    note "g${i} md5=$cand_md5  bytes=$(wc -c <"$cand")"
-    if [[ "$cand_md5" == "$prev_md5" && "$i" -ge 2 ]]; then
-      # prev was already a fixed point; ship prev (which equals cand)
-      note "SETTLED at g$((i-1))==g${i}  md5=$cand_md5"
-      echo "$cand"
-      return 0
-    fi
-    # special-case i==1: g0→g1 may differ; continue
-    prev="$cand"
-    prev_md5="$cand_md5"
-    i=$((i + 1))
-  done
-
-  # After loop, check last two generations if we produced >=2
-  if [[ -x "$out_dir/g$((MAX_GENS-1)).elf" && -x "$out_dir/g${MAX_GENS}.elf" ]]; then
-    local a b
-    a="$(md5_of "$out_dir/g$((MAX_GENS-1)).elf")"
-    b="$(md5_of "$out_dir/g${MAX_GENS}.elf")"
-    if [[ "$a" == "$b" ]]; then
-      note "SETTLED at g$((MAX_GENS-1))==g${MAX_GENS} md5=$a"
-      echo "$out_dir/g${MAX_GENS}.elf"
-      return 0
-    fi
-  fi
-  die "did not reach fixed point within MAX_GENS=$MAX_GENS (see $out_dir)"
-}
-
-# Refined settle: after each new gen i>=2, compare g{i-1} vs g{i}
+# ── derive loop ─────────────────────────────────────────────────────────────
+# Writes out/gens.tsv (gen\\tmd5\\tsha256\\tpath), out/SETTLED.md5, out/SETTLED.k,
+# out/seed.elf. Prints path to settled ELF on stdout (last line).
 derive_fixed_point_v2() {
   local work_root="$1"
   local start_elf="$2"
@@ -342,11 +313,14 @@ derive_fixed_point_v2() {
   local src="$work_root/$SRC"
   [[ -f "$src" && -x "$start_elf" ]] || die "derive_v2: bad inputs"
 
-  # g0 is start; produce g1.. until g{n}==g{n+1}
+  local gens_tsv="$out_dir/gens.tsv"
+  : >"$gens_tsv"
+
   local -a md5s=()
   local -a paths=()
   paths[0]="$start_elf"
   md5s[0]="$(md5_of "$start_elf")"
+  printf 'g0\t%s\t%s\t%s\n' "${md5s[0]}" "$(sha256_of "$start_elf")" "$start_elf" >>"$gens_tsv"
   note "g0 md5=${md5s[0]}  path=${paths[0]}"
 
   local i=1
@@ -361,10 +335,11 @@ derive_fixed_point_v2() {
     chmod +x "$cand"
     paths[$i]="$cand"
     md5s[$i]="$(md5_of "$cand")"
+    printf 'g%d\t%s\t%s\t%s\n' "$i" "${md5s[$i]}" "$(sha256_of "$cand")" "$cand" >>"$gens_tsv"
     note "g${i} md5=${md5s[$i]}  bytes=$(wc -c <"$cand")"
     if [[ "$i" -ge 2 && "${md5s[$i]}" == "${md5s[$((i-1))]}" ]]; then
-      note "SETTLED: g$((i-1)) == g${i}  md5=${md5s[$i]}"
-      # Also prove the gate property: settled ELF self-reproduces once more
+      local k=$((i - 1))
+      note "SETTLED: g${k} == g${i}  md5=${md5s[$i]}"
       local repro="$out_dir/repro.elf"
       if ! "$cand" "$src" "$repro" >"$out_dir/repro.log" 2>&1; then
         tail -20 "$out_dir/repro.log" >&2 || true
@@ -376,12 +351,42 @@ derive_fixed_point_v2() {
       [[ "$repro_md5" == "${md5s[$i]}" ]] \
         || die "settled md5 ${md5s[$i]} != self-repro $repro_md5 (not a fixed point)"
       note "SELF-REPRO ok md5=$repro_md5"
+      printf '%s\n' "${md5s[$i]}" >"$out_dir/SETTLED.md5"
+      printf '%s\n' "$k" >"$out_dir/SETTLED.k"
+      cp -f "$cand" "$out_dir/seed.elf"
+      chmod +x "$out_dir/seed.elf"
       printf '%s\n' "$cand"
       return 0
     fi
     i=$((i + 1))
   done
   die "no fixed point within MAX_GENS=$MAX_GENS — dump: ${md5s[*]}"
+}
+
+emit_seed_receipt() {
+  # Args via env-style locals set by caller:
+  #   _gens_tsv _source _input_seed _output_seed _settle_k _placement
+  #   _canon_status _verify_status  (pass|fail|skip)
+  local out_dir="${1:-$RECEIPT_OUT}"
+  mkdir -p "$out_dir"
+  [[ -f "$RECEIPT_PY" ]] || die "missing $RECEIPT_PY"
+  python3 "$RECEIPT_PY" \
+    --out-dir "$out_dir" \
+    --gens-tsv "$_gens_tsv" \
+    --source "$_source" \
+    --input-seed "$_input_seed" \
+    --output-seed "$_output_seed" \
+    --settle-k "$_settle_k" \
+    --placement "${_placement:-unknown}" \
+    --slurm-partition "${_slurm_partition:-}" \
+    --slurm-time "${_slurm_time:-}" \
+    --slurm-job-id "${_slurm_job_id:-}" \
+    --slurm-nodelist "${_slurm_nodelist:-}" \
+    --hostname "${_hostname:-$(hostname 2>/dev/null || true)}" \
+    --git-commit "$(git rev-parse HEAD 2>/dev/null || true)" \
+    --git-branch "$(git branch --show-current 2>/dev/null || echo detached)" \
+    --canonical-gate "${_canon_status:-skip}" \
+    --verify-lean-seed "${_verify_status:-skip}"
 }
 
 install_seed() {
@@ -412,8 +417,9 @@ run_execute() {
   Print the recipe with: bash scripts/dev/refresh_lean_seed.sh --print"
 
   require_inputs
-  local work_root=""
-  local start_elf=""
+  local out_meta=""   # directory holding gens.tsv / SETTLED.*
+  local input_seed_abs=""
+  local placement=""
 
   case "$VIA" in
     slurm)
@@ -422,22 +428,32 @@ run_execute() {
         STAGE_DIR="$(run_stage | tail -1)"
       fi
       [[ -d "$STAGE_DIR" ]] || die "stage dir missing: $STAGE_DIR"
-      work_root="$STAGE_DIR"
-      start_elf="$STAGE_DIR/$SEED"
+      input_seed_abs="$STAGE_DIR/$SEED"
+      # Snapshot input seed hashes before overwrite risk
+      cp -f "$STAGE_DIR/$SEED" "$STAGE_DIR/out/input_seed.elf" 2>/dev/null || {
+        mkdir -p "$STAGE_DIR/out"
+        cp -f "$STAGE_DIR/$SEED" "$STAGE_DIR/out/input_seed.elf"
+      }
+      placement="slurm"
       note "launching derive on Slurm via $SRUN (partition=$SLURM_PARTITION)"
       # shellcheck disable=SC2016
       bash "$SRUN" --partition="$SLURM_PARTITION" --time="$SLURM_TIME" -- "
         set -euo pipefail
         ulimit -s $STACK_KB || true
         cd '$STAGE_DIR'
-        # inline minimal derive so the node needs no /workspace
         SRC='$SRC'
         SEED='$SEED'
         OUT=out
         mkdir -p \"\$OUT\"
+        : >\"\$OUT/gens.tsv\"
         prev=\"\$SEED\"
         prev_md5=\$(md5sum \"\$prev\" | awk '{print \$1}')
-        echo \"[slurm-derive] g0 md5=\$prev_md5\"
+        prev_sha=\$(sha256sum \"\$prev\" | awk '{print \$1}')
+        printf 'g0\\t%s\\t%s\\t%s\\n' \"\$prev_md5\" \"\$prev_sha\" \"\$prev\" >>\"\$OUT/gens.tsv\"
+        echo \"[slurm-derive] g0 md5=\$prev_md5 hostname=\$(hostname) job=\${SLURM_JOB_ID:-} node=\${SLURM_NODELIST:-}\"
+        echo \"\$(hostname)\" >\"\$OUT/slurm.hostname\"
+        echo \"\${SLURM_JOB_ID:-}\" >\"\$OUT/slurm.job_id\"
+        echo \"\${SLURM_NODELIST:-}\" >\"\$OUT/slurm.nodelist\"
         i=1
         while [ \"\$i\" -le $MAX_GENS ]; do
           cand=\"\$OUT/g\${i}.elf\"
@@ -447,9 +463,10 @@ run_execute() {
           }
           chmod +x \"\$cand\"
           cand_md5=\$(md5sum \"\$cand\" | awk '{print \$1}')
+          cand_sha=\$(sha256sum \"\$cand\" | awk '{print \$1}')
+          printf 'g%d\\t%s\\t%s\\t%s\\n' \"\$i\" \"\$cand_md5\" \"\$cand_sha\" \"\$cand\" >>\"\$OUT/gens.tsv\"
           echo \"[slurm-derive] g\${i} md5=\$cand_md5\"
           if [ \"\$i\" -ge 2 ] && [ \"\$cand_md5\" = \"\$prev_md5\" ]; then
-            # self-repro check
             \"\$cand\" \"\$SRC\" \"\$OUT/repro.elf\" >\"\$OUT/repro.log\" 2>&1
             chmod +x \"\$OUT/repro.elf\"
             repro_md5=\$(md5sum \"\$OUT/repro.elf\" | awk '{print \$1}')
@@ -457,11 +474,13 @@ run_execute() {
               echo \"[slurm-derive] FAIL self-repro \$repro_md5 != \$cand_md5\" >&2
               exit 1
             }
+            k=\$((i - 1))
             echo \"\$cand_md5\" >\"\$OUT/SETTLED.md5\"
+            echo \"\$k\" >\"\$OUT/SETTLED.k\"
             echo \"\$cand\" >\"\$OUT/SETTLED.path\"
             cp -f \"\$cand\" \"\$OUT/seed.elf\"
             chmod +x \"\$OUT/seed.elf\"
-            echo \"[slurm-derive] SETTLED g\$((i-1))==g\${i} md5=\$cand_md5\"
+            echo \"[slurm-derive] SETTLED g\${k}==g\${i} md5=\$cand_md5\"
             exit 0
           fi
           prev=\"\$cand\"
@@ -471,44 +490,94 @@ run_execute() {
         echo \"[slurm-derive] FAIL no fixed point in $MAX_GENS gens\" >&2
         exit 1
       "
-      [[ -f "$STAGE_DIR/out/SETTLED.md5" ]] \
-        || die "M1 FAIL: slurm derive produced no SETTLED.md5 — refuse install"
-      local settled_md5
-      settled_md5="$(tr -d '[:space:]' <"$STAGE_DIR/out/SETTLED.md5")"
-      note "slurm settled md5=$settled_md5 (M1)"
+      [[ -f "$STAGE_DIR/out/SETTLED.md5" && -f "$STAGE_DIR/out/gens.tsv" ]] \
+        || die "M1 FAIL: slurm derive produced no SETTLED.md5/gens.tsv — refuse install"
+      note "slurm settled md5=$(tr -d '[:space:]' <"$STAGE_DIR/out/SETTLED.md5") (M1)"
       install_seed "$STAGE_DIR/out/seed.elf" "$ROOT_DIR/$SEED" "$STAGE_DIR/out/SETTLED.md5"
+      out_meta="$STAGE_DIR/out"
+      input_seed_abs="$STAGE_DIR/out/input_seed.elf"
+      [[ -f "$input_seed_abs" ]] || input_seed_abs="$STAGE_DIR/$SEED"
       ;;
     local-locked)
       note "LOCAL-LOCKED path — holds souc-build-lock; can stress the pod"
-      work_root="$ROOT_DIR"
-      start_elf="$ROOT_DIR/$SEED"
-      local cand settled_file
-      settled_file="$ROOT_DIR/out/SETTLED.md5"
+      placement="local-locked"
       mkdir -p "$ROOT_DIR/out"
-      cand="$(bash "$LOCK" bash -c "
+      cp -f "$ROOT_DIR/$SEED" "$ROOT_DIR/out/input_seed.elf"
+      input_seed_abs="$ROOT_DIR/out/input_seed.elf"
+      bash "$LOCK" bash -c "
         set -euo pipefail
-        $(declare -f note die md5_of derive_fixed_point_v2)
+        $(declare -f note die md5_of sha256_of derive_fixed_point_v2)
         ROOT_DIR='$ROOT_DIR'
         SRC='$SRC'
         MAX_GENS='$MAX_GENS'
         STACK_KB='$STACK_KB'
-        c=\$(derive_fixed_point_v2 '$work_root' '$start_elf')
-        md5sum \"\$c\" | awk '{print \$1}' > '$settled_file'
-        printf '%s\n' \"\$c\"
-      ")"
-      [[ -f "$settled_file" ]] || die "M1 FAIL: local derive wrote no SETTLED.md5"
-      install_seed "$cand" "$ROOT_DIR/$SEED" "$settled_file"
+        derive_fixed_point_v2 '$ROOT_DIR' '$ROOT_DIR/out/input_seed.elf' >/dev/null
+      "
+      [[ -f "$ROOT_DIR/out/SETTLED.md5" && -f "$ROOT_DIR/out/gens.tsv" ]] \
+        || die "M1 FAIL: local derive wrote no SETTLED.md5/gens.tsv"
+      install_seed "$ROOT_DIR/out/seed.elf" "$ROOT_DIR/$SEED" "$ROOT_DIR/out/SETTLED.md5"
+      out_meta="$ROOT_DIR/out"
       ;;
     *)
       die "--execute requires --via-slurm or --local-locked"
       ;;
   esac
 
+  local canon_status=fail verify_status=fail
   note "post-install verification"
-  (cd "$ROOT_DIR" && bash "$GATE")
-  (cd "$ROOT_DIR" && bash "$VERIFY")
-  note "EXECUTE PASS — commit $SEED when ready"
+  if (cd "$ROOT_DIR" && bash "$GATE"); then canon_status=pass; else canon_status=fail; fi
+  if (cd "$ROOT_DIR" && bash "$VERIFY"); then verify_status=pass; else verify_status=fail; fi
+  if [[ "${SOUNIO_SEED_DDC:-0}" == "1" ]]; then
+    note "DDC leg"
+    SOUNIO_SEED_DDC=1 bash "$VERIFY" || verify_status=fail
+  fi
+  [[ "$canon_status" == "pass" && "$verify_status" == "pass" ]] \
+    || die "post-install gates failed (canonical=$canon_status verify=$verify_status) — seed installed but NOT receipt-clean"
+
+  local settle_k
+  settle_k="$(tr -d '[:space:]' <"$out_meta/SETTLED.k")"
+  _gens_tsv="$out_meta/gens.tsv"
+  _source="$ROOT_DIR/$SRC"
+  # Prefer pre-chain snapshot of input seed
+  _input_seed="$input_seed_abs"
+  _output_seed="$ROOT_DIR/$SEED"
+  _settle_k="$settle_k"
+  _placement="$placement"
+  _slurm_partition="$SLURM_PARTITION"
+  _slurm_time="$SLURM_TIME"
+  _slurm_job_id=""
+  _slurm_nodelist=""
+  _hostname="$(hostname 2>/dev/null || true)"
+  if [[ -f "$out_meta/slurm.job_id" ]]; then
+    _slurm_job_id="$(tr -d '[:space:]' <"$out_meta/slurm.job_id")"
+  fi
+  if [[ -f "$out_meta/slurm.nodelist" ]]; then
+    _slurm_nodelist="$(tr -d '[:space:]' <"$out_meta/slurm.nodelist")"
+  fi
+  if [[ -f "$out_meta/slurm.hostname" ]]; then
+    _hostname="$(tr -d '[:space:]' <"$out_meta/slurm.hostname")"
+  fi
+  _canon_status="$canon_status"
+  _verify_status="$verify_status"
+
+  # Receipt in artifacts/ and next to stage out/
+  emit_seed_receipt "$RECEIPT_OUT"
+  if [[ "$out_meta" != "$RECEIPT_OUT" ]]; then
+    emit_seed_receipt "$out_meta" || true
+  fi
+
+  note "EXECUTE PASS — commit $SEED + SeedReceipt when ready"
   note "md5=$(md5_of "$ROOT_DIR/$SEED")"
+  note "receipt_dir=$RECEIPT_OUT (also see SeedReceipt.latest.json)"
+  note "fixed_point field: open the .txt and confirm gk_md5 == gk_plus1_md5 by eye"
+}
+
+run_verify_receipt() {
+  local p="${VERIFY_RECEIPT_PATH:-}"
+  [[ -n "$p" ]] || die "--verify-receipt requires a path"
+  [[ -f "$p" ]] || die "receipt not found: $p"
+  [[ -f "$RECEIPT_PY" ]] || die "missing $RECEIPT_PY"
+  python3 "$RECEIPT_PY" --verify-receipt "$p"
 }
 
 # ── argv ────────────────────────────────────────────────────────────────────
@@ -519,12 +588,24 @@ while [[ $# -gt 0 ]]; do
     --check) MODE=check; shift ;;
     --stage) MODE=stage; shift ;;
     --execute) MODE=execute; shift ;;
+    --verify-receipt)
+      MODE=verify-receipt
+      VERIFY_RECEIPT_PATH="${2:-}"
+      [[ -n "$VERIFY_RECEIPT_PATH" ]] || die "--verify-receipt needs PATH"
+      shift 2
+      ;;
+    --verify-receipt=*)
+      MODE=verify-receipt
+      VERIFY_RECEIPT_PATH="${1#*=}"
+      shift
+      ;;
     --cost) MODE=cost; shift ;;
     --via-slurm) VIA=slurm; shift ;;
     --local-locked) VIA=local-locked; shift ;;
     --stage-dir=*) STAGE_DIR="${1#*=}"; shift ;;
     --partition=*) SLURM_PARTITION="${1#*=}"; shift ;;
     --time=*) SLURM_TIME="${1#*=}"; shift ;;
+    --receipt-out=*) RECEIPT_OUT="${1#*=}"; shift ;;
     *) die "unknown arg: $1 (see --help)" ;;
   esac
 done
@@ -535,5 +616,6 @@ case "$MODE" in
   check)  run_check ;;
   stage)  run_stage >/dev/null; note "STAGE_DIR=$STAGE_DIR" ;;
   execute) run_execute ;;
+  verify-receipt) run_verify_receipt ;;
   *) die "bad mode $MODE" ;;
 esac

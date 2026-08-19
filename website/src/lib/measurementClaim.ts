@@ -14,6 +14,21 @@
  *
  * `bin/souc` and `souc-linux-x86_64-gpu` are launchers, not engines.
  * Do not invent Madaros or lean_single from a path.
+ *
+ * The site does not classify digits. It classifies who has license
+ * to assert. Three surfaces:
+ *   1. claimFace / claimRefusal — a MeasurementClaim that may print.
+ *   2. Unlicensed wells — a live page reading metrics.* / proof.*
+ *      without (1) or (3) fails the check.
+ *   3. claimEscape — a numeral that is not a scientific assertion.
+ *      Annotated, counted, printed as a table on every check run.
+ * Without (3), (1) and (2) push people to turn the script off.
+ * A silent skip is a door. A counted escape is a measurement.
+ *
+ * The CLOSED_PATTERNS denylist is debt. Do not grow it. Retire it
+ * after the license rule is the sole green on one Website CI run
+ * on main and the positive control still fires. Two mechanisms
+ * for the same thing is how neither is owned.
  */
 
 export const COMPILER_ENGINES = ['Madaros', 'lean_single'] as const;
@@ -100,4 +115,55 @@ export function claimFace(
 
 export function claimRefusal(c: MeasurementClaim, noun: string): string {
   return `${noun} · ${reachabilityFace(c)} · artifact ${c.measuredAt.slice(0, 10)} · engine unnamed`;
+}
+
+export const ESCAPE_CLASSES = ['inventory', 'literature', 'identity', 'threshold', 'version'] as const;
+export type EscapeClass = (typeof ESCAPE_CLASSES)[number];
+
+export type ClaimEscape = {
+  id: string;
+  class: EscapeClass;
+  reason: string;
+  text: string;
+};
+
+const escapeRegistry: ClaimEscape[] = [];
+
+function isEscapeClass(value: string): value is EscapeClass {
+  return (ESCAPE_CLASSES as readonly string[]).includes(value);
+}
+
+/**
+ * Mark a numeral that is not a MeasurementClaim. Returns the text
+ * without going through claimFace — this is not a green.
+ *
+ * id, class, and reason are required. The check parses every call
+ * and prints the table on every run. Growing the table is a review
+ * signal. An unannotated skip is a refuse.
+ */
+export function claimEscape(spec: ClaimEscape): string {
+  if (typeof spec.id !== 'string' || spec.id.trim().length === 0) {
+    throw new Error('claimEscape: id is required');
+  }
+  if (!isEscapeClass(spec.class)) {
+    throw new Error(
+      `claimEscape: class must be one of ${ESCAPE_CLASSES.join(', ')} (got ${String(spec.class)})`,
+    );
+  }
+  if (typeof spec.reason !== 'string' || spec.reason.trim().length < 20) {
+    throw new Error(
+      'claimEscape: reason must say why this numeral is not a MeasurementClaim (≥ 20 characters)',
+    );
+  }
+  escapeRegistry.push({
+    id: spec.id.trim(),
+    class: spec.class,
+    reason: spec.reason.trim(),
+    text: spec.text,
+  });
+  return spec.text;
+}
+
+export function claimEscapeTable(): readonly ClaimEscape[] {
+  return escapeRegistry.slice();
 }
