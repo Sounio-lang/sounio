@@ -493,3 +493,176 @@ pub fn sed64_zero_divisor_distance(s: Sedenion64) -> f64 {
     let orth_viol = sed64_abs(inner) / (a_norm * b_norm + 1e-30)
     sed64_sqrt(norm_imb * norm_imb + orth_viol * orth_viol)
 }
+
+// ============================================================================
+// TRIANGULAR-ROOT SUPPORT CLASSIFICATION
+// ============================================================================
+
+// Support-level classification of a sedenion's active imaginary components.
+// A support mask is a 16-bit integer; bit i is set when component e_i is
+// active. Bit 0 (the scalar direction) is ignored by every classifier here.
+//
+// A "triangular root" exists exactly when the active imaginary support is a
+// nonzero projective cell: P = U \ {0} for a subspace U <= F2^4 (Cayley-Dickson
+// XOR support closure). Classification:
+//   Strong — root exists, coordinate span is zero-divisor-free.
+//   Ghost  — root exists, coordinate span contains at least one zero divisor.
+//   Bad    — support is not XOR-closed, so no geometric triangular root exists.
+//
+// Return codes for sed64_classify_triangular: 0 = Strong, 1 = Ghost, 2 = Bad.
+// Reference: de Marrais DOI package criterion; verified against the Rust
+// reference in sedenion/src/lib.rs (support_mask, GF(2) RREF root).
+
+// Bitmask of the 15 imaginary directions (bit 0 = scalar, always ignored).
+pub fn sed64_imaginary_support_mask() -> i32 { 0xfffe }
+
+// Imaginary directions of the first octonion (e1..e7) in the split S = O + O.
+pub fn sed64_octonion_imaginary_support_mask() -> i32 { 0x00fe }
+
+// Bitmask of active canonical basis components.
+// Bit i is set iff |component_i| > threshold (threshold is taken in absolute
+// value). Bit 0 is included in the raw mask; classifiers ignore it.
+pub fn sed64_support_mask(s: Sedenion64, threshold: f64) -> i32 {
+    var mask = 0
+    let t = if threshold < 0.0 { 0.0 - threshold } else { threshold }
+    var i = 0
+    while i < 16 {
+        let c = sed64_get(s, i)
+        let cabs = if c < 0.0 { 0.0 - c } else { c }
+        if cabs > t {
+            mask = mask | (1 << (i as u8))
+        }
+        i = i + 1
+    }
+    mask
+}
+
+// Population count of a 16-bit mask (clears the lowest set bit per iteration).
+pub fn sed64_mask_popcount(mask: i32) -> i32 {
+    var n = 0
+    var m = mask
+    while m != 0 {
+        m = m & (m - 1)
+        n = n + 1
+    }
+    n
+}
+
+// Whether the imaginary support is closed under the Cayley-Dickson XOR law:
+// every pair of active directions a, b has a ^ b active as well.
+pub fn sed64_triangularly_closed(mask: i32) -> bool {
+    let support = mask & 0xfffe
+    if support == 0 { return false }
+    var a = 1
+    while a < 16 {
+        if (support & (1 << (a as u8))) != 0 {
+            var b = 1
+            while b < 16 {
+                if a != b && (support & (1 << (b as u8))) != 0 {
+                    if (support & (1 << ((a ^ b) as u8))) == 0 {
+                        return false
+                    }
+                }
+                b = b + 1
+            }
+        }
+        a = a + 1
+    }
+    true
+}
+
+// Canonical GF(2) RREF basis of the subspace spanned by the active imaginary
+// indices (interpreted as 4-bit vectors). Returns a mask with one bit per
+// pivot row; 0 when the input has no active imaginary direction.
+pub fn sed64_rref_root_mask(mask: i32) -> i32 {
+    var rows = [0; 15]
+    var len = 0
+    var idx = 1
+    while idx < 16 {
+        if (mask & (1 << (idx as u8))) != 0 {
+            rows[len] = idx
+            len = len + 1
+        }
+        idx = idx + 1
+    }
+    var rank = 0
+    var col = 0
+    while col < 4 {
+        let bit = 1 << (col as u8)
+        var pivot = -1
+        var r = rank
+        while r < len {
+            if (rows[r] & bit) != 0 {
+                pivot = r
+                r = len
+            }
+            r = r + 1
+        }
+        if pivot >= 0 {
+            var tmp = rows[rank]
+            rows[rank] = rows[pivot]
+            rows[pivot] = tmp
+            var row = 0
+            while row < len {
+                if row != rank && (rows[row] & bit) != 0 {
+                    rows[row] = rows[row] ^ rows[rank]
+                }
+                row = row + 1
+            }
+            rank = rank + 1
+        }
+        col = col + 1
+    }
+    var out = 0
+    var k = 0
+    while k < rank {
+        if rows[k] != 0 {
+            out = out | (1 << (rows[k] as u8))
+        }
+        k = k + 1
+    }
+    out
+}
+
+// Geometric triangular root of a support mask; 0 when none exists.
+// The scalar bit is ignored. A root exists exactly when the active imaginary
+// support is a nonzero projective cell P = U \ {0} for a subspace U <= F2^4.
+pub fn sed64_triangular_root(mask: i32) -> i32 {
+    let support = mask & 0xfffe
+    if support == 0 { return 0 }
+    if !sed64_triangularly_closed(support) { return 0 }
+    sed64_rref_root_mask(support)
+}
+
+// Relabel of the second octonion's imaginary directions: bit (8 + u) -> bit u.
+pub fn sed64_second_octonion_relabel(mask: i32) -> i32 {
+    var out = 0
+    var u = 1
+    while u < 8 {
+        if (mask & (1 << ((8 + u) as u8))) != 0 {
+            out = out | (1 << (u as u8))
+        }
+        u = u + 1
+    }
+    out
+}
+
+// Whether the coordinate span of the support contains a nonzero sedenion zero
+// divisor (DOI criterion for the fixed split S = O + O with e8 as the second
+// octonion's real direction).
+pub fn sed64_is_zd_degenerate_support(mask: i32) -> bool {
+    let support = mask & 0xfffe
+    let a = support & 0x00fe
+    let b = sed64_second_octonion_relabel(support)
+    if a == 0 || b == 0 { return false }
+    !(a == b && sed64_mask_popcount(a) == 1)
+}
+
+// Classify a support mask: 0 = Strong, 1 = Ghost, 2 = Bad.
+// Ghost means the coordinate span contains some zero divisor; it does not
+// claim that every vector with that support is itself a zero divisor.
+pub fn sed64_classify_triangular(mask: i32) -> i32 {
+    let root = sed64_triangular_root(mask)
+    if root == 0 { return 2 }
+    if sed64_is_zd_degenerate_support(mask) { 1 } else { 0 }
+}
