@@ -11,8 +11,6 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.subpt
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
->
-> **Live golden-gate (not this page):** on 2026-08-18 `kaxi_ptx_golden_gate.sh` measured **0/318** PASS, rc=1, 80 s (`docs/audit/CI_GATE_BUDGET_2026-08-18.tsv`, #1915). The 318/318 row below is a 2026-05-11 receipt. It is not a current measurement.
 <!-- docs:status-note:end -->
 
 # Sub-PTX Phase H complete — convergence-grade Sinkhorn unlocked
