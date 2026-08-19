@@ -315,6 +315,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.portfolio-imported-native-139-untag-2026-08-18 | repo_only | docs/audit/PORTFOLIO_IMPORTED_NATIVE_139_UNTAG_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.portfolio-split-source-ceiling-2026-08-17 | repo_only | docs/audit/PORTFOLIO_SPLIT_SOURCE_CEILING_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.primary-checkout-reconciliation-plan-2026-06-21 | repo_only | docs/audit/PRIMARY_CHECKOUT_RECONCILIATION_PLAN_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.provenance-layer-staircase-2026-08-19 | repo_only | docs/audit/PROVENANCE_LAYER_STAIRCASE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.dispatch | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.fix.proposed-fix | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/fix/PROPOSED_FIX.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.r2-2-synthesis | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/R2_2_SYNTHESIS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
