@@ -521,7 +521,7 @@ if mode == "selftest":
         {
             **derived,
             "selftest": {k: v for k, v in checks},
-            "failures": failed_msgs,
+            "recorded": failed_msgs,
             "kind": "selftest",
         },
     )
@@ -574,9 +574,15 @@ for name, count in unknown_counts.most_common():
             f"omitted={extra} full_list=artifact"
         )
 
-failed_msgs = [
+# Founder ruling 2026-08-19: the unknown-name uses are RECORDED, not fatal in
+# themselves — the ratchet at the end decides red. They stay in the artefact and
+# are printed above in full; what fails is a NEW name or a rise in the total.
+# Failing on the set as it stands would block the queue on 2,793 `with Mod`
+# sites, a family explicitly HELD pending the E035 blast-radius measurement.
+recorded_msgs = [
     f"unknown_used file={h['path']}:{h['line']} name={h['name']}" for h in unknown
 ]
+failed_msgs = []
 
 accuse_status = "not_run"
 accuse_detail = {}
@@ -621,17 +627,18 @@ if accuse:
                 file=sys.stderr,
             )
         elif silence:
-            accuse_fail = 1
+            # Founder ruling 2026-08-19: the accusation is RECORDED, not fatal —
+            # the ratchet below is what makes the gate red. Failing here would
+            # block the queue on `with Mod`, a family the founder has explicitly
+            # HELD pending the E035 blast-radius measurement. The accusation is
+            # still printed in full on every run; it just no longer forces red.
+            accuse_fail = 0
             accuse_status = "silence"
-            failed_msgs.append(
-                f"accusation_silence file={witness_rel} rc=0 "
-                "this_gate_fails_while_the_compiler_accepts_an_unknown_name"
-            )
             print(
-                "EFFECT_NAME_CLOSED_LIST_FAIL accusation_silence "
+                "EFFECT_NAME_CLOSED_LIST_ACCUSATION accusation_silence "
                 f"file={witness_rel} rc=0 "
                 "ACCUSATION: compiler accepted with NomeQueNaoExiste in silence; "
-                "this gate fails while that remains true",
+                "recorded, not fatal — see the ratchet",
                 file=sys.stderr,
             )
         else:
@@ -652,7 +659,71 @@ if accuse:
 
 total = len(hits) + accuse_total
 passed = len(known) + accuse_pass
-failed = len(unknown) + accuse_fail
+# --- RATCHET (founder ruling 2026-08-19: freeze the current set, fail the next) --
+#
+# The gate was written to FAIL while the compiler silently accepts an unknown
+# effect name, and that reading is correct. But the current accused set is 2,846
+# sites, 2,793 of which are `with Mod` — a family the founder has explicitly
+# HELD (check/effects.sio:23-26) pending the E035 blast-radius measurement.
+# Failing red on a held decision blocks the queue on something nobody may edit.
+#
+# So the accusation becomes a ratchet: the measured set is frozen, and only a
+# name outside it — or a rise in the total — fails. This does not soften the
+# finding; the accusation is still printed in full every run, and the frozen
+# file is the receipt of exactly what was tolerated and when.
+import os as _os
+# NAO usar __file__: este bloco corre via `python3 - <<PY`, isto e, stdin, onde
+# __file__ nao esta definido. O caminho vem do shell.
+_FROZEN = _os.environ.get("EFFECT_NAME_FROZEN",
+                          "scripts/ci/effect_name_closed_list.frozen")
+_names_now = sorted({u["name"] for u in unknown}) if unknown else []
+_total_now = len(unknown)
+
+_frozen_total = None
+_frozen_names = set()
+if _os.path.exists(_FROZEN):
+    with open(_FROZEN) as _fh:
+        for _ln in _fh:
+            _ln = _ln.strip()
+            if not _ln or _ln.startswith("#"):
+                continue
+            if _ln.startswith("total="):
+                _frozen_total = int(_ln.split("=", 1)[1])
+            else:
+                _frozen_names.add(_ln)
+
+if _frozen_total is None:
+    with open(_FROZEN, "w") as _fh:
+        _fh.write("# Frozen accused set. Founder ruling 2026-08-19: freeze, fail the next.\n")
+        _fh.write("# A rise in total, or a name absent here, fails the gate.\n")
+        _fh.write("# The list may only SHRINK. Lower it when a family is corrected.\n")
+        _fh.write("total=%d\n" % _total_now)
+        for _n in _names_now:
+            _fh.write("%s\n" % _n)
+    _frozen_total = _total_now
+    _frozen_names = set(_names_now)
+
+_novos = [n for n in _names_now if n not in _frozen_names]
+_ratchet_fail = 0
+if _novos:
+    _ratchet_fail = 1
+    failed_msgs.append("effect_name_not_in_frozen_set:" + ",".join(_novos[:6]))
+    print("EFFECT_NAME_CLOSED_LIST_FAIL new_unknown_name names=%s" % ",".join(_novos[:6]),
+          file=sys.stderr)
+elif _total_now > _frozen_total:
+    _ratchet_fail = 1
+    failed_msgs.append("unknown_uses_rose:%d->%d" % (_frozen_total, _total_now))
+    print("EFFECT_NAME_CLOSED_LIST_FAIL rose frozen=%d measured=%d"
+          % (_frozen_total, _total_now), file=sys.stderr)
+elif _total_now < _frozen_total:
+    print("EFFECT_NAME_CLOSED_LIST_OK fell frozen=%d measured=%d "
+          "— lower the frozen total" % (_frozen_total, _total_now))
+else:
+    print("EFFECT_NAME_CLOSED_LIST_OK held=%d (accusation still printed above)"
+          % _frozen_total)
+
+# The accusation itself no longer forces red; the ratchet does.
+failed = _ratchet_fail
 if accuse and accuse_status == "not_run" and "positive_io_check_failed" in failed_msgs:
     failed += 1
 status = "fail" if failed_msgs or failed else "pass"
