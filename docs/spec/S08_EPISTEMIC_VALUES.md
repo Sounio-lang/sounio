@@ -218,13 +218,28 @@ So the numbers flow through plain `f64` arrays (`m`, `v`, `c`) and the
   assignments zeros `sens[0]` and fails TEST 5; the unmodified file passes 9/9
   under lean_single. The numbers pass through it.
 
-Three further facts fall out of the same measurement, and each is a defect:
+Five further facts fall out of the same measurement, and each is a defect:
 
 - **The field written is not the field read.** The literal writes `epsilon:`;
-  under Madaros `.epsilon` reads **0.0** while `.confidence` reads 0.65. One of
-  the two names is silently inert.
-- **The engines disagree on a wrong-field literal.** Madaros refuses with
-  `E012`; **lean_single warns and emits an ELF anyway**.
+  under Madaros `.epsilon` reads **0.0** while `.confidence` reads 0.65.
+- **The cause is positional filling, not a swapped alias.** Madaros fills the
+  builtin `Knowledge` literal **by position**, ignoring the written names.
+  lean_single resolves **by name** and aliases `epsilon` to `confidence`. Both
+  therefore land `c[i]` in the confidence slot *under the field order this file
+  happens to use* — Madaros by arithmetic, lean_single by meaning.
+- **Madaros does not validate constructor field names at all.** Negative control
+  (`docs/audit/repro/epsilon/neg_epsilom.sio`): a literal writing the invented
+  name `epsilom: 0.42` is accepted by Madaros with `check: OK`, rc=0, and **no
+  diagnostic**; lean_single emits `warning: unknown field in Knowledge literal`
+  and drops the write. An earlier draft of this section stated the opposite —
+  that *Madaros refuses with `E012`* — and that is **false for the builtin**,
+  re-measured on both engines. It is corrected here rather than quietly dropped,
+  because the error credited the silent engine with the rigour of the noisy one.
+- **The correctness is order-dependent and nothing records the dependence.**
+  Under Madaros, moving `epsilon:` ahead of `variance:` — a reordering no
+  diagnostic objects to — puts `c[i]` in the variance slot and zeroes
+  `.confidence`. The dissertation's GUM numbers are right because of the
+  sequence the literal was typed in, not because the names were honoured.
 - **The gate that covers this file is unreachable.**
   `scripts/ci/dissertation_pbpk_suite_gate.sh` lists it, and no workflow reaches
   that gate.
