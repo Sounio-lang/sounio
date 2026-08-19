@@ -28,8 +28,8 @@ Intent-Preserved: a gate that does not run is not a pass; declaring
   declaring it well; the off-CI list stays visible when the gate
   is green
 Transformation: every top-level scripts/ci/*.sh must have a
-  manifest row (admitido | nao-admitido | obsoleto). admitido must
-  be named under .github/. nao-admitido and obsoleto require a
+  manifest row (admitted | not-admitted | obsolete). admitted must
+  be named under .github/. not-admitted and obsolete require a
   non-empty owner and reason. Missing row is red. Malformed is
   redder than absent.
 Types-Changed: none
@@ -38,8 +38,8 @@ IR-Changed: none
 Claims-Introduced: of the 547 top-level scripts/ci/*.sh on
   origin/main f9b3147364, 104 are named under .github/ and 443
   are not (19.0%), by git grep -F <basename> -- .github/; those
-  104 may be declared admitido and the 443 may be declared
-  nao-admitido with bootstrap debt
+  104 may be declared admitted and the 443 may be declared
+  not-admitted with bootstrap debt
 Claims-Forbidden: 443 isolated accidents; a green contracts job
   means the unrun gates passed; the bootstrap reason is a
   per-gate review; this gate being green means the 443 have
@@ -58,14 +58,14 @@ Read-Set: origin/main scripts/ci/*.sh, .github/,
   scripts/ci/concept_status_gate.sh, ci.yml:68,
   grok-cli3 ontology-14, glm-cli1 rebracket-10
 Positive-Witness: no manifest → red; bootstrap manifest → green;
-  --self-test fixture colours; dce_reach-style: admitido but
+  --self-test fixture colours; dce_reach-style: admitted but
   unnamed → red, then that edit is undone before merge
 Negative-Witness: a scripts/ci/*.sh with no row that still
-  exits 0; nao-admitido with empty owner that still exits 0;
+  exits 0; not-admitted with empty owner that still exits 0;
   this gate itself unnamed under .github/ after merge
 Acceptance-Gate: scripts/ci/gate_reachability_gate.sh exit 0
   on this branch with the committed manifest; --self-test
-  exit 0; the negative admitido-unwired case exit 1
+  exit 0; the negative admitted-unwired case exit 1
 Integration-Target: origin/main at the branch point (f9b3147364)
 Authoritative-Only-If: the 547/104/443 count is re-derived in
   this file with a command, and the two known cases match
@@ -94,25 +94,32 @@ done
 Both known cases match. The founder number is the top-level glob,
 not the recursive tree. This gate enumerates that glob.
 
+## Vocabulary
+
+The founder dispatch named the three states in Portuguese (operational
+instruction). The product vocabulary is EN-UK: `admitted`,
+`not-admitted`, `obsolete`. Owner `unassigned`. Bootstrap reason
+`inherited at 2026-08-19 bootstrap, state pending review`.
+
 ## Bootstrap (not a review)
 
-The 104 named rows enter as `admitido`.
-The 443 unnamed rows enter as `nao-admitido` with
-`owner=por atribuir` and
-`reason=herdado no bootstrap 2026-08-19, estado por rever`.
+The 104 named rows enter as `admitted`.
+The 443 unnamed rows enter as `not-admitted` with
+`owner=unassigned` and
+`reason=inherited at 2026-08-19 bootstrap, state pending review`.
 
-No individual reasons. The printed nao-admitido list is the debt.
+No individual reasons. The printed not-admitted list is the debt.
 
 The new gate is a 548th `scripts/ci/*.sh`. After it is named in
-`ci.yml` it is `admitido` and the unnamed count stays 443.
+`ci.yml` it is `admitted` and the unnamed count stays 443.
 
 ## Refutation
 
 This gate is the wrong thing if:
 
 - **R1** it exits 0 when the manifest is absent.
-- **R2** `nao-admitido` with empty owner or reason exits 0.
-- **R3** an `admitido` row whose basename is not under `.github/`
+- **R2** `not-admitted` with empty owner or reason exits 0.
+- **R3** an `admitted` row whose basename is not under `.github/`
   exits 0.
 - **R4** wiring it requires touching any workflow step other than
   its own, or reverting someone else's commit.
@@ -129,15 +136,15 @@ Instrument on `origin/main` `f9b3147364`, then this branch:
 | rc | **1** (`missing-manifest` + 548 `unlisted=`) | 0 | **0** |
 
 Negative phase (undone before commit):
-`exact_bitwise_rebracket_authority_gate.sh` flipped to `admitido`
+`exact_bitwise_rebracket_authority_gate.sh` flipped to `admitted`
 without a `.github/` mention → rc=1
-`admitido-unwired=exact_bitwise_rebracket_authority_gate.sh`.
+`admitted-unwired=exact_bitwise_rebracket_authority_gate.sh`.
 Restored. Not a revert of anyone else's commit.
 
 `--self-test` (fixture dir, six colours) → `GATE_REACHABILITY_SELFTEST_OK`.
 
-On green the gate still prints all 443 `nao-admitido` rows with
-`owner=por atribuir`. That list is the debt.
+On green the gate still prints all 443 `not-admitted` rows with
+`owner=unassigned`. That list is the debt.
 
 `ci.yml` delta is seven lines: one contracts step immediately after
 `concept_status_gate.sh`. Nothing else wired. grok-cli3's ontology
@@ -146,7 +153,7 @@ On green the gate still prints all 443 `nao-admitido` rows with
 ```text
 Semantic-Outcome: the 443 unrun gates are no longer silent. They
   are a printed, counted debt. A new scripts/ci/*.sh without a
-  row is red. An admitido row that CI does not name is red.
-  Declaring nao-admitido without owner and reason is red.
+  row is red. An admitted row that CI does not name is red.
+  Declaring not-admitted without owner and reason is red.
   This gate names itself under .github/. The 443 are not owned.
 ```

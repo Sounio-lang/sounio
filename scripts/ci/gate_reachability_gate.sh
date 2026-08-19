@@ -3,13 +3,13 @@
 #
 # Enumerates scripts/ci/*.sh (non-recursive — the founder 547) and
 # requires a manifest row for each. States:
-#   admitido     must be named under .github/ (git grep -F <basename>)
-#   nao-admitido written, deliberately not wired; owner AND reason required
-#   obsoleto     candidate to delete; owner AND reason required
+#   admitted      must be named under .github/ (git grep -F <basename>)
+#   not-admitted  written, deliberately not wired; owner AND reason required
+#   obsolete      candidate to delete; owner AND reason required
 # Missing row = red. Malformed (empty owner/reason, unknown state,
 # duplicate, stale row) is redder than absent.
 #
-# Visibility: counts and the full nao-admitido list print even on green.
+# Visibility: counts and the full not-admitted list print even on green.
 # No age expiry. The list is the debt.
 #
 # usage:
@@ -59,9 +59,9 @@ SCRIPTS_DIR = pathlib.Path(os.environ["GATE_REACHABILITY_SCRIPTS_DIR"])
 GITHUB_DIR = pathlib.Path(os.environ["GATE_REACHABILITY_GITHUB_DIR"])
 MODE = os.environ["GATE_REACHABILITY_MODE"]
 
-STATES = ("admitido", "nao-admitido", "obsoleto")
-BOOTSTRAP_OWNER = "por atribuir"
-BOOTSTRAP_REASON = "herdado no bootstrap 2026-08-19, estado por rever"
+STATES = ("admitted", "not-admitted", "obsolete")
+BOOTSTRAP_OWNER = "unassigned"
+BOOTSTRAP_REASON = "inherited at 2026-08-19 bootstrap, state pending review"
 SELF = "gate_reachability_gate.sh"
 
 def list_gates(scripts_dir: pathlib.Path):
@@ -120,8 +120,8 @@ def parse_manifest(path: pathlib.Path):
         else:
             seen[gate] = lineno
         if state not in STATES:
-            errors.append(f"malformed:{gate}: unknown-state={state!r} (want admitido|nao-admitido|obsoleto)")
-        if state in ("nao-admitido", "obsoleto"):
+            errors.append(f"malformed:{gate}: unknown-state={state!r} (want admitted|not-admitted|obsolete)")
+        if state in ("not-admitted", "obsolete"):
             if not owner:
                 errors.append(f"malformed:{gate}: {state} missing owner")
             if not reason:
@@ -133,7 +133,7 @@ def classify(gates, rows, named):
     by_gate = {r["gate"]: r for r in (rows or [])}
     fails = []
     counts = {s: 0 for s in STATES}
-    debt = []  # nao-admitido / obsoleto rows, for the always-on print
+    debt = []  # not-admitted / obsolete rows, for the always-on print
     for g in gates:
         row = by_gate.get(g)
         if row is None:
@@ -142,12 +142,12 @@ def classify(gates, rows, named):
         st = row["state"]
         if st in counts:
             counts[st] += 1
-        if st in ("nao-admitido", "obsoleto"):
+        if st in ("not-admitted", "obsolete"):
             debt.append(row)
         is_named = g in named
-        if st == "admitido" and not is_named:
-            fails.append(f"admitido-unwired={g}")
-        if st in ("nao-admitido", "obsoleto") and is_named:
+        if st == "admitted" and not is_named:
+            fails.append(f"admitted-unwired={g}")
+        if st in ("not-admitted", "obsolete") and is_named:
             fails.append(f"declared-{st}-but-named={g}")
     if rows is not None:
         live = set(gates)
@@ -164,13 +164,13 @@ def print_report(gates, named, counts, debt, fails, extra_errors):
         "manifest_"
         + " ".join(f"{s}={counts.get(s, 0)}" for s in STATES)
     )
-    print(f"nao-admitido ({sum(1 for r in debt if r['state']=='nao-admitido')}):")
+    print(f"not-admitted ({sum(1 for r in debt if r['state']=='not-admitted')}):")
     for r in debt:
-        if r["state"] != "nao-admitido":
+        if r["state"] != "not-admitted":
             continue
         print(f"  {r['gate']}  owner={r['owner']}  reason={r['reason']}")
-    obs = [r for r in debt if r["state"] == "obsoleto"]
-    print(f"obsoleto ({len(obs)}):")
+    obs = [r for r in debt if r["state"] == "obsolete"]
+    print(f"obsolete ({len(obs)}):")
     for r in obs:
         print(f"  {r['gate']}  owner={r['owner']}  reason={r['reason']}")
     all_err = list(extra_errors) + list(fails)
@@ -186,19 +186,19 @@ def bootstrap_tsv(gates, named):
     lines = [
         "# gate_reachability.manifest.tsv",
         "# Columns: gate<TAB>state<TAB>owner<TAB>reason",
-        "# state ∈ admitido | nao-admitido | obsoleto",
-        "# admitido: must be named under .github/; owner/reason may be empty",
-        "# nao-admitido / obsoleto: owner AND reason must be non-empty",
+        "# state ∈ admitted | not-admitted | obsolete",
+        "# admitted: must be named under .github/; owner/reason may be empty",
+        "# not-admitted / obsolete: owner AND reason must be non-empty",
         "# A scripts/ci/*.sh with no row is RED. Malformed is redder than absent.",
         f"# Bootstrap 2026-08-19 on {len(gates)} top-level scripts/ci/*.sh.",
-        "# named → admitido; unnamed → nao-admitido owner=por atribuir",
+        "# named → admitted; unnamed → not-admitted owner=unassigned",
         "gate\tstate\towner\treason",
     ]
     for g in gates:
         if g in named:
-            lines.append(f"{g}\tadmitido\t\t")
+            lines.append(f"{g}\tadmitted\t\t")
         else:
-            lines.append(f"{g}\tnao-admitido\t{BOOTSTRAP_OWNER}\t{BOOTSTRAP_REASON}")
+            lines.append(f"{g}\tnot-admitted\t{BOOTSTRAP_OWNER}\t{BOOTSTRAP_REASON}")
     return "\n".join(lines) + "\n"
 
 def run_check(scripts_dir, github_dir, manifest, require_manifest=True):
@@ -246,9 +246,9 @@ def self_test():
         # 2. well-formed bootstrap-shaped manifest → green
         man.write_text(
             "gate\tstate\towner\treason\n"
-            "on_ci.sh\tadmitido\t\t\n"
-            "off_ci.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
-            "ghost.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
+            "on_ci.sh\tadmitted\t\t\n"
+            "off_ci.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
+            "ghost.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
         )
         rc = run_check(scripts, github, man)
         expect(rc, rc == 0, "bootstrap-shaped fixture must be green")
@@ -257,51 +257,51 @@ def self_test():
         man.write_text(
             "# comment\n"
             "gate\tstate\towner\treason\n"
-            "on_ci.sh\tadmitido\t\t\n"
-            "off_ci.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
-            "ghost.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
+            "on_ci.sh\tadmitted\t\t\n"
+            "off_ci.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
+            "ghost.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
         )
         rc = run_check(scripts, github, man)
         expect(rc, rc == 0, "header-after-comments must be green")
 
-        # 3. admitido but unnamed → red (the negative phase)
+        # 3. admitted but unnamed → red (the negative phase)
         man.write_text(
             "gate\tstate\towner\treason\n"
-            "on_ci.sh\tadmitido\t\t\n"
-            "off_ci.sh\tadmitido\t\t\n"
-            "ghost.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
+            "on_ci.sh\tadmitted\t\t\n"
+            "off_ci.sh\tadmitted\t\t\n"
+            "ghost.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
         )
         rc = run_check(scripts, github, man)
-        expect(rc, rc == 1, "admitido-unwired must be red")
+        expect(rc, rc == 1, "admitted-unwired must be red")
 
-        # 4. nao-admitido missing owner → redder than a review
+        # 4. not-admitted missing owner → redder than a review
         man.write_text(
             "gate\tstate\towner\treason\n"
-            "on_ci.sh\tadmitido\t\t\n"
-            "off_ci.sh\tnao-admitido\t\therdado\n"
-            "ghost.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
+            "on_ci.sh\tadmitted\t\t\n"
+            "off_ci.sh\tnot-admitted\t\tinherited\n"
+            "ghost.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
         )
         rc = run_check(scripts, github, man)
-        expect(rc, rc == 1, "nao-admitido without owner must be red")
+        expect(rc, rc == 1, "not-admitted without owner must be red")
 
         # 5. missing row → red
         man.write_text(
             "gate\tstate\towner\treason\n"
-            "on_ci.sh\tadmitido\t\t\n"
-            "off_ci.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
+            "on_ci.sh\tadmitted\t\t\n"
+            "off_ci.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
         )
         rc = run_check(scripts, github, man)
         expect(rc, rc == 1, "unlisted ghost.sh must be red")
 
-        # 6. declared nao-admitido but named → red
+        # 6. declared not-admitted but named → red
         man.write_text(
             "gate\tstate\towner\treason\n"
-            "on_ci.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
-            "off_ci.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
-            "ghost.sh\tnao-admitido\tpor atribuir\therdado no bootstrap 2026-08-19, estado por rever\n"
+            "on_ci.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
+            "off_ci.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
+            "ghost.sh\tnot-admitted\tunassigned\tinherited at 2026-08-19 bootstrap, state pending review\n"
         )
         rc = run_check(scripts, github, man)
-        expect(rc, rc == 1, "named-but-nao-admitido must be red")
+        expect(rc, rc == 1, "named-but-not-admitted must be red")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
