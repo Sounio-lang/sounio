@@ -48,17 +48,74 @@ supposedly *discharged*: an unrecognised effect name is ignored without a
 diagnostic, and a function already carrying eight effects has the handled effect
 dropped.
 
-## 7.3 What is not yet measured
+## 7.3 Measured: the expression is erased in silence on one engine and unknown on the other
 
-Whether a program containing `handle` **refuses**, **compiles and silently does
-nothing**, **crashes**, or **works** is not established by static reading. The
-lowering dispatches on `ExprKind` through `if` chains rather than a match with
-an explicit default, so the fall-through behaviour must be observed rather than
-inferred.
+Runtime witness, 2026-08-19, both engines, on Slurm
+(`docs/audit/HANDLE_EXECUTION_WITNESS_2026-08-19.md`):
 
-A runtime witness is owed, under **both engines**, with a control program that
-differs only by the absence of `handle`. Until it lands this section states the
-front-end/back-end split above and nothing about execution.
+| engine | result |
+|---|---|
+| **Madaros** (default) | **Silent erasure.** `handle<IO>` *and* `handle<NotARealEffect>` both check OK, emit an ELF, exit 0, and print nothing. The whole expression is discarded. |
+| **lean_single** (the seed) | **Refuses** — `error[E200]: undefined identifier \`handle\`` |
+
+Controls close the other three outcomes. A control program differing only by the
+absence of `handle` compiled and printed `BODY_MARK` on **both** engines, so the
+empty cells are the construct and not the instrument. `HANDLER_MARK` never
+appears, so this is not *works*. Madaros exits 0, so this is not *crash*.
+
+**The negative control is the sharper finding.** On Madaros an invented effect is
+**indistinguishable from `IO`**. The checker does not separate a real effect from
+a fake one — independently confirming §6.2's `eff_id >= 0` guard and #1953's
+`Foo` → `check: OK` / silence.
+
+### 7.3.1 lean_single's refusal is ignorance, not design
+
+`E200: undefined identifier` is the diagnostic the seed gives any name it does
+not know. It does not treat `handle` as a keyword at all. This is **not** a typed
+`Reserved` refusal.
+
+The consequence for 7.4 is direct: **neither engine refuses `handle` by
+decision.** One erases it silently, the other has never heard of it. The
+*Reserved* option below is therefore not the cheap one already half-present — it
+does not exist anywhere and must be built like the others.
+
+### 7.3.2 The corpus contains no live handler at all
+
+Census, 2026-08-19 (`docs/audit/HANDLE_GREEN_CENSUS_2026-08-19.md`): **zero**
+`tests/run-pass/` files contain a live algebraic-effect `handle` expression and
+pass under Madaros. The perverse cell — a green that is really an erased
+construct — is empty.
+
+The files that appear to use handlers are **name traps**:
+
+| site | what it actually is |
+|---|---|
+| `tests/run-pass/closure_linear.sio:14` | `let handle = open_file(42)` — a variable |
+| `tests/run-pass/linear_correct_consume.sio:13` | `let handle = FileHandle { fd: 42 }` |
+| `tests/run-pass/async_spawn.sio:11` | `let handle = spawn {` |
+| `examples/showcase/linear_file_server.sio` | `handle` as a field and a parameter of a linear `FileHandle` |
+| `self-hosted/ir/lower.sio:4810` | `lower_handle_buf_arg_index` — the runtime handle table, unrelated |
+
+In `examples/effects*.sio` the handler code sits **inside comments**; the live
+program below is a stub.
+
+> **Correction, 2026-08-19.** An earlier revision of this section listed four of
+> those files as programs whose algebraic-effect parts silently do nothing. That
+> was wrong: none contains a handler. The claim came from a pattern that matched
+> the identifier `handle` — the exact trap the census's own negative control was
+> written to exclude.
+
+**This narrows §7.4 rather than widening it.** Silent erasure has, today, no
+victims in the corpus: there is nothing to break by refusing `handle`, and
+nothing to fix by implementing it. Whichever way 7.4 is ruled, the cost of
+ruling is the lowest it will ever be.
+
+### 7.3.3 One green tests the message, not the mechanism
+
+The census records that `handler_discharge.sio` is green on both engines
+**because it was rewritten to `println("handler: PASS")`**. The file's name
+claims a discharge test; what it asserts is a string. Reclassifying it is a
+founder decision and the census did not touch it.
 
 ## 7.4 Rulings owed
 
