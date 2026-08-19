@@ -63,8 +63,10 @@ These follow from 8.1. Each is normative; none is implemented.
 4. **Decisions read the invariant, not the number.** `Admissible<T>` requires
    support that has not been degraded without justification
    (`SOUNIO-ADMISSIBILITY`). Deciding is the fifth sink.
-5. **`confidence` is bounded and its endpoints mean something.** `0` and `1000`
-   are not merely clamps. What they denote is **undefined** — see 8.5.
+5. **`confidence = 1000` denotes certainty.** Founder ruling, 2026-08-19. It is
+   not "maximum representable" and not "no claim made". `ep_exact` constructing
+   an exact value with `variance: 0.0, confidence: 1000` is therefore correct
+   rather than incidental. `0` is the opposite endpoint: no confidence.
 
 ## 8.4 What the ruling buys
 
@@ -83,10 +85,14 @@ A rule can be argued away one at a time. A definition has to be replaced whole.
 
 ## 8.5 Undefined — rulings owed
 
-- **The meaning of `confidence = 1000`.** `ep_exact` uses it for an exact value
-  with zero variance. Whether it denotes *certainty*, *maximum representable
-  confidence*, or *no confidence claim made* is unstated, and the three differ
-  where it matters (`SOUNIO-NO-VERSUS-UNKNOWN`).
+- **Where "no confidence claim made" lives.** Ruled 2026-08-19: `1000` is
+  **certainty** and `0` is **no confidence**, so the scale `0..1000` is fully
+  occupied by meanings. A value constructed without anyone having assessed
+  confidence must still carry a number — and every number in range is an
+  assertion nobody made. `SOUNIO-NO-VERSUS-UNKNOWN` names the exit: *the defect
+  is the collision, not the sentinel; a sentinel no correct value can occupy is
+  fine.* The sentinel must therefore live **outside** `0..1000`, or the type
+  must make an unassessed value unconstructible. Which of the two is **owed**.
 - **Whether `variance = 0.0` is legitimate.** An exact value has no variance; a
   degraded value reports none. The two currently print identically. Whether the
   type admits a genuine zero, or reserves it, is owed.
