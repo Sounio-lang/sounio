@@ -42,10 +42,11 @@ Use these labels inside every seed:
 | `Hypothesis` | A precise direction that could become testable but is not yet proven. |
 | `Executable` | Backed by a repo command, test, gate, artifact, or implementation path. |
 | `Claim-ready` | Suitable for paper or public use only after explicit validation and review. |
-| `Reserved` | The name is taken and the system **refuses every use** with a named diagnostic, pending implementation. Beside the ladder, not on it. |
+| `reserved-owed` | Name taken; refuses every use; **someone owes** the landing (`Reserved-Owner`, `Reserved-Since`, `Reserved-Blocked-On`). |
+| `reserved-taken` | Name taken so nobody else defines it; **owes nothing**; `Reserved-Reason` only. |
 
 The ladder is **monotone**: each state requires every state beneath it. A
-seed or kind cannot be `Claim-ready` without being `Executable`. `Reserved`
+seed or kind cannot be `Claim-ready` without being `Executable`. Reserved forms
 sits beside the ladder — it has not failed to reach `Executable`, it is held
 short of it on purpose. See `docs/internal/concepts/MATURITY_LADDER.md` for
 the two-program test that decides a position.

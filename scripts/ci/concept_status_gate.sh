@@ -32,7 +32,7 @@ REGISTRY="$CONCEPTS_DIR/registry.tsv"
 BINDINGS="$CONCEPTS_DIR/bindings.tsv"
 REPORT_ONLY="${SOUNIO_CONCEPT_STATUS_REPORT_ONLY:-0}"
 
-VOCAB_RE='^(garden|hypothesis|executable|integrated|claim-ready|reserved|superseded)$'
+VOCAB_RE='^(garden|hypothesis|executable|integrated|claim-ready|reserved-owed|reserved-taken|superseded)$'
 
 META_DOCS=$'README.md\nSEMANTIC_LANE_CONTRACT.md\nMATURITY_LADDER.md'
 
@@ -41,6 +41,8 @@ declare -a FAILURES=()
 # Active (well-formed) EDNC declarations — printed always, oldest first.
 # Age from Date field only (not git log). No expiry, no age-based fail.
 declare -a EDNC_ROWS=()  # "age\tdoc\towner\tdate\treason"
+declare -a OWED_ROWS=()  # "age\tdoc\towner\tsince\tblocked_on"
+
 
 note_fail() {
   FAILURES+=("$1")
@@ -251,6 +253,66 @@ parse_ednc() {
 }
 
 
+
+# Parse reserved-owed / reserved-taken required fields from a concept doc.
+# Sets: RES_OWNER RES_SINCE RES_BLOCKED RES_REASON RES_MISS RES_AGE_DAYS RES_OK
+parse_reserved_fields() {
+  local file="$1" kind="$2"
+  RES_OWNER="" RES_SINCE="" RES_BLOCKED="" RES_REASON=""
+  RES_MISS="" RES_AGE_DAYS=-1 RES_OK=0
+
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ ^[[:space:]]*[Rr]eserved-[Oo]wner[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      RES_OWNER="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^[[:space:]]*[Rr]eserved-[Ss]ince[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      RES_SINCE="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^[[:space:]]*[Rr]eserved-[Bb]locked-[Oo]n[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      RES_BLOCKED="${BASH_REMATCH[1]}"
+    elif [[ "$line" =~ ^[[:space:]]*[Rr]eserved-[Rr]eason[[:space:]]*:[[:space:]]*(.*)$ ]]; then
+      RES_REASON="${BASH_REMATCH[1]}"
+    fi
+  done <"$file"
+
+  RES_OWNER="$(echo -n "$RES_OWNER" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  RES_SINCE="$(echo -n "$RES_SINCE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  RES_BLOCKED="$(echo -n "$RES_BLOCKED" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  RES_REASON="$(echo -n "$RES_REASON" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+  local miss=()
+  if [[ "$kind" == "reserved-owed" ]]; then
+    [[ -z "$RES_OWNER" ]] && miss+=("Reserved-Owner")
+    [[ -z "$RES_SINCE" ]] && miss+=("Reserved-Since")
+    [[ -z "$RES_BLOCKED" ]] && miss+=("Reserved-Blocked-On")
+    if [[ -n "$RES_SINCE" ]]; then
+      if ! [[ "$RES_SINCE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+        miss+=("Reserved-Since(not_ISO)")
+      elif date -d "$RES_SINCE" >/dev/null 2>&1; then
+        local then now
+        then=$(date -d "$RES_SINCE" +%s)
+        now=$(date +%s)
+        RES_AGE_DAYS=$(( (now - then) / 86400 ))
+      fi
+    fi
+    if [[ -n "$RES_BLOCKED" && ${#RES_BLOCKED} -lt 12 ]]; then
+      miss+=("Reserved-Blocked-On(too_short)")
+    fi
+  elif [[ "$kind" == "reserved-taken" ]]; then
+    [[ -z "$RES_REASON" ]] && miss+=("Reserved-Reason")
+    if [[ -n "$RES_REASON" && ${#RES_REASON} -lt 8 ]]; then
+      miss+=("Reserved-Reason(too_short)")
+    fi
+  fi
+
+  if ((${#miss[@]} > 0)); then
+    local IFS=,
+    RES_MISS="${miss[*]}"
+    RES_OK=0
+  else
+    RES_OK=1
+  fi
+}
+
 extract_claims_forbidden() {
   # Print concrete forbidden claim strings (lines under ## Claims Forbidden)
   local file="$1"
@@ -298,8 +360,13 @@ for doc in "$CONCEPTS_DIR"/*.md; do
     continue
   fi
   if ! [[ "$status" =~ $VOCAB_RE ]]; then
-    note_fail "invalid_status doc=$base status=$status"
-    echo -e "${cid:--}\t${base}\t${status}\t${reg_st:--}\t-\t-\t-\t-\tFAIL_INVALID_STATUS"
+    if [[ "$status" == "reserved" ]]; then
+      note_fail "bare_reserved doc=$base (use reserved-owed or reserved-taken; bare reserved is invalid)"
+      echo -e "${cid:--}\t${base}\treserved\t${reg_st:--}\t-\t-\t-\t-\tFAIL_BARE_RESERVED"
+    else
+      note_fail "invalid_status doc=$base status=$status"
+      echo -e "${cid:--}\t${base}\t${status}\t${reg_st:--}\t-\t-\t-\t-\tFAIL_INVALID_STATUS"
+    fi
     continue
   fi
 
@@ -357,11 +424,30 @@ for doc in "$CONCEPTS_DIR"/*.md; do
         note_fail "ahead_of_evidence doc=$base status=claim-ready missing pass+refuse pair in bindings"
       fi
       ;;
-    reserved)
-      # Reserved requires a refuse surface. EDNC does not waive this.
-      if ((HAS_NEG == 0)); then
+    reserved-owed)
+      parse_reserved_fields "$doc" "reserved-owed"
+      if ((RES_OK == 0)); then
+        verdict=FAIL_RESERVED_OWED_MALFORMED
+        note_fail "reserved_owed_malformed doc=$base missing=$RES_MISS (Reserved-Owner+Reserved-Since+Reserved-Blocked-On required)"
+      else
+        age="$RES_AGE_DAYS"; [[ "$age" -lt 0 ]] && age=0
+        bflat="$(echo -n "$RES_BLOCKED" | tr '	
+' '  ')"
+        OWED_ROWS+=("${age}"$'	'"${base}"$'	'"${RES_OWNER}"$'	'"${RES_SINCE}"$'	'"${bflat}")
+        if ((HAS_NEG == 0)); then
+          verdict=FAIL_RESERVED_WITHOUT_REFUSE
+          note_fail "reserved_without_refuse doc=$base status=reserved-owed"
+        fi
+      fi
+      ;;
+    reserved-taken)
+      parse_reserved_fields "$doc" "reserved-taken"
+      if ((RES_OK == 0)); then
+        verdict=FAIL_RESERVED_TAKEN_MALFORMED
+        note_fail "reserved_taken_malformed doc=$base missing=$RES_MISS (Reserved-Reason required)"
+      elif ((HAS_NEG == 0)); then
         verdict=FAIL_RESERVED_WITHOUT_REFUSE
-        note_fail "reserved_without_refuse doc=$base"
+        note_fail "reserved_without_refuse doc=$base status=reserved-taken"
       fi
       ;;
     executable)
@@ -470,6 +556,49 @@ emit_ednc_visibility() {
     } >>"$GITHUB_STEP_SUMMARY"
   fi
   rm -f "$tmp"
+
+  # reserved-owed roster (same visibility rules as EDNC)
+  local on=${#OWED_ROWS[@]}
+  local otmp
+  otmp="$(mktemp)"
+  {
+    echo -e "age_days\tdoc\towner\tsince\tblocked_on"
+    if ((on > 0)); then
+      printf '%s\n' "${OWED_ROWS[@]}" | sort -t$'\t' -k1,1nr
+    fi
+  } >"$otmp"
+  echo "CONCEPT_STATUS_OWED_ACTIVE count=$on (no expiry; age from Reserved-Since; oldest first)"
+  if ((on == 0)); then
+    echo "CONCEPT_STATUS_OWED_ACTIVE none"
+  else
+    local j=0
+    while IFS=$'\t' read -r age doc owner since blocked; do
+      [[ "$age" == "age_days" ]] && continue
+      j=$((j + 1))
+      echo "CONCEPT_STATUS_OWED_ACTIVE [$j/$on] doc=$doc owner=$owner age_days=$age since=$since"
+    done <"$otmp"
+  fi
+  cp "$otmp" "$ROOT_DIR/docs/internal/concepts/reserved_owed_active.tsv"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      echo ""
+      echo "## reserved-owed (active debts)"
+      echo ""
+      echo "Do **not** expire. Age from \`Reserved-Since\`. Oldest first. Count: **$on**."
+      echo ""
+      if ((on == 0)); then
+        echo "_No active reserved-owed declarations._"
+      else
+        echo "| age_days | doc | owner | since | blocked_on |"
+        echo "|---:|---|---|---|---|"
+        while IFS=$'\t' read -r age doc owner since blocked; do
+          [[ "$age" == "age_days" ]] && continue
+          echo "| $age | \`$doc\` | $owner | $since | $blocked |"
+        done <"$otmp"
+      fi
+    } >>"$GITHUB_STEP_SUMMARY"
+  fi
+  rm -f "$otmp"
 }
 
 emit_ednc_visibility

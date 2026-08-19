@@ -250,6 +250,57 @@ Coord: notified grok-cli5 (ci.yml claim) before edit.
 
 ---
 
+
+
+---
+
+## Reserved splits in two (founder 2026-08-19)
+
+`reserved` is no longer a single state. A promise and a marker must not read the same.
+
+| status | means | required fields | refuse evidence |
+|---|---|---|---|
+| **reserved-owed** | name taken; **someone owes** the landing | `Reserved-Owner`, `Reserved-Since` (ISO), `Reserved-Blocked-On` (technical condition, not a deadline) | HAS_NEG required |
+| **reserved-taken** | name taken so nobody else defines it; **owes nothing** | `Reserved-Reason` (non-empty) | HAS_NEG required |
+| bare `reserved` | **invalid** | — | FAIL_BARE_RESERVED |
+
+Malformed owed/taken is **more red than absence** (names which field is missing).
+
+### Bare `reserved` migration
+
+**Measured:** zero concept contracts declared `Status: reserved` when the split
+landed. Migration cost is zero. The gate **rejects** bare `reserved` rather than
+guessing owed vs taken — guessing would hide the distinction the founder just drew.
+
+### Visibility (owed debts)
+
+Same rule as EDNC: no expiry, no age-red. Every run prints
+`CONCEPT_STATUS_OWED_ACTIVE` oldest-first; age from `Reserved-Since` only.
+Also: Job Summary + `docs/internal/concepts/reserved_owed_active.tsv` (gitignored).
+
+### TyF128 / TyF256 — proposal for founder (not written as fact)
+
+Both are measured Reserved in typekind archaeology (`E218`, `tests/typekind/index.tsv`).
+Both are promises under precision-preservation science surface → **`reserved-owed`**.
+
+| kind | proposed Reserved-Blocked-On |
+|---|---|
+| TyF128 | Madaros/native x86-64 path where a *correct* `f128` bind constructs while a wrong program still refuses with a typed diagnostic — today E218 refuses all surface use including correct binds |
+| TyF256 | same class for `f256` (or explicit qd-family surface if that is the chosen representation) |
+
+Owner/Since: assign when Status is attached to a concept or typekind row. **Awaiting founder confirmation of Blocked-On wording.**
+
+### Phase D additions (reserved)
+
+| case | expected |
+|---|---|
+| bare `reserved` | EXIT 1 `FAIL_BARE_RESERVED` |
+| owed without Blocked-On | EXIT 1 `missing=Reserved-Blocked-On` |
+| owed without Owner | EXIT 1 `missing=Reserved-Owner` |
+| taken without Reason | EXIT 1 `missing=Reserved-Reason` |
+| complete owed + refuse | EXIT 0 + OWED_ACTIVE roster |
+| complete taken + refuse | EXIT 0 |
+
 ## Run
 
 ```bash
