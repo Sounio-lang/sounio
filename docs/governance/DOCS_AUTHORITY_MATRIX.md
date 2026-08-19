@@ -343,6 +343,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.native-pow-tgamma-numerical-design-2026-08-23 | repo_only | docs/audit/NATIVE_POW_TGAMMA_NUMERICAL_DESIGN_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.octonion-action-r7-2026-08-23 | repo_only | docs/audit/OCTONION_ACTION_R7_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ode-epistemic-zero-params-2026-06-02 | repo_only | docs/audit/ODE_EPISTEMIC_ZERO_PARAMS_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.ontology-bundle-versioning-2026-08-19 | repo_only | docs/audit/ONTOLOGY_BUNDLE_VERSIONING_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ontology-ci-disconnect-2026-08-19 | repo_only | docs/audit/ONTOLOGY_CI_DISCONNECT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ousadia-epistemic-method-rx-madaros-2026-07-19 | repo_only | docs/audit/OUSADIA_EPISTEMIC_METHOD_RX_MADAROS_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk-dissertation-session-notes-2026-06-28 | repo_only | docs/audit/PBPK_DISSERTATION_SESSION_NOTES_2026-06-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
