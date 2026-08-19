@@ -116,7 +116,9 @@ Stating the rule turns each instance from an archaeological discovery into a
 conformance obligation, which is the difference between a language that has these
 properties and a language that **keeps** them.
 
-## What this concept does not claim
+## Claims Forbidden
+
+What this concept does not claim:
 
 - Not that a property must be interrogated at every stage. Once, reachably, is
   the requirement.
