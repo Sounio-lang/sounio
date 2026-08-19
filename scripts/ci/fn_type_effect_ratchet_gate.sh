@@ -14,6 +14,12 @@
 # true right now.
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
+# Shared assertions rather than hand-rolled ones: gate_vacuity_gate.sh requires
+# them, and it is right to. count_matches separates "no match" from "the tool
+# broke", which `grep -c ... || true` collapses into the same 0 — the exact error
+# that voided a measurement of mine earlier today.
+. "scripts/lib/gate_assert.sh"
+gate_name "fn_type_effect_ratchet"
 
 REF="scripts/ci/fn_type_effect_ratchet.frozen"
 OUT="${GATE_ARTIFACT:-artifacts/gates/fn_type_effect_ratchet.json}"
@@ -92,7 +98,15 @@ selftest >/dev/null 2>&1 || {
   exit 2
 }
 
+# Anti-vacuity: the sweep must see the corpus at all. If enumerate returns
+# nothing because the pattern rotted or the file list came back empty, that is a
+# broken instrument, not a repository with zero bare function types.
+ficheiros=$(git ls-files '*.sio' | grep -vE '^(archive|bootstrap)/' | wc -l | tr -d ' ')
+require_nonempty "$ficheiros" "the .sio file list came back empty"
+require_min_count "$ficheiros" 500 "live .sio files"
+
 atual=$(enumerate | wc -l | tr -d ' ')
+require_nonempty "$atual" "the bare-function-type count came back empty"
 [ -f "$REF" ] || printf '%s\n' "$atual" > "$REF"
 congelado=$(head -1 "$REF" | tr -d ' ')
 
