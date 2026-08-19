@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.zd-cp2-general-closed-form-2026-08-18
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -80,6 +81,50 @@ Spot checks against the formula: `W = 25` at `m = 4` has bits `{4,3,0}`, so
 `4⁰·[3,2]₂ − 4¹·[2,2]₂ = 7 − 4 = 3` ✓. `W = 57` at `m = 5` has bits `{5,4,3,0}`, so
 `4⁰·[4,2]₂ − 4¹·[3,2]₂ + 4²·[2,2]₂ = 35 − 28 + 16 = 23` ✓.
 
+## 2026-08-19 — the base case, reduced and mapped (still not proved)
+
+**The base case has a much simpler form than the `c`-recursion.** Translating
+`c(p, 2^p + r) = [p−1,2]₂ − 4·c(p−1,r)` back into `cp2` and putting `N = 2^p`, the
+`192·[p−1,2]₂ = 8N² − 48N + 64` cancels almost everything:
+
+    cp2(m+1, 2^(m+1) + r) = 4 − 4·cp2(m, r)          for 1 ≤ r < 2^(m+1)
+
+Measured: residual `0` at every `r`, for `m = 1, 2, 3` (25 labels). Spot checks by hand:
+`4 − 4·(−12) = 52` = `cp2(3,9)`; `4 − 4·(52) = −204` = `cp2(4,25)`; `4 − 4·(−780) = 3124`
+= `cp2(5,48)`.
+
+The companion case `c(p, 2^p) = 0` is already a theorem — it is `cp2_pow2_labels` at `j = 0`.
+
+**The label shift is the mirror of the level shift, with the base entry TRANSPOSED.** Writing
+`N = 2^(m+1)`, `l₀, y₀ < N`, `λ, μ ∈ {0,1}`, measured over `m = 1,2,3` and every `r` (thousands
+of entries, zero mismatches):
+
+    P3(l₀ + λN, y₀ + μN, r + N, m+1) = s(λ,μ) · C(λ,μ)(l₀,y₀,r) · P3(y₀, l₀, r, m)
+
+| `(λ,μ)` | sign | carrier |
+|---|---|---|
+| `(0,0)` | `+` | `1` |
+| `(0,1)` | `−` | `E01(l₀,y₀,r)` |
+| `(1,0)` | `−` | `E10(l₀,y₀,r)` |
+| `(1,1)` | `+` | `E11(l₀,y₀,r)` |
+
+The carriers are the SAME `E01`/`E10`/`E11` as the level transfer (Tier 91), evaluated at the
+LOW label `r`. Note the transpose: the level-`m` entry on the right is `P3(y₀,l₀,·)`, not
+`P3(l₀,y₀,·)`.
+
+**The `(0,0)` law derives in four lines** and the others should go the same way. For
+`l₀, y₀ ≠ 0`, `P3_red` gives
+`P3 l₀ y₀ (r+N) (m+1) = −(cdSigma ((y₀⊕r)+N) l₀ (m+2) · cdSigma ((l₀⊕r)+N) y₀ (m+2))`
+— using `y₀ ⊕ (r+N) = (y₀⊕r) + N`, since `N` is the top bit — and `R_ul` turns each factor into
+`−cdSigma (·) (·) (m+1)`, so the two minus signs cancel and what is left is `P3_red`'s expansion
+of `P3 y₀ l₀ r m` with the product commuted. The boundary cases `l₀ = 0` / `y₀ = 0` are `R_ul`'s
+`if v = 0` branch, exactly as in the existing `P3_block*` lemmas.
+
+**Remaining work, honestly sized.** Four entry laws (~200 lines, each a `P3_red` plus
+`R_ul`/`R_lu`/`R_uu` with boundary cases, on the model of `P3_block01_total`), then a four-block
+split of the `cp2` sum — NOT `cp2Split`, because a high label makes the coset `a ⊕ W` swap the
+halves — then the evaluation. Comparable in size to Tier 167.
+
 ## Why this matters to the lane
 
 `cp2` is one of the two coordinates of the proved transfer matrix `[[8,24],[0,4]]`. Its
@@ -92,7 +137,7 @@ block structure is the binary one above — not constancy across all labels.
 
 ## What this note does NOT claim
 
-* The base-case identity is not proved. Nothing here is a Lean theorem except the scaling, and
-  that was already `cp2_level_recursion`.
+* The base-case identity is not proved, and neither are the four label-shift entry laws. Nothing
+  in this note is a Lean theorem except the scaling, and that was already `cp2_level_recursion`.
 * The 116-label sweep is exhaustive only for `m ≤ 5`. The formula's form is fitted to that range.
 * No claim is made about `cp3`, whose transfer row remains fitted-only.
