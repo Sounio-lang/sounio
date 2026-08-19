@@ -182,6 +182,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.gum-fo-propagation-hidden-by-main-vacuous-harness-dispatch-2026-08-10 | repo_only | docs/audit/GUM_FO_PROPAGATION_HIDDEN_BY_MAIN_VACUOUS_HARNESS_DISPATCH_2026-08-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.gum-uncertainty-tail-2026-08-19 | repo_only | docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.handle-execution-witness-2026-08-19 | repo_only | docs/audit/HANDLE_EXECUTION_WITNESS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.handle-green-census-2026-08-19 | repo_only | docs/audit/HANDLE_GREEN_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.handle-table-e230-refutation-2026-08-18 | repo_only | docs/audit/HANDLE_TABLE_E230_REFUTATION_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.handle-table-reclamation-design-2026-08-17 | repo_only | docs/audit/HANDLE_TABLE_RECLAMATION_DESIGN_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.hlir-disconnect-cost-2026-08-19 | repo_only | docs/audit/HLIR_DISCONNECT_COST_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
