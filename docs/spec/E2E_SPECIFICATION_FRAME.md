@@ -87,6 +87,47 @@ registry's; the ladder is monotone (`MATURITY_LADDER`).
 `contested` means the two engines are known or suspected to disagree there, and
 **the specification's job is to say which is right** — not to describe both.
 
+## The recurring shape
+
+Six subsystems were measured on 2026-08-19 by different agents with different
+instruments. Every one has the same shape, and it is not the shape people expect
+of an unfinished language.
+
+| subsystem | designed | built | connected |
+|---|---|---|---|
+| ENIR verified pipeline | yes | yes | **no** — imports neither `hlir::` nor `ir::`, and nothing imports it |
+| Effect rows (`check/effects_row.sio`) | yes — rule stated in its header | yes, 84 lines | **no** — three functions call one another, zero external callers; `check_handler_coverage` has none at all |
+| Effect handlers (`handle`) | yes | token, parser, checker | **no** — `ExprHandle` occurs 0 times in `ir/`, `native/`, `enir/` (control: `ExprCall` 23) |
+| `Knowledge<T>` (compiler) | yes — ε, validity, provenance, proof constraints | yes, in the AST | **no** — the stdlib declares its own three-field struct instead |
+| Provenance vocabulary | six kinds | six declared | **no** — three have no surface syntax; unknown ones are dropped without a diagnostic |
+| Refinement ↔ totality | yes | `pred_implies` works, path narrowing works | **no** — `/` generates no obligation, so nothing ever asks |
+
+The exception proves the reading. `self-hosted/ir/egraph.sio` is 3,526 lines and
+286 functions implementing equality saturation, and it is **imported by
+`self-hosted/compiler/main.sio` and `ir/opt_cleanup.sio`**. It is the one large
+piece examined that is both designed and connected — and it is the most
+technically demanding of them.
+
+**So the failure mode is not ambition, and not execution.** In each case the
+design and a working implementation exist; what was never written is the call
+site. And in each case the design and the partial implementation were committed
+**together** — `AstProvenanceKind`'s six cases and the parser's three branches
+entered in the same commit, `f9da2142f4`, 2026-02-27. Nothing rotted. The
+connection was never there.
+
+Two consequences for this specification.
+
+**First, `undefined` is usually the wrong status for these.** A subsystem whose
+semantics are written down in a header comment and implemented in code that
+nothing calls is not undefined — it is *unreachable*. The distinction matters
+because the remedy differs: an undefined section needs a ruling, an unreachable
+one needs a caller.
+
+**Second, this is what the specification is for.** None of the six was found by
+someone using the language and hitting a wall — they were found by measurement,
+months later, by agents grepping. A specification that states what must reach
+what turns each of these from an archaeological discovery into a failing gate.
+
 ## Method
 
 1. **Derive, do not invent.** Every normative statement starts as a measurement
