@@ -48,17 +48,43 @@ supposedly *discharged*: an unrecognised effect name is ignored without a
 diagnostic, and a function already carrying eight effects has the handled effect
 dropped.
 
-## 7.3 What is not yet measured
+## 7.3 Measured: the expression is erased in silence on one engine and unknown on the other
 
-Whether a program containing `handle` **refuses**, **compiles and silently does
-nothing**, **crashes**, or **works** is not established by static reading. The
-lowering dispatches on `ExprKind` through `if` chains rather than a match with
-an explicit default, so the fall-through behaviour must be observed rather than
-inferred.
+Runtime witness, 2026-08-19, both engines, on Slurm
+(`docs/audit/HANDLE_EXECUTION_WITNESS_2026-08-19.md`):
 
-A runtime witness is owed, under **both engines**, with a control program that
-differs only by the absence of `handle`. Until it lands this section states the
-front-end/back-end split above and nothing about execution.
+| engine | result |
+|---|---|
+| **Madaros** (default) | **Silent erasure.** `handle<IO>` *and* `handle<NotARealEffect>` both check OK, emit an ELF, exit 0, and print nothing. The whole expression is discarded. |
+| **lean_single** (the seed) | **Refuses** — `error[E200]: undefined identifier \`handle\`` |
+
+Controls close the other three outcomes. A control program differing only by the
+absence of `handle` compiled and printed `BODY_MARK` on **both** engines, so the
+empty cells are the construct and not the instrument. `HANDLER_MARK` never
+appears, so this is not *works*. Madaros exits 0, so this is not *crash*.
+
+**The negative control is the sharper finding.** On Madaros an invented effect is
+**indistinguishable from `IO`**. The checker does not separate a real effect from
+a fake one — independently confirming §6.2's `eff_id >= 0` guard and #1953's
+`Foo` → `check: OK` / silence.
+
+### 7.3.1 lean_single's refusal is ignorance, not design
+
+`E200: undefined identifier` is the diagnostic the seed gives any name it does
+not know. It does not treat `handle` as a keyword at all. This is **not** a typed
+`Reserved` refusal.
+
+The consequence for 7.4 is direct: **neither engine refuses `handle` by
+decision.** One erases it silently, the other has never heard of it. The
+*Reserved* option below is therefore not the cheap one already half-present — it
+does not exist anywhere and must be built like the others.
+
+### 7.3.2 The corpus already contains programs this affects
+
+`examples/effects.sio`, `examples/effects/basic_handler_continuation.sio`,
+`examples/showcase/linear_file_server.sio` and `tests/run-pass/closure_linear.sio`
+use the construct. Under Madaros they compile, run, and their algebraic-effect
+parts do nothing, with no warning. Under lean_single none of them compiles.
 
 ## 7.4 Rulings owed
 
