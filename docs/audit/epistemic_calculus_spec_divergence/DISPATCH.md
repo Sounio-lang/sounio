@@ -199,12 +199,12 @@ consumer 3).** One importer ≠ V2 covered. Re-derive with the names in
 `EpistemicEffectsV2.lean` against every `EpistemicEffectsV2_*.lean`
 consumer, comments stripped:
 
-| Layer | After measure | After + kvalue | After + invKraw | Remainder |
-|---|---:|---:|---:|---:|
-| Named theorems (28) | 0 | 1 (`preservation`) | **2** (`+ invKraw`) | 26 |
-| `HasTy` rules (14) | 3 | 4 | **7** (`+ t_var, t_lam, t_app`) | 7 |
-| `Step` rules (19) | 1 | 2 | **2** | 17 |
-| `IsValue` rules (4) | 1 (`v_nat`) | 1 (`v_nat`) | **3** (`+ v_lam, v_kraw`) | 1 (`v_real`) |
+| Layer | After measure | After + kvalue | After + invKraw | After + mg | Remainder |
+|---|---:|---:|---:|---:|---:|
+| Named theorems | 0 | 1 (`preservation`) | **2** (`+ invKraw`) | **2** (same; `invKraw` again) | glue |
+| `HasTy` rules | 3 | 4 | **7** | **8** (`+ t_lit_mg`; now 15) | 7 |
+| `Step` rules (19) | 1 | 2 | **2** | **2** | 17 |
+| `IsValue` rules | 1 (`v_nat`) | 1 | **3** | **4** (`+ v_mg`; now 5) | 1 (`v_real`) |
 
 kvalue did **not** move `IsValue`. invKraw on the propagation witness
 does: the identity is `v_lam` and the reduct used as a CBV argument is
@@ -251,36 +251,51 @@ operation is either consumed or classified as a hole/glue.
 |---|---|---|---|
 | Introduce (`measure` / ctor) | `ty_knowledge(v_ty)` | Yes — V1 discards `v` | Consumed (round 1) |
 | Eliminate payload | `check_knowledge_unwrap` | Yes — V1 → `lit_real` | Consumed (round 2) |
-| Use as `Knowledge<T>` | pass / apply / let | Yes — V1 existential | Consumed (round 3) |
+| Use as `Knowledge<T>` | pass / apply / let | Yes — V1 existential | Consumed (round 3); T≠Nat in round 4 |
 | Eliminate metadata | `.epsilon` / `.confidence` | No — both → `Real` | Do not consume |
 | GUM `+` `*` | `ty_knowledge(left_inner, …)` | Hole — V2 pins Real, checker keeps `T` | Do not consume; see R3-adjacent |
 | Progress, weakening, lookup, shift, `int_sq_nonneg`, `gAddMeta_valid` | none | Glue | Do not consume |
 
-**Conclusion — discriminating set empty.** Fraction beside it:
-**2/28** theorems, **7/14** `HasTy`, **2/19** `Step`, **3/4**
-`IsValue`. Read 2/28 without that sentence and it looks like 93% is
-missing. The other 26 theorems are ones any implementation would
-satisfy. They do not separate V2 from V1. Three consumers exhausted
-the surfaces that do. This is a stop by measurement, not by fatigue,
-and it is not "V2 is covered": it is "the next Nat-shaped client
-would not discriminate".
+**Conclusion after rounds 1–3 — discriminating set empty at Nat.**
+Fraction beside it was **2/28** theorems, **7/14** `HasTy`,
+**2/19** `Step`, **3/4** `IsValue`. Read 2/28 without that sentence
+and it looks like 93% is missing. The other theorems are ones any
+implementation would satisfy. They do not separate V2 from V1.
+Three consumers exhausted the Nat-shaped surfaces that do.
 
-**What would make the discriminating set non-empty again.** Not a
-fourth `Knowledge<Nat>` consumer. Either:
+**What reopened the set (round 4, landed).** Not a fourth
+`Knowledge<Nat>` consumer. The second reopening clause: a client
+that uses `Knowledge` at a type other than Nat. The checker is
+generic (`ty_knowledge(v_ty)`). We had only consumed Nat. The
+payload the language ships is `Knowledge<mg>`.
+`EpistemicEffectsV2_invkraw_mg.lean` cites `invKraw` on
+`kraw (.lit_mg 500) m`. `tmg` was added to the shared `Ty` spine
+so the V1 mutant can write `Knowledge<mg>` and still fail because
+`t_kraw` pins Real, not because `tmg` is missing. `lit_mg` /
+`t_lit_mg` / `v_mg` are the V2 intro; they are new constructors,
+not new discriminating *reasons*. The unique named-theorem count
+stays 2 (`preservation`, `invKraw`).
+
+Do **not** clone measure or unwrap at mg. Those V1 mutants would
+fail for the same Real pin already scored at Nat. That would be
+the 93%-left mistake at the type-instance level.
+
+**What would make the discriminating set non-empty again.** Not
+another unit literal (`Knowledge<kg>`, `Knowledge<L>`). Either:
 
 1. A **new proposition in V2** whose V1 mutant fails for a
    payload/Real reason (a new rule, a new inversion, a new
    operational clause). Glue added tomorrow is still glue.
-2. A **client that uses `Knowledge` at a type other than Nat.**
-   The checker is generic (`ty_knowledge(v_ty)`). We only consumed
-   Nat. That second case is the next round, and it already has a
-   name: `Knowledge<T>` for `T ≠ Nat` — the inverted V1 witness at a
-   payload the language actually ships (a unit type in the spec,
-   `Knowledge<mg>`, not another literal `0 : Nat`).
+   `genMg` is glue for the new literal.
+2. A correspondence close of the GUM hole (`t_kadd` pins Real;
+   the checker keeps `T`) — that is R3-adjacent, not a consumer.
 
 Until one of those appears, do not add a consumer. If a proposed
 client's V1 mutant elaborates, that is the signal to stop, not to
-weaken the mutant.
+weaken the mutant. `tmg` on the shared spine is not spine
+extraction: V2 still imports `Ty` from the refuted module.
+The three extraction triggers in the deferred note below have
+not fired.
 
 **Landed (consumer 3).** `EpistemicEffectsV2_invkraw_nat.lean` cites
 `invKraw` and proves `kraw_nat_inverts_and_is_usable`. The
@@ -306,6 +321,32 @@ A job whose this step is skipped is the 390-gate class. The #1892 /
 #1883 verifications do not transfer: those heads did not have this
 step. If the invKraw mutant elaborates, the consumer must not be
 scored.
+
+**Landed (consumer 4).** `EpistemicEffectsV2_invkraw_mg.lean` cites
+`invKraw` at `Knowledge<mg>` and proves `kraw_mg_inverts_and_is_usable`.
+The `--lean-consume-invkraw-mg` arm builds that module only after
+`v1_imports_invkraw_mg.lean` fails.
+
+**Acceptance for the named invKraw-mg step (written before the step
+is scored).** A green Lean Proofs *job* is not evidence. The PR
+head must show this step as `success` and not `skipped`:
+
+```
+success  V2 invKraw-mg consumer (V1 mutant must fail first)
+```
+
+and that step's log must contain:
+
+```
+POSITIVE_CONTROL_FIRED: v1_imports_invkraw_mg rejected
+V2_CONSUMED: EpistemicEffectsV2_invkraw_mg built
+```
+
+and the mutant rejection must mention `Knowledge` / `tmg` / `treal`
+(payload/Real), not an unknown identifier `tmg`. A job whose this
+step is skipped is the 390-gate class. The #1909 / #1892 / #1883
+verifications do not transfer: those heads did not have this step.
+If the mg mutant elaborates, the consumer must not be scored.
 
 **Deferred — extract the shared spine (end condition).** A third
 module holding `Effect`, `Ty`, `EffectSet`, `TyCtx` would stop V2 from
@@ -392,15 +433,19 @@ consume `kadd` as if it were the next coverage target.
 1. R1 and R2 landed. R3 recorded and explicitly deferred, not silently dropped.
    R1's remaining *fact* (V2 had no importer) is closed by
    `EpistemicEffectsV2_measure_nat.lean`, not by the banner. That close is
-   an import edge, not metatheory coverage. After consumer 3 the
-   fraction is **2 of 28** named theorems (`preservation`, `invKraw`),
-   **7 of 14** `HasTy`, **2 of 19** `Step`, **3 of 4** `IsValue`.
-   The discriminating set in §5 R1 is empty (2/28 is not "93% left").
-   It re-opens only on a new V2 proposition or a `Knowledge<T>` client
-   with `T ≠ Nat`. Spine extraction stays deferred until one of the
-   three end conditions in §5 R1 — none has fired.
+   an import edge, not metatheory coverage. After consumer 4 the
+   cited named theorems are still **2** (`preservation`, `invKraw` —
+   the mg client re-cites `invKraw`, it does not add a third name),
+   **8 of 15** `HasTy` (`+ t_lit_mg`), **2 of 19** `Step`,
+   **4 of 5** `IsValue` (`+ v_mg`). The Nat-shaped discriminating
+   set stayed empty; the `T ≠ Nat` hole closed at `Knowledge<mg>`.
+   It re-opens only on a new V2 proposition or the GUM
+   correspondence hole (R3-adjacent). Spine extraction stays
+   deferred until one of the three end conditions in §5 R1 — none
+   has fired. Adding `tmg` to the shared `Ty` is not extraction.
 2. `Lean Proofs` green, with V1, V2, `EpistemicEffectsV2_measure_nat`,
-   `EpistemicEffectsV2_kvalue_nat`, and `EpistemicEffectsV2_invkraw_nat`
+   `EpistemicEffectsV2_kvalue_nat`, `EpistemicEffectsV2_invkraw_nat`,
+   and `EpistemicEffectsV2_invkraw_mg`
    all `@[default_target]`. Deleting
    V1 to make the problem disappear is **out of scope** — the refutation
    is a result worth keeping, and §1's theorems are its statement.
