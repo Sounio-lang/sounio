@@ -11,109 +11,137 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.typekind
 
 **Date:** 2026-08-19  
 **Engine (canonical):** Madaros v0.80.0 (`./bin/souc`, default)  
-**sha_main:** `98eb2b4f41a3cecfa1eccae2f635ade3c62f653f`  
-**Protocol:** bus ARQUEOLOGIA (claude-1 fleet-orchestrator 2026-08-19)  
-**Rule:** Claim-ready only if a program is **REFUSED** because of that kind. Accept-only = label, not a type.
+**Protocol:** v3 — position is **calculated**, never asserted  
+**Ladder law:** `docs/internal/concepts/MATURITY_LADDER.md` (#1943 Reserved + monotonicity)
 
-Ladder:
+A handwritten census rots. The deliverable is no longer a verdict column in this
+file. It is:
 
-| position | meaning |
-|---|---|
-| **Garden** | name in `TypeKind` enum and nothing more that fires |
-| **Hypothesis** | constructor and/or checker rule exists; **no user program** constructs the kind |
-| **Executable** | a program constructs the kind and the checker imposes something (run, not read) |
-| **Claim-ready** | a **wrong** program is **rejected** with that kind in the expect/found story |
+1. two fixtures per kind under `tests/typekind/<slug>/` — `pass.sio` must run,
+   `refuse.sio` must be refused with a named diagnostic; **or**
+2. an empty index row (no paths) — declared **Garden**
 
-**Control positive for the ladder itself:** TyI64 / TyBool / TyArray must reach Claim-ready. If they do not, the criterion is too tight.
+Index: `tests/typekind/index.tsv`  
+Gate (derives the table): `bash scripts/ci/typekind_archaeology_gate.sh`
 
-Probes: `/tmp/arch_fh/probe_*.sio` this session; command `timeout 45 ./bin/souc check <file>`.
+```
+kind | pass | refuse | expected_diagnostic | deepest_named_layer
+```
+
+**The index does not store position.** Re-run the gate.
 
 ---
 
-## Family F (shape / gradient / complexity)
+## Derived table (re-run; do not hand-edit)
 
-| kind | position | evidencia | ficheiro:linha | sha_main | notas |
+```bash
+bash scripts/ci/typekind_archaeology_gate.sh
+```
+
+Measured on this lane (Madaros v0.80.0, tip at commit time):
+
+| kind | derived position | pass | refuse | diag | deepest |
 |---|---|---|---|---|---|
-| **VecShaped** | Hypothesis | enum+`ty_vec_shaped`+compat; **zero callers** of `ty_vec_shaped(` outside `types.sio`. Surface `let v: Vec<i64,3>=…` → E001 expected **Vec** (TyNamed label), not TyVecShaped. `var a:Vec; var b:Vec; a=b` OK as names. | `self-hosted/check/types.sio:93`, `:2617`; probe_vecshaped rc=1 E001 | 98eb2b4f41a3 | **sem doc**; semente de forma, não tipo vivo |
-| **MatrixShaped** | Hypothesis | `ty_matrix_shaped` **called** only from `epistemic.sio` (internal). Surface `Matrix<…>` → E001 expected **Matrix** (named), not kind. No user construct of TyMatrixShaped. | `types.sio:94`, `:2641`; `epistemic.sio:1715+`; probe_matrixshaped rc=1 E001 | 98eb2b4f41a3 | **sem doc** |
-| **Broadcastable** | Hypothesis | `ty_broadcastable` defined, **never called**. Surface name → TyNamed. | `types.sio:95`, `:2665`; probe_broadcastable rc=1 E001 | 98eb2b4f41a3 | |
-| **Differentiable** | Hypothesis | `ty_differentiable` only from `epistemic.sio`. Surface `Differentiable<…>` → TyNamed E001; bare `var a:Differentiable` OK as name. | `types.sio:100`, `:2758`; `epistemic.sio:1920`; probe_diff rc=1 E001 | 98eb2b4f41a3 | |
-| **Gradient** | Hypothesis | `ty_gradient` only `epistemic.sio:2238`. Surface → TyNamed. | `types.sio:101`, `:2783`; probe_grad rc=1 E001 | 98eb2b4f41a3 | |
-| **Jacobian** | Hypothesis | `ty_jacobian` only `epistemic.sio:1931`. Surface → TyNamed. | `types.sio:102`, `:2808`; probe_jac rc=1 E001 | 98eb2b4f41a3 | |
-| **BigO** | Hypothesis | `ty_bigO` **is** called from `epistemic.sio` (complexity bridges). **No user program** reaches TyBigO: surface `BigO` / `BigO<i64,2>` is **TyNamed** (“expected BigO”). `is_bigO_type` + compat exist. **Not empty enum** — internal seed of complexity types; **not** article-ready surface. | `types.sio:111`, `ty_bigO` `:2941`; `epistemic.sio:2097,2102,2107`; probe_bigo rc=1 E001 expected BigO found i64 | 98eb2b4f41a3 | **semente grande de complexidade**, não claim |
-| **Amortized** | Hypothesis | `ty_amortized` defined, **never called**. Surface TyNamed. | `types.sio:112`, `:2966`; probe_amortized rc=1 E001 | 98eb2b4f41a3 | semente irmã do BigO |
+| TyI64 | Claim-ready | run 0 | check≠0 | E001 | checker |
+| TyBool | Claim-ready | run 0 | check≠0 | E001 | checker |
+| TyArray | Claim-ready | run 0 | check≠0 | E001 | checker |
+| TyI128 | Claim-ready | run 0 | check≠0 | E001 | checker |
+| TyU128 | Claim-ready | run 0 | check≠0 | E001 | checker |
+| TyRawPtr | Claim-ready | run 0 | check≠0 | E001 | checker |
+| TySliceMut | Claim-ready | run 0 | check≠0 | E009 | checker |
+| TyF128 | **Reserved** | check≠0 + E218 | check≠0 + E218 | E218 | checker |
+| TyF256 | **Reserved** | check≠0 + E218 | check≠0 + E218 | E218 | checker |
+| TyVecShaped | Garden | — | — | — | checker |
+| TyMatrixShaped | Garden | — | — | — | checker |
+| TyBroadcastable | Garden | — | — | — | checker |
+| TyDifferentiable | Garden | — | — | — | checker |
+| TyGradient | Garden | — | — | — | checker |
+| TyJacobian | Garden | — | — | — | checker |
+| TyBigO | Garden | — | — | — | checker |
+| TyAmortized | Garden | — | — | — | checker |
+
+Gate fail modes (same pattern as XPAS):
+
+- **XPASS** — `refuse.sio` starts passing → kind no longer discriminates
+- **PASS_REGRESSION** — `pass.sio` stops running
+- **WRONG_DIAGNOSTIC** — refuse fails but expected code is missing
 
 ---
 
-## Family H (wide float / wide int / memory)
+## Conversion map (v1/v2 prose → v3 fixtures)
 
-| kind | position | evidencia | ficheiro:linha | sha_main | notas |
-|---|---|---|---|---|---|
-| **F128** | **Claim-ready** | Madaros **refuses** any surface use with **E218** (parser). Probes: bind, arith, signature-only — all rc=1 E218. Not constructible under V0-A Madaros. | `parser/types.sio:24-41` E218; `check.sio:13378`; probe_f128_bind/arith/sig_only | 98eb2b4f41a3 | Canon=Madaros. lean_single history: may accept arith (known dual-engine); **not** measured as authority here |
-| **F256** | **Claim-ready** | Same E218 refuse on Madaros for bind+arith. | same; probe_f256_* | 98eb2b4f41a3 | same |
-| **I128** | **Claim-ready** | Construct: `let x:i128=1; x+x` → check OK. Refuse: `let x:i128=true` → E001 expected **i128** found bool. | `types.sio:123`, `ty_i128` `:411`; probe_i128 / probe_i128_bad | 98eb2b4f41a3 | |
-| **U128** | **Claim-ready** | Construct OK; refuse true→u128 E001 expected **u128**. | `types.sio:124`, `:432`; probe_u128 / _bad | 98eb2b4f41a3 | |
-| **RawPtr** | **Claim-ready** | Construct: `*mut i64` / `*const f64` + cast 0 OK. Refuse: `let p:*mut i64=1` E001 expected **\*mut i64** found i64. | `types.sio:127`, `ty_raw_ptr` `:817`; `check.sio:16517`; probe_rawptr / _bad | 98eb2b4f41a3 | **sem doc** no inventário de 22; superfície `*mut`/`*const` real |
-| **SliceMut** | **Claim-ready** | Construct: `fn take(s:&![i64])` + `take(&!a)` OK. Refuse: `take(&a)` E009 expected **&![i64]** found `&[i64;2]`. | `types.sio:28`, `ty_slice_mut` `:884`; probe_slice_mut / _bad | 98eb2b4f41a3 | **sem doc**; recusa de exclusividade |
+Prior handwritten verdicts told us exactly which fixtures were missing.
+Nothing was thrown away.
 
----
+| v1/v2 prose | what it meant | v3 artefact |
+|---|---|---|
+| Claim-ready (I128, U128, RawPtr, SliceMut, controls) | found construct + refuse | `pass.sio` + `refuse.sio` → derived Claim-ready |
+| Claim-ready (F128/F256) under refuse-only rule | always E218 | both fixtures refuse → derived **Reserved** (#1943) |
+| Hypothesis (VecShaped…Amortized) | no constructing user program | **no fixtures** → derived **Garden** (declared) |
+| internal `ty_bigO` / epistemic mint notes | dig evidence, not ladder | kept below as archaeology notes |
 
-## Ladder control (ordinary types)
-
-| kind | position | evidencia | ficheiro:linha | sha_main | notas |
-|---|---|---|---|---|---|
-| **TyI64** | **Claim-ready** | construct `let x:i64=1` OK; `let x:i64=true` E001 expected i64 | `types.sio:17` | 98eb2b4f41a3 | controlo: critério **não** demasiado apertado |
-| **TyBool** | **Claim-ready** | construct OK; `let b:bool=1` E001 expected bool | `types.sio:19` | 98eb2b4f41a3 | controlo OK |
-| **TyArray** | **Claim-ready** | `[i64;3]=[1,2,3]` OK; `[i64;3]=[1,2]` E001 expected [i64;3] found [i64;2] | `types.sio:24` | 98eb2b4f41a3 | controlo OK — length is part of the type |
-
-**Conclusion on criterion:** three ordinary types all Claim-ready via refuse. The ladder is usable for judging the 99; F-family Hypothesis mass is real structure, not an over-tight rule.
+v2 already corrected F128/F256 off Claim-ready onto Reserva/Reserved via the
+monotone ladder. v3 makes that correction **executable**: both programs exist
+in-repo and both fail with E218; the gate, not a human, prints Reserved.
 
 ---
 
-## Summary counts (F+H+control)
+## Archaeology notes (why F-family rows are empty)
+
+These notes are **not** ladder positions. They explain why no honest
+`pass.sio` was written. Inventing a program that only binds a TyNamed label
+(`let v: Vec = …`) would spoof Executable without ever touching the TypeKind.
+
+| kind | dig | source |
+|---|---|---|
+| VecShaped | `ty_vec_shaped` defined; **zero** callers outside `types.sio`. Surface `Vec` → TyNamed E001 | `self-hosted/check/types.sio` enum + ctor |
+| MatrixShaped | `ty_matrix_shaped` only from `epistemic.sio` internal | types + epistemic |
+| Broadcastable | `ty_broadcastable` never called | types |
+| Differentiable / Gradient / Jacobian | ctors only from epistemic bridges; surface names TyNamed | types + epistemic |
+| BigO | `ty_bigO` **is** minted inside epistemic complexity bridges; surface `BigO` is still TyNamed — **large seed**, not a user type | types + epistemic |
+| Amortized | `ty_amortized` never called; sister seed of BigO | types |
+
+When a real constructor reaches the surface, add `pass.sio` + `refuse.sio` and
+delete the empty row's blank paths. The gate will move the kind without editing
+this prose.
+
+---
+
+## Fixture contracts
+
+**Claim-ready pair** (example `tests/typekind/i64/`):
+
+- `pass.sio` — constructs the kind, `souc run` exits 0
+- `refuse.sio` — wrong program, `souc check` fails containing `error[E001]` (or the kind's diag)
+
+**Reserved pair** (example `tests/typekind/f128/`):
+
+- both programs must fail with the **same** named diagnostic (E218)
+- the "pass" file is the would-be correct program; under Reserved it is refused too
+
+**Garden** (example `tests/typekind/bigo/README.md`):
+
+- no pair; index paths empty; directory README declares absence
+
+---
+
+## Scope
+
+This tree covers families **F** (shape / gradient / complexity) and **H**
+(wide float/int, raw pointer, exclusive slice) plus ladder controls
+TyI64/TyBool/TyArray. Other families own their own indices (family A causal,
+type-census epistemic, …). Do not merge foreign kinds here without a coord claim.
+
+---
+
+## Counts (derived, not asserted)
 
 | position | n | kinds |
 |---|---:|---|
-| Garden | 0 | — |
-| Hypothesis | 8 | VecShaped MatrixShaped Broadcastable Differentiable Gradient Jacobian BigO Amortized |
-| Executable | 0 | (none stuck here: refuse witnesses pulled ordinary/H to Claim-ready) |
-| Claim-ready | 9 | F128 F256 I128 U128 RawPtr SliceMut + TyI64 TyBool TyArray |
+| Garden | 8 | VecShaped MatrixShaped Broadcastable Differentiable Gradient Jacobian BigO Amortized |
+| Reserved | 2 | F128 F256 |
+| Claim-ready | 7 | I128 U128 RawPtr SliceMut + TyI64 TyBool TyArray |
+| Executable | 0 | (would be XPASS if refuse went green) |
+| Hypothesis | 0 | (v3: no fixtures ⇒ Garden; Hypothesis returns only if a partial pair appears) |
 
----
-
-## Notes (founder-facing)
-
-1. **BigO / Amortized:** not empty enum stubs only — there is `ty_bigO` / `ty_amortized`, compat, and epistemic **bridges that mint TyBigO** internally. There is **no** user-facing complexity type that rejects a wrong program *as TyBigO*. Surface `BigO` is a **name tag** (TyNamed). Treat as a **large seed** for a complexity article, not as a shipped type. Same for Amortized with even less wiring (zero `ty_amortized` callers).
-
-2. **F128/F256:** under **Madaros** (canonical), refuse is hard and early (**E218** parser). That is Claim-ready as a *reserved* surface, not as a numeric type you can compute with. Dual-engine history (lean_single may still emit ELFs for f128 `+`) is real but **out of authority** for this census — Madaros is the clock.
-
-3. **VecShaped / MatrixShaped / SliceMut / RawPtr “sem doc”:** RawPtr and SliceMut are **Claim-ready** despite no concept-registry blurb — the compiler already refuses. Vec/Matrix shaped kinds are **Hypothesis** (and surface names are labels).
-
-4. **No promotion by analogy:** MatrixShaped internal use does not lift VecShaped; BigO internal mint does not lift Amortized to Executable.
-
----
-
-## Machine table
-
-```
-kind	position	evidence	file:line	sha_main	notes
-VecShaped	Hypothesis	ty_vec_shaped never called; surface Vec is TyNamed E001	types.sio:93,2617	98eb2b4f41a3	no doc; label not kind
-MatrixShaped	Hypothesis	ty_matrix_shaped only epistemic internal; surface Matrix TyNamed	types.sio:94; epistemic.sio:1715	98eb2b4f41a3	no doc
-Broadcastable	Hypothesis	ty_broadcastable never called; surface TyNamed	types.sio:95,2665	98eb2b4f41a3	
-Differentiable	Hypothesis	ty_differentiable only epistemic; surface TyNamed	types.sio:100; epistemic.sio:1920	98eb2b4f41a3	
-Gradient	Hypothesis	ty_gradient only epistemic:2238; surface TyNamed	types.sio:101	98eb2b4f41a3	
-Jacobian	Hypothesis	ty_jacobian only epistemic:1931; surface TyNamed	types.sio:102	98eb2b4f41a3	
-BigO	Hypothesis	ty_bigO internal only; surface BigO is TyNamed not TyBigO	types.sio:111,2941; epistemic.sio:2097	98eb2b4f41a3	complexity seed not claim
-Amortized	Hypothesis	ty_amortized never called; surface TyNamed	types.sio:112,2966	98eb2b4f41a3	complexity seed
-F128	Claim-ready	Madaros E218 refuse bind/arith/sig	parser/types.sio:24-41; probe_f128_*	98eb2b4f41a3	Madaros canon; reserved not numeric
-F256	Claim-ready	Madaros E218 refuse	same; probe_f256_*	98eb2b4f41a3	
-I128	Claim-ready	construct OK; E001 expected i128 vs bool	types.sio:123; probe_i128*	98eb2b4f41a3	
-U128	Claim-ready	construct OK; E001 expected u128 vs bool	types.sio:124; probe_u128*	98eb2b4f41a3	
-RawPtr	Claim-ready	*mut/*const OK; E001 *mut vs i64	types.sio:127; probe_rawptr*	98eb2b4f41a3	no doc but real
-SliceMut	Claim-ready	&! slice OK; E009 &! vs &	types.sio:28; probe_slice_mut*	98eb2b4f41a3	no doc but real
-TyI64	Claim-ready	control OK+E001	types.sio:17	98eb2b4f41a3	ladder control
-TyBool	Claim-ready	control OK+E001	types.sio:19	98eb2b4f41a3	ladder control
-TyArray	Claim-ready	control OK+E001 length	types.sio:24	98eb2b4f41a3	ladder control
-```
-
-*Censo produz a tabela; a decisão de registo de conceitos é do founder.*
+*The gate is the table. This document explains the dig and points at the ruler.*
