@@ -12,9 +12,26 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.s06-effec
 Spec-Section: `SOUNIO-SPEC-06`
 Frame: `docs/spec/E2E_SPECIFICATION_FRAME.md`
 
-Status: **undefined.** No normative statement has been ruled. This section
-records the measured state and the rulings it makes owed. Nothing below is a
-specification of what Sounio *should* do.
+Status: **Hypothesis.** One normative statement is ruled (6.0). No conformance
+test exists for it. Everything else in this section is measured state and owed
+rulings, not specification.
+
+## 6.0 Normative
+
+> **A function type carries the effects of the function.**
+
+Founder ruling, 2026-08-19. A function type is not merely its parameter and
+result types; the effects the function may perform are part of it.
+
+Measured state at the time of the ruling: **559 function types occur in live
+`.sio` source and not one of them declares an effect.** The ruling is therefore a
+change of kind, not a description. What it buys is that the question *"what does
+this function argument do?"* becomes **askable**; today it is not formulable at
+all, because the type has nowhere to say it.
+
+Two things follow immediately and are recorded in 6.6 rather than assumed here:
+what a function type with no effect clause means, and whether a function may
+abstract over the effects of its argument.
 
 ## 6.1 What runs
 
@@ -95,6 +112,23 @@ Instrument: `^use effects::`, validated in the same command against
 `^use parser::` (155) and `^use ir::` (117).
 
 ## 6.6 Rulings owed
+
+- **What does a bare function type mean under 6.0?** If `fn(f64) -> f64` denotes
+  a *pure* function, then 559 existing types become purity claims overnight, and
+  the claim is already false at live call sites: of the functions actually passed
+  to higher-order functions, `sin`, `cos`, `exp` and `sqrt` are pure while
+  `my_sin`, `tc_sin` and `tc_cos` declare `with Mut, Panic, Div` — and `my_sin`
+  is passed six times. If instead a bare type denotes *any* effects, the ruling
+  buys nothing, because the type still cannot be relied upon. A third option is
+  that a bare type is **refused**, making the clause mandatory.
+
+- **May a function abstract over its argument's effects?** 6.0 makes the question
+  live; it does not answer it. Measured pressure: `my_sin` is mathematically a
+  pure `f64 -> f64` and carries three effects **because of how it is
+  implemented** — a loop (`Mut`) and division (`Div`). Sounio's effect set does
+  not separate observable effect from implementation mechanism, so effectful
+  numeric functions are the norm rather than the exception. Under 6.0 without
+  abstraction, one `deriv` cannot serve both `sin` and `my_sin`.
 
 - **Is the effect annotation a set or a row?** A flat set with subset is what
   runs. A row discipline with an open tail is what `effects_row.sio` implements
