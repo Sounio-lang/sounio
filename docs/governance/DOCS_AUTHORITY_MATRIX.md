@@ -143,6 +143,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.frame-fix-7fa3c3524-dead-code-2026-06-16 | repo_only | docs/audit/FRAME_FIX_7fa3c3524_DEAD_CODE_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-full-selfhosted-2026-06-16 | repo_only | docs/audit/FRAME_FIX_FULL_SELFHOSTED_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.frame-fix-validation-2026-06-16 | repo_only | docs/audit/FRAME_FIX_VALIDATION_2026-06-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.full-suite-engine-green-divergence-2026-08-19 | repo_only | docs/audit/FULL_SUITE_ENGINE_GREEN_DIVERGENCE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.g1-let-spine-crash-rootcause-2026-06-01 | repo_only | docs/audit/G1_LET_SPINE_CRASH_ROOTCAUSE_2026-06-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.g1-wip.bare-pattern-reject-guard-readiness-2026-06-01 | repo_only | docs/audit/g1_wip/BARE_PATTERN_REJECT_GUARD_READINESS_2026-06-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.g1-wip.codegen-bug-pinned-2026-06-02 | repo_only | docs/audit/g1_wip/CODEGEN_BUG_PINNED_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
