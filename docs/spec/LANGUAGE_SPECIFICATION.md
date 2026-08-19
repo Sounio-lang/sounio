@@ -147,6 +147,21 @@ uint      u8        u16       u32       u64       u128
 f32       f64       bool      char      string
 ```
 
+> **Measured 2026-08-19 — `int` and `uint` are listed and do not work.**
+> `let x: i64 = 0` checks; `let x: int = 0` gives
+> `error[E001]: this binding expects a different type`, as does `uint`. The two
+> widths this document might have been expected to be aspirational about,
+> `i128` and `u128`, **do** check — that guess was tested and was wrong.
+>
+> **A test in parameter position proves nothing here.** `fn f(x: T) -> i32 { 0 }`
+> checks under Madaros for *every* `T`, including `naoexiste_zorble`. An
+> undeclared parameter type is refused only once the function has a caller
+> (`error[E009]`), so the declaration is never interrogated on its own — the use
+> is. lean_single emits an ELF **either way**, caller or not.
+>
+> This is `SOUNIO-TYPE-INTERROGATION` at the level of the type namespace: a name
+> in a declaration is not asked to exist until something forces the question.
+
 ### 2.4 Built-in Effect Names
 
 ```
