@@ -1,20 +1,20 @@
 <!-- docs:meta
 topic_id: repo.docs.audit.ontology-ci-disconnect-2026-08-19
 authority: repo_only
-audience: maintainers
+audience: users
 last_validated: 2026-08-19
 validated_by: grok-cli3
-source_of_truth: scripts/ci/*ontolog*.sh
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ontology-ci-disconnect-2026-08-19
 -->
 
-# Ontology CI disconnect — measurement, not religation
+# Ontology CI disconnect — measurement, not rewiring
 
 Date: 2026-08-19
 Lane: `ontology-ci-audit-20260819`
 Worktree: `/workspace/.wt/ontology-ci-audit`
 Source: `origin/main` `f9b314736421f6cff0ca02ffe02c6cb7def71a0a`
   (`compiler(effects): Chaotic exists; six extras after id 22; Mod held (#1963)`)
-This is not a religation. No gate was wired. No known-failure tag was changed.
+This is not a rewiring. No gate was wired. No known-failure tag was changed.
 
 Companion: [`ONTOLOGY_CI_DISCONNECT_2026-08-19.tsv`](ONTOLOGY_CI_DISCONNECT_2026-08-19.tsv)
 
@@ -36,14 +36,14 @@ Transformation: none — measurement of CI wiring against today's main
 Types-Changed: none
 Effects-Changed: none
 IR-Changed: none
-Claims-Introduced: 17 ontology-named scripts/ci gates exist; 3 are named by .github/; of the 14 unwired, 8 are VERDE today and 6 are VERMELHO-PODRE; none are VERMELHO-REAL
-Claims-Forbidden: "the fourteen are all green so they can be wired"; "the fourteen re-measured Madaros/lean ontology divergence"; "praticamente tudo is already gated"; "a red rc is an axiom hole"
+Claims-Introduced: 17 ontology-named scripts/ci gates exist; 3 are named by .github/; of the 14 unwired, 8 are GREEN today and 6 are RED-STALE; none are RED-REAL
+Claims-Forbidden: "the fourteen are all green so they can be wired"; "the fourteen re-measured Madaros/lean ontology divergence"; "practically everything is already gated"; "a red rc is an axiom hole"
 Assumptions: the wiring instrument is `git grep -l --fixed-strings <basename> origin/main -- .github/`; Madaros v0.80.0 is the default `bin/souc` oracle
 Write-Set: docs/audit/ONTOLOGY_CI_DISCONNECT_2026-08-19.md; docs/audit/ONTOLOGY_CI_DISCONNECT_2026-08-19.tsv
 Read-Set: scripts/ci/*ontolog*; scripts/ci/classify_ci_impact.sh; scripts/ontology/validate_unit_metadata.py; .github/workflows/ci.yml; self-hosted/check/units.sio; self-hosted/check/mod.sio; stdlib/ontology/**
-Positive-Witness: none claimed (no religation)
+Positive-Witness: none claimed (no rewiring)
 Negative-Witness: none claimed
-Acceptance-Gate: fourteen per-gate rcs against f9b3147364; each classified; map of the 17 versus founder "praticamente tudo"; wiring order proposed; nothing wired
+Acceptance-Gate: fourteen per-gate rcs against f9b3147364; each classified; map of the 17 versus founder "practically everything"; wiring order proposed; nothing wired
 Integration-Target: none
 Authoritative-Only-If: a later dispatch wires a named subset after the repairs listed below
 ```
@@ -88,29 +88,29 @@ Fourteen unwired. Per-gate rc against `f9b3147364`, not aggregated:
 
 | # | gate | rc | class |
 |---|---|---:|---|
-| 1 | `generated_ontology_manifest_gate.sh` | 0 | VERDE |
-| 2 | `generated_ontology_gate.sh --check` | 0 | VERDE |
-| 3 | `ontology_cache_compile_gate.sh` | 0 | VERDE |
-| 4 | `ontology_model_compile_gate.sh` | 0 | VERDE |
-| 5 | `ontology_query_compile_gate.sh` | 0 | VERDE |
-| 6 | `ontology_reasoner_compile_gate.sh` | 0 | VERDE |
-| 7 | `ontology_typed_bridge_gate.sh` | 0 | VERDE |
-| 8 | `build_ontology_validation_souc.sh` | 0 | VERDE |
-| 9 | `ontology_unit_metadata_gate.sh` | 1 | VERMELHO-PODRE |
-| 10 | `ontology_bundle_directive_gate.sh` | 1 | VERMELHO-PODRE |
-| 11 | `knowledge_context_phase2_ontology_gate.sh` | 1 | VERMELHO-PODRE |
-| 12 | `ontology_cache_frontend_composition_gate.sh` | 1 | VERMELHO-PODRE |
-| 13 | `ontology_bundle_directive_native_scan_gate.sh` | 1 | VERMELHO-PODRE |
-| 14 | `ontology_hash_benchmark.sh` | 1 | VERMELHO-PODRE |
+| 1 | `generated_ontology_manifest_gate.sh` | 0 | GREEN |
+| 2 | `generated_ontology_gate.sh --check` | 0 | GREEN |
+| 3 | `ontology_cache_compile_gate.sh` | 0 | GREEN |
+| 4 | `ontology_model_compile_gate.sh` | 0 | GREEN |
+| 5 | `ontology_query_compile_gate.sh` | 0 | GREEN |
+| 6 | `ontology_reasoner_compile_gate.sh` | 0 | GREEN |
+| 7 | `ontology_typed_bridge_gate.sh` | 0 | GREEN |
+| 8 | `build_ontology_validation_souc.sh` | 0 | GREEN |
+| 9 | `ontology_unit_metadata_gate.sh` | 1 | RED-STALE |
+| 10 | `ontology_bundle_directive_gate.sh` | 1 | RED-STALE |
+| 11 | `knowledge_context_phase2_ontology_gate.sh` | 1 | RED-STALE |
+| 12 | `ontology_cache_frontend_composition_gate.sh` | 1 | RED-STALE |
+| 13 | `ontology_bundle_directive_native_scan_gate.sh` | 1 | RED-STALE |
+| 14 | `ontology_hash_benchmark.sh` | 1 | RED-STALE |
 
 Not all-green (dispatch: that would have meant the instrument was not
-running). Zero VERMELHO-REAL. Zero INDETERMINADO after the isolated re-run.
+running). Zero RED-REAL. Zero INDETERMINATE after the isolated re-run.
 
 ---
 
 ## Classification notes
 
-### VERDE — may be named first
+### GREEN — may be named first
 
 - **generated_ontology_manifest.** Stable `MANIFEST.tsv` covers the nine
   public bundles (alg, chebi, go, hpo, loinc, part, phys, qm, snomed) plus
@@ -130,9 +130,9 @@ running). Zero VERMELHO-REAL. Zero INDETERMINADO after the isolated re-run.
   `build_native_souc.sh` prefers a checked-in ELF; this is "wrapper built",
   not a from-source fixed-point. Still what the gate claims.
 
-### VERMELHO-PODRE — the tree moved; the gate did not
+### RED-STALE — the tree moved; the gate did not
 
-Dispatch item 4 asked for one line each if any were VERMELHO-REAL.
+Dispatch item 4 asked for one line each if any were RED-REAL.
 There are none. The six reds, one line each, are aged instruments:
 
 1. **unit_metadata** — `validate_unit_metadata.py` requires
@@ -166,7 +166,7 @@ that the unwired redness today is gate rot, not a newly measured axiom hole.
 
 ---
 
-## Map of the seventeen versus "praticamente tudo"
+## Map of the seventeen versus "practically everything"
 
 Founder today: practically everything should be ontologically validated.
 
@@ -226,7 +226,7 @@ Census on this SHA (re-derived, not remembered):
 - **Query / reasoner soundness.** Compile+run of the module, not a decision
   procedure against the bundles.
 
-Distance from "praticamente tudo": the wired surface is a kernel-fixture
+Distance from "practically everything": the wired surface is a kernel-fixture
 harness plus one inverse-role check, both easy to skip (impact predicate or
 skip-as-pass). The compile, typed-bridge, cache, proof-context, unit, and
 directive gates that would widen that surface are either unwired, optional
@@ -274,7 +274,7 @@ Name them as *independent* steps. Leaving them only as children of
 14. `build_ontology_validation_souc.sh` — builder already invoked by the
     wired parent.
 
-**Religation that would actually approach the founder sentence** (later
+**Rewiring that would actually approach the founder sentence** (later
 dispatch, not this one): teach `classify_ci_impact.sh` that
 `stdlib/ontology/**`, `stdlib/data/data/ontology/**`, and
 `self-hosted/**/*ontology*` flip `ontology=true`. Until that happens,
