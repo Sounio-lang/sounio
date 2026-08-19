@@ -85,16 +85,26 @@ Three layers, each of which alone would hide the divergence: the polarity fork
 itself; gates that pin to the one engine where the surface's polarity holds; and
 gates no workflow reaches. `bin/souc` defaults to Madaros.
 
-## It is a family, not a test — three of three
+## It is a family, not a test — three of six
 
-Every ε-refusal `compile-fail` test in the corpus is inert under the default
-engine.
+An earlier revision of this document said *three of three*. That was measured on
+a census requiring `Knowledge[... ε ...]` on one line, which under-counts. A
+wider search on `ε >=` finds **six** `compile-fail` tests, and three of them are
+refused. The claim is corrected here rather than quietly widened.
 
 | test | lean_single | Madaros v0.80.0 |
 |---|---|---|
 | `vancomycin_low_conf.sio` | `error[P0003]` ε boundary violation | **`check: OK`** |
 | `epsilon_bound_violation.sio` | `error[P0003]` | **`check: OK`** |
 | `covid_2020_knightian_refusal.sio` | `type error line 10: Knightian uncertainty (ε=⊥) cannot satisfy required confidence` | **`check: OK`** |
+| `knightian_mixed.sio` | `type error` | `error[E004]` — refused |
+| `med/vancomycin_low_conf_refusal.sio` | `error[P0003]` | refused, but **`module failed to parse`** |
+| `med/vancomycin_weak_evidence_refusal.sio` | `error[E001]` | refused, but **`module failed to parse`** |
+
+The last two are their own defect and are recorded here because the suite cannot
+tell them apart from a real refusal: a `compile-fail` test that fails because the
+file does not parse is green for a reason unrelated to what it claims to test.
+Only `knightian_mixed.sio` is refused by Madaros on a decision.
 
 The covid case is worth separating: `epsilon_subsumes_call_boundary` opens with
 `if !epsilon_is_valid(provided_eps) { return false }` — an explicit fail-closed
@@ -135,6 +145,30 @@ Bare `Knowledge {` literals in versioned `.sio` outside `archive/`/`bootstrap/`:
 (`tests/compile-fail/vancomycin_low_conf.sio`,
 `tests/run-pass/epsilon_comparison_valid.sio`). No `stdlib/` literal deviates
 from the canonical order.
+
+## The cost of each decision, measured
+
+**Option A — ε is confidence (amend Madaros).** Every site lives in **one file**,
+`self-hosted/check/epistemic.sio`: the comparison `epsilon_subsumes` (:595), its
+three call sites (:611, :648, :668), the boundary caller (:892), the lattice pair
+`epsilon_meet`/`epsilon_join` (:615, :624) whose direction flips with it, and
+three comments (:30, :588, :614). **~8 sites, one file.** lean_single already
+implements this reading and does not change. No corpus file changes.
+
+**Option B — ε is an error bound (rewrite the corpus).** **51 annotation sites
+across 22 files**, including `stdlib/darwin_pbpk/core/tissue_composition.sio`,
+`stdlib/pbpk/regulatory.sio`, `stdlib/epistemic/klibanoff.sio`,
+`stdlib/epistemic/graded_effects.sio`, `tests/run-pass/dissertation_pbpk28_confidence_gate.sio`,
+and `tools/test-framework/src/lib.sio` — the test framework itself. Six
+`compile-fail` tests are in the set, and each must have its intent re-derived
+rather than mechanically flipped, since a refusal test whose comparison reverses
+may stop being a refusal. **lean_single changes too**, so option B is the only
+one that costs both engines.
+
+The asymmetry is not close: one file against twenty-two, one engine against two.
+This is a measurement of cost, not a recommendation — the cheap direction is not
+automatically the correct one, and ε as an error bound is the reading most of the
+literature on interval and GUM propagation uses.
 
 ## What is owed
 
