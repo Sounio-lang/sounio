@@ -103,6 +103,41 @@ it is the vocabulary the dissertation surface uses. A value labelled `constant`
 in `darwin_epistemic_pbpk.sio` has no image in the provenance the compiler can
 reason about.
 
+### 8.2.2 The cost of withdrawing the `label` vocabulary
+
+Measured on `origin/main`, 2026-08-19, because the withdrawal proposed in 8.5(c)
+touches the dissertation surface and its cost must precede its ruling.
+
+**Footprint.** Four files, thirteen constructions, **two reads**. The four files
+each carry an identical copy-pasted three-constructor preamble (`label: 0`,
+`label: 1`, `label: 2`); twelve of the thirteen constructions are inside those
+helpers. The only reads are `examples/epistemic_quantum_vqe.sio:247-248`, two
+equality comparisons. **`darwin_epistemic_pbpk.sio` — the dissertation surface —
+never reads `.label` at all.** There, the tag is write-only metadata.
+
+**The tag conflates two axes, and one of them is already recorded elsewhere.**
+Every one of the four `label: 2` sites is character-for-character the same
+literal:
+
+    Epistemic { value: value, variance: 0.0, label: 2 }
+
+`2 = constant` is not a provenance. It is a claim about the variance, and the
+claim is already made in the adjacent field of the same literal. Only `0 =
+measured` and `1 = asserted` carry provenance.
+
+**Therefore the withdrawal is not lossy — it removes a redundancy.**
+
+| tag | carries | image under withdrawal |
+|---|---|---|
+| `0` measured | provenance | `AstProvMeasured` — exact |
+| `1` asserted | provenance | `AstProvInput` or `AstProvSource` — **owed**, the only real decision |
+| `2` constant | *variance*, not provenance | already expressed by `variance: 0.0`; no provenance image needed |
+
+The residue is one mapping decision — where an *asserted* value sits among
+`Input` and `Source` — plus two equality comparisons in a file that is not the
+dissertation. `label: 2` needs no image at all, because it never carried
+provenance to lose.
+
 Other measured facts about shape 2, which is the shape the stdlib exposes:
 
 - **Not linear.** Dropping one requires nothing.
@@ -143,6 +178,20 @@ These follow from 8.1. Each is normative; none is implemented.
 4. **Decisions read the invariant, not the number.** `Admissible<T>` requires
    support that has not been degraded without justification
    (`SOUNIO-ADMISSIBILITY`). Deciding is the fifth sink.
+6. **`epsilon` is a predicate over the runtime variance, not an alternative to
+   it.** Founder ruling, 2026-08-19. The compiler's `Knowledge<T>` states a
+   bound; the value-level representation computes a variance; the bound is
+   something the variance is **checked against**. The two levels therefore do
+   not compete for the same role, and no unification of the two declarations is
+   required by this section.
+
+7. **The predicate is discharged by the GUM coverage convention.** Founder
+   ruling, 2026-08-19. `k` is the bridge from a computed variance to the
+   expanded uncertainty the bound compares against, and `gum_k95` already
+   computes it. Which `k` a given `EpsilonBound` implies is a matter for the
+   conformance test, not a further ruling; what is settled is that the bridge is
+   GUM's and not an invention of this specification.
+
 5. **`confidence = 1000` denotes certainty.** Founder ruling, 2026-08-19. It is
    not "maximum representable" and not "no claim made". `ep_exact` constructing
    an exact value with `variance: 0.0, confidence: 1000` is therefore correct
@@ -165,16 +214,8 @@ A rule can be argued away one at a time. A definition has to be replaced whole.
 
 ## 8.5 Undefined — rulings owed
 
-- **The layering, now that 8.2.1 has narrowed it.** The question is not "which
-  of three shapes wins" — the compiler type and the stdlib struct sit at
-  different levels and do not compete. What is owed is narrower and answerable:
-  (a) that `epsilon` is normatively a **predicate over** the runtime variance
-  rather than an alternative to it; (b) which coverage convention discharges the
-  predicate (GUM `k` is the candidate, and `gum_k95` already computes it); and
-  (c) that shape 3's three-tag `label` vocabulary is **withdrawn** in favour of
-  `AstProvenanceKind`, since two of its three tags name provenances the compiler
-  cannot represent. (c) touches the dissertation surface and is not a
-  documentation change.
+- **(c) Withdrawal of the `label` vocabulary — cost measured, ruling owed.**
+  See 8.2.2. (a) and (b) are ruled in 8.3.6 and 8.3.7.
 
 - **Where "no confidence claim made" lives.** Ruled 2026-08-19: `1000` is
   **certainty** and `0` is **no confidence**, so the scale `0..1000` is fully
