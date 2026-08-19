@@ -86,6 +86,25 @@ Editor-tooling details:
 
 ### Active Known Bugs / Architectural Gaps
 
+**ε has opposite polarities in the two engines — a patient-safety compile-fail test passes under the default compiler (2026-08-19, OPEN).**
+`tests/compile-fail/vancomycin_low_conf.sio` is refused by `lean_single` with
+`error[P0003] ... Knowledge ε boundary violation at line 27` and **accepted by
+Madaros** with `check: OK`, rc=0. This is **not** a missing check: Madaros has
+`epsilon_subsumes_call_boundary` (`self-hosted/check/epistemic.sio:601`) with a
+live caller, the violation site is a call boundary, and the check runs and
+returns `true`. Madaros reads ε as an **error bound** (`epsilon_subsumes` is
+`a <= b`; `parser/types.sio:873` documents `ε < 0.05`), while lean_single and the
+clinical surface read ε as **confidence** (`Knowledge[f64, ε >= 0.82]`). Madaros
+computes `0.40 <= 0.82`, subsumes, accepts — correct for its own semantics.
+The three covering gates (`clinical_vanco_tdm_e2e`,
+`epistemic_prescription_chain_e2e`, `ousadia_epistemic_method_rx`) all pin
+`SOUNIO_SOUC_ENGINE=lean_single` and none is workflow-reachable.
+**Do not state the vancomycin ε guarantee without naming the engine: it holds
+under `lean_single` and does not hold under the default compiler.** A decision
+on ε's polarity is owed; patching one engine alone re-points the other half of
+the corpus. Audit: `docs/audit/EPSILON_POLARITY_FORK_2026-08-19.md`.
+
+
 **Imported-module native path (D1–D4) — partial closeout (2026-07-14 → Wave10 2026-07-21).** On the default **native** engine, composing real modules historically failed or *silently miscompiled* in four distinct ways. Full catalogue + minimal repros + priority: [`docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md`](../audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md). Which stdlib results survive native import: [`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md`](../audit/EPISTEMIC_TRUST_MAP_2026-07-14.md). Live gate: `scripts/epistemic_trust_gate.sh`.
 
 - **D1 — `f64 → i64/i32` cast on an f64 *parameter* was a bit reinterpretation, not a truncating convert.** ~~OPEN~~ **FIXED (2026-07-19 → Wave10 trust closeout 2026-07-21):** root-caused as general f64-param `scalar_kind` (#983); joint D5+D1 land (#1252 / `fix/madaros-d5-d1-f64-param-cast`); stdlib `dof_to_i64` arithmetic-source + half-up round (prescription-chain). Finite-dof `gum_k95` under native import returns **t95(ν)** (e.g. **2.776** at ν≈4), not the normal 1.960 collapse. Gate: `scripts/epistemic_trust_gate.sh` Section A (`GUM_TRUST_OK` + `witness_gum_k95` → `2776`). **NB:** the pre-Wave10 witness used a Type-B-dominant budget so k95=1.960 was *correct* and could never flip — fixed to Type-A-dominant. Dispatch: `docs/audit/MADAROS_IMPORTED_MODULE_F64_CAST_BITCAST_2026-07-14.md`. Issues #932/#983 **CLOSED**.
