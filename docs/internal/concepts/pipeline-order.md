@@ -11,9 +11,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-PIPELINE-ORDER`
 
-Status: **Hypothesis** — two founder rulings of 2026-08-19, recorded together
-because they must coexist and the tension between them is **not resolved**.
-Neither is implemented.
+Status: **Hypothesis** — two founder rulings of 2026-08-19. Their apparent
+tension was **resolved on 2026-08-19 by claude-1 under founder delegation** (see
+"Resolution of T1" below); the founder may overrule. Neither ruling is
+implemented.
 
 ## The two rulings
 
@@ -21,10 +22,52 @@ Neither is implemented.
 layer everything descends through; the backends hang below it.
 
 ```
-check → HLIR → ir/ → native      (CPU)
-             ↘ gpu               (GPU)
-             ↘ enir → verify     (epistemic)
+check → HLIR → ENIR → verify → native      mandatory route
+                    ↘ ir/ + e-graph        optional accelerator, translation-validated
+             ↘ gpu                         route under T1-R below
 ```
+
+## Resolution of T1 — the two rulings compose; the earlier diagram did not
+
+The corpus cross-check of 2026-08-19 recorded a contradiction between
+`pipeline-order.md` ("HLIR is always on the path") and `verified-lowering.md`
+("ENIR becomes the only path"), and left it `INDETERMINATE`. Resolved as follows.
+
+**The two statements are about different things.** "HLIR is always on the path"
+is a claim about a **layer** — what everything descends through.
+"ENIR is the only path" is a claim about a **route**, and `verified-lowering.md`
+qualifies it in the same sentence: *"`ir/` and the e-graph are an optional
+accelerator, never mandatory"*. An optional accelerator sits **below** the
+mandatory route, not beside it.
+
+What contradicted was this document's **diagram**, which drew
+`HLIR → ir/ → native` as the CPU spine. That is the tree as measured today, not
+the ruling. The diagram yields and has been replaced above.
+
+**Measured state at resolution** (`origin/main`, 2026-08-19; instrument
+`^use <dir>::`, positive control `check/` → `parser::` in 6 files):
+
+| directory | imports |
+|---|---|
+| `enir/` | only itself (10). Imports neither `hlir::` nor `ir::`, and nothing imports it — an **island** |
+| `ir/` | only itself (21) |
+| `native/` | `ir::` (14) |
+| `gpu/` | `hlir::` (1 file) |
+
+So the live tree holds three disconnected pieces: the spine `ir/ → native/`, the
+pair `hlir → gpu` with a single importer, and `enir/` connected to nothing. Both
+rulings describe a tree that does not exist, which is why neither could be
+falsified by the other.
+
+### T1-R — the residue this resolution makes visible
+
+Where **GPU** sits is *not* decided by either ruling and is not decided here.
+`pipeline-order.md` hangs `gpu` directly below HLIR; `verified-lowering.md` says
+ENIR is the only path. If "only" includes GPU, then `gpu/` descends through ENIR
+too, and translation validation applies to PTX emission. If it does not, GPU is
+a second route below HLIR and the word "only" needs narrowing to CPU lowering.
+
+Owed to the founder. Recorded as newly visible rather than closed.
 
 **Verification is the floor** (`SOUNIO-VERIFIED-LOWERING`): ENIR becomes the
 path for content that must be trusted; `ir/` and the e-graph are an optional
