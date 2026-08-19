@@ -71,9 +71,9 @@ registry's; the ladder is monotone (`MATURITY_LADDER`).
 | 3 | Type system — kinds | **eight** type-kind enums, 238 variants, 57 multi-enum stems, **0 homonyms** (#1949) | measured, unspecified |
 | 4 | Type system — rules | bidirectional inference in `check/`; no written rules | undefined |
 | 5 | Effects — vocabulary | 29 ids after #1963; `EffectKind` enum now in production | measured |
-| 6 | Effects — rows and subtyping | `EffVar` row polymorphism exists in `effects/types.sio`, **not** in production | contested |
-| 7 | Effects — handlers | fast path (#1926) exists; **the CPS path has no execution semantics** (`EFFECTS_JUNCTION_ROUTING_2026-08-19`) | undefined |
-| 8 | Epistemic values | `Knowledge<T>` = `{value, variance, confidence}`; **not linear**, no provenance field; `.value` is an unmarked projection | measured, contested |
+| 6 | Effects — rows and subtyping | **written**: `S06_EFFECTS_ROWS.md`. Rows are implemented in the *live* tree (`check/effects_row.sio`) with **zero external callers**; the set is `[i64; 8]` against **23** named effects, and four of them gate no decision | Hypothesis — §6.0 ruled |
+| 7 | Effects — handlers | **written**: `S07_EFFECT_HANDLERS.md`. Measured stronger than the earlier reading — **no** path has execution semantics: `ExprHandle` occurs 0× in `ir/`, `native/`, `enir/`; Madaros erases the expression, lean_single refuses by ignorance | undefined — measured |
+| 8 | Epistemic values | **written**: `S08_EPISTEMIC_VALUES.md`. The struct in the earlier cell **does not exist** — three incompatible declarations do, plus a two-line fixture; the compiler type holds *predicates*, not numbers | Hypothesis — §8.0 and the 1000-endpoint ruled |
 | 9 | Uncertainty propagation | machine-level emitters in `ir/lower.sio`; `emit_variance_independent_product` assumes independence with nothing checking it | contested |
 | 10 | Units and dimensions | `stdlib/units/` 9 files incl. QUDT; whether `mg` is an alias, a nominal type or a primitive is **under measurement** | undefined |
 | 11 | Ontological validation | ChEBI, GO, HPO, LOINC bundles + reasoner; TBox present, **ABox absent** | measured, incomplete |
@@ -82,7 +82,7 @@ registry's; the ladder is monotone (`MATURITY_LADDER`).
 | 14 | Lowering pipeline | live: `parser → check → ir → native`; HLIR is the **GPU frontend**; ENIR is a parallel verified pipeline with 0 production importers | contested |
 | 15 | Backends | x86-64 ELF, arm64, GPU/PTX, wasm | undefined |
 | 16 | Diagnostics | error codes `E001`–`E230+`; no catalogue with normative meaning | undefined |
-| 17 | Conformance suite | the corpus runs on **lean_single**, not the canonical compiler (#1964) | contested |
+| 17 | Conformance suite | **written**: `S17_CONFORMANCE_SUITE.md`. 437 of 1,527 CI greens fail under source-built Madaros (28.6%), and part of the gap is **absence, not disagreement**: the seed has no `Knowledge<…>` annotation machinery at all | undefined — measured |
 
 `contested` means the two engines are known or suspected to disagree there, and
 **the specification's job is to say which is right** — not to describe both.
