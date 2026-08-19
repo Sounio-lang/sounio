@@ -1228,6 +1228,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.spec.s06-effects-rows | repo_only | docs/spec/S06_EFFECTS_ROWS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.s07-effect-handlers | repo_only | docs/spec/S07_EFFECT_HANDLERS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.s08-epistemic-values | repo_only | docs/spec/S08_EPISTEMIC_VALUES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.spec.s17-conformance-suite | repo_only | docs/spec/S17_CONFORMANCE_SUITE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.status.madaros-main-proof-17d115 | repo_only | docs/status/madaros_main_proof_17d115.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.linalg.blas-ffi | repo_only | docs/stdlib/linalg/BLAS_FFI.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.stdlib.stdlib-api-reference | repo_only | docs/stdlib/STDLIB_API_REFERENCE.md | - | A3 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
