@@ -165,7 +165,11 @@ What the FO programme itself did when it outgrew 2 — **read, not ported**: it 
 
 ### Does skip → 4 or → 8 cover the dissertation?
 
-**No.**
+**No.** Two layers, both measured:
+
+**Layer A — files that lose variance today (Knowledge / `variance_of` after a call).** After the #1889 inline, `rapamycin_epistemic_adaptive` and `rapamycin_rk4_budget` are LIVE (`FAMILY_A_VAR_LIVE`). `rapamycin_iso_budget` peels `.value` on purpose; Budget64 is the ISO path. `rapamycin_epistemic_pbpk` / `rapamycin_gum_vs_mc` do not call `variance_of`. The only remaining FO-call zero on this slice is `gum_fo_across_call.sio`: **one helper, arity 3**, body nest+`−`+`/`. skip=4 would *admit* it to classification; the classifier still would not register the body. A ceiling bump does not turn that 0 into a live GUM var.
+
+**Layer B — helpers sitting in those files if the model is written as functions again.** In `rapamycin_rk4_budget.sio` the named RHS (called only from the plain finite-diff sim today) are `rhs_brain` **4**, `rhs_periph` **4**, `rhs_blood` **11**. `examples/dissertation_pbpk_rapamycin.sio` has `pbpk_rhs(y0,y1,y2)` arity **3**, but its uncertainty is hand-rolled finite-diff, not `variance_of`. Max arity on the Knowledge-shaped RHS is **11**. skip=8 still skips `rhs_blood`. Even skip=16 would still miss the body (nest / OpSub / OpDiv).
 
 | Thesis helper (Knowledge path vs plain) | Arity | Body | skip=4 | skip=8 |
 |---|---:|---|---|---|
