@@ -12,27 +12,40 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.epistemi
 **Opened.** 2026-08-17, on founder instruction, after `#1772` merged at
 `1bb2db46fc` carrying `EpistemicPreservationWIP_counterexample.lean`.
 
-**Class.** Formalisation defect in `formal/lean4/`. **Not** a compiler defect
-and **not** a soundness bug in Sounio. The repair has already landed; what
-remains open is correspondence and consumption, enumerated in §5.
+**Class.** Formalisation defect in `formal/lean4/`, now read as a **language
+specification** defect. The payload repair has landed. Consumption of the
+discriminating Nat/`mg` surfaces has landed. What remains is not another
+consumer: it is whether `EpistemicEffectsV2` is the specification of
+`Knowledge<T>` — the feature that makes Sounio not Rust — or an exercise
+that is silent where the language is wrong.
 
-**Priority.** P3. No shipping code is wrong. The exposure is citation exposure:
-`EpistemicEffects.lean` is the file a reader reaches for when asking what the
-metatheory of `Knowledge<T>` is, and that file's calculus is provably unsound.
-The dissertation defends Aug–Sep 2026 with `Knowledge<T>` as contribution
-material, so a citation of the refuted module is a live risk with a date on it.
+**Priority.** P0 for epistemic honesty (2). The model-as-exercise reading
+is closed. A citation of V2 as the metatheory of `Knowledge<T>` without a
+proposition about GUM across a compiled call is an overclaim.
 
-**Founder ruling.** "isso vai contra a spec" — the divergence is a defect in
-the model, not a design choice in the language. §2 records the spec text and
-the implementation that ruling rests on.
+**Founder ruling (payload, 2026-08-17).** "isso vai contra a spec" — V1's
+discard of the payload was a defect in the model, not a design choice.
+§2 still holds for `measure` / `ty_knowledge(v_ty)`.
+
+**Founder ruling (PL, 2026-08-19).** All lanes in Sounio as a programming
+language. V2 is no longer "a formalisation with consumers". It is the
+specification of `Knowledge<T>`. The discriminating set being empty at
+Nat/`mg` does not end the work. R3 — correspondence for GUM
+propagation — is the target. Claims-Forbidden: "V2 models `Knowledge<T>`"
+without a proposition about boundary crossing.
 
 ---
 
 ## §0 — Scope constraint
 
-This dispatch is confined to `formal/lean4/` plus one new gate under
-`scripts/ci/`. It authorises **no** edit to `self-hosted/`, because §2
-establishes that the compiler is the side that is already correct.
+This dispatch is confined to `formal/lean4/` plus gates under
+`scripts/ci/`. It authorises **no** edit to `self-hosted/ir/lower.sio`.
+§2 still holds for the *payload* of `measure`: the checker is the
+correct side of that disagreement. It does **not** hold for
+first-order GUM across a compiled call — that is a language defect
+the model does not mention. The FO-call-boundary lane owns the
+compiler object (`docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`).
+This dispatch's job is to stop V2 from being silent about it.
 
 The `formal/` contract holds without exception: **no Mathlib, no `sorry`,
 no `axiom`.** Any repair that needs Mathlib — HALT and report.
@@ -280,15 +293,15 @@ Do **not** clone measure or unwrap at mg. Those V1 mutants would
 fail for the same Real pin already scored at Nat. That would be
 the 93%-left mistake at the type-instance level.
 
-**What would make the discriminating set non-empty again.** Not
-another unit literal (`Knowledge<kg>`, `Knowledge<L>`). Either:
+**What would make the *consumer* set non-empty again.** Not
+another unit literal (`Knowledge<kg>`, `Knowledge<L>`). A new
+V2 proposition whose V1 mutant fails for a payload/Real reason.
+Glue (`genMg`) is still glue. `t_kadd` pins Real (R3b) is still
+not a consumer.
 
-1. A **new proposition in V2** whose V1 mutant fails for a
-   payload/Real reason (a new rule, a new inversion, a new
-   operational clause). Glue added tomorrow is still glue.
-   `genMg` is glue for the new literal.
-2. A correspondence close of the GUM hole (`t_kadd` pins Real;
-   the checker keeps `T`) — that is R3-adjacent, not a consumer.
+**What is owed as *specification*, not as a consumer.** R3c:
+`gum_across_compiled_call`. That is the PL target. It does not
+reopen the Nat/`mg` consumer table. See §5 R3.
 
 Until one of those appears, do not add a consumer. If a proposed
 client's V1 mutant elaborates, that is the signal to stop, not to
@@ -412,19 +425,130 @@ literal. A grep-shaped gate is acceptable here provided it ships with a
 must reject. Per house rule, a gate without a firing positive control measures
 nothing.
 
-### R3 — ε is unspecified at the type level
+### R3 — GUM correspondence (the target, 2026-08-19)
 
-The checker writes `ty_knowledge(v_ty, 0.0 - 1.0)` — the sentinel `-1` for
-"epsilon unspecified". V2's `t_kraw` instead demands `kvalid m`, i.e. metadata
-present and well-formed with `conf ∈ [0, 1000]`.
+R3 was recorded as two type-level holes and deferred. Under the PL
+ruling they are still holes, and they are **not** the target. The
+target is the hole the language actually has and the model does not
+state.
 
-So V2 is *stricter* than the implementation on the confidence channel while
-being exactly right on the payload channel. The same shape of hole sits
-on GUM arithmetic: V2's `t_kadd` / `t_kmul` pin `Knowledge<Real>`; the
-checker's Knowledge binop returns `ty_knowledge(left_inner, …)` and so
-keeps `T`. Neither hole is a refutation of the payload repair. Record
-them here; do not attempt to close them under this dispatch, and do not
-consume `kadd` as if it were the next coverage target.
+**R3a — ε unspecified (still deferred).** The checker writes
+`ty_knowledge(v_ty, 0.0 - 1.0)` — sentinel `-1`. V2's `t_kraw`
+demands `kvalid m` (`conf ∈ [0, 1000]`). V2 is stricter on
+confidence, right on payload.
+
+**R3b — `kadd` pins Real (still not a consumer).** V2's `t_kadd` /
+`t_kmul` require `Knowledge<Real>`. The checker's Knowledge binop
+returns `ty_knowledge(left_inner, …)` and keeps `T`. Do not "cover"
+this by forcing a Real-only client.
+
+**R3c — GUM across a compiled call (the target).** Madaros loses
+first-order variance at a user `fn` the FO catalog does not fire
+for. The catalog in `fo_register_pure_fn_transfer` registers 1 or 2
+parameters; a third parameter returns without registering. Thesis
+pin: `tests/run-pass/gum_fo_across_call.sio` — `rhs(c, cl, fu)` is
+three arguments plus `OpSub`/`OpDiv`; `variance_of(c)` after the
+loop is exactly `0`. Independent matrix: same-file `ADD2` is live
+on Madaros; `ADD3`/`ADD4` print `0.000000` (`docs/audit/FO_VARIANCE_ACROSS_FN_INDEPENDENT_VERIFY_2026-08-18.md`).
+This is calculation, not print. lean_single is the honesty oracle
+on that additive matrix, not a universal GUM-magnitude oracle.
+
+The model says nothing about this. `kadd_red` combines metadata on
+two `kraw` cells in the same term. That is not the path the
+language takes, and it is not the path that zeros.
+
+#### Question 1 — can V2 express propagation across a call?
+
+**No**, not the call the language has.
+
+| Object | V2 | Language (Madaros today) |
+|---|---|---|
+| Application | `app f a` — CBV **beta**, one argument, substitution of a whole `kraw` | compiled `fn`, catalog lookup, silent `0` on miss |
+| Arity | curried; no third-parameter abort | third parameter **does not register** |
+| Payload of the call | `Knowledge<T>` cell (`kraw v m`) | peeled `f64` (`.value`) then `variance_of` on an `f64` |
+| GUM rule in play | `gAddMeta` / `gMulMeta` on cells | FO transfer on unwrapped floats |
+| Import / method | absent | catalog miss → `0` |
+
+V2 can express "a lambda receives a `kraw` and beta substitutes it".
+Metadata rides along because it is a field of the term. That is
+source-level substitution. The defect is FO after a peel through a
+*compiled* function. Identifying V2 `app` with that call is a
+category error.
+
+So the missing proposition is not another `HasTy` client. It is a
+judgment **distinct from `Step.beta`**: uncertainty on either side
+of a compiled application of an unwrapped payload. Working name:
+`gum_across_compiled_call`. Until that object exists in V2, V2
+does not specify the feature that makes Sounio not Rust. It
+specifies a cell calculus that the checker uses for `measure` /
+unwrap / apply-of-`Knowledge<T>`, and that is already consumed.
+
+#### Question 2 — if it could, would the theorem be true of today's Madaros?
+
+The primary answer is question 1. The counterfactual is still
+binding, because it is the failure mode of writing the wrong
+theorem:
+
+- `id1` / `ADD2` (catalog, ≤2 args, same file): Madaros **keeps**
+  FO. A V2 theorem "metadata survives beta of identity" would be
+  true in both, and would **not** discriminate the defect.
+- `ADD3` / `rhs(c,cl,fu)` (third parameter): Madaros **zeros**.
+  Curried V2 beta would still substitute and keep metadata. A
+  theorem stated of V2 `app` and read as the language would be
+  **true in the model and false in Madaros** — a specification of
+  a compiler that does not exist.
+
+Do not write that theorem. Do not close R3 by citing `preservation`
+on `app`. `preservation` says the reduct stays well-typed. The
+defect is a live `0` that is well-typed.
+
+#### Semantic-Lane declaration (before any Lean)
+
+```text
+Semantic-Lane-ID: v2-is-language-spec-r3
+Owner: cursor-3
+Concept-IDs: SOUNIO-EPISTEMIC-NUMERIC-VALUE
+Intent-Preserved: Knowledge<T> is a language feature (payload +
+  uncertainty), not a Lean coverage exercise. Uncertainty is not
+  a value and not an arithmetic error.
+Transformation: V2 is declared the specification of Knowledge<T>.
+  The next owed object is gum_across_compiled_call, a judgment
+  distinct from Step.beta. No constructor added in this turn.
+Types-Changed: none (declaration only)
+Effects-Changed: none
+IR-Changed: none
+Claims-Introduced: V2 does not yet specify GUM across a compiled
+  call; that silence is now a named hole (R3c), not a deferred
+  remark beside epsilon.
+Claims-Forbidden: "V2 models Knowledge<T>" ; "the discriminating
+  set is empty, so the spec is done" ; "preservation on app is
+  GUM-across-call" ; "R3 is only kadd-pins-Real"
+Assumptions: fo_register_pure_fn_transfer still aborts at the
+  third parameter; gum_fo_across_call.sio still zeros; this lane
+  does not edit lower.sio.
+Write-Set: docs/audit/epistemic_calculus_spec_divergence/DISPATCH.md
+Read-Set: formal/lean4/EpistemicEffectsV2.lean ;
+  tests/run-pass/gum_fo_across_call.sio ;
+  docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md
+Positive-Witness: a V2 judgment whose Madaros reading can fail
+  (ADD3 / rhs arity 3 → 0)
+Negative-Witness: V2.preservation on app (true, does not mention
+  variance); V2.kadd_red (inline cells, not a compiled call)
+Acceptance-Gate: this declaration, in this file, on a head that
+  adds no Lean theorem about app/kadd. The next Lean edit is
+  owed the named judgment or an explicit halt that it cannot be
+  stated Mathlib-free.
+Integration-Target: V2 as language spec, not a fifth consumer
+Authoritative-Only-If: a proposition about compiled-call GUM
+  exists in V2 and a correspondence gate can fail when Madaros
+  zeros
+```
+
+**What this turn does not do.** No `lit`, no `HasTy`, no consumer,
+no `--lean-consume-*`. Writing Lean now would be either glue
+(`gen` for a new constructor) or the forbidden theorem (beta
+read as call). Halt is the deliverable until the judgment is
+designed so that it can be false of today's Madaros.
 
 ---
 
@@ -439,10 +563,14 @@ consume `kadd` as if it were the next coverage target.
    **8 of 15** `HasTy` (`+ t_lit_mg`), **2 of 19** `Step`,
    **4 of 5** `IsValue` (`+ v_mg`). The Nat-shaped discriminating
    set stayed empty; the `T ≠ Nat` hole closed at `Knowledge<mg>`.
-   It re-opens only on a new V2 proposition or the GUM
-   correspondence hole (R3-adjacent). Spine extraction stays
-   deferred until one of the three end conditions in §5 R1 — none
-   has fired. Adding `tmg` to the shared `Ty` is not extraction.
+   The Nat/`mg` discriminating set is empty as a *consumer*
+   question. Under the PL ruling that is not "the spec is done".
+   R3c (`gum_across_compiled_call`) is the owed proposition. It
+   is not `kadd`-pins-Real and it is not `Step.beta`. Spine
+   extraction stays deferred until one of the three end
+   conditions in §5 R1 — none has fired. Adding `tmg` to the
+   shared `Ty` is not extraction. This declaration does not
+   fire extraction: no new Lean module is being born.
 2. `Lean Proofs` green, with V1, V2, `EpistemicEffectsV2_measure_nat`,
    `EpistemicEffectsV2_kvalue_nat`, `EpistemicEffectsV2_invkraw_nat`,
    and `EpistemicEffectsV2_invkraw_mg`
@@ -460,16 +588,23 @@ consume `kadd` as if it were the next coverage target.
 
 ## §7 — What NOT to do
 
-- **Do not "fix" the compiler.** §2 establishes the compiler is the correct
-  side. An edit to `self-hosted/check/check.sio` under this dispatch is a
-  category error.
+- **Do not "fix" the compiler under this dispatch.** The payload side of
+  §2 still forbids editing `self-hosted/check/check.sio` here. The
+  FO-across-call defect is real and is owned by the call-boundary
+  lane (`lower.sio`), not by a silent patch from this file.
+- **Do not write a Lean theorem about `Step.beta` / `t_app` and call
+  it GUM-across-call.** That theorem is true of V2 and, read as the
+  language, false of Madaros at arity ≥ 3. It would specify a
+  compiler that does not exist.
+- **Do not claim "V2 models `Knowledge<T>`"** until
+  `gum_across_compiled_call` exists as an object distinct from beta.
 - **Do not delete or weaken `EpistemicEffects.lean` §9.1.** A refutation is a
   result. The honest record of a false claim is more valuable here than a clean
   file, and this repository's thesis is exactly that.
 - **Do not restate the refutation a fourth time.** Three statements of it
   already exist. A fourth adds citation ambiguity, not confidence.
 - **Do not claim V2 "proves Sounio sound."** It proves subject reduction and
-  progress for a calculus that models a fragment of `Knowledge<T>`. The step
-  from that to a statement about Madaros is exactly what R2 does not yet
-  establish, and overstating it would repeat the §1 `sorry` annotation's error
-  in the opposite direction.
+  progress for a cell calculus. The step from that to a statement about
+  Madaros is R2 (payload grep) plus R3c (compiled-call GUM). Overstating
+  either repeats the §1 `sorry` annotation's error in the opposite
+  direction.
