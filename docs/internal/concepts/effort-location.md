@@ -32,7 +32,7 @@ and already correct:
 | defect | how long | the information was |
 |---|---|---|
 | `with GUM` inert, `effect_name_to_id` returns `-1` | 8 months | in the source since day one (`b6d03ae18a`) |
-| 14 of 17 ontology gates named by no workflow | unknown | in `scripts/ci/`, readable |
+| 14 of 17 ontology gates named by no workflow¹ | unknown | in `scripts/ci/`, readable |
 | 2,800 `with Mod` that no compiler reads | years | in 360 files |
 | `serialize.sio` sized `[IrFunction; 1024]` against `IR_MAX_FUNCS` 16384 | 5 weeks | one `git grep` away |
 | shipped `bin/madaros` cannot compile the shipped tree | 2 days | printed by the compiler itself |
@@ -40,6 +40,27 @@ and already correct:
 
 None of these was hidden. Every one was a record that nothing forced anybody to
 read.
+
+**¹ How that row was measured, and why it understates.** By `git grep -c
+"<basename>" -- .github/` — that is **direct invocation**, not coverage. A gate
+can be reached without being named: called from inside another gate, from an
+aggregator, from an umbrella. A same-day census of the 443 workflow-unnamed
+scripts found **45 covered by a running parent** — not dead, not disconnected,
+*included*. So "named by no workflow" is a lower bound on what runs, and any
+figure derived from it is understated by an unknown amount. A transitive-closure
+measurement is in flight.
+
+The correction belongs in this document rather than in an erratum, because the
+error is an instance of what the document is about: a number crossed a boundary —
+from `git grep` to argument — and **lost its measurement conditions on the way**.
+Nobody wrote "104 of 547 by direct invocation, which understates coverage"; the
+round figure was written, and from there it was treated as fact.
+
+That is `SOUNIO-EPISTEMIC-ERASURE` outside the compiler, committed by the author
+of this corpus on the same day it was specified. And it is the harder kind to
+catch, because **the wrong number supported a conclusion that remains true** —
+there really are far more gates written than wired. A faulty measurement backing
+a sound conclusion has nothing in its result that screams.
 
 ## The demonstration that produced it
 
@@ -128,6 +149,10 @@ record does when it cannot become a gate yet.
 - The escape hatch must cost more than compliance. If declaring badly is cheaper
   than declaring well, everyone declares badly — which is why malformed is
   redder than absent throughout this corpus.
+- A number carries how it was measured, or it is not evidence. `19%` and
+  `19% by direct invocation, transitive coverage unmeasured` are different
+  claims; only the second can be checked, and only the second degrades
+  visibly when its method turns out to be wrong.
 - Records remain necessary. This is not an argument against writing things down:
   it is an argument that writing them down is **not sufficient**, and that every
   record should name what would enforce it, or say plainly that nothing does.
