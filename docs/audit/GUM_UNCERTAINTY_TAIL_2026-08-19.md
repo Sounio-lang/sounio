@@ -9,7 +9,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.gum-unce
 
 # GUM/Uncertainty e a cauda do enumerado — tres denominadores separados, sem denominador verdadeiro
 
-Lane: `lane/minimax-cli3/gum-uncertainty-tail-20260819-v2` (census-only; sem alteracoes ao compilador). Data: 2026-08-19. Validacao contra `origin/main` = `f9b3147364`.
+Lane: `lane/minimax-cli3/gum-uncertainty-tail-20260819-v2` (census-only; sem alteracoes ao compilador). Data: 2026-08-19. Validacao contra `origin/main` = `f9b3147364`. PR aberto contra `main`; merge autorizado pelo founder assim que `main` voltar a verde (f64 lowering, bisect noutra lane).
 
 ## Declaracao semantica (leitura primeiro)
 
@@ -21,6 +21,8 @@ Este documento NAO enumera "os efeitos que o founder desenhou". **Essa lista nao
 4. Classifica cada nome num dos tres baldes que o despacho pediu: "tentado e falhou a ultima aresta" / "nunca foi tentado" / "nasceu no desenho e desapareceu do codigo".
 
 A interpretacao do que estes numeros dizem sobre o desenho efectivo do founder fica para outra leitura. As tres contagens sao proxies, nao a verdade.
+
+**O que este documento NAO propoe**: nada. NAO conclui que GUM deva entrar no enum. NAO conclui que Uncertainty deva entrar no enum. NAO propoe id novo, alias, ou alteracao a `self-hosted/check/effects.sio`. A classificacao e descritiva, nao prescritiva. Decisao sobre o que adicionar fica para o fowner, na lane apropriada, com base noutro tipo de evidencia (semantica, design, custo de manutencao).
 
 ## Os tres denominadores
 
@@ -121,6 +123,20 @@ main com Epistemic      → OK
 
 Isto confirma: `with GUM` e `with NaoExisteIsto` contribuem ZERO para a mascara de efeitos do type checker. Identicos entre si. A diferenca so e visivel no `effect_name_to_id` da tabela de bytes (que retorna 0..28 ou -1), e esse id nao parece estar ligado a nada que o utilizador consiga observar em tempo de compilacao.
 
+## Os dois achados que NAO sao detalhes
+
+### Achado 1: um efeito desenhado no dia um e um nome inventado agora sao invisiveis da mesma maneira
+
+`with GUM` (D2=144, no commit fundador) e `with NaoExisteIsto` (nome que acabei de inventar agora) sao, do ponto de vista do type checker, **a mesma coisa**: contribuem zero para a mascara de efeitos, falham identicamente o E035 quando outro efeito e requerido, e compilam sem diagnostico quando nenhum o e. Nao ha nenhuma ferramenta que distinga um efeito "real mas nao reconhecido" de um efeito "inventado para teste". O unico sitio onde a distincao existe e a tabela de bytes `effect_name_to_id`, e essa tabela nao parece ter efeito observavel no caminho de compilacao.
+
+Isto significa que **a historia do efeito nao e visivel no codigo que o declara**. GUM tem sete meses de existencia; NaoExisteIsto tem sete segundos. Sao identicos para o type checker, para o linker, para o codegen, para o ELF. A semantica que distingue os dois e externa: o programador que sabe que GUM "deveria ser" algo e o programador que sabe que NaoExisteIsto "nao e" nada. O compilador nao partilha nenhuma das duas conviccoes.
+
+### Achado 2: `with Uncertainty` foi declarado ha tres dias, nao em Dezembro
+
+A ultima ocorrencia de `with Uncertainty` em todo o repo (via `git log main -G"\bUncertainty\b" --max-count=1`) e o commit **`8999e0fdff` — WS-C PR1 ENIR/MIR shadow, 2026-08-16, ha tres dias**. Nao e codigo morto de 2025-12-25; e codigo de 2026-08-16. Alguem esta semana, ao integrar o lane WS-C, declarou `with Uncertainty` numa funcao acreditando que isso dizia algo — que Uncertainty tinha semantica de incerteza no sistema de tipos — e nao disse nada. O type checker viu o nome, ignorou-o, e compilou um programa que nao marca propagacao de incerteza em lado nenhum.
+
+Este achado NAO e sobre a equipa WS-C. E sobre o parser: **se o parser aceita nomes silenciosamente, ninguem sabe quando a sua declaracao de efeito e real ou um wish**. O risco nao e GUM ou Uncertainty serem esquecidos; o risco e que hoje, 2026-08-19, alguem declare `with NovoEfeitoQueVaiMudarTudo` e o compilador faca exactamente o mesmo que faria sem essa clausula — e ninguem detecte ate a propriedade que o efeito deveria garantir estar em falta no runtime.
+
 ## Classificacao (os tres baldes do despacho)
 
 | Nome | D1 | D2 | D3 | 29 ids? | Classe |
@@ -161,8 +177,10 @@ Para a visao completa: dos 11 nomes, 10 tem `with X` actual ou tem prosa fundado
 
 ## Claims-Forbidden (nenhum denominador e a verdade)
 
-- **NENHUM destes tres denominadores e "os efeitos que o founder desenhou".** Sao substitutos, nao a lista original. A lista original continua por escrever.
+- **NENHUM destes tres denominadores e "os efeitos que o founder desenhou".** Sao substitutos, nao a lista original. A lista original continua por escrever — nenhum commit, manifesto, spec, design doc ou thread da grok-cli5 a declara como conjunto fechado. Medicao sobre substitute proxies NAO autoriza ninguem a afirmar o que o founder desenhou.
 - **A razao 9/11 ≠ "9 em cada 11 efeitos do founder foram reconhecidos".** O denominador e "efeitos que aparecem em codigo ou prosa rastreavel" — uma fracao desconhecida do universo real.
+- **D1 e um instrumento FROUXO** — conta a palavra `with` seguida de nome em qualquer posicao, inclusive dentro de comentarios `// ...`. Foi exactamente assim que `GetTid` entrou com 13 ocurrencias e foi assim que foi excluido: as 13 estao todas em comentarios `// emit: get_tid = ...` em codigo GPU, nao em clausulas `with` reais. Significa que D1 pode inflacionar nomes de prosa-em-codigo; e a razao pela qual o instrumento strict (`find_with_names.py`) da contagens menores (Epistemic 218 vs 426). A leitura de D1 NAO e a contagem de declaracoes de efeito; e a contagem de "onde o nome segue `with` em texto, dentro ou fora de codigo activo". Distincao preservada acima para nao inflacionar conclusoes.
+- **Este documento NAO conclui que GUM ou Uncertainty devam entrar no enum.** A medicao mostra que ambos tem D2 massiva (144 e 156) — foram desenhados — mas a ausencia dos 29 ids de producao e um facto, nao uma sentenca. A decisao de adicionar (ou nao) pertence ao founder, em outra lane, com outra evidencia. Este doc descreve; nao prescreve.
 - **A descoberta de que `with GUM` e `with NaoExisteIsto` sao identicos nao prova que GUM e NaoExisteIsto sao identicos.** Prova que o parser nao distingue. O compilador pode ainda dar semantica a GUM num momento posterior; hoje, da perspectiva do type checker, nao da.
 - **A leitura "tentado e falhou a ultima aresta" para GUM/Uncertainty e uma leitura de D2 + D1.** Nao exclui a leitura alternativa "nascido em prosa, nunca chegou a ser declarado de verdade mesmo no fundador" — a fronteira entre prosa do fundador e declaracao de efeito do fundador depende do que se considera declaracao.
 - **INDETERMINADO** (per precedent do `Mod` phase 2b da minimax-cli2): se um leitor razoavel nao conseguir decidir em qual dos tres baldes um nome cai, **essa decisao fica em aberto** e nao se inventa um quarto balde para forcar caber.
