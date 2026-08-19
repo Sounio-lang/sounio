@@ -48,6 +48,17 @@ let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
 let SOIR_VERSION: i8 = 4
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
+// Detectable capacity refusal. Returning ir_empty_module() on an oversized
+// fn_count / string_count (or ir_empty_function() on an oversized instr_count)
+// used to be a silent clamp: the caller could not tell "empty input" from
+// "refused because it would write past the buffer". Incremented on every
+// capacity refuse so a gate / test can observe that deserialize declined.
+pub var SOIR_DESER_REFUSAL_COUNT: i64 = 0
+
+fn soir_note_deser_refusal() with Mut {
+    SOIR_DESER_REFUSAL_COUNT = SOIR_DESER_REFUSAL_COUNT + 1
+}
+
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     b[pos] = val
@@ -648,6 +659,7 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
     // bounded by IR_MAX_INSTRS; a larger count is refused below.
     if instr_count < 0 || instr_count > IR_MAX_INSTRS {
         // Refuse an oversized function rather than allocating past the arena.
+        soir_note_deser_refusal()
         let empty = ir_empty_function()
         return (empty, p)
     }
@@ -655,6 +667,7 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
     if instr_count > 0 {
         let alloc_rc = ir_instr_arena_alloc(instr_count, &! region)
         if alloc_rc != IR_ARENA_OK {
+            soir_note_deser_refusal()
             let empty = ir_empty_function()
             return (empty, p)
         }
@@ -4483,8 +4496,13 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     // check below uses IR_MAX_FUNCS directly, so an oversized module is REFUSED
     // (returns empty module) rather than written past the buffer.
     if fn_count < 0 || fn_count > IR_MAX_FUNCS {
+        soir_note_deser_refusal()
         return ir_empty_module()
     }
+    // Literal MUST equal IR_MAX_FUNCS. Sounio array sizes are compile-time
+    // literals, so this cannot be written `[IrFunction; IR_MAX_FUNCS]`.
+    // scripts/ci/irfunction_instr_capacity_coherence_gate.sh fails if the
+    // handwritten 16384 drifts from the constant.
     var functions: [IrFunction; 16384] = [ir_empty_function(); 16384]
     var i: i64 = 0
     while i < fn_count {
@@ -4502,8 +4520,10 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     // Read string table. Literal matches IR_MAX_STRINGS (ir.sio:36).
     // Refuse oversized modules rather than writing past the buffer.
     if string_count < 0 || string_count > IR_MAX_STRINGS {
+        soir_note_deser_refusal()
         return ir_empty_module()
     }
+    // Literal MUST equal IR_MAX_STRINGS; same gate as the function table.
     var string_table: [Name; 4096] = [ir_empty_name(); 4096]
     var j: i64 = 0
     while j < string_count {
