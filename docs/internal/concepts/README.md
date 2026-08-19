@@ -32,6 +32,10 @@ without a package manager, and consumed by
 - `garden`: captured intuition, not yet a formal model.
 - `hypothesis`: explicit formal or scientific question.
 - `executable`: implemented with a focused witness.
+- `reserved`: the name is taken and every surface **refuses** with a named
+  diagnostic; semantics unimplemented. Beside the ladder, not on it — held
+  short of `executable` on purpose, not failing to reach it. See
+  `MATURITY_LADDER.md`.
 - `integrated`: represented across every currently required layer.
 - `claim-ready`: evidence permits the scoped external claim.
 - `superseded`: retained for history; another concept is authoritative.
