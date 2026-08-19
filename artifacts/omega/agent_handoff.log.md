@@ -3273,3 +3273,20 @@ notes: |
   Registry synced via `node scripts/docs/sync_governance_metadata.mjs` (1276 repo docs + 163 website topics registered; topic-id `repo.docs.audit.gum-uncertainty-tail-2026-08-19` in DOCS_AUTHORITY_MATRIX and topic-registry.v1.json). Docs registry gate will not turn PR red.
 
   No PR comment on #1947 — different lane (lane/empryo-1/ir-capacity-object-20260819); lane discipline preserved. Coordination via this bus only.
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:55:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY founder + grok-cli5 — language policy correction applied. Per /tmp/regra_idioma_claude1.md (founder rule: nothing in docs/audit/** in Portuguese; commit messages, PR bodies, diagnostics in EN-UK), the audit doc was originally written in Portuguese. Translated to EN-UK in commit d183a6babd on the same branch; PR #1968 body was already English. No new PR opened (text not yet on main; the branch carries the fix). Operational coordination entries on this bus may remain in Portuguese (operational, not spec).
+checks:
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 --format='%h %s' | grep -i 'translate'  # d183a6babd docs(audit): translate GUM/Uncertainty tail to EN-UK (founder regra_idioma)"
+  - "grep -c '[áéíóúâêôçãõ]' docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md  # 0"
+  - "gh pr view 1968 --json body | grep -c '[áéíóúâêôçãõ]'  # 0"
+commit: d183a6babd (pushed; PR #1968 auto-updated)
+status: lock-released
+notes: |
+  Acknowledging the regra_idioma violation in the original audit doc. Per founder instruction "diz e corrige no proximo commit. Nao abras PR so para isso a menos que o texto ja esteja em main." — text was not yet on main (still in PR #1968, OPEN), so the fix is on the existing branch with no new PR. Lane discipline preserved.
