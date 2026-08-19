@@ -83,6 +83,24 @@ outside this repository.
   functions. That propagation has never run. The blast radius is unmeasured and
   is the next thing to measure, before any edit.
 
+## Correction, 2026-08-19 — the counts in this document were wrong
+
+`docs/audit/E035_MOD_BLAST_RADIUS_2026-08-19.md` re-measured and the authoritative
+count is **2,813 sites in 365 files**.
+
+Two of my numbers were artefacts, not measurements:
+
+- **2,806** (mine) undercounts by seven: eight sites carry two `Mod` clauses on
+  one line and one adjacency was a comment. Arithmetic: 2806 − 1 + 8 = 2813.
+- **2,793** was **never a count at all**. The closed-list gate prints twenty
+  offending sites and then `omitted=2793`; 2813 − 20 = 2793. I read a **stdout
+  cap** as a census and recorded it here as an independent instrument
+  disagreeing with mine. It was the same instrument, truncated.
+
+The "13-site disagreement recorded, not averaged" below is therefore also wrong:
+there was no second measurement to disagree with. Recording a disagreement was
+right; the disagreement was not real.
+
 ## Instrument
 
 `git grep -lE '\bwith[[:space:]]+Mod\b' -- '*.sio' ':!archive/*' ':!bootstrap/*'`,
