@@ -274,7 +274,7 @@ fn observe(p: ExactlyPrivate<f64>) -> i32 {
 fn main() -> i32 { 0 }
 ```
 
-**Slurm dual-engine receipt** (`slurm_ceremony_dual_engine.log`, job **10421**, host `cpuops-t560-proxmox`):
+**Slurm dual-engine receipt** (`slurm_ceremony_dual_engine.txt`, job **10421**, host `cpuops-t560-proxmox`):
 
 | Cell | Engine | Command shape | rc | Notes |
 |---|---|---|---:|---|
