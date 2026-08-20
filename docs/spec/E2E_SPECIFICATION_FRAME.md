@@ -68,7 +68,7 @@ registry's; the ladder is monotone (`MATURITY_LADDER`).
 |---|---|---|---|
 | 1 | Lexical structure | `self-hosted/lexer/` (8 files); token kinds have **two numberings** and comparing raw code to an enum cast silently never matches | contested |
 | 2 | Grammar | `self-hosted/parser/` (9 files), `TypeExprKind` 54 variants; no grammar document | undefined |
-| 3 | Type system — kinds | **eight** type-kind enums, 238 variants, 57 multi-enum stems, **0 homonyms** (#1949) | measured, unspecified |
+| 3 | Type system — kinds | **written**: `S03_TYPE_SYSTEM_KINDS.md`. `stdlib/theorem` has 76 ordinary type declarations but uses compiler `Axiom<T>`/`Lemma<T>`/`Proof<T>` 0 times; the three kinds have no positive source inhabitant, and their parameter spine is silent | measured, unspecified |
 | 4 | Type system — rules | bidirectional inference in `check/`; no written rules | undefined |
 | 5 | Effects — vocabulary | 29 ids after #1963; `EffectKind` enum now in production | measured |
 | 6 | Effects — rows and subtyping | **written**: `S06_EFFECTS_ROWS.md`. Rows are implemented in the *live* tree (`check/effects_row.sio`) with **zero external callers**; the set is `[i64; 8]` against **23** named effects, and four of them gate no decision | Hypothesis — §6.0 ruled |

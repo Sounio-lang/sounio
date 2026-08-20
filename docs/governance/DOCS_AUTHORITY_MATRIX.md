@@ -1250,6 +1250,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.sounio-vs-python | repo_only | docs/sounio_vs_python.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.e2e-specification-frame | repo_only | docs/spec/E2E_SPECIFICATION_FRAME.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.language-specification | repo_only | docs/spec/LANGUAGE_SPECIFICATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.spec.s03-type-system-kinds | repo_only | docs/spec/S03_TYPE_SYSTEM_KINDS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.s06-effects-rows | repo_only | docs/spec/S06_EFFECTS_ROWS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.s07-effect-handlers | repo_only | docs/spec/S07_EFFECT_HANDLERS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.spec.s08-epistemic-values | repo_only | docs/spec/S08_EPISTEMIC_VALUES.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
