@@ -79,6 +79,59 @@ caller anywhere, internal or external.
 with the comment *"Confidence is an alias of Epistemic (id 8). Not a new
 variant."*
 
+### 6.1.0 CORRECTION — thirty names, twenty-nine ids, and this is not a row
+
+Raised by an independent review of this section on 2026-08-20 (fable-1, consulted
+for disagreement rather than agreement). Four criticisms; three land.
+
+**The count. §6.1 says 23 names. It is stale.** Derivation, from
+`self-hosted/check/effects.sio`:
+
+    fn effect_named_id_max() -> i64 { 28 }
+
+so ids run `0..=28` — **29 named effects** — and `effect_name_to_id` opens with a
+hardcoded alias, *"Confidence is an alias of Epistemic (id 8). Not a new
+variant."* That is **30 names over 29 identities**, and it matches the closed-list
+gate (`scripts/ci/effect_name_closed_list_gate.sh`) exactly. The two numbers were
+never in conflict about the world; this document was simply behind the table.
+
+**This is not a row, and this document's own measurement says so.** A row's
+defining property is a variable, unbounded tail. `current_effects: [i64; 8]` is a
+fixed width. Whatever §6 specifies, the thing implemented today is a **bounded
+set** with an inclusion check at the call boundary, and the title's word "rows"
+describes an intention rather than the mechanism. The review put it exactly:
+*writing `[i64; 8]` is already the answer to the question of whether this is a
+row.*
+
+**The two silent-drop holes are one mechanism.** The unknown-name hole and the
+ninth-effect hole are both `if eff_id >= 0 && c.current_effect_count < 8`. §6.1.1
+already unified them; a later dispatch of mine re-separated them, and that was a
+regression against this section.
+
+**The fourth criticism does not survive measurement, and is recorded because
+deference to a reviewer is the same failure as deference to an instrument.** The
+review read the `lean_single` confidence gate as `== 400` hardcoded, i.e.
+validation rather than algebra. Measured on
+`tests/run-pass/dissertation_pbpk28_confidence_gate.sio`, varying only N:
+
+| `Epistemic(N)` | lean_single |
+|---|---|
+| 350 | passes |
+| 399 | passes |
+| 400 | passes |
+| **401** | **refused** |
+
+The source is `if call_cmin > 0 && call_conf > 0 && call_conf < call_cmin`
+(`lean_single.sio:26489`) — an inequality against a `call_conf` computed by
+`ety_conf_product(arg_conf, FN_EFF_CONF[...])`, a multiplicative composition along
+the call. That is an algebra, not an equality test.
+
+**Where the payload question belongs.** The same review makes a point this section
+should adopt: `Epistemic(N)` is a **belief** gate, and §8.2.6 ruled that belief is
+the value layer. So whether `Epistemic(950)` satisfies a requirement of
+`Epistemic(400)` is not a §6 question about effect algebra — it is §8 wearing an
+effect's syntax, and its ordering must be ruled there.
+
 ### 6.1.1 Four of the effects are bookkeeping with no consumer
 
 Measured 2026-08-19. Of the 23 names, the ones any `has_effect_id` **decision**
