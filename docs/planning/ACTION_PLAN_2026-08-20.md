@@ -91,18 +91,54 @@ four is today a name that promises and does not deliver.
 
 ### R1 — `i256` is implemented for real, in limbs
 
-Not `Reserved`, not an alias. `fn i256_*` occurs **zero** times in `stdlib/`
-today, so this is a new arithmetic library plus lowering:
+Not `Reserved`, not an alias. **And it is much cheaper than "a new arithmetic
+library", because most of it already exists unused** — measured after the ruling,
+and it corrects a claim of mine in §12 and `KNOWN_LIMITATIONS`.
 
-    struct I256 { lo: i64, l1: i64, l2: i64, hi: i64 }
-    fn i256_mul(a: I256, b: I256) -> I256 with Panic
-    fn i256_add(a: I256, b: I256) -> I256 with Panic
-    fn i256_cmp(a: I256, b: I256) -> i64
+I wrote that *"`fn i256_*` occurs zero times, so there is no limb implementation
+underneath."* True about the **name**, false about the **fact**. There is limb
+machinery in two places:
+
+**In the compiler, and it is already width-generic:**
+
+    // self-hosted/ir/numeric_payload.sio
+    pub fn ir_wide_numeric_required_limb_count(format_id: i64) -> i64 with Div {
+        let descriptor = binary_format_descriptor_for_id(format_id)
+        descriptor.storage_bits / 64          // <- the limb count DERIVES from the width
+    }
+
+    pub struct IrWideNumericPayloadEntry { format_id, limb_start, limb_count }
+    pub struct IrWideNumericPayloadPool   { entries: [...; 256], payload_count }
+
+`self-hosted/check/numeric_format.sio` (54 lines) already carries descriptors for
+`binary128` (`storage_bits: 128`) and `binary256` (`storage_bits: 256`).
+
+**In the Lorenz certificate itself**, hand-rolled under a different naming
+convention: `lorenz_dec4_add_limb`, `lorenz_dec4_mul_small_limb`,
+`lorenz_dec4_div3_exact_limb`, `lorenz_i256_beta_z_limb`. So the certificate is not
+naive about width — parts of it already carry limbs by hand, which is what makes
+the raw typed-`i256` product at `step5.sio:2310` the exception rather than the rule.
+
+**What is actually missing is the connection, not the representation.**
+`wide_numeric` occurs **0 times** in `self-hosted/ir/lower.sio` and **0 times** in
+`self-hosted/native/codegen_x86_linux.sio`. The pool is built and unused — the same
+shape as every other debt measured today, and this time it works in our favour.
+
+**So R1 becomes:** two descriptors (`storage_bits: 256`, `storage_bits: 512`), the
+arithmetic ops, and the lowering/codegen wiring the pool never got.
+
+**And `i512` costs one descriptor line beyond `i256`**, because `storage_bits / 64`
+does the rest. The founder's instinct that *"building i512 would already be good"*
+is measured: at the representation layer it is nearly free, and building both at
+once is what proves the width-generic path is genuinely generic rather than an
+`i256` special case wearing a loop.
 
 **Acceptance:** the peak the Lorenz certificate actually reaches —
-`868,167,572 × 2^63` at `lorenz_i256_cert_step5.sio:2310` — computes exactly, and
-an arbitrary-precision oracle agrees. Only then does the certificate assert what it
-says it asserts. *Gate: a new `run-pass` witness reproducing the measured peak.*
+`868,167,572 × 2^63` at `lorenz_i256_cert_step5.sio:2310` — computes exactly under
+`i256`, an arbitrary-precision oracle agrees, **and the same expression under
+`i512` agrees with it**. Two widths passing the same oracle is the evidence that
+the path is generic. *Gate: `run-pass` witnesses at both widths reproducing the
+measured peak.*
 
 ### R2 — every declared integer width wraps at its declared width
 
