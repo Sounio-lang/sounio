@@ -60,6 +60,43 @@ The cast works. Its controls are what matter:
 So the cast confirms the target type exists and verifies **nothing about the
 source**. A string enters an `ExactlyPrivate<f64>` without a diagnostic.
 
+## There is no ceremony either: E201 was never reached
+
+This document first said the guarantee amounts to *declare `with ZD`, then cast
+anything in*. That is still too generous, and the correction is recorded rather
+than folded in silently, because it runs in the direction of my own earlier
+claim.
+
+`lower_exactly_private_type` is where `E201` — *"ExactlyPrivate&lt;T&gt; requires ZD
+effect"* — is emitted. **Six positions were written without any `with ZD` at all,
+and every one checks clean:**
+
+| position | Madaros |
+|---|---|
+| `fn r(x: ExactlyPrivate<f64>) -> f64 { 0.0 }` | `check: OK` |
+| `let x: ExactlyPrivate<f64> = 1.0 as ExactlyPrivate<f64>` | `check: OK` |
+| the same, inside a function with a live caller | `check: OK` |
+| `fn make() -> ExactlyPrivate<f64> { ... }` (return position) | `check: OK` |
+| `struct Holder { p: ExactlyPrivate<f64> }` | `check: OK` |
+| `docs/audit/exactly_private_lean/witness_nozd.sio` — the witness written to demonstrate the refusal | `check: OK` |
+
+The cause is structural, and it is why a patch to the obvious function changes
+nothing. There are **two** lowering spines. Parameter types go through
+`checker_lower_type_expr_mut` (`check/check.sio:2329`), whose `match` handles
+`TypeNamed`, `TypeUnit`, `TypeNever`, `TypeInfer`, `TypeSelfUpper`,
+`TypeKnowledge`, `TypeModel`, `TypePolicy`, `TypeDecisionPolicy` and
+`TypeDeferralPolicy` — and **not one** of the eight ZD kinds. They fall to the
+`_ =>` default. `lower_exactly_private_type`, with its E201 and its inner-type
+lowering, sits on the *other* spine.
+
+**Verified by positive control, not inferred.** `zd_locus_is_wellformed` was
+forced to return `false` unconditionally and the compiler rebuilt: a locus that
+must then be refused was still accepted. The function is not reached.
+
+The claim is bounded: six positions were measured and none reached it. That is
+not a proof of unreachability, but it is every position a program can put the
+type in that I could construct.
+
 ## What the guarantee currently amounts to
 
 Write `with ZD`, then cast any value at all into the wrapper — including one of a
@@ -68,9 +105,11 @@ type the wrapper does not name. `lower_exactly_private_type`
 and returns the inner type.
 
 `docs/internal/concepts/type-interrogation.md` calls this failure type 3,
-*ceremony instead of proof*. That description is too generous. The ceremony
-**admits anything**: it is not that the compiler asks the programmer to assert
-something it never verifies — it is that the assertion itself has no content.
+*ceremony instead of proof*. Both that description and this document's first
+version of it are too generous. **There is no ceremony.** The compiler does not
+ask the programmer to assert anything: the effect requirement is unreached, the
+wrapper accepts a string through a cast, and a program may write any of the eight
+names in any position with no consequence of any kind.
 
 ## Scope of the claim
 
