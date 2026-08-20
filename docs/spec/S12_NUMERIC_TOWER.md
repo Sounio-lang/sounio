@@ -83,6 +83,46 @@ and it is the question that decides whether this is a naming hazard or a
 soundness defect in a proof artefact. It is recorded as owed (§12.4-4) rather
 than asserted in either direction.
 
+### 12.2.6 ANSWERED — the Lorenz certificate's products do exceed `i64`
+
+§12.2.3 left one question open and refused to answer it in either direction. It
+is answered (#2046, measured on an independently source-built compiler).
+
+**Maximum observed intermediate:**
+
+    8,007,432,506,888,905,229,835,698,176
+
+against a signed `i64` ceiling of `9,223,372,036,854,775,807`. The observed
+product is **868,167,572 times** that bound. It is `y_lte_source * den` in
+`lorenz_i256_step5_taylor2_remainder_obligation_check`,
+`stdlib/systems/lorenz_i256_cert_step5.sio:2310`.
+
+Since §12.2.2 measures `i256` to be `i64`, that product **wraps**, silently,
+inside a computer-assisted proof artefact.
+
+**How it was measured, because a result this size is worth its method.** Madaros
+was built from source `67aa2aec12` on Slurm (`cpuops-t560-proxmox`, 32 CPUs,
+`rc=0`, ELF SHA-256 recorded), 25 fixtures were executed under that ELF, and an
+**exact arbitrary-precision accumulator** replayed the typed-`i256` arithmetic of
+the calls actually executed — 933 intermediate values, **no floating-point
+conversion at any point**. The positive control forced `10^30` and the detector
+reported it above `2^63 - 1`, so the detector is known to fire.
+
+**Coverage is bounded and declared.** Covered: centre, radius and remainder checks
+for steps 1–6, the step certificate, the trajectory-5 certificate, imported
+child-0 and child-1 arithmetic bundles, the refinement ledger, and two standalone
+negative controls. Explicitly **`NOT EXECUTABLE`** for this receipt: children 2–4,
+bridge families, long loops, proof skeletons, candidate/replay/enclosure/flowpipe
+fixtures, and the trajectory-5 projection-inclusion fingerprint — because no
+source-built invocation was made for them, and *static inspection is not counted
+as runtime measurement*. This is a measured certificate-path result, not an
+exhaustive claim about every Lorenz `i256` path.
+
+**What remains unknown, and it is not small.** Whether the wrap changes the
+certificate's **verdict**. A product that overflows inside a comparison may still
+land on the correct side by arithmetic accident. That is a different question from
+this one and it is owed (§12.4-6).
+
 ### 12.2.4 The tower as the corpus actually uses it
 
 Type annotations and return positions in versioned `.sio` outside `archive/` and
@@ -133,19 +173,29 @@ in question here.
 3. **`i256`: real or Reserved?** It is neither at present — it is accepted and it
    is `i64`. The `f128` treatment is the honest template: refuse it by name until
    it exists.
-4. **Owed measurement, not a ruling.** Whether the Lorenz certificate's
-   intermediate products exceed `i64`. Until that is measured, no claim about the
-   certification's soundness should be made in either direction.
+4. ~~**Owed measurement, not a ruling.**~~ **ANSWERED 2026-08-20 — it exceeds
+   `i64`.** See §12.2.6. The question is now a ruling: what to do about a proof
+   artefact whose arithmetic wraps.
 5. **Does `Reserved` belong on both engines?** `E218` is Madaros-only; lean_single
    accepts `f128`. The Reserved state is the tree's one first-class refusal, and
    it currently holds on one engine.
+
+6. **Owed: does the wrap change the verdict?** §12.2.6 measures that the
+   certificate's arithmetic exceeds `i64` and therefore wraps. It does **not**
+   measure whether any certificate conclusion is thereby wrong — an overflowed
+   product inside a comparison can still fall on the correct side. Until that is
+   measured, the honest statement is *the arithmetic is unsound, the conclusions
+   are unaudited*.
 
 ## Claims Forbidden
 
 What this section does not license anyone to say:
 
-- Not that `stdlib/systems` is wrong. The magnitudes that would decide it are
-  unmeasured, and §12.4-4 names that as the missing step.
+- **Superseded 2026-08-20.** This bullet read *"not that `stdlib/systems` is
+  wrong — the magnitudes are unmeasured"*. They have since been measured (§12.2.6)
+  and they exceed `i64`. What is still forbidden is the next step: **not that any
+  certificate conclusion is wrong.** The arithmetic is unsound; whether the
+  verdicts are affected is unaudited, and §12.4-6 owes it.
 - Not that the widths are unimplementable. They are unimplemented.
 - Not that `f128`'s refusal is a defect. It is the one place in the tower where a
   name that does not work says so, and it is the template the rest owes.
