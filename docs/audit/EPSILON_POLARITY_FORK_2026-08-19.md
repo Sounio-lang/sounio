@@ -85,7 +85,35 @@ Three layers, each of which alone would hide the divergence: the polarity fork
 itself; gates that pin to the one engine where the surface's polarity holds; and
 gates no workflow reaches. `bin/souc` defaults to Madaros.
 
-## It is a family, not a test — three of six
+## It is a family, not a test — five of eight
+
+**Second correction, 2026-08-20.** The count above read *three of six*, then
+*three of six* again after a first widening. Both were low. Searching `ε` with
+any comparison operator — not just `ε >=` — finds **eight** ε-bounded
+`compile-fail` tests, and **five** of them are accepted by Madaros. The two the
+earlier searches missed are the two that matter most:
+
+| test | Madaros | lean_single |
+|---|---|---|
+| `dissertation_pbpk28_overclaim.sio` | **`check: OK`** | refused |
+| `knowledge_nonliteral_eps_ungated.sio` | **`check: OK`** | refused |
+
+The first is the dissertation's own over-claim guard: a rapamycin dosing function
+demanding 95% confidence, built from a 65%-confidence hepatic-clearance prior.
+
+The second describes itself as a **soundness** guard against *confidence
+laundering* — a `Knowledge` built with a **non-literal** ε (a runtime variable)
+cannot prove its confidence at compile time and must not satisfy a
+`with Epistemic(N)` gate, *"otherwise a low/unknown confidence could be laundered
+as certain by binding ε to a variable."* Under the default compiler it satisfies
+it.
+
+Two undercounts in a row on the same question is the reason
+`scripts/ci/epsilon_engine_parity_gate.sh` now exists: the number was wrong twice
+because nothing was watching it. The gate does not choose the polarity. It names
+every divergence on every run and refuses to let the count grow.
+
+## The original measurement — three of six
 
 An earlier revision of this document said *three of three*. That was measured on
 a census requiring `Knowledge[... ε ...]` on one line, which under-counts. A
