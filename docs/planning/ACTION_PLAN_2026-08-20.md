@@ -82,17 +82,115 @@ and refused for a real reason.*
 types declare no effects against a ruling that says they carry them.
 *Gate: `fn_type_effect_ratchet` (216) must shrink.* Not started.
 
+## 2-bis. RULED 2026-08-20 — four decisions, and the hard option was taken four times
+
+The founder ruled on four of the eight. **Every one chose capability over
+convenience.** They are recorded together because they are not independent: they
+compose into a single direction — *Sounio's declarations become true.* Each of the
+four is today a name that promises and does not deliver.
+
+### R1 — `i256` is implemented for real, in limbs
+
+Not `Reserved`, not an alias. `fn i256_*` occurs **zero** times in `stdlib/`
+today, so this is a new arithmetic library plus lowering:
+
+    struct I256 { lo: i64, l1: i64, l2: i64, hi: i64 }
+    fn i256_mul(a: I256, b: I256) -> I256 with Panic
+    fn i256_add(a: I256, b: I256) -> I256 with Panic
+    fn i256_cmp(a: I256, b: I256) -> i64
+
+**Acceptance:** the peak the Lorenz certificate actually reaches —
+`868,167,572 × 2^63` at `lorenz_i256_cert_step5.sio:2310` — computes exactly, and
+an arbitrary-precision oracle agrees. Only then does the certificate assert what it
+says it asserts. *Gate: a new `run-pass` witness reproducing the measured peak.*
+
+### R2 — every declared integer width wraps at its declared width
+
+`i8` gives `200` for `100 + 100` where `-56` is due; `u8` gives `400`; `i32` gives
+`4000000000`. All of them become true.
+
+**The risk is named, not hidden:** code that today relies on the silent `i64`
+behind a narrow annotation **changes behaviour**. That is not a reason to decline —
+it is the reason to land it behind a witness suite per width before anything else
+depends on it.
+
+**Acceptance:** a `run-pass` per width whose expected output is the wrapped value.
+Interacts with R1: `i256` is the same question at the other end of the tower, so
+one representation strategy should serve both.
+
+### R3 — the epistemic value carries a Beta posterior, not a scalar confidence
+
+    struct Epistemic { value: f64, uncertainty: f64, conf_alpha: f64, conf_beta: f64 }
+
+The minority form today — **10 of 45 sites** against 26 for the scalar — chosen
+because it knows what the scalar cannot: `0.5` from two observations is
+`Beta(1,1)`, `0.5` from two thousand is `Beta(1000,1000)`, and a point cannot tell
+them apart.
+
+**This is the only one of the four that changes a number rather than a check.**
+GUM propagation stops composing variances and starts composing *evidence*. It
+touches the dissertation's own surface. Sequencing follows from that: the
+propagation rule is specified and tested against an oracle **before** any site is
+migrated.
+
+**Acceptance:** the 26 scalar sites migrate without changing a published result, or
+each changed result is derived and explained. *Gate: `S08` conformance.*
+
+### R4 — effects become a real row, with effect variables
+
+    fn map<A, B, e>(xs: [A; 8], f: fn(A) -> B with e) -> [B; 8] with e
+
+The largest type-system change on the list, taken where **nothing in live code
+requires it** — the only `with e` in the tree is in `effect.sio.old`.
+
+**That is a deliberate inversion and it is worth saying plainly.** Every debt
+measured on 2026-08-20 has the shape *built, and not connected*: the capability
+arrived before the consumer and the consumer never came. R4 chooses to build a
+capability before its consumer **again** — knowingly. The mitigation is the one
+this repository already has: a ratchet from day one, so the gap between the
+capability and its first live use is a number that must shrink rather than a fact
+nobody is watching.
+
+`current_effects: [i64; 8]` is a fixed width, and a fixed width is the negation of
+a row. So R4 subsumes **C2**: the ninth-effect drop stops being a hole to plug and
+becomes a representation to replace.
+
+**Acceptance:** a live `.sio` in `tests/run-pass/` that abstracts over an effect
+and could not be written today. *Gate: a new ratchet counting effect-polymorphic
+signatures, starting at 0 and required to grow — the first ratchet in this tree
+that ratchets upward.*
+
+## 2-ter. What the four rulings imply for order
+
+They interact, so the order is not the order they were asked in.
+
+1. **R2 before R1.** Both are representation questions about the same tower —
+   narrow widths at one end, `i256` at the other. One strategy should serve both,
+   and getting `i8` right is the cheap rehearsal for getting `i256` right.
+2. **R3's propagation rule before R3's migration.** The Beta posterior changes a
+   *number*, not a check. Specify and test the composition against an
+   arbitrary-precision oracle first; migrate the 26 sites second. Migrating first
+   would change published results before the rule that changed them is written down.
+3. **R1 unblocks M1.** Recomputing the Lorenz obligations at full width is exactly
+   what a real `i256` does natively. Do not build a one-off recomputation harness
+   that R1 will make redundant.
+4. **R4 subsumes C2**, and should not start before C1 lands. C1 makes an unknown
+   effect name refused; R4 changes what an effect row *is*. Doing them at once
+   means neither has a stable base to be tested against.
+5. **C3 is independent of all four** and is already in flight. It is the only cause
+   fix that needs nothing from these rulings.
+
 ## 3. Decisions owed — measured, unblocked, waiting
 
 | # | question | measured basis |
 |---|---|---|
-| 1 | **`i256`: real, alias, or Reserved?** | `i256` is `i64`; the Lorenz certificate reaches `868,167,572 × 2^63`; `fn i256_*` occurs 0× in stdlib. `f128`'s `E218` is the honest template. |
-| 2 | **Does a declared integer width mean anything?** | none does: `i8` gives 200 for 100+100. |
+| ~~1~~ | ~~`i256`~~ | **RULED — R1, implement in limbs.** |
+| ~~2~~ | ~~integer widths~~ | **RULED — R2, wrap at the declared width.** |
 | 3 | **Is the integer tower closed or open?** | `i7`, `i999999`, `u4096` all typecheck; `i0` does not. |
-| 4 | **Canonical epistemic value shape** | 18 shapes → **10 classes** modulo spelling; 26 of 45 sites are one idea; the residue is binary: scalar confidence (26) or Beta `(α,β)` (10). |
+| ~~4~~ | ~~canonical epistemic shape~~ | **RULED — R3, Beta `(α, β)`.** |
 | 5 | **`int`/`uint`, `own`/`handle`, `u16`** | documented and dead — decision table in #2049. |
 | 6 | **Does `Reserved` belong on both engines?** | `E218` is Madaros-only; lean_single accepts `f128`. |
-| 7 | **Effect rows: abstract over effects?** | nothing in live code requires row polymorphism; `[i64; 8]` is a bounded set. Decides §6's subtyping direction. |
+| ~~7~~ | ~~abstract over effects?~~ | **RULED — R4, a real row with effect variables.** §6's subtyping direction follows from it and is still owed. |
 | 8 | **Does `Epistemic(950)` satisfy `Epistemic(400)`?** | §8, not §6 — belief is the value layer. |
 
 ## 4. Owed measurement — not decisions
