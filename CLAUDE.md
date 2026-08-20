@@ -212,18 +212,21 @@ The numbered principles below are binding. Each was learned from a measured fail
 
 ## 7. Sounio syntax (NOT Rust)
 
-Critical differences — these are compile errors:
+Critical differences. **Five of the seven rows below were measured on
+2026-08-20 and are style, not enforcement** — the compiler accepts the Rust form.
+Write the Sounio form; do not expect a diagnostic if you slip. Rows marked ✓ are
+enforced.
 
 | Wrong (Rust) | Correct (Sounio) |
 |---|---|
-| `let x = 5;` | `let x = 5` (no semicolons) |
-| `let mut y = 10` | `var y = 10` |
-| `&mut T` | `&!T` |
-| `assert!(cond)` | `assert(cond)` |
-| `println!("hi")` | `println("hi")` |
-| `#[test]`, `#[derive()]` | No attributes |
-| `-42` | `0 - 42` (no unary minus) |
-| `x >> 4` | `x >> 4u8` (bit shifts require `u8`) |
+| `let x = 5;` | `let x = 5` — **style, not a compile error.** Measured 2026-08-20: the trailing `;` is accepted and the program runs. Prefer the semicolon-free form; do not expect the compiler to enforce it. |
+| `let mut y = 10` | `var y = 10` — ✓ enforced, `error[E040]` |
+| `&mut T` | `&!T` — ✓ enforced, `error[E041]` |
+| `assert!(cond)` | `assert(cond)` — **DANGEROUS.** `assert!` checks clean and is **inert**: `assert!(1 == 2)` does not halt. `assert(1 == 2)` does. One character apart. |
+| `println!("hi")` | `println("hi")` — **`println!`/`print!`/`panic!` check clean and SIGSEGV at run time (`rc=139`)**, killing every statement after them. See `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md`. |
+| `#[test]`, `#[derive()]` | No attributes — ✓ enforced, fails to parse |
+| ~~`-42`~~ | **STALE — unary minus works.** Measured 2026-08-20 on both engines: `-3.5`, `f(-7)`, `10 - -3` and `[-1, -2, -3]` all check and compute correctly. `0 - x` is no longer required. |
+| `x >> 4` | `x >> 4u8` — **STALE.** Measured 2026-08-20: `x >> 4` checks and computes correctly (`64 >> 4 = 4`). |
 
 Helpers must be defined before callers — no forward references.
 
@@ -342,7 +345,7 @@ Headline limitations (full list in [`docs/compiler/KNOWN_LIMITATIONS.md`](docs/c
 
 - **Imported-module native path — partial closeout.** Historical D1 (`f64→i64` param cast bitcast → GUM k95 stuck at 1.960) and much of D2 (`&local_array`→builtin) are **closed** (D1: #983/#1252 + Wave10 trust gate; D2: #933/#1247 family). Residuals remain: multi-module memory-wall / exclusive-ref fragile chains (D3 family), named-import/`print_f64` papercuts (D4/#862). Finite-dof `gum_k95` is **TRUSTWORTHY** under default Madaros (`scripts/epistemic_trust_gate.sh` → k95i=2776). Map: [`docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md`](docs/audit/EPISTEMIC_TRUST_MAP_2026-07-14.md). Escalation: [`docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md`](docs/audit/MADAROS_IMPORTED_MODULE_NATIVE_PATH_ESCALATION_2026-07-14.md).
 - `Knowledge<T>` supports struct-level generics (`f64`, `bool`, struct types)
-- No unary minus — write `0 - x`
+- ~~No unary minus — write `0 - x`~~ **STALE (2026-08-20).** Unary minus checks and computes correctly in literal, argument, binary-operand and array-element position, on both engines.
 - `--show-ast` / `--show-types` are unavailable under the default Madaros engine (`bin/souc compile ... --show-ast` -> `error: madaros build: unsupported option`); both work under `SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64` (they're in that engine's own usage string). A REPL does exist (`souc repl` -> `tools/repl.sh`, shipped 2026-05-28 per `docs/compiler/KNOWN_LIMITATIONS.md`) -- it's a file-based compile-and-run loop over whichever engine `bin/souc` currently resolves to, not a true interactive evaluator; "no REPL" itself is stale and superseded by that entry.
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper or `(*arr)[i]`
 - GPU: end-to-end `kernel fn` → PTX path **exists and is reproducible under default Madaros**. `bin/souc build <file>.sio --backend gpu -o out.ptx` (verified: `examples/kernel_vec_add.sio` → valid PTX). This is Madaros-only: `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc build ... --backend gpu ...` has no GPU CLI surface at all and fails to parse the invocation (verified 2026-08-17). Runtime execution is fixture-bounded (L4-validated profiles). See `docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT_2026-05-30.md` for the measured/projected/source-only breakdown
