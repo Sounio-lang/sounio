@@ -82,6 +82,45 @@ fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div 
     }
 }
 
+// A ZD locus names a pair of sedenion imaginary units, written `eIeJ`, with
+// 1 <= I < J <= 15. Well-formedness is decidable by inspection of the name,
+// which is the whole point: a type that declares a locus must declare one
+// that can be checked. Narrowing this from "well-formed pair" to "one of the
+// 84 validPrims" needs the zero-divisor predicate over cd_sigma_ct and is
+// OWED, not done here -- see
+// docs/audit/EXACTLY_PRIVATE_TA_DISPATCH_2026-08-19.md. Refusing e3e3 and
+// e3e99 today is strictly more interrogation than refusing nothing.
+fn zd_locus_is_wellformed(n: Name) -> bool with Mut, Panic, Div {
+    var ok = true
+    if n.len < 4 { ok = false }
+    if ok && n.buf[0] != 101 { ok = false }
+    var idx = 1
+    var a = 0
+    var adig = 0
+    while ok && idx < n.len && n.buf[idx] >= 48 && n.buf[idx] <= 57 {
+        a = a * 10 + (n.buf[idx] as i64 - 48)
+        adig = adig + 1
+        idx = idx + 1
+    }
+    if ok && adig == 0 { ok = false }
+    if ok && idx >= n.len { ok = false }
+    if ok && n.buf[idx] != 101 { ok = false }
+    if ok { idx = idx + 1 }
+    var b = 0
+    var bdig = 0
+    while ok && idx < n.len && n.buf[idx] >= 48 && n.buf[idx] <= 57 {
+        b = b * 10 + (n.buf[idx] as i64 - 48)
+        bdig = bdig + 1
+        idx = idx + 1
+    }
+    if ok && bdig == 0 { ok = false }
+    if ok && idx != n.len { ok = false }
+    if ok && a < 1 { ok = false }
+    if ok && b > 15 { ok = false }
+    if ok && a >= b { ok = false }
+    ok
+}
+
 fn ast_path_eq(a: AstPath, b: AstPath) -> bool with Mut, Panic, Div {
     if a.seg_count != b.seg_count { return false }
     if a.seg_count == 0 { return true }
@@ -16261,7 +16300,7 @@ impl Checker {
             TypeExprKind::TypeLemma => c.lower_lemma_annotation(te.type_args, te.span)
             TypeExprKind::TypeAxiom => c.lower_axiom_annotation(te.type_args, te.span)
             TypeExprKind::TypeForgettable => c.lower_forgettable_type(te.inner, te.span)
-            TypeExprKind::TypeExactlyPrivate => c.lower_exactly_private_type(te.inner, te.span)
+            TypeExprKind::TypeExactlyPrivate => c.lower_exactly_private_type(te.inner, te.type_args, te.span)
             TypeExprKind::TypeEditable => c.lower_editable_type(te.inner, te.span)
             TypeExprKind::TypeCapabilityGated => c.lower_capability_gated_type(te.inner, te.span)
             TypeExprKind::TypeComposable => c.lower_composable_type(te.inner, te.span)
@@ -16723,9 +16762,10 @@ impl Checker {
         }
     }
 
+
     // ExactlyPrivate<T> (G3): training-data contribution algebraically zero in the
     // ZD kernel. Requires `with ZD`; missing effect emits error 201.
-    fn lower_exactly_private_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_exactly_private_type(self, inner_opt: Option<Box<TypeExpr> >, locus_opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match inner_opt {
             None => (self, ty_error())
             Some(inner_te) => {
@@ -16735,6 +16775,19 @@ impl Checker {
                 let zd_id = 18
                 if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
                     c = c.report_error_at(span, 201, 0, 0, 0)
+                }
+                // The locus is optional. When written, it is interrogated: a
+                // privacy claim made AT a named ZD element must name one that
+                // could exist. An unchecked locus would be decoration, which is
+                // the defect this parameter was added to remove.
+                match locus_opt {
+                    None => {}
+                    Some(largs) => {
+                        let lname = checker_copy_string_list_to_name((*largs).head.path.segments)
+                        if !zd_locus_is_wellformed(lname) {
+                            c = c.report_error_at(span, 208, 0, 0, 0)
+                        }
+                    }
                 }
                 (c, inner_ty)
             }
