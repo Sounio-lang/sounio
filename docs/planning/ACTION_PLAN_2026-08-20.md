@@ -279,6 +279,38 @@ They interact, so the order is not the order they were asked in.
 5. **C3 is independent of all four** and is already in flight. It is the only cause
    fix that needs nothing from these rulings.
 
+### R6/R7 landed as a pair — and the two layers do NOT have the same reach
+
+`Correlated` (#2058, type layer) and `EReg.origin` (#2057, metal) were dispatched
+as a pair and delivered as one. They agree on discipline: both refuse false
+positives, both name what they do not cover. **They do not agree on reach, and the
+difference must be stated rather than discovered.**
+
+| | mechanism | catches `m*2 + m*3` |
+|---|---|---|
+| #2057 — metal | `origin` **propagated through operations** | **yes** — both carry origin 42 |
+| #2058 — type | same **`ExprIdent` name** (slot identity) | **no** — the names differ |
+
+**The type layer is the narrower one.** So passing the type check does *not*
+guarantee the metal agrees, and **the metal has the last word on the number**. A
+reader must not infer from a clean `check` that no correlation is present.
+
+Both refuse string-provenance equality, and #2058 says why: the false-positive risk
+was measured. Two different measurements written by the same author on the same day
+can carry the same string.
+
+**One decision neither dispatch specified, taken by #2057 and taken correctly:**
+`esub` does **not** cancel. `x - x` retains uncertainty rather than collapsing to
+zero as the seed does. The optimistic reading manufactures certainty out of a
+syntactic coincidence; in a proof artefact the conservative one is the only
+defensible default.
+
+**Fleet note, because the protocol earned itself:** the two lanes collided on effect
+id 30 and resolved it without escalation — one noticed the other had edited a
+claimed file without a claim, asked for a rebase, and they settled on
+`Correlated = 30`, `EffVar = 31`. `EffVar` is the effect variable R4 will need, so
+its slot is now reserved before the work starts.
+
 ## 3. Decisions owed — measured, unblocked, waiting
 
 | # | question | measured basis |
