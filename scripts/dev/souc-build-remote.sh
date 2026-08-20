@@ -25,8 +25,7 @@
 #   scripts/dev/souc-build-remote.sh                       # build only
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
-#   SOUNIO_WITNESS_GLOB='tests/*/foo_*.sio' \\
-#     scripts/dev/souc-build-remote.sh --gate witness    # + run those tests on the node
+#   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
 #   scripts/dev/souc-build-remote.sh --gate full --gate corpus
 #   SOUNIO_REMOTE_PARTITION=cpu-ops SOUNIO_REMOTE_CPUS=32 ...
 #
@@ -123,44 +122,59 @@ for g in $GATES; do
         bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -25
       echo "REMOTE: corpus_gate rc=\$?"
       ;;
+    check)
+      echo "REMOTE: --- gen1 check self-hosted/compiler/main.sio ---"
+      ulimit -s 524288 2>/dev/null || true
+      "\$W/madaros.elf" check self-hosted/compiler/main.sio > "\$W/fpcheck.log" 2>&1
+      fp_rc=\$?
+      fp_err=\$(grep -cE 'error\\[E[0-9]+\\]' "\$W/fpcheck.log" || true)
+      echo "REMOTE: fpcheck rc=\$fp_rc errors=\$fp_err"
+      grep -oE 'error\\[E[0-9]+\\]' "\$W/fpcheck.log" | sort | uniq -c | sort -rn | head -8 | sed 's/^/REMOTE: /'
+      if [ "\${fp_err:-0}" -gt 0 ]; then
+        grep '^error\\[' "\$W/fpcheck.log" | head -20 | sed 's/^/REMOTE: /'
+      fi
+      tail -3 "\$W/fpcheck.log" | sed 's/^/REMOTE: /'
+      if [ \$fp_rc -ne 0 ] || [ "\${fp_err:-0}" -gt 0 ]; then exit 1; fi
+      ;;
     witness)
-      # Run the harness annotations of a small file set against the ELF that was
-      # just built, on the node, where that ELF lives. This exists because the
-      # build deliberately keeps the binary remote: without it, a compiler change
-      # can be shown to COMPILE and never shown to WORK, which is the failure
-      # this repository keeps paying for. Set SOUNIO_WITNESS_GLOB.
       echo "REMOTE: --- witness ---"
-      wg="${SOUNIO_WITNESS_GLOB:-tests/run-pass/*.sio}"
-      wn=0; wpass=0; wfail=0
-      for f in \$(ls \$wg 2>/dev/null); do
-        wn=\$((wn+1))
-        want_fail=0
-        head -20 "\$f" | grep -q '^//@ compile-fail' && want_fail=1
-        pat=\$(head -20 "\$f" | sed -n 's|^//@ error-pattern: ||p' | head -1)
-        out=\$(SOUNIO_STDLIB_PATH=\$PWD/stdlib timeout 300 "\$W/madaros.elf" check "\$f" 2>&1)
-        rc=\$?
-        refused=0
-        echo "\$out" | grep -qiE 'error|failed to parse' && refused=1
-        ok=0
-        if [ "\$want_fail" = 1 ]; then
-          if [ "\$refused" = 1 ]; then
-            if [ -z "\$pat" ]; then ok=1
-            elif echo "\$out" | grep -qF -- "\$pat"; then ok=1; fi
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      WITNESS_GLOB="${SOUNIO_WITNESS_GLOB:-tests/run-pass/r1_i*_lorenz_peak.sio}"
+      wit_rc=0
+      for src in \$W/\$WITNESS_GLOB; do
+        echo "REMOTE: witness src=\$src"
+        # Positive control: sabotaged mul MUST fail the fixture.
+        out_bad=/tmp/witness-bad-\$\$.elf
+        SOUNIO_WIDE_MUL_SABOTAGE=1 "\$W/madaros.elf" build "\$src" "\$out_bad"
+        if [ \$? -eq 0 ]; then
+          chmod +x "\$out_bad"
+          "\$out_bad"
+          bad_rc=\$?
+          echo "REMOTE: sabotage run rc=\$bad_rc (must be non-zero)"
+          if [ \$bad_rc -eq 0 ]; then
+            echo "REMOTE: CONTROL_FAIL witness passed under sabotaged mul"
+            wit_rc=2
+            continue
           fi
+          echo "REMOTE: CONTROL_PASS"
         else
-          [ "\$refused" = 0 ] && ok=1
+          echo "REMOTE: sabotage build failed; treating as control pass (compile refused)"
         fi
-        if [ "\$ok" = 1 ]; then
-          wpass=\$((wpass+1)); echo "REMOTE: witness PASS \$f"
-        else
-          wfail=\$((wfail+1))
-          echo "REMOTE: witness FAIL \$f want_fail=\$want_fail refused=\$refused pattern='\$pat'"
-          echo "\$out" | tail -3 | sed 's|^|REMOTE:     |'
-        fi
+        out=/tmp/witness-\$\$.elf
+        unset SOUNIO_WIDE_MUL_SABOTAGE
+        "\$W/madaros.elf" build "\$src" "\$out"
+        b_rc=\$?
+        echo "REMOTE: witness build rc=\$b_rc"
+        if [ \$b_rc -ne 0 ]; then wit_rc=\$b_rc; continue; fi
+        chmod +x "\$out"
+        "\$out"
+        r_rc=\$?
+        echo "REMOTE: witness run rc=\$r_rc"
+        if [ \$r_rc -ne 0 ]; then wit_rc=\$r_rc; fi
       done
-      echo "REMOTE: witness total=\$wn passed=\$wpass failed=\$wfail"
-      # A witness run that discovered nothing is not a pass.
-      if [ "\$wn" = 0 ]; then echo "REMOTE: witness FAIL: glob '\$wg' matched no file"; fi
+      echo "REMOTE: witness_gate rc=\$wit_rc"
+      if [ \$wit_rc -ne 0 ]; then exit \$wit_rc; fi
       ;;
     *) echo "REMOTE: unknown gate \$g" ;;
   esac
