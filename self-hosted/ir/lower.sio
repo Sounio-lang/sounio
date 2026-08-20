@@ -4,6 +4,7 @@ module ir::lower
 
 use parser::ast::*
 use ir::ir::*
+use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
 use check::specializer::{spec_dce_filter_with_global_marks}
 use io::trace::*
 use io::env::{read_env}
@@ -996,6 +997,7 @@ fn lowerer_box_register_knowledge_layout(layouts: Box<StructLayoutTable>) -> Box
 
 fn lowerer_new() -> Lowerer with Alloc, Mut {
     lower_hard_error_reset()
+    ir_wide_compile_pool_reset()
     // Sequential peels — one large Box::new frame at a time (see helpers above).
     let module = lowerer_box_empty_module()
     let epistemic_contests = lowerer_box_empty_epistemic_contests()
@@ -15606,6 +15608,29 @@ impl Lowerer {
             }
         }
         if wide_bits > 64 {
+            if e.bin_op == BinaryOp::OpShr {
+                match e.right {
+                    Some(re) => {
+                        var shift_bits: i64 = 0 - 1
+                        if (*re).kind == ExprKind::ExprIntLit {
+                            shift_bits = (*re).int_val
+                        } else if (*re).kind == ExprKind::ExprCast {
+                            match (*re).left {
+                                Some(inner) => {
+                                    if (*inner).kind == ExprKind::ExprIntLit {
+                                        shift_bits = (*inner).int_val
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                        if shift_bits >= 0 {
+                            return (lo3.emit(ir_wide_shr(dst, lhs, limbs, shift_bits)), dst)
+                        }
+                    }
+                    None => {}
+                }
+            }
             if e.bin_op == BinaryOp::OpAdd {
                 return (lo3.emit(ir_wide_add(dst, lhs, rhs, limbs)), dst)
             } else if e.bin_op == BinaryOp::OpSub {
@@ -16001,6 +16026,14 @@ impl Lowerer {
             while wi < limbs {
                 lo2 = lo2.emit(ir_load_imm(dst + wi, 0))
                 wi = wi + 1
+            }
+            match e.left {
+                Some(left_e) => {
+                    if (*left_e).kind == ExprKind::ExprIntLit {
+                        let _payload_id = ir_wide_compile_pool_intern_low(wide_bits, (*left_e).int_val)
+                    }
+                }
+                None => {}
             }
             (lo2, dst)
         } else if lower_cast_type_is_f64(&e.cast_type) {
