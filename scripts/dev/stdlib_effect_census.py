@@ -10,12 +10,31 @@ carrying it past lowering.
 Per effect it reports:
   sites      uses of `with ... E` in versioned .sio outside archive/ and bootstrap/
   check      references to the name in self-hosted/check/  (a possible consumer)
-  decides    references inside a conditional in check/     (a consumer that BRANCHES)
+  special    references on a conditional line in check/    (NAME-SPECIFIC logic)
   ir         references in self-hosted/ir/
   native     references in self-hosted/native/
 
-An effect with sites and no `decides` is written by programmers and consulted by
-nothing.
+WHAT `special` DOES NOT MEAN, corrected 2026-08-20 after the first run misled.
+
+A zero here does NOT mean the effect is unconsumed. Every one of the 30 closed-list
+names IS consumed, by a NAME-GENERIC mechanism: the effect row. Measured —
+
+    fn pode(x: i64) -> i64 with Panic { x }
+    fn nao_declara(y: i64) -> i64 { pode(y) }        // error[E035], missing: Panic
+
+and the same for Observe, Learn, Chaotic and Sensor: refused without the
+declaration, accepted with it. The row propagates up the call graph and names the
+missing effect and the callee that requires it.
+
+Because that mechanism does not mention any effect BY NAME, it contributes zero to
+this column for every effect. So `special` measures special-case logic layered on
+top of the generic row — not consumption. Panic at 0 is correct and healthy: it is
+consumed generically and needs no special case. ZD at 25 has name-specific logic
+because it carries a claim the row alone cannot express.
+
+The real hole this column cannot see: `with Zorblex` — an invented name — is
+accepted AND does not propagate. An unknown effect participates in nothing. That
+is what scripts/ci/effect_name_closed_list_gate.sh exists for.
 
 ON THE `decides` HEURISTIC, because the number is only as good as its method.
 It counts a reference whose LINE also carries a conditional token (if / while /
@@ -86,7 +105,7 @@ def main():
                 line = src[line_start: src.find("\n", m.start())]
                 if re.search(r'\b(if|while|match|&&|\|\||==|!=)\b|[=!]=', line):
                     decides += 1
-        rows.append({"effect": e, "sites": sites, "check": chk, "decides": decides,
+        rows.append({"effect": e, "sites": sites, "check": chk, "special": decides,
                      "ir": len(re.findall(r'\b%s\b' % re.escape(e), ir_src)),
                      "native": len(re.findall(r'\b%s\b' % re.escape(e), native_src))})
 
@@ -94,13 +113,14 @@ def main():
 
     print("EFFECT_CENSUS effects=%d" % len(rows))
     print()
-    print("%-26s %7s %7s %8s %5s %7s" % ("EFFECT","SITES","check","decides","ir","native"))
+    print("%-26s %7s %7s %8s %5s %7s" % ("EFFECT","SITES","check","special","ir","native"))
     for r in sorted(rows, key=lambda r: -r["sites"]):
         print("%-26s %7d %7d %8d %5d %7d" % (
-            r["effect"], r["sites"], r["check"], r["decides"], r["ir"], r["native"]))
-    silent = [r["effect"] for r in rows if r["sites"] > 0 and r["decides"] == 0]
+            r["effect"], r["sites"], r["check"], r["special"], r["ir"], r["native"]))
+    plain = [r["effect"] for r in rows if r["sites"] > 0 and r["special"] == 0]
     print()
-    print("written but never branched on (%d): %s" % (len(silent), " ".join(silent)))
+    print("consumed by the generic effect row only, no special case (%d): %s"
+          % (len(plain), " ".join(plain)))
     unused = [r["effect"] for r in rows if r["sites"] == 0]
     print("in the closed list, never written (%d): %s" % (len(unused), " ".join(unused)))
     return 0
