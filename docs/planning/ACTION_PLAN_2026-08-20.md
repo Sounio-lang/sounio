@@ -200,9 +200,13 @@ that ratchets upward.*
 
 They interact, so the order is not the order they were asked in.
 
-1. **R2 before R1.** Both are representation questions about the same tower —
-   narrow widths at one end, `i256` at the other. One strategy should serve both,
-   and getting `i8` right is the cheap rehearsal for getting `i256` right.
+1. ~~**R2 before R1.**~~ **CORRECTED — they are parallel, not sequential.** The
+   first draft said narrow widths rehearse the wide ones because both are "the same
+   tower". They are not the same mechanism. **Narrow** is masking and sign-extending
+   inside one `i64` register; **wide** is a multi-limb payload. Sharing a *name* is
+   not sharing an implementation, and treating them as one would have put both
+   behind a single lane for no reason. They run in parallel, and the only thing they
+   must share is the spec section that describes the result.
 2. **R3's propagation rule before R3's migration.** The Beta posterior changes a
    *number*, not a check. Specify and test the composition against an
    arbitrary-precision oracle first; migrate the 26 sites second. Migrating first
