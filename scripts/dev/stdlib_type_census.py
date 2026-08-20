@@ -13,6 +13,30 @@ stdlib/cybernetic (alive, no types) from the ZD family (types, no life):
   kind          does the compiler have a TypeExprKind naming the same concept
   mut_spine     does the *mut lowering spine handle that kind (parameter position)
 
+TWO THINGS THIS CENSUS IS NOT, corrected 2026-08-20 before either misled anyone.
+
+1. `kind` being false is NORMAL and healthy. Every ordinary struct is lowered by
+   the generic `TypeExprKind::TypeNamed` path, which is present on BOTH spines and
+   type-checks correctly -- passing an i64 where a declared struct is expected
+   gives E009. A plain data type neither needs nor should have a dedicated kind.
+   So "17 of 3,156 have a compiler kind" is NOT a defect count: a dedicated kind
+   is for a type making a SPECIAL CLAIM, and those are rare by design.
+
+2. The `kind` column has FALSE POSITIVES. Kinds are extracted from ast.sio by the
+   pattern `Type<Name>,`, which turns the AST node types `TypeExpr` and
+   `TypeExprKind` into phantom kinds "Expr" and "ExprKind". Any stdlib struct so
+   named matches spuriously -- two of the five names reported off the *mut spine
+   in the first run were exactly that.
+
+   For the authoritative figure on claims lost in parameter position, read
+   scripts/ci/silent_type_spine_ratchet_gate.sh: 20 kinds handled by one spine and
+   not the other, measured from the two `match` bodies directly rather than by
+   name collision with stdlib.
+
+What this census IS good for: `param_uses` -- 53% of stdlib types never appear in
+a parameter position, and that figure is robust across two extraction strategies
+with opposite biases -- and `module_importers`, which says what is alive at all.
+
 Usage:  python3 scripts/dev/stdlib_type_census.py [--json out.json] [--module NAME]
 """
 import json, os, re, subprocess, sys, collections
