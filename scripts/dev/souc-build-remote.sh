@@ -25,6 +25,7 @@
 #   scripts/dev/souc-build-remote.sh                       # build only
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
+#   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
 #   scripts/dev/souc-build-remote.sh --gate full --gate corpus
 #   SOUNIO_REMOTE_PARTITION=cpu-ops SOUNIO_REMOTE_CPUS=32 ...
 #
@@ -120,6 +121,20 @@ for g in $GATES; do
       SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS=\$(nproc) \\
         bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -25
       echo "REMOTE: corpus_gate rc=\$?"
+      ;;
+    check)
+      echo "REMOTE: --- gen1 check self-hosted/compiler/main.sio ---"
+      ulimit -s 524288 2>/dev/null || true
+      "\$W/madaros.elf" check self-hosted/compiler/main.sio > "\$W/fpcheck.log" 2>&1
+      fp_rc=\$?
+      fp_err=\$(grep -cE 'error\\[E[0-9]+\\]' "\$W/fpcheck.log" || true)
+      echo "REMOTE: fpcheck rc=\$fp_rc errors=\$fp_err"
+      grep -oE 'error\\[E[0-9]+\\]' "\$W/fpcheck.log" | sort | uniq -c | sort -rn | head -8 | sed 's/^/REMOTE: /'
+      if [ "\${fp_err:-0}" -gt 0 ]; then
+        grep '^error\\[' "\$W/fpcheck.log" | head -20 | sed 's/^/REMOTE: /'
+      fi
+      tail -3 "\$W/fpcheck.log" | sed 's/^/REMOTE: /'
+      if [ \$fp_rc -ne 0 ] || [ "\${fp_err:-0}" -gt 0 ]; then exit 1; fi
       ;;
     witness)
       echo "REMOTE: --- witness ---"
