@@ -86,6 +86,30 @@ Editor-tooling details:
 
 ### Active Known Bugs / Architectural Gaps
 
+**`i256` is `i64`, and the Lorenz certificate's products exceed `i64` by nine orders of magnitude (2026-08-20, OPEN).**
+No integer width in Sounio carries semantics: `i8` gives `200` for `100 + 100`
+where `-56` is due, and `i256` on `5e18 + 5e18` returns the exact `i64`
+wraparound. `fn i256_*` occurs **zero** times in all of `stdlib/`, so there is no
+limb implementation underneath the annotation.
+
+`stdlib/systems/` — 56,327 lines, 220 importers, almost entirely the Lorenz i256
+certification — carries **733** `i256` annotations on the certificate's own
+quantities. Measured on an independently source-built compiler with an exact
+arbitrary-precision replay (#2046): the maximum intermediate actually reached is
+**8,007,432,506,888,905,229,835,698,176**, which is **868,167,572×** the signed
+`i64` ceiling, at `y_lte_source * den` in
+`stdlib/systems/lorenz_i256_cert_step5.sio:2310`. **That product wraps.**
+
+Coverage is bounded and declared: steps 1–6, the step and trajectory-5
+certificates, children 0–1, the refinement ledger. Children 2–4, bridge families
+and long loops are marked `NOT EXECUTABLE` for that receipt.
+
+**Do not state that any certificate conclusion is wrong.** That is unaudited: an
+overflowed product inside a comparison can still land on the correct side. The
+honest statement is **the arithmetic is unsound and the conclusions are
+unaudited**. Spec: `docs/spec/S12_NUMERIC_TOWER.md` §12.2.6, ruling §12.4-6.
+
+
 **ε has opposite polarities in the two engines — a patient-safety compile-fail test passes under the default compiler (2026-08-19, OPEN).**
 `tests/compile-fail/vancomycin_low_conf.sio` is refused by `lean_single` with
 `error[P0003] ... Knowledge ε boundary violation at line 27` and **accepted by
