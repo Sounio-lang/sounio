@@ -336,6 +336,71 @@ gap is the section's work.
 > this section's own subject is what happens when a claim is separated from what
 > justifies it.
 
+## 8.2.6 RULING — the epistemic value is TWO things, and they are not the same thing
+
+Founder ruling, 2026-08-20: **the refinement in the type and the record in the
+value are two layers, and each gets its own name.**
+
+### What forced the question
+
+`self-hosted/check/types.sio`:
+
+    pub fn ty_knowledge(inner: TypeEntry, epsilon: f64) -> TypeEntry
+
+The compiler's `Knowledge` carries **an inner type and one `f64`**. No value, no
+variance, no confidence, no provenance. It is a **refinement type** — `T` with a
+bound — not a record. The corpus writes records: 26 of 45 declaration sites are
+`value, uncertainty, confidence` (§8.2.4-ter).
+
+Four separately-recorded defects are one defect under this reading:
+
+| observed | explained by |
+|---|---|
+| the builtin literal fills **by position** (§8.2.5) | there are no fields to match — there is `inner` and `knowledge_epsilon` |
+| `.epsilon` reads `0.0` while `.confidence` reads the number | the reader expects record fields on a thing that never had any |
+| ε has opposite polarities in the two engines (#2030) | a bound on a refinement **can only** be an error: satisfying it means being **below** |
+| the clinical surface writes `ε >= 0.82` meaning confidence | a **measurement written into a constraint slot** |
+
+**Madaros is not wrong about ε.** It implements the only reading a
+`knowledge_epsilon: f64` on a `TypeEntry` can support.
+
+### The ruling
+
+1. **ε is the type-level error bound.** Doubt, compile-time, lower is better.
+   `Knowledge[T, ε < 0.05]` reads *"this value's error is under 0.05"*.
+   `epsilon_subsumes(a, b) = a <= b` (`check/epistemic.sio:595`) is **correct** and
+   stays.
+2. **Belief is a value-layer property and takes its own name.** It is not ε, it
+   is not a bound, and it does not belong in the type's constraint slot.
+3. **Writing belief as an ε bound is a layer error**, not a polarity difference.
+   The five engine-divergent `compile-fail` tests frozen by
+   `scripts/ci/epsilon_engine_parity_gate.sh` are written in the wrong layer.
+
+### What this costs, stated plainly
+
+**The vancomycin ε guarantee does not currently hold in either layer.** The
+clinical surface wrote it into the type, and the type does not speak that
+language. §13 of `KNOWN_LIMITATIONS` records it as engine-dependent; under this
+ruling it is layer-absent, which is worse and more honest.
+
+### The first task is smaller than the ruling
+
+The value layer already has a syntax. Five files write `with Epistemic(950)` and
+`with Epistemic(400)`; `parser/types.sio:812` parses it:
+
+    fn parse_effect_payload(self) -> Parser {
+
+It returns **only the parser**. It counts parentheses and advances past
+everything, so `950` is read, balanced and **discarded**. `Epistemic(950)` and
+`Epistemic(400)` are **identical to the compiler**.
+
+That is why `tests/compile-fail/dissertation_pbpk28_overclaim.sio` — which demands
+95% confidence over a 65% prior — is one of the five silent passes. It was never
+a polarity failure. The belief gate is syntax with no semantics.
+
+**So the ruling's first implementation step is: make the effect payload carry its
+number.** The syntax is already parsed; only the slot is missing.
+
 ## 8.3 Invariants entailed by the ruling
 
 These follow from 8.1. Each is normative; none is implemented.
