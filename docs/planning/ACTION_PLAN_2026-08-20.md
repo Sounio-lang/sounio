@@ -82,7 +82,7 @@ and refused for a real reason.*
 types declare no effects against a ruling that says they carry them.
 *Gate: `fn_type_effect_ratchet` (216) must shrink.* Not started.
 
-## 2-bis. RULED 2026-08-20 — four decisions, and the hard option was taken four times
+## 2-bis. RULED 2026-08-20 — five decisions, and the hard option was taken every time
 
 The founder ruled on four of the eight. **Every one chose capability over
 convenience.** They are recorded together because they are not independent: they
@@ -195,6 +195,65 @@ becomes a representation to replace.
 and could not be written today. *Gate: a new ratchet counting effect-polymorphic
 signatures, starting at 0 and required to grow — the first ratchet in this tree
 that ratchets upward.*
+
+### R5 — an operator must require its effect
+
+Founder ruling, 2026-08-20: *"deve exigir tudo, não vou deixar dívida no futuro."*
+
+Neither operator requires anything today:
+
+    fn m(a: i64, b: i64) -> i64 { a % b }     // no `with Mod`  ->  check: OK
+    fn d(a: i64, b: i64) -> i64 { a / b }     // no `with Div`  ->  check: OK
+
+`Div` is written **46,978** times and has **zero** name-specific decisions in the
+checker. That is not because it is unconsumed — the generic effect row consumes it
+— but because nothing ever *originates* it. An effect nobody is required to
+declare is an effect that only propagates from wherever someone happened to write
+it first.
+
+**`Mod` is not a misspelling of `Mut`.** The tree recorded it as one, with 2,813
+sites to rename. It is modular arithmetic:
+
+    pub fn lorenz_i256_cert_mix(acc: i64, value: i64, salt: i64) -> i64 with Mod {
+        return ((acc * 16777619) + value + salt) % 1000000007
+    }
+
+It is written **2,814** times across **366** files, co-occurs with `Mut` in **3**
+signatures out of 2,814, and is **not in the closed list of 30**. So it is a real,
+deliberate, thirty-first effect that the compiler does not know — which is why C1
+would have broken 366 files, and why C1 was right to stop.
+
+### The natural experiment this ruling already has
+
+| operator | functions using it | already declaring | compliance |
+|---|---:|---:|---:|
+| `/` → `Div` | 15,905 | 11,037 | **69%** |
+| `%` → `Mod` | 3,467 | 278 | **8%** |
+
+Same authors, same language, same habits. The one variable is whether the compiler
+can answer: `Div` is a known name that enters the effect row and propagates, so
+writing it produces feedback; `Mod` is unknown, drops silently, and produces none.
+
+**The gap between 69% and 8% is what enforcement buys.** Requirement does not
+invent discipline here — it catches the fraction that slipped.
+
+*(Method caveat: the `/` count is an upper bound — the scan sees slashes in
+comments and paths. Both sides were counted the same way, so the ratio is the
+robust part.)*
+
+**Residue, stated plainly:** roughly **8,057** functions would newly need a
+declaration. That is not an afternoon. The 69% figure is the reason to do it
+anyway — the convention already lives in the authors' heads, and the compiler is
+simply not yet able to hold them to it.
+
+**Acceptance:** `a % b` without `with Mod` is refused; `a / b` without `with Div`
+is refused; both accepted with. `Mod` joins the closed list (30 → 31). *Gate:
+`effect_name_closed_list`, and a new count of operator-without-effect sites,
+frozen and shrink-only.*
+
+**Order:** R5 unblocks **C1**. C1 stopped because refusing unknown names would
+break 366 `Mod` files; admitting `Mod` removes that, and then C1 and R5 land as one
+change rather than two that fight.
 
 ## 2-ter. What the four rulings imply for order
 
