@@ -92,8 +92,12 @@ is answered (#2046, measured on an independently source-built compiler).
 
     8,007,432,506,888,905,229,835,698,176
 
-against a signed `i64` ceiling of `9,223,372,036,854,775,807`. The observed
-product is **868,167,572 times** that bound. It is `y_lte_source * den` in
+against a signed `i64` ceiling of `9,223,372,036,854,775,807`. The product is
+**exactly `868,167,572 × 2^63`** — the ratio to the `i64` *ceiling* is
+`868167572.000000` to six decimals but is **not** an integer multiple of it, and
+the first receipt's phrasing *"exactly 868,167,572 times that bound"* was the
+rounding, not the identity. The independent replica (#2050) caught it. It is
+`y_lte_source * den` in
 `lorenz_i256_step5_taylor2_remainder_obligation_check`,
 `stdlib/systems/lorenz_i256_cert_step5.sio:2310`.
 
@@ -117,6 +121,18 @@ fixtures, and the trajectory-5 projection-inclusion fingerprint — because no
 source-built invocation was made for them, and *static inspection is not counted
 as runtime measurement*. This is a measured certificate-path result, not an
 exhaustive claim about every Lorenz `i256` path.
+
+**Independently replicated, and the replica answers more than it was asked.**
+#2050 measured the same peak at the same site, from a separate from-source build,
+**measuring first and reading #2046 only after the peak was in hand** — the order
+is what separates a replication from an echo. Its positive control fired on `2^63`
+before any Lorenz number was touched.
+
+It also settles, for the obligation measured, the question §12.4-6 was opened to
+hold: **the wrap does not overturn this conclusion.** Full-width arithmetic still
+leaves `source_lte_ok = 1`. So the honest statement narrows by one notch — the
+arithmetic is unsound, and *the one obligation whose verdict has been recomputed
+at full width survives it.*
 
 **What remains unknown, and it is not small.** Whether the wrap changes the
 certificate's **verdict**. A product that overflows inside a comparison may still
@@ -180,12 +196,13 @@ in question here.
    accepts `f128`. The Reserved state is the tree's one first-class refusal, and
    it currently holds on one engine.
 
-6. **Owed: does the wrap change the verdict?** §12.2.6 measures that the
-   certificate's arithmetic exceeds `i64` and therefore wraps. It does **not**
-   measure whether any certificate conclusion is thereby wrong — an overflowed
-   product inside a comparison can still fall on the correct side. Until that is
-   measured, the honest statement is *the arithmetic is unsound, the conclusions
-   are unaudited*.
+6. **Owed, and now partly answered: does the wrap change the verdict?** #2050
+   recomputed the step-5 remainder obligation at full width and it still yields
+   `source_lte_ok = 1` — that conclusion survives its own overflow. **One
+   obligation is not the certificate.** What is owed is the same recomputation
+   across the obligations §12.2.6 lists as covered, and then across those it lists
+   as `NOT EXECUTABLE`. Until then: *the arithmetic is unsound; one verdict has
+   been recomputed and holds; the rest are unaudited.*
 
 ## Claims Forbidden
 
