@@ -3752,14 +3752,19 @@ fn checker_lookup_user_effect_id_mut(c: *mut Checker, name_buf: [i8; 64], name_l
     0 - 1
 }
 
-fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div {
+fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div, IO {
     var effs = effects
     var n = count
     var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
     if eff_id < 0 {
         eff_id = checker_lookup_user_effect_id_mut(c, list.head.name_buf, list.head.name_len)
     }
-    if eff_id >= 0 && n < 8 {
+    if eff_id < 0 {
+        report_unknown_effect_name(list.head.name_buf, list.head.name_len)
+        checker_note_type_error_mut(c)
+        (*c).had_error = true
+        (*c).diag_emitted = true
+    } else {
         var already_present = false
         var i: i64 = 0
         while i < n {
@@ -3769,8 +3774,15 @@ fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64;
             i = i + 1
         }
         if !already_present {
-            effs[n as usize] = eff_id
-            n = n + 1
+            if n >= 8 {
+                report_effect_set_full()
+                checker_note_type_error_mut(c)
+                (*c).had_error = true
+                (*c).diag_emitted = true
+            } else {
+                effs[n as usize] = eff_id
+                n = n + 1
+            }
         }
     }
     match list.tail {
@@ -3779,7 +3791,7 @@ fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64;
     }
 }
 
-fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div {
+fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div, IO {
     match opt {
         None => MutEffectsResult { effects: [0; 8], count: 0 }
         Some(list) => checker_collect_effects_mut(c, *list, [0; 8], 0)
@@ -5757,6 +5769,24 @@ fn checker_narrow_float_literal_operand_ty(operand_ty: TypeEntry, operand_was_fl
 // dodges the by-value check_path_expr SRET crash — then bridge to the by-value op-typing
 // tail (check_binary_with_operand_types), which is driven by the already-computed operand
 // types and never re-checks operands, so it never recurses into check_path_expr.
+fn checker_require_operator_effect_mut(c: *mut Checker, span: Span, op: BinaryOp) with Mut, Panic, Div, IO {
+    if op == BinaryOp::OpDiv {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, 4) {
+            print("error[E233]: operator `/` requires `with Div`\n")
+            checker_note_type_error_mut(c)
+            (*c).had_error = true
+            (*c).diag_emitted = true
+        }
+    } else if op == BinaryOp::OpRem {
+        if !has_effect_id((*c).current_effects, (*c).current_effect_count, 29) {
+            print("error[E233]: operator `%` requires `with Mod`\n")
+            checker_note_type_error_mut(c)
+            (*c).had_error = true
+            (*c).diag_emitted = true
+        }
+    }
+}
+
 fn checker_check_binary_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let left_ty = checker_check_opt_expr_inplace(c, e.left)
     let left_was_int_lit = (*c).last_literal_kind == 1
@@ -5960,11 +5990,13 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
         checker_report_mismatch_inplace(c, e.span, 4, left_ty, right_ty)
     }
     if e.bin_op == BinaryOp::OpDiv {
+        checker_require_operator_effect_mut(c, e.span, e.bin_op)
         let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
         if denom_pair.0 != 0 && denom_pair.1 == 0 {
             checker_report_error_at_inplace(c, e.span, 56, 0, 0, 0)
         }
     } else if e.bin_op == BinaryOp::OpRem {
+        checker_require_operator_effect_mut(c, e.span, e.bin_op)
         let denom_pair = checker_eval_const_int_opt_expr_mut(c, e.right)
         if denom_pair.0 != 0 && denom_pair.1 == 0 {
             checker_report_error_at_inplace(c, e.span, 57, 0, 0, 0)
@@ -17804,21 +17836,27 @@ impl Checker {
         -1
     }
 
-    fn extract_effects_with_checker(self, opt: Option<Box<EffectList> >) -> ExtractEffectsResult with Mut, Panic, Div {
+    fn extract_effects_with_checker(self, opt: Option<Box<EffectList> >) -> ExtractEffectsResult with Mut, Panic, Div, IO {
         match opt {
             None => ExtractEffectsResult { checker: self, effects: [0; 8], count: 0 }
             Some(list) => self.collect_effects_with_checker(*list, [0; 8], 0)
         }
     }
 
-    fn collect_effects_with_checker(self, list: EffectList, effects: [i64; 8], count: i64) -> ExtractEffectsResult with Mut, Panic, Div {
+    fn collect_effects_with_checker(self, list: EffectList, effects: [i64; 8], count: i64) -> ExtractEffectsResult with Mut, Panic, Div, IO {
+        var c = self
         var effs = effects
         var n = count
         var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
         if eff_id < 0 {
-            eff_id = self.lookup_user_effect_id(list.head.name_buf, list.head.name_len)
+            eff_id = c.lookup_user_effect_id(list.head.name_buf, list.head.name_len)
         }
-        if eff_id >= 0 && n < 8 {
+        if eff_id < 0 {
+            report_unknown_effect_name(list.head.name_buf, list.head.name_len)
+            c.error_count = c.error_count + 1
+            c.had_error = true
+            c.diag_emitted = true
+        } else {
             var already_present = false
             var i: i64 = 0
             while i < n {
@@ -17828,13 +17866,20 @@ impl Checker {
                 i = i + 1
             }
             if !already_present {
-                effs[n as usize] = eff_id
-                n = n + 1
+                if n >= 8 {
+                    report_effect_set_full()
+                    c.error_count = c.error_count + 1
+                    c.had_error = true
+                    c.diag_emitted = true
+                } else {
+                    effs[n as usize] = eff_id
+                    n = n + 1
+                }
             }
         }
         match list.tail {
-            None => ExtractEffectsResult { checker: self, effects: effs, count: n }
-            Some(next) => self.collect_effects_with_checker(*next, effs, n)
+            None => ExtractEffectsResult { checker: c, effects: effs, count: n }
+            Some(next) => c.collect_effects_with_checker(*next, effs, n)
         }
     }
 
@@ -20960,11 +21005,23 @@ impl Checker {
         }
         // Division/modulo by zero: detect denominators that fold to a constant integer zero.
         if e.bin_op == BinaryOp::OpDiv {
+            if !has_effect_id(c.current_effects, c.current_effect_count, 4) {
+                print("error[E233]: operator `/` requires `with Div`\n")
+                c.error_count = c.error_count + 1
+                c.had_error = true
+                c.diag_emitted = true
+            }
             let denom_pair = eval_const_int_opt_expr(c, e.right)
             if denom_pair.0 != 0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 56, 0, 0, 0)
             }
         } else if e.bin_op == BinaryOp::OpRem {
+            if !has_effect_id(c.current_effects, c.current_effect_count, 29) {
+                print("error[E233]: operator `%` requires `with Mod`\n")
+                c.error_count = c.error_count + 1
+                c.had_error = true
+                c.diag_emitted = true
+            }
             let denom_pair = eval_const_int_opt_expr(c, e.right)
             if denom_pair.0 != 0 && denom_pair.1 == 0 {
                 c = c.report_error_at(e.span, 57, 0, 0, 0)
