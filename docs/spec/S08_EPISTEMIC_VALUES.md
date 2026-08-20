@@ -246,6 +246,52 @@ fictional**: `examples/alphageozero_final.sio:83` declares exactly that, and
 `Knowledge::exact` (:422) has **one** call site tree-wide, and `ep_exact` — which
 §8.4 already records as non-existent — remains at **zero**.
 
+### 8.2.4-ter Ten classes, and the real disagreement is binary
+
+§8.2.4-bis counts **18 field shapes over 46 sites** and closes by saying
+canonicalisation must choose a spelling before it can choose a shape. Doing that
+first collapses the problem.
+
+Normalising the slot names — `value`/`val` → **V**;
+`uncertainty`/`variance`/`uncert`/`epsilon` → **U**;
+`confidence`/`conf`/`label`/`knightian` → **C**; the pair
+`conf_alpha, conf_beta` (and `alpha, beta`) → **Cab**;
+`provenance`/`prov`/`prov_id`/`provenance_id`/`source`/`provenance_count` → **P** —
+the 18 shapes become **10 classes**:
+
+| sites | class |
+|---:|---|
+| **21** | `V, U, C` |
+| 10 | `V, U, Cab` |
+| 5 | `V, U, C, P` |
+| 3 | `V, U` |
+| 1 | `V, P, metadata` |
+| 1 | `V, C, P` |
+| 1 | `P` |
+| 1 | `V, U, reducible_by_n_samples` |
+| 1 | `V, U, C, P, debt_bits` |
+| 1 | `V, C, C` |
+
+**Twenty-six of forty-five sites are one idea** — value, uncertainty, a scalar
+confidence, with or without provenance. Most of the apparent disagreement was
+spelling, and it costs nothing to settle: no site changes meaning when `val`
+becomes `value`.
+
+**What remains is a single binary question, and it is modelling, not naming:**
+
+> Is confidence a **scalar** (26 sites) or a **Beta posterior `(α, β)`**
+> (10 sites)?
+
+Those two cannot be renamed into each other. A scalar is a point; `(α, β)` carries
+sample size, so it knows the difference between *0.5 from two observations* and
+*0.5 from two thousand*. The 3 sites at `V, U` have no confidence slot at all and
+are a third answer — *confidence is not part of the value* — held by too few
+sites to be a contender but worth naming, since it is the position the compiler's
+own `TyKnowledge` is closest to.
+
+The six one-off classes are each a single site and none of them is a candidate;
+they are recorded so the count is complete, not because they are live options.
+
 ### 8.2.5 The dissertation surface writes a shape that is declared nowhere
 
 `stdlib/darwin_pbpk/epistemic_pbpk28.sio:292` contains, verified **not** inside a
