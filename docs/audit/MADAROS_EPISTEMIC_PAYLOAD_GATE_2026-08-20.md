@@ -17,15 +17,17 @@ Date: 2026-08-20
 - Required payload branch: `origin/feat/effect-payload` at the same commit
 - Comparison target at measurement time: `origin/main` at
   `67aa2aec127020122ff961480b83b36c09e91432`
+- Final rebase target: `origin/main` at
+  `e021ce8a3` (revalidated 2026-08-21 before this receipt-only update)
 - The four witnesses under `tests/compiler/epistemic_payload_gate/` are
   byte-identical after replacing the integer in `Epistemic(N)` with `N`.
 
 The consumer stores the parsed floor in `FnSig.epistemic_min_confidence` in
-both function-signature collection spines and both function-type lowerers. The `Knowledge` constructor keeps
-its literal confidence in the semantic type. While checking a function with a
-parameterised `Epistemic(N)` effect, Madaros emits E215 when a literal
-confidence is below the floor, and treats a non-literal confidence as unknown
-and therefore insufficient.
+both function-signature collection spines and both function-type lowerers. The
+`Knowledge` constructor keeps its literal confidence in the semantic type.
+While checking a function with a parameterised `Epistemic(N)` effect, Madaros
+emits E215 when a literal confidence is below the floor, and treats a
+non-literal confidence as unknown and therefore insufficient.
 
 ## Before: measured engine divergence
 
@@ -89,7 +91,7 @@ Build receipt:
 ```text
 REMOTE: host=gpuorangefs-r770-proxmox nproc=32 unpacked=196M
 REMOTE: build rc=0 elapsed=227s
-REMOTE: elf bytes=100574016
+REMOTE: elf bytes=100642004
 ```
 
 | Engine | N | Expected | rc | ELF | Diagnostic | Verdict |
