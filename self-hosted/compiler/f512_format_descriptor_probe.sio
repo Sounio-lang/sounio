@@ -1,0 +1,95 @@
+// Source-owned executable identity probe for the f512 (IEEE 754-2008 binary512)
+// format family. Mirrors f128_f256_format_descriptor_probe.sio so the V0-A
+// identity contract is asserted per format; the sibling covers f128/f256.
+//
+// What this probe asserts:
+//   1. The numeric_format::BinaryFormatDescriptor for binary512 is exact
+//      (format_id 512, storage_bits 512, exponent_bits 23, precision_bits 489,
+//       trailing_significand_bits 488).
+//   2. The TypeKind discriminant for TyF512 is 99 — appended after TyF128 (97)
+//      and TyF256 (98) without disturbing either existing slot.
+//   3. binary_format_for_type(ty_f512()) returns the binary512 descriptor.
+//   4. wide_float_format_identity_compatible is identity-only for f512:
+//      t512==t512 (true), t512 vs t128/t256/f64 (all false, both directions).
+//   5. is_wide_float_type(ty_f512()) is true.
+//   6. name_is_f512 accepts the literal "f512" and rejects the sibling
+//      names "f128"/"f256".
+//   7. ir_wide_numeric_required_limb_count(format_id 512) returns 8
+//      (storage_bits / 64) — within the multi-limb pool's per-payload cap.
+//   8. The existing f128/f256 invariants still hold (probe re-asserts them
+//      so adding f512 cannot silently regress them).
+//
+// What this probe does NOT assert:
+//   * Value semantics, operations, status, or rounding for f512. Those are
+//     explicitly deferred to the V0-D ladder (see docs/architecture/F128_F256_LADDER.md).
+//   * Source-level use of f512. The parser/checker treat it as a wide-float
+//     reserved keyword today, same shape as f128/f256 in V0-A.
+
+use check::numeric_format::*
+use check::types::*
+use check::compat::*
+use ir::numeric_payload::{ir_wide_numeric_required_limb_count}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    // (1) descriptor exact — IEEE 754-2008 binary512, derived not invented.
+    let d512 = binary_format_binary512_descriptor()
+    if d512.format_id != numeric_format_binary512_id() { return 30 }
+    if d512.storage_bits != 512 { return 31 }
+    if d512.exponent_bits != 23 { return 32 }
+    if d512.precision_bits != 489 { return 33 }
+    if d512.trailing_significand_bits != 488 { return 34 }
+
+    // (2) discriminant contract — TyF512 must be 99 (after TyF128=97, TyF256=98).
+    let t512 = ty_f512()
+    if (TypeKind::TyRawPtr as i64) != 96 { return 35 }
+    if (TypeKind::TyF128   as i64) != 97 { return 36 }
+    if (TypeKind::TyF256   as i64) != 98 { return 37 }
+    if (t512.kind as i64) != 99 { return 38 }
+
+    // (3) type → descriptor routing.
+    if binary_format_for_type(t512).format_id != numeric_format_binary512_id() { return 39 }
+    if binary_format_for_type(t512).storage_bits != 512 { return 40 }
+
+    // (4) compatibility is identity-only.
+    if !wide_float_format_identity_compatible(t512, t512) { return 41 }
+    let t128 = ty_f128()
+    let t256 = ty_f256()
+    let f64 = ty_f64()
+    if wide_float_format_identity_compatible(t512, t128) { return 42 }
+    if wide_float_format_identity_compatible(t128, t512) { return 43 }
+    if wide_float_format_identity_compatible(t512, t256) { return 44 }
+    if wide_float_format_identity_compatible(t256, t512) { return 45 }
+    if wide_float_format_identity_compatible(t512, f64)  { return 46 }
+    if wide_float_format_identity_compatible(f64, t512)  { return 47 }
+
+    // (5) wide-float membership.
+    if !is_wide_float_type(t512) { return 48 }
+
+    // (6) name recognition — accept "f512", reject the siblings.
+    let n512 = wide_float_format_identity_name(t512)
+    if n512.len != 4 { return 49 }
+    if (n512.buf[0] as i64) != 102 { return 50 }   // 'f'
+    if (n512.buf[1] as i64) != 53  { return 51 }   // '5'
+    if (n512.buf[2] as i64) != 49  { return 52 }   // '1'
+    if (n512.buf[3] as i64) != 50  { return 53 }   // '2'
+    if !name_is_f512(n512) { return 54 }
+    let n128 = wide_float_format_identity_name(t128)
+    if name_is_f512(n128) { return 55 }
+    let n256 = wide_float_format_identity_name(t256)
+    if name_is_f512(n256) { return 56 }
+
+    // (7) multi-limb pool reports 8 limbs for f512 (storage_bits / 64).
+    // Pool cap is 8 limbs per payload (IR_WIDE_NUMERIC_MAX_LIMBS_PER_PAYLOAD),
+    // so f512 is at the cap — confirmed below.
+    let required = ir_wide_numeric_required_limb_count(numeric_format_binary512_id())
+    if required != 8 { return 57 }
+
+    // (8) the sibling identity probe still passes after adding f512.
+    let identity_probe = f128_f256_internal_identity_probe_code()
+    if identity_probe != 0 { return identity_probe }
+    let compatibility_probe = f128_f256_compatibility_probe_code()
+    if compatibility_probe != 0 { return compatibility_probe }
+
+    println("PASS f512_format_descriptor_probe")
+    0
+}
