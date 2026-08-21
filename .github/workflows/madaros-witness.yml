@@ -1,0 +1,54 @@
+name: Madaros witness
+
+# CI runs lean_single. The Full Test Suite prints
+# SOUNIO_TEST_SOUC_BIN=/tmp/souc-stage2, built from lean_single.sio by
+# selfhost_host_gate.sh, so every check that exists is blind to the modular
+# Madaros compiler -- which is what bin/souc resolves to and what users get.
+#
+# Measured 2026-08-21, all of it invisible to CI at the time: `let d: mg = 500.0`
+# could not bind at all under Madaros; a correct refinement alias and an
+# incorrect one drew the SAME diagnostic; and a first-order-variance regression
+# sat on main printing 0.000000 with no check reporting it.
+#
+# The full corpus cannot close this gap. 1773 programs serialised exceed the
+# 60-minute limit -- measured, the job was cancelled at 1h00m21s. Run parallel,
+# the raw ELF SIGSEGVs under memory pressure and invents regressions. So the
+# corpus stays a periodic Slurm sweep, and this small set is the per-PR gate.
+
+on:
+  pull_request:
+    paths:
+      - 'self-hosted/**'
+      - 'stdlib/**'
+      - 'scripts/ci/madaros_witness_set.list'
+      - 'scripts/ci/madaros_witness_gate.sh'
+      - '.github/workflows/madaros-witness.yml'
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: madaros-witness-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  witness:
+    name: Madaros witness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Madaros from source
+        run: |
+          ulimit -s 524288 || true
+          bash scripts/ci/build_modular_madaros.sh /tmp/madaros.elf
+          test -x /tmp/madaros.elf || { echo "no Madaros ELF produced"; exit 1; }
+          ls -l /tmp/madaros.elf
+
+      - name: Witness set
+        env:
+          SOUNIO_MADAROS_WITNESS_BIN: /tmp/madaros.elf
+        run: bash scripts/ci/madaros_witness_gate.sh
