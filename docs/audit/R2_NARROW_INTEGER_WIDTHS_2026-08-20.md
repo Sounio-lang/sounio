@@ -11,8 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.r2-narro
 
 **Filed:** 2026-08-20 - **Lane:** minimax-cli2 (worktree at
 `/workspace/.wt/minimax-cli2/r2-narrow-int-2026-08-20/`) - **Status:**
-semantic declaration filed before any self-hosted change; implementation
-deferred to a follow-up commit on this branch.
+semantic declaration filed; implementation landed across 5 follow-up
+commits; off-pod regression measurement is the remaining acceptance step.
 
 ## Semantic declaration (filed before any code change)
 
@@ -107,23 +107,46 @@ The 6-dimension declaration this work rests on:
 
 In scope (this PR, narrow-int semantics):
 
-- `i8`, `u8`, `i32`, `u32`: TypeKind already exists; HLIR kinds already
-  exist; defect is in the lowering, fix is in HLIR. Three sites.
-- `i7`, `i13`, `i999999`, `u3`, `u4096` and any other non-power-of-two
-  / non-spec width: refused at the parser with `E219` (mirrors `E218`'s
-  form for `f128`/`f256`). New diagnostic.
+- `i8`, `u8`, `i16`, `u16`, `i32`, `u32`: TypeKind + HlirType already
+  exist (i8/u8/i32/u32 pre-R2; i16/u16 added by this PR with the
+  appended-variant pattern that preserves every existing discriminant).
+  Defect is in the lowering, fix is in HLIR.
+- `i7`, `i13`, `i999999`, `u3`, `u4096` and any other non-spec width:
+  refused at the parser with `E219` (mirrors `E218`'s form for `f128`/
+  `f256`). New diagnostic.
 
 Out of scope (this PR, deferred):
 
-- `i16`, `u16`: TypeKind does not exist; would require adding `TyI16`/
-  `TyU16` and the corresponding HlirType kinds, which touches the
-  R1-wide-numeric pool indirectly (these widths would still be one-
-  register, but they currently route to `ty_wide_int`). Deferred.
 - `i128`, `u128`: multi-limb; R1's lane; off-limits.
 - `f128`, `f256`: already refused via `E218`; not changed.
 
 The PR will list these scope decisions in the body and the audit doc
 will not be updated to claim a wider scope than this.
+
+### Decision on i16/u16 (recorded after the original audit-doc commit)
+
+The original commit deferred i16/u16 to the founder, on the basis that
+adding `TyI16`/`TyU16` would cross into R1's wide-numeric pool. After
+further reading, the decision is: **narrow scope**. Reasons:
+
+1. The dispatch's evidence table lists `i16 20000 + 20000 -> -25536`.
+   That is a one-register two's-complement wrap, not R1's multi-limb
+   pool. Routing through `ty_wide_int()` would produce a different
+   value.
+2. `HlirTypeI16`/`HlirTypeU16` already exist in the tree; only the
+   checker-side `TypeKind` variants were missing. Adding two appended
+   variants (which preserves every existing discriminant, per the
+   pattern set by `TyI128`/`TyU128` and `TyF128`/`TyF256`) is a strictly
+   smaller diff than re-routing.
+3. The founder's "no second mechanism" rule says extend existing
+   mechanisms, not invent parallels. The narrow-int mask is the
+   existing mechanism for `i8`/`u8`/`i32`/`u32`; extending it to
+   `i16`/`u16` follows the rule. Routing through R1 would be the
+   second mechanism.
+4. The `i16/u16 -> ty_wide_int` routing is the same defect class as
+   `i7/i999999`: any `iN`/`uN` name silently maps to a non-semantic
+   path. The right fix is to give `i16/u16` real semantics in the
+   narrow path, parallel to `i8/u8`.
 
 ## Why recusa nomeada (mirroring E218)
 
@@ -143,28 +166,30 @@ reached for the rejected source.
 
 ## What changes
 
-(Not yet implemented. This section will be filled in as the
-implementation lands; the audit doc is filed before the code.)
+| File | Change | Status |
+|---|---|---|
+| `self-hosted/check/types.sio` | Append `TyI16`/`TyU16` to `TypeKind` (after `TyF256`, preserves every existing discriminant per the pattern set by `TyI128`/`TyU128`/`TyF128`/`TyF256`). Add `ty_i16()`/`ty_u16()` constructors. | landed |
+| `self-hosted/check/compat.sio` | Add `name_is_i16`/`name_is_u16` predicates. Extend `int_width_family` (signed: `{i8,i16,i32,i64}`; unsigned: `{u8,u16,u32,u64}`), `is_integer_type`, `is_numeric_type`. | landed |
+| `self-hosted/check/check.sio` | Route `i16`/`u16` to narrow kinds (before the `name_wide_int_bits` fallthrough that would otherwise send them to R1). Add `TyI16`/`TyU16` cases to `print_type_name` (exhaustive match over `TypeKind`). Add `mangle_append_type_name` cases. | landed |
+| `self-hosted/hlir/ir.sio` | `hlir_const_int`: mask `value` to the bit-width of `ty`, sign-extend for signed kinds. New helper `hlir_mask_value_to_int_type`. | landed |
+| `self-hosted/hlir/lower.sio` | `hlir_ast_binary_result_ty_typed`: return `lhs_ty` when it is a narrow integer kind; no longer fall through to `hlir_type_i64()`. | landed |
+| `self-hosted/hlir/builder.sio` | `hlir_builder_emit_binary`: after the binary op, if `ty` is narrower than i64, emit a const mask + bit-and that wraps the result. New helper `hlir_int_type_mask_bits`. | landed |
+| `self-hosted/parser/types.sio` | New `parser_reject_reserved_narrow_int_path` mirroring `parser_reject_reserved_wide_float_path`, with diagnostic `E219`. Hooked into the type-expression parser at both the generic-args and non-generic paths. | landed |
+| `tests/run-pass/os_teus_r2_*.sio` | One positive witness per width (`i8`, `u8`, `i16`, `i32`, `u32`), plus non-regression (`i64`, `f64`), plus the mandatory positive-control file. | landed |
+| `tests/compile-fail/r2_narrow_int_e219_*.sio` | One compile-fail per refused width (`i7`, `i13`, `i999999`, `u3`, `u4096`); `//@ error-pattern: E219`. | landed |
 
-| File | Change |
-|---|---|
-| `self-hosted/hlir/ir.sio` | `hlir_const_int`: mask `value` to the bit-width of `ty`; sign-extend for signed kinds. New helper `hlir_mask_value_to_int_type(value, ty)`. |
-| `self-hosted/hlir/lower.sio` | `hlir_ast_binary_result_ty_typed`: return `lhs_ty` when it is a narrow integer kind; no longer fall through to `hlir_type_i64()`. |
-| `self-hosted/hlir/builder.sio` | `hlir_builder_emit_binary`: after the binary op, if `ty` is narrower than i64, emit a const mask + bit-and that wraps the result. |
-| `self-hosted/parser/types.sio` | New `parser_reject_reserved_narrow_int_path` mirroring `parser_reject_reserved_wide_float_path`, with diagnostic `E219`. Hook into the type-expression parser. |
-| `tests/run-pass/os_teus_r2_*.sio` | One positive witness per width (`i8`, `u8`, `i32`, `u32`): `let x: i8 = 100 + 100; print(x);` prints `-56`, etc. Mandatory positive control: a deliberately wrong mask forces the witness to fail. |
-| `tests/compile-fail/r2_narrow_int_e219_*.sio` | One compile-fail per refused width (`i7`, `i13`, `i999999`, `u3`, `u4096`); `//@ error-pattern: E219`. |
+## Open questions deferred
 
-## Open questions deferred to the founder
-
-- `i16` / `u16` semantics: does the founder want them in narrow scope
-  (require `TyI16`/`TyU16` and the corresponding HLIR kinds, touching
-  R1's wide-numeric routing) or in R1's wide-numeric pool (one-register
-  but allocated from the multi-limb pool)? Dispatch's evidence table
-  lists i16 but the lane separation forbids touching R1.
-- The dispatch's evidence table shows `i16 20000 + 20000` should print
-  `-25536`. If `i16` stays in R1's pool, this PR does not produce that
-  result; if the founder wants it, the lane boundary must move.
+- i16/u16: **decided in this lane** (narrow scope). Reasons are in the
+  Scope section above. The original commit's "open question" was
+  resolved by reading the existing tree more carefully; no founder
+  input required.
+- Off-pod regression measurement: the founder's directive is "corre
+  a suite completa e reporta quantos testes mudam de resultado, com
+  os nomes." This is run from outside the pod via
+  `scripts/dev/souc-build-remote.sh --gate witness`. Per FLEET_CONSTRAINTS
+  it cannot run here. The PR lifts from DRAFT only after that count
+  is reported.
 
 ## FLEET_CONSTRAINTS check
 
