@@ -627,6 +627,38 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
         i = i + 1
     }
 
+    // Pass 1.5: WIDENING PRE-PASS, only when effect inference is enabled.
+    //
+    // Modules are checked in list order, so a caller in module 0 is checked
+    // before the body of its callee in module 1 has widened that callee's
+    // effect row. A DECLARED effect is already in the signature table from the
+    // collect pass and therefore crosses the boundary fine; an INFERRED one is
+    // only added while the callee's body is walked, and by then the importer
+    // has been and gone. The obligation does not get refused -- it disappears,
+    // rc=0, no diagnostic.
+    //
+    // Isolated 2026-08-21 with an A/B pair differing in one clause:
+    //
+    //   mid declares `with Panic`   -> top += Panic, main += Panic  (reaches)
+    //   mid infers  it              -> mid_calls += Panic, and stops
+    //
+    // This walks every body once with diagnostics suppressed, purely for the
+    // widening side effect, so the real pass below sees every signature at its
+    // fixed point. One extra pass covers one level of module indirection; a
+    // true fixpoint would iterate until nothing widens, and that is the honest
+    // next step if a three-module chain is found that still leaks.
+    if checker_effect_inference_enabled() {
+        (*checker_ptr).suppress_diagnostics = (*checker_ptr).suppress_diagnostics + 1
+        i = 0
+        while i < count && i < 256 {
+            (*checker_ptr).current_module = (*programs)[i as usize].module_path
+            (*checker_ptr).current_module_id = i
+            checker_check_items_mut(checker_ptr, (*programs)[i as usize].items)
+            i = i + 1
+        }
+        (*checker_ptr).suppress_diagnostics = (*checker_ptr).suppress_diagnostics - 1
+    }
+
     // Pass 2: check function bodies module-by-module, with current_module set
     // to the module being checked.  This is what makes E175/E176/E177 fire on
     // cross-module access to private items.

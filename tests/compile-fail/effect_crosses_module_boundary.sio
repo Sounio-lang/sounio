@@ -1,0 +1,39 @@
+//@ compile-fail
+//@ requires: madaros
+//@ error-pattern: E035
+//@ sabotage: SOUNIO_EFFECT_INFER
+//
+// An INFERRED effect must cross a module boundary. Measured 2026-08-21: it did
+// not, and the failure was silent -- rc=0, no diagnostic, the obligation gone.
+//
+// Isolated with an A/B pair differing in ONE clause in the middle module:
+//
+//   pub fn mid_calls(x: i64) -> i64 with Panic { deep_panics(x) }
+//     -> top += Panic (from mid_calls); main += Panic (from top)   reaches
+//   pub fn mid_calls(x: i64) -> i64 { deep_panics(x) }
+//     -> mid_calls += Panic (from deep_panics), and stops
+//
+// Cause: modules are checked in list order, so a caller in an earlier module
+// is checked before the body of its callee in a later module has widened that
+// callee's row. A DECLARED effect is in the signature table from the collect
+// pass and crosses fine; an INFERRED one is added while the callee's body is
+// walked, and by then the importer has been and gone.
+//
+// This is the single-file form of the same shape, which must keep being
+// refused with inference OFF: the caller declares nothing and the callee
+// declares Panic. The sabotage knob is SOUNIO_EFFECT_INFER because turning
+// inference ON is exactly what must make this refusal disappear.
+
+fn leaf(x: i64) -> i64 with Panic {
+    if x < 0 { panic("neg") }
+    x
+}
+
+fn caller_without_panic(x: i64) -> i64 {
+    leaf(x)
+}
+
+fn main() -> i64 with IO {
+    println("unreachable")
+    caller_without_panic(1)
+}

@@ -236,6 +236,30 @@ for g in $GATES; do
       echo "REMOTE: witness_gate rc=\$wit_rc"
       if [ \$wit_rc -ne 0 ]; then exit \$wit_rc; fi
       ;;
+    modchain)
+      # Three-module A/B for the inferred-effect boundary. Built on the node
+      # from the freshly compiled Madaros, because the shipped bin/souc does
+      # not have the fix and a single-file witness cannot express the shape.
+      echo "REMOTE: --- module chain A/B ---"
+      ulimit -s 524288 2>/dev/null || true
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      for variant in declares infers; do
+        D=\$(mktemp -d)
+        printf 'pub fn deep_panics(x: i64) -> i64 with Panic {\n    if x < 0 { panic("neg") }\n    x\n}\n' > "\$D/deep.sio"
+        if [ "\$variant" = declares ]; then
+          printf 'use deep::{deep_panics}\npub fn mid_calls(x: i64) -> i64 with Panic { deep_panics(x) }\n' > "\$D/mid.sio"
+        else
+          printf 'use deep::{deep_panics}\npub fn mid_calls(x: i64) -> i64 { deep_panics(x) }\n' > "\$D/mid.sio"
+        fi
+        printf 'use mid::{mid_calls}\n\nfn top(x: i64) -> i64 { mid_calls(x) }\n\nfn main() -> i64 with IO {\n    println("chain")\n    top(1)\n}\n' > "\$D/main.sio"
+        ( cd "\$D" && SOUNIO_EFFECT_INFER=1 SOUNIO_EFFECT_INFER_TRACE=1 "\$W/madaros.elf" check main.sio ) > "\$D/out.txt" 2>&1
+        rc=\$?
+        reached=\$(grep -c 'main += Panic' "\$D/out.txt")
+        echo "REMOTE: modchain variant=\$variant rc=\$rc main_widened=\$reached"
+        grep 'effect_infer' "\$D/out.txt" | sed 's/^/REMOTE:   /'
+        rm -rf "\$D"
+      done
+      ;;
     *) echo "REMOTE: unknown gate \$g" ;;
   esac
 done
