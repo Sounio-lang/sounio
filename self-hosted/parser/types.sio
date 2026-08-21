@@ -43,6 +43,57 @@ fn parser_reject_reserved_wide_float_path(mut_p: Parser, path: &AstPath, span: S
     p
 }
 
+// R2 narrow-integer recusa: refuse any iN/uN name that is NOT in the spec
+// set {i8, i16, i32, i64, i128, u8, u16, u32, u64, u128}. Mirrors the E218
+// pattern: parser marks the source invalid before checker, IR, SOIR, ABI,
+// or native lowering. Corpus scan: zero real width annotations match.
+// Examples refused: i7, i13, i999999, u3, u4096.
+// Examples accepted: i8, i16, i32, i64, i128, u8, u16, u32, u64, u128.
+fn parser_reject_reserved_narrow_int_path(mut_p: Parser, path: &AstPath, span: Span) -> Parser with Mut, IO {
+    if (*path).seg_count != 1 { return mut_p }
+    let buf = (*path).segments.head_buf
+    let head_len = (*path).segments.head_len
+    let c0 = buf[0] as i64
+    if c0 != 105 && c0 != 117 { return mut_p }  // not 'i' / 'u'
+    if head_len < 2 { return mut_p }
+    // Verify the remainder is all decimal digits (same shape as name_wide_int_bits).
+    var i: i64 = 1
+    while i < head_len {
+        let d = buf[i as usize] as i64
+        if d < 48 || d > 57 { return mut_p }
+        i = i + 1
+    }
+    // Parse the bit-width from the head bytes (digits at positions 1..head_len-1).
+    var bits: i64 = 0
+    var j: i64 = 1
+    while j < head_len {
+        bits = bits * 10 + ((buf[j as usize] as i64) - 48)
+        j = j + 1
+    }
+    // Spec-set membership. Allow exactly these widths; refuse anything else.
+    let is_spec_width =
+        bits == 8 || bits == 16 || bits == 32 || bits == 64 || bits == 128
+    if is_spec_width { return mut_p }
+
+    var p = mut_p
+    p.had_error = true
+    p.error_count = p.error_count + 1
+    print("error[E219]")
+    if span.start > 0 || span.end > 0 {
+        print(" at ")
+        print_int(span.start)
+        print("..")
+        print_int(span.end)
+    }
+    let kind_letter = if c0 == 105 { "i" } else { "u" }
+    print(": narrow integer width '")
+    print(kind_letter)
+    print_int(bits)
+    print("' is not in the spec set {8, 16, 32, 64, 128}; source values are unavailable in V0-A\n")
+    print("   = note: parser marks this source invalid before checker, IR, SOIR, ABI, or native lowering\n")
+    p
+}
+
 impl Parser {
     // ============================================================
     // Type expression entry point
@@ -286,7 +337,8 @@ impl Parser {
             let p2_end: i64 = if p2.pos < p2.token_count { PT_END[p2.pos as usize] } else { start.end }
             let span = Span { file_id: start.file_id, start: start.start, end: p2_end }
             let p3 = parser_reject_reserved_wide_float_path(pair2.0, &path, span)
-            (p3, TypeExpr {
+            let p4 = parser_reject_reserved_narrow_int_path(p3, &path, span)
+            (p4, TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
                 path: path,
@@ -302,7 +354,8 @@ impl Parser {
             let p1_end: i64 = if p1.pos < p1.token_count { PT_END[p1.pos as usize] } else { start.end }
             let span = Span { file_id: start.file_id, start: start.start, end: p1_end }
             let p2 = parser_reject_reserved_wide_float_path(p1, &path, span)
-            (p2, TypeExpr {
+            let p2a = parser_reject_reserved_narrow_int_path(p2, &path, span)
+            (p2a, TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
                 path: path,
