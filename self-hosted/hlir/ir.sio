@@ -729,13 +729,50 @@ pub fn hlir_const_int(value: i64, ty: HlirType) -> HlirConstant {
     HlirConstant {
         kind: HlirConstKind::HlirConstInt,
         bool_val: base.bool_val,
-        int_val: value,
+        int_val: hlir_mask_value_to_int_type(value, ty),
         float_val: base.float_val,
         string_val: base.string_val,
         ty: ty,
         elem_indices: base.elem_indices,
         elem_count: base.elem_count,
         ref_name: base.ref_name,
+    }
+}
+
+// R2: declared narrow integer width is now semantic. Mask `value` to the
+// bit-width that `ty` carries, then sign-extend back to 64 bits for signed
+// kinds so subsequent arithmetic on the loaded register works as expected
+// (e.g. 200 as i8 -> -56, not 200 as i8 -> 200 with silent i64 promotion).
+// i64/u64/i128/u128 return value unchanged. Float kinds are caller-error;
+// hlir_const_float is the right ctor for those.
+pub fn hlir_mask_value_to_int_type(value: i64, ty: HlirType) -> i64 with Panic, Div {
+    var bits: i64 = 64
+    var is_signed: bool = true
+    if ty.kind == HlirTypeKind::HlirTypeI8 { bits = 8; is_signed = true }
+    else if ty.kind == HlirTypeKind::HlirTypeI16 { bits = 16; is_signed = true }
+    else if ty.kind == HlirTypeKind::HlirTypeI32 { bits = 32; is_signed = true }
+    else if ty.kind == HlirTypeKind::HlirTypeU8 { bits = 8; is_signed = false }
+    else if ty.kind == HlirTypeKind::HlirTypeU16 { bits = 16; is_signed = false }
+    else if ty.kind == HlirTypeKind::HlirTypeU32 { bits = 32; is_signed = false }
+    else { return value }  // i64/u64/i128/u128 + floats: untouched
+
+    // Build the mask: (1 << bits) - 1. For bits == 64, shift overflows, so the
+    // mask is -1 (all bits set), which is also the no-op identity.
+    var mask: i64 = 0
+    if bits >= 64 { mask = 0 - 1 } else { mask = (1 << bits) - 1 }
+    let masked: i64 = value & mask
+
+    if is_signed {
+        // Sign-extend bit (bits-1) to the top of the i64 register. If the bit
+        // is set, OR with the inverted mask, which fills bits [bits..63] with 1.
+        let sign_bit: i64 = (masked >> (bits - 1)) & 1
+        if sign_bit == 1 && bits < 64 {
+            masked | (mask ^ (0 - 1))
+        } else {
+            masked
+        }
+    } else {
+        masked
     }
 }
 
