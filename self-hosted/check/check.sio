@@ -303,6 +303,13 @@ pub struct Checker {
     last_literal_int: i64,
     last_literal_float: f64,
     last_literal_kind: i64,   // 0=none, 1=int, 2=float
+    // R-ORIGIN scratch: the provenance kind of the Knowledge annotation most
+    // recently lowered, or -1. Same pattern as last_literal_kind, and for the
+    // same reason: TypeEntry carries knowledge_epsilon and nothing else, so
+    // checker_lower_knowledge_type_mut is the last place the written
+    // provenance exists. Without stashing it here the binding-init check
+    // cannot see what the author claimed.
+    last_knowledge_provenance: i64,
     escape_provenance: i64,   // tail-expr escape provenance: 0=safe, 1=local ref escapes the frame
     loop_depth: i64,
     suppress_linear_consume_depth: i64,
@@ -1270,6 +1277,7 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         last_literal_int: 0,
         last_literal_float: 0.0,
         last_literal_kind: 0,
+        last_knowledge_provenance: 0 - 1,
         escape_provenance: 0,
         loop_depth: 0,
         suppress_linear_consume_depth: 0,
@@ -1372,6 +1380,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).last_literal_int = 0
     (*raw).last_literal_float = 0.0
     (*raw).last_literal_kind = 0
+    (*raw).last_knowledge_provenance = 0 - 1
     (*raw).escape_provenance = 0
     (*raw).loop_depth = 0
     (*raw).suppress_linear_consume_depth = 0
@@ -1955,6 +1964,8 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             if !knowledge_meta_is_valid(meta) {
                 checker_note_type_error_mut(c)
             }
+            let prov_written = knowledge_meta_provenance(meta)
+            (*c).last_knowledge_provenance = prov_written.kind
             var eps_val: f64 = -1.0
             match info.epsilon {
                 Some(eb) => {
@@ -8873,6 +8884,48 @@ fn checker_check_binding_init_expr_bridge(c: *mut Checker, opt: Option<Box<Expr>
 // *mut binding-init dispatch: simple exprs run on the *mut expr spine (which
 // handles IntLit inline and sets last_literal_*); epistemic cases bridge.
 fn checker_check_binding_init_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >, ann_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // R-ORIGIN. A computed value may not claim it was obtained.
+    //
+    // Measured, Literature, Source and Input are claims about where a value
+    // CAME FROM. Arithmetic does not obtain a value from anywhere -- nobody
+    // measured a sum. Ascribing one of those four to the result of a Knowledge
+    // arithmetic operation is origin laundering: a Literature quantity goes in,
+    // some arithmetic happens, and a Measured quantity comes out with nobody
+    // having measured anything.
+    //
+    // Checked HERE, at the annotated binding, because this is the last point
+    // where both halves exist at once: ann_ty carries the annotation and
+    // (*c).last_knowledge_provenance carries what the author wrote, while
+    // (*e).kind still says whether the right-hand side is arithmetic. TypeEntry
+    // does not persist provenance, so a later check has nothing to read.
+    //
+    // Derived (and absent) stay legal on an arithmetic result. Computed on an
+    // arithmetic result is a ruling owed and is NOT refused here.
+    if ann_ty.kind == TypeKind::TyKnowledge {
+        let claimed = (*c).last_knowledge_provenance
+        // Source=1, Literature=3, Measured=4, Input=5 (check/epistemic.sio:217-222).
+        // Derived=0 and Computed=2 are excluded deliberately: they do not claim
+        // the value was obtained from anywhere.
+        let claims_origin = claimed == PROVENANCE_KIND_SOURCE
+            || claimed == PROVENANCE_KIND_LITERATURE
+            || claimed == PROVENANCE_KIND_MEASURED
+            || claimed == PROVENANCE_KIND_INPUT
+        if claims_origin {
+            match opt {
+                Some(re) => {
+                    if (*re).kind == ExprKind::ExprBinary {
+                        let op = (*re).bin_op
+                        let is_arith = op == BinaryOp::OpAdd || op == BinaryOp::OpSub
+                            || op == BinaryOp::OpMul || op == BinaryOp::OpDiv
+                        if is_arith {
+                            checker_report_error_at_inplace(c, (*re).span, 222, 0, 0, 0)
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+    }
     match opt {
         Some(e) => {
             if (*e).kind == ExprKind::ExprPath && ann_ty.kind == TypeKind::TyNamed {
@@ -13433,6 +13486,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
     else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
+    else if code == 222 { print("a computed value may not claim it was obtained") }
     else { print("unknown error") }
 }
 
@@ -13719,6 +13773,12 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 219 {
         print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system, read_i64, write_i64, read_f64, write_f64\n")
+    }
+    else if code == 222 {
+        print("   |\n   = help: R-ORIGIN. Measured, Literature, Source and Input are claims about")
+        print("\n   =       where a value CAME FROM. Arithmetic does not obtain a value from")
+        print("\n   =       anywhere -- nobody measured a sum. Ascribe Derived to a computed")
+        print("\n   =       result, or leave the provenance off.\n")
     }
     else {
         // No help available for unknown errors
