@@ -29,3 +29,43 @@ jobs:
       - uses: actions/checkout@v4
       - name: R7 origin acceptance
         run: bash scripts/ci/eisa_origin_gate.sh
+      - name: Negative control -- RSS-only eadd must fail the gate
+        run: |
+          set -euo pipefail
+          cp stdlib/eisa/core.sio /tmp/eisa-core.bak
+          restore() { cp /tmp/eisa-core.bak stdlib/eisa/core.sio; }
+          trap restore EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("stdlib/eisa/core.sio")
+          s = p.read_text()
+          old = """fn eisa_u_add_sub(x: EReg, y: EReg) -> f64 with Mut, Div {
+              if eisa_origins_correlated(x.origin, y.origin) != 0 {
+                  x.u + y.u
+              } else {
+                  eisa_sqrt_f64(x.u * x.u + y.u * y.u)
+              }
+          }"""
+          new = """fn eisa_u_add_sub(x: EReg, y: EReg) -> f64 with Mut, Div {
+              eisa_sqrt_f64(x.u * x.u + y.u * y.u)
+          }"""
+          if old not in s:
+              raise SystemExit("NEGATIVE_CONTROL_FAIL hook text not found")
+          p.write_text(s.replace(old, new, 1))
+          PY
+          set +e
+          bash scripts/ci/eisa_origin_gate.sh > /tmp/eisa-origin-neg.log 2>&1
+          rc=$?
+          set -e
+          if [[ $rc -eq 0 ]]; then
+            echo "NEGATIVE_CONTROL_FAIL the gate passed after RSS-only sabotage"
+            cat /tmp/eisa-origin-neg.log
+            exit 1
+          fi
+          grep -q 'EISA_ORIGIN_GATE_FAIL' /tmp/eisa-origin-neg.log || {
+            echo "NEGATIVE_CONTROL_FAIL it failed, but not for the GUM reason"
+            cat /tmp/eisa-origin-neg.log
+            exit 1
+          }
+          echo "NEGATIVE_CONTROL_PASS"
+
