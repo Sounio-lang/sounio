@@ -26,6 +26,8 @@
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
 #   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
+#   SOUNIO_WITNESS_GLOB='tests/compiler/foo/*.sio' \
+#     scripts/dev/souc-build-remote.sh --gate witness      # + task witness gate
 #   scripts/dev/souc-build-remote.sh --gate full --gate corpus
 #   SOUNIO_REMOTE_PARTITION=cpu-ops SOUNIO_REMOTE_CPUS=32 ...
 #
@@ -141,38 +143,45 @@ for g in $GATES; do
       export SOUNIO_STDLIB_PATH="\$W/stdlib"
       ulimit -s 524288 2>/dev/null || true
       WITNESS_GLOB="${SOUNIO_WITNESS_GLOB:-tests/run-pass/r1_i*_lorenz_peak.sio}"
-      wit_rc=0
-      for src in \$W/\$WITNESS_GLOB; do
-        echo "REMOTE: witness src=\$src"
-        # Positive control: sabotaged mul MUST fail the fixture.
-        out_bad=/tmp/witness-bad-\$\$.elf
-        SOUNIO_WIDE_MUL_SABOTAGE=1 "\$W/madaros.elf" build "\$src" "\$out_bad"
-        if [ \$? -eq 0 ]; then
-          chmod +x "\$out_bad"
-          "\$out_bad"
-          bad_rc=\$?
-          echo "REMOTE: sabotage run rc=\$bad_rc (must be non-zero)"
-          if [ \$bad_rc -eq 0 ]; then
-            echo "REMOTE: CONTROL_FAIL witness passed under sabotaged mul"
-            wit_rc=2
-            continue
+      if [ "\$WITNESS_GLOB" = 'tests/compiler/epistemic_payload_gate/*.sio' ]; then
+        MADAROS_RAW_BIN="\$W/madaros.elf" \
+          SOUNIO_WITNESS_GLOB="\$WITNESS_GLOB" \
+          bash scripts/ci/madaros_epistemic_payload_gate.sh 2>&1
+        wit_rc=\$?
+      else
+        wit_rc=0
+        for src in \$W/\$WITNESS_GLOB; do
+          echo "REMOTE: witness src=\$src"
+          # Positive control: sabotaged mul MUST fail the fixture.
+          out_bad=/tmp/witness-bad-\$\$.elf
+          SOUNIO_WIDE_MUL_SABOTAGE=1 "\$W/madaros.elf" build "\$src" "\$out_bad"
+          if [ \$? -eq 0 ]; then
+            chmod +x "\$out_bad"
+            "\$out_bad"
+            bad_rc=\$?
+            echo "REMOTE: sabotage run rc=\$bad_rc (must be non-zero)"
+            if [ \$bad_rc -eq 0 ]; then
+              echo "REMOTE: CONTROL_FAIL witness passed under sabotaged mul"
+              wit_rc=2
+              continue
+            fi
+            echo "REMOTE: CONTROL_PASS"
+          else
+            echo "REMOTE: sabotage build failed; treating as control pass (compile refused)"
           fi
-          echo "REMOTE: CONTROL_PASS"
-        else
-          echo "REMOTE: sabotage build failed; treating as control pass (compile refused)"
-        fi
-        out=/tmp/witness-\$\$.elf
-        unset SOUNIO_WIDE_MUL_SABOTAGE
-        "\$W/madaros.elf" build "\$src" "\$out"
-        b_rc=\$?
-        echo "REMOTE: witness build rc=\$b_rc"
-        if [ \$b_rc -ne 0 ]; then wit_rc=\$b_rc; continue; fi
-        chmod +x "\$out"
-        "\$out"
-        r_rc=\$?
-        echo "REMOTE: witness run rc=\$r_rc"
-        if [ \$r_rc -ne 0 ]; then wit_rc=\$r_rc; fi
-      done
+          out=/tmp/witness-\$\$.elf
+          unset SOUNIO_WIDE_MUL_SABOTAGE
+          "\$W/madaros.elf" build "\$src" "\$out"
+          b_rc=\$?
+          echo "REMOTE: witness build rc=\$b_rc"
+          if [ \$b_rc -ne 0 ]; then wit_rc=\$b_rc; continue; fi
+          chmod +x "\$out"
+          "\$out"
+          r_rc=\$?
+          echo "REMOTE: witness run rc=\$r_rc"
+          if [ \$r_rc -ne 0 ]; then wit_rc=\$r_rc; fi
+        done
+      fi
       echo "REMOTE: witness_gate rc=\$wit_rc"
       if [ \$wit_rc -ne 0 ]; then exit \$wit_rc; fi
       ;;
@@ -184,7 +193,7 @@ REMOTE
 )
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
-PAYLOAD="self-hosted stdlib bin/souc-linux-x86_64 scripts"
+PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
 case "$GATES" in *full*|*corpus*|*witness*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
