@@ -113,13 +113,13 @@ for g in $GATES; do
   case "\$g" in
     full)
       echo "REMOTE: --- madaros_full_gate ---"
-      MADAROS_RAW_BIN="\$W/madaros.elf" bash scripts/ci/madaros_full_gate.sh 2>&1 | tail -20
+      MADAROS_RAW_BIN="\$W/madaros.elf" bash scripts/ci/madaros_full_gate.sh 2>&1 | tail -${SOUNIO_REMOTE_TAIL:-20}
       echo "REMOTE: full_gate rc=\$?"
       ;;
     corpus)
       echo "REMOTE: --- corpus regression gate ---"
       SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS=\$(nproc) \\
-        bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -25
+        bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -${SOUNIO_REMOTE_TAIL:-25}
       echo "REMOTE: corpus_gate rc=\$?"
       ;;
     check)
