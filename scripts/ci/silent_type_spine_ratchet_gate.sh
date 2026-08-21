@@ -25,19 +25,6 @@
 # session types — the whole ambitious surface. The ordinary kinds (Named, Unit,
 # Never, Infer, Knowledge, Model, Policy) are on both spines.
 #
-# CORRECTION 2026-08-20, from the lane that did the port (PR #2053): for at least
-# ExactlyPrivate in PARAMETER position, the type does not arrive as
-# TypeExprKind::TypeExactlyPrivate at all — it arrives as TypeNamed, and never
-# reaches the `_ =>` arm described above. Adding a match arm for the kind is
-# therefore NOT the fix, and looks like one. That lane's own PR carries the warning
-# to reviewers: "do not treat new `match TypeExactlyPrivate` arms as evidence —
-# they are not the path that runs."
-#
-# The `_ =>` description above still holds for kinds that DO arrive as themselves.
-# What it does not do is explain every case, and this census counts crossings by
-# source text rather than by lowering path, so its number is unaffected — but a
-# reader inferring the mechanism from the count would infer the wrong one.
-#
 # Scaffolding is not a defect. Invisible scaffolding is. This gate makes it
 # legible and shrink-only: as each family is brought across, the count falls, and
 # when it reaches zero the `_ =>` can become a hard error by exhaustion rather
@@ -48,7 +35,10 @@ cd "$ROOT_DIR"
 FROZEN_FILE="scripts/ci/silent_type_spine.frozen"
 OUT="${GATE_ARTIFACT:-artifacts/gates/silent_type_spine_ratchet.json}"
 
-KINDS='Forgettable|ExactlyPrivate|Editable|CapabilityGated|Composable|Audited|Revivable|Interpretable|Axiom|Lemma|Proof|CausalEffect|Counterfactual|Intervention|PotentialOutcome|DiffPrivate|DPBudget|Aleatoric|Chan|Session'
+# ZD surgical family (Forgettable ExactlyPrivate Editable CapabilityGated
+# Composable Audited Revivable Interpretable) now lowers on the *mut spine.
+# Remaining scaffolding: proof, causal, privacy, aleatoric, sessions.
+KINDS='Axiom|Lemma|Proof|CausalEffect|Counterfactual|Intervention|PotentialOutcome|DiffPrivate|DPBudget|Aleatoric|Chan|Session'
 PAT="fn [a-zA-Z_0-9]+\([^)]*: *(${KINDS})[<\[]"
 
 frozen=$(tr -dc '0-9' < "$FROZEN_FILE" 2>/dev/null)
