@@ -199,10 +199,23 @@ for g in $GATES; do
 
         if [ \$b_rc -ne 0 ]; then wit_rc=\$b_rc; continue; fi
         chmod +x "\$out"
-        "\$out"
+        out_txt=\$("\$out" 2>&1)
         r_rc=\$?
         echo "REMOTE: witness run rc=\$r_rc"
         if [ \$r_rc -ne 0 ]; then wit_rc=\$r_rc; continue; fi
+        # expect-stdout, which this gate could not see before. A test that
+        # exits 0 and prints the wrong number passes every check here unless
+        # the marker is compared -- and that is exactly the failure class of
+        # the madaros_gum_fo_* family: rc=0, wrong value.
+        marker=\$(sed -n 's|^//@[[:space:]]*expect-stdout:[[:space:]]*||p' "\$src" | head -1)
+        if [ -n "\$marker" ]; then
+          case "\$out_txt" in
+            *"\$marker"*) echo "REMOTE: WITNESS_PASS stdout carries: \$marker" ;;
+            *) echo "REMOTE: WITNESS_FAIL stdout missing: \$marker"
+               echo "\$out_txt" | head -4 | sed 's/^/REMOTE:   got: /'
+               wit_rc=1; continue ;;
+          esac
+        fi
 
         # If the sabotaged build is byte-identical to the clean one, the knob
         # never reached this code. That is inapplicable, not a vacuous witness,
