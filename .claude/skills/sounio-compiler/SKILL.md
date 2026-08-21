@@ -28,7 +28,7 @@ reasoning on top of an instrument that was never checked**. Before any claim:
 | probe | why it is void |
 |---|---|
 | `fn f(x: T)` with no caller | passes for any `T`, invented ones included |
-| `with <invented effect>` | accepted on both engines, propagates nothing |
+| `with <invented effect>` | accepted **by Madaros** (`check: OK`) and propagates nothing. **Not both engines** — `lean_single` refuses it: `error: effect not declared in function signature`, rc=1. Measured 2026-08-21 with `with Zorblex`. lean_single is the stricter engine here, so a probe that looks void under Madaros may be caught by the seed. |
 | an invented field beside a valid one in a `Knowledge` literal | one recognised name (`value`) licenses all the others |
 | a top-level block with invented syntax | `lean_single` skips it in silence and still emits an ELF |
 | `./bin/souc check` after editing `self-hosted/` | **`bin/souc` is PREBUILT.** Source edits do not change it. Build first. |
@@ -42,10 +42,14 @@ reasoning on top of an instrument that was never checked**. Before any claim:
 ## 3. Two engines, and they disagree
 
 `bin/souc` is **Madaros** (default). `SOUNIO_SOUC_ENGINE=lean_single` is the
-bootstrap seed, and **it is what CI actually runs**. They diverge on accept /
+bootstrap seed, and **it is what CI actually runs** — the Full Test Suite job
+prints `SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2`, and `selfhost_host_gate.sh`
+builds that stage2 from `lean_single.sio`. They diverge on accept /
 reject, on `~`, on ε polarity, on printed variance. **Never quote a green without
-naming the engine.** `lean_single` mutes 35+ diagnostic classes for `from_import`
-functions — build exit 0 is not typecheck clean.
+naming the engine.** `lean_single` mutes diagnostic classes for `from_import`
+functions — build exit 0 is not typecheck clean. (The "35+" figure comes from an
+earlier session's note, not from a measurement made here; treat the direction as
+solid and the number as needing a re-count before you quote it.)
 
 ## 4. Building
 
@@ -63,8 +67,10 @@ bash scripts/dev/souc-build-remote.sh
 - `souc-build-remote.sh` streams the **live tree** into `tar`. Switching branches
   during a run poisons it, and the poisoned read **passes** instead of failing.
   Use a second worktree for concurrent work.
-- Raise the soft stack to 524288. `madaros run` needs 4× the stack of
-  compile-then-execute; CI reports that crash as a 30s timeout.
+- Raise the soft stack to 524288. `madaros run` needs more stack than
+  compile-then-execute, and CI has reported that crash as a timeout rather than a
+  segfault. (The "4×" and "30s" come from an earlier session's note; the practice
+  — raise the stack — is what matters, the figures need re-measuring.)
 
 ## 5. Where things run
 
