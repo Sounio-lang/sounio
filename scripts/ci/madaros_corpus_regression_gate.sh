@@ -51,6 +51,30 @@ fail() {
 [[ -n "$MADAROS" ]] || fail "SOUNIO_MADAROS_CORPUS_BIN must name a current-source Madaros ELF"
 [[ -x "$MADAROS" ]] || fail "not executable: $MADAROS"
 
+# The raw Madaros ELF needs far more stack than the default 8 MB. bin/souc
+# raises it; this gate invokes the ELF directly and did not, so every compile
+# SIGSEGVed and the gate reported the whole corpus as regressed.
+#
+# Measured 2026-08-21 on tests/run-pass/refinement_return.sio, same ELF, same
+# file, one variable:
+#     ulimit -s 8192     -> rc=139 (SIGSEGV)
+#     ulimit -s 524288   -> rc=0
+#
+# The symptom was 1510 "regressions" against a 284-entry baseline, IDENTICAL
+# across nproc-parallel, 4-parallel and inference-on runs, and identical on
+# main with no change at all -- a deterministic crash wearing the costume of a
+# semantic regression. A number that does not move when you turn a knob is the
+# signature of a wrong cause.
+#
+# Fail loudly rather than silently continuing at 8 MB: a corpus gate that
+# cannot raise its stack measures nothing, and this gate exists precisely
+# because CI's lean_single suite cannot see Madaros regressions.
+if ! ulimit -s 524288 2>/dev/null; then
+  ulimit -s unlimited 2>/dev/null \
+    || fail "cannot raise the stack to 524288 KiB; the raw Madaros ELF will SIGSEGV on every compile"
+fi
+echo "[madaros-corpus] stack: $(ulimit -s) KiB"
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-madaros-corpus.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 

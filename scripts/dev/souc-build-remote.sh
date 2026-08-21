@@ -26,8 +26,6 @@
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
 #   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
-#   SOUNIO_WITNESS_GLOB='tests/compiler/foo/*.sio' \
-#     scripts/dev/souc-build-remote.sh --gate witness      # + task witness gate
 #   scripts/dev/souc-build-remote.sh --gate full --gate corpus
 #   SOUNIO_REMOTE_PARTITION=cpu-ops SOUNIO_REMOTE_CPUS=32 ...
 #
@@ -115,13 +113,18 @@ for g in $GATES; do
   case "\$g" in
     full)
       echo "REMOTE: --- madaros_full_gate ---"
-      MADAROS_RAW_BIN="\$W/madaros.elf" bash scripts/ci/madaros_full_gate.sh 2>&1 | tail -20
+      MADAROS_RAW_BIN="\$W/madaros.elf" bash scripts/ci/madaros_full_gate.sh 2>&1 | tail -${SOUNIO_REMOTE_TAIL:-20}
       echo "REMOTE: full_gate rc=\$?"
       ;;
     corpus)
       echo "REMOTE: --- corpus regression gate ---"
-      SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS=\$(nproc) \\
-        bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -25
+        # Belt and braces: the gate raises this itself now, but the raw Madaros
+        # ELF SIGSEGVs at the default 8 MB, and that failure wears the costume of
+        # a semantic regression -- 1510 files, identical every run. 2026-08-21.
+        ulimit -s 524288 2>/dev/null || true
+      SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS="${SOUNIO_TEST_JOBS:-4}" \\
+        SOUNIO_EFFECT_INFER="${SOUNIO_EFFECT_INFER:-}" SOUNIO_EFFECT_INFER_TRACE="${SOUNIO_EFFECT_INFER_TRACE:-}" \
+        bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -${SOUNIO_REMOTE_TAIL:-25}
       echo "REMOTE: corpus_gate rc=\$?"
       ;;
     check)
@@ -143,45 +146,93 @@ for g in $GATES; do
       export SOUNIO_STDLIB_PATH="\$W/stdlib"
       ulimit -s 524288 2>/dev/null || true
       WITNESS_GLOB="${SOUNIO_WITNESS_GLOB:-tests/run-pass/r1_i*_lorenz_peak.sio}"
-      if [ "\$WITNESS_GLOB" = 'tests/compiler/epistemic_payload_gate/*.sio' ]; then
-        MADAROS_RAW_BIN="\$W/madaros.elf" \
-          SOUNIO_WITNESS_GLOB="\$WITNESS_GLOB" \
-          bash scripts/ci/madaros_epistemic_payload_gate.sh 2>&1
-        wit_rc=\$?
-      else
-        wit_rc=0
-        for src in \$W/\$WITNESS_GLOB; do
-          echo "REMOTE: witness src=\$src"
-          # Positive control: sabotaged mul MUST fail the fixture.
-          out_bad=/tmp/witness-bad-\$\$.elf
-          SOUNIO_WIDE_MUL_SABOTAGE=1 "\$W/madaros.elf" build "\$src" "\$out_bad"
-          if [ \$? -eq 0 ]; then
-            chmod +x "\$out_bad"
-            "\$out_bad"
-            bad_rc=\$?
-            echo "REMOTE: sabotage run rc=\$bad_rc (must be non-zero)"
-            if [ \$bad_rc -eq 0 ]; then
-              echo "REMOTE: CONTROL_FAIL witness passed under sabotaged mul"
-              wit_rc=2
-              continue
-            fi
-            echo "REMOTE: CONTROL_PASS"
-          else
-            echo "REMOTE: sabotage build failed; treating as control pass (compile refused)"
+      wit_rc=0
+      for src in \$W/\$WITNESS_GLOB; do
+        echo "REMOTE: witness src=\$src"
+        # The harness annotations decide what this witness IS. Reading them is
+        # not optional: without them a compile-fail witness is scored as a
+        # broken build, and its refusal -- the entire point -- reads as failure.
+        want_fail=0
+        grep -qE '^//@[[:space:]]*compile-fail' "\$src" && want_fail=1
+        pat=\$(sed -n 's|^//@[[:space:]]*error-pattern:[[:space:]]*||p' "\$src" | head -1)
+        # Each witness names the knob that must break it. The default perturbs
+        # WIDE multiply, which reaches nothing outside 256/512-bit arithmetic.
+        # Applying it to any other witness and calling the pass CONTROL_FAIL
+        # blames the witness for the sabotage being inapplicable.
+        has_knob=0
+        grep -qE '^//@[[:space:]]*sabotage:' "\$src" && has_knob=1
+        knob=\$(sed -n 's|^//@[[:space:]]*sabotage:[[:space:]]*||p' "\$src" | head -1)
+        [ -z "\$knob" ] && knob=SOUNIO_WIDE_MUL_SABOTAGE
+        kind=run-pass; [ \$want_fail -eq 1 ] && kind=compile-fail
+        echo "REMOTE: witness kind=\$kind sabotage=\$knob"
+
+        out=/tmp/witness-\$\$.elf
+        log=/tmp/witness-\$\$.log
+        env -u SOUNIO_WIDE_MUL_SABOTAGE "\$W/madaros.elf" build "\$src" "\$out" > "\$log" 2>&1
+        b_rc=\$?
+        echo "REMOTE: witness build rc=\$b_rc"
+        grep -E 'error\[E[0-9]+\]' "\$log" | head -4 | sed 's/^/REMOTE:   /'
+
+        if [ \$want_fail -eq 1 ]; then
+          if [ \$b_rc -eq 0 ]; then
+            echo "REMOTE: WITNESS_FAIL compile-fail witness built cleanly"
+            wit_rc=1; continue
           fi
-          out=/tmp/witness-\$\$.elf
-          unset SOUNIO_WIDE_MUL_SABOTAGE
-          "\$W/madaros.elf" build "\$src" "\$out"
-          b_rc=\$?
-          echo "REMOTE: witness build rc=\$b_rc"
-          if [ \$b_rc -ne 0 ]; then wit_rc=\$b_rc; continue; fi
-          chmod +x "\$out"
-          "\$out"
-          r_rc=\$?
-          echo "REMOTE: witness run rc=\$r_rc"
-          if [ \$r_rc -ne 0 ]; then wit_rc=\$r_rc; fi
-        done
-      fi
+          if [ -n "\$pat" ] && ! grep -qF "\$pat" "\$log"; then
+            echo "REMOTE: WITNESS_FAIL refused, but not for the declared reason: \$pat"
+            wit_rc=1; continue
+          fi
+          echo "REMOTE: WITNESS_PASS refused with \$pat"
+          # A refusal cannot be controlled by "it also failed under sabotage" --
+          # it fails either way, so that control is satisfied automatically and
+          # proves nothing. Only a knob that makes the refusal DISAPPEAR shows
+          # the rule under test is what refused.
+          if [ \$has_knob -eq 0 ]; then
+            echo "REMOTE: CONTROL_ABSENT no //@ sabotage: knob -- refusal unproven, not proven"
+          else
+            env "\$knob=1" "\$W/madaros.elf" build "\$src" "\$out.sab" > "\$log.sab" 2>&1
+            if [ \$? -eq 0 ]; then echo "REMOTE: CONTROL_PASS refusal disappears under \$knob"
+            else echo "REMOTE: CONTROL_INAPPLICABLE \$knob does not reach this refusal"; fi
+          fi
+          continue
+        fi
+
+        if [ \$b_rc -ne 0 ]; then wit_rc=\$b_rc; continue; fi
+        chmod +x "\$out"
+        "\$out"
+        r_rc=\$?
+        echo "REMOTE: witness run rc=\$r_rc"
+        if [ \$r_rc -ne 0 ]; then wit_rc=\$r_rc; continue; fi
+
+        # If the sabotaged build is byte-identical to the clean one, the knob
+        # never reached this code. That is inapplicable, not a vacuous witness,
+        # and saying which is the difference between a real alarm and one every
+        # future lane learns to ignore.
+        out_bad=/tmp/witness-bad-\$\$.elf
+        env "\$knob=1" "\$W/madaros.elf" build "\$src" "\$out_bad" > /dev/null 2>&1
+        if [ \$? -ne 0 ]; then
+          echo "REMOTE: CONTROL_PASS sabotaged build refused"
+        elif cmp -s "\$out" "\$out_bad"; then
+          # A DECLARED knob that does not bite is a false claim of control, and
+          # that is red. The DEFAULT knob not biting is merely no control, which
+          # is the same false alarm under a new name if it fails the gate.
+          if [ \$has_knob -eq 1 ]; then
+            echo "REMOTE: CONTROL_FAIL declared knob \$knob left the ELF byte-identical"
+            wit_rc=3
+          else
+            echo "REMOTE: CONTROL_ABSENT default \$knob does not reach this witness -- declare //@ sabotage:"
+          fi
+        else
+          chmod +x "\$out_bad"; "\$out_bad"; bad_rc=\$?
+          echo "REMOTE: sabotage run rc=\$bad_rc (must be non-zero)"
+          if [ \$bad_rc -eq 0 ]; then
+            echo "REMOTE: CONTROL_FAIL witness passed under sabotaged \$knob"
+            wit_rc=2
+          else
+            echo "REMOTE: CONTROL_PASS"
+          fi
+        fi
+      done
       echo "REMOTE: witness_gate rc=\$wit_rc"
       if [ \$wit_rc -ne 0 ]; then exit \$wit_rc; fi
       ;;
@@ -193,7 +244,7 @@ REMOTE
 )
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
-PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
+PAYLOAD="self-hosted stdlib bin/souc-linux-x86_64 scripts"
 case "$GATES" in *full*|*corpus*|*witness*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \

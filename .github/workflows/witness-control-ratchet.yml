@@ -1,0 +1,50 @@
+name: Witness control ratchet
+
+# A witness exists to FAIL when a rule stops working. If nothing can make it
+# fall, it is a test that happens to pass, and it will keep passing after the
+# rule it was written for has been deleted.
+#
+# This gate freezes the count of declared witnesses carrying no
+# `//@ sabotage:` knob and fails the next one (founder ruling 2026-08-20).
+# No existing witness turns red; no new witness enters without a control.
+#
+# Dedicated workflow, and not continue-on-error: this ratchet is green today
+# and must stay green. A gate that is not reachable is not a gate (#1994) --
+# which is exactly what was measured of the witness gate itself: its glob
+# SOUNIO_WITNESS_GLOB was named in no workflow at all.
+
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: witness-control-ratchet-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  witness-control:
+    name: Witness control ratchet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ratchet
+        run: bash scripts/ci/witness_control_ratchet_gate.sh
+      - name: Negative control -- an unannotated witness must fail the gate
+        run: |
+          cp scripts/ci/witnesses.list /tmp/wl.bak
+          echo 'tests/compile-fail/effects_unhandled.sio' >> scripts/ci/witnesses.list
+          if bash scripts/ci/witness_control_ratchet_gate.sh > /tmp/neg.log 2>&1; then
+            echo "NEGATIVE_CONTROL_FAIL the gate passed with an unannotated witness added"
+            cp /tmp/wl.bak scripts/ci/witnesses.list
+            exit 1
+          fi
+          grep -q 'WITNESS_CONTROL_FAIL rose' /tmp/neg.log || {
+            echo "NEGATIVE_CONTROL_FAIL it failed, but not for the ratchet reason"
+            cat /tmp/neg.log; cp /tmp/wl.bak scripts/ci/witnesses.list; exit 1; }
+          cp /tmp/wl.bak scripts/ci/witnesses.list
+          echo "NEGATIVE_CONTROL_PASS"

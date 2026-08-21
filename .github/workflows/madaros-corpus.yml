@@ -1,0 +1,60 @@
+name: Madaros corpus
+
+# The engine gap, closed. Founder ruling 2026-08-21.
+#
+# Measured that day: recognising the Mod effect id produced 3016 green tests
+# in the Full Test Suite and 1510 regressed files under the Madaros corpus --
+# the same commit, two engines. CI runs lean_single (the suite prints
+# SOUNIO_TEST_SOUC_BIN=/tmp/souc-stage2, built from lean_single.sio by
+# selfhost_host_gate.sh), so a change confined to the modular Madaros tree
+# under self-hosted/ is invisible to every check that exists today.
+#
+# The corpus gate itself says so in its own output:
+#   "These pass on the baseline and fail on this change.
+#    CI's full-test-suite runs lean_single and will not show this."
+#
+# It ran only when somebody asked for it by hand on a Slurm node. Now it runs
+# on every PR that touches the compiler, and it blocks.
+
+on:
+  pull_request:
+    paths:
+      - 'self-hosted/**'
+      - 'tests/madaros_corpus_baseline.txt'
+      - 'scripts/ci/madaros_corpus_regression_gate.sh'
+      - '.github/workflows/madaros-corpus.yml'
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+concurrency:
+  group: madaros-corpus-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  corpus:
+    name: Madaros corpus
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Madaros from source
+        run: |
+          ulimit -s 524288 || true
+          bash scripts/ci/build_modular_madaros.sh /tmp/madaros.elf
+          test -x /tmp/madaros.elf || { echo "no Madaros ELF produced"; exit 1; }
+          ls -l /tmp/madaros.elf
+
+      - name: Corpus regression against the baseline
+        env:
+          SOUNIO_MADAROS_CORPUS_BIN: /tmp/madaros.elf
+        run: |
+          ulimit -s 524288 || true
+          # Pinned, not $(nproc). Measured 2026-08-21: on a 128-core node the
+          # remote gate ran nproc-way parallel and reported 1510 regressions
+          # against a 284-entry baseline -- more than half the corpus, and a
+          # sampled file built and ran clean when compiled alone. Madaros
+          # lowering holds ~900 KB RSS per function with no reclamation, so
+          # wide parallelism turns into mass false regressions.
+          SOUNIO_TEST_JOBS=4 bash scripts/ci/madaros_corpus_regression_gate.sh
