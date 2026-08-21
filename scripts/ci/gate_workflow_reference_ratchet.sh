@@ -35,7 +35,19 @@ OUT="${GATE_ARTIFACT:-artifacts/gates/gate_workflow_reference_ratchet.json}"
 
 listar_gates()   { git ls-files 'scripts/ci/*.sh' 'scripts/dev/*gate*.sh' | sort; }
 listar_nomeados() {
-  grep -rhoE '(\./)?scripts/[A-Za-z0-9_./-]+' .github/workflows/ 2>/dev/null \
+  # Comments are stripped before extraction. Measured 2026-08-21: without this,
+  # appending `# ... scripts/ci/168_biology_validation_gate.sh ...` to any
+  # workflow moved the count 475 -> 474 and the gate then INVITED lowering the
+  # frozen total -- blessing the fiction permanently. A gate mentioned in a
+  # YAML comment is not run by anything, and this ratchet exists precisely to
+  # say that a gate nothing runs is not a gate (#1994).
+  #
+  # `#` also opens a shell comment inside `run: |` blocks, so the same strip is
+  # correct there. Cost of the fix at the time it landed: 2 non-gate paths lost
+  # their comment-only reference (a fixtures directory and scripts/install.sh);
+  # no gate was reachable by comment alone, so the frozen total is unchanged.
+  sed 's/#.*//' .github/workflows/*.yml .github/workflows/*.yaml 2>/dev/null \
+    | grep -ohE '(\./)?scripts/[A-Za-z0-9_./-]+' \
     | sed 's|^\./||' | sort -u
 }
 nao_nomeados() { comm -23 <(listar_gates) <(listar_nomeados); }

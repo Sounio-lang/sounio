@@ -80,11 +80,31 @@ A rule the compiler's own source violates is a self-inflicted cascade that kills
 the fixed point. This is a `grep` and takes seconds; skipping it has cost a full
 build cycle more than once.
 
+**But the grep is a floor, not the radius.** A literal `with X` count finds
+*declaration sites*; effects also reach a file transitively through call chains,
+and those sites carry no text to grep for. The only honest radius is a corpus run
+under the engine you changed. Measured 2026-08-21: lifting the Mod hold showed
+zero new failures in CI's 3016-test suite — because that suite runs lean_single,
+which never saw the change — while `--gate corpus` under a freshly built Madaros
+came back **red**, with the gate saying so itself: *"These pass on the baseline
+and fail on this change. CI's full-test-suite runs lean_single and will not show
+this."*
+
 ## 7. Gates and ratchets
 
-- A gate that no workflow names **is not a gate**. Check: `grep -rn <gate> .github/`.
-  Measured 2026-08-20: `SOUNIO_WITNESS_GLOB` was named in no workflow at all, so
-  the witness gate had never run in CI.
+- A gate that no workflow names **is not a gate**. Check it with
+  `bash scripts/ci/gate_workflow_reference_ratchet.sh`, **not** with
+  `grep -rn <gate> .github/` — that grep counts a mention in a YAML comment as
+  wiring, and this skill shipped that advice and then failed its own example on
+  it: after adding a workflow whose *comment* names `SOUNIO_WITNESS_GLOB`, the
+  grep went green while the gate keyed on it was still run by nothing.
+  The ratchet had the same hole and it is now closed — it strips comments before
+  extracting. Verified both ways: a comment no longer moves the count, a real
+  `run:` line still does.
+- Not everything belongs in GitHub CI. `souc-build-remote.sh --gate witness`
+  needs a freshly built Madaros and runs on Slurm; what is CI-reachable is the
+  ratchet over the *declared witness list*, not the witness run itself. Say which
+  of the two you mean.
 - Gate artifacts go in `artifacts/gates/`, never loose in `scripts/ci/` — a gate
   that dirties the tree fails the worktree governance gate **in the same job**.
 - Emit `status=pass` plus `metrics {total,passed,failed,not_run}`.
