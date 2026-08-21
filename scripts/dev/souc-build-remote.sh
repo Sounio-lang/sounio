@@ -118,7 +118,8 @@ for g in $GATES; do
       ;;
     corpus)
       echo "REMOTE: --- corpus regression gate ---"
-      SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS=\$(nproc) \\
+      SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS="${SOUNIO_TEST_JOBS:-4}" \\
+        SOUNIO_EFFECT_INFER="${SOUNIO_EFFECT_INFER:-}" SOUNIO_EFFECT_INFER_TRACE="${SOUNIO_EFFECT_INFER_TRACE:-}" \
         bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -${SOUNIO_REMOTE_TAIL:-25}
       echo "REMOTE: corpus_gate rc=\$?"
       ;;

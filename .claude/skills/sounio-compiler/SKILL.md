@@ -121,6 +121,28 @@ this."*
 - Adding a gate script without naming it in a workflow raises the unnamed-gate
   ratchet and blocks every open PR.
 
+## 7b. A gate can lie about scale before it lies about semantics
+
+Two failure modes of the harness itself, both measured 2026-08-21, both of
+which produced a confident and wrong story before anyone questioned the tool:
+
+- **Truncated reporting.** `souc-build-remote.sh` piped the corpus gate through
+  `tail -25`. A regression list arrived cut, with nothing saying it had been cut,
+  and the visible slice ran alphabetically from `uncertain_` to `zero_`. Reading
+  the count off that slice gives 21 where the number is 1510.
+- **Oversubscription.** The same script ran the corpus `$(nproc)`-way parallel.
+  On a 128-core node that reported **1510 regressions against a 284-entry
+  baseline** — more than half the corpus — and a sampled "regressed" file built
+  and ran clean (`rc=0`) when compiled by itself from the same tree. Madaros
+  lowering holds ~900 KB RSS per function with no reclamation, so wide
+  parallelism becomes mass false failure.
+
+The tell in the second case was there before the diagnosis: the run with
+`SOUNIO_EFFECT_INFER=1` returned **exactly** the same 1510. A number that does
+not move when you turn a knob is the signature of an inert knob or a wrong
+cause — never of a confirmed finding. Check the count against the baseline size
+and spot-check one item alone before believing any mass regression.
+
 ## 8. Cross-check with another agent — this is not optional
 
 **Founder ruling 2026-08-21: compiler work is critical, and every substantive
