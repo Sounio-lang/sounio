@@ -210,7 +210,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.lean-single-a64-two-level-field-store-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_A64_TWO_LEVEL_FIELD_STORE_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-bugd-already-fixed-by-buga-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_BUGD_ALREADY_FIXED_BY_BUGA_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-bugf-rootcaused-not-fixed-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_BUGF_ROOTCAUSED_NOT_FIXED_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.lean-single-diagnostic-silencing-2026-08-17.readme | repo_only | docs/audit/lean_single_diagnostic_silencing_2026-08-17/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-literal-ref-arg-2026-07-05 | repo_only | docs/audit/LEAN_SINGLE_LITERAL_REF_ARG_2026-07-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-multiplicative-line-boundary-2026-07-04 | repo_only | docs/audit/LEAN_SINGLE_MULTIPLICATIVE_LINE_BOUNDARY_2026-07-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.lean-single-multisegment-qualified-call-2026-07-04 | repo_only | docs/audit/LEAN_SINGLE_MULTISEGMENT_QUALIFIED_CALL_2026-07-04.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
