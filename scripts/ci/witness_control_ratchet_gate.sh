@@ -16,14 +16,22 @@
 # no new witness enters without a control. The frozen number may only SHRINK.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+# shellcheck source=scripts/lib/gate_assert.sh
+. scripts/lib/gate_assert.sh
 
 LIST=scripts/ci/witnesses.list
 FROZEN_FILE=scripts/ci/witness_control.frozen
 ART_DIR=artifacts/gates
 mkdir -p "$ART_DIR"
 
-frozen=$(sed -n 's/^total=//p' "$FROZEN_FILE" 2>/dev/null | head -1)
-: "${frozen:=0}"
+# Every value pulled out of a tool gets an emptiness guard. Without one a
+# renamed or malformed frozen file silently yields the empty string, and the
+# ratchet then compares against nothing at all -- the exact vacuity this gate
+# exists to prevent, committed by the gate itself.
+require_nonempty_file "$LIST" "the witness list is missing or empty"
+require_nonempty_file "$FROZEN_FILE" "the frozen count is missing or empty"
+frozen=$(sed -n 's/^total=//p' "$FROZEN_FILE" | head -1)
+require_nonempty "$frozen" "no 'total=' line in $FROZEN_FILE"
 
 missing=0
 listed=0
@@ -43,6 +51,9 @@ while IFS= read -r pat; do
     fi
   done
 done < "$LIST"
+
+# A sweep that found nothing to check must be red, not green.
+require_min_count "$listed" 1 "witnesses resolved from $LIST"
 
 st=pass
 if [ "$missing" -gt "$frozen" ]; then
