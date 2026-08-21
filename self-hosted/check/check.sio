@@ -1576,6 +1576,44 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
     } else if name_wide_int_bits(name) > 0 {
         ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105)
     } else {
+        // Units and refinement aliases, mirroring the by-value spine.
+        //
+        // These two lookups existed ONLY on the by-value type resolver. This is
+        // the *mut spine, which is the one annotations, parameters and return
+        // types actually traverse under Madaros, so `mg` and a refinement alias
+        // both fell through to the env lookup below and came back as a plain
+        // named type carrying no unit_id and no refinement_id.
+        //
+        // Measured 2026-08-21, and the symptom is worse than an absence: the
+        // correct program and the incorrect one received the SAME diagnostic.
+        //
+        //   let d: mg = 500.0        madaros E001 "expected mg, found f64"
+        //                            lean_single OK
+        //   let d: mg = 500.0 as mg  both OK          (the cast carries the id)
+        //   let p: Pos = 5           madaros E001     lean_single OK
+        //   let p: Pos = 0 - 5       madaros E001     lean_single "refinement
+        //                                             type violation - value -5"
+        //
+        // So under the default engine dimensional analysis and refinement
+        // aliases were not merely unenforced, they were unusable: a unit-typed
+        // binding could not be initialised at all except through an explicit
+        // cast, and every refusal was a type mismatch that happened to fire
+        // rather than the dimensional or refinement check the test asked for.
+        // tests/compile-fail/unit_cast_incompatible.sio declares
+        // `//@ error-pattern: incompatible unit dimensions`, which Madaros never
+        // produced. CI runs lean_single, so none of this was visible.
+        //
+        // The other four resolvers on the by-value spine (wide ints, u128) are
+        // already present above; only these two were missing.
+        let unit_idx = (*c).units.find(name)
+        if unit_idx >= 0 {
+            return ty_with_unit(ty_f64(), unit_idx)
+        }
+        let ref_idx = refinement_table_find((*c).refinements, name)
+        if ref_idx >= 0 {
+            let rt = (*c).refinements.entries[ref_idx as usize]
+            return ty_with_refinement(rt.base_type, ref_idx)
+        }
         let bound_ty = (*c).env.lookup(name)
         // A type-position name resolves against the VALUE environment first so
         // that type aliases and ontology bindings win. But `use m::{S}` binds
@@ -5443,6 +5481,24 @@ fn checker_narrow_float_literal_operand_ty(operand_ty: TypeEntry, operand_was_fl
     }
     if is_float_type(peer_ty) && peer_ty.kind != TypeKind::TyF64 {
         return peer_ty
+    }
+    // A float LITERAL takes the unit of its peer. This is the same rule that
+    // lets `let dose: mg = 500.0` bind: a bare literal has no dimension of its
+    // own, so it reads as a quantity in whatever unit the context supplies.
+    //
+    // Without this, resolving unit names on the *mut spine (the fix in
+    // checker_lower_named_type_mut) turned one failure into another:
+    // `mg` began to exist, and then `doubled == 1000.0` in the repo's own
+    // tests/run-pass/unit_scalar_mul.sio was refused with
+    // `error[E041]: unit mismatch in arithmetic operation`, because the
+    // comparison rule demands lu == ru and the literal carried no unit.
+    //
+    // Deliberately narrow: only a literal, only when it has NO unit of its own
+    // and the peer HAS one. A computed f64 with no unit compared against `mg`
+    // stays a mismatch -- that is a real dimensional error and must keep
+    // failing. Measured 2026-08-21.
+    if operand_ty.unit_id < 0 && peer_ty.kind == TypeKind::TyF64 && peer_ty.unit_id >= 0 {
+        return ty_with_unit(operand_ty, peer_ty.unit_id)
     }
     operand_ty
 }
