@@ -143,6 +143,52 @@ not move when you turn a knob is the signature of an inert knob or a wrong
 cause — never of a confirmed finding. Check the count against the baseline size
 and spot-check one item alone before believing any mass regression.
 
+## 7c. Four instruments lied in one day, and none of them was broken
+
+Every one produced a confident, round number. None threw an error. The failure
+was always the same: the tool measured less than it claimed to.
+
+| what happened | what it looked like |
+|---|---|
+| the corpus gate ran the raw ELF without raising the stack | 1510 semantic regressions, identical across three configurations |
+| `gh api .../logs` returned an **empty** file | `grep -c 'Segmentation fault'` said **0**, read as "no crashes" |
+| a CI job hit the 60-minute timeout | `gh pr checks` printed **fail**, read as a regression |
+| the witness gate never compared `//@ expect-stdout:` | a test that exits 0 and prints the wrong number **passed** |
+
+Three checks that would have caught all four, and cost seconds:
+
+- **Does the number move when you turn a knob?** A count *identical* across a
+  parallelism change, a flag change and a branch change is a deterministic
+  fault, not a finding.
+- **Is the file you just parsed non-empty?** `grep -c` on an empty file returns
+  0 and exits 0. Check the line count before believing the count.
+- **Is the run `completed` or `cancelled`?** Read `status`, not only
+  `conclusion`. A timeout and a failure print the same word downstream.
+
+## 7d. Pin the base before you believe a comparison
+
+A control taken this morning is not a control this afternoon. Seven PRs landed
+between one corpus run and the next, and the earlier number was used all day as
+if the base had held.
+
+Three ways the base moved without complaint, all measured 2026-08-21, all in
+one session:
+
+- **A stale `origin/main` in a second worktree.** The fetch had been run in the
+  *other* worktree.
+- **A `git checkout` that never ran**, killed by a `pkill` earlier in the same
+  command chain. The next `git log` reported the old branch, confidently, as
+  though it had succeeded.
+- **A dirty worktree refusing the switch.** `git checkout` printed *"Please
+  commit your changes"* and aborted; the verification line that followed read
+  the unchanged tree and reported it as the new base.
+
+After any checkout, print `git rev-parse --short HEAD`, the branch name, **and
+one content fact you expect to differ** — a grep count of the thing under test.
+The SHA alone does not tell you the file you care about changed. This paragraph
+was itself written on the third such failure of the session, one command after
+being drafted.
+
 ## 8. Cross-check with another agent — this is not optional
 
 **Founder ruling 2026-08-21: compiler work is critical, and every substantive
