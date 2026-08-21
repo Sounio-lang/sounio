@@ -118,6 +118,10 @@ for g in $GATES; do
       ;;
     corpus)
       echo "REMOTE: --- corpus regression gate ---"
+        # Belt and braces: the gate raises this itself now, but the raw Madaros
+        # ELF SIGSEGVs at the default 8 MB, and that failure wears the costume of
+        # a semantic regression -- 1510 files, identical every run. 2026-08-21.
+        ulimit -s 524288 2>/dev/null || true
       SOUNIO_MADAROS_CORPUS_BIN="\$W/madaros.elf" SOUNIO_TEST_JOBS="${SOUNIO_TEST_JOBS:-4}" \\
         SOUNIO_EFFECT_INFER="${SOUNIO_EFFECT_INFER:-}" SOUNIO_EFFECT_INFER_TRACE="${SOUNIO_EFFECT_INFER_TRACE:-}" \
         bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -${SOUNIO_REMOTE_TAIL:-25}
