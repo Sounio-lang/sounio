@@ -20,14 +20,21 @@
 //   27=NarrowWidthApproximation  stdlib comment "bit 24" = 16777216
 //   28=NonUnitary      stdlib comment "bit 22" = 4194304 (a BIT; id 22 is Chaotic)
 //
-// Mod is HELD, not forgotten (founder 2026-08-19, hold_mod_claude1).
-// 360 files / 2800 `with Mod` still return -1. If those sites are Mut
-// misspellings, adding Mod would consecrate the error. No reserved
-// hole: a vacant id invites someone to fill it.
+// Mod is id 29. The hold of 2026-08-19 (hold_mod_claude1) is LIFTED
+// (founder 2026-08-20). The hold rested on one conjecture -- that the
+// 2800 `with Mod` sites were `Mut` misspellings, and recognising Mod
+// would consecrate the error. Measured 2026-08-20 and refuted: the
+// bodies compute `%`, not mutation (e.g. lorenz_i256_cert_mix is
+// `((acc * 16777619) + value + salt) % 1000000007`), and Mod co-occurs
+// with Mut in 3 of 2814 signatures -- a typo does not sit beside the
+// word it is a typo for. `%` is a partial operator: `a % 0` traps
+// exactly as `a / 0` does, and Div is already an effect. Recognising
+// Mod is what lets C1 demand it at the operator.
 //
 // Confidence is an alias of Epistemic (id 8). Same id, not a new variant.
 //
-// EffVar is the row-polymorphism slot (discriminant 29 after 2b hold).
+// EffVar is the row-polymorphism slot (discriminant 30, first id past
+// the named range, which is now 0..=29).
 // It is not a user-facing `with` name and effect_name_to_id never returns it.
 
 // ============================================================
@@ -64,11 +71,12 @@ enum EffectKind {
     EffPerturbative,
     EffNarrowWidthApproximation,
     EffNonUnitary,
+    EffMod,
     EffVar,
 }
 
 fn effect_named_id_max() -> i64 {
-    28
+    29
 }
 
 fn effect_kind_name_len(k: i64) -> i64 {
@@ -101,6 +109,7 @@ fn effect_kind_name_len(k: i64) -> i64 {
     else if k == 26 { 12 }
     else if k == 27 { 24 }
     else if k == 28 { 10 }
+    else if k == 29 { 3 }
     else { 0 }
 }
 
@@ -163,6 +172,8 @@ fn effect_kind_name_byte(k: i64, i: i64) -> i8 {
         if i == 0 { 78 as i8 } else if i == 1 { 97 as i8 } else if i == 2 { 114 as i8 } else if i == 3 { 114 as i8 } else if i == 4 { 111 as i8 } else if i == 5 { 119 as i8 } else if i == 6 { 87 as i8 } else if i == 7 { 105 as i8 } else if i == 8 { 100 as i8 } else if i == 9 { 116 as i8 } else if i == 10 { 104 as i8 } else if i == 11 { 65 as i8 } else if i == 12 { 112 as i8 } else if i == 13 { 112 as i8 } else if i == 14 { 114 as i8 } else if i == 15 { 111 as i8 } else if i == 16 { 120 as i8 } else if i == 17 { 105 as i8 } else if i == 18 { 109 as i8 } else if i == 19 { 97 as i8 } else if i == 20 { 116 as i8 } else if i == 21 { 105 as i8 } else if i == 22 { 111 as i8 } else { 110 as i8 }
     } else if k == 28 {
         if i == 0 { 78 as i8 } else if i == 1 { 111 as i8 } else if i == 2 { 110 as i8 } else if i == 3 { 85 as i8 } else if i == 4 { 110 as i8 } else if i == 5 { 105 as i8 } else if i == 6 { 116 as i8 } else if i == 7 { 97 as i8 } else if i == 8 { 114 as i8 } else { 121 as i8 }
+    } else if k == 29 {
+        if i == 0 { 77 as i8 } else if i == 1 { 111 as i8 } else { 100 as i8 }
     } else {
         0 as i8
     }
@@ -218,15 +229,39 @@ pub fn effect_name_to_id(name_buf: [i8; 64], name_len: i64) -> i64 with Mut, Pan
 // Extract effects from EffectList
 // ============================================================
 
-pub fn collect_effects_from_list(list: EffectList, effects: [i64; 8], count: i64) -> ([i64; 8], i64) with Mut, Panic, Div {
+// Effect-row overflow counter, shared by the two places an effect can be lost
+// for want of a slot: this file's declaration collection, and the widener in
+// check/defs.sio. Read and cleared by the checker, which turns it into a named
+// diagnostic. Founder ruling 2026-08-21: widen the row, and never lose, and
+// never silence.
+pub var EFFECT_ROW_OVERFLOW: i64 = 0
+
+pub fn collect_effects_from_list(list: EffectList, effects: [i64; 32], count: i64) -> ([i64; 32], i64) with Mut, Panic, Div {
     var effs = effects
     var n = count
 
     // Convert this effect to ID
     let eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
 
-    // Add if valid and not duplicate
-    if eff_id >= 0 && n < 8 {
+    // Add if valid and not duplicate.
+    //
+    // This condition guarded TWO silent losses, and they are different faults:
+    //
+    //   n >= 32       the row is full and this effect is dropped. A real
+    //                obligation disappears from the signature and no caller is
+    //                ever asked to declare it.
+    //   eff_id < 0   the name is not recognised. `with Zorblex` was accepted
+    //                and inert -- measured 2026-08-21 under Madaros, while
+    //                lean_single refuses it.
+    //
+    // Only the first is counted here. Refusing an unrecognised effect name is
+    // a separate ruling and has its own ratchet
+    // (scripts/ci/effect_name_closed_list.frozen); counting it in the same
+    // place would conflate a full row with a typo.
+    if eff_id >= 0 && n >= 32 {
+        EFFECT_ROW_OVERFLOW = EFFECT_ROW_OVERFLOW + 1
+    }
+    if eff_id >= 0 && n < 32 {
         var already_present = false
         var i: i64 = 0
         while i < n {
@@ -249,10 +284,10 @@ pub fn collect_effects_from_list(list: EffectList, effects: [i64; 8], count: i64
     }
 }
 
-pub fn extract_effects(opt: Option<Box<EffectList>>) -> ([i64; 8], i64) with Mut, Panic, Div {
+pub fn extract_effects(opt: Option<Box<EffectList>>) -> ([i64; 32], i64) with Mut, Panic, Div {
     match opt {
-        None => ([0; 8], 0)
-        Some(list) => collect_effects_from_list(*list, [0; 8], 0)
+        None => ([0; 32], 0)
+        Some(list) => collect_effects_from_list(*list, [0; 32], 0)
     }
 }
 
@@ -261,7 +296,7 @@ pub fn extract_effects(opt: Option<Box<EffectList>>) -> ([i64; 8], i64) with Mut
 // ============================================================
 
 // Check if effect ID is present in array
-pub fn has_effect_id(effects: [i64; 8], count: i64, target_id: i64) -> bool with Mut, Panic, Div {
+pub fn has_effect_id(effects: [i64; 32], count: i64, target_id: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < count {
         if effects[i as usize] == target_id {
@@ -273,7 +308,7 @@ pub fn has_effect_id(effects: [i64; 8], count: i64, target_id: i64) -> bool with
 }
 
 // Check if required effects are subset of declared effects
-pub fn effects_subset(required: [i64; 8], req_count: i64, declared: [i64; 8], decl_count: i64) -> bool with Mut, Panic, Div {
+pub fn effects_subset(required: [i64; 32], req_count: i64, declared: [i64; 32], decl_count: i64) -> bool with Mut, Panic, Div {
     var i: i64 = 0
     while i < req_count {
         let req_id = required[i as usize]
@@ -373,13 +408,13 @@ pub fn print_effect_name(id: i64) with IO, Mut, Panic, Div {
 }
 
 // Find missing effects: returns effects in required that are not in declared
-pub fn find_missing_effects(required: [i64; 8], req_count: i64, declared: [i64; 8], decl_count: i64) -> ([i64; 8], i64) with Mut, Panic, Div {
-    var missing: [i64; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+pub fn find_missing_effects(required: [i64; 32], req_count: i64, declared: [i64; 32], decl_count: i64) -> ([i64; 32], i64) with Mut, Panic, Div {
+    var missing: [i64; 32] = [0; 32]
     var missing_count: i64 = 0
     var i: i64 = 0
     while i < req_count {
         let req_id = required[i as usize]
-        if !has_effect_id(declared, decl_count, req_id) && missing_count < 8 {
+        if !has_effect_id(declared, decl_count, req_id) && missing_count < 32 {
             missing[missing_count as usize] = req_id
             missing_count = missing_count + 1
         }
@@ -389,13 +424,13 @@ pub fn find_missing_effects(required: [i64; 8], req_count: i64, declared: [i64; 
 }
 
 // Merge two effect sets (union)
-pub fn merge_effects(a: [i64; 8], a_count: i64, b: [i64; 8], b_count: i64) -> ([i64; 8], i64) with Mut, Panic, Div {
+pub fn merge_effects(a: [i64; 32], a_count: i64, b: [i64; 32], b_count: i64) -> ([i64; 32], i64) with Mut, Panic, Div {
     var result = a
     var result_count = a_count
 
     // Add effects from b that aren't in a
     var i: i64 = 0
-    while i < b_count && result_count < 8 {
+    while i < b_count && result_count < 32 {
         let b_id = b[i as usize]
         if !has_effect_id(result, result_count, b_id) {
             result[result_count as usize] = b_id

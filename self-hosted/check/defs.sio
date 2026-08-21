@@ -8,6 +8,7 @@
 use parser::ast::{BinaryOp, CompareOp, Expr, ExprKind, Name, StudyHypothesis, StudyOutcome, UnaryOp, Visibility, empty_name, empty_path, empty_study_hypothesis, empty_study_outcome, name_eq, visibility_private, visibility_pub}
 use lexer::span::{Span}
 use check::types::*
+use check::effects::{EFFECT_ROW_OVERFLOW}
 
 // ============================================================
 // Field info (for struct fields)
@@ -1282,7 +1283,7 @@ pub struct FnSig {
     is_method: bool,
     self_type_name: Name,
     self_type_entry: TypeEntry,   // Semantic receiver type (replaces string heuristic)
-    effects: [i64; 8],        // Effect IDs (encoded as integers for now)
+    effects: [i64; 32],        // Effect IDs (encoded as integers for now)
     effect_count: i64,
     is_kernel: bool,
     is_epistemic_kernel: bool,
@@ -1312,7 +1313,7 @@ fn empty_fn_sig() -> FnSig {
         is_method: false,
         self_type_name: Name { buf: [0; 128], len: 0 },
         self_type_entry: ty_unit(),
-        effects: [0; 8],
+        effects: [0; 32],
         effect_count: 0,
         is_kernel: false,
         is_epistemic_kernel: false,
@@ -1430,7 +1431,7 @@ pub fn fn_sig_table_get(t: *mut FnSigTable, idx: i64) -> FnSig with Mut, Panic, 
 // effect from the body and the annotation is a declaration of the inferred fact). Returns true when
 // something was added. Only ever ADDS — an inferred set can grow as callees are discovered, never
 // shrink, so this cannot silently drop a declared effect.
-pub fn fn_sig_table_widen_effects(t: *mut FnSigTable, idx: i64, extra: [i64; 8], extra_count: i64) -> bool with Mut, Panic, Div {
+pub fn fn_sig_table_widen_effects(t: *mut FnSigTable, idx: i64, extra: [i64; 32], extra_count: i64) -> bool with Mut, Panic, Div {
     if idx < 0 || idx >= (*t).count {
         return false
     }
@@ -1450,21 +1451,37 @@ pub fn fn_sig_table_widen_effects(t: *mut FnSigTable, idx: i64, extra: [i64; 8],
     let slot = idx % 512
     var changed = false
     var i: i64 = 0
-    while i < extra_count && i < 8 {
+    while i < extra_count && i < 32 {
         let e = extra[i as usize]
         var seen = false
         var j: i64 = 0
-        while j < (*cur).entries[slot as usize].effect_count && j < 8 {
+        while j < (*cur).entries[slot as usize].effect_count && j < 32 {
             if (*cur).entries[slot as usize].effects[j as usize] == e {
                 seen = true
             }
             j = j + 1
         }
-        if !seen && (*cur).entries[slot as usize].effect_count < 8 {
+        if !seen && (*cur).entries[slot as usize].effect_count < 32 {
             let k = (*cur).entries[slot as usize].effect_count
             (*cur).entries[slot as usize].effects[k as usize] = e
             (*cur).entries[slot as usize].effect_count = k + 1
             changed = true
+        } else {
+            // NOT SILENT. Founder ruling 2026-08-21: widen the row, and never
+            // lose, and never silence.
+            //
+            // This branch used to drop the effect and say nothing -- no
+            // diagnostic, no flag, `changed` left false. An obligation
+            // disappeared and the compile carried on. With inference enabled
+            // the row can fill without anyone having written eight effects, so
+            // the loss is not even something an author could see coming.
+            //
+            // The counter is read by the checker, which reports and clears it.
+            // A count is used rather than a bool so a caller can tell one lost
+            // obligation from many.
+            if !seen {
+                EFFECT_ROW_OVERFLOW = EFFECT_ROW_OVERFLOW + 1
+            }
         }
         i = i + 1
     }
