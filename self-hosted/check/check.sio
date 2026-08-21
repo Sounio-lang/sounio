@@ -4894,6 +4894,12 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
                 }
+                // The implicit tail return carries the same obligation as an
+                // explicit one. `fn f() -> T { 2000000000 }` and
+                // `fn f() -> T { return 2000000000 }` are the same claim, and
+                // before 2026-08-21 neither was checked against the refinement --
+                // only bindings were.
+                checker_check_refinement_literal_inplace(c, (*fd).span, sig2.return_type)
             }
             if (*c).multitest_count > 1 && !(*c).multitest_corrected {
                 checker_report_multitest_correction_required_inplace(c, (*fd).span, (*c).multitest_count)
@@ -5554,6 +5560,22 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
+            // A refinement must hold at the RETURN too, not only at a binding.
+            //
+            // Measured 2026-08-21: checker_check_refinement_literal_inplace had
+            // exactly two callers, both in the let/var handlers. So a refinement
+            // was enforced where a value is bound and nowhere else, and
+            //
+            //     fn f() -> T { return 2000000000 }
+            //
+            // was accepted for `type T = { n: i64 | n >= 0 && n < 1000000007 }`.
+            // types_compatible does not look at refinement_id at all -- zero
+            // references in check/compat.sio -- so nothing else caught it.
+            //
+            // That made every refinement escapable in three words: wrap the value
+            // in a function whose return type is the refined one, and the
+            // predicate is gone. A refinement you can launder is not a refinement.
+            checker_check_refinement_literal_inplace(c, e.span, (*c).current_return_type)
             // Raw-reference escape: `return &local` / `return r` where r is rooted
             // in a frame-local → dangling reference.
             if checker_expr_provenance(c, *val_expr) == 1 {
