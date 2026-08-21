@@ -165,6 +165,29 @@ Three checks that would have caught all four, and cost seconds:
 - **Is the run `completed` or `cancelled`?** Read `status`, not only
   `conclusion`. A timeout and a failure print the same word downstream.
 
+## 7e. Compare two lists with the SAME extraction
+
+The most expensive false finding of 2026-08-21 was two lines of `sed` that did
+not match each other.
+
+Two corpus runs were compared. One list was built with
+
+    sed 's/ \(compile\|run\)$//'
+
+and the other with a pattern that also stripped `stdout`. Every `stdout`-type
+failure fell out of one side and stayed on the other. Fourteen files appeared
+to be "new in my branch". They were on both.
+
+Cost before the arithmetic was checked: four dead hypotheses, three
+four-minute builds, a three-cell bisect, and an A/B pair across three modules.
+With symmetric extraction the two runs are 60 and 60, differing by one file —
+and that one had *improved*, moving from a compile failure to a run failure.
+
+The tell was available from the start and ignored: **the two lists had
+different totals for the same base.** When a comparison surprises you, print
+the size of both inputs and the extraction used for each, before reasoning
+about the difference.
+
 ## 7d. Pin the base before you believe a comparison
 
 A control taken this morning is not a control this afternoon. Seven PRs landed
