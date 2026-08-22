@@ -25,7 +25,7 @@ Intent-Preserved: with X requires X to be built-in or declared in
   originates Mod
 Transformation: Mod is closed-list id 29 (effect_named_id_max 28→29;
   Confidence remains alias of id 8). Unknown closed-list names emit
-  error[E229]. A ninth distinct slot emits error[E232]. `/` without
+  error[E230]. A ninth distinct slot emits error[E232]. `/` without
   Div and `%` without Mod emit error[E233]. Insert/lookup of the
   remaining recognised names, and of user-declared effects, is
   unchanged. Existing undeclared operator sites are not rewritten;
@@ -33,7 +33,7 @@ Transformation: Mod is closed-list id 29 (effect_named_id_max 28→29;
 Types-Changed: none
 Effects-Changed: Mod admitted (id 29). Lattice otherwise unchanged.
 IR-Changed: none
-Claims-Introduced: with Zorblex is refused with E229; `%` without
+Claims-Introduced: with Zorblex is refused with E230; `%` without
   Mod is refused with E233; `/` without Div is refused with E233;
   with Mod / Panic / ZD and the remaining 31 closed names still
   check; the eight-slot cap is a named refusal
@@ -42,7 +42,7 @@ Claims-Forbidden: raising the slot cap; Mod is Mut; mass-migrating
   fixed-point-verified; Correlated is id 29 (that name is R6, id 30
   after this lane)
 Assumptions: E208 is refinement. E230 is handle-table folklore.
-  E231 is grok-cli3's unmerged Foo. E229/E232/E233 were free on
+  E231 is grok-cli3's unmerged Foo. E230/E232/E233 were free on
   origin/main 67aa2aec12. Live Madaros collection is check.sio
   (checker_collect_effects_mut and collect_effects_with_checker),
   not effects.sio extract_effects (no callers). Seed compile of
@@ -67,14 +67,14 @@ Read-Set: docs/spec/LANGUAGE_SPECIFICATION.md §2.4,
   docs/internal/concepts/effect-declaration.md,
   scripts/ci/effect_name_closed_list_gate.sh
 Positive-Witness: pre-patch souc check of Zorblex exits 0 (the hole);
-  after the patch it prints error[E229] and exits non-zero. `%` and
+  after the patch it prints error[E230] and exits non-zero. `%` and
   `/` without the matching effect were check: OK; after the patch
   they print error[E233]
 Negative-Witness: with Panic still E035 when missing; with IO still
   checks; with Mod checks; user-declared effect Choice still
   resolves (it is not in the closed list and remains a declared
   effect, not a silent drop)
-Acceptance-Gate: compile-fail unknown_effect_zorblex (E229);
+Acceptance-Gate: compile-fail unknown_effect_zorblex (E230);
   effect_mod_without_decl / effect_div_without_decl (E233);
   effect_ninth_slot (E232, Madaros); known-name regression
   check: OK; effect_name_closed_list_gate.sh --scan-only;
@@ -82,7 +82,7 @@ Acceptance-Gate: compile-fail unknown_effect_zorblex (E229);
 Integration-Target: origin/main 67aa2aec12
 Authoritative-Only-If: the pre-patch Zorblex check: OK is recorded,
   and check.sio is patched on the live collect path, and a rebuilt
-  Madaros ELF is the instrument for E229/E232/E233
+  Madaros ELF is the instrument for E230/E232/E233
 ```
 
 ## Why these two changes are one
@@ -156,7 +156,7 @@ silently raise the bound.
 repository to compile, stop and report the number. Seed compile of
 Madaros (`build_modular_madaros.sh`) does not run this checker and
 still succeeds. `RAW --check self-hosted/compiler/main.sio` under
-the new ELF reports **221 error[E233]** (E229=0, E232=0). That is
+the new ELF reports **221 error[E233]** (E230=0, E232=0). That is
 the number. This lane does not add `with Div` / `with Mod` to those
 sites.
 
@@ -164,7 +164,7 @@ sites.
 
 | code | meaning | why not the neighbour |
 |---|---|---|
-| E229 | unknown effect name | E208 is refinement |
+| E230 | unknown effect name | E208 is refinement |
 | E232 | ninth effect dropped | E230 handle-table folklore; E231 grok-cli3 Foo |
 | E233 | operator missing its effect | next free after E232 |
 
@@ -186,7 +186,7 @@ are the closed-list freeze; Zorblex is the compile-fail witness.
 `check.sio` was held by Codex (`session-019fcd2c-c730-7391-b120-`).
 That claim is STALE. This lane claimed the write set before editing.
 
-grok-cli4 R6 (`Correlated`) copied uncommitted Mod/E229/E233 and
+grok-cli4 R6 (`Correlated`) copied uncommitted Mod/E230/E233 and
 added `Correlated` as id 30 in `/workspace/.wt/grok-cli4` without a
 file claim. This lane does **not** add `Correlated`. After R5+C1,
 `Correlated` is id 30 and `EffVar` is 31.
@@ -205,7 +205,7 @@ lean_single after commit `9b3c7edfd7`, compiled on Slurm
 `gpuorangefs-multi-r740-proxmox` 2026-08-20T15:50Z, 4 s, ELF 2553281 B:
 
 ```
-Zorblex  → error[E229]: unknown effect `Zorblex` — name is not in the
+Zorblex  → error[E230]: unknown effect `Zorblex` — name is not in the
            closed list and is not a declared effect
            typecheck: failed  rc=1
 known names (Panic, Observe, ZD, IO) → ELF rc=0
@@ -231,17 +231,17 @@ Second rebuild on the same node 2026-08-20T19:55Z, ELF 100567411 B,
 
 | witness | rc | diagnostic |
 |---|---:|---|
-| `unknown_effect_zorblex.sio` | 1 | `error[E229]: unknown effect \`Zorblex\` — name is not in the closed list and is not a declared effect` (count 1) |
+| `unknown_effect_zorblex.sio` | 1 | `error[E230]: unknown effect \`Zorblex\` — name is not in the closed list and is not a declared effect` (count 1) |
 | `effect_mod_without_decl.sio` | 1 | `error[E233]: operator \`%\` requires \`with Mod\`` (count 1) |
 | `effect_div_without_decl.sio` | 1 | `error[E233]: operator \`/\` requires \`with Div\`` (count 1) |
 | `effect_ninth_slot.sio` | 1 | `error[E232]: too many effects — the checker set holds 8; the ninth was not recorded` (count 1) |
 | `effect_known_names_regression.sio` | 0 | `check: OK` |
 | `effect_mod_with_decl.sio` | 0 | `check: OK` |
 | `effect_div_with_decl.sio` | 0 | `check: OK` |
-| `docs/audit/repro/effect_unknown_name.sio` | 1 | `error[E229]: unknown effect \`NomeQueNaoExiste\` …` (count 2) |
-| `self-hosted/compiler/main.sio` | 1 | **E233=221**, E229=0, E232=0. Samples are `%` requires `with Mod`. 58 s |
+| `docs/audit/repro/effect_unknown_name.sio` | 1 | `error[E230]: unknown effect \`NomeQueNaoExiste\` …` (count 2) |
+| `self-hosted/compiler/main.sio` | 1 | **E233=221**, E230=0, E232=0. Samples are `%` requires `with Mod`. 58 s |
 
-Pre-patch Zorblex was check: OK. Post-patch it is E229. That is the
+Pre-patch Zorblex was check: OK. Post-patch it is E230. That is the
 positive control.
 
 Local scans, no rebuilt ELF required:
@@ -255,7 +255,7 @@ OPERATOR_EFFECT_RATCHET_OK
 ```
 
 ```text
-Semantic-Outcome: Madaros live collect refuses Zorblex (E229), a
+Semantic-Outcome: Madaros live collect refuses Zorblex (E230), a
   ninth slot (E232), `%` without Mod and `/` without Div (E233).
   Mod is closed-list id 29. Known names including Mod still check.
   Seed self-compile of Madaros succeeded. Checking main.sio with the
