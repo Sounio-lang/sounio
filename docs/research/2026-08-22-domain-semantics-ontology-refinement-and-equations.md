@@ -294,6 +294,51 @@ the type tags — not a proliferation of per-area effects.
    `Knowledge<_, ontology>` derives uncertainty automatically, folding in
    particle physics' quadrature-under-condition rule.
 
+## 8. Fork 1 measured — N5 cost verdict: mechanical-to-medium, NOT research-grade
+
+The load-bearing assumption ("does the ontology slot exist-but-discarded, or
+not-exist?") was measured against `self-hosted/check/`.
+
+**The slot pattern exists and threads through unification.** `TypeEntry`
+(`check/types.sio:139`) already carries index-tags that flow through `compat`:
+`unit_id` (units — proven), `refinement_id` (moduli-style refinement), `algebra_kind`
+/`clifford_p/q`, `epistemic_meta_id` (Contest/Policy), `ontology_id` (**domain**
+ontology — ChEBI/OWL, backed by `ontology_side_table_cache.sio` which loads
+ontology files), and `knowledge_epsilon: f64`.
+
+**The join site and the rejection pattern already exist.** `compat.sio` `TyKnowledge`
+arm (~230) compares `knowledge_epsilon` (subsumption ε1≤ε2). The `TyModelFamily`
+arm (`compat.sio:250`) already does `a.epistemic_meta_id == b.epistemic_meta_id`
+— "tags must match or incompatible" — which is exactly the shape of
+`check_ontology_join`, already in the tree, just applied to ModelFamily.
+
+**The gap is precise:** `knowledge_epsilon` is *magnitude only*, and is overloaded
+(`types.sio` comments: `transport_confidence_milli`, `diagram_confidence_milli`,
+`fairness_slack_milli`, `grade ε∈[0,1]`). Two `Knowledge` with equal ε but
+different calculi (GUM variance vs truncation band) are indistinguishable today.
+The ontology KIND is missing.
+
+**Validity/provenance are confirmed checked-then-discarded:**
+`knowledge_meta_from_ty` (`epistemic.sio:496`) hard-codes `validity_always()` and
+`PROVENANCE_KIND_DERIVED` regardless of the type — the CEI plan's N3 claim, verified.
+But N5 needs the ontology KIND, not those; cleaner to add as its own field.
+
+Cost:
+
+| Piece | Cost | Note |
+|---|---|---|
+| New field `uncertainty_ontology_id: i64` in `TypeEntry` (default −1) | mechanical | same site as the ~6 `ontology_id: -1` inits; do NOT reuse `ontology_id` (ChEBI/domain — collision) nor `epsilon` (overloaded) |
+| Lattice + `ontology_join(a,b)` | mechanical | mirrors the ModelFamily `tag==tag` arm |
+| Set the tag at constructors (`measure`→Variance, interval→Interval …) | medium | locate constructor sites, write the tag |
+| Extend `TyKnowledge` compat arm + binary-op join (`check.sio:18862`) | medium | site already exists; add KIND check beside the ε check |
+
+**Verdict:** no new type parameter, no new unifier plumbing from scratch — it is
+"add one more `unit_id`." N5, and by extension forks 2–4, fall on the
+mechanical/medium side, not the research horizon. Caveat: because
+`knowledge_epsilon` is overloaded across Transport/Diagram/Fairness/Grade kinds,
+the ontology tag must be a **separate** field, with those constructors defaulting
+it to −1/⊥.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
