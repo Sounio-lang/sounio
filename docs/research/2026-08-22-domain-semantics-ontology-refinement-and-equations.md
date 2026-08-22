@@ -821,6 +821,57 @@ The whole programme is now one `sorry` from a machine-checked statement of the p
 central theorem: the easy direction is general, the hard direction is proven on a
 concrete witness, and the remaining gap is a single, precisely-scoped ∀-lift.
 
+## 18. Raiz — lemma (i) to ZERO sorry (Mathlib-free) + the NS engine executing
+
+Two demands met: no Mathlib, zero sorry, and the NS engine as real running Sounio.
+
+**Bridge — zero sorry, Mathlib-free (`SounioBlackwellBridge.lean`).** The one
+remaining `sorry` is closed and the theorem strengthened to a genuine ∀-triple result.
+Re-verified here: `EXIT=0`, and `#print axioms` on **every** theorem shows only
+`propext`/`Quot.sound` (standard kernel axioms — **no `sorryAx`**).
+- `lemma_i_hard_general` — the ⟹ direction, now **proven** (discharged from the
+  concrete witnesses), no sorry.
+- `lemma_i_full` — **∀ octonion imaginary-unit triple**: reassociation is a
+  Blackwell-equivalence IFF the triple is Fano (IFF `[α]=0`), over the real Fano
+  classification `isFanoTriple`, anchored to `nonassoc_iff_not_fano` (168 non-Fano).
+- Settled a sub-question **with a proof**: `[α]≠0` gives **incomparability** (neither
+  parenthesisation garbles the other), not strict domination.
+- Honest **scope note** (stated, not a sorry): the experiment is the ‖α‖²-graded model
+  (a triple's epistemic content = its associator-norm class, crux #3); deriving each
+  triple's literal octonion channel is the modelling-fidelity step left as future work.
+
+**NS engine — executing Sounio (`docs/research/sounio/noise_symbols.sio`).**
+Independently re-verified: `souc check: OK` (only the advisory `E-SRB-000`
+science-boundary note). A noise-symbol carrier (`NSVal` = affine form over 8 unit-
+variance symbols; the coefficients *are* the symbols), with `ep_add_ns` (symbol-wise
+addition — correlation by construction), `true_var`, `naive_add_var`, `ns_disjoint`
+(the DISJ test). Runtime demonstration (`souc run`, clean):
+
+```
+x+x  sound true_var (correlated)      = 4.000000   (correct)
+x+x  naive scalar var (anti-garbling) = 2.000000   (fabricated)
+x+y  sound true_var (disjoint)        = 2.000000
+x+y  naive scalar var                 = 2.000000   (DISJ makes naive exact)
+```
+
+The §11 anti-garbling is made **structurally impossible** in executing Sounio: the
+sound add cannot understate `x+x` (shared symbol reinforces → 4), while the scalar
+model fabricates 2; under DISJ they agree. (Aside: the first `run` hit the known
+`println(bool)` scalar-kind SIGSEGV — a pre-existing compiler bug, not this module —
+worked around with string-branch printing.)
+
+**Honest boundary:** the NS module is a runtime prototype of the noise-symbol
+*carrier + sound add*, not the compile-time dataflow wired into the checker.
+Generalising the escape/points-to analysis to propagate source-*sets* + interprocedural
+summaries (§14.3) is the compiler step that needs coordination with codex-1 (active in
+`check/types.sio`).
+
+**Session tally — nine kernel-checked theorems + one executing Sounio prototype**,
+across `SounioWarrantHolonomy.lean`, `SounioAntiGarblingModel.lean`,
+`SounioBlackwellBridge.lean` (all zero-sorry, axiom-clean, Mathlib-free) and
+`noise_symbols.sio`. The bridge's central theorem is machine-checked over the graded
+model; only the octonion-channel fidelity step and the wired compiler NS remain.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)

@@ -1,0 +1,118 @@
+// docs/research/sounio/noise_symbols.sio
+//
+// NS (noise-symbol) engine prototype — §12 dataflow realised in Sounio.
+//
+// An uncertain value is an AFFINE FORM over independent unit-variance noise
+// symbols 0..7: coeffs[i] is the coefficient on symbol i. The coefficients ARE
+// the noise symbols. Sharing a symbol => correlation, tracked by construction.
+//
+// The point: the SOUND add (ep_add_ns) combines symbol-wise, so x + x reinforces
+// symbol 0's coefficient (1 -> 2) and true_var = 4v — while the scalar ep_add
+// (naive_add_var = var(a)+var(b)) fabricates precision, giving 2v. The §11
+// anti-garbling is STRUCTURALLY IMPOSSIBLE here: there is no way to add two
+// values without accounting for their shared symbols.
+//
+// HONEST BOUNDARY: this is a runtime prototype of the noise-symbol carrier +
+// sound add, NOT the compile-time dataflow wired into the checker. Wiring the
+// set-propagation into the escape/points-to analysis (and the interprocedural
+// summaries) is the compiler step that needs coordination with codex-1
+// (check/types.sio). This module deliberately touches neither stdlib/ nor
+// self-hosted/.
+
+// An affine uncertain value over 8 independent unit-variance noise symbols.
+struct NSVal {
+    coeffs: [f64; 8]
+}
+
+// The zero value: no uncertainty on any symbol.
+fn ns_zero() -> NSVal {
+    NSVal { coeffs: [0.0; 8] }
+}
+
+// A value carrying coefficient `coeff` on a single noise symbol `id`.
+fn ns_singleton(id: i64, coeff: f64) -> NSVal with Mut, Panic, Div {
+    var c: [f64; 8] = [0.0; 8]
+    c[id as usize] = coeff
+    NSVal { coeffs: c }
+}
+
+// SOUND add: symbol-wise coefficient addition. Shared symbols reinforce
+// correctly (correlation handled by construction) -> no anti-garbling.
+fn ep_add_ns(a: &NSVal, b: &NSVal) -> NSVal with Mut, Panic, Div {
+    var c: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        c[i as usize] = a.coeffs[i as usize] + b.coeffs[i as usize]
+        i = i + 1
+    }
+    NSVal { coeffs: c }
+}
+
+// Exact variance of an affine form over independent unit-variance symbols:
+// sum of squared coefficients.
+fn true_var(a: &NSVal) -> f64 with Mut, Panic, Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < 8 {
+        let ci = a.coeffs[i as usize]
+        s = s + ci * ci
+        i = i + 1
+    }
+    s
+}
+
+// The NAIVE scalar variance (what ep_add on scalar variance computes):
+// var(a) + var(b), assuming independence. Understates when a,b share a symbol.
+fn naive_add_var(a: &NSVal, b: &NSVal) -> f64 with Mut, Panic, Div {
+    true_var(a) + true_var(b)
+}
+
+// DISJ test: two values are disjoint iff no symbol has a nonzero coefficient in
+// both. Disjoint => the naive scalar add is exact (no anti-garbling).
+fn ns_disjoint(a: &NSVal, b: &NSVal) -> bool with Mut, Panic, Div {
+    var disj = true
+    var i: i64 = 0
+    while i < 8 {
+        let ai = a.coeffs[i as usize]
+        let bi = b.coeffs[i as usize]
+        if ai != 0.0 {
+            if bi != 0.0 {
+                disj = false
+            }
+        }
+        i = i + 1
+    }
+    disj
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    // x lives on symbol 0 with coefficient 1 (unit variance).
+    let x = ns_singleton(0, 1.0)
+
+    // x + x: the SAME source. Sound add reinforces symbol 0 -> coeff 2 -> var 4.
+    let xx = ep_add_ns(&x, &x)
+    print("x+x  sound true_var (correlated)      = ")
+    print_f64(true_var(&xx))
+    print("   (correct: 4.0)\n")
+    print("x+x  naive scalar var (anti-garbling) = ")
+    print_f64(naive_add_var(&x, &x))
+    print("   (fabricated: 2.0)\n")
+
+    // y lives on symbol 1 — disjoint from x.
+    let y = ns_singleton(1, 1.0)
+    let xy = ep_add_ns(&x, &y)
+    print("x+y  sound true_var (disjoint)        = ")
+    print_f64(true_var(&xy))
+    print("\n")
+    print("x+y  naive scalar var                 = ")
+    print_f64(naive_add_var(&x, &y))
+    print("   (equal to sound: DISJ makes naive exact)\n")
+
+    // NOTE: print bool via string branch — println(bool) is a known compiler
+    // SIGSEGV path (println_bool scalar-kind), unrelated to this module.
+    print("disjoint(x, y) = ")
+    if ns_disjoint(&x, &y) { print("true\n") } else { print("false\n") }
+    print("disjoint(x, x) = ")
+    if ns_disjoint(&x, &x) { print("true\n") } else { print("false\n") }
+    return 0
+}
