@@ -5,7 +5,7 @@
 
   Lemma (ii): over the imaginary-octonion basis triples, the variance-holonomy
   equals base + κ·‖α‖², and curvature enters the variance channel IFF the triple
-  is non-Fano (non-associative). Proven here by `native_decide`/`rfl` over the
+  is non-Fano (non-associative). Proven here by `decide` (kernel-checked) over the
   finite {0,4} associator-norm shadow, in centi-variance INTEGERS (avoids the
   Float axioms that block the repo's p-box Lean; see SounioKnightian.lean).
 
@@ -18,10 +18,11 @@
   no Mathlib, no sorry). This file adds the VARIANCE (holonomy) half and states
   the still-open epistemic bridge.
 
-  STATUS: written to check by `native_decide`/`rfl`; NOT compiled in this
-  environment (no lean toolchain on PATH). Requires a lean run to confirm.
-  sorry = 0 in the proven part. Lemma (i) is a *documented open conjecture*,
-  deliberately NOT written as a vacuous `: True` placeholder.
+  STATUS: CHECKED clean under Lean 4.33.1 (leanprover/lean4:stable), 2026-08-22.
+  All four theorems compile with `decide`; `#print axioms` reports each depends on
+  NO axioms (fully kernel-checked — not even native_decide's `ofReduceBool`).
+  sorry = 0. Lemma (i) is a *documented open conjecture*, deliberately NOT written
+  as a vacuous `: True` placeholder.
 -/
 
 namespace Sounio.WarrantHolonomy
@@ -42,14 +43,14 @@ def varianceHolonomyCenti (fano : Bool) : Nat :=
   baseVarCenti + kappaCenti * assocNormSq fano
 
 /-- Flat (Fano) triple reproduces the measured 0.25. -/
-theorem holonomy_flat : varianceHolonomyCenti true = 25 := by native_decide
+theorem holonomy_flat : varianceHolonomyCenti true = 25 := by decide
 
 /-- Curved (non-Fano) triple reproduces the measured 4.25. -/
-theorem holonomy_curved : varianceHolonomyCenti false = 425 := by native_decide
+theorem holonomy_curved : varianceHolonomyCenti false = 425 := by decide
 
 /-- The squared holonomy entering the variance channel is exactly 4.00 (= 400 centi). -/
 theorem holonomy_gap : varianceHolonomyCenti false - varianceHolonomyCenti true = 400 := by
-  native_decide
+  decide
 
 /-- **Curvature-in-the-variance-channel theorem.** The variance-holonomy exceeds the
     base aleatory variance IFF the triple is non-Fano — i.e. curvature enters the
@@ -57,7 +58,7 @@ theorem holonomy_gap : varianceHolonomyCenti false - varianceHolonomyCenti true 
     variance (second-moment) shadow of the Blackwell holonomy. -/
 theorem curvature_iff_nonfano (fano : Bool) :
     (varianceHolonomyCenti fano > baseVarCenti) ↔ (fano = false) := by
-  cases fano <;> native_decide
+  cases fano <;> decide
 
 /-!
 ## Lemma (i) — the epistemic bridge (OPEN CONJECTURE, no Lean statement yet)

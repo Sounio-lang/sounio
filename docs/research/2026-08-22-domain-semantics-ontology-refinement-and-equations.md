@@ -722,11 +722,14 @@ algebraic half is `nonassoc_iff_not_fano`, the variance half is `curvature_iff_n
 the missing link is the full-distribution Blackwell order). It is deliberately **not**
 a `: True` stub.
 
-**STATUS (honest):** the file is written to check by `native_decide`/`rfl` but was
-**NOT compiled** in this environment (no lean toolchain on PATH); it needs a lean run
-(or CI) to confirm. It lives under `docs/research/lean/` — **outside** the
-`formal/lean4/` lakefile build — so it cannot break CI while unverified. Next step to
-harden: run it under lean, then lift into `formal/lean4/` and wire the lakefile.
+**STATUS: CHECKED clean under Lean 4.33.1 (leanprover/lean4:stable), 2026-08-22.**
+All four theorems (`holonomy_flat`, `holonomy_curved`, `holonomy_gap`,
+`curvature_iff_nonfano`) compile with `decide`; `#print axioms` reports each depends
+on **no axioms** — fully kernel-checked, not even native_decide's `ofReduceBool`.
+sorry = 0. It lives under `docs/research/lean/` (outside the `formal/lean4/` lakefile
+build); next hardening step is to lift it into `formal/lean4/` and wire the lakefile
+so CI re-checks it. Lemma (i) remains the declared open conjecture (needs the
+statistical Blackwell order formalised).
 
 ## References (in-tree)
 
