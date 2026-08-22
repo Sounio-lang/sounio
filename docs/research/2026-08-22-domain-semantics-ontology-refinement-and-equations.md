@@ -386,12 +386,17 @@ boundary between "has ⊗" and "no ⊗ → E" is the scientific content.**
   collapse, usually in the wrong order. The type makes it explicit and ordered.
   (Echo of the NonAssoc theme: order matters in two places — algebra and
   epistemic/aleatory collapse.)
-- **(c) Containment is the soundness certificate** (already in `pb_dominates`).
-  Every ProbBox op preserves containment of the true CDF — the p-box soundness
-  lemma, which is the CEI-N1 certificate for the `(Variance⊗Interval)` handler:
-  "handler soundly realises the effect" = "output p-box contains the true family."
-  **Unconditional** (unlike GUM's curvature-conditional soundness) — the strongest
-  Lean obligation in the programme.
+- **(c) ~~Containment is the soundness certificate~~ — RETRACTED (see §10).**
+  Claimed: `pb_dominates` preserves containment of the true CDF, an unconditional
+  Lean certificate. **False, verified in source (codex-1 refutation, 2026-08-22):**
+  `pb_contains`/`pb_dominates` (`knightian.sio:117,121`) compare only the mean band
+  and **ignore the variance and CDF shape**; `SounioKnightian.lean` states the
+  containment obligations as `: True`/`sorry` placeholders (lines 27–29, 96, 122,
+  159 — "deferred via sorry or trivial"). A bounded-ℚ discharge exists in
+  `SounioPBoxSemantics.lean` (line 163, no sorry) but does **not** transfer to the
+  Float `PBox` runtime (import cycle + Float≠ℚ). So there is no unconditional
+  certificate today — the real target is a proven CDF/credal concretization
+  theorem, still future work.
 
 ### 9.3 The clinical demonstration (the dissertation line)
 
@@ -429,6 +434,46 @@ caught at compile time.**
 - **`pb_decay(c) = c*99/100` per op is heuristic, not derived.** Per principle #6
   (values derivable, not retrofitted), the confidence-decay rate needs a derivation
   or it is drift.
+
+## 10. codex-1 refutation (2026-08-22) — reframe to typed admissibility
+
+codex-1 (PL/CS novelty review, coord bus) refuted Fork 2's novelty and soundness
+claims. Verified in source and adopted:
+
+**Refuted:**
+1. **§9.2(c) soundness certificate is false.** `pb_contains`/`pb_dominates` ignore
+   variance/CDF (mean-band only); `SounioKnightian.lean` containment is `: True`/
+   `sorry` (deferred). Only a non-transferring bounded-ℚ analogue is proven. See §9.2(c).
+2. **Tag-in-type is not novel.** Graded monads / type-level named epistemic sources
+   (POPL'25 compositional imprecise probability; ICFP'26 "Imp") already do this.
+   The `PBox` product is prior-art-shaped (Ferson p-boxes as the math; graded
+   effects as the typing).
+3. **Constructor inference is insufficient** (corrects §3.2 / §9). Same operational
+   `Prob` effect → two result meanings: a Monte-Carlo handler returns
+   epistemically-reducible *sampling error*; a generative model returns *aleatoric*
+   variation. So neither the effect row nor the constructor alone derives the
+   ontology — it must be declared by the **handler's knowledge-transformer contract**.
+   (This strengthens the §2/§3 "effect row ≠ ontology" point.)
+
+**What survives, elevated (codex-1's convergence reframe):** the thesis is not the
+PBox product — it is **typed admissibility of uncertainty-modality transitions**.
+The ordered/non-commutative collapse (§9.2(b)) survives as **one instance** of an
+admissible/forbidden modality transition, alongside R-ORIGIN no-laundering and
+E224. Defensible novelty moves from "a typed p-box" to **certified scientific
+handler contracts + relational/refinement results**: a handler declares a
+knowledge-transformer type and discharges a sound-abstraction/refinement obligation.
+
+**Convergence, not a parallel track.** codex-1 is concurrently implementing L5
+*provenance in `TypeEntry`* with R-ORIGIN laundering witnesses (`check/types.sio`,
+`tests/compile-fail/r_origin_*`) — the same tag-slot Fork 1 identified.
+`check_ontology_join` is a **sibling** of the R-ORIGIN check (both TypeEntry-borne
+forbidden modality transitions). codex-1 holds the `types.sio` claim; this work
+aligns under his frame rather than opening a parallel surface.
+
+**Revised next target:** formalise the *admissibility relation* on modality
+transitions (which handler contracts are sound abstractions), with ordered collapse,
+R-ORIGIN, and E224 as its first three instances — and a real CDF/credal
+concretization theorem to replace the retracted §9.2(c) certificate.
 
 ## References (in-tree)
 
