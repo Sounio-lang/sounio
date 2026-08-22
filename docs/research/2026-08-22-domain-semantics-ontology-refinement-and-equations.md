@@ -475,6 +475,72 @@ transitions (which handler contracts are sound abstractions), with ordered colla
 R-ORIGIN, and E224 as its first three instances — and a real CDF/credal
 concretization theorem to replace the retracted §9.2(c) certificate.
 
+## 11. The deep frame and its falsification test — CONFIRMED
+
+**The deep frame (beyond "typed admissibility"):** a Sounio value is a justified
+belief; computation transforms *warrant*, and the type system exists to forbid
+*manufacturing* warrant. This is a conservation law — the information-theoretic
+**Data-Processing Inequality**, and more exactly **Blackwell's informativeness
+(garbling) order**: an admissible transition is a garbling (information-losing);
+a forbidden one is an anti-garbling (information-creating). R-ORIGIN, E224, and
+ordered collapse are instances. Two conservation laws, one language: physical
+(units/balance/dimension = Noether/symmetry) and epistemic (warrant =
+Blackwell/Shannon). This also restates the retracted §9.2(c) certificate at the
+right level: **a handler is sound iff it is a garbling (Markov post-processing) of
+the true experiment, never an anti-garbling** — a channel-monotonicity obligation,
+not per-op CDF containment.
+
+**Falsification test (founder-requested):** find an operation that type-checks
+today but violates Blackwell (creates information). **Found, in
+`stdlib/epistemic/knowledge.sio`:**
+
+```
+ep_add(a,b): variance = a.variance + b.variance    // :96  unconditional independence
+ep_sub(a,b): variance = a.variance + b.variance    // :105
+ep_mul(a,b): variance = b.val²·a.var + a.val²·b.var // :112 no covariance term
+```
+
+None takes a correlation param; none tracks shared provenance. For `x` with
+variance `v`:
+
+| Op | true (ρ=1) | Sounio | verdict |
+|---|---|---|---|
+| `ep_add(&x,&x)` = 2x | 4v | 2v | **understates → anti-garbling** |
+| `ep_sub(&x,&x)` = 0 | 0 | 2v | overstates → garbling (safe) |
+| `ep_mul(&x,&x)` = x² | 4x²v | 2x²v | **understates → anti-garbling** |
+
+The add/sub **asymmetry** (correlated add understates = the sin; sub overstates =
+merely conservative) is a directional prediction of the frame, confirmed by the code.
+
+**Smoking gun:** same file, `ep_mul(&x,&x)` gives `2x²v` (`:112`) while `ep_square(&x)`
+gives the correct `4x²v` (`:154`). `x*x` and `x²` are the same operation; both
+formulas ship; nothing routes `x*x` to `ep_square`. The compiler lets you pick the
+one that fabricates half the precision.
+
+**Not a toy — it is the dissertation.** The realistic case is
+`ep_add(&auc_central, &auc_peripheral)` where both derive from the same measured
+clearance; every PBPK compartment shares the rate constants, so every
+inter-compartmental sum understates uncertainty — which *weakens* the
+`vancomycin_auc_epistemic` WARN the thesis relies on.
+
+**Predicted new type error (not covered by R-ORIGIN/E224/collapse):** adding /
+multiplying / merging two `Knowledge` that share a noise symbol under the
+independence-assuming operator must be rejected or dispatched to the correlated
+version. This requires **noise-symbol identity tracking on the type** — i.e., the
+project's own affine-forms line (`affine_octonion`; "correlated-error substrate
+fused with variance budget"). The Blackwell frame **re-derives affine forms as a
+soundness necessity, not a feature**: without noise-symbol tracking, `ep_add` is an
+anti-garbling generator. The correlated machinery already exists orphaned —
+`gum_supplement1.sio`: `CovarianceMatrix`, `gum_s1_add_correlated(x1,x2,ρ)` — never
+on the default path.
+
+**Status:** deep frame confirmed with teeth. Open: (i) formalise garbling-
+monotonicity as the Lean obligation replacing §9.2(c); (ii) design the noise-symbol
+tag + the E-anti-garbling check (sibling of R-ORIGIN, under codex-1's TypeEntry
+provenance frame); (iii) the non-commutative Blackwell order along non-associative
+channels (associator = path-dependence of garbling) — where the affine-octonion
+frontier meets the epistemic frame.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
