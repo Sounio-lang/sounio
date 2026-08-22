@@ -613,6 +613,89 @@ where the theorem must be proven, not by hand. Falsifiable: the measured
 associator-variances *are* the curvature values; if the groupoid structure fails to
 reproduce "order-safe iff N≤3", the frame breaks.
 
+## 14. The three cruxes, developed in parallel — one stacked object
+
+Three parallel forks developed the crux theorems to their provable/falsifiable
+cores. They are **not independent — they are a stack**, and one gap unblocks all.
+
+### 14.1 The unified object
+
+A **bicategory of epistemic states**: objects = uncertain quantities (affine forms
+over noise symbols, coefficients in 𝕆); morphisms = garblings (the Blackwell
+order); monoidal product ⊗ = the (octonion) product lifted to uncertain quantities.
+- **Morphisms are garblings** (Crux #1): warrant non-increasing.
+- **The order is computed by a monotone dataflow** over the value graph (Crux #2):
+  the noise-symbol lattice.
+- **The product has curvature = the associator, living in HH³** (Crux #3):
+  flatness ⟺ associativity ⟺ the order is a path-independent poset.
+
+### 14.2 The dependency stack
+
+- **#2 provides `NS`** (noise-symbol sets) — and the engine already exists:
+  `ir/memory_analysis.sio`'s Andersen points-to propagates *sets* along the
+  value-graph edges to a fixpoint; relabel the seed (allocations→measurements,
+  region→source). `Provenance.source_id` exists today but as a **scalar**,
+  un-propagated (`epistemic.sio:225,240`); the work is lifting it to a propagated set.
+- **#1's DISJ becomes checkable once `NS` exists** → the keystone monotonicity
+  lemma lands: linear-fragment, DISJ-conditional variance-monotonicity, a 2-line
+  proof (`gAddMeta_monotone`) on the **sorry-free** `EpistemicEffectsV2.lean`
+  (byte-identical `ep_*` twins, 28 theorems, progress/preservation done). This
+  honestly retires §9.2(c) (false-unconditional → true-conditional; anti-garbling
+  = the explicit hypothesis-failure ¬DISJ).
+- **#3 is what the order does under non-associativity**: it lifts to the
+  bicategory; curvature = associator. The measured numbers **are** curvature:
+  `product_nonassoc` Fano ‖α‖²=0→0.25 (flat), non-Fano ‖α‖²=4→4.25 (curved);
+  `4.25−0.25 = 4 = ‖[e1,e2,e4]‖²` is the squared holonomy in the variance channel.
+  "order-safe iff N≤3" is geometric: N=3 = one associator = complete curvature;
+  N=4 = the associahedron K4 (pentagon, Catalan C₃=5), two edges exact Mac Lane
+  identities (verified in `order_spread_exact.sio`).
+
+### 14.3 The convergent gap — one missing piece unblocks everything
+
+All three name the **same** missing piece: **interprocedural summaries.** #1 needs
+them for DISJ across calls; #2 names them (both analyzers intraprocedural →
+conservative *assume-sharing* default, the opposite of `ep_add`'s assume-independent
+`knowledge.sio:96`); CEI WS-B needs them for memory reclamation. One artifact —
+callee escape/points-to summaries — closes the epistemic soundness gap AND the
+memory-reclamation gap. This is the concrete keystone-of-the-keystone.
+
+### 14.4 Grounded vs conjecture (ruthless split)
+
+**Grounded (source or external math):**
+- #1: sorry-free `EpistemicEffectsV2.lean` `ep_*` twins; `gAddMeta_monotone` 2-line;
+  anti-garbling = ¬DISJ exactly.
+- #2: two engines in-tree (escape=boolean, `memory_analysis`=Andersen set); Kildall
+  lfp existence/soundness; `source_id` present (scalar).
+- #3: `associator_field.sio` implements the seven-window object and **names HH³
+  (:54) and R-flux (:13)**; measured holonomy 4.25−0.25=4; N=4 pentagon exact edges;
+  octonion alternativity → antisymmetric 3-form; HH³ obstruction (Gerstenhaber);
+  non-associativity ↔ non-geometric flux (Bakas–Lüst; Mylonas–Schupp–Szabo) —
+  precedent the source already invokes.
+
+**Conjecture (the genuinely new, unproven — the whole novelty):**
+- The unifying frame that *all* Sounio epistemic rules are Blackwell garblings.
+- #2's "the three analyses are one framework" — Kildall-backed but the epistemic
+  instance is sound only with interprocedural summaries; and memory-aliasing ≠
+  noise-aliasing as *relations* (shared framework/engine, not relation).
+- **#3's core bridge:** the Blackwell garbling order on octonion-valued affine forms
+  is governed by HH³ — *"reassociation is a garbling ⟺ [α]=0."* Nobody has proven
+  the Blackwell order and the octonion associator are the same obstruction. **This
+  single link is the whole novelty**, currently structural motivation, not theorem.
+
+### 14.5 The minimal buildable program (proven-now core, flagged frontier)
+
+1. **#2:** relabel the points-to engine → `NS` as a forward-propagated source-set.
+2. **#1:** DISJ check at binary ops using `NS`; prove `gAddMeta_monotone` +
+   linear-fragment DISJ-conditional variance-monotonicity (sorry-free). Retires
+   §9.2(c). *Nonlinear ops (`ep_mul/div/square/sqrt`) are delta-method and drop
+   2nd-order → residual anti-garbling even under DISJ; only "= true first-order
+   variance" holds — do not overclaim.*
+3. **#3:** prove lemma (ii) variance-holonomy = κ‖α‖² (now, from `oct_associator`/
+   `oct_norm_sq`); **state** lemma (i) reassociation-garbling ⟺ [α]=0 with the
+   Blackwell definition — (i) is the deep new theorem the whole frame rests on.
+   *Caveat: variance model is first-order delta; κ‖α‖² is the second-moment shadow
+   of the full-distribution Blackwell holonomy.*
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
