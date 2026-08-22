@@ -11,11 +11,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 
 **Date:** 2026-08-17
 **Toolchain:** `./bin/souc` → Madaros v0.80.0 (default engine); cross-checked against `SOUNIO_SOUC_ENGINE=lean_single`
-**Owner:** claude (Defect A only, fixed 2026-08-17); Defects B and C unassigned
-**Status:** Defect A **fixed and merged** (see its section for the commit and verification). Defects
-B and C remain open, unpatched, dispatch only. Originally filed with no `self-hosted/` changes per
-this repo's forensic dispatch protocol (CLAUDE.md §8); Defect A's fix followed as an explicit,
-separately-authorized implementation pass on top of this same dispatch, not an ad hoc patch.
+**Owner:** claude (Defects A and B-partial, fixed 2026-08-17/18); Defect C and the E009 half of B unassigned
+**Status:** Defect A **fixed and merged**. Defect B's E035 half **fixed and merged**; its E009 half
+remains open, now isolated from the E035 noise (see Defect B's section). Defect C remains open,
+unpatched, dispatch only. Originally filed with no `self-hosted/` changes per this repo's forensic
+dispatch protocol (CLAUDE.md §8); each fix followed as an explicit, separately-authorized
+implementation pass on top of this same dispatch, not an ad hoc patch.
 
 ## Why this dispatch
 
@@ -162,7 +163,7 @@ the note needs re-wording, not removal.
 
 ---
 
-## Defect B — `pbpk28_sobol_pce.sio` fails Madaros's multi-module check; the same imported function checks clean standalone
+## Defect B — `pbpk28_sobol_pce.sio` fails Madaros's multi-module check; the same imported function checks clean standalone — **E035 half FIXED 2026-08-18, E009 half still open**
 
 ### Repro
 
@@ -195,40 +196,88 @@ Under `SOUNIO_SOUC_ENGINE=lean_single`, `pbpk28_sobol_pce.sio` compiles (with tw
 `lean_single` typecheck-tolerance behavior documented as #1494 in
 `docs/compiler/KNOWN_LIMITATIONS.md`) and runs all 5 tests to `SOBOL_PCE_SEMAGLUTIDE_FULL_PASS`.
 
-### Root cause — not isolated
+### Root cause of the E035 half — isolated and fixed
 
-Two independent-looking symptoms are bundled in one multi-module check run:
+The two symptoms turned out to be independent, confirmed by fixing one and observing the other is
+untouched (see Verification below). The `E035` half:
 
-- The `E035` (missing `Epistemic` effect on `epistemic_pbpk28::main`) firing **only** when
-  `epistemic_pbpk28.sio` is checked as an *imported dependency* of another module, never when
-  checked standalone, points at a context-sensitivity bug in Madaros's multi-module effect
-  inference — plausibly related to the "Imported-module native path" residuals already tracked in
-  `docs/compiler/KNOWN_LIMITATIONS.md` §13 (D3 family: "multi-module memory-wall / exclusive-ref
-  fragile chains"), though this dispatch did not confirm that specific connection.
-- The two `E009` (`expected fn#167, found fn#6`/`fn#11`) errors are function-reference/pointer type
-  mismatches at the call sites of `sp28_selftest_main`/`sp28_selftest_semaglutide_main` — consistent
-  with a higher-order function argument (a callback passed by reference) being resolved to the
-  wrong function-type slot when the module closure includes `epistemic_pbpk28.sio`'s functions.
-  Not traced further; whether this is the *same* root cause as the E035 (one context-sensitivity
-  bug producing two symptoms) or a second, independent bug was not determined.
+Minimal 2-file repro (not the full 6-module closure — matches the acceptance gate this dispatch
+originally asked for):
 
-### Proposed fix locus
+```sounio
+// module_a.sio
+pub fn wanted_fn() -> i32 { 42 }
+fn ep28_selftest_main() -> i32 with Epistemic { 0 }
+fn main() -> i32 with Epistemic { ep28_selftest_main() }
 
-`self-hosted/check/check.sio`'s multi-module effect-inference and function-reference-resolution
-passes, specifically around how a module's own standalone-checked signature (effects, function
-identity) is or isn't preserved when that module is re-checked as a dependency of a different
-entry module. Needs a minimal repro isolated to 2 files (not `pbpk28_sobol_pce.sio`'s full 6-module
-closure) before attempting a fix — this dispatch provides the symptom, not the minimal repro.
+// module_b.sio
+use module_a::wanted_fn
+fn main() -> i32 { wanted_fn() }
+```
 
-### Acceptance gate (proposed)
+`souc check module_b.sio` reproduces the identical `error[E035] ... missing: Epistemic ... required
+by ep28_selftest_main` on `module_a::main` — even though `module_a::main` visibly declares
+`Epistemic` in its own signature. Renaming `module_a`'s `main` to anything else makes the error
+vanish; renaming `module_b`'s `main` to anything else *also* makes it vanish. The bug requires
+**both** the entry file and an imported module to each declare their own `fn main` — exactly
+`pbpk28_sobol_pce.sio`'s (`with IO, Mut, Div, Panic`, no Epistemic) and `epistemic_pbpk28.sio`'s
+(`with IO, Mut, Div, Panic, Epistemic`) shape.
 
-1. A 2-file minimal repro: module A declares a function requiring effect `X`; module B imports A
-   and calls a *different* function in A that doesn't require `X`. Module A checks clean standalone
-   and does not spuriously require `X` on unrelated functions when checked as B's dependency.
+`self-hosted/check/check.sio`'s `checker_check_fn_item_inplace` looks up "my own signature" (to
+populate `current_effects`/`current_return_type` before checking a function's body) via
+`fn_sig_table_find((*c).fn_sigs, (*fd).name)` — a **bare-name, first-match** lookup into the shared
+multi-module signature table. With two modules each contributing a `main` entry, whichever one sits
+earlier in the table wins regardless of which module is actually being checked, so
+`epistemic_pbpk28::main`'s body gets checked against `pbpk28_sobol_pce::main`'s declared effects.
+
+This is the *identical disease* `fn_sig_table_find_prefer_module` in `self-hosted/check/defs.sio`
+already exists to cure — its own doc comment describes the exact same collision for a different
+symptom (E175 visibility, not E035 effects): "the later module's body calls resolve to the earlier
+module's private sig." That fix was applied at other call sites (e.g. `check.sio:7120`) but missed
+this one.
+
+### Fix (landed 2026-08-18)
+
+One-line change: `checker_check_fn_item_inplace` now calls
+`fn_sig_table_find_prefer_module((*c).fn_sigs, (*fd).name, (*c).current_module_id)` instead of the
+bare-name `fn_sig_table_find`. `current_module_id` is already correctly tracked per-module by this
+pass's caller (`check_modules_verdict_boot4_with_visibility` in `self-hosted/check/mod.sio`), so no
+other plumbing was needed.
+
+**Not fixed, found during triage, deliberately left alone:** the identical bare-name pattern also
+exists at `check.sio:19228` in `check_fn_item` — the by-value `Checker` twin of the function just
+fixed, used by the *specialized-generics-merged* check path (`check_items_verdict_boot4`) rather
+than the plain multi-module path this dispatch's repro goes through. That path does not track
+`current_module_id` per-item at all (it stays at its initial value for the whole merged pass), so
+swapping in `_prefer_module` there would not actually disambiguate anything without first adding
+per-item module tracking to that pass — a larger, separate change, not attempted here without a
+reproduced failure to verify against. Two more bare `fn_sig_table_find` call sites
+(`check.sio:19779`, `mod.sio:274`) were found and are unrelated in kind (call-site resolution and
+hyper-algebra inference respectively, not "look up my own signature") — not investigated.
+
+### Root cause of the E009 half — still open, now isolated
+
+Confirmed independent of the E035 bug: after the fix above, `pbpk28_sobol_pce.sio` no longer
+produces the E035 error at all, but still fails with exactly the two `E009` errors, unchanged. Both
+fire *inside* `sp28_selftest_main`/`sp28_selftest_semaglutide_main`'s own bodies — both are
+**zero-argument** functions (`fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic { ... }`), so
+"argument type does not match parameter" must refer to a call *made from within* one of these
+~250-400 line bodies to some other function, not to the self-test functions' own call sites (which
+take no arguments to mismatch). Not yet bisected to a specific call or a minimal repro. `fn#167`/
+`fn#6`/`fn#11` are internal `TypeEntry` ids, not necessarily function-specific despite the `fn#`
+prefix — whether this is a third instance of the same bare-name-lookup disease (in a different
+table, e.g. one resolving function-typed parameters) or something else entirely is unconfirmed.
+
+### Acceptance gate — E035 half done, E009 half still open
+
+1. ~~A 2-file minimal repro~~ — done, see above.
 2. `pbpk28_sobol_pce.sio` checks and runs clean under default Madaros, matching lean_single
-   (`SOBOL_PCE_SEMAGLUTIDE_FULL_PASS`).
+   (`SOBOL_PCE_SEMAGLUTIDE_FULL_PASS`) — **not yet**: the E035 blocker is gone but the two E009s
+   remain, so the file still does not check or run clean.
 3. `docs/dissertation/results/sobol_pce_semaglutide_v1.md`'s engine-dependency note (added in
-   #1809) updated once this closes.
+   #1809) should stay as-is until the E009 half also closes — the file still doesn't compile clean
+   under Madaros, so the note's substance is still accurate even though its named cause is now only
+   half the story.
 
 ---
 
