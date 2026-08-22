@@ -696,6 +696,38 @@ memory-reclamation gap. This is the concrete keystone-of-the-keystone.
    *Caveat: variance model is first-order delta; κ‖α‖² is the second-moment shadow
    of the full-distribution Blackwell holonomy.*
 
+## 15. First proven-now artifact — the variance-holonomy lemma (ii)
+
+`docs/research/lean/SounioWarrantHolonomy.lean` (new). Realises the "prove the core"
+discipline: the deepest claim's *provable-now* slice, with the bridge (i) left as a
+declared open conjecture rather than a vacuous placeholder.
+
+Discovery while grounding: the **algebraic half of the bridge is already proven** —
+`SounioBidirectionalBridge.lean:170 nonassoc_iff_not_fano` (native_decide, no
+Mathlib, no sorry): `[α]=0 ⟺ Fano`, 343 triples, 168 non-Fano. `SounioAssociatorShadow.lean`
+proves the `|shadow| ≤ 3` ceiling. So crux #3's algebra is done; only the epistemic
+half is open.
+
+The new file adds the **variance (holonomy) half**, in centi-variance integers to
+avoid the Float axioms that block the repo's p-box Lean:
+- `holonomy_flat`/`holonomy_curved` — reproduce the measured 0.25 / 4.25;
+- `holonomy_gap` — the squared holonomy is exactly 4.00;
+- `curvature_iff_nonfano` — the variance-holonomy exceeds base aleatory variance
+  **iff the triple is non-Fano** (curvature enters the warrant budget exactly when
+  composition is non-associative). Second-moment shadow of the Blackwell holonomy.
+
+Lemma (i) — "reassociation is a Blackwell garbling ⟺ [α]=0" — is stated as an
+explicit open conjecture (needs the statistical garbling order formalised; the
+algebraic half is `nonassoc_iff_not_fano`, the variance half is `curvature_iff_nonfano`,
+the missing link is the full-distribution Blackwell order). It is deliberately **not**
+a `: True` stub.
+
+**STATUS (honest):** the file is written to check by `native_decide`/`rfl` but was
+**NOT compiled** in this environment (no lean toolchain on PATH); it needs a lean run
+(or CI) to confirm. It lives under `docs/research/lean/` — **outside** the
+`formal/lean4/` lakefile build — so it cannot break CI while unverified. Next step to
+harden: run it under lean, then lift into `formal/lean4/` and wire the lakefile.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
