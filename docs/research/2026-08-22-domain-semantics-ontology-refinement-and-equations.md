@@ -731,6 +731,46 @@ build); next hardening step is to lift it into `formal/lean4/` and wire the lake
 so CI re-checks it. Lemma (i) remains the declared open conjecture (needs the
 statistical Blackwell order formalised).
 
+## 16. Two more kernel-checked increments — the keystone model + the bridge shadow
+
+Both attacked at once, both discharged as axiom-free Lean (Lean 4.33.1, `decide`,
+`#print axioms` = none). Neither touches the compiler; both are checked here.
+
+**Keystone #1 as a model — `docs/research/lean/SounioAntiGarblingModel.lean`.** A value
+is an affine form over independent unit-variance noise symbols (the coefficients *are*
+the §12 noise symbols). `trueVar` = the affine (source-tracking) variance;
+`naiveAddVar` = the scalar `ep_add` variance (var_a + var_b), which forgets source
+identity. Proven:
+- `anti_garbling_x_plus_x`: naive `x+x` variance 2 < true 4 — the §11 anti-garbling.
+- `anti_garbling_gap_x` / `_z`: the understatement is exactly `2·⟨a,b⟩` (twice the
+  covariance) — the precise size of the fabricated precision.
+- `sound_under_disjoint` + `gap_zero_iff_disjoint_witness`: the naive add is exact
+  **iff** the sources are disjoint (⟨a,b⟩=0) — the DISJ side-condition of Crux #1,
+  now a checked fact, not an assertion. The affine model itself is anti-garbling-free
+  *by construction* (it tracks shared symbols) — which is precisely why the sound
+  representation must be affine, not scalar (§11 conclusion, now modelled).
+
+**Bridge shadow (toward lemma i) — added to `SounioWarrantHolonomy.lean`.**
+`reassoc_variance_preserving_iff_fano`: reassociation is warrant-preserving (the two
+parenthesisations coincide in the variance channel) **iff [α]=0 (Fano)**; when [α]≠0
+they are separated by holonomy ‖α‖²>0, Blackwell-incomparable in the second-moment
+shadow. This is the checked second-moment shadow of lemma (i).
+
+**Where the bridge now stands — proven anchors on both sides, one open middle:**
+
+| Claim | Status |
+|---|---|
+| `[α]=0 ⟺ Fano` (algebraic half) | ✅ proven — `SounioBidirectionalBridge:170` |
+| curvature enters σ² ⟺ non-Fano | ✅ proven — `curvature_iff_nonfano` (axiom-free) |
+| reassociation variance-preserving ⟺ Fano | ✅ proven — `reassoc_variance_preserving_iff_fano` |
+| naive add anti-garbles by 2·cov; sound ⟺ DISJ | ✅ proven — `SounioAntiGarblingModel` |
+| **reassociation is a Blackwell *garbling* ⟺ [α]=0** (full distribution) | ⬜ **open — lemma (i), the whole novelty** |
+
+The two remaining moves are no longer "think harder": (a) formalise the full-
+distribution Blackwell garbling order in Lean and prove lemma (i) — research; (b) build
+the `NS` engine + interprocedural summaries in the compiler (relabel the points-to
+engine; §14.3) — coordinate with codex-1 (active in `check/types.sio`).
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)

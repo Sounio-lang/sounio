@@ -60,6 +60,20 @@ theorem curvature_iff_nonfano (fano : Bool) :
     (varianceHolonomyCenti fano > baseVarCenti) ↔ (fano = false) := by
   cases fano <;> decide
 
+/-- Variance-space separation between the two parenthesisations (ab)c and a(bc):
+    the squared associator ‖α‖². -/
+def parenGap (fano : Bool) : Nat := assocNormSq fano
+
+/-- **Bridge shadow (toward lemma i).** Reassociation is warrant-preserving — the two
+    parenthesisations coincide in the variance channel — IFF [α]=0 (Fano). When [α]≠0
+    the two are separated by holonomy ‖α‖²>0, so neither is a pure reassociation-
+    garbling of the other (they are Blackwell-incomparable in the second-moment shadow).
+    The FULL statistical version — reassociation is a garbling ⟺ [α]=0 — is lemma (i),
+    still open (needs the full-distribution Blackwell order). -/
+theorem reassoc_variance_preserving_iff_fano (fano : Bool) :
+    parenGap fano = 0 ↔ fano = true := by
+  cases fano <;> decide
+
 /-!
 ## Lemma (i) — the epistemic bridge (OPEN CONJECTURE, no Lean statement yet)
 
