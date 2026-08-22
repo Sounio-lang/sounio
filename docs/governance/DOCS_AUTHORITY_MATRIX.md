@@ -399,6 +399,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.runtime-gc-capability-honesty-2026-08-18 | repo_only | docs/audit/RUNTIME_GC_CAPABILITY_HONESTY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.rust-macro-acceptance-2026-08-20 | repo_only | docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-artin-2026-08-23 | repo_only | docs/audit/SEDENION_ARTIN_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.sedenion-bipartite-handoff-2026-08-16 | repo_only | docs/audit/SEDENION_BIPARTITE_HANDOFF_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-basis-2026-08-23 | repo_only | docs/audit/SEDENION_KER_BASIS_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-intersect-2026-08-23 | repo_only | docs/audit/SEDENION_KER_INTERSECT_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sedenion-ker-lw-2026-08-23 | repo_only | docs/audit/SEDENION_KER_LW_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
