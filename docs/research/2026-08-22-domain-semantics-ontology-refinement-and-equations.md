@@ -339,6 +339,97 @@ mechanical/medium side, not the research horizon. Caveat: because
 the ontology tag must be a **separate** field, with those constructors defaulting
 it to −1/⊥.
 
+## 9. Fork 2 designed — the ontology product `Variance ⊗ Interval`
+
+The representation already exists, orphaned from the type system:
+`stdlib/epistemic/knightian.sio:65` defines
+
+```
+pub struct PBox { lo_mean: f64, hi_mean: f64, variance: f64, confidence: i64 }
+```
+
+which **is** `Variance ⊗ Interval`: `[lo_mean, hi_mean]` is the epistemic
+(Knightian/interval) axis on the mean (parameter uncertainty, reducible with
+data); `variance` is the aleatory axis (inter-individual variability, irreducible).
+`pb_add` propagates the two axes by *different* laws — interval extension on the
+means (`lo+lo, hi+hi`), GUM on the variance (`var+var`). `pb_dominates` is the
+containment order; `pb_dispersion = gap + 2·sd` is the conservative both-axes
+collapse (final gate only). All built; disconnected from the type system.
+
+### 9.1 The lattice has a partial monoidal product ⊗
+
+Beyond ⊥=Exact, ⊤=Approx and the atoms {Variance, Interval, Band, OrderDependent},
+there are selected **product objects**. `Variance ⊗ Interval = ProbBox` sits above
+both atoms, below ⊤.
+
+- **Join** `Variance ⊔ Interval = ⊤` — lossy (what N5 rejects).
+- **Product** `Variance ⊗ Interval = ProbBox` — lossless (the reconciliation).
+
+⊗ is **partial**: `Variance ⊗ Band` is undefined (a variance and a systematic bias
+do not form a coherent p-box; they combine by the physicist's
+quadrature-under-condition rule — a different reconciliation); `Variance ⊗
+OrderDependent` is the affine-octonion case (associator-as-variance, N=3). **The
+boundary between "has ⊗" and "no ⊗ → E" is the scientific content.**
+`check_ontology_join`: equal→ok; ⊥→the other; ⊤→down-cast; pair with ⊗ defined
+*under a declared reconciliation op*→⊗; else→E.
+
+### 9.2 Three type-theoretic claims (the novelty)
+
+- **(a) Axis non-interference.** The two components propagate by different algebras;
+  the type forbids cross-axis operations — `a.variance + b.hi_mean` is ill-typed.
+  No existing system types this separation.
+- **(b) Collapse is non-commutative, and the order is typed.**
+  `resolve_epistemic ∘ resolve_aleatory ≠ resolve_aleatory ∘ resolve_epistemic`.
+  The correct nesting (aleatory inner, epistemic outer — the 2D-MC convention) is
+  the only one the type permits without an explicit `assume`; the wrong order must
+  be written out and carries an obligation. Reporting a single SD *is* an implicit
+  collapse, usually in the wrong order. The type makes it explicit and ordered.
+  (Echo of the NonAssoc theme: order matters in two places — algebra and
+  epistemic/aleatory collapse.)
+- **(c) Containment is the soundness certificate** (already in `pb_dominates`).
+  Every ProbBox op preserves containment of the true CDF — the p-box soundness
+  lemma, which is the CEI-N1 certificate for the `(Variance⊗Interval)` handler:
+  "handler soundly realises the effect" = "output p-box contains the true family."
+  **Unconditional** (unlike GUM's curvature-conditional soundness) — the strongest
+  Lean obligation in the programme.
+
+### 9.3 The clinical demonstration (the dissertation line)
+
+Vancomycin / rapamycin — "is this patient therapeutic?":
+
+| Representation | Answer | Problem |
+|---|---|---|
+| point estimate | "therapeutic" | ignores all uncertainty |
+| variance only (GUM) | "84% therapeutic" | *which* 84% — population or my ignorance? fused |
+| **ProbBox** | "**between 71% and 92%** of patients like this are therapeutic" | the width [71,92] is epistemic (shrinks with one TDM sample); the position spread is real IIV (does not shrink) |
+
+The `WARN` fires when the epistemic lower bound crosses subtherapeutic even though
+the point estimate is therapeutic — the `project_vancomycin_auc_epistemic` result,
+now a type-level theorem. It separates "get more data" (shrinks the interval) from
+"irreducible patient variation" (the variance) — clinically actionable.
+
+### 9.4 Competitor kill
+
+GUM/Measurements.jl → one variance, axes fused. Uncertain⟨T⟩ → MC, one
+distribution, no epistemic axis. Stan/Pyro → *can* model it (hierarchical) but at
+inference time; a posterior fuses unless hand-structured, and fusing-wrong is never
+a type error. Ferson p-boxes → this *is* the math, but a library — no type, no
+collapse-order checking, no compile-time WARN. **Sounio: `Knowledge<T, ProbBox>`
+as a type, collapse order compiler-checked, formation = the reconciliation handler
+with a containment certificate. The only system where fusing the two axes wrong is
+caught at compile time.**
+
+### 9.5 Honest boundaries
+
+- `PBox` models only Normal-with-interval-mean (parametric). General p-boxes
+  (arbitrary CDF bands) are broader; start parametric (matches `PBox`), generalise.
+- **Correlation:** `pb_add` assumes independent variance addition. Under *unknown*
+  correlation the aleatory axis needs Fréchet bounds; the correlation assumption
+  should be **another tag** on the type — a real gap.
+- **`pb_decay(c) = c*99/100` per op is heuristic, not derived.** Per principle #6
+  (values derivable, not retrofitted), the confidence-decay rate needs a derivation
+  or it is drift.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
@@ -348,4 +439,6 @@ it to −1/⊥.
 - `stdlib/chemistry/ontology.sio` — CHEBI species bridge
 - `stdlib/physics/sr.sio:123–161` — invariant-mass law-in-comment, hand-threaded uncertainty
 - `stdlib/metrology/` — `TypeAEval`, `CalCertificate` (ontology-in-type, done right)
+- `stdlib/epistemic/knightian.sio:65` — `PBox` = `Variance ⊗ Interval` (product representation, orphaned from the type system); `interval_ieee.sio`, `montecarlo.sio` — other handler adapter targets
+- `self-hosted/check/types.sio:139` — `TypeEntry` (the tag-slot host); `self-hosted/check/compat.sio:225,250` — the join site (`TyKnowledge` ε; `TyModelFamily` tag==tag template)
 - `.claude/plans/silly-enchanting-newt.md` — CEI program (handlers as certified interpreters; N1–N4)
