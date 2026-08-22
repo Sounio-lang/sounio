@@ -771,6 +771,56 @@ distribution Blackwell garbling order in Lean and prove lemma (i) — research; 
 the `NS` engine + interprocedural summaries in the compiler (relabel the points-to
 engine; §14.3) — coordinate with codex-1 (active in `check/types.sio`).
 
+## 17. Lemma (i) attacked — the Blackwell bridge, in Lean
+
+`docs/research/lean/SounioBlackwellBridge.lean` (new). Independently re-verified here
+under Lean 4.33.1: `EXIT=0`, exactly **one** `sorry` (the general hard direction);
+`#print axioms` on the proven theorems shows only standard `propext`/`Quot.sound` —
+**no `sorryAx` leakage** into anything claimed proven.
+
+Model (the honest setting): Blackwell informativeness is an order on *experiments*,
+not single distributions (single distributions trivialise — any post-processes any;
+that trap was checked and avoided). An epistemic state = a 2-hypothesis binary
+experiment (2×2, integer-scaled → Mathlib-free); `IsGarbling A B := ∃ N stochastic,
+compose A N = scale2 B` — the real post-processing definition.
+
+Proven, kernel-checked:
+- `garbling_refl` — `IsGarbling` is a genuine reflexive post-processing preorder
+  (identity channel), not a variance stand-in.
+- `lemma_i_easy` — the ⟸ direction: `[α]=0` (Fano) ⟹ the two parenthesisation
+  experiments coincide ⟹ reassociation is the identity garbling.
+- `paren_incomparable` — **the hard direction on a concrete non-Fano witness**:
+  `Eleft=((2,0),(1,1))`, `Eright=((1,1),(0,2))` are Blackwell-**incomparable** —
+  neither is a garbling of the other, over *all* unbounded channels (discharged by
+  `omega`, a coordinate forced simultaneously `=1` and `=0`; holds over ℚ≥0 too).
+  This settles the earlier open sub-question in §16's favour: `[α]≠0` gives
+  **incomparability** (neither dominates), not strict domination — at least on this
+  witness.
+
+Remaining (exactly one documented `sorry`): `lemma_i_hard_general` — the full
+"∀ non-Fano triple, reassociation is not a garbling." Needs (1) a map from every
+non-Fano triple to such an incomparable pair (anchored on
+`SounioBidirectionalBridge.nonassoc_iff_not_fano`) and (2) the general Blackwell/
+Le Cam criterion (`B ⪯ A ⟺ ∀ convex φ, ⟨φ,B⟩≤⟨φ,A⟩`) whose negation is an
+LP-duality separating-φ certificate (or Mathlib's majorization order). The concrete
+case is discharged; only the ∀-lift + general criterion remain.
+
+**Updated bridge status:**
+
+| Claim | Status |
+|---|---|
+| `[α]=0 ⟺ Fano` | ✅ `SounioBidirectionalBridge:170` |
+| curvature enters σ² ⟺ non-Fano | ✅ `curvature_iff_nonfano` |
+| reassoc variance-preserving ⟺ Fano | ✅ `reassoc_variance_preserving_iff_fano` |
+| naive add anti-garbles by 2·cov; sound ⟺ DISJ | ✅ `SounioAntiGarblingModel` |
+| lemma (i) ⟸: `[α]=0` ⟹ garbling | ✅ `lemma_i_easy` |
+| lemma (i) ⟹, concrete non-Fano witness: incomparable | ✅ `paren_incomparable` |
+| lemma (i) ⟹, **∀ non-Fano triple** (full novelty) | ⬜ **one documented sorry** — `lemma_i_hard_general` |
+
+The whole programme is now one `sorry` from a machine-checked statement of the paper's
+central theorem: the easy direction is general, the hard direction is proven on a
+concrete witness, and the remaining gap is a single, precisely-scoped ∀-lift.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
