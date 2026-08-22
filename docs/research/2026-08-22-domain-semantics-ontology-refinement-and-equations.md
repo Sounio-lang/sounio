@@ -541,6 +541,78 @@ provenance frame); (iii) the non-commutative Blackwell order along non-associati
 channels (associator = path-dependence of garbling) — where the affine-octonion
 frontier meets the epistemic frame.
 
+## 12. The shared mechanism — one data-flow, three provenance lattices (source-verified)
+
+The escape analyzer `self-hosted/analysis/escape.sio` (orphaned) is a data-flow
+graph: `EscNode` = values, `EscEdge` = flow relations (copy/phi/field-store),
+propagating a mark along edges. This is the reuse substrate for noise-symbol
+tracking: seed each measurement/input node with a fresh symbol, propagate the
+**set of reachable source-symbols** along the same edges; two values share noise
+iff their source-sets intersect. Same graph, same edges, different lattice
+(boolean-escape → set-of-ids).
+
+Source correction (no overclaim): there are **three** provenance notions, and none
+is a noise symbol today —
+
+| Provenance | Where | Lattice | Propagates as |
+|---|---|---|---|
+| kind (R-ORIGIN measured/derived) | `epistemic.sio:217` PROVENANCE_KIND_* | small enum | monotone (derived ↛ measured) |
+| escape (memory local/first-class) | `borrow.sio:5` flag 0/1 | boolean | reachability to a sink |
+| identity (which measurement = noise symbol) | **absent** | set-of-ids | union of source-sets |
+
+All three are abstract interpretation over the *same* data-flow graph, differing
+only in the lattice. **The concrete N4 capstone:** memory-safety (escape),
+provenance-honesty (R-ORIGIN kind), and epistemic-soundness (noise symbol) all fall
+out of one flow analysis — by the same graph, not by analogy.
+
+**Limitation (honest):** escape analysis is intraprocedural today (CEI: "a call is
+unconditionally an escape"). Cross-call noise sharing is lost; for anti-garbling
+soundness the conservative default must be **assume sharing** (unproven
+independence → treat as correlated → do not shrink variance) — the *opposite* of
+`ep_add`'s current independent default. The sound version needs interprocedural
+summaries — the same piece CEI WS-B needs for memory reclamation.
+
+## 13. The associator is the curvature of warrant transport
+
+A garbling is a Markov kernel `K`; composing garblings is matrix product —
+associative. Non-associativity does not come from garbling composition; it comes
+from the **algebra of the affine coefficients**. In an affine form
+`x₀ + Σ xᵢεᵢ` with coefficients in a non-associative algebra (octonions,
+`stdlib/epistemic/affine_octonion.sio`), the product of two forms involves products
+of coefficients, and `(ab)c ≠ a(bc)`: the two parenthesisations are two different
+garblings of the same three sources, landing on different epistemic states.
+
+> The associator `[a,b,c] = (ab)c − a(bc)` is the **holonomy** of transporting
+> warrant around the parenthesisation loop — the **curvature** of the composition
+> connection. **Associativity ⟺ flat connection ⟺ Blackwell order is a clean
+> path-independent poset.** Non-associativity ⟺ nonzero curvature ⟺ the Blackwell
+> order must lift to a **groupoid / 2-category** that records the path.
+
+Not vapor — the curvature is already measured: `product_nonassoc` (Fano→0.25,
+non-Fano→4.25) are curvature values. "order-safe iff N≤3" is geometric: N=3 has one
+associator (one loop); N≥4 has multiple loops requiring **Mac Lane pentagon
+coherence** — "N=4 via pentagon_variance/Catalan" (Catalan counts parenthesisations,
+the pentagon is the integrability condition). Curvature enters at N=3; the pentagon
+is integrability at N=4, and its failure is why warrant transport is path-dependent
+beyond triples.
+
+**Fusion of §12 and §13 — why no competitor has order-dependent uncertainty.** In
+the affine noise-symbol substrate (§12), the associator is literally a **new noise
+symbol injected by order-ambiguity**: the sound representation must generate an
+associator noise symbol per non-associative triple; curvature enters the warrant as
+an irreducible source of uncertainty. Order-dependent uncertainty requires **both**
+the affine noise-symbol substrate (§12) *and* a non-flat composition (§13). Each
+half alone is insufficient (GUM/Uncertain: scalar, no §12; non-associative algebras:
+no epistemic substrate, no §13). The fusion is the novelty; the associator-as-
+variance is curvature entering the noise budget.
+
+**Sceptic (§13):** "associator = curvature" has precedent (non-associativity ↔
+flux/gerbes in string theory; non-associative coordinates under a monopole) — not an
+invented analogy, but the rigorous home is a monoidal category + Mac Lane coherence,
+where the theorem must be proven, not by hand. Falsifiable: the measured
+associator-variances *are* the curvature values; if the groupoid structure fails to
+reproduce "order-safe iff N≤3", the frame breaks.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
