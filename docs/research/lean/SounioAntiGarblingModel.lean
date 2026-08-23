@@ -12,14 +12,20 @@
   Self-contained: core Lean 4 only (Int coefficients; a minimal Mathlib-free
   additive-group class for Lemma 4). No Mathlib import.
 
-  STATUS (verified): Lemmas 3 and 4 carry full proofs and are MACHINE-CHECKED —
-  `lean` (Lean 4.33.0, leanprover/lean4:v4.33.0) typechecks this file clean:
-  exit 0, zero warnings, zero `sorry` in code (the only "sorry" token is in this
-  comment). The composite Theorem 4.1 (both certificates ⇒ exact variance) and the
-  completeness dimension count (Prop 2) require the sensitivity-propagation model
-  and live, with full rigor, in the .md proof companion — they are NOT asserted
-  here as if machine-checked; Lemmas 3 and 4 are the two certificate cores those
-  theorems invoke.
+  STATUS (verified): MACHINE-CHECKED by `lean` (Lean 4.33.0,
+  leanprover/lean4:v4.33.0) — typechecks clean: exit 0, zero warnings, zero `sorry`
+  in code (the only "sorry" token is in this comment). Verified here:
+    * Lemma 3 (Axis 2)  — `cov_zero_of_disjoint`.
+    * Lemma 4 (Axis 1)  — `parenthesizations_agree_of_associator_zero`.
+    * THEOREM 4.1, Axis-2 (sum-node) instance — `antigarbling_sound_sum`: disjoint
+      supports ⇒ the naive independence-variance equals the true variance of the
+      sum (no fabricated precision), proved through `varSum_expand` and Lemma 3.
+    * `var_eq_of_sensitivity_eq` — the congruence shape of Theorem 4.1 for both
+      axes (equal sensitivities ⇒ equal variance).
+  Still prose-only in the .md companion (NOT asserted machine-checked): the
+  Axis-1/product-node instance of Theorem 4.1, the completeness dimension count
+  (Prop 2), and the §5 non-separability caveat — these need the full
+  sensitivity-propagation model over the algebra.
 -/
 
 namespace SounioAntiGarbling
@@ -111,13 +117,78 @@ theorem parenthesizations_agree_of_associator_zero
   unfold associator at h
   exact sub_eq_zero_imp _ _ h
 
-/-
-  The composite operational theorem (PROOF §4.1) —
-    (Δ_support = 0  ∧  Δ_order = 0)  →  Var_naive = Var_true
-  and the completeness dimension count (PROOF §4.2, Prop 2) rest on the
-  first-order sensitivity-propagation model. They are proved in prose in the .md
-  companion and are NOT re-asserted here as machine-checked. Lemmas 3 and 4 above
-  are the two certificate cores those theorems invoke.
--/
+/- ===================================================================== -/
+/-  Theorem 4.1 (operational core) — the sum-node / Axis-2 instance,       -/
+/-  machine-checked, using Lemma 3.                                        -/
+/- ===================================================================== -/
+
+/-- `listSum` distributes over pointwise addition of the mapped function. -/
+theorem listSum_map_add (f g : Nat → Int) (S : List Nat) :
+    listSum (S.map (fun s => f s + g s))
+      = listSum (S.map f) + listSum (S.map g) := by
+  induction S with
+  | nil => rfl
+  | cons a t ih =>
+      simp only [List.map_cons, listSum]
+      rw [ih]; omega
+
+/-- `listSum` pulls out a scalar factor. -/
+theorem listSum_map_smul (c : Int) (f : Nat → Int) (S : List Nat) :
+    listSum (S.map (fun s => c * f s)) = c * listSum (S.map f) := by
+  induction S with
+  | nil => simp only [List.map_nil, listSum, Int.mul_zero]
+  | cons a t ih =>
+      simp only [List.map_cons, listSum]
+      rw [ih, Int.mul_add]
+
+/-- First-order variance of a scalar sensitivity vector over its support list:
+    `Var = Σ (d s)²`  (Lemma 0 specialised to scalars). -/
+def varN (d : Nat → Int) (S : List Nat) : Int :=
+  listSum (S.map (fun s => d s * d s))
+
+/-- The `(dL+dR)² = dL² + dR² + 2·(dL·dR)` expansion, summed:
+    true variance of a sum (sensitivities add) = the two naive variances plus
+    twice the covariance. -/
+theorem varSum_expand (dL dR : Nat → Int) (S : List Nat) :
+    listSum (S.map (fun s => (dL s + dR s) * (dL s + dR s)))
+      = varN dL S + varN dR S + 2 * cov dL dR S := by
+  unfold varN cov
+  have hpt : (fun s => (dL s + dR s) * (dL s + dR s))
+      = (fun s => dL s * dL s + (dR s * dR s + 2 * (dL s * dR s))) := by
+    funext s
+    rw [Int.add_mul, Int.mul_add, Int.mul_add, Int.mul_comm (dR s) (dL s)]
+    omega
+  rw [hpt]
+  rw [listSum_map_add (fun s => dL s * dL s)
+        (fun s => dR s * dR s + 2 * (dL s * dR s)) S]
+  rw [listSum_map_add (fun s => dR s * dR s) (fun s => 2 * (dL s * dR s)) S]
+  rw [listSum_map_smul 2 (fun s => dL s * dR s) S]
+  omega
+
+/-- THEOREM 4.1 (operational core, sum node): if the operand supports are disjoint
+    (Lemma 3 ⇒ zero covariance), the NAIVE variance computed under the independence
+    assumption equals the TRUE variance of the sum — no fabricated precision.
+    This is the Axis-2 instance of `(Δ_support = 0) → Var_naive = Var_true`. -/
+theorem antigarbling_sound_sum (dL dR : Noise) (S : List Nat)
+    (hdisj : disjointSupport dL dR) :
+    listSum (S.map (fun s => (dL s + dR s) * (dL s + dR s)))
+      = varN dL S + varN dR S := by
+  rw [varSum_expand]
+  rw [cov_zero_of_disjoint dL dR S hdisj]
+  omega
+
+/-- Composite congruence (the shape of Theorem 4.1 for BOTH axes): if the true and
+    naive propagators agree on the whole sensitivity vector, the variances agree.
+    The certificates deliver the hypothesis — Lemma 3 (disjoint ⇒ the naive
+    independence bookkeeping matches the shared-symbol sensitivity) and Lemma 4
+    (vanishing associator ⇒ the freely-re-associated sensitivity matches the true
+    one). The remaining content (that each certificate makes its own correction
+    vanish, and the §5 non-separability caveat) is the prose proof companion. -/
+theorem var_eq_of_sensitivity_eq (dTrue dNaive : Noise) (S : List Nat)
+    (h : ∀ s, dTrue s = dNaive s) : varN dTrue S = varN dNaive S := by
+  unfold varN
+  have hfun : (fun s => dTrue s * dTrue s) = (fun s => dNaive s * dNaive s) := by
+    funext s; rw [h s]
+  rw [hfun]
 
 end SounioAntiGarbling
