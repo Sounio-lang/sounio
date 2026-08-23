@@ -113,6 +113,23 @@ published total shift +223.000
 The fork is **mostly HVP**, not only HVP. HLbL moved 23.5 units. Claims-forbidden
 still includes “Sounio computed lattice HVP” and “the tension is resolved”.
 
+## WP25 HVP is a hybrid (Madaros, same run)
+
+Eq. (9.1): lattice LO + e⁺e⁻ NLO + e⁺e⁻ NNLO. There is **no** WP25
+data-driven LO HVP (Table 5: estimates not provided).
+
+```
+HVP_LO_LATTICE 7132.000
+HVP_NLO_EPEM   −99.600
+HVP_NNLO_EPEM   12.400
+HVP_ASSEMBLED 7044.800
+HVP_PUBLISHED 7045.000
+HVP_LO_WP20    6931.000
+PULL_HVP_LO_LATTICE_VS_WP20 2.755
+VERDICT_HVP_HYBRID 1
+VERDICT_HVP_LO_SPLIT 1
+```
+
 ```text
 Semantic-Outcome: two SM a_μ citations are Epistemic values; GUM pulls
   are computed in Sounio under Madaros; they are not averaged. The SM
