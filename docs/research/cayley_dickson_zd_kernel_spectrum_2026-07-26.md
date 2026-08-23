@@ -119,7 +119,9 @@ group.
 For `n = 16` this reproduces the validity conditions used in `formal/lean4/SounioZeroDivisorBridge.lean`
 (`hi ≠ 8` and `lo⊕hi ≠ 8`), which the repository states as a definition.
 
-**Cross-validation.** An independent reconstruction of the algebra in exact rational arithmetic
+**Cross-validation.** An independent reconstruction of the algebra — modular in
+`F_P` for the rank step, with every reported kernel dimension separately
+certified over ℤ (see the Reproduction note below) —
 reproduces the repository's Lean results: 84 valid primitives in 𝕊, each with exactly 4 annihilators
 (`prim_count_84`, `every_primitive_has_4_annihilators`). It further shows `dim ker(L_u) = 0` for a
 generic element such as `1 + e₃` — annihilation is a rare, structured property, not a generic one.
@@ -152,8 +154,32 @@ kernel dimensions up the tower.
 
 `scripts/research/cd_zd_kernel_spectrum.py` is self-contained and independent of the repository's
 Lean corpus: it builds the CD multiplication table by recursion on the construction, computes
-`dim ker(L_u)` by rank over a prime field (entries are `0, ±1`, so the rank equals the rational
-rank), and enumerates cycle structures. Running it reproduces, in order:
+`dim ker(L_u)` by rank over the prime field `F_P`, `P = 2^31 - 1`, and enumerates
+cycle structures.
+
+> **Correction, 2026-08-23.** This sentence previously read "(entries are
+> `0, ±1`, so the rank equals the rational rank)". **That implication is false.**
+> An integer matrix with entries `0, ±1` can have a minor that is nonzero over
+> ℚ and divisible by `P`, and the rank then drops mod `P`; entry magnitude
+> bounds nothing about a determinant. Size does not rescue it either — the
+> Hadamard bound for a 16×16 matrix with `|a_ij| ≤ 1` is `16^8 = 2^32`, exactly
+> **2.00×** `P`, so a single minor can be twice the prime.
+>
+> The modular computation is kept, because `rank_{F_P} ≤ rank_ℚ` holds for every
+> prime, which makes the reported kernel dimension a genuine **upper bound** at
+> no cost and with no assumption about the entries. The lower bound is supplied
+> separately, by exhibiting the kernel vectors and verifying `M · v = 0`
+> **exactly over ℤ** plus independence over ℚ by integer-only Bareiss
+> elimination — see `scripts/research/cd_zd_kernel_spectrum_exact_certificate.py`,
+> which certifies all 5,208 index pairs for `n ≤ 128` with no pair failing.
+> The `n = 16` structure numbers are separately recomputed over ℚ in
+> `scripts/research/cd_zd_kernel_spectrum_exact_check.py` and are unchanged: 42
+> distinct kernels, clique 2, maximum 3 independent.
+>
+> No published number changed. What changed is which of them is load-bearing:
+> the numbers now rest on integer arithmetic, not on a claim about the alphabet
+> of the entries. Full record:
+> `docs/audit/KERNEL_SPECTRUM_ORACLE_DOMAIN_2026-08-23.md`. Running it reproduces, in order:
 
 | output | claim it checks | scope |
 |---|---|---|
