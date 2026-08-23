@@ -32,8 +32,15 @@ Commands:
           [--limit N] [--from-agent ID] [--from-lane ID] [--kind KIND]
           [--thread ID] [--since-epoch N]
                                  show unread messages for one lane
+  injected --agent ID --lane ID --messages ID [ID ...]
+                                 record that the hook surfaced messages to a lane
   ack     --agent ID --lane ID --message ID
                                  mark a message as read by one lane
+  message-status --agent ID --lane ID --message ID
+                                 show injection, acknowledgement, and request state
+  wait    --agent ID --lane ID --message ID [--timeout-seconds N]
+          [--poll-seconds N]
+                                 wait for a reply, blocker, or handoff in the thread
   prune                          remove expired claims
 
 Environment:
@@ -82,8 +89,9 @@ STATE_DIR="${SOUNIO_COORD_DIR:-${TMPDIR:-/tmp}/sounio-coord/$REPO_KEY}"
 CLAIMS_DIR="$STATE_DIR/claims"
 MESSAGES_DIR="$STATE_DIR/messages"
 ACKS_DIR="$STATE_DIR/message-acks"
+INJECTIONS_DIR="$STATE_DIR/message-injections"
 EVENT_LOG="$STATE_DIR/events.log"
-mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR"
+mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR" "$INJECTIONS_DIR"
 
 NOW_EPOCH="$(date +%s)"
 NOW_TICK="$(date +%s%N)"
@@ -335,6 +343,17 @@ message_expired() {
 
 message_ack_path() {
   printf '%s/%s--%s--%s.ack' "$ACKS_DIR" "$(slug "$1")" "$(slug "$2")" "$(slug "$3")"
+}
+
+message_injection_path() {
+  printf '%s/%s--%s--%s.injected' \
+    "$INJECTIONS_DIR" "$(slug "$1")" "$(slug "$2")" "$(slug "$3")"
+}
+
+print_message_line() {
+  printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s thread=%s reply_to=%s\n' \
+    "$M_ID" "$M_CREATED_UTC" "$M_FROM_AGENT" "$M_FROM_LANE" "$M_KIND" "$M_TEXT" \
+    "$M_THREAD_ID" "${M_REPLY_TO:--}"
 }
 
 claim_paths=()
@@ -701,8 +720,12 @@ send_command() {
     load_message "$reply_file"
     [[ "$M_ID" == "$reply_to" ]] || die "reply message not found: $reply_to"
     [[ -n "$thread_id" ]] || thread_id="$M_THREAD_ID"
+    [[ -n "$to_agent" ]] || to_agent="$M_FROM_AGENT"
+    [[ -n "$to_lane" ]] || to_lane="$M_FROM_LANE"
   fi
   [[ -n "$thread_id" ]] || thread_id="$message_id"
+  validate_value to-agent "$to_agent"
+  validate_value to-lane "$to_lane"
   tmp_file="$(mktemp "$MESSAGES_DIR/.message-write.XXXXXX")"
   {
     printf 'message_id=%s\n' "$message_id"
@@ -791,15 +814,226 @@ inbox_command() {
   for message_file in "${ordered_paths[@]}"; do
     ((limit == 0 || shown < limit)) || break
     load_message "$message_file"
-    printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s thread=%s reply_to=%s\n' \
-      "$M_ID" "$M_CREATED_UTC" "$M_FROM_AGENT" "$M_FROM_LANE" "$M_KIND" "$M_TEXT" \
-      "$M_THREAD_ID" "${M_REPLY_TO:--}"
+    print_message_line
     shown=$((shown + 1))
   done
   omitted=$((matching - shown))
   printf 'inbox_messages=%s\n' "$shown"
   printf 'inbox_matching=%s\n' "$matching"
   printf 'inbox_omitted=%s\n' "$omitted"
+}
+
+injected_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id message_file injection_file index
+  local -a message_ids=() injection_files=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --messages)
+        shift
+        (($#)) || die "--messages requires at least one message id"
+        message_ids=("$@")
+        set --
+        ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown injected option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "injected requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "injected requires --lane"
+  ((${#message_ids[@]} > 0)) || die "injected requires --messages"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+
+  for message_id in "${message_ids[@]}"; do
+    validate_value message "$message_id"
+    message_file="$MESSAGES_DIR/$(slug "$message_id").message"
+    [[ -f "$message_file" ]] || die "message not found: $message_id"
+    load_message "$message_file"
+    [[ "$M_ID" == "$message_id" ]] || die "message not found: $message_id"
+    [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$agent" ]] || \
+      die "message is addressed to agent $M_TO_AGENT"
+    [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$lane" ]] || \
+      die "message is addressed to lane $M_TO_LANE"
+    injection_files+=("$(message_injection_path "$message_id" "$agent" "$lane")")
+  done
+
+  acquire_state_lock "the injection receipt"
+  for ((index = 0; index < ${#message_ids[@]}; index++)); do
+    message_id="${message_ids[index]}"
+    injection_file="${injection_files[index]}"
+    if [[ ! -f "$injection_file" ]]; then
+      printf 'utc=%s agent=%s lane=%s\n' "$NOW_UTC" "$agent" "$lane" > "$injection_file"
+    fi
+    printf 'INJECTED message_id=%s agent=%s lane=%s\n' "$message_id" "$agent" "$lane"
+  done
+}
+
+message_status_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file receipt_file
+  local original_from_agent original_from_lane original_to_agent original_to_lane
+  local original_kind original_thread original_epoch request_state latest_response='-'
+  local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0
+  local receipt_utc receipt_agent receipt_lane token_utc token_agent token_lane
+  local -a message_paths=() injection_paths=() ack_paths=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message_id="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown message-status option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "message-status requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "message-status requires --lane"
+  [[ -n "$message_id" ]] || die "message-status requires --message"
+  message_file="$MESSAGES_DIR/$(slug "$message_id").message"
+  [[ -f "$message_file" ]] || die "message not found: $message_id"
+  load_message "$message_file"
+  [[ "$M_ID" == "$message_id" ]] || die "message not found: $message_id"
+  if [[ "$M_FROM_AGENT" != "$agent" || "$M_FROM_LANE" != "$lane" ]]; then
+    [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$agent" ]] || \
+      die "message status is not visible to agent $agent"
+    [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$lane" ]] || \
+      die "message status is not visible to lane $lane"
+  fi
+
+  original_from_agent="$M_FROM_AGENT"
+  original_from_lane="$M_FROM_LANE"
+  original_to_agent="$M_TO_AGENT"
+  original_to_lane="$M_TO_LANE"
+  original_kind="$M_KIND"
+  original_thread="$M_THREAD_ID"
+  original_epoch="$M_CREATED_EPOCH"
+  request_state='not-request'
+  [[ "$original_kind" != request ]] || request_state='open'
+
+  message_paths=("$MESSAGES_DIR"/*.message)
+  for message_file in "${message_paths[@]}"; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    message_expired && continue
+    [[ "$M_ID" != "$message_id" && "$M_THREAD_ID" == "$original_thread" ]] || continue
+    ((M_CREATED_EPOCH >= original_epoch)) || continue
+    [[ "$M_FROM_AGENT" != "$original_from_agent" || "$M_FROM_LANE" != "$original_from_lane" ]] || continue
+    [[ -z "$original_to_agent" || "$M_FROM_AGENT" == "$original_to_agent" ]] || continue
+    [[ -z "$original_to_lane" || "$M_FROM_LANE" == "$original_to_lane" ]] || continue
+    [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$original_from_agent" ]] || continue
+    [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$original_from_lane" ]] || continue
+    [[ "$M_KIND" =~ ^(reply|blocker|handoff)$ ]] || continue
+    responses=$((responses + 1))
+    if ((M_CREATED_EPOCH > latest_epoch)) || \
+      { ((M_CREATED_EPOCH == latest_epoch)) && [[ "$message_file" > "$latest_file" ]]; }; then
+      latest_epoch="$M_CREATED_EPOCH"
+      latest_file="$message_file"
+      latest_response="$M_ID"
+      latest_kind="$M_KIND"
+    fi
+  done
+  if [[ "$original_kind" == request && -n "$latest_kind" ]]; then
+    if [[ "$latest_kind" == blocker ]]; then
+      request_state='blocked'
+    else
+      request_state='answered'
+    fi
+  fi
+
+  injection_paths=("$INJECTIONS_DIR/$(slug "$message_id")"--*.injected)
+  ack_paths=("$ACKS_DIR/$(slug "$message_id")"--*.ack)
+  injected="${#injection_paths[@]}"
+  acknowledged="${#ack_paths[@]}"
+  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s\n' \
+    "$message_id" "$original_kind" "$original_thread" "$request_state" "$injected" \
+    "$acknowledged" "$responses" "$latest_response"
+  for receipt_file in "${injection_paths[@]}"; do
+    [[ -f "$receipt_file" ]] || continue
+    read -r token_utc token_agent token_lane < "$receipt_file" || true
+    receipt_utc="${token_utc#utc=}"
+    receipt_agent="${token_agent#agent=}"
+    receipt_lane="${token_lane#lane=}"
+    printf 'INJECTION message_id=%s utc=%s agent=%s lane=%s\n' \
+      "$message_id" "$receipt_utc" "$receipt_agent" "$receipt_lane"
+  done
+  for receipt_file in "${ack_paths[@]}"; do
+    [[ -f "$receipt_file" ]] || continue
+    read -r token_utc token_agent token_lane < "$receipt_file" || true
+    receipt_utc="${token_utc#utc=}"
+    receipt_agent="${token_agent#agent=}"
+    receipt_lane="${token_lane#lane=}"
+    printf 'ACKNOWLEDGEMENT message_id=%s utc=%s agent=%s lane=%s\n' \
+      "$message_id" "$receipt_utc" "$receipt_agent" "$receipt_lane"
+  done
+}
+
+wait_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' timeout_seconds=300 poll_seconds=1
+  local message_file original_from_agent original_from_lane original_to_agent original_to_lane
+  local original_thread original_epoch response_file='' response_state deadline current_epoch
+  local -a message_paths=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message_id="$2"; shift 2 ;;
+      --timeout-seconds) require_arg "$1" "$2"; timeout_seconds="$2"; shift 2 ;;
+      --poll-seconds) require_arg "$1" "$2"; poll_seconds="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown wait option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "wait requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "wait requires --lane"
+  [[ -n "$message_id" ]] || die "wait requires --message"
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "--timeout-seconds must be a non-negative integer"
+  [[ "$poll_seconds" =~ ^[1-9][0-9]*$ ]] || die "--poll-seconds must be a positive integer"
+  message_file="$MESSAGES_DIR/$(slug "$message_id").message"
+  [[ -f "$message_file" ]] || die "message not found: $message_id"
+  load_message "$message_file"
+  [[ "$M_ID" == "$message_id" ]] || die "message not found: $message_id"
+  [[ "$M_FROM_AGENT" == "$agent" && "$M_FROM_LANE" == "$lane" ]] || \
+    die "only the sending lane can wait for this message"
+  original_from_agent="$M_FROM_AGENT"
+  original_from_lane="$M_FROM_LANE"
+  original_to_agent="$M_TO_AGENT"
+  original_to_lane="$M_TO_LANE"
+  original_thread="$M_THREAD_ID"
+  original_epoch="$M_CREATED_EPOCH"
+  deadline=$(( $(date +%s) + timeout_seconds ))
+
+  while true; do
+    response_file=''
+    message_paths=("$MESSAGES_DIR"/*.message)
+    for message_file in "${message_paths[@]}"; do
+      [[ -f "$message_file" ]] || continue
+      load_message "$message_file"
+      message_expired && continue
+      [[ "$M_ID" != "$message_id" && "$M_THREAD_ID" == "$original_thread" ]] || continue
+      ((M_CREATED_EPOCH >= original_epoch)) || continue
+      [[ "$M_FROM_AGENT" != "$original_from_agent" || "$M_FROM_LANE" != "$original_from_lane" ]] || continue
+      [[ -z "$original_to_agent" || "$M_FROM_AGENT" == "$original_to_agent" ]] || continue
+      [[ -z "$original_to_lane" || "$M_FROM_LANE" == "$original_to_lane" ]] || continue
+      [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$original_from_agent" ]] || continue
+      [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$original_from_lane" ]] || continue
+      [[ "$M_KIND" =~ ^(reply|blocker|handoff)$ ]] || continue
+      response_file="$message_file"
+    done
+    if [[ -n "$response_file" ]]; then
+      load_message "$response_file"
+      response_state='answered'
+      [[ "$M_KIND" != blocker ]] || response_state='blocked'
+      printf 'WAIT_RESPONSE request_id=%s request_state=%s\n' "$message_id" "$response_state"
+      print_message_line
+      return 0
+    fi
+    current_epoch="$(date +%s)"
+    if ((current_epoch >= deadline)); then
+      printf 'WAIT_TIMEOUT message_id=%s timeout_seconds=%s\n' "$message_id" "$timeout_seconds"
+      return 3
+    fi
+    sleep "$poll_seconds"
+  done
 }
 
 ack_command() {
@@ -828,8 +1062,8 @@ ack_command() {
 }
 
 prune_command() {
-  local removed=0 messages_removed=0 claim_file message_file ack_file
-  local -a message_paths=() ack_paths=()
+  local removed=0 messages_removed=0 claim_file message_file ack_file injection_file
+  local -a message_paths=() ack_paths=() injection_paths=()
   acquire_state_lock "prune"
   refresh_claim_paths
   for claim_file in "${claim_paths[@]}"; do
@@ -851,6 +1085,10 @@ prune_command() {
       ack_paths=("$ACKS_DIR/$(slug "$M_ID")"--*.ack)
       for ack_file in "${ack_paths[@]}"; do
         [[ -f "$ack_file" ]] && unlink "$ack_file"
+      done
+      injection_paths=("$INJECTIONS_DIR/$(slug "$M_ID")"--*.injected)
+      for injection_file in "${injection_paths[@]}"; do
+        [[ -f "$injection_file" ]] && unlink "$injection_file"
       done
       messages_removed=$((messages_removed + 1))
       printf 'PRUNED_MESSAGE message_id=%s\n' "$M_ID"
@@ -1041,11 +1279,14 @@ case "$command" in
   authorize) authorize_command "$@" ;;
   send) send_command "$@" ;;
   inbox) inbox_command "$@" ;;
+  injected) injected_command "$@" ;;
   ack) ack_command "$@" ;;
+  message-status) message_status_command "$@" ;;
+  wait) wait_command "$@" ;;
   prune)
     (($# == 0)) || die "prune does not accept arguments"
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try brief, status, check, claim, scope, heartbeat, release, authorize, send, inbox, ack, or prune)" ;;
+  *) die "unknown command: $command (try brief, status, check, claim, scope, heartbeat, release, authorize, send, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac
