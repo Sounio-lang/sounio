@@ -1152,3 +1152,1075 @@ fn mf_split_pow2(nc: NativeCompiler, out: i64, e_out: i64, sgn_out: i64, xs: i64
     c = mf_st0(c, out)                                  // |xs| / 2^e, in [1,2)
     c
 }
+
+// ---------------------------------------------------------------------------
+// Sign surgery on a slot, and the three constants mf_y_parity answers with.
+//
+// Both sign helpers flip or clear bit 63 rather than computing 0 - x. That is
+// not a micro-optimisation: `0 - x` turns -0.0 into +0.0, and the sign of a
+// zero is the entire content of pow rows 12-15 and 16-19. The oracle carries
+// them as Machine sugar (m.fabs_, m.fneg), 6 instructions each.
+// ---------------------------------------------------------------------------
+
+// [rbp+dst] = |[rbp+src]|. Clobbers rax, rbx. Oracle: m.fabs_.
+fn mf_fabs_slot(nc: NativeCompiler, dst: i64, src: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, src)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c = mf_st0(c, dst)
+    c
+}
+
+// [rbp+dst] = -[rbp+src]. Clobbers rax, rbx. Oracle: m.fneg.
+fn mf_fneg_slot(nc: NativeCompiler, dst: i64, src: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, src)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 0x8000000000000000)
+    c.code = emit_xor_rax_rbx(c.code)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c = mf_st0(c, dst)
+    c
+}
+
+// [rbp+s] = -[rbp+s] when the INTEGER slot sgn holds a nonzero value. The
+// oracle writes `if sgn_neg: m.fneg(out, out)` in four places of pow_ and
+// sgn_neg is a HOST bool there, decided while emitting; here it is a runtime
+// flag, so the test and the branch are emitted. Clobbers rax, rbx.
+fn mf_fneg_slot_if(nc: NativeCompiler, s: i64, sgn: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_load_rbp_disp32_rax(c.code, sgn)
+    c.code = emit_test_rax_rax(c.code)
+    let skip = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_fneg_slot(c, s, s)
+    let target = c.code.len
+    c.code = patch_u32_le(c.code, skip + 2, target - (skip + 6))
+    c
+}
+
+// rbx = |bits| of the double in slot s, i.e. the oracle's `axb = xb & MASK`.
+// Clobbers rax, rbx. The value is left in rbx because every use of it here is
+// the left operand of `cmp rbx, rax`.
+fn mf_abs_bits_rbx(nc: NativeCompiler, s: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_load_rbp_disp32_rax(c.code, s)
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_mov_rbx_rax(c.code)
+    c
+}
+
+// rax = the sign bit (0 or 1) of the bit pattern in the INTEGER slot s.
+// LOGICAL shift, deliberately: emit_sar_rax_cl on a negative double would give
+// -1 rather than 1, and every use below feeds the result to `test` or `and`,
+// where -1 and 1 happen to behave the same until one of them does not.
+// Clobbers rax, rcx.
+fn mf_sign_bit_rax(nc: NativeCompiler, s: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_load_rbp_disp32_rax(c.code, s)
+    c.code = emit_mov_reg_imm(c.code, 1, 63)
+    c.code = emit_shr_rax_cl(c.code)
+    c
+}
+
+// [rbp+dst] = 2^(n + adj), where the INTEGER slot ns holds n. Oracle: m.pow2,
+// 4 instructions. Exact while -1022 <= n + adj <= 1023; outside that the
+// biased exponent runs into the sign bit and the result is garbage with no
+// diagnostic, so every caller states why its n is in range.
+// Clobbers rax, rbx, rcx.
+fn mf_pow2_slot(nc: NativeCompiler, dst: i64, ns: i64, adj: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_load_rbp_disp32_rax(c.code, ns)
+    c.code = emit_mov_reg_imm(c.code, 3, 1023 + adj)
+    c.code = emit_add_rax_rbx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 1, 52)
+    c.code = emit_shl_rax_cl(c.code)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c = mf_st0(c, dst)
+    c
+}
+
+// The three values mf_y_parity writes into its integer slot. Named because
+// mf_pow reads them back in four places and a bare 1 inside a `cmp` is exactly
+// the kind of thing that survives review.
+fn mf_par_notint() -> i64 { 0 }
+fn mf_par_odd() -> i64 { 1 }
+fn mf_par_even() -> i64 { 2 }
+
+// ---------------------------------------------------------------------------
+// y_parity — design 1.6, oracle y_parity (line 765).
+//
+//   Writes NOTINT / ODD / EVEN into the INTEGER slot r_out, for the y that
+//   pow's rows 12-15, 16-19 and 20-21 all have to classify.
+//
+//       trunc(y) != y            -> NOTINT
+//       trunc(y/2) != y/2        -> ODD
+//       otherwise                -> EVEN
+//
+//   y*0.5 is EXACT for every finite y — it is a division by a power of two,
+//   and it stays exact into the subnormals because the quotient of a subnormal
+//   by 2 either is representable or is a value trunc() agrees with anyway. So
+//   the test needs NO 2^53 magnitude guard, and that is the whole reason it is
+//   written this way rather than through cvttsd2si.
+//
+//   That distinction is load-bearing, not stylistic. EVERY finite |y| >= 2^53
+//   is an even integer, so pow(-2.0, 1e300) must be +inf and not NaN. An
+//   integer-ness test built on cvttsd2si returns the 0x8000000000000000
+//   indefinite value for |y| >= 2^63 and would classify 1e300 as NOTINT,
+//   turning that +inf into a NaN. roundsd has no such cliff: design 1.6 uses
+//   it, the oracle uses it, and so does this.
+//
+//   The comparison is `ucomisd; setne`, which is FALSE for a NaN operand — a
+//   NaN y would be classified EVEN. Callers must have excluded NaN first;
+//   pow's row 3 does, before any of the three call sites.
+//
+// 2 temps: t0 trunc scratch, t1 y/2. Oracle: y_parity, 22 instructions, 2 slots.
+//
+// .rodata: half_off, 0.5.
+// r_out is an INTEGER slot, written with `mov [rbp+r_out], rax`.
+// GPRs clobbered: rax.
+fn mf_y_parity(nc: NativeCompiler, r_out: i64, ys: i64,
+               half_off: i64, tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let t = mf_t(tb, 0)
+    let h = mf_t(tb, 1)
+
+    // ---- 1. is y an integer at all? ---------------------------------------
+    c = mf_ld0(c, ys)
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 11)    // mode 3 trunc, inexact muted
+    c = mf_st0(c, t)
+    c = mf_ld0(c, t); c = mf_ld1(c, ys)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setne_al(c.code)                      // ZF=0: ordered AND unequal
+    c.code = emit_test_al_al(c.code)
+    let int_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)                      // equal -> y is an integer
+
+    c.code = emit_mov_reg_imm(c.code, 0, mf_par_notint())
+    c.code = emit_store_rax_rbp_disp32(c.code, r_out)
+    let notint_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let int_target = c.code.len
+    c.code = patch_u32_le(c.code, int_jz + 2, int_target - (int_jz + 6))
+
+    // ---- 2. odd or even ----------------------------------------------------
+    c = mf_ld0(c, ys); c = mf_ld1c(c, half_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, h)                                    // y*0.5, EXACT
+    c = mf_ld0(c, h)
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 11)
+    c = mf_st0(c, t)                                    // trunc(y/2)
+    c = mf_ld0(c, t); c = mf_ld1(c, h)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setne_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let even_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)                      // y/2 integral -> even
+
+    c.code = emit_mov_reg_imm(c.code, 0, mf_par_odd())
+    c.code = emit_store_rax_rbp_disp32(c.code, r_out)
+    let odd_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    let even_target = c.code.len
+    c.code = patch_u32_le(c.code, even_jz + 2, even_target - (even_jz + 6))
+    c.code = emit_mov_reg_imm(c.code, 0, mf_par_even())
+    c.code = emit_store_rax_rbp_disp32(c.code, r_out)
+
+    let done = c.code.len
+    c.code = patch_u32_le(c.code, notint_jmp + 1, done - (notint_jmp + 5))
+    c.code = patch_u32_le(c.code, odd_jmp + 1, done - (odd_jmp + 5))
+    c
+}
+
+// ---------------------------------------------------------------------------
+// scale_2n — design 1.1 items 2 and 3, oracle scale_2n (line 779).
+//
+//   out = ms * 2^n, for an ms already reduced to [2^-1/2, 2^1/2]. Exact where
+//   the result is a normal double; a SINGLE rounding in each of the two tails,
+//   which is why they are two-step:
+//
+//       n > 1023      ms * 2^(n-54) is finite and exact, then * 2^54 rounds once
+//       n < -1076     the result is zero under any rounding
+//       n < -1022     ms * 2^(n+54) is normal and exact, then * 2^-54 rounds once
+//       otherwise     ms * 2^n, exact
+//
+//   Multiplying by 2^n in one step in the tails would round TWICE — once into
+//   the subnormal grid and once again — which is where the classic 1-ulp
+//   subnormal error in a hand-written pow comes from.
+//
+//   n reaches this routine as a RUNTIME value in an integer slot, so all four
+//   arms are emitted and the selection is three compares. The oracle picks the
+//   arm while emitting, because there n is a host integer.
+//
+//   PRECONDITION, and it is not decorative: mf_pow2_slot needs the biased
+//   exponent it builds to stay inside 11 bits. Every arm satisfies that only
+//   because pow has already decided the pure overflow and underflow cases
+//   before calling here: r_hi <= 1024 gives n <= 1024, so the first arm sees
+//   n-54 <= 970, and r_hi >= -1080 gives n >= -1080, so the third arm sees
+//   n+54 >= -1026 and the fourth is entered only for n >= -1022. A caller that
+//   skips those guards gets garbage from the shift with no diagnostic.
+//
+// 1 temp: t0, the 2^n factor. Oracle: scale_2n, 4-8 instructions on a host
+// branch; here four arms are present and one runs.
+//
+// .rodata: zero_off (0.0), p54_off (2^54), twom54_off (2^-54).
+// ns is an INTEGER slot holding n. out and ms must be distinct slots.
+// GPRs clobbered: rax, rbx, rcx.
+fn mf_scale_2n(nc: NativeCompiler, out: i64, ms: i64, ns: i64,
+               zero_off: i64, p54_off: i64, twom54_off: i64,
+               tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let s = mf_t(tb, 0)
+
+    // ---- arm 1: n > 1023, the overflow tail --------------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, ns)
+    c.code = emit_mov_reg_imm(c.code, 0, 1023)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setg_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let a1_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_pow2_slot(c, s, ns, -54)
+    c = mf_ld0(c, ms); c = mf_ld1(c, s)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)                                  // exact
+    c = mf_ld0(c, out); c = mf_ld1c(c, p54_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)                                  // the single rounding
+    let a1_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let a1_target = c.code.len
+    c.code = patch_u32_le(c.code, a1_jz + 2, a1_target - (a1_jz + 6))
+
+    // ---- arm 2: n < -1076, certain underflow -------------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, ns)
+    c.code = emit_mov_reg_imm(c.code, 0, -1076)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let a2_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    let a2_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let a2_target = c.code.len
+    c.code = patch_u32_le(c.code, a2_jz + 2, a2_target - (a2_jz + 6))
+
+    // ---- arm 3: n < -1022, the subnormal tail ------------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, ns)
+    c.code = emit_mov_reg_imm(c.code, 0, -1022)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let a3_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_pow2_slot(c, s, ns, 54)
+    c = mf_ld0(c, ms); c = mf_ld1(c, s)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)                                  // exact, still normal
+    c = mf_ld0(c, out); c = mf_ld1c(c, twom54_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)                                  // the single rounding
+    let a3_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let a3_target = c.code.len
+    c.code = patch_u32_le(c.code, a3_jz + 2, a3_target - (a3_jz + 6))
+
+    // ---- arm 4: the normal range -------------------------------------------
+    c = mf_pow2_slot(c, s, ns, 0)
+    c = mf_ld0(c, ms); c = mf_ld1(c, s)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)
+
+    let done = c.code.len
+    c.code = patch_u32_le(c.code, a1_jmp + 1, done - (a1_jmp + 5))
+    c.code = patch_u32_le(c.code, a2_jmp + 1, done - (a2_jmp + 5))
+    c.code = patch_u32_le(c.code, a3_jmp + 1, done - (a3_jmp + 5))
+    c
+}
+
+// al/rax = 1 when a step of the exactness fast path must be abandoned: either
+// the TwoProd residual e is nonzero (the partial product was NOT exact) or the
+// leading word t has left the finite range. Leaves the flags set by `test rax,
+// rax`, so the caller follows with one jnz.
+//
+// The two tests are OR-ed in a register rather than short-circuited with a
+// branch. That is value-identical — neither has a side effect — and it keeps
+// the loop body to a single conditional exit.
+//
+// The e != 0 test is `ucomisd; setne`, which is FALSE when e is NaN. e IS NaN
+// when the product overflowed to infinity (inf - inf), and that case is caught
+// by the second test rather than the first; the two together have no hole.
+//
+// Clobbers rax, rbx, rdx. Oracle: the two `if` conditions inside
+// _pow_exact_int (line 812 and line 818).
+fn mf_exact_step_bad(nc: NativeCompiler, t: i64, e: i64,
+                     zero_off: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, e); c = mf_ld1c(c, zero_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setne_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_mov_rdx_rax(c.code)                   // rdx = "not exact"
+    c = mf_ld0(c, t)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FFFFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_mov_rbx_rax(c.code)                   // rbx = |bits(t)|
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setge_al(c.code)                      // inf or NaN
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_mov_rbx_rax(c.code)
+    c.code = emit_mov_rax_rdx(c.code)
+    c.code = emit_or_rax_rbx(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    c
+}
+
+// ---------------------------------------------------------------------------
+// pow_exact_int — design 1.7, oracle _pow_exact_int (line 801).
+//
+//   Binary exponentiation of |x| to a small positive integer power, carried
+//   with TwoProd so that every partial product is known EXACTLY, and abandoned
+//   the moment a residual is nonzero or a partial product leaves the finite
+//   range. On success out holds |x|^ny with no rounding at all — that is what
+//   makes pow(10, 3) return exactly 1000.0 rather than 999.9999999999999, and
+//   the fast path exists for nothing else.
+//
+//   The integer slot ok_out receives 1 on success and 0 on abandonment. On
+//   abandonment out is NOT written: the oracle's `if ok: m.fmov(out, P)` is
+//   the same shape, and the caller falls through to the general path.
+//
+//   ny arrives as a RUNTIME value in the integer slot ny_in, so the oracle's
+//   `while ny:` — a host loop unrolled at emit time — is a real backward
+//   branch here. The caller has bounded 1 <= ny <= 64, so it runs at most
+//   seven times.
+//
+// 12 temps. Oracle: _pow_exact_int, 285 instructions on the 10^3 path, 15 slots.
+//
+//   t0 p   the running product      t4 nw  ny, shifted down each pass (INTEGER)
+//   t1 b   the running square       t5..t11 the 7 temps mf_two_prod wants
+//   t2 t   TwoProd leading word
+//   t3 e   TwoProd residual
+//
+// .rodata: split_off (SPLIT = 2^27+1), one_off (1.0), zero_off (0.0).
+// ny_in and ok_out are INTEGER slots. axs must be finite and positive.
+// GPRs clobbered: rax, rbx, rcx, rdx.
+fn mf_pow_exact_int(nc: NativeCompiler, out: i64, ok_out: i64, axs: i64, ny_in: i64,
+                    split_off: i64, one_off: i64, zero_off: i64,
+                    tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let p = mf_t(tb, 0)
+    let b = mf_t(tb, 1)
+    let t = mf_t(tb, 2)
+    let e = mf_t(tb, 3)
+    let nw = mf_t(tb, 4)
+
+    // ok is set optimistically and cleared on the one path that fails.
+    c.code = emit_mov_reg_imm(c.code, 0, 1)
+    c.code = emit_store_rax_rbp_disp32(c.code, ok_out)
+    c = mf_ld0c(c, one_off); c = mf_st0(c, p)           // p = 1.0
+    c = mf_mov_slot(c, b, axs)                          // b = |x|
+    c.code = emit_load_rbp_disp32_rax(c.code, ny_in)
+    c.code = emit_store_rax_rbp_disp32(c.code, nw)      // working copy of ny
+
+    let loop_top = c.code.len
+    c.code = emit_load_rbp_disp32_rax(c.code, nw)
+    c.code = emit_test_rax_rax(c.code)
+    let exit_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)                      // nw == 0 -> done
+
+    // ---- odd bit: p *= b, exactly or not at all ----------------------------
+    c.code = emit_load_rbp_disp32_rax(c.code, nw)
+    c.code = emit_mov_reg_imm(c.code, 3, 1)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let odd_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_two_prod(c, t, e, p, b, split_off,
+                    mf_t(tb, 5), mf_t(tb, 6), mf_t(tb, 7), mf_t(tb, 8),
+                    mf_t(tb, 9), mf_t(tb, 10), mf_t(tb, 11))
+    c = mf_exact_step_bad(c, t, e, zero_off)
+    let fail1_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c = mf_mov_slot(c, p, t)
+    let odd_target = c.code.len
+    c.code = patch_u32_le(c.code, odd_jz + 2, odd_target - (odd_jz + 6))
+
+    // ---- nw >>= 1, and stop before squaring a b nobody will use -------------
+    c.code = emit_load_rbp_disp32_rax(c.code, nw)
+    c.code = emit_mov_reg_imm(c.code, 1, 1)
+    c.code = emit_shr_rax_cl(c.code)                    // LOGICAL: ny is positive
+    c.code = emit_store_rax_rbp_disp32(c.code, nw)
+    c.code = emit_test_rax_rax(c.code)
+    let last_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)                      // nw == 0 -> done
+
+    // ---- b *= b, exactly or not at all -------------------------------------
+    c = mf_two_prod(c, t, e, b, b, split_off,
+                    mf_t(tb, 5), mf_t(tb, 6), mf_t(tb, 7), mf_t(tb, 8),
+                    mf_t(tb, 9), mf_t(tb, 10), mf_t(tb, 11))
+    c = mf_exact_step_bad(c, t, e, zero_off)
+    let fail2_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c = mf_mov_slot(c, b, t)
+
+    let back = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    c.code = patch_u32_le(c.code, back + 1, loop_top - (back + 5))
+
+    // ---- abandoned ----------------------------------------------------------
+    let fail_target = c.code.len
+    c.code = patch_u32_le(c.code, fail1_jnz + 2, fail_target - (fail1_jnz + 6))
+    c.code = patch_u32_le(c.code, fail2_jnz + 2, fail_target - (fail2_jnz + 6))
+    c.code = emit_mov_reg_imm(c.code, 0, 0)
+    c.code = emit_store_rax_rbp_disp32(c.code, ok_out)
+    let fail_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+
+    // ---- succeeded -----------------------------------------------------------
+    let done_target = c.code.len
+    c.code = patch_u32_le(c.code, exit_jz + 2, done_target - (exit_jz + 6))
+    c.code = patch_u32_le(c.code, last_jz + 2, done_target - (last_jz + 6))
+    c = mf_mov_slot(c, out, p)
+
+    let end = c.code.len
+    c.code = patch_u32_le(c.code, fail_jmp + 1, end - (fail_jmp + 5))
+    c
+}
+
+// ---------------------------------------------------------------------------
+// pow — design 1.5 special-case table in the published order, design 1.7
+// exactness fast path, design 1.1/1.2 general path. Oracle: pow_ (line 827).
+//
+//   The 22 rows are emitted in the oracle's order and the order is not free:
+//   row 1 (y == 0) and row 2 (x == 1) must fire BEFORE row 3 claims a NaN
+//   operand, rows 4-8 must see an x that is not +-1, row 8 relies on row 2
+//   having already taken x == +1, and rows 12-19 rely on rows 4-8 having taken
+//   every infinite y. Reorder them and the NaN behaviour silently changes.
+//
+//   Finding F3 is why rows 1 and 2 are INTEGER compares on the bit pattern and
+//   not `ucomisd; sete`. No setcc in this instruction set expresses ORDERED
+//   equality: ucomisd sets ZF for "equal" and for "unordered" alike, so sete
+//   fires on a NaN operand too. Rows 1 and 2 exist precisely to fire WITH a
+//   NaN operand (pow(NaN, 0) is 1.0, pow(1.0, NaN) is 1.0) while row 3 claims
+//   every other NaN, and only an integer compare separates those two jobs.
+//   NaN DETECTION, in row 3, is `ucomisd x,x; setb` — CF is set iff unordered,
+//   and setb IS in the set.
+//
+//   Finding F5 is the |y| >= 2^63 guard before the general path. TwoProd is
+//   valid only for operands below 2^996, y = 1e300 is a legal input (design
+//   3.1 row 50), and for such a y every x other than +-1 gives |r| >= 1448:
+//   the answer is a pure overflow/underflow decision and the multiply is
+//   skipped rather than performed out of domain.
+//
+//   And every finite |y| >= 2^53 is an EVEN integer, so pow(-2.0, 1e300) is
+//   +inf and not NaN. That works here because mf_y_parity is built on roundsd
+//   and exact halving; see its header for why cvttsd2si cannot be used for the
+//   same job, and see the fast path below for the one place cvttsd2si IS used
+//   and the magnitude bound that makes it safe.
+//
+// 72 temps. Oracle: pow_, 1081 instructions on the general path, 285 on the
+// exactness fast path, 60 on a special-case row; peak 42 slots.
+//
+//   t0  xbits  bits(x)   (INTEGER)   t11 ax     |x|
+//   t1  ybits  bits(y)   (INTEGER)   t12 ay     |y|
+//   t2  yneg   y < 0     (INTEGER)   t13 pf     the fast path's |x|^|iy|
+//   t3  par    mf_y_parity (INTEGER) t14 l_hi \ log2(|x|), dd
+//   t4  odd    par == ODD (INTEGER)  t15 l_lo /
+//   t5  oddneg odd AND x<0 (INTEGER) t16 r_hi \ r = y * log2(|x|), dd
+//   t6  sgn    result < 0 (INTEGER)  t17 r_lo /
+//   t7  iy     trunc(y)   (INTEGER)  t18 ns     n = round(r_hi), as a double
+//   t8  aiy    |iy|       (INTEGER)  t19 f      (r_hi - n) + r_lo
+//   t9  okf    fast path ok(INTEGER) t20 mm     2^f
+//   t10 nn     n          (INTEGER)  t21..t71 inner block (51, sized for
+//                                          mf_log2_dd, the largest callee)
+//
+// .rodata offsets from data_section_add_f64. The first twelve are exactly what
+// mf_log2_dd and mf_exp2_core want and are passed straight through:
+//   split_off, one_off, zero_off, half_off, two_off, sqrt2_off, p54_off,
+//   atanh_off, third_off, tl2e_off, ln2_off, expe_off
+// and pow's own, every one a single double:
+//   inf_off      +inf
+//   ninf_off     -inf
+//   nan_off      a quiet NaN            (row 20-21, x < 0 with a non-integer y)
+//   nzero_off    -0.0
+//   rovf_off     1024.0                 (design 1.1: r_hi above this overflows)
+//   runf_off     -1080.0                (below this the result is zero)
+//   ybig_off     2^63                   (finding F5's guard)
+//   twom54_off   2^-54                  (mf_scale_2n's subnormal tail)
+//
+// out must be distinct from xs, ys and every temp. GPRs clobbered: rax, rbx,
+// rcx, rdx, rsi.
+//
+// Deviations from the oracle, all forced by the same thing — the oracle's
+// branches are HOST branches taken while emitting, and here every one of them
+// is a runtime branch, so every arm is emitted:
+//
+//   * xb and yb live in rsi and rdi for the whole of the oracle's routine.
+//     Here mf_y_parity, mf_log2_dd and mf_exp2_core run in between and clobber
+//     rsi, so the two bit patterns go to integer slots and are reloaded per row.
+//   * `sgn_neg`, `par` and `ok` are host values in the oracle and integer slots
+//     here.
+//   * the oracle computes y's parity lazily (`if par is None`) so that the
+//     x < 0 rows and the fast path share one evaluation. The same sharing is
+//     kept, by computing it once before row 20 — the earliest point at which
+//     BOTH consumers are still ahead. Rows 12-15 and 16-19 each evaluate their
+//     own, as the oracle does.
+fn mf_pow(nc: NativeCompiler, out: i64, xs: i64, ys: i64,
+          split_off: i64, one_off: i64, zero_off: i64, half_off: i64,
+          two_off: i64, sqrt2_off: i64, p54_off: i64,
+          atanh_off: i64, third_off: i64, tl2e_off: i64,
+          ln2_off: i64, expe_off: i64,
+          inf_off: i64, ninf_off: i64, nan_off: i64, nzero_off: i64,
+          rovf_off: i64, runf_off: i64, ybig_off: i64, twom54_off: i64,
+          tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let xbits = mf_t(tb, 0)
+    let ybits = mf_t(tb, 1)
+    let yneg = mf_t(tb, 2)
+    let par = mf_t(tb, 3)
+    let odd = mf_t(tb, 4)
+    let oddneg = mf_t(tb, 5)
+    let sgn = mf_t(tb, 6)
+    let iy = mf_t(tb, 7)
+    let aiy = mf_t(tb, 8)
+    let okf = mf_t(tb, 9)
+    let nn = mf_t(tb, 10)
+    let ax = mf_t(tb, 11)
+    let ay = mf_t(tb, 12)
+    let pf = mf_t(tb, 13)
+    let l_hi = mf_t(tb, 14)
+    let l_lo = mf_t(tb, 15)
+    let r_hi = mf_t(tb, 16)
+    let r_lo = mf_t(tb, 17)
+    let ns = mf_t(tb, 18)
+    let f = mf_t(tb, 19)
+    let mm = mf_t(tb, 20)
+    let inner = mf_t(tb, 21)
+
+    // Every row that fires stores its answer and jumps to the single exit at
+    // the bottom; the positions are collected here and patched in one pass,
+    // the same shape native_v2_emit_current_frame_live_probe uses.
+    var exit_at: [i64; 32] = [0; 32]
+    var nex: i64 = 0
+
+    c = mf_ld0(c, xs)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, xbits)
+    c = mf_ld0(c, ys)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, ybits)
+
+    // ---- row 1: y == +-0, for ANY x INCLUDING NaN --------------------------
+    // Shifting left by one drops the sign; what remains is zero exactly for
+    // +-0. Finding F3: `ucomisd; sete` would also fire for a NaN y.
+    c.code = emit_load_rbp_disp32_rax(c.code, ybits)
+    c.code = emit_mov_reg_imm(c.code, 1, 1)
+    c.code = emit_shl_rax_cl(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let r1_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c = mf_ld0c(c, one_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r1_t = c.code.len
+    c.code = patch_u32_le(c.code, r1_jnz + 2, r1_t - (r1_jnz + 6))
+
+    // ---- row 2: x == 1.0, for ANY y INCLUDING NaN --------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x3FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r2_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, one_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r2_t = c.code.len
+    c.code = patch_u32_le(c.code, r2_jz + 2, r2_t - (r2_jz + 6))
+
+    // ---- row 3: NaN in either operand -> x + y (quietens the payload) ------
+    // `ucomisd v,v; setb`: CF is set iff the operands are unordered, which for
+    // v against itself means exactly "v is NaN".
+    c = mf_ld0(c, xs); c = mf_ld1(c, xs)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setb_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r3_xjnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c = mf_ld0(c, ys); c = mf_ld1(c, ys)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setb_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r3_yjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    let r3_fire = c.code.len
+    c.code = patch_u32_le(c.code, r3_xjnz + 2, r3_fire - (r3_xjnz + 6))
+    c = mf_ld0(c, xs); c = mf_ld1(c, ys)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r3_t = c.code.len
+    c.code = patch_u32_le(c.code, r3_yjz + 2, r3_t - (r3_yjz + 6))
+
+    // ---- rows 4-8: y == +-inf ----------------------------------------------
+    c = mf_abs_bits_rbx(c, ybits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r4_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+
+    // row 8 first: |x| == 1. x == +1 was taken by row 2, so this is x == -1,
+    // and pow(-1, +-inf) is 1.0.
+    c = mf_abs_bits_rbx(c, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x3FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r8_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, one_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r8_t = c.code.len
+    c.code = patch_u32_le(c.code, r8_jz + 2, r8_t - (r8_jz + 6))
+
+    // rows 4-7: zero when |x| < 1 agrees with y > 0, infinity otherwise. The
+    // oracle's `lt1 == ypos` is computed as two 0/1 integers and one compare,
+    // because there is no boolean XNOR in the instruction set.
+    c = mf_abs_bits_rbx(c, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x3FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)                       // lt1 = |x| < 1
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_mov_rdx_rax(c.code)
+    c = mf_sign_bit_rax(c, ybits)
+    c.code = emit_mov_reg_imm(c.code, 3, 1)
+    c.code = emit_xor_rax_rbx(c.code)                   // ypos = 1 - signbit(y)
+    c.code = emit_mov_rbx_rax(c.code)
+    c.code = emit_mov_rax_rdx(c.code)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r4_zjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r4_it = c.code.len
+    c.code = patch_u32_le(c.code, r4_zjz + 2, r4_it - (r4_zjz + 6))
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+
+    let r4_t = c.code.len
+    c.code = patch_u32_le(c.code, r4_jz + 2, r4_t - (r4_jz + 6))
+
+    // ---- row 9: y == 1.0 -> x, bit for bit ---------------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, ybits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x3FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r9_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_mov_slot(c, out, xs)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r9_t = c.code.len
+    c.code = patch_u32_le(c.code, r9_jz + 2, r9_t - (r9_jz + 6))
+
+    // y is finite, nonzero and not 1 from here on; its sign is read once.
+    c = mf_sign_bit_rax(c, ybits)
+    c.code = emit_store_rax_rbp_disp32(c.code, yneg)
+
+    // ---- rows 10-11: x == +inf ---------------------------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r10_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, yneg)
+    c.code = emit_test_rax_rax(c.code)
+    let r10_pjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r10_pt = c.code.len
+    c.code = patch_u32_le(c.code, r10_pjz + 2, r10_pt - (r10_pjz + 6))
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r10_t = c.code.len
+    c.code = patch_u32_le(c.code, r10_jz + 2, r10_t - (r10_jz + 6))
+
+    // ---- rows 12-15: x == -inf ---------------------------------------------
+    // 0xFFF0000000000000 is -inf; as a signed 64-bit immediate that is -2^52.
+    c.code = emit_load_rbp_disp32_rbx(c.code, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0xFFF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r12_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_y_parity(c, par, ys, half_off, inner)
+    c.code = emit_load_rbp_disp32_rbx(c.code, par)
+    c.code = emit_mov_reg_imm(c.code, 0, mf_par_odd())
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, odd)
+    c.code = emit_load_rbp_disp32_rax(c.code, yneg)
+    c.code = emit_test_rax_rax(c.code)
+    let r12_yjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    // y < 0: a signed zero, negative only for an odd y (rows 12-13)
+    c.code = emit_load_rbp_disp32_rax(c.code, odd)
+    c.code = emit_test_rax_rax(c.code)
+    let r12_ojz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, nzero_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r12_ot = c.code.len
+    c.code = patch_u32_le(c.code, r12_ojz + 2, r12_ot - (r12_ojz + 6))
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    // y > 0: an infinity, negative only for an odd y (rows 14-15)
+    let r12_yt = c.code.len
+    c.code = patch_u32_le(c.code, r12_yjz + 2, r12_yt - (r12_yjz + 6))
+    c.code = emit_load_rbp_disp32_rax(c.code, odd)
+    c.code = emit_test_rax_rax(c.code)
+    let r12_o2jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, ninf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r12_o2t = c.code.len
+    c.code = patch_u32_le(c.code, r12_o2jz + 2, r12_o2t - (r12_o2jz + 6))
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r12_t = c.code.len
+    c.code = patch_u32_le(c.code, r12_jz + 2, r12_t - (r12_jz + 6))
+
+    // ---- rows 16-19: x == +-0 ----------------------------------------------
+    c = mf_abs_bits_rbx(c, xbits)
+    c.code = emit_mov_rax_rbx(c.code)                   // test wants it in rax
+    c.code = emit_test_rax_rax(c.code)
+    let r16_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c = mf_y_parity(c, par, ys, half_off, inner)
+    c.code = emit_load_rbp_disp32_rbx(c.code, par)
+    c.code = emit_mov_reg_imm(c.code, 0, mf_par_odd())
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, odd)
+    // the sign of the answer is carried only by an odd y over a negative zero
+    c = mf_sign_bit_rax(c, xbits)
+    c.code = emit_mov_rbx_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, odd)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, oddneg)
+    c.code = emit_load_rbp_disp32_rax(c.code, yneg)
+    c.code = emit_test_rax_rax(c.code)
+    let r16_yjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    // y < 0: an infinity, and this row is the one that raises divide-by-zero
+    c.code = emit_load_rbp_disp32_rax(c.code, oddneg)
+    c.code = emit_test_rax_rax(c.code)
+    let r16_ojz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, ninf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r16_ot = c.code.len
+    c.code = patch_u32_le(c.code, r16_ojz + 2, r16_ot - (r16_ojz + 6))
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    // y > 0: a signed zero
+    let r16_yt = c.code.len
+    c.code = patch_u32_le(c.code, r16_yjz + 2, r16_yt - (r16_yjz + 6))
+    c.code = emit_load_rbp_disp32_rax(c.code, oddneg)
+    c.code = emit_test_rax_rax(c.code)
+    let r16_o2jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, nzero_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r16_o2t = c.code.len
+    c.code = patch_u32_le(c.code, r16_o2jz + 2, r16_o2t - (r16_o2jz + 6))
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r16_t = c.code.len
+    c.code = patch_u32_le(c.code, r16_jnz + 2, r16_t - (r16_jnz + 6))
+
+    // ---- rows 20-21: x < 0 --------------------------------------------------
+    // The parity is evaluated HERE, once, and read again by the fast path
+    // below: this is the earliest point at which both consumers are still
+    // ahead, which is what the oracle's `if par is None` achieves lazily.
+    c = mf_y_parity(c, par, ys, half_off, inner)
+    c.code = emit_mov_reg_imm(c.code, 0, 0)
+    c.code = emit_store_rax_rbp_disp32(c.code, sgn)     // sgn_neg defaults to 0
+    c = mf_sign_bit_rax(c, xbits)
+    c.code = emit_test_rax_rax(c.code)
+    let r20_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    // row 20: a negative x to a non-integer power is the invalid operation
+    c.code = emit_load_rbp_disp32_rax(c.code, par)
+    c.code = emit_test_rax_rax(c.code)
+    let r20_ijnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c = mf_ld0c(c, nan_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r20_it = c.code.len
+    c.code = patch_u32_le(c.code, r20_ijnz + 2, r20_it - (r20_ijnz + 6))
+    // row 21: an odd integer power keeps the sign, an even one drops it
+    c.code = emit_load_rbp_disp32_rbx(c.code, par)
+    c.code = emit_mov_reg_imm(c.code, 0, mf_par_odd())
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, sgn)
+    let r20_t = c.code.len
+    c.code = patch_u32_le(c.code, r20_jz + 2, r20_t - (r20_jz + 6))
+
+    // ---- row 22: the general path, on |x| -----------------------------------
+    c = mf_fabs_slot(c, ax, xs)
+
+    // design 1.7 exactness fast path: an integer y with 1 <= |y| <= 64.
+    c.code = emit_load_rbp_disp32_rax(c.code, par)
+    c.code = emit_test_rax_rax(c.code)
+    let fp_notint = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0(c, ys)
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 11)    // mode 3 trunc
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, iy)
+    // cvttsd2si has ALREADY returned the 0x8000000000000000 indefinite value
+    // for every |y| >= 2^63, and negating that gives itself. The 1..64 bound
+    // two blocks down is the only thing that makes this harmless — an
+    // integer-ness test built on cvttsd2si without a magnitude bound produces
+    // garbage exactly where mf_y_parity is right.
+    c.code = emit_load_rbp_disp32_rbx(c.code, iy)
+    c.code = emit_mov_reg_imm(c.code, 0, 0)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let fp_nneg = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, iy)
+    c.code = emit_neg_rax(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, aiy)
+    let fp_absjmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let fp_nneg_t = c.code.len
+    c.code = patch_u32_le(c.code, fp_nneg + 2, fp_nneg_t - (fp_nneg + 6))
+    c.code = emit_load_rbp_disp32_rax(c.code, iy)
+    c.code = emit_store_rax_rbp_disp32(c.code, aiy)
+    let fp_absdone = c.code.len
+    c.code = patch_u32_le(c.code, fp_absjmp + 1, fp_absdone - (fp_absjmp + 5))
+
+    c.code = emit_load_rbp_disp32_rbx(c.code, aiy)
+    c.code = emit_mov_reg_imm(c.code, 0, 1)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setge_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let fp_lo = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c.code = emit_load_rbp_disp32_rbx(c.code, aiy)
+    c.code = emit_mov_reg_imm(c.code, 0, 64)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setle_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let fp_hi = c.code.len
+    c.code = emit_jz_rel32(c.code)
+
+    c = mf_pow_exact_int(c, pf, okf, ax, aiy, split_off, one_off, zero_off, inner)
+    c.code = emit_load_rbp_disp32_rax(c.code, okf)
+    c.code = emit_test_rax_rax(c.code)
+    let fp_ok = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    // a negative exponent is one exactly-rounded reciprocal of an exact power
+    c.code = emit_load_rbp_disp32_rbx(c.code, iy)
+    c.code = emit_mov_reg_imm(c.code, 0, 0)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let fp_pos = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, one_off); c = mf_ld1(c, pf)
+    c.code = emit_divsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, pf)
+    let fp_pos_t = c.code.len
+    c.code = patch_u32_le(c.code, fp_pos + 2, fp_pos_t - (fp_pos + 6))
+    c = mf_mov_slot(c, out, pf)
+    c = mf_fneg_slot_if(c, out, sgn)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+
+    let fp_skip = c.code.len
+    c.code = patch_u32_le(c.code, fp_notint + 2, fp_skip - (fp_notint + 6))
+    c.code = patch_u32_le(c.code, fp_lo + 2, fp_skip - (fp_lo + 6))
+    c.code = patch_u32_le(c.code, fp_hi + 2, fp_skip - (fp_hi + 6))
+    c.code = patch_u32_le(c.code, fp_ok + 2, fp_skip - (fp_ok + 6))
+
+    // ---- finding F5: |y| >= 2^63 never reaches TwoProd ----------------------
+    // For such a y and any x other than +-1, |r| >= 1448, so the answer is a
+    // pure overflow/underflow decision. Taking it here keeps y out of
+    // mf_dd_mul_d, whose TwoProd is only valid below 2^996.
+    c = mf_fabs_slot(c, ay, ys)
+    c = mf_ld0(c, ay); c = mf_ld1c(c, ybig_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setae_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let yb_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_abs_bits_rbx(c, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x3FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let yb_one = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, one_off); c = mf_st0(c, out)
+    let yb_j1 = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let yb_one_t = c.code.len
+    c.code = patch_u32_le(c.code, yb_one + 2, yb_one_t - (yb_one + 6))
+    // big = (|x| > 1) == (y > 0), again as two 0/1 integers and one compare
+    c = mf_abs_bits_rbx(c, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x3FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setg_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_mov_rdx_rax(c.code)
+    c = mf_sign_bit_rax(c, ybits)
+    c.code = emit_mov_reg_imm(c.code, 3, 1)
+    c.code = emit_xor_rax_rbx(c.code)
+    c.code = emit_mov_rbx_rax(c.code)
+    c.code = emit_mov_rax_rdx(c.code)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let yb_big = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    let yb_j2 = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let yb_big_t = c.code.len
+    c.code = patch_u32_le(c.code, yb_big + 2, yb_big_t - (yb_big + 6))
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    let yb_join = c.code.len
+    c.code = patch_u32_le(c.code, yb_j1 + 1, yb_join - (yb_j1 + 5))
+    c.code = patch_u32_le(c.code, yb_j2 + 1, yb_join - (yb_j2 + 5))
+    c = mf_fneg_slot_if(c, out, sgn)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let yb_t = c.code.len
+    c.code = patch_u32_le(c.code, yb_jz + 2, yb_t - (yb_jz + 6))
+
+    // ---- r = y * log2(|x|), double-double throughout ------------------------
+    c = mf_log2_dd(c, l_hi, l_lo, ax, split_off, one_off, zero_off, half_off,
+                   sqrt2_off, p54_off, atanh_off, third_off, tl2e_off, inner)
+    c = mf_dd_mul_d(c, r_hi, r_lo, l_hi, l_lo, ys, split_off, inner)
+
+    // overflow: r_hi > 1024. Ordered `>` is honest here — r_hi is not NaN.
+    c = mf_ld0(c, r_hi); c = mf_ld1c(c, rovf_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_seta_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let ov_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    c = mf_fneg_slot_if(c, out, sgn)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let ov_t = c.code.len
+    c.code = patch_u32_le(c.code, ov_jz + 2, ov_t - (ov_jz + 6))
+
+    // underflow: r_hi < -1080
+    c = mf_ld0(c, r_hi); c = mf_ld1c(c, runf_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setb_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let un_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    c = mf_fneg_slot_if(c, out, sgn)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let un_t = c.code.len
+    c.code = patch_u32_le(c.code, un_jz + 2, un_t - (un_jz + 6))
+
+    // ---- 2^r, split into an exact exponent and |f| <= 1/2 -------------------
+    // Those two guards are what bound n for mf_pow2_slot: -1080 <= n <= 1024.
+    c = mf_ld0(c, r_hi)
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 8)     // mode 0, inexact muted
+    c = mf_st0(c, ns)
+    c = mf_ld0(c, ns)
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, nn)
+    // r_hi - n is exact (Sterbenz: n is the nearest integer to r_hi), so f
+    // carries the whole residual including r_lo and only the add rounds.
+    c = mf_ld0(c, r_hi); c = mf_ld1(c, ns)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, r_lo)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, f)
+    c = mf_exp2_core(c, mm, f, split_off, one_off, two_off, ln2_off, expe_off, inner)
+    c = mf_scale_2n(c, out, mm, nn, zero_off, p54_off, twom54_off, inner)
+    c = mf_fneg_slot_if(c, out, sgn)
+
+    // ---- the single exit every special-case row jumps to --------------------
+    let fin = c.code.len
+    var q: i64 = 0
+    while q < nex {
+        let at = exit_at[q as usize]
+        c.code = patch_u32_le(c.code, at + 1, fin - (at + 5))
+        q = q + 1
+    }
+    c
+}
