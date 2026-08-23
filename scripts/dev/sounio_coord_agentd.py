@@ -28,7 +28,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.1"
+RUNTIME_VERSION = "2026.08.23.2"
 MAX_CONTROL_BYTES = 65536
 MAX_PROMPT_BYTES = 8192
 RING_BYTES = 65536
@@ -138,6 +138,13 @@ def safe_command(command: list[str]) -> list[str]:
     return command
 
 
+def command_argv_digest(command: list[str]) -> str:
+    encoded = json.dumps(
+        command, ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def token_from(path: Path) -> str:
     try:
         token = path.read_text().strip()
@@ -225,6 +232,7 @@ def print_status(response: dict[str, Any]) -> None:
         "harness_pid",
         "harness_pid_start",
         "command",
+        "argv_digest",
         "attached_clients",
     )
     for key in ordered:
@@ -309,6 +317,7 @@ class Supervisor:
             "harness_pid": self.child_pid,
             "harness_pid_start": process_start(self.child_pid),
             "command": Path(self.command[0]).name,
+            "argv_digest": command_argv_digest(self.command),
             "socket": str(self.paths["socket"]),
             "token_file": str(self.paths["token"]),
             "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -575,6 +584,7 @@ def start_command(args: argparse.Namespace) -> int:
                 response.get("session_id") != args.session_id
                 or Path(str(response.get("worktree", ""))).resolve() != cwd
                 or response.get("command") != Path(command[0]).name
+                or response.get("argv_digest") != command_argv_digest(command)
             ):
                 raise AgentdError(
                     "a live supervisor generation owns this agent/lane with a different identity"
@@ -781,12 +791,17 @@ def add_locator(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--token-file")
 
 
+def print_runtime_version(_: argparse.Namespace) -> int:
+    print(f"protocol_version={PROTOCOL_VERSION}\nruntime_version={RUNTIME_VERSION}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sounio-agentd")
     subparsers = parser.add_subparsers(dest="command_name", required=True)
 
     version = subparsers.add_parser("runtime-version")
-    version.set_defaults(function=lambda _: (print(f"protocol_version={PROTOCOL_VERSION}\nruntime_version={RUNTIME_VERSION}"), 0)[1])
+    version.set_defaults(function=print_runtime_version)
 
     start = subparsers.add_parser("start")
     start.add_argument("--agent", required=True)

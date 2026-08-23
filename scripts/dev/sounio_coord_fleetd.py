@@ -4,23 +4,30 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import dataclasses
 import fcntl
+import functools
 import hashlib
+import hmac
 import json
 import os
+import secrets
+import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+import tempfile
 import tomllib
+import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.1"
+RUNTIME_VERSION = "2026.08.23.2"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -70,6 +77,24 @@ def canonical_json(value: Any) -> str:
 
 def digest_json(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def atomic_write_secret_json(path: Path, value: dict[str, Any]) -> None:
+    if path.exists() or path.is_symlink():
+        raise FleetdError(f"refusing to replace capability file: {path}")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(canonical_json(value))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def utc_now() -> str:
@@ -269,6 +294,10 @@ def connect_db(path: Path) -> sqlite3.Connection:
         "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
         (SCHEMA_VERSION,),
     )
+    connection.execute(
+        "INSERT OR IGNORE INTO meta(key, value) VALUES ('database_id', ?)",
+        (str(uuid.uuid4()),),
+    )
     connection.commit()
     os.chmod(path, 0o600)
     return connection
@@ -366,19 +395,20 @@ def append_event(
     payload: dict[str, Any],
 ) -> tuple[sqlite3.Row, bool]:
     payload_text = canonical_json(payload)
-    existing = connection.execute(
-        "SELECT * FROM events WHERE causal_key = ?", (causal_key,)
-    ).fetchone()
-    if existing:
-        if (
-            existing["event_type"] != event_type
-            or existing["slot"] != slot
-            or existing["payload"] != payload_text
-        ):
-            raise FleetdError(f"causal key collision: {causal_key}")
-        return existing, False
     connection.execute("BEGIN IMMEDIATE")
     try:
+        existing = connection.execute(
+            "SELECT * FROM events WHERE causal_key = ?", (causal_key,)
+        ).fetchone()
+        if existing:
+            if (
+                existing["event_type"] != event_type
+                or existing["slot"] != slot
+                or existing["payload"] != payload_text
+            ):
+                raise FleetdError(f"causal key collision: {causal_key}")
+            connection.commit()
+            return existing, False
         tail = connection.execute(
             "SELECT seq, event_hash FROM events ORDER BY seq DESC LIMIT 1"
         ).fetchone()
@@ -563,6 +593,283 @@ def rebuild_views(connection: sqlite3.Connection) -> None:
         raise
 
 
+@functools.lru_cache(maxsize=1)
+def openssl_command() -> str:
+    configured = os.environ.get("SOUNIO_FLEET_OPENSSL")
+    if configured and not Path(configured).is_absolute():
+        raise FleetdError("SOUNIO_FLEET_OPENSSL must be an absolute path")
+    command = configured or shutil.which("openssl")
+    if not command:
+        raise FleetdError("OpenSSL is required for Ed25519 fleet anchors")
+    executable = Path(command).resolve()
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise FleetdError(f"OpenSSL executable is not usable: {executable}")
+    try:
+        result = subprocess.run(
+            [str(executable), "version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise FleetdError("OpenSSL version probe timed out") from exc
+    words = result.stdout.split()
+    try:
+        major = int(words[1].split(".", maxsplit=1)[0])
+    except (IndexError, ValueError) as exc:
+        raise FleetdError("OpenSSL returned an unparseable version") from exc
+    if result.returncode != 0 or words[0] != "OpenSSL" or major < 3:
+        raise FleetdError("OpenSSL 3 or newer is required for Ed25519 anchors")
+    return str(executable)
+
+
+def run_openssl(arguments: list[str], *, input_bytes: bytes | None = None) -> bytes:
+    try:
+        result = subprocess.run(
+            [openssl_command(), *arguments],
+            input=input_bytes,
+            check=False,
+            capture_output=True,
+            timeout=30.0,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise FleetdError("OpenSSL timed out during Ed25519 operation") from exc
+    if result.returncode != 0:
+        reason = result.stderr.decode("utf-8", errors="replace").strip()
+        raise FleetdError(f"OpenSSL refused Ed25519 operation: {reason}")
+    return result.stdout
+
+
+def generate_anchor_keypair(private_key: Path, public_key: Path) -> None:
+    for path in (private_key, public_key):
+        if path.exists() or path.is_symlink():
+            raise FleetdError(f"refusing to replace anchor key: {path}")
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="sounio-fleet-keygen-") as raw_temp:
+        temporary = Path(raw_temp)
+        staged_private = temporary / "private.pem"
+        staged_public = temporary / "public.pem"
+        run_openssl(
+            ["genpkey", "-algorithm", "ED25519", "-out", str(staged_private)]
+        )
+        run_openssl(
+            [
+                "pkey",
+                "-in",
+                str(staged_private),
+                "-pubout",
+                "-out",
+                str(staged_public),
+            ]
+        )
+        os.replace(staged_private, private_key)
+        os.replace(staged_public, public_key)
+    os.chmod(private_key, 0o600)
+    os.chmod(public_key, 0o644)
+
+
+def validate_private_key(path: Path) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise FleetdError(f"private anchor key is missing or a symlink: {path}")
+    if path.stat().st_mode & 0o077:
+        raise FleetdError(f"private anchor key permissions are not 600: {path}")
+
+
+def public_key_fingerprint(public_key: Path) -> str:
+    if public_key.is_symlink() or not public_key.is_file():
+        raise FleetdError(f"public anchor key is missing or a symlink: {public_key}")
+    der = run_openssl(
+        ["pkey", "-pubin", "-in", str(public_key), "-outform", "DER"]
+    )
+    return hashlib.sha256(der).hexdigest()
+
+
+def sign_ed25519(private_key: Path, material: bytes) -> bytes:
+    validate_private_key(private_key)
+    with tempfile.TemporaryDirectory(prefix="sounio-fleet-sign-") as raw_temp:
+        temporary = Path(raw_temp)
+        message = temporary / "message"
+        signature = temporary / "signature"
+        message.write_bytes(material)
+        run_openssl(
+            [
+                "pkeyutl",
+                "-sign",
+                "-rawin",
+                "-inkey",
+                str(private_key),
+                "-in",
+                str(message),
+                "-out",
+                str(signature),
+            ]
+        )
+        return signature.read_bytes()
+
+
+def verify_ed25519(public_key: Path, material: bytes, signature: bytes) -> None:
+    with tempfile.TemporaryDirectory(prefix="sounio-fleet-verify-") as raw_temp:
+        temporary = Path(raw_temp)
+        message = temporary / "message"
+        signature_path = temporary / "signature"
+        message.write_bytes(material)
+        signature_path.write_bytes(signature)
+        run_openssl(
+            [
+                "pkeyutl",
+                "-verify",
+                "-rawin",
+                "-pubin",
+                "-inkey",
+                str(public_key),
+                "-in",
+                str(message),
+                "-sigfile",
+                str(signature_path),
+            ]
+        )
+
+
+def read_anchor(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise FleetdError(f"anchor is missing or a symlink: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FleetdError(f"cannot read fleet anchor {path}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise FleetdError(f"unsupported fleet anchor: {path}")
+    return value
+
+
+def anchor_document_digest(document: dict[str, Any]) -> str:
+    return digest_json(document)
+
+
+def verify_anchor_document(
+    connection: sqlite3.Connection,
+    path: Path,
+    public_key: Path,
+    expected_previous: str | None = None,
+) -> dict[str, Any]:
+    document = read_anchor(path)
+    payload = document.get("payload")
+    encoded_signature = document.get("signature_base64")
+    if not isinstance(payload, dict) or not isinstance(encoded_signature, str):
+        raise FleetdError(f"anchor omits payload or signature: {path}")
+    if payload.get("algorithm") != "Ed25519":
+        raise FleetdError(f"anchor uses an unsupported algorithm: {path}")
+    key_fingerprint = public_key_fingerprint(public_key)
+    if payload.get("public_key_sha256") != key_fingerprint:
+        raise FleetdError(f"anchor public-key identity mismatch: {path}")
+    database = connection.execute(
+        "SELECT value FROM meta WHERE key = 'database_id'"
+    ).fetchone()
+    if not database or payload.get("database_id") != database["value"]:
+        raise FleetdError(f"anchor belongs to a different fleet database: {path}")
+    count = payload.get("event_count")
+    if not isinstance(count, int) or count < 1:
+        raise FleetdError(f"anchor has an invalid event count: {path}")
+    event = connection.execute(
+        "SELECT event_hash FROM events WHERE seq = ?", (count,)
+    ).fetchone()
+    if not event or payload.get("tail_hash") != event["event_hash"]:
+        raise FleetdError(f"anchor does not match its event-log prefix: {path}")
+    if (
+        expected_previous is not None
+        and payload.get("previous_anchor_sha256") != expected_previous
+    ):
+        raise FleetdError(f"anchor chain predecessor mismatch: {path}")
+    try:
+        signature = base64.b64decode(encoded_signature, validate=True)
+    except ValueError as exc:
+        raise FleetdError(f"anchor signature is not canonical base64: {path}") from exc
+    verify_ed25519(public_key, canonical_json(payload).encode("utf-8"), signature)
+    return document
+
+
+def anchor_paths(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(directory.glob("anchor-*.json"))
+
+
+def verify_anchor_directory(
+    connection: sqlite3.Connection, directory: Path, public_key: Path
+) -> tuple[int, dict[str, Any] | None]:
+    verify_state(connection)
+    previous = ZERO_HASH
+    latest: dict[str, Any] | None = None
+    paths = anchor_paths(directory)
+    if not paths:
+        raise FleetdError(f"no signed fleet anchors found in {directory}")
+    previous_count = 0
+    for path in paths:
+        document = verify_anchor_document(
+            connection, path, public_key, expected_previous=previous
+        )
+        payload = document["payload"]
+        if payload["event_count"] <= previous_count:
+            raise FleetdError(f"fleet anchors are not strictly increasing: {path}")
+        previous_count = payload["event_count"]
+        previous = anchor_document_digest(document)
+        latest = document
+    return len(paths), latest
+
+
+def create_anchor(
+    connection: sqlite3.Connection,
+    directory: Path,
+    private_key: Path,
+    public_key: Path,
+) -> Path:
+    count, tail, _ = verify_state(connection)
+    if count < 1:
+        raise FleetdError("cannot anchor an empty fleet event log")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    previous = ZERO_HASH
+    paths = anchor_paths(directory)
+    if paths:
+        _, latest = verify_anchor_directory(connection, directory, public_key)
+        if latest is None:
+            raise FleetdError("signed fleet anchor directory has no latest anchor")
+        if latest["payload"]["event_count"] == count:
+            return paths[-1]
+        previous = anchor_document_digest(latest)
+    database = connection.execute(
+        "SELECT value FROM meta WHERE key = 'database_id'"
+    ).fetchone()
+    if not database:
+        raise FleetdError("fleet database identity is missing")
+    payload = {
+        "algorithm": "Ed25519",
+        "anchored_utc": utc_now(),
+        "database_id": database["value"],
+        "event_count": count,
+        "previous_anchor_sha256": previous,
+        "public_key_sha256": public_key_fingerprint(public_key),
+        "tail_hash": tail,
+    }
+    signature = sign_ed25519(
+        private_key, canonical_json(payload).encode("utf-8")
+    )
+    document = {
+        "payload": payload,
+        "signature_base64": base64.b64encode(signature).decode("ascii"),
+        "version": 1,
+    }
+    verify_ed25519(
+        public_key,
+        canonical_json(payload).encode("utf-8"),
+        signature,
+    )
+    output = directory / f"anchor-{count:020d}-{tail[:16]}.json"
+    atomic_write_secret_json(output, document)
+    return output
+
+
 def mapping_path(spec: LaneSpec) -> Path:
     return agentd_state_root(spec.cwd) / "fleet-slots" / f"{slug(spec.slot)}.json"
 
@@ -607,6 +914,9 @@ def desired_mapping_mismatch(spec: LaneSpec, mapping: dict[str, Any]) -> str | N
         expected["identity"] = spec.identity
     if spec.command:
         expected["command"] = Path(spec.command[0]).name
+        expected["argv_digest"] = hashlib.sha256(
+            canonical_json(list(spec.command)).encode("utf-8")
+        ).hexdigest()
     for key, value in expected.items():
         observed = mapping.get(key)
         if key == "worktree" and isinstance(observed, str):
@@ -689,6 +999,7 @@ def observe_spec(spec: LaneSpec) -> dict[str, Any]:
             "agent": mapping.get("agent"),
             "lane": mapping.get("lane"),
             "session_id": mapping.get("session_id"),
+            "argv_digest": mapping.get("argv_digest"),
             "harness_pid": fields.get("harness_pid"),
             "attached_clients": fields.get("attached_clients"),
         }
@@ -722,6 +1033,8 @@ def decide(
     state = observation["state"]
     if state == "drifted":
         return "blocked", observation["reason"]
+    if state == "unreachable":
+        return "blocked", "probe-unreachable-start-not-authorized"
     if not spec.enabled:
         if state == "active":
             return "hold", "disabled-active-stop-policy-not-authorized"
@@ -732,9 +1045,9 @@ def decide(
         return "hold", "restart-policy-never"
     if spec.restart == "on-failure":
         previous = previous_observation_state(connection, spec.slot, observation_seq)
-        if previous != "active":
+        if previous is not None and previous != "active":
             return "hold", "on-failure-requires-prior-active-observation"
-    if state in {"absent", "unreachable"}:
+    if state == "absent":
         return "start", f"restart-policy-{spec.restart}"
     return "blocked", f"unsupported-observed-state:{state}"
 
@@ -799,6 +1112,671 @@ def record_plan(
     )
 
 
+def capability_events(
+    connection: sqlite3.Connection, capability_id: str
+) -> list[tuple[str, dict[str, Any]]]:
+    matched: list[tuple[str, dict[str, Any]]] = []
+    for row in connection.execute(
+        """
+        SELECT event_type, payload FROM events
+        WHERE event_type IN (
+            'CAPABILITY_ISSUED', 'CAPABILITY_CONSUMED', 'CAPABILITY_REVOKED'
+        ) ORDER BY seq
+        """
+    ):
+        payload = json.loads(row["payload"])
+        if payload.get("capability_id") == capability_id:
+            matched.append((row["event_type"], payload))
+    return matched
+
+
+def outstanding_capability_exists(
+    connection: sqlite3.Connection,
+    slot: str,
+    desired_hash: str,
+    observation_fingerprint: str,
+) -> bool:
+    issued: dict[str, dict[str, Any]] = {}
+    terminal: set[str] = set()
+    for row in connection.execute(
+        """
+        SELECT event_type, payload FROM events
+        WHERE event_type IN (
+            'CAPABILITY_ISSUED', 'CAPABILITY_CONSUMED', 'CAPABILITY_REVOKED'
+        ) ORDER BY seq
+        """
+    ):
+        payload = json.loads(row["payload"])
+        capability_id = payload.get("capability_id")
+        if not isinstance(capability_id, str):
+            continue
+        if row["event_type"] == "CAPABILITY_ISSUED":
+            issued[capability_id] = payload
+        else:
+            terminal.add(capability_id)
+    now = int(time.time())
+    return any(
+        capability_id not in terminal
+        and payload.get("slot") == slot
+        and payload.get("desired_hash") == desired_hash
+        and payload.get("observation_fingerprint") == observation_fingerprint
+        and int(payload.get("expires_unix", 0)) >= now
+        for capability_id, payload in issued.items()
+    )
+
+
+def issue_start_capability(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    observation: dict[str, Any],
+    observation_seq: int,
+    output_path: Path,
+    ttl_seconds: int,
+) -> str:
+    if ttl_seconds < 1 or ttl_seconds > 86400:
+        raise FleetdError("capability TTL must be between 1 and 86400 seconds")
+    if outstanding_capability_exists(
+        connection, spec.slot, spec.desired_hash, observation["fingerprint"]
+    ):
+        raise FleetdError(
+            f"an unconsumed start capability already exists for slot {spec.slot}"
+        )
+    capability_id = f"cap-{uuid.uuid4()}"
+    token = secrets.token_urlsafe(48)
+    issued_unix = int(time.time())
+    payload = {
+        "action": "start",
+        "capability_id": capability_id,
+        "desired_hash": spec.desired_hash,
+        "expires_unix": issued_unix + ttl_seconds,
+        "issued_unix": issued_unix,
+        "observation_fingerprint": observation["fingerprint"],
+        "observation_seq": observation_seq,
+        "slot": spec.slot,
+        "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+    }
+    event, _ = append_event(
+        connection,
+        "CAPABILITY_ISSUED",
+        spec.slot,
+        f"capability-issued:{capability_id}",
+        payload,
+    )
+    document = {
+        "action": "start",
+        "capability_id": capability_id,
+        "desired_hash": spec.desired_hash,
+        "expires_unix": payload["expires_unix"],
+        "issued_event_hash": event["event_hash"],
+        "observation_fingerprint": observation["fingerprint"],
+        "slot": spec.slot,
+        "token": token,
+        "version": 1,
+    }
+    try:
+        atomic_write_secret_json(output_path, document)
+    except Exception:
+        append_event(
+            connection,
+            "CAPABILITY_REVOKED",
+            spec.slot,
+            f"capability-revoked:{capability_id}:write-failed",
+            {
+                "capability_id": capability_id,
+                "reason": "capability-file-write-failed",
+            },
+        )
+        raise
+    return capability_id
+
+
+def read_capability_file(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise FleetdError(f"capability file is missing or a symlink: {path}")
+    if path.stat().st_mode & 0o077:
+        raise FleetdError(f"capability file permissions are not private: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FleetdError(f"cannot read capability file {path}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("version") != 1:
+        raise FleetdError(f"unsupported capability document: {path}")
+    return value
+
+
+def load_capability_documents(paths: list[str]) -> dict[str, dict[str, Any]]:
+    documents: dict[str, dict[str, Any]] = {}
+    for raw_path in paths:
+        path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        path = path.absolute()
+        document = read_capability_file(path)
+        slot = document.get("slot")
+        if not isinstance(slot, str) or not slot:
+            raise FleetdError(f"capability file has no slot: {path}")
+        if slot in documents:
+            raise FleetdError(f"multiple capability files target slot {slot}")
+        document["_path"] = str(path)
+        documents[slot] = document
+    return documents
+
+
+def consume_start_capability(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    observation: dict[str, Any],
+    document: dict[str, Any],
+) -> str:
+    capability_id = document.get("capability_id")
+    token = document.get("token")
+    if not isinstance(capability_id, str) or not isinstance(token, str):
+        raise FleetdError("capability document omits its identity or secret")
+    events = capability_events(connection, capability_id)
+    issued = [payload for kind, payload in events if kind == "CAPABILITY_ISSUED"]
+    if len(issued) != 1:
+        raise FleetdError(f"capability {capability_id} has no unique issuance event")
+    if any(kind == "CAPABILITY_CONSUMED" for kind, _ in events):
+        raise FleetdError(f"capability {capability_id} was already consumed")
+    if any(kind == "CAPABILITY_REVOKED" for kind, _ in events):
+        raise FleetdError(f"capability {capability_id} was revoked")
+    authority = issued[0]
+    required = {
+        "action": "start",
+        "capability_id": capability_id,
+        "desired_hash": spec.desired_hash,
+        "observation_fingerprint": observation["fingerprint"],
+        "slot": spec.slot,
+    }
+    if any(authority.get(key) != value for key, value in required.items()):
+        raise FleetdError(f"capability {capability_id} does not authorize this transition")
+    if any(document.get(key) != value for key, value in required.items()):
+        raise FleetdError(f"capability file {capability_id} binding was altered")
+    if int(authority.get("expires_unix", 0)) < int(time.time()):
+        raise FleetdError(f"capability {capability_id} expired")
+    observed_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(observed_hash, str(authority.get("token_hash", ""))):
+        raise FleetdError(f"capability {capability_id} secret does not match its issuance")
+    append_event(
+        connection,
+        "CAPABILITY_CONSUMED",
+        spec.slot,
+        f"capability-consumed:{capability_id}",
+        {
+            "action": "start",
+            "capability_id": capability_id,
+            "desired_hash": spec.desired_hash,
+            "observation_fingerprint": observation["fingerprint"],
+            "slot": spec.slot,
+        },
+    )
+    return capability_id
+
+
+def file_receipt(raw_path: str) -> dict[str, Any]:
+    path = absolute_without_symlink_resolution(raw_path)
+    if path.is_symlink() or not path.is_file():
+        raise FleetdError(f"evidence file is missing or a symlink: {path}")
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+    return {"path": str(path), "sha256": digest.hexdigest(), "size": size}
+
+
+def events_with_identity(
+    connection: sqlite3.Connection,
+    event_types: tuple[str, ...],
+    identity_key: str,
+    identity: str,
+) -> list[tuple[sqlite3.Row, dict[str, Any]]]:
+    placeholders = ",".join("?" for _ in event_types)
+    rows = connection.execute(
+        f"SELECT * FROM events WHERE event_type IN ({placeholders}) ORDER BY seq",
+        event_types,
+    ).fetchall()
+    matched: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+    for row in rows:
+        payload = json.loads(row["payload"])
+        if payload.get(identity_key) == identity:
+            matched.append((row, payload))
+    return matched
+
+
+def create_checkpoint(
+    connection: sqlite3.Connection,
+    specs: list[LaneSpec],
+    slot: str,
+    checkpoint_kind: str,
+    summary_file: str,
+    evidence_files: list[str],
+) -> str:
+    verify_state(connection)
+    verify_config_coverage(connection, specs)
+    matches = [spec for spec in specs if spec.slot == slot]
+    if len(matches) != 1:
+        raise FleetdError(f"fleet config has no unique slot: {slot}")
+    spec = matches[0]
+    declare_desired(connection, spec)
+    observation = observe_spec(spec)
+    observation_event, _ = record_observation(connection, spec, observation)
+    if observation["state"] != "active" or not observation.get("argv_digest"):
+        raise FleetdError(
+            f"checkpoint requires an active argv-attested slot: {slot}"
+        )
+    summary = file_receipt(summary_file)
+    evidence = [file_receipt(path) for path in evidence_files]
+    if not evidence:
+        raise FleetdError("checkpoint requires at least one evidence file")
+    checkpoint_id = f"chk-{uuid.uuid4()}"
+    payload = {
+        "argv_digest": observation["argv_digest"],
+        "checkpoint_id": checkpoint_id,
+        "checkpoint_kind": checkpoint_kind,
+        "evidence": evidence,
+        "generation": observation["generation"],
+        "observation_seq": int(observation_event["seq"]),
+        "slot": slot,
+        "state": "draft",
+        "summary": summary,
+    }
+    event, _ = append_event(
+        connection,
+        "CHECKPOINT_DRAFTED",
+        slot,
+        f"checkpoint-drafted:{checkpoint_id}",
+        payload,
+    )
+    print(
+        "FLEET_CHECKPOINT_DRAFTED "
+        f"checkpoint_id={checkpoint_id} kind={checkpoint_kind} slot={slot} "
+        f"event_seq={event['seq']} evidence={len(evidence)}"
+    )
+    return checkpoint_id
+
+
+def checkpoint_evidence_status(
+    draft: dict[str, Any],
+) -> tuple[str, list[str]]:
+    expected_receipts = [draft["summary"], *draft["evidence"]]
+    mismatches: list[str] = []
+    for expected in expected_receipts:
+        try:
+            actual = file_receipt(expected["path"])
+        except FleetdError:
+            mismatches.append(expected["path"])
+            continue
+        if actual != expected:
+            mismatches.append(expected["path"])
+    return digest_json(expected_receipts), mismatches
+
+
+def refuse_checkpoint_evidence(
+    connection: sqlite3.Connection,
+    draft: dict[str, Any],
+    checkpoint_id: str,
+    mismatches: list[str],
+    reason: str,
+) -> None:
+    append_event(
+        connection,
+        "CHECKPOINT_REFUSED",
+        draft["slot"],
+        transition_key(
+            connection,
+            "checkpoint-refused",
+            draft["slot"],
+            {"checkpoint_id": checkpoint_id, "reason": reason},
+        ),
+        {
+            "checkpoint_id": checkpoint_id,
+            "mismatch_count": len(mismatches),
+            "reason": reason,
+        },
+    )
+
+
+def verify_checkpoint(connection: sqlite3.Connection, checkpoint_id: str) -> int:
+    verify_state(connection)
+    events = events_with_identity(
+        connection,
+        ("CHECKPOINT_DRAFTED", "CHECKPOINT_VERIFIED", "CHECKPOINT_REFUSED"),
+        "checkpoint_id",
+        checkpoint_id,
+    )
+    drafts = [
+        (row, payload)
+        for row, payload in events
+        if row["event_type"] == "CHECKPOINT_DRAFTED"
+    ]
+    if len(drafts) != 1:
+        raise FleetdError(f"checkpoint has no unique draft: {checkpoint_id}")
+    if any(row["event_type"] == "CHECKPOINT_VERIFIED" for row, _ in events):
+        raise FleetdError(f"checkpoint was already verified: {checkpoint_id}")
+    draft_event, draft = drafts[0]
+    evidence_set_digest, mismatches = checkpoint_evidence_status(draft)
+    if mismatches:
+        refuse_checkpoint_evidence(
+            connection, draft, checkpoint_id, mismatches, "evidence-drift"
+        )
+        raise FleetdError(
+            f"checkpoint evidence drifted: {checkpoint_id} mismatches={len(mismatches)}"
+        )
+    event, _ = append_event(
+        connection,
+        "CHECKPOINT_VERIFIED",
+        draft["slot"],
+        f"checkpoint-verified:{checkpoint_id}",
+        {
+            "checkpoint_id": checkpoint_id,
+            "draft_event_hash": draft_event["event_hash"],
+            "draft_event_seq": draft_event["seq"],
+            "evidence_set_digest": evidence_set_digest,
+            "state": "verified",
+        },
+    )
+    print(
+        "FLEET_CHECKPOINT_VERIFIED "
+        f"checkpoint_id={checkpoint_id} event_seq={event['seq']} "
+        f"evidence_set_digest={evidence_set_digest}"
+    )
+    return 0
+
+
+def verified_checkpoint(
+    connection: sqlite3.Connection, checkpoint_id: str
+) -> tuple[sqlite3.Row, dict[str, Any], sqlite3.Row, dict[str, Any]]:
+    events = events_with_identity(
+        connection,
+        ("CHECKPOINT_DRAFTED", "CHECKPOINT_VERIFIED"),
+        "checkpoint_id",
+        checkpoint_id,
+    )
+    drafts = [
+        (row, payload)
+        for row, payload in events
+        if row["event_type"] == "CHECKPOINT_DRAFTED"
+    ]
+    verified = [
+        (row, payload)
+        for row, payload in events
+        if row["event_type"] == "CHECKPOINT_VERIFIED"
+    ]
+    if len(drafts) != 1 or len(verified) != 1:
+        raise FleetdError(
+            f"handoff requires a uniquely verified checkpoint: {checkpoint_id}"
+        )
+    return drafts[0][0], drafts[0][1], verified[0][0], verified[0][1]
+
+
+def prepare_handoff(
+    connection: sqlite3.Connection,
+    checkpoint_id: str,
+    to_agent: str,
+    to_lane: str,
+    output_path: Path,
+    ttl_seconds: int,
+) -> str:
+    verify_state(connection)
+    if ttl_seconds < 1 or ttl_seconds > 86400:
+        raise FleetdError("handoff capability TTL must be between 1 and 86400 seconds")
+    _, draft, verified_event, verified = verified_checkpoint(
+        connection, checkpoint_id
+    )
+    evidence_set_digest, mismatches = checkpoint_evidence_status(draft)
+    if mismatches or verified.get("evidence_set_digest") != evidence_set_digest:
+        refuse_checkpoint_evidence(
+            connection,
+            draft,
+            checkpoint_id,
+            mismatches,
+            "evidence-drift-before-handoff",
+        )
+        raise FleetdError(
+            f"checkpoint evidence drifted before handoff: {checkpoint_id} "
+            f"mismatches={len(mismatches)}"
+        )
+    existing = events_with_identity(
+        connection,
+        ("HANDOFF_PREPARED", "HANDOFF_ACCEPTED"),
+        "checkpoint_id",
+        checkpoint_id,
+    )
+    if any(row["event_type"] == "HANDOFF_PREPARED" for row, _ in existing):
+        raise FleetdError(f"checkpoint already has a prepared handoff: {checkpoint_id}")
+    handoff_id = f"handoff-{uuid.uuid4()}"
+    prepared, _ = append_event(
+        connection,
+        "HANDOFF_PREPARED",
+        draft["slot"],
+        f"handoff-prepared:{handoff_id}",
+        {
+            "checkpoint_id": checkpoint_id,
+            "evidence_set_digest": evidence_set_digest,
+            "handoff_id": handoff_id,
+            "state": "prepared",
+            "to_agent": to_agent,
+            "to_lane": to_lane,
+            "verified_checkpoint_event_hash": verified_event["event_hash"],
+            "verified_checkpoint_event_seq": verified_event["seq"],
+        },
+    )
+    capability_id = f"cap-{uuid.uuid4()}"
+    token = secrets.token_urlsafe(48)
+    issued_unix = int(time.time())
+    issued_payload = {
+        "action": "accept-handoff",
+        "capability_id": capability_id,
+        "checkpoint_id": checkpoint_id,
+        "evidence_set_digest": evidence_set_digest,
+        "expires_unix": issued_unix + ttl_seconds,
+        "handoff_id": handoff_id,
+        "issued_unix": issued_unix,
+        "prepared_event_hash": prepared["event_hash"],
+        "prepared_event_seq": prepared["seq"],
+        "slot": draft["slot"],
+        "to_agent": to_agent,
+        "to_lane": to_lane,
+        "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+    }
+    issued_event, _ = append_event(
+        connection,
+        "CAPABILITY_ISSUED",
+        draft["slot"],
+        f"capability-issued:{capability_id}",
+        issued_payload,
+    )
+    document = {
+        key: value
+        for key, value in issued_payload.items()
+        if key not in {"issued_unix", "token_hash"}
+    }
+    document.update(
+        {
+            "issued_event_hash": issued_event["event_hash"],
+            "token": token,
+            "version": 1,
+        }
+    )
+    try:
+        atomic_write_secret_json(output_path, document)
+    except Exception:
+        append_event(
+            connection,
+            "CAPABILITY_REVOKED",
+            draft["slot"],
+            f"capability-revoked:{capability_id}:write-failed",
+            {
+                "capability_id": capability_id,
+                "reason": "capability-file-write-failed",
+            },
+        )
+        raise
+    print(
+        "FLEET_HANDOFF_PREPARED "
+        f"handoff_id={handoff_id} checkpoint_id={checkpoint_id} "
+        f"capability_id={capability_id} event_seq={prepared['seq']}"
+    )
+    return handoff_id
+
+
+def consume_handoff_capability(
+    connection: sqlite3.Connection,
+    handoff_id: str,
+    agent: str,
+    lane: str,
+    evidence_set_digest: str,
+    document: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    capability_id = document.get("capability_id")
+    token = document.get("token")
+    if not isinstance(capability_id, str) or not isinstance(token, str):
+        raise FleetdError("handoff capability omits its identity or secret")
+    events = capability_events(connection, capability_id)
+    issued = [payload for kind, payload in events if kind == "CAPABILITY_ISSUED"]
+    if len(issued) != 1:
+        raise FleetdError(f"handoff capability has no unique issuance: {capability_id}")
+    if any(kind == "CAPABILITY_CONSUMED" for kind, _ in events):
+        raise FleetdError(f"handoff capability was already consumed: {capability_id}")
+    if any(kind == "CAPABILITY_REVOKED" for kind, _ in events):
+        raise FleetdError(f"handoff capability was revoked: {capability_id}")
+    authority = issued[0]
+    required = {
+        "action": "accept-handoff",
+        "capability_id": capability_id,
+        "evidence_set_digest": evidence_set_digest,
+        "handoff_id": handoff_id,
+        "to_agent": agent,
+        "to_lane": lane,
+    }
+    if any(authority.get(key) != value for key, value in required.items()):
+        raise FleetdError("handoff capability does not authorize this recipient")
+    if any(document.get(key) != value for key, value in required.items()):
+        raise FleetdError("handoff capability binding was altered")
+    if int(authority.get("expires_unix", 0)) < int(time.time()):
+        raise FleetdError(f"handoff capability expired: {capability_id}")
+    observed_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(observed_hash, str(authority.get("token_hash", ""))):
+        raise FleetdError("handoff capability secret does not match its issuance")
+    append_event(
+        connection,
+        "CAPABILITY_CONSUMED",
+        authority["slot"],
+        f"capability-consumed:{capability_id}",
+        {
+            "action": "accept-handoff",
+            "capability_id": capability_id,
+            "evidence_set_digest": evidence_set_digest,
+            "handoff_id": handoff_id,
+            "slot": authority["slot"],
+            "to_agent": agent,
+            "to_lane": lane,
+        },
+    )
+    return capability_id, authority
+
+
+def accept_handoff(
+    connection: sqlite3.Connection,
+    handoff_id: str,
+    agent: str,
+    lane: str,
+    capability_path: Path,
+    public_key: Path,
+    anchor_dir: Path,
+) -> int:
+    verify_state(connection)
+    prepared_events = events_with_identity(
+        connection,
+        ("HANDOFF_PREPARED", "HANDOFF_ACCEPTED"),
+        "handoff_id",
+        handoff_id,
+    )
+    prepared = [
+        (row, payload)
+        for row, payload in prepared_events
+        if row["event_type"] == "HANDOFF_PREPARED"
+    ]
+    if len(prepared) != 1:
+        raise FleetdError(f"handoff has no unique prepared state: {handoff_id}")
+    if any(row["event_type"] == "HANDOFF_ACCEPTED" for row, _ in prepared_events):
+        raise FleetdError(f"handoff was already accepted: {handoff_id}")
+    prepared_event, prepared_payload = prepared[0]
+    if prepared_payload.get("to_agent") != agent or prepared_payload.get("to_lane") != lane:
+        raise FleetdError("handoff recipient does not match the prepared state")
+    checkpoint_id = prepared_payload.get("checkpoint_id")
+    if not isinstance(checkpoint_id, str):
+        raise FleetdError("prepared handoff omits its checkpoint identity")
+    _, draft, verified_event, verified_payload = verified_checkpoint(
+        connection, checkpoint_id
+    )
+    evidence_set_digest, mismatches = checkpoint_evidence_status(draft)
+    evidence_bound = (
+        verified_payload.get("evidence_set_digest") == evidence_set_digest
+        and prepared_payload.get("evidence_set_digest") == evidence_set_digest
+        and prepared_payload.get("verified_checkpoint_event_hash")
+        == verified_event["event_hash"]
+    )
+    if mismatches or not evidence_bound:
+        refuse_checkpoint_evidence(
+            connection,
+            draft,
+            checkpoint_id,
+            mismatches,
+            "evidence-drift-before-accept",
+        )
+        raise FleetdError(
+            f"checkpoint evidence drifted before handoff acceptance: {checkpoint_id} "
+            f"mismatches={len(mismatches)}"
+        )
+    _, latest_anchor = verify_anchor_directory(connection, anchor_dir, public_key)
+    covered_event = max(int(prepared_event["seq"]), int(verified_event["seq"]))
+    if (
+        latest_anchor is None
+        or latest_anchor["payload"]["event_count"] < covered_event
+    ):
+        raise FleetdError(
+            f"handoff preparation is not covered by a signed anchor: {handoff_id}"
+        )
+    document = read_capability_file(capability_path)
+    capability_id, authority = consume_handoff_capability(
+        connection,
+        handoff_id,
+        agent,
+        lane,
+        evidence_set_digest,
+        document,
+    )
+    event, _ = append_event(
+        connection,
+        "HANDOFF_ACCEPTED",
+        authority["slot"],
+        f"handoff-accepted:{handoff_id}",
+        {
+            "anchor_event_count": latest_anchor["payload"]["event_count"],
+            "anchor_tail_hash": latest_anchor["payload"]["tail_hash"],
+            "capability_id": capability_id,
+            "checkpoint_id": checkpoint_id,
+            "evidence_set_digest": evidence_set_digest,
+            "handoff_id": handoff_id,
+            "state": "accepted",
+            "to_agent": agent,
+            "to_lane": lane,
+        },
+    )
+    print(
+        "FLEET_HANDOFF_ACCEPTED "
+        f"handoff_id={handoff_id} checkpoint_id={authority['checkpoint_id']} "
+        f"event_seq={event['seq']} anchor_events={latest_anchor['payload']['event_count']}"
+    )
+    return 0
+
+
 def launch_arguments(spec: LaneSpec) -> list[str]:
     base = [str(fleet_agent_command())]
     if spec.kind:
@@ -844,10 +1822,12 @@ def apply_start(
     spec: LaneSpec,
     observation: dict[str, Any],
     observation_seq: int,
+    capability_id: str,
 ) -> bool:
     action_id = digest_json(
         {
             "action": "start",
+            "capability_id": capability_id,
             "desired_hash": spec.desired_hash,
             "observation": observation["fingerprint"],
             "slot": spec.slot,
@@ -856,6 +1836,7 @@ def apply_start(
     requested = {
         "action": "start",
         "action_id": action_id,
+        "capability_id": capability_id,
         "desired_hash": spec.desired_hash,
         "observation_seq": observation_seq,
     }
@@ -888,6 +1869,7 @@ def apply_start(
     outcome = {
         "action": "start",
         "action_id": action_id,
+        "capability_id": capability_id,
         "exit_code": return_code,
         "output_digest": hashlib.sha256(output.encode("utf-8")).hexdigest(),
         "status": "committed" if return_code == 0 else "failed",
@@ -912,12 +1894,15 @@ def cycle(
     specs: list[LaneSpec],
     *,
     apply: bool,
+    capabilities: dict[str, dict[str, Any]] | None = None,
     emit: bool = True,
 ) -> int:
     verify_state(connection)
     verify_config_coverage(connection, specs)
     blocked = 0
     failed = 0
+    capabilities = capabilities or {}
+    used_capabilities: set[str] = set()
     for spec in specs:
         declare_desired(connection, spec)
         observation = observe_spec(spec)
@@ -943,8 +1928,73 @@ def cycle(
         if decision == "blocked":
             blocked += 1
         elif decision == "start" and apply:
+            document = capabilities.get(spec.slot)
+            if document is None:
+                failed += 1
+                append_event(
+                    connection,
+                    "ACTION_REFUSED",
+                    spec.slot,
+                    transition_key(
+                        connection,
+                        "action-refused",
+                        spec.slot,
+                        {
+                            "action": "start",
+                            "observation_fingerprint": observation["fingerprint"],
+                            "reason": "linear-capability-required",
+                        },
+                    ),
+                    {
+                        "action": "start",
+                        "observation_fingerprint": observation["fingerprint"],
+                        "reason": "linear-capability-required",
+                    },
+                )
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=start status=refused "
+                    "reason=linear-capability-required"
+                )
+                continue
+            used_capabilities.add(spec.slot)
+            try:
+                capability_id = consume_start_capability(
+                    connection, spec, observation, document
+                )
+            except FleetdError as exc:
+                failed += 1
+                refusal_reason = slug(str(exc), limit=160)
+                refusal_payload = {
+                    "action": "start",
+                    "capability_id": str(document.get("capability_id", "unknown")),
+                    "observation_fingerprint": observation["fingerprint"],
+                    "reason": refusal_reason,
+                }
+                append_event(
+                    connection,
+                    "CAPABILITY_REFUSED",
+                    spec.slot,
+                    transition_key(
+                        connection,
+                        "capability-refused",
+                        spec.slot,
+                        refusal_payload,
+                    ),
+                    refusal_payload,
+                )
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=start status=refused "
+                    f"reason={refusal_reason}"
+                )
+                continue
             if apply_start(
-                connection, spec, observation, int(observation_event["seq"])
+                connection,
+                spec,
+                observation,
+                int(observation_event["seq"]),
+                capability_id,
             ):
                 after = observe_spec(spec)
                 after_event, _ = record_observation(connection, spec, after)
@@ -963,6 +2013,13 @@ def cycle(
                     failed += 1
             else:
                 failed += 1
+    unused = sorted(set(capabilities) - used_capabilities)
+    for slot in unused:
+        failed += 1
+        print(
+            "FLEET_ACTION "
+            f"slot={slot} action=start status=refused reason=capability-not-applicable"
+        )
     return 2 if failed else (1 if blocked else 0)
 
 
@@ -985,6 +2042,53 @@ def observe_cycle(
             f"observation={'new' if inserted else 'deduplicated'}"
         )
     return 1 if drifted else 0
+
+
+def authorize_start(
+    connection: sqlite3.Connection,
+    specs: list[LaneSpec],
+    slot: str,
+    output_path: Path,
+    ttl_seconds: int,
+) -> int:
+    verify_state(connection)
+    verify_config_coverage(connection, specs)
+    matches = [spec for spec in specs if spec.slot == slot]
+    if len(matches) != 1:
+        raise FleetdError(f"fleet config has no unique slot: {slot}")
+    spec = matches[0]
+    declare_desired(connection, spec)
+    observation = observe_spec(spec)
+    observation_event, _ = record_observation(connection, spec, observation)
+    decision, reason = decide(
+        connection, spec, observation, int(observation_event["seq"])
+    )
+    record_plan(
+        connection,
+        spec,
+        observation,
+        int(observation_event["seq"]),
+        decision,
+        reason,
+    )
+    if decision != "start":
+        raise FleetdError(
+            f"slot {slot} is not authorizable: decision={decision} reason={reason}"
+        )
+    capability_id = issue_start_capability(
+        connection,
+        spec,
+        observation,
+        int(observation_event["seq"]),
+        output_path,
+        ttl_seconds,
+    )
+    print(
+        "FLEET_CAPABILITY_ISSUED "
+        f"capability_id={capability_id} slot={slot} action=start "
+        f"expires_unix={int(time.time()) + ttl_seconds} path={output_path}"
+    )
+    return 0
 
 
 def print_events(connection: sqlite3.Connection, slot: str | None, limit: int) -> None:
@@ -1055,6 +2159,13 @@ def common_db_path(args: argparse.Namespace) -> Path:
     return default_db(Path(args.cwd).resolve())
 
 
+def absolute_without_symlink_resolution(raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.absolute()
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="sounio-fleet")
     root.add_argument("--db")
@@ -1062,6 +2173,9 @@ def parser() -> argparse.ArgumentParser:
     subparsers = root.add_subparsers(dest="command_name", required=True)
 
     subparsers.add_parser("runtime-version")
+    keygen_parser = subparsers.add_parser("keygen")
+    keygen_parser.add_argument("--private-key", required=True)
+    keygen_parser.add_argument("--public-key", required=True)
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("--config", default="fleet.toml")
     for name in ("observe", "plan", "reconcile"):
@@ -1069,6 +2183,13 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--config", default="fleet.toml")
         if name == "reconcile":
             command.add_argument("--apply", action="store_true")
+            command.add_argument("--capability", action="append", default=[])
+    authorize_parser = subparsers.add_parser("authorize")
+    authorize_parser.add_argument("--config", default="fleet.toml")
+    authorize_parser.add_argument("--slot", required=True)
+    authorize_parser.add_argument("--action", choices=("start",), default="start")
+    authorize_parser.add_argument("--out", required=True)
+    authorize_parser.add_argument("--ttl", type=int, default=600)
     watch_parser = subparsers.add_parser("watch")
     watch_parser.add_argument("--config", default="fleet.toml")
     watch_parser.add_argument("--interval", type=float, default=2.0)
@@ -1084,6 +2205,36 @@ def parser() -> argparse.ArgumentParser:
     explain_parser.add_argument("--limit", type=int, default=20)
     subparsers.add_parser("verify-log")
     subparsers.add_parser("rebuild-views")
+    anchor_parser = subparsers.add_parser("anchor-log")
+    anchor_parser.add_argument("--private-key", required=True)
+    anchor_parser.add_argument("--public-key", required=True)
+    anchor_parser.add_argument("--anchor-dir", required=True)
+    verify_anchor_parser = subparsers.add_parser("verify-anchors")
+    verify_anchor_parser.add_argument("--public-key", required=True)
+    verify_anchor_parser.add_argument("--anchor-dir", required=True)
+    checkpoint_create = subparsers.add_parser("checkpoint-create")
+    checkpoint_create.add_argument("--config", default="fleet.toml")
+    checkpoint_create.add_argument("--slot", required=True)
+    checkpoint_create.add_argument(
+        "--kind", choices=("cognitive", "scientific"), required=True
+    )
+    checkpoint_create.add_argument("--summary-file", required=True)
+    checkpoint_create.add_argument("--evidence", action="append", required=True)
+    checkpoint_verify = subparsers.add_parser("checkpoint-verify")
+    checkpoint_verify.add_argument("--checkpoint-id", required=True)
+    handoff_prepare = subparsers.add_parser("handoff-prepare")
+    handoff_prepare.add_argument("--checkpoint-id", required=True)
+    handoff_prepare.add_argument("--to-agent", required=True)
+    handoff_prepare.add_argument("--to-lane", required=True)
+    handoff_prepare.add_argument("--capability-out", required=True)
+    handoff_prepare.add_argument("--ttl", type=int, default=600)
+    handoff_accept = subparsers.add_parser("handoff-accept")
+    handoff_accept.add_argument("--handoff-id", required=True)
+    handoff_accept.add_argument("--agent", required=True)
+    handoff_accept.add_argument("--lane", required=True)
+    handoff_accept.add_argument("--capability", required=True)
+    handoff_accept.add_argument("--public-key", required=True)
+    handoff_accept.add_argument("--anchor-dir", required=True)
     return root
 
 
@@ -1094,12 +2245,51 @@ def main() -> int:
         print(f"runtime_version={RUNTIME_VERSION}")
         print(f"schema_version={SCHEMA_VERSION}")
         return 0
+    if args.command_name == "keygen":
+        private_key = absolute_without_symlink_resolution(args.private_key)
+        public_key = absolute_without_symlink_resolution(args.public_key)
+        generate_anchor_keypair(private_key, public_key)
+        print(
+            "FLEET_ANCHOR_KEY_GENERATED "
+            f"private_key={private_key} public_key={public_key} "
+            f"public_key_sha256={public_key_fingerprint(public_key)}"
+        )
+        return 0
     db_path = common_db_path(args)
     with connect_db(db_path) as connection:
         if args.command_name == "verify-log":
             count, tail, views = verify_state(connection)
             print(
                 f"FLEET_LOG_VERIFIED events={count} views={views} tail_hash={tail}"
+            )
+            return 0
+        if args.command_name == "anchor-log":
+            private_key = absolute_without_symlink_resolution(args.private_key)
+            public_key = absolute_without_symlink_resolution(args.public_key)
+            directory = absolute_without_symlink_resolution(args.anchor_dir)
+            with writer_lock(db_path):
+                output = create_anchor(
+                    connection, directory, private_key, public_key
+                )
+            document = read_anchor(output)
+            print(
+                "FLEET_LOG_ANCHORED "
+                f"events={document['payload']['event_count']} "
+                f"tail_hash={document['payload']['tail_hash']} path={output}"
+            )
+            return 0
+        if args.command_name == "verify-anchors":
+            public_key = absolute_without_symlink_resolution(args.public_key)
+            directory = absolute_without_symlink_resolution(args.anchor_dir)
+            count, latest = verify_anchor_directory(
+                connection, directory, public_key
+            )
+            if latest is None:
+                raise FleetdError("signed fleet anchor directory has no latest anchor")
+            print(
+                "FLEET_ANCHORS_VERIFIED "
+                f"anchors={count} latest_events={latest['payload']['event_count']} "
+                f"latest_tail_hash={latest['payload']['tail_hash']}"
             )
             return 0
         if args.command_name == "rebuild-views":
@@ -1117,6 +2307,35 @@ def main() -> int:
         if args.command_name == "explain":
             verify_state(connection)
             return explain(connection, args.slot, args.limit)
+        if args.command_name == "checkpoint-verify":
+            with writer_lock(db_path):
+                return verify_checkpoint(connection, args.checkpoint_id)
+        if args.command_name == "handoff-prepare":
+            output_path = absolute_without_symlink_resolution(args.capability_out)
+            with writer_lock(db_path):
+                prepare_handoff(
+                    connection,
+                    args.checkpoint_id,
+                    args.to_agent,
+                    args.to_lane,
+                    output_path,
+                    args.ttl,
+                )
+            return 0
+        if args.command_name == "handoff-accept":
+            capability_path = absolute_without_symlink_resolution(args.capability)
+            public_key = absolute_without_symlink_resolution(args.public_key)
+            anchor_dir = absolute_without_symlink_resolution(args.anchor_dir)
+            with writer_lock(db_path):
+                return accept_handoff(
+                    connection,
+                    args.handoff_id,
+                    args.agent,
+                    args.lane,
+                    capability_path,
+                    public_key,
+                    anchor_dir,
+                )
         config_path = Path(args.config).expanduser().resolve()
         specs = load_config(config_path)
         if args.command_name == "init":
@@ -1129,21 +2348,61 @@ def main() -> int:
                 f"FLEET_INITIALIZED db={db_path} config={config_path} lanes={len(specs)}"
             )
             return 0
+        if args.command_name == "authorize":
+            output_path = Path(args.out).expanduser()
+            if not output_path.is_absolute():
+                output_path = Path.cwd() / output_path
+            with writer_lock(db_path):
+                return authorize_start(
+                    connection,
+                    specs,
+                    args.slot,
+                    output_path.absolute(),
+                    args.ttl,
+                )
+        if args.command_name == "checkpoint-create":
+            with writer_lock(db_path):
+                create_checkpoint(
+                    connection,
+                    specs,
+                    args.slot,
+                    args.kind,
+                    args.summary_file,
+                    args.evidence,
+                )
+            return 0
         if args.command_name == "observe":
             with writer_lock(db_path):
                 return observe_cycle(connection, specs)
         if args.command_name in {"plan", "reconcile"}:
             apply = args.command_name == "reconcile" and args.apply
+            capabilities = (
+                load_capability_documents(args.capability)
+                if args.command_name == "reconcile"
+                else {}
+            )
+            if capabilities and not apply:
+                raise FleetdError("capability files require reconcile --apply")
             with writer_lock(db_path):
-                return cycle(connection, specs, apply=apply)
+                return cycle(
+                    connection,
+                    specs,
+                    apply=apply,
+                    capabilities=capabilities,
+                )
         if args.command_name == "watch":
             if args.interval <= 0:
                 raise FleetdError("watch interval must be positive")
+            if args.apply:
+                raise FleetdError(
+                    "watch cannot hold reusable mutation authority; use one-shot "
+                    "reconcile --apply --capability"
+                )
             cycles = 0
             while True:
                 specs = load_config(config_path)
                 with writer_lock(db_path):
-                    result = cycle(connection, specs, apply=args.apply)
+                    result = cycle(connection, specs, apply=False)
                 cycles += 1
                 if args.cycles and cycles >= args.cycles:
                     return result

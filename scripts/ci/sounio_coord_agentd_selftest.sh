@@ -112,10 +112,26 @@ socket_path="$(sed -n 's/.* socket=\([^ ]*\).*/\1/p' <<< "$start_output")"
 token_file="$(sed -n 's/.* token_file=\([^ ]*\).*/\1/p' <<< "$start_output")"
 [[ -S "$socket_path" && -f "$token_file" ]] || fail 'supervisor omitted its protected endpoint'
 [[ "$(stat -c %a "$token_file")" == 600 ]] || fail 'capability file mode is not 600'
+output="$(agentd status --agent codex --lane "$LANE" --cwd "$REPO")"
+argv_digest="$(python3 - "node" "$RECEIVER" "$REPO" "$CONTEXT" \
+  "$COORD_STATE" "$RECEIVER_LOG" "$SESSION_ID" <<'PY'
+import hashlib
+import json
+import sys
+print(hashlib.sha256(json.dumps(sys.argv[1:], separators=(",", ":")).encode()).hexdigest())
+PY
+)"
+grep -q "^argv_digest=$argv_digest$" <<< "$output" || \
+  fail 'supervisor did not attest the complete argv vector'
 if agentd start --agent codex --lane "$LANE" --session-id 'different-live-generation' \
   --cwd "$REPO" -- node "$RECEIVER" "$REPO" "$CONTEXT" "$COORD_STATE" \
   "$RECEIVER_LOG" 'different-live-generation' >/dev/null 2>&1; then
   fail 'start aliased a different UUID onto the live supervisor generation'
+fi
+if agentd start --agent codex --lane "$LANE" --session-id "$SESSION_ID" \
+  --cwd "$REPO" -- node "$RECEIVER" "$REPO" "$CONTEXT" "$COORD_STATE" \
+  "$RECEIVER_LOG" 'sabotaged-argv' >/dev/null 2>&1; then
+  fail 'start reused a live generation with a different argv vector'
 fi
 wait_for_text "$RECEIVER_LOG" 'HOOK_RC=0' || fail 'harness hook did not start'
 wait_for_text "$RECEIVER_LOG" "agent=codex lane=$LANE" || fail 'hook did not claim the supervised lane'
@@ -226,5 +242,6 @@ coord release --agent sender --lane origin --reason 'agentd selftest complete' >
 
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_selftest.sh"
 "$ROOT_DIR/scripts/ci/sounio_coord_fleetd_selftest.sh"
+"$ROOT_DIR/scripts/ci/sounio_coord_fleet_model_selftest.sh"
 
 echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed raw_body=absent'
