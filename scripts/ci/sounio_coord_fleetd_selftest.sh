@@ -14,6 +14,17 @@ RECEIVER="$TEST_ROOT/receiver.py"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
 SLOT='proof-lane'
 SESSION_ID='11111111-2222-4333-8444-555555555555'
+CAPABILITY="$TEST_ROOT/start.capability.json"
+BAD_CAPABILITY="$TEST_ROOT/start.capability.bad.json"
+SECOND_CAPABILITY="$TEST_ROOT/start-2.capability.json"
+PRIVATE_KEY="$TEST_ROOT/anchor-private.pem"
+PUBLIC_KEY="$TEST_ROOT/anchor-public.pem"
+WRONG_PRIVATE_KEY="$TEST_ROOT/wrong-private.pem"
+WRONG_PUBLIC_KEY="$TEST_ROOT/wrong-public.pem"
+ANCHORS="$TEST_ROOT/anchors"
+CHECKPOINT_SUMMARY="$TEST_ROOT/checkpoint-summary.txt"
+CHECKPOINT_EVIDENCE="$TEST_ROOT/checkpoint-evidence.txt"
+HANDOFF_CAPABILITY="$TEST_ROOT/handoff.capability.json"
 
 cleanup() {
   if [[ -x "$RUNTIME/sounio-fleet-agent-runtime" && -d "$REPO" ]]; then
@@ -68,6 +79,8 @@ for _ in sys.stdin:
     pass
 PY
 chmod +x "$RECEIVER"
+printf 'bounded cognitive state transition\n' > "$CHECKPOINT_SUMMARY"
+printf 'evidence receipt v1\n' > "$CHECKPOINT_EVIDENCE"
 
 cat > "$CONFIG" <<EOF
 version = 1
@@ -115,6 +128,41 @@ fleetd() {
     "$RUNTIME/sounio-fleet-runtime" --db "$DB" "$@"
 }
 
+python3 - "$RUNTIME/sounio-fleet-runtime" "$TEST_ROOT/policy.db" <<'PY'
+import importlib.util
+import sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+loader = SourceFileLoader("fleetd_policy", sys.argv[1])
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+loader.exec_module(module)
+lane = module.LaneSpec(
+    slot="policy-test",
+    enabled=True,
+    restart="on-failure",
+    cwd=Path.cwd(),
+    kind=None,
+    home=None,
+    agent=None,
+    lane=None,
+    session_id=None,
+    identity=None,
+    command=("true",),
+)
+with module.connect_db(Path(sys.argv[2])) as connection:
+    initial = module.decide(
+        connection, lane, {"state": "absent", "reason": "test"}, 1
+    )
+    unreachable = module.decide(
+        connection, lane, {"state": "unreachable", "reason": "test"}, 1
+    )
+assert initial[0] == "start", initial
+assert unreachable == ("blocked", "probe-unreachable-start-not-authorized"), unreachable
+PY
+
 output="$(fleetd init --config "$CONFIG")"
 grep -q 'FLEET_INITIALIZED .*lanes=2' <<< "$output" || \
   fail 'init did not validate and persist desired state'
@@ -140,7 +188,42 @@ fleetd reconcile --config "$CONFIG" >/dev/null
 [[ "$(event_count)" == "$first_count" ]] || \
   fail 'identical reconciliation was not causally deduplicated'
 
-output="$(fleetd reconcile --config "$CONFIG" --apply)"
+# MODEL_CONTROL:capability_required
+if fleetd reconcile --config "$CONFIG" --apply >"$TEST_ROOT/no-capability" 2>&1; then
+  fail 'reconcile --apply mutated state without a linear capability'
+fi
+grep -q 'status=refused reason=linear-capability-required' \
+  "$TEST_ROOT/no-capability" || \
+  fail 'missing mutation authority was not attributed to the capability rule'
+[[ ! -e "$STATE/fleet-slots/$SLOT.json" ]] || \
+  fail 'capability refusal changed the live fleet'
+
+output="$(fleetd authorize --config "$CONFIG" --slot "$SLOT" --out "$CAPABILITY")"
+grep -q 'FLEET_CAPABILITY_ISSUED .*action=start' <<< "$output" || \
+  fail 'authorize did not issue a start capability'
+[[ "$(stat -c %a "$CAPABILITY")" == 600 ]] || \
+  fail 'start capability file mode is not 600'
+cp "$CAPABILITY" "$BAD_CAPABILITY"
+python3 - "$BAD_CAPABILITY" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["token"] = "sabotaged-secret"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+chmod 600 "$BAD_CAPABILITY"
+if fleetd reconcile --config "$CONFIG" --apply --capability "$BAD_CAPABILITY" \
+  >"$TEST_ROOT/bad-capability" 2>&1; then
+  fail 'reconciler accepted a capability with a sabotaged secret'
+fi
+grep -q 'status=refused reason=.*secret-does-not-match' \
+  "$TEST_ROOT/bad-capability" || \
+  fail 'capability secret sabotage was not attributed to token verification'
+
+output="$(fleetd reconcile --config "$CONFIG" --apply --capability "$CAPABILITY")"
 grep -q 'FLEET_ACTION .*status=committed' <<< "$output" || \
   fail 'authorized reconciliation did not commit the start action'
 wait_for 'reconciler did not start the supervised harness' \
@@ -160,6 +243,21 @@ fleetd watch --config "$CONFIG" --cycles 2 --interval 0.01 >/dev/null
 output="$(fleetd verify-log)"
 grep -q 'FLEET_LOG_VERIFIED events=' <<< "$output" || \
   fail 'hash chain did not verify'
+output="$(fleetd keygen --private-key "$PRIVATE_KEY" --public-key "$PUBLIC_KEY")"
+grep -q 'FLEET_ANCHOR_KEY_GENERATED ' <<< "$output" || \
+  fail 'Ed25519 anchor key generation did not return a receipt'
+[[ "$(stat -c %a "$PRIVATE_KEY")" == 600 ]] || \
+  fail 'Ed25519 private key mode is not 600'
+output="$(fleetd anchor-log --private-key "$PRIVATE_KEY" \
+  --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS")"
+grep -q 'FLEET_LOG_ANCHORED events=' <<< "$output" || \
+  fail 'event log was not signed'
+fleetd verify-anchors --public-key "$PUBLIC_KEY" \
+  --anchor-dir "$ANCHORS" >/dev/null
+fleetd anchor-log --private-key "$PRIVATE_KEY" --public-key "$PUBLIC_KEY" \
+  --anchor-dir "$ANCHORS" >/dev/null
+[[ "$(find "$ANCHORS" -type f -name 'anchor-*.json' | wc -l)" == 1 ]] || \
+  fail 'anchoring an unchanged prefix created a duplicate anchor'
 output="$(fleetd explain --slot "$SLOT")"
 grep -q '^decision=noop$' <<< "$output" || fail 'explain omitted the decision'
 grep -q '^reason=desired-state-satisfied$' <<< "$output" || \
@@ -200,6 +298,156 @@ grep -q 'decision=blocked reason=desired-session_id-mismatch' \
 mv "$CONFIG.good" "$CONFIG"
 fleetd reconcile --config "$CONFIG" >/dev/null
 
+SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+  stop --cwd "$REPO" --slot "$SLOT" >/dev/null
+# MODEL_CONTROL:capability_reuse
+if fleetd reconcile --config "$CONFIG" --apply --capability "$CAPABILITY" \
+  >"$TEST_ROOT/reused-capability" 2>&1; then
+  fail 'reconciler accepted a consumed capability after the slot stopped'
+fi
+grep -q 'status=refused reason=.*already-consumed' "$TEST_ROOT/reused-capability" || \
+  fail 'capability reuse was not attributed to linear consumption'
+[[ "$(grep -c '^START pid=' "$RECEIVER_LOG")" == 1 ]] || \
+  fail 'consumed capability restarted the harness'
+fleetd authorize --config "$CONFIG" --slot "$SLOT" \
+  --out "$SECOND_CAPABILITY" >/dev/null
+fleetd reconcile --config "$CONFIG" --apply \
+  --capability "$SECOND_CAPABILITY" >/dev/null
+wait_for 'second linear capability did not restore the stopped slot' \
+  "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 2"
+
+output="$(fleetd checkpoint-create --config "$CONFIG" --slot "$SLOT" \
+  --kind cognitive --summary-file "$CHECKPOINT_SUMMARY" \
+  --evidence "$CHECKPOINT_EVIDENCE")"
+checkpoint_id="$(sed -n 's/.*checkpoint_id=\([^ ]*\).*/\1/p' <<< "$output")"
+[[ -n "$checkpoint_id" ]] || fail 'checkpoint draft omitted its typed identity'
+
+# MODEL_CONTROL:wrong_checkpoint_state
+if fleetd handoff-prepare --checkpoint-id "$checkpoint_id" \
+  --to-agent reviewer --to-lane review-lane \
+  --capability-out "$HANDOFF_CAPABILITY" >"$TEST_ROOT/draft-handoff" 2>&1; then
+  fail 'handoff preparation accepted a draft checkpoint'
+fi
+grep -q 'requires a uniquely verified checkpoint' "$TEST_ROOT/draft-handoff" || \
+  fail 'draft handoff refusal omitted the checkpoint typestate rule'
+
+cp "$CHECKPOINT_EVIDENCE" "$CHECKPOINT_EVIDENCE.good"
+printf 'sabotaged after draft\n' >> "$CHECKPOINT_EVIDENCE"
+if fleetd checkpoint-verify --checkpoint-id "$checkpoint_id" \
+  >"$TEST_ROOT/evidence-drift" 2>&1; then
+  fail 'checkpoint verification accepted drifted evidence'
+fi
+grep -q 'checkpoint evidence drifted' "$TEST_ROOT/evidence-drift" || \
+  fail 'checkpoint evidence sabotage omitted its refusal reason'
+mv "$CHECKPOINT_EVIDENCE.good" "$CHECKPOINT_EVIDENCE"
+fleetd checkpoint-verify --checkpoint-id "$checkpoint_id" >/dev/null
+
+output="$(fleetd handoff-prepare --checkpoint-id "$checkpoint_id" \
+  --to-agent reviewer --to-lane review-lane \
+  --capability-out "$HANDOFF_CAPABILITY")"
+handoff_id="$(sed -n 's/.*handoff_id=\([^ ]*\).*/\1/p' <<< "$output")"
+[[ -n "$handoff_id" ]] || fail 'prepared handoff omitted its typed identity'
+[[ "$(stat -c %a "$HANDOFF_CAPABILITY")" == 600 ]] || \
+  fail 'handoff capability file mode is not 600'
+
+# MODEL_CONTROL:unanchored_handoff
+if fleetd handoff-accept --handoff-id "$handoff_id" \
+  --agent reviewer --lane review-lane --capability "$HANDOFF_CAPABILITY" \
+  --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
+  >"$TEST_ROOT/unanchored-handoff" 2>&1; then
+  fail 'handoff acceptance used a log anchor older than its prepared state'
+fi
+grep -q 'not covered by a signed anchor' "$TEST_ROOT/unanchored-handoff" || \
+  fail 'unanchored handoff refusal omitted the signed-prefix rule'
+
+fleetd anchor-log --private-key "$PRIVATE_KEY" --public-key "$PUBLIC_KEY" \
+  --anchor-dir "$ANCHORS" >/dev/null
+if fleetd handoff-accept --handoff-id "$handoff_id" \
+  --agent intruder --lane review-lane --capability "$HANDOFF_CAPABILITY" \
+  --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
+  >"$TEST_ROOT/wrong-recipient" 2>&1; then
+  fail 'handoff acceptance allowed a different recipient'
+fi
+grep -q 'recipient does not match' "$TEST_ROOT/wrong-recipient" || \
+  fail 'wrong recipient refusal omitted the prepared-recipient rule'
+cp "$CHECKPOINT_EVIDENCE" "$CHECKPOINT_EVIDENCE.prepared-good"
+printf 'sabotaged after handoff preparation\n' >> "$CHECKPOINT_EVIDENCE"
+if fleetd handoff-accept --handoff-id "$handoff_id" \
+  --agent reviewer --lane review-lane --capability "$HANDOFF_CAPABILITY" \
+  --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
+  >"$TEST_ROOT/prepared-evidence-drift" 2>&1; then
+  fail 'handoff acceptance used evidence changed after preparation'
+fi
+grep -q 'evidence drifted before handoff acceptance' \
+  "$TEST_ROOT/prepared-evidence-drift" || \
+  fail 'prepared evidence drift omitted its acceptance refusal reason'
+mv "$CHECKPOINT_EVIDENCE.prepared-good" "$CHECKPOINT_EVIDENCE"
+output="$(fleetd handoff-accept --handoff-id "$handoff_id" \
+  --agent reviewer --lane review-lane --capability "$HANDOFF_CAPABILITY" \
+  --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS")"
+grep -q 'FLEET_HANDOFF_ACCEPTED ' <<< "$output" || \
+  fail 'anchored handoff did not reach Accepted typestate'
+if fleetd handoff-accept --handoff-id "$handoff_id" \
+  --agent reviewer --lane review-lane --capability "$HANDOFF_CAPABILITY" \
+  --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
+  >"$TEST_ROOT/reused-handoff" 2>&1; then
+  fail 'accepted handoff capability was reusable'
+fi
+grep -q 'handoff was already accepted' "$TEST_ROOT/reused-handoff" || \
+  fail 'handoff reuse refusal omitted its terminal typestate'
+fleetd anchor-log --private-key "$PRIVATE_KEY" --public-key "$PUBLIC_KEY" \
+  --anchor-dir "$ANCHORS" >/dev/null
+output="$(fleetd verify-anchors --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS")"
+grep -q 'FLEET_ANCHORS_VERIFIED anchors=3 ' <<< "$output" || \
+  fail 'signed anchor chain did not retain all three log prefixes'
+# MODEL_CONTROL:anchor_removal
+mapfile -t anchor_files < <(find "$ANCHORS" -type f -name 'anchor-*.json' | sort)
+[[ "${#anchor_files[@]}" == 3 ]] || fail 'anchor chain file count is wrong'
+mv "${anchor_files[0]}" "$TEST_ROOT/removed-anchor.json"
+if fleetd verify-anchors --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
+  >"$TEST_ROOT/anchor-removal" 2>&1; then
+  fail 'anchor verifier accepted an omitted predecessor'
+fi
+grep -q 'anchor chain predecessor mismatch' "$TEST_ROOT/anchor-removal" || \
+  fail 'anchor removal was not attributed to predecessor continuity'
+mv "$TEST_ROOT/removed-anchor.json" "${anchor_files[0]}"
+
+cp "${anchor_files[1]}" "$TEST_ROOT/anchor.good"
+# MODEL_CONTROL:signature_sabotage
+python3 - "${anchor_files[1]}" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["signature_base64"] = "AAAA"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+if fleetd verify-anchors --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
+  >"$TEST_ROOT/signature-sabotage" 2>&1; then
+  fail 'anchor verifier accepted a sabotaged Ed25519 signature'
+fi
+grep -q 'OpenSSL refused Ed25519 operation' "$TEST_ROOT/signature-sabotage" || \
+  fail 'signature sabotage was not attributed to Ed25519 verification'
+mv "$TEST_ROOT/anchor.good" "${anchor_files[1]}"
+
+fleetd keygen --private-key "$WRONG_PRIVATE_KEY" \
+  --public-key "$WRONG_PUBLIC_KEY" >/dev/null
+if fleetd verify-anchors --public-key "$WRONG_PUBLIC_KEY" \
+  --anchor-dir "$ANCHORS" >"$TEST_ROOT/key-substitution" 2>&1; then
+  fail 'anchor verifier accepted a substituted public key'
+fi
+grep -q 'anchor public-key identity mismatch' "$TEST_ROOT/key-substitution" || \
+  fail 'key substitution was not attributed to key identity'
+
+if fleetd watch --config "$CONFIG" --cycles 1 --apply \
+  >"$TEST_ROOT/watch-apply" 2>&1; then
+  fail 'watch accepted reusable mutation authority'
+fi
+grep -q 'watch cannot hold reusable mutation authority' "$TEST_ROOT/watch-apply" || \
+  fail 'watch mutation refusal omitted the linear-authority reason'
+
 python3 - "$DB" <<'PY'
 import sqlite3
 import sys
@@ -232,4 +480,4 @@ fi
 grep -q 'event 1 hash mismatch' "$TEST_ROOT/log-sabotage" || \
   fail 'log sabotage was not attributed to the hash-chain rule'
 
-echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation duplicate_start=refused omission=blocked generation_sabotage=blocked identity_sabotage=blocked replay=reconstructed hash_sabotage=refused'
+echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused replay=reconstructed hash_sabotage=refused'

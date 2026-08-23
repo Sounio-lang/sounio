@@ -100,6 +100,7 @@ kill -0 "$harness_pid" 2>/dev/null || fail 'harness pid died with tmux'
 
 mapping="$STATE/fleet-slots/$SLOT.json"
 cp "$mapping" "$mapping.good"
+# MODEL_CONTROL:generation_sabotage
 python3 - "$mapping" <<'PY'
 import json
 import sys
@@ -125,6 +126,33 @@ grep -q 'identity drifted; refusing' "$TEST_ROOT/drift-launch" || \
   fail 'launcher did not fail closed on generation drift'
 mv "$mapping.good" "$mapping"
 kill -0 "$harness_pid" 2>/dev/null || fail 'sabotage control disturbed the live harness'
+
+cp "$mapping" "$mapping.good"
+# MODEL_CONTROL:argv_sabotage
+python3 - "$mapping" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["argv_digest"] = "0" * 64
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, sort_keys=True)
+    handle.write("\n")
+PY
+if fleet status --cwd "$REPO" --slot "$SLOT" >"$TEST_ROOT/argv-drift" 2>&1; then
+  fail 'status accepted a sabotaged argv attestation'
+fi
+grep -q 'state=drifted' "$TEST_ROOT/argv-drift" || \
+  fail 'argv sabotage was not classified as drifted'
+if fleet launch --slot "$SLOT" --agent codex --session-id "$SESSION_ID" \
+  --identity exact --cwd "$REPO" --no-attach -- "$RECEIVER" "$RECEIVER_LOG" \
+  >"$TEST_ROOT/argv-launch" 2>&1; then
+  fail 'launcher replaced a live slot with a sabotaged argv attestation'
+fi
+grep -q 'identity drifted; refusing' "$TEST_ROOT/argv-launch" || \
+  fail 'launcher did not fail closed on argv attestation drift'
+mv "$mapping.good" "$mapping"
 
 tmux -S "$TMUX_SOCKET" new-session -d -s fleet "$launch_command"
 wait_for 'replacement tmux client did not reattach' \
@@ -191,4 +219,4 @@ tmux -S "$TMUX_SOCKET" kill-server
 fleet stop --cwd "$REPO" --slot "$SLOT" >/dev/null
 [[ ! -e "$mapping" ]] || fail 'stop left the slot mapping behind'
 
-echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived reattach=same-generation duplicate_harness=refused generation_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'
+echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived reattach=same-generation duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'

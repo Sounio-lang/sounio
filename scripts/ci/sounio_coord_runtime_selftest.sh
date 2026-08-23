@@ -21,13 +21,16 @@ fail() {
   exit 1
 }
 
-mkdir -p "$REPO/bin" "$REPO/scripts/dev"
+mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/formal/tla"
 cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" \
   "$ROOT_DIR/bin/sounio-fleet" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
+  "$REPO/formal/tla/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
@@ -57,6 +60,10 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the fleet launcher'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-runtime" ]] || \
   fail 'installed runtime omitted the fleet reconciler'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-tla-sabotage" ]] || \
+  fail 'installed runtime omitted the model-derived sabotage generator'
+[[ -f "$RUNTIME_ROOT/versions/$first_id/formal/SounioFleet.tla" ]] || \
+  fail 'installed runtime omitted the TLA+ fleet model'
 grep -q '^capability=crash-recovery-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the crash-recovery capability'
 grep -q '^capability=agentd-transport-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
@@ -67,6 +74,11 @@ grep -q '^capability=fleet-event-log-v1$' "$RUNTIME_ROOT/versions/$first_id/mani
   fail 'installed runtime omitted the fleet-event-log capability'
 grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the fleet-reconciler capability'
+for capability in agentd-argv-attestation-v1 fleet-linear-capability-v1 \
+  fleet-ed25519-anchor-v1 fleet-checkpoint-handoff-v1 fleet-tla-model-v1; do
+  grep -q "^capability=$capability$" "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+    fail "installed runtime omitted capability=$capability"
+done
 
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'second worktree did not select shared runtime'
@@ -106,13 +118,16 @@ output="$(cd "$SECOND" && bin/sounio-agentd runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared agentd runtime'
 
-mkdir -p "$ALT/scripts/dev"
+mkdir -p "$ALT/scripts/dev" "$ALT/formal/tla"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$ALT/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
+cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
+  "$ALT/formal/tla/"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
@@ -128,13 +143,16 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'runtime rollba
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'worktree did not observe runtime rollback'
 
-mkdir -p "$BAD/scripts/dev"
+mkdir -p "$BAD/scripts/dev" "$BAD/formal/tla"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$BAD/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
+cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
+  "$BAD/formal/tla/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \
   "$BAD/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$BAD/scripts/dev/"*

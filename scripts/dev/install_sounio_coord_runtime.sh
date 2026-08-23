@@ -53,6 +53,12 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-fleet-runtime" ]] || \
       die "installed runtime declares fleet reconciliation but omits its implementation: $runtime_id"
   fi
+  if grep -q '^capability=fleet-tla-model-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-fleet-tla-sabotage" && \
+      -f "$version_dir/formal/SounioFleet.tla" && \
+      -f "$version_dir/formal/SounioFleet.cfg" ]] || \
+      die "installed runtime declares the TLA+ fleet model but omits its bundle: $runtime_id"
+  fi
   [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
     die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
   link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
@@ -122,12 +128,19 @@ causal_source="$SOURCE_ROOT/scripts/dev/sounio_coord_causal_runtime.py"
 agentd_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agentd.py"
 fleet_source="$SOURCE_ROOT/scripts/dev/sounio_coord_fleet.py"
 fleetd_source="$SOURCE_ROOT/scripts/dev/sounio_coord_fleetd.py"
+fleet_model_source="$SOURCE_ROOT/formal/tla/SounioFleet.tla"
+fleet_model_config="$SOURCE_ROOT/formal/tla/SounioFleet.cfg"
+fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
 [[ -x "$agentd_source" ]] || die "agent supervisor source missing or not executable: $agentd_source"
 [[ -x "$fleet_source" ]] || die "fleet launcher source missing or not executable: $fleet_source"
 [[ -x "$fleetd_source" ]] || die "fleet reconciler source missing or not executable: $fleetd_source"
+[[ -f "$fleet_model_source" ]] || die "fleet TLA+ model missing: $fleet_model_source"
+[[ -f "$fleet_model_config" ]] || die "fleet TLC config missing: $fleet_model_config"
+[[ -x "$fleet_model_generator" ]] || \
+  die "fleet model sabotage generator missing or not executable: $fleet_model_generator"
 
 version_output="$(cd "$WORKTREE" && "$runtime_source" runtime-version)"
 protocol="$(sed -n 's/^protocol_version=//p' <<< "$version_output" | head -1)"
@@ -150,7 +163,8 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 
 bundle_sha="$(
   sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
-    "$fleet_source" "$fleetd_source" | \
+    "$fleet_source" "$fleetd_source" "$fleet_model_source" \
+    "$fleet_model_config" "$fleet_model_generator" | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
@@ -168,12 +182,15 @@ else
     [[ -z "${stage:-}" ]] || rm -rf "$stage"
   }
   trap cleanup_stage EXIT
-  mkdir -p "$stage/bin" "$stage/hooks"
+  mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
   install -m 0755 "$fleet_source" "$stage/bin/sounio-fleet-agent-runtime"
   install -m 0755 "$fleetd_source" "$stage/bin/sounio-fleet-runtime"
+  install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
+  install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
+  install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   {
     printf 'runtime_id=%s\n' "$runtime_id"
@@ -187,9 +204,14 @@ else
     printf 'capability=causal-experiment-receipts-v1\n'
     printf 'capability=crash-recovery-v1\n'
     printf 'capability=agentd-transport-v1\n'
+    printf 'capability=agentd-argv-attestation-v1\n'
     printf 'capability=fleet-launcher-v1\n'
     printf 'capability=fleet-event-log-v1\n'
     printf 'capability=fleet-reconciler-v1\n'
+    printf 'capability=fleet-linear-capability-v1\n'
+    printf 'capability=fleet-ed25519-anchor-v1\n'
+    printf 'capability=fleet-checkpoint-handoff-v1\n'
+    printf 'capability=fleet-tla-model-v1\n'
     printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$stage/manifest"
   mv "$stage" "$version_dir"

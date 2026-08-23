@@ -107,3 +107,5 @@ if [[ "$sabotage_rc" -eq 0 ]]; then
 fi
 
 echo "causal-receipt-typestate: PASS modular-check=1 single-module-runtime=1 privacy=E176 wrong-state=E009 sabotage-control=1"
+
+"$ROOT_DIR/scripts/ci/fleet_transaction_typestate_gate.sh"

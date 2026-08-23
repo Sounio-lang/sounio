@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -21,7 +22,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.2"
+RUNTIME_VERSION = "2026.08.23.3"
 UUID_RE = re.compile(
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -107,6 +108,13 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def command_argv_digest(command: list[str]) -> str:
+    encoded = json.dumps(
+        command, ensure_ascii=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -157,6 +165,7 @@ def probe_mapping(mapping: dict[str, Any], root: Path) -> tuple[str, dict[str, s
         "worktree",
         "instance_id",
         "command",
+        "argv_digest",
     )
     if any(not isinstance(mapping.get(key), str) or not mapping[key] for key in required):
         return "drifted", {}
@@ -183,6 +192,7 @@ def probe_mapping(mapping: dict[str, Any], root: Path) -> tuple[str, dict[str, s
         "worktree": str(Path(mapping["worktree"]).resolve()),
         "instance_id": mapping["instance_id"],
         "command": mapping["command"],
+        "argv_digest": mapping["argv_digest"],
     }
     observed = dict(status)
     if observed.get("worktree"):
@@ -336,6 +346,7 @@ def mapping_for(
     worktree: Path,
     instance_id: str,
     command_name: str,
+    argv_digest: str,
 ) -> dict[str, Any]:
     return {
         "protocol": PROTOCOL_VERSION,
@@ -348,6 +359,7 @@ def mapping_for(
         "worktree": str(worktree),
         "instance_id": instance_id,
         "command": command_name,
+        "argv_digest": argv_digest,
         "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
@@ -412,8 +424,13 @@ def start_or_reuse(
             worktree,
             status.get("instance_id", ""),
             status.get("command", ""),
+            status.get("argv_digest", ""),
         )
-        if not mapping["instance_id"] or not mapping["command"]:
+        if (
+            not mapping["instance_id"]
+            or not mapping["command"]
+            or not mapping["argv_digest"]
+        ):
             raise FleetError("new supervisor omitted immutable identity fields")
         atomic_write_json(paths["mapping"], mapping)
         if start_status.startswith("AGENTD_ALREADY_RUNNING"):
@@ -497,6 +514,7 @@ def status_command(args: argparse.Namespace) -> int:
             f"session_id={mapping.get('session_id', '-')} "
             f"identity={mapping.get('identity', '-')} "
             f"instance_id={mapping.get('instance_id', '-')} "
+            f"argv_digest={mapping.get('argv_digest', '-')} "
             f"harness_pid={status.get('harness_pid', '-')} "
             f"attached_clients={status.get('attached_clients', '0')} "
             f"worktree={mapping.get('worktree', '-')}",
