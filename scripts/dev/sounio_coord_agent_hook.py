@@ -15,6 +15,7 @@ from typing import Any
 
 PATCH_PATH = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
 CONFLICT_OWNER = re.compile(r"existing_claim=\S+ agent=(\S+) lane=(\S+)")
+MESSAGE_ID = re.compile(r"^MESSAGE id=(\S+) ")
 
 
 def parse_args() -> argparse.Namespace:
@@ -307,6 +308,28 @@ def main() -> int:
         if lines:
             print("Recent directed Sounio lane messages waiting for this agent:")
             print("\n".join(lines))
+            message_ids = [
+                match.group(1)
+                for line in lines
+                if (match := MESSAGE_ID.match(line)) is not None
+            ]
+            if message_ids:
+                injection = run_coord(
+                    tool_root,
+                    "injected",
+                    "--agent",
+                    agent,
+                    "--lane",
+                    lane,
+                    "--messages",
+                    *message_ids,
+                    worktree=root,
+                )
+                if injection.returncode != 0:
+                    sys.stderr.write(
+                        "sounio coordination injection receipt warning: "
+                        f"{injection.stderr}"
+                    )
             if omitted:
                 print(
                     f"{omitted} older directed message(s) omitted. Inspect them with "

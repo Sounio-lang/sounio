@@ -106,9 +106,29 @@ output="$(run_hook claude "$SECOND" \
 grep -q "MESSAGE id=$message_id" <<< "$output" || fail 'message was not delivered to Claude'
 grep -q 'broadcast hook exclusion marker' <<< "$output" && \
   fail 'hook injected a broadcast alongside directed work'
+output="$(run_coord "$REPO" message-status --agent codex --lane session-codex-a \
+  --message "$message_id")"
+grep -q 'request_state=open injected=1 acknowledged=0 responses=0' <<< "$output" || \
+  fail 'hook delivery did not create an injection receipt'
 run_coord "$SECOND" ack --agent claude --lane session-claude-b --message "$message_id" >/dev/null
 output="$(run_coord "$SECOND" inbox --agent claude --lane session-claude-b --directed-only)"
 grep -q '^inbox_messages=0$' <<< "$output" || fail 'acknowledged message remained unread'
+output="$(run_coord "$REPO" message-status --agent codex --lane session-codex-a \
+  --message "$message_id")"
+grep -q 'request_state=open injected=1 acknowledged=1 responses=0' <<< "$output" || \
+  fail 'explicit acknowledgement was not distinct from injection'
+reply_output="$(run_coord "$SECOND" send --agent claude --lane session-claude-b \
+  --kind reply --reply-to "$message_id" --message 'Parser boundary reviewed')"
+reply_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
+output="$(run_coord "$REPO" wait --agent codex --lane session-codex-a \
+  --message "$message_id" --timeout-seconds 0)"
+grep -q "^WAIT_RESPONSE request_id=$message_id request_state=answered$" <<< "$output" || \
+  fail 'native wait did not observe the cross-worktree reply'
+grep -q "MESSAGE id=$reply_id" <<< "$output" || fail 'native wait returned the wrong reply'
+output="$(run_coord "$REPO" message-status --agent codex --lane session-codex-a \
+  --message "$message_id")"
+grep -q "request_state=answered injected=1 acknowledged=1 responses=1 latest_response=$reply_id" <<< "$output" || \
+  fail 'cross-worktree request lifecycle did not close as answered'
 
 set +e
 conflict_output="$(run_hook claude "$SECOND" \
@@ -131,10 +151,20 @@ grep -q 'ACTIVE claim_id=claude--session-claude-b' <<< "$output" && \
 run_coord "$SECOND" release --agent codex --lane cross-worktree \
   --reason 'cross-worktree selftest complete' >/dev/null
 
-run_coord "$REPO" send --agent codex --lane session-codex-a --kind info \
-  --ttl-seconds 1 --message 'ephemeral selftest message' >/dev/null
+ephemeral_output="$(run_coord "$REPO" send --agent codex --lane session-codex-a \
+  --to-agent claude --to-lane session-claude-b --kind info \
+  --ttl-seconds 1 --message 'ephemeral selftest message')"
+ephemeral_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$ephemeral_output")"
+run_coord "$SECOND" injected --agent claude --lane session-claude-b \
+  --messages "$ephemeral_id" >/dev/null
+run_coord "$SECOND" ack --agent claude --lane session-claude-b \
+  --message "$ephemeral_id" >/dev/null
 sleep 2
 output="$(run_coord "$REPO" prune)"
 grep -q 'pruned_messages=1$' <<< "$output" || fail 'expired message was not pruned'
+[[ -z "$(find "$STATE/message-injections" -name "$ephemeral_id--*" -print -quit)" ]] || \
+  fail 'prune left an orphan injection receipt'
+[[ -z "$(find "$STATE/message-acks" -name "$ephemeral_id--*" -print -quit)" ]] || \
+  fail 'prune left an orphan acknowledgement receipt'
 
 echo 'sounio-coord-agent-hook-selftest: PASS'

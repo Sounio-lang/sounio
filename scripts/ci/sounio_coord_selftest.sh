@@ -157,19 +157,70 @@ grep -q "$broadcast_id" <<< "$output" && fail 'directed inbox included a broadca
 grep -q '^inbox_matching=2$' <<< "$output" || fail 'directed inbox matching count is wrong'
 grep -q '^inbox_omitted=1$' <<< "$output" || fail 'directed inbox omitted count is wrong'
 
+output="$(
+  cd "$REPO"
+  run_coord message-status --agent agent-a --lane parser --message "$second_id"
+)"
+grep -q 'request_state=open injected=0 acknowledged=0 responses=0' <<< "$output" || \
+  fail 'unanswered request was not reported open'
+
+set +e
+output="$(
+  cd "$REPO"
+  run_coord wait --agent agent-a --lane parser --message "$first_id" --timeout-seconds 0
+)"
+wait_rc=$?
+set -e
+[[ "$wait_rc" -eq 3 ]] || fail "reply wait timeout returned $wait_rc instead of 3"
+grep -q "^WAIT_TIMEOUT message_id=$first_id timeout_seconds=0$" <<< "$output" || \
+  fail 'reply wait did not report its timeout'
+
 reply_output="$(
   cd "$TEST_ROOT/second-worktree"
-  run_coord send --agent agent-b --lane codegen --to-agent agent-a --to-lane parser \
-    --kind reply --reply-to "$second_id" --message 'threaded reply'
+  run_coord send --agent agent-b --lane codegen --kind reply \
+    --reply-to "$second_id" --message 'threaded reply'
 )"
 reply_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
 thread_id="$(sed -n 's/.* thread_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
 [[ "$thread_id" == "$second_id" ]] || fail 'reply did not inherit the request thread'
+grep -q 'to_agent=agent-a to_lane=parser' <<< "$reply_output" || \
+  fail 'reply did not inherit the request sender as its destination'
 output="$(
   cd "$REPO"
   run_coord inbox --agent agent-a --lane parser --thread "$thread_id"
 )"
 grep -q "MESSAGE id=$reply_id .*kind=reply text=threaded reply thread=$thread_id reply_to=$second_id" <<< "$output" || \
   fail 'threaded reply metadata was not delivered'
+output="$(
+  cd "$REPO"
+  run_coord wait --agent agent-a --lane parser --message "$second_id" --timeout-seconds 0
+)"
+grep -q "^WAIT_RESPONSE request_id=$second_id request_state=answered$" <<< "$output" || \
+  fail 'reply wait did not return the existing response'
+output="$(
+  cd "$REPO"
+  run_coord message-status --agent agent-a --lane parser --message "$second_id"
+)"
+grep -q "request_state=answered .*responses=1 latest_response=$reply_id" <<< "$output" || \
+  fail 'replied request was not reported answered'
+
+blocked_output="$(
+  cd "$REPO"
+  run_coord send --agent agent-a --lane parser --to-agent agent-b --to-lane codegen \
+    --kind request --message 'request that will block'
+)"
+blocked_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$blocked_output")"
+blocker_output="$(
+  cd "$TEST_ROOT/second-worktree"
+  run_coord send --agent agent-b --lane codegen --kind blocker \
+    --reply-to "$blocked_id" --message 'blocked by acceptance gate'
+)"
+blocker_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$blocker_output")"
+output="$(
+  cd "$REPO"
+  run_coord message-status --agent agent-a --lane parser --message "$blocked_id"
+)"
+grep -q "request_state=blocked .*responses=1 latest_response=$blocker_id" <<< "$output" || \
+  fail 'blocked request was not reported blocked'
 
 echo 'sounio-coord-selftest: PASS'
