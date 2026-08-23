@@ -84,11 +84,26 @@ for word in Derived Computed Measured Valid ValidUntil ValidWhile; do
 done
 
 # Absence of the three unreachable provenance words as keywords.
+# E241 refuses a *bare* Source identifier; it does not make Source a provenance word.
 for word in Source Literature Input; do
   if grep -q "return TokenKind::${word}" "$LEX_TABLES" "$LEX_PARSER"; then
-    pin_fail "$word became a lexer keyword — the Ident epsilon-sink may have closed"
+    pin_fail "$word became a lexer keyword — that would mint a provenance surface we did not ask for"
   fi
 done
+
+# Honesty pin: the silent skip / default-CmpLt sink must stay closed.
+if grep -q 'Unknown component — skip' "$TYPES"; then
+  pin_fail "unknown-component skip comment returned in types.sio"
+fi
+if ! grep -q 'error\[E241\]' "$TYPES"; then
+  pin_fail "E241 diagnostic missing from types.sio"
+fi
+if ! grep -q 'report_unknown_knowledge_component' "$TYPES"; then
+  pin_fail "report_unknown_knowledge_component missing from types.sio"
+fi
+if ! grep -q 'saw_cmp' "$TYPES"; then
+  pin_fail "Ident-as-epsilon no longer requires a comparison operator"
+fi
 
 # Wrapper path still only constructs the same three (no ValidUntil/ValidWhile).
 # Bounded to parse_epistemic_wrapper_type by reading that function body.
@@ -101,14 +116,17 @@ for word in ValidUntil ValidWhile; do
   fi
 done
 
-note "STATIC: declared=6 constructed=3 unreachable=Source,Literature,Input lexer-keywords=Derived,Computed,Measured,Valid,ValidUntil,ValidWhile"
+note "STATIC: declared=6 constructed=3 unreachable=Source,Literature,Input E241=present Ident-epsilon-requires-cmp"
 
 # ---------------------------------------------------------------------------
-# DYNAMIC — default bin/souc ELF, labeled
+# DYNAMIC — only against a source-built Madaros (SOUNIO_KCOV_DYNAMIC=1).
+# The committed ELF still swallows unknown components; putting this in
+# Contracts would fail every PR until the ELF is rebuilt. The live-refuse
+# gate under Madaros Witness is the source-current clock.
 # ---------------------------------------------------------------------------
 
-if [[ "${SOUNIO_KCOV_SKIP_DYNAMIC:-0}" == "1" ]]; then
-  note "DYNAMIC: skipped (SOUNIO_KCOV_SKIP_DYNAMIC=1)"
+if [[ "${SOUNIO_KCOV_DYNAMIC:-0}" != "1" ]]; then
+  note "DYNAMIC: skipped (set SOUNIO_KCOV_DYNAMIC=1 against a source-built Madaros)"
 else
   SOUC="$ROOT_DIR/bin/souc"
   if [[ ! -x "$SOUC" ]]; then
@@ -128,8 +146,7 @@ else
 
     pass_probes=(
       derived computed measured valid validuntil validwhile
-      source literature input source_eps int_skip typo_ident
-      knowledge_angle_derived
+      source_eps knowledge_angle_derived
     )
     for name in "${pass_probes[@]}"; do
       f="$PROBE_DIR/${name}.sio"
@@ -144,7 +161,7 @@ else
       fi
     done
 
-    fail_probes=(derived_eps)
+    fail_probes=(derived_eps source literature input int_skip typo_ident)
     for name in "${fail_probes[@]}"; do
       f="$PROBE_DIR/${name}.sio"
       if [[ ! -f "$f" ]]; then
