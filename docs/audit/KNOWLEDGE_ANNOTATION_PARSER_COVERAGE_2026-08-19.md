@@ -187,3 +187,51 @@ Three new probes (`angle_source.sio`, `angle_literature.sio`, `angle_input.sio`)
 This is a useful empirical discriminator for the silent-skip honesty gap. The static read of `self-hosted/parser/types.sio` says the comma-component loop runs in both forms after the inner type (lines 1003-1122 are not gated on `use_bracket`); the same Ident-epsilon sink at 1009-1039 should fire for `<f64, Source>` and `[f64, Source]`. It fires only in bracket form. The angle-form probe reaches the failure before the epsilon sink does — the parser demands a token the Ident path cannot satisfy (expected=147 actual=137), then bails. This narrows the silent-skip from "two forms are silent" to "one form is silent; the other fails loudly, for a reason the static read does not predict". A source-built Madaros would close the why; the shipped ELF cannot.
 
 These three probes are documentation, not part of the pin. They are receipts of current behaviour, the same way `source.sio` etc. are — but unlike those they are fail probes, and the audit explicitly does not promote fail probes into the pin (a future change could turn them green by either closing the gap or making the angle form silent; both should flip the tripwire, and the script currently encodes only the green cases).
+
+## Addendum 2026-08-23 — source-built Madaros confirms the wrapper bracket surface
+
+Built a fresh Madaros from `self-hosted/compiler/main.sio` against the current `self-hosted/` tree (`bash scripts/ci/build_modular_madaros.sh /tmp/madaros-source-built`, 102241868-byte ELF, 2026-08-23). This is the first measurement in this audit from a compiler whose source I can read bit-for-bit against the running binary.
+
+New probes in `docs/audit/probes/knowledge-annotation-parser-coverage-2026-08-19/`:
+
+- `intervention_angle_derived.sio` — `Intervention<f64, Derived>` (angle form, not bracket). Should compile.
+- `intervention_bracket_only.sio` — `Intervention[f64]`. Shipped ELF: parse fail (8 errors). Source-built: same.
+- `intervention_bracket_derived.sio` — `Intervention[f64, Derived>`. Shipped ELF: parse fail (13 errors). Source-built: parse fail (12 errors).
+- `validated_bracket_derived.sio` — `Validated[f64, Derived>`. Shipped ELF: parse fail (13 errors). Source-built: parse fail (12 errors).
+
+Side-by-side probe matrix (shipped `./bin/souc check` vs source-built `/tmp/madaros-source-built check`, all 21 probes + `derived_eps`):
+
+```
+derived              shipped=check: OK   source-built=check: OK   AGREE
+computed             shipped=check: OK   source-built=check: OK   AGREE
+measured             shipped=check: OK   source-built=check: OK   AGREE
+valid                shipped=check: OK   source-built=check: OK   AGREE
+validuntil           shipped=check: OK   source-built=check: OK   AGREE
+validwhile           shipped=check: OK   source-built=check: OK   AGREE
+source               shipped=check: OK   source-built=check: OK   AGREE
+literature           shipped=check: OK   source-built=check: OK   AGREE
+input                shipped=check: OK   source-built=check: OK   AGREE
+source_eps           shipped=check: OK   source-built=check: OK   AGREE
+int_skip             shipped=check: OK   source-built=check: OK   AGREE
+typo_ident           shipped=check: OK   source-built=check: OK   AGREE
+knowledge_angle_derived  shipped=check: OK   source-built=check: OK   AGREE
+angle_source         shipped=parse failed source-built=parse failed AGREE
+angle_literature     shipped=parse failed source-built=parse failed AGREE
+angle_input          shipped=parse failed source-built=parse failed AGREE
+intervention_angle_derived   shipped=check: OK   source-built=check: OK   AGREE
+intervention_bracket_only    shipped=parse failed source-built=parse failed AGREE
+intervention_bracket_derived shipped=parse failed source-built=parse failed AGREE
+validated_bracket_derived    shipped=parse failed source-built=parse failed AGREE
+derived_eps          parse failed        parse failed             AGREE
+```
+
+**Two ELFs built from different sources — same compiler, same version — agree on every probe.** This eliminates one of the three unresolved readings in the previous addendum ("ELF/source drift") and leaves two:
+
+1. The bracket form is genuinely parser-side blocked (a real limit in `parse_epistemic_wrapper_type`, not stale ELFs or recovering mid-edit state). The static read at `self-hosted/parser/types.sio:1369-1393` says the bracket-component loop is gated on `use_bracket` and the closing `]` is mandatory at line 1394. Empirically the bracket path cannot produce any wrapper with components.
+2. The wrapper bracket form is unreachable *at the source level*, by design.
+
+Both readings agree on the operational consequence: the bracket form is not a live surface on the wrapper side. Future work either rewrites `parse_epistemic_wrapper_type` to accept `[f64, Derived]` or accepts that wrappers are angle-only. The audit does not pick between (1) and (2); both are now grounded in two compilers.
+
+The source-built ELF does **not** change the `--emit-ast` / `--emit-tokens` plumbing pin from the previous addendum. Both flags are still consumed only at the fast-path gate; the source-built ELF reproduces the same dead-switch behaviour. This is the expected outcome — the gap is in `self-hosted/compiler/main.sio:3241`, not in any artefact of the shipped build.
+
+`scripts/dev/knowledge_annotation_parser_coverage_source_built.sh` is a sister pin to the existing one: same probes, source-built Madaros required (no fallback to `bin/souc`). It fails loudly if either compiler diverges; both pass on this commit.
