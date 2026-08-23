@@ -117,6 +117,68 @@ fn main() -> i64 with IO {
         return 1
     }
 
+    // Second round: prove find_content_length is anchored to a real line
+    // start, not a substring match anywhere in the header block. The
+    // fixture below puts a decoy header "X-Orig-Content-Length: 99"
+    // BEFORE the real "Content-Length: 5" -- a byte-scan that doesn't
+    // check for a line boundary would match the decoy's "Content-Length:"
+    // substring first and report body_len 99, not 5.
+    let server_ip2 = rawbuf_new(16)
+    rawbuf_set(&server_ip2, 0, 127)
+    rawbuf_set(&server_ip2, 1, 0)
+    rawbuf_set(&server_ip2, 2, 0)
+    rawbuf_set(&server_ip2, 3, 1)
+
+    let (listener2, listen_err2) = tcp_listen(&server_ip2, 18093, 1)
+    let TcpSocket { fd: listener2_fd } = listener2
+
+    let pid2 = syscall6(57, 0, 0, 0, 0, 0, 0)   // fork()
+    if pid2 == 0 {
+        let child_listener2 = TcpSocket { fd: listener2_fd }
+        let (child_listener2b, conn, accept_err) = tcp_accept(child_listener2)
+        tcp_close(child_listener2b)
+
+        let drain_buf = rawbuf_new(4096)
+        let (conn2, _drained) = tcp_recv(conn, &drain_buf, 4096)
+
+        let response2 = rawbuf_new(128)
+        var off2: i64 = 0
+        off2 = write_str(&response2, off2, "HTTP/1.1 200 OK\r\nX-Orig-Content-Length: 99\r\nContent-Length: 5\r\n\r\nhello")
+        let (conn3, _sent) = tcp_send(conn2, &response2, off2)
+        tcp_close(conn3)
+
+        syscall6(231, 0, 0, 0, 0, 0, 0)   // exit_group(0)
+        return 0
+    }
+
+    let parent_listener2 = TcpSocket { fd: listener2_fd }
+    tcp_close(parent_listener2)
+
+    let response_decoy = http_get(&host, 9, 18093, &path, 1)
+
+    reap_child(pid2)
+
+    if listen_err2 != 0 {
+        print_int(6)
+        return 1
+    }
+    if response_decoy.ok != true {
+        print_int(7)
+        return 1
+    }
+    if response_decoy.body_len != 5 {
+        print_int(8)
+        return 1
+    }
+    if rawbuf_get(&response_decoy.body, 0) != 104 {   // 'h'
+        print_int(9)
+        return 1
+    }
+    if rawbuf_get(&response_decoy.body, 4) != 111 {   // 'o'
+        print_int(10)
+        return 1
+    }
+
     print_int(0)
     return 0
 }

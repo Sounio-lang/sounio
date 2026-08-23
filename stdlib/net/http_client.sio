@@ -200,7 +200,14 @@ fn find_content_length(buf: &RawBuf, header_end: i64) -> i64 with IO {
     let needle_len = str_len(needle)
     var i: i64 = 0
     while i < header_end {
-        if matches_at(buf, i, header_end, needle) {
+        // Only a real line start can begin a header name: either the very
+        // first byte of the header block, or the byte right after a
+        // "\r\n" line terminator. Without this, the literal text
+        // "Content-Length:" matches anywhere it appears as a substring --
+        // e.g. inside "X-Orig-Content-Length: 99" -- and silently returns
+        // the wrong header's value.
+        let at_line_start = i == 0 || (rawbuf_get(buf, i - 2) == CH_CR && rawbuf_get(buf, i - 1) == CH_LF)
+        if at_line_start && matches_at(buf, i, header_end, needle) {
             var j: i64 = i + needle_len
             while j < header_end && rawbuf_get(buf, j) == CH_SPACE {
                 j = j + 1
@@ -225,6 +232,21 @@ fn failed_response() -> HttpResponse with IO {
     HttpResponse { status: 0 - 1, headers: rawbuf_new(1), body: rawbuf_new(1), body_len: 0, ok: false }
 }
 
+// Bounds used to reject oversized input before it ever reaches a
+// fixed-size buffer copy. `http_get` is a `pub` entry point that will
+// eventually front a web crawler processing arbitrary/untrusted URLs, so
+// these are real security limits, not style nits.
+//
+// - ADDR_TEXT_CAP matches `addr_text`'s `rawbuf_new(16)` below: the
+//   numeric-IP passthrough path copies `host_len` raw bytes into it with
+//   no other bounds check, so any host_len > 16 is a heap overflow.
+// - MAX_HOSTNAME_LEN is the real DNS limit (RFC 1035): a full hostname is
+//   at most 253 bytes.
+// - REQUEST_BUF_CAP matches the `rawbuf_new(512)` request buffer below.
+const ADDR_TEXT_CAP: i64 = 16
+const MAX_HOSTNAME_LEN: i64 = 253
+const REQUEST_BUF_CAP: i64 = 512
+
 // `ok` means "a well-formed status line + Content-Length body was
 // received and parsed" -- NOT that the HTTP status code itself indicates
 // success. A 404 or 500 response is `ok: true`; check `status` separately.
@@ -236,10 +258,22 @@ fn failed_response() -> HttpResponse with IO {
 // are only inspected for pass/fail AFTER `sock` has already been
 // consumed/closed.
 pub fn http_get(host: &RawBuf, host_len: i64, port: u16, path: &RawBuf, path_len: i64) -> HttpResponse with IO {
+    if host_len < 0 || host_len > MAX_HOSTNAME_LEN || path_len < 0 {
+        return failed_response()
+    }
+
     let addr_text = rawbuf_new(16)
     var dns_err: i64 = 0
 
     if is_numeric_ip(host, host_len) {
+        // Numeric-IP passthrough copies `host_len` bytes verbatim into
+        // `addr_text` below with no other bounds check -- reject anything
+        // that wouldn't fit `addr_text`'s capacity before touching it.
+        // (No valid dotted-decimal IPv4 text is longer than 15 bytes
+        // anyway, so this never rejects a well-formed address.)
+        if host_len > ADDR_TEXT_CAP {
+            return failed_response()
+        }
         var i: i64 = 0
         while i < host_len {
             rawbuf_set(&addr_text, i, rawbuf_get(host, i))
@@ -260,6 +294,14 @@ pub fn http_get(host: &RawBuf, host_len: i64, port: u16, path: &RawBuf, path_len
     }
 
     // Build "GET <path> HTTP/1.1\r\nHost: <host>\r\nConnection: close\r\n\r\n".
+    // Reject up front if host_len + path_len (plus the fixed boilerplate
+    // around them) wouldn't fit the fixed-size request buffer below --
+    // otherwise a long host or path silently overflows it.
+    let request_boilerplate_len = str_len("GET ") + str_len(" HTTP/1.1\r\nHost: ") + str_len("\r\nConnection: close\r\n\r\n")
+    if request_boilerplate_len + host_len + path_len > REQUEST_BUF_CAP {
+        return failed_response()
+    }
+
     let request = rawbuf_new(512)
     var off: i64 = 0
     off = write_str(&request, off, "GET ")
@@ -299,10 +341,24 @@ pub fn http_get(host: &RawBuf, host_len: i64, port: u16, path: &RawBuf, path_len
         hi = hi + 1
     }
 
+    // Honesty check: this function's contract is "a well-formed status
+    // line + Content-Length body was received and parsed". If fewer body
+    // bytes actually arrived in this single recv() than Content-Length
+    // claims (body spans more than one recv(), or the response exceeds
+    // the fixed 4096-byte buffer), that is a real failure of this
+    // function -- not something to silently under-report. Reading a
+    // read-loop-until-content-length is out of scope here (larger,
+    // separate piece of work); this just refuses to fabricate a
+    // `body_len` that overstates what's actually in the buffer.
     let body_start = header_end + 4
+    let available = received - body_start
+    if available < content_length {
+        return failed_response()
+    }
+
     let body = rawbuf_new(content_length + 1)
     var bi: i64 = 0
-    while bi < content_length && body_start + bi < received {
+    while bi < content_length {
         rawbuf_set(&body, bi, rawbuf_get(&response_buf, body_start + bi))
         bi = bi + 1
     }
