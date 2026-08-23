@@ -14,10 +14,17 @@
 #      — proves on a controlled non-linear synthetic endpoint that
 #      |GUM_2nd − truth| < |GUM_1st − truth|.
 #   4. The e2e test also emits a rapamycin AUC Hessian budget in CSV
-#      form; the gate diffs the captured CSV against the committed
-#      golden at benchmarks/pbpk/hessian_budget.csv (bytewise — the
-#      Hessian propagator is fully deterministic, so any drift here
-#      means a real regression in the FD math or the simulator).
+#      form. print_f64's six fixed decimals floor the first-order
+#      variance (~2.05e-7) to 0.000000, so the e2e test additionally
+#      emits a tagged full-precision line (HESSBUD|var_o1_scaled_1e9=)
+#      and the gate canonicalises that value into the CSV as %.6e
+#      (pbpk28-parity pattern: raw values out of Sounio, CSV shaping in
+#      the gate) before diffing bytewise against the committed golden
+#      at benchmarks/pbpk/hessian_budget.csv — the Hessian propagator
+#      is fully deterministic, so any drift, including sub-5e-7 drift
+#      the fixed-point rows cannot show, means a real regression in the
+#      FD math or the simulator. Refresh the golden from a real run
+#      with HESSIAN_BUDGET_UPDATE_GOLDEN=1.
 #
 # Files this gate exercises:
 #   stdlib/darwin_pbpk/epistemic_pbpk14_hessian.sio
@@ -76,7 +83,8 @@ TMP_UNIT_OUT="$(mktemp -t hess_unit.XXXXXX.out)"
 TMP_E2E="$(mktemp -t hess_e2e.XXXXXX)"
 TMP_E2E_OUT="$(mktemp -t hess_e2e.XXXXXX.out)"
 TMP_E2E_CSV="$(mktemp -t hess_e2e.XXXXXX.csv)"
-trap 'rm -f "$TMP_UNIT" "$TMP_UNIT_OUT" "$TMP_E2E" "$TMP_E2E_OUT" "$TMP_E2E_CSV"' EXIT
+TMP_E2E_SECTION="$(mktemp -t hess_e2e.XXXXXX.section)"
+trap 'rm -f "$TMP_UNIT" "$TMP_UNIT_OUT" "$TMP_E2E" "$TMP_E2E_OUT" "$TMP_E2E_CSV" "$TMP_E2E_SECTION"' EXIT
 
 if "$SOUC" compile "$SRC_UNIT" -o "$TMP_UNIT" >/dev/null 2>&1 && [[ -x "$TMP_UNIT" ]]; then
     if "$TMP_UNIT" >"$TMP_UNIT_OUT" 2>&1; then
@@ -107,22 +115,50 @@ else
     note_fail "souc compile failed: $SRC_E2E"
 fi
 
-# --- (e) extract CSV section from e2e stdout, diff against golden ---
-sed -n '/# rapamycin_hessian_budget_v1/,/^hess,/p' "$TMP_E2E_OUT" > "$TMP_E2E_CSV"
-# tail of the section: include all `hess,` rows until the final row.  The
-# above stops at the FIRST hess line, so post-process to keep all hess rows.
+# --- (e) extract budget section, canonicalise var_o1, diff against golden ---
+# print_f64 emits six fixed decimals, so the budget row's var_o1 value
+# (var_first_order, ~2.05e-7 (ng·h/mL)²) prints as 0.000000: the runtime's
+# own row text can neither match a full-precision golden nor fail one. The
+# e2e test therefore emits a tagged full-precision channel before the
+# section header — HESSBUD|var_o1_scaled_1e9=<print_f64 of the value ×1e9>
+# — and this step folds it back in: every budget row passes through
+# unchanged except var_o1, re-emitted as %.6e of scaled/1e9. The golden is
+# a mechanical capture of that canonical form; drift in var_first_order
+# beyond ~0.5 ppm relative goes red.
 awk '
     /^# rapamycin_hessian_budget_v1$/ { keep = 1 }
     keep && /^PASS / { keep = 0; next }
     keep { print }
-' "$TMP_E2E_OUT" > "$TMP_E2E_CSV"
+' "$TMP_E2E_OUT" > "$TMP_E2E_SECTION"
 
-if diff -q "$GOLDEN_CSV" "$TMP_E2E_CSV" >/dev/null 2>&1; then
-    PASS=$((PASS + 1))
+RAW_SCALED="$(awk -F= '/^HESSBUD\|var_o1_scaled_1e9=/ { print $2 }' "$TMP_E2E_OUT")"
+if [[ -z "$RAW_SCALED" ]]; then
+    note_fail "e2e stdout carries no HESSBUD|var_o1_scaled_1e9 full-precision channel"
 else
-    note_fail "rapamycin Hessian CSV differs from golden $GOLDEN_CSV"
-    echo "  (diff -u $GOLDEN_CSV <runtime>):" >&2
-    diff -u "$GOLDEN_CSV" "$TMP_E2E_CSV" | head -40 >&2 || true
+    if awk -F, -v OFS=, -v SCALED="$RAW_SCALED" '
+        $1 == "var_o1" && NF >= 4 {
+            if (SCALED + 0 <= 0.0) {
+                printf "  var_o1 scaled channel is not positive: %s\n", SCALED > "/dev/stderr"
+                exit 3
+            }
+            $4 = sprintf("%.6e", (SCALED + 0) / 1e9)
+        }
+        { print }
+    ' "$TMP_E2E_SECTION" > "$TMP_E2E_CSV"; then
+        if [[ "${HESSIAN_BUDGET_UPDATE_GOLDEN:-0}" == "1" ]]; then
+            cp "$TMP_E2E_CSV" "$GOLDEN_CSV"
+            echo "  golden refreshed from a real run: $GOLDEN_CSV" >&2
+        fi
+        if diff -q "$GOLDEN_CSV" "$TMP_E2E_CSV" >/dev/null 2>&1; then
+            PASS=$((PASS + 1))
+        else
+            note_fail "rapamycin Hessian CSV differs from golden $GOLDEN_CSV"
+            echo "  (diff -u $GOLDEN_CSV <runtime>):" >&2
+            diff -u "$GOLDEN_CSV" "$TMP_E2E_CSV" | head -40 >&2 || true
+        fi
+    else
+        note_fail "var_o1 canonicalisation failed (scaled channel: $RAW_SCALED)"
+    fi
 fi
 
 echo "=== Lane 8a second-order Hessian GUM gate ==="

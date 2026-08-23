@@ -9,8 +9,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ci-gate-
 
 # CI gate workflow reachability census
 
+**6/6 never was a CI signal (measured at `64924d371a`; at `12ebda238d` two of the six are already in Contracts).**
+
 **Date:** 2026-08-18  
-**SHA measured:** `465008a76b` (`origin/main` at census)  
+**SHA measured (pass 1):** `465008a76b`  
+**SHA measured (pass 2 leftover class):** `64924d371a`  
+**SHA that expired the present-tense 6/6 leftover claim:** `12ebda238d` (#1880)  
+**Live leftover after #1880 + #1893 (this merge / `origin/main`):** reachable **91** / leftover **380** (population 471). The umbrella-closure **25** is unchanged — that walk starts at the umbrella, not at `sigpipe_hygiene_gate.sh`.  
 **Instrument:** `python3 scripts/dev/ci_gate_workflow_reachability.py`  
 **Table:** [`CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv`](CI_GATE_WORKFLOW_REACHABILITY_CENSUS_2026-08-18.tsv)
 
@@ -100,14 +105,16 @@ Adjacent, not auto-bucketed: `ci.yml` line 515 says `madaros_corpus_regression_g
 
 ### Manual-by-design (56) — includes the six dissertation gates and bootstrap
 
-All six dissertation gates are leftover:
+6/6 never was a CI signal (measured at `64924d371a`; at `12ebda238d` two of the six are already in Contracts).
 
-- `dissertation_confidence_gate_gate.sh`
-- `dissertation_dossier_gate.sh`
-- `dissertation_frontend_parity_gate.sh`
-- `dissertation_pbpk28_parity_gate.sh`
-- `dissertation_pbpk_hessian_gate.sh`
-- `dissertation_pbpk_suite_gate.sh`
+All six dissertation gates are leftover **on the measurement SHA** (`64924d371a` / this census). After `12ebda238d` (#1880) `dissertation_confidence_gate_gate.sh` and `dissertation_frontend_parity_gate.sh` are in Contracts. The other four stay leftover and stay red:
+
+- `dissertation_confidence_gate_gate.sh` — leftover on `64924d371a`; Contracts as of `12ebda238d`
+- `dissertation_dossier_gate.sh` — leftover on both SHAs (red)
+- `dissertation_frontend_parity_gate.sh` — leftover on `64924d371a`; Contracts as of `12ebda238d`
+- `dissertation_pbpk28_parity_gate.sh` — leftover on both SHAs (red)
+- `dissertation_pbpk_hessian_gate.sh` — leftover on both SHAs (red)
+- `dissertation_pbpk_suite_gate.sh` — leftover on both SHAs (red; umbrella only)
 
 `dissertation_pbpk_suite_gate.sh` **is** called by `native_v2_cpu_compiler_umbrella_gate.sh`. The umbrella is **not** in any workflow (handoff / Slurm / operator). So the suite is operator-reachable and workflow-unreachable. That is manual-by-design, not forgotten.
 
@@ -134,3 +141,69 @@ Start with the three already shown to fire their positive controls and to be abs
 3. `madaros_ontology_enforcement_gate.sh`
 
 One gate per pull request. Re-run this instrument after each wire; the forgotten count must fall by exactly one, and the reachable count must rise by exactly one.
+
+---
+
+## Pass 2 — leftover class (measured 2026-08-18, SHA `64924d371a`)
+
+**Instrument:** `python3 scripts/dev/ci_gate_leftover_class_pass2.py`  
+**Table:** [`CI_GATE_LEFTOVER_CLASS_PASS2_2026-08-18.tsv`](CI_GATE_LEFTOVER_CLASS_PASS2_2026-08-18.tsv)
+
+Pass 1 counted leftovers. This pass classifies them. Filename prefixes are not a class. A quoted historical phrase is not a class.
+
+Population on this SHA: **470** `*_gate.sh`, **88** workflow-reachable, **382** leftover. (Pass 1 was 468 / 85 / 383 on `465008a76b`. Wires since then, plus two new gates, plus a scan-list false-positive removed — see below.)
+
+### Instrument corrections before the class count
+
+| Control | What would refute it | Result |
+|---|---|---|
+| Leftover non-empty | leftover = 0 | **382** |
+| Six dissertation gates leftover | any of the six in the invoke graph | all six **unreachable** on `64924d371a`. After `12ebda238d` (#1880) confidence + frontend_parity are in Contracts; the other four stay leftover |
+| Six unmentioned in `.github/` | any dissertation `*_gate.sh` string under `.github/` | **zero** mentions; `git log -S dissertation_pbpk_suite_gate -- .github/` is empty for the whole history |
+| Scan-list is not an invoke | `mli_s3_bit_identity_gate.sh` reachable because `sigpipe_hygiene_gate.sh` lists it | leftover (listed for `grep -q` hygiene, never executed) |
+| Quoted SUPERSEDED is not obsolete | `lean_single_fixed_point_gate.sh` class = obsolete | **not** obsolete — the header quotes a *wrong* old line |
+
+`BARE_GATE_RE` now applies only to workflow YAML. Applying it to `.sh` files counted scan-lists as execution. Pass 1 did not hit that on `465008a76b` because `mli_s3` was not yet in the sigpipe list.
+
+### Leftover classes (382)
+
+| Class | N | Rule |
+|---|---:|---|
+| `forgotten` | **36** | Header is a measurement contract (`GATE_CONTRACT`, “positive control”, “evidence gate”, “Acceptance:”, “HARD GATE/PATH”) and there is no live operator entry |
+| `manual-by-design` | **29** | Makefile recipe, `native_v2_cpu_compiler_umbrella_gate.sh` child, `bootstrap_chain_gate.sh`, or header says hand/Slurm/operator |
+| `obsolete` | **0** | Current header *asserts* the gate is obsolete / do-not-use. Quoted “old header said SUPERSEDED” does not count |
+| `unclassified` | **317** | Leftover, no evidence for the three buckets. Same size as pass 1 — the extra forgotten came out of the old filename-`dissertation_*` / coarse manual bucket, not from inventing a class for 317 names |
+
+Do not call the 317 obsolete. A third pass that reads every body (not just the header) can split them; doing it from `madaros_*` / `fo_*` would fabricate a class.
+
+Pass 1 put all six dissertation gates in `manual-by-design` because the name started with `dissertation_`. That was a filename rule. Pass 2 drops it.
+
+### The six dissertation gates — CI never ran them (on `64924d371a`)
+
+6/6 never was a CI signal (measured at `64924d371a`; at `12ebda238d` two of the six are already in Contracts).
+
+| Gate | Pass-2 class on `64924d371a` | Workflow-reachable on `64924d371a` | After `12ebda238d` |
+|---|---|---|---|
+| `dissertation_confidence_gate_gate.sh` | forgotten | no | Contracts (#1880) |
+| `dissertation_dossier_gate.sh` | forgotten | no | leftover, red |
+| `dissertation_frontend_parity_gate.sh` | forgotten | no | Contracts (#1880) |
+| `dissertation_pbpk28_parity_gate.sh` | forgotten | no | leftover, red |
+| `dissertation_pbpk_hessian_gate.sh` | forgotten | no | leftover, red |
+| `dissertation_pbpk_suite_gate.sh` | manual-by-design | no | leftover, red; still only via leftover umbrella |
+
+The umbrella is itself leftover (not in any workflow). So the suite is operator-reachable if someone runs the umbrella by hand, and still **not** a GitHub Actions signal.
+
+`git grep` on `64924d371a:.github` finds no `dissertation_*_gate`. A `-S` history walk of `.github/` for `dissertation_pbpk_suite_gate` is empty through that SHA: the suite was never added to a workflow and later removed. It was never there. After `12ebda238d` the confidence and frontend_parity names are in Contracts; the other four still are not.
+
+June qualification prose called these “6/6 dissertation CI gates green”. The 2026-08-16 remasure (`docs/audit/DISSERTATION_DOSSIER_RESOLUTION_DISPATCH_2026-08-16.md`) on `6f2c4e2461` via **Slurm** (job 9908) was 1 pass / 3 fail / 2 unmeasured — not Actions. The 2026-08-17 suite remasure is 19 fail / 53 (`docs/audit/DISSERTATION_PBPK_SUITE_REMEASURE_2026-08-17.md`): twelve toolchain, seven rc=182, zero science. Actions never saw either number.
+
+Two further vacuous-green paths, unused by CI only because CI never calls them:
+
+- `SOUNIO_DPS_GATE_SKIP=1` makes `dissertation_pbpk_suite_gate.sh` exit 0
+- `dissertation_confidence_gate_gate.sh` exits 0 on non-Linux / non-x86_64
+
+**Verdict:** yes, **on `64924d371a`**. 6/6 never was a CI signal (measured at `64924d371a`; at `12ebda238d` two of the six are already in Contracts — confidence and frontend_parity, both green, `SOUNIO_GATE_SOUC` pinned). The other four (dossier, hessian, pbpk28, suite) stay leftover and stay red. A numeral without a SHA expires the moment a later wire lands; this one will not.
+
+Live leftover after that wire and the #1893 scan-list fix: **91** reachable / **380** leftover. The umbrella-closure **25** does not move — that walk does not start at sigpipe.
+
+This pass does **not** authorise wiring the remaining four, the 36 forgotten, or the 317 unclassified. The suite is a 53-entry compile/run forest; putting it in Contracts while red would redden every PR the way a V0-A-red f128 ladder would.

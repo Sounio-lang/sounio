@@ -82,6 +82,43 @@ fn string_list_eq_sl(a: StringList, b: StringList) -> bool with Mut, Panic, Div 
     }
 }
 
+// A ZD locus names a pair of sedenion imaginary units, written `eIeJ`, with
+// 1 <= I < J <= 15. Well-formedness is decidable by inspection of the name.
+// Narrowing this from "well-formed pair" to "one of the 84 validPrims" needs
+// the zero-divisor predicate over cd_sigma_ct and is OWED — see
+// docs/audit/EXACTLY_PRIVATE_TA_DISPATCH_2026-08-19.md. Refusing e3e3 and
+// e3e99 today is strictly more interrogation than refusing nothing.
+fn zd_locus_is_wellformed(n: Name) -> bool with Mut, Panic, Div {
+    var ok = true
+    if n.len < 4 { ok = false }
+    if ok && n.buf[0] != 101 { ok = false }
+    var idx = 1
+    var a = 0
+    var adig = 0
+    while ok && idx < n.len && n.buf[idx] >= 48 && n.buf[idx] <= 57 {
+        a = a * 10 + (n.buf[idx] as i64 - 48)
+        adig = adig + 1
+        idx = idx + 1
+    }
+    if ok && adig == 0 { ok = false }
+    if ok && idx >= n.len { ok = false }
+    if ok && n.buf[idx] != 101 { ok = false }
+    if ok { idx = idx + 1 }
+    var b = 0
+    var bdig = 0
+    while ok && idx < n.len && n.buf[idx] >= 48 && n.buf[idx] <= 57 {
+        b = b * 10 + (n.buf[idx] as i64 - 48)
+        bdig = bdig + 1
+        idx = idx + 1
+    }
+    if ok && bdig == 0 { ok = false }
+    if ok && idx != n.len { ok = false }
+    if ok && a < 1 { ok = false }
+    if ok && b > 15 { ok = false }
+    if ok && a >= b { ok = false }
+    ok
+}
+
 fn ast_path_eq(a: AstPath, b: AstPath) -> bool with Mut, Panic, Div {
     if a.seg_count != b.seg_count { return false }
     if a.seg_count == 0 { return true }
@@ -923,8 +960,285 @@ fn call_expr_type_args(e: Expr) -> Option<Box<TypeExprList> > with Mut, Panic, D
     }
 }
 
+// setup_intrinsics — pre-register codegen intrinsics in fn_sig_table.
+//
+// Codegen-only intrinsics (measure, acknowledge, uncertainty_of,
+// require_confidence, variance_of, seq_new) have dispatch sites in
+// self-hosted/compiler/lean_single.sio (compile_measure_call_x86 at
+// 10142, compile_acknowledge_call_x86 at 10249, compile_require_confidence_
+// call_x86 at 10322, compile_uncertainty_of_call_x86 at 10301, etc.) but
+// no source-level function definitions. The typechecker at check.sio:19734
+// looks the name up in env (miss), then in fn_sigs (miss), and emits E137.
+// Pre-registering them here makes the typechecker find them by name and
+// pass the lookup, so the call site fails at codegen only if codegen has
+// no handler.
+//
+// observe() is NOT registered here: it has neither a source definition nor
+// a compile_observe_call_* handler in lean_single.sio. Adding observe
+// codegen is a separate task for the lane that owns lean_single.sio.
+//
+// See docs/audit/E137_TWO_CAUSES_DIAGNOSIS_2026-08-18.md (Cause B).
+fn setup_intrinsics(tbl: *mut FnSigTable) with Mut, Panic, Div, Alloc {
+    // measure(value: T, uncertainty: f64) -> Knowledge<T>
+    var measure_name = Name { buf: [0; 128], len: 7 }
+    measure_name.buf[0] = 109   // 'm'
+    measure_name.buf[1] = 101   // 'e'
+    measure_name.buf[2] = 97    // 'a'
+    measure_name.buf[3] = 115   // 's'
+    measure_name.buf[4] = 117   // 'u'
+    measure_name.buf[5] = 114   // 'r'
+    measure_name.buf[6] = 101   // 'e'
+    // T remains inferred, but the result must retain the Knowledge wrapper. A
+    // top-level TyUnknown here erases the information lowering needs to treat
+    // the value as the three-word epistemic payload.
+    let measure_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_unknown() }
+    let measure_p2 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_f64() }
+    let measure_pl = FnParamList {
+        head: measure_p1,
+        tail: Some(Box::new(FnParamList { head: measure_p2, tail: None }))
+    }
+    let measure_sig = FnSig {
+        name: measure_name,
+        params: Some(Box::new(measure_pl)),
+        param_count: 2,
+        return_type: ty_knowledge(ty_unknown(), 0.0 - 1.0),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: 0 - 1,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, measure_sig)
+
+    // acknowledge(k: Knowledge<T>, reason: String) -> T
+    // Common call shape: `let v: f64 = acknowledge(k, "reason")`.
+    var ack_name = Name { buf: [0; 128], len: 11 }
+    ack_name.buf[0] = 97     // 'a'
+    ack_name.buf[1] = 99     // 'c'
+    ack_name.buf[2] = 107    // 'k'
+    ack_name.buf[3] = 110    // 'n'
+    ack_name.buf[4] = 111    // 'o'
+    ack_name.buf[5] = 119    // 'w'
+    ack_name.buf[6] = 108    // 'l'
+    ack_name.buf[7] = 101    // 'e'
+    ack_name.buf[8] = 100    // 'd'
+    ack_name.buf[9] = 103    // 'g'
+    ack_name.buf[10] = 101   // 'e'
+    let ack_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_knowledge(ty_unknown(), 0.0 - 1.0) }
+    let ack_p2 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_string() }
+    let ack_pl = FnParamList {
+        head: ack_p1,
+        tail: Some(Box::new(FnParamList { head: ack_p2, tail: None }))
+    }
+    let ack_sig = FnSig {
+        name: ack_name,
+        params: Some(Box::new(ack_pl)),
+        param_count: 2,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: 0 - 1,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, ack_sig)
+
+    // uncertainty_of(k: Knowledge<T>) -> f64
+    var unc_name = Name { buf: [0; 128], len: 14 }
+    unc_name.buf[0] = 117    // 'u'
+    unc_name.buf[1] = 110    // 'n'
+    unc_name.buf[2] = 99     // 'c'
+    unc_name.buf[3] = 101    // 'e'
+    unc_name.buf[4] = 114    // 'r'
+    unc_name.buf[5] = 116    // 't'
+    unc_name.buf[6] = 97     // 'a'
+    unc_name.buf[7] = 105    // 'i'
+    unc_name.buf[8] = 110    // 'n'
+    unc_name.buf[9] = 116    // 't'
+    unc_name.buf[10] = 121   // 'y'
+    unc_name.buf[11] = 95    // '_'
+    unc_name.buf[12] = 111   // 'o'
+    unc_name.buf[13] = 102   // 'f'
+    let unc_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_knowledge(ty_unknown(), 0.0 - 1.0) }
+    let unc_pl = FnParamList { head: unc_p1, tail: None }
+    let unc_sig = FnSig {
+        name: unc_name,
+        params: Some(Box::new(unc_pl)),
+        param_count: 1,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: 0 - 1,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, unc_sig)
+
+    // require_confidence(k: Knowledge<T>, min: f64) -> T
+    // Common call shape: `let v: f64 = require_confidence(k, 0.95)`.
+    var rc_name = Name { buf: [0; 128], len: 18 }
+    rc_name.buf[0] = 114     // 'r'
+    rc_name.buf[1] = 101     // 'e'
+    rc_name.buf[2] = 113     // 'q'
+    rc_name.buf[3] = 117     // 'u'
+    rc_name.buf[4] = 105     // 'i'
+    rc_name.buf[5] = 114     // 'r'
+    rc_name.buf[6] = 101     // 'e'
+    rc_name.buf[7] = 95      // '_'
+    rc_name.buf[8] = 99      // 'c'
+    rc_name.buf[9] = 111     // 'o'
+    rc_name.buf[10] = 110    // 'n'
+    rc_name.buf[11] = 102    // 'f'
+    rc_name.buf[12] = 105    // 'i'
+    rc_name.buf[13] = 100    // 'd'
+    rc_name.buf[14] = 101    // 'e'
+    rc_name.buf[15] = 110    // 'n'
+    rc_name.buf[16] = 99     // 'c'
+    rc_name.buf[17] = 101    // 'e'
+    let rc_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_knowledge(ty_unknown(), 0.0 - 1.0) }
+    let rc_p2 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_f64() }
+    let rc_pl = FnParamList {
+        head: rc_p1,
+        tail: Some(Box::new(FnParamList { head: rc_p2, tail: None }))
+    }
+    let rc_sig = FnSig {
+        name: rc_name,
+        params: Some(Box::new(rc_pl)),
+        param_count: 2,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: 0 - 1,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, rc_sig)
+
+    // variance_of(x: f64) -> f64
+    var var_name = Name { buf: [0; 128], len: 11 }
+    var_name.buf[0] = 118    // 'v'
+    var_name.buf[1] = 97     // 'a'
+    var_name.buf[2] = 114    // 'r'
+    var_name.buf[3] = 105    // 'i'
+    var_name.buf[4] = 97     // 'a'
+    var_name.buf[5] = 110    // 'n'
+    var_name.buf[6] = 99     // 'c'
+    var_name.buf[7] = 101    // 'e'
+    var_name.buf[8] = 95     // '_'
+    var_name.buf[9] = 111    // 'o'
+    var_name.buf[10] = 102   // 'f'
+    let var_p1 = FnParamInfo { name: Name { buf: [0; 128], len: 0 }, ty: ty_f64() }
+    let var_pl = FnParamList { head: var_p1, tail: None }
+    let var_sig = FnSig {
+        name: var_name,
+        params: Some(Box::new(var_pl)),
+        param_count: 1,
+        return_type: ty_f64(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: 0 - 1,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, var_sig)
+
+    // seq_new() -> Seq<T>
+    var seq_name = Name { buf: [0; 128], len: 7 }
+    seq_name.buf[0] = 115    // 's'
+    seq_name.buf[1] = 101    // 'e'
+    seq_name.buf[2] = 113    // 'q'
+    seq_name.buf[3] = 95     // '_'
+    seq_name.buf[4] = 110    // 'n'
+    seq_name.buf[5] = 101    // 'e'
+    seq_name.buf[6] = 119    // 'w'
+    let seq_sig = FnSig {
+        name: seq_name,
+        params: None,
+        param_count: 0,
+        return_type: ty_unknown(),
+        is_method: false,
+        self_type_name: Name { buf: [0; 128], len: 0 },
+        self_type_entry: ty_unit(),
+        effects: [0; 8],
+        effect_count: 0,
+        is_kernel: false,
+        is_epistemic_kernel: false,
+        is_extern: false,
+        is_linear_closure: false,
+        linear_capture_count: 0,
+        epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: 0 - 1,
+        visibility_kind: VISIBILITY_PUB,
+        defining_module_seg_count: 0,
+        defining_module_id: 0,
+        visibility: visibility_pub(),
+        defining_module: empty_path(),
+    }
+    let _ = fn_sig_table_add(tbl, seq_sig)
+}
+
 pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
-    Checker {
+    let c = Checker {
         env: type_env_new(),
         borrows: borrow_env_new(),
         units: register_builtin_units(unit_registry_new()),
@@ -1025,6 +1339,8 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         refine_cond_env: refine_static_env_new(),
         ontology_items: None,
     }
+    let _ = setup_intrinsics(c.fn_sigs)
+    c
 }
 
 pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
@@ -1035,6 +1351,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).structs = struct_table_alloc()
     (*raw).enums = enum_table_alloc()
     (*raw).fn_sigs = fn_sig_table_alloc()
+    let _ = setup_intrinsics((*raw).fn_sigs)
     (*raw).algebras = empty_algebra_table()
     (*raw).studies = empty_study_table()
     (*raw).ontologies = empty_ontology_table()
@@ -1321,11 +1638,13 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         // this looked like a let/var bug for hours.
         //
         // A binding that carries no information must not outrank a type that
-        // does.
+        // does. Imported names are bound as TyUnknown even when the struct is
+        // not yet in this module's table — treating that Unknown as informative
+        // made `fn forge() -> Epistemic { 1.0 }` typecheck. Match the
+        // by-value spine: Unknown/Error/Never fall through to ty_named.
         let bound_is_informative = bound_ty.kind != TypeKind::TyError
-            && !(bound_ty.kind == TypeKind::TyUnknown
-                 && (struct_table_find((*c).structs, name) >= 0
-                     || enum_table_find((*c).enums, name) >= 0))
+            && bound_ty.kind != TypeKind::TyUnknown
+            && bound_ty.kind != TypeKind::TyNever
         if bound_is_informative || bound_ty.ontology_id >= 0 {
             bound_ty
         } else {
@@ -1441,8 +1760,37 @@ fn invariant_framed_named_type(rank: i64, frame: Name, inner_ty: TypeEntry) -> T
     bte
 }
 
-fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_args: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let name = checker_copy_string_list_to_name(path.segments)
+    // ZD surgical family. The *mut match on TypeExprKind maps every
+    // discriminant onto TypeNamed, so ExactlyPrivate<T> arrives here as a
+    // name + type_args, the same way Seq and Hyper already do. Interrogate
+    // the name and do what the by-value spine does: lower the inner type
+    // and demand the enclosing `with` clause.
+    if name_matches_str11(name, 70, 111, 114, 103, 101, 116, 116, 97, 98, 108, 101) {
+        return checker_lower_zd_named_mut(c, type_args, span, 200)
+    }
+    if name_matches_str14(name, 69, 120, 97, 99, 116, 108, 121, 80, 114, 105, 118, 97, 116, 101) {
+        return checker_lower_exactly_private_named_mut(c, type_args, span)
+    }
+    if name_matches_str8(name, 69, 100, 105, 116, 97, 98, 108, 101) {
+        return checker_lower_zd_named_mut(c, type_args, span, 202)
+    }
+    if name_matches_str15(name, 67, 97, 112, 97, 98, 105, 108, 105, 116, 121, 71, 97, 116, 101, 100) {
+        return checker_lower_zd_named_mut(c, type_args, span, 203)
+    }
+    if name_matches_str10(name, 67, 111, 109, 112, 111, 115, 97, 98, 108, 101) {
+        return checker_lower_zd_named_mut(c, type_args, span, 204)
+    }
+    if name_matches_str7(name, 65, 117, 100, 105, 116, 101, 100) {
+        return checker_lower_audited_named_mut(c, type_args, span)
+    }
+    if name_matches_str9(name, 82, 101, 118, 105, 118, 97, 98, 108, 101) {
+        return checker_lower_revivable_named_mut(c, type_args, span)
+    }
+    if name_matches_str13(name, 73, 110, 116, 101, 114, 112, 114, 101, 116, 97, 98, 108, 101) {
+        return checker_lower_zd_named_mut(c, type_args, span, 207)
+    }
     // Seq<T>: language-level growable sequence (lean_single TY_SEQ). Lower to
     // ty_seq(elem) so methods/index see the element type. Without this, Seq is a
     // bare TyNamed and kaxi/ontology/model fail under Madaros check.
@@ -1853,6 +2201,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
     }
 
     let eff_pair = checker_extract_effects_mut(c, te.effects)
+    let epistemic_min_confidence = epistemic_min_confidence_from_effects(te.effects)
     let sig = FnSig {
         name: Name { buf: [0; 128], len: 0 },
         params: params,
@@ -1869,6 +2218,7 @@ fn checker_lower_fn_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry wi
         is_linear_closure: false,
         linear_capture_count: 0,
         epistemic_epsilon: 0.0 - 1.0,
+        epistemic_min_confidence: epistemic_min_confidence,
         visibility_kind: VISIBILITY_PUB,
         defining_module_seg_count: 0,
         defining_module_id: 0,
@@ -2013,19 +2363,213 @@ fn checker_type_expr_contains_reserved_wide_float(te: &TypeExpr) -> bool with Mu
     false
 }
 
+// Match TypeExprKind OUTSIDE a *mut function. Seed codegen of
+// `match enum_field` inside a *mut fn maps discriminant 0 onto the first
+// arm (TypeNamed), so ExactlyPrivate never arrived at a dedicated arm.
+// A helper that does not take *mut Checker can see the real kind.
+fn checker_type_expr_kind_tag(te: TypeExpr) -> i64 {
+    match te.kind {
+        TypeExprKind::TypeNamed => 0
+        TypeExprKind::TypeForgettable => 12
+        TypeExprKind::TypeExactlyPrivate => 13
+        TypeExprKind::TypeEditable => 14
+        TypeExprKind::TypeCapabilityGated => 15
+        TypeExprKind::TypeComposable => 16
+        TypeExprKind::TypeAudited => 17
+        TypeExprKind::TypeRevivable => 18
+        TypeExprKind::TypeInterpretable => 19
+        _ => -1
+    }
+}
+
+fn checker_lower_opt_inner_type_mut(c: *mut Checker, opt: Option<Box<TypeExpr> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        Some(inner_te) => checker_lower_type_expr_mut(c, *inner_te)
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+    }
+}
+
+fn checker_require_effect_mut(c: *mut Checker, span: Span, effect_id: i64, code: i64) with Mut, IO, Panic, Div, Alloc {
+    if !has_effect_id((*c).current_effects, (*c).current_effect_count, effect_id) {
+        checker_report_error_at_inplace(c, span, code, 0, 0, 0)
+    }
+}
+
+// ZD wrappers lower to the inner type and demand the enclosing function
+// declare the named effect. Parameter position goes through this spine;
+// the by-value spine already did the same work and was never reached from
+// a parameter.
+fn checker_lower_zd_wrapper_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, span: Span, code: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let inner_ty = checker_lower_opt_inner_type_mut(c, inner_opt)
+    checker_require_effect_mut(c, span, 18, code)
+    inner_ty
+}
+
+fn checker_lower_exactly_private_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, locus_opt: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let inner_ty = checker_lower_opt_inner_type_mut(c, inner_opt)
+    checker_require_effect_mut(c, span, 18, 201)
+    match locus_opt {
+        None => {}
+        Some(largs) => {
+            let lname = checker_copy_string_list_to_name((*largs).head.path.segments)
+            if !zd_locus_is_wellformed(lname) {
+                checker_report_error_at_inplace(c, span, 208, 0, 0, 0)
+            }
+        }
+    }
+    inner_ty
+}
+
+fn checker_lower_audited_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let inner_ty = checker_lower_opt_inner_type_mut(c, inner_opt)
+    let has_zd = has_effect_id((*c).current_effects, (*c).current_effect_count, 18)
+    let has_wit = has_effect_id((*c).current_effects, (*c).current_effect_count, 19)
+    if !has_zd || !has_wit {
+        checker_report_error_at_inplace(c, span, 205, 0, 0, 0)
+    }
+    inner_ty
+}
+
+fn checker_lower_revivable_type_mut(c: *mut Checker, inner_opt: Option<Box<TypeExpr> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let inner_ty = checker_lower_opt_inner_type_mut(c, inner_opt)
+    let has_zd = has_effect_id((*c).current_effects, (*c).current_effect_count, 18)
+    let has_temp = has_effect_id((*c).current_effects, (*c).current_effect_count, 20)
+    if !has_zd || !has_temp {
+        checker_report_error_at_inplace(c, span, 206, 0, 0, 0)
+    }
+    inner_ty
+}
+
+fn checker_lower_zd_named_mut(c: *mut Checker, type_args: Option<Box<TypeExprList> >, span: Span, code: i64) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match type_args {
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+        Some(args) => {
+            let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+            checker_require_effect_mut(c, span, 18, code)
+            inner_ty
+        }
+    }
+}
+
+fn checker_lower_exactly_private_named_mut(c: *mut Checker, type_args: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match type_args {
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+        Some(args) => {
+            let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+            checker_require_effect_mut(c, span, 18, 201)
+            match (*args).tail {
+                None => {}
+                Some(rest) => {
+                    let lname = checker_copy_string_list_to_name((*rest).head.path.segments)
+                    if !zd_locus_is_wellformed(lname) {
+                        checker_report_error_at_inplace(c, span, 208, 0, 0, 0)
+                    }
+                }
+            }
+            inner_ty
+        }
+    }
+}
+
+fn checker_lower_audited_named_mut(c: *mut Checker, type_args: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match type_args {
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+        Some(args) => {
+            let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+            let has_zd = has_effect_id((*c).current_effects, (*c).current_effect_count, 18)
+            let has_wit = has_effect_id((*c).current_effects, (*c).current_effect_count, 19)
+            if !has_zd || !has_wit {
+                checker_report_error_at_inplace(c, span, 205, 0, 0, 0)
+            }
+            inner_ty
+        }
+    }
+}
+
+fn checker_lower_revivable_named_mut(c: *mut Checker, type_args: Option<Box<TypeExprList> >, span: Span) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    match type_args {
+        None => {
+            checker_note_type_error_mut(c)
+            ty_error()
+        }
+        Some(args) => {
+            let inner_ty = checker_lower_type_expr_mut(c, (*args).head)
+            let has_zd = has_effect_id((*c).current_effects, (*c).current_effect_count, 18)
+            let has_temp = has_effect_id((*c).current_effects, (*c).current_effect_count, 20)
+            if !has_zd || !has_temp {
+                checker_report_error_at_inplace(c, span, 206, 0, 0, 0)
+            }
+            inner_ty
+        }
+    }
+}
+
 fn checker_lower_type_expr_mut(c: *mut Checker, te: TypeExpr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if !checker_enter_type_expr_mut(c) {
         return ty_error()
     }
-
     if checker_type_expr_contains_reserved_wide_float(&te) {
         checker_report_error_at_inplace(c, te.span, 218, 0, 0, 0)
         checker_exit_type_expr_mut(c)
         return ty_error()
     }
 
+    let kind_tag = checker_type_expr_kind_tag(te)
+    if kind_tag == 13 {
+        let lowered = checker_lower_exactly_private_type_mut(c, te.inner, te.type_args, te.span)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+    if kind_tag == 12 {
+        let lowered = checker_lower_zd_wrapper_mut(c, te.inner, te.span, 200)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+    if kind_tag == 14 {
+        let lowered = checker_lower_zd_wrapper_mut(c, te.inner, te.span, 202)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+    if kind_tag == 15 {
+        let lowered = checker_lower_zd_wrapper_mut(c, te.inner, te.span, 203)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+    if kind_tag == 16 {
+        let lowered = checker_lower_zd_wrapper_mut(c, te.inner, te.span, 204)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+    if kind_tag == 17 {
+        let lowered = checker_lower_audited_type_mut(c, te.inner, te.span)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+    if kind_tag == 18 {
+        let lowered = checker_lower_revivable_type_mut(c, te.inner, te.span)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+    if kind_tag == 19 {
+        let lowered = checker_lower_zd_wrapper_mut(c, te.inner, te.span, 207)
+        checker_exit_type_expr_mut(c)
+        return lowered
+    }
+
     let lowered = match te.kind {
-        TypeExprKind::TypeNamed => checker_lower_named_type_with_args_mut(c, te.path, te.type_args)
+        TypeExprKind::TypeNamed => checker_lower_named_type_with_args_mut(c, te.path, te.type_args, te.span)
         TypeExprKind::TypeUnit => ty_unit()
         TypeExprKind::TypeNever => ty_never()
         TypeExprKind::TypeInfer => ty_unknown()
@@ -3244,6 +3788,22 @@ fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -
     }
 }
 
+fn epistemic_min_confidence_from_effects(opt: Option<Box<EffectList> >) -> i64 with Mut, Panic, Div {
+    var cursor = opt
+    while true {
+        match cursor {
+            Some(list) => {
+                if effect_name_to_id((*list).head.name_buf, (*list).head.name_len) == 8 && (*list).head.payload >= 0 {
+                    return (*list).head.payload
+                }
+                cursor = (*list).tail
+            }
+            None => return 0 - 1
+        }
+    }
+    0 - 1
+}
+
 fn checker_collect_fn_param_list_mut(c: *mut Checker, pl: ParamList) -> MutParamListResult with Mut, Panic, Div, Alloc, IO {
     let head_ty = checker_lower_type_expr_mut(c, pl.head.ty)
     let head_param = FnParamInfo { name: pl.head.name, ty: head_ty }
@@ -3270,6 +3830,16 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
     match opt {
         Some(fd) => {
             let name = (*fd).name
+            // Effects must be current BEFORE parameter types lower. The ZD
+            // family interrogates `with ZD` at the parameter; collecting the
+            // signature with an empty effect set would refuse every `with ZD`
+            // function and the positive control would be indistinguishable
+            // from a dead arm.
+            let saved_effects = (*c).current_effects
+            let saved_effect_count = (*c).current_effect_count
+            let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
+            (*c).current_effects = eff_pair.effects
+            (*c).current_effect_count = eff_pair.count
             let params_pair = checker_collect_fn_params_mut(c, (*fd).params)
             let params = params_pair.params
             let param_count = params_pair.count
@@ -3277,9 +3847,11 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 Some(te) => checker_lower_type_expr_mut(c, *te)
                 None => ty_unknown()
             }
-            let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
+            (*c).current_effects = saved_effects
+            (*c).current_effect_count = saved_effect_count
             let fn_effects = eff_pair.effects
             let fn_effect_count = eff_pair.count
+            let epistemic_min_confidence = epistemic_min_confidence_from_effects((*fd).effects)
 
             let is_kernel_fn = (*fd).is_kernel
             var kernel_effects = fn_effects
@@ -3354,6 +3926,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
+                epistemic_min_confidence: epistemic_min_confidence,
                 visibility_kind: visibility.kind,
                 defining_module_seg_count: defining_module.seg_count,
                 defining_module_id: (*c).current_module_id,
@@ -4331,6 +4904,11 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
     match item.fn_def {
         Some(fd) => {
             // Skip the self param for method signatures (mirror collect_method_params).
+            let saved_effects = (*c).current_effects
+            let saved_effect_count = (*c).current_effect_count
+            let eff_pair_early = checker_extract_effects_mut(c, (*fd).effects)
+            (*c).current_effects = eff_pair_early.effects
+            (*c).current_effect_count = eff_pair_early.count
             let params_pair = match (*fd).params {
                 Some(pl) => {
                     if (*pl).head.is_self {
@@ -4347,9 +4925,11 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 Some(te) => checker_lower_type_expr_mut(c, *te)
                 None => ty_unknown()
             }
-            let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
-            let fn_effects = eff_pair.effects
-            let fn_effect_count = eff_pair.count
+            (*c).current_effects = saved_effects
+            (*c).current_effect_count = saved_effect_count
+            let fn_effects = eff_pair_early.effects
+            let fn_effect_count = eff_pair_early.count
+            let epistemic_min_confidence = epistemic_min_confidence_from_effects((*fd).effects)
             let sig = FnSig {
                 name: item.name,
                 params: params,
@@ -4366,6 +4946,7 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 is_linear_closure: false,
                 linear_capture_count: 0,
                 epistemic_epsilon: 0.0 - 1.0,
+                epistemic_min_confidence: epistemic_min_confidence,
                 visibility_kind: item.visibility.kind,
                 defining_module_seg_count: (*c).current_module.seg_count,
                 defining_module_id: (*c).current_module_id,
@@ -4554,7 +5135,22 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
             (*c).current_fn_name = (*fd).name
-            let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
+            // Defect B (docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md):
+            // a bare-name fn_sig_table_find here is the exact same disease the
+            // fn_sig_table_find_prefer_module doc comment describes for E175 --
+            // "the later module's body calls resolve to the earlier module's
+            // private sig" -- just for effect-checking (E035) rather than
+            // visibility. Two modules each declaring their own `fn main` (a
+            // real shape: an entry file importing specific names from a module
+            // that also happens to define its own main) collide on this
+            // self-lookup: whichever module's `main` sits earlier in the shared
+            // fn_sigs table wins, so the OTHER module's `main` gets checked
+            // against the wrong function's declared effects/return type.
+            // current_module_id is already correctly tracked per-module by
+            // this pass's caller (check_modules_verdict_boot4_with_visibility)
+            // -- prefer it, exactly as the sibling E175 fix already does at
+            // check.sio:7120.
+            let sig_id = fn_sig_table_find_prefer_module((*c).fn_sigs, (*fd).name, (*c).current_module_id)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
@@ -6578,6 +7174,7 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         is_linear_closure: capture_linear,
         linear_capture_count: capture_linear_count,
         epistemic_epsilon: capture_epsilon,
+        epistemic_min_confidence: 0 - 1,
         visibility_kind: VISIBILITY_PRIVATE,
         defining_module_seg_count: (*c).current_module.seg_count,
         defining_module_id: (*c).current_module_id,
@@ -7136,11 +7733,8 @@ fn checker_check_acknowledge_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
         Some(_) => {}
     }
-    // Epistemic effect required (same honesty gate as .value / E170).
-    let epistemic_id: i64 = 8
-    if !has_effect_id((*c).current_effects, (*c).current_effect_count, epistemic_id) {
-        checker_report_error_at_inplace(c, e.span, 170, 0, 0, 0)
-    }
+    // acknowledge is the explicit discharge operation. Requiring Epistemic
+    // here would make the E170 help ("use acknowledge") self-contradictory.
     if k_ty.kind == TypeKind::TyKnowledge {
         return knowledge_inner(k_ty)
     }
@@ -7150,13 +7744,65 @@ fn checker_check_acknowledge_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry
     ty_error()
 }
 
+fn knowledge_confidence_label(name: Name) -> bool with Panic, Div {
+    if name_matches_str1(name, 101) { return true } // e
+    if name_matches_str7(name, 101, 112, 115, 105, 108, 111, 110) { return true } // epsilon
+    // UTF-8 epsilon (U+03B5): 0xCE 0xB5, stored in the parser's i8 name buffer.
+    name.len == 2 && name.buf[0] == 206 as i8 && name.buf[1] == 181 as i8
+}
+
+fn knowledge_ctor_confidence(args: Option<Box<ExprList> >) -> f64 with Mut, Panic, Div, Alloc {
+    var cursor = args
+    var position: i64 = 0
+    while true {
+        match cursor {
+            Some(list) => {
+                // The lexer recovery path accepts the Unicode epsilon label but
+                // may not preserve its bytes in ExprList.label. The constructor
+                // ABI is stable: confidence is argument 2, so position is the
+                // authoritative fallback when the label is unavailable.
+                if knowledge_confidence_label((*list).label) || position == 1 {
+                    if (*list).head.kind == ExprKind::ExprFloatLit {
+                        return (*list).head.float_val
+                    }
+                    if (*list).head.kind == ExprKind::ExprIntLit {
+                        return (*list).head.int_val as f64
+                    }
+                    return 0.0 - 1.0
+                }
+                cursor = (*list).tail
+                position = position + 1
+            }
+            None => return 0.0 - 1.0
+        }
+    }
+    0.0 - 1.0
+}
+
+fn checker_current_epistemic_min_inplace(c: *mut Checker) -> i64 with Mut, Panic, Div {
+    let sig_id = (*c).current_sig_id
+    if sig_id < 0 { return 0 - 1 }
+    let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+    if !name_eq(sig.name, (*c).current_sig_name) { return 0 - 1 }
+    sig.epistemic_min_confidence
+}
+
+fn checker_enforce_knowledge_confidence_inplace(c: *mut Checker, args: Option<Box<ExprList> >, span: Span) -> f64 with Mut, Panic, Div, Alloc, IO {
+    let confidence = knowledge_ctor_confidence(args)
+    let minimum = checker_current_epistemic_min_inplace(c)
+    let confidence_milli = if confidence < 0.0 { 1 } else { (confidence * 1000.0 + 0.5) as i64 }
+    if minimum > 0 && confidence_milli < minimum {
+        checker_report_error_at_inplace(c, span, 215, confidence_milli, minimum, 0)
+    }
+    confidence
+}
+
 fn checker_check_knowledge_ctor_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // Knowledge(v, e=<confidence>, prov=<provenance>) -> Knowledge<T>.
-    // Same shape as checker_check_measure_expr_inplace: T comes from the first argument,
-    // epsilon is left unspecified at the type level (-1) exactly as measure() does.
     let first_arg = expr_list_head(e.args)
     let v_ty = checker_check_opt_expr_inplace(c, first_arg)
-    ty_knowledge(v_ty, 0.0 - 1.0)
+    let confidence = checker_enforce_knowledge_confidence_inplace(c, e.args, e.span)
+    ty_knowledge(v_ty, confidence)
 }
 
 fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -8137,6 +8783,13 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
     }
     if provided_ty.kind != expected_ty.kind {
         checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+        return
+    }
+    // Knowledge<_> with unspecified epsilon is a generic wrapper constraint,
+    // not a concrete confidence contract. Intrinsic signatures use this shape
+    // to retain the operand kind without inventing a confidence bound.
+    if knowledge_inner(expected_ty).kind == TypeKind::TyUnknown &&
+       knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
         return
     }
     if !knowledge_call_boundary_compatible(provided_ty, expected_ty) {
@@ -13094,7 +13747,9 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 205 { print("Audited<T> requires ZD and Witness effects: witness-bearing surgery (G9) must emit a machine-checkable Lean derivation of the ZD-kernel action. `with ZD` alone produces the erasure without evidence; Witness is what makes it checkable. Add `with ZD, Witness` to your function signature.") }
     else if code == 206 { print("Revivable<T> requires ZD and Temporal effects: time-bounded reversible surgery (G10) needs both the ZD annihilator algebra and an explicit Temporal window in which the op can be inverted. After the window, the surgery is irrevocable. Add `with ZD, Temporal` to your function signature.") }
     else if code == 207 { print("Interpretable<T> requires ZD effect: the 168-class canonical basis is the projective ZD-graph of sedenions. Without the ZD effect the compiler cannot guarantee that decomposition/reconstruction is fp-exact. Add `with ZD` to your function signature.") }
+    else if code == 208 { print("ZD locus is not a well-formed sedenion pair eIeJ with 1 <= I < J <= 15") }
     else if code == 213 { print("tuple destructure arity mismatch") }
+    else if code == 215 { print("EpistemicComplete violation") }
     else if code == 216 { print("infinite recursive type") }
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
@@ -14217,6 +14872,8 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("write_i64")) { return true }        // id 34
     if name_eq(n, make_name("read_f64")) { return true }         // id 35
     if name_eq(n, make_name("write_f64")) { return true }        // id 36
+    if name_eq(n, make_name("acknowledge")) { return true }      // id 37
+    if name_eq(n, make_name("require_confidence")) { return true } // id 38
     false
 }
 
@@ -15981,7 +16638,7 @@ impl Checker {
             TypeExprKind::TypeLemma => c.lower_lemma_annotation(te.type_args, te.span)
             TypeExprKind::TypeAxiom => c.lower_axiom_annotation(te.type_args, te.span)
             TypeExprKind::TypeForgettable => c.lower_forgettable_type(te.inner, te.span)
-            TypeExprKind::TypeExactlyPrivate => c.lower_exactly_private_type(te.inner, te.span)
+            TypeExprKind::TypeExactlyPrivate => c.lower_exactly_private_type(te.inner, te.type_args, te.span)
             TypeExprKind::TypeEditable => c.lower_editable_type(te.inner, te.span)
             TypeExprKind::TypeCapabilityGated => c.lower_capability_gated_type(te.inner, te.span)
             TypeExprKind::TypeComposable => c.lower_composable_type(te.inner, te.span)
@@ -16307,6 +16964,7 @@ impl Checker {
         // 3. Extract effects from te.effects (EffectList)
         var effects: [i64; 8] = [0; 8]
         var effect_count: i64 = 0
+        let epistemic_min_confidence = epistemic_min_confidence_from_effects(te.effects)
         match te.effects {
             Some(eff_list) => {
                 let ep = c.extract_effect_ids(*eff_list)
@@ -16332,6 +16990,7 @@ impl Checker {
             is_linear_closure: false,
             linear_capture_count: 0,
             epistemic_epsilon: 0.0 - 1.0,
+            epistemic_min_confidence: epistemic_min_confidence,
             visibility_kind: VISIBILITY_PUB,
             defining_module_seg_count: 0,
             defining_module_id: 0,
@@ -16445,7 +17104,7 @@ impl Checker {
 
     // ExactlyPrivate<T> (G3): training-data contribution algebraically zero in the
     // ZD kernel. Requires `with ZD`; missing effect emits error 201.
-    fn lower_exactly_private_type(self, inner_opt: Option<Box<TypeExpr> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
+    fn lower_exactly_private_type(self, inner_opt: Option<Box<TypeExpr> >, locus_opt: Option<Box<TypeExprList> >, span: Span) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
         match inner_opt {
             None => (self, ty_error())
             Some(inner_te) => {
@@ -16455,6 +17114,15 @@ impl Checker {
                 let zd_id = 18
                 if !has_effect_id(c.current_effects, c.current_effect_count, zd_id) {
                     c = c.report_error_at(span, 201, 0, 0, 0)
+                }
+                match locus_opt {
+                    None => {}
+                    Some(largs) => {
+                        let lname = checker_copy_string_list_to_name((*largs).head.path.segments)
+                        if !zd_locus_is_wellformed(lname) {
+                            c = c.report_error_at(span, 208, 0, 0, 0)
+                        }
+                    }
                 }
                 (c, inner_ty)
             }
@@ -18316,6 +18984,7 @@ impl Checker {
                 c = eff_pair.checker
                 let fn_effects = eff_pair.effects
                 let fn_effect_count = eff_pair.count
+                let epistemic_min_confidence = epistemic_min_confidence_from_effects((*fd).effects)
 
                 // Kernel function enforcement
                 let is_kernel_fn = (*fd).is_kernel
@@ -18461,6 +19130,7 @@ impl Checker {
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
+                    epistemic_min_confidence: epistemic_min_confidence,
                     visibility_kind: visibility.kind,
                     defining_module_seg_count: defining_module.seg_count,
                     defining_module_id: c.current_module_id,
@@ -19443,6 +20113,7 @@ impl Checker {
                 c = eff_pair.checker
                 let fn_effects = eff_pair.effects
                 let fn_effect_count = eff_pair.count
+                let epistemic_min_confidence = epistemic_min_confidence_from_effects((*fd).effects)
 
                 let sig = FnSig {
                     name: item.name,
@@ -19460,6 +20131,7 @@ impl Checker {
                     is_linear_closure: false,
                     linear_capture_count: 0,
                     epistemic_epsilon: 0.0 - 1.0,
+                    epistemic_min_confidence: epistemic_min_confidence,
                     visibility_kind: item.visibility.kind,
                     defining_module_seg_count: c.current_module.seg_count,
                     defining_module_id: c.current_module_id,
@@ -23344,9 +24016,21 @@ impl Checker {
         // checker_check_knowledge_ctor_expr_inplace.
         let first_arg = expr_list_head(e.args)
         let v_pair = self.check_opt_expr(first_arg)
-        let c = v_pair.0
+        var c = v_pair.0
         let v_ty = v_pair.1
-        (c, ty_knowledge(v_ty, 0.0 - 1.0))
+        let confidence = knowledge_ctor_confidence(e.args)
+        var minimum: i64 = 0 - 1
+        if c.current_sig_id >= 0 {
+            let sig = fn_sig_table_get(c.fn_sigs, c.current_sig_id)
+            if name_eq(sig.name, c.current_sig_name) {
+                minimum = sig.epistemic_min_confidence
+            }
+        }
+        let confidence_milli = if confidence < 0.0 { 1 } else { (confidence * 1000.0 + 0.5) as i64 }
+        if minimum > 0 && confidence_milli < minimum {
+            c = c.report_error_at(e.span, 215, confidence_milli, minimum, 0)
+        }
+        (c, ty_knowledge(v_ty, confidence))
     }
 
     fn check_variance_metric_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -23645,6 +24329,10 @@ impl Checker {
         }
         if provided_ty.kind != expected_ty.kind {
             return self.report_error_at(call_span, 36, 0, 0, 0)
+        }
+        if knowledge_inner(expected_ty).kind == TypeKind::TyUnknown &&
+           knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
+            return self
         }
         if knowledge_call_boundary_compatible(provided_ty, expected_ty) {
             self
@@ -24645,6 +25333,7 @@ impl Checker {
             is_linear_closure: capture_linear,
             linear_capture_count: capture_linear_count,
             epistemic_epsilon: capture_epsilon,
+            epistemic_min_confidence: 0 - 1,
             visibility_kind: VISIBILITY_PRIVATE,
             defining_module_seg_count: c.current_module.seg_count,
             defining_module_id: c.current_module_id,

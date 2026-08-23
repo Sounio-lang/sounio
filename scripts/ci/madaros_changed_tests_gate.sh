@@ -168,3 +168,8 @@ SOUNIO_TEST_SOUC_BIN="$MADAROS_BIN" \
     --jobs "${SOUNIO_TEST_JOBS:-4}"
 
 echo "MADAROS_CHANGED_TESTS_PASS count=${#selected[@]}"
+
+# Changed-tests only sees the PR diff. Recheck every suite-visible
+# requires:madaros known-failure so a compiler-only change cannot rot a tag
+# the way the 240 imported/native 139s did.
+bash "$ROOT_DIR/scripts/ci/known_failure_madaros_recheck.sh"
