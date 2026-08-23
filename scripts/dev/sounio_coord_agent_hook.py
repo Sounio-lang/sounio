@@ -168,7 +168,8 @@ def extract_paths(event: dict[str, Any]) -> list[str]:
 
 
 def notify_conflict(
-    root: Path,
+    tool_root: Path,
+    worktree: Path,
     agent: str,
     lane: str,
     paths: list[str],
@@ -180,7 +181,7 @@ def notify_conflict(
     to_agent, to_lane = owner.groups()
     message = f"Write conflict requested by {agent}/{lane}: {', '.join(paths)}"
     run_coord(
-        root,
+        tool_root,
         "send",
         "--agent",
         agent,
@@ -194,6 +195,7 @@ def notify_conflict(
         "request",
         "--message",
         message,
+        worktree=worktree,
     )
 
 
@@ -202,7 +204,16 @@ def main() -> int:
     event = read_event()
     cwd = str(event.get("cwd") or os.getcwd())
     root = repo_root(cwd)
-    if root is None or not (root / "bin" / "sounio-coord").is_file():
+    if root is None:
+        return 0
+    tool_root = repo_root(str(Path(__file__).resolve().parent))
+    if (
+        tool_root is None
+        or git_common_dir(tool_root) != git_common_dir(root)
+        or not (tool_root / "bin" / "sounio-coord").is_file()
+    ):
+        tool_root = root
+    if not (tool_root / "bin" / "sounio-coord").is_file():
         return 0
 
     event_name = str(event.get("hook_event_name", ""))
@@ -221,7 +232,7 @@ def main() -> int:
 
     if event_name == "SessionEnd":
         run_coord(
-            root,
+            tool_root,
             "release",
             "--agent",
             agent,
@@ -229,6 +240,7 @@ def main() -> int:
             lane,
             "--reason",
             "agent session ended",
+            worktree=root,
         )
         return 0
 
@@ -246,7 +258,7 @@ def main() -> int:
         target_root, target_paths = target
 
         result = run_coord(
-            root,
+            tool_root,
             "authorize",
             "--agent",
             agent,
@@ -258,21 +270,36 @@ def main() -> int:
             return 0
 
         if target_root == root:
-            result = run_coord(root, "scope", *common, "--files", *target_paths)
+            result = run_coord(
+                tool_root,
+                "scope",
+                *common,
+                "--files",
+                *target_paths,
+                worktree=root,
+            )
         if result.returncode != 0:
-            notify_conflict(root, agent, lane, target_paths, result.stderr)
+            notify_conflict(
+                tool_root, root, agent, lane, target_paths, result.stderr
+            )
             sys.stderr.write(result.stderr or "coordination scope update failed\n")
             return 2
         return 0
 
     if event_name == "SessionStart":
-        result = run_coord(root, "scope", *common)
+        result = run_coord(tool_root, "scope", *common, worktree=root)
     else:
         result = run_coord(
-            root, "heartbeat", "--agent", agent, "--lane", lane
+            tool_root,
+            "heartbeat",
+            "--agent",
+            agent,
+            "--lane",
+            lane,
+            worktree=root,
         )
         if result.returncode != 0:
-            result = run_coord(root, "scope", *common)
+            result = run_coord(tool_root, "scope", *common, worktree=root)
     if result.returncode != 0:
         sys.stderr.write(f"sounio coordination warning: {result.stderr}")
         return 0
@@ -286,7 +313,13 @@ def main() -> int:
 
     if event_name in {"UserPromptSubmit", "PostToolUse"}:
         inbox = run_coord(
-            root, "inbox", "--agent", agent, "--lane", lane
+            tool_root,
+            "inbox",
+            "--agent",
+            agent,
+            "--lane",
+            lane,
+            worktree=root,
         )
         lines = [line for line in inbox.stdout.splitlines() if line.startswith("MESSAGE ")]
         if lines:
