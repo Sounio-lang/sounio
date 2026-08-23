@@ -220,10 +220,13 @@ fn main() -> i64 with IO {
 
 Verified against real `/etc/hosts` (576 bytes, matching `wc -c` exactly) and
 `str_char_at(content, i)` returning the correct ASCII byte values for the
-file's real first line. This form is safe for READS — the write-corruption
-risk in Finding 1 (a `string` argument silently corrupting on-disk content)
-is specific to `write_file` being handed a `string` as its *write buffer*;
-reading via `read_file` into a `string` return value has no such risk.
+file's real first line. This form is safe for READS — a separate,
+`write_file`-specific write-corruption risk exists (passing a `string` as
+`write_file`'s buffer argument compiles and returns a plausible byte count
+while silently corrupting the file's actual on-disk content; only the
+array-buffer form is safe for writes) but does not apply here, since
+`read_file` only ever produces a `string`, never consumes one as a write
+buffer.
 
 ## Finding 8 — sibling-file imports within the same stdlib subdirectory use the bare unqualified form
 
@@ -270,23 +273,57 @@ compiles cleanly from OUTSIDE the defining module even though the struct
 itself is `pub` — Madaros does not appear to enforce field-level privacy
 independent of the struct's own visibility.
 
-## Known gap (not a compiler bug) — `stdlib/net/socket.sio`'s `tcp_listen` has no `SO_REUSEADDR`, causing real TIME_WAIT port-reuse flakiness
+## Resolved: `tcp_listen` now sets `SO_REUSEADDR` (was: known gap — TIME_WAIT port-reuse flakiness)
 
 Running a test that calls `tcp_listen` on a fixed port, then immediately
-reruns the same test on the same port with no delay, fails the second run's
-`tcp_listen` with a nonzero error — confirmed via `ss -tan` showing lingering
-TIME_WAIT entries on both the client and server side after a run (both ends
-actively close in quick succession, a simultaneous-close pattern). This
-clears within a few seconds on its own (well under the traditional 60s
-default), so it is NOT a hang — but any test suite that reruns fixed-port
-socket tests back-to-back can flake. **Mitigations available today**: use
-distinct ports across test files likely to run close together in time (the
-approach used so far). **Real fix, not yet done** (would require editing
-`stdlib/net/socket.sio`'s `tcp_listen`, which is out of scope for whichever
-task last touched this doc — flag it as a small, well-understood follow-up):
-add a `setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &1, 4)` syscall (`setsockopt`
-= syscall number 54 on x86-64 Linux) between `socket()` and `bind()` in
-`tcp_listen`.
+reruns the same test on the same port with no delay, used to fail the
+second run's `tcp_listen` with a nonzero error — confirmed via `ss -tan`
+showing lingering TIME_WAIT entries on both the client and server side
+after a run (both ends actively close in quick succession, a
+simultaneous-close pattern). This cleared within a few seconds on its own
+(well under the traditional 60s default), so it was NOT a hang — but any
+test suite that reruns fixed-port socket tests back-to-back could flake.
+**Mitigation used while this was open**: distinct ports across test files
+likely to run close together in time.
+
+**Fixed** in commit `723b87496`, which added a
+`setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &1, 4)` syscall (`setsockopt` =
+syscall number 54 on x86-64 Linux) between `socket()` and `bind()` in
+`stdlib/net/socket.sio`'s `tcp_listen`. Distinct ports per test file remain
+good practice for isolation, but the underlying TIME_WAIT flakiness this
+section originally described is no longer a live gap.
+
+## Finding 10 — ASCII dotted-decimal TEXT and raw 4-byte OCTETS are two different IPv4 representations, and mixing them up silently connects to the wrong address
+
+`stdlib/net/dns.sio`'s `resolve_ipv4` and `stdlib/net/http_client.sio`'s
+"host looks like a numeric IP" (`is_numeric_ip`) path both produce/consume
+ASCII dotted-decimal TEXT — e.g. the literal bytes `'1'`, `'2'`, `'7'`,
+`'.'`, `'0'`, `'.'`, `'0'`, `'.'`, `'1'` for `"127.0.0.1"`. `tcp_connect`'s
+`build_sockaddr` (`stdlib/net/socket.sio`), by contrast, reads its `ip:
+&RawBuf` argument as 4 raw octet BYTES directly (`rawbuf_get(ip, 0)` through
+`rawbuf_get(ip, 3)` used verbatim as the address bytes of a `sockaddr_in`)
+— it does not parse dotted-decimal text at all.
+
+An implementation that conflates these two representations — e.g. copying
+a numeric host's ASCII bytes straight into the buffer handed to
+`tcp_connect` — compiles cleanly, returns no error, and **silently connects
+to the wrong address**: the 4 bytes `'1'`, `'2'`, `'7'`, `'.'` (ASCII values
+49, 50, 55, 46) get used as the raw octets `49.50.55.46`, not `127.0.0.1`.
+This is exactly the kind of "silently wrong, not just unimplemented"
+failure mode this audit exists to catch.
+
+**Fix**: `stdlib/net/http_client.sio` adds `parse_ipv4_dotted(text: &RawBuf,
+max_len: i64, out: &RawBuf) -> bool`, which parses ASCII dotted-decimal text
+into 4 raw octets exactly once, in one place, before the result ever
+reaches `tcp_connect`. Both the "already numeric" and "resolved via DNS"
+branches of `http_get` produce ASCII dotted text into a common `addr_text`
+buffer; `parse_ipv4_dotted` is then the single conversion point from that
+text into the raw-octet buffer `tcp_connect` actually needs. Any future
+code that produces or consumes an IPv4 address on this stack must be
+explicit about which of the two representations it is working with —
+DNS/text-facing code produces dotted-decimal TEXT, syscall-facing code
+(`build_sockaddr`) consumes raw OCTETS, and the two must never be passed to
+each other directly.
 
 ## Scope note
 
