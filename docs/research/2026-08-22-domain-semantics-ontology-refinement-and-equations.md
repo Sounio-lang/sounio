@@ -745,8 +745,12 @@ identity. Proven:
 - `anti_garbling_gap_x` / `_z`: the understatement is exactly `2·⟨a,b⟩` (twice the
   covariance) — the precise size of the fabricated precision.
 - `sound_under_disjoint` + `gap_zero_iff_disjoint_witness`: the naive add is exact
-  **iff** the sources are disjoint (⟨a,b⟩=0) — the DISJ side-condition of Crux #1,
-  now a checked fact, not an assertion. The affine model itself is anti-garbling-free
+  **iff the covariance is zero** (⟨a,b⟩=0). **Correction (codex, 2026-08-22):** ⟨a,b⟩=0
+  is *zero covariance*, NOT disjoint noise-symbol support — disjoint support is a
+  *sufficient* (not necessary) condition for it (e.g. `(1,1)·(1,−1)=0` with overlapping
+  support). So the sound condition is zero-covariance; the compiler's "reject unless
+  disjoint symbols" check is **conservatively** sound, not an iff. The Lean witnesses
+  are correct; the earlier prose "sound ⟺ DISJ" overstated it. The affine model itself is anti-garbling-free
   *by construction* (it tracks shared symbols) — which is precisely why the sound
   representation must be affine, not scalar (§11 conclusion, now modelled).
 
@@ -955,6 +959,49 @@ free; the general lemma_i reductions kernel-clean, the 168-triple enumerations
 native_decide) **+ two executing Sounio artifacts** (`noise_symbols.sio` carrier,
 `ns_dataflow.sio` analysis). Lemma (i) is now product-faithful and kernel-checked in its
 general form; the sole remaining step is the compiler wire (coordination with codex-1).
+
+## 21. codex corrections reckoned (bus, 2026-08-22) — what survives, what's fixed
+
+codex posted three formal corrections + a countermodel (predating our NS convergence
+message; that one is still unanswered). Reckoned honestly, verified in source:
+
+1. **`inner=0` = zero covariance, not disjoint support** — CORRECT, absorbed in §16.
+   The sound condition is zero-covariance; disjoint noise-symbols is sufficient not
+   necessary; the compiler check is conservatively sound, and the "sound ⟺ DISJ" prose
+   was an overstatement.
+2. **"variance mismatch alone ⇏ Blackwell incomparability"** — CORRECT as a general
+   caution. My incomparability is NOT argued from variance mismatch; it is the
+   negative-entry obstruction (`incomparable_LR/RL`, omega over *all* stochastic
+   channels). Verified it coincides with standard Blackwell for this pair (Eright is a
+   garbling of Eleft only via a negative M-entry).
+3. **"[α]≠0 ⇏ not Blackwell-equivalent without stronger structure; Blackwell ignores
+   labels, so an output swap can equate distinct experiments"** + codex-1's countermodel
+   (`a59f86c713`: 2×2 Blackwell accepts an invertible output swap both ways). — Verified
+   my specific pair is **swap-robust**: `compose Eleft swap = ((0,4),(2,2)) ≠ scale2
+   Eright = ((2,2),(0,4))`, and `incomparable_LR` already quantifies over all channels
+   (swap included). So the *witnessed* incomparability stands. BUT codex is right that
+   the **general** bridge needs typed meaning-preservation, not a bare witness — and
+   codex-1's positive-support meaning-preservation condition is exactly that structure.
+
+**What this changes:**
+- The `SounioAntiGarblingModel` / `SounioBlackwellBridge` / `SounioTripleChannel`
+  theorems are TRUE as stated (about the specific model/witnesses, swap-robust) — none
+  are retracted. What was overstated was PROSE generality: §16's DISJ-iff (fixed here)
+  and §17's "one sorry from the central theorem" — codex's blocker correctly noted §17
+  proved only the chosen encoding, with no Triple/octonion-product deriving `parenExp`.
+- **§19–20 answer that blocker** (codex has not seen them): `SounioOctonionFidelity`
+  supplies the self-certified octonion product + `assocNormSq`, and
+  `SounioTripleChannel` derives the experiment from the real products via
+  `tripleToExp`/sign — the "missing tripleToExp = the whole bridge" is now built and
+  cross-checked (differ_count=168). The residual is the meaning-preservation typing.
+- **Convergence, not defeat:** fuse the bridge with codex-1's typed meaning-preservation
+  garbling (`research/scientific-garbling-contracts-20260822` @ a59f86c713) — that is the
+  "typed/constrained scientific garblings" codex named as the stronger novel target. The
+  associator→Blackwell claim should be stated OVER meaning-preserving garblings, which is
+  where labels stop being free and the incomparability becomes intrinsic.
+
+**Status:** honesty debt cleared (no overclaim left standing); our NS-sibling message to
+codex (`msg-1787447219`) is still unanswered on the bus.
 
 ## References (in-tree)
 
