@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.2
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.3
 
 usage() {
   cat <<'USAGE'
@@ -31,6 +31,15 @@ Commands:
                                  release a claim and record the handoff event
   authorize --agent ID [--lane ID] [--resources RESOURCE ...] [--files PATH ...]
                                  verify that a local active claim covers the requested ownership
+  endpoint-register --agent ID --lane ID --harness claude|codex
+          --transport tmux --address PANE --socket PATH [--ttl-seconds N]
+                                 register an expiring, verified delivery endpoint
+  endpoint-unregister --agent ID --lane ID
+                                 remove the lane's delivery endpoint
+  endpoint-status --agent ID --lane ID
+                                 inspect one delivery endpoint
+  wake    --agent ID --lane ID --message MESSAGE_ID
+                                 retry immediate delivery for a visible directed message
   handoff --agent ID --lane ID --to-agent ID --to-lane ID --message TEXT
           --commit SHA --gate NAME=PASS [--gate NAME=PASS ...]
           --evidence PATH [--evidence PATH ...] [--reply-to MESSAGE_ID]
@@ -51,11 +60,13 @@ Commands:
   wait    --agent ID --lane ID --message ID [--timeout-seconds N]
           [--poll-seconds N]
                                  wait for a reply, blocker, or handoff in the thread
-  prune                          remove expired claims
+  prune                          remove expired claims, messages, and delivery endpoints
 
 Environment:
   SOUNIO_AGENT_ID                default agent identifier for claim commands
   SOUNIO_COORD_TTL_SECONDS       claim lease duration (default: 14400)
+  SOUNIO_COORD_ENDPOINT_TTL_SECONDS
+                                 delivery endpoint duration (default: 1800)
   SOUNIO_COORD_DIR               shared state directory override
 
 Examples:
@@ -66,6 +77,8 @@ Examples:
   bin/sounio-coord scope --agent codex --lane session-abc123 \
     --intent "active Codex session" --files self-hosted/parser/ast.sio
   bin/sounio-coord heartbeat --agent codex-1 --lane parser-fix
+  bin/sounio-coord endpoint-register --agent codex-1 --lane parser-fix \
+    --harness codex --transport tmux --address "$TMUX_PANE" --socket "${TMUX%%,*}"
   bin/sounio-coord handoff --agent codex-1 --lane parser-fix \
     --to-agent claude --to-lane integration --message "parser fix ready" \
     --commit HEAD --gate parser-selftest=PASS --evidence artifacts/parser-gate.txt
@@ -104,8 +117,11 @@ CLAIMS_DIR="$STATE_DIR/claims"
 MESSAGES_DIR="$STATE_DIR/messages"
 ACKS_DIR="$STATE_DIR/message-acks"
 INJECTIONS_DIR="$STATE_DIR/message-injections"
+ENDPOINTS_DIR="$STATE_DIR/delivery-endpoints"
+WAKES_DIR="$STATE_DIR/message-wakes"
 EVENT_LOG="$STATE_DIR/events.log"
-mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR" "$INJECTIONS_DIR"
+mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR" "$INJECTIONS_DIR" \
+  "$ENDPOINTS_DIR" "$WAKES_DIR"
 
 NOW_EPOCH="$(date +%s)"
 NOW_TICK="$(date +%s%N)"
@@ -486,6 +502,190 @@ message_injection_path() {
     "$INJECTIONS_DIR" "$(slug "$1")" "$(slug "$2")" "$(slug "$3")"
 }
 
+endpoint_path() {
+  printf '%s/%s.endpoint' "$ENDPOINTS_DIR" "$(claim_id_for "$1" "$2")"
+}
+
+wake_receipt_path() {
+  printf '%s/%s--%s.wake' "$WAKES_DIR" "$(slug "$1")" "$(slug "$2")"
+}
+
+load_endpoint() {
+  local endpoint_file="$1" line
+  E_ID=''
+  E_AGENT=''
+  E_LANE=''
+  E_WORKTREE=''
+  E_HARNESS=''
+  E_TRANSPORT=''
+  E_ADDRESS=''
+  E_SOCKET=''
+  E_PANE_PID=''
+  E_COMMAND=''
+  E_CREATED_UTC=''
+  E_LAST_UTC=''
+  E_LAST_EPOCH=0
+  E_TTL=0
+  [[ -r "$endpoint_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      endpoint_id=*) E_ID="${line#endpoint_id=}" ;;
+      agent=*) E_AGENT="${line#agent=}" ;;
+      lane=*) E_LANE="${line#lane=}" ;;
+      worktree=*) E_WORKTREE="${line#worktree=}" ;;
+      harness=*) E_HARNESS="${line#harness=}" ;;
+      transport=*) E_TRANSPORT="${line#transport=}" ;;
+      address=*) E_ADDRESS="${line#address=}" ;;
+      socket=*) E_SOCKET="${line#socket=}" ;;
+      pane_pid=*) E_PANE_PID="${line#pane_pid=}" ;;
+      command=*) E_COMMAND="${line#command=}" ;;
+      created_utc=*) E_CREATED_UTC="${line#created_utc=}" ;;
+      last_seen_utc=*) E_LAST_UTC="${line#last_seen_utc=}" ;;
+      last_seen_epoch=*) E_LAST_EPOCH="${line#last_seen_epoch=}" ;;
+      ttl_seconds=*) E_TTL="${line#ttl_seconds=}" ;;
+    esac
+  done < "$endpoint_file"
+}
+
+endpoint_expired() {
+  local ttl="${E_TTL:-0}" last="${E_LAST_EPOCH:-0}"
+  [[ "$ttl" =~ ^[0-9]+$ && "$last" =~ ^[0-9]+$ ]] || return 0
+  ((NOW_EPOCH > last + ttl))
+}
+
+write_endpoint() {
+  local endpoint_file="$1" tmp_file
+  tmp_file="$(mktemp "$ENDPOINTS_DIR/.endpoint-write.XXXXXX")"
+  {
+    printf 'endpoint_id=%s\n' "$E_ID"
+    printf 'agent=%s\n' "$E_AGENT"
+    printf 'lane=%s\n' "$E_LANE"
+    printf 'worktree=%s\n' "$E_WORKTREE"
+    printf 'harness=%s\n' "$E_HARNESS"
+    printf 'transport=%s\n' "$E_TRANSPORT"
+    printf 'address=%s\n' "$E_ADDRESS"
+    printf 'socket=%s\n' "$E_SOCKET"
+    printf 'pane_pid=%s\n' "$E_PANE_PID"
+    printf 'command=%s\n' "$E_COMMAND"
+    printf 'created_utc=%s\n' "$E_CREATED_UTC"
+    printf 'last_seen_utc=%s\n' "$E_LAST_UTC"
+    printf 'last_seen_epoch=%s\n' "$E_LAST_EPOCH"
+    printf 'ttl_seconds=%s\n' "$E_TTL"
+  } > "$tmp_file"
+  mv "$tmp_file" "$endpoint_file"
+}
+
+tmux_endpoint_snapshot() {
+  local socket="$1" address="$2" pane_line pane_id pane_pid pane_command pane_path pane_root
+  pane_line="$(tmux -S "$socket" display-message -p -t "$address" \
+    '#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
+  IFS='|' read -r pane_id pane_pid pane_command pane_path <<< "$pane_line"
+  [[ -n "$pane_id" && "$pane_pid" =~ ^[1-9][0-9]*$ && -n "$pane_command" && -n "$pane_path" ]] || \
+    return 1
+  pane_root="$(git -C "$pane_path" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$pane_root" ]] || return 1
+  pane_root="$(cd "$pane_root" && pwd -P)"
+  [[ "$pane_root" == "$WORKTREE" ]] || return 1
+  T_PANE_ID="$pane_id"
+  T_PANE_PID="$pane_pid"
+  T_COMMAND="$pane_command"
+  T_PATH="$pane_path"
+}
+
+harness_command_matches() {
+  local harness="$1" command="$2"
+  case "$harness" in
+    claude) [[ "$command" == claude* ]] ;;
+    codex) [[ "$command" == codex* || "$command" == node ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+ENDPOINT_STATE='unavailable'
+endpoint_state() {
+  local current_pane current_pid current_command current_path current_root
+  ENDPOINT_STATE='unavailable'
+  if endpoint_expired; then
+    ENDPOINT_STATE='stale'
+    return 1
+  fi
+  [[ "$E_TRANSPORT" == tmux && -S "$E_SOCKET" ]] || return 1
+  current_pane="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_id}' 2>/dev/null || true)"
+  current_pid="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_pid}' 2>/dev/null || true)"
+  current_command="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_current_command}' 2>/dev/null || true)"
+  current_path="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_current_path}' 2>/dev/null || true)"
+  if [[ "$current_pane" != "$E_ADDRESS" || "$current_pid" != "$E_PANE_PID" || \
+    "$current_command" != "$E_COMMAND" || -z "$current_path" ]] || \
+    ! harness_command_matches "$E_HARNESS" "$current_command"; then
+    ENDPOINT_STATE='drifted'
+    return 1
+  fi
+  current_root="$(git -C "$current_path" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$current_root" ]] && current_root="$(cd "$current_root" && pwd -P)"
+  if [[ "$current_root" != "$E_WORKTREE" ]]; then
+    ENDPOINT_STATE='drifted'
+    return 1
+  fi
+  ENDPOINT_STATE='active'
+}
+
+remove_endpoint_for_lane() {
+  local agent="$1" lane="$2" worktree="$3" reason="$4" endpoint_file
+  endpoint_file="$(endpoint_path "$agent" "$lane")"
+  [[ -f "$endpoint_file" ]] || return 0
+  load_endpoint "$endpoint_file"
+  [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" ]] || die "endpoint owner mismatch"
+  [[ "$E_WORKTREE" == "$worktree" ]] || die "endpoint belongs to worktree $E_WORKTREE"
+  unlink "$endpoint_file"
+  printf 'utc=%s event=ENDPOINT_UNREGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s reason=%s\n' \
+    "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$reason" >> "$EVENT_LOG"
+}
+
+WAKE_STATUS='unavailable'
+attempt_message_wake() {
+  local message_id="$1" message_file endpoint_file receipt_file prompt tmp_file
+  WAKE_STATUS='unavailable'
+  message_file="$MESSAGES_DIR/$(slug "$message_id").message"
+  [[ -f "$message_file" ]] || return 1
+  load_message "$message_file"
+  [[ -n "$M_TO_AGENT" && -n "$M_TO_LANE" ]] || return 1
+  endpoint_file="$(endpoint_path "$M_TO_AGENT" "$M_TO_LANE")"
+  [[ -f "$endpoint_file" ]] || return 1
+  load_endpoint "$endpoint_file"
+  if ! endpoint_state; then
+    WAKE_STATUS="$ENDPOINT_STATE"
+    if [[ "$ENDPOINT_STATE" == drifted ]]; then
+      printf 'WAKE_REFUSED message_id=%s endpoint_id=%s reason=endpoint-drift\n' "$M_ID" "$E_ID" >&2
+      WAKE_STATUS='failed-closed'
+    fi
+    return 1
+  fi
+  receipt_file="$(wake_receipt_path "$M_ID" "$E_ID")"
+  if [[ -f "$receipt_file" ]]; then
+    WAKE_STATUS='deduplicated'
+    printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s reason=already-delivered\n' "$M_ID" "$E_ID"
+    return 0
+  fi
+
+  prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run bin/sounio-coord inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then reply or ack $M_ID."
+  if ! tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" -l "$prompt" 2>/dev/null || \
+    ! tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" Enter 2>/dev/null; then
+    WAKE_STATUS='failed'
+    printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=tmux\n' "$M_ID" "$E_ID" >&2
+    return 1
+  fi
+
+  tmp_file="$(mktemp "$WAKES_DIR/.wake-write.XXXXXX")"
+  printf 'utc=%s message_id=%s endpoint_id=%s transport=%s address=%s\n' \
+    "$NOW_UTC" "$M_ID" "$E_ID" "$E_TRANSPORT" "$E_ADDRESS" > "$tmp_file"
+  mv "$tmp_file" "$receipt_file"
+  printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=%s address=%s\n' \
+    "$NOW_UTC" "$M_ID" "$E_ID" "$E_AGENT" "$E_LANE" "$E_TRANSPORT" "$E_ADDRESS" >> "$EVENT_LOG"
+  WAKE_STATUS='delivered'
+  printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=%s address=%s\n' \
+    "$M_ID" "$E_ID" "$E_TRANSPORT" "$E_ADDRESS"
+}
+
 print_message_line() {
   printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s thread=%s reply_to=%s' \
     "$M_ID" "$M_CREATED_UTC" "$M_FROM_AGENT" "$M_FROM_LANE" "$M_KIND" "$M_TEXT" \
@@ -806,6 +1006,7 @@ release_command() {
   C_SHA="$(current_sha)"
   append_event RELEASE "$reason"
   unlink "$claim_file"
+  remove_endpoint_for_lane "$agent" "$lane" "$WORKTREE" release
   printf 'RELEASED claim_id=%s reason=%s\n' "$C_ID" "${reason:-unspecified}"
 }
 
@@ -911,6 +1112,170 @@ authorize_command() {
   die "no active claim in worktree $WORKTREE covers the requested ownership for agent $agent"
 }
 
+endpoint_register_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' harness='' transport='' address='' socket=''
+  local ttl="${SOUNIO_COORD_ENDPOINT_TTL_SECONDS:-1800}" claim_file endpoint_file created_utc
+  local existing_endpoint
+  local -a endpoint_paths=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --harness) require_arg "$1" "$2"; harness="$2"; shift 2 ;;
+      --transport) require_arg "$1" "$2"; transport="$2"; shift 2 ;;
+      --address) require_arg "$1" "$2"; address="$2"; shift 2 ;;
+      --socket) require_arg "$1" "$2"; socket="$2"; shift 2 ;;
+      --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown endpoint-register option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "endpoint-register requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "endpoint-register requires --lane"
+  [[ "$harness" =~ ^(claude|codex)$ ]] || die "--harness must be claude or codex"
+  [[ "$transport" == tmux ]] || die "--transport currently supports only tmux"
+  [[ -n "$address" ]] || die "endpoint-register requires --address"
+  [[ -n "$socket" ]] || die "endpoint-register requires --socket"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  [[ "$agent" =~ ^[A-Za-z0-9._-]+$ ]] || \
+    die "endpoint agent contains unsupported characters: $agent"
+  [[ "$lane" =~ ^[A-Za-z0-9._-]+$ ]] || \
+    die "endpoint lane contains unsupported characters: $lane"
+  validate_value address "$address"
+  validate_value socket "$socket"
+  socket="$(readlink -f "$socket" 2>/dev/null || true)"
+  [[ -n "$socket" && -S "$socket" ]] || die "tmux socket is not available: ${socket:-missing}"
+  tmux_endpoint_snapshot "$socket" "$address" || \
+    die "tmux endpoint does not resolve to the current worktree"
+  harness_command_matches "$harness" "$T_COMMAND" || \
+    die "tmux pane command $T_COMMAND does not match harness $harness"
+
+  claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
+  endpoint_file="$(endpoint_path "$agent" "$lane")"
+  acquire_state_lock "the endpoint registration"
+  [[ -f "$claim_file" ]] || die "claim not found: $(claim_id_for "$agent" "$lane")"
+  load_claim "$claim_file"
+  claim_expired && die "claim expired before endpoint registration: $C_ID"
+  [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" ]] || die "claim owner mismatch"
+  [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+  endpoint_paths=("$ENDPOINTS_DIR"/*.endpoint)
+  for existing_endpoint in "${endpoint_paths[@]}"; do
+    [[ -f "$existing_endpoint" && "$existing_endpoint" != "$endpoint_file" ]] || continue
+    load_endpoint "$existing_endpoint"
+    endpoint_expired && continue
+    if [[ "$E_SOCKET" == "$socket" && "$E_ADDRESS" == "$T_PANE_ID" ]]; then
+      die "tmux endpoint is already owned by $E_AGENT/$E_LANE"
+    fi
+  done
+  created_utc="$NOW_UTC"
+  if [[ -f "$endpoint_file" ]]; then
+    load_endpoint "$endpoint_file"
+    [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" ]] || die "endpoint owner mismatch"
+    [[ "$E_WORKTREE" == "$WORKTREE" ]] || die "endpoint belongs to worktree $E_WORKTREE"
+    created_utc="${E_CREATED_UTC:-$NOW_UTC}"
+  fi
+  E_ID="$(claim_id_for "$agent" "$lane")"
+  E_AGENT="$agent"
+  E_LANE="$lane"
+  E_WORKTREE="$WORKTREE"
+  E_HARNESS="$harness"
+  E_TRANSPORT="$transport"
+  E_ADDRESS="$T_PANE_ID"
+  E_SOCKET="$socket"
+  E_PANE_PID="$T_PANE_PID"
+  E_COMMAND="$T_COMMAND"
+  E_CREATED_UTC="$created_utc"
+  E_LAST_UTC="$NOW_UTC"
+  E_LAST_EPOCH="$NOW_EPOCH"
+  E_TTL="$ttl"
+  write_endpoint "$endpoint_file"
+  printf 'utc=%s event=ENDPOINT_REGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s harness=%s transport=%s address=%s\n' \
+    "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$E_HARNESS" \
+    "$E_TRANSPORT" "$E_ADDRESS" >> "$EVENT_LOG"
+  printf 'ENDPOINT_REGISTERED endpoint_id=%s harness=%s transport=%s address=%s pane_pid=%s command=%s expires_in=%s\n' \
+    "$E_ID" "$E_HARNESS" "$E_TRANSPORT" "$E_ADDRESS" "$E_PANE_PID" "$E_COMMAND" "$E_TTL"
+}
+
+endpoint_unregister_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' endpoint_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown endpoint-unregister option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "endpoint-unregister requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "endpoint-unregister requires --lane"
+  endpoint_file="$(endpoint_path "$agent" "$lane")"
+  acquire_state_lock "the endpoint removal"
+  if [[ ! -f "$endpoint_file" ]]; then
+    printf 'ENDPOINT_ABSENT endpoint_id=%s\n' "$(claim_id_for "$agent" "$lane")"
+    return 0
+  fi
+  load_endpoint "$endpoint_file"
+  [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" ]] || die "endpoint owner mismatch"
+  [[ "$E_WORKTREE" == "$WORKTREE" ]] || die "endpoint belongs to worktree $E_WORKTREE"
+  unlink "$endpoint_file"
+  printf 'utc=%s event=ENDPOINT_UNREGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s\n' \
+    "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" >> "$EVENT_LOG"
+  printf 'ENDPOINT_UNREGISTERED endpoint_id=%s\n' "$E_ID"
+}
+
+endpoint_status_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' endpoint_file state
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown endpoint-status option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "endpoint-status requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "endpoint-status requires --lane"
+  endpoint_file="$(endpoint_path "$agent" "$lane")"
+  [[ -f "$endpoint_file" ]] || die "endpoint not found: $(claim_id_for "$agent" "$lane")"
+  load_endpoint "$endpoint_file"
+  endpoint_state || true
+  state="$ENDPOINT_STATE"
+  printf 'ENDPOINT_STATUS endpoint_id=%s state=%s agent=%s lane=%s worktree=%s harness=%s transport=%s address=%s pane_pid=%s command=%s last_seen=%s\n' \
+    "$E_ID" "$state" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$E_HARNESS" \
+    "$E_TRANSPORT" "$E_ADDRESS" "$E_PANE_PID" "$E_COMMAND" "$E_LAST_UTC"
+}
+
+wake_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message_id="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown wake option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "wake requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "wake requires --lane"
+  [[ -n "$message_id" ]] || die "wake requires --message"
+  message_file="$MESSAGES_DIR/$(slug "$message_id").message"
+  [[ -f "$message_file" ]] || die "message not found: $message_id"
+  load_message "$message_file"
+  if [[ "$M_FROM_AGENT" != "$agent" || "$M_FROM_LANE" != "$lane" ]]; then
+    [[ "$M_TO_AGENT" == "$agent" && "$M_TO_LANE" == "$lane" ]] || \
+      die "message wake is not visible to $agent/$lane"
+  fi
+  acquire_state_lock "the message wake"
+  if attempt_message_wake "$message_id"; then
+    return 0
+  fi
+  printf 'WAKE_UNAVAILABLE message_id=%s status=%s\n' "$message_id" "$WAKE_STATUS" >&2
+  return 3
+}
+
 send_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane=''
   local kind='info' message='' ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
@@ -985,6 +1350,9 @@ send_command() {
     "$NOW_UTC" "$message_id" "$agent" "$lane" "$to_agent" "$to_lane" "$kind" >> "$EVENT_LOG"
   printf 'SENT message_id=%s to_agent=%s to_lane=%s kind=%s thread_id=%s reply_to=%s\n' \
     "$message_id" "${to_agent:-*}" "${to_lane:-*}" "$kind" "$thread_id" "${reply_to:--}"
+  if [[ -n "$to_agent" && -n "$to_lane" ]] && ! attempt_message_wake "$message_id"; then
+    printf 'WAKE_UNAVAILABLE message_id=%s status=%s\n' "$message_id" "$WAKE_STATUS"
+  fi
 }
 
 handoff_command() {
@@ -1106,9 +1474,13 @@ handoff_command() {
   C_SHA="${commit_sha:0:12}"
   append_event HANDOFF "message_id=$message_id commit=$commit_sha"
   unlink "$claim_file"
+  remove_endpoint_for_lane "$agent" "$lane" "$WORKTREE" handoff
   printf 'HANDED_OFF claim_id=%s message_id=%s commit=%s to_agent=%s to_lane=%s gates=%s evidence=%s\n' \
     "$C_ID" "$message_id" "$commit_sha" "$to_agent" "$to_lane" \
     "$(join_values "${gates[@]}")" "$(join_values "${evidence_paths[@]}")"
+  if ! attempt_message_wake "$message_id"; then
+    printf 'WAKE_UNAVAILABLE message_id=%s status=%s\n' "$message_id" "$WAKE_STATUS"
+  fi
 }
 
 inbox_command() {
@@ -1235,9 +1607,10 @@ message_status_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file receipt_file
   local original_from_agent original_from_lane original_to_agent original_to_lane
   local original_kind original_thread original_epoch request_state latest_response='-'
-  local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0
+  local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0 wakes=0
   local receipt_utc receipt_agent receipt_lane token_utc token_agent token_lane
-  local -a message_paths=() injection_paths=() ack_paths=()
+  local token_message token_endpoint token_transport token_address
+  local -a message_paths=() injection_paths=() ack_paths=() wake_paths=()
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
@@ -1303,11 +1676,13 @@ message_status_command() {
 
   injection_paths=("$INJECTIONS_DIR/$(slug "$message_id")"--*.injected)
   ack_paths=("$ACKS_DIR/$(slug "$message_id")"--*.ack)
+  wake_paths=("$WAKES_DIR/$(slug "$message_id")"--*.wake)
   injected="${#injection_paths[@]}"
   acknowledged="${#ack_paths[@]}"
-  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s\n' \
+  wakes="${#wake_paths[@]}"
+  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s wakes=%s\n' \
     "$message_id" "$original_kind" "$original_thread" "$request_state" "$injected" \
-    "$acknowledged" "$responses" "$latest_response"
+    "$acknowledged" "$responses" "$latest_response" "$wakes"
   for receipt_file in "${injection_paths[@]}"; do
     [[ -f "$receipt_file" ]] || continue
     read -r token_utc token_agent token_lane < "$receipt_file" || true
@@ -1325,6 +1700,13 @@ message_status_command() {
     receipt_lane="${token_lane#lane=}"
     printf 'ACKNOWLEDGEMENT message_id=%s utc=%s agent=%s lane=%s\n' \
       "$message_id" "$receipt_utc" "$receipt_agent" "$receipt_lane"
+  done
+  for receipt_file in "${wake_paths[@]}"; do
+    [[ -f "$receipt_file" ]] || continue
+    read -r token_utc token_message token_endpoint token_transport token_address < "$receipt_file" || true
+    printf 'WAKE_RECEIPT message_id=%s utc=%s endpoint_id=%s transport=%s address=%s\n' \
+      "$message_id" "${token_utc#utc=}" "${token_endpoint#endpoint_id=}" \
+      "${token_transport#transport=}" "${token_address#address=}"
   done
 }
 
@@ -1423,8 +1805,9 @@ ack_command() {
 }
 
 prune_command() {
-  local removed=0 messages_removed=0 claim_file message_file ack_file injection_file
-  local -a message_paths=() ack_paths=() injection_paths=()
+  local removed=0 messages_removed=0 endpoints_removed=0
+  local claim_file message_file ack_file injection_file endpoint_file wake_file
+  local -a message_paths=() ack_paths=() injection_paths=() endpoint_paths=() wake_paths=()
   acquire_state_lock "prune"
   refresh_claim_paths
   for claim_file in "${claim_paths[@]}"; do
@@ -1433,6 +1816,7 @@ prune_command() {
     if claim_expired; then
       append_event EXPIRED "lease expired"
       unlink "$claim_file"
+      remove_endpoint_for_lane "$C_AGENT" "$C_LANE" "$C_WORKTREE" claim-expired
       removed=$((removed + 1))
       printf 'PRUNED claim_id=%s agent=%s lane=%s\n' "$C_ID" "$C_AGENT" "$C_LANE"
     fi
@@ -1451,18 +1835,34 @@ prune_command() {
       for injection_file in "${injection_paths[@]}"; do
         [[ -f "$injection_file" ]] && unlink "$injection_file"
       done
+      wake_paths=("$WAKES_DIR/$(slug "$M_ID")"--*.wake)
+      for wake_file in "${wake_paths[@]}"; do
+        [[ -f "$wake_file" ]] && unlink "$wake_file"
+      done
       messages_removed=$((messages_removed + 1))
       printf 'PRUNED_MESSAGE message_id=%s\n' "$M_ID"
     fi
   done
+  endpoint_paths=("$ENDPOINTS_DIR"/*.endpoint)
+  for endpoint_file in "${endpoint_paths[@]}"; do
+    [[ -f "$endpoint_file" ]] || continue
+    load_endpoint "$endpoint_file"
+    if endpoint_expired; then
+      unlink "$endpoint_file"
+      endpoints_removed=$((endpoints_removed + 1))
+      printf 'PRUNED_ENDPOINT endpoint_id=%s agent=%s lane=%s\n' "$E_ID" "$E_AGENT" "$E_LANE"
+    fi
+  done
   printf 'pruned=%s pruned_messages=%s\n' "$removed" "$messages_removed"
+  printf 'pruned_endpoints=%s\n' "$endpoints_removed"
 }
 
 status_command() {
-  local claim_file existing other_file wt branch dirty head marker context_branch file resource local_conflict
+  local claim_file endpoint_file existing other_file wt branch dirty head marker context_branch file resource local_conflict
   local active=0 stale=0 conflicts=0 total_wt=0 dirty_wt=0 claimed_wt=0 shown_wt=0 relevant_wt=0 max_rows
+  local active_endpoints=0 stale_endpoints=0 drifted_endpoints=0 unavailable_endpoints=0 endpoint_marker
   local brief=0 inspect_all=0 worktree_scan='current-and-claimed'
-  local -a worktrees=() inspect_worktrees=() first_files=() second_files=()
+  local -a worktrees=() inspect_worktrees=() first_files=() second_files=() endpoint_paths=()
   local -a first_resources=() second_resources=()
   max_rows="${SOUNIO_COORD_MAX_WORKTREE_ROWS:-40}"
 
@@ -1529,6 +1929,25 @@ status_command() {
     fi
   done
   ((active + stale > 0)) || printf 'NONE\n'
+
+  printf '\n== Delivery endpoints ==\n'
+  endpoint_paths=("$ENDPOINTS_DIR"/*.endpoint)
+  for endpoint_file in "${endpoint_paths[@]}"; do
+    [[ -f "$endpoint_file" ]] || continue
+    load_endpoint "$endpoint_file"
+    endpoint_state || true
+    case "$ENDPOINT_STATE" in
+      active) active_endpoints=$((active_endpoints + 1)) ;;
+      stale) stale_endpoints=$((stale_endpoints + 1)) ;;
+      drifted) drifted_endpoints=$((drifted_endpoints + 1)) ;;
+      *) unavailable_endpoints=$((unavailable_endpoints + 1)) ;;
+    esac
+    endpoint_marker="${ENDPOINT_STATE^^}_ENDPOINT"
+    printf '%s endpoint_id=%s agent=%s lane=%s worktree=%s harness=%s transport=%s address=%s last_seen=%s\n' \
+      "$endpoint_marker" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$E_HARNESS" \
+      "$E_TRANSPORT" "$E_ADDRESS" "$E_LAST_UTC"
+  done
+  ((active_endpoints + stale_endpoints + drifted_endpoints + unavailable_endpoints > 0)) || printf 'NONE\n'
 
   printf '\n== Active conflicts ==\n'
   for existing in "${claim_paths[@]}"; do
@@ -1621,6 +2040,8 @@ status_command() {
     fi
   fi
   printf '\nsummary=active_claims:%s stale_claims:%s conflicts:%s\n' "$active" "$stale" "$conflicts"
+  printf 'delivery_summary=active_endpoints:%s stale_endpoints:%s drifted_endpoints:%s unavailable_endpoints:%s\n' \
+    "$active_endpoints" "$stale_endpoints" "$drifted_endpoints" "$unavailable_endpoints"
   STATUS_CONFLICTS="$conflicts"
 }
 
@@ -1654,6 +2075,10 @@ case "$command" in
   heartbeat) heartbeat_command "$@" ;;
   release) release_command "$@" ;;
   authorize) authorize_command "$@" ;;
+  endpoint-register) endpoint_register_command "$@" ;;
+  endpoint-unregister) endpoint_unregister_command "$@" ;;
+  endpoint-status) endpoint_status_command "$@" ;;
+  wake) wake_command "$@" ;;
   handoff) handoff_command "$@" ;;
   send) send_command "$@" ;;
   inbox) inbox_command "$@" ;;
@@ -1666,5 +2091,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, wake, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac

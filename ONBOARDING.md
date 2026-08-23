@@ -89,13 +89,24 @@ IR ou claims científicas, leia também
   `--files` por último, e proteja globs com aspas, por exemplo
   `'concept:epistemic/**'` e `'self-hosted/compiler/**'`.
 - Hooks de projeto registram automaticamente sessões Claude/Codex e reservam arquivos antes de
-  `Write`, `Edit` e `apply_patch`. No Codex, abra `/hooks` e aprove o hook quando seu hash mudar.
+  `Write`, `Edit` e `apply_patch`. Quando o hook comprova pane tmux, processo e worktree, ele
+  também anuncia um endpoint de entrega imediata com expiração. No Codex, abra `/hooks` e aprove
+  o hook quando seu hash mudar.
 - Escritas feitas dentro de comandos Bash continuam exigindo claim manual, pois o hook não pode
   inferir com segurança todos os efeitos de um comando de shell. Reuse o agent/lane exibido pelo
   hook de startup com `bin/sounio-coord scope`, evitando criar uma segunda lease sobreposta.
-- Para conversar com outra lane durante o trabalho, use `bin/sounio-coord send`; mensagens não
-  lidas entram automaticamente no próximo turno ou passo de ferramenta do destinatário. Consulte com
+- Para conversar com outra lane durante o trabalho, use `bin/sounio-coord send`. Uma mensagem
+  dirigida tenta acordar imediatamente um endpoint verificado; qualquer drift de pane, PID,
+  harness ou worktree recusa a entrega sem apagar a mensagem durável. O wake injeta apenas
+  metadados e o comando de inbox, nunca o corpo da mensagem. Sem endpoint, mensagens não lidas
+  entram no próximo turno ou passo de ferramenta do destinatário. Consulte com
   `bin/sounio-coord inbox` e confirme o tratamento com `bin/sounio-coord ack`.
+- `WAKE_DELIVERED` prova somente a entrega ao transporte. Não prova injeção pelo hook, leitura,
+  ack ou resposta; `bin/sounio-coord message-status` mostra esses recibos separadamente. Use
+  `endpoint-status` para inspecionar um endpoint e `wake --message <id>` para tentar novamente.
+- Não abra um segundo `claude --resume` para forçar uma mensagem em uma sessão local já ativa.
+  Agentes Claude em background sem endpoint próprio verificável continuam recebendo pelo próximo
+  boundary de hook ou pelo gerenciador `claude agents` existente.
 - Para uma entrega aceita, use `bin/sounio-coord handoff` com `--commit HEAD`,
   um ou mais `--gate <nome>=PASS` e ao menos um `--evidence <caminho>`. O comando
   publica commit, gates, evidências e o snapshot da ownership antes de liberar a
