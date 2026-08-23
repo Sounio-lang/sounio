@@ -1,0 +1,79 @@
+//@ run-pass
+//@ description: TCP loopback round-trip on a high port (>= 32768) — regression test for the port_hi_lo threshold-ladder bug (missing 32768 rung meant any port with bit 15 set silently corrupted the hi/lo byte split)
+//
+// Same structure/workarounds as net_socket_loopback.sio (see that file and
+// the top-of-file comment in stdlib/net/socket.sio for the full writeup of
+// the compiler-limitation workarounds this exercises). This test differs
+// only in using port 40000 (0x9C40, bit 15 set) instead of 18080, so it
+// specifically covers the previously-broken high half of the u16 port
+// range that 18080 alone does not exercise.
+
+use net::socket::*
+
+fn main() -> i32 with IO, Mut {
+    var server_ip = Buf4096 { data: [0; 4096] }
+    server_ip.data[0] = 49   // "1"
+    server_ip.data[1] = 50   // "2"
+    server_ip.data[2] = 55   // "7"
+    server_ip.data[3] = 46   // "."
+    server_ip.data[4] = 48   // "0"
+    server_ip.data[5] = 46   // "."
+    server_ip.data[6] = 48   // "0"
+    server_ip.data[7] = 46   // "."
+    server_ip.data[8] = 49   // "1"
+    let ip_len = 9
+
+    let (listener_raw, listen_err) = tcp_listen(&server_ip, ip_len, 40000 as u16, 1)
+    if listen_err != 0 {
+        println("FAIL: tcp_listen returned error")
+        return 1
+    }
+    let listener = TcpSocket { fd: listener_raw.fd }
+
+    let (client_sock_raw, connect_err) = tcp_connect(&server_ip, ip_len, 40000 as u16)
+    if connect_err != 0 {
+        println("FAIL: tcp_connect returned error")
+        return 1
+    }
+    let client_sock = TcpSocket { fd: client_sock_raw.fd }
+
+    let (server_conn_raw, accept_err) = tcp_accept(&listener)
+    if accept_err != 0 {
+        println("FAIL: tcp_accept returned error")
+        return 1
+    }
+    let server_conn = TcpSocket { fd: server_conn_raw.fd }
+
+    var send_buf = Buf4096 { data: [0; 4096] }
+    send_buf.data[0] = 72   // 'H'
+    send_buf.data[1] = 73   // 'I'
+    let (client_sock2_raw, sent) = tcp_send(client_sock, &send_buf, 2)
+    if sent != 2 {
+        println("FAIL: tcp_send did not send 2 bytes")
+        return 1
+    }
+    let client_sock2 = TcpSocket { fd: client_sock2_raw.fd }
+
+    var recv_buf = Buf4096 { data: [0; 4096] }
+    let (server_conn2_raw, received) = tcp_recv(server_conn, &!recv_buf)
+    if received != 2 {
+        println("FAIL: tcp_recv did not receive 2 bytes")
+        return 1
+    }
+    let server_conn2 = TcpSocket { fd: server_conn2_raw.fd }
+    if recv_buf.data[0] != 72 {
+        println("FAIL: byte 0 mismatch")
+        return 1
+    }
+    if recv_buf.data[1] != 73 {
+        println("FAIL: byte 1 mismatch")
+        return 1
+    }
+
+    tcp_close(client_sock2)
+    tcp_close(server_conn2)
+    tcp_close(listener)
+
+    println("PASS: high-port (40000) loopback round-trip matched")
+    return 0
+}
