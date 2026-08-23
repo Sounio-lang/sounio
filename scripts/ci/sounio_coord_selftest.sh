@@ -40,6 +40,20 @@ output="$(
 )"
 grep -qE '^CLAIMED claim_id=agent-a--parser$' <<< "$output" || fail 'first claim was not created'
 
+output="$(
+  cd "$REPO"
+  run_coord authorize --agent agent-a --files self-hosted/parser/example.sio
+)"
+grep -qE '^AUTHORIZED claim_id=agent-a--parser ' <<< "$output" || \
+  fail 'owning worktree did not authorize a covered child path'
+
+if (
+  cd "$TEST_ROOT/second-worktree"
+  run_coord authorize --agent agent-a --files self-hosted/parser/example.sio
+) >/dev/null 2>&1; then
+  fail 'claim authorized a write from the wrong worktree'
+fi
+
 if (
   cd "$TEST_ROOT/second-worktree"
   run_coord claim --agent agent-b --lane parser-child --ttl-seconds 600 \
@@ -54,6 +68,20 @@ output="$(
     --intent 'disjoint ownership' --files 'self-hosted/codegen/**'
 )"
 grep -qE '^CLAIMED claim_id=agent-b--codegen$' <<< "$output" || fail 'disjoint claim was rejected'
+
+output="$(
+  cd "$TEST_ROOT/second-worktree"
+  run_coord authorize --agent agent-b --lane codegen --files self-hosted/codegen/example.sio
+)"
+grep -qE '^AUTHORIZED claim_id=agent-b--codegen ' <<< "$output" || \
+  fail 'explicit lane authorization rejected a covered path'
+
+if (
+  cd "$TEST_ROOT/second-worktree"
+  run_coord authorize --agent agent-b --lane codegen --files self-hosted
+) >/dev/null 2>&1; then
+  fail 'a child claim authorized its parent directory'
+fi
 
 output="$(
   cd "$TEST_ROOT/second-worktree"
