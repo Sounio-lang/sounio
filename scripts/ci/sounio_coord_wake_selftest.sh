@@ -112,6 +112,34 @@ output="$(coord "$REPO" message-status --agent sender --lane origin --message "$
 grep -q 'request_state=open injected=0 acknowledged=0 responses=0 .*wakes=1$' <<< "$output" || \
   fail 'message status did not expose the wake receipt independently'
 
+SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent codex \
+  --lane legacy-recipient --to-agent sender --to-lane origin --kind info \
+  --message 'establish a historical endpoint without registration' >/dev/null
+legacy_secret='legacy-raw-message-must-not-be-injected'
+output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sender \
+  --lane origin --to-agent codex --to-lane legacy-recipient --kind request \
+  --message "$legacy_secret")"
+legacy_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+[[ -n "$legacy_message" ]] || fail 'history-discovered send did not return a message id'
+grep -q "^WAKE_DELIVERED message_id=$legacy_message .*discovery=history$" <<< "$output" || \
+  fail 'stale client was not woken through its unique message history'
+wait_for_text "$RECEIVER_LOG" "$legacy_message" || \
+  fail 'history-discovered wake did not reach the recipient'
+if grep -q "$legacy_secret" "$RECEIVER_LOG"; then
+  fail 'history-discovered wake injected raw message content'
+fi
+
+SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent codex \
+  --lane moved-recipient --to-agent sender --to-lane origin --kind info \
+  --message 'record branch before drift' >/dev/null
+git -C "$SECOND" switch -qc moved-after-history
+output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sender \
+  --lane origin --to-agent codex --to-lane moved-recipient --kind info \
+  --message 'must fail closed after branch drift')"
+grep -q '^WAKE_UNAVAILABLE .*status=unavailable$' <<< "$output" || \
+  fail 'history discovery followed a worktree after branch drift'
+git -C "$SECOND" switch -q recipient-lane
+
 if coord "$REPO" endpoint-register --agent sender --lane origin --harness codex \
   --transport tmux --address "$pane" --socket "$SOCKET" >/dev/null 2>&1; then
   fail 'endpoint registration accepted a pane from another worktree'

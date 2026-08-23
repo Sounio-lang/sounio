@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.4
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.5
 
 usage() {
   cat <<'USAGE'
@@ -637,6 +637,76 @@ harness_command_matches() {
   esac
 }
 
+coord_inbox_launcher() {
+  local shared_runtime
+  shared_runtime="$GIT_COMMON_DIR/sounio-coord-runtime/current/bin/sounio-coord-runtime"
+  if [[ -x "$shared_runtime" ]]; then
+    printf '%s' "$shared_runtime"
+  else
+    printf 'bin/sounio-coord'
+  fi
+}
+
+discover_history_endpoint() {
+  local target_agent="$1" target_lane="$2" harness='' best_file='' best_epoch=0
+  local message_file candidate_worktree candidate_branch candidate_common socket
+  local pane_id pane_pid pane_command pane_path pane_root matches=0
+  local -a message_paths=()
+
+  case "$target_agent" in
+    claude) harness='claude' ;;
+    codex) harness='codex' ;;
+    *) return 1 ;;
+  esac
+
+  message_paths=("$MESSAGES_DIR"/*.message)
+  for message_file in "${message_paths[@]}"; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    message_expired && continue
+    [[ "$M_FROM_AGENT" == "$target_agent" && "$M_FROM_LANE" == "$target_lane" ]] || continue
+    [[ -n "$M_FROM_WORKTREE" && -n "$M_FROM_BRANCH" ]] || continue
+    if ((M_CREATED_EPOCH > best_epoch)) || \
+      { ((M_CREATED_EPOCH == best_epoch)) && [[ "$message_file" > "$best_file" ]]; }; then
+      best_epoch="$M_CREATED_EPOCH"
+      best_file="$message_file"
+    fi
+  done
+  [[ -n "$best_file" ]] || return 1
+
+  load_message "$best_file"
+  candidate_worktree="$(git -C "$M_FROM_WORKTREE" rev-parse --show-toplevel 2>/dev/null || true)"
+  [[ -n "$candidate_worktree" ]] || return 1
+  candidate_worktree="$(cd "$candidate_worktree" && pwd -P)"
+  candidate_common="$(git -C "$candidate_worktree" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [[ "$candidate_common" == "$GIT_COMMON_DIR" ]] || return 1
+  candidate_branch="$(git -C "$candidate_worktree" branch --show-current 2>/dev/null || true)"
+  if [[ -z "$candidate_branch" ]]; then
+    candidate_branch="detached@$(git -C "$candidate_worktree" rev-parse --short=12 HEAD 2>/dev/null || true)"
+  fi
+  [[ "$candidate_branch" == "$M_FROM_BRANCH" ]] || return 1
+
+  socket="${SOUNIO_COORD_DISCOVERY_SOCKET:-${TMUX%%,*}}"
+  [[ -n "$socket" && -S "$socket" ]] || return 1
+  while IFS='|' read -r pane_id pane_pid pane_command pane_path; do
+    [[ -n "$pane_id" && "$pane_pid" =~ ^[1-9][0-9]*$ ]] || continue
+    harness_command_matches "$harness" "$pane_command" || continue
+    pane_root="$(git -C "$pane_path" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$pane_root" ]] || continue
+    pane_root="$(cd "$pane_root" && pwd -P)"
+    [[ "$pane_root" == "$candidate_worktree" ]] || continue
+    matches=$((matches + 1))
+    D_ADDRESS="$pane_id"
+  done < <(tmux -S "$socket" list-panes -a -F \
+    '#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)
+  [[ "$matches" == 1 ]] || return 1
+
+  D_ENDPOINT_ID="history-$(claim_id_for "$target_agent" "$target_lane")"
+  D_AGENT="$target_agent"
+  D_LANE="$target_lane"
+  D_SOCKET="$socket"
+}
+
 ENDPOINT_STATE='unavailable'
 endpoint_state() {
   local current_pane current_pid current_command current_path current_root
@@ -680,13 +750,48 @@ remove_endpoint_for_lane() {
 WAKE_STATUS='unavailable'
 attempt_message_wake() {
   local message_id="$1" message_file endpoint_file receipt_file prompt tmp_file
+  local target_agent target_lane discovered=0 launcher
   WAKE_STATUS='unavailable'
   message_file="$MESSAGES_DIR/$(slug "$message_id").message"
   [[ -f "$message_file" ]] || return 1
   load_message "$message_file"
   [[ -n "$M_TO_AGENT" && -n "$M_TO_LANE" ]] || return 1
+  target_agent="$M_TO_AGENT"
+  target_lane="$M_TO_LANE"
   endpoint_file="$(endpoint_path "$M_TO_AGENT" "$M_TO_LANE")"
-  [[ -f "$endpoint_file" ]] || return 1
+  if [[ ! -f "$endpoint_file" ]]; then
+    if discover_history_endpoint "$target_agent" "$target_lane"; then
+      discovered=1
+    fi
+    load_message "$message_file"
+    ((discovered)) || return 1
+    receipt_file="$(wake_receipt_path "$M_ID" "$D_ENDPOINT_ID")"
+    if [[ -f "$receipt_file" ]]; then
+      WAKE_STATUS='deduplicated'
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s reason=already-delivered discovery=history\n' \
+        "$M_ID" "$D_ENDPOINT_ID"
+      return 0
+    fi
+    launcher="$(coord_inbox_launcher)"
+    prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $D_AGENT --lane $D_LANE --directed-only --newest-first, then reply or ack $M_ID."
+    if ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" -l "$prompt" 2>/dev/null || \
+      ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" Enter 2>/dev/null; then
+      WAKE_STATUS='failed'
+      printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=tmux discovery=history\n' \
+        "$M_ID" "$D_ENDPOINT_ID" >&2
+      return 1
+    fi
+    tmp_file="$(mktemp "$WAKES_DIR/.wake-write.XXXXXX")"
+    printf 'utc=%s message_id=%s endpoint_id=%s transport=tmux address=%s discovery=history\n' \
+      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" > "$tmp_file"
+    mv "$tmp_file" "$receipt_file"
+    printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s discovery=history\n' \
+      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" "$D_ADDRESS" >> "$EVENT_LOG"
+    WAKE_STATUS='delivered'
+    printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=tmux address=%s discovery=history\n' \
+      "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS"
+    return 0
+  fi
   load_endpoint "$endpoint_file"
   if ! endpoint_state; then
     WAKE_STATUS="$ENDPOINT_STATE"
@@ -703,7 +808,8 @@ attempt_message_wake() {
     return 0
   fi
 
-  prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run bin/sounio-coord inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then reply or ack $M_ID."
+  launcher="$(coord_inbox_launcher)"
+  prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then reply or ack $M_ID."
   if ! tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" -l "$prompt" 2>/dev/null || \
     ! tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" Enter 2>/dev/null; then
     WAKE_STATUS='failed'
