@@ -152,3 +152,20 @@ Wrapper probes are **not** in the census pin for that reason. Closing that quest
 - Does not add a diagnostic for the silent skip / Ident-epsilon sink (that remains the honesty gap).
 - Does not promote the silent-OK probes into `tests/run-pass/` — they are receipts of current behaviour, not features. The day `source.sio` starts failing check, the census fails and the gap has moved.
 - Does not claim the shipped ELF matches this checkout’s `self-hosted/` bit-for-bit.
+
+## Addendum 2026-08-23 — `--emit-ast` and `--emit-tokens` are plumbed but unimplemented
+
+Refining the wrapper-bracket question closure path. The shipped `madaros` ELF prints both flags in its usage banner:
+
+```
+--emit-ast             Print AST to stdout
+--emit-tokens          Print tokens to stdout
+```
+
+Empirically neither does what it says. On `madaros --emit-ast <probe.sio>` and `--emit-tokens <probe.sio>` the output is byte-identical to a plain invocation: a compile summary, a native dispatch line, an ELF size, and `Compilation successful!` — no AST, no token stream, only stdout noise from the native-v2 fallback. The pin script has a static check (`opts.emit_ast` / `opts.emit_tokens` consumers; both = 1, the fast-path gate at `self-hosted/compiler/main.sio:3241`) so a future wiring that actually prints will flip the tripwire.
+
+Reading the source confirms the empirical observation. `arg == "--emit-ast"` parses at `main.sio:3764`; the value is stored on `CompilerOptions.emit_ast` at `main.sio:3836`. That field is then referenced exactly once, at `main.sio:3241`, where it only causes the native-v2 path to bail out. There is no call site that invokes `print_ast_*` (defined in `self-hosted/printer/print_ast.sio`) in response to the flag. Same shape for `--emit-tokens`.
+
+Consequence for the wrapper pin: an AST-level discriminator matrix for `Intervention[f64, Derived]` etc. cannot be run from the shipped ELF at any version we can read here. The earlier reading "the shipped ELF has no `--show-ast`" is now more precise: the flag exists in usage, is parsed, is stored, but does nothing. Closing the wrapper bracket question therefore requires either (a) a source-built Madaros (so `print_ast_*` actually emits), or (b) ELF-level tracing. Neither is in scope for this audit branch.
+
+Pin extension is in `scripts/dev/knowledge_annotation_parser_coverage.sh` (the two `STATIC: --emit-*` notes above). State on this commit: 6 declared / 3 constructed / 3 unreachable provenance, lexer keywords unchanged, wrapper bracket probes remain a behavioural matrix rather than an AST assertion, and the two emit flags remain dead switches in the shipped ELF.

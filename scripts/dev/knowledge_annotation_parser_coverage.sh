@@ -101,6 +101,41 @@ for word in ValidUntil ValidWhile; do
   fi
 done
 
+# --emit-ast plumbing: the flag is parsed and stored, but in the shipped
+# compiler main dispatcher (self-hosted/compiler/main.sio) `opts.emit_ast`
+# is checked exactly once (line 3241) and only to bail out of the native-v2
+# fast path. No call site invokes the print_ast_* functions in response.
+# Consequence: AST-level discriminators for the wrapper bracket surface
+# cannot be run from the shipped ELF; the wrapper pin must remain a probe
+# matrix, not an AST assertion.
+if grep -q 'arg == "--emit-ast"' self-hosted/compiler/main.sio \
+   && grep -q 'emit_ast: emit_ast' self-hosted/compiler/main.sio; then
+  # Both present — pin the "parsed and stored" state.
+  emit_ast_consumed=$(grep -c 'opts\.emit_ast' self-hosted/compiler/main.sio || true)
+  if [[ "$emit_ast_consumed" -lt 2 ]]; then
+    note "STATIC: --emit-ast parsed+stored but consumed=${emit_ast_consumed}x (only fast-path gate; AST not printed)"
+  else
+    pin_fail "--emit-ast gained a consumer site beyond the fast-path gate — re-evaluate AST dump capability"
+  fi
+else
+  pin_fail "--emit-ast no longer parsed and stored on the compiler"
+fi
+
+# Same plumbing-but-unimplemented pattern for --emit-tokens. Pinned
+# alongside --emit-ast so a future wiring of one without the other flips
+# the tripwire.
+if grep -q 'arg == "--emit-tokens"' self-hosted/compiler/main.sio \
+   && grep -q 'emit_tokens: emit_tokens' self-hosted/compiler/main.sio; then
+  emit_tokens_consumed=$(grep -c 'opts\.emit_tokens' self-hosted/compiler/main.sio || true)
+  if [[ "$emit_tokens_consumed" -lt 2 ]]; then
+    note "STATIC: --emit-tokens parsed+stored but consumed=${emit_tokens_consumed}x (only fast-path gate; tokens not printed)"
+  else
+    pin_fail "--emit-tokens gained a consumer site beyond the fast-path gate"
+  fi
+else
+  pin_fail "--emit-tokens no longer parsed and stored on the compiler"
+fi
+
 note "STATIC: declared=6 constructed=3 unreachable=Source,Literature,Input lexer-keywords=Derived,Computed,Measured,Valid,ValidUntil,ValidWhile"
 
 # ---------------------------------------------------------------------------
