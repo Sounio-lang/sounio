@@ -1,8 +1,9 @@
 // self-hosted::ir::reachability — Whole-program dead function elimination.
 //
-// Builds a call graph from IrCall.fn_id edges, marks all functions reachable
-// from main() via fixed-point BFS, then compacts the IrModule to contain only
-// reachable functions. All IrCall.fn_id references are remapped to new indices.
+// Builds a call graph from IrCall.fn_id and IrLoadFnRef.fn_id edges, marks all
+// functions reachable from main() via fixed-point BFS, then compacts the
+// IrModule to contain only reachable functions. All IrCall/IrLoadFnRef fn_id
+// references are remapped to new indices.
 //
 // This pass dramatically reduces function count before codegen, shrinking
 // both JIT compile time and output binary size. Critical for bootstrapping
@@ -10,7 +11,7 @@
 //
 // Algorithm (O(F * I) fixed-point BFS, F = fn_count, I = instr_count):
 //   1. Seed mark[main_idx] = true
-//   2. Repeat: for each marked fn, scan IrCall instrs, mark callee fn_ids
+//   2. Repeat: for each marked fn, scan IrCall / IrLoadFnRef instrs, mark callee fn_ids
 //   3. Until no new functions are marked
 //   4. Compact: copy only marked fns to new positions
 //   5. Patch: remap all IrCall.fn_id to new indices
@@ -61,9 +62,10 @@ fn reach_find_main(module: &IrModule) -> i64 with Mut, Panic, Div {
     -1
 }
 
-fn reach_is_call(op: IrOpcode) -> bool {
+fn reach_is_direct_fn_ref(op: IrOpcode) -> bool {
     match op {
         IrOpcode::IrCall => true,
+        IrOpcode::IrLoadFnRef => true,
         _ => false,
     }
 }
@@ -73,7 +75,7 @@ fn reach_is_call(op: IrOpcode) -> bool {
 // ============================================================================
 
 // One BFS pass: extend mark[] by scanning all currently-marked functions
-// for IrCall edges. Returns (updated_mark, changed).
+// for IrCall / IrLoadFnRef edges. Returns (updated_mark, changed).
 fn reach_mark_one_pass(mark: [bool; 1024], module: &IrModule) -> ([bool; 1024], bool) with Mut, Panic, Div {
     var out = mark
     var changed = false
@@ -83,7 +85,7 @@ fn reach_mark_one_pass(mark: [bool; 1024], module: &IrModule) -> ([bool; 1024], 
             var ii: i64 = 0
             while ii < module.functions[fi as usize].instr_count {
                 let instr = ir_arena_load(ir_region_slot_r(module.functions[fi as usize].region, (ii)))
-                if reach_is_call(instr.op) {
+                if reach_is_direct_fn_ref(instr.op) {
                     let callee = instr.fn_id
                     if callee >= 0 && callee < 1024 && !out[callee as usize] {
                         out[callee as usize] = true
@@ -148,13 +150,13 @@ fn reach_compact_module(module: IrModule, mark: [bool; 1024], remap: [i64; 1024]
     result
 }
 
-// Patch all IrCall.fn_id references using the remap table.
+// Patch all IrCall / IrLoadFnRef fn_id references using the remap table.
 fn reach_patch_calls(module: &!IrModule, remap: &[i64; 1024]) with Mut, Panic, Div {
     var fi: i64 = 0
     while fi < module.fn_count {
         var ii: i64 = 0
         while ii < module.functions[fi as usize].instr_count {
-            if reach_is_call((IR_A_OP[(ir_region_slot_r(module.functions[fi as usize].region, (ii))) as usize] as IrOpcode)) {
+            if reach_is_direct_fn_ref((IR_A_OP[(ir_region_slot_r(module.functions[fi as usize].region, (ii))) as usize] as IrOpcode)) {
                 let old_id = IR_A_FN_ID[(ir_region_slot_r(module.functions[fi as usize].region, (ii))) as usize]
                 if old_id >= 0 && old_id < 1024 {
                     let new_id = remap[old_id as usize]
