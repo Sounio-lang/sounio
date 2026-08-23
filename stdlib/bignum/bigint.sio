@@ -210,3 +210,75 @@ pub fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
     }
     result
 }
+
+// Binary long division: processes a's bits from most significant to least
+// significant, maintaining a running remainder shifted left by 1 bit and
+// OR'd with the next input bit at each step, subtracting n whenever the
+// remainder is >= n. O(bits^2) but correctness-first; RSA's ~4096-bit
+// modulus makes this a small absolute cost for a once-per-handshake op.
+//
+// Divisor-is-zero: returns a copy of a unchanged (a defined, safe fallback
+// per this module's error convention -- no Result/Option, no crash).
+pub fn bigint_mod(a: &BigInt, n: &BigInt) -> BigInt {
+    if n.len == 0 {
+        return *a
+    }
+
+    var remainder = bigint_zero()
+    var bit_index = a.len * 16 - 1   // highest possible bit position in a;
+                                       // a.len <= BIGINT_MAX_LIMBS (512), so
+                                       // bit_index maxes out at 512*16-1 =
+                                       // 8191 -- a tiny i32 value, nowhere
+                                       // near bit 63
+
+    while bit_index >= 0 {
+        let limb_index = bit_index / 16   // bit_index <= 8191, so this
+                                            // division is on tiny i32 values,
+                                            // not a u64 -- Finding 11 doesn't
+                                            // apply to i32 arithmetic at all
+        let bit_offset = bit_index % 16     // same: tiny i32 values only
+        let this_limb: u16 = a.limbs[limb_index as usize]
+        let bit: u16 = (this_limb >> bit_offset) & 1   // this_limb is a 16-bit
+                                                          // value; shifting it
+                                                          // (as u16, promoted
+                                                          // for the op) never
+                                                          // approaches bit 63
+
+        // remainder = (remainder << 1) | bit
+        remainder = bigint_shl1_or_bit(&remainder, bit)
+
+        if bigint_cmp(&remainder, n) >= 0 {
+            remainder = bigint_sub(&remainder, n)
+        }
+
+        bit_index = bit_index - 1
+    }
+
+    remainder
+}
+
+// Helper: shifts a BigInt left by exactly 1 bit and ORs in a single bit at
+// position 0. Every limb's intermediate value here is at most
+// (65535 << 1) | 1 = 131071, computed as u32 -- tiny, safe.
+fn bigint_shl1_or_bit(a: &BigInt, bit: u16) -> BigInt {
+    var result = bigint_zero()
+    var carry: u32 = bit as u32
+    var i = 0
+    while i < a.len {
+        let limb: u32 = a.limbs[i as usize] as u32
+        let shifted: u32 = (limb << 1) | carry   // max 131071, tiny
+        result.limbs[i as usize] = (shifted & 65535) as u16
+        carry = shifted >> 16                       // safe: shifted is tiny
+        i = i + 1
+    }
+    var len = a.len
+    if carry != 0 {
+        result.limbs[len as usize] = carry as u16
+        len = len + 1
+    }
+    result.len = len
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
