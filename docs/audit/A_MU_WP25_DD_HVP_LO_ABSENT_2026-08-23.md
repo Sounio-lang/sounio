@@ -22,13 +22,13 @@ Types-Changed: Wp25DdHvpLoAbsent added
 Effects-Changed: none
 IR-Changed: none
 Claims-Introduced: Sounio can hold "WP25 has no data-driven HVP LO" without
-  inventing 6931, 7132, or 7045; collapsing the slot to f64 is E008
-  under Madaros
+  inventing 6931, 7132, or 7045; Madaros rejects the slot as f64 (E008)
+  and as a locally-resolved pin-shaped struct (E009)
 Claims-Forbidden: Sounio computed HVP; new physics; the tension is
   resolved; 0.0 is the WP25 data-driven LO; Unobserved<f64> is inhabited
-  for this slot under Madaros; returning the slot as Epistemic is
-  rejected (it is not, under current Madaros); lean_single is a claim
-  oracle
+  for this slot under Madaros; imported Epistemic is a closed type
+  (it is a pre-existing Unknown sink: even `1.0` typechecks as
+  `-> Epistemic`); lean_single is a claim oracle
 Assumptions: TI WP25 Table 5 "Estimates not provided at this point" is
   the citation for absence. WP25 Eq. (9.1) hybrid pins are unchanged.
   ADR-008: Madaros is the only semantic clock for this claim.
@@ -37,15 +37,16 @@ Write-Set: stdlib/particle_physics/ew_precision.sio,
   examples/particle_physics/a_mu_wp25_dd_hvp_lo_absent.sio,
   tests/run-pass/a_mu_wp25_dd_hvp_lo_absent.sio,
   tests/compile-fail/a_mu_wp25_dd_hvp_lo_observe_is_not_a_float.sio,
+  tests/compile-fail/a_mu_wp25_dd_hvp_lo_cannot_be_a_pin.sio,
   this file
 Read-Set: docs/audit/A_MU_GUM_SPLIT_2026-08-23.md,
   docs/decisions/adr-008-claim-oracle-semantic-clock.md
 Positive-Witness: Madaros souc run prints WP25_DD_HVP_LO_PROVIDED 0 and
   HVP_ASSEMBLED 7044.8; VERDICT_ABSENT 1; VERDICT_HYBRID_INTACT 1
-Negative-Witness: Madaros souc check of collapsing the slot to f64 is
-  E008 (expected f64, found Wp25DdHvpLoAbsent)
-Acceptance-Gate: run-pass exit 0 under Madaros; Madaros typecheck-fail
-  with pinned error-pattern Wp25DdHvpLoAbsent
+Negative-Witness: Madaros E008 collapsing the slot to f64; Madaros E009
+  feeding the slot to a local pin-shaped struct (Epistemic field layout)
+Acceptance-Gate: run-pass exit 0 under Madaros; both Madaros typecheck-fail
+  tests fail with pinned error-pattern Wp25DdHvpLoAbsent
 Integration-Target: origin/main
 Authoritative-Only-If: produced by Madaros running Sounio
 ```
@@ -63,11 +64,14 @@ with E008 (expected Unobserved, found f64). Putting 0.0, 6931, 7132, or
 is the bootstrap seed, not a claim oracle for this lane.
 
 The Madaros-authoritative slot is a struct with **no HVP number field**.
-Collapsing it to f64 is E008.
+Collapsing it to f64 is E008. Feeding it to a locally-resolved pin-shaped
+struct (`LocalPin { val, variance, confidence }`) is E009.
 
-Madaros currently **accepts** `fn as_pin(x: Wp25DdHvpLoAbsent) -> Epistemic { x }`.
-This lane does not claim that hole is closed. It claims the slot is not
-a float and Table 5 is `provided = false`.
+Imported `Epistemic` is a **pre-existing Unknown sink** under Madaros:
+`fn forge() -> Epistemic { 1.0 }` typechecks. That is not special to this
+slot. The live fix site is `self-hosted/check/check.sio` type-position
+lookup (imported names bound as TyUnknown). That file is claimed by
+another lane (`ns-wire`); this PR does not touch it.
 
 ## Receipts (2026-08-23)
 
@@ -94,6 +98,10 @@ VERDICT_HYBRID_INTACT 1
 Madaros `souc check` of
 `tests/compile-fail/a_mu_wp25_dd_hvp_lo_observe_is_not_a_float.sio`:
 **verdict=1**, `expected f64 found Wp25DdHvpLoAbsent`.
+
+Madaros `souc check` of
+`tests/compile-fail/a_mu_wp25_dd_hvp_lo_cannot_be_a_pin.sio`:
+**verdict=1**, `expected LocalPin found Wp25DdHvpLoAbsent` (E009).
 
 LLM-offload math-review:
 
