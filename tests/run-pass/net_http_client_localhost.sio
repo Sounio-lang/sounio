@@ -72,16 +72,39 @@ use net::http_client::*
 // correct regardless of what the parent's own socket calls do: it does not
 // depend on believing a timeout value guessed here will always be "long
 // enough" for a slow CI box yet "short enough" to not itself wedge the
-// suite. `reap_child` below sends SIGKILL (signal 9, raw syscall 62,
+// suite. `reap_child` below guards on `pid > 0` before doing anything: a
+// negative `pid` here is not "some other child" to be signaled, it is
+// `fork()` having FAILED to create a child at all (the pid==0 branch above
+// is the only path that ever spawns one) — POSIX `kill(-1, sig)` is a
+// BROADCAST to every process the caller may signal, not a targeted no-op,
+// so calling it with `fork()`'s raw -1 return would be far worse than the
+// original wedge risk this fix addresses (up to and including killing
+// unrelated processes on the machine). With the guard in place, only a
+// verified positive pid — meaning `fork()` actually created a child — ever
+// reaches `kill`/`wait4`; when `fork()` fails there is nothing to reap,
+// and the test simply falls through to `http_get` against a listener no
+// child will ever accept on, which fails and is reported normally. Once
+// past the guard, `reap_child` sends SIGKILL (signal 9, raw syscall 62,
 // `kill(pid, SIGKILL)`) to the child unconditionally — harmless (ESRCH) if
 // the child has already exited on its own — and then blocks in `wait4`
 // (raw syscall 61) to actually reap it, so no zombie or orphan can outlive
-// the parent. This is called from EVERY return path in `main()` after the
-// fork (all three: both early-failure returns and the success return), not
-// just the happy path.
+// the parent. This is called from every `return` in `main()` after the
+// fork (all three: both early-failure returns and the success return) —
+// but that guarantee holds only for those three explicit `return` paths.
+// If the `Panic` effect actually fires (a real runtime abort, not a
+// `return`) anywhere between the fork and one of those three call sites,
+// none of them run and the child is never reaped — the original wedge
+// risk could reintroduce itself on that path. This is an accepted
+// residual risk, not a solved one: it is structurally narrower than the
+// original bug because it now requires BOTH a successful fork AND an
+// actual panic to manifest, rather than any ordinary parent-side failure,
+// and closing it fully would need compiler-level unwind/cleanup support
+// this language does not have.
 fn reap_child(pid: i64) with IO, Mut, Panic, Div {
-    syscall6(62, pid, 9, 0, 0, 0, 0)     // kill(pid, SIGKILL) -- ok if already exited
-    syscall6(61, pid, 0, 0, 0, 0, 0)     // wait4(pid, NULL, 0, NULL) -- blocks until reaped
+    if pid > 0 {
+        syscall6(62, pid, 9, 0, 0, 0, 0)     // kill(pid, SIGKILL) -- ok if already exited
+        syscall6(61, pid, 0, 0, 0, 0, 0)     // wait4(pid, NULL, 0, NULL) -- blocks until reaped
+    }
 }
 
 fn main() -> i32 with IO, Mut, Panic, Div {
