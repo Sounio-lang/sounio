@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.5
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.6
 
 usage() {
   cat <<'USAGE'
@@ -31,7 +31,7 @@ Commands:
                                  release a claim and record the handoff event
   authorize --agent ID [--lane ID] [--resources RESOURCE ...] [--files PATH ...]
                                  verify that a local active claim covers the requested ownership
-  endpoint-register --agent ID --lane ID --harness claude|codex
+  endpoint-register --agent ID --lane ID --harness claude|codex|grok|cursor|kimi
           --transport tmux --address PANE --socket PATH [--ttl-seconds N]
                                  register an expiring, verified delivery endpoint
   endpoint-unregister --agent ID --lane ID
@@ -633,6 +633,20 @@ harness_command_matches() {
   case "$harness" in
     claude) [[ "$command" == claude* ]] ;;
     codex) [[ "$command" == codex* || "$command" == node ]] ;;
+    grok) [[ "$command" == grok* ]] ;;
+    cursor) [[ "$command" == cursor-agent* || "$command" == cursor* ]] ;;
+    kimi) [[ "$command" == kimi-code* || "$command" == kimi* ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+harness_for_agent() {
+  case "$1" in
+    claude|claude-*) printf 'claude' ;;
+    codex|codex-*) printf 'codex' ;;
+    grok|grok-*) printf 'grok' ;;
+    cursor|cursor-*) printf 'cursor' ;;
+    kimi|kimi-*) printf 'kimi' ;;
     *) return 1 ;;
   esac
 }
@@ -653,11 +667,7 @@ discover_history_endpoint() {
   local pane_id pane_pid pane_command pane_path pane_root matches=0
   local -a message_paths=()
 
-  case "$target_agent" in
-    claude) harness='claude' ;;
-    codex) harness='codex' ;;
-    *) return 1 ;;
-  esac
+  harness="$(harness_for_agent "$target_agent")" || return 1
 
   message_paths=("$MESSAGES_DIR"/*.message)
   for message_file in "${message_paths[@]}"; do
@@ -1279,7 +1289,8 @@ endpoint_register_command() {
   done
   [[ -n "$agent" ]] || die "endpoint-register requires --agent or SOUNIO_AGENT_ID"
   [[ -n "$lane" ]] || die "endpoint-register requires --lane"
-  [[ "$harness" =~ ^(claude|codex)$ ]] || die "--harness must be claude or codex"
+  [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi)$ ]] || \
+    die "--harness must be claude, codex, grok, cursor, or kimi"
   [[ "$transport" == tmux ]] || die "--transport currently supports only tmux"
   [[ -n "$address" ]] || die "endpoint-register requires --address"
   [[ -n "$socket" ]] || die "endpoint-register requires --socket"

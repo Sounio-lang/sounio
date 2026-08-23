@@ -78,7 +78,7 @@ mkdir -p "$ALT/scripts/dev"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
-sed -i 's/SOUNIO_COORD_RUNTIME_VERSION=2026\.08\.23\.5/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.6-test/' \
+sed -i 's/SOUNIO_COORD_RUNTIME_VERSION=2026\.08\.23\.6/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.7-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --source-root "$ALT")"
@@ -86,7 +86,7 @@ second_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$second_id" && "$second_id" != "$first_id" ]] || fail 'upgrade did not create a new runtime id'
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$second_id$" <<< "$output" || fail 'worktree did not observe atomic runtime upgrade'
-grep -q '^runtime_version=2026.08.23.6-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
+grep -q '^runtime_version=2026.08.23.7-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
 
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --activate "$first_id")"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'runtime rollback failed'
