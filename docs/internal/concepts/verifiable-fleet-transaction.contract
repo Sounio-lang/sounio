@@ -14,18 +14,18 @@ Semantic-Lane-ID: codex-verifiable-fleet-transaction-20260823
 Owner: codex/session-01a02a17-f139-7613-98a1-
 Concept-IDs: SOUNIO-VERIFIABLE-FLEET-TRANSACTION (proposed)
 Intent-Preserved: execution authority, cognitive state, scientific evidence, and transfer acceptance remain distinguishable but compose in one event history
-Transformation: textual mutation intent becomes a one-shot capability and nominal typestate transition
+Transformation: textual mutation intent becomes a published one-shot capability, crash-recoverable event transaction, and nominal typestate transition
 Types-Changed: new linear StartCapability, ActiveSlot, Checkpoint, and Handoff states
 Effects-Changed: fleet mutation consumes explicit authority; acceptance consumes recipient authority
 IR-Changed: none
-Claims-Introduced: only an argv-attested active slot can draft a checkpoint; only verified evidence can prepare a handoff; only an anchored preparation can be accepted
-Claims-Forbidden: Byzantine safety, public non-repudiation, host-loss recovery, global exactly-once execution, PL/CS novelty or priority
+Claims-Introduced: only one capability-bound argv-attested generation can draft a checkpoint; only verified evidence can prepare a handoff; only an independently trace-conforming anchored preparation can be accepted; ten named process-crash boundaries recover without duplicate start, capability consumption, or acceptance in the bounded laboratory
+Claims-Forbidden: Byzantine safety, public non-repudiation, host-loss recovery, global exactly-once execution, machine-checked Python-to-Sounio refinement, PL/CS novelty or priority
 Assumptions: SQLite single-writer locking works; Ed25519 private key remains private; SHA-256 and OpenSSL behave as specified; host file receipts name the intended evidence
 Write-Set: coordination runtime, stdlib/coordination/fleet_transaction.sio, TLA+ model, and focused gates
 Read-Set: agentd descriptors, fleet slot mappings, signed anchor directory, and evidence files
-Positive-Witness: one issued capability starts one argv-attested generation, drafts and verifies a checkpoint, and transfers it through an anchored handoff
-Negative-Witness: missing/reused authority, argv drift, draft handoff, evidence drift, unanchored acceptance, signature substitution, and anchor removal refuse
-Acceptance-Gate: scripts/ci/sounio_coord_agentd_selftest.sh plus scripts/ci/causal_receipt_typestate_gate.sh
+Positive-Witness: one published capability starts one argv-attested generation, drafts and verifies a capability-bound checkpoint, survives named process crashes, and transfers it through an independently checked anchored handoff
+Negative-Witness: missing/reused/unpublished authority, argv drift, draft handoff, evidence drift, unanchored acceptance, signature substitution, anchor removal, raw HostTrust admission, and a fully rehashed semantic substitution refuse
+Acceptance-Gate: scripts/ci/sounio_coord_agentd_selftest.sh, scripts/ci/sounio_coord_fleet_crash_selftest.sh, scripts/ci/sounio_coord_fleet_trace_selftest.sh, and scripts/ci/causal_receipt_typestate_gate.sh
 Integration-Target: shared sounio-coord runtime and stdlib coordination kernel
 Authoritative-Only-If: TLC, runtime sabotage catalog, linear compiler controls, replay, and Ed25519 verification all pass
 ```
@@ -36,21 +36,28 @@ The executable host transition is:
 
 ```text
 Observed(Absent, desired) -> StartCapability<Issued>
-StartCapability<Issued> -> StartCapability<Consumed> -> Active<ArgvAttested>
+StartCapability<Issued> -> StartCapability<Published>
+StartCapability<Published> -> StartCapability<Consumed>
+    -> StartAction<Requested> -> Active<ArgvAttested, CapabilityBound>
 Active<ArgvAttested> -> Checkpoint<Draft>
 Checkpoint<Draft> + unchanged evidence -> Checkpoint<Verified>
-Checkpoint<Verified> -> Handoff<Prepared> + AcceptCapability<Issued>
+Checkpoint<Verified> -> Handoff<Prepared> -> AcceptCapability<Published>
 SignedAnchor(prefix >= Prepared) + matching recipient
-    + AcceptCapability<Issued> -> Handoff<Accepted>
+    -> Acceptance<Requested> + AcceptCapability<Consumed>
+    -> Handoff<Accepted>
 ```
 
 Capability secrets never enter the Event Log. The log stores their SHA-256
-commitment and terminal state. Ed25519 anchors are detached files signed over a
-canonical log-prefix receipt and chained to the previous anchor digest.
+commitment, publication receipt, and terminal state. Ed25519 anchors are
+detached files signed over a canonical log-prefix receipt and chained to the
+previous anchor digest.
 
 The Sounio kernel admits each complete host assertion as a distinct linear
-runtime receipt under an explicit `HostTrust` effect. Imports accept no parallel
-caller payload. Subsequent promotions consume separate start, argv, evidence,
+runtime receipt under an explicit `HostTrust` effect and a private linear seal.
+The seal fixes transaction identity, receipt-chain identity, and the next
+receipt ID. Both the seal constructor and raw admission function are private;
+ordinary imported code that declares `HostTrust` is refused with `E175`.
+Imports accept no parallel caller payload. Subsequent promotions consume separate start, argv, evidence,
 preparation, anchor-prefix, and recipient facts while requiring one transaction,
 one receipt-chain identity, and contiguous receipt IDs. Slot, argv
 digest, checkpoint, evidence set, recipient, event sequence, and anchor receipt
@@ -58,8 +65,9 @@ remain bound through the entire safe path. Finalization returns a linear opaque
 receipt rather than raw authority. Private linear structs prevent reuse and
 wrong-order calls inside safe Sounio code. The kernel does not recompute SQLite,
 SHA-256, Git, process, or Ed25519 facts; its guarantee is conditional on the
-host adapter admitting only verified assertions. Arbitrary declaration of
-`HostTrust` outside that adapter is outside the stated trust boundary.
+host adapter admitting only verified assertions. The current executable
+positive witness composes the adapter and kernel as one trusted module; wiring a
+native production bridge into that sealed entry remains integration work.
 
 The present language kernel uses `Panic` as a fail-closed mismatch path. Durable
 denial evidence is emitted by the host Event Log; a typed linear rejection value
@@ -68,7 +76,9 @@ inside Sounio remains future work and is not claimed here.
 ## Formal Model
 
 `formal/tla/SounioFleet.tla` bounds event and capability counts for exhaustive
-TLC exploration. The checked invariants are:
+TLC exploration. `Crash` and `Recover` toggle process availability while leaving
+all persisted facts unchanged. Concrete publication, action-request, and retry
+events refine to explicit stuttering steps. The checked invariants are:
 
 - type closure;
 - start capability consumption never exceeds issuance;
@@ -81,6 +91,14 @@ TLC exploration. The checked invariants are:
 - accepted handoffs consume their modeled handoff authority and cover their
   preparation with a verified signed anchor. Exact recipient matching remains
   a runtime control outside this bounded abstraction.
+
+`scripts/dev/sounio_fleet_trace_verify.py` is an independently implemented,
+read-only concrete-trace checker: it imports no producer code, recalculates the
+Event Log hash chain, verifies the Ed25519 anchor chain, reconstructs linear
+capability/checkpoint/handoff bindings, and emits a canonical refinement
+certificate. Its formal labels are checked against action names in the TLA+
+source. A sabotage control changes the accepted capability and then recomputes
+the complete remaining hash chain; the independent semantic rule still refuses.
 
 The annotations in the TLA+ source generate the sabotage catalog. The model gate
 refuses an annotation whose invariant is not checked or whose executable control
@@ -100,6 +118,10 @@ marker is absent from the runtime tests.
 - private typestate construction, wrong-state acceptance, or linear reuse checks;
 - safe promotion accepts mismatched slot, evidence, recipient, or anchor-prefix IDs;
 - finalization returns raw authority that can be replayed into a host import.
+- an imported caller can invoke raw host admission by declaring `HostTrust`;
+- a process crash after issuance, publication, consumption, request, launch,
+  preparation, or acceptance creates duplicate authority or duplicate execution;
+- a rehashed but semantically altered Event Log receives a refinement certificate.
 
 ## Evidence Boundary
 
@@ -110,6 +132,9 @@ typestate execution currently uses `lean_single`; Madaros supplies the negative
 diagnostic controls but presently reports false-positive `E039` errors on valid
 linear pass-through programs. That compiler discrepancy is retained as a
 separate integration limitation rather than hidden by the bootstrap path.
-Capability-gated stop, crash-loop backoff, multi-event crash sealing, and a
-machine-checked refinement from the Python Event Log to the Sounio receipt
-algebra are not established by this bounded release.
+The crash laboratory covers ten named failpoints on one host and one SQLite
+database. It does not simulate disk loss, database corruption, host loss,
+network partitions, or malicious concurrent writers. Capability-gated stop,
+crash-loop backoff/circuit breaking, external transparency witnesses, a wired
+native sealed-host adapter, and a machine-checked refinement from the Python
+Event Log to the Sounio receipt algebra are not established by this release.

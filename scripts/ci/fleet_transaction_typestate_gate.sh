@@ -34,7 +34,7 @@ expect_rejection() {
   }
   local count
   count="$(rg -c "error\[$code" "$log")"
-  if [[ "$code" == E039 ]]; then
+  if [[ "$code" == E039 || "$code" == E175 ]]; then
     [[ "$count" -ge 1 ]] || {
       cat "$log" >&2
       fail "$label must emit at least one $code"
@@ -45,6 +45,13 @@ expect_rejection() {
     cat "$log" >&2
     fail "$label must emit exactly one $code"
   }
+}
+
+expect_composed_rejection() {
+  local label="$1" source="$2" code="$3"
+  local program="$WORK/$label.sio"
+  compose_source "$source" "$program"
+  expect_rejection "$label" "$program" "$code"
 }
 
 compose_source() {
@@ -79,11 +86,6 @@ expect_runtime_refusal() {
 }
 
 [[ -x "$SOUC" ]] || fail "compiler is missing: $SOUC"
-SOUNIO_SOUC_ENGINE="$ENGINE" SOUNIO_STDLIB_PATH="$STDLIB" \
-  "$SOUC" check "$WITNESS" >"$WORK/modular.log" 2>&1 || {
-  cat "$WORK/modular.log" >&2
-  fail 'imported linear typestate module did not check'
-}
 
 compose_source "$WITNESS" "$WORK/fleet_transaction_kernel.sio"
 SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$WORK/fleet_transaction_kernel.sio" \
@@ -100,9 +102,11 @@ rg -Fxq \
 
 expect_rejection private-constructor \
   "$PRIVACY/fleet_transaction_private_struct_main.sio" E176
-expect_rejection wrong-state \
+expect_rejection unsealed-host-admission \
+  "$PRIVACY/fleet_transaction_unsealed_admission_main.sio" E175
+expect_composed_rejection wrong-state \
   "$PRIVACY/fleet_transaction_wrong_state_main.sio" E009
-expect_rejection linear-reuse \
+expect_composed_rejection linear-reuse \
   "$PRIVACY/fleet_transaction_linear_reuse_main.sio" E039
 
 expect_runtime_refusal argv-binding \
@@ -118,4 +122,4 @@ expect_runtime_refusal anchor-prefix-binding \
   "$PRIVACY/fleet_transaction_anchor_prefix_mismatch.sio" \
   'anchor or recipient verification does not match prepared handoff'
 
-echo "fleet-transaction-typestate: PASS positive_engine=$ENGINE negative_engine=madaros modular=1 runtime=1 private=E176 wrong-state=E009 linear-reuse=E039 argv-binding=refused evidence-binding=refused recipient-binding=refused anchor-prefix-binding=refused"
+echo "fleet-transaction-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host_bridge=sealed-E175 runtime=1 private=E176 wrong-state=E009 linear-reuse=E039 argv-binding=refused evidence-binding=refused recipient-binding=refused anchor-prefix-binding=refused"

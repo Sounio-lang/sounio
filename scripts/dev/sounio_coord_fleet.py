@@ -22,7 +22,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.3"
+RUNTIME_VERSION = "2026.08.23.4"
 UUID_RE = re.compile(
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -113,6 +113,21 @@ def command_argv_digest(command: list[str]) -> str:
         command, ensure_ascii=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def capability_wrapped_command(
+    command: list[str], start_capability_id: str | None
+) -> list[str]:
+    if start_capability_id is None:
+        return command
+    env_command = shutil.which("env")
+    if env_command is None:
+        raise FleetError("env is required to bind a fleet start capability")
+    return [
+        str(Path(env_command).resolve()),
+        f"SOUNIO_FLEET_START_CAPABILITY_ID={start_capability_id}",
+        *command,
+    ]
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -347,6 +362,8 @@ def mapping_for(
     instance_id: str,
     command_name: str,
     argv_digest: str,
+    original_argv_digest: str,
+    start_capability_id: str | None,
 ) -> dict[str, Any]:
     return {
         "protocol": PROTOCOL_VERSION,
@@ -360,12 +377,17 @@ def mapping_for(
         "instance_id": instance_id,
         "command": command_name,
         "argv_digest": argv_digest,
+        "original_argv_digest": original_argv_digest,
+        "start_capability_id": start_capability_id,
         "updated_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
 
 def start_or_reuse(
-    slot: str, plan: LaunchPlan, worktree: Path
+    slot: str,
+    plan: LaunchPlan,
+    worktree: Path,
+    start_capability_id: str | None,
 ) -> tuple[dict[str, Any], str]:
     root = state_root(worktree)
     paths = slot_paths(root, slot)
@@ -375,6 +397,13 @@ def start_or_reuse(
             existing = read_json(paths["mapping"])
             state, _ = probe_mapping(existing, root)
             if state == "active":
+                if (
+                    start_capability_id is not None
+                    and existing.get("start_capability_id") != start_capability_id
+                ):
+                    raise FleetError(
+                        f"fleet slot {slot} belongs to a different start capability"
+                    )
                 return existing, "reattached"
             if state == "drifted":
                 raise FleetError(
@@ -382,6 +411,9 @@ def start_or_reuse(
                 )
             paths["mapping"].unlink(missing_ok=True)
 
+        supervised_command = capability_wrapped_command(
+            plan.command, start_capability_id
+        )
         result = run_agentd(
             [
                 "start",
@@ -396,7 +428,7 @@ def start_or_reuse(
                 "--state-dir",
                 str(root),
                 "--",
-                *plan.command,
+                *supervised_command,
             ]
         )
         if result.returncode != 0:
@@ -425,6 +457,8 @@ def start_or_reuse(
             status.get("instance_id", ""),
             status.get("command", ""),
             status.get("argv_digest", ""),
+            command_argv_digest(plan.command),
+            start_capability_id,
         )
         if (
             not mapping["instance_id"]
@@ -466,12 +500,15 @@ def launch(args: argparse.Namespace, plan: LaunchPlan) -> int:
     worktree = Path(args.cwd).resolve()
     if not worktree.is_dir():
         raise FleetError(f"worktree does not exist: {worktree}")
-    mapping, action = start_or_reuse(args.slot, plan, worktree)
+    mapping, action = start_or_reuse(
+        args.slot, plan, worktree, args.start_capability_id
+    )
     print(
         "FLEET_SLOT "
         f"action={action} slot={args.slot} agent={mapping['agent']} lane={mapping['lane']} "
         f"session_id={mapping['session_id']} identity={mapping['identity']} "
-        f"instance_id={mapping['instance_id']}",
+        f"instance_id={mapping['instance_id']} "
+        f"start_capability_id={mapping.get('start_capability_id') or '-'}",
         flush=True,
     )
     if args.no_attach:
@@ -515,6 +552,7 @@ def status_command(args: argparse.Namespace) -> int:
             f"identity={mapping.get('identity', '-')} "
             f"instance_id={mapping.get('instance_id', '-')} "
             f"argv_digest={mapping.get('argv_digest', '-')} "
+            f"start_capability_id={mapping.get('start_capability_id') or '-'} "
             f"harness_pid={status.get('harness_pid', '-')} "
             f"attached_clients={status.get('attached_clients', '0')} "
             f"worktree={mapping.get('worktree', '-')}",
@@ -600,6 +638,7 @@ def parser() -> argparse.ArgumentParser:
     )
     launch_parser.add_argument("--cwd", required=True)
     launch_parser.add_argument("--no-attach", action="store_true")
+    launch_parser.add_argument("--start-capability-id")
     launch_parser.add_argument("command", nargs=argparse.REMAINDER)
 
     kind_parser = subparsers.add_parser("launch-kind")
@@ -612,6 +651,7 @@ def parser() -> argparse.ArgumentParser:
     kind_parser.add_argument("--home", required=True)
     kind_parser.add_argument("--cwd", required=True)
     kind_parser.add_argument("--no-attach", action="store_true")
+    kind_parser.add_argument("--start-capability-id")
 
     plan_parser = subparsers.add_parser("plan-kind")
     plan_parser.add_argument("--slot", required=True)

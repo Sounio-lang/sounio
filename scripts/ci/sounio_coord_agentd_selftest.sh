@@ -242,6 +242,7 @@ coord release --agent sender --lane origin --reason 'agentd selftest complete' >
 
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_selftest.sh"
 "$ROOT_DIR/scripts/ci/sounio_coord_fleetd_selftest.sh"
+"$ROOT_DIR/scripts/ci/sounio_coord_fleet_crash_selftest.sh"
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_model_selftest.sh"
 
-echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed raw_body=absent'
+echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed fleet_crash_lab=PASS raw_body=absent'

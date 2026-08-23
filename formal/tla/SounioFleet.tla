@@ -3,7 +3,8 @@ EXTENDS Naturals, Integers, TLC
 
 CONSTANTS MaxEvents, MaxCapabilities
 
-VARIABLES phase,
+VARIABLES online,
+          phase,
           desired,
           startCapsIssued,
           startCapsConsumed,
@@ -20,7 +21,7 @@ VARIABLES phase,
           handoffCapsIssued,
           handoffCapsConsumed
 
-vars == << phase, desired, startCapsIssued, startCapsConsumed, starts,
+vars == << online, phase, desired, startCapsIssued, startCapsConsumed, starts,
            argvAttested, decision, logSeq, anchorSeq, anchorVerified,
            checkpoint, checkpointSeq, handoff, handoffSeq,
            handoffCapsIssued, handoffCapsConsumed >>
@@ -31,6 +32,7 @@ CheckpointSet == {"None", "Draft", "Verified"}
 HandoffSet == {"None", "Prepared", "Accepted"}
 
 Init ==
+    /\ online = TRUE
     /\ phase = "Absent"
     /\ desired = TRUE
     /\ startCapsIssued = 0
@@ -247,7 +249,7 @@ RefuseUnanchoredHandoff ==
                      checkpoint, checkpointSeq, handoff, handoffSeq,
                      handoffCapsIssued, handoffCapsConsumed >>
 
-Next ==
+PersistentStep ==
     \/ DisableDesired
     \/ EnableDesired
     \/ IssueStartCapability
@@ -265,9 +267,33 @@ Next ==
     \/ AcceptAnchoredHandoff
     \/ RefuseUnanchoredHandoff
 
+Crash ==
+    /\ online
+    /\ online' = FALSE
+    /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
+                     starts, argvAttested, decision, logSeq, anchorSeq,
+                     anchorVerified, checkpoint, checkpointSeq, handoff,
+                     handoffSeq, handoffCapsIssued, handoffCapsConsumed >>
+
+Recover ==
+    /\ ~online
+    /\ online' = TRUE
+    /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
+                     starts, argvAttested, decision, logSeq, anchorSeq,
+                     anchorVerified, checkpoint, checkpointSeq, handoff,
+                     handoffSeq, handoffCapsIssued, handoffCapsConsumed >>
+
+Next ==
+    \/ /\ online
+       /\ online' = TRUE
+       /\ PersistentStep
+    \/ Crash
+    \/ Recover
+
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
+    /\ online \in BOOLEAN
     /\ phase \in PhaseSet
     /\ desired \in BOOLEAN
     /\ startCapsIssued \in 0..MaxCapabilities
@@ -314,6 +340,10 @@ AcceptedHandoffIsAnchored ==
         /\ anchorVerified
         /\ anchorSeq >= handoffSeq
         /\ checkpointSeq < handoffSeq
+
+\* Concrete capability publication, action requests, and crash recovery map
+\* to stuttering steps. Issue/commit/verify/accept events map to the named
+\* persistent actions above; Crash and Recover change no persisted fact.
 
 \* @sabotage id=start-without-capability invariant=LinearStartAuthority control=capability_required
 \* @sabotage id=capability-reuse invariant=LinearStartAuthority control=capability_reuse
