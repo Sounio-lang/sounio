@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.9
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.10
 
 usage() {
   cat <<'USAGE'
@@ -1062,7 +1062,19 @@ attempt_message_wake() {
   target_agent="$M_TO_AGENT"
   target_lane="$M_TO_LANE"
   endpoint_file="$(endpoint_path "$M_TO_AGENT" "$M_TO_LANE")"
-  if [[ ! -f "$endpoint_file" ]]; then
+  if [[ -f "$endpoint_file" ]]; then
+    load_endpoint "$endpoint_file"
+    if ! endpoint_state; then
+      WAKE_STATUS="$ENDPOINT_STATE"
+      if [[ "$ENDPOINT_STATE" == drifted ]]; then
+        printf 'WAKE_REFUSED message_id=%s endpoint_id=%s reason=endpoint-drift\n' "$M_ID" "$E_ID" >&2
+        WAKE_STATUS='failed-closed'
+        return 1
+      fi
+      endpoint_file=''
+    fi
+  fi
+  if [[ -z "$endpoint_file" || ! -f "$endpoint_file" ]]; then
     if discover_history_endpoint "$target_agent" "$target_lane"; then
       discovered=1
     fi
@@ -1097,14 +1109,6 @@ attempt_message_wake() {
     return 0
   fi
   load_endpoint "$endpoint_file"
-  if ! endpoint_state; then
-    WAKE_STATUS="$ENDPOINT_STATE"
-    if [[ "$ENDPOINT_STATE" == drifted ]]; then
-      printf 'WAKE_REFUSED message_id=%s endpoint_id=%s reason=endpoint-drift\n' "$M_ID" "$E_ID" >&2
-      WAKE_STATUS='failed-closed'
-    fi
-    return 1
-  fi
   receipt_file="$(wake_receipt_path "$M_ID" "$E_ID")"
   if [[ -f "$receipt_file" ]]; then
     WAKE_STATUS='deduplicated'
