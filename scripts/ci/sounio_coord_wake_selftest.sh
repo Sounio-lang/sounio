@@ -10,6 +10,7 @@ STATE="$TEST_ROOT/state"
 SOCKET="$TEST_ROOT/tmux.sock"
 RECEIVER="$TEST_ROOT/receiver.js"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
+GROK_BIN="$TEST_ROOT/grok"
 RUNTIME="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh"
 
 cleanup() {
@@ -73,6 +74,11 @@ tmux -S "$SOCKET" new-session -d -s recipient -c "$SECOND" \
 sleep 0.2
 pane="$(tmux -S "$SOCKET" display-message -p -t recipient '#{pane_id}')"
 [[ -n "$pane" ]] || fail 'tmux pane was not created'
+cp "$(command -v sleep)" "$GROK_BIN"
+tmux -S "$SOCKET" new-window -d -t recipient -n grok -c "$SECOND" \
+  "$GROK_BIN 300"
+grok_pane="$(tmux -S "$SOCKET" display-message -p -t recipient:grok '#{pane_id}')"
+[[ -n "$grok_pane" ]] || fail 'grok compatibility pane was not created'
 
 output="$(coord "$SECOND" endpoint-register --agent codex --lane recipient \
   --harness codex --transport tmux --address "$pane" --socket "$SOCKET" \
@@ -128,6 +134,17 @@ wait_for_text "$RECEIVER_LOG" "$legacy_message" || \
 if grep -q "$legacy_secret" "$RECEIVER_LOG"; then
   fail 'history-discovered wake injected raw message content'
 fi
+
+SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent grok-cli2 \
+  --lane legacy-grok --to-agent sender --to-lane origin --kind info \
+  --message 'establish a historical Grok endpoint' >/dev/null
+output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sender \
+  --lane origin --to-agent grok-cli2 --to-lane legacy-grok --kind request \
+  --message 'wake the Grok-compatible lane')"
+grok_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+[[ -n "$grok_message" ]] || fail 'cross-harness send did not return a message id'
+grep -q "^WAKE_DELIVERED message_id=$grok_message .*address=$grok_pane discovery=history$" \
+  <<< "$output" || fail 'Grok lane was not woken through verified history'
 
 SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent codex \
   --lane moved-recipient --to-agent sender --to-lane origin --kind info \
