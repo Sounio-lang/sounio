@@ -325,6 +325,64 @@ DNS/text-facing code produces dotted-decimal TEXT, syscall-facing code
 (`build_sockaddr`) consumes raw OCTETS, and the two must never be passed to
 each other directly.
 
+## Finding 11 — `u64` right-shift, division, and modulo silently use signed/arithmetic semantics whenever bit 63 is set
+
+`>>`, `/`, and `%` on a `u64` value whose bit 63 is set produce mathematically
+WRONG results — silently, no error. `+`, `-`, `*`, `&`, `|`, `^`, `<<`, `==`,
+and `!=` are all confirmed bit-exact correct regardless of bit 63; only
+right-shift/divide/modulo (and ordering comparisons `<`/`>`/`<=`/`>=` when
+the signed and unsigned interpretations of the operands diverge) are broken.
+
+```sio
+let x: u64 = 18446744065119617025   // 0xFFFFFFFE00000001, bit 63 set
+x >> 1    // WRONG (arithmetic-shifts as if signed, corrupting the result)
+x >> 32   // WRONG
+x >> 63   // WRONG
+x / 2                // WRONG
+x / 4294967296        // WRONG
+x % 4294967296        // WRONG, nonsensical negative output
+x & 0xFFFFFFFF        // CORRECT
+x << 1                 // CORRECT, even when the result sets bit 63
+x == <same value>      // CORRECT (bit-pattern comparison, not signed compare)
+```
+
+Confirmed the break is precisely at bit 63 (not "large values" generally):
+a value with bit 62 set and bit 63 clear right-shifts correctly. Confirmed
+`i64`'s own right-shift is internally consistent with sign-extension (as
+expected for a signed type) — strongly suggesting `u64`'s `>>`/`/`/`%` share
+the same arithmetic-shift/signed-divide code path as `i64` instead of using
+a logical-shift/unsigned-divide path when the value's top bit is set.
+
+**Consequence for bignum/wide-arithmetic work**: multiplying two ~32-bit
+values and extracting the high 32 bits of their 64-bit product via `>> 32`
+or `/ 4294967296` is UNSAFE whenever the product's bit 63 ends up set — which
+happens for a large fraction of possible 32-bit×32-bit products (any pair
+whose product exceeds `2^63`). **Workaround/recommendation: use 16-bit limbs
+for any multi-limb (bignum) arithmetic**, not 32-bit. With 16-bit limbs,
+every partial product, carry, and running sum in a schoolbook multiply stays
+under roughly `2^33` — always far below bit 63 — so every shift/mask/carry
+step needed is safe:
+
+```sio
+// 32-bit inputs decomposed into 16-bit halves; every intermediate below 2^33
+let a_hi = a >> 16; let a_lo = a & 0xFFFF   // a itself has no bit-63 risk (32-bit input)
+let b_hi = b >> 16; let b_lo = b & 0xFFFF
+let p_hh = a_hi*b_hi; let p_hl = a_hi*b_lo; let p_lh = a_lo*b_hi; let p_ll = a_lo*b_lo  // each < 2^32
+let mid = p_hl + p_lh                                    // < 2^33, safe to shift
+let mid_lo = mid & 0xFFFF; let mid_hi = mid >> 16          // safe: mid has no bit 63
+let low32 = (mid_lo << 16) + p_ll
+let carry = low32 >> 32                                    // safe: low32 max ~2^33
+let low32_final = low32 & 0xFFFFFFFF
+let high32 = p_hh + mid_hi + carry
+```
+
+Verified this reconstructs the exact correct 64-bit product
+(`0xFFFFFFFE00000001` for `4294967295 * 4294967295`) that direct `u64`
+shift/divide extraction gets wrong. **A future bignum module for RSA/TLS on
+this compiler should use 16-bit limbs throughout, not 32-bit** — 32-bit
+limbs are only safe if every multiply is itself internally decomposed this
+same way, which is equivalent to using 16-bit limbs in the first place.
+
 ## Scope note
 
 Neither finding blocks this project — both have workarounds (hand-rolled
