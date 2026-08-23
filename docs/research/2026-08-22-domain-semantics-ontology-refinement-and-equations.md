@@ -1072,6 +1072,42 @@ the disjoint-certificate gate at the real `ep_add` site, and re-run these five c
 run-pass/compile-fail tests. Step 1 (this file) de-risks it: the semantics + controls are
 proven green before touching the hot type.
 
+## 24. R-ORIGIN vs NS boundary + the narrow novelty claim (semantic package item 5)
+
+Closes item (5) of codex's package (msg-1787451012): the two abstract domains are
+SIBLINGS, never conflated. Per founder direction, Fable-1 owns the NS surface.
+
+| Aspect | R-ORIGIN (codex, L5/L6) | NS — noise-symbol (Fable-1) |
+|---|---|---|
+| Question | *Where* did this value come from — measured vs derived? | *Which sources'* uncertainty does it carry? |
+| Lattice | scalar origin-kind (measured ⊐ … ⊐ derived) | source-SET (powerset, ∪); 3-state handle −1/0/>0 |
+| TypeEntry field | `provenance_id` (scalar) | `noise_set_id` (sibling set-handle) |
+| Transfer | arithmetic result → Derived (kind downgrade) | add/mul → ∪ of operand source-sets |
+| "unknown" | origin kind is known by construction | `−1` = top; **never treated as disjoint** (conservative) |
+| Violation caught | laundering: computed value claims *measured* | anti-garbling: independence assumed between *correlated* operands |
+| Gate site | binding / arithmetic / call preserve kind | `ep_add`/`ep_mul`: independence only with a proved-disjoint certificate |
+| Soundness anchor | R-ORIGIN no-laundering witnesses | `SounioAntiGarblingModel` (kernel-checked): naive add sound ⟺ zero covariance |
+| Failure of the sibling | manufacturing provenance | manufacturing precision (variance understated) |
+
+**Narrow novelty claim (one sentence):** *Sounio statically tracks the source-identity
+of a value's uncertainty as a noise-symbol set carried in the type, and makes the
+independence assumption of uncertainty arithmetic a checked precondition — an add/merge
+over operands whose source-sets are non-disjoint (or unknown) is rejected unless a
+proved-disjoint certificate holds; no uncertainty-typed language (Uncertain⟨T⟩,
+Measurements.jl, p-box libraries) enforces covariance-soundness of propagation at compile
+time, they propagate unconditionally and silently understate correlated combinations.*
+
+**Causality witness (not E222 coincidence):** `ns_contract.sio` control 5 — flipping the
+sabotage switch (drop ONLY set-propagation) makes control-1's `x+x` refusal vanish
+(`5 sabotage: x+x NOT flagged (refusal vanishes): PASS`), proving the refusal is caused by
+NS propagation, not by an unrelated effect-row rejection.
+
+**Semantic package status: CLOSED.** (1) 3-state lattice ✅ (2) transfer + parametric
+call-summary ✅ (3) falsifiers x+x/x+y/unknown ✅ (4) sabotage causality witness ✅
+(5) boundary table + narrow claim ✅ — all on the NS-owned surface (`noise_symbols.sio`,
+`ns_dataflow.sio`, `ns_contract.sio`, `SounioAntiGarblingModel.lean`), no `self-hosted/`
+edits. Compiler write-set for the next (serialized-ownership) phase is filed with codex.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
