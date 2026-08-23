@@ -29369,4 +29369,107 @@ theorem cp2_level_recursion (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [hsplit, h01, h10, h11, hC0, hR0, hD1, hkappa]
   grind
 
+/-! ### Tier 163 — the deviation law CROSS-CHECKED against the raw definition
+
+    Tier 161 proves the law through a chain: Tier 90's decomposition, Tiers 155/157's legs,
+    Tier 159's iteration, Tier 136's seam value and — for half the base case — the concurrent
+    lane's Tier 166.  A chain that long deserves a check that does not use any of it.
+
+    Each point below is stated TWICE with the same statement: once by `decide`, which evaluates
+    `tri3` straight from the `P3` definition in the kernel, and once from `deviation_law`.  If
+    either side ever drifts, one of the two proofs stops compiling.
+
+      `j = 3, m = 3`   `D = 1728`    `= 1728 · 8⁰ · [3,3]₂`,  `[3,3]₂ = 1`
+      `j = 3, m = 4`   `D = 13824`   `= 1728 · 8¹ · [3,3]₂`
+      `j = 4, m = 4`   `D = 25920`   `= 1728 · 8⁰ · [4,3]₂`,  `[4,3]₂ = 15`
+
+    The third is the one that matters: a DIFFERENT base `j`, so it exercises the q-binomial
+    factor — the part that fails first if the base case or the `8^(m−j)` channel is wrong.
+
+    **A NEGATIVE CONTROL** (`dev_control_W12_m4`).  The law is stated only for `W = 2^j`, and
+    that restriction is NOT vacuous: at level 4, `W = 12` gives `D = 4608`, which is not of the
+    form `1728·8^i·[j,3]₂` for any `i, j` — it would need `8^i·[j,3]₂ = 8/3`.  So the law really
+    does fail off the power-of-two labels, rather than holding there for uninteresting reasons.
+
+    Measured alongside it (`#eval`, MEASUREMENT not proof): at level 4, `W = 3` and `W = 5` give
+    `D = 0`, while `W = 24` gives `D = 13824` — the same value as `W = 8`.  `24 = 11000₂` and
+    `8 = 1000₂` share their lowest set bit; `12 = 1100₂` has lowest set bit `4` and does NOT
+    reproduce `W = 4`'s value (`D = 0`).  So the deviation is not a function of `lsb(W)` alone,
+    and no claim of that shape is made here.
+
+    Kernel cost: `2^4` runs in ~3 s, each `2^5` in ~16 s; this tier adds ~50 s to a full build.
+    Level 5 (`2^6`) is MEASUREMENT only — `#eval` gives `−53072` at the reference and `57520` at
+    `W = 8`, so `D = 110592 = 1728·8²` — and is deliberately NOT reproduced as a kernel `decide`:
+    it is not evidence of the same strength as the three checked points, and the build time is
+    not worth it.
+
+    The `decide` proofs depend on `[propext]` alone. -/
+
+set_option maxRecDepth 100000 in
+/-- `j = 3, m = 3`: `D = 1728`, by kernel evaluation of `P3`. -/
+theorem dev_check_j3_m3 :
+    tri3 (2^4) (fun x y => P3 x y 8 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 1728 := by
+  decide
+
+/-- The same value, from `deviation_law`. -/
+theorem dev_from_law_j3_m3 :
+    tri3 (2^4) (fun x y => P3 x y 8 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 1728 := by
+  have h := deviation_law 0 0
+  simp only [Nat.zero_add, Nat.add_zero, show 3+1 = 4 from rfl,
+    show (2:Nat)^3 = 8 from rfl] at h
+  have e0 : ((2^0 : Nat) : Int) = 1 := by decide
+  have e4 : ((2^4 : Nat) : Int) = 16 := by decide
+  rw [e0, e4] at h
+  omega
+
+set_option maxRecDepth 1000000 in
+/-- `j = 3, m = 4`: `D = 13824`, by kernel evaluation of `P3`. -/
+theorem dev_check_j3_m4 :
+    tri3 (2^5) (fun x y => P3 x y 8 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 13824 := by
+  decide
+
+/-- The same value, from `deviation_law` — the `8^(m−j)` channel at one step. -/
+theorem dev_from_law_j3_m4 :
+    tri3 (2^5) (fun x y => P3 x y 8 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 13824 := by
+  have h := deviation_law 0 1
+  simp only [Nat.zero_add, show 3+1+1 = 5 from rfl, show 3+1 = 4 from rfl,
+    show (2:Nat)^3 = 8 from rfl] at h
+  have e1 : ((2^1 : Nat) : Int) = 2 := by decide
+  have e4 : ((2^4 : Nat) : Int) = 16 := by decide
+  rw [e1, e4] at h
+  omega
+
+set_option maxRecDepth 1000000 in
+/-- `j = 4, m = 4`: `D = 25920 = 1728·15`, by kernel evaluation of `P3`.  **The q-binomial
+    check** — a different base `j`, so `[4,3]₂ = 15` has to come out right. -/
+theorem dev_check_j4_m4 :
+    tri3 (2^5) (fun x y => P3 x y 16 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 25920 := by
+  decide
+
+/-- The same value, from `deviation_law`. -/
+theorem dev_from_law_j4_m4 :
+    tri3 (2^5) (fun x y => P3 x y 16 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 25920 := by
+  have h := deviation_law 1 0
+  simp only [show 1+3 = 4 from rfl, show 4+1 = 5 from rfl,
+    show (2:Nat)^4 = 16 from rfl] at h
+  have e0 : ((2^0 : Nat) : Int) = 1 := by decide
+  have e5 : ((2^5 : Nat) : Int) = 32 := by decide
+  rw [e0, e5] at h
+  omega
+
+set_option maxRecDepth 100000 in
+/-- `j = 1, m = 3` — two steps of the `8^(m−j)` channel in the VANISHING branch: `[1,3]₂ = 0`,
+    so the law predicts `D = 0`, and it is. -/
+theorem dev_check_j1_m3 :
+    tri3 (2^4) (fun x y => P3 x y 2 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 0 := by
+  decide
+
+set_option maxRecDepth 1000000 in
+/-- **NEGATIVE CONTROL.**  Off the power-of-two labels the law fails: at level 4, `W = 12` gives
+    `D = 4608`, and `4608 = 1728·8^i·[j,3]₂` has no solution (it needs `8^i·[j,3]₂ = 8/3`).
+    The restriction to `W = 2^j` in `deviation_law` is therefore doing real work. -/
+theorem dev_control_W12_m4 :
+    tri3 (2^5) (fun x y => P3 x y 12 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 4608 := by
+  decide
+
 end SounioZDFiberAntisym
