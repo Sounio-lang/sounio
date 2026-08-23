@@ -86,10 +86,13 @@ grep -Fq "worktree=$SECOND" <<< "$output" || \
   fail 'cross-worktree claim was not retained on the target worktree'
 
 set +e
-cross_output="$(run_hook codex "$REPO" \
-  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/unclaimed-new.sio\"}}" 2>&1)"
+cross_log="$TEST_ROOT/unclaimed-cross-write.log"
+run_hook codex "$REPO" \
+  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/unclaimed-new.sio\"}}" \
+  >"$cross_log" 2>&1
 cross_rc=$?
 set -e
+cross_output="$(<"$cross_log")"
 [[ "$cross_rc" -eq 2 ]] || fail "unclaimed cross-worktree write returned $cross_rc instead of 2"
 grep -q 'no active claim in worktree' <<< "$cross_output" || \
   fail 'unclaimed cross-worktree write did not explain the missing target claim'

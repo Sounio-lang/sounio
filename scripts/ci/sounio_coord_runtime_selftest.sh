@@ -47,6 +47,8 @@ first_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime was not activated'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-causal-runtime" ]] || \
   fail 'installed runtime omitted the causal receipt verifier'
+grep -q '^capability=crash-recovery-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed runtime omitted the crash-recovery capability'
 
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'second worktree did not select shared runtime'
@@ -78,7 +80,7 @@ mkdir -p "$ALT/scripts/dev"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
-sed -i 's/SOUNIO_COORD_RUNTIME_VERSION=2026\.08\.23\.7/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
+sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --source-root "$ALT")"
