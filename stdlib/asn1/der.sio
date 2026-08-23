@@ -170,3 +170,46 @@ pub fn der_peek_tag(r: &DerReader) -> (DerTag, i64) with IO {
     }
     (tag, DER_OK)
 }
+
+// Decodes the tag+length header starting at r.pos, same as der_peek_tag,
+// but returns a new DerReader whose pos has advanced past the header to
+// content_start. Per this plan's Global Constraints, this rebuilds a fresh
+// DerReader by reading fields individually -- never `*r`.
+pub fn der_read_tlv(r: &DerReader) -> (DerReader, DerTag, i64) with IO {
+    let (tag, status) = der_peek_tag(r)
+    if status != DER_OK {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, tag, status)
+    }
+    let advanced = DerReader { buf_ptr: r.buf_ptr, pos: tag.content_start, end: r.end }
+    (advanced, tag, DER_OK)
+}
+
+// Returns a child cursor scoped to exactly `tag`'s value bytes. `r` must be
+// positioned such that `tag` was decoded from it (i.e. `tag.content_start`
+// falls within `r`'s range) -- this is always true when `tag` came from a
+// der_peek_tag/der_read_tlv call on this same `r`.
+pub fn der_enter(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
+    if tag.constructed == false {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, DER_ERR_NOT_CONSTRUCTED)
+    }
+    let child = DerReader {
+        buf_ptr: r.buf_ptr,
+        pos: tag.content_start,
+        end: tag.content_start + tag.content_len,
+    }
+    (child, DER_OK)
+}
+
+// Returns a cursor advanced past this whole TLV (header + value), without
+// reading or copying the value's bytes.
+pub fn der_skip(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
+    let new_pos = tag.content_start + tag.content_len
+    if new_pos > r.end {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, DER_ERR_TRUNCATED)
+    }
+    let advanced = DerReader { buf_ptr: r.buf_ptr, pos: new_pos, end: r.end }
+    (advanced, DER_OK)
+}
