@@ -27,7 +27,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.2"
+RUNTIME_VERSION = "2026.08.23.3"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -99,6 +99,13 @@ def atomic_write_secret_json(path: Path, value: dict[str, Any]) -> None:
 
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def failpoint(name: str) -> None:
+    if os.environ.get("SOUNIO_FLEET_FAILPOINT") != name:
+        return
+    print(f"FLEET_FAILPOINT name={name} exit=197", file=sys.stderr, flush=True)
+    os._exit(197)
 
 
 def slug(value: str, limit: int = 96) -> str:
@@ -913,10 +920,27 @@ def desired_mapping_mismatch(spec: LaneSpec, mapping: dict[str, Any]) -> str | N
     if spec.identity:
         expected["identity"] = spec.identity
     if spec.command:
-        expected["command"] = Path(spec.command[0]).name
-        expected["argv_digest"] = hashlib.sha256(
+        original_digest = hashlib.sha256(
             canonical_json(list(spec.command)).encode("utf-8")
         ).hexdigest()
+        start_capability_id = mapping.get("start_capability_id")
+        if isinstance(start_capability_id, str) and start_capability_id:
+            env_command = shutil.which("env")
+            if env_command is None:
+                return "capability-env-unavailable"
+            wrapped = [
+                str(Path(env_command).resolve()),
+                f"SOUNIO_FLEET_START_CAPABILITY_ID={start_capability_id}",
+                *spec.command,
+            ]
+            expected["command"] = Path(env_command).name
+            expected["argv_digest"] = hashlib.sha256(
+                canonical_json(wrapped).encode("utf-8")
+            ).hexdigest()
+            expected["original_argv_digest"] = original_digest
+        else:
+            expected["command"] = Path(spec.command[0]).name
+            expected["argv_digest"] = original_digest
     for key, value in expected.items():
         observed = mapping.get(key)
         if key == "worktree" and isinstance(observed, str):
@@ -1000,6 +1024,7 @@ def observe_spec(spec: LaneSpec) -> dict[str, Any]:
             "lane": mapping.get("lane"),
             "session_id": mapping.get("session_id"),
             "argv_digest": mapping.get("argv_digest"),
+            "start_capability_id": mapping.get("start_capability_id"),
             "harness_pid": fields.get("harness_pid"),
             "attached_clients": fields.get("attached_clients"),
         }
@@ -1120,7 +1145,8 @@ def capability_events(
         """
         SELECT event_type, payload FROM events
         WHERE event_type IN (
-            'CAPABILITY_ISSUED', 'CAPABILITY_CONSUMED', 'CAPABILITY_REVOKED'
+            'CAPABILITY_ISSUED', 'CAPABILITY_PUBLISHED',
+            'CAPABILITY_CONSUMED', 'CAPABILITY_REVOKED'
         ) ORDER BY seq
         """
     ):
@@ -1128,6 +1154,104 @@ def capability_events(
         if payload.get("capability_id") == capability_id:
             matched.append((row["event_type"], payload))
     return matched
+
+
+def capability_document_digest(document: dict[str, Any]) -> str:
+    public = {key: value for key, value in document.items() if key != "_path"}
+    return hashlib.sha256(
+        (canonical_json(public) + "\n").encode("utf-8")
+    ).hexdigest()
+
+
+def validate_capability_document(
+    issued_event: sqlite3.Row,
+    authority: dict[str, Any],
+    document: dict[str, Any],
+) -> None:
+    capability_id = authority.get("capability_id")
+    token = document.get("token")
+    if not isinstance(capability_id, str) or not isinstance(token, str):
+        raise FleetdError("capability document omits its identity or secret")
+    required = {
+        key: value
+        for key, value in authority.items()
+        if key not in {"issued_unix", "observation_seq", "token_hash"}
+    }
+    required["issued_event_hash"] = issued_event["event_hash"]
+    required["version"] = 1
+    if any(document.get(key) != value for key, value in required.items()):
+        raise FleetdError(f"capability file {capability_id} binding was altered")
+    observed_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(observed_hash, str(authority.get("token_hash", ""))):
+        raise FleetdError(
+            f"capability {capability_id} secret does not match its issuance"
+        )
+
+
+def publish_capability(
+    connection: sqlite3.Connection,
+    issued_event: sqlite3.Row,
+    authority: dict[str, Any],
+    document: dict[str, Any],
+    output_path: Path,
+) -> sqlite3.Row:
+    validate_capability_document(issued_event, authority, document)
+    payload = {
+        "action": authority["action"],
+        "capability_id": authority["capability_id"],
+        "document_path": str(output_path),
+        "document_sha256": capability_document_digest(document),
+        "issued_event_hash": issued_event["event_hash"],
+        "issued_event_seq": issued_event["seq"],
+        "slot": authority["slot"],
+    }
+    event, _ = append_event(
+        connection,
+        "CAPABILITY_PUBLISHED",
+        authority["slot"],
+        f"capability-published:{authority['capability_id']}",
+        payload,
+    )
+    return event
+
+
+def recover_unpublished_capabilities(connection: sqlite3.Connection) -> int:
+    recovered = 0
+    issued_rows = connection.execute(
+        "SELECT * FROM events WHERE event_type = 'CAPABILITY_ISSUED' ORDER BY seq"
+    ).fetchall()
+    for issued_event in issued_rows:
+        authority = json.loads(issued_event["payload"])
+        capability_id = authority.get("capability_id")
+        raw_path = authority.get("capability_path")
+        if not isinstance(capability_id, str) or not isinstance(raw_path, str):
+            continue
+        events = capability_events(connection, capability_id)
+        kinds = [kind for kind, _ in events]
+        if "CAPABILITY_PUBLISHED" in kinds or any(
+            kind in {"CAPABILITY_CONSUMED", "CAPABILITY_REVOKED"}
+            for kind in kinds
+        ):
+            continue
+        path = absolute_without_symlink_resolution(raw_path)
+        if not path.is_file() or path.is_symlink():
+            append_event(
+                connection,
+                "CAPABILITY_REVOKED",
+                authority["slot"],
+                f"capability-revoked:{capability_id}:crash-before-publish",
+                {
+                    "capability_id": capability_id,
+                    "reason": "crash-before-capability-publish",
+                },
+            )
+            recovered += 1
+            continue
+        document = read_capability_file(path)
+        validate_capability_document(issued_event, authority, document)
+        publish_capability(connection, issued_event, authority, document, path)
+        recovered += 1
+    return recovered
 
 
 def outstanding_capability_exists(
@@ -1187,6 +1311,7 @@ def issue_start_capability(
     payload = {
         "action": "start",
         "capability_id": capability_id,
+        "capability_path": str(output_path),
         "desired_hash": spec.desired_hash,
         "expires_unix": issued_unix + ttl_seconds,
         "issued_unix": issued_unix,
@@ -1202,9 +1327,11 @@ def issue_start_capability(
         f"capability-issued:{capability_id}",
         payload,
     )
+    failpoint("start-capability:issued")
     document = {
         "action": "start",
         "capability_id": capability_id,
+        "capability_path": str(output_path),
         "desired_hash": spec.desired_hash,
         "expires_unix": payload["expires_unix"],
         "issued_event_hash": event["event_hash"],
@@ -1215,6 +1342,8 @@ def issue_start_capability(
     }
     try:
         atomic_write_secret_json(output_path, document)
+        failpoint("start-capability:file-written")
+        publish_capability(connection, event, payload, document, output_path)
     except Exception:
         append_event(
             connection,
@@ -1280,6 +1409,9 @@ def consume_start_capability(
         raise FleetdError(f"capability {capability_id} was already consumed")
     if any(kind == "CAPABILITY_REVOKED" for kind, _ in events):
         raise FleetdError(f"capability {capability_id} was revoked")
+    published = [
+        payload for kind, payload in events if kind == "CAPABILITY_PUBLISHED"
+    ]
     authority = issued[0]
     required = {
         "action": "start",
@@ -1292,11 +1424,18 @@ def consume_start_capability(
         raise FleetdError(f"capability {capability_id} does not authorize this transition")
     if any(document.get(key) != value for key, value in required.items()):
         raise FleetdError(f"capability file {capability_id} binding was altered")
+    if authority.get("capability_path") is not None:
+        if len(published) != 1:
+            raise FleetdError(f"capability {capability_id} was not uniquely published")
     if int(authority.get("expires_unix", 0)) < int(time.time()):
         raise FleetdError(f"capability {capability_id} expired")
     observed_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(observed_hash, str(authority.get("token_hash", ""))):
         raise FleetdError(f"capability {capability_id} secret does not match its issuance")
+    if authority.get("capability_path") is not None and (
+        published[0].get("document_sha256") != capability_document_digest(document)
+    ):
+        raise FleetdError(f"capability {capability_id} publication digest drifted")
     append_event(
         connection,
         "CAPABILITY_CONSUMED",
@@ -1310,6 +1449,7 @@ def consume_start_capability(
             "slot": spec.slot,
         },
     )
+    failpoint("start-action:authority-consumed")
     return capability_id
 
 
@@ -1348,6 +1488,49 @@ def events_with_identity(
     return matched
 
 
+def active_start_authority(
+    connection: sqlite3.Connection,
+    slot: str,
+    observation: dict[str, Any],
+) -> tuple[sqlite3.Row, dict[str, Any]]:
+    matches: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+    for row in connection.execute(
+        """
+        SELECT * FROM events
+        WHERE event_type = 'ACTION_COMMITTED' AND slot = ?
+        ORDER BY seq
+        """,
+        (slot,),
+    ):
+        payload = json.loads(row["payload"])
+        if (
+            payload.get("action") == "start"
+            and payload.get("status") == "committed"
+            and payload.get("generation") == observation.get("generation")
+            and payload.get("argv_digest") == observation.get("argv_digest")
+            and payload.get("capability_id")
+            == observation.get("start_capability_id")
+        ):
+            matches.append((row, payload))
+    if len(matches) != 1:
+        raise FleetdError(
+            f"checkpoint requires one capability-bound active generation: {slot}"
+        )
+    capability_id = matches[0][1].get("capability_id")
+    if not isinstance(capability_id, str):
+        raise FleetdError("active start receipt omits its capability identity")
+    consumed = [
+        payload
+        for kind, payload in capability_events(connection, capability_id)
+        if kind == "CAPABILITY_CONSUMED" and payload.get("action") == "start"
+    ]
+    if len(consumed) != 1:
+        raise FleetdError(
+            f"active generation has no unique consumed authority: {capability_id}"
+        )
+    return matches[0]
+
+
 def create_checkpoint(
     connection: sqlite3.Connection,
     specs: list[LaneSpec],
@@ -1369,6 +1552,9 @@ def create_checkpoint(
         raise FleetdError(
             f"checkpoint requires an active argv-attested slot: {slot}"
         )
+    start_event, start_receipt = active_start_authority(
+        connection, slot, observation
+    )
     summary = file_receipt(summary_file)
     evidence = [file_receipt(path) for path in evidence_files]
     if not evidence:
@@ -1382,6 +1568,10 @@ def create_checkpoint(
         "generation": observation["generation"],
         "observation_seq": int(observation_event["seq"]),
         "slot": slot,
+        "start_action_event_hash": start_event["event_hash"],
+        "start_action_event_seq": start_event["seq"],
+        "start_action_id": start_receipt["action_id"],
+        "start_capability_id": start_receipt["capability_id"],
         "state": "draft",
         "summary": summary,
     }
@@ -1514,6 +1704,95 @@ def verified_checkpoint(
     return drafts[0][0], drafts[0][1], verified[0][0], verified[0][1]
 
 
+def ensure_handoff_capability(
+    connection: sqlite3.Connection,
+    prepared: sqlite3.Row,
+    prepared_payload: dict[str, Any],
+    output_path: Path,
+    ttl_seconds: int,
+) -> str:
+    recover_unpublished_capabilities(connection)
+    handoff_id = str(prepared_payload["handoff_id"])
+    for issued_event in connection.execute(
+        "SELECT * FROM events WHERE event_type = 'CAPABILITY_ISSUED' ORDER BY seq"
+    ):
+        authority = json.loads(issued_event["payload"])
+        if (
+            authority.get("action") != "accept-handoff"
+            or authority.get("handoff_id") != handoff_id
+        ):
+            continue
+        capability_id = str(authority.get("capability_id", ""))
+        events = capability_events(connection, capability_id)
+        kinds = [kind for kind, _ in events]
+        if "CAPABILITY_REVOKED" in kinds:
+            continue
+        if "CAPABILITY_PUBLISHED" in kinds or "CAPABILITY_CONSUMED" in kinds:
+            if authority.get("capability_path") != str(output_path):
+                raise FleetdError(
+                    "prepared handoff capability path changed during recovery"
+                )
+            return capability_id
+    capability_id = f"cap-{uuid.uuid4()}"
+    token = secrets.token_urlsafe(48)
+    issued_unix = int(time.time())
+    issued_payload = {
+        "action": "accept-handoff",
+        "capability_id": capability_id,
+        "capability_path": str(output_path),
+        "checkpoint_id": prepared_payload["checkpoint_id"],
+        "evidence_set_digest": prepared_payload["evidence_set_digest"],
+        "expires_unix": issued_unix + ttl_seconds,
+        "handoff_id": handoff_id,
+        "issued_unix": issued_unix,
+        "prepared_event_hash": prepared["event_hash"],
+        "prepared_event_seq": prepared["seq"],
+        "slot": prepared["slot"],
+        "to_agent": prepared_payload["to_agent"],
+        "to_lane": prepared_payload["to_lane"],
+        "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+    }
+    issued_event, _ = append_event(
+        connection,
+        "CAPABILITY_ISSUED",
+        prepared["slot"],
+        f"capability-issued:{capability_id}",
+        issued_payload,
+    )
+    failpoint("handoff-prepare:authority-issued")
+    document = {
+        key: value
+        for key, value in issued_payload.items()
+        if key not in {"issued_unix", "token_hash"}
+    }
+    document.update(
+        {
+            "issued_event_hash": issued_event["event_hash"],
+            "token": token,
+            "version": 1,
+        }
+    )
+    try:
+        atomic_write_secret_json(output_path, document)
+        failpoint("handoff-prepare:file-written")
+        publish_capability(
+            connection, issued_event, issued_payload, document, output_path
+        )
+    except Exception:
+        append_event(
+            connection,
+            "CAPABILITY_REVOKED",
+            prepared["slot"],
+            f"capability-revoked:{capability_id}:write-failed",
+            {
+                "capability_id": capability_id,
+                "reason": "capability-file-write-failed",
+            },
+        )
+        raise
+    return capability_id
+
+
 def prepare_handoff(
     connection: sqlite3.Connection,
     checkpoint_id: str,
@@ -1547,8 +1826,35 @@ def prepare_handoff(
         "checkpoint_id",
         checkpoint_id,
     )
-    if any(row["event_type"] == "HANDOFF_PREPARED" for row, _ in existing):
-        raise FleetdError(f"checkpoint already has a prepared handoff: {checkpoint_id}")
+    if any(row["event_type"] == "HANDOFF_ACCEPTED" for row, _ in existing):
+        raise FleetdError(f"checkpoint handoff was already accepted: {checkpoint_id}")
+    prepared_existing = [
+        (row, payload)
+        for row, payload in existing
+        if row["event_type"] == "HANDOFF_PREPARED"
+    ]
+    if prepared_existing:
+        if len(prepared_existing) != 1:
+            raise FleetdError(f"checkpoint has non-unique handoff: {checkpoint_id}")
+        prepared, prepared_payload = prepared_existing[0]
+        required = {
+            "capability_path": str(output_path),
+            "checkpoint_id": checkpoint_id,
+            "evidence_set_digest": evidence_set_digest,
+            "to_agent": to_agent,
+            "to_lane": to_lane,
+        }
+        if any(prepared_payload.get(key) != value for key, value in required.items()):
+            raise FleetdError("prepared handoff recovery binding changed")
+        capability_id = ensure_handoff_capability(
+            connection, prepared, prepared_payload, output_path, ttl_seconds
+        )
+        print(
+            "FLEET_HANDOFF_RECOVERED "
+            f"handoff_id={prepared_payload['handoff_id']} "
+            f"checkpoint_id={checkpoint_id} capability_id={capability_id}"
+        )
+        return str(prepared_payload["handoff_id"])
     handoff_id = f"handoff-{uuid.uuid4()}"
     prepared, _ = append_event(
         connection,
@@ -1556,6 +1862,7 @@ def prepare_handoff(
         draft["slot"],
         f"handoff-prepared:{handoff_id}",
         {
+            "capability_path": str(output_path),
             "checkpoint_id": checkpoint_id,
             "evidence_set_digest": evidence_set_digest,
             "handoff_id": handoff_id,
@@ -1566,57 +1873,11 @@ def prepare_handoff(
             "verified_checkpoint_event_seq": verified_event["seq"],
         },
     )
-    capability_id = f"cap-{uuid.uuid4()}"
-    token = secrets.token_urlsafe(48)
-    issued_unix = int(time.time())
-    issued_payload = {
-        "action": "accept-handoff",
-        "capability_id": capability_id,
-        "checkpoint_id": checkpoint_id,
-        "evidence_set_digest": evidence_set_digest,
-        "expires_unix": issued_unix + ttl_seconds,
-        "handoff_id": handoff_id,
-        "issued_unix": issued_unix,
-        "prepared_event_hash": prepared["event_hash"],
-        "prepared_event_seq": prepared["seq"],
-        "slot": draft["slot"],
-        "to_agent": to_agent,
-        "to_lane": to_lane,
-        "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
-    }
-    issued_event, _ = append_event(
-        connection,
-        "CAPABILITY_ISSUED",
-        draft["slot"],
-        f"capability-issued:{capability_id}",
-        issued_payload,
+    failpoint("handoff-prepare:prepared")
+    prepared_payload = json.loads(prepared["payload"])
+    capability_id = ensure_handoff_capability(
+        connection, prepared, prepared_payload, output_path, ttl_seconds
     )
-    document = {
-        key: value
-        for key, value in issued_payload.items()
-        if key not in {"issued_unix", "token_hash"}
-    }
-    document.update(
-        {
-            "issued_event_hash": issued_event["event_hash"],
-            "token": token,
-            "version": 1,
-        }
-    )
-    try:
-        atomic_write_secret_json(output_path, document)
-    except Exception:
-        append_event(
-            connection,
-            "CAPABILITY_REVOKED",
-            draft["slot"],
-            f"capability-revoked:{capability_id}:write-failed",
-            {
-                "capability_id": capability_id,
-                "reason": "capability-file-write-failed",
-            },
-        )
-        raise
     print(
         "FLEET_HANDOFF_PREPARED "
         f"handoff_id={handoff_id} checkpoint_id={checkpoint_id} "
@@ -1625,14 +1886,14 @@ def prepare_handoff(
     return handoff_id
 
 
-def consume_handoff_capability(
+def validate_handoff_capability(
     connection: sqlite3.Connection,
     handoff_id: str,
     agent: str,
     lane: str,
     evidence_set_digest: str,
     document: dict[str, Any],
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[str, dict[str, Any], bool]:
     capability_id = document.get("capability_id")
     token = document.get("token")
     if not isinstance(capability_id, str) or not isinstance(token, str):
@@ -1641,11 +1902,17 @@ def consume_handoff_capability(
     issued = [payload for kind, payload in events if kind == "CAPABILITY_ISSUED"]
     if len(issued) != 1:
         raise FleetdError(f"handoff capability has no unique issuance: {capability_id}")
-    if any(kind == "CAPABILITY_CONSUMED" for kind, _ in events):
-        raise FleetdError(f"handoff capability was already consumed: {capability_id}")
+    consumed = [
+        payload for kind, payload in events if kind == "CAPABILITY_CONSUMED"
+    ]
+    if len(consumed) > 1:
+        raise FleetdError(f"handoff capability was consumed more than once: {capability_id}")
     if any(kind == "CAPABILITY_REVOKED" for kind, _ in events):
         raise FleetdError(f"handoff capability was revoked: {capability_id}")
     authority = issued[0]
+    published = [
+        payload for kind, payload in events if kind == "CAPABILITY_PUBLISHED"
+    ]
     required = {
         "action": "accept-handoff",
         "capability_id": capability_id,
@@ -1658,11 +1925,30 @@ def consume_handoff_capability(
         raise FleetdError("handoff capability does not authorize this recipient")
     if any(document.get(key) != value for key, value in required.items()):
         raise FleetdError("handoff capability binding was altered")
-    if int(authority.get("expires_unix", 0)) < int(time.time()):
+    if len(published) != 1:
+        raise FleetdError(f"handoff capability was not uniquely published: {capability_id}")
+    if published[0].get("document_sha256") != capability_document_digest(document):
+        raise FleetdError("handoff capability publication digest drifted")
+    if not consumed and int(authority.get("expires_unix", 0)) < int(time.time()):
         raise FleetdError(f"handoff capability expired: {capability_id}")
     observed_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(observed_hash, str(authority.get("token_hash", ""))):
         raise FleetdError("handoff capability secret does not match its issuance")
+    if consumed:
+        if any(consumed[0].get(key) != value for key, value in required.items()):
+            raise FleetdError("consumed handoff capability binding drifted")
+    return capability_id, authority, bool(consumed)
+
+
+def consume_handoff_capability(
+    connection: sqlite3.Connection,
+    capability_id: str,
+    authority: dict[str, Any],
+    handoff_id: str,
+    agent: str,
+    lane: str,
+    evidence_set_digest: str,
+) -> None:
     append_event(
         connection,
         "CAPABILITY_CONSUMED",
@@ -1678,7 +1964,7 @@ def consume_handoff_capability(
             "to_lane": lane,
         },
     )
-    return capability_id, authority
+    failpoint("handoff-accept:authority-consumed")
 
 
 def accept_handoff(
@@ -1744,7 +2030,7 @@ def accept_handoff(
             f"handoff preparation is not covered by a signed anchor: {handoff_id}"
         )
     document = read_capability_file(capability_path)
-    capability_id, authority = consume_handoff_capability(
+    capability_id, authority, already_consumed = validate_handoff_capability(
         connection,
         handoff_id,
         agent,
@@ -1752,14 +2038,79 @@ def accept_handoff(
         evidence_set_digest,
         document,
     )
+    request_payload = {
+        "anchor_event_count": latest_anchor["payload"]["event_count"],
+        "anchor_tail_hash": latest_anchor["payload"]["tail_hash"],
+        "capability_id": capability_id,
+        "checkpoint_id": checkpoint_id,
+        "evidence_set_digest": evidence_set_digest,
+        "handoff_id": handoff_id,
+        "state": "requested",
+        "to_agent": agent,
+        "to_lane": lane,
+    }
+    request_events = events_with_identity(
+        connection,
+        ("HANDOFF_ACCEPTANCE_REQUESTED",),
+        "handoff_id",
+        handoff_id,
+    )
+    if request_events:
+        if len(request_events) != 1:
+            raise FleetdError("handoff has non-unique acceptance request")
+        _, prior_request = request_events[0]
+        stable = {
+            key: request_payload[key]
+            for key in (
+                "capability_id",
+                "checkpoint_id",
+                "evidence_set_digest",
+                "handoff_id",
+                "state",
+                "to_agent",
+                "to_lane",
+            )
+        }
+        if any(prior_request.get(key) != value for key, value in stable.items()):
+            raise FleetdError("handoff acceptance request binding drifted")
+        covered_count = int(prior_request.get("anchor_event_count", 0))
+        covered_row = connection.execute(
+            "SELECT event_hash FROM events WHERE seq = ?", (covered_count,)
+        ).fetchone()
+        if (
+            covered_row is None
+            or covered_row["event_hash"] != prior_request.get("anchor_tail_hash")
+            or covered_count > int(latest_anchor["payload"]["event_count"])
+        ):
+            raise FleetdError("recorded handoff anchor prefix no longer verifies")
+        request_payload = prior_request
+    else:
+        append_event(
+            connection,
+            "HANDOFF_ACCEPTANCE_REQUESTED",
+            authority["slot"],
+            f"handoff-acceptance-requested:{handoff_id}",
+            request_payload,
+        )
+    failpoint("handoff-accept:requested")
+    if not already_consumed:
+        consume_handoff_capability(
+            connection,
+            capability_id,
+            authority,
+            handoff_id,
+            agent,
+            lane,
+            evidence_set_digest,
+        )
     event, _ = append_event(
         connection,
         "HANDOFF_ACCEPTED",
         authority["slot"],
         f"handoff-accepted:{handoff_id}",
         {
-            "anchor_event_count": latest_anchor["payload"]["event_count"],
-            "anchor_tail_hash": latest_anchor["payload"]["tail_hash"],
+            "anchor_event_count": request_payload["anchor_event_count"],
+            "anchor_tail_hash": request_payload["anchor_tail_hash"],
             "capability_id": capability_id,
             "checkpoint_id": checkpoint_id,
             "evidence_set_digest": evidence_set_digest,
@@ -1772,12 +2123,12 @@ def accept_handoff(
     print(
         "FLEET_HANDOFF_ACCEPTED "
         f"handoff_id={handoff_id} checkpoint_id={authority['checkpoint_id']} "
-        f"event_seq={event['seq']} anchor_events={latest_anchor['payload']['event_count']}"
+        f"event_seq={event['seq']} anchor_events={request_payload['anchor_event_count']}"
     )
     return 0
 
 
-def launch_arguments(spec: LaneSpec) -> list[str]:
+def launch_arguments(spec: LaneSpec, capability_id: str) -> list[str]:
     base = [str(fleet_agent_command())]
     if spec.kind:
         if spec.home is None:
@@ -1793,6 +2144,8 @@ def launch_arguments(spec: LaneSpec) -> list[str]:
             str(spec.home),
             "--cwd",
             str(spec.cwd),
+            "--start-capability-id",
+            capability_id,
             "--no-attach",
         ]
     if spec.agent is None or spec.session_id is None:
@@ -1810,11 +2163,30 @@ def launch_arguments(spec: LaneSpec) -> list[str]:
         spec.identity or "exact",
         "--cwd",
         str(spec.cwd),
+        "--start-capability-id",
+        capability_id,
         "--no-attach",
     ]
     if spec.lane:
         arguments.extend(["--lane", spec.lane])
     return [*arguments, "--", *spec.command]
+
+
+def start_action_id(
+    slot: str,
+    desired_hash: str,
+    observation_fingerprint: str,
+    capability_id: str,
+) -> str:
+    return digest_json(
+        {
+            "action": "start",
+            "capability_id": capability_id,
+            "desired_hash": desired_hash,
+            "observation": observation_fingerprint,
+            "slot": slot,
+        }
+    )
 
 
 def apply_start(
@@ -1824,14 +2196,11 @@ def apply_start(
     observation_seq: int,
     capability_id: str,
 ) -> bool:
-    action_id = digest_json(
-        {
-            "action": "start",
-            "capability_id": capability_id,
-            "desired_hash": spec.desired_hash,
-            "observation": observation["fingerprint"],
-            "slot": spec.slot,
-        }
+    action_id = start_action_id(
+        spec.slot,
+        spec.desired_hash,
+        observation["fingerprint"],
+        capability_id,
     )
     requested = {
         "action": "start",
@@ -1847,7 +2216,8 @@ def apply_start(
         f"action-request:{action_id}",
         requested,
     )
-    arguments = launch_arguments(spec)
+    failpoint("start-action:requested")
+    arguments = launch_arguments(spec, capability_id)
     try:
         result = subprocess.run(
             arguments,
@@ -1866,6 +2236,15 @@ def apply_start(
             if isinstance(timeout_output, bytes)
             else timeout_output
         ).strip()
+    failpoint("start-action:launched")
+    committed_observation = observe_spec(spec) if return_code == 0 else None
+    if committed_observation is not None and (
+        committed_observation.get("state") != "active"
+        or committed_observation.get("start_capability_id") != capability_id
+    ):
+        return_code = 125
+        output = f"{output}\nstart capability did not bind the active generation".strip()
+        committed_observation = None
     outcome = {
         "action": "start",
         "action_id": action_id,
@@ -1874,6 +2253,14 @@ def apply_start(
         "output_digest": hashlib.sha256(output.encode("utf-8")).hexdigest(),
         "status": "committed" if return_code == 0 else "failed",
     }
+    if committed_observation is not None:
+        outcome.update(
+            {
+                "argv_digest": committed_observation.get("argv_digest"),
+                "generation": committed_observation.get("generation"),
+                "observed_state": committed_observation.get("state"),
+            }
+        )
     append_event(
         connection,
         "ACTION_COMMITTED" if return_code == 0 else "ACTION_FAILED",
@@ -1889,6 +2276,107 @@ def apply_start(
     return return_code == 0
 
 
+def recover_start_actions(
+    connection: sqlite3.Connection, specs: list[LaneSpec]
+) -> int:
+    specs_by_slot = {spec.slot: spec for spec in specs}
+    issued: dict[str, tuple[sqlite3.Row, dict[str, Any]]] = {}
+    consumed: dict[str, tuple[sqlite3.Row, dict[str, Any]]] = {}
+    for row in connection.execute(
+        """
+        SELECT * FROM events
+        WHERE event_type IN ('CAPABILITY_ISSUED', 'CAPABILITY_CONSUMED')
+        ORDER BY seq
+        """
+    ):
+        payload = json.loads(row["payload"])
+        capability_id = payload.get("capability_id")
+        if not isinstance(capability_id, str) or payload.get("action") != "start":
+            continue
+        if row["event_type"] == "CAPABILITY_ISSUED":
+            issued[capability_id] = (row, payload)
+        else:
+            consumed[capability_id] = (row, payload)
+    failed = 0
+    for capability_id, (_, consumption) in consumed.items():
+        issuance = issued.get(capability_id)
+        if issuance is None:
+            raise FleetdError(
+                f"consumed start capability has no issuance: {capability_id}"
+            )
+        _, authority = issuance
+        slot = consumption.get("slot")
+        spec = specs_by_slot.get(str(slot))
+        if spec is None:
+            raise FleetdError(
+                f"pending start action has no configured slot: {capability_id}"
+            )
+        fingerprint = str(consumption.get("observation_fingerprint", ""))
+        authority_desired_hash = str(authority.get("desired_hash", ""))
+        action_id = start_action_id(
+            spec.slot, authority_desired_hash, fingerprint, capability_id
+        )
+        action_rows = events_with_identity(
+            connection,
+            ("ACTION_REQUESTED", "ACTION_COMMITTED", "ACTION_FAILED"),
+            "action_id",
+            action_id,
+        )
+        if any(
+            row["event_type"] in {"ACTION_COMMITTED", "ACTION_FAILED"}
+            for row, _ in action_rows
+        ):
+            continue
+        if authority_desired_hash != spec.desired_hash:
+            raise FleetdError(
+                f"pending start action desired state drifted: {capability_id}"
+            )
+        observation = observe_spec(spec)
+        if any(row["event_type"] == "ACTION_REQUESTED" for row, _ in action_rows) and (
+            observation.get("state") == "active"
+            and observation.get("argv_digest")
+            and observation.get("generation")
+            and observation.get("start_capability_id") == capability_id
+        ):
+            outcome = {
+                "action": "start",
+                "action_id": action_id,
+                "argv_digest": observation["argv_digest"],
+                "capability_id": capability_id,
+                "exit_code": 0,
+                "generation": observation["generation"],
+                "observed_state": "active",
+                "output_digest": digest_json(observation),
+                "recovered_after_crash": True,
+                "status": "committed",
+            }
+            append_event(
+                connection,
+                "ACTION_COMMITTED",
+                spec.slot,
+                f"action-result:{action_id}:recovered:{outcome['output_digest']}",
+                outcome,
+            )
+            print(
+                "FLEET_ACTION_RECOVERED "
+                f"slot={spec.slot} action=start action_id={action_id[:16]}"
+            )
+            continue
+        observation_seq = int(authority.get("observation_seq", 0))
+        recovery_observation = {
+            "fingerprint": fingerprint,
+        }
+        if not apply_start(
+            connection,
+            spec,
+            recovery_observation,
+            observation_seq,
+            capability_id,
+        ):
+            failed += 1
+    return failed
+
+
 def cycle(
     connection: sqlite3.Connection,
     specs: list[LaneSpec],
@@ -1898,9 +2386,10 @@ def cycle(
     emit: bool = True,
 ) -> int:
     verify_state(connection)
+    recover_unpublished_capabilities(connection)
     verify_config_coverage(connection, specs)
     blocked = 0
-    failed = 0
+    failed = recover_start_actions(connection, specs) if apply else 0
     capabilities = capabilities or {}
     used_capabilities: set[str] = set()
     for spec in specs:
@@ -2052,6 +2541,7 @@ def authorize_start(
     ttl_seconds: int,
 ) -> int:
     verify_state(connection)
+    recover_unpublished_capabilities(connection)
     verify_config_coverage(connection, specs)
     matches = [spec for spec in specs if spec.slot == slot]
     if len(matches) != 1:

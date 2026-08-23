@@ -25,6 +25,8 @@ ANCHORS="$TEST_ROOT/anchors"
 CHECKPOINT_SUMMARY="$TEST_ROOT/checkpoint-summary.txt"
 CHECKPOINT_EVIDENCE="$TEST_ROOT/checkpoint-evidence.txt"
 HANDOFF_CAPABILITY="$TEST_ROOT/handoff.capability.json"
+TRACE_CERTIFICATE="$TEST_ROOT/trace-certificate.json"
+TRACE_SABOTAGE_DB="$TEST_ROOT/trace-sabotage.db"
 
 cleanup() {
   if [[ -x "$RUNTIME/sounio-fleet-agent-runtime" && -d "$REPO" ]]; then
@@ -66,6 +68,8 @@ install -m 0755 "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" \
   "$RUNTIME/sounio-fleet-agent-runtime"
 install -m 0755 "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" \
   "$RUNTIME/sounio-fleet-runtime"
+install -m 0755 "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" \
+  "$RUNTIME/sounio-fleet-trace-verify"
 
 cat > "$RECEIVER" <<'PY'
 #!/usr/bin/env python3
@@ -285,6 +289,28 @@ grep -q 'decision=blocked reason=supervisor-generation-drift' \
   fail 'generation sabotage caused a replacement harness'
 mv "$mapping.good" "$mapping"
 
+cp "$mapping" "$mapping.good"
+python3 - "$mapping" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["start_capability_id"] = "cap-sabotaged-generation-authority"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, sort_keys=True)
+    handle.write("\n")
+PY
+if fleetd reconcile --config "$CONFIG" --apply \
+  >"$TEST_ROOT/generation-authority-drift" 2>&1; then
+  fail 'reconciler accepted a generation relabeled with another capability'
+fi
+grep -q 'decision=blocked reason=desired-argv_digest-mismatch' \
+  "$TEST_ROOT/generation-authority-drift" || \
+  fail 'generation authority sabotage was not tied back to supervised argv'
+[[ "$(grep -c '^START pid=' "$RECEIVER_LOG")" == 1 ]] || \
+  fail 'generation authority sabotage caused a replacement harness'
+mv "$mapping.good" "$mapping"
+
 cp "$CONFIG" "$CONFIG.good"
 sed -i "s/$SESSION_ID/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/" "$CONFIG"
 if fleetd reconcile --config "$CONFIG" --apply >"$TEST_ROOT/identity-drift" 2>&1; then
@@ -441,6 +467,75 @@ fi
 grep -q 'anchor public-key identity mismatch' "$TEST_ROOT/key-substitution" || \
   fail 'key substitution was not attributed to key identity'
 
+output="$("$RUNTIME/sounio-fleet-trace-verify" --db "$DB" \
+  --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
+  --certificate "$TRACE_CERTIFICATE")"
+grep -q 'FLEET_TRACE_CONFORMS .*accepted=1 .*invariants=8 ' <<< "$output" || \
+  fail 'independent trace verifier did not certify the accepted handoff'
+[[ -s "$TRACE_CERTIFICATE" ]] || \
+  fail 'independent trace verifier omitted its refinement certificate'
+
+python3 - "$DB" "$TRACE_SABOTAGE_DB" <<'PY'
+import hashlib
+import json
+import sqlite3
+import sys
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+def digest(value):
+    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+
+source = sqlite3.connect(sys.argv[1])
+target = sqlite3.connect(sys.argv[2])
+source.backup(target)
+source.close()
+target.row_factory = sqlite3.Row
+accepted = target.execute(
+    "SELECT * FROM events WHERE event_type = 'HANDOFF_ACCEPTED'"
+).fetchone()
+start_cap = target.execute(
+    "SELECT payload FROM events WHERE event_type = 'CAPABILITY_ISSUED' ORDER BY seq"
+).fetchone()
+payload = json.loads(accepted["payload"])
+payload["capability_id"] = json.loads(start_cap["payload"])["capability_id"]
+target.execute(
+    "UPDATE events SET payload = ? WHERE seq = ?",
+    (canonical(payload), accepted["seq"]),
+)
+previous = target.execute(
+    "SELECT event_hash FROM events WHERE seq = ?", (accepted["seq"] - 1,)
+).fetchone()[0]
+for row in target.execute(
+    "SELECT * FROM events WHERE seq >= ? ORDER BY seq", (accepted["seq"],)
+).fetchall():
+    material = {
+        "causal_key": row["causal_key"],
+        "event_type": row["event_type"],
+        "occurred_utc": row["occurred_utc"],
+        "payload": row["payload"],
+        "prev_hash": previous,
+        "seq": row["seq"],
+        "slot": row["slot"],
+    }
+    event_hash = digest(material)
+    target.execute(
+        "UPDATE events SET prev_hash = ?, event_hash = ?, event_id = ? WHERE seq = ?",
+        (previous, event_hash, f"evt-{event_hash[:24]}", row["seq"]),
+    )
+    previous = event_hash
+target.commit()
+target.close()
+PY
+if "$RUNTIME/sounio-fleet-trace-verify" --db "$TRACE_SABOTAGE_DB" \
+  >"$TEST_ROOT/trace-semantic-sabotage" 2>&1; then
+  fail 'independent trace verifier accepted a rehashed capability substitution'
+fi
+grep -q 'accepted handoff capability mismatch' \
+  "$TEST_ROOT/trace-semantic-sabotage" || \
+  fail 'semantic sabotage was not attributed to the independent handoff rule'
+
 if fleetd watch --config "$CONFIG" --cycles 1 --apply \
   >"$TEST_ROOT/watch-apply" 2>&1; then
   fail 'watch accepted reusable mutation authority'
@@ -480,4 +575,4 @@ fi
 grep -q 'event 1 hash mismatch' "$TEST_ROOT/log-sabotage" || \
   fail 'log sabotage was not attributed to the hash-chain rule'
 
-echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused replay=reconstructed hash_sabotage=refused'
+echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked generation_authority_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused trace_refinement=verified semantic_rehash_sabotage=refused replay=reconstructed hash_sabotage=refused'

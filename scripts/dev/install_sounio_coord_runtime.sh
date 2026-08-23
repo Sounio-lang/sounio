@@ -59,6 +59,10 @@ activate_runtime() {
       -f "$version_dir/formal/SounioFleet.cfg" ]] || \
       die "installed runtime declares the TLA+ fleet model but omits its bundle: $runtime_id"
   fi
+  if grep -q '^capability=fleet-trace-refinement-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-fleet-trace-verify" ]] || \
+      die "installed runtime declares fleet trace refinement but omits its verifier: $runtime_id"
+  fi
   [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
     die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
   link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
@@ -131,6 +135,7 @@ fleetd_source="$SOURCE_ROOT/scripts/dev/sounio_coord_fleetd.py"
 fleet_model_source="$SOURCE_ROOT/formal/tla/SounioFleet.tla"
 fleet_model_config="$SOURCE_ROOT/formal/tla/SounioFleet.cfg"
 fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
+fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -141,6 +146,8 @@ fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 [[ -f "$fleet_model_config" ]] || die "fleet TLC config missing: $fleet_model_config"
 [[ -x "$fleet_model_generator" ]] || \
   die "fleet model sabotage generator missing or not executable: $fleet_model_generator"
+[[ -x "$fleet_trace_verifier" ]] || \
+  die "fleet trace verifier missing or not executable: $fleet_trace_verifier"
 
 version_output="$(cd "$WORKTREE" && "$runtime_source" runtime-version)"
 protocol="$(sed -n 's/^protocol_version=//p' <<< "$version_output" | head -1)"
@@ -164,7 +171,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 bundle_sha="$(
   sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
     "$fleet_source" "$fleetd_source" "$fleet_model_source" \
-    "$fleet_model_config" "$fleet_model_generator" | \
+    "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier" | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
@@ -189,6 +196,7 @@ else
   install -m 0755 "$fleet_source" "$stage/bin/sounio-fleet-agent-runtime"
   install -m 0755 "$fleetd_source" "$stage/bin/sounio-fleet-runtime"
   install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
+  install -m 0755 "$fleet_trace_verifier" "$stage/bin/sounio-fleet-trace-verify"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -212,6 +220,7 @@ else
     printf 'capability=fleet-ed25519-anchor-v1\n'
     printf 'capability=fleet-checkpoint-handoff-v1\n'
     printf 'capability=fleet-tla-model-v1\n'
+    printf 'capability=fleet-trace-refinement-v1\n'
     printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$stage/manifest"
   mv "$stage" "$version_dir"

@@ -29,6 +29,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$REPO/formal/tla/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
@@ -62,6 +63,8 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the fleet reconciler'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-tla-sabotage" ]] || \
   fail 'installed runtime omitted the model-derived sabotage generator'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-trace-verify" ]] || \
+  fail 'installed runtime omitted the independent trace verifier'
 [[ -f "$RUNTIME_ROOT/versions/$first_id/formal/SounioFleet.tla" ]] || \
   fail 'installed runtime omitted the TLA+ fleet model'
 grep -q '^capability=crash-recovery-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
@@ -75,7 +78,8 @@ grep -q '^capability=fleet-event-log-v1$' "$RUNTIME_ROOT/versions/$first_id/mani
 grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the fleet-reconciler capability'
 for capability in agentd-argv-attestation-v1 fleet-linear-capability-v1 \
-  fleet-ed25519-anchor-v1 fleet-checkpoint-handoff-v1 fleet-tla-model-v1; do
+  fleet-ed25519-anchor-v1 fleet-checkpoint-handoff-v1 fleet-tla-model-v1 \
+  fleet-trace-refinement-v1; do
   grep -q "^capability=$capability$" "$RUNTIME_ROOT/versions/$first_id/manifest" || \
     fail "installed runtime omitted capability=$capability"
 done
@@ -126,6 +130,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$ALT/formal/tla/"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
@@ -151,6 +156,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \

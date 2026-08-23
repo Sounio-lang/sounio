@@ -2,13 +2,21 @@
 //!
 //! `HostTrust` is the trusted-computing boundary: it admits a complete runtime
 //! assertion after the host performs its SQLite, process, hash, signature, and
-//! recipient checks. This module does not repeat those checks. Outside that
-//! boundary, imports consume assertions without accepting parallel payloads,
-//! and safe promotions preserve one transaction and monotone receipt chain.
+//! recipient checks. A private linear seal prevents ordinary consumers from
+//! laundering caller-chosen integers into host receipts merely by declaring
+//! the effect. Outside that sealed adapter, imports consume assertions without
+//! accepting parallel payloads, and safe promotions preserve one transaction
+//! and monotone receipt chain.
 //! The executable refinement lives in `scripts/dev/sounio_coord_fleetd.py`;
 //! the bounded safety model lives in `formal/tla/SounioFleet.tla`.
 
 pub effect HostTrust {}
+
+linear struct HostTrustSeal {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    next_receipt_id: i64,
+}
 
 linear struct HostRuntimeReceipt {
     transaction_id: i64,
@@ -162,12 +170,30 @@ linear struct FinalizedHandoffReceipt {
     anchored_through_seq: i64,
 }
 
-// Receipt kinds: 1 issued, 2 argv, 3 draft, 4 evidence, 5 preparation,
-// 6 anchor-recipient verification. All payload fields are in-band.
-pub fn admit_runtime_receipt(
+// This constructor is deliberately private. The native host adapter is the
+// only production caller; single-module gates exercise it as the TCB witness.
+fn open_host_trust_bridge(
     transaction_id: i64,
-    receipt_id: i64,
     receipt_chain_id: i64,
+) -> HostTrustSeal with HostTrust, Panic {
+    if transaction_id <= 0 || receipt_chain_id <= 0 {
+        panic("host trust bridge identity must be positive")
+    }
+    HostTrustSeal {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        next_receipt_id: 1,
+    }
+}
+
+// Receipt kinds: 1 issued, 2 argv, 3 draft, 4 evidence, 5 preparation,
+// 6 anchor-recipient verification. All payload fields are in-band. Admission
+// consumes and returns the private seal, so receipt identities cannot fork.
+fn admit_runtime_receipt(
+    seal: HostTrustSeal,
+    receipt_transaction_id: i64,
+    receipt_id: i64,
+    receipt_chain: i64,
     receipt_kind: i64,
     capability_id: i64,
     slot_id: i64,
@@ -179,7 +205,12 @@ pub fn admit_runtime_receipt(
     prepared_seq: i64,
     anchor_receipt_id: i64,
     anchored_through_seq: i64,
-) -> HostRuntimeReceipt with HostTrust, Panic {
+) -> (HostTrustSeal, HostRuntimeReceipt) with HostTrust, Panic {
+    let HostTrustSeal {
+        transaction_id,
+        receipt_chain_id,
+        next_receipt_id,
+    } = seal
     let kind_valid =
         (receipt_kind == 1 && capability_id > 0 && slot_id > 0 &&
             argv_digest_id == 0 && checkpoint_id == 0 && evidence_set_id == 0 &&
@@ -205,14 +236,20 @@ pub fn admit_runtime_receipt(
             argv_digest_id > 0 && checkpoint_id > 0 && evidence_set_id > 0 &&
             handoff_id > 0 && recipient_id > 0 && prepared_seq > 0 &&
             anchor_receipt_id > 0 && anchored_through_seq >= prepared_seq)
-    if transaction_id <= 0 || receipt_id <= 0 || receipt_chain_id <= 0 ||
-        !kind_valid {
+    if receipt_transaction_id != transaction_id ||
+        receipt_chain != receipt_chain_id ||
+        receipt_id != next_receipt_id || !kind_valid {
         panic("runtime receipt payload is not canonical for its kind")
     }
-    HostRuntimeReceipt {
+    let next_seal = HostTrustSeal {
         transaction_id: transaction_id,
-        receipt_id: receipt_id,
         receipt_chain_id: receipt_chain_id,
+        next_receipt_id: next_receipt_id + 1,
+    }
+    let receipt = HostRuntimeReceipt {
+        transaction_id: receipt_transaction_id,
+        receipt_id: receipt_id,
+        receipt_chain_id: receipt_chain,
         receipt_kind: receipt_kind,
         capability_id: capability_id,
         slot_id: slot_id,
@@ -224,6 +261,18 @@ pub fn admit_runtime_receipt(
         prepared_seq: prepared_seq,
         anchor_receipt_id: anchor_receipt_id,
         anchored_through_seq: anchored_through_seq,
+    }
+    (next_seal, receipt)
+}
+
+fn close_host_trust_bridge(seal: HostTrustSeal) with Panic {
+    let HostTrustSeal {
+        transaction_id,
+        receipt_chain_id,
+        next_receipt_id,
+    } = seal
+    if transaction_id <= 0 || receipt_chain_id <= 0 || next_receipt_id <= 1 {
+        panic("host trust bridge closed without an admitted receipt")
     }
 }
 

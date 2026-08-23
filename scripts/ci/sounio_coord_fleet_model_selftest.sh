@@ -8,6 +8,7 @@ CONFIG="$ROOT_DIR/formal/tla/SounioFleet.cfg"
 GENERATOR="$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py"
 RUNTIME_TEST="$ROOT_DIR/scripts/ci/sounio_coord_fleetd_selftest.sh"
 FLEET_TEST="$ROOT_DIR/scripts/ci/sounio_coord_fleet_selftest.sh"
+TRACE_TEST="$ROOT_DIR/scripts/ci/sounio_coord_fleet_trace_selftest.sh"
 TLA_JAR_SHA256='936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88'
 TLA_JAR_URL='https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar'
 JRE_SHA256='2413149700df0f7d440500a84a8f764c535f21e5a5e87d38328b64eec2c5b500'
@@ -56,6 +57,8 @@ catalog="$($GENERATOR --model "$MODEL" --config "$CONFIG" \
 [[ "$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["sabotages"]))' <<< "$catalog")" == 8 ]] || \
   fail 'model-derived sabotage catalog does not contain eight controls'
 
+"$TRACE_TEST"
+
 work="$(mktemp -d "${TMPDIR:-/tmp}/sounio-fleet-tlc.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 cp "$MODEL" "$CONFIG" "$work/"
@@ -72,4 +75,4 @@ grep -q 'Model checking completed. No error has been found.' "$work/tlc.log" || 
   fail 'TLC did not establish all configured invariants'
 }
 
-echo 'sounio-coord-fleet-model-selftest: PASS tlc=exhaustive invariants=8 model_controls=8 runtime_witnesses=bound'
+echo 'sounio-coord-fleet-model-selftest: PASS tlc=exhaustive invariants=8 model_controls=8 crash_steps=2 refinement_labels=bound runtime_witnesses=bound'
