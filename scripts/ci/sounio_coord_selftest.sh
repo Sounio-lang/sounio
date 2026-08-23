@@ -157,6 +157,14 @@ grep -q "$broadcast_id" <<< "$output" && fail 'directed inbox included a broadca
 grep -q '^inbox_matching=2$' <<< "$output" || fail 'directed inbox matching count is wrong'
 grep -q '^inbox_omitted=1$' <<< "$output" || fail 'directed inbox omitted count is wrong'
 
+if (
+  cd "$TEST_ROOT/second-worktree"
+  run_coord send --agent agent-b --lane codegen --to-agent agent-a --to-lane parser \
+    --kind reply --message 'uncorrelated reply'
+) >/dev/null 2>&1; then
+  fail 'uncorrelated reply was accepted without --reply-to'
+fi
+
 output="$(
   cd "$REPO"
   run_coord message-status --agent agent-a --lane parser --message "$second_id"

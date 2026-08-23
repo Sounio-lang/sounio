@@ -106,6 +106,8 @@ output="$(run_hook claude "$SECOND" \
 grep -q "MESSAGE id=$message_id" <<< "$output" || fail 'message was not delivered to Claude'
 grep -q 'broadcast hook exclusion marker' <<< "$output" && \
   fail 'hook injected a broadcast alongside directed work'
+grep -q "Pending request ids: $message_id" <<< "$output" || \
+  fail 'hook did not show the correlated reply command for a request'
 output="$(run_coord "$REPO" message-status --agent codex --lane session-codex-a \
   --message "$message_id")"
 grep -q 'request_state=open injected=1 acknowledged=0 responses=0' <<< "$output" || \
