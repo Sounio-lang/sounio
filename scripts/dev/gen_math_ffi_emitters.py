@@ -83,10 +83,14 @@ def common_prefix():
     ]
 
 
+# pow does NOT register a NaN constant. Row 20 produces its NaN by dividing
+# zero by zero, which raises the invalid flag C99 requires and returns the same
+# real-indefinite pattern glibc's pow(-2.0, 0.5) returns; a constant would raise
+# nothing and carry the other sign. Registering one anyway would leave a value
+# in .rodata that nothing reads.
 POW_RODATA = common_prefix() + [
     ("s", "inf", "INF", "+inf"),
     ("s", "ninf", "NINF", "-inf"),
-    ("s", "nan", "NANV", "a quiet NaN"),
     ("s", "nzero", "NZERO", "-0.0"),
     ("s", "rovf", "R_OVF", "1024.0, r_hi above this overflows"),
     ("s", "runf", "R_UNF", "-1080.0, below this the result is zero"),

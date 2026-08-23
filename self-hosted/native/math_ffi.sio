@@ -1674,12 +1674,48 @@ fn mf_pow_exact_int(nc: NativeCompiler, out: i64, ok_out: i64, axs: i64, ny_in: 
 //     kept, by computing it once before row 20 — the earliest point at which
 //     BOTH consumers are still ahead. Rows 12-15 and 16-19 each evaluate their
 //     own, as the oracle does.
+
+// Produce a value by the OPERATION that raises its exception, instead of
+// loading the answer from .rodata.
+//
+// C99 Annex F requires pow to raise divide-by-zero on rows 16-19 and invalid on
+// row 20. Loading +inf or NaN from a constant gives the right number and raises
+// nothing, which is a faithful transliteration of the oracle -- the oracle does
+// the same -- and still a real difference from libm.
+//
+// The fix needs no new instruction. divsd already raises:
+//
+//     1.0 / +0.0  ->  +inf   and raises divide-by-zero
+//     1.0 / -0.0  ->  -inf   and raises divide-by-zero
+//     0.0 /  0.0  ->   NaN   and raises invalid
+//
+// It also lands closer to libm than the constants did. x86 produces the "real
+// indefinite" 0xFFF8000000000000 for 0/0, and that is exactly what glibc's
+// pow(-2.0, 0.5) returns -- measured, not assumed. The constant this replaces
+// was 0x7FF8000000000000, the other sign. IEEE-754 leaves the sign and payload
+// of a generated NaN unspecified, so neither is wrong, but matching the
+// reference implementation costs nothing here and the fixture asserts
+// NaN-ness rather than bits for exactly that reason.
+fn mf_raise_div(nc: NativeCompiler, out: i64, num_off: i64, den_off: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0c(c, num_off)
+    c = mf_ld1c(c, den_off)
+    c.code = emit_divsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)
+    c
+}
+
 pub fn mf_pow(nc: NativeCompiler, out: i64, xs: i64, ys: i64,
           split_off: i64, one_off: i64, zero_off: i64, half_off: i64,
           two_off: i64, sqrt2_off: i64, p54_off: i64,
           atanh_off: i64, third_off: i64, tl2e_off: i64,
           ln2_off: i64, expe_off: i64,
-          inf_off: i64, ninf_off: i64, nan_off: i64, nzero_off: i64,
+          // nan_off is deliberately absent: row 20 now produces its NaN by
+          // dividing zero by zero, which raises the invalid flag C99 requires
+          // and returns the same real-indefinite pattern glibc does. Keeping an
+          // unused parameter here would be the inert surface this branch
+          // ratchets against.
+          inf_off: i64, ninf_off: i64, nzero_off: i64,
           rovf_off: i64, runf_off: i64, ybig_off: i64, twom54_off: i64,
           tb: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -1961,13 +1997,13 @@ pub fn mf_pow(nc: NativeCompiler, out: i64, xs: i64, ys: i64,
     c.code = emit_test_rax_rax(c.code)
     let r16_ojz = c.code.len
     c.code = emit_jz_rel32(c.code)
-    c = mf_ld0c(c, ninf_off); c = mf_st0(c, out)
+    c = mf_raise_div(c, out, one_off, nzero_off)      // -inf, raises divide-by-zero
     exit_at[nex as usize] = c.code.len
     c.code = emit_jmp_rel32(c.code)
     nex = nex + 1
     let r16_ot = c.code.len
     c.code = patch_u32_le(c.code, r16_ojz + 2, r16_ot - (r16_ojz + 6))
-    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    c = mf_raise_div(c, out, one_off, zero_off)       // +inf, raises divide-by-zero
     exit_at[nex as usize] = c.code.len
     c.code = emit_jmp_rel32(c.code)
     nex = nex + 1
@@ -2007,7 +2043,7 @@ pub fn mf_pow(nc: NativeCompiler, out: i64, xs: i64, ys: i64,
     c.code = emit_test_rax_rax(c.code)
     let r20_ijnz = c.code.len
     c.code = emit_jnz_rel32(c.code)
-    c = mf_ld0c(c, nan_off); c = mf_st0(c, out)
+    c = mf_raise_div(c, out, zero_off, zero_off)      // NaN, raises invalid
     exit_at[nex as usize] = c.code.len
     c.code = emit_jmp_rel32(c.code)
     nex = nex + 1
