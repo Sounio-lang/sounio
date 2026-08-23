@@ -169,3 +169,21 @@ Reading the source confirms the empirical observation. `arg == "--emit-ast"` par
 Consequence for the wrapper pin: an AST-level discriminator matrix for `Intervention[f64, Derived]` etc. cannot be run from the shipped ELF at any version we can read here. The earlier reading "the shipped ELF has no `--show-ast`" is now more precise: the flag exists in usage, is parsed, is stored, but does nothing. Closing the wrapper bracket question therefore requires either (a) a source-built Madaros (so `print_ast_*` actually emits), or (b) ELF-level tracing. Neither is in scope for this audit branch.
 
 Pin extension is in `scripts/dev/knowledge_annotation_parser_coverage.sh` (the two `STATIC: --emit-*` notes above). State on this commit: 6 declared / 3 constructed / 3 unreachable provenance, lexer keywords unchanged, wrapper bracket probes remain a behavioural matrix rather than an AST assertion, and the two emit flags remain dead switches in the shipped ELF.
+
+## Addendum 2026-08-23 — angle form is loud, bracket form is silent (new empirical discriminator)
+
+Three new probes (`angle_source.sio`, `angle_literature.sio`, `angle_input.sio`) repeat the unreachable-word experiment in angle form, mirroring `knowledge_angle_derived.sio` (which already passes):
+
+| Probe | Form | ELF |
+|---|---|---|
+| `knowledge_angle_derived.sio` | `<f64, Derived>` | check OK |
+| `angle_source.sio` | `<f64, Source>` | **parse fail** (1 parser error) |
+| `angle_literature.sio` | `<f64, Literature>` | **parse fail** (1 parser error) |
+| `angle_input.sio` | `<f64, Input>` | **parse fail** (1 parser error) |
+| `source.sio` | `[f64, Source]` | check OK (silent) |
+| `literature.sio` | `[f64, Literature]` | check OK (silent) |
+| `input.sio` | `[f64, Input>` | check OK (silent) |
+
+This is a useful empirical discriminator for the silent-skip honesty gap. The static read of `self-hosted/parser/types.sio` says the comma-component loop runs in both forms after the inner type (lines 1003-1122 are not gated on `use_bracket`); the same Ident-epsilon sink at 1009-1039 should fire for `<f64, Source>` and `[f64, Source]`. It fires only in bracket form. The angle-form probe reaches the failure before the epsilon sink does — the parser demands a token the Ident path cannot satisfy (expected=147 actual=137), then bails. This narrows the silent-skip from "two forms are silent" to "one form is silent; the other fails loudly, for a reason the static read does not predict". A source-built Madaros would close the why; the shipped ELF cannot.
+
+These three probes are documentation, not part of the pin. They are receipts of current behaviour, the same way `source.sio` etc. are — but unlike those they are fail probes, and the audit explicitly does not promote fail probes into the pin (a future change could turn them green by either closing the gap or making the angle form silent; both should flip the tripwire, and the script currently encodes only the green cases).
