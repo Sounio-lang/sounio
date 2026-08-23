@@ -181,6 +181,20 @@ fail() {
   exit 1
 }
 
+assert_clean_build_log() {
+  local log="\$1"
+  local label="\$2"
+
+  [[ -f "\$log" ]] || fail "\$label build log is missing: \$log"
+  if grep -Eiq '(^|[[:space:]])error(\[[A-Za-z0-9_-]+\])?:|segmentation fault|core dumped|internal compiler error' "\$log"; then
+    tail -n 120 "\$log" >&2 || true
+    fail "\$label build log contains a compiler failure despite the builder exit status"
+  fi
+}
+
+ulimit -s 524288 || fail 'worker could not raise the Madaros stack limit to 512 MiB'
+echo "worker_stack_kib=\$(ulimit -s)"
+
 echo "source_fresh_slurm_job_id=\${SLURM_JOB_ID:-manual}"
 echo "source_remote=\$SOURCE_REMOTE"
 echo "worker_git_ssl_verify=\$WORKER_GIT_SSL_VERIFY"
@@ -259,6 +273,7 @@ if [[ "\$WORKER_PROBE" == 'block-ladder' ]]; then
     tail -n 120 "\$BUILD_LOG" >&2 || true
     fail 'block-ladder current-source build failed'
   fi
+  assert_clean_build_log "\$BUILD_LOG" block-ladder
   [[ -x "\$RAW_MADAROS" ]] || fail 'block-ladder build did not emit an executable raw ELF'
   [[ -z "\$(git -C "\$REPO" status --porcelain)" ]] || fail 'source tree changed during block-ladder build'
 
@@ -580,8 +595,11 @@ elif [[ "\$WORKER_PROBE" == 'imported-runtime-source-fresh' ]]; then
   SOUNIO_MADAROS_IMPORTED_RUNTIME_SOURCE_FRESH_KEEP=1 \\
     bash "\$REPO/scripts/ci/madaros_imported_runtime_source_fresh_gate.sh"
 else
-  SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=0 \\
+  GATE_WORK="\$ROOT/source-fresh-gate"
+  SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_DIR="\$GATE_WORK" \\
+  SOUNIO_EPISTEMIC_RECEIPT_SOURCE_FRESH_KEEP=1 \\
     bash "\$REPO/scripts/ci/epistemic_receipt_source_fresh_gate.sh"
+  assert_clean_build_log "\$GATE_WORK/source-build.log" source-fresh-gate
 fi
 EOF
 chmod 700 "$RUNNER"
