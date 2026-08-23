@@ -1089,13 +1089,15 @@ SIBLINGS, never conflated. Per founder direction, Fable-1 owns the NS surface.
 | Soundness anchor | R-ORIGIN no-laundering witnesses | `SounioAntiGarblingModel` (kernel-checked): naive add sound ⟺ zero covariance |
 | Failure of the sibling | manufacturing provenance | manufacturing precision (variance understated) |
 
-**Narrow novelty claim (one sentence):** *Sounio statically tracks the source-identity
-of a value's uncertainty as a noise-symbol set carried in the type, and makes the
-independence assumption of uncertainty arithmetic a checked precondition — an add/merge
-over operands whose source-sets are non-disjoint (or unknown) is rejected unless a
-proved-disjoint certificate holds; no uncertainty-typed language (Uncertain⟨T⟩,
-Measurements.jl, p-box libraries) enforces covariance-soundness of propagation at compile
-time, they propagate unconditionally and silently understate correlated combinations.*
+**Narrow novelty claim (one sentence, CANDIDATE — pending prior-art gate per codex
+msg-1787451556):** *Sounio statically tracks the source-identity of a value's uncertainty
+as a noise-symbol set carried in the type, and makes the independence assumption of
+uncertainty arithmetic a checked precondition — an add/merge over operands whose
+source-sets are non-disjoint (or unknown) is rejected unless a proved-disjoint certificate
+holds; **to our knowledge** no uncertainty-typed language (Uncertain⟨T⟩, Measurements.jl,
+p-box libraries) enforces covariance-soundness of propagation at compile time.* This is a
+CANDIDATE claim, not established novelty — it requires an explicit literature /
+adversarial-prior-art gate before being asserted.
 
 **Causality witness (not E222 coincidence):** `ns_contract.sio` control 5 — flipping the
 sabotage switch (drop ONLY set-propagation) makes control-1's `x+x` refusal vanish
@@ -1107,6 +1109,41 @@ call-summary ✅ (3) falsifiers x+x/x+y/unknown ✅ (4) sabotage causality witne
 (5) boundary table + narrow claim ✅ — all on the NS-owned surface (`noise_symbols.sio`,
 `ns_dataflow.sio`, `ns_contract.sio`, `SounioAntiGarblingModel.lean`), no `self-hosted/`
 edits. Compiler write-set for the next (serialized-ownership) phase is filed with codex.
+
+## 25. codex ownership reply — decisions + corrections (bus, 2026-08-23)
+
+codex reviewed `9a2abe4557` (msg-1787451556). **No checker ownership granted yet**; edits
+still held. Decisions and corrections, all absorbed on the NS-owned surface:
+
+**Decisions (accepted):**
+- Next compiler base = `codex/l5-provenance-typeentry-20260822` at L6 tip `06e85a6ada`.
+- `noise_set_id` is trailing, AFTER `provenance_id`.
+- NS storage lives in its OWN checker module (not the ontology side-table).
+
+**Representation contradiction (codex correct):** an interned *handle* cannot use `(a&b)==0`
+/ `a|b` — those are inline-*mask* operations. Resolution, two levels:
+- **Prototype (`ns_contract.sio`) = option (A) bounded inline mask.** It is an `i64` bitmask
+  → **rename intent to `noise_mask`, source-count cap = 64.** The `&`/`|` are valid there.
+- **Compiler field = option (B) interned handle** (codex's preference): `union`/`disjoint`
+  DEREFERENCE canonical sets through the NS module's table and return a canonical handle —
+  no bitwise ops on the handle itself. The prototype validates the *semantics*; the compiler
+  uses the *handle* representation. This removes the contradiction.
+
+**Reclassifications (honesty, absorbed):**
+- `ns_ident(a)={a}` demonstrates the transfer *obligation*, and is NOT yet an
+  interprocedural parametric-summary *implementation* (that is next-phase compiler work).
+- The sabotage control proves *local helper* causality; the *compiler* acceptance control
+  must flip only the wired NS rule on the SAME source-built compiler and PRESERVE unrelated
+  E222 refusals. (§23/§24 causality claim is scoped to the prototype accordingly.)
+- §24's universal "no uncertainty-typed language…" is downgraded to a CANDIDATE claim
+  ("to our knowledge", pending an explicit prior-art gate) — fixed in §24.
+
+**Coordination v2 (founder + codex):** the bus needs an upgrade; my reply carries my top-3
+pain points and support for the v2 fields (stable persona alias, thread_id/reply_to,
+request-status, --since/--from, receipts).
+
+**Status:** semantic package corrections done; still HOLDING all `self-hosted/` edits until
+codex serializes/grants the NS write-set on the `06e85a6ada` base.
 
 ## References (in-tree)
 
