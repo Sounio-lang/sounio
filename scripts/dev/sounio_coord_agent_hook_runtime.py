@@ -191,6 +191,112 @@ def refresh_delivery_endpoint(
         )
 
 
+def process_identity() -> tuple[int, str, str, str, str] | None:
+    pid = os.getppid()
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        _, separator, tail = stat.rpartition(")")
+        fields = tail.split()
+        pid_start = fields[19]
+        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        pid_namespace = os.readlink("/proc/self/ns/pid")
+        host = os.uname().nodename
+    except (IndexError, OSError):
+        return None
+    if not separator or not pid_start or not boot_id or not pid_namespace or not host:
+        return None
+    return pid, pid_start, boot_id, pid_namespace, host
+
+
+def refresh_process_presence(
+    tool_root: Path,
+    root: Path,
+    agent: str,
+    lane: str,
+    session_id: str,
+) -> bool:
+    identity = process_identity()
+    if identity is None:
+        sys.stderr.write(
+            "sounio coordination process-presence warning: "
+            "could not identify the harness process\n"
+        )
+        return False
+    if agent.startswith("claude"):
+        harness = "claude"
+    elif agent.startswith("codex"):
+        harness = "codex"
+    else:
+        return False
+    pid, pid_start, boot_id, pid_namespace, host = identity
+    ttl = os.environ.get("SOUNIO_COORD_HOOK_TTL_SECONDS", "1800")
+    result = run_coord(
+        tool_root,
+        "presence-register",
+        "--agent",
+        agent,
+        "--lane",
+        lane,
+        "--harness",
+        harness,
+        "--session-id",
+        session_id,
+        "--pid",
+        str(pid),
+        "--pid-start",
+        pid_start,
+        "--boot-id",
+        boot_id,
+        "--pid-namespace",
+        pid_namespace,
+        "--host",
+        host,
+        "--ttl-seconds",
+        ttl,
+        worktree=root,
+    )
+    if result.returncode != 0 and "claim not found:" in result.stderr:
+        scope = run_coord(
+            tool_root,
+            "scope",
+            *scope_args(agent, lane, f"active {agent} session"),
+            worktree=root,
+        )
+        if scope.returncode == 0:
+            result = run_coord(
+                tool_root,
+                "presence-register",
+                "--agent",
+                agent,
+                "--lane",
+                lane,
+                "--harness",
+                harness,
+                "--session-id",
+                session_id,
+                "--pid",
+                str(pid),
+                "--pid-start",
+                pid_start,
+                "--boot-id",
+                boot_id,
+                "--pid-namespace",
+                pid_namespace,
+                "--host",
+                host,
+                "--ttl-seconds",
+                ttl,
+                worktree=root,
+            )
+    if result.returncode != 0:
+        sys.stderr.write(
+            "sounio coordination process-presence warning: "
+            f"{result.stderr or result.stdout}"
+        )
+        return False
+    return True
+
+
 def scope_args(agent: str, lane: str, intent: str) -> list[str]:
     return ["--agent", agent, "--lane", lane, "--intent", intent]
 
@@ -271,16 +377,34 @@ def main() -> int:
         return 0
 
     event_name = str(event.get("hook_event_name", ""))
-    session_id = safe_token(str(event.get("session_id", "unknown")))
+    raw_session_id = str(event.get("session_id", "unknown"))
+    session_id = safe_token(raw_session_id)
     agent = safe_token(args.agent)
     lane = f"session-{session_id}"
     intent = f"active {agent} session"
     common = scope_args(agent, lane, intent)
 
     if event_name == "SessionEnd":
+        if not refresh_process_presence(
+            tool_root, root, agent, lane, raw_session_id
+        ):
+            sys.stderr.write(
+                "coordination refused: this process cannot end another live "
+                "lane generation\n"
+            )
+            return 2
         run_coord(
             tool_root,
             "endpoint-unregister",
+            "--agent",
+            agent,
+            "--lane",
+            lane,
+            worktree=root,
+        )
+        run_coord(
+            tool_root,
+            "presence-unregister",
             "--agent",
             agent,
             "--lane",
@@ -312,6 +436,14 @@ def main() -> int:
             )
             return 2
         target_root, target_paths = target
+        if not refresh_process_presence(
+            tool_root, root, agent, lane, raw_session_id
+        ):
+            sys.stderr.write(
+                "coordination refused: this process does not own the live "
+                "lane generation\n"
+            )
+            return 2
 
         result = run_coord(
             tool_root,
@@ -362,6 +494,8 @@ def main() -> int:
         sys.stderr.write(f"sounio coordination warning: {result.stderr}")
         return 0
 
+    if not refresh_process_presence(tool_root, root, agent, lane, raw_session_id):
+        return 2
     refresh_delivery_endpoint(tool_root, root, agent, lane)
 
     if event_name == "SessionStart":

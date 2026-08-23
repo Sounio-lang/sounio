@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.7
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8
 
 usage() {
   cat <<'USAGE'
@@ -38,6 +38,14 @@ Commands:
                                  remove the lane's delivery endpoint
   endpoint-status --agent ID --lane ID
                                  inspect one delivery endpoint
+  presence-register --agent ID --lane ID --harness NAME --session-id ID
+          --pid PID --pid-start TICK --boot-id ID --pid-namespace ID
+          --host HOST [--ttl-seconds N]
+                                 bind a lane to a tmux-independent process identity
+  presence-unregister --agent ID --lane ID
+                                 remove the lane's process identity on a clean exit
+  recover [--agent ID --lane ID] [--all]
+                                 reconstruct one lane or audit the fleet after a crash
   wake    --agent ID --lane ID --message MESSAGE_ID
                                  retry immediate delivery for a visible directed message
   experiment-open --agent ID --lane ID --receipt PATH --statement TEXT
@@ -79,6 +87,8 @@ Environment:
   SOUNIO_COORD_TTL_SECONDS       claim lease duration (default: 14400)
   SOUNIO_COORD_ENDPOINT_TTL_SECONDS
                                  delivery endpoint duration (default: 1800)
+  SOUNIO_COORD_PRESENCE_TTL_SECONDS
+                                 process heartbeat duration (default: 1800)
   SOUNIO_COORD_DIR               shared state directory override
 
 Examples:
@@ -124,16 +134,49 @@ case "$GIT_COMMON_DIR" in
 esac
 
 REPO_KEY="$(printf '%s' "$GIT_COMMON_DIR" | cksum | awk '{print $1}')"
-STATE_DIR="${SOUNIO_COORD_DIR:-${TMPDIR:-/tmp}/sounio-coord/$REPO_KEY}"
+LEGACY_STATE_DIR="${TMPDIR:-/tmp}/sounio-coord/$REPO_KEY"
+DURABLE_STATE_DIR="$GIT_COMMON_DIR/sounio-coord-state"
+
+migrate_legacy_state() {
+  local lock_file="$GIT_COMMON_DIR/.sounio-coord-state-migration.lock"
+  exec 8>"$lock_file"
+  flock 8
+
+  if [[ -e "$DURABLE_STATE_DIR" && -e "$LEGACY_STATE_DIR" && \
+    "$(readlink -f "$DURABLE_STATE_DIR")" != "$(readlink -f "$LEGACY_STATE_DIR")" ]]; then
+    die "split coordination state detected: durable=$DURABLE_STATE_DIR legacy=$LEGACY_STATE_DIR"
+  fi
+
+  if [[ ! -e "$DURABLE_STATE_DIR" && -d "$LEGACY_STATE_DIR" ]]; then
+    mv "$LEGACY_STATE_DIR" "$DURABLE_STATE_DIR"
+  fi
+  mkdir -p "$DURABLE_STATE_DIR"
+
+  # Older runtimes still look under TMPDIR. Keep that path as an alias so an
+  # in-flight pre-upgrade command cannot create a second coordination world.
+  if [[ ! -e "$LEGACY_STATE_DIR" && ! -L "$LEGACY_STATE_DIR" ]]; then
+    mkdir -p "$(dirname "$LEGACY_STATE_DIR")"
+    ln -s "$DURABLE_STATE_DIR" "$LEGACY_STATE_DIR"
+  fi
+  flock -u 8
+}
+
+if [[ -n "${SOUNIO_COORD_DIR:-}" ]]; then
+  STATE_DIR="$SOUNIO_COORD_DIR"
+else
+  migrate_legacy_state
+  STATE_DIR="$DURABLE_STATE_DIR"
+fi
 CLAIMS_DIR="$STATE_DIR/claims"
 MESSAGES_DIR="$STATE_DIR/messages"
 ACKS_DIR="$STATE_DIR/message-acks"
 INJECTIONS_DIR="$STATE_DIR/message-injections"
 ENDPOINTS_DIR="$STATE_DIR/delivery-endpoints"
+PRESENCES_DIR="$STATE_DIR/process-presences"
 WAKES_DIR="$STATE_DIR/message-wakes"
 EVENT_LOG="$STATE_DIR/events.log"
 mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR" "$INJECTIONS_DIR" \
-  "$ENDPOINTS_DIR" "$WAKES_DIR"
+  "$ENDPOINTS_DIR" "$PRESENCES_DIR" "$WAKES_DIR"
 
 NOW_EPOCH="$(date +%s)"
 NOW_TICK="$(date +%s%N)"
@@ -542,6 +585,10 @@ endpoint_path() {
   printf '%s/%s.endpoint' "$ENDPOINTS_DIR" "$(claim_id_for "$1" "$2")"
 }
 
+presence_path() {
+  printf '%s/%s.presence' "$PRESENCES_DIR" "$(claim_id_for "$1" "$2")"
+}
+
 wake_receipt_path() {
   printf '%s/%s--%s.wake' "$WAKES_DIR" "$(slug "$1")" "$(slug "$2")"
 }
@@ -779,6 +826,129 @@ remove_endpoint_for_lane() {
   unlink "$endpoint_file"
   printf 'utc=%s event=ENDPOINT_UNREGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s reason=%s\n' \
     "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$reason" >> "$EVENT_LOG"
+}
+
+load_presence() {
+  local presence_file="$1" line
+  P_ID=''
+  P_AGENT=''
+  P_LANE=''
+  P_WORKTREE=''
+  P_HARNESS=''
+  P_SESSION_ID=''
+  P_HOST=''
+  P_BOOT_ID=''
+  P_PID_NAMESPACE=''
+  P_PID=0
+  P_PID_START=0
+  P_GENERATION=0
+  P_CREATED_UTC=''
+  P_LAST_UTC=''
+  P_LAST_EPOCH=0
+  P_TTL=0
+  [[ -r "$presence_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      presence_id=*) P_ID="${line#presence_id=}" ;;
+      agent=*) P_AGENT="${line#agent=}" ;;
+      lane=*) P_LANE="${line#lane=}" ;;
+      worktree=*) P_WORKTREE="${line#worktree=}" ;;
+      harness=*) P_HARNESS="${line#harness=}" ;;
+      session_id=*) P_SESSION_ID="${line#session_id=}" ;;
+      host=*) P_HOST="${line#host=}" ;;
+      boot_id=*) P_BOOT_ID="${line#boot_id=}" ;;
+      pid_namespace=*) P_PID_NAMESPACE="${line#pid_namespace=}" ;;
+      pid=*) P_PID="${line#pid=}" ;;
+      pid_start=*) P_PID_START="${line#pid_start=}" ;;
+      generation=*) P_GENERATION="${line#generation=}" ;;
+      created_utc=*) P_CREATED_UTC="${line#created_utc=}" ;;
+      last_seen_utc=*) P_LAST_UTC="${line#last_seen_utc=}" ;;
+      last_seen_epoch=*) P_LAST_EPOCH="${line#last_seen_epoch=}" ;;
+      ttl_seconds=*) P_TTL="${line#ttl_seconds=}" ;;
+    esac
+  done < "$presence_file"
+}
+
+write_presence() {
+  local presence_file="$1" tmp_file
+  tmp_file="$(mktemp "$PRESENCES_DIR/.presence-write.XXXXXX")"
+  {
+    printf 'presence_id=%s\n' "$P_ID"
+    printf 'agent=%s\n' "$P_AGENT"
+    printf 'lane=%s\n' "$P_LANE"
+    printf 'worktree=%s\n' "$P_WORKTREE"
+    printf 'harness=%s\n' "$P_HARNESS"
+    printf 'session_id=%s\n' "$P_SESSION_ID"
+    printf 'host=%s\n' "$P_HOST"
+    printf 'boot_id=%s\n' "$P_BOOT_ID"
+    printf 'pid_namespace=%s\n' "$P_PID_NAMESPACE"
+    printf 'pid=%s\n' "$P_PID"
+    printf 'pid_start=%s\n' "$P_PID_START"
+    printf 'generation=%s\n' "$P_GENERATION"
+    printf 'created_utc=%s\n' "$P_CREATED_UTC"
+    printf 'last_seen_utc=%s\n' "$P_LAST_UTC"
+    printf 'last_seen_epoch=%s\n' "$P_LAST_EPOCH"
+    printf 'ttl_seconds=%s\n' "$P_TTL"
+  } > "$tmp_file"
+  mv "$tmp_file" "$presence_file"
+}
+
+PRESENCE_STATE='unbound'
+PRESENCE_REASON='no-presence-record'
+presence_state() {
+  local current_boot current_namespace current_start proc_tail
+  PRESENCE_STATE='orphaned'
+  PRESENCE_REASON='invalid-record'
+  [[ "$P_PID" =~ ^[1-9][0-9]*$ && "$P_PID_START" =~ ^[1-9][0-9]*$ && \
+    "$P_LAST_EPOCH" =~ ^[0-9]+$ && "$P_TTL" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  current_boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  current_namespace="$(readlink /proc/self/ns/pid 2>/dev/null || true)"
+  if [[ -z "$current_boot" || "$current_boot" != "$P_BOOT_ID" ]]; then
+    PRESENCE_REASON='boot-changed'
+    return 1
+  fi
+  if [[ -z "$current_namespace" || "$current_namespace" != "$P_PID_NAMESPACE" ]]; then
+    PRESENCE_REASON='pid-namespace-changed'
+    return 1
+  fi
+  if [[ ! -r "/proc/$P_PID/stat" ]] || ! kill -0 "$P_PID" 2>/dev/null; then
+    PRESENCE_REASON='process-missing'
+    return 1
+  fi
+  proc_tail="$(sed 's/^[^)]*) //' "/proc/$P_PID/stat" 2>/dev/null || true)"
+  current_start="$(awk '{print $20}' <<< "$proc_tail")"
+  if [[ -z "$current_start" || "$current_start" != "$P_PID_START" ]]; then
+    PRESENCE_REASON='pid-reused'
+    return 1
+  fi
+  if ((NOW_EPOCH > P_LAST_EPOCH + P_TTL)); then
+    PRESENCE_STATE='unresponsive'
+    PRESENCE_REASON='heartbeat-expired'
+    return 1
+  fi
+  PRESENCE_STATE='live'
+  PRESENCE_REASON='process-verified'
+  return 0
+}
+
+append_presence_event() {
+  local event="$1" reason="${2:-}"
+  printf 'utc=%s event=%s presence_id=%s agent=%s lane=%s worktree=%s harness=%s session_id=%s host=%s pid=%s pid_start=%s generation=%s reason=%s\n' \
+    "$NOW_UTC" "$event" "$P_ID" "$P_AGENT" "$P_LANE" "$P_WORKTREE" \
+    "$P_HARNESS" "$P_SESSION_ID" "$P_HOST" "$P_PID" "$P_PID_START" \
+    "$P_GENERATION" "$reason" >> "$EVENT_LOG"
+}
+
+remove_presence_for_lane() {
+  local agent="$1" lane="$2" worktree="$3" reason="$4" presence_file
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || return 0
+  load_presence "$presence_file"
+  [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" ]] || die "presence owner mismatch"
+  [[ "$P_WORKTREE" == "$worktree" ]] || die "presence belongs to worktree $P_WORKTREE"
+  unlink "$presence_file"
+  append_presence_event PRESENCE_UNREGISTERED "$reason"
 }
 
 WAKE_STATUS='unavailable'
@@ -1189,6 +1359,7 @@ release_command() {
   append_event RELEASE "$reason"
   unlink "$claim_file"
   remove_endpoint_for_lane "$agent" "$lane" "$WORKTREE" release
+  remove_presence_for_lane "$agent" "$lane" "$WORKTREE" release
   printf 'RELEASED claim_id=%s reason=%s\n' "$C_ID" "${reason:-unspecified}"
 }
 
@@ -1428,6 +1599,279 @@ endpoint_status_command() {
   printf 'ENDPOINT_STATUS endpoint_id=%s state=%s agent=%s lane=%s worktree=%s harness=%s transport=%s address=%s pane_pid=%s command=%s last_seen=%s\n' \
     "$E_ID" "$state" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$E_HARNESS" \
     "$E_TRANSPORT" "$E_ADDRESS" "$E_PANE_PID" "$E_COMMAND" "$E_LAST_UTC"
+}
+
+presence_register_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' harness='' session_id='' host=''
+  local boot_id='' pid_namespace='' pid='' pid_start=''
+  local ttl="${SOUNIO_COORD_PRESENCE_TTL_SECONDS:-1800}"
+  local claim_file presence_file created_utc event='PRESENCE_REGISTERED' generation=1
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --harness) require_arg "$1" "$2"; harness="$2"; shift 2 ;;
+      --session-id) require_arg "$1" "$2"; session_id="$2"; shift 2 ;;
+      --host) require_arg "$1" "$2"; host="$2"; shift 2 ;;
+      --boot-id) require_arg "$1" "$2"; boot_id="$2"; shift 2 ;;
+      --pid-namespace) require_arg "$1" "$2"; pid_namespace="$2"; shift 2 ;;
+      --pid) require_arg "$1" "$2"; pid="$2"; shift 2 ;;
+      --pid-start) require_arg "$1" "$2"; pid_start="$2"; shift 2 ;;
+      --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown presence-register option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "presence-register requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "presence-register requires --lane"
+  [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi)$ ]] || \
+    die "--harness must be claude, codex, grok, cursor, or kimi"
+  [[ -n "$session_id" ]] || die "presence-register requires --session-id"
+  [[ -n "$host" ]] || die "presence-register requires --host"
+  [[ -n "$boot_id" ]] || die "presence-register requires --boot-id"
+  [[ -n "$pid_namespace" ]] || die "presence-register requires --pid-namespace"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || die "--pid must be a positive integer"
+  [[ "$pid_start" =~ ^[1-9][0-9]*$ ]] || die "--pid-start must be a positive integer"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value session-id "$session_id"
+  validate_value host "$host"
+  validate_value boot-id "$boot_id"
+  validate_value pid-namespace "$pid_namespace"
+
+  claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
+  presence_file="$(presence_path "$agent" "$lane")"
+  acquire_state_lock "the process-presence registration"
+  [[ -f "$claim_file" ]] || die "claim not found: $(claim_id_for "$agent" "$lane")"
+  load_claim "$claim_file"
+  claim_expired && die "claim expired before presence registration: $C_ID"
+  [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" ]] || die "claim owner mismatch"
+  [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+
+  created_utc="$NOW_UTC"
+  if [[ -f "$presence_file" ]]; then
+    load_presence "$presence_file"
+    [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" ]] || die "presence owner mismatch"
+    [[ "$P_WORKTREE" == "$WORKTREE" ]] || die "presence belongs to worktree $P_WORKTREE"
+    created_utc="${P_CREATED_UTC:-$NOW_UTC}"
+    generation="${P_GENERATION:-1}"
+    if [[ "$P_BOOT_ID" == "$boot_id" && "$P_PID_NAMESPACE" == "$pid_namespace" && \
+      "$P_PID" == "$pid" && "$P_PID_START" == "$pid_start" ]]; then
+      event='PRESENCE_REFRESHED'
+    else
+      presence_state || true
+      case "$PRESENCE_STATE" in
+        live|unresponsive)
+          die "lane is still bound to generation $P_GENERATION pid $P_PID ($PRESENCE_STATE)"
+          ;;
+        orphaned)
+          generation=$((P_GENERATION + 1))
+          event='PRESENCE_RECOVERED'
+          ;;
+        *)
+          generation=$((P_GENERATION + 1))
+          event='PRESENCE_RECOVERED'
+          ;;
+      esac
+    fi
+  fi
+
+  P_ID="$(claim_id_for "$agent" "$lane")"
+  P_AGENT="$agent"
+  P_LANE="$lane"
+  P_WORKTREE="$WORKTREE"
+  P_HARNESS="$harness"
+  P_SESSION_ID="$session_id"
+  P_HOST="$host"
+  P_BOOT_ID="$boot_id"
+  P_PID_NAMESPACE="$pid_namespace"
+  P_PID="$pid"
+  P_PID_START="$pid_start"
+  P_GENERATION="$generation"
+  P_CREATED_UTC="$created_utc"
+  P_LAST_UTC="$NOW_UTC"
+  P_LAST_EPOCH="$NOW_EPOCH"
+  P_TTL="$ttl"
+  presence_state || die "refusing unverifiable process presence: $PRESENCE_REASON"
+  write_presence "$presence_file"
+  append_presence_event "$event" "$PRESENCE_REASON"
+  printf '%s presence_id=%s generation=%s pid=%s session_id=%s last_seen=%s\n' \
+    "$event" "$P_ID" "$P_GENERATION" "$P_PID" "$P_SESSION_ID" "$P_LAST_UTC"
+}
+
+presence_unregister_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' presence_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown presence-unregister option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "presence-unregister requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "presence-unregister requires --lane"
+  presence_file="$(presence_path "$agent" "$lane")"
+  acquire_state_lock "the process-presence removal"
+  if [[ ! -f "$presence_file" ]]; then
+    printf 'PRESENCE_ABSENT presence_id=%s\n' "$(claim_id_for "$agent" "$lane")"
+    return 0
+  fi
+  remove_presence_for_lane "$agent" "$lane" "$WORKTREE" clean-exit
+  printf 'PRESENCE_UNREGISTERED presence_id=%s\n' "$(claim_id_for "$agent" "$lane")"
+}
+
+pending_directed_count() {
+  local agent="$1" lane="$2" message_file ack_file count=0
+  local -a message_paths=()
+  message_paths=("$MESSAGES_DIR"/*.message)
+  for message_file in "${message_paths[@]}"; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    message_expired && continue
+    [[ "$M_TO_AGENT" == "$agent" && "$M_TO_LANE" == "$lane" ]] || continue
+    [[ "$M_FROM_AGENT" != "$agent" || "$M_FROM_LANE" != "$lane" ]] || continue
+    ack_file="$(message_ack_path "$M_ID" "$agent" "$lane")"
+    [[ -f "$ack_file" ]] || count=$((count + 1))
+  done
+  printf '%s' "$count"
+}
+
+recover_one() {
+  local agent="$1" lane="$2" compact="$3"
+  local claim_file presence_file endpoint_file claim_state='missing' presence='unbound'
+  local presence_reason='no-presence-record' delivery='unavailable' lane_state='missing'
+  local worktree='' branch='' sha='' intent='' files='' resources='' last_seen=''
+  local harness='' session_id='' generation=0 pid=0 pending=0 actual_branch='' actual_sha='' dirty='missing'
+
+  claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
+  if [[ -f "$claim_file" ]]; then
+    load_claim "$claim_file"
+    if claim_expired; then claim_state='stale'; else claim_state='active'; fi
+    worktree="$C_WORKTREE"
+    branch="$C_BRANCH"
+    sha="$C_SHA"
+    intent="$C_INTENT"
+    files="$(join_files)"
+    resources="$(join_resources)"
+    last_seen="$C_LAST_UTC"
+  fi
+
+  presence_file="$(presence_path "$agent" "$lane")"
+  if [[ -f "$presence_file" ]]; then
+    load_presence "$presence_file"
+    presence_state || true
+    presence="$PRESENCE_STATE"
+    presence_reason="$PRESENCE_REASON"
+    harness="$P_HARNESS"
+    session_id="$P_SESSION_ID"
+    generation="$P_GENERATION"
+    pid="$P_PID"
+    [[ -n "$worktree" ]] || worktree="$P_WORKTREE"
+  fi
+
+  endpoint_file="$(endpoint_path "$agent" "$lane")"
+  if [[ -f "$endpoint_file" ]]; then
+    load_endpoint "$endpoint_file"
+    endpoint_state || true
+    delivery="$ENDPOINT_STATE"
+  fi
+  pending="$(pending_directed_count "$agent" "$lane")"
+
+  case "$presence" in
+    live) lane_state='live' ;;
+    unresponsive) lane_state='unresponsive' ;;
+    orphaned) lane_state='orphaned' ;;
+    unbound)
+      if [[ "$claim_state" == active ]]; then lane_state='legacy-unbound';
+      elif [[ "$claim_state" == stale ]]; then lane_state='stale-unbound'; fi
+      ;;
+  esac
+
+  if ((compact)); then
+    printf 'LANE_RECOVERY agent=%s lane=%s state=%s claim=%s presence=%s reason=%s delivery=%s pending=%s generation=%s worktree=%s\n' \
+      "$agent" "$lane" "$lane_state" "$claim_state" "$presence" "$presence_reason" \
+      "$delivery" "$pending" "$generation" "${worktree:--}"
+    return 0
+  fi
+
+  if [[ -d "$worktree" ]]; then
+    actual_branch="$(git -C "$worktree" branch --show-current 2>/dev/null || true)"
+    [[ -n "$actual_branch" ]] || actual_branch="detached@$(git -C "$worktree" rev-parse --short=10 HEAD 2>/dev/null || printf unknown)"
+    actual_sha="$(git -C "$worktree" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)"
+    dirty="$(git -C "$worktree" status --porcelain=v1 --untracked-files=all 2>/dev/null | wc -l | tr -d ' ')"
+  fi
+  printf 'Sounio lane recovery\n'
+  printf 'snapshot_utc=%s\n' "$NOW_UTC"
+  printf 'state_dir=%s\n' "$STATE_DIR"
+  printf 'durability=git-common-dir\n'
+  printf 'agent=%s\n' "$agent"
+  printf 'lane=%s\n' "$lane"
+  printf 'lane_state=%s\n' "$lane_state"
+  printf 'claim_state=%s\n' "$claim_state"
+  printf 'claim_last_seen=%s\n' "${last_seen:--}"
+  printf 'presence_state=%s\n' "$presence"
+  printf 'presence_reason=%s\n' "$presence_reason"
+  printf 'presence_generation=%s\n' "$generation"
+  printf 'process_pid=%s\n' "$pid"
+  printf 'delivery_state=%s\n' "$delivery"
+  printf 'harness=%s\n' "${harness:--}"
+  printf 'resume_session_id=%s\n' "${session_id:--}"
+  printf 'worktree=%s\n' "${worktree:--}"
+  printf 'recorded_branch=%s\n' "${branch:--}"
+  printf 'actual_branch=%s\n' "${actual_branch:--}"
+  printf 'recorded_sha=%s\n' "${sha:--}"
+  printf 'actual_sha=%s\n' "${actual_sha:--}"
+  printf 'dirty_paths=%s\n' "$dirty"
+  printf 'intent=%s\n' "${intent:--}"
+  printf 'files=%s\n' "${files:--}"
+  printf 'resources=%s\n' "${resources:--}"
+  printf 'pending_directed=%s\n' "$pending"
+  printf 'inbox_next=bin/sounio-coord inbox --agent %s --lane %s --directed-only --newest-first\n' "$agent" "$lane"
+  if [[ "$lane_state" == orphaned ]]; then
+    printf 'recovery_next=resume harness=%s session_id=%s in worktree=%s; the next hook boundary will fence generation %s\n' \
+      "${harness:--}" "${session_id:--}" "${worktree:--}" "$((generation + 1))"
+  fi
+}
+
+recover_command() {
+  local agent='' lane='' all=0 claim_file presence_file
+  local -a ids=() seen=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --all) all=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown recover option: $1" ;;
+    esac
+  done
+  if ((all)); then
+    [[ -z "$agent" && -z "$lane" ]] || die "recover --all does not accept --agent or --lane"
+    printf 'Sounio fleet recovery snapshot_utc=%s state_dir=%s durability=git-common-dir\n' "$NOW_UTC" "$STATE_DIR"
+    for claim_file in "$CLAIMS_DIR"/*.claim; do
+      [[ -f "$claim_file" ]] || continue
+      load_claim "$claim_file"
+      ids+=("$C_AGENT|$C_LANE")
+    done
+    for presence_file in "$PRESENCES_DIR"/*.presence; do
+      [[ -f "$presence_file" ]] || continue
+      load_presence "$presence_file"
+      ids+=("$P_AGENT|$P_LANE")
+    done
+    if ((${#ids[@]})); then
+      mapfile -t seen < <(printf '%s\n' "${ids[@]}" | sort -u)
+    fi
+    for claim_file in "${seen[@]}"; do
+      recover_one "${claim_file%%|*}" "${claim_file#*|}" 1
+    done
+    printf 'fleet_lanes=%s\n' "${#seen[@]}"
+    return 0
+  fi
+  [[ -n "$agent" ]] || die "recover requires --agent and --lane, or --all"
+  [[ -n "$lane" ]] || die "recover requires --agent and --lane, or --all"
+  recover_one "$agent" "$lane" 0
 }
 
 wake_command() {
@@ -1689,6 +2133,7 @@ handoff_command() {
   append_event HANDOFF "message_id=$message_id commit=$commit_sha"
   unlink "$claim_file"
   remove_endpoint_for_lane "$agent" "$lane" "$WORKTREE" handoff
+  remove_presence_for_lane "$agent" "$lane" "$WORKTREE" handoff
   printf 'HANDED_OFF claim_id=%s message_id=%s commit=%s to_agent=%s to_lane=%s gates=%s evidence=%s experiment=%s\n' \
     "$C_ID" "$message_id" "$commit_sha" "$to_agent" "$to_lane" \
     "$(join_values "${gates[@]}")" "$(join_values "${evidence_paths[@]}")" \
@@ -2020,9 +2465,12 @@ ack_command() {
 }
 
 prune_command() {
-  local removed=0 messages_removed=0 endpoints_removed=0
-  local claim_file message_file ack_file injection_file endpoint_file wake_file
-  local -a message_paths=() ack_paths=() injection_paths=() endpoint_paths=() wake_paths=()
+  local removed=0 messages_removed=0 endpoints_removed=0 presences_removed=0
+  local recovery_retention="${SOUNIO_COORD_RECOVERY_RETENTION_SECONDS:-604800}"
+  local claim_file message_file ack_file injection_file endpoint_file presence_file wake_file
+  local -a message_paths=() ack_paths=() injection_paths=() endpoint_paths=() presence_paths=() wake_paths=()
+  [[ "$recovery_retention" =~ ^[1-9][0-9]*$ ]] || \
+    die "SOUNIO_COORD_RECOVERY_RETENTION_SECONDS must be a positive integer"
   acquire_state_lock "prune"
   refresh_claim_paths
   for claim_file in "${claim_paths[@]}"; do
@@ -2068,16 +2516,30 @@ prune_command() {
       printf 'PRUNED_ENDPOINT endpoint_id=%s agent=%s lane=%s\n' "$E_ID" "$E_AGENT" "$E_LANE"
     fi
   done
+  presence_paths=("$PRESENCES_DIR"/*.presence)
+  for presence_file in "${presence_paths[@]}"; do
+    [[ -f "$presence_file" ]] || continue
+    load_presence "$presence_file"
+    presence_state || true
+    if [[ "$PRESENCE_STATE" == orphaned ]] && \
+      ((NOW_EPOCH > P_LAST_EPOCH + recovery_retention)); then
+      unlink "$presence_file"
+      presences_removed=$((presences_removed + 1))
+      printf 'PRUNED_PRESENCE presence_id=%s agent=%s lane=%s\n' "$P_ID" "$P_AGENT" "$P_LANE"
+    fi
+  done
   printf 'pruned=%s pruned_messages=%s\n' "$removed" "$messages_removed"
   printf 'pruned_endpoints=%s\n' "$endpoints_removed"
+  printf 'pruned_presences=%s\n' "$presences_removed"
 }
 
 status_command() {
-  local claim_file endpoint_file existing other_file wt branch dirty head marker context_branch file resource local_conflict
+  local claim_file endpoint_file presence_file existing other_file wt branch dirty head marker context_branch file resource local_conflict
   local active=0 stale=0 conflicts=0 total_wt=0 dirty_wt=0 claimed_wt=0 shown_wt=0 relevant_wt=0 max_rows
   local active_endpoints=0 stale_endpoints=0 drifted_endpoints=0 unavailable_endpoints=0 endpoint_marker
+  local live_presences=0 unresponsive_presences=0 orphaned_presences=0 presence_marker
   local brief=0 inspect_all=0 worktree_scan='current-and-claimed'
-  local -a worktrees=() inspect_worktrees=() first_files=() second_files=() endpoint_paths=()
+  local -a worktrees=() inspect_worktrees=() first_files=() second_files=() endpoint_paths=() presence_paths=()
   local -a first_resources=() second_resources=()
   max_rows="${SOUNIO_COORD_MAX_WORKTREE_ROWS:-40}"
 
@@ -2163,6 +2625,25 @@ status_command() {
       "$E_TRANSPORT" "$E_ADDRESS" "$E_LAST_UTC"
   done
   ((active_endpoints + stale_endpoints + drifted_endpoints + unavailable_endpoints > 0)) || printf 'NONE\n'
+
+  printf '\n== Process presence ==\n'
+  presence_paths=("$PRESENCES_DIR"/*.presence)
+  for presence_file in "${presence_paths[@]}"; do
+    [[ -f "$presence_file" ]] || continue
+    load_presence "$presence_file"
+    presence_state || true
+    case "$PRESENCE_STATE" in
+      live) live_presences=$((live_presences + 1)) ;;
+      unresponsive) unresponsive_presences=$((unresponsive_presences + 1)) ;;
+      orphaned) orphaned_presences=$((orphaned_presences + 1)) ;;
+    esac
+    presence_marker="${PRESENCE_STATE^^}_PRESENCE"
+    printf '%s presence_id=%s agent=%s lane=%s generation=%s harness=%s session_id=%s host=%s pid=%s reason=%s last_seen=%s worktree=%s\n' \
+      "$presence_marker" "$P_ID" "$P_AGENT" "$P_LANE" "$P_GENERATION" \
+      "$P_HARNESS" "$P_SESSION_ID" "$P_HOST" "$P_PID" "$PRESENCE_REASON" \
+      "$P_LAST_UTC" "$P_WORKTREE"
+  done
+  ((live_presences + unresponsive_presences + orphaned_presences > 0)) || printf 'NONE\n'
 
   printf '\n== Active conflicts ==\n'
   for existing in "${claim_paths[@]}"; do
@@ -2257,6 +2738,8 @@ status_command() {
   printf '\nsummary=active_claims:%s stale_claims:%s conflicts:%s\n' "$active" "$stale" "$conflicts"
   printf 'delivery_summary=active_endpoints:%s stale_endpoints:%s drifted_endpoints:%s unavailable_endpoints:%s\n' \
     "$active_endpoints" "$stale_endpoints" "$drifted_endpoints" "$unavailable_endpoints"
+  printf 'presence_summary=live:%s unresponsive:%s orphaned:%s\n' \
+    "$live_presences" "$unresponsive_presences" "$orphaned_presences"
   STATUS_CONFLICTS="$conflicts"
 }
 
@@ -2293,6 +2776,9 @@ case "$command" in
   endpoint-register) endpoint_register_command "$@" ;;
   endpoint-unregister) endpoint_unregister_command "$@" ;;
   endpoint-status) endpoint_status_command "$@" ;;
+  presence-register) presence_register_command "$@" ;;
+  presence-unregister) presence_unregister_command "$@" ;;
+  recover) recover_command "$@" ;;
   wake) wake_command "$@" ;;
   experiment-open) causal_runtime_command open "$@" ;;
   experiment-close) causal_runtime_command close "$@" ;;
@@ -2309,5 +2795,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac

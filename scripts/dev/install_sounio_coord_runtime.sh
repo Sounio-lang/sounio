@@ -148,6 +148,7 @@ else
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
     printf 'capability=causal-experiment-receipts-v1\n'
+    printf 'capability=crash-recovery-v1\n'
     printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$stage/manifest"
   mv "$stage" "$version_dir"
