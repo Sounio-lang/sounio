@@ -1,0 +1,234 @@
+// self-hosted::native::math_ffi — exact-arithmetic kernels for the libm intrinsics
+//
+// This module is a TRANSLITERATION, not a fresh implementation. Every routine
+// here corresponds line for line to a routine in
+// scripts/research/pow_tgamma_oracle.py, which models this exact instruction
+// set — two xmm registers, rbp-relative slots, no FMA, no libm — and which has
+// been measured against mpmath at 60 digits: pow 0.76 ulp, tgamma 3.64 ulp.
+//
+// The correspondence is the point. Hand-writing a thousand emitter calls and
+// hoping is how the exp and log emitters ended up stopping at degree 6 and
+// degree 4 (see the comment on emit_horner_step): the code, not the
+// mathematics, set the accuracy. Here the mathematics was settled first, in a
+// model that could be measured cheaply, and this file only spells it in bytes.
+// When you change something here, change the oracle first and re-measure.
+//
+// Conventions, all inherited from the oracle:
+//
+//   * A "slot" is a byte offset from rbp, negative, a multiple of 8. Slot moves
+//     use the disp32 forms: disp8 reaches 16 slots below rbp and the frames
+//     here peak at 42 (pow) and 49 (tgamma).
+//   * Every arithmetic instruction is xmm0 = xmm0 <op> xmm1. There is no
+//     three-operand form and no third register.
+//   * A "dd" (double-double) is a PAIR of slots, hi and lo, passed as two
+//     arguments. hi + lo is the represented value and the sum is exact.
+//   * Callers pass temporaries explicitly. The oracle allocates them with a
+//     mark/release stack; doing that at emit time would need mutable state
+//     threaded through every call, so the frame is laid out statically instead
+//     and each routine documents how many temps it wants. Temps MUST be
+//     distinct from every input and output slot — these routines do not check,
+//     and an overlap corrupts silently rather than failing.
+
+use native::encode::*
+use native::codegen_x86_linux::{NativeCompiler}
+
+// ---------------------------------------------------------------------------
+// Slot moves. Thin names so the transliteration reads like the oracle.
+// ---------------------------------------------------------------------------
+
+// xmm0 <- [rbp+s]      (oracle: m.ld0)
+fn mf_ld0(nc: NativeCompiler, s: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_movsd_xmm0_rbp_disp32(c.code, s)
+    c
+}
+
+// xmm1 <- [rbp+s]      (oracle: m.ld1)
+fn mf_ld1(nc: NativeCompiler, s: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_movsd_xmm1_rbp_disp32(c.code, s)
+    c
+}
+
+// [rbp+s] <- xmm0      (oracle: m.st0)
+fn mf_st0(nc: NativeCompiler, s: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_movsd_rbp_disp32_xmm0(c.code, s)
+    c
+}
+
+// [rbp+s] <- xmm1      (oracle: m.st1)
+fn mf_st1(nc: NativeCompiler, s: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_movsd_rbp_disp32_xmm1(c.code, s)
+    c
+}
+
+// xmm0 <- .rodata[off] (oracle: m.ld0c)
+fn mf_ld0c(nc: NativeCompiler, off: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_movsd_xmm0_rip_disp32(c.code, off)
+    c
+}
+
+// xmm1 <- .rodata[off] (oracle: m.ld1c)
+fn mf_ld1c(nc: NativeCompiler, off: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_movsd_xmm1_rip_disp32(c.code, off)
+    c
+}
+
+// [rbp+dst] <- [rbp+src], via xmm0. The oracle's m.fmov, which is a no-op when
+// the two coincide; here the caller decides, so this one always moves.
+fn mf_mov_slot(nc: NativeCompiler, dst: i64, src: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, src)
+    c = mf_st0(c, dst)
+    c
+}
+
+// ---------------------------------------------------------------------------
+// Error-free transformations. These are the whole foundation: each produces a
+// PAIR whose exact sum is the exact result of an operation that binary64 can
+// only round. Everything above this line is bookkeeping; everything below it
+// depends on these being exactly right.
+// ---------------------------------------------------------------------------
+
+// TwoSum (Knuth): s + e == a + b EXACTLY, for any a and b.
+// 3 temps. Oracle: TwoSum, 23 instructions.
+//
+// The subtraction chain is not redundant algebra. `bb = s - a` recovers the
+// part of b that survived the rounding of a+b; `a - (s - bb)` is then the part
+// of a that did NOT, and `b - bb` the part of b that did not. Reordering any of
+// it, or cancelling a term that looks like it cancels, destroys the property.
+fn mf_two_sum(nc: NativeCompiler, s_out: i64, e_out: i64, a: i64, b: i64,
+              t_s: i64, t_bb: i64, t_t: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, a); c = mf_ld1(c, b)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_s)                                  // s = a + b
+    c = mf_ld1(c, a)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_bb)                                 // bb = s - a
+    c = mf_ld0(c, t_s); c = mf_ld1(c, t_bb)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_t)                                  // t = s - bb
+    c = mf_ld0(c, a); c = mf_ld1(c, t_t)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_t)                                  // t = a - (s - bb)
+    c = mf_ld0(c, b); c = mf_ld1(c, t_bb)
+    c.code = emit_subsd_xmm0_xmm1(c.code)               // x0 = b - bb
+    c = mf_ld1(c, t_t)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e_out)                                // e = (b - bb) + t
+    c = mf_mov_slot(c, s_out, t_s)
+    c
+}
+
+// TwoDiff: s + e == a - b EXACTLY. 3 temps. Oracle: TwoDiff, 23 instructions.
+fn mf_two_diff(nc: NativeCompiler, s_out: i64, e_out: i64, a: i64, b: i64,
+               t_s: i64, t_bb: i64, t_t: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, a); c = mf_ld1(c, b)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_s)                                  // s = a - b
+    c = mf_ld1(c, a)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_bb)                                 // bb = s - a
+    c = mf_ld0(c, t_s); c = mf_ld1(c, t_bb)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_t)                                  // t = s - bb
+    c = mf_ld0(c, a); c = mf_ld1(c, t_t)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_t)                                  // t = a - (s - bb)
+    c = mf_ld0(c, b); c = mf_ld1(c, t_bb)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_bb)                                 // bb = b + bb, exact
+    c = mf_ld0(c, t_t); c = mf_ld1(c, t_bb)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e_out)                                // e = t - (b + bb)
+    c = mf_mov_slot(c, s_out, t_s)
+    c
+}
+
+// QuickTwoSum: the same guarantee, 1 temp instead of 3, but ONLY when
+// |a| >= |b|. Call it with the magnitudes the other way round and it returns a
+// wrong e with no diagnostic, which is why every call site below states why the
+// ordering holds. Oracle: QuickTwoSum, 11 instructions.
+fn mf_quick_two_sum(nc: NativeCompiler, s_out: i64, e_out: i64, a: i64, b: i64,
+                    t_s: i64, t_t: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, a); c = mf_ld1(c, b)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_s)                                  // s = a + b
+    c = mf_ld1(c, a)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_t)                                  // t = s - a
+    c = mf_ld0(c, b); c = mf_ld1(c, t_t)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e_out)                                // e = b - t
+    c = mf_mov_slot(c, s_out, t_s)
+    c
+}
+
+// Dekker split: hi + lo == a exactly, each holding at most 26 significant bits,
+// so a product of two halves is exact in binary64. split_off must point at
+// SPLIT = 2^27 + 1 in .rodata. 2 temps. Oracle: _Split, 15 instructions.
+fn mf_split(nc: NativeCompiler, hi: i64, lo: i64, a: i64,
+            split_off: i64, t_c: i64, t_t: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, a); c = mf_ld1c(c, split_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_c)                                  // cc = SPLIT * a
+    c = mf_ld1(c, a)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_t)                                  // t = cc - a
+    c = mf_ld0(c, t_c); c = mf_ld1(c, t_t)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, hi)                                   // hi = cc - (cc - a)
+    c = mf_ld0(c, a); c = mf_ld1(c, hi)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, lo)                                   // lo = a - hi
+    c
+}
+
+// TwoProd (Dekker, no FMA): p + e == a * b EXACTLY.
+// 7 temps. Oracle: TwoProd, 58 instructions.
+//
+// Valid for |a|, |b| < 2^996: SPLIT * a must not overflow. The oracle found two
+// call sites that leave that domain and both are guarded before they get here
+// (pow with |y| >= 2^63, and the Gamma(x+1)/x branch at x = 1e-300, which
+// overflowed and returned NaN silently until the exponent was divided out
+// first). If you add a third call site, establish the bound.
+fn mf_two_prod(nc: NativeCompiler, p_out: i64, e_out: i64, a: i64, b: i64,
+               split_off: i64, t_p: i64, t_ah: i64, t_al: i64, t_bh: i64, t_bl: i64,
+               t_c: i64, t_t: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c = mf_ld0(c, a); c = mf_ld1(c, b)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t_p)                                  // p = a * b
+    c = mf_split(c, t_ah, t_al, a, split_off, t_c, t_t)
+    c = mf_split(c, t_bh, t_bl, b, split_off, t_c, t_t)
+    c = mf_ld0(c, t_ah); c = mf_ld1(c, t_bh)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, t_p)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e_out)                                // e = ah*bh - p
+    c = mf_ld0(c, t_ah); c = mf_ld1(c, t_bl)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, e_out)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e_out)                                // e += ah*bl
+    c = mf_ld0(c, t_al); c = mf_ld1(c, t_bh)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, e_out)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e_out)                                // e += al*bh
+    c = mf_ld0(c, t_al); c = mf_ld1(c, t_bl)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, e_out)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e_out)                                // e += al*bl
+    c = mf_mov_slot(c, p_out, t_p)
+    c
+}
