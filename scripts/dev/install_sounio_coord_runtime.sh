@@ -106,8 +106,10 @@ fi
 
 runtime_source="$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
 hook_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agent_hook_runtime.py"
+causal_source="$SOURCE_ROOT/scripts/dev/sounio_coord_causal_runtime.py"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
+[[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
 
 version_output="$(cd "$WORKTREE" && "$runtime_source" runtime-version)"
 protocol="$(sed -n 's/^protocol_version=//p' <<< "$version_output" | head -1)"
@@ -117,7 +119,8 @@ runtime_version="$(sed -n 's/^runtime_version=//p' <<< "$version_output" | head 
 [[ -n "$runtime_version" ]] || die "source runtime did not report a version"
 
 bundle_sha="$(
-  sha256sum "$runtime_source" "$hook_source" | awk '{print $1}' | sha256sum | awk '{print $1}'
+  sha256sum "$runtime_source" "$hook_source" "$causal_source" | \
+    awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
 runtime_id="p${protocol}-${safe_version}-${bundle_sha:0:12}"
@@ -136,6 +139,7 @@ else
   trap cleanup_stage EXIT
   mkdir -p "$stage/bin" "$stage/hooks"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
+  install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   {
     printf 'runtime_id=%s\n' "$runtime_id"
@@ -143,6 +147,7 @@ else
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
+    printf 'capability=causal-experiment-receipts-v1\n'
     printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$stage/manifest"
   mv "$stage" "$version_dir"
