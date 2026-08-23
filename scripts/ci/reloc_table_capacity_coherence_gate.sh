@@ -44,6 +44,19 @@ if check "$SAB" >/dev/null 2>&1; then
 fi
 echo "control: a literal 256 guard is rejected, as required"
 
+# The flag is worthless if nothing reads it. Checked in the emitter, not here,
+# because that is where the refusal has to live -- the same place code_overflow
+# and reloc_overflow are already refused on.
+CONSUMER="$ROOT/self-hosted/native/codegen_x86_linux.sio"
+if ! grep -q 'nc\.relocs\.overflow' "$CONSUMER"; then
+  echo "RELOC_CAPACITY_FAIL reason=nothing_refuses_on_overflow" >&2
+  echo "  reloc.sio records a dropped relocation but $CONSUMER never checks it," >&2
+  echo "  so the binary ships with an unpatched site instead of being refused." >&2
+  printf '{"status":"fail","reason":"nothing refuses on overflow","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' > "$ART"
+  exit 1
+fi
+echo "control: the emitter refuses on a dropped relocation"
+
 if out=$(check "$SOURCE" 2>&1); then
   echo "$out"
   printf '{"status":"pass","metrics":{"total":1,"passed":1,"failed":0,"not_run":0}}\n' > "$ART"
