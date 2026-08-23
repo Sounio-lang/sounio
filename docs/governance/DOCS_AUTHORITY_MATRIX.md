@@ -81,6 +81,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.archived.roadmap-v0.5.0-part3 | archived | docs/archived/ROADMAP_v0.5.0_PART3.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.strategic-growth-plan | archived | docs/archived/STRATEGIC_GROWTH_PLAN.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.todo-next | archived | docs/archived/TODO_NEXT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.a-mu-gum-split-2026-08-23 | repo_only | docs/audit/A_MU_GUM_SPLIT_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.affine-nonassoc-uncertainty-2026-06-13 | repo_only | docs/audit/AFFINE_NONASSOC_UNCERTAINTY_2026-06-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.branch-audit-2026-08-15 | repo_only | docs/audit/BRANCH_AUDIT_2026-08-15.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.bucket-d-script-hardening-2026-06-21 | repo_only | docs/audit/BUCKET_D_SCRIPT_HARDENING_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
