@@ -1071,6 +1071,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.neurodyn-ossm-sota-deep-research-2026-07-05 | historical | docs/research/neurodyn_ossm_sota_deep_research_2026-07-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.nma-algebraic-detector-validation-2026-08-06 | historical | docs/research/nma_algebraic_detector_validation_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.non-associative-programme-2026-08-13 | historical | docs/research/non_associative_programme_2026-08-13.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.nonassociativity-as-rupture | historical | docs/research/nonassociativity-as-rupture.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.nullity-histogram-law-falsifiers-2026-07-26 | historical | docs/research/nullity_histogram_law_falsifiers_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.nullity-histogram-law-spec-2026-07-26 | historical | docs/research/nullity_histogram_law_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.ocssm-annotation-manual-v0 | historical | docs/research/ocssm_annotation_manual_v0.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
