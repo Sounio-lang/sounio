@@ -383,6 +383,72 @@ this compiler should use 16-bit limbs throughout, not 32-bit** — 32-bit
 limbs are only safe if every multiply is itself internally decomposed this
 same way, which is equivalent to using 16-bit limbs in the first place.
 
+## Finding 12 — the Madaros runtime arena is never reclaimed: every value-returning function that allocates is a permanent, per-process budget spend
+
+A Sounio function that returns a struct containing an array field (e.g.
+`fn f() -> BigInt` where `BigInt` holds `[u16; 512]`) allocates a fresh block
+in the Madaros runtime arena on every call, and that block is **never freed or
+reused** for the life of the process. When the arena is exhausted the process
+dies with an uncatchable
+
+```
+madaros: arena full
+```
+
+and exit status 181 — no `Result`, no unwinding, nothing a Sounio program can
+observe or recover from.
+
+**Measured ceiling** (`stdlib/bignum/bigint.sio`, this compiler, this branch):
+a bare loop calling `bigint_add` — one `BigInt`-returning call per iteration —
+completes **≈460,000 iterations** before aborting. That is the whole budget for
+a process, regardless of how short-lived each value is.
+
+**In-place field mutation is genuinely allocation-free.** This is the important
+positive half of the finding, and it was verified directly:
+
+```sio
+var acc = bigint_zero()          // ONE allocation
+var i = 0
+while i < 5000000 {
+    acc.limbs[(i % 512) as usize] = (i % 65535) as u16   // mutates in place
+    acc.len = 512
+    i = i + 1
+}
+```
+
+5,000,000 field/element writes to the same `var` binding complete without the
+arena growing at all — the array field really is a single boxed handle
+(consistent with Finding 2) that is written through, not re-boxed. So the
+allocation cost of an algorithm on this runtime is driven entirely by how many
+**value-returning helper calls** it makes, not by how much work it does.
+
+**Consequence, and what was done about it.** `bigint_mod`'s binary long
+division originally called two `BigInt`-returning helpers
+(`bigint_shl1_or_bit`, `bigint_sub`) once per bit of the dividend — up to
+`2 * 8192 = 16384` arena allocations per single `bigint_mod` call. Measured
+end-to-end with a 2048-bit modulus and exponent 65537:
+
+| | RSA-2048 `bigint_modpow` calls per process | RSA-4096 `bigint_modpow` calls per process |
+|---|---|---|
+| helper-call version | **5** | **2** |
+| in-place version | **3402** | **> 20** (no arena abort in the measured run) |
+
+Rewriting that inner loop to shift and subtract directly on one `remainder`
+binding's limbs — no helper calls, identical arithmetic, identical Finding 11
+bounds — reduced `bigint_mod` from O(bits) allocations to exactly **one**, a
+**~680×** improvement in RSA operations per process. Note the per-modpow
+allocation cost is now dominated by `bigint_mul`'s temporaries and is
+independent of operand width, which is why RSA-4096 gains as much as RSA-2048.
+
+**Guidance for any future wide-arithmetic or buffer-heavy Sounio code on this
+runtime**: treat a value-returning function that allocates as an expensive,
+non-refundable operation. Prefer mutating a single `var` binding across a loop
+over calling a helper that returns a fresh value each iteration. The ceiling
+has not been removed — it has been pushed roughly three orders of magnitude
+out — and it will return for any long-running process (e.g. a TLS server
+handling many handshakes) until Madaros gains arena reclamation or this module
+is restructured around explicit caller-supplied scratch buffers.
+
 ## Scope note
 
 Neither finding blocks this project — both have workarounds (hand-rolled
