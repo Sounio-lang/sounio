@@ -46,6 +46,44 @@
 use net::socket::*
 use net::http_client::*
 
+// REAPING NOTE (fix round 1, addressing a task review finding) — the
+// original version of this test forked a child to play the loopback server
+// role but never reaped it (no `wait4`/`waitpid`), and had no timeout on
+// the child's blocking `tcp_accept`/`tcp_recv` calls. If the PARENT ever
+// failed or returned early (e.g. its own `tcp_connect`/`tcp_send` call
+// failed) while the child was still blocked waiting on a peer that would
+// now never arrive, the child became an orphan that still held this
+// process's inherited stdout fd open — and the test runner's
+// `output=$(...)` command substitution waits for EVERY holder of the pipe's
+// write end to close it, including an orphaned grandchild the runner's own
+// `timeout` wrapper can no longer see (once the parent has exited, the
+// process `timeout` was tracking is gone, but the orphan survives). That is
+// a real risk of wedging the ENTIRE test suite, not just this test.
+//
+// FIX CHOSEN: (a) unconditional reap-and-kill on every parent exit path,
+// not (b) a socket-level SO_RCVTIMEO timeout. Reasoning: (b) would require
+// this test to reach into `setsockopt` via a fresh raw `syscall6` (not
+// currently exercised anywhere in this plan) on BOTH the listener fd
+// (for `accept()`'s timeout, supported by Linux via SO_RCVTIMEO on a
+// listening socket since 2.6.28) and the accepted connection fd (for
+// `recv()`'s timeout), which is more new, untested raw-syscall surface
+// than this task should add on top of everything already stacked in this
+// file. (a) is strictly simpler and, more importantly, unconditionally
+// correct regardless of what the parent's own socket calls do: it does not
+// depend on believing a timeout value guessed here will always be "long
+// enough" for a slow CI box yet "short enough" to not itself wedge the
+// suite. `reap_child` below sends SIGKILL (signal 9, raw syscall 62,
+// `kill(pid, SIGKILL)`) to the child unconditionally — harmless (ESRCH) if
+// the child has already exited on its own — and then blocks in `wait4`
+// (raw syscall 61) to actually reap it, so no zombie or orphan can outlive
+// the parent. This is called from EVERY return path in `main()` after the
+// fork (all three: both early-failure returns and the success return), not
+// just the happy path.
+fn reap_child(pid: i64) with IO, Mut, Panic, Div {
+    syscall6(62, pid, 9, 0, 0, 0, 0)     // kill(pid, SIGKILL) -- ok if already exited
+    syscall6(61, pid, 0, 0, 0, 0, 0)     // wait4(pid, NULL, 0, NULL) -- blocks until reaped
+}
+
 fn main() -> i32 with IO, Mut, Panic, Div {
     var server_ip = Buf4096 { data: [0; 4096] }
     server_ip.data[0] = 49   // "1"
@@ -129,12 +167,15 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     let response = http_get(&host, 9, port, &path, 1)
     if response.ok != true {
         println("FAIL: http_get did not succeed")
+        reap_child(pid)
         return 1
     }
     if response.status != 200 {
         println("FAIL: expected status 200")
+        reap_child(pid)
         return 1
     }
     println("PASS: http_get round-trip matched")
+    reap_child(pid)
     return 0
 }

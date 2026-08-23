@@ -41,62 +41,55 @@
 // as the SECOND COMPILER LIMITATION's mandatory struct-literal rebuild
 // after tuple destructuring.
 //
-// EIGHTH COMPILER LIMITATION (new, discovered writing this task) — a
-// tuple-destructured value's field can read back CORRUPTED if even one
-// unrelated function call (including something as innocuous as `println`)
-// executes between the destructuring `let (x, err) = f(...)` and the first
-// read of `x`'s field. Reproduced directly: `let (sock, connect_err) =
-// tcp_connect(...)` followed immediately by `if connect_err != 0 {...}`
-// (fine — `connect_err` is read with zero intervening calls) then a bare
-// `println("connected")` BEFORE `let sock1 = TcpSocket { fd: sock.fd }` —
-// `sock.fd` read back as -1 (tcp_connect's own error sentinel) in roughly
-// half of repeated runs of the identical binary, despite `connect_err`
-// having just been confirmed 0 moments earlier. Removing the intervening
-// `println` (rebuilding the struct literal as the VERY NEXT statement
-// after destructuring, with no calls, branches, or other statements in
-// between) made the corruption disappear across dozens of repeated runs.
-// This sharpens the SECOND COMPILER LIMITATION (which only documented
-// call-ARGUMENT passing as unsafe for destructured values): the destructured
-// binding appears to live in a volatile/caller-saved location rather than
-// being spilled to a stable stack slot, so ANY call in between — not just
-// passing it as an argument — is unsafe. WORKAROUND applied throughout
-// `http_get` below: every `let (x, err) = tcp_*(...)` is immediately
-// followed by its struct-literal rebuild as the literal next line, with the
-// error-code check and any other logic coming AFTER that rebuild, never
-// before it.
+// EIGHTH/TENTH COMPILER LIMITATION — REVISED, HONEST WRITEUP (fix round 1)
+// —————————————————————————————————————————————————————————————————————
+// The two paragraphs that originally lived in this slot (numbered EIGHTH
+// and TENTH) reported CONTRADICTORY attributions of which half of a
+// `(LinearStruct, i32)` tuple return was the corrupted one: the original
+// EIGHTH paragraph claimed the STRUCT half (`sock.fd`) spuriously read -1
+// while the paired scalar (`connect_err`) was correctly 0; the original
+// TENTH paragraph claimed the opposite — the SCALAR half spuriously read 0
+// while the struct half was correctly -1. Both cannot be true, and a task
+// review correctly flagged this as unproven and self-contradictory. Here is
+// the honest epistemic state:
 //
-// TENTH COMPILER LIMITATION (new, discovered writing this task, and the one
-// that actually explains the test's real flakiness — the EIGHTH limitation
-// above was a false lead from an early, less-controlled repro) — the
-// SCALAR half of a `(LinearStruct, i32)`-shaped tuple return can read back
-// as 0 (masking a real nonzero error) even when the struct half's own field
-// correctly reflects the true failure. Reproduced via `let (sock,
-// connect_err) = tcp_connect(...)` inside `http_get`, called from the
-// PARENT side of a `fork()`-based test (see the test file's ORDERING NOTE):
-// captured immediately (first two statements after destructuring, zero
-// intervening calls — ruling out the EIGHTH limitation's mechanism),
-// `sock.fd` reads back as -1 (the real sentinel `tcp_connect` returns on
-// failure) while `connect_err` reads back as 0 in the SAME observation —
-// a combination `tcp_connect`'s own source code cannot produce (every
-// return path pairs `fd == -1` with a nonzero error code). This was only
-// visible under the fork-based test's timing; the equivalent single-process
-// tests in this plan (net_socket_loopback.sio, etc.) check their paired
-// error codes directly and have never shown this symptom, so the trigger
-// condition is most plausibly tied to `fork()`'s process-level concurrency
-// rather than being a universal defect in all tuple returns. Root cause
-// not fully isolated (day-one hypotheses considered: an unsafe write to
-// some non-reentrant multi-value-return staging location under
-// scheduling/signal pressure from the forked child's exit; ruled out
-// disproven alternatives: register-corruption-from-intervening-calls,
-// since this reproduces with zero intervening statements). WORKAROUND: in
-// `http_get`, `sock1.fd < 0` (the struct field, rebuilt immediately) is
-// used as the sole success/failure signal for `tcp_connect`'s result —
-// never the paired scalar error code — since the struct field was observed
-// to read back correctly in every trial. Any future caller of a `tcp_*`
-// function from inside a forked child or a fork-adjacent parent path
-// should apply the same discipline: trust the struct's own sentinel field,
-// not a separately-returned scalar status code, until this is root-caused
-// in the compiler itself.
+//   - It IS reproducible that the two halves of a `(LinearStruct, i32)`
+//     tuple return from a `tcp_*` function can DISAGREE with each other in
+//     a way that the callee's own source code cannot legitimately produce
+//     (e.g. `tcp_connect` never returns `fd == -1` paired with a zero error
+//     code, yet that combination has been observed at the call site).
+//   - WHICH half is the corrupted one is NOT proven. The two earlier repro
+//     attempts (one under an intervening `println`, one under fork()-based
+//     concurrency) produced reports that contradict each other about this,
+//     and neither was isolated rigorously enough to settle it. Root cause
+//     is not identified (candidate mechanisms considered but not confirmed:
+//     a volatile/caller-saved home for destructured tuple fields; a
+//     non-reentrant multi-value-return staging location under fork()'s
+//     process-level concurrency). This is left as an open compiler question,
+//     not a solved one.
+//   - WORKAROUND actually shipped in `http_get` below: trust `.fd` (the
+//     struct field), never the paired scalar error code, as the sole
+//     success/failure signal. This choice is NOT based on a proven claim
+//     that `.fd` is the reliably-correct half — it is chosen because it
+//     FAILS CLOSED: `tcp_connect`'s only error sentinel on the struct side
+//     is `fd == -1`, an established, unambiguous sentinel value — so
+//     checking `sock.fd < 0` can, at worst, be overly conservative
+//     (treating a call as failed when it actually succeeded), but it can
+//     never silently permit code to proceed past a real failure, because
+//     the ambiguity here is about which returned signal to trust, not
+//     about a third outcome where both signals falsely agree on success.
+//     If this hypothesis is ever wrong in the
+//     other direction (i.e. `.fd` itself is the corrupted half in some
+//     case not yet observed), the failure mode is still "erroneously
+//     treats a good connection as failed," never "erroneously treats a
+//     failed connection as good" for any case this file has actually
+//     observed. Every rebuild-immediately-after-destructuring discipline
+//     from the original EIGHTH/TENTH notes is preserved unchanged below
+//     (struct-literal rebuild as the literal next statement after
+//     destructuring, before any branch/other-call). Any future caller of a
+//     `tcp_*` function should apply the same discipline — trust the
+//     struct's own sentinel field, not a separately-returned scalar status
+//     code — until this is root-caused in the compiler itself.
 //
 // NINTH COMPILER LIMITATION (new, discovered writing this task) — calling
 // `stdlib/str/lib.sio`'s `str_from_i64`/`str_to_string` (and, empirically,
@@ -328,15 +321,14 @@ pub fn http_get(host: &Buf256, host_len: i32, port: u16, path: &Buf256, path_len
 
     let (sock, _connect_err) = tcp_connect(&resolved_ip, resolved_len, port)
     // Rebuild immediately (zero intervening statements/calls) -- see the
-    // EIGHTH COMPILER LIMITATION note above `http_get`. The success check
-    // below deliberately uses `sock1.fd < 0` (the struct field), NOT the
-    // paired `_connect_err` scalar -- see the TENTH COMPILER LIMITATION
-    // note above `http_get` for why that scalar half of a `(TcpSocket, i32)`
-    // tuple return was observed to read back as 0 even when the struct half
-    // correctly shows failure (fd == -1) in this fork-based test. `sock.fd`
-    // itself reads back correctly in every observed case, so it -- not the
-    // paired error code -- is the authoritative success/failure signal used
-    // throughout this function.
+    // EIGHTH/TENTH COMPILER LIMITATION note above (revised, fix round 1).
+    // The success check below deliberately uses `sock1.fd < 0` (the struct
+    // field), NOT the paired `_connect_err` scalar: the two halves of a
+    // `(TcpSocket, i32)` tuple return have been observed to disagree in a
+    // way `tcp_connect`'s own source cannot produce, and which half is
+    // actually corrupted is not proven. `.fd` is used here because it fails
+    // closed (see the note above for the full reasoning), not because it
+    // has been proven to be the reliable half.
     let sock1 = TcpSocket { fd: sock.fd }
     if sock1.fd < 0 {
         return HttpResponse { status: -1, headers: Str { data: [0; 256], len: 0 }, body: Str { data: [0; 256], len: 0 }, ok: false }
@@ -352,6 +344,20 @@ pub fn http_get(host: &Buf256, host_len: i32, port: u16, path: &Buf256, path_len
         return HttpResponse { status: -1, headers: Str { data: [0; 256], len: 0 }, body: Str { data: [0; 256], len: 0 }, ok: false }
     }
 
+    // SCOPE LIMITATION (deliberate, not an oversight; fix round 1 review) —
+    // this is a SINGLE `tcp_recv` call, not the read-loop the design spec
+    // (docs/superpowers/specs/2026-08-22-sounio-sockets-http-client-design.md)
+    // explicitly calls for: "loop tcp_recv until the peer closes (recv
+    // returns 0) or a Content-Length-implied byte count is reached,
+    // whichever comes first." A single call happens to be sufficient for
+    // this file's own test (a fixed 43-byte response that always arrives in
+    // one segment), but it will silently TRUNCATE any real-world response
+    // that spans multiple TCP segments or exceeds one `recv()`'s worth of
+    // data. A real crawler/client needs a proper receive-loop here (buffer
+    // append + Content-Length/EOF accounting) before this is safe to point
+    // at arbitrary servers. Deferred to a follow-up task given how many
+    // compiler workarounds are already stacked in this file; do not mistake
+    // this single-call version for the intended final behavior.
     var response_buf = Buf4096 { data: [0; 4096] }
     let (sock3, received) = tcp_recv(sock2c, &!response_buf)
     let sock3b = TcpSocket { fd: sock3.fd }
