@@ -213,3 +213,78 @@ pub fn der_skip(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
     let advanced = DerReader { buf_ptr: r.buf_ptr, pos: new_pos, end: r.end }
     (advanced, DER_OK)
 }
+
+pub fn der_read_boolean(r: &DerReader, tag: &DerTag) -> (bool, i64) with IO {
+    if tag.tag_number != DER_TAG_BOOLEAN || tag.content_len != 1 {
+        return (false, DER_ERR_BAD_LENGTH_FORM)
+    }
+    if tag.content_start + 1 > r.end {
+        return (false, DER_ERR_TRUNCATED)
+    }
+    let b = der_byte_at(r, tag.content_start)
+    if b == 0 {
+        return (false, DER_OK)
+    }
+    if b == 255 {
+        return (true, DER_OK)
+    }
+    // DER forbids any nonzero byte other than 0xFF for a true BOOLEAN.
+    (false, DER_ERR_BAD_LENGTH_FORM)
+}
+
+pub fn der_read_null(r: &DerReader, tag: &DerTag) -> i64 {
+    if tag.tag_number != DER_TAG_NULL || tag.content_len != 0 {
+        return DER_ERR_BAD_LENGTH_FORM
+    }
+    DER_OK
+}
+
+// Decodes a DER INTEGER as an unsigned magnitude into a BigInt. Every
+// INTEGER this project ever decodes (serial numbers, RSA moduli/exponents)
+// is non-negative by construction, so this treats the content bytes as an
+// unsigned big-endian magnitude after stripping DER's required single
+// leading 0x00 padding byte (present whenever the true value's high bit
+// would otherwise look like a two's-complement sign bit).
+pub fn der_read_integer(r: &DerReader, tag: &DerTag) -> (BigInt, i64) with IO {
+    if tag.tag_number != DER_TAG_INTEGER || tag.content_len == 0 {
+        return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+    }
+    if tag.content_start + tag.content_len > r.end {
+        return (bigint_zero(), DER_ERR_TRUNCATED)
+    }
+
+    var start = tag.content_start
+    var len = tag.content_len
+
+    if len > 1 {
+        let b0 = der_byte_at(r, start)
+        if b0 == 0 {
+            start = start + 1
+            len = len - 1
+            let b1 = der_byte_at(r, start)
+            if b1 == 0 {
+                // A second leading zero byte is non-minimal DER -- reject.
+                return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+            }
+        }
+    }
+
+    // BigInt's storage is BIGINT_MAX_LIMBS (512) limbs of 16 bits = 1024
+    // bytes = 8192 bits. Reject before looping rather than silently
+    // truncating a value wider than BigInt can hold.
+    if len > (BIGINT_MAX_LIMBS as i64) * 2 {
+        return (bigint_zero(), DER_ERR_LENGTH_TOO_LARGE)
+    }
+
+    var acc = bigint_zero()
+    let base256 = bigint_from_u32(256)
+    var i: i64 = 0
+    while i < len {
+        let byte_val = der_byte_at(r, start + i)
+        let digit = bigint_from_u32(byte_val as u32)
+        let scaled = bigint_mul(&acc, &base256)
+        acc = bigint_add(&scaled, &digit)
+        i = i + 1
+    }
+    (acc, DER_OK)
+}
