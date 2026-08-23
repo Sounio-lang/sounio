@@ -72,7 +72,11 @@ cat > "$FAKE_BIN/claude" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
-chmod +x "$FAKE_BIN/codex" "$FAKE_BIN/claude"
+cat > "$FAKE_BIN/em" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$FAKE_BIN/codex" "$FAKE_BIN/claude" "$FAKE_BIN/em"
 
 fleet() {
   SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" "$@"
@@ -176,8 +180,15 @@ PATH="$FAKE_BIN:$PATH" fleet plan-kind --slot claude-existing --kind claude \
 grep -q "resume $CLAUDE_SESSION_ID" "$TEST_ROOT/claude-project-exact" || \
   fail 'Claude plan crossed project boundaries while resolving the latest session'
 
+PATH="$FAKE_BIN:$PATH" fleet plan-kind --slot empryo-new --kind empryo \
+  --home "$HOME_ROOT" --cwd "$REPO" > "$TEST_ROOT/empryo-standalone"
+grep -q '^identity=standalone$' "$TEST_ROOT/empryo-standalone" || \
+  fail 'Empryo plan was not a durable standalone slot'
+grep -q 'command=.*/em$' "$TEST_ROOT/empryo-standalone" || \
+  fail 'Empryo plan did not resolve the em launcher'
+
 tmux -S "$TMUX_SOCKET" kill-server
 fleet stop --cwd "$REPO" --slot "$SLOT" >/dev/null
 [[ ! -e "$mapping" ]] || fail 'stop left the slot mapping behind'
 
-echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived reattach=same-generation duplicate_harness=refused generation_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap'
+echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived reattach=same-generation duplicate_harness=refused generation_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'

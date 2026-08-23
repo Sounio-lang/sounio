@@ -21,7 +21,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.1"
+RUNTIME_VERSION = "2026.08.23.2"
 UUID_RE = re.compile(
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -320,6 +320,13 @@ def resolve_kind(kind: str, home: Path, slot: str, cwd: Path) -> LaunchPlan:
             "cursor", f"fleet-{slug(slot)}", session_id, "standalone", command
         )
 
+    if kind == "empryo":
+        executable = require_program(["em", "empryo"])
+        session_id = str(uuid.uuid4())
+        return LaunchPlan(
+            "empryo", f"fleet-{slug(slot)}", session_id, "standalone", [executable]
+        )
+
     raise FleetError(f"unsupported fleet agent kind: {kind}")
 
 
@@ -580,7 +587,9 @@ def parser() -> argparse.ArgumentParser:
     kind_parser = subparsers.add_parser("launch-kind")
     kind_parser.add_argument("--slot", required=True)
     kind_parser.add_argument(
-        "--kind", required=True, choices=("claude", "codex", "kimi", "grok", "cursor")
+        "--kind",
+        required=True,
+        choices=("claude", "codex", "kimi", "grok", "cursor", "empryo"),
     )
     kind_parser.add_argument("--home", required=True)
     kind_parser.add_argument("--cwd", required=True)
@@ -589,7 +598,9 @@ def parser() -> argparse.ArgumentParser:
     plan_parser = subparsers.add_parser("plan-kind")
     plan_parser.add_argument("--slot", required=True)
     plan_parser.add_argument(
-        "--kind", required=True, choices=("claude", "codex", "kimi", "grok", "cursor")
+        "--kind",
+        required=True,
+        choices=("claude", "codex", "kimi", "grok", "cursor", "empryo"),
     )
     plan_parser.add_argument("--home", required=True)
     plan_parser.add_argument("--cwd", default=os.getcwd())
