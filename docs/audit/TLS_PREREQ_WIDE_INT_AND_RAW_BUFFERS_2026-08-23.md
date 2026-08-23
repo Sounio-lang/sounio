@@ -118,6 +118,89 @@ packed multi-byte buffer (e.g. a 16-byte `sockaddr_in`) on Madaros — offset
 arithmetic goes through an `i64` intermediate, never directly on the
 pointer type.
 
+## Finding 3 — `rawbuf_get`-style pointer dereference reads a full word, not one byte
+
+`(*p) as i64` where `p: *mut u8` does not perform a single-byte read — it reads a
+full (up to 8-byte) word starting at the pointee address, little-endian,
+zero-filled past whatever memory happens to follow. Confirmed: writing `88` at
+offset 0 and `89` at offset 1 of a `heap_alloc`'d buffer, then reading back
+`(*p) as i64`, returns `22872` (`0x5958` — both bytes packed little-endian),
+not `88`. **Always mask a single-byte pointer read to its low byte**:
+`((*p) as i64) & 255`. A related, smaller finding: `*p = v` requires an
+explicit `as u8` cast when `v` is a typed (non-literal) value — a bare
+integer literal like `*p = 88` infers as `u8` and compiles fine, but
+`*p = some_i64_variable` fails with `error[E002]` until cast.
+
+## Finding 4 — the linear-type checker treats ANY use of a linear binding, including a shared borrow, as full consumption
+
+A design that borrows a linear value multiple times (e.g. `&h` for one
+operation, then a plain move for a final closing operation) is expected to
+work under normal linear-typing semantics (a shared borrow doesn't consume).
+On this compiler it does not: `peek(&h); peek(&h)` on one `linear struct`
+binding `h` fails on the SECOND call with `error[E039]: linear value has
+already been used` — even though neither call takes `h` by value. Any
+function signature taking `&SomeLinearStruct` and being called more than
+once on the same binding (or once after any other operation already touched
+that binding) will hit this.
+
+**Workaround**: value-thread the resource instead of borrowing it. Every
+function touching the linear value takes it BY VALUE, destructures it to
+pull out the field(s) it needs, and returns a FRESHLY CONSTRUCTED instance
+of the same linear type alongside its real result — never reusing the
+original binding for a second operation. This matches the pre-existing
+style already used elsewhere in this repo (e.g. `self-hosted/llvm/context.sio`'s
+"each operation consumes ... and returns a new one"). Concretely, a
+`tcp_send(sock: &TcpSocket, ...)` signature must instead be
+`tcp_send(sock: TcpSocket, ...) -> (TcpSocket, i64)`, with every call site
+rebinding the returned socket.
+
+A related restriction (source: `self-hosted/check/check.sio:6010`, the
+compiler's own comment, explicitly calling this conservative-but-sound):
+**a linear value must be consumed identically in every arm of an `if`, or in
+neither** — even `if c { use(t) } else { use(t) }` (consuming it in BOTH
+arms) trips `error[E039]`. This blocks the common "check an error code,
+early-return with cleanup" pattern for any code holding a linear resource
+across a conditional. Workaround used so far: restructure the code as one
+unconditional straight-line sequence (no `if` ever touches the linear
+binding) and check the resulting plain-value error codes/outputs only AFTER
+every linear resource has already been fully consumed/closed — accepting
+that a failure partway through the sequence is still detected (the
+downstream operations on an invalid resource produce their own
+distinguishable failure values), just reported after full teardown rather
+than via early exit.
+
+## Finding 5 — `syscall6(N, linear_value.field, ...)` does not register as consuming the linear value
+
+Calling `syscall6` directly on a field of a linear-struct parameter —
+`syscall6(3, sock.fd, 0, 0, 0, 0, 0)` where `sock: TcpSocket` (a `linear
+struct`) — fails to compile with `error[E040]: linear value not consumed (1
+unconsumed)`, with NO diagnostic location or other hint pointing at the
+actual cause. This is despite the function body containing no other
+statement, and despite `sock.fd` clearly being "used." Bisection confirmed:
+extracting the field to a plain local FIRST (`let fd = sock.fd; syscall6(3,
+fd, 0, 0, 0, 0, 0)`) compiles clean — the destructuring `let` is what the
+checker recognizes as consuming `sock`, not the inline field access inside
+the `syscall6` call. `syscall6` is presumably handled as a compiler
+intrinsic on a code path that bypasses the checker's normal
+argument-consumption tracking used for ordinary function calls.
+
+**Rule going forward**: always bind a linear struct's field to a local
+variable before passing it to `syscall6` (or any other body-less/intrinsic
+extern); never pass `linear_param.field` inline as a `syscall6` argument.
+This generalizes beyond sockets to any future linear-resource type whose
+consuming operations call `syscall6` directly.
+
+## Finding 6 — module import path for a file inside `stdlib/net/` is `net::<filename>::*`, not a bare `<filename>::*`
+
+A program outside `stdlib/` importing `stdlib/net/socket.sio` must write
+`use net::socket::*` (the directory/filename path relative to `stdlib/`) —
+the bare form `use socket::*` fails with `error[E137]: use of undeclared
+variable`. This matches the existing convention used elsewhere in this repo
+(e.g. `stdlib/algebra/cayley_dickson_exact.sio` is imported as `use
+algebra::cayley_dickson_exact::{...}`) — confirm the correct qualified path
+by checking how an existing, working stdlib module of the same shape is
+actually imported, rather than assuming a bare filename import will resolve.
+
 ## Scope note
 
 Neither finding blocks this project — both have workarounds (hand-rolled
