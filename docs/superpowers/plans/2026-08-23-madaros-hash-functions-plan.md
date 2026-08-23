@@ -871,7 +871,31 @@ git commit -m "feat(hash): add word64 scalar-pair primitives, audit 64-bit arith
 
 **Interfaces:**
 - Consumes: `stdlib/hash/word64.sio`'s `add64`/`xor64`/`and64`/`not64`/`rotr64`/`shr64` (all `(i64,i64) -> (i64,i64)`, taking two `(hi,lo)` pairs as four scalar arguments where binary); `stdlib/net/socket.sio`'s `RawBuf`/`rawbuf_get`.
-- Produces: `pub fn sha512_compress(buf: &RawBuf, len: i64, iv_hi: [i64; 8], iv_lo: [i64; 8]) -> ([i64; 8], [i64; 8]) with IO` (in `sha512_core.sio`); `pub fn sha512(buf: &RawBuf, len: i64) -> [u8; 64] with IO` (in `sha512.sio`).
+- Produces: `pub fn sha512_compress(buf: &RawBuf, len: i64, iv_hi: &[i64; 8], iv_lo: &[i64; 8]) -> ([i64; 8], [i64; 8]) with IO` (in `sha512_core.sio`); `pub fn sha512(buf: &RawBuf, len: i64) -> [u8; 64] with IO` (in `sha512.sio`).
+
+**Pre-flight ruling (made before dispatch, not discovered mid-task):** `sha512_compress` takes `iv_hi`/`iv_lo` BY REFERENCE (`&[i64; 8]`), not by value. Passing a bare fixed-size array as a function parameter — by value OR by reference — has never been exercised anywhere on this branch (BigInt/DER always embed arrays inside a struct and pass `&TheStruct`, never a bare array type as a parameter). By-reference is the safer default given this branch's overwhelming preference for passing compound data by reference (`&BigInt`, `&DerReader`, `&RawBuf`), so this plan commits to that form rather than by-value. **Step 1 of this task adds an explicit smoke check of this exact pattern** (a trivial function taking `&[i64; N]` and reading an element) before the real compression logic is written on top of it — mirroring Task 1/4's "verify the risky pattern first" discipline.
+
+- [ ] **Step 0: Smoke-check passing a fixed-size array by reference as a function parameter**
+
+Before writing any real code, create a scratch file `tests/run-pass/hash_scratch_smoke2.sio` (delete it at the end of this step) with:
+
+```sio
+fn read_third(arr: &[i64; 8]) -> i64 {
+    arr[2]
+}
+
+fn main() with IO {
+    let a: [i64; 8] = [10, 20, 30, 40, 50, 60, 70, 80]
+    let v = read_third(&a)
+    assert(v == 30)
+    println("smoke check passed")
+}
+```
+
+Run: `./bin/souc run tests/run-pass/hash_scratch_smoke2.sio`
+Expected: prints `smoke check passed`, exits 0. This confirms the exact pattern `sha512_compress`'s signature depends on — a bare fixed-size array passed by reference to a function — which has not been used anywhere else on this branch (BigInt/DER always pass arrays wrapped inside a struct's own reference, never a bare array type). If this fails to compile or behaves unexpectedly, STOP and report BLOCKED with the exact output — do not silently switch to by-value or another workaround; this affects the signature this whole task is built on and needs a controller ruling.
+
+Once it passes: `rm tests/run-pass/hash_scratch_smoke2.sio`.
 
 - [ ] **Step 1: Independently re-verify the SHA-512 test vectors and the round-constant table**
 
@@ -946,7 +970,7 @@ fn sha512_padded_byte(buf: &RawBuf, len: i64, padded_len: i64, i: i64) -> i64 wi
 // given 8-word IV (as parallel hi/lo arrays), returning the final state as
 // parallel hi/lo arrays. The caller (sha384.sio / sha512.sio) supplies the
 // IV and decides how many of the resulting 64 bytes to keep.
-pub fn sha512_compress(buf: &RawBuf, len: i64, iv_hi: [i64; 8], iv_lo: [i64; 8]) -> ([i64; 8], [i64; 8]) with IO {
+pub fn sha512_compress(buf: &RawBuf, len: i64, iv_hi: &[i64; 8], iv_lo: &[i64; 8]) -> ([i64; 8], [i64; 8]) with IO {
     var h_hi: [i64; 8] = [0; 8]
     var h_lo: [i64; 8] = [0; 8]
     var i: i64 = 0
@@ -1094,7 +1118,7 @@ const SHA512_IV_HI: [i64; 8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 
 const SHA512_IV_LO: [i64; 8] = [0xf3bcc908, 0x84caa73b, 0xfe94f82b, 0x5f1d36f1, 0xade682d1, 0x2b3e6c1f, 0xfb41bd6b, 0x137e2179]
 
 pub fn sha512(buf: &RawBuf, len: i64) -> [u8; 64] with IO {
-    let (h_hi, h_lo) = sha512_compress(buf, len, SHA512_IV_HI, SHA512_IV_LO)
+    let (h_hi, h_lo) = sha512_compress(buf, len, &SHA512_IV_HI, &SHA512_IV_LO)
     var out: [u8; 64] = [0; 64]
     var i: i64 = 0
     while i < 8 {
@@ -1174,7 +1198,7 @@ const SHA384_IV_HI: [i64; 8] = [0xcbbb9d5d, 0x629a292a, 0x9159015a, 0x152fecd8, 
 const SHA384_IV_LO: [i64; 8] = [0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7, 0xbefa4fa4]
 
 pub fn sha384(buf: &RawBuf, len: i64) -> [u8; 48] with IO {
-    let (h_hi, h_lo) = sha512_compress(buf, len, SHA384_IV_HI, SHA384_IV_LO)
+    let (h_hi, h_lo) = sha512_compress(buf, len, &SHA384_IV_HI, &SHA384_IV_LO)
     var out: [u8; 48] = [0; 48]
     var i: i64 = 0
     while i < 6 {
