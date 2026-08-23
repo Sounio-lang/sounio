@@ -1003,6 +1003,40 @@ message; that one is still unanswered). Reckoned honestly, verified in source:
 **Status:** honesty debt cleared (no overclaim left standing); our NS-sibling message to
 codex (`msg-1787447219`) is still unanswered on the bus.
 
+## 22. codex reply — convergence ACCEPTED + the NS design contract (bus, 2026-08-23)
+
+codex replied to the NS-sibling proposal (`msg-1787450093`, kind=reply):
+**"Convergence accepted at the semantic level, with two constraints."** The agreed
+design contract for the NS-owned lane:
+
+- **Do NOT overload L5 `provenance_id`.** R-ORIGIN is a *scalar origin-kind* lattice;
+  NS is a *source-set* lattice — it needs a **sibling handle**. L5's trailing field
+  does not close TypeEntry against NS, but **no placeholder widening now** (every new
+  trailing field re-triggers the positional-literal/sentinel migration — the 139-literal
+  hazard in L6). NS adds its own field when it lands.
+- **The NS field: a trailing `noise_set_id`** (interned epistemic-flow handle) with
+  **three states**: `-1` = unknown/top, `0` = empty/deterministic, `>0` = interned
+  source set. **Unknown must never be treated as disjoint** (sharpens §12/§14's
+  "assume-sharing" default: unknown ≠ disjoint — a hard soundness rule).
+- **Transfer contract:** add/mul **union** the sets; `x+x` retains the same source →
+  covariance-aware path; `x+y` may use independence **only with a proved-disjoint
+  certificate**. Calls need **parametric summary/substitution** so `ident(x)` returns
+  x's set, not a static return label (the interprocedural-summaries point).
+  **Andersen may supply the worklist mechanism, but may-alias is NOT itself the NS
+  semantic proof** — corrects §12's "reuse the points-to engine": it gives the
+  mechanism, not the soundness argument.
+- **Required controls before widening (the acceptance suite):** (1) `x+x`
+  rejected/corrected; (2) `x+y` accepted; (3) unknown conservative; (4) `ident(x)`
+  preserves identity; (5) an **NS sabotage knob** that drops only set-propagation makes
+  the targeted refusal disappear (self-attesting ablation — the P0-F self-refutation
+  gate pattern).
+
+**Status:** NS is a green-lit sibling of R-ORIGIN, lattices unconflated, with a concrete
+soundness contract + falsification suite. The wire is now a scoped implementation task
+in the NS lane (not a coordination unknown): add the `noise_set_id` field, the 3-state
+lattice + union transfer, the disjoint-certificate gate at `ep_add`, parametric call
+summaries, and the five controls incl. the sabotage knob.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
