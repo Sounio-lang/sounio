@@ -12,12 +12,14 @@
   Self-contained: core Lean 4 only (Int coefficients; a minimal Mathlib-free
   additive-group class for Lemma 4). No Mathlib import.
 
-  STATUS (honest): Lemmas 3 and 4 are stated with full proofs (no `sorry`). The
-  composite Theorem 4.1 (both certificates ⇒ exact variance) and the completeness
-  dimension count (Prop 2) require the sensitivity-propagation model and live, with
-  full rigor, in the .md proof companion — they are NOT asserted here as if
-  machine-checked. `lean`/`lake` is absent on the authoring host, so this file's
-  typecheck is pending a toolchain slot; it is written to compile on core Lean 4.
+  STATUS (verified): Lemmas 3 and 4 carry full proofs and are MACHINE-CHECKED —
+  `lean` (Lean 4.33.0, leanprover/lean4:v4.33.0) typechecks this file clean:
+  exit 0, zero warnings, zero `sorry` in code (the only "sorry" token is in this
+  comment). The composite Theorem 4.1 (both certificates ⇒ exact variance) and the
+  completeness dimension count (Prop 2) require the sensitivity-propagation model
+  and live, with full rigor, in the .md proof companion — they are NOT asserted
+  here as if machine-checked; Lemmas 3 and 4 are the two certificate cores those
+  theorems invoke.
 -/
 
 namespace SounioAntiGarbling
