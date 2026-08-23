@@ -98,10 +98,14 @@ pub fn der_peek_tag(r: &DerReader) -> (DerTag, i64) with IO {
     let constructed_bit = (b0 >> 5) & 1
     let constructed = constructed_bit == 1
     let tag_num = b0 & 31
-    // tag_num == 31 would mean a multi-byte tag number (bits 4-0 all set);
-    // this decoder does not parse multi-byte tag numbers -- no field this
-    // project needs ever uses one. Recording the truncated low-5-bits value
-    // here is a documented limitation, not a silent misparse.
+    if tag_num == 31 {
+        // Bits 4-0 all set means a multi-byte tag number follows in
+        // subsequent bytes -- this decoder does not support multi-byte
+        // tag numbers (no field this project needs ever uses one).
+        // Reject explicitly rather than silently misinterpreting the
+        // continuation byte as the length byte.
+        return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+    }
 
     var p = r.pos + 1
     if p >= r.end {
@@ -174,7 +178,9 @@ pub fn der_peek_tag(r: &DerReader) -> (DerTag, i64) with IO {
 // Decodes the tag+length header starting at r.pos, same as der_peek_tag,
 // but returns a new DerReader whose pos has advanced past the header to
 // content_start. Per this plan's Global Constraints, this rebuilds a fresh
-// DerReader by reading fields individually -- never `*r`.
+// DerReader by reading fields individually -- never `*r`. To advance a
+// cursor past a field's content after reading it, use `der_next` (or
+// `der_skip` if you never intend to read the field at all).
 pub fn der_read_tlv(r: &DerReader) -> (DerReader, DerTag, i64) with IO {
     let (tag, status) = der_peek_tag(r)
     if status != DER_OK {
@@ -194,10 +200,15 @@ pub fn der_enter(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
         let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
         return (unchanged, DER_ERR_NOT_CONSTRUCTED)
     }
+    let child_end = tag.content_start + tag.content_len
+    if child_end > r.end {
+        let unchanged = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+        return (unchanged, DER_ERR_TRUNCATED)
+    }
     let child = DerReader {
         buf_ptr: r.buf_ptr,
         pos: tag.content_start,
-        end: tag.content_start + tag.content_len,
+        end: child_end,
     }
     (child, DER_OK)
 }
@@ -214,8 +225,32 @@ pub fn der_skip(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
     (advanced, DER_OK)
 }
 
+// Alias for der_skip, documenting a different caller intent: "I already
+// read this field's content (or descended into it via der_enter), now
+// advance past it" vs. der_skip's "I never want to read this field at
+// all." Both compute the identical bound-checked advance.
+//
+// USAGE IDIOM: der_read_tlv only ever advances a cursor to
+// tag.content_start (the START of a field's value) -- never past it. To
+// get a cursor positioned AFTER a field, once you are done with it
+// (whether you read it, descended into it, or skipped it entirely), call
+// der_next(r, tag) passing the READER THAT der_read_tlv WAS CALLED ON
+// (not the reader it returned) together with the tag it returned:
+//
+//   let (r2, tag, status) = der_read_tlv(&r)
+//   // ... read the value via r2/tag, or der_enter(&r2, &tag), or nothing ...
+//   let (r3, status) = der_next(&r, &tag)   // r3 is now positioned after this field
+//
+// Treating r2 as "done with this field" without this step is a real,
+// previously-hit bug (two independent instances found in this module's
+// own tests during review) -- always advance explicitly via der_next or
+// der_skip before moving on to read the next field.
+pub fn der_next(r: &DerReader, tag: &DerTag) -> (DerReader, i64) {
+    der_skip(r, tag)
+}
+
 pub fn der_read_boolean(r: &DerReader, tag: &DerTag) -> (bool, i64) with IO {
-    if tag.tag_number != DER_TAG_BOOLEAN || tag.content_len != 1 {
+    if tag.tag_number != DER_TAG_BOOLEAN || tag.constructed || tag.content_len != 1 {
         return (false, DER_ERR_BAD_LENGTH_FORM)
     }
     if tag.content_start + 1 > r.end {
@@ -233,7 +268,7 @@ pub fn der_read_boolean(r: &DerReader, tag: &DerTag) -> (bool, i64) with IO {
 }
 
 pub fn der_read_null(r: &DerReader, tag: &DerTag) -> i64 {
-    if tag.tag_number != DER_TAG_NULL || tag.content_len != 0 {
+    if tag.tag_number != DER_TAG_NULL || tag.constructed || tag.content_len != 0 {
         return DER_ERR_BAD_LENGTH_FORM
     }
     DER_OK
@@ -246,7 +281,7 @@ pub fn der_read_null(r: &DerReader, tag: &DerTag) -> i64 {
 // leading 0x00 padding byte (present whenever the true value's high bit
 // would otherwise look like a two's-complement sign bit).
 pub fn der_read_integer(r: &DerReader, tag: &DerTag) -> (BigInt, i64) with IO {
-    if tag.tag_number != DER_TAG_INTEGER || tag.content_len == 0 {
+    if tag.tag_number != DER_TAG_INTEGER || tag.constructed || tag.content_len == 0 {
         return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
     }
     if tag.content_start + tag.content_len > r.end {
@@ -255,30 +290,51 @@ pub fn der_read_integer(r: &DerReader, tag: &DerTag) -> (BigInt, i64) with IO {
 
     var start = tag.content_start
     var len = tag.content_len
+    let first_byte = der_byte_at(r, start)
 
-    if len > 1 {
-        let b0 = der_byte_at(r, start)
-        if b0 == 0 {
-            start = start + 1
-            len = len - 1
-            let b1 = der_byte_at(r, start)
-            if b1 == 0 {
-                // A second leading zero byte is non-minimal DER -- reject.
-                return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
-            }
-            if (b1 & 128) == 0 {
-                // The padding byte wasn't actually needed -- b1's high bit
-                // was already clear, so this INTEGER didn't need a leading
-                // 0x00 at all. Non-minimal DER -- reject. (b1 is a single
-                // byte, 0-255, so this mask is trivially far from bit 63.)
-                return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
-            }
+    if len > 1 && first_byte == 0 {
+        start = start + 1
+        len = len - 1
+        let b1 = der_byte_at(r, start)
+        if b1 == 0 {
+            // A second leading zero byte is non-minimal DER -- reject.
+            return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if (b1 & 128) == 0 {
+            // The padding byte wasn't actually needed -- b1's high bit
+            // was already clear, so this INTEGER didn't need a leading
+            // 0x00 at all. Non-minimal DER -- reject. (b1 is a single
+            // byte, 0-255, so this mask is trivially far from bit 63.)
+            return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        // b1's high bit IS set here, which is exactly why the 0x00 pad
+        // was required -- this is a valid large positive magnitude, not
+        // a negative value. Fall through to the accumulation loop below.
+    } else {
+        if (first_byte & 128) != 0 {
+            // No leading 0x00 pad is present, and the first content byte's
+            // high bit is set -- in two's-complement this is a NEGATIVE
+            // value. This module only supports non-negative INTEGERs (see
+            // the doc comment above), and every X.509 field it decodes
+            // (serial numbers, RSA moduli/exponents) must never be
+            // negative -- reject rather than silently reinterpreting a
+            // negative value as a large positive magnitude.
+            return (bigint_zero(), DER_ERR_BAD_LENGTH_FORM)
         }
     }
 
     // BigInt's storage is BIGINT_MAX_LIMBS (512) limbs of 16 bits = 1024
     // bytes = 8192 bits. Reject before looping rather than silently
     // truncating a value wider than BigInt can hold.
+    //
+    // Note: the loop below calls bigint_mul(&acc, &base256) up to 1024
+    // times with acc potentially approaching BIGINT_MAX_LIMBS in size.
+    // bigint_mul's SAFETY PRECONDITION (both operands <=
+    // BIGINT_MUL_SAFE_OPERAND_LIMBS=256, or the result silently
+    // truncates) does NOT bind here: base256 always has len==1, so the
+    // true product width (acc.len + base256.len) never approaches the
+    // 512-limb ceiling that precondition protects against -- that ceiling
+    // is only reachable when BOTH operands are large.
     if len > (BIGINT_MAX_LIMBS as i64) * 2 {
         return (bigint_zero(), DER_ERR_LENGTH_TOO_LARGE)
     }
