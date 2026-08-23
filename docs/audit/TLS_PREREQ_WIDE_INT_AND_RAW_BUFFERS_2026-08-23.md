@@ -449,6 +449,56 @@ out — and it will return for any long-running process (e.g. a TLS server
 handling many handshakes) until Madaros gains arena reclamation or this module
 is restructured around explicit caller-supplied scratch buffers.
 
+## Finding 13 — native `u32` arithmetic does not wrap mod 2^32 at all: `+` and `-` silently promote to unbounded/signed precision
+
+Discovered while auditing `u32` for the hash-functions sub-project (SHA-1/
+SHA-256), before any hash code was written to depend on it. This is a
+different, more fundamental failure than Finding 11: Finding 11 is about
+`u64` `>>`/`/`/`%` breaking specifically when bit 63 is set, with `+`/`-`
+confirmed fine for `u64`. Here, plain `u32` `+`/`-` — no shift, no divide,
+no bit-63-scale value involved at all — do not wrap to 32 bits.
+
+```sio
+let x: u32 = 4294967295   // 0xFFFFFFFF, u32::MAX
+let y: u32 = 1
+let z = x + y
+(z as i64) == 4294967296   // TRUE -- the unbounded/full-precision sum
+z == 0                      // FALSE -- correct u32 wraparound would give 0
+
+let d: u32 = 0
+let e: u32 = 1
+let f = d - e
+(f as i64) == -1            // TRUE -- signed underflow, not wraparound
+(f as i64) == 4294967295    // FALSE -- correct u32 wraparound would give 0xFFFFFFFF
+```
+
+Also confirmed non-power-of-two-adjacent operands reproduce it the same way
+(`3000000000u32 + 3000000000u32` as `i64` is `6000000000`, the unbounded
+sum, not the correct wrapped `1705032704`) — this is not specific to
+operands sitting exactly at the type's boundary value; `u32 + u32`/`u32 -
+u32` simply never truncates to 32 bits on this compiler, for any operands.
+Right-shift/rotate/bitwise-op correctness at 32-bit width was not
+separately isolated once `+` was found broken (the audit stopped at the
+first failing case, per this branch's "stop and report, don't chain
+workarounds past an unexplained failure" discipline) — treat those as
+unverified at native `u32` width too, not confirmed-safe by omission.
+
+**Workaround/recommendation: do not use native `u32` for any arithmetic
+that must wrap correctly at 32 bits.** Represent 32-bit words as a plain
+`i64`, explicitly masked (`& 0xFFFFFFFF`) after every operation that could
+exceed 32 bits (addition, left shift) — the exact same discipline already
+used for `BigInt`'s 16-bit limbs (Finding 11) and for this project's own
+64-bit hash words (`stdlib/hash/word64.sio`, using 32-bit-half decomposition
+of a `u64`-scale value). Masked `i64` arithmetic bounded to 0..4294967295
+never approaches `i64`'s own bit-63 danger zone (Finding 11 does not apply),
+and plain `i64` `+`/`-`/shift/bitwise-ops at this magnitude have been
+independently, repeatedly confirmed correct elsewhere on this branch.
+Verified: `stdlib/hash/word32.sio`'s `add32`/`rotl32`/`rotr32`/`shr32`/
+`xor32`/`and32`/`or32`/`not32`, each computing on masked `i64` values,
+reproduce the correct results for every case Finding 13's own reproducer
+above gets wrong under native `u32` — see
+`tests/run-pass/hash_word32_primitives.sio`.
+
 ## Scope note
 
 Neither finding blocks this project — both have workarounds (hand-rolled

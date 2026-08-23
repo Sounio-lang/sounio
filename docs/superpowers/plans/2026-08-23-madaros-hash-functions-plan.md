@@ -4,7 +4,7 @@
 
 **Goal:** Build `stdlib/hash/{word32,sha1,sha256,word64,sha512_core,sha384,sha512}.sio` — SHA-1, SHA-256, SHA-384, and SHA-512, each tested against published NIST/FIPS test vectors, as a prerequisite for the X.509 semantic layer's PKCS#1 v1.5 signature verification.
 
-**Architecture:** Two independent phases, each opening with an empirical arithmetic audit before any hash code depends on its outcome. Phase 1 (32-bit family: SHA-1, SHA-256) audits `u32`. Phase 2 (64-bit family: SHA-384, SHA-512, sharing one compression core) audits 64-bit arithmetic and — per this plan's own ruling below — represents every 64-bit "word" as a **pair of plain `i64` scalars** (high/low 32-bit halves), never as a struct or an array of structs, to avoid two entirely untested Sounio patterns (struct-typed arrays, and taking a reference to an array element) on top of the already-uncertain arithmetic.
+**Architecture:** Two independent phases, each opening with an empirical arithmetic audit before any hash code depends on its outcome. Phase 1 (32-bit family: SHA-1, SHA-256) audited `u32` — the audit found native `u32` `+`/`-` do not wrap mod 2^32 at all (**Finding 13**, more severe than anticipated), so Phase 1's words are represented as masked `i64` scalars, never native `u32`. Phase 2 (64-bit family: SHA-384, SHA-512, sharing one compression core) audits 64-bit arithmetic and — per this plan's own ruling below — represents every 64-bit "word" as a **pair of plain `i64` scalars** (high/low 32-bit halves), never as a struct or an array of structs, to avoid two entirely untested Sounio patterns (struct-typed arrays, and taking a reference to an array element) on top of the already-uncertain arithmetic.
 
 **Tech Stack:** Sounio (Madaros v0.80.0). Byte input via `stdlib/net/socket.sio`'s `RawBuf`/`rawbuf_get` (already proven).
 
@@ -14,7 +14,7 @@
 
 - **Module import path:** a caller outside `stdlib/` uses `use hash::sha256::*` (etc.); a sibling file inside `stdlib/hash/` uses the bare `use word32::*` form (per the audit doc's Findings 6/8).
 - **Ruling — 64-bit words are `(i64, i64)` scalar pairs, not a struct.** The spec described a `U64Pair { hi, lo }` struct. This plan deviates: represent every 64-bit value as two independent plain `i64` values (high half, low half), and every `word64`-family function takes/returns them as separate scalar parameters or a `(i64, i64)` tuple — never a named struct, and never an array of such a struct. Reason: this branch has proven arrays of scalars (`BigInt.limbs: [u16;512]`) and tuples of scalars (`(TcpSocket, i64)`, `(DerReader, DerTag, i64)`) extensively, but has never once used an array of structs, or taken a reference to a single element of an array, anywhere in ~15 commits of prior work on this exact compiler. Introducing BOTH of those untested patterns simultaneously, in a plan that cannot be interactively tested before dispatch, is an avoidable risk for zero benefit — a struct wrapper adds naming convenience, not new capability. The message schedule for the 64-bit algorithms is therefore two parallel plain arrays, `w_hi: [i64; 80]` and `w_lo: [i64; 80]`, not one array of a pair type.
-- **All 32-bit "words" are the native `u32` type** (pending Task 1's audit confirming this is safe — see Task 1's BLOCKED escalation path if it is not). All 64-bit "words" are `i64` scalar pairs regardless of Task 4's audit outcome, UNLESS Task 4's audit finds native 64-bit arithmetic fully safe for every operation these algorithms need, in which case the implementer may simplify to native `u64`/`i64`-native and must document that decision plus still pass every primitive-level test this plan specifies.
+- **All 32-bit "words" are masked `i64` scalars, never native `u32`.** Task 1's audit already ran and found native `u32` `+`/`-` do not wrap mod 2^32 (Finding 13) — this is settled, not pending. All 64-bit "words" are `i64` scalar pairs regardless of Task 4's audit outcome, UNLESS Task 4's audit finds native 64-bit arithmetic fully safe for every operation these algorithms need, in which case the implementer may simplify to native `u64`/`i64`-native and must document that decision plus still pass every primitive-level test this plan specifies.
 - **Every arithmetic step that could exceed 32 bits (or, for the scalar-pair 64-bit code, exceed the `i64` type's own bit-63 boundary) must carry a one-line comment justifying why it stays within bounds**, matching this branch's established documentation discipline (`stdlib/bignum/bigint.sio`, `stdlib/asn1/der.sio`).
 - **No AI attribution in any commit message** (this repo's CLAUDE.md rule, zero exceptions).
 - **Conventional-Commits-style commit messages**: `feat(hash): ...`, `test(hash): ...`, `docs(audit): ...`.
@@ -22,7 +22,7 @@
 - **Run every shell command as a plain foreground command, one at a time. Never use any Monitor/background-wait mechanism.**
 - **Every test asserts a real, independently-reverified expected value** — for hash digests, this means an implementer must independently confirm each expected hex digest against its cited published source (FIPS 180-4 / RFC 3174 / a NIST test-vector page) before committing it, per this project's "measure, don't assume" discipline. This plan's own recollection of these digests (given below) is a best-effort starting point, not a substitute for that independent check.
 - **Both arithmetic audits (Task 1, Task 4) get recorded as new, explicitly-numbered findings in `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`**, continuing that document's existing numbering (it currently ends at Finding 12).
-- **If Task 1's `u32` audit finds ANY of `+` (wraparound), `>>`, `<<`, `&`, `|`, `^` broken at native 32-bit width**, STOP and report BLOCKED with the exact failing case — do not invent a workaround yourself. This plan committed to native `u32` based on strong (but unverified) prior evidence (`u16` arithmetic showed no bugs anywhere in the BigInt sub-project's extensive review); a failure here is a real plan-design surprise requiring a controller ruling, not a unilateral implementer fix.
+- **Task 1's `u32` audit already ran and found native `u32` broken (Finding 13)** — this is why Task 1's plan text below uses masked `i64`, not native `u32`. If Task 1's `hash_word32_primitives.sio` test STILL fails against the `i64`-masked design, that is a new, second surprise beyond Finding 13 — STOP and report BLOCKED, do not invent a further workaround; plain `i64` arithmetic bounded away from bit 63 has been extensively proven correct elsewhere on this branch (`BigInt`, `word64.sio`), so a failure here would need a controller ruling.
 
 ## File Structure
 
@@ -38,49 +38,36 @@ stdlib/hash/sha384.sio        -- Task 6: SHA-384 (thin wrapper over the core, di
 
 ---
 
-### Task 1: `u32` arithmetic audit + `word32.sio` primitives
+### Task 1: `word32.sio` primitives (`i64`-masked — see Finding 13 below)
+
+**Revised after the audit ran.** The audit this task originally opened with has already been executed once (by an implementer dispatch) and found native `u32` arithmetic broken in a way more severe than anticipated: `u32 + u32` does not wrap mod 2^32 at all (`4294967295u32 + 1u32` evaluates to `4294967296`, the unbounded sum, not `0`), and `u32 - u32` underflows with signed semantics instead of wrapping to `0xFFFFFFFF`. This is now **Finding 13** in `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md` (see Step 0 below — the controller independently reproduced this before revising this plan). This is a different, more fundamental failure than the bit-31-shift analogue of Finding 11 this task was designed to check for: it affects a `u32` `+`/`-` with no shift/rotate involved at all.
+
+**Ruling:** `word32.sio` is redesigned to represent every 32-bit "word" as a plain `i64`, always masked (`& 0xFFFFFFFF`) after any operation that could exceed 32 bits (addition, left shift) — exactly the technique Task 4 already plans to use for 64-bit words (there, applied to 32-bit halves of a 64-bit value; here, applied directly to the 32-bit word itself). This is not a new, unverified technique: masked `i64` arithmetic bounded away from bit 63 is the same discipline `stdlib/bignum/bigint.sio`'s entire (already reviewed, tested, and shipped) design rests on, and `word64.sio` (Task 4) independently re-confirms it again for a different bit width. No further audit step is needed before adopting it here — the audit already happened, found `u32` untrustworthy, and the fix is a proven pattern from elsewhere on this branch, not a new gamble.
 
 **Files:**
 - Create: `stdlib/hash/word32.sio`
-- Modify: `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md` (append a new numbered finding)
+- Modify: `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md` (Finding 13 — may already be present if the controller added it; confirm before appending a duplicate)
 - Test: `tests/run-pass/hash_word32_primitives.sio`
 
 **Interfaces:**
-- Produces: `fn add32(a: u32, b: u32) -> u32`, `fn rotl32(x: u32, n: u32) -> u32`, `fn rotr32(x: u32, n: u32) -> u32`, `fn shr32(x: u32, n: u32) -> u32`, `fn xor32(a: u32, b: u32) -> u32`, `fn and32(a: u32, b: u32) -> u32`, `fn or32(a: u32, b: u32) -> u32`, `fn not32(a: u32) -> u32`.
+- Produces: `fn add32(a: i64, b: i64) -> i64`, `fn rotl32(x: i64, n: i64) -> i64`, `fn rotr32(x: i64, n: i64) -> i64`, `fn shr32(x: i64, n: i64) -> i64`, `fn xor32(a: i64, b: i64) -> i64`, `fn and32(a: i64, b: i64) -> i64`, `fn or32(a: i64, b: i64) -> i64`, `fn not32(a: i64) -> i64`. Every parameter and return value is a 32-bit word STORED in an `i64`, always in range `0..4294967295` — never a native `u32`/`u64` value.
 
-- [ ] **Step 1: Two quick smoke checks before the real audit**
+- [ ] **Step 0: Confirm the audit finding is recorded**
 
-Before writing any real code, create a scratch file `tests/run-pass/hash_scratch_smoke.sio` (delete it at the end of this step) with:
+Read the end of `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`. If a Finding 13 describing the `u32` non-wraparound bug is already present, proceed to Step 1. If not, append it now, continuing the document's existing numbering and formatting style (match Finding 11/12's structure: a minimal reproducer, the actual vs. expected behavior, and the workaround this task adopts). Minimal reproducer to include:
 
 ```sio
-fn make_bytes() -> [u8; 4] {
-    var out: [u8; 4] = [0; 4]
-    out[0] = 1
-    out[1] = 2
-    out[2] = 3
-    out[3] = 4
-    out
-}
-
 fn main() with IO {
-    let b = make_bytes()
-    assert(b[0] == 1)
-    assert(b[3] == 4)
     let x: u32 = 4294967295
     let y: u32 = 1
     let z = x + y
-    println("smoke check passed")
+    if (z as i64) == 4294967296 { println("BUG: z as i64 == 4294967296 (not truncated to 32 bits)") }
+    if z == 0 { println("correct: wrapped to 0") }
 }
 ```
+Actual: prints the BUG line. Expected (correct `u32` semantics): prints "correct: wrapped to 0". Workaround: represent 32-bit words as masked `i64` (this task's `word32.sio`), never as native `u32`.
 
-Run: `./bin/souc run tests/run-pass/hash_scratch_smoke.sio`
-Expected: prints `smoke check passed`, exits 0. This checks two things the rest of this whole sub-project depends on: (1) a function can return a fixed-size byte array directly (`[u8; 4]`, not as a struct field) and the caller can index it — needed for every `shaN` function's return type; (2) `u32` addition compiles and runs at all (this does NOT yet confirm correct wraparound — that's Step 2's job — only that the type is usable).
-
-If this fails to compile or crashes, STOP and report BLOCKED with the exact output — this is load-bearing for the whole module's public API shape.
-
-Once it passes: `rm tests/run-pass/hash_scratch_smoke.sio`.
-
-- [ ] **Step 2: Write the failing audit/primitives test**
+- [ ] **Step 1: Write the failing primitives test**
 
 Create `tests/run-pass/hash_word32_primitives.sio`:
 
@@ -89,22 +76,22 @@ use hash::word32::*
 
 fn main() with IO {
     // Wraparound addition: the defining property of mod-2^32 arithmetic
-    // every SHA round depends on.
+    // every SHA round depends on. This is the exact case that failed
+    // under native u32 (Finding 13) -- word32.sio's masking must fix it.
     assert(add32(4294967295, 1) == 0)
     assert(add32(1, 1) == 2)
     assert(add32(2147483648, 2147483648) == 0)   // 0x80000000 + 0x80000000 wraps to 0
 
-    // Logical (not arithmetic) right shift -- this is THE exact failure
-    // shape Finding 11 documents for u64 at bit 63; this is the same check
-    // at bit 31 for u32. If Madaros's u32 >> is secretly arithmetic
-    // (sign-extending) rather than logical, this specific assertion catches
-    // it: an arithmetic shift of 0x80000000 right by 1 would produce
-    // 0xC0000000, not the correct logical-shift result 0x40000000.
+    // Logical right shift at the bit-31 boundary -- the shape Finding 11
+    // documents for u64 at bit 63, checked here for this module's i64-
+    // masked 32-bit words. Since every value here is always 0..4294967295
+    // (never negative), i64's `>>` behaves as a logical shift regardless
+    // of arithmetic/logical semantics -- confirmed empirically here anyway.
     assert(shr32(2147483648, 1) == 1073741824)   // 0x80000000 >> 1 == 0x40000000
     assert(shr32(1, 1) == 0)
 
     // Rotations, both directions, including rotating a value whose top bit
-    // is set -- again deliberately exercising the bit-31 boundary.
+    // is set.
     assert(rotr32(2147483648, 1) == 1073741824)  // 0x80000000 ROTR 1 == 0x40000000
     assert(rotr32(1, 1) == 2147483648)            // 1 ROTR 1 == 0x80000000
     assert(rotl32(2147483648, 1) == 1)            // 0x80000000 ROTL 1 == 1
@@ -126,69 +113,79 @@ fn main() with IO {
 Run: `./bin/souc run tests/run-pass/hash_word32_primitives.sio`
 Expected: FAIL to compile — `stdlib/hash/word32.sio` doesn't exist yet.
 
-- [ ] **Step 3: Implement `stdlib/hash/word32.sio`**
+- [ ] **Step 2: Implement `stdlib/hash/word32.sio`**
 
 ```sio
 // stdlib/hash/word32.sio
 //
-// 32-bit word arithmetic primitives shared by SHA-1 and SHA-256. Native u32
-// is used directly (not an i64-masked fallback) -- Task 1's own test suite
-// (tests/run-pass/hash_word32_primitives.sio) specifically exercises the
-// bit-31 boundary (the u32 analogue of Finding 11's bit-63 boundary for
-// u64) before any SHA-1/SHA-256 code is written to depend on this file.
-// See docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md for the
-// recorded finding from this audit.
+// 32-bit word arithmetic primitives shared by SHA-1 and SHA-256. Every word
+// is a plain i64, ALWAYS masked to 0..4294967295 after any operation that
+// could exceed 32 bits -- native u32 arithmetic is NOT used here. Finding
+// 13 (docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md) found
+// that native u32 + and - do not wrap mod 2^32 at all on Madaros (a more
+// severe failure than Finding 11's u64 shift/divide/modulo bug). This
+// module sidesteps that entirely by never letting arithmetic run in the
+// u32 type: every value here is bounded to 32 bits by explicit masking on
+// a plain i64, the same discipline stdlib/bignum/bigint.sio's 16-bit-limb
+// design and this project's own word64.sio (Task 4) both already use --
+// values this small never approach i64's own bit-63 danger zone (Finding
+// 11), so plain i64 +/-/shift/bitwise-ops are trustworthy here.
 
-pub fn add32(a: u32, b: u32) -> u32 {
-    a + b   // u32's own type semantics define wraparound mod 2^32
+pub fn add32(a: i64, b: i64) -> i64 {
+    (a + b) & 4294967295   // a,b are always 0..4294967295, so a+b is at
+                             // most ~2^33 -- far under bit 63, masking
+                             // truncates to the correct mod-2^32 result
 }
 
-pub fn rotl32(x: u32, n: u32) -> u32 {
-    (x << n) | (x >> (32 - n))   // n is always in [1,31] in this project's callers
+pub fn rotl32(x: i64, n: i64) -> i64 {
+    ((x << n) | (x >> (32 - n))) & 4294967295   // n always in [1,31] here;
+                                                   // x << n can reach ~2^63... no,
+                                                   // x <= 0xFFFFFFFF and n <= 31,
+                                                   // so x << n <= 0xFFFFFFFF << 31,
+                                                   // well under bit 63 -- mask
+                                                   // discards the overflow bits
+                                                   // above bit 31, which is exactly
+                                                   // the rotation's intended effect
 }
 
-pub fn rotr32(x: u32, n: u32) -> u32 {
-    (x >> n) | (x << (32 - n))   // n is always in [1,31] in this project's callers
+pub fn rotr32(x: i64, n: i64) -> i64 {
+    ((x >> n) | (x << (32 - n))) & 4294967295
 }
 
-pub fn shr32(x: u32, n: u32) -> u32 {
-    x >> n
+pub fn shr32(x: i64, n: i64) -> i64 {
+    x >> n   // x is always 0..4294967295 (non-negative, 32-bit bounded);
+              // shifting right only ever shrinks it, never approaches bit 63
 }
 
-pub fn xor32(a: u32, b: u32) -> u32 {
-    a ^ b
+pub fn xor32(a: i64, b: i64) -> i64 {
+    a ^ b   // XOR of two 32-bit-bounded values is itself 32-bit bounded
 }
 
-pub fn and32(a: u32, b: u32) -> u32 {
+pub fn and32(a: i64, b: i64) -> i64 {
     a & b
 }
 
-pub fn or32(a: u32, b: u32) -> u32 {
+pub fn or32(a: i64, b: i64) -> i64 {
     a | b
 }
 
-pub fn not32(a: u32) -> u32 {
-    a ^ 4294967295   // XOR with all-ones == bitwise NOT, avoids relying on
-                       // an unverified standalone `!`/`~` operator
+pub fn not32(a: i64) -> i64 {
+    a ^ 4294967295   // XOR with all-ones == bitwise NOT within 32 bits
 }
 ```
 
-- [ ] **Step 4: Run the test and verify it passes**
+- [ ] **Step 3: Run the test and verify it passes**
 
 Run: `./bin/souc run tests/run-pass/hash_word32_primitives.sio`
 Expected: prints `hash_word32_primitives: all cases passed`, exits 0.
 
-If ANY assertion fails: per this plan's Global Constraints, STOP — do not patch around it. Report BLOCKED with the exact failing assertion and its actual vs. expected value.
+If ANY assertion fails here, this is a genuinely new surprise beyond Finding 13 (plain `i64` `+`/`-`/shift/bitwise-ops at small, 32-bit-bounded magnitudes have been extensively proven correct elsewhere on this branch) — STOP and report BLOCKED with the exact failing assertion; do not patch around it.
 
-- [ ] **Step 5: Record the audit finding**
-
-Append a new numbered finding to `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md` (continuing from Finding 12), stating: native `u32` arithmetic (`+` wraparound, `>>`, `<<`, `&`, `|`, `^`, all at the bit-31 boundary) is confirmed correct on Madaros, with a one-line pointer to `tests/run-pass/hash_word32_primitives.sio` as the empirical evidence. (If Step 4 instead led to a BLOCKED report, this step doesn't happen — the controller handles the finding write-up as part of resolving the ruling.)
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add stdlib/hash/word32.sio tests/run-pass/hash_word32_primitives.sio docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md
-git commit -m "feat(hash): add word32 primitives, audit u32 arithmetic safe at bit-31 boundary"
+git commit -m "feat(hash): add word32 primitives as i64-masked words (native u32 arithmetic is broken -- Finding 13)"
 ```
 
 ---
@@ -286,16 +283,19 @@ Expected: FAIL to compile — `stdlib/hash/sha1.sio` doesn't exist yet.
 use hash::word32::*
 use net::socket::*
 
-const SHA1_H0: u32 = 1732584193
-const SHA1_H1: u32 = 4023233417
-const SHA1_H2: u32 = 2562383102
-const SHA1_H3: u32 = 271733878
-const SHA1_H4: u32 = 3285377520
+// Every "u32" constant/word in this file is stored as an i64 in
+// 0..4294967295 -- see word32.sio for why (Finding 13: native u32
+// arithmetic does not wrap mod 2^32 on Madaros).
+const SHA1_H0: i64 = 1732584193
+const SHA1_H1: i64 = 4023233417
+const SHA1_H2: i64 = 2562383102
+const SHA1_H3: i64 = 271733878
+const SHA1_H4: i64 = 3285377520
 
-const SHA1_K0: u32 = 1518500249
-const SHA1_K1: u32 = 1859775393
-const SHA1_K2: u32 = 2400959708
-const SHA1_K3: u32 = 3395469782
+const SHA1_K0: i64 = 1518500249
+const SHA1_K1: i64 = 1859775393
+const SHA1_K2: i64 = 2400959708
+const SHA1_K3: i64 = 3395469782
 
 // Returns the byte at absolute offset `i` of the padded message: the real
 // message for i<len, the 0x80 marker at i==len, zero padding, then the
@@ -334,14 +334,14 @@ pub fn sha1(buf: &RawBuf, len: i64) -> [u8; 20] with IO {
 
     var block_start: i64 = 0
     while block_start < padded_len {
-        var w: [u32; 80] = [0; 80]
+        var w: [i64; 80] = [0; 80]
         var t: i64 = 0
         while t < 16 {
             let base = block_start + t * 4
-            let b0 = sha1_padded_byte(buf, len, padded_len, base) as u32
-            let b1 = sha1_padded_byte(buf, len, padded_len, base + 1) as u32
-            let b2 = sha1_padded_byte(buf, len, padded_len, base + 2) as u32
-            let b3 = sha1_padded_byte(buf, len, padded_len, base + 3) as u32
+            let b0 = sha1_padded_byte(buf, len, padded_len, base)
+            let b1 = sha1_padded_byte(buf, len, padded_len, base + 1)
+            let b2 = sha1_padded_byte(buf, len, padded_len, base + 2)
+            let b3 = sha1_padded_byte(buf, len, padded_len, base + 3)
             w[t as usize] = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
             t = t + 1
         }
@@ -360,8 +360,8 @@ pub fn sha1(buf: &RawBuf, len: i64) -> [u8; 20] with IO {
 
         t = 0
         while t < 80 {
-            var f: u32 = 0
-            var k: u32 = 0
+            var f: i64 = 0
+            var k: i64 = 0
             if t < 20 {
                 f = or32(and32(b, c), and32(not32(b), d))
                 k = SHA1_K0
@@ -522,20 +522,23 @@ Expected: FAIL to compile — `stdlib/hash/sha256.sio` doesn't exist yet (also f
 use hash::word32::*
 use net::socket::*
 
-const SHA256_H0: u32 = 0x6a09e667
-const SHA256_H1: u32 = 0xbb67ae85
-const SHA256_H2: u32 = 0x3c6ef372
-const SHA256_H3: u32 = 0xa54ff53a
-const SHA256_H4: u32 = 0x510e527f
-const SHA256_H5: u32 = 0x9b05688c
-const SHA256_H6: u32 = 0x1f83d9ab
-const SHA256_H7: u32 = 0x5be0cd19
+// Every "u32" constant/word in this file is stored as an i64 in
+// 0..4294967295 -- see word32.sio for why (Finding 13: native u32
+// arithmetic does not wrap mod 2^32 on Madaros).
+const SHA256_H0: i64 = 0x6a09e667
+const SHA256_H1: i64 = 0xbb67ae85
+const SHA256_H2: i64 = 0x3c6ef372
+const SHA256_H3: i64 = 0xa54ff53a
+const SHA256_H4: i64 = 0x510e527f
+const SHA256_H5: i64 = 0x9b05688c
+const SHA256_H6: i64 = 0x1f83d9ab
+const SHA256_H7: i64 = 0x5be0cd19
 
 // FIPS 180-4 Table 4.1. Public, standardized constants -- cross-check
 // against the published standard (or a second independent published
 // source) before trusting this transcription; any single wrong constant
 // is caught immediately by this task's own NIST vector tests failing.
-const SHA256_K: [u32; 64] = [
+const SHA256_K: [i64; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -574,14 +577,14 @@ pub fn sha256(buf: &RawBuf, len: i64) -> [u8; 32] with IO {
     let padded_len: i64 = ((len + 9 + 63) / 64) * 64
     var block_start: i64 = 0
     while block_start < padded_len {
-        var w: [u32; 64] = [0; 64]
+        var w: [i64; 64] = [0; 64]
         var t: i64 = 0
         while t < 16 {
             let base = block_start + t * 4
-            let b0 = sha256_padded_byte(buf, len, padded_len, base) as u32
-            let b1 = sha256_padded_byte(buf, len, padded_len, base + 1) as u32
-            let b2 = sha256_padded_byte(buf, len, padded_len, base + 2) as u32
-            let b3 = sha256_padded_byte(buf, len, padded_len, base + 3) as u32
+            let b0 = sha256_padded_byte(buf, len, padded_len, base)
+            let b1 = sha256_padded_byte(buf, len, padded_len, base + 1)
+            let b2 = sha256_padded_byte(buf, len, padded_len, base + 2)
+            let b3 = sha256_padded_byte(buf, len, padded_len, base + 3)
             w[t as usize] = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
             t = t + 1
         }
