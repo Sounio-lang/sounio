@@ -576,7 +576,7 @@ async function scanEnglishOnlyCollection(rootDir, collection) {
   });
 }
 
-async function scanRepoTopics(rootDir, claimedRepoPaths) {
+export async function listGovernedRepoDocPaths(rootDir) {
   const repoFiles = [];
   const docsFiles = await listFilesRecursive(path.join(rootDir, 'docs'), (absPath) => absPath.endsWith('.md'));
   repoFiles.push(...docsFiles.map((absPath) => normalizeRelative(path.relative(rootDir, absPath))));
@@ -596,9 +596,21 @@ async function scanRepoTopics(rootDir, claimedRepoPaths) {
   const paperFiles = await listFilesRecursive(path.join(rootDir, 'paper'), (absPath) => absPath.endsWith('.md'));
   repoFiles.push(...paperFiles.map((absPath) => normalizeRelative(path.relative(rootDir, absPath))));
 
-  const uniqueRepoFiles = dedupe(
+  return dedupe(
     repoFiles.filter((relPath) => !SKIP_REPO_PATHS.has(relPath)).sort((a, b) => a.localeCompare(b))
   );
+}
+
+export async function listGovernedWebsiteDocSlugs(rootDir) {
+  const docsRoot = path.join(rootDir, 'website/src/content/docs');
+  const englishFiles = await listFilesRecursive(path.join(docsRoot, 'en'), (absPath) => absPath.endsWith('.mdx'));
+  return englishFiles.map((englishAbsPath) =>
+    stripExtension(normalizeRelative(path.relative(path.join(docsRoot, 'en'), englishAbsPath)))
+  );
+}
+
+async function scanRepoTopics(rootDir, claimedRepoPaths) {
+  const uniqueRepoFiles = await listGovernedRepoDocPaths(rootDir);
 
   return uniqueRepoFiles
     .filter((relPath) => !claimedRepoPaths.has(relPath))
