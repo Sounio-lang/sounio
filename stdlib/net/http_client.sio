@@ -32,8 +32,8 @@
 // sibling-relative rule, which is specific to modules that live inside the
 // SAME top-level directory as their importer.
 //
-// Host/path buffers use a locally-declared `Buf256` (not `stdlib/str/mod.sio`'s
-// same-shaped-but-private `Buf256`, and not `net::dns::HostnameBuf` either)
+// Host/path buffers use a locally-declared `HttpPathBuf` (not `stdlib/str/mod.sio`'s
+// same-shaped-but-private `HttpPathBuf`, and not `net::dns::HostnameBuf` either)
 // so this file does not depend on either of those unrelated modules' private
 // or narrowly-scoped types; when a hostname (not a numeric IP) needs to be
 // resolved, its bytes are copied into a fresh `HostnameBuf` literal before
@@ -115,10 +115,19 @@ use socket::*
 use dns::*
 use str::lib::*
 
-pub struct Buf256 {
+pub struct HttpPathBuf {
     data: [u8; 256]
 }
 
+// `ok` indicates the response was WELL-FORMED and SUCCESSFULLY PARSED
+// (a valid status line was found and a status code was extracted) — it is
+// NOT an HTTP-level success/failure signal. A 404 or 500 response is
+// `ok: true`, because the server DID send back a well-formed HTTP response
+// that was parsed correctly; a well-formed error response is not a parse
+// failure. Check `status` separately (e.g. `status >= 200 && status < 300`)
+// to determine HTTP-level success. `ok` is only `false` when something
+// below the HTTP-parsing layer failed: DNS resolution, connect, send, recv,
+// or finding a parseable status line/header block at all.
 pub struct HttpResponse {
     status: i32,
     headers: Str,
@@ -133,7 +142,7 @@ const DIGIT0: u8 = 48
 const DIGIT9: u8 = 57
 const DOT: u8 = 46
 
-fn is_numeric_ip(host: &Buf256, host_len: i32) -> bool with Mut, Panic, Div {
+fn is_numeric_ip(host: &HttpPathBuf, host_len: i32) -> bool with Mut, Panic, Div {
     var i = 0
     while i < host_len {
         let c = host.data[i as usize]
@@ -159,9 +168,9 @@ fn append_lit(buf: &!Buf4096, start: i32, lit: [i32; 32], count: i32) -> i32 wit
     return start + count
 }
 
-// Copies `count` bytes from a Buf256 (host or path, caller-provided) into
+// Copies `count` bytes from a HttpPathBuf (host or path, caller-provided) into
 // `buf` starting at `start`, returning the new write position.
-fn append_buf256(buf: &!Buf4096, start: i32, src: &Buf256, count: i32) -> i32 with Mut, Panic, Div {
+fn append_httppathbuf(buf: &!Buf4096, start: i32, src: &HttpPathBuf, count: i32) -> i32 with Mut, Panic, Div {
     var i = 0
     while i < count {
         buf.data[(start + i) as usize] = src.data[i as usize]
@@ -172,18 +181,18 @@ fn append_buf256(buf: &!Buf4096, start: i32, src: &Buf256, count: i32) -> i32 wi
 
 // Builds "GET <path> HTTP/1.1\r\nHost: <host>\r\nConnection: close\r\n\r\n"
 // into `out`, returning the total byte length written.
-fn build_request(out: &!Buf4096, host: &Buf256, host_len: i32, path: &Buf256, path_len: i32) -> i32 with Mut, Panic, Div {
+fn build_request(out: &!Buf4096, host: &HttpPathBuf, host_len: i32, path: &HttpPathBuf, path_len: i32) -> i32 with Mut, Panic, Div {
     // "GET "
     let lit_get: [i32; 32] = [71, 69, 84, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     var pos = append_lit(out, 0, lit_get, 4)
 
-    pos = append_buf256(out, pos, path, path_len)
+    pos = append_httppathbuf(out, pos, path, path_len)
 
     // " HTTP/1.1\r\nHost: "
     let lit_httphost: [i32; 32] = [32, 72, 84, 84, 80, 47, 49, 46, 49, 13, 10, 72, 111, 115, 116, 58, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     pos = append_lit(out, pos, lit_httphost, 17)
 
-    pos = append_buf256(out, pos, host, host_len)
+    pos = append_httppathbuf(out, pos, host, host_len)
 
     // "\r\nConnection: close\r\n\r\n"
     let lit_tail: [i32; 32] = [13, 10, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 58, 32, 99, 108, 111, 115, 101, 13, 10, 13, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -289,7 +298,13 @@ fn str_from_buf_range(buf: &Buf4096, start: i32, count: i32) -> Str with Mut, Pa
     return out
 }
 
-pub fn http_get(host: &Buf256, host_len: i32, port: u16, path: &Buf256, path_len: i32) -> HttpResponse with IO, Mut, Panic, Div {
+// Performs a single blocking HTTP/1.1 GET and returns an `HttpResponse`.
+// Reminder: `response.ok` means "a well-formed response was received and
+// parsed," NOT "the HTTP request succeeded" — a 404/500 response is
+// `ok: true` with `status` set accordingly; only DNS/connect/send/recv
+// failures or an unparseable response set `ok: false`. Callers that care
+// about HTTP-level success must check `status` themselves.
+pub fn http_get(host: &HttpPathBuf, host_len: i32, port: u16, path: &HttpPathBuf, path_len: i32) -> HttpResponse with IO, Mut, Panic, Div {
     var resolved_ip = Buf4096 { data: [0; 4096] }
     var resolved_len = host_len
 

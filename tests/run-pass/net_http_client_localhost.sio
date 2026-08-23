@@ -45,6 +45,7 @@
 
 use net::socket::*
 use net::http_client::*
+use str::lib::*
 
 // REAPING NOTE (fix round 1, addressing a task review finding) — the
 // original version of this test forked a child to play the loopback server
@@ -138,31 +139,42 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     let pid = syscall6(57, 0, 0, 0, 0, 0, 0)   // fork()
 
     if pid == 0 {
-        // CHILD: hand-rolled minimal HTTP server. Accept one connection,
-        // drain (ignore) the request, write back a fixed response, close.
-        let (conn_raw, _accept_err) = tcp_accept(&listener)
-        let conn = TcpSocket { fd: conn_raw.fd }
-        if conn.fd >= 0 {
-            var drain_buf = Buf4096 { data: [0; 4096] }
-            let (conn2_raw, _drained) = tcp_recv(conn, &!drain_buf)
-            let conn2 = TcpSocket { fd: conn2_raw.fd }
+        // CHILD: hand-rolled minimal HTTP server. Accepts TWO connections in
+        // sequence (not one) so the parent can drive `http_get` twice against
+        // the same server: once with a numeric-IP host (exercising the
+        // `is_numeric_ip == true` branch, as before) and once with the
+        // hostname "localhost" (exercising the `is_numeric_ip == false` /
+        // `resolve_ipv4`/`HostnameBuf` branch, which previously had zero
+        // runtime coverage — every existing test only ever called `http_get`
+        // with a numeric IP). Each connection: drain (ignore) the request,
+        // write back the same fixed response, close.
+        var conn_count = 0
+        while conn_count < 2 {
+            let (conn_raw, _accept_err) = tcp_accept(&listener)
+            let conn = TcpSocket { fd: conn_raw.fd }
+            if conn.fd >= 0 {
+                var drain_buf = Buf4096 { data: [0; 4096] }
+                let (conn2_raw, _drained) = tcp_recv(conn, &!drain_buf)
+                let conn2 = TcpSocket { fd: conn2_raw.fd }
 
-            // "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" (43 bytes,
-            // computed byte-by-byte, not copied from the plan's guess).
-            let resp: [i32; 43] = [
-                72, 84, 84, 80, 47, 49, 46, 49, 32, 50, 48, 48, 32, 79, 75, 13, 10,
-                67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104, 58, 32, 53, 13, 10, 13, 10,
-                104, 101, 108, 108, 111
-            ]
-            var response_buf = Buf4096 { data: [0; 4096] }
-            var i = 0
-            while i < 43 {
-                response_buf.data[i as usize] = resp[i as usize] as u8
-                i = i + 1
+                // "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" (43 bytes,
+                // computed byte-by-byte, not copied from the plan's guess).
+                let resp: [i32; 43] = [
+                    72, 84, 84, 80, 47, 49, 46, 49, 32, 50, 48, 48, 32, 79, 75, 13, 10,
+                    67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104, 58, 32, 53, 13, 10, 13, 10,
+                    104, 101, 108, 108, 111
+                ]
+                var response_buf = Buf4096 { data: [0; 4096] }
+                var i = 0
+                while i < 43 {
+                    response_buf.data[i as usize] = resp[i as usize] as u8
+                    i = i + 1
+                }
+                let (conn3_raw, _sent) = tcp_send(conn2, &response_buf, 43)
+                let conn3 = TcpSocket { fd: conn3_raw.fd }
+                tcp_close(conn3)
             }
-            let (conn3_raw, _sent) = tcp_send(conn2, &response_buf, 43)
-            let conn3 = TcpSocket { fd: conn3_raw.fd }
-            tcp_close(conn3)
+            conn_count = conn_count + 1
         }
         tcp_close(listener)
         syscall6(231, 0, 0, 0, 0, 0, 0)   // exit_group(0) — never returns
@@ -173,7 +185,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     // here (only the child accepts on it) — close this process's copy.
     tcp_close(listener)
 
-    var host = Buf256 { data: [0; 256] }
+    var host = HttpPathBuf { data: [0; 256] }
     host.data[0] = 49
     host.data[1] = 50
     host.data[2] = 55
@@ -184,21 +196,66 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     host.data[7] = 46
     host.data[8] = 49
 
-    var path = Buf256 { data: [0; 256] }
+    var path = HttpPathBuf { data: [0; 256] }
     path.data[0] = 47   // "/"
 
+    let expected_body = str_from_literal("hello")
+
+    // FIRST CALL — numeric IP host (the branch every other net_ test already
+    // exercises via `is_numeric_ip == true`).
     let response = http_get(&host, 9, port, &path, 1)
     if response.ok != true {
-        println("FAIL: http_get did not succeed")
+        println("FAIL: http_get did not succeed (numeric-IP host)")
         reap_child(pid)
         return 1
     }
     if response.status != 200 {
-        println("FAIL: expected status 200")
+        println("FAIL: expected status 200 (numeric-IP host)")
         reap_child(pid)
         return 1
     }
-    println("PASS: http_get round-trip matched")
+    if !str_eq(&response.body, &expected_body) {
+        println("FAIL: response.body did not equal \"hello\" (numeric-IP host)")
+        reap_child(pid)
+        return 1
+    }
+
+    // SECOND CALL — hostname host ("localhost", not a numeric IP). This
+    // exercises `is_numeric_ip == false` and the `resolve_ipv4`/`HostnameBuf`
+    // path inside `http_get`, which previously had zero runtime coverage
+    // (every existing net_ test only ever passed a numeric IP as the host).
+    // `tests/run-pass/net_dns_resolve.sio` already proves `resolve_ipv4`
+    // itself resolves "localhost" correctly in isolation; this exercises the
+    // same resolution end-to-end through `http_get`.
+    var hostname_host = HttpPathBuf { data: [0; 256] }
+    hostname_host.data[0] = 108  // 'l'
+    hostname_host.data[1] = 111  // 'o'
+    hostname_host.data[2] = 99   // 'c'
+    hostname_host.data[3] = 97   // 'a'
+    hostname_host.data[4] = 108  // 'l'
+    hostname_host.data[5] = 104  // 'h'
+    hostname_host.data[6] = 111  // 'o'
+    hostname_host.data[7] = 115  // 's'
+    hostname_host.data[8] = 116  // 't'
+
+    let response2 = http_get(&hostname_host, 9, port, &path, 1)
+    if response2.ok != true {
+        println("FAIL: http_get did not succeed (hostname host)")
+        reap_child(pid)
+        return 1
+    }
+    if response2.status != 200 {
+        println("FAIL: expected status 200 (hostname host)")
+        reap_child(pid)
+        return 1
+    }
+    if !str_eq(&response2.body, &expected_body) {
+        println("FAIL: response.body did not equal \"hello\" (hostname host)")
+        reap_child(pid)
+        return 1
+    }
+
+    println("PASS: http_get round-trip matched (numeric IP + hostname)")
     reap_child(pid)
     return 0
 }
