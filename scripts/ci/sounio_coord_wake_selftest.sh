@@ -6,6 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-coord-wake-selftest.XXXXXX")"
 REPO="$TEST_ROOT/repo"
 SECOND="$TEST_ROOT/second-worktree"
+GROK_HOME="$TEST_ROOT/grok-cli2"
 STATE="$TEST_ROOT/state"
 SOCKET="$TEST_ROOT/tmux.sock"
 RECEIVER="$TEST_ROOT/receiver.js"
@@ -15,6 +16,7 @@ RUNTIME="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh"
 
 cleanup() {
   tmux -S "$SOCKET" kill-server >/dev/null 2>&1 || true
+  git -C "$REPO" worktree remove --force "$GROK_HOME" >/dev/null 2>&1 || true
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
   rm -rf "$TEST_ROOT"
 }
@@ -40,6 +42,7 @@ git -C "$REPO" config user.email 'coord-wake-selftest@sounio.local'
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
 git -C "$REPO" worktree add -q -b recipient-lane "$SECOND"
+git -C "$REPO" worktree add -q -b grok-session "$GROK_HOME"
 
 cat > "$RECEIVER" <<'JS'
 const fs = require("fs");
@@ -75,7 +78,7 @@ sleep 0.2
 pane="$(tmux -S "$SOCKET" display-message -p -t recipient '#{pane_id}')"
 [[ -n "$pane" ]] || fail 'tmux pane was not created'
 cp "$(command -v sleep)" "$GROK_BIN"
-tmux -S "$SOCKET" new-window -d -t recipient -n grok -c "$SECOND" \
+tmux -S "$SOCKET" new-window -d -t recipient -n grok -c "$GROK_HOME" \
   "$GROK_BIN 300"
 grok_pane="$(tmux -S "$SOCKET" display-message -p -t recipient:grok '#{pane_id}')"
 [[ -n "$grok_pane" ]] || fail 'grok compatibility pane was not created'
@@ -143,8 +146,20 @@ output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sen
   --message 'wake the Grok-compatible lane')"
 grok_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$grok_message" ]] || fail 'cross-harness send did not return a message id'
-grep -q "^WAKE_DELIVERED message_id=$grok_message .*address=$grok_pane discovery=history$" \
+grep -q "^WAKE_DELIVERED message_id=$grok_message .*address=$grok_pane discovery=identity-root$" \
   <<< "$output" || fail 'Grok lane was not woken through verified history'
+
+tmux -S "$SOCKET" new-window -d -t recipient -n grok-duplicate -c "$GROK_HOME" \
+  "$GROK_BIN 300"
+SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent grok-cli2 \
+  --lane ambiguous-grok --to-agent sender --to-lane origin --kind info \
+  --message 'establish an ambiguous Grok identity' >/dev/null
+output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sender \
+  --lane origin --to-agent grok-cli2 --to-lane ambiguous-grok --kind info \
+  --message 'must refuse two matching Grok panes')"
+grep -q '^WAKE_UNAVAILABLE .*status=unavailable$' <<< "$output" || \
+  fail 'identity-root discovery accepted two matching harness panes'
+tmux -S "$SOCKET" kill-window -t recipient:grok-duplicate
 
 SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent codex \
   --lane moved-recipient --to-agent sender --to-lane origin --kind info \
