@@ -83,7 +83,28 @@
 
 use socket::*
 
-pub struct Buf256 {
+// SEVENTH NOTE (fix round 1, post-review) — `stdlib/str/mod.sio:128` already
+// declares a `struct Buf256 { data: [u8; 256] }` with the identical shape and
+// name used here, but it is NOT `pub`, so it cannot be imported/reused as-is
+// from this file. Grepping the whole tree (`grep -rn Buf256`) confirmed
+// `str::mod`'s `Buf256` is consumed only internally by that file's own
+// `str_buf_to_upper_wrapped`/`test_to_upper` — no other module reaches into
+// it, so marking it `pub` would not break any existing non-pub-reliant call
+// site. It was still rejected as the fix here: per the SIXTH LIMITATION
+// documented above, cross-module struct imports in this compiler are
+// resolved differently depending on whether the importer is a top-level
+// program or itself already inside a stdlib subdirectory, and the only
+// working form found for net/-internal imports was the sibling-relative
+// `use socket::*` — `net::socket::*` from inside `net/` did not typecheck.
+// Reaching into a *different* top-level stdlib module (`str/`) from `net/`
+// is untested territory for this compiler and was judged higher-risk than
+// the fix is worth for a struct whose only job is wrapping one `[u8; 256]`
+// array for by-ref mutation. RESOLUTION: keep a local struct in this file,
+// but renamed to `HostnameBuf` (was `Buf256`) so it no longer collides in
+// *name* with `str::mod::Buf256` even though the shape is coincidentally
+// identical — a future reader grepping either name now finds exactly one
+// declaration instead of two same-named-different-module structs.
+pub struct HostnameBuf {
     data: [u8; 256]
 }
 
@@ -148,7 +169,7 @@ fn try_match_line(
     content: &Buf4096,
     line_start: i32,
     line_end: i32,
-    hostname: &Buf256,
+    hostname: &HostnameBuf,
     hostname_len: i32,
     out_ip: &!Buf4096
 ) -> i32 with Mut, Panic, Div {
@@ -213,7 +234,7 @@ fn try_match_line(
 // no libc FFI — see the top-of-file comment for why). Returns 0 on
 // success, ERR_DNS_RESOLVE if the file can't be opened/read or no entry
 // matches.
-pub fn resolve_ipv4(hostname: &Buf256, hostname_len: i32, out_ip: &!Buf4096) -> i32 with IO, Mut, Panic, Div {
+pub fn resolve_ipv4(hostname: &HostnameBuf, hostname_len: i32, out_ip: &!Buf4096) -> i32 with IO, Mut, Panic, Div {
     var path = PathWords { w0: 0, w1: 0 }
     build_hosts_path(&!path)
     let path_ptr = &!path as *mut u8
