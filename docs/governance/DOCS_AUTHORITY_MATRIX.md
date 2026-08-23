@@ -386,8 +386,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.stats-shapiro-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SHAPIRO_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.surgical-calculus-disjoint-union-2026-08-19 | repo_only | docs/audit/SURGICAL_CALCULUS_DISJOINT_UNION_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.token-ceiling-blocked-runpass-census-2026-08-17 | repo_only | docs/audit/TOKEN_CEILING_BLOCKED_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.type-archaeology-family-g-2026-08-19 | repo_only | docs/audit/TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-enum-denominator-2026-08-19 | repo_only | docs/audit/TYPE_ENUM_DENOMINATOR_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.typekind-archaeology-fh-2026-08-19 | repo_only | docs/audit/TYPEKIND_ARCHAEOLOGY_FH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.typekind-concept-cross-2026-08-19 | repo_only | docs/audit/TYPEKIND_CONCEPT_CROSS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.units-promise-measurement-2026-08-19 | repo_only | docs/audit/UNITS_PROMISE_MEASUREMENT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.unlearning-quadrant-2026-08-19 | repo_only | docs/audit/UNLEARNING_QUADRANT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.vec-new-path-call-fabrication-census-2026-08-17 | repo_only | docs/audit/VEC_NEW_PATH_CALL_FABRICATION_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -407,6 +409,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.worktree-branch-governance-audit-2026-06-20 | repo_only | docs/audit/WORKTREE_BRANCH_GOVERNANCE_AUDIT_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ws-c2-lean-single-seed-only-surface-map-2026-08-19 | repo_only | docs/audit/WS_C2_LEAN_SINGLE_SEED_ONLY_SURFACE_MAP_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ws-f-close-acceptance-2026-08-16 | repo_only | docs/audit/WS_F_CLOSE_ACCEPTANCE_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.xpas21-known-failure-audit-2026-08-19 | repo_only | docs/audit/XPAS21_KNOWN_FAILURE_AUDIT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.zd-annihilate-builtin-dispatch-2026-08-19 | repo_only | docs/audit/ZD_ANNIHILATE_BUILTIN_DISPATCH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.zd-exactness-floating-point-boundary-2026-08-19 | repo_only | docs/audit/ZD_EXACTNESS_FLOATING_POINT_BOUNDARY_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.zd-family-call-path-2026-08-20 | repo_only | docs/audit/ZD_FAMILY_CALL_PATH_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
