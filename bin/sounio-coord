@@ -26,9 +26,11 @@ Commands:
   authorize --agent ID [--lane ID] --files PATH [PATH ...]
                                  verify that an active claim in this worktree covers the files
   send    --agent ID --lane ID [--to-agent ID] [--to-lane ID]
-          --kind KIND --message TEXT
+          [--thread ID] [--reply-to MESSAGE_ID] --kind KIND --message TEXT
                                  send a message to another lane or broadcast
-  inbox   --agent ID --lane ID [--all]
+  inbox   --agent ID --lane ID [--all] [--directed-only] [--newest-first]
+          [--limit N] [--from-agent ID] [--from-lane ID] [--kind KIND]
+          [--thread ID] [--since-epoch N]
                                  show unread messages for one lane
   ack     --agent ID --lane ID --message ID
                                  mark a message as read by one lane
@@ -84,6 +86,7 @@ EVENT_LOG="$STATE_DIR/events.log"
 mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR"
 
 NOW_EPOCH="$(date +%s)"
+NOW_TICK="$(date +%s%N)"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 shopt -s nullglob
 LOCK_TO_CLEAN=''
@@ -301,6 +304,8 @@ load_message() {
   M_TO_LANE=''
   M_KIND=''
   M_TEXT=''
+  M_THREAD_ID=''
+  M_REPLY_TO=''
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
@@ -316,8 +321,11 @@ load_message() {
       to_lane=*) M_TO_LANE="${line#to_lane=}" ;;
       kind=*) M_KIND="${line#kind=}" ;;
       text=*) M_TEXT="${line#text=}" ;;
+      thread_id=*) M_THREAD_ID="${line#thread_id=}" ;;
+      reply_to=*) M_REPLY_TO="${line#reply_to=}" ;;
     esac
   done < "$message_file"
+  [[ -n "$M_THREAD_ID" ]] || M_THREAD_ID="$M_ID"
 }
 
 message_expired() {
@@ -652,7 +660,7 @@ authorize_command() {
 send_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane=''
   local kind='info' message='' ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
-  local message_id message_file tmp_file
+  local thread_id='' reply_to='' message_id message_file tmp_file reply_file
 
   while (($#)); do
     case "$1" in
@@ -660,6 +668,8 @@ send_command() {
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --to-agent) require_arg "$1" "$2"; to_agent="$2"; shift 2 ;;
       --to-lane) require_arg "$1" "$2"; to_lane="$2"; shift 2 ;;
+      --thread) require_arg "$1" "$2"; thread_id="$2"; shift 2 ;;
+      --reply-to) require_arg "$1" "$2"; reply_to="$2"; shift 2 ;;
       --kind) require_arg "$1" "$2"; kind="$2"; shift 2 ;;
       --message) require_arg "$1" "$2"; message="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
@@ -678,11 +688,21 @@ send_command() {
   validate_value lane "$lane"
   validate_value to-agent "$to_agent"
   validate_value to-lane "$to_lane"
+  validate_value thread "$thread_id"
+  validate_value reply-to "$reply_to"
   validate_value message "$message"
 
-  message_id="msg-${NOW_EPOCH}-$$-${RANDOM}"
+  message_id="msg-${NOW_TICK}-$$-${RANDOM}"
   message_file="$MESSAGES_DIR/$message_id.message"
   acquire_state_lock "the message"
+  if [[ -n "$reply_to" ]]; then
+    reply_file="$MESSAGES_DIR/$(slug "$reply_to").message"
+    [[ -f "$reply_file" ]] || die "reply message not found: $reply_to"
+    load_message "$reply_file"
+    [[ "$M_ID" == "$reply_to" ]] || die "reply message not found: $reply_to"
+    [[ -n "$thread_id" ]] || thread_id="$M_THREAD_ID"
+  fi
+  [[ -n "$thread_id" ]] || thread_id="$message_id"
   tmp_file="$(mktemp "$MESSAGES_DIR/.message-write.XXXXXX")"
   {
     printf 'message_id=%s\n' "$message_id"
@@ -697,28 +717,48 @@ send_command() {
     printf 'to_lane=%s\n' "$to_lane"
     printf 'kind=%s\n' "$kind"
     printf 'text=%s\n' "$message"
+    printf 'thread_id=%s\n' "$thread_id"
+    printf 'reply_to=%s\n' "$reply_to"
   } > "$tmp_file"
   mv "$tmp_file" "$message_file"
   printf 'utc=%s event=MESSAGE message_id=%s from_agent=%s from_lane=%s to_agent=%s to_lane=%s kind=%s\n' \
     "$NOW_UTC" "$message_id" "$agent" "$lane" "$to_agent" "$to_lane" "$kind" >> "$EVENT_LOG"
-  printf 'SENT message_id=%s to_agent=%s to_lane=%s kind=%s\n' \
-    "$message_id" "${to_agent:-*}" "${to_lane:-*}" "$kind"
+  printf 'SENT message_id=%s to_agent=%s to_lane=%s kind=%s thread_id=%s reply_to=%s\n' \
+    "$message_id" "${to_agent:-*}" "${to_lane:-*}" "$kind" "$thread_id" "${reply_to:--}"
 }
 
 inbox_command() {
-  local agent="${SOUNIO_AGENT_ID:-}" lane='' show_all=0 message_file ack_file shown=0
-  local -a message_paths=()
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' show_all=0 directed_only=0 newest_first=0 limit_set=0
+  local limit=0 from_agent='' from_lane='' kind='' thread_id='' since_epoch=0
+  local message_file ack_file shown=0 matching=0 omitted=0 index
+  local -a message_paths=() matching_paths=() ordered_paths=()
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --all) show_all=1; shift ;;
+      --directed-only) directed_only=1; shift ;;
+      --newest-first) newest_first=1; shift ;;
+      --limit) require_arg "$1" "$2"; limit="$2"; limit_set=1; shift 2 ;;
+      --from-agent) require_arg "$1" "$2"; from_agent="$2"; shift 2 ;;
+      --from-lane) require_arg "$1" "$2"; from_lane="$2"; shift 2 ;;
+      --kind) require_arg "$1" "$2"; kind="$2"; shift 2 ;;
+      --thread) require_arg "$1" "$2"; thread_id="$2"; shift 2 ;;
+      --since-epoch) require_arg "$1" "$2"; since_epoch="$2"; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown inbox option: $1" ;;
     esac
   done
   [[ -n "$agent" ]] || die "inbox requires --agent or SOUNIO_AGENT_ID"
   [[ -n "$lane" ]] || die "inbox requires --lane"
+  ((limit_set == 0)) || [[ "$limit" =~ ^[1-9][0-9]*$ ]] || \
+    die "--limit must be a positive integer"
+  [[ "$since_epoch" =~ ^[0-9]+$ ]] || die "--since-epoch must be a non-negative integer"
+  [[ -z "$kind" || "$kind" =~ ^(info|request|reply|blocker|handoff)$ ]] || \
+    die "--kind must be info, request, reply, blocker, or handoff"
+  validate_value from-agent "$from_agent"
+  validate_value from-lane "$from_lane"
+  validate_value thread "$thread_id"
 
   message_paths=("$MESSAGES_DIR"/*.message)
   for message_file in "${message_paths[@]}"; do
@@ -728,13 +768,38 @@ inbox_command() {
     [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$agent" ]] || continue
     [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$lane" ]] || continue
     [[ "$M_FROM_AGENT" != "$agent" || "$M_FROM_LANE" != "$lane" ]] || continue
+    ((directed_only == 0)) || [[ -n "$M_TO_AGENT" || -n "$M_TO_LANE" ]] || continue
+    [[ -z "$from_agent" || "$M_FROM_AGENT" == "$from_agent" ]] || continue
+    [[ -z "$from_lane" || "$M_FROM_LANE" == "$from_lane" ]] || continue
+    [[ -z "$kind" || "$M_KIND" == "$kind" ]] || continue
+    [[ -z "$thread_id" || "$M_THREAD_ID" == "$thread_id" ]] || continue
+    ((M_CREATED_EPOCH >= since_epoch)) || continue
     ack_file="$(message_ack_path "$M_ID" "$agent" "$lane")"
     ((show_all)) || [[ ! -f "$ack_file" ]] || continue
-    printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s\n' \
-      "$M_ID" "$M_CREATED_UTC" "$M_FROM_AGENT" "$M_FROM_LANE" "$M_KIND" "$M_TEXT"
+    matching_paths+=("$message_file")
+  done
+
+  matching="${#matching_paths[@]}"
+  if ((newest_first)); then
+    for ((index = matching - 1; index >= 0; index--)); do
+      ordered_paths+=("${matching_paths[index]}")
+    done
+  else
+    ordered_paths=("${matching_paths[@]}")
+  fi
+
+  for message_file in "${ordered_paths[@]}"; do
+    ((limit == 0 || shown < limit)) || break
+    load_message "$message_file"
+    printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s thread=%s reply_to=%s\n' \
+      "$M_ID" "$M_CREATED_UTC" "$M_FROM_AGENT" "$M_FROM_LANE" "$M_KIND" "$M_TEXT" \
+      "$M_THREAD_ID" "${M_REPLY_TO:--}"
     shown=$((shown + 1))
   done
+  omitted=$((matching - shown))
   printf 'inbox_messages=%s\n' "$shown"
+  printf 'inbox_matching=%s\n' "$matching"
+  printf 'inbox_omitted=%s\n' "$omitted"
 }
 
 ack_command() {

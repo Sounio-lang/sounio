@@ -126,4 +126,50 @@ output="$(
 )"
 grep -qE '^summary=active_claims:0 stale_claims:0 conflicts:0$' <<< "$output" || fail 'claims remained active'
 
+broadcast_output="$(
+  cd "$REPO"
+  run_coord send --agent observer --lane announcements --kind info \
+    --message 'broadcast must not bury directed work'
+)"
+broadcast_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$broadcast_output")"
+first_output="$(
+  cd "$REPO"
+  run_coord send --agent agent-a --lane parser --to-agent agent-b --to-lane codegen \
+    --kind request --message 'first directed request'
+)"
+first_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$first_output")"
+second_output="$(
+  cd "$REPO"
+  run_coord send --agent agent-a --lane parser --to-agent agent-b --to-lane codegen \
+    --kind request --message 'newest directed request'
+)"
+second_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$second_output")"
+[[ -n "$broadcast_id" && -n "$first_id" && -n "$second_id" ]] || fail 'message ids were not returned'
+
+output="$(
+  cd "$TEST_ROOT/second-worktree"
+  run_coord inbox --agent agent-b --lane codegen --directed-only --newest-first --limit 1
+)"
+grep -q "MESSAGE id=$second_id .*text=newest directed request" <<< "$output" || \
+  fail 'limited directed inbox did not return the newest message'
+grep -q "$first_id" <<< "$output" && fail 'limited directed inbox returned an older message body'
+grep -q "$broadcast_id" <<< "$output" && fail 'directed inbox included a broadcast'
+grep -q '^inbox_matching=2$' <<< "$output" || fail 'directed inbox matching count is wrong'
+grep -q '^inbox_omitted=1$' <<< "$output" || fail 'directed inbox omitted count is wrong'
+
+reply_output="$(
+  cd "$TEST_ROOT/second-worktree"
+  run_coord send --agent agent-b --lane codegen --to-agent agent-a --to-lane parser \
+    --kind reply --reply-to "$second_id" --message 'threaded reply'
+)"
+reply_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
+thread_id="$(sed -n 's/.* thread_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
+[[ "$thread_id" == "$second_id" ]] || fail 'reply did not inherit the request thread'
+output="$(
+  cd "$REPO"
+  run_coord inbox --agent agent-a --lane parser --thread "$thread_id"
+)"
+grep -q "MESSAGE id=$reply_id .*kind=reply text=threaded reply thread=$thread_id reply_to=$second_id" <<< "$output" || \
+  fail 'threaded reply metadata was not delivered'
+
 echo 'sounio-coord-selftest: PASS'
