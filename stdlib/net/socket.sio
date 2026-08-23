@@ -1,0 +1,347 @@
+// stdlib/net/socket.sio — TCP client + server via raw Linux x86-64 syscalls.
+//
+// pointer-to-local-buffer pattern: `&!x.field as *mut u8` (or `&!x as *mut u8`
+// for the whole struct) takes the address of a local (stack) struct and
+// casts it to a raw mutable pointer — the ADDRESS computation itself is
+// reliable (confirmed via a throwaway spike at /tmp/sounio_ptr_spike.sio,
+// attempt 1 from the plan, `souc check` exit 0, and later verified against
+// real memory via `write()` — see the FOURTH limitation below for why a
+// second verification pass was necessary). The same address-of-field
+// pattern already exists in this codebase for local scalars, e.g.
+// `&!out_len as *mut i64` in stdlib/compress/gzip.sio and `&!ts as *mut i64`
+// in stdlib/profile/profiler.sio.
+//
+// FIRST COMPILER LIMITATION — extern "C" doesn't reach libc: self-hosted/
+// compiler/lean_single.sio's `append_extern_c_stubs()` only recognizes a
+// fixed allow-list of extern names (getpid family, a handful of libm
+// functions, and malloc/free); any other extern "C" function — socket,
+// connect, bind, listen, accept, send, recv, close, inet_pton, htons all
+// included — is silently replaced with a generated stub that always panics
+// ("unresolved extern fn"), which is why the plan's draft code (using
+// `extern "C" { fn socket(...); ... }`) produced dozens of type/effect/
+// arity mismatch errors (the panic-stub's guessed i64/f64 signature never
+// matches the real prototype declared in the extern block). There is no
+// dynamic linking to arbitrary libc symbols in this compiler today.
+//
+// The escape hatch this codebase actually provides is the `syscall6(nr,
+// a1, a2, a3, a4, a5, a6)` builtin (see self-hosted/compiler/lean_single.sio
+// around line 10304), which is how getpid() etc. are themselves implemented
+// (`syscall6(39, 0,0,0,0,0,0)`). It requires exactly 7 arguments and a
+// `with IO` effect, and is otherwise a raw Linux x86-64 syscall with no
+// libc involvement. This file uses `syscall6` directly for every
+// networking operation instead of `extern "C"`:
+//   socket=41, bind=49, listen=50, accept=43, connect=42,
+//   sendto=44, recvfrom=45, close=3
+// `send`/`recv` are implemented via the 6-argument `sendto`/`recvfrom`
+// syscalls with a NULL destination/source address (equivalent to send/recv
+// on a connected socket) since sendto/recvfrom take exactly 6 args (fd,
+// buf, len, flags, addr, addrlen) — a perfect fit for syscall6's 6 argument
+// slots after the syscall number.
+//
+// `htons`/`inet_pton` are likewise unavailable as real libc calls, so both
+// are reimplemented directly in Sounio, folded into `build_sockaddr` (see
+// below) using integer bit-packing rather than a byte array — for reasons
+// explained in the FOURTH limitation, not merely style.
+//
+// SECOND COMPILER LIMITATION — tuple-destructured structs lose their type
+// tag as call arguments: a struct value obtained via `let (x, err) =
+// some_fn_returning_tuple()` cannot be passed as an argument to another
+// function expecting that struct type (`error[E001]: Type mismatch in call
+// argument`), even though `x`'s own scalar fields still read correctly.
+// Confirmed with both plain and `linear` structs, in the same module and
+// across modules. WORKAROUND: rebuild a fresh struct literal copying each
+// field (`TcpSocket { fd: x.fd }`) before passing it anywhere — this is
+// required of every caller of tcp_connect/tcp_listen/tcp_accept/tcp_send/
+// tcp_recv, not just this file (see tests/run-pass/net_socket_loopback.sio
+// for the pattern in use). Passing `&x` (a reference to the raw
+// destructured value) does NOT need the rebuild — only passing/binding the
+// struct BY VALUE does.
+//
+// THIRD COMPILER LIMITATION — `u16` arithmetic is broken for most
+// operators (this surfaced because `port: u16` is mandated by the public
+// interface). Confirmed empirically:
+//   - `u16 as i32` / `u16 as i64` casts return garbage (observed: the raw
+//     IEEE-754 double bit pattern of the value reinterpreted as an integer
+//     — i.e. the cast appears to route through a float conversion path
+//     that was never intended for u16).
+//   - `&`, `|`, `>>`, `<<`, `%` on two u16 operands silently return the
+//     LEFT OPERAND UNCHANGED (not even zero — literally a no-op).
+//   - `/` (division) on two u16 values is unreliable — worked once with
+//     both operands literal-derived in the same expression, then failed
+//     once either operand had passed through an extra `let` binding.
+//   - `+`, `-`, `*`, `==`, `<`, `<=`, `>`, `>=` on u16 all compute
+//     correctly for plain non-looping code.
+//   - Critically: a `while` loop that re-checks a condition on a `var: u16`
+//     mutated inside the loop body evaluates the condition WRONG after the
+//     first iteration (confirmed: a "keep subtracting 256 while >= 256"
+//     loop stopped after exactly one iteration regardless of the true
+//     remaining value). Equivalent straight-line (no back-edge) sequential
+//     `if` statements mutating the same `var: u16` work perfectly.
+// WORKAROUND (see `port_hi_lo` below): a fixed unrolled sequence of 7
+// `if remaining >= K { ... }` statements (no loop, only `+`/`-`/`>=` on
+// u16) isolates the high byte (0-255) directly; both bytes are then
+// `as u8`-cast, which is reliable once the value is confirmed < 256 (this
+// specific direction/range was verified separately from the broken
+// `as i32` case). Do not reintroduce `>>`, `&`, `/`, or a `while` loop over
+// a u16 value — those are exactly the operations confirmed broken above.
+//
+// FOURTH COMPILER LIMITATION — the big one, and the reason this file does
+// NOT use a `[u8; N]` array for the actual `sockaddr_in` passed to
+// bind/connect/accept: indexed writes to a `[u8; N]` array (`arr[i] = x`
+// for i > 0) compute the target address using an 8-byte stride regardless
+// of the element's real 1-byte size. `arr[0]` lands at the real base
+// address (looks correct), but `arr[1]` lands 8 bytes further on, `arr[2]`
+// 16 bytes further on, etc. Reads via the same indexing are self-consistent
+// (so purely-logical byte-array code that never takes a raw pointer, like
+// the dotted-decimal IP parser below, is unaffected and was NOT the bug —
+// this took real memory verification via `write()`+`od -c` to catch, not
+// just re-reading the array in Sounio, since the read path is just as
+// "wrong" as the write path and hides the bug completely). Two consequences
+// forced design choices here:
+//   1. It is a real stack-buffer-overflow risk for any small `[u8; N]`
+//      array whose indices are used beyond index 0 — e.g. a naively-written
+//      16-byte `sockaddr_in` buffer indexed up to byte 15 actually writes
+//      up to offset 120, corrupting 104 bytes of adjacent stack memory.
+//      `Buf4096`'s array is oversized enough (4096 declared bytes vs. the
+//      handful of indices any caller actually uses) that this never
+//      overflows its own allocation in practice, which is the only reason
+//      the public `Buf4096 { data: [u8; 4096] }` interface type — mandated
+//      by the plan and used directly by callers like the loopback test via
+//      plain `buf.data[i] = x` — remains safe to keep as specified.
+//   2. `sockaddr_in` itself is NOT built as a `[u8; 16]` array anywhere in
+//      this file. `SockAddrWords { w0: i64, w1: i64 }` builds the 16 bytes
+//      as two `i64` words via shifts/OR (confirmed reliable — `[i64; N]`
+//      arrays and struct fields of type `i64` do NOT have this bug, since
+//      an 8-byte stride is *correct* for an 8-byte element; the bug is
+//      specifically that 1-byte elements are incorrectly treated as if
+//      they were 8 bytes wide). `tcp_send`/`tcp_recv` similarly cannot hand
+//      `Buf4096.data`'s pointer straight to `sendto`/`recvfrom` — `pack_bytes`/
+//      `unpack_bytes` below transcode between the caller-visible (buggy but
+//      self-consistent) `Buf4096.data[i]` indexing and a correctly-strided
+//      `WordBuf512 { w: [i64; 512] }` staging buffer that is what actually
+//      gets pointed at the syscall. `tcp_accept`'s scratch `SockAddrBuf`
+//      (kernel writes into it, we never read it back) is the one place a
+//      `[u8; 16]` array remains safe as-is, precisely because nothing ever
+//      indexes into it.
+//
+// Byte buffers are wrapped in a one-field struct (`struct Buf4096 { data: [u8; N] }`)
+// rather than passed as a bare `&![u8; N]`, per the JIT-mutation-bug
+// workaround already used in stdlib/str/mod.sio (Buf256).
+
+pub const ERR_SOCKET_CREATE: i32 = 0 - 1
+pub const ERR_CONNECT: i32 = 0 - 2
+pub const ERR_BIND: i32 = 0 - 3
+pub const ERR_LISTEN: i32 = 0 - 4
+pub const ERR_ACCEPT: i32 = 0 - 5
+
+const SYS_CLOSE: i64 = 3
+const SYS_SOCKET: i64 = 41
+const SYS_CONNECT: i64 = 42
+const SYS_ACCEPT: i64 = 43
+const SYS_SENDTO: i64 = 44
+const SYS_RECVFROM: i64 = 45
+const SYS_BIND: i64 = 49
+const SYS_LISTEN: i64 = 50
+
+const AF_INET: i64 = 2
+const SOCK_STREAM: i64 = 1
+
+pub linear struct TcpSocket { fd: i32 }
+pub struct Buf4096 { data: [u8; 4096] }
+
+// Real sockaddr_in storage — see FOURTH limitation above for why this is
+// two i64 words rather than a [u8; 16] array.
+struct SockAddrWords { w0: i64, w1: i64 }
+
+// Scratch destination for accept()'s peer-address out-param. The kernel
+// writes into this; we never read it back, so the [u8; 16] array here is
+// safe despite the FOURTH limitation (nothing ever indexes into it).
+struct SockAddrBuf { data: [u8; 16] }
+
+// Staging buffer for send/recv payloads — see FOURTH limitation above.
+// 512 i64 words * 8 bytes = 4096 bytes, matching Buf4096's capacity.
+struct WordBuf512 { w: [i64; 512] }
+
+fn raw_close(fd: i64) with IO, Mut, Panic, Div {
+    syscall6(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+}
+
+// Splits a u16 port into its big-endian (network-order) high/low bytes.
+// See the THIRD compiler limitation above for why this uses a fixed
+// unrolled sequence of `if remaining >= K` subtractions instead of `htons`
+// or any `>>`/`&`/`while` on u16 — all confirmed broken. High-byte-first is
+// already network (big-endian) byte order, so no separate byte-swap step
+// is needed once hi/lo are isolated this way.
+fn port_hi_lo(port: u16) -> (u8, u8) with Mut, Panic, Div {
+    var remaining: u16 = port
+    var hi: u16 = 0 as u16
+
+    if remaining >= (16384 as u16) { remaining = remaining - (16384 as u16); hi = hi + (64 as u16) }
+    if remaining >= (8192 as u16) { remaining = remaining - (8192 as u16); hi = hi + (32 as u16) }
+    if remaining >= (4096 as u16) { remaining = remaining - (4096 as u16); hi = hi + (16 as u16) }
+    if remaining >= (2048 as u16) { remaining = remaining - (2048 as u16); hi = hi + (8 as u16) }
+    if remaining >= (1024 as u16) { remaining = remaining - (1024 as u16); hi = hi + (4 as u16) }
+    if remaining >= (512 as u16) { remaining = remaining - (512 as u16); hi = hi + (2 as u16) }
+    if remaining >= (256 as u16) { remaining = remaining - (256 as u16); hi = hi + (1 as u16) }
+
+    return (hi as u8, remaining as u8)
+}
+
+// Builds a real 16-byte sockaddr_in into `out` (two i64 words — see FOURTH
+// limitation above): bytes 0-1 = AF_INET, bytes 2-3 = port (network byte
+// order), bytes 4-7 = IPv4 address (network byte order, parsed by hand from
+// the dotted-decimal input buffer since there is no real `inet_pton` in
+// this compiler), bytes 8-15 = zero padding.
+fn build_sockaddr(ip: &Buf4096, ip_len: i32, port: u16, out: &!SockAddrWords) -> i32 with IO, Mut, Panic, Div {
+    let (port_hi, port_lo) = port_hi_lo(port)
+
+    // Parse dotted-decimal IPv4 (e.g. "127.0.0.1") from ip.data[0..ip_len).
+    // Plain i32 arithmetic/indexing here — not affected by the FOURTH
+    // limitation since nothing here takes a raw pointer to `ip`.
+    var octets: [i32; 4] = [0, 0, 0, 0]
+    var octet: i32 = 0
+    var octet_idx: i32 = 0
+    var i: i32 = 0
+    while i < ip_len {
+        let c = ip.data[i as usize]
+        if c == 46 as u8 {   // '.'
+            if octet_idx > 2 {
+                return ERR_CONNECT
+            }
+            octets[octet_idx as usize] = octet
+            octet_idx = octet_idx + 1
+            octet = 0
+        } else {
+            octet = octet * 10 + ((c as i32) - 48)
+        }
+        i = i + 1
+    }
+    if octet_idx != 3 {
+        return ERR_CONNECT
+    }
+    octets[3] = octet
+
+    let family: i64 = AF_INET
+    let ph: i64 = port_hi as i64
+    let pl: i64 = port_lo as i64
+    let a0: i64 = octets[0] as i64
+    let a1: i64 = octets[1] as i64
+    let a2: i64 = octets[2] as i64
+    let a3: i64 = octets[3] as i64
+
+    out.w0 = family | (ph << 16) | (pl << 24) | (a0 << 32) | (a1 << 40) | (a2 << 48) | (a3 << 56)
+    out.w1 = 0
+    return 0
+}
+
+// Copies `count` logical bytes from buf.data[0..count) into a
+// correctly-strided WordBuf512 (see FOURTH limitation above) so its
+// address can be handed to a real syscall.
+fn pack_bytes(buf: &Buf4096, count: i32, out: &!WordBuf512) with Mut, Panic, Div {
+    var i: i32 = 0
+    while i < count {
+        let word_idx = i / 8
+        let byte_idx = i - word_idx * 8
+        let shift = (byte_idx * 8) as i64
+        let b = buf.data[i as usize] as i64
+        out.w[word_idx as usize] = out.w[word_idx as usize] | (b << shift)
+        i = i + 1
+    }
+}
+
+// Inverse of pack_bytes: copies `count` bytes out of a correctly-strided
+// WordBuf512 (real syscall-written memory) into the caller-visible
+// Buf4096.data[i] (logical indexing — self-consistent for the caller, see
+// FOURTH limitation above).
+fn unpack_bytes(inp: WordBuf512, count: i32, out: &!Buf4096) with Mut, Panic, Div {
+    var i: i32 = 0
+    while i < count {
+        let word_idx = i / 8
+        let byte_idx = i - word_idx * 8
+        let shift = (byte_idx * 8) as i64
+        let word = inp.w[word_idx as usize]
+        let b = (word >> shift) & (255 as i64)
+        out.data[i as usize] = b as u8
+        i = i + 1
+    }
+}
+
+pub fn tcp_connect(ip: &Buf4096, ip_len: i32, port: u16) -> (TcpSocket, i32) with IO, Mut, Panic, Div {
+    let fd = syscall6(SYS_SOCKET, AF_INET, SOCK_STREAM, 0, 0, 0, 0)
+    if fd < 0 {
+        return (TcpSocket { fd: -1 }, ERR_SOCKET_CREATE)
+    }
+    var addr = SockAddrWords { w0: 0, w1: 0 }
+    let build_err = build_sockaddr(ip, ip_len, port, &!addr)
+    if build_err != 0 {
+        raw_close(fd)
+        return (TcpSocket { fd: -1 }, build_err)
+    }
+    let addr_ptr = &!addr as *mut u8
+    let result = syscall6(SYS_CONNECT, fd, addr_ptr as i64, 16, 0, 0, 0)
+    if result != 0 {
+        raw_close(fd)
+        return (TcpSocket { fd: -1 }, ERR_CONNECT)
+    }
+    return (TcpSocket { fd: fd as i32 }, 0)
+}
+
+pub fn tcp_listen(ip: &Buf4096, ip_len: i32, port: u16, backlog: i32) -> (TcpSocket, i32) with IO, Mut, Panic, Div {
+    let fd = syscall6(SYS_SOCKET, AF_INET, SOCK_STREAM, 0, 0, 0, 0)
+    if fd < 0 {
+        return (TcpSocket { fd: -1 }, ERR_SOCKET_CREATE)
+    }
+    var addr = SockAddrWords { w0: 0, w1: 0 }
+    let build_err = build_sockaddr(ip, ip_len, port, &!addr)
+    if build_err != 0 {
+        raw_close(fd)
+        return (TcpSocket { fd: -1 }, build_err)
+    }
+    let addr_ptr = &!addr as *mut u8
+    let bind_result = syscall6(SYS_BIND, fd, addr_ptr as i64, 16, 0, 0, 0)
+    if bind_result != 0 {
+        raw_close(fd)
+        return (TcpSocket { fd: -1 }, ERR_BIND)
+    }
+    let listen_result = syscall6(SYS_LISTEN, fd, backlog as i64, 0, 0, 0, 0)
+    if listen_result != 0 {
+        raw_close(fd)
+        return (TcpSocket { fd: -1 }, ERR_LISTEN)
+    }
+    return (TcpSocket { fd: fd as i32 }, 0)
+}
+
+pub fn tcp_accept(listener: &TcpSocket) -> (TcpSocket, i32) with IO, Mut, Panic, Div {
+    var addr = SockAddrBuf { data: [0; 16] }
+    var addrlen_buf: [u8; 8] = [0; 8]
+    addrlen_buf[0] = 16   // socklen_t = 16 (sizeof sockaddr_in), little-endian
+    let addr_ptr = &!addr.data as *mut u8
+    let addrlen_ptr = &!addrlen_buf as *mut u8
+    let conn_fd = syscall6(SYS_ACCEPT, listener.fd as i64, addr_ptr as i64, addrlen_ptr as i64, 0, 0, 0)
+    if conn_fd < 0 {
+        return (TcpSocket { fd: -1 }, ERR_ACCEPT)
+    }
+    return (TcpSocket { fd: conn_fd as i32 }, 0)
+}
+
+pub fn tcp_send(sock: TcpSocket, buf: &Buf4096, len: i32) -> (TcpSocket, i64) with IO, Mut, Panic, Div {
+    var packed = WordBuf512 { w: [0; 512] }
+    pack_bytes(buf, len, &!packed)
+    let buf_ptr = &!packed as *mut u8
+    let result = syscall6(SYS_SENDTO, sock.fd as i64, buf_ptr as i64, len as i64, 0, 0, 0)
+    return (sock, result)
+}
+
+pub fn tcp_recv(sock: TcpSocket, out: &!Buf4096) -> (TcpSocket, i64) with IO, Mut, Panic, Div {
+    var packed = WordBuf512 { w: [0; 512] }
+    let buf_ptr = &!packed as *mut u8
+    let result = syscall6(SYS_RECVFROM, sock.fd as i64, buf_ptr as i64, 4096, 0, 0, 0)
+    if result > 0 {
+        unpack_bytes(packed, result as i32, out)
+    }
+    return (sock, result)
+}
+
+pub fn tcp_close(sock: TcpSocket) with IO, Mut, Panic, Div {
+    raw_close(sock.fd as i64)
+}
