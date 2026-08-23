@@ -15,12 +15,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.nonas
 
 > **Re-author note (2026-08-17):** restored onto current `main` from PR #1237 tip `e2f66da28b36` so the parent literature map cited by `rupture-abcd-claims_2026-07-24.md` and `rupture-programme-synthesis_2026-07-25.md` exists in-tree again. Content is the original synthesis; no claim expansion.
 
+> **Corrections, 2026-08-23.** Four mathematical errors survived the #1813 restoration and are corrected *in place* below. The lineage restoration itself is kept: current documents cite this parent, and a silent rewrite or a correction living elsewhere would not travel with that citation. (1) The associator is not the G₂ 3-form. (2) V₂(ℝ⁷) ≅ G₂/SU(2); the quotient G₂/V₂(ℝ⁷) is not a homogeneous space. (3) The space of zero-divisor *pairs* and the locus of *elements* are different manifolds. (4) “Statistical invisibility” is a named open hypothesis, not a result. Tensor-core numerical quotes in §9 read “within measured tolerance”, never “exact”.
+
 # Non-associativity as the algebra of rupture — a research synthesis
 
 *A literature map and program synthesis grounded in three parallel deep-research sweeps (categorical
 semantics; morphodynamics & epistemic rupture; sedenion zero-divisors & annihilation), ~180 primary
 sources. Its purpose: locate where the non-associative program (𝕆 as the algebra of meaning/rupture,
-via the homology functor F; sedenion zero-divisors as statistical invisibility) sits in the real
+via the homology functor F; sedenion zero-divisors as the *open* Hypothesis H-annihilation, not a
+measured statistical invisibility) sits in the real
 literature, and what is genuinely unclaimed.*
 
 ---
@@ -38,11 +41,18 @@ result*. That is the rupture of **meaning** (composition that won't stay context
 
 The unifying fact, hidden inside results that were mis-filed as "nulls":
 
-- The octonion associator is **alternating → it is the G₂-invariant 3-form** (verified: `[a,b,c] =
-  −[b,a,c] = −[a,c,b]`, lands in Im 𝕆; Baez, *The Octonions*, 2002, arXiv math/0105155).
-- The **sedenion zero-divisor set is isometric to G₂** (Moreno 1998, arXiv q-alg/9710013: ZD pairs ≅ G₂;
-  Reggiani 2024, arXiv 2411.18881: 𝒵(𝕊) ≅ G₂ and the single-element locus ZD(𝕊) ≅ the Stiefel manifold
-  V₂(ℝ⁷), with a G₂-invariant metric and **curvature**).
+- The octonion associator `[a,b,c] = (ab)c − a(bc)` is **alternating and Im 𝕆-valued** (verified:
+  `[a,b,c] = −[b,a,c] = −[a,c,b]`, lands in Im 𝕆; Baez, *The Octonions*, 2002, arXiv math/0105155).
+  **Correction, 2026-08-23:** it is *not* the G₂-invariant 3-form. That 3-form is the scalar
+  `φ(a,b,c) = ⟨ab, c⟩` on Im 𝕆 ≅ ℝ⁷. They are different objects: a vector-valued map versus a
+  3-form. The relation is a pairing, not an identity — `⟨[a,b,c], d⟩` reconstructs (a multiple of)
+  the G₂-invariant 4-form; `φ` is recovered as `⟨ab, c⟩`.
+- **Correction, 2026-08-23 — two manifolds, not one.** Moreno 1998 (arXiv q-alg/9710013) identifies
+  the space of zero-divisor *pairs* with G₂. Reggiani 2024 (arXiv 2411.18881) identifies the
+  *single-element* locus ZD(𝕊) with the Stiefel manifold V₂(ℝ⁷), which carries a G₂-invariant
+  metric and **curvature**. Pair space and element locus have different dimensions and different
+  geometry; they must not be collapsed. V₂(ℝ⁷) is a Stiefel manifold, not a subgroup of G₂, so the
+  quotient “G₂/V₂(ℝ⁷)” is not a homogeneous space. The correct statement is **V₂(ℝ⁷) ≅ G₂/SU(2)**.
 
 **The same exceptional geometry governs the two faces of rupture** — the associator (semantic) and the
 zero divisors (epistemic). This is the hinge of the program, not a coincidence to report.
@@ -105,10 +115,13 @@ coordinates fail to associate ⇒ no global position frame.
 
 **Annihilation — the sharpest opening.** ℂ, ℍ, 𝕆 are **division algebras with no zero divisors**, so all
 existing hypercomplex statistics is annihilation-free. Genuine "statistical invisibility by annihilation"
-(`E[XY]=0` with X,Y a nonzero zero-divisor pair) is possible **only from 𝕊 upward — exactly where no
-probability theory has been built**. And the annihilation locus is already a known curved manifold
-(G₂/V₂(ℝ⁷), Reggiani), so distributions *supported on or transported across* it are well-posed and
-unstudied. This is the Annihilation-paper thesis with a rigorous geometric anchor. Combinatorial
+(`E[XY]=0` with X,Y a nonzero zero-divisor pair) is **Hypothesis H-annihilation (open)**, not a
+result: the algebraic fact `XY = 0` does not imply a statistical claim. The hypothesis would need
+a probability law, a measure, and an estimator before it can be a theorem; none of the three is
+defined here. The construction is conceivable **only from 𝕊 upward — exactly where no probability
+theory has been built**. The *pair* space and the *element* locus remain the two manifolds of §1
+(pairs with G₂; elements ≅ V₂(ℝ⁷) ≅ G₂/SU(2), Reggiani); distributions *supported on or
+transported across* either are well-posed as programmes and remain unstudied. This is the Annihilation-paper thesis with a rigorous geometric anchor. Combinatorial
 vocabulary: de Marrais's box-kites (42 assessors / 84 pairs / 168 primitive units = |PSL(2,7)|,
 XOR-indexed) — counts reliable (agree with Cawagas 2004), the PSL(2,7) organizing role asserted not
 proved; load-bearing geometry from Moreno/Reggiani/Biss–Christensen–Dugger–Isaksen (annihilator
@@ -120,9 +133,10 @@ Across all three sweeps, every neighboring formalism models rupture with a **neg
 (Sneed/Halvorson), *no* global section (Abramsky), the metric *diverges* (Amari/Watanabe), the attractor
 *vanishes* (Thom). None proposes a **positive, computable, graded** one.
 
-**The associator is exactly that:** a single algebraic quantity that is **zero under continuity**
-(the associative/smooth regime) and, at rupture, **nonzero — measuring the magnitude *and direction* of
-the break.** And the historical seam is exact: Hamilton **coined the word "associative" at the very moment
+**The associator is exactly that:** a single algebraic quantity that is **zero under associativity**
+(the associative regime) and, at rupture, **nonzero — measuring the magnitude *and direction* of
+the break.** **Correction, 2026-08-23:** the vanishing is associativity, not continuity; a continuous
+non-associative product still has a nonzero associator. And the historical seam is exact: Hamilton **coined the word "associative" at the very moment
 he saw the octonions fail it** (letter to Graves: "A·BC = AB·C … but not so, generally, with your
 octaves"). Non-associativity was named at the rupture point.
 
@@ -130,14 +144,16 @@ So the program is the **positivization** of the rupture-as-obstruction tradition
 isn't there" with "the associator that is," a graded invariant that can unify:
 - the **semantic** side (Petitot/Wildgen morphodynamics, whose four-actant limit already demands
   exceptional singularities), via the homology functor F, and
-- the **epistemic** side (incommensurability-as-failed-reassociation; annihilation as invisibility),
+- the **epistemic** side (incommensurability-as-failed-reassociation; Hypothesis H-annihilation),
 under **one exceptional geometry, G₂**.
 
 ## 5. Re-reading the experiments (they were instrumentation, not contests)
 
-- **#1230** (CD associator = G₂ 3-form, alternating, ⊥ Massey): not a failed bridge — the **hinge**. It
-  locates the associator as the G₂ 3-form, the *same* G₂ as the zero-divisor geometry, and proves 𝕆 and
-  higher-homotopy (Massey) are *distinct* modes of rupture (a fine, publishable distinction).
+- **#1230** (CD associator related to the G₂ 3-form by the pairing of §1, alternating, ⊥ Massey): not a
+  failed bridge — the **hinge**. **Correction, 2026-08-23:** it does *not* identify the associator with
+  the 3-form. It locates a pairing between the associator and the G₂ geometry that also governs the
+  zero-divisor manifolds of §1, and distinguishes 𝕆 from higher-homotopy (Massey) as *distinct* modes
+  of rupture (a fine, publishable distinction).
 - **#1225** (Borromean/Massey): the topological face of "structure that appears exactly where primary
   products annihilate" — invisible pairwise, bound at third order. The cleanest metaphor for
   *invisibility that carries structure* (the annihilation thesis in topology).
@@ -149,8 +165,9 @@ under **one exceptional geometry, G₂**.
 ## 6. The genuinely unclaimed (the jewels)
 
 1. **Associator = semantic rupture + a homology functor F** (the four ingredients never assembled).
-2. **Sedenion zero divisors = statistical invisibility / epistemic annihilation** (no probability theory
-   below 𝕊; the annihilation manifold known but unused).
+2. **Hypothesis H-annihilation (open):** sedenion zero divisors as a *candidate* for statistical
+   invisibility / epistemic annihilation (no probability theory below 𝕊; the two annihilation
+   manifolds of §1 known but unused; law, measure and estimator still undefined).
 3. **The unification:** both faces are **G₂** — a single exceptional-geometric theory of rupture with a
    semantic face (the associator) and an epistemic face (annihilation).
 4. **Positivization:** the associator as the first *positive, graded, computable* rupture invariant, where
@@ -167,7 +184,7 @@ Merge* (2023, arXiv 2305.18278) · Stasheff associahedra / A∞ (Loday–Vallett
 Abramsky–Sadrzadeh (2014, arXiv 1403.3351) · Balzer–Moulines–Sneed, *An Architectonic for Science* (1987)
 + Kuhn (1962) + Bachelard (1938) · Amari information geometry + Watanabe singular learning theory.
 *Algebra / annihilation:* **Baez, *The Octonions* (2002, arXiv math/0105155) — the spine** · Moreno (1998,
-q-alg/9710013) · **Reggiani (2024, arXiv 2411.18881) — ZD ≅ G₂/V₂(ℝ⁷), curved** · Cawagas (2004) ·
+q-alg/9710013) · **Reggiani (2024, arXiv 2411.18881) — element locus ZD(𝕊) ≅ V₂(ℝ⁷) ≅ G₂/SU(2), curved** · Cawagas (2004) ·
 Biss–Christensen–Dugger–Isaksen (2007/2008) · Günaydin–Piron–Ruegg (1978) · Jackiw (1985) + Szabo (2019,
 arXiv 1903.05673).
 *Philosophy of structure / gesture:* **Châtelet, *Figuring Space* (1993/2000) — the grammar of
@@ -193,10 +210,19 @@ stable heteroclinic channels (2008).
 ## 9. Where the compiler fits
 
 Not an ML play. It is the **infrastructure to compute in the algebra of rupture** — the associator, its
-VJP, the zero-divisor locus, discrete curvature — in hardware, exactly (octonion/sedenion associator and
-its full VJP on Blackwell tensor cores, verified on GB10). The experiments instrument the structure; they
-were never contests. The scaffold was mistaken for the cathedral once already — this document is the
-correction.
+VJP, the zero-divisor locus, discrete curvature — in hardware, **within measured tolerance**
+(octonion/sedenion associator and its full VJP on Blackwell tensor cores, verified on GB10). The
+experiments instrument the structure; they were never contests. The scaffold was mistaken for the
+cathedral once already — this document is the correction.
+
+## Warrant of equations (2026-08-23)
+
+A green CI run on this file is StructuralCI: the registry synced, the links resolve, no reference is
+broken. It is not a ComputationalOracle, a FormalProof, or a LiteratureValidatedClaim. A document
+that current work cites as parent, and that carries equations, should name which of those four backs
+each displayed identity. The four corrections above are LiteratureValidatedClaim against Baez /
+Moreno / Reggiani; they are not FormalProof in this repository, and #1813's watcher correctly
+refused to decide scientific semantics.
 
 ---
 
