@@ -159,9 +159,12 @@ repository contracts named below.
 Project hooks in `.codex/hooks.json` and `.claude/settings.json` automate the
 common path. They register session presence, refresh a 30-minute lease during
 active turns, and reserve files before structured `Write`, `Edit`, or
-`apply_patch` calls. Claude releases its session lease on `SessionEnd`; Codex
-currently has no session-end event, so its inactive hook lease expires. Codex
-users must review and trust the project hook with `/hooks` once per hook hash.
+`apply_patch` calls. When a hook can verify that its tmux pane, harness process,
+and current path all belong to the session worktree, it also registers an
+expiring immediate-delivery endpoint. Claude releases its session lease and
+endpoint on `SessionEnd`; Codex currently has no session-end event, so its
+inactive hook lease and endpoint expire. Codex users must review and trust the
+project hook with `/hooks` once per hook hash.
 Shell commands can write arbitrary files and cannot be scoped reliably, so a
 manual exact scope remains mandatory before write-bearing Bash commands. The
 startup hook prints the session's agent/lane identity; reuse it with
@@ -187,9 +190,22 @@ publishes no handoff. Use `--reply-to <request-id>` to close a directed request.
 The compatibility form `send --kind handoff` is only an unstructured message;
 it does not release ownership or establish an evidence-bearing transfer.
 
-Prompt and post-tool hooks inject unread messages into the agent's active turn.
-A rejected structured write also sends a request to the current owner
-automatically. Use
+An exact directed message attempts immediate delivery when the recipient has a
+verified endpoint. The wake contains only message metadata and an inbox command,
+never the raw message body. Before sending any input, delivery revalidates the
+tmux socket, pane id, process id, harness command, and worktree; drift or expiry
+fails closed and leaves the durable bus message untouched. Wake receipts are
+deduplicated and visible through `message-status`, but prove only transport
+delivery: they are not hook injection receipts, acknowledgements, or responses.
+Use `endpoint-status` to inspect a lane and `wake --message <id>` to retry.
+
+Prompt and post-tool hooks remain the source-of-truth fallback and inject unread
+messages into the agent's active turn. A rejected structured write also sends a
+request to the current owner automatically. Do not start a second
+`claude --resume` process to force delivery into a running local session. A
+Claude background agent whose own worktree endpoint cannot be verified receives
+the durable message at a hook boundary or through the existing `claude agents`
+manager. Use
 `info`, `request`, `reply`, `blocker`, or `handoff` as message kinds. Messages
 coordinate work in progress; durable blockers still require the blocker
 contract.

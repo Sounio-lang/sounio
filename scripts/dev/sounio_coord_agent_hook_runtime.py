@@ -116,6 +116,81 @@ def run_coord(
     )
 
 
+def tmux_endpoint(root: Path) -> tuple[str, str] | None:
+    tmux_value = os.environ.get("TMUX", "")
+    pane = os.environ.get("TMUX_PANE", "")
+    socket = tmux_value.partition(",")[0]
+    if not socket or not pane:
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "tmux",
+                "-S",
+                socket,
+                "display-message",
+                "-p",
+                "-t",
+                pane,
+                "#{pane_id}|#{pane_current_path}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    pane_id, separator, pane_cwd = result.stdout.strip().partition("|")
+    if not separator or not pane_id or not pane_cwd:
+        return None
+    pane_root = repo_root(pane_cwd)
+    if pane_root is None or pane_root.resolve() != root.resolve():
+        return None
+    return socket, pane_id
+
+
+def refresh_delivery_endpoint(
+    tool_root: Path, root: Path, agent: str, lane: str
+) -> None:
+    endpoint = tmux_endpoint(root)
+    if endpoint is None:
+        return
+    if agent.startswith("claude"):
+        harness = "claude"
+    elif agent.startswith("codex"):
+        harness = "codex"
+    else:
+        return
+    socket, pane = endpoint
+    ttl = os.environ.get("SOUNIO_COORD_HOOK_TTL_SECONDS", "1800")
+    result = run_coord(
+        tool_root,
+        "endpoint-register",
+        "--agent",
+        agent,
+        "--lane",
+        lane,
+        "--harness",
+        harness,
+        "--transport",
+        "tmux",
+        "--address",
+        pane,
+        "--socket",
+        socket,
+        "--ttl-seconds",
+        ttl,
+        worktree=root,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(
+            "sounio coordination delivery endpoint warning: "
+            f"{result.stderr or result.stdout}"
+        )
+
+
 def scope_args(agent: str, lane: str, intent: str) -> list[str]:
     return ["--agent", agent, "--lane", lane, "--intent", intent]
 
@@ -205,6 +280,15 @@ def main() -> int:
     if event_name == "SessionEnd":
         run_coord(
             tool_root,
+            "endpoint-unregister",
+            "--agent",
+            agent,
+            "--lane",
+            lane,
+            worktree=root,
+        )
+        run_coord(
+            tool_root,
             "release",
             "--agent",
             agent,
@@ -239,6 +323,7 @@ def main() -> int:
             worktree=target_root,
         )
         if result.returncode == 0:
+            refresh_delivery_endpoint(tool_root, target_root, agent, lane)
             return 0
 
         if target_root == root:
@@ -256,6 +341,7 @@ def main() -> int:
             )
             sys.stderr.write(result.stderr or "coordination scope update failed\n")
             return 2
+        refresh_delivery_endpoint(tool_root, root, agent, lane)
         return 0
 
     if event_name == "SessionStart":
@@ -275,6 +361,8 @@ def main() -> int:
     if result.returncode != 0:
         sys.stderr.write(f"sounio coordination warning: {result.stderr}")
         return 0
+
+    refresh_delivery_endpoint(tool_root, root, agent, lane)
 
     if event_name == "SessionStart":
         print(
