@@ -8833,6 +8833,17 @@ impl Lowerer {
                                     return lo.fo_xfer_set(name, 3, 0.0, ir_empty_name())
                                 }
                             }
+                            // p0 / p1 -- kind 7. Deliberately NOT accepting the
+                            // swapped (li == 1 && ri == 0) form the mul/add arms
+                            // allow: division is not commutative, and the apply side
+                            // takes arg0 as the numerator. Matching `p1 / p0` here
+                            // would silently compute the derivative of the reciprocal
+                            // expression, which is worse than leaving it unregistered.
+                            if (*e).bin_op == BinaryOp::OpDiv {
+                                if nparams >= 2 && li == 0 && ri == 1 {
+                                    return lo.fo_xfer_set(name, 7, 0.0, ir_empty_name())
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -9062,6 +9073,24 @@ impl Lowerer {
             let aval1 = lo.fo_lower_nth_arg_value(args, 1)
             lo = aval1.0
             lo = lo.fo_combine_sens_mul(s0, s1, val0, aval1.1)
+            return lo.fo_emit_var_from_sens()
+        }
+        // kind 7: `f(a, b) = a / b`. Mirrors kind 4 exactly, except the combiner is
+        // the quotient rule instead of the product rule. fo_combine_sens_div already
+        // existed for the INLINE algebra (`variance_of(a / b)` written out in the
+        // caller); this makes the same rule reachable when the division is behind an
+        // imported helper -- which is why fo_div2 in stdlib/epistemic/fo.sio missed
+        // while fo_mul2, one line away, hit (#1706).
+        //
+        // ORDER MATTERS: d/da (a/b) = 1/b and d/db (a/b) = -a/b^2, so unlike mul and
+        // add the two arguments are NOT interchangeable. s0/arg0 is the numerator.
+        if kind == 7 {
+            let dval0 = lo.fo_lower_nth_arg_value(args, 0)
+            lo = dval0.0
+            let dnum = dval0.1
+            let dval1 = lo.fo_lower_nth_arg_value(args, 1)
+            lo = dval1.0
+            lo = lo.fo_combine_sens_div(s0, s1, dnum, dval1.1)
             return lo.fo_emit_var_from_sens()
         }
         (lo.fo_clear_expr_sens(), -1)
