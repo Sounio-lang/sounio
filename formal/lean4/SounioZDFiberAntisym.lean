@@ -25398,16 +25398,23 @@ theorem s3_recursion_pow2 (p j : Nat) :
     (from `2β = 8β + 264A`) and a CONSTANT that is not an integer — `γ = 8γ − 464` gives
     `γ = 464/7`.  That is why the theorem below is stated as `7 · s3 = …` rather than `s3 = …`:
     the honest closed form carries the geometric sum `(8^j − 1)/7`, and clearing the denominator
-    is cheaper than introducing a `Σ 8^i` definition.  Everything is integral — `8^j ≡ 1 mod 7`
-    makes `464 − 576·8^j` divisible by `7` at every `j`.
+    is cheaper than introducing a `Σ 8^i` definition.  Everything is integral, and the reason
+    takes TWO facts, not one: `8 ≡ 1 (mod 7)` so `8^j ≡ 1`, AND `464 ≡ 576 ≡ 2 (mod 7)`.
+    Together they give `464 − 576·8^j ≡ 2 − 2 ≡ 0 (mod 7)` at every `j`.  (Stating only the
+    `8^j ≡ 1` half, as an earlier draft of this docstring did, does not establish it: the
+    congruence of the two coefficients to each other is what makes the difference vanish.)
 
     Numeric checks against the E5 table (`X = 2^j`, `A = 2^(p+1)`):
       `p = 3, j = 0` (level 3, `H = 16`):  `s3 = 1456`   — the value Tier 136's docstring cites
       `p = 3, j = 1` (level 4):            `s3 = 9264`   — closed form and one recursion step agree
 
-    ⚠ SCOPE.  `p ≥ 1` (the theorem is indexed by `k` with `p = k+1`), because `s3_maximal_seam`
-    is stated at `W = 2^(k+1)`.  The remaining label is the REFERENCE `W = 1`, which is the
-    concurrent lane's base case, not this one's. -/
+    ⚠ SCOPE, and what KIND of bound it is.  `p ≥ 1` (the theorem is indexed by `k` with
+    `p = k+1`).  This is a DEPENDENCY bound, not a property of the formula: it is inherited from
+    `s3_maximal_seam` being stated at `W = 2^(k+1)`, and the closed form itself remains
+    meaningful at `p = 0` (`A = 2`, giving `S(0) = 8 − 48 + 56 − 16 = 0`).  So `p = 0` is not
+    excluded because the algebra breaks there — it is excluded because this tier's base case is
+    not stated there.  That remaining label is the REFERENCE `W = 1`, which is the concurrent
+    lane's base case (Tier 166), not this one's. -/
 
 /-- **`s3` IN CLOSED FORM** at `W = 2^(k+1)`, every level above it.  With `A = 2^(k+2)` and
     `X = 2^j`:  `7·s3 = (7A³ − 126A² + 504A − 576)·X³ + 42A²·X² − 308A·X + 464`.
