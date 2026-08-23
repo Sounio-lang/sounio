@@ -1,8 +1,13 @@
 # Anti-Garbling Completeness: fabricated precision as the kernel of the free-algebra quotient
 
 **Date:** 2026-08-23 · **Author:** fable-1 (agent=claude), ns-antigarbling-wire lane
-**Status:** research note — a *unifying conjecture* with a proven core, a falsifier
-set, and one actionable soundness hardening for the live N2 encoding.
+**Status:** research note — the two-orthogonal-axes thesis, a falsifier set, and one
+actionable soundness hardening for the live N2 encoding. **Machine-verified
+(2026-08-23):** the full first-order proof spine is checked in
+`docs/research/lean/SounioAntiGarblingModel.lean` (Lean 4.33.0, exit 0, zero
+warnings, `sorry`-free) — both certificate lemmas, both axes of Theorem 4.1 with the
+associator sensitivity identity, the completeness dimension count (Prop 2), and the
+§5 non-separability caveat. See the proof companion §7 for the theorem map.
 **Extends:** the NS anti-garbling wire (`self-hosted/check/noise_sets.sio`,
 E230) and the associator-variance corpus (`stdlib/epistemic/product_nonassoc.sio`,
 `order_spread_exact.sio`, `docs/research/variance_of_associator.md`).
@@ -223,11 +228,15 @@ which obligation (2) is non-trivial, and no competing system (`Uncertain⟨T⟩`
 
 ## 6. Immediate, buildable next steps (no new claims beyond §5)
 
-1. **Formalise the anchor** `docs/research/lean/SounioAntiGarblingModel.lean`
-   (referenced by the lane contract, not yet present): the affine model, the two
-   kernel families, and the *soundness-of-certificate* lemmas — NS-disjoint ⇒
-   Cov=0 term absent; associator-vanish ⇒ order term absent. Leave (C) as a stated
-   conjecture with the F1 falsifier, not a proved theorem.
+1. **Formalise the anchor — DONE (machine-checked).**
+   `docs/research/lean/SounioAntiGarblingModel.lean` now exists and typechecks
+   clean under Lean 4.33.0 (`sorry`-free): the affine model, both
+   *soundness-of-certificate* lemmas (NS-disjoint ⇒ Cov term absent;
+   associator-vanish ⇒ order term absent), both axes of Theorem 4.1 with the §3(B)
+   associator sensitivity identity, the completeness dimension count (Prop 2), and
+   the §5 non-separability caveat. (C) is verified as a theorem **for the
+   first-order structural model**; the F1 falsifier stands for the general-algebra
+   claim, which the structural Lean model instantiates. See the proof companion §7.
 2. **Adopt the orientation fix** (0=⊤) in the N2 encoding if the `ns_antigarbling_gate.sh`
    sabotage control exhibits an unseeded fail-open — turning a
    seed-discipline-dependent soundness into an encoding-guaranteed one.

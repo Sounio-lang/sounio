@@ -7,6 +7,9 @@
 honesty correction to the informal version (the error is not additively separable
 when a certificate fails; the two certificates are *independent and jointly
 sufficient*, which is the operationally load-bearing statement).
+**Machine-verified (2026-08-23):** the full spine below is checked in
+`docs/research/lean/SounioAntiGarblingModel.lean` (Lean 4.33.0, exit 0, zero
+warnings, `sorry`-free) — see §7 for the theorem map.
 
 ---
 
@@ -182,15 +185,24 @@ vanish when *both* certificates fail. So:
 
 ---
 
-## 7. What this promotes in the Lean anchor
+## 7. The Lean anchor — theorem map (machine-checked)
 
-`SounioAntiGarblingModel.lean` should now target **Theorem §4.1** as the
-machine-checked result (it is clean and unconditional):
-- `cov_zero_of_disjoint` (Lemma 3) — support half, PROVEN core already stated.
-- `sensitivity_agrees_of_disjoint_and_associative` (Lemmas 3+4 ⇒ `∂w_naive=∂w_true`).
-- `var_eq_of_sensitivity_eq` (Lemma 0 ⇒ equal variance).
-- `AntiGarblingSound := (Δ_support=0 ∧ Δ_order=0) → Var_naive = Var_true` — the
-  target theorem, no `sorry`.
-Leave §4.2 completeness (Proposition 2) as a structural argument and §5 as the
-interaction caveat; both are prose-rigorous and do not need to be `sorry`-hidden as
-if they were the operational claim.
+`docs/research/lean/SounioAntiGarblingModel.lean` is checked clean by Lean 4.33.0
+(exit 0, zero warnings, `sorry`-free). The whole spine of this proof is verified —
+in a first-order model (scalar/`Int` coefficients where the arithmetic is the
+content; an abstract biadditive magma over an abelian group for the associator):
+
+| this proof | Lean name |
+|---|---|
+| Lemma 3 (Axis 2 support) | `cov_zero_of_disjoint` (core `cov_pointwise_zero`) |
+| Lemma 4 (Axis 1 order) | `parenthesizations_agree_of_associator_zero` (via `sub_eq_zero_imp`) |
+| Theorem §4.1, sum node (Axis 2) | `antigarbling_sound_sum` (via `varSum_expand`) |
+| Theorem §4.1, product node (Axis 1) | `antigarbling_sound_product`; and §3(B) sensitivity identity `fo_product_sensitivity_diff` (∂ diff = sum of 3 associators) |
+| §4.1 congruence shape | `var_eq_of_sensitivity_eq` |
+| Prop 2 (§4.2 dimension count) | `sens_eadd`/`sens_emul` (Leibniz-compositional), `sens_eadd_assoc`/`sens_eadd_comm` (sum-reassoc invariant), `sens_emul_reassoc` (product-reassoc = associators) |
+| §5 non-separability | `antigarbling_interaction` (error = dSup+dOrd+2·interaction), `antigarbling_not_additive` (concrete witness the additive form fails) |
+
+Mathlib-free throughout: the additive group (`AddGrp`), inverse/negation lemmas,
+and polynomial expansions are self-contained, with `omega` over abstracted products
+standing in for `ring`. The `.md` companions carry the general-algebra (octonion,
+real-coefficient) framing that the structural Lean model instantiates.
