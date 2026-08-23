@@ -135,15 +135,21 @@ so attached worktrees see the same active claims.
 Before the first write in an implementation lane:
 
 1. Run `bin/sounio-coord brief` (also shown by `./sounio-whereami --quick`).
-2. Claim the exact write set:
-   `bin/sounio-coord claim --agent <id> --lane <id> --intent "<goal>" --files <paths...>`.
+2. Claim the exact write set and any semantic resources whose meaning must stay
+   single-writer:
+   `bin/sounio-coord claim --agent <id> --lane <id> --intent "<goal>" --resources concept:<id> diagnostic:<id> --files <paths...>`.
 3. Keep long-running work alive with
    `bin/sounio-coord heartbeat --agent <id> --lane <id>`.
-4. Release on completion, abort, or handoff with
+4. Release on completion or abort with
    `bin/sounio-coord release --agent <id> --lane <id> --reason "<result>"`.
 
-Put `--files` last and quote glob scopes such as
-`'self-hosted/compiler/**'`. The command refuses overlapping active claims.
+Typed resources use `concept:`, `diagnostic:`, `gate:`, or `api:`. Exact names
+conflict exactly; a trailing `/**` claims a semantic subtree. Resource ownership
+is independent of file ownership, so two lanes touching different files still
+conflict when they claim the same diagnostic or semantic boundary. Put
+`--resources` before `--files`, put `--files` last, and quote glob scopes such as
+`'concept:epistemic/**'` or `'self-hosted/compiler/**'`. The command refuses
+overlapping active claims.
 Claims expire after four hours by default; expiry makes abandoned work visible,
 but does not authorize overwriting dirty files. Git status and executable repo
 truth still outrank coordination metadata. Treat this as runtime presence, not a
@@ -170,6 +176,16 @@ Agents can exchange live messages across worktrees:
   `bin/sounio-coord inbox --agent <id> --lane <id>`.
 - After acting on a message, acknowledge it with
   `bin/sounio-coord ack --agent <id> --lane <id> --message <message-id>`.
+- For an accepted transfer, use the transactional proof-carrying handoff:
+  `bin/sounio-coord handoff --agent <id> --lane <id> --to-agent <id> --to-lane <id> --message "<result>" --commit HEAD --gate <gate>=PASS --evidence <path>`.
+
+The handoff command requires the current `HEAD`, at least one passing gate, at
+least one existing evidence path, and clean claimed files. It publishes the
+commit, gates, evidence, file snapshot, and semantic-resource snapshot before
+removing the claim. Any refused precondition leaves the claim active and
+publishes no handoff. Use `--reply-to <request-id>` to close a directed request.
+The compatibility form `send --kind handoff` is only an unstructured message;
+it does not release ownership or establish an evidence-bearing transfer.
 
 Prompt and post-tool hooks inject unread messages into the agent's active turn.
 A rejected structured write also sends a request to the current owner

@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.1
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.2
 
 usage() {
   cat <<'USAGE'
@@ -18,17 +18,23 @@ Commands:
   brief                          show the startup-sized coordination summary
   status                         show claims, conflicts, and relevant worktrees
   status --all-worktrees         include a full (slower) worktree scan
-  check                          status, then fail when active file conflicts exist
-  claim   --agent ID --lane ID --intent TEXT --files PATH [PATH ...]
-                                 reserve a file set for one lane
-  scope   --agent ID --lane ID --intent TEXT [--files PATH ...]
+  check                          status, then fail when active ownership conflicts exist
+  claim   --agent ID --lane ID --intent TEXT
+          [--resources RESOURCE ...] [--files PATH ...]
+                                 reserve file and semantic resource sets for one lane
+  scope   --agent ID --lane ID --intent TEXT
+          [--resources RESOURCE ...] [--files PATH ...]
                                  create or extend a session-aware lease
   heartbeat --agent ID --lane ID
                                  refresh an existing claim
   release --agent ID --lane ID --reason TEXT
                                  release a claim and record the handoff event
-  authorize --agent ID [--lane ID] --files PATH [PATH ...]
-                                 verify that an active claim in this worktree covers the files
+  authorize --agent ID [--lane ID] [--resources RESOURCE ...] [--files PATH ...]
+                                 verify that a local active claim covers the requested ownership
+  handoff --agent ID --lane ID --to-agent ID --to-lane ID --message TEXT
+          --commit SHA --gate NAME=PASS [--gate NAME=PASS ...]
+          --evidence PATH [--evidence PATH ...] [--reply-to MESSAGE_ID]
+                                 publish proof metadata, then release the owned claim
   send    --agent ID --lane ID [--to-agent ID] [--to-lane ID]
           [--thread ID] [--reply-to MESSAGE_ID] --kind KIND --message TEXT
                                  send a message to another lane or broadcast
@@ -55,10 +61,14 @@ Environment:
 Examples:
   bin/sounio-coord status
   bin/sounio-coord claim --agent codex-1 --lane parser-fix \
-    --intent "isolate parser regression" --files 'self-hosted/parser/**' tests/compile-fail/foo.sio
+    --intent "isolate parser regression" --resources concept:parser diagnostic:E231 \
+    --files 'self-hosted/parser/**' tests/compile-fail/foo.sio
   bin/sounio-coord scope --agent codex --lane session-abc123 \
     --intent "active Codex session" --files self-hosted/parser/ast.sio
   bin/sounio-coord heartbeat --agent codex-1 --lane parser-fix
+  bin/sounio-coord handoff --agent codex-1 --lane parser-fix \
+    --to-agent claude --to-lane integration --message "parser fix ready" \
+    --commit HEAD --gate parser-selftest=PASS --evidence artifacts/parser-gate.txt
   bin/sounio-coord send --agent codex-1 --lane parser-fix \
     --to-agent claude --kind request --message "Can you review the parser boundary?"
   bin/sounio-coord inbox --agent claude --lane integration
@@ -189,6 +199,96 @@ join_files() {
   printf '%s' "$output"
 }
 
+join_resources() {
+  local output='' resource
+  for resource in "${C_RESOURCES[@]}"; do
+    if [[ -n "$output" ]]; then
+      output="$output,$resource"
+    else
+      output="$resource"
+    fi
+  done
+  printf '%s' "$output"
+}
+
+join_values() {
+  local output='' value
+  for value in "$@"; do
+    if [[ -n "$output" ]]; then
+      output="$output,$value"
+    else
+      output="$value"
+    fi
+  done
+  printf '%s' "$output"
+}
+
+normalize_resource() {
+  local resource="$1" kind value
+  validate_value resource "$resource"
+  [[ "$resource" == *:* ]] || \
+    die "resource must use KIND:VALUE syntax: $resource"
+  kind="${resource%%:*}"
+  value="${resource#*:}"
+  [[ "$kind" =~ ^(concept|diagnostic|gate|api)$ ]] || \
+    die "resource kind must be concept, diagnostic, gate, or api: $resource"
+  [[ -n "$value" && "$value" =~ ^[A-Za-z0-9._:/@+-]+(/\*\*)?$ ]] || \
+    die "resource value contains unsupported characters: $resource"
+  case "$value" in
+    *\* ) [[ "$value" == */\*\* ]] || die "resource wildcard is only supported as a trailing /**: $resource" ;;
+  esac
+  printf '%s:%s' "$kind" "$value"
+}
+
+resource_kind() {
+  printf '%s' "${1%%:*}"
+}
+
+resource_value() {
+  printf '%s' "${1#*:}"
+}
+
+resource_is_wildcard() {
+  [[ "$(resource_value "$1")" == */\*\* ]]
+}
+
+resource_scope() {
+  local value
+  value="$(resource_value "$1")"
+  case "$value" in
+    */\*\*) value="${value%/\*\*}" ;;
+  esac
+  while [[ "$value" == */ ]]; do value="${value%/}"; done
+  printf '%s' "$value"
+}
+
+resources_overlap() {
+  local left="$1" right="$2" left_scope right_scope
+  [[ "$(resource_kind "$left")" == "$(resource_kind "$right")" ]] || return 1
+  [[ "$left" == "$right" ]] && return 0
+  left_scope="$(resource_scope "$left")"
+  right_scope="$(resource_scope "$right")"
+  if resource_is_wildcard "$left" && \
+    [[ "$right_scope" == "$left_scope" || "$right_scope" == "$left_scope"/* ]]; then
+    return 0
+  fi
+  if resource_is_wildcard "$right" && \
+    [[ "$left_scope" == "$right_scope" || "$left_scope" == "$right_scope"/* ]]; then
+    return 0
+  fi
+  return 1
+}
+
+resource_covers() {
+  local claimed="$1" requested="$2" claimed_scope requested_scope
+  [[ "$(resource_kind "$claimed")" == "$(resource_kind "$requested")" ]] || return 1
+  [[ "$claimed" == "$requested" ]] && return 0
+  resource_is_wildcard "$claimed" || return 1
+  claimed_scope="$(resource_scope "$claimed")"
+  requested_scope="$(resource_scope "$requested")"
+  [[ "$requested_scope" == "$claimed_scope" || "$requested_scope" == "$claimed_scope"/* ]]
+}
+
 load_claim() {
   local claim_file="$1" line
   C_ID=''
@@ -203,6 +303,7 @@ load_claim() {
   C_TTL=0
   C_INTENT=''
   C_FILES=()
+  C_RESOURCES=()
 
   # Unreadable claim file (e.g. written by a root session): treat as empty so
   # callers skip it via claim_expired instead of dying on the read.
@@ -222,6 +323,7 @@ load_claim() {
       ttl_seconds=*) C_TTL="${line#ttl_seconds=}" ;;
       intent=*) C_INTENT="${line#intent=}" ;;
       file=*) C_FILES+=("${line#file=}") ;;
+      resource=*) C_RESOURCES+=("${line#resource=}") ;;
     esac
   done < "$claim_file"
 }
@@ -264,6 +366,23 @@ path_covers() {
   return 1
 }
 
+claim_files_clean() {
+  local file scope status
+  for file in "${C_FILES[@]}"; do
+    case "$file" in
+      "$WORKTREE"/*) scope="${file#"$WORKTREE"/}" ;;
+      /*) continue ;;
+      *) scope="$file" ;;
+    esac
+    scope="$(path_scope "$scope")"
+    [[ -n "$scope" ]] || return 1
+    status="$(git -C "$WORKTREE" status --porcelain=v1 --untracked-files=all -- "$scope")" || \
+      return 1
+    [[ -z "$status" ]] || return 1
+  done
+  return 0
+}
+
 write_claim() {
   local claim_file="$1" tmp_file file
   tmp_file="$(mktemp "$CLAIMS_DIR/.claim-write.XXXXXX")"
@@ -282,6 +401,9 @@ write_claim() {
     for file in "${C_FILES[@]}"; do
       [[ -n "$file" ]] && printf 'file=%s\n' "$file"
     done
+    for resource in "${C_RESOURCES[@]}"; do
+      [[ -n "$resource" ]] && printf 'resource=%s\n' "$resource"
+    done
   } > "$tmp_file"
   mv "$tmp_file" "$claim_file"
 }
@@ -297,9 +419,9 @@ array_contains() {
 
 append_event() {
   local event="$1" reason="${2:-}"
-  printf 'utc=%s event=%s agent=%s lane=%s worktree=%s branch=%s sha=%s files=%s intent=%s reason=%s\n' \
+  printf 'utc=%s event=%s agent=%s lane=%s worktree=%s branch=%s sha=%s files=%s resources=%s intent=%s reason=%s\n' \
     "$NOW_UTC" "$event" "$C_AGENT" "$C_LANE" "$C_WORKTREE" "$C_BRANCH" \
-    "$C_SHA" "$(join_files)" "$C_INTENT" "$reason" >> "$EVENT_LOG"
+    "$C_SHA" "$(join_files)" "$(join_resources)" "$C_INTENT" "$reason" >> "$EVENT_LOG"
 }
 
 load_message() {
@@ -318,6 +440,11 @@ load_message() {
   M_TEXT=''
   M_THREAD_ID=''
   M_REPLY_TO=''
+  M_COMMIT_SHA=''
+  M_GATES=()
+  M_EVIDENCE=()
+  M_CLAIM_FILES=()
+  M_CLAIM_RESOURCES=()
 
   while IFS= read -r line || [[ -n "$line" ]]; do
     case "$line" in
@@ -335,6 +462,11 @@ load_message() {
       text=*) M_TEXT="${line#text=}" ;;
       thread_id=*) M_THREAD_ID="${line#thread_id=}" ;;
       reply_to=*) M_REPLY_TO="${line#reply_to=}" ;;
+      commit_sha=*) M_COMMIT_SHA="${line#commit_sha=}" ;;
+      gate=*) M_GATES+=("${line#gate=}") ;;
+      evidence=*) M_EVIDENCE+=("${line#evidence=}") ;;
+      claim_file=*) M_CLAIM_FILES+=("${line#claim_file=}") ;;
+      claim_resource=*) M_CLAIM_RESOURCES+=("${line#claim_resource=}") ;;
     esac
   done < "$message_file"
   [[ -n "$M_THREAD_ID" ]] || M_THREAD_ID="$M_ID"
@@ -355,9 +487,16 @@ message_injection_path() {
 }
 
 print_message_line() {
-  printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s thread=%s reply_to=%s\n' \
+  printf 'MESSAGE id=%s utc=%s from_agent=%s from_lane=%s kind=%s text=%s thread=%s reply_to=%s' \
     "$M_ID" "$M_CREATED_UTC" "$M_FROM_AGENT" "$M_FROM_LANE" "$M_KIND" "$M_TEXT" \
     "$M_THREAD_ID" "${M_REPLY_TO:--}"
+  if [[ "$M_KIND" == handoff && -n "$M_COMMIT_SHA" ]]; then
+    printf ' commit=%s gates=%s evidence=%s files=%s resources=%s' \
+      "$M_COMMIT_SHA" "$(join_values "${M_GATES[@]}")" \
+      "$(join_values "${M_EVIDENCE[@]}")" "$(join_values "${M_CLAIM_FILES[@]}")" \
+      "$(join_values "${M_CLAIM_RESOURCES[@]}")"
+  fi
+  printf '\n'
 }
 
 claim_paths=()
@@ -387,8 +526,9 @@ worktree_in_list() {
 
 claim_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' intent='' ttl="${SOUNIO_COORD_TTL_SECONDS:-14400}"
-  local file claim_file existing old_file new_file conflict=0
-  local files=()
+  local file resource claim_file existing old_file new_file old_resource new_resource
+  local file_conflict=0 resource_conflict=0
+  local files=() resources=()
 
   while (($#)); do
     case "$1" in
@@ -396,6 +536,15 @@ claim_command() {
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --intent) require_arg "$1" "$2"; intent="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --resources)
+        shift
+        (($#)) || die "--resources requires at least one resource"
+        while (($#)) && [[ "$1" != --files ]]; do
+          [[ "$1" != --* ]] || die "put command options before --resources and --files"
+          resources+=("$(normalize_resource "$1")")
+          shift
+        done
+        ;;
       --files)
         shift
         while (($#)); do files+=("$(normalize_path "$1")"); shift; done
@@ -408,12 +557,14 @@ claim_command() {
   [[ -n "$agent" ]] || die "claim requires --agent or SOUNIO_AGENT_ID"
   [[ -n "$lane" ]] || die "claim requires --lane"
   [[ -n "$intent" ]] || die "claim requires --intent"
-  ((${#files[@]} > 0)) || die "claim requires at least one path after --files"
+  ((${#files[@]} + ${#resources[@]} > 0)) || \
+    die "claim requires at least one resource or file"
   [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
   validate_value agent "$agent"
   validate_value lane "$lane"
   validate_value intent "$intent"
   for file in "${files[@]}"; do validate_value file "$file"; done
+  for resource in "${resources[@]}"; do validate_value resource "$resource"; done
 
   C_ID="$(claim_id_for "$agent" "$lane")"
   claim_file="$CLAIMS_DIR/$C_ID.claim"
@@ -431,12 +582,22 @@ claim_command() {
         if paths_overlap "$new_file" "$old_file"; then
           printf 'CONFLICT existing_claim=%s agent=%s lane=%s path=%s requested_by=%s requested_lane=%s\n' \
             "$C_ID" "$C_AGENT" "$C_LANE" "$old_file" "$agent" "$lane" >&2
-          conflict=1
+          file_conflict=1
+        fi
+      done
+    done
+    for new_resource in "${resources[@]}"; do
+      for old_resource in "${C_RESOURCES[@]}"; do
+        if resources_overlap "$new_resource" "$old_resource"; then
+          printf 'CONFLICT existing_claim=%s agent=%s lane=%s resource=%s requested_resource=%s requested_by=%s requested_lane=%s\n' \
+            "$C_ID" "$C_AGENT" "$C_LANE" "$old_resource" "$new_resource" "$agent" "$lane" >&2
+          resource_conflict=1
         fi
       done
     done
   done
-  ((conflict == 0)) || die "requested file set overlaps an active claim"
+  ((file_conflict == 0)) || die "requested file set overlaps an active claim"
+  ((resource_conflict == 0)) || die "requested semantic resource set overlaps an active claim"
 
   C_AGENT="$agent"
   C_LANE="$lane"
@@ -449,20 +610,24 @@ claim_command() {
   C_TTL="$ttl"
   C_INTENT="$intent"
   C_FILES=("${files[@]}")
+  C_RESOURCES=("${resources[@]}")
   C_ID="$(claim_id_for "$agent" "$lane")"
   write_claim "$claim_file"
   append_event CLAIM
   printf 'CLAIMED claim_id=%s\n' "$C_ID"
   printf 'agent=%s lane=%s worktree=%s branch=%s sha=%s\n' "$agent" "$lane" "$WORKTREE" "$C_BRANCH" "$C_SHA"
   printf 'files=%s\n' "$(join_files)"
+  printf 'resources=%s\n' "$(join_resources)"
   printf 'state_dir=%s\n' "$STATE_DIR"
   printf 'next=bin/sounio-coord heartbeat --agent %s --lane %s\n' "$agent" "$lane"
 }
 
 scope_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' intent='' ttl="${SOUNIO_COORD_TTL_SECONDS:-14400}"
-  local file claim_file existing old_file new_file requested_id created_utc event='SCOPE' conflict=0
+  local file resource claim_file existing old_file new_file old_resource new_resource
+  local requested_id created_utc event='SCOPE' file_conflict=0 resource_conflict=0
   local files=() merged_files=() existing_files=()
+  local resources=() merged_resources=() existing_resources=()
 
   while (($#)); do
     case "$1" in
@@ -470,6 +635,15 @@ scope_command() {
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --intent) require_arg "$1" "$2"; intent="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --resources)
+        shift
+        (($#)) || die "--resources requires at least one resource"
+        while (($#)) && [[ "$1" != --files ]]; do
+          [[ "$1" != --* ]] || die "put command options before --resources and --files"
+          resources+=("$(normalize_resource "$1")")
+          shift
+        done
+        ;;
       --files)
         shift
         while (($#)); do files+=("$(normalize_path "$1")"); shift; done
@@ -487,6 +661,7 @@ scope_command() {
   validate_value lane "$lane"
   validate_value intent "$intent"
   for file in "${files[@]}"; do validate_value file "$file"; done
+  for resource in "${resources[@]}"; do validate_value resource "$resource"; done
 
   requested_id="$(claim_id_for "$agent" "$lane")"
   claim_file="$CLAIMS_DIR/$requested_id.claim"
@@ -504,6 +679,7 @@ scope_command() {
       [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
       [[ "$C_BRANCH" == "$(current_branch)" ]] || die "branch changed from $C_BRANCH; release and scope again"
       existing_files=("${C_FILES[@]}")
+      existing_resources=("${C_RESOURCES[@]}")
       created_utc="${C_CREATED_UTC:-$NOW_UTC}"
     fi
   else
@@ -519,6 +695,14 @@ scope_command() {
     fi
   done
 
+  merged_resources=("${existing_resources[@]}")
+  for resource in "${resources[@]}"; do
+    [[ -n "$resource" ]] || continue
+    if ! array_contains "$resource" "${merged_resources[@]}"; then
+      merged_resources+=("$resource")
+    fi
+  done
+
   refresh_claim_paths
   for existing in "${claim_paths[@]}"; do
     [[ -f "$existing" && "$existing" != "$claim_file" ]] || continue
@@ -531,12 +715,24 @@ scope_command() {
         if paths_overlap "$new_file" "$old_file"; then
           printf 'CONFLICT existing_claim=%s agent=%s lane=%s path=%s requested_by=%s requested_lane=%s\n' \
             "$C_ID" "$C_AGENT" "$C_LANE" "$old_file" "$agent" "$lane" >&2
-          conflict=1
+          file_conflict=1
+        fi
+      done
+    done
+    for new_resource in "${merged_resources[@]}"; do
+      [[ -n "$new_resource" ]] || continue
+      for old_resource in "${C_RESOURCES[@]}"; do
+        [[ -n "$old_resource" ]] || continue
+        if resources_overlap "$new_resource" "$old_resource"; then
+          printf 'CONFLICT existing_claim=%s agent=%s lane=%s resource=%s requested_resource=%s requested_by=%s requested_lane=%s\n' \
+            "$C_ID" "$C_AGENT" "$C_LANE" "$old_resource" "$new_resource" "$agent" "$lane" >&2
+          resource_conflict=1
         fi
       done
     done
   done
-  ((conflict == 0)) || die "requested file set overlaps an active claim"
+  ((file_conflict == 0)) || die "requested file set overlaps an active claim"
+  ((resource_conflict == 0)) || die "requested semantic resource set overlaps an active claim"
 
   C_ID="$requested_id"
   C_AGENT="$agent"
@@ -550,9 +746,11 @@ scope_command() {
   C_TTL="$ttl"
   C_INTENT="$intent"
   C_FILES=("${merged_files[@]}")
+  C_RESOURCES=("${merged_resources[@]}")
   write_claim "$claim_file"
   append_event "$event"
-  printf 'SCOPED claim_id=%s files=%s last_seen=%s\n' "$C_ID" "$(join_files)" "$C_LAST_UTC"
+  printf 'SCOPED claim_id=%s files=%s resources=%s last_seen=%s\n' \
+    "$C_ID" "$(join_files)" "$(join_resources)" "$C_LAST_UTC"
 }
 
 heartbeat_command() {
@@ -612,14 +810,23 @@ release_command() {
 }
 
 authorize_command() {
-  local agent="${SOUNIO_AGENT_ID:-}" lane='' requested claim_file claimed_file covered
-  local conflict=0
-  local files=()
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' requested claim_file claimed_file claimed_resource covered
+  local file_conflict=0 resource_conflict=0
+  local files=() resources=()
 
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --resources)
+        shift
+        (($#)) || die "--resources requires at least one resource"
+        while (($#)) && [[ "$1" != --files ]]; do
+          [[ "$1" != --* ]] || die "put command options before --resources and --files"
+          resources+=("$(normalize_resource "$1")")
+          shift
+        done
+        ;;
       --files)
         shift
         while (($#)); do files+=("$(normalize_path "$1")"); shift; done
@@ -630,10 +837,12 @@ authorize_command() {
   done
 
   [[ -n "$agent" ]] || die "authorize requires --agent or SOUNIO_AGENT_ID"
-  ((${#files[@]} > 0)) || die "authorize requires at least one path after --files"
+  ((${#files[@]} + ${#resources[@]} > 0)) || \
+    die "authorize requires at least one resource or file"
   validate_value agent "$agent"
   validate_value lane "$lane"
   for requested in "${files[@]}"; do validate_value file "$requested"; done
+  for requested in "${resources[@]}"; do validate_value resource "$requested"; done
 
   refresh_claim_paths
   for claim_file in "${claim_paths[@]}"; do
@@ -656,6 +865,17 @@ authorize_command() {
       break
     done
     if ((covered)); then
+      for requested in "${resources[@]}"; do
+        for claimed_resource in "${C_RESOURCES[@]}"; do
+          if resource_covers "$claimed_resource" "$requested"; then
+            continue 2
+          fi
+        done
+        covered=0
+        break
+      done
+    fi
+    if ((covered)); then
       printf 'AUTHORIZED claim_id=%s agent=%s lane=%s worktree=%s branch=%s\n' \
         "$C_ID" "$C_AGENT" "$C_LANE" "$C_WORKTREE" "$C_BRANCH"
       return 0
@@ -671,13 +891,24 @@ authorize_command() {
         if paths_overlap "$requested" "$claimed_file"; then
           printf 'CONFLICT existing_claim=%s agent=%s lane=%s path=%s requested_by=%s requested_lane=%s\n' \
             "$C_ID" "$C_AGENT" "$C_LANE" "$claimed_file" "$agent" "${lane:-any}" >&2
-          conflict=1
+          file_conflict=1
+        fi
+      done
+    done
+    for requested in "${resources[@]}"; do
+      for claimed_resource in "${C_RESOURCES[@]}"; do
+        if resources_overlap "$requested" "$claimed_resource"; then
+          printf 'CONFLICT existing_claim=%s agent=%s lane=%s resource=%s requested_resource=%s requested_by=%s requested_lane=%s\n' \
+            "$C_ID" "$C_AGENT" "$C_LANE" "$claimed_resource" "$requested" "$agent" "${lane:-any}" >&2
+          resource_conflict=1
         fi
       done
     done
   done
-  ((conflict == 0)) || die "requested file set overlaps an active claim but is not authorized"
-  die "no active claim in worktree $WORKTREE covers the requested file set for agent $agent"
+  ((file_conflict == 0)) || die "requested file set overlaps an active claim but is not authorized"
+  ((resource_conflict == 0)) || \
+    die "requested semantic resource set overlaps an active claim but is not authorized"
+  die "no active claim in worktree $WORKTREE covers the requested ownership for agent $agent"
 }
 
 send_command() {
@@ -754,6 +985,130 @@ send_command() {
     "$NOW_UTC" "$message_id" "$agent" "$lane" "$to_agent" "$to_lane" "$kind" >> "$EVENT_LOG"
   printf 'SENT message_id=%s to_agent=%s to_lane=%s kind=%s thread_id=%s reply_to=%s\n' \
     "$message_id" "${to_agent:-*}" "${to_lane:-*}" "$kind" "$thread_id" "${reply_to:--}"
+}
+
+handoff_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane='' message=''
+  local commit='' commit_sha='' head_sha='' reply_to='' thread_id=''
+  local ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
+  local gate evidence evidence_path claim_file reply_file message_id message_file tmp_file
+  local -a gates=() evidence_paths=()
+
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --to-agent) require_arg "$1" "$2"; to_agent="$2"; shift 2 ;;
+      --to-lane) require_arg "$1" "$2"; to_lane="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message="$2"; shift 2 ;;
+      --commit) require_arg "$1" "$2"; commit="$2"; shift 2 ;;
+      --gate) require_arg "$1" "$2"; gates+=("$2"); shift 2 ;;
+      --evidence) require_arg "$1" "$2"; evidence_paths+=("$(normalize_path "$2")"); shift 2 ;;
+      --reply-to) require_arg "$1" "$2"; reply_to="$2"; shift 2 ;;
+      --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown handoff option: $1" ;;
+    esac
+  done
+
+  [[ -n "$agent" ]] || die "handoff requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "handoff requires --lane"
+  [[ -n "$to_agent" ]] || die "handoff requires --to-agent"
+  [[ -n "$to_lane" ]] || die "handoff requires --to-lane"
+  [[ -n "$message" ]] || die "handoff requires --message"
+  [[ -n "$commit" ]] || die "handoff requires --commit"
+  ((${#gates[@]} > 0)) || die "handoff requires at least one --gate NAME=PASS"
+  ((${#evidence_paths[@]} > 0)) || die "handoff requires at least one --evidence PATH"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value to-agent "$to_agent"
+  validate_value to-lane "$to_lane"
+  validate_value message "$message"
+  validate_value reply-to "$reply_to"
+  for gate in "${gates[@]}"; do
+    validate_value gate "$gate"
+    [[ "$gate" =~ ^[A-Za-z0-9._:/+-]+=PASS$ ]] || \
+      die "handoff gates must use NAME=PASS: $gate"
+  done
+  for evidence in "${evidence_paths[@]}"; do
+    validate_value evidence "$evidence"
+    case "$evidence" in
+      /*) evidence_path="$evidence" ;;
+      *) evidence_path="$WORKTREE/$evidence" ;;
+    esac
+    [[ -e "$evidence_path" ]] || die "handoff evidence does not exist: $evidence"
+  done
+
+  commit_sha="$(git -C "$WORKTREE" rev-parse --verify "$commit^{commit}" 2>/dev/null || true)"
+  [[ -n "$commit_sha" ]] || die "handoff commit does not resolve to a commit: $commit"
+  head_sha="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
+  [[ "$commit_sha" == "$head_sha" ]] || \
+    die "handoff commit must equal current HEAD: commit=$commit_sha head=$head_sha"
+
+  claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
+  message_id="msg-${NOW_TICK}-$$-${RANDOM}"
+  message_file="$MESSAGES_DIR/$message_id.message"
+  acquire_state_lock "the proof-carrying handoff"
+  [[ -f "$claim_file" ]] || die "claim not found: $(claim_id_for "$agent" "$lane")"
+  load_claim "$claim_file"
+  claim_expired && die "claim expired before handoff: $C_ID"
+  [[ "$C_AGENT" == "$agent" ]] || die "claim owner mismatch: $C_AGENT"
+  [[ "$C_LANE" == "$lane" ]] || die "claim lane mismatch: $C_LANE"
+  [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+  [[ "$C_BRANCH" == "$(current_branch)" ]] || \
+    die "branch changed from $C_BRANCH; release and scope again"
+  [[ "$commit_sha" == "$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)" ]] || \
+    die "HEAD changed while preparing the handoff; retry with the new commit"
+  claim_files_clean || die "handoff claim files differ from commit $commit_sha"
+
+  if [[ -n "$reply_to" ]]; then
+    reply_file="$MESSAGES_DIR/$(slug "$reply_to").message"
+    [[ -f "$reply_file" ]] || die "reply message not found: $reply_to"
+    load_message "$reply_file"
+    [[ "$M_ID" == "$reply_to" ]] || die "reply message not found: $reply_to"
+    [[ "$M_KIND" == request ]] || die "handoff --reply-to must reference a request"
+    [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$agent" ]] || \
+      die "handoff request is addressed to agent $M_TO_AGENT"
+    [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$lane" ]] || \
+      die "handoff request is addressed to lane $M_TO_LANE"
+    [[ "$M_FROM_AGENT" == "$to_agent" && "$M_FROM_LANE" == "$to_lane" ]] || \
+      die "handoff destination must match the requesting lane"
+    thread_id="$M_THREAD_ID"
+  fi
+  [[ -n "$thread_id" ]] || thread_id="$message_id"
+
+  tmp_file="$(mktemp "$MESSAGES_DIR/.message-write.XXXXXX")"
+  {
+    printf 'message_id=%s\n' "$message_id"
+    printf 'created_utc=%s\n' "$NOW_UTC"
+    printf 'created_epoch=%s\n' "$NOW_EPOCH"
+    printf 'ttl_seconds=%s\n' "$ttl"
+    printf 'from_agent=%s\n' "$agent"
+    printf 'from_lane=%s\n' "$lane"
+    printf 'from_worktree=%s\n' "$WORKTREE"
+    printf 'from_branch=%s\n' "$(current_branch)"
+    printf 'to_agent=%s\n' "$to_agent"
+    printf 'to_lane=%s\n' "$to_lane"
+    printf 'kind=handoff\n'
+    printf 'text=%s\n' "$message"
+    printf 'thread_id=%s\n' "$thread_id"
+    printf 'reply_to=%s\n' "$reply_to"
+    printf 'commit_sha=%s\n' "$commit_sha"
+    for gate in "${gates[@]}"; do printf 'gate=%s\n' "$gate"; done
+    for evidence in "${evidence_paths[@]}"; do printf 'evidence=%s\n' "$evidence"; done
+    for evidence in "${C_FILES[@]}"; do printf 'claim_file=%s\n' "$evidence"; done
+    for evidence in "${C_RESOURCES[@]}"; do printf 'claim_resource=%s\n' "$evidence"; done
+  } > "$tmp_file"
+  mv "$tmp_file" "$message_file"
+
+  C_BRANCH="$(current_branch)"
+  C_SHA="${commit_sha:0:12}"
+  append_event HANDOFF "message_id=$message_id commit=$commit_sha"
+  unlink "$claim_file"
+  printf 'HANDED_OFF claim_id=%s message_id=%s commit=%s to_agent=%s to_lane=%s gates=%s evidence=%s\n' \
+    "$C_ID" "$message_id" "$commit_sha" "$to_agent" "$to_lane" \
+    "$(join_values "${gates[@]}")" "$(join_values "${evidence_paths[@]}")"
 }
 
 inbox_command() {
@@ -1104,10 +1459,11 @@ prune_command() {
 }
 
 status_command() {
-  local claim_file existing other_file wt branch dirty head marker context_branch file local_conflict
+  local claim_file existing other_file wt branch dirty head marker context_branch file resource local_conflict
   local active=0 stale=0 conflicts=0 total_wt=0 dirty_wt=0 claimed_wt=0 shown_wt=0 relevant_wt=0 max_rows
   local brief=0 inspect_all=0 worktree_scan='current-and-claimed'
   local -a worktrees=() inspect_worktrees=() first_files=() second_files=()
+  local -a first_resources=() second_resources=()
   max_rows="${SOUNIO_COORD_MAX_WORKTREE_ROWS:-40}"
 
   while (($#)); do
@@ -1162,12 +1518,14 @@ status_command() {
     load_claim "$claim_file"
     if claim_expired; then
       stale=$((stale + 1))
-      printf 'STALE claim_id=%s agent=%s lane=%s last_seen=%s worktree=%s files=%s\n' \
-        "$C_ID" "$C_AGENT" "$C_LANE" "$C_LAST_UTC" "$C_WORKTREE" "$(join_files)"
+      printf 'STALE claim_id=%s agent=%s lane=%s last_seen=%s worktree=%s files=%s resources=%s\n' \
+        "$C_ID" "$C_AGENT" "$C_LANE" "$C_LAST_UTC" "$C_WORKTREE" \
+        "$(join_files)" "$(join_resources)"
     else
       active=$((active + 1))
-      printf 'ACTIVE claim_id=%s agent=%s lane=%s last_seen=%s branch=%s sha=%s worktree=%s files=%s\n' \
-        "$C_ID" "$C_AGENT" "$C_LANE" "$C_LAST_UTC" "$C_BRANCH" "$C_SHA" "$C_WORKTREE" "$(join_files)"
+      printf 'ACTIVE claim_id=%s agent=%s lane=%s last_seen=%s branch=%s sha=%s worktree=%s files=%s resources=%s\n' \
+        "$C_ID" "$C_AGENT" "$C_LANE" "$C_LAST_UTC" "$C_BRANCH" "$C_SHA" \
+        "$C_WORKTREE" "$(join_files)" "$(join_resources)"
     fi
   done
   ((active + stale > 0)) || printf 'NONE\n'
@@ -1182,12 +1540,19 @@ status_command() {
       load_claim "$other_file"
       claim_expired && continue
       second_files=("${C_FILES[@]}")
+      second_resources=("${C_RESOURCES[@]}")
       load_claim "$existing"
       first_files=("${C_FILES[@]}")
+      first_resources=("${C_RESOURCES[@]}")
       local_conflict=0
       for file in "${first_files[@]}"; do
         for wt in "${second_files[@]}"; do
           if paths_overlap "$file" "$wt"; then local_conflict=1; fi
+        done
+      done
+      for resource in "${first_resources[@]}"; do
+        for wt in "${second_resources[@]}"; do
+          if resources_overlap "$resource" "$wt"; then local_conflict=1; fi
         done
       done
       if ((local_conflict)); then
@@ -1289,6 +1654,7 @@ case "$command" in
   heartbeat) heartbeat_command "$@" ;;
   release) release_command "$@" ;;
   authorize) authorize_command "$@" ;;
+  handoff) handoff_command "$@" ;;
   send) send_command "$@" ;;
   inbox) inbox_command "$@" ;;
   injected) injected_command "$@" ;;
@@ -1300,5 +1666,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, send, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac
