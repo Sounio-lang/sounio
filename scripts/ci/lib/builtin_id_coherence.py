@@ -17,6 +17,20 @@ CONSUMER = re.compile(
 # The ffi_* range. Below this are main's own builtins, which this gate does not
 # police -- it exists for the parallel range added alongside them.
 FFI_ID_FLOOR = 39
+# The FOURTH table. native_v2_builtin_returns_float maps an id to whether the
+# builtin returns f64, and a missing row there is not cosmetic: without it the
+# call site omits IR_FLOAT_REG_MARKER_FLAG, the native core marks the result
+# INT, and downstream f64 arithmetic runs cvtsi2sd on an IEEE bit pattern. The
+# program runs and computes nonsense.
+#
+# This checker did not parse it until 2026-08-23, so the gate's own header
+# claimed four tables while it policed three -- found by the control it exists
+# to run: deleting the returns_float row for ffi_pow left the gate green.
+RETURNS_FLOAT_ROW = re.compile(r"if builtin_id == (\d+) \{ return true \}")
+# Which ffi_* return f64. The integer-returning ones must NOT appear in
+# returns_float, so this is a two-sided check: a missing row and a spurious one
+# are both defects.
+FFI_RETURNS_F64 = {"ffi_sqrt", "ffi_floor", "ffi_ceil", "ffi_pow", "ffi_tgamma"}
 
 
 # native_v2_builtin_id_for_name_ref is a THIRD producer table in the same file.
@@ -66,9 +80,10 @@ def check_dead_table_stays_dead(root: str) -> int:
 
 
 def main(path: str) -> int:
+    text = open(path).read()
     producers = collections.defaultdict(list)
     consumers = collections.defaultdict(list)
-    for line in open(path):
+    for line in text.split("\n"):
         m = PRODUCER.search(line)
         if m:
             producers[m.group(1)].append(int(m.group(2)))
@@ -91,6 +106,22 @@ def main(path: str) -> int:
         if not ok:
             bad += 1
         print(f"  {name:14s} producers={count}x{ids} emitter={emitted} {'ok' if ok else 'DIVERGES'}")
+
+    floats = {int(m) for m in RETURNS_FLOAT_ROW.findall(text)}
+    for name in sorted(producers):
+        ids = set(producers[name])
+        if len(ids) != 1:
+            continue
+        the_id = ids.pop()
+        wants_float = name in FFI_RETURNS_F64
+        declared = the_id in floats
+        if wants_float and not declared:
+            print(f"  {name} returns f64 but has no returns_float row for id {the_id}")
+            print("    the call site would omit the float marker and the result would be read as INT")
+            problems += 1
+        if declared and not wants_float:
+            print(f"  {name} has a returns_float row for id {the_id} but does not return f64")
+            problems += 1
 
     every = [i for v in consumers.values() for i in v]
     dupes = sorted({i for i in set(every) if every.count(i) > 1})
