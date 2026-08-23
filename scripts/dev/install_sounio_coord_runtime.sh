@@ -45,6 +45,10 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-agentd-runtime" ]] || \
       die "installed runtime declares agentd transport but omits its implementation: $runtime_id"
   fi
+  if grep -q '^capability=fleet-launcher-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-fleet-agent-runtime" ]] || \
+      die "installed runtime declares the fleet launcher but omits its implementation: $runtime_id"
+  fi
   [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
     die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
   link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
@@ -112,10 +116,12 @@ runtime_source="$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
 hook_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agent_hook_runtime.py"
 causal_source="$SOURCE_ROOT/scripts/dev/sounio_coord_causal_runtime.py"
 agentd_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agentd.py"
+fleet_source="$SOURCE_ROOT/scripts/dev/sounio_coord_fleet.py"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
 [[ -x "$agentd_source" ]] || die "agent supervisor source missing or not executable: $agentd_source"
+[[ -x "$fleet_source" ]] || die "fleet launcher source missing or not executable: $fleet_source"
 
 version_output="$(cd "$WORKTREE" && "$runtime_source" runtime-version)"
 protocol="$(sed -n 's/^protocol_version=//p' <<< "$version_output" | head -1)"
@@ -128,8 +134,13 @@ agentd_version_output="$($agentd_source runtime-version)"
 agentd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$agentd_version_output" | head -1)"
 [[ "$agentd_protocol" == 1 ]] || die "agent supervisor protocol must be 1"
 
+fleet_version_output="$($fleet_source runtime-version)"
+fleet_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleet_version_output" | head -1)"
+[[ "$fleet_protocol" == 1 ]] || die "fleet launcher protocol must be 1"
+
 bundle_sha="$(
-  sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" | \
+  sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
+    "$fleet_source" | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
@@ -151,17 +162,20 @@ else
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
+  install -m 0755 "$fleet_source" "$stage/bin/sounio-fleet-agent-runtime"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   {
     printf 'runtime_id=%s\n' "$runtime_id"
     printf 'protocol_version=%s\n' "$protocol"
     printf 'agentd_protocol_version=%s\n' "$agentd_protocol"
+    printf 'fleet_protocol_version=%s\n' "$fleet_protocol"
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
     printf 'capability=causal-experiment-receipts-v1\n'
     printf 'capability=crash-recovery-v1\n'
     printf 'capability=agentd-transport-v1\n'
+    printf 'capability=fleet-launcher-v1\n'
     printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$stage/manifest"
   mv "$stage" "$version_dir"
