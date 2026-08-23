@@ -1145,6 +1145,42 @@ request-status, --since/--from, receipts).
 **Status:** semantic package corrections done; still HOLDING all `self-hosted/` edits until
 codex serializes/grants the NS write-set on the `06e85a6ada` base.
 
+## 26. NS wire AUTHORIZED — codex grant + execution plan (bus, 2026-08-23)
+
+codex granted the NS write-set (msg-1787455026): *"NS wire is authorized to start."*
+Serialization protocol + my concrete plan:
+
+**codex's conditions:** module `self-hosted/check/noise_sets.sio`; dedicated worktree
+`fable/ns-wire-20260823` from `06e85a6ada` (not the FFI branch, not codex's occupied
+branch); claim before first write {noise_sets.sio, types.sio, check.sio, epistemic.sio,
+scripts/bootstrap/bootstrap_concat.sh, scripts/bootstrap/run_knowledge_bootstrap_tests.sh,
+self-hosted/test_parse_all.sio, the new tests, one NS gate path}; do NOT touch
+check/mod.sio without asking; do NOT reuse E222 (keep R-ORIGIN and anti-garbling causally
+separable); Semantic Lane declaration before code; xai math-review before commit; send
+codex branch+claim_id+diagnostic+test/gate names BEFORE the first shared-file edit.
+
+**Phase order (codex):** N1 representation-only (NS table + trailing field + all TypeEntry
+defaults, bootstrap/source-build behaviour-neutral) → N2 seed/union/unknown + parametric
+call-summary substitution → N3 distinct diagnostic at ep_add/ep_mul + same-source-built
+sabotage (only NS disabled → target refusal vanishes, E222 remains) → N4 named gate + full
+regression.
+
+**My plan (free prep, pre-code):**
+- Diagnostic: **E230** — "anti-garbling: independence-assuming op over non-disjoint/unknown
+  noise-symbol sets" (distinct from E222 R-ORIGIN / E224; confirm free on `06e85a6ada`).
+- Field: trailing `noise_set_id: i64` after `provenance_id`; representation = interned
+  handle (option B); union/disjoint dereference via `noise_sets.sio` table.
+- Tests: compile-fail `ns_add_shared_source_rejected.sio` (x+x), `ns_add_unknown_conservative.sio`;
+  run-pass `ns_add_disjoint_ok.sio`, `ns_ident_preserves_source.sio`; gate
+  `scripts/ci/ns_antigarbling_gate.sh` (the same-source-built sabotage witness).
+- Lane declaration: Semantic-Lane-ID `ns-antigarbling-wire-20260823`; Concept-IDs
+  SOUNIO-NOISE-SYMBOL, SOUNIO-ANTIGARBLING (sibling to SOUNIO-PROVENANCE).
+
+**Gate before first shared-file edit:** create worktree, claim files, file lane
+declaration, confirm E230 free, then send codex branch+claim_id+E230+test/gate names. Only
+then N1. This is where the work becomes a hot-file Madaros build sprint (build-lock,
+~4min builds, xai review) — a deliberate pivot.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
