@@ -1,0 +1,159 @@
+// docs/research/sounio/ns_dataflow.sio
+//
+// NS (noise-symbol) engine, step 2: the §12 COMPILE-TIME DATAFLOW ANALYSIS,
+// realised in Sounio. Where noise_symbols.sio is a runtime CARRIER (an affine
+// value + sound add), this is the ANALYSIS: a monotone fixpoint over a value
+// graph that propagates source-SETS and flags any add whose inputs share a
+// source — the anti-garbling detector (= the DISJ check at analysis level).
+//
+// Modelled on self-hosted/analysis/escape.sio's esc_propagate loop, but the
+// lattice is set-of-sources (a bitmask) instead of a boolean, and the transfer
+// is UNION over inputs instead of reachability. Same graph, same fixpoint engine,
+// different lattice — exactly the §12 "one dataflow, three lattices" claim.
+//
+// HONEST BOUNDARY: this is a standalone compile-time-style analysis over an
+// EXPLICIT graph, NOT yet wired into Madaros's checker at the real ep_add site.
+// Wiring it needs a noise-symbol field in TypeEntry (overlaps codex-1's
+// provenance work) plus interprocedural summaries. Touches neither stdlib/ nor
+// self-hosted/.
+
+// Node kinds.
+// MEASURE = 0  (a fresh measurement; seeds a singleton noise symbol)
+// COPY    = 1  (data flow: inherits its input's source-set)
+// ADD     = 2  (combines: union of its two inputs' source-sets)
+
+struct NSGraph {
+    kind:   [i64; 16],
+    in0:    [i64; 16],
+    in1:    [i64; 16],
+    srcset: [i64; 16],   // bitmask: bit s set => source symbol s flows into this node
+    count:  i64
+}
+
+fn nsg_new() -> NSGraph {
+    NSGraph { kind: [0; 16], in0: [0; 16], in1: [0; 16], srcset: [0; 16], count: 0 }
+}
+
+// Bit s as an i64 mask (shift amount must be u8 in Sounio).
+fn bit(s: i64) -> i64 {
+    ((1 as i64) << (s as u8)) as i64
+}
+
+// A fresh measurement node: seeds a singleton source symbol = its own index.
+fn nsg_measure(g: &! NSGraph) -> i64 with Mut, Panic, Div {
+    let id = g.count
+    g.kind[id as usize] = 0
+    g.in0[id as usize] = 0 - 1
+    g.in1[id as usize] = 0 - 1
+    g.srcset[id as usize] = bit(id)
+    g.count = id + 1
+    id
+}
+
+// A copy node (single input); source-set filled by propagation.
+fn nsg_copy(g: &! NSGraph, a: i64) -> i64 with Mut, Panic, Div {
+    let id = g.count
+    g.kind[id as usize] = 1
+    g.in0[id as usize] = a
+    g.in1[id as usize] = 0 - 1
+    g.srcset[id as usize] = 0
+    g.count = id + 1
+    id
+}
+
+// An add node (two inputs); source-set filled by propagation (union).
+fn nsg_add(g: &! NSGraph, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    let id = g.count
+    g.kind[id as usize] = 2
+    g.in0[id as usize] = a
+    g.in1[id as usize] = b
+    g.srcset[id as usize] = 0
+    g.count = id + 1
+    id
+}
+
+// One monotone propagation pass. Returns the number of source-sets that grew.
+fn nsg_propagate_step(g: &! NSGraph) -> i64 with Mut, Panic, Div {
+    var changed: i64 = 0
+    var i: i64 = 0
+    while i < g.count {
+        let k = g.kind[i as usize]
+        var newset = g.srcset[i as usize]
+        if k == 1 {
+            let a = g.in0[i as usize]
+            newset = g.srcset[a as usize]
+        }
+        if k == 2 {
+            let a = g.in0[i as usize]
+            let b = g.in1[i as usize]
+            newset = g.srcset[a as usize] | g.srcset[b as usize]
+        }
+        if newset != g.srcset[i as usize] {
+            g.srcset[i as usize] = newset
+            changed = changed + 1
+        }
+        i = i + 1
+    }
+    changed
+}
+
+// Iterate the monotone transfer to a fixpoint (bounded by node count).
+fn nsg_propagate(g: &! NSGraph) with Mut, Panic, Div {
+    var going = true
+    var iters: i64 = 0
+    while going {
+        let c = nsg_propagate_step(g)
+        if c == 0 {
+            going = false
+        }
+        iters = iters + 1
+        if iters > 64 {
+            going = false
+        }
+    }
+}
+
+// The anti-garbling detector: an ADD whose two inputs' source-sets intersect
+// (a shared noise symbol) — the naive independent add would understate variance.
+fn add_is_anti_garbling(g: &NSGraph, node: i64) -> bool with Mut, Panic, Div {
+    let k = g.kind[node as usize]
+    if k == 2 {
+        let a = g.in0[node as usize]
+        let b = g.in1[node as usize]
+        let overlap = g.srcset[a as usize] & g.srcset[b as usize]
+        overlap != 0
+    } else {
+        false
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var g = nsg_new()
+
+    // x, y: two independent measurements (fresh source symbols).
+    let x = nsg_measure(&! g)
+    let y = nsg_measure(&! g)
+
+    // s1 = x + x  (SHARED source -> anti-garbling)
+    let s1 = nsg_add(&! g, x, x)
+    // s2 = x + y  (DISJOINT sources -> clean)
+    let s2 = nsg_add(&! g, x, y)
+
+    // Run the dataflow to a fixpoint.
+    nsg_propagate(&! g)
+
+    print("NS dataflow analysis (source-set fixpoint over the value graph)\n")
+    print("s1 = ADD(x, x): ")
+    if add_is_anti_garbling(&g, s1) {
+        print("FLAGGED anti-garbling (inputs share a source)\n")
+    } else {
+        print("clean\n")
+    }
+    print("s2 = ADD(x, y): ")
+    if add_is_anti_garbling(&g, s2) {
+        print("FLAGGED anti-garbling\n")
+    } else {
+        print("clean (disjoint sources)\n")
+    }
+    return 0
+}

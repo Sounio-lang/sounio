@@ -912,6 +912,50 @@ an octonion-certified grading; the one open modelling step is the per-triple cha
 derivation, and the wired compiler NS (interprocedural summaries) remains the compiler
 task.
 
+## 20. Per-triple channel + the NS analysis engine (both attacked, both verified)
+
+**Per-triple channel — `docs/research/lean/SounioTripleChannel.lean`.** Discharges the
+last §19 caveat: the experiment is now derived from the ACTUAL octonion products, not
+the ‖α‖² class. Re-verified here: `EXIT=0`, **zero sorry**.
+- Construction: each parenthesisation's product `(eᵢ·eⱼ)·eₖ` / `eᵢ·(eⱼ·eₖ)` (certified
+  table) → its sign maps `+1↦Eleft`, `−1↦Eright`. Non-associative ⟹ `assocNormSq=4`
+  forces same index / opposite sign ⟹ the mirror incomparable pair; associative ⟹
+  equal products ⟹ same experiment.
+- `garblingEquiv_iff_eq`, `lemma_i_channel` — **kernel-checked** (`propext`/`Quot.sound`,
+  no native_decide): reassociation of the product-derived experiments is a
+  Blackwell-equivalence IFF the two octonion products give the same experiment. This is
+  the general reduction, kernel-clean.
+- `channel_faithful`, `differ_count = 168` (native_decide): for every distinct triple
+  the product-experiments coincide IFF `isFanoTriple`, and exactly 168 ordered triples
+  differ — cross-checking `nonassoc_iff_not_fano` / `nonassoc_count`. **168/168 non-Fano
+  covered, no scoped exclusion.**
+- Residual (honest): the experiment encodes the product **sign** (the associator's sole
+  discriminating datum between the two parenthesisations; the shared index carries no
+  distinguishing information), with `Eleft/Eright` the canonical 2-outcome incomparable
+  pair. Within that, the "experiment is a function of the ‖α‖² class" caveat is
+  **discharged** — it is now a function of the real product, proven equal to the Fano
+  classification.
+
+**NS analysis engine — `docs/research/sounio/ns_dataflow.sio`.** Raises NS from a
+runtime carrier to a compile-time-style dataflow. Re-verified: `souc check` OK,
+`souc run` clean:
+```
+s1 = ADD(x, x): FLAGGED anti-garbling (inputs share a source)
+s2 = ADD(x, y): clean (disjoint sources)
+```
+A value graph (nodes MEASURE/COPY/ADD, `srcset` bitmask), monotone fixpoint (COPY
+inherits, ADD unions inputs — modelled on `escape.sio`'s `esc_propagate`, lattice
+boolean→set), and `add_is_anti_garbling` (inputs' source-sets intersect). The §12
+engine as a real analysis. Honest boundary: standalone over an explicit graph, NOT wired
+into Madaros's checker at the real `ep_add` site — that needs a noise-symbol field in
+`TypeEntry` (overlaps codex-1's provenance work) + interprocedural summaries.
+
+**Session tally — fourteen checked theorems** (five `.lean`, all zero-sorry, Mathlib-
+free; the general lemma_i reductions kernel-clean, the 168-triple enumerations
+native_decide) **+ two executing Sounio artifacts** (`noise_symbols.sio` carrier,
+`ns_dataflow.sio` analysis). Lemma (i) is now product-faithful and kernel-checked in its
+general form; the sole remaining step is the compiler wire (coordination with codex-1).
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
