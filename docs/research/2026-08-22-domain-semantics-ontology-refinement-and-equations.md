@@ -1037,6 +1037,41 @@ in the NS lane (not a coordination unknown): add the `noise_set_id` field, the 3
 lattice + union transfer, the disjoint-certificate gate at `ep_add`, parametric call
 summaries, and the five controls incl. the sabotage knob.
 
+## 23. NS contract implemented — the five acceptance controls PASS (step 1)
+
+`docs/research/sounio/ns_contract.sio` (new). The "required controls BEFORE widening"
+step of codex's §22 contract, in Sounio. Independently re-verified: `souc check` OK,
+`souc run` EXIT=0, **5/5 controls PASS, 0 FAIL**:
+
+```
+1 x+x flagged (shared source): PASS
+2 x+y accepted (disjoint cert): PASS
+3 unknown conservative (flagged): PASS
+4 ident(x)+x flagged (identity survives): PASS
+5 sabotage: x+x NOT flagged (refusal vanishes): PASS
+ALL FIVE CONTROLS PASS
+```
+
+Implements the contract exactly: 3-state NS handle (`ns_unknown()=-1` top,
+`ns_empty()=0`, `>0` interned bitmask); `ns_measure` seeds a singleton (and drops
+propagation under the sabotage flag); `ns_ident` inherits the input set unchanged
+(identity survives the call); `ns_union` unions with unknown absorbing;
+`ns_disjoint(a,b) = a>=0 && b>=0 && (a&b)==0` (unknown ⇒ NOT disjoint, conservative);
+`add_flagged` = flagged unless a proved-disjoint certificate holds (the `ep_add` gate).
+Control 5 is the self-attesting ablation: dropping only set-propagation makes control-1's
+refusal vanish, proving the refusal is caused by the propagation.
+
+**Sequencing to the wire (step 2, scoped, not yet done):** my FFI lane's `TypeEntry`
+(types.sio:139) does NOT carry codex's L5 `provenance_id` (that lives on
+`codex/l5-provenance-typeentry-20260822`). Per §22, NS gets its OWN sibling field, so the
+wire belongs on a **dedicated NS branch based on codex's L5** (where `provenance_id`
+exists, for `noise_set_id` to sit beside it) — NOT this FFI lane (mixing a TypeEntry field
+into unrelated FFI work would be drift). Step 2 = that branch: add the `noise_set_id`
+3-state field, the union transfer + parametric call summaries in the checker's dataflow,
+the disjoint-certificate gate at the real `ep_add` site, and re-run these five controls as
+run-pass/compile-fail tests. Step 1 (this file) de-risks it: the semantics + controls are
+proven green before touching the hot type.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)
