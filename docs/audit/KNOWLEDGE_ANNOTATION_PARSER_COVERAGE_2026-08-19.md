@@ -76,3 +76,69 @@ Slurm jobs 10392/10394 were submitted per the standing directive, but the cluste
 was degraded (jobs failing with signal 53). The measurement is static text
 analysis over versioned files, performed as reads, so no pod compute was consumed
 and the directive's purpose was met by other means. Recorded rather than omitted.
+
+## Addendum 2026-08-23 — empirical Madaros discriminators; wrapper surface refined
+
+Continuation of the parser-*surface* measurement. Still no parser invention: no new surface words, no diagnostic, `self-hosted/` untouched. This does **not** reopen the anticipation-vs-lag verdict of #2015 / `PROVENANCE_LAYER_STAIRCASE_2026-08-19.md`. Parser surface remaining 3-of-6 is compatible with lag at the checker/runtime layer (those three cases already have consumer arms and runtime constants).
+
+Two clocks, labeled:
+
+| Clock | What it is | What it is not |
+|---|---|---|
+| **STATIC** | Current `self-hosted/parser/{ast,types,parser}.sio` + `self-hosted/lexer/tables.sio` | A claim that the shipped ELF was built from this SHA |
+| **DYNAMIC** | `env -u SOUC_BIN -u SOUNIO_SOUC_BIN ulimit -s 524288 ./bin/souc check` (Madaros v0.80.0 shipped ELF) | A from-source Madaros rebuild; not Slurm |
+
+Re-run: `bash scripts/dev/knowledge_annotation_parser_coverage.sh`. Probes live in `docs/audit/probes/knowledge-annotation-parser-coverage-2026-08-19/` (not on the test-suite glob). Skip ELF checks with `SOUNIO_KCOV_SKIP_DYNAMIC=1`.
+
+### STATIC — pin (unchanged 3-of-6, now including the live Madaros lexer table)
+
+`AstProvenanceKind` still declares six cases; `types.sio` still constructs only `AstProvDerived` / `AstProvComputed` / `AstProvMeasured`. `self-hosted/lexer/tables.sio` (the Madaros keyword table) matches `parser.sio`: `Derived`, `Computed`, `Measured`, `Valid`, `ValidUntil`, `ValidWhile` are keywords; `Source`, `Literature`, `Input` are not. The original 2026-08-19 read of `parser.sio` alone was not the whole lexer.
+
+`parse_knowledge_type` runs the comma-component loop **unconditionally** after the inner type — the comment says “only in bracket form”, but `Knowledge<f64, Derived>` is a live angle-form path. `parse_epistemic_wrapper_type` still gates that loop on brackets, and still has no `ValidUntil` / `ValidWhile` arms.
+
+### DYNAMIC — discriminator matrix (shipped ELF, 2026-08-23)
+
+Command for each probe: `ulimit -s 524288`; `env -u SOUC_BIN -u SOUNIO_SOUC_BIN SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/souc check <probe>`.
+
+| Probe | Type | ELF | Source interpretation |
+|---|---|---|---|
+| `derived.sio` | `Knowledge[f64, Derived]` | check OK | reachable provenance |
+| `computed.sio` | `Knowledge[f64, Computed]` | check OK | reachable; first versioned use of this word |
+| `measured.sio` | `Knowledge[f64, Measured]` | check OK | reachable; first versioned use of this word |
+| `valid.sio` | `Knowledge[f64, Valid(1.0)]` | check OK | reachable validity |
+| `validuntil.sio` | `Knowledge[f64, ValidUntil("2020-03-31")]` | check OK | already exercised by `covid_2020_kernel.sio` |
+| `validwhile.sio` | `Knowledge[f64, ValidWhile(true)]` | check OK | reachable, still unused in product code |
+| `knowledge_angle_derived.sio` | `Knowledge<f64, Derived>` | check OK | angle-form components are live for Knowledge |
+| `source.sio` | `Knowledge[f64, Source]` | check OK | **silent** — not `AstProvSource` |
+| `literature.sio` | `Knowledge[f64, Literature]` | check OK | **silent** |
+| `input.sio` | `Knowledge[f64, Input]` | check OK | **silent** |
+| `typo_ident.sio` | `Knowledge[f64, Sourc]` | check OK | misspelling is also silent |
+| `source_eps.sio` | `Knowledge[f64, Source < 0.05]` | check OK | `Source` is Ident, so this is an epsilon bound |
+| `derived_eps.sio` | `Knowledge[f64, Derived < 0.05]` | parse fail | `Derived` is a keyword; it cannot be an epsilon ident |
+| `int_skip.sio` | `Knowledge[f64, 123]` | check OK | non-ident unknown component is skipped |
+
+The pair `source_eps` (OK) vs `derived_eps` (parse fail) is the empirical discriminator for the Ident-epsilon sink. It does **not** prove which AST field `Source` occupies; it proves `Source` is not the `Derived`/`Computed`/`Measured` keyword class. Combined with the lexer having no `Source` word, the silent-OK probes are Ident capture or skip, not `AstProvSource`.
+
+### Wrapper surface — do not treat the 3-of-6 copy as independently exercised
+
+Under the same ELF:
+
+| Probe | ELF |
+|---|---|
+| `Intervention<f64>` | check OK |
+| `Intervention<f64, Derived>` | check OK |
+| `Intervention[f64]` | parse fail (8 parser errors) |
+| `Validated[f64, Derived]` | parse fail (13 parser errors) |
+| `Validated<f64>` | check OK |
+
+Current source sends `Intervention` / `Counterfactual` through `parse_epistemic_wrapper_type` (bracket component loop) and `Validated` through that loop only when the next token is `[`. Empirically the **bracket** form does not round-trip on this ELF, so the wrapper’s provenance arms are not a live Madaros surface in this measurement. `Intervention<f64, Derived>` checking OK is **not** evidence that `Derived` became `AstProvDerived` on an Intervention: the angle path in current source expects `>` immediately after the inner type, and the shipped ELF has no `--show-ast`. Possible readings (unresolved here): generic type-args (`knowledge_info: None`), ELF/source drift, or recovery. Do not collapse them.
+
+Wrapper probes are **not** in the census pin for that reason. Closing that question needs a source-built Madaros or an AST dump.
+
+### What this addendum does not do
+
+- Does not add `Source` / `Literature` / `Input` keywords or parser arms.
+- Does not add a diagnostic for the silent skip / Ident-epsilon sink (that remains the honesty gap).
+- Does not promote the silent-OK probes into `tests/run-pass/` — they are receipts of current behaviour, not features. The day `source.sio` starts failing check, the census fails and the gap has moved.
+- Does not claim the shipped ELF matches this checkout’s `self-hosted/` bit-for-bit.
+- Does not reopen #2015's lag verdict.
