@@ -3634,3 +3634,10 @@ tracked as issues #862/#864/#865/#890/#901/#913 and audit docs under docs/audit/
 | 2026-08-23 | xai/grok-4.3 [OK] + zai/glm-5.2 [ERROR: quota] | math-review | ew_precision.sio a_μ sector budget (QED/EW/HVP/HLbL WP20 vs WP25, independent GUM sum) | PASS_SINGLE_PROVIDER_DEGRADED | xAI accepted WP25 sector sum 116592033.7 vs published 116592033, independent-GUM σ≈61.8 vs 62, WP20 HVP 6931−98.3+12.4=6845.1, and the independent-sum vs TI-correlated-total distinction. Raw: `/tmp/llm-offload-bEgVYx/`. |
 
 | 2026-08-23 | xai/grok-4.3 [OK, TIGHTENABLE] + zai [quota] | math-review | WP25 HVP hybrid assembly 7132−99.6+12.4=7044.8 vs 7045(61) | ADDRESSED_SINGLE_PROVIDER | xAI accepted the arithmetic and ep_add structure. TIGHTENABLE on calling the 0.2 residual "rounding/correlations" without a covariance; comment now states the residual is printed and not unpacked. Raw: `/tmp/llm-offload-rVHufo/`. |
+
+## 2026-08-23 grok-cli1 math-review — Bergman kernel call (parity ref)
+
+- **Target:** tests/run-pass/dissertation_pbpk28_parity_ref_semaglutide.sio (Pbpk28 PD step → stdlib `pd_step_glucose_insulin`)
+- **Command:** `bin/llm-offload -t math-review -i /tmp/bergman_kernel_call.diff`
+- **xai (grok-4.5):** OK on occupancy and ODE form; FAIL/TIGHTENABLE on "same math, one kernel" as an unverified parity claim and on silent `bergman_default_params()` vs getters. Comment tightened: kernel is the G-ε-14 extraction (CN, I then G); params are the getter pack. No numeric claim.
+- **zai:** ERROR (incomplete fan-out; not treated as a pass).
