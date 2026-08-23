@@ -1032,6 +1032,46 @@ fn name_is_heap_alloc(n: Name) -> bool with Mut, Panic, Div {
 // body calls ffi_getpid(); these recognisers route that call (by name, via
 // ir_module_ensure_builtin_call_targets) to the hand-coded emitters below.
 
+fn name_is_ffi_sqrt(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }              // "ffi_sqrt"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 115 as i8 { return false }     // 's'
+    if n.buf[5] != 113 as i8 { return false }     // 'q'
+    if n.buf[6] != 114 as i8 { return false }     // 'r'
+    if n.buf[7] != 116 as i8 { return false }     // 't'
+    true
+}
+
+fn name_is_ffi_floor(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }              // "ffi_floor"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 102 as i8 { return false }     // 'f'
+    if n.buf[5] != 108 as i8 { return false }     // 'l'
+    if n.buf[6] != 111 as i8 { return false }     // 'o'
+    if n.buf[7] != 111 as i8 { return false }     // 'o'
+    if n.buf[8] != 114 as i8 { return false }     // 'r'
+    true
+}
+
+fn name_is_ffi_ceil(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }              // "ffi_ceil"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 99 as i8 { return false }      // 'c'
+    if n.buf[5] != 101 as i8 { return false }     // 'e'
+    if n.buf[6] != 105 as i8 { return false }     // 'i'
+    if n.buf[7] != 108 as i8 { return false }     // 'l'
+    true
+}
+
 fn name_is_ffi_getpid(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 10 { return false }               // "ffi_getpid"
     if n.buf[0] != 102 as i8 { return false }     // 'f'
@@ -1311,6 +1351,9 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
         if name_is_ffi_malloc((*func).name) { return 43 }
         if name_is_ffi_free((*func).name) { return 44 }
         if name_is_ffi_system((*func).name) { return 45 }
+        if name_is_ffi_sqrt((*func).name) { return 46 }
+        if name_is_ffi_floor((*func).name) { return 47 }
+        if name_is_ffi_ceil((*func).name) { return 48 }
     0
 }
 
@@ -4902,6 +4945,61 @@ fn emit_builtin_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div 
     c
 }
 
+// ffi_sqrt / ffi_floor / ffi_ceil — the three libm entry points this backend
+// can answer EXACTLY, with one instruction each and no approximation.
+//
+// The calling shape is the one every scalar builtin here uses: the f64
+// argument arrives in rdi as raw bits, not in xmm0, so it is moved across with
+// movq before the operation and back after it.
+//
+// These three are grouped because they share a property the rest of libm does
+// not: each is a single IEEE-754-defined operation the hardware implements
+// correctly-rounded, so there is no error budget to state and no reference
+// vector that can fail by an ulp. pow and tgamma are a different kind of
+// object and do not belong beside them.
+
+fn emit_builtin_ffi_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    c.code = emit_sqrtsd_xmm0_xmm0(c.code)            // sqrtsd xmm0, xmm0
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// floor: ROUNDSD mode 1 (toward -inf), 0x08 set to suppress the inexact
+// exception exactly as libm's floor does.
+fn emit_builtin_ffi_floor(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 9)   // roundsd xmm0, xmm0, 0x09
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// ceil: ROUNDSD mode 2 (toward +inf), same inexact suppression.
+fn emit_builtin_ffi_ceil(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 10)  // roundsd xmm0, xmm0, 0x0A
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 // f64_to_bits / bits_to_f64 — pure IEEE-754 reinterpret. The 64-bit value is
 // identical whether read as f64 or i64, and this backend passes the argument in
 // rdi and returns in rax (same convention as emit_builtin_sqrt), so the body is
@@ -7003,6 +7101,9 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
         if name_is_ffi_malloc(name) { return 43 }
         if name_is_ffi_free(name) { return 44 }
         if name_is_ffi_system(name) { return 45 }
+        if name_is_ffi_sqrt(name) { return 46 }
+        if name_is_ffi_floor(name) { return 47 }
+        if name_is_ffi_ceil(name) { return 48 }
     0
 }
 
@@ -7022,6 +7123,9 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
     if builtin_id == 35 { return true }  // read_f64 (Defect A)
     if builtin_id == 37 { return true }  // acknowledge(Knowledge<f64>, reason)
     if builtin_id == 38 { return true }  // require_confidence(Knowledge<f64>, min)
+    if builtin_id == 46 { return true }  // ffi_sqrt
+    if builtin_id == 47 { return true }  // ffi_floor
+    if builtin_id == 48 { return true }  // ffi_ceil
     false
 }
 
@@ -7036,6 +7140,9 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 43 { emit_builtin_heap_alloc_into(nc); return }
     if builtin_id == 44 { emit_builtin_heap_free_into(nc); return }
     if builtin_id == 45 { emit_builtin_ffi_system_into(nc); return }
+    if builtin_id == 46 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_sqrt((*nc))); return }
+    if builtin_id == 47 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_floor((*nc))); return }
+    if builtin_id == 48 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_ceil((*nc))); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
     if builtin_id == 2 { emit_builtin_print_char_into(nc); return }
     if builtin_id == 3 {
