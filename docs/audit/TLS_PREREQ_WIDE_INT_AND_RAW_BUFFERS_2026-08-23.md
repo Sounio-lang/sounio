@@ -201,6 +201,41 @@ algebra::cayley_dickson_exact::{...}`) — confirm the correct qualified path
 by checking how an existing, working stdlib module of the same shape is
 actually imported, rather than assuming a bare filename import will resolve.
 
+## Finding 7 — `read_file` is a no-`extern` compiler builtin taking `string` directly
+
+`read_file`, `str_len`, and `str_char_at` are compiler builtins requiring NO
+`import` and NO `extern "C"` block at all — declaring `extern "C" { fn
+read_file(path: [i8; 32]) -> string; }` and calling it with a string literal
+fails with `error[E009]: argument type does not match parameter`. The
+correct, confirmed-working form is a bare call with no declaration:
+
+```sio
+fn main() -> i64 with IO {
+    let content: string = read_file("/etc/hosts")
+    let n: i64 = str_len(content)
+    print_int(n)
+    return 0
+}
+```
+
+Verified against real `/etc/hosts` (576 bytes, matching `wc -c` exactly) and
+`str_char_at(content, i)` returning the correct ASCII byte values for the
+file's real first line. This form is safe for READS — the write-corruption
+risk in Finding 1 (a `string` argument silently corrupting on-disk content)
+is specific to `write_file` being handed a `string` as its *write buffer*;
+reading via `read_file` into a `string` return value has no such risk.
+
+## Finding 8 — sibling-file imports within the same stdlib subdirectory use the bare unqualified form
+
+Finding 6 above is scoped to a program OUTSIDE `stdlib/` importing INTO
+`stdlib/net/` (`use net::socket::*`). For a file that itself lives in
+`stdlib/net/` importing another file in the SAME directory (e.g.
+`stdlib/net/dns.sio` importing `stdlib/net/socket.sio`), the correct and
+only-working form is the bare `use socket::*` — confirmed via a throwaway
+spike. General pattern: import paths are relative to the directory a file
+lives in for sibling imports, and `net::`-prefixed (relative to `stdlib/`)
+only when crossing into `stdlib/net/` from outside it.
+
 ## Scope note
 
 Neither finding blocks this project — both have workarounds (hand-rolled
