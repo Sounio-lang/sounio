@@ -83,6 +83,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.archived.todo-next | archived | docs/archived/TODO_NEXT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.a-mu-cmd3-2pi-split-2026-08-23 | repo_only | docs/audit/A_MU_CMD3_2PI_SPLIT_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.a-mu-gum-split-2026-08-23 | repo_only | docs/audit/A_MU_GUM_SPLIT_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.a-mu-hvp-window-ud-2026-08-23 | repo_only | docs/audit/A_MU_HVP_WINDOW_UD_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.a-mu-wp25-dd-hvp-lo-absent-2026-08-23 | repo_only | docs/audit/A_MU_WP25_DD_HVP_LO_ABSENT_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.affine-nonassoc-uncertainty-2026-06-13 | repo_only | docs/audit/AFFINE_NONASSOC_UNCERTAINTY_2026-06-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.branch-audit-2026-08-15 | repo_only | docs/audit/BRANCH_AUDIT_2026-08-15.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
