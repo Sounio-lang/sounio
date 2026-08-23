@@ -27,8 +27,17 @@
       biadditive magma, ∂((xy)z) − ∂(x(yz)) = the SUM OF THREE ASSOCIATORS.
     * `var_eq_of_sensitivity_eq` — the congruence shape of Theorem 4.1 for both
       axes (equal sensitivities ⇒ equal variance).
-  Still prose-only in the .md companion (NOT asserted machine-checked): the
-  completeness dimension count (Prop 2) and the §5 non-separability caveat.
+    * PROPOSITION 2 (completeness / dimension count) — over an `Expr` tree with
+      first-order `eval`: `sens_eadd`/`sens_emul` (the sensitivity is Leibniz-
+      compositional — reads only sub-sensitivities + centers, the two data);
+      `sens_eadd_assoc`/`sens_eadd_comm` (SUM re-association is sensitivity-
+      invariant — no order garbling from `+`); `sens_emul_reassoc` (PRODUCT
+      re-association changes it by EXACTLY the three associators). "No third input"
+      is manifest in `eval`'s structural recursion.
+  Still prose-only in the .md companion (NOT machine-asserted): the §5
+  non-separability caveat (a negative observation: when BOTH certificates fail the
+  understatement carries a support×order interaction term and does not split
+  additively).
 -/
 
 namespace SounioAntiGarbling
@@ -288,5 +297,71 @@ theorem antigarbling_sound_product {α : Type} [AddGrp α] (mul : α → α → 
     (Var : α → Int) (x y z : α) (h : associator mul x y z = 0) :
     Var (mul (mul x y) z) = Var (mul x (mul y z)) := by
   rw [parenthesizations_agree_of_associator_zero mul x y z h]
+
+/- ===================================================================== -/
+/-  Proposition 2 (completeness / dimension count), machine-checked.       -/
+/-  The first-order sensitivity of an expression tree reads ONLY the tree   -/
+/-  shape (parenthesization) and the leaf data (symbol-assignment):         -/
+/-   - it is Leibniz-compositional (reads sub-sensitivities + centers);     -/
+/-   - SUM re-association leaves it unchanged (no order garbling from +);   -/
+/-   - PRODUCT re-association changes it by EXACTLY the associators.         -/
+/-  Hence the only structural variation is (σ, product-parenthesization).   -/
+/- ===================================================================== -/
+
+/-- First-order sum (sensitivities add). -/
+def fadd {α : Type} [AddGrp α] (x y : FO α) : FO α :=
+  { c := x.c + y.c
+    d := x.d + y.d }
+
+/-- A bilinear expression tree over first-order leaf values. -/
+inductive Expr (α : Type) where
+  | leaf : FO α → Expr α
+  | eadd : Expr α → Expr α → Expr α
+  | emul : Expr α → Expr α → Expr α
+
+/-- First-order evaluation of an expression tree (structural recursion — it reads
+    ONLY the tree shape and the leaves; there is no third input). -/
+def eval {α : Type} [AddGrp α] [Magma α] : Expr α → FO α
+  | Expr.leaf x   => x
+  | Expr.eadd a b => fadd (eval a) (eval b)
+  | Expr.emul a b => fmul (eval a) (eval b)
+
+/-- The first-order sensitivity (ε-coefficient) of a tree. -/
+def sens {α : Type} [AddGrp α] [Magma α] (t : Expr α) : α := (eval t).d
+/-- The center of a tree. -/
+def cen {α : Type} [AddGrp α] [Magma α] (t : Expr α) : α := (eval t).c
+
+/-- Leibniz for `+`: the sensitivity of a sum reads only the sub-sensitivities. -/
+theorem sens_eadd {α : Type} [AddGrp α] [Magma α] (a b : Expr α) :
+    sens (Expr.eadd a b) = sens a + sens b := rfl
+
+/-- Leibniz for `·`: the sensitivity of a product reads only the sub-sensitivities
+    and the centers — the two data, and nothing else. -/
+theorem sens_emul {α : Type} [AddGrp α] [Magma α] (a b : Expr α) :
+    sens (Expr.emul a b)
+      = Magma.mul (sens a) (cen b) + Magma.mul (cen a) (sens b) := rfl
+
+/-- SUM re-association is sensitivity-INVARIANT: `+` contributes no order garbling,
+    so the only parenthesization that can matter is of products. -/
+theorem sens_eadd_assoc {α : Type} [AddGrp α] [Magma α] (a b c : Expr α) :
+    sens (Expr.eadd (Expr.eadd a b) c) = sens (Expr.eadd a (Expr.eadd b c)) := by
+  simp only [sens_eadd]; rw [AddGrp.add_assoc]
+
+/-- SUM commutation is sensitivity-INVARIANT as well. -/
+theorem sens_eadd_comm {α : Type} [AddGrp α] [Magma α] (a b : Expr α) :
+    sens (Expr.eadd a b) = sens (Expr.eadd b a) := by
+  simp only [sens_eadd]; rw [AddGrp.add_comm]
+
+/-- PRODUCT re-association changes the sensitivity by EXACTLY the sum of three
+    associators (the tree-level lift of `fo_product_sensitivity_diff`). Together
+    with `sens_eadd_assoc`/`sens_eadd_comm`, this pins ALL parenthesization
+    dependence of the sensitivity to products-via-associators — the Axis-1 half of
+    the two degrees of freedom. -/
+theorem sens_emul_reassoc {α : Type} [AddGrp α] [Magma α] (a b c : Expr α) :
+    sens (Expr.emul (Expr.emul a b) c) - sens (Expr.emul a (Expr.emul b c))
+      = associator Magma.mul (sens a) (cen b) (cen c)
+      + associator Magma.mul (cen a) (sens b) (cen c)
+      + associator Magma.mul (cen a) (cen b) (sens c) :=
+  fo_product_sensitivity_diff (eval a) (eval b) (eval c)
 
 end SounioAntiGarbling
