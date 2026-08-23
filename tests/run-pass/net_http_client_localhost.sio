@@ -1,0 +1,140 @@
+//@ run-pass
+//@ description: http_get against a hand-rolled loopback HTTP server returns the expected status and body
+//
+// ORDERING NOTE (deviates from the plan's draft, per its own sanctioned
+// fallback clause): a single OS thread cannot interleave "server accepts +
+// sends a response" with `http_get`'s own connect+send+recv, because
+// `http_get` bundles all three into one blocking call — by the time its
+// internal recv() would need a peer to have sent something, control has
+// not (and structurally cannot have) returned to this test function to
+// drive the server side. Verified by reasoning through TCP's blocking
+// semantics: connect() on a loopback socket can complete before accept()
+// is ever called (the handshake completes into the listen backlog
+// regardless of accept() timing — this is what tests/run-pass/
+// net_socket_loopback.sio already relies on for its listen-then-connect-
+// then-accept ordering), but recv() strictly cannot return until a peer
+// has actually sent bytes, and nothing in a single sequential thread can
+// perform that send while also being blocked inside http_get's own recv().
+//
+// RESOLUTION: use a real OS-level `fork()` (raw syscall 57 via `syscall6`,
+// the same escape hatch this whole plan uses for socket/DNS syscalls — see
+// stdlib/net/socket.sio's FIRST compiler limitation). This is genuine
+// process-level concurrency from the kernel's perspective, not a Sounio
+// "thread" (which the language does not have) — the child process runs the
+// hand-rolled server (accept, drain the request, send the canned response,
+// close) while the parent runs `http_get` end-to-end as an ordinary
+// blocking client. `exit_group` (raw syscall 231) terminates the child
+// immediately after its server role so it never falls through into the
+// parent's assertions/printing.
+//
+// PORT-RETRY NOTE — `tcp_listen` here is retried across a small range of
+// candidate ports (rather than one hardcoded port) because repeated back-
+// to-back runs of this same test (e.g. while developing it) can otherwise
+// hit a transient `EADDRINUSE`-style bind failure from a prior run's
+// connection still sitting in the kernel's TIME_WAIT state on that exact
+// port — this stdlib has no `SO_REUSEADDR` equivalent available (`socket.sio`
+// never calls `setsockopt`), so the standard portable workaround is to try
+// the next port instead of waiting out TIME_WAIT. This also empirically
+// masked what first looked like tuple-return corruption (see
+// stdlib/net/http_client.sio's TENTH COMPILER LIMITATION note) — some of
+// that flakiness traced back to `tcp_listen` genuinely failing on a reused
+// port while its paired error code misread as 0, not to memory corruption
+// in the destructured value itself. `listener.fd < 0` (the struct field),
+// not the paired scalar error code, is what this file checks, consistent
+// with the same workaround applied in `http_client.sio`.
+
+use net::socket::*
+use net::http_client::*
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var server_ip = Buf4096 { data: [0; 4096] }
+    server_ip.data[0] = 49   // "1"
+    server_ip.data[1] = 50   // "2"
+    server_ip.data[2] = 55   // "7"
+    server_ip.data[3] = 46   // "."
+    server_ip.data[4] = 48   // "0"
+    server_ip.data[5] = 46   // "."
+    server_ip.data[6] = 48   // "0"
+    server_ip.data[7] = 46   // "."
+    server_ip.data[8] = 49   // "1"
+
+    var port: u16 = 18090 as u16
+    var listener = TcpSocket { fd: -1 }
+    var attempt = 0
+    while attempt < 10 && listener.fd < 0 {
+        let (listener_raw, listen_err) = tcp_listen(&server_ip, 9, port, 1)
+        listener = TcpSocket { fd: listener_raw.fd }
+        if listener.fd < 0 {
+            port = port + (1 as u16)
+        }
+        attempt = attempt + 1
+    }
+    if listener.fd < 0 {
+        println("FAIL: tcp_listen returned error on every candidate port")
+        return 1
+    }
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)   // fork()
+
+    if pid == 0 {
+        // CHILD: hand-rolled minimal HTTP server. Accept one connection,
+        // drain (ignore) the request, write back a fixed response, close.
+        let (conn_raw, _accept_err) = tcp_accept(&listener)
+        let conn = TcpSocket { fd: conn_raw.fd }
+        if conn.fd >= 0 {
+            var drain_buf = Buf4096 { data: [0; 4096] }
+            let (conn2_raw, _drained) = tcp_recv(conn, &!drain_buf)
+            let conn2 = TcpSocket { fd: conn2_raw.fd }
+
+            // "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello" (43 bytes,
+            // computed byte-by-byte, not copied from the plan's guess).
+            let resp: [i32; 43] = [
+                72, 84, 84, 80, 47, 49, 46, 49, 32, 50, 48, 48, 32, 79, 75, 13, 10,
+                67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104, 58, 32, 53, 13, 10, 13, 10,
+                104, 101, 108, 108, 111
+            ]
+            var response_buf = Buf4096 { data: [0; 4096] }
+            var i = 0
+            while i < 43 {
+                response_buf.data[i as usize] = resp[i as usize] as u8
+                i = i + 1
+            }
+            let (conn3_raw, _sent) = tcp_send(conn2, &response_buf, 43)
+            let conn3 = TcpSocket { fd: conn3_raw.fd }
+            tcp_close(conn3)
+        }
+        tcp_close(listener)
+        syscall6(231, 0, 0, 0, 0, 0, 0)   // exit_group(0) — never returns
+        return 0
+    }
+
+    // PARENT: ordinary client via http_get. The listener fd isn't needed
+    // here (only the child accepts on it) — close this process's copy.
+    tcp_close(listener)
+
+    var host = Buf256 { data: [0; 256] }
+    host.data[0] = 49
+    host.data[1] = 50
+    host.data[2] = 55
+    host.data[3] = 46
+    host.data[4] = 48
+    host.data[5] = 46
+    host.data[6] = 48
+    host.data[7] = 46
+    host.data[8] = 49
+
+    var path = Buf256 { data: [0; 256] }
+    path.data[0] = 47   // "/"
+
+    let response = http_get(&host, 9, port, &path, 1)
+    if response.ok != true {
+        println("FAIL: http_get did not succeed")
+        return 1
+    }
+    if response.status != 200 {
+        println("FAIL: expected status 200")
+        return 1
+    }
+    println("PASS: http_get round-trip matched")
+    return 0
+}

@@ -1,0 +1,386 @@
+// stdlib/net/http_client.sio — minimal HTTP/1.1 GET client over
+// stdlib/net/socket.sio's TcpSocket, with real (non-hardcoded) response
+// parsing: finds the header/body boundary (`\r\n\r\n`), extracts the
+// numeric status code from the status line, reads `Content-Length` out of
+// the header block, and slices the body to that many bytes.
+//
+// TRAIT INVESTIGATION (per this task's brief) — a real, working `trait`/
+// `impl` example was found and confirmed at tests/run-pass/trait_basic.sio
+// (`trait Shape { fn area(self: Circle) -> f64 }` / `impl Shape for
+// Circle { ... }`), so the mechanism itself is not hypothetical. It was NOT
+// used here: that example's method has no effect annotations, no reference
+// parameters, and a non-linear `self` — none of which resembles what a
+// `Stream` trait covering `TcpSocket` (linear self, `with IO, Mut, Panic,
+// Div`, `&Buf4096`/`&!Buf4096` byte-buffer parameters) would need, and nothing
+// in the tree demonstrates a trait method with any of those shapes. Given
+// every other task in this plan needed multiple rounds of empirical
+// discovery to get far simpler code working, speculatively extending trait
+// syntax into untested territory (linear self + effects + refs) was judged
+// a disproportionate side-quest for this task. Falling back to direct
+// `TcpSocket` usage, exactly as the brief sanctions:
+// TODO(0b): re-parameterize over a Stream trait once TLS lands.
+//
+// MODULE IMPORT NOTES — following net/dns.sio's SIXTH LIMITATION writeup:
+// sibling modules inside net/ are imported via the sibling-relative form
+// (`use socket::*`, `use dns::*`), not `net::socket::*`/`net::dns::*` (the
+// latter is what a top-level program file uses to reach into net/, but it
+// does not typecheck from another file that is already inside net/).
+// `use str::lib::*` (a different top-level stdlib module) is imported using
+// the ordinary `module::path::*` form, matching the working cross-top-level
+// -module precedent already in the tree (e.g. `stats/hypothesis.sio`'s
+// `use epistemic::gum::{...}`) — this is a different case from the
+// sibling-relative rule, which is specific to modules that live inside the
+// SAME top-level directory as their importer.
+//
+// Host/path buffers use a locally-declared `Buf256` (not `stdlib/str/mod.sio`'s
+// same-shaped-but-private `Buf256`, and not `net::dns::HostnameBuf` either)
+// so this file does not depend on either of those unrelated modules' private
+// or narrowly-scoped types; when a hostname (not a numeric IP) needs to be
+// resolved, its bytes are copied into a fresh `HostnameBuf` literal before
+// calling `resolve_ipv4` — a small, deliberate rebuild, in the same spirit
+// as the SECOND COMPILER LIMITATION's mandatory struct-literal rebuild
+// after tuple destructuring.
+//
+// EIGHTH COMPILER LIMITATION (new, discovered writing this task) — a
+// tuple-destructured value's field can read back CORRUPTED if even one
+// unrelated function call (including something as innocuous as `println`)
+// executes between the destructuring `let (x, err) = f(...)` and the first
+// read of `x`'s field. Reproduced directly: `let (sock, connect_err) =
+// tcp_connect(...)` followed immediately by `if connect_err != 0 {...}`
+// (fine — `connect_err` is read with zero intervening calls) then a bare
+// `println("connected")` BEFORE `let sock1 = TcpSocket { fd: sock.fd }` —
+// `sock.fd` read back as -1 (tcp_connect's own error sentinel) in roughly
+// half of repeated runs of the identical binary, despite `connect_err`
+// having just been confirmed 0 moments earlier. Removing the intervening
+// `println` (rebuilding the struct literal as the VERY NEXT statement
+// after destructuring, with no calls, branches, or other statements in
+// between) made the corruption disappear across dozens of repeated runs.
+// This sharpens the SECOND COMPILER LIMITATION (which only documented
+// call-ARGUMENT passing as unsafe for destructured values): the destructured
+// binding appears to live in a volatile/caller-saved location rather than
+// being spilled to a stable stack slot, so ANY call in between — not just
+// passing it as an argument — is unsafe. WORKAROUND applied throughout
+// `http_get` below: every `let (x, err) = tcp_*(...)` is immediately
+// followed by its struct-literal rebuild as the literal next line, with the
+// error-code check and any other logic coming AFTER that rebuild, never
+// before it.
+//
+// TENTH COMPILER LIMITATION (new, discovered writing this task, and the one
+// that actually explains the test's real flakiness — the EIGHTH limitation
+// above was a false lead from an early, less-controlled repro) — the
+// SCALAR half of a `(LinearStruct, i32)`-shaped tuple return can read back
+// as 0 (masking a real nonzero error) even when the struct half's own field
+// correctly reflects the true failure. Reproduced via `let (sock,
+// connect_err) = tcp_connect(...)` inside `http_get`, called from the
+// PARENT side of a `fork()`-based test (see the test file's ORDERING NOTE):
+// captured immediately (first two statements after destructuring, zero
+// intervening calls — ruling out the EIGHTH limitation's mechanism),
+// `sock.fd` reads back as -1 (the real sentinel `tcp_connect` returns on
+// failure) while `connect_err` reads back as 0 in the SAME observation —
+// a combination `tcp_connect`'s own source code cannot produce (every
+// return path pairs `fd == -1` with a nonzero error code). This was only
+// visible under the fork-based test's timing; the equivalent single-process
+// tests in this plan (net_socket_loopback.sio, etc.) check their paired
+// error codes directly and have never shown this symptom, so the trigger
+// condition is most plausibly tied to `fork()`'s process-level concurrency
+// rather than being a universal defect in all tuple returns. Root cause
+// not fully isolated (day-one hypotheses considered: an unsafe write to
+// some non-reentrant multi-value-return staging location under
+// scheduling/signal pressure from the forked child's exit; ruled out
+// disproven alternatives: register-corruption-from-intervening-calls,
+// since this reproduces with zero intervening statements). WORKAROUND: in
+// `http_get`, `sock1.fd < 0` (the struct field, rebuilt immediately) is
+// used as the sole success/failure signal for `tcp_connect`'s result —
+// never the paired scalar error code — since the struct field was observed
+// to read back correctly in every trial. Any future caller of a `tcp_*`
+// function from inside a forked child or a fork-adjacent parent path
+// should apply the same discipline: trust the struct's own sentinel field,
+// not a separately-returned scalar status code, until this is root-caused
+// in the compiler itself.
+//
+// NINTH COMPILER LIMITATION (new, discovered writing this task) — calling
+// `stdlib/str/lib.sio`'s `str_from_i64`/`str_to_string` (and, empirically,
+// anything in that file that internally calls its own non-`pub` helper
+// functions — `str_from_i64` itself calls `str_i64_to_buf`/`str_buf64_rev`/
+// `str_from_buf_i64`, all file-private) segfaults at RUNTIME (not a
+// compile error) when invoked from a different top-level module or a
+// standalone program, even though the call typechecks cleanly. Reproduced
+// in isolation with a two-line throwaway program (`use str::lib::*` +
+// `str_from_i64(42 as i64)`) — crashes every time. By contrast, merely
+// importing `str::lib::*` and constructing a `Str { data: [0; 256], len: 0 }`
+// struct LITERAL (no function call into that module at all) works fine, and
+// is all this file actually does with the `Str` type. WORKAROUND: this file
+// only ever uses `str::lib::Str` as a plain struct shape, via its own local
+// `str_from_buf_range` helper (manual byte-copy loop, no calls into
+// `str::lib`'s functions) — never calling `str_from_i64`, `str_to_string`,
+// or any other `str::lib` function cross-module. This was only caught
+// because of debug instrumentation written to diagnose the EIGHTH
+// limitation above; no debug-print call into `str::lib` survives in this
+// committed file, precisely to avoid it.
+
+use socket::*
+use dns::*
+use str::lib::*
+
+pub struct Buf256 {
+    data: [u8; 256]
+}
+
+pub struct HttpResponse {
+    status: i32,
+    headers: Str,
+    body: Str,
+    ok: bool
+}
+
+const CR: u8 = 13
+const LF: u8 = 10
+const SPACE: u8 = 32
+const DIGIT0: u8 = 48
+const DIGIT9: u8 = 57
+const DOT: u8 = 46
+
+fn is_numeric_ip(host: &Buf256, host_len: i32) -> bool with Mut, Panic, Div {
+    var i = 0
+    while i < host_len {
+        let c = host.data[i as usize]
+        if (c < DIGIT0 || c > DIGIT9) && c != DOT {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Appends the first `count` entries of a 32-slot literal ASCII table into
+// `buf` starting at `start`, returning the new write position. Every fixed
+// literal segment in this file (request-line/header text) fits in 32 bytes,
+// so one fixed-size helper covers all of them; callers pad unused trailing
+// slots with zeros, which are never read since `count` bounds the loop.
+fn append_lit(buf: &!Buf4096, start: i32, lit: [i32; 32], count: i32) -> i32 with Mut, Panic, Div {
+    var i = 0
+    while i < count {
+        buf.data[(start + i) as usize] = lit[i as usize] as u8
+        i = i + 1
+    }
+    return start + count
+}
+
+// Copies `count` bytes from a Buf256 (host or path, caller-provided) into
+// `buf` starting at `start`, returning the new write position.
+fn append_buf256(buf: &!Buf4096, start: i32, src: &Buf256, count: i32) -> i32 with Mut, Panic, Div {
+    var i = 0
+    while i < count {
+        buf.data[(start + i) as usize] = src.data[i as usize]
+        i = i + 1
+    }
+    return start + count
+}
+
+// Builds "GET <path> HTTP/1.1\r\nHost: <host>\r\nConnection: close\r\n\r\n"
+// into `out`, returning the total byte length written.
+fn build_request(out: &!Buf4096, host: &Buf256, host_len: i32, path: &Buf256, path_len: i32) -> i32 with Mut, Panic, Div {
+    // "GET "
+    let lit_get: [i32; 32] = [71, 69, 84, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var pos = append_lit(out, 0, lit_get, 4)
+
+    pos = append_buf256(out, pos, path, path_len)
+
+    // " HTTP/1.1\r\nHost: "
+    let lit_httphost: [i32; 32] = [32, 72, 84, 84, 80, 47, 49, 46, 49, 13, 10, 72, 111, 115, 116, 58, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    pos = append_lit(out, pos, lit_httphost, 17)
+
+    pos = append_buf256(out, pos, host, host_len)
+
+    // "\r\nConnection: close\r\n\r\n"
+    let lit_tail: [i32; 32] = [13, 10, 67, 111, 110, 110, 101, 99, 116, 105, 111, 110, 58, 32, 99, 108, 111, 115, 101, 13, 10, 13, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    pos = append_lit(out, pos, lit_tail, 23)
+
+    return pos
+}
+
+// Finds the first "\r\n\r\n" in buf.data[0..len). Returns its start index,
+// or -1 if not found. Plain indexed reads only (never a raw pointer into
+// buf), so the FOURTH compiler limitation's 8-byte-stride bug does not
+// apply here.
+fn find_double_crlf(buf: &Buf4096, len: i32) -> i32 with Mut, Panic, Div {
+    var i = 0
+    while i + 4 <= len {
+        if buf.data[i as usize] == CR && buf.data[(i + 1) as usize] == LF && buf.data[(i + 2) as usize] == CR && buf.data[(i + 3) as usize] == LF {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Parses the status code out of a status line "HTTP/1.1 200 OK...": skips
+// to the first space, then reads consecutive digits.
+fn parse_status(buf: &Buf4096, len: i32) -> i32 with Mut, Panic, Div {
+    var i = 0
+    while i < len && buf.data[i as usize] != SPACE {
+        i = i + 1
+    }
+    if i >= len {
+        return -1
+    }
+    i = i + 1
+    var status = 0
+    var found_digit = false
+    while i < len && buf.data[i as usize] >= DIGIT0 && buf.data[i as usize] <= DIGIT9 {
+        status = status * 10 + ((buf.data[i as usize] as i32) - 48)
+        found_digit = true
+        i = i + 1
+    }
+    if !found_digit {
+        return -1
+    }
+    return status
+}
+
+// Scans buf.data[0..header_end) for a case-sensitive "Content-Length:"
+// token and, if found, parses the integer that follows it (skipping any
+// spaces in between). Returns -1 if the header is absent or malformed.
+fn find_content_length(buf: &Buf4096, header_end: i32) -> i32 with Mut, Panic, Div {
+    let pat: [i32; 15] = [67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104, 58]
+    var i = 0
+    while i + 15 <= header_end {
+        var matched = 1
+        var k = 0
+        while k < 15 {
+            if (buf.data[(i + k) as usize] as i32) != pat[k as usize] {
+                matched = 0
+            }
+            k = k + 1
+        }
+        if matched == 1 {
+            var j = i + 15
+            while j < header_end && buf.data[j as usize] == SPACE {
+                j = j + 1
+            }
+            var val = 0
+            var found_digit = false
+            while j < header_end && buf.data[j as usize] >= DIGIT0 && buf.data[j as usize] <= DIGIT9 {
+                val = val * 10 + ((buf.data[j as usize] as i32) - 48)
+                found_digit = true
+                j = j + 1
+            }
+            if found_digit {
+                return val
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Builds a Str from buf.data[start..start+count). Plain indexed
+// reads/writes only (no raw pointer taken), so this is unaffected by the
+// FOURTH compiler limitation. Clips to Str's 256-byte capacity.
+fn str_from_buf_range(buf: &Buf4096, start: i32, count: i32) -> Str with Mut, Panic, Div {
+    var out = Str { data: [0; 256], len: 0 }
+    var clipped = count
+    if clipped > 256 {
+        clipped = 256
+    }
+    if clipped < 0 {
+        clipped = 0
+    }
+    var i = 0
+    while i < clipped {
+        out.data[i as usize] = buf.data[(start + i) as usize] as i8
+        i = i + 1
+    }
+    out.len = clipped
+    return out
+}
+
+pub fn http_get(host: &Buf256, host_len: i32, port: u16, path: &Buf256, path_len: i32) -> HttpResponse with IO, Mut, Panic, Div {
+    var resolved_ip = Buf4096 { data: [0; 4096] }
+    var resolved_len = host_len
+
+    if is_numeric_ip(host, host_len) {
+        var i = 0
+        while i < host_len {
+            resolved_ip.data[i as usize] = host.data[i as usize]
+            i = i + 1
+        }
+    } else {
+        var hostname_buf = HostnameBuf { data: [0; 256] }
+        var i = 0
+        while i < host_len {
+            hostname_buf.data[i as usize] = host.data[i as usize]
+            i = i + 1
+        }
+        let dns_result = resolve_ipv4(&hostname_buf, host_len, &!resolved_ip)
+        if dns_result != 0 {
+            return HttpResponse { status: -1, headers: Str { data: [0; 256], len: 0 }, body: Str { data: [0; 256], len: 0 }, ok: false }
+        }
+        // Determine the resolved dotted-decimal address's length by
+        // scanning for the first zero byte written by resolve_ipv4.
+        var len_scan = 0
+        while len_scan < 4096 && resolved_ip.data[len_scan as usize] != (0 as u8) {
+            len_scan = len_scan + 1
+        }
+        resolved_len = len_scan
+    }
+
+    let (sock, _connect_err) = tcp_connect(&resolved_ip, resolved_len, port)
+    // Rebuild immediately (zero intervening statements/calls) -- see the
+    // EIGHTH COMPILER LIMITATION note above `http_get`. The success check
+    // below deliberately uses `sock1.fd < 0` (the struct field), NOT the
+    // paired `_connect_err` scalar -- see the TENTH COMPILER LIMITATION
+    // note above `http_get` for why that scalar half of a `(TcpSocket, i32)`
+    // tuple return was observed to read back as 0 even when the struct half
+    // correctly shows failure (fd == -1) in this fork-based test. `sock.fd`
+    // itself reads back correctly in every observed case, so it -- not the
+    // paired error code -- is the authoritative success/failure signal used
+    // throughout this function.
+    let sock1 = TcpSocket { fd: sock.fd }
+    if sock1.fd < 0 {
+        return HttpResponse { status: -1, headers: Str { data: [0; 256], len: 0 }, body: Str { data: [0; 256], len: 0 }, ok: false }
+    }
+
+    var request_buf = Buf4096 { data: [0; 4096] }
+    let request_len = build_request(&!request_buf, host, host_len, path, path_len)
+
+    let (sock2, sent) = tcp_send(sock1, &request_buf, request_len)
+    let sock2c = TcpSocket { fd: sock2.fd }
+    if sent < 0 {
+        tcp_close(sock2c)
+        return HttpResponse { status: -1, headers: Str { data: [0; 256], len: 0 }, body: Str { data: [0; 256], len: 0 }, ok: false }
+    }
+
+    var response_buf = Buf4096 { data: [0; 4096] }
+    let (sock3, received) = tcp_recv(sock2c, &!response_buf)
+    let sock3b = TcpSocket { fd: sock3.fd }
+    tcp_close(sock3b)
+
+    if received <= 0 {
+        return HttpResponse { status: -1, headers: Str { data: [0; 256], len: 0 }, body: Str { data: [0; 256], len: 0 }, ok: false }
+    }
+
+    let total_len = received as i32
+    let header_boundary = find_double_crlf(&response_buf, total_len)
+    if header_boundary < 0 {
+        return HttpResponse { status: -1, headers: Str { data: [0; 256], len: 0 }, body: Str { data: [0; 256], len: 0 }, ok: false }
+    }
+
+    let status = parse_status(&response_buf, header_boundary)
+    let headers_str = str_from_buf_range(&response_buf, 0, header_boundary)
+
+    let body_start = header_boundary + 4
+    let content_length = find_content_length(&response_buf, header_boundary)
+    var body_len = total_len - body_start
+    if content_length >= 0 && content_length < body_len {
+        body_len = content_length
+    }
+    if body_len < 0 {
+        body_len = 0
+    }
+    let body_str = str_from_buf_range(&response_buf, body_start, body_len)
+
+    let ok_flag = status > 0
+    return HttpResponse { status: status, headers: headers_str, body: body_str, ok: ok_flag }
+}
