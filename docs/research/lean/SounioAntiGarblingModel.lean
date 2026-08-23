@@ -34,10 +34,13 @@
       invariant — no order garbling from `+`); `sens_emul_reassoc` (PRODUCT
       re-association changes it by EXACTLY the three associators). "No third input"
       is manifest in `eval`'s structural recursion.
-  Still prose-only in the .md companion (NOT machine-asserted): the §5
-  non-separability caveat (a negative observation: when BOTH certificates fail the
-  understatement carries a support×order interaction term and does not split
-  additively).
+    * §5 NON-SEPARABILITY — `antigarbling_interaction` (true understatement =
+      dSup + dOrd + the support×order interaction term 2·(u·v)) and
+      `antigarbling_not_additive` (a concrete witness where dSup + dOrd is WRONG),
+      confirming the two garblings are independent jointly-sufficient certificates,
+      not additive error terms.
+  The FULL proof spine of Anti-Garbling Completeness is now machine-checked; the
+  .md companions carry the prose exposition and the general-algebra framing.
 -/
 
 namespace SounioAntiGarbling
@@ -363,5 +366,48 @@ theorem sens_emul_reassoc {α : Type} [AddGrp α] [Magma α] (a b c : Expr α) :
       + associator Magma.mul (cen a) (sens b) (cen c)
       + associator Magma.mul (cen a) (cen b) (sens c) :=
   fo_product_sensitivity_diff (eval a) (eval b) (eval c)
+
+/- ===================================================================== -/
+/-  §5 non-separability caveat, machine-checked.                           -/
+/-  Single-component sensitivity model: ∂naive = a, δ_support = u,          -/
+/-  δ_order = v; Var(w) = w², ⟨u,v⟩ = u·v.                                  -/
+/- ===================================================================== -/
+
+/-- `(x+y)² = x² + y² + 2xy` over ℤ (Mathlib-free: distribute, then `omega`
+    over the abstracted products). -/
+theorem int_sq_add (x y : Int) : (x + y) * (x + y) = x*x + y*y + 2*(x*y) := by
+  rw [Int.add_mul, Int.mul_add, Int.mul_add, Int.mul_comm y x]; omega
+
+/-- The true understatement `Var(a+u+v) − Var(a)`. -/
+def trueErr (a u v : Int) : Int := (a + u + v) * (a + u + v) - a * a
+/-- The support correction alone `Var(a+u) − Var(a)`. -/
+def dSup (a u : Int) : Int := 2*(a*u) + u*u
+/-- The order correction alone `Var(a+v) − Var(a)`. -/
+def dOrd (a v : Int) : Int := 2*(a*v) + v*v
+
+/-- Three-term square, via `int_sq_add` twice. -/
+theorem var_three_expand (a u v : Int) :
+    (a + u + v) * (a + u + v)
+      = a*a + u*u + v*v + 2*(a*u) + 2*(a*v) + 2*(u*v) := by
+  have h1 : (a + u + v) * (a + u + v)
+      = (a + u) * (a + u) + v*v + 2*((a + u)*v) := int_sq_add (a + u) v
+  rw [h1, int_sq_add a u, Int.add_mul a u v, Int.mul_add 2 (a*v) (u*v)]
+  omega
+
+/-- §5 (positive form): the true understatement = the two corrections PLUS the
+    support×order INTERACTION term `2·(u·v)`. It does not split as `dSup + dOrd`. -/
+theorem antigarbling_interaction (a u v : Int) :
+    trueErr a u v = dSup a u + dOrd a v + 2*(u*v) := by
+  unfold trueErr dSup dOrd
+  rw [var_three_expand]; omega
+
+/-- §5 (negative form): the additive decomposition `dSup + dOrd` is genuinely
+    WRONG — witnessed by `a=0, u=v=1`, where the true understatement is `4` but
+    `dSup + dOrd = 2`. So the two garblings are INDEPENDENT, JOINTLY-SUFFICIENT
+    certificates (Theorem 4.1), not two additive error terms. -/
+theorem antigarbling_not_additive :
+    ∃ a u v : Int, trueErr a u v ≠ dSup a u + dOrd a v := by
+  refine ⟨0, 1, 1, ?_⟩
+  decide
 
 end SounioAntiGarbling
