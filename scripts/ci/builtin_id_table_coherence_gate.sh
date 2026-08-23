@@ -26,6 +26,13 @@
 # tables instead of assuming them.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# The anti-vacuity primitives. This gate reads its facts out of source with
+# regexes, and a regex that stops matching reports on ZERO rows and calls that
+# agreement. Not hypothetical: on 2026-08-23 a comment containing `{ on }`
+# truncated a non-greedy extraction in a sibling gate and silently dropped six
+# entries from the set being checked. So the count is floored, not trusted.
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/gate_assert.sh"
+gate_name "builtin_id_table_coherence"
 CG=self-hosted/native/codegen_x86_linux.sio
 ART=artifacts/gates/builtin_id_table_coherence.v1.json
 mkdir -p "$(dirname "$ART")"
@@ -47,6 +54,11 @@ echo "control: sabotaged table rejected, as required"
 if out=$(run "$CG" 2>&1); then
   echo "$out"
   n=$(printf '%s' "$out" | grep -cE '^ *[a-z_]+ +producers=' || true)
+  # A green over nothing is the failure this gate exists to prevent elsewhere,
+  # so it must not be able to commit it itself. Ten is the count on the day the
+  # floor was set: the seven original ffi_* plus sqrt, floor and ceil. The range
+  # only grows, so a drop means the extraction broke, not that builtins left.
+  require_min_count "$n" 10 "ffi_* builtins compared across the tables"
   printf '{"status":"pass","metrics":{"total":%s,"passed":%s,"failed":0,"not_run":0}}\n' "$n" "$n" > "$ART"
   exit 0
 fi
