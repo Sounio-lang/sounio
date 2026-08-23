@@ -232,3 +232,140 @@ fn mf_two_prod(nc: NativeCompiler, p_out: i64, e_out: i64, a: i64, b: i64,
     c = mf_mov_slot(c, p_out, t_p)
     c
 }
+
+// ---------------------------------------------------------------------------
+// Double-double layer.
+//
+// From here on temporaries come from a BLOCK rather than one argument each: a
+// routine takes `tb`, the offset of the first temp, and uses tb, tb-8, tb-16 …
+// going away from rbp. Each routine documents how many it consumes, and the
+// caller must not overlap that span with anything live. The base layer above
+// keeps its explicit arguments — it is the foundation and worth reading
+// literally — but a dd_mul with eighteen slot parameters would be unreadable,
+// and unreadable is how a slot collision survives review.
+//
+// A "dd" is two slots. They are always passed as (hi, lo) and their exact sum
+// is the value; the invariant every routine restores on exit is |lo| <= ulp(hi)/2,
+// which is what QuickTwoSum at the end of each routine is for.
+// ---------------------------------------------------------------------------
+
+// Temp i of the block based at tb.
+fn mf_t(tb: i64, i: i64) -> i64 { tb - 8 * i }
+
+// dd + dd. 7 temps. Oracle: dd_add.
+fn mf_dd_add(nc: NativeCompiler, o_hi: i64, o_lo: i64, a_hi: i64, a_lo: i64,
+             b_hi: i64, b_lo: i64, tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let s = mf_t(tb, 0)
+    let e = mf_t(tb, 1)
+    c = mf_two_sum(c, s, e, a_hi, b_hi, mf_t(tb, 2), mf_t(tb, 3), mf_t(tb, 4))
+    c = mf_ld0(c, e); c = mf_ld1(c, a_lo)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, b_lo)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e)                                    // e += a_lo + b_lo
+    // |s| >= |e| here: s is the rounded sum of the two leading words and e
+    // collects only what those roundings dropped, so QuickTwoSum is in domain.
+    c = mf_quick_two_sum(c, o_hi, o_lo, s, e, mf_t(tb, 5), mf_t(tb, 6))
+    c
+}
+
+// dd + double. 7 temps. Oracle: dd_add_d.
+fn mf_dd_add_d(nc: NativeCompiler, o_hi: i64, o_lo: i64, a_hi: i64, a_lo: i64,
+               b: i64, tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let s = mf_t(tb, 0)
+    let e = mf_t(tb, 1)
+    c = mf_two_sum(c, s, e, a_hi, b, mf_t(tb, 2), mf_t(tb, 3), mf_t(tb, 4))
+    c = mf_ld0(c, e); c = mf_ld1(c, a_lo)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e)                                    // e += a_lo
+    c = mf_quick_two_sum(c, o_hi, o_lo, s, e, mf_t(tb, 5), mf_t(tb, 6))
+    c
+}
+
+// dd - dd. 7 temps. Oracle: dd_sub.
+fn mf_dd_sub(nc: NativeCompiler, o_hi: i64, o_lo: i64, a_hi: i64, a_lo: i64,
+             b_hi: i64, b_lo: i64, tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let s = mf_t(tb, 0)
+    let e = mf_t(tb, 1)
+    c = mf_two_diff(c, s, e, a_hi, b_hi, mf_t(tb, 2), mf_t(tb, 3), mf_t(tb, 4))
+    c = mf_ld0(c, e); c = mf_ld1(c, a_lo)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, b_lo)
+    c.code = emit_subsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e)                                    // e += a_lo - b_lo
+    c = mf_quick_two_sum(c, o_hi, o_lo, s, e, mf_t(tb, 5), mf_t(tb, 6))
+    c
+}
+
+// dd * dd. 13 temps. Oracle: dd_mul.
+fn mf_dd_mul(nc: NativeCompiler, o_hi: i64, o_lo: i64, a_hi: i64, a_lo: i64,
+             b_hi: i64, b_lo: i64, split_off: i64, tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let p = mf_t(tb, 0)
+    let e = mf_t(tb, 1)
+    let t = mf_t(tb, 2)
+    c = mf_two_prod(c, p, e, a_hi, b_hi, split_off,
+                    mf_t(tb, 3), mf_t(tb, 4), mf_t(tb, 5), mf_t(tb, 6),
+                    mf_t(tb, 7), mf_t(tb, 8), mf_t(tb, 9))
+    c = mf_ld0(c, a_hi); c = mf_ld1(c, b_lo)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, t)                                    // t = a_hi * b_lo
+    c = mf_ld0(c, a_lo); c = mf_ld1(c, b_hi)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, t)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, e)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e)                                    // e += a_lo*b_hi + t
+    c = mf_quick_two_sum(c, o_hi, o_lo, p, e, mf_t(tb, 10), mf_t(tb, 11))
+    c
+}
+
+// dd * double. 12 temps. Oracle: dd_mul_d.
+fn mf_dd_mul_d(nc: NativeCompiler, o_hi: i64, o_lo: i64, a_hi: i64, a_lo: i64,
+               b: i64, split_off: i64, tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let p = mf_t(tb, 0)
+    let e = mf_t(tb, 1)
+    c = mf_two_prod(c, p, e, a_hi, b, split_off,
+                    mf_t(tb, 2), mf_t(tb, 3), mf_t(tb, 4), mf_t(tb, 5),
+                    mf_t(tb, 6), mf_t(tb, 7), mf_t(tb, 8))
+    c = mf_ld0(c, a_lo); c = mf_ld1(c, b)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_ld1(c, e)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, e)                                    // e += a_lo * b
+    c = mf_quick_two_sum(c, o_hi, o_lo, p, e, mf_t(tb, 9), mf_t(tb, 10))
+    c
+}
+
+// dd / dd, one Newton correction, ~2^-104. 24 temps. Oracle: dd_div.
+//
+// The correction is not optional decoration: q1 = a_hi/b_hi is a plain binary64
+// divide and carries 53 bits, which is less than the dd layer promises. The
+// second term recovers the residual a - b*q1.
+fn mf_dd_div(nc: NativeCompiler, o_hi: i64, o_lo: i64, a_hi: i64, a_lo: i64,
+             b_hi: i64, b_lo: i64, split_off: i64, tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let q1 = mf_t(tb, 0)
+    let q2 = mf_t(tb, 1)
+    let t_hi = mf_t(tb, 2)
+    let t_lo = mf_t(tb, 3)
+    let r_hi = mf_t(tb, 4)
+    let r_lo = mf_t(tb, 5)
+    let inner = mf_t(tb, 6)
+    c = mf_ld0(c, a_hi); c = mf_ld1(c, b_hi)
+    c.code = emit_divsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, q1)                                   // q1 = a_hi / b_hi
+    c = mf_dd_mul_d(c, t_hi, t_lo, b_hi, b_lo, q1, split_off, inner)
+    c = mf_dd_sub(c, r_hi, r_lo, a_hi, a_lo, t_hi, t_lo, inner)
+    c = mf_ld0(c, r_hi); c = mf_ld1(c, b_hi)
+    c.code = emit_divsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, q2)                                   // q2 = r_hi / b_hi
+    // |q1| >= |q2| by construction: q2 corrects a residual that q1 rounded away.
+    c = mf_quick_two_sum(c, o_hi, o_lo, q1, q2, mf_t(tb, 22), mf_t(tb, 23))
+    c
+}
