@@ -365,6 +365,19 @@ def main() -> int:
                     f"`bin/sounio-coord inbox --agent {agent} --lane {lane} "
                     "--directed-only --newest-first`."
                 )
+            request_ids = [
+                match.group(1)
+                for line in lines
+                if " kind=request " in line
+                and (match := MESSAGE_ID.match(line)) is not None
+            ]
+            if request_ids:
+                print(
+                    "Reply on-thread with "
+                    f"`bin/sounio-coord send --agent {agent} --lane {lane} "
+                    "--kind reply --reply-to <request-id> --message \"<text>\"`. "
+                    f"Pending request ids: {', '.join(request_ids)}."
+                )
             print(
                 "After handling one, acknowledge it with "
                 f"bin/sounio-coord ack --agent {agent} --lane {lane} --message <id>."
