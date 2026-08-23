@@ -71,37 +71,35 @@ If after GUM the WP20–WP25 difference is consistent with 0 at k95 (`|pull| ≤
 ## Receipts (2026-08-23)
 
 Madaros `souc check` of `ew_precision.sio`, the example, and the test:
-**verdict=0**. Default Madaros `souc run` of the imported example **SIGSEGV
-139** (imported-module native residual; same family as the particle expN
-gates). Execution oracle for this lane is **lean_single**, matching
-`scripts/ci/particle_exp7_gum_transfer_gate.sh`.
+**verdict=0**.
 
-lean_single `souc run examples/particle_physics/a_mu_gum_split.sio` rc=0:
+**Re-run 2026-08-23 after Madaros native fix** (control ELF
+`bin/madaros-linux-x86_64` 100902241 B). Default Madaros `souc run`
+of the imported example and of `tests/run-pass/a_mu_gum_split.sio`:
+**rc=0**. Combined experimental σ is now `sqrt(stat²+syst²+ext²)`
+passed into `Epistemic::measured` — a computed f64, not a decimal
+literal. Probe: `measured(central, newton_sqrt(11.4²+9.1²+2.1²))`
+keeps σ = 14.737028 on both the Newton value and `ep_std`.
 
 ```
-A_MU_EXP_VAL 116592070.500000   STD 14.737049
+A_MU_EXP_VAL 116592070.500000   STD 14.737028
 A_MU_WP20_VAL 116591810.000000  STD 43.000000
 A_MU_WP25_VAL 116592033.000000  STD 62.000000
-A_MU_PULL_EXP_WP20 5.730910
-A_MU_PULL_EXP_WP25 0.588444
-A_MU_PULL_WP25_WP20 2.955523
+A_MU_PULL_EXP_WP20 5.730909
+A_MU_PULL_EXP_WP25 0.588443
+A_MU_PULL_WP25_WP20 2.955522
 VERDICT_EXP_DISAGREES_WP20 1
 VERDICT_EXP_AGREES_WP25 1
 VERDICT_SPLIT_SURVIVES 1
 ```
 
-`tests/run-pass/a_mu_gum_split.sio` lean_single rc=0.
-
 `delta_alpha_had` needed `with Mut, Div, Panic` so Madaros could check the
 module at all (E035 on `measured`). That is one signature, not a mass migrate.
 
-Computed `f64` arguments to `Epistemic::measured` come back as σ=0 under
-lean_single. Combined experimental σ is therefore a **literal**
-(`14.7370485`) whose square is checked against `11.4²+9.1²+2.1²` in Sounio.
+This does **not** claim the imported-module native path is closed for every
+graph. It claims this four-module a_μ graph runs.
 
 ```text
 Semantic-Outcome: two SM a_μ citations are Epistemic values; GUM pulls
-  are computed in Sounio; they are not averaged. Madaros typechecks.
-  Execution is lean_single until the imported native path stops
-  SIGSEGVing this module graph.
+  are computed in Sounio under Madaros; they are not averaged.
 ```
