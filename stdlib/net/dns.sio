@@ -1,0 +1,251 @@
+// stdlib/net/dns.sio — hostname resolution.
+//
+// FIFTH COMPILER LIMITATION (new, discovered in this task) — `extern "C"`
+// has NO path to arbitrary libc symbols, confirmed by reading
+// `append_extern_c_stubs()` in self-hosted/compiler/lean_single.sio
+// (~line 29585) in full: it is a hardcoded `if extern_stub_name_eq(si,
+// "<name>") == 1 { append_src_lit("fn <name>(...) { <hand-written body,
+// usually syscall6(...) or __native_*> }\n") }` chain covering exactly:
+// getpid/getppid/gettid/getuid/getgid/geteuid/getegid (syscall6 wrappers),
+// sqrt/sin/cos/exp/log/ln/fabs/abs/tanh/atan2/atan/tan/asin/acos/pow
+// (delegating to `__native_*` builtins), and malloc/free (delegating to
+// heap_alloc/heap_free). ANY other extern "C" name — including
+// `getaddrinfo`/`freeaddrinfo` — falls through to the final `else` branch,
+// which emits a stub that always calls `panic("unresolved extern fn")`
+// regardless of the real function's signature. There is no dynamic-linking
+// mechanism, no libc symbol table lookup, and no generic "call whatever
+// address this name resolves to" path — each allow-listed name has its
+// C semantics manually re-implemented in Sounio source text at compile
+// time. Extending this allow-list to cover getaddrinfo would require: (a)
+// deciding how to represent/consume its `struct addrinfo` linked-list
+// return value from generated Sounio source (the compiler has no notion
+// of arbitrary C structs), and (b) hand-writing getaddrinfo's NSS/resolver
+// logic in Sounio anyway, since there's no way to just "call into" the
+// real libc implementation — at which point you have reimplemented
+// getaddrinfo, not bound it. That is compiler surgery, explicitly out of
+// scope for this stdlib task (see task-3-brief.md).
+//
+// getaddrinfo also has no raw-syscall equivalent: unlike socket/connect/
+// bind (each a single Linux syscall number), name resolution is
+// implemented entirely in userspace by glibc — it reads /etc/nsswitch.conf,
+// /etc/hosts, /etc/resolv.conf, and may itself issue connect/sendto/recvfrom
+// syscalls to a DNS resolver, or none at all for /etc/hosts-only lookups.
+// `syscall6`, the only real FFI escape hatch this compiler provides (see
+// socket.sio's FIRST limitation), has nothing to bind to for "resolve a
+// hostname" as a single syscall number.
+//
+// RESOLUTION TAKEN: rather than mark the test `//@ ignore`, this module
+// implements the "more ambitious alternative" the task brief explicitly
+// sanctions — real hostname resolution via a raw syscall path, without any
+// FFI to getaddrinfo. `/etc/hosts` is opened/read/closed via the bare
+// `open`/`read`/`close` Linux x86-64 syscalls (2/0/3) through `syscall6`,
+// exactly like socket.sio's sockets, and parsed by hand for a matching
+// hostname token, returning its IPv4 dotted-decimal string. This correctly
+// resolves "localhost" (and any other /etc/hosts entry) without touching
+// DNS at all — which is honest: real getaddrinfo() would do the same
+// /etc/hosts check first (nsswitch.conf's default `hosts: files dns`
+// ordering) before ever sending a DNS packet. A full DNS (UDP,
+// resolv.conf-driven) resolver was considered and rejected for this task:
+// it cannot reliably resolve "localhost" itself (that name is virtually
+// never present in upstream DNS — it's a /etc/hosts-only convention), so
+// it would not satisfy this task's own test, and it is a materially larger
+// undertaking (DNS wire-format query construction, response parsing,
+// resolv.conf parsing) that belongs in a follow-up task if a real
+// non-local hostname resolver is ever needed.
+//
+// Reuses socket.sio's pack/unpack-into-i64-words technique (FOURTH
+// limitation there) for the raw `read()` syscall target buffer, since the
+// same 8-byte-stride-on-`[u8;N]`-indexed-write bug applies here: the
+// kernel writes real bytes at real 1-byte offsets into whatever buffer
+// `read()`'s pointer points at, but Sounio's own indexed writes to a
+// `[u8; N]` array use an 8-byte stride, so the two are incompatible unless
+// staged through an `[i64; N]`-backed buffer first.
+//
+// SIXTH COMPILER LIMITATION (new, discovered in this task) — cross-module
+// struct import inside the stdlib requires the SIBLING-RELATIVE module
+// path, not the full `net::socket::...` path, even though `net::socket::*`
+// is exactly what test files (e.g. tests/run-pass/net_socket_loopback.sio)
+// use successfully to import the same struct. `use net::socket::Buf4096`,
+// `use net::socket::*`, and `pub use net::socket::*` all typecheck-failed
+// from within THIS file (stdlib/net/dns.sio, itself already inside
+// `net/`) with `E200 \`Buf4096\` at line ...` on every later
+// `Buf4096 { data: [...] }` struct-literal use, even though the same glob
+// import compiles fine as an entry-point program's own `use` statement.
+// `use socket::*` (sibling-relative, no `net::` prefix) is what actually
+// works here — apparently a top-level program resolves `use net::socket`
+// against the stdlib root, while a file that is itself already inside
+// `net/` must resolve sibling modules relative to its own directory, and
+// the two resolution rules are not interchangeable from inside a stdlib
+// module. `pub use socket::Buf4096` (a single named re-export, rather
+// than `*`) failed the same way — only `use socket::*` (unqualified glob)
+// was confirmed to work, so struct re-export via `pub use socket::*` was
+// used instead of trying to isolate why the single-name form failed.
+
+use socket::*
+
+pub struct Buf256 {
+    data: [u8; 256]
+}
+
+pub const ERR_DNS_RESOLVE: i32 = 0 - 1
+pub const ERR_DNS_UNEXPECTED_SHAPE: i32 = 0 - 2
+
+const SYS_READ: i64 = 0
+const SYS_OPEN: i64 = 2
+const SYS_CLOSE: i64 = 3
+
+const SP: u8 = 32
+const TAB: u8 = 9
+const NL: u8 = 10
+const HASH: u8 = 35
+
+// "/etc/hosts\0" packed as two i64 words (little-endian byte order within
+// each word), built via shifts/OR exactly like socket.sio's SockAddrWords
+// — never as indexed `[u8; N]` writes, per the FOURTH limitation.
+struct PathWords { w0: i64, w1: i64 }
+
+fn build_hosts_path(out: &!PathWords) with Mut, Panic, Div {
+    out.w0 = 47
+        | (101 << 8)
+        | (116 << 16)
+        | (99 << 24)
+        | (47 << 32)
+        | (104 << 40)
+        | (111 << 48)
+        | (115 << 56)
+    out.w1 = 116 | (115 << 8)
+}
+
+struct WordBuf512 { w: [i64; 512] }
+
+// Inverse of socket.sio's pack_bytes: copies `count` real syscall-written
+// bytes out of a correctly-strided WordBuf512 into the caller-visible
+// Buf4096.data[i] logical indexing.
+fn unpack_bytes(inp: WordBuf512, count: i32, out: &!Buf4096) with Mut, Panic, Div {
+    var i: i32 = 0
+    while i < count {
+        let word_idx = i / 8
+        let byte_idx = i - word_idx * 8
+        let shift = (byte_idx * 8) as i64
+        let word = inp.w[word_idx as usize]
+        let b = (word >> shift) & (255 as i64)
+        out.data[i as usize] = b as u8
+        i = i + 1
+    }
+}
+
+fn raw_close(fd: i64) with IO, Mut, Panic, Div {
+    syscall6(SYS_CLOSE, fd, 0, 0, 0, 0, 0)
+}
+
+// Scans one line of /etc/hosts (content.data[line_start..line_end), a
+// half-open logical byte range — safe because this is pure indexed
+// reading/comparison, never a raw pointer, so the FOURTH limitation's
+// 8-byte-stride bug does not apply). Returns 1 and fills `out_ip` with the
+// line's address token if one of the line's hostname tokens matches
+// `hostname[0..hostname_len)`; returns 0 otherwise.
+fn try_match_line(
+    content: &Buf4096,
+    line_start: i32,
+    line_end: i32,
+    hostname: &Buf256,
+    hostname_len: i32,
+    out_ip: &!Buf4096
+) -> i32 with Mut, Panic, Div {
+    if line_start >= line_end {
+        return 0
+    }
+    if content.data[line_start as usize] == HASH {
+        return 0
+    }
+
+    var p: i32 = line_start
+    let ip_start = p
+    while p < line_end && content.data[p as usize] != SP && content.data[p as usize] != TAB {
+        p = p + 1
+    }
+    let ip_end = p
+    let ip_len = ip_end - ip_start
+    if ip_len == 0 {
+        return 0
+    }
+
+    while p < line_end {
+        while p < line_end && (content.data[p as usize] == SP || content.data[p as usize] == TAB) {
+            p = p + 1
+        }
+        if p >= line_end {
+            return 0
+        }
+        let tok_start = p
+        while p < line_end && content.data[p as usize] != SP && content.data[p as usize] != TAB {
+            p = p + 1
+        }
+        let tok_end = p
+        let tok_len = tok_end - tok_start
+
+        if tok_len == hostname_len {
+            var matched: i32 = 1
+            var k: i32 = 0
+            while k < tok_len {
+                if content.data[(tok_start + k) as usize] != hostname.data[k as usize] {
+                    matched = 0
+                }
+                k = k + 1
+            }
+            if matched == 1 {
+                var m: i32 = 0
+                while m < ip_len {
+                    out_ip.data[m as usize] = content.data[(ip_start + m) as usize]
+                    m = m + 1
+                }
+                return 1
+            }
+        }
+    }
+
+    return 0
+}
+
+// Resolves `hostname` (the first `hostname_len` bytes of `hostname.data`)
+// to an IPv4 dotted-decimal string written into `out_ip.data`, by reading
+// and parsing /etc/hosts via raw open/read/close syscalls (no getaddrinfo,
+// no libc FFI — see the top-of-file comment for why). Returns 0 on
+// success, ERR_DNS_RESOLVE if the file can't be opened/read or no entry
+// matches.
+pub fn resolve_ipv4(hostname: &Buf256, hostname_len: i32, out_ip: &!Buf4096) -> i32 with IO, Mut, Panic, Div {
+    var path = PathWords { w0: 0, w1: 0 }
+    build_hosts_path(&!path)
+    let path_ptr = &!path as *mut u8
+    let fd = syscall6(SYS_OPEN, path_ptr as i64, 0, 0, 0, 0, 0)
+    if fd < 0 {
+        return ERR_DNS_RESOLVE
+    }
+
+    var packed = WordBuf512 { w: [0; 512] }
+    let buf_ptr = &!packed as *mut u8
+    let n = syscall6(SYS_READ, fd, buf_ptr as i64, 4096, 0, 0, 0)
+    raw_close(fd)
+    if n <= 0 {
+        return ERR_DNS_RESOLVE
+    }
+
+    var content = Buf4096 { data: [0; 4096] }
+    unpack_bytes(packed, n as i32, &!content)
+
+    let total = n as i32
+    var i: i32 = 0
+    while i < total {
+        var line_end = i
+        while line_end < total && content.data[line_end as usize] != NL {
+            line_end = line_end + 1
+        }
+        let found = try_match_line(&content, i, line_end, hostname, hostname_len, out_ip)
+        if found == 1 {
+            return 0
+        }
+        i = line_end + 1
+    }
+
+    return ERR_DNS_RESOLVE
+}
