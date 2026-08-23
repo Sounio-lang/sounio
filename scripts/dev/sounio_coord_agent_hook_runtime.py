@@ -151,20 +151,75 @@ def tmux_endpoint(root: Path) -> tuple[str, str] | None:
     return socket, pane_id
 
 
+def agentd_endpoint() -> tuple[str, str] | None:
+    socket_path = os.environ.get("SOUNIO_AGENTD_SOCKET", "")
+    token_file = os.environ.get("SOUNIO_AGENTD_TOKEN_FILE", "")
+    if not socket_path or not token_file:
+        return None
+    socket = Path(socket_path)
+    token = Path(token_file)
+    if not socket.exists() or not token.is_file():
+        return None
+    return str(socket.resolve()), str(token.resolve())
+
+
+def process_worktree(context_root: Path) -> Path:
+    supervised = os.environ.get("SOUNIO_AGENTD_WORKTREE", "")
+    if not supervised:
+        return context_root
+    physical_root = repo_root(supervised)
+    if physical_root is None:
+        return context_root
+    if git_common_dir(physical_root) != git_common_dir(context_root):
+        return context_root
+    return physical_root
+
+
 def refresh_delivery_endpoint(
     tool_root: Path, root: Path, agent: str, lane: str
 ) -> None:
-    endpoint = tmux_endpoint(root)
-    if endpoint is None:
-        return
     if agent.startswith("claude"):
         harness = "claude"
     elif agent.startswith("codex"):
         harness = "codex"
     else:
         return
-    socket, pane = endpoint
     ttl = os.environ.get("SOUNIO_COORD_HOOK_TTL_SECONDS", "1800")
+    supervised = agentd_endpoint()
+    if supervised is not None:
+        socket, token_file = supervised
+        result = run_coord(
+            tool_root,
+            "endpoint-register",
+            "--agent",
+            agent,
+            "--lane",
+            lane,
+            "--harness",
+            harness,
+            "--transport",
+            "agentd",
+            "--address",
+            socket,
+            "--socket",
+            socket,
+            "--token-file",
+            token_file,
+            "--ttl-seconds",
+            ttl,
+            worktree=root,
+        )
+        if result.returncode != 0:
+            sys.stderr.write(
+                "sounio coordination agentd endpoint warning: "
+                f"{result.stderr or result.stdout}"
+            )
+        return
+
+    endpoint = tmux_endpoint(root)
+    if endpoint is None:
+        return
+    socket, pane = endpoint
     result = run_coord(
         tool_root,
         "endpoint-register",
@@ -210,10 +265,11 @@ def process_identity() -> tuple[int, str, str, str, str] | None:
 
 def refresh_process_presence(
     tool_root: Path,
-    root: Path,
+    process_root: Path,
     agent: str,
     lane: str,
     session_id: str,
+    claim_root: Path | None = None,
 ) -> bool:
     identity = process_identity()
     if identity is None:
@@ -253,14 +309,14 @@ def refresh_process_presence(
         host,
         "--ttl-seconds",
         ttl,
-        worktree=root,
+        worktree=process_root,
     )
     if result.returncode != 0 and "claim not found:" in result.stderr:
         scope = run_coord(
             tool_root,
             "scope",
             *scope_args(agent, lane, f"active {agent} session"),
-            worktree=root,
+            worktree=claim_root or process_root,
         )
         if scope.returncode == 0:
             result = run_coord(
@@ -286,7 +342,7 @@ def refresh_process_presence(
                 host,
                 "--ttl-seconds",
                 ttl,
-                worktree=root,
+                worktree=process_root,
             )
     if result.returncode != 0:
         sys.stderr.write(
@@ -383,10 +439,11 @@ def main() -> int:
     lane = f"session-{session_id}"
     intent = f"active {agent} session"
     common = scope_args(agent, lane, intent)
+    presence_root = process_worktree(root)
 
     if event_name == "SessionEnd":
         if not refresh_process_presence(
-            tool_root, root, agent, lane, raw_session_id
+            tool_root, presence_root, agent, lane, raw_session_id, claim_root=root
         ):
             sys.stderr.write(
                 "coordination refused: this process cannot end another live "
@@ -400,7 +457,7 @@ def main() -> int:
             agent,
             "--lane",
             lane,
-            worktree=root,
+            worktree=presence_root,
         )
         run_coord(
             tool_root,
@@ -409,7 +466,7 @@ def main() -> int:
             agent,
             "--lane",
             lane,
-            worktree=root,
+            worktree=presence_root,
         )
         run_coord(
             tool_root,
@@ -437,7 +494,7 @@ def main() -> int:
             return 2
         target_root, target_paths = target
         if not refresh_process_presence(
-            tool_root, root, agent, lane, raw_session_id
+            tool_root, presence_root, agent, lane, raw_session_id, claim_root=root
         ):
             sys.stderr.write(
                 "coordination refused: this process does not own the live "
@@ -455,7 +512,7 @@ def main() -> int:
             worktree=target_root,
         )
         if result.returncode == 0:
-            refresh_delivery_endpoint(tool_root, target_root, agent, lane)
+            refresh_delivery_endpoint(tool_root, presence_root, agent, lane)
             return 0
 
         if target_root == root:
@@ -473,7 +530,7 @@ def main() -> int:
             )
             sys.stderr.write(result.stderr or "coordination scope update failed\n")
             return 2
-        refresh_delivery_endpoint(tool_root, root, agent, lane)
+        refresh_delivery_endpoint(tool_root, presence_root, agent, lane)
         return 0
 
     if event_name == "SessionStart":
@@ -497,9 +554,11 @@ def main() -> int:
         sys.stderr.write(f"sounio coordination warning: {result.stderr}")
         return 0
 
-    if not refresh_process_presence(tool_root, root, agent, lane, raw_session_id):
+    if not refresh_process_presence(
+        tool_root, presence_root, agent, lane, raw_session_id, claim_root=root
+    ):
         return 2
-    refresh_delivery_endpoint(tool_root, root, agent, lane)
+    refresh_delivery_endpoint(tool_root, presence_root, agent, lane)
 
     if event_name == "SessionStart":
         print(

@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.10
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.11
 
 usage() {
   cat <<'USAGE'
@@ -32,7 +32,8 @@ Commands:
   authorize --agent ID [--lane ID] [--resources RESOURCE ...] [--files PATH ...]
                                  verify that a local active claim covers the requested ownership
   endpoint-register --agent ID --lane ID --harness claude|codex|grok|cursor|kimi
-          --transport tmux --address PANE --socket PATH [--ttl-seconds N]
+          --transport tmux|agentd --address ADDRESS --socket PATH
+          [--token-file PATH] [--ttl-seconds N]
                                  register an expiring, verified delivery endpoint
   endpoint-unregister --agent ID --lane ID
                                  remove the lane's delivery endpoint
@@ -242,6 +243,19 @@ causal_runtime_command() {
   fi
   SOUNIO_COORD_WORKTREE="$WORKTREE" SOUNIO_COORD_STATE_DIR="$STATE_DIR" \
     "$helper" "$@"
+}
+
+agentd_runtime_command() {
+  local script_dir helper
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  if [[ -x "$script_dir/sounio-agentd-runtime" ]]; then
+    helper="$script_dir/sounio-agentd-runtime"
+  elif [[ -x "$script_dir/sounio_coord_agentd.py" ]]; then
+    helper="$script_dir/sounio_coord_agentd.py"
+  else
+    die "agent supervisor runtime is not installed beside ${BASH_SOURCE[0]}"
+  fi
+  "$helper" "$@"
 }
 
 slug() {
@@ -603,7 +617,12 @@ load_endpoint() {
   E_TRANSPORT=''
   E_ADDRESS=''
   E_SOCKET=''
+  E_TOKEN_FILE=''
   E_PANE_PID=''
+  E_INSTANCE_ID=''
+  E_SESSION_ID=''
+  E_HARNESS_PID=''
+  E_HARNESS_PID_START=''
   E_COMMAND=''
   E_CREATED_UTC=''
   E_LAST_UTC=''
@@ -620,7 +639,12 @@ load_endpoint() {
       transport=*) E_TRANSPORT="${line#transport=}" ;;
       address=*) E_ADDRESS="${line#address=}" ;;
       socket=*) E_SOCKET="${line#socket=}" ;;
+      token_file=*) E_TOKEN_FILE="${line#token_file=}" ;;
       pane_pid=*) E_PANE_PID="${line#pane_pid=}" ;;
+      instance_id=*) E_INSTANCE_ID="${line#instance_id=}" ;;
+      session_id=*) E_SESSION_ID="${line#session_id=}" ;;
+      harness_pid=*) E_HARNESS_PID="${line#harness_pid=}" ;;
+      harness_pid_start=*) E_HARNESS_PID_START="${line#harness_pid_start=}" ;;
       command=*) E_COMMAND="${line#command=}" ;;
       created_utc=*) E_CREATED_UTC="${line#created_utc=}" ;;
       last_seen_utc=*) E_LAST_UTC="${line#last_seen_utc=}" ;;
@@ -648,7 +672,12 @@ write_endpoint() {
     printf 'transport=%s\n' "$E_TRANSPORT"
     printf 'address=%s\n' "$E_ADDRESS"
     printf 'socket=%s\n' "$E_SOCKET"
+    printf 'token_file=%s\n' "$E_TOKEN_FILE"
     printf 'pane_pid=%s\n' "$E_PANE_PID"
+    printf 'instance_id=%s\n' "$E_INSTANCE_ID"
+    printf 'session_id=%s\n' "$E_SESSION_ID"
+    printf 'harness_pid=%s\n' "$E_HARNESS_PID"
+    printf 'harness_pid_start=%s\n' "$E_HARNESS_PID_START"
     printf 'command=%s\n' "$E_COMMAND"
     printf 'created_utc=%s\n' "$E_CREATED_UTC"
     printf 'last_seen_utc=%s\n' "$E_LAST_UTC"
@@ -673,6 +702,54 @@ tmux_endpoint_snapshot() {
   T_PANE_PID="$pane_pid"
   T_COMMAND="$pane_command"
   T_PATH="$pane_path"
+}
+
+A_STATE=''
+A_AGENT=''
+A_LANE=''
+A_SESSION_ID=''
+A_WORKTREE=''
+A_INSTANCE_ID=''
+A_DAEMON_PID=''
+A_DAEMON_PID_START=''
+A_HARNESS_PID=''
+A_HARNESS_PID_START=''
+A_COMMAND=''
+agentd_endpoint_snapshot() {
+  local agent="$1" lane="$2" socket="$3" token_file="$4" output line
+  A_STATE=''
+  A_AGENT=''
+  A_LANE=''
+  A_SESSION_ID=''
+  A_WORKTREE=''
+  A_INSTANCE_ID=''
+  A_DAEMON_PID=''
+  A_DAEMON_PID_START=''
+  A_HARNESS_PID=''
+  A_HARNESS_PID_START=''
+  A_COMMAND=''
+  output="$(agentd_runtime_command status --agent "$agent" --lane "$lane" \
+    --socket "$socket" --token-file "$token_file" 2>/dev/null)" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      state=*) A_STATE="${line#state=}" ;;
+      agent=*) A_AGENT="${line#agent=}" ;;
+      lane=*) A_LANE="${line#lane=}" ;;
+      session_id=*) A_SESSION_ID="${line#session_id=}" ;;
+      worktree=*) A_WORKTREE="${line#worktree=}" ;;
+      instance_id=*) A_INSTANCE_ID="${line#instance_id=}" ;;
+      daemon_pid=*) A_DAEMON_PID="${line#daemon_pid=}" ;;
+      daemon_pid_start=*) A_DAEMON_PID_START="${line#daemon_pid_start=}" ;;
+      harness_pid=*) A_HARNESS_PID="${line#harness_pid=}" ;;
+      harness_pid_start=*) A_HARNESS_PID_START="${line#harness_pid_start=}" ;;
+      command=*) A_COMMAND="${line#command=}" ;;
+    esac
+  done <<< "$output"
+  [[ "$A_STATE" == active && "$A_AGENT" == "$agent" && "$A_LANE" == "$lane" && \
+    -n "$A_SESSION_ID" && -n "$A_WORKTREE" && -n "$A_INSTANCE_ID" && \
+    "$A_DAEMON_PID" =~ ^[1-9][0-9]*$ && "$A_DAEMON_PID_START" =~ ^[1-9][0-9]*$ && \
+    "$A_HARNESS_PID" =~ ^[1-9][0-9]*$ && "$A_HARNESS_PID_START" =~ ^[1-9][0-9]*$ && \
+    -n "$A_COMMAND" ]]
 }
 
 harness_command_matches() {
@@ -897,24 +974,59 @@ endpoint_state() {
     ENDPOINT_STATE='stale'
     return 1
   fi
-  [[ "$E_TRANSPORT" == tmux && -S "$E_SOCKET" ]] || return 1
-  current_pane="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_id}' 2>/dev/null || true)"
-  current_pid="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_pid}' 2>/dev/null || true)"
-  current_command="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_current_command}' 2>/dev/null || true)"
-  current_path="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_current_path}' 2>/dev/null || true)"
-  if [[ "$current_pane" != "$E_ADDRESS" || "$current_pid" != "$E_PANE_PID" || \
-    "$current_command" != "$E_COMMAND" || -z "$current_path" ]] || \
-    ! harness_command_matches "$E_HARNESS" "$current_command"; then
-    ENDPOINT_STATE='drifted'
-    return 1
-  fi
-  current_root="$(git -C "$current_path" rev-parse --show-toplevel 2>/dev/null || true)"
-  [[ -n "$current_root" ]] && current_root="$(cd "$current_root" && pwd -P)"
-  if [[ "$current_root" != "$E_WORKTREE" ]]; then
-    ENDPOINT_STATE='drifted'
-    return 1
-  fi
+  case "$E_TRANSPORT" in
+    tmux)
+      [[ -S "$E_SOCKET" ]] || return 1
+      current_pane="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_id}' 2>/dev/null || true)"
+      current_pid="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_pid}' 2>/dev/null || true)"
+      current_command="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_current_command}' 2>/dev/null || true)"
+      current_path="$(tmux -S "$E_SOCKET" display-message -p -t "$E_ADDRESS" '#{pane_current_path}' 2>/dev/null || true)"
+      if [[ "$current_pane" != "$E_ADDRESS" || "$current_pid" != "$E_PANE_PID" || \
+        "$current_command" != "$E_COMMAND" || -z "$current_path" ]] || \
+        ! harness_command_matches "$E_HARNESS" "$current_command"; then
+        ENDPOINT_STATE='drifted'
+        return 1
+      fi
+      current_root="$(git -C "$current_path" rev-parse --show-toplevel 2>/dev/null || true)"
+      [[ -n "$current_root" ]] && current_root="$(cd "$current_root" && pwd -P)"
+      if [[ "$current_root" != "$E_WORKTREE" ]]; then
+        ENDPOINT_STATE='drifted'
+        return 1
+      fi
+      ;;
+    agentd)
+      [[ -S "$E_SOCKET" && -f "$E_TOKEN_FILE" ]] || return 1
+      if ! agentd_endpoint_snapshot "$E_AGENT" "$E_LANE" "$E_SOCKET" "$E_TOKEN_FILE"; then
+        ENDPOINT_STATE='drifted'
+        return 1
+      fi
+      if [[ "$A_WORKTREE" != "$E_WORKTREE" || "$A_INSTANCE_ID" != "$E_INSTANCE_ID" || \
+        "$A_SESSION_ID" != "$E_SESSION_ID" || "$A_HARNESS_PID" != "$E_HARNESS_PID" || \
+        "$A_HARNESS_PID_START" != "$E_HARNESS_PID_START" || "$A_COMMAND" != "$E_COMMAND" ]] || \
+        ! harness_command_matches "$E_HARNESS" "$A_COMMAND"; then
+        ENDPOINT_STATE='drifted'
+        return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
   ENDPOINT_STATE='active'
+}
+
+deliver_registered_endpoint() {
+  local prompt="$1" message_id="$2"
+  case "$E_TRANSPORT" in
+    tmux)
+      tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" -l "$prompt" 2>/dev/null && \
+        tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" Enter 2>/dev/null
+      ;;
+    agentd)
+      agentd_runtime_command wake --agent "$E_AGENT" --lane "$E_LANE" \
+        --session-id "$E_SESSION_ID" --message-id "$message_id" --prompt "$prompt" \
+        --socket "$E_SOCKET" --token-file "$E_TOKEN_FILE" >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 remove_endpoint_for_lane() {
@@ -1118,10 +1230,10 @@ attempt_message_wake() {
 
   launcher="$(coord_inbox_launcher)"
   prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then reply or ack $M_ID."
-  if ! tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" -l "$prompt" 2>/dev/null || \
-    ! tmux -S "$E_SOCKET" send-keys -t "$E_ADDRESS" Enter 2>/dev/null; then
+  if ! deliver_registered_endpoint "$prompt" "$M_ID"; then
     WAKE_STATUS='failed'
-    printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=tmux\n' "$M_ID" "$E_ID" >&2
+    printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=%s\n' \
+      "$M_ID" "$E_ID" "$E_TRANSPORT" >&2
     return 1
   fi
 
@@ -1569,9 +1681,9 @@ authorize_command() {
 }
 
 endpoint_register_command() {
-  local agent="${SOUNIO_AGENT_ID:-}" lane='' harness='' transport='' address='' socket=''
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' harness='' transport='' address='' socket='' token_file=''
   local ttl="${SOUNIO_COORD_ENDPOINT_TTL_SECONDS:-1800}" claim_file endpoint_file presence_file created_utc
-  local existing_endpoint
+  local existing_endpoint registered_address registered_pid registered_command token_mode token_owner
   local -a endpoint_paths=()
   while (($#)); do
     case "$1" in
@@ -1581,6 +1693,7 @@ endpoint_register_command() {
       --transport) require_arg "$1" "$2"; transport="$2"; shift 2 ;;
       --address) require_arg "$1" "$2"; address="$2"; shift 2 ;;
       --socket) require_arg "$1" "$2"; socket="$2"; shift 2 ;;
+      --token-file) require_arg "$1" "$2"; token_file="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown endpoint-register option: $1" ;;
@@ -1590,7 +1703,7 @@ endpoint_register_command() {
   [[ -n "$lane" ]] || die "endpoint-register requires --lane"
   [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi)$ ]] || \
     die "--harness must be claude, codex, grok, cursor, or kimi"
-  [[ "$transport" == tmux ]] || die "--transport currently supports only tmux"
+  [[ "$transport" =~ ^(tmux|agentd)$ ]] || die "--transport must be tmux or agentd"
   [[ -n "$address" ]] || die "endpoint-register requires --address"
   [[ -n "$socket" ]] || die "endpoint-register requires --socket"
   [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
@@ -1602,12 +1715,42 @@ endpoint_register_command() {
     die "endpoint lane contains unsupported characters: $lane"
   validate_value address "$address"
   validate_value socket "$socket"
+  [[ -z "$token_file" ]] || validate_value token-file "$token_file"
   socket="$(readlink -f "$socket" 2>/dev/null || true)"
-  [[ -n "$socket" && -S "$socket" ]] || die "tmux socket is not available: ${socket:-missing}"
-  tmux_endpoint_snapshot "$socket" "$address" || \
-    die "tmux endpoint does not resolve to the current worktree"
-  harness_command_matches "$harness" "$T_COMMAND" || \
-    die "tmux pane command $T_COMMAND does not match harness $harness"
+  [[ -n "$socket" && -S "$socket" ]] || die "$transport socket is not available: ${socket:-missing}"
+  case "$transport" in
+    tmux)
+      [[ -z "$token_file" ]] || die "tmux endpoints do not accept --token-file"
+      tmux_endpoint_snapshot "$socket" "$address" || \
+        die "tmux endpoint does not resolve to the current worktree"
+      harness_command_matches "$harness" "$T_COMMAND" || \
+        die "tmux pane command $T_COMMAND does not match harness $harness"
+      registered_address="$T_PANE_ID"
+      registered_pid="$T_PANE_PID"
+      registered_command="$T_COMMAND"
+      ;;
+    agentd)
+      [[ -n "$token_file" ]] || die "agentd endpoints require --token-file"
+      token_file="$(readlink -f "$token_file" 2>/dev/null || true)"
+      [[ -n "$token_file" && -f "$token_file" ]] || \
+        die "agentd capability file is not available: ${token_file:-missing}"
+      token_owner="$(stat -c %u "$token_file" 2>/dev/null || true)"
+      token_mode="$(stat -c %a "$token_file" 2>/dev/null || true)"
+      [[ "$token_owner" == "$(id -u)" && "$token_mode" == 600 ]] || \
+        die "agentd capability file must be owned by the current uid with mode 600"
+      [[ "$(readlink -f "$address" 2>/dev/null || true)" == "$socket" ]] || \
+        die "agentd address must name its control socket"
+      agentd_endpoint_snapshot "$agent" "$lane" "$socket" "$token_file" || \
+        die "agentd endpoint did not return a verified live identity"
+      [[ "$A_WORKTREE" == "$WORKTREE" ]] || \
+        die "agentd endpoint belongs to worktree $A_WORKTREE"
+      harness_command_matches "$harness" "$A_COMMAND" || \
+        die "agentd command $A_COMMAND does not match harness $harness"
+      registered_address="$socket"
+      registered_pid="$A_DAEMON_PID"
+      registered_command="$A_COMMAND"
+      ;;
+  esac
 
   claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
   endpoint_file="$(endpoint_path "$agent" "$lane")"
@@ -1616,22 +1759,28 @@ endpoint_register_command() {
   load_claim "$claim_file"
   claim_expired && die "claim expired before endpoint registration: $C_ID"
   [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" ]] || die "claim owner mismatch"
-  if [[ "$C_WORKTREE" != "$WORKTREE" ]]; then
+  if [[ "$transport" == agentd || "$C_WORKTREE" != "$WORKTREE" ]]; then
     presence_file="$(presence_path "$agent" "$lane")"
     [[ -f "$presence_file" ]] || \
-      die "cross-worktree endpoint requires verified process presence"
+      die "$transport endpoint requires verified process presence"
     load_presence "$presence_file"
-    presence_state || die "cross-worktree process presence is $PRESENCE_STATE: $PRESENCE_REASON"
+    presence_state || die "$transport process presence is $PRESENCE_STATE: $PRESENCE_REASON"
     [[ "$P_WORKTREE" == "$WORKTREE" ]] || \
       die "process presence belongs to worktree $P_WORKTREE"
+    if [[ "$transport" == agentd ]]; then
+      [[ "$PRESENCE_STATE" == live && "$P_HARNESS" == "$harness" && \
+        "$P_SESSION_ID" == "$A_SESSION_ID" && "$P_PID" == "$A_HARNESS_PID" && \
+        "$P_PID_START" == "$A_HARNESS_PID_START" ]] || \
+        die "agentd identity does not match the live process-presence generation"
+    fi
   fi
   endpoint_paths=("$ENDPOINTS_DIR"/*.endpoint)
   for existing_endpoint in "${endpoint_paths[@]}"; do
     [[ -f "$existing_endpoint" && "$existing_endpoint" != "$endpoint_file" ]] || continue
     load_endpoint "$existing_endpoint"
     endpoint_expired && continue
-    if [[ "$E_SOCKET" == "$socket" && "$E_ADDRESS" == "$T_PANE_ID" ]]; then
-      die "tmux endpoint is already owned by $E_AGENT/$E_LANE"
+    if [[ "$E_SOCKET" == "$socket" && "$E_ADDRESS" == "$registered_address" ]]; then
+      die "$transport endpoint is already owned by $E_AGENT/$E_LANE"
     fi
   done
   created_utc="$NOW_UTC"
@@ -1647,10 +1796,15 @@ endpoint_register_command() {
   E_WORKTREE="$WORKTREE"
   E_HARNESS="$harness"
   E_TRANSPORT="$transport"
-  E_ADDRESS="$T_PANE_ID"
+  E_ADDRESS="$registered_address"
   E_SOCKET="$socket"
-  E_PANE_PID="$T_PANE_PID"
-  E_COMMAND="$T_COMMAND"
+  E_TOKEN_FILE="$token_file"
+  E_PANE_PID="$registered_pid"
+  E_INSTANCE_ID="${A_INSTANCE_ID:-}"
+  E_SESSION_ID="${A_SESSION_ID:-}"
+  E_HARNESS_PID="${A_HARNESS_PID:-}"
+  E_HARNESS_PID_START="${A_HARNESS_PID_START:-}"
+  E_COMMAND="$registered_command"
   E_CREATED_UTC="$created_utc"
   E_LAST_UTC="$NOW_UTC"
   E_LAST_EPOCH="$NOW_EPOCH"
@@ -1659,7 +1813,7 @@ endpoint_register_command() {
   printf 'utc=%s event=ENDPOINT_REGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s harness=%s transport=%s address=%s\n' \
     "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$E_HARNESS" \
     "$E_TRANSPORT" "$E_ADDRESS" >> "$EVENT_LOG"
-  printf 'ENDPOINT_REGISTERED endpoint_id=%s harness=%s transport=%s address=%s pane_pid=%s command=%s expires_in=%s\n' \
+  printf 'ENDPOINT_REGISTERED endpoint_id=%s harness=%s transport=%s address=%s endpoint_pid=%s command=%s expires_in=%s\n' \
     "$E_ID" "$E_HARNESS" "$E_TRANSPORT" "$E_ADDRESS" "$E_PANE_PID" "$E_COMMAND" "$E_TTL"
 }
 
@@ -1707,9 +1861,10 @@ endpoint_status_command() {
   load_endpoint "$endpoint_file"
   endpoint_state || true
   state="$ENDPOINT_STATE"
-  printf 'ENDPOINT_STATUS endpoint_id=%s state=%s agent=%s lane=%s worktree=%s harness=%s transport=%s address=%s pane_pid=%s command=%s last_seen=%s\n' \
+  printf 'ENDPOINT_STATUS endpoint_id=%s state=%s agent=%s lane=%s worktree=%s harness=%s transport=%s address=%s endpoint_pid=%s command=%s session_id=%s instance_id=%s last_seen=%s\n' \
     "$E_ID" "$state" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$E_HARNESS" \
-    "$E_TRANSPORT" "$E_ADDRESS" "$E_PANE_PID" "$E_COMMAND" "$E_LAST_UTC"
+    "$E_TRANSPORT" "$E_ADDRESS" "$E_PANE_PID" "$E_COMMAND" \
+    "${E_SESSION_ID:--}" "${E_INSTANCE_ID:--}" "$E_LAST_UTC"
 }
 
 presence_register_command() {
