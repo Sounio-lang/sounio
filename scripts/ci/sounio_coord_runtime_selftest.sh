@@ -22,13 +22,14 @@ fail() {
 }
 
 mkdir -p "$REPO/bin" "$REPO/scripts/dev"
-cp "$ROOT_DIR/bin/sounio-coord" "$REPO/bin/"
+cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
-chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
+chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Runtime Selftest'
 git -C "$REPO" config user.email 'coord-runtime-selftest@sounio.local'
@@ -47,23 +48,33 @@ first_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime was not activated'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-causal-runtime" ]] || \
   fail 'installed runtime omitted the causal receipt verifier'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-agentd-runtime" ]] || \
+  fail 'installed runtime omitted the detached agent supervisor'
 grep -q '^capability=crash-recovery-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the crash-recovery capability'
+grep -q '^capability=agentd-transport-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed runtime omitted the agentd transport capability'
 
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'second worktree did not select shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'worktrees selected different runtime ids'
 grep -q "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" <<< "$output" || \
   fail 'runtime path is not anchored in the Git common directory'
+output="$(cd "$SECOND" && bin/sounio-agentd runtime-info)"
+grep -q '^selection=shared$' <<< "$output" || fail 'agentd launcher did not select the shared runtime'
+grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'agentd selected a different runtime id'
 
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/scripts/dev/sounio_coord_runtime.sh"
 printf '#!/usr/bin/env python3\nraise SystemExit(98)\n' > \
   "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py"
 printf '#!/usr/bin/env python3\nraise SystemExit(99)\n' > \
   "$SECOND/scripts/dev/sounio_coord_causal_runtime.py"
+printf '#!/usr/bin/env python3\nraise SystemExit(100)\n' > \
+  "$SECOND/scripts/dev/sounio_coord_agentd.py"
 chmod +x "$SECOND/scripts/dev/sounio_coord_runtime.sh" \
   "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py" \
-  "$SECOND/scripts/dev/sounio_coord_causal_runtime.py"
+  "$SECOND/scripts/dev/sounio_coord_causal_runtime.py" \
+  "$SECOND/scripts/dev/sounio_coord_agentd.py"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared CLI runtime'
@@ -75,11 +86,15 @@ output="$(
 )"
 grep -q 'agent=claude lane=session-runtime-test' <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared hook runtime'
+output="$(cd "$SECOND" && bin/sounio-agentd runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'sabotaged worktree fallback displaced the shared agentd runtime'
 
 mkdir -p "$ALT/scripts/dev"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$ALT/scripts/dev/"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
@@ -99,6 +114,7 @@ mkdir -p "$BAD/scripts/dev"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$BAD/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$BAD/scripts/dev/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \
   "$BAD/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$BAD/scripts/dev/"*
@@ -120,6 +136,9 @@ unlink "$RUNTIME_ROOT/current"
 ln -s versions/missing "$RUNTIME_ROOT/current"
 if (cd "$REPO" && bin/sounio-coord runtime-info) >/dev/null 2>&1; then
   fail 'CLI launcher silently fell back across a broken shared-runtime link'
+fi
+if (cd "$REPO" && bin/sounio-agentd runtime-info) >/dev/null 2>&1; then
+  fail 'agentd launcher silently fell back across a broken shared-runtime link'
 fi
 if (
   cd "$REPO"
