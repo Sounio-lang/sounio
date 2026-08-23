@@ -134,8 +134,53 @@ Not one pair failed certification. The spectrum `{0} ∪ {4 + 8i}` and its
 maximum `n/2 − 4` now rest on integer arithmetic across the whole published
 range, not on a claim about the alphabet of the entries.
 
+## Second addendum: the STRUCTURE, exactly, for n = 32, 64 and 128
+
+`scripts/research/cd_zd_kernel_structure_exact.py`. Each of the three structure
+claims fails in a DIFFERENT direction under a modular computation, and two of
+them turn out to need no extra work at all:
+
+**Distinct kernels — the modular count is a lower bound, and it is tight.**
+Equal over ℚ implies equal modular key, because the lifted modular basis is (by
+the certificate above) an exact basis of `ker_ℚ`, so equal ℚ-spaces reduce to
+equal `F_P`-spaces. Distinct keys therefore mean distinct over ℚ, and the only
+thing left to check is whether any key bucket secretly holds two different
+ℚ-subspaces. Rank test, integers only. **Zero non-uniform buckets in every
+dimension.**
+
+**Clique — already exact, and nobody had noticed.** `zero_pair` sums four ±1
+table entries, so every component satisfies `|v_k| ≤ 4 < P`, and `v % P == 0`
+is *equivalent* to `v == 0` over ℤ. The modular test was never approximate here.
+
+**Maximum independent set — the modular value is a lower bound.** Independent
+mod `P` implies independent over ℚ, so confirming a maximum requires showing no
+set of size `max+1` is independent over ℚ. That is genuine combinatorial search
+and is the one claim with no shortcut; it is still running for `n = 32` and is
+not reported here.
+
+| n | pairs | `ker = 0` | `ker > 0` | distinct kernels | non-uniform buckets | clique |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 56 | 14 | 42 | **42** | 0 | 2 |
+| 32 | 240 | 30 | 210 | **210** | 0 | 3 |
+| 64 | 992 | 62 | 930 | **930** | 0 | 3 |
+| 128 | 4032 | 126 | 3906 | **3906** | 0 | 3 |
+
+Three facts the published document does not state:
+
+1. **The map pair → kernel is injective** on non-degenerate pairs, in every
+   dimension measured. Two *primitives* share a subspace (`e_a + e_b` and
+   `e_a − e_b`); two *pairs* never do. The document observes this at `n = 16`
+   and treats it as a remark; it holds across all 5,208 pairs.
+2. **The clique rises from 2 to 3 and stops.** `n = 16` gives 2; `n = 32`, 64
+   and 128 all give 3. The document only speaks of `n = 16`, so this is new
+   ground rather than verification.
+3. **`ker = 0` count is exactly `n − 2`** in every dimension, which confirms the
+   degeneracy rule `c₊ = 0 ⟺ b′ = 0 ∨ a = b′` by an independent count.
+
 ## Not claimed
 
+- The maximum-independent-set value at `n ≥ 32` is NOT established. The modular
+  search gives a lower bound and the exact confirmation is still running.
 - The certificate covers the kernel DIMENSIONS. The n = 16 structure numbers —
   42 distinct kernels, clique 2, max 3 independent — were verified separately
   over Q by `cd_zd_kernel_spectrum_exact_check.py`; the analogous structure at
