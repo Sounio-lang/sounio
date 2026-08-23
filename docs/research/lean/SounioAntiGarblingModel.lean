@@ -20,12 +20,15 @@
     * THEOREM 4.1, Axis-2 (sum-node) instance — `antigarbling_sound_sum`: disjoint
       supports ⇒ the naive independence-variance equals the true variance of the
       sum (no fabricated precision), proved through `varSum_expand` and Lemma 3.
+    * THEOREM 4.1, Axis-1 (product-node) instance — `antigarbling_sound_product`:
+      a vanishing associator ⇒ any variance functional agrees across the two
+      parenthesizations (no order garbling), via Lemma 4; AND the deep §3B identity
+      `fo_product_sensitivity_diff`: over a first-order dual-number model on a
+      biadditive magma, ∂((xy)z) − ∂(x(yz)) = the SUM OF THREE ASSOCIATORS.
     * `var_eq_of_sensitivity_eq` — the congruence shape of Theorem 4.1 for both
       axes (equal sensitivities ⇒ equal variance).
   Still prose-only in the .md companion (NOT asserted machine-checked): the
-  Axis-1/product-node instance of Theorem 4.1, the completeness dimension count
-  (Prop 2), and the §5 non-separability caveat — these need the full
-  sensitivity-propagation model over the algebra.
+  completeness dimension count (Prop 2) and the §5 non-separability caveat.
 -/
 
 namespace SounioAntiGarbling
@@ -83,6 +86,7 @@ theorem cov_zero_of_disjoint (x y : Noise) (S : List Nat)
     `a - b = 0 → a = b`. The octonion carrier ℝ⁸ is an instance. -/
 class AddGrp (α : Type) extends Add α, Neg α, Zero α, Sub α where
   add_assoc      : ∀ a b c : α, a + b + c = a + (b + c)
+  add_comm       : ∀ a b : α, a + b = b + a
   zero_add       : ∀ a : α, 0 + a = a
   add_zero       : ∀ a : α, a + 0 = a
   neg_add_cancel : ∀ a : α, -a + a = 0
@@ -190,5 +194,99 @@ theorem var_eq_of_sensitivity_eq (dTrue dNaive : Noise) (S : List Nat)
   have hfun : (fun s => dTrue s * dTrue s) = (fun s => dNaive s * dNaive s) := by
     funext s; rw [h s]
   rw [hfun]
+
+/- ===================================================================== -/
+/-  Theorem 4.1 — the product-node / Axis-1 instance, machine-checked.     -/
+/-  Needs an abelian additive group + a biadditive (non-associative) mul.  -/
+/- ===================================================================== -/
+
+/-- Uniqueness of inverses: `a + b = 0 → b = -a`. -/
+theorem neg_unique {α : Type} [AddGrp α] (a b : α) (h : a + b = 0) : b = -a := by
+  calc b = 0 + b        := (AddGrp.zero_add b).symm
+    _ = (-a + a) + b := by rw [AddGrp.neg_add_cancel]
+    _ = -a + (a + b) := AddGrp.add_assoc _ _ _
+    _ = -a + 0       := by rw [h]
+    _ = -a           := AddGrp.add_zero _
+
+/-- Negation distributes over addition (abelian). -/
+theorem neg_add_dist {α : Type} [AddGrp α] (c d : α) : -(c + d) = -c + -d := by
+  have h : (c + d) + (-c + -d) = 0 := by
+    calc (c + d) + (-c + -d)
+        = c + (d + (-c + -d)) := AddGrp.add_assoc c d (-c + -d)
+      _ = c + (d + (-d + -c)) := by rw [AddGrp.add_comm (-c) (-d)]
+      _ = c + ((d + -d) + -c) := by rw [← AddGrp.add_assoc d (-d) (-c)]
+      _ = c + ((-d + d) + -c) := by rw [AddGrp.add_comm d (-d)]
+      _ = c + (0 + -c)        := by rw [AddGrp.neg_add_cancel d]
+      _ = c + -c              := by rw [AddGrp.zero_add (-c)]
+      _ = -c + c              := AddGrp.add_comm c (-c)
+      _ = 0                   := AddGrp.neg_add_cancel c
+  exact (neg_unique (c + d) (-c + -d) h).symm
+
+/-- `(a+b) - (c+d) = (a-c) + (b-d)` (abelian). -/
+theorem add_sub_add {α : Type} [AddGrp α] (a b c d : α) :
+    (a + b) - (c + d) = (a - c) + (b - d) := by
+  rw [AddGrp.sub_eq_add_neg (a + b) (c + d), AddGrp.sub_eq_add_neg a c,
+      AddGrp.sub_eq_add_neg b d, neg_add_dist]
+  calc (a + b) + (-c + -d)
+      = a + (b + (-c + -d)) := AddGrp.add_assoc a b (-c + -d)
+    _ = a + ((b + -c) + -d) := by rw [← AddGrp.add_assoc b (-c) (-d)]
+    _ = a + ((-c + b) + -d) := by rw [AddGrp.add_comm b (-c)]
+    _ = a + (-c + (b + -d)) := by rw [AddGrp.add_assoc (-c) b (-d)]
+    _ = (a + -c) + (b + -d) := by rw [← AddGrp.add_assoc a (-c) (b + -d)]
+
+/-- Three-term regroup: `(p1+p2+p3) - (q1+q2+q3) = (p1-q1)+(p2-q2)+(p3-q3)`. -/
+theorem sub_add3 {α : Type} [AddGrp α] (p1 p2 p3 q1 q2 q3 : α) :
+    (p1 + p2 + p3) - (q1 + q2 + q3)
+      = (p1 - q1) + (p2 - q2) + (p3 - q3) := by
+  rw [add_sub_add (p1 + p2) p3 (q1 + q2) q3, add_sub_add p1 p2 q1 q2]
+
+/-- A (possibly non-associative) product on an additive group that is BIADDITIVE
+    (distributes over `+` on both sides) — the octonions are an instance. -/
+class Magma (α : Type) [AddGrp α] where
+  mul     : α → α → α
+  mul_add : ∀ a b c : α, mul a (b + c) = mul a b + mul a c
+  add_mul : ∀ a b c : α, mul (a + b) c = mul a c + mul b c
+
+/-- First-order value over the algebra: a center `c` and an ε-coefficient `d`
+    (the first-order sensitivity ∂). -/
+structure FO (α : Type) where
+  c : α
+  d : α
+
+/-- First-order product (Leibniz; the ε² term is dropped by first-order truncation). -/
+def fmul {α : Type} [AddGrp α] [Magma α] (x y : FO α) : FO α :=
+  { c := Magma.mul x.c y.c
+    d := Magma.mul x.d y.c + Magma.mul x.c y.d }
+
+/-- The §3B identity: the first-order sensitivity of a triple product differs
+    between the two parenthesizations by exactly the SUM OF THREE ASSOCIATORS
+    (one per factor, with the ε-coefficient in that slot and centers elsewhere).
+    This is the algebraic heart of Axis 1. -/
+theorem fo_product_sensitivity_diff {α : Type} [AddGrp α] [Magma α] (x y z : FO α) :
+    (fmul (fmul x y) z).d - (fmul x (fmul y z)).d
+      = associator Magma.mul x.d y.c z.c
+      + associator Magma.mul x.c y.d z.c
+      + associator Magma.mul x.c y.c z.d := by
+  show (Magma.mul (Magma.mul x.d y.c + Magma.mul x.c y.d) z.c
+          + Magma.mul (Magma.mul x.c y.c) z.d)
+        - (Magma.mul x.d (Magma.mul y.c z.c)
+          + Magma.mul x.c (Magma.mul y.d z.c + Magma.mul y.c z.d))
+      = _
+  rw [Magma.add_mul (Magma.mul x.d y.c) (Magma.mul x.c y.d) z.c,
+      Magma.mul_add x.c (Magma.mul y.d z.c) (Magma.mul y.c z.d),
+      ← AddGrp.add_assoc (Magma.mul x.d (Magma.mul y.c z.c))
+        (Magma.mul x.c (Magma.mul y.d z.c)) (Magma.mul x.c (Magma.mul y.c z.d)),
+      sub_add3]
+  rfl
+
+/-- THEOREM 4.1 (operational core, product node / Axis 1): a vanishing associator
+    (Lemma 4) makes ANY variance functional agree across the two parenthesizations
+    of a triple product — no order garbling. (`Var` is left abstract: the result
+    holds for the Euclidean norm², the `κ‖·‖²` augmentation, or the MC reference
+    alike, since the two VALUES coincide.) -/
+theorem antigarbling_sound_product {α : Type} [AddGrp α] (mul : α → α → α)
+    (Var : α → Int) (x y z : α) (h : associator mul x y z = 0) :
+    Var (mul (mul x y) z) = Var (mul x (mul y z)) := by
+  rw [parenthesizations_agree_of_associator_zero mul x y z h]
 
 end SounioAntiGarbling
