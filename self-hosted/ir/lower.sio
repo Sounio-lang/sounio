@@ -42,6 +42,8 @@ struct LowerLocalStack {
     // Layout-table index of the T in a Box<T> param/local; -1 otherwise. struct_types keeps
     // holding the literal "Box" because twelve sites read it and two test it with ir_name_is_box.
     box_inner_layout: [i64; 4096],
+    // 1 when local/param is fn(...) -> f64 (or f32); drives IrCallIndirect float markers.
+    fn_ptr_ret_float: [i64; 4096],
     count: i64,
 }
 
@@ -65,6 +67,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         variance_regs: [-1; 4096],
         closure_fn_id: [-1; 4096],
         box_inner_layout: [-1; 4096],
+        fn_ptr_ret_float: [0; 4096],
         count: 0,
     }
 }
@@ -3925,6 +3928,22 @@ fn lowerer_mark_local_scalar_kind_mut(
     }
 }
 
+fn lowerer_mark_local_fn_ptr_ret_float_mut(
+    lo: &! Lowerer,
+    name: Name
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*locals_box).depths[i as usize] <= (*lo).scope_depth && ir_name_eq((*locals_box).names[i as usize], name) {
+            (*locals_box).fn_ptr_ret_float[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
 // *mut analogue of bind_local_fixed_array_len: the active summary-owned
 // parameter path must update the LocalStack through its Box. Reassigning a
 // by-value Lowerer silently loses this metadata in current-source Madaros.
@@ -4100,6 +4119,8 @@ fn lowerer_lower_fn_params_mut(
                 // println of int params stays on print_int (i64-only left i32 at 0).
                 if lower_type_expr_is_f64(&(*list).head.ty) {
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 2)
+                } else if lower_type_expr_fn_returns_f64(&(*list).head.ty) {
+                    lowerer_mark_local_fn_ptr_ret_float_mut(lo, (*list).head.name)
                 } else if lower_type_expr_is_integer(&(*list).head.ty) {
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 1)
                 } else if lower_type_expr_is_bool(&(*list).head.ty) {
@@ -4673,6 +4694,14 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     let is_64 = seg.head_buf[1] as i64 == 54 && seg.head_buf[2] as i64 == 52
     let is_32 = seg.head_buf[1] as i64 == 51 && seg.head_buf[2] as i64 == 50
     is_64 || is_32
+}
+
+fn lower_type_expr_fn_returns_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeFn { return false }
+    match (*te).inner {
+        Some(ret) => lower_type_expr_is_f64(&(*ret)),
+        None => false,
+    }
 }
 
 // println i64-segfault fix: mirror lower_type_expr_is_f64 for i64 so a struct
@@ -7394,6 +7423,7 @@ impl Lowerer {
                 (*stk).variance_regs[idx as usize] = -1
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*stk).box_inner_layout[idx as usize] = 0 - 1
+                (*stk).fn_ptr_ret_float[idx as usize] = 0
                 (*stk).count = idx + 1
             lo.locals = stk
         } else {
@@ -7713,6 +7743,17 @@ impl Lowerer {
             i = i - 1
         }
         0
+    }
+
+    fn lookup_local_fn_ptr_ret_float(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).fn_ptr_ret_float[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
     }
 
     fn bind_local_variance_reg(self, name: Name, variance_reg: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -10854,6 +10895,11 @@ impl Lowerer {
                         || self.name_is_sensitivity_of(callee_name)
                         || self.name_is_hessian_of(callee_name) {
                         return true
+                    }
+                    if (*callee_expr).kind == ExprKind::ExprIdent {
+                        if self.lookup_local_fn_ptr_ret_float((*callee_expr).name) {
+                            return true
+                        }
                     }
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                     if fn_id >= 0 && fn_id < self.module.fn_count {
@@ -15417,7 +15463,15 @@ impl Lowerer {
                     let pair_dx = lo_x.fresh_reg()
                     let lo_dx = pair_dx.0
                     let dst_x = pair_dx.1
-                    let lo_cx = lo_dx.emit(ir_call_indirect(dst_x, callee_reg, args_x, argc_x))
+                    var lo_cx = lo_dx
+                    var call_x = ir_call_indirect(dst_x, callee_reg, args_x, argc_x)
+                    if lo_dx.expr_result_is_float_ref(e) {
+                        call_x.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    }
+                    lo_cx = lo_cx.emit(call_x)
+                    if call_x.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+                        lo_cx = lo_cx.emit(ir_mark_float_reg(dst_x))
+                    }
                     return (lo_cx, dst_x)
                 }
                 _ => {}
@@ -15467,7 +15521,15 @@ impl Lowerer {
             let pair_d_i = lo_i.fresh_reg()
             let lo2_i = pair_d_i.0
             let dst_i = pair_d_i.1
-            let lo3_i = lo2_i.emit(ir_call_indirect(dst_i, callee_local_reg, args_i, argc_i))
+            var lo3_i = lo2_i
+            var call_i = ir_call_indirect(dst_i, callee_local_reg, args_i, argc_i)
+            if lo2_i.expr_result_is_float_ref(e) {
+                call_i.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+            }
+            lo3_i = lo3_i.emit(call_i)
+            if call_i.imm_flags == IR_FLOAT_REG_MARKER_FLAG {
+                lo3_i = lo3_i.emit(ir_mark_float_reg(dst_i))
+            }
             return (lo3_i, dst_i)
         }
         var lo1 = self
