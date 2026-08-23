@@ -63,12 +63,16 @@ grep -q 'files=self-hosted/parser/ast.sio,self-hosted/parser/items.sio' <<< "$ou
 
 run_coord "$SECOND" claim --agent codex --lane cross-worktree --ttl-seconds 600 \
   --intent 'cross-worktree target owned explicitly' \
-  --files self-hosted/parser/cross-new.sio >/dev/null
+  --files self-hosted/parser/cross-new.sio self-hosted/parser/own-new.sio >/dev/null
 cp "$SECOND/bin/sounio-coord" "$SECOND/bin/sounio-coord.target-copy"
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/bin/sounio-coord"
 chmod +x "$SECOND/bin/sounio-coord"
 run_hook codex "$REPO" \
   "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/cross-new.sio\"}}"
+printf '%s\n' \
+  "{\"session_id\":\"codex-target\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/own-new.sio\"}}" | \
+  SOUNIO_COORD_DIR="$STATE" \
+  python3 "$REPO/scripts/dev/sounio_coord_agent_hook.py" --agent codex
 mv "$SECOND/bin/sounio-coord.target-copy" "$SECOND/bin/sounio-coord"
 output="$(run_coord "$SECOND" brief --max-rows 6)"
 grep -Fq "ACTIVE claim_id=codex--cross-worktree" <<< "$output" || \
