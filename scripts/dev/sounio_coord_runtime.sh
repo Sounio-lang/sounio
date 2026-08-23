@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.3
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.4
 
 usage() {
   cat <<'USAGE'
@@ -40,9 +40,21 @@ Commands:
                                  inspect one delivery endpoint
   wake    --agent ID --lane ID --message MESSAGE_ID
                                  retry immediate delivery for a visible directed message
+  experiment-open --agent ID --lane ID --receipt PATH --statement TEXT
+          --falsifier TEXT --intervention TEXT --treatment-predicate TEXT
+          --control-predicate TEXT --resource RESOURCE [--resource RESOURCE ...]
+                                 preregister a falsifiable, versioned experiment
+  experiment-close --agent ID --lane ID --prereg PATH --outcome PATH
+          --verdict supported|falsified|inconclusive --treatment NAME=PASS|FAIL
+          --control NAME=PASS|FAIL --treatment-evidence PATH
+          --control-evidence PATH
+                                 record a Git-bound treatment and sabotage outcome
+  experiment-status --prereg PATH [--outcome PATH]
+                                 verify and inspect a causal experiment chain
   handoff --agent ID --lane ID --to-agent ID --to-lane ID --message TEXT
           --commit SHA --gate NAME=PASS [--gate NAME=PASS ...]
           --evidence PATH [--evidence PATH ...] [--reply-to MESSAGE_ID]
+          [--experiment-prereg PATH --experiment-outcome PATH]
                                  publish proof metadata, then release the owned claim
   send    --agent ID --lane ID [--to-agent ID] [--to-lane ID]
           [--thread ID] [--reply-to MESSAGE_ID] --kind KIND --message TEXT
@@ -173,6 +185,20 @@ current_branch() {
 
 current_sha() {
   git -C "$WORKTREE" rev-parse --short=12 HEAD 2>/dev/null || printf unknown
+}
+
+causal_runtime_command() {
+  local script_dir helper
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  if [[ -x "$script_dir/sounio-coord-causal-runtime" ]]; then
+    helper="$script_dir/sounio-coord-causal-runtime"
+  elif [[ -x "$script_dir/sounio_coord_causal_runtime.py" ]]; then
+    helper="$script_dir/sounio_coord_causal_runtime.py"
+  else
+    die "causal coordination runtime is not installed beside ${BASH_SOURCE[0]}"
+  fi
+  SOUNIO_COORD_WORKTREE="$WORKTREE" SOUNIO_COORD_STATE_DIR="$STATE_DIR" \
+    "$helper" "$@"
 }
 
 slug() {
@@ -457,6 +483,11 @@ load_message() {
   M_THREAD_ID=''
   M_REPLY_TO=''
   M_COMMIT_SHA=''
+  M_EXPERIMENT_ID=''
+  M_EXPERIMENT_PREREG=''
+  M_EXPERIMENT_OUTCOME=''
+  M_EXPERIMENT_PREREG_SHA256=''
+  M_EXPERIMENT_OUTCOME_SHA256=''
   M_GATES=()
   M_EVIDENCE=()
   M_CLAIM_FILES=()
@@ -479,6 +510,11 @@ load_message() {
       thread_id=*) M_THREAD_ID="${line#thread_id=}" ;;
       reply_to=*) M_REPLY_TO="${line#reply_to=}" ;;
       commit_sha=*) M_COMMIT_SHA="${line#commit_sha=}" ;;
+      experiment_id=*) M_EXPERIMENT_ID="${line#experiment_id=}" ;;
+      experiment_prereg=*) M_EXPERIMENT_PREREG="${line#experiment_prereg=}" ;;
+      experiment_outcome=*) M_EXPERIMENT_OUTCOME="${line#experiment_outcome=}" ;;
+      experiment_prereg_sha256=*) M_EXPERIMENT_PREREG_SHA256="${line#experiment_prereg_sha256=}" ;;
+      experiment_outcome_sha256=*) M_EXPERIMENT_OUTCOME_SHA256="${line#experiment_outcome_sha256=}" ;;
       gate=*) M_GATES+=("${line#gate=}") ;;
       evidence=*) M_EVIDENCE+=("${line#evidence=}") ;;
       claim_file=*) M_CLAIM_FILES+=("${line#claim_file=}") ;;
@@ -695,6 +731,11 @@ print_message_line() {
       "$M_COMMIT_SHA" "$(join_values "${M_GATES[@]}")" \
       "$(join_values "${M_EVIDENCE[@]}")" "$(join_values "${M_CLAIM_FILES[@]}")" \
       "$(join_values "${M_CLAIM_RESOURCES[@]}")"
+    if [[ -n "$M_EXPERIMENT_ID" ]]; then
+      printf ' experiment=%s experiment_prereg=%s experiment_outcome=%s prereg_sha256=%s outcome_sha256=%s' \
+        "$M_EXPERIMENT_ID" "$M_EXPERIMENT_PREREG" "$M_EXPERIMENT_OUTCOME" \
+        "$M_EXPERIMENT_PREREG_SHA256" "$M_EXPERIMENT_OUTCOME_SHA256"
+    fi
   fi
   printf '\n'
 }
@@ -1358,6 +1399,8 @@ send_command() {
 handoff_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane='' message=''
   local commit='' commit_sha='' head_sha='' reply_to='' thread_id=''
+  local experiment_prereg='' experiment_outcome='' experiment_id=''
+  local experiment_prereg_sha256='' experiment_outcome_sha256='' causal_output=''
   local ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
   local gate evidence evidence_path claim_file reply_file message_id message_file tmp_file
   local -a gates=() evidence_paths=()
@@ -1372,6 +1415,8 @@ handoff_command() {
       --commit) require_arg "$1" "$2"; commit="$2"; shift 2 ;;
       --gate) require_arg "$1" "$2"; gates+=("$2"); shift 2 ;;
       --evidence) require_arg "$1" "$2"; evidence_paths+=("$(normalize_path "$2")"); shift 2 ;;
+      --experiment-prereg) require_arg "$1" "$2"; experiment_prereg="$(normalize_path "$2")"; shift 2 ;;
+      --experiment-outcome) require_arg "$1" "$2"; experiment_outcome="$(normalize_path "$2")"; shift 2 ;;
       --reply-to) require_arg "$1" "$2"; reply_to="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
       -h|--help) usage; return 0 ;;
@@ -1394,6 +1439,12 @@ handoff_command() {
   validate_value to-lane "$to_lane"
   validate_value message "$message"
   validate_value reply-to "$reply_to"
+  validate_value experiment-prereg "$experiment_prereg"
+  validate_value experiment-outcome "$experiment_outcome"
+  if [[ -n "$experiment_prereg" || -n "$experiment_outcome" ]]; then
+    [[ -n "$experiment_prereg" && -n "$experiment_outcome" ]] || \
+      die "causal handoff requires both --experiment-prereg and --experiment-outcome"
+  fi
   for gate in "${gates[@]}"; do
     validate_value gate "$gate"
     [[ "$gate" =~ ^[A-Za-z0-9._:/+-]+=PASS$ ]] || \
@@ -1413,6 +1464,20 @@ handoff_command() {
   head_sha="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
   [[ "$commit_sha" == "$head_sha" ]] || \
     die "handoff commit must equal current HEAD: commit=$commit_sha head=$head_sha"
+
+  if [[ -n "$experiment_prereg" ]]; then
+    if ! causal_output="$(causal_runtime_command verify \
+      --prereg "$experiment_prereg" --outcome "$experiment_outcome" \
+      --agent "$agent" --lane "$lane" --head "$commit_sha" --require-supported)"; then
+      die "causal experiment chain refused the handoff"
+    fi
+    experiment_id="$(sed -n 's/.*experiment_id=\([^ ]*\).*/\1/p' <<< "$causal_output")"
+    experiment_prereg_sha256="$(sed -n 's/.*prereg_sha256=\([^ ]*\).*/\1/p' <<< "$causal_output")"
+    experiment_outcome_sha256="$(sed -n 's/.*outcome_sha256=\([^ ]*\).*/\1/p' <<< "$causal_output")"
+    [[ -n "$experiment_id" && "$experiment_prereg_sha256" =~ ^[0-9a-f]{64}$ && \
+      "$experiment_outcome_sha256" =~ ^[0-9a-f]{64}$ ]] || \
+      die "causal verifier returned an invalid receipt"
+  fi
 
   claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
   message_id="msg-${NOW_TICK}-$$-${RANDOM}"
@@ -1463,6 +1528,13 @@ handoff_command() {
     printf 'thread_id=%s\n' "$thread_id"
     printf 'reply_to=%s\n' "$reply_to"
     printf 'commit_sha=%s\n' "$commit_sha"
+    if [[ -n "$experiment_id" ]]; then
+      printf 'experiment_id=%s\n' "$experiment_id"
+      printf 'experiment_prereg=%s\n' "$experiment_prereg"
+      printf 'experiment_outcome=%s\n' "$experiment_outcome"
+      printf 'experiment_prereg_sha256=%s\n' "$experiment_prereg_sha256"
+      printf 'experiment_outcome_sha256=%s\n' "$experiment_outcome_sha256"
+    fi
     for gate in "${gates[@]}"; do printf 'gate=%s\n' "$gate"; done
     for evidence in "${evidence_paths[@]}"; do printf 'evidence=%s\n' "$evidence"; done
     for evidence in "${C_FILES[@]}"; do printf 'claim_file=%s\n' "$evidence"; done
@@ -1475,9 +1547,10 @@ handoff_command() {
   append_event HANDOFF "message_id=$message_id commit=$commit_sha"
   unlink "$claim_file"
   remove_endpoint_for_lane "$agent" "$lane" "$WORKTREE" handoff
-  printf 'HANDED_OFF claim_id=%s message_id=%s commit=%s to_agent=%s to_lane=%s gates=%s evidence=%s\n' \
+  printf 'HANDED_OFF claim_id=%s message_id=%s commit=%s to_agent=%s to_lane=%s gates=%s evidence=%s experiment=%s\n' \
     "$C_ID" "$message_id" "$commit_sha" "$to_agent" "$to_lane" \
-    "$(join_values "${gates[@]}")" "$(join_values "${evidence_paths[@]}")"
+    "$(join_values "${gates[@]}")" "$(join_values "${evidence_paths[@]}")" \
+    "${experiment_id:--}"
   if ! attempt_message_wake "$message_id"; then
     printf 'WAKE_UNAVAILABLE message_id=%s status=%s\n' "$message_id" "$WAKE_STATUS"
   fi
@@ -2079,6 +2152,9 @@ case "$command" in
   endpoint-unregister) endpoint_unregister_command "$@" ;;
   endpoint-status) endpoint_status_command "$@" ;;
   wake) wake_command "$@" ;;
+  experiment-open) causal_runtime_command open "$@" ;;
+  experiment-close) causal_runtime_command close "$@" ;;
+  experiment-status) causal_runtime_command status "$@" ;;
   handoff) handoff_command "$@" ;;
   send) send_command "$@" ;;
   inbox) inbox_command "$@" ;;
@@ -2091,5 +2167,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, wake, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac

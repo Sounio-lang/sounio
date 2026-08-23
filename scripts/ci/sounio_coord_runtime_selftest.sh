@@ -26,6 +26,7 @@ cp "$ROOT_DIR/bin/sounio-coord" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
@@ -44,6 +45,8 @@ output="$(cd "$REPO" && bin/sounio-coord install-runtime)"
 first_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$first_id" ]] || fail 'installer did not return the first runtime id'
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime was not activated'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-causal-runtime" ]] || \
+  fail 'installed runtime omitted the causal receipt verifier'
 
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'second worktree did not select shared runtime'
@@ -54,8 +57,11 @@ grep -q "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" <<< "$output
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/scripts/dev/sounio_coord_runtime.sh"
 printf '#!/usr/bin/env python3\nraise SystemExit(98)\n' > \
   "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py"
+printf '#!/usr/bin/env python3\nraise SystemExit(99)\n' > \
+  "$SECOND/scripts/dev/sounio_coord_causal_runtime.py"
 chmod +x "$SECOND/scripts/dev/sounio_coord_runtime.sh" \
-  "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py"
+  "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py" \
+  "$SECOND/scripts/dev/sounio_coord_causal_runtime.py"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared CLI runtime'
@@ -71,7 +77,8 @@ grep -q 'agent=claude lane=session-runtime-test' <<< "$output" || \
 mkdir -p "$ALT/scripts/dev"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/"
-sed -i 's/SOUNIO_COORD_RUNTIME_VERSION=2026\.08\.23\.3/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.4-test/' \
+cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
+sed -i 's/SOUNIO_COORD_RUNTIME_VERSION=2026\.08\.23\.4/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.5-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --source-root "$ALT")"
@@ -79,7 +86,7 @@ second_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$second_id" && "$second_id" != "$first_id" ]] || fail 'upgrade did not create a new runtime id'
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$second_id$" <<< "$output" || fail 'worktree did not observe atomic runtime upgrade'
-grep -q '^runtime_version=2026.08.23.4-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
+grep -q '^runtime_version=2026.08.23.5-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
 
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --activate "$first_id")"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'runtime rollback failed'
@@ -89,6 +96,7 @@ grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'worktree did not observe
 mkdir -p "$BAD/scripts/dev"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$BAD/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$BAD/scripts/dev/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \
   "$BAD/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$BAD/scripts/dev/"*
