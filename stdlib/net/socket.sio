@@ -87,27 +87,46 @@
 //
 // FOURTH COMPILER LIMITATION — the big one, and the reason this file does
 // NOT use a `[u8; N]` array for the actual `sockaddr_in` passed to
-// bind/connect/accept: indexed writes to a `[u8; N]` array (`arr[i] = x`
-// for i > 0) compute the target address using an 8-byte stride regardless
-// of the element's real 1-byte size. `arr[0]` lands at the real base
+// bind/connect/accept: the compiler allocates `[u8; N]` (and other narrow-
+// element) arrays with an 8-byte-per-element stride internally, even though
+// the declared element type is 1 byte wide. `arr[0]` lands at the real base
 // address (looks correct), but `arr[1]` lands 8 bytes further on, `arr[2]`
-// 16 bytes further on, etc. Reads via the same indexing are self-consistent
-// (so purely-logical byte-array code that never takes a raw pointer, like
-// the dotted-decimal IP parser below, is unaffected and was NOT the bug —
-// this took real memory verification via `write()`+`od -c` to catch, not
-// just re-reading the array in Sounio, since the read path is just as
-// "wrong" as the write path and hides the bug completely). Two consequences
-// forced design choices here:
-//   1. It is a real stack-buffer-overflow risk for any small `[u8; N]`
-//      array whose indices are used beyond index 0 — e.g. a naively-written
-//      16-byte `sockaddr_in` buffer indexed up to byte 15 actually writes
-//      up to offset 120, corrupting 104 bytes of adjacent stack memory.
-//      `Buf4096`'s array is oversized enough (4096 declared bytes vs. the
-//      handful of indices any caller actually uses) that this never
-//      overflows its own allocation in practice, which is the only reason
-//      the public `Buf4096 { data: [u8; 4096] }` interface type — mandated
-//      by the plan and used directly by callers like the loopback test via
-//      plain `buf.data[i] = x` — remains safe to keep as specified.
+// 16 bytes further on, etc. Reads via the same indexing use the identical
+// stride, so indexed access is internally SELF-CONSISTENT and memory-safe
+// within the array's own declared bound — purely-logical byte-array code
+// that only ever reads what it wrote through the array (never takes a raw
+// pointer to it), like the dotted-decimal IP parser below, is unaffected.
+//
+// CORRECTED CHARACTERIZATION (post-review; the original writeup here
+// overstated this as a stack-buffer-overflow/memory-corruption bug, which
+// direct testing against the committed compiler disproved): this is a
+// LAYOUT-COMPATIBILITY bug, not a memory-safety bug. Guard i64 values
+// placed immediately before and after a `[u8; 16]` field, plus a second
+// adjacent `[u8; 16]` field, both stayed intact across many index positions
+// 0-15, and a full `[u8; 4096]` write-then-verify round-tripped correctly
+// for all 4096 bytes — ordinary in-language indexed use of `Buf4096`/similar
+// structs (`buf.data[i] = x` at any i within bounds) does NOT corrupt
+// adjacent memory. The real, narrower problem: because of the 8-byte
+// internal stride, `[u8; N]` has no C-compatible 1-byte-packed layout — so a
+// raw pointer taken into such an array cannot be handed to a syscall (or any
+// other consumer) expecting packed bytes at real 1-byte offsets. The
+// syscall has no knowledge of Sounio's internal stride, so it reads/writes
+// at up to 8x the intended offsets in the *external* memory it is given —
+// this is a real problem for a syscall-facing buffer, which is exactly why
+// `SockAddrWords`/`WordBuf512` below stage through `i64` words instead. Two
+// consequences forced design choices here:
+//   1. Never take a raw pointer into an indexed `[u8; N]` array (e.g. a
+//      naively-written 16-byte `sockaddr_in` buffer touched via
+//      `arr[i] = x` up to index 15) and hand that pointer to a syscall —
+//      the syscall would read/write at up to 8x the intended byte offsets
+//      in its own (correctly 1-byte-strided) view of that memory, corrupting
+//      whatever real memory sits at those inflated offsets. The public
+//      `Buf4096 { data: [u8; 4096] }` interface type — mandated by the plan
+//      and used directly by callers like the loopback test via plain
+//      `buf.data[i] = x` — remains safe to use exactly as specified for
+//      ordinary in-language indexing; it is unsafe only if a raw pointer
+//      into it were ever handed directly to a syscall, which this file
+//      never does (see `pack_bytes`/`unpack_bytes` below).
 //   2. `sockaddr_in` itself is NOT built as a `[u8; 16]` array anywhere in
 //      this file. `SockAddrWords { w0: i64, w1: i64 }` builds the 16 bytes
 //      as two `i64` words via shifts/OR (confirmed reliable — `[i64; N]`
