@@ -70,3 +70,75 @@ pub fn bigint_cmp(a: &BigInt, b: &BigInt) -> i32 {
     }
     0
 }
+
+// Adds a and b. Every intermediate `sum` value below is at most
+// 65535 + 65535 + 1 = 131071, computed as u32 -- nowhere near bit 63,
+// so the `>> 16` used to extract the carry is safe per Finding 11
+// (the boundary is bit 63 of a u64; 131071 doesn't even fill 32 bits).
+pub fn bigint_add(a: &BigInt, b: &BigInt) -> BigInt {
+    var result = bigint_zero()
+    var carry: u32 = 0
+    var max_len = a.len
+    if b.len > max_len {
+        max_len = b.len
+    }
+    var i = 0
+    while i < max_len {
+        var ai: u32 = 0
+        if i < a.len {
+            ai = a.limbs[i as usize] as u32
+        }
+        var bi: u32 = 0
+        if i < b.len {
+            bi = b.limbs[i as usize] as u32
+        }
+        let sum: u32 = ai + bi + carry   // max 131071, far below any u64 bit-63 concern
+        result.limbs[i as usize] = (sum & 65535) as u16
+        carry = sum >> 16                 // safe: sum is tiny, nowhere near bit 63
+        i = i + 1
+    }
+    if carry != 0 {
+        result.limbs[max_len as usize] = carry as u16
+        max_len = max_len + 1
+    }
+    result.len = max_len
+    // Normalize: trim trailing zero limbs (can only happen if max_len was
+    // computed from operands whose top limb summed to exactly 0, which
+    // cannot happen from addition of two non-negative values unless both
+    // were zero -- but trim defensively anyway to keep the invariant airtight).
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
+
+// Subtracts b from a. REQUIRES bigint_cmp(a, b) >= 0 -- caller's responsibility,
+// per this plan's Global Constraints; an unchecked call with a < b produces a
+// garbage result (not a crash, not a checked error), matching this module's
+// stated error convention.
+pub fn bigint_sub(a: &BigInt, b: &BigInt) -> BigInt {
+    var result = bigint_zero()
+    var borrow: i32 = 0
+    var i = 0
+    while i < a.len {
+        var ai: i32 = a.limbs[i as usize] as i32
+        var bi: i32 = 0
+        if i < b.len {
+            bi = b.limbs[i as usize] as i32
+        }
+        var diff: i32 = ai - bi - borrow   // range roughly -65536..65535, tiny, safe
+        if diff < 0 {
+            diff = diff + 65536
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        result.limbs[i as usize] = diff as u16
+        i = i + 1
+    }
+    result.len = a.len
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
