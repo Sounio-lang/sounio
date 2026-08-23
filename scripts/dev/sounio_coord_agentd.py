@@ -798,15 +798,6 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("command", nargs=argparse.REMAINDER)
     start.set_defaults(function=start_command)
 
-    serve = subparsers.add_parser("_serve", help=argparse.SUPPRESS)
-    serve.add_argument("--agent", required=True)
-    serve.add_argument("--lane", required=True)
-    serve.add_argument("--session-id", required=True)
-    serve.add_argument("--cwd", required=True)
-    serve.add_argument("--state-dir", required=True)
-    serve.add_argument("command", nargs=argparse.REMAINDER)
-    serve.set_defaults(function=serve_command)
-
     status = subparsers.add_parser("status")
     add_locator(status)
     status.set_defaults(function=status_command)
@@ -834,9 +825,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def parse_serve_args(arguments: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="sounio-agentd _serve", add_help=False)
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("--lane", required=True)
+    parser.add_argument("--session-id", required=True)
+    parser.add_argument("--cwd", required=True)
+    parser.add_argument("--state-dir", required=True)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    return parser.parse_args(arguments)
+
+
 def main() -> int:
     os.umask(0o077)
     try:
+        if sys.argv[1:2] == ["_serve"]:
+            return serve_command(parse_serve_args(sys.argv[2:]))
         args = build_parser().parse_args()
         return int(args.function(args))
     except (AgentdError, OSError, ValueError, json.JSONDecodeError) as exc:
