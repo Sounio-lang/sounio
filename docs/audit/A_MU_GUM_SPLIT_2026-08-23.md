@@ -99,7 +99,23 @@ module at all (E035 on `measured`). That is one signature, not a mass migrate.
 This does **not** claim the imported-module native path is closed for every
 graph. It claims this four-module a_μ graph runs.
 
+## Sector budget (Madaros run, same ELF)
+
+Sounio *sums* published QED, EW, HVP, HLbL. It does not compute HVP.
+
+```
+WP20  QED 116584718.931  EW 153.600  HVP 6845.100  HLbL 92.000  SUM 116591809.631
+WP25  QED 116584718.800  EW 154.400  HVP 7045.000  HLbL 115.500 SUM 116592033.700
+shift QED −0.131  EW +0.800  HVP +199.900  HLbL +23.500  SUM +224.069
+published total shift +223.000
+```
+
+The fork is **mostly HVP**, not only HVP. HLbL moved 23.5 units. Claims-forbidden
+still includes “Sounio computed lattice HVP” and “the tension is resolved”.
+
 ```text
 Semantic-Outcome: two SM a_μ citations are Epistemic values; GUM pulls
-  are computed in Sounio under Madaros; they are not averaged.
+  are computed in Sounio under Madaros; they are not averaged. The SM
+  is a sum of sectors; the WP20→WP25 shift is largest in HVP and not
+  zero in HLbL.
 ```
