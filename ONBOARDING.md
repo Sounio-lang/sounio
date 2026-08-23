@@ -92,6 +92,12 @@ IR ou claims científicas, leia também
 - Para conversar com outra lane durante o trabalho, use `bin/sounio-coord send`; mensagens não
   lidas entram automaticamente no próximo turno ou passo de ferramenta do destinatário. Consulte com
   `bin/sounio-coord inbox` e confirme o tratamento com `bin/sounio-coord ack`.
+- `bin/sounio-coord` e o hook de agente são launchers estáveis. Depois da migração inicial da
+  branch, ambos executam o mesmo runtime versionado em
+  `<git-common-dir>/sounio-coord-runtime/current`, independentemente da worktree.
+- Use `bin/sounio-coord runtime-info` para confirmar o runtime efetivo. Instalações e upgrades são
+  atômicos via `bin/sounio-coord install-runtime`; versões anteriores permanecem disponíveis para
+  rollback com `bin/sounio-coord install-runtime --activate <runtime-id>`.
 - **Re-cheque `git status` antes de stage.** Nunca trate uma claim como licença para
   sobrescrever mudanças já presentes na worktree.
 - Edits podem aparecer no commit de outro agente sob mensagens não-relacionadas. Não brigue com a história.
