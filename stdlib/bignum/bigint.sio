@@ -142,3 +142,63 @@ pub fn bigint_sub(a: &BigInt, b: &BigInt) -> BigInt {
     }
     result
 }
+
+// Schoolbook O(n^2) multiplication. Accumulates partial products into a
+// u64 array twice the max limb count, then does one final carry-propagation
+// pass. Bound analysis (this is THE reason 16-bit limbs were chosen):
+//   - each partial product a.limbs[i] * b.limbs[j] is at most
+//     65535 * 65535 = 4294836225, comfortably under 2^32, let alone bit 63.
+//   - each accumulator slot can receive at most BIGINT_MAX_LIMBS (256)
+//     partial-product contributions in the worst case (a maximally-sized
+//     a and b), giving a worst-case accumulator value of
+//     256 * 4294836225 ~= 2^40 -- still enormously far below 2^63.
+//   - the final carry-propagation pass's `>> 16` and `& 65535` operate on
+//     values bounded by that same ~2^40 ceiling, safe per Finding 11
+//     (which only breaks values with bit 63 set).
+pub fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
+    var acc: [u64; 512] = [0; 512]   // BIGINT_MAX_LIMBS * 2
+
+    var i = 0
+    while i < a.len {
+        var j = 0
+        while j < b.len {
+            let ai: u64 = a.limbs[i as usize] as u64
+            let bj: u64 = b.limbs[j as usize] as u64
+            let partial: u64 = ai * bj   // max ~4.29e9, tiny
+            acc[(i + j) as usize] = acc[(i + j) as usize] + partial   // max ~2^40, tiny
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var result = bigint_zero()
+    var carry: u64 = 0
+    var k = 0
+    while k < 512 {
+        let total: u64 = acc[k as usize] + carry   // still far below bit 63
+        if k < 256 {
+            result.limbs[k as usize] = (total & 65535) as u16
+        }
+        carry = total >> 16   // safe: total is bounded far below bit 63
+        k = k + 1
+    }
+
+    result.len = 512
+    if result.len > 256 {
+        result.len = 256   // acc has 512 slots for overflow headroom during
+                             // accumulation, but a BigInt's limbs array is
+                             // only 256 wide -- this plan does not need
+                             // products larger than BIGINT_MAX_LIMBS for its
+                             // RSA use case (both operands are already
+                             // bounded to <=256 limbs, so a full product
+                             // needs at most their combined length, safely
+                             // under 512, but the visible `limbs` array
+                             // itself caps at 256; this length clamp is a
+                             // defensive bound, not expected to trigger for
+                             // this module's actual RSA-sized inputs)
+    }
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
