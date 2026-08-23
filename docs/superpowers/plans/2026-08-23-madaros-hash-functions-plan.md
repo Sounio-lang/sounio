@@ -23,6 +23,7 @@
 - **Every test asserts a real, independently-reverified expected value** — for hash digests, this means an implementer must independently confirm each expected hex digest against its cited published source (FIPS 180-4 / RFC 3174 / a NIST test-vector page) before committing it, per this project's "measure, don't assume" discipline. This plan's own recollection of these digests (given below) is a best-effort starting point, not a substitute for that independent check.
 - **Both arithmetic audits (Task 1, Task 4) get recorded as new, explicitly-numbered findings in `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`**, continuing that document's existing numbering (it currently ends at Finding 12).
 - **Task 1's `u32` audit already ran and found native `u32` broken (Finding 13)** — this is why Task 1's plan text below uses masked `i64`, not native `u32`. If Task 1's `hash_word32_primitives.sio` test STILL fails against the `i64`-masked design, that is a new, second surprise beyond Finding 13 — STOP and report BLOCKED, do not invent a further workaround; plain `i64` arithmetic bounded away from bit 63 has been extensively proven correct elsewhere on this branch (`BigInt`, `word64.sio`), so a failure here would need a controller ruling.
+- **Every narrowing `as u8` cast in this whole plan is masked with `& 255` immediately beforehand** (e.g. `(shr32(h0, 16) & 255) as u8`, never bare `shr32(h0, 16) as u8`), even where the source value is already provably ≤255. This is **Finding 14**: Task 2's implementer discovered that `i64 as u8` on Madaros does not truncate to the low 8 bits when the source exceeds 255 — the standard big-endian-byte-extraction idiom every C-family language relies on is silently wrong here. Every digest-output-writing code block in this plan (Tasks 2, 3, 5, 6) has already been updated with this masking; if you find an unmasked `as u8` cast anywhere in this plan's remaining code blocks that this revision missed, add the mask yourself rather than trusting the literal text — do not treat this omission as evidence the cast is safe in that specific spot.
 
 ## File Structure
 
@@ -205,7 +206,7 @@ git commit -m "feat(hash): add word32 primitives as i64-masked words (native u32
 This project's standing discipline requires confirming these against their published source before trusting them. This plan's best recollection (verify against FIPS 180-4 / RFC 3174 or an equivalent authoritative source):
 - SHA-1("") = `da39a3ee5e6b4b0d3255bfef95601890afd80709`
 - SHA-1("abc") = `a9993e364706816aba3e25717850c26c9cd0d89d`
-- SHA-1("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") = `84983e441c3bd26ebaae4aa1f95129e5e54670f`
+- SHA-1("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") = `84983e441c3bd26ebaae4aa1f95129e5e54670f1` (corrected -- the original transcription was missing the trailing "1", confirmed via three independent tools during Task 2)
 
 - [ ] **Step 2: Write the failing test**
 
@@ -267,7 +268,7 @@ fn main() with IO {
     let buf3 = rawbuf_new(64)
     let len3 = write_str(&buf3, msg3)
     let d3 = sha1(&buf3, len3)
-    assert_digest_hex(d3, "84983e441c3bd26ebaae4aa1f95129e5e54670f")
+    assert_digest_hex(d3, "84983e441c3bd26ebaae4aa1f95129e5e54670f1")
 
     println("hash_sha1_vectors: all cases passed")
 }
@@ -394,26 +395,26 @@ pub fn sha1(buf: &RawBuf, len: i64) -> [u8; 20] with IO {
     }
 
     var out: [u8; 20] = [0; 20]
-    out[0] = shr32(h0, 24) as u8
-    out[1] = shr32(h0, 16) as u8
-    out[2] = shr32(h0, 8) as u8
-    out[3] = h0 as u8
-    out[4] = shr32(h1, 24) as u8
-    out[5] = shr32(h1, 16) as u8
-    out[6] = shr32(h1, 8) as u8
-    out[7] = h1 as u8
-    out[8] = shr32(h2, 24) as u8
-    out[9] = shr32(h2, 16) as u8
-    out[10] = shr32(h2, 8) as u8
-    out[11] = h2 as u8
-    out[12] = shr32(h3, 24) as u8
-    out[13] = shr32(h3, 16) as u8
-    out[14] = shr32(h3, 8) as u8
-    out[15] = h3 as u8
-    out[16] = shr32(h4, 24) as u8
-    out[17] = shr32(h4, 16) as u8
-    out[18] = shr32(h4, 8) as u8
-    out[19] = h4 as u8
+    out[0] = (shr32(h0, 24) & 255) as u8
+    out[1] = (shr32(h0, 16) & 255) as u8
+    out[2] = (shr32(h0, 8) & 255) as u8
+    out[3] = (h0 & 255) as u8
+    out[4] = (shr32(h1, 24) & 255) as u8
+    out[5] = (shr32(h1, 16) & 255) as u8
+    out[6] = (shr32(h1, 8) & 255) as u8
+    out[7] = (h1 & 255) as u8
+    out[8] = (shr32(h2, 24) & 255) as u8
+    out[9] = (shr32(h2, 16) & 255) as u8
+    out[10] = (shr32(h2, 8) & 255) as u8
+    out[11] = (h2 & 255) as u8
+    out[12] = (shr32(h3, 24) & 255) as u8
+    out[13] = (shr32(h3, 16) & 255) as u8
+    out[14] = (shr32(h3, 8) & 255) as u8
+    out[15] = (h3 & 255) as u8
+    out[16] = (shr32(h4, 24) & 255) as u8
+    out[17] = (shr32(h4, 16) & 255) as u8
+    out[18] = (shr32(h4, 8) & 255) as u8
+    out[19] = (h4 & 255) as u8
     out
 }
 ```
@@ -639,38 +640,38 @@ pub fn sha256(buf: &RawBuf, len: i64) -> [u8; 32] with IO {
     }
 
     var out: [u8; 32] = [0; 32]
-    out[0] = shr32(h0, 24) as u8
-    out[1] = shr32(h0, 16) as u8
-    out[2] = shr32(h0, 8) as u8
-    out[3] = h0 as u8
-    out[4] = shr32(h1, 24) as u8
-    out[5] = shr32(h1, 16) as u8
-    out[6] = shr32(h1, 8) as u8
-    out[7] = h1 as u8
-    out[8] = shr32(h2, 24) as u8
-    out[9] = shr32(h2, 16) as u8
-    out[10] = shr32(h2, 8) as u8
-    out[11] = h2 as u8
-    out[12] = shr32(h3, 24) as u8
-    out[13] = shr32(h3, 16) as u8
-    out[14] = shr32(h3, 8) as u8
-    out[15] = h3 as u8
-    out[16] = shr32(h4, 24) as u8
-    out[17] = shr32(h4, 16) as u8
-    out[18] = shr32(h4, 8) as u8
-    out[19] = h4 as u8
-    out[20] = shr32(h5, 24) as u8
-    out[21] = shr32(h5, 16) as u8
-    out[22] = shr32(h5, 8) as u8
-    out[23] = h5 as u8
-    out[24] = shr32(h6, 24) as u8
-    out[25] = shr32(h6, 16) as u8
-    out[26] = shr32(h6, 8) as u8
-    out[27] = h6 as u8
-    out[28] = shr32(h7, 24) as u8
-    out[29] = shr32(h7, 16) as u8
-    out[30] = shr32(h7, 8) as u8
-    out[31] = h7 as u8
+    out[0] = (shr32(h0, 24) & 255) as u8
+    out[1] = (shr32(h0, 16) & 255) as u8
+    out[2] = (shr32(h0, 8) & 255) as u8
+    out[3] = (h0 & 255) as u8
+    out[4] = (shr32(h1, 24) & 255) as u8
+    out[5] = (shr32(h1, 16) & 255) as u8
+    out[6] = (shr32(h1, 8) & 255) as u8
+    out[7] = (h1 & 255) as u8
+    out[8] = (shr32(h2, 24) & 255) as u8
+    out[9] = (shr32(h2, 16) & 255) as u8
+    out[10] = (shr32(h2, 8) & 255) as u8
+    out[11] = (h2 & 255) as u8
+    out[12] = (shr32(h3, 24) & 255) as u8
+    out[13] = (shr32(h3, 16) & 255) as u8
+    out[14] = (shr32(h3, 8) & 255) as u8
+    out[15] = (h3 & 255) as u8
+    out[16] = (shr32(h4, 24) & 255) as u8
+    out[17] = (shr32(h4, 16) & 255) as u8
+    out[18] = (shr32(h4, 8) & 255) as u8
+    out[19] = (h4 & 255) as u8
+    out[20] = (shr32(h5, 24) & 255) as u8
+    out[21] = (shr32(h5, 16) & 255) as u8
+    out[22] = (shr32(h5, 8) & 255) as u8
+    out[23] = (h5 & 255) as u8
+    out[24] = (shr32(h6, 24) & 255) as u8
+    out[25] = (shr32(h6, 16) & 255) as u8
+    out[26] = (shr32(h6, 8) & 255) as u8
+    out[27] = (h6 & 255) as u8
+    out[28] = (shr32(h7, 24) & 255) as u8
+    out[29] = (shr32(h7, 16) & 255) as u8
+    out[30] = (shr32(h7, 8) & 255) as u8
+    out[31] = (h7 & 255) as u8
     out
 }
 ```
@@ -1128,14 +1129,14 @@ pub fn sha512(buf: &RawBuf, len: i64) -> [u8; 64] with IO {
         let hv = h_hi[i as usize]
         let lv = h_lo[i as usize]
         let base = i * 8
-        out[base as usize] = (hv >> 24) as u8
-        out[(base + 1) as usize] = (hv >> 16) as u8
-        out[(base + 2) as usize] = (hv >> 8) as u8
-        out[(base + 3) as usize] = hv as u8
-        out[(base + 4) as usize] = (lv >> 24) as u8
-        out[(base + 5) as usize] = (lv >> 16) as u8
-        out[(base + 6) as usize] = (lv >> 8) as u8
-        out[(base + 7) as usize] = lv as u8
+        out[base as usize] = ((hv >> 24) & 255) as u8
+        out[(base + 1) as usize] = ((hv >> 16) & 255) as u8
+        out[(base + 2) as usize] = ((hv >> 8) & 255) as u8
+        out[(base + 3) as usize] = (hv & 255) as u8
+        out[(base + 4) as usize] = ((lv >> 24) & 255) as u8
+        out[(base + 5) as usize] = ((lv >> 16) & 255) as u8
+        out[(base + 6) as usize] = ((lv >> 8) & 255) as u8
+        out[(base + 7) as usize] = (lv & 255) as u8
         i = i + 1
     }
     out
@@ -1210,14 +1211,14 @@ pub fn sha384(buf: &RawBuf, len: i64) -> [u8; 48] with IO {
         let hv = h_hi[i as usize]
         let lv = h_lo[i as usize]
         let base = i * 8
-        out[base as usize] = (hv >> 24) as u8
-        out[(base + 1) as usize] = (hv >> 16) as u8
-        out[(base + 2) as usize] = (hv >> 8) as u8
-        out[(base + 3) as usize] = hv as u8
-        out[(base + 4) as usize] = (lv >> 24) as u8
-        out[(base + 5) as usize] = (lv >> 16) as u8
-        out[(base + 6) as usize] = (lv >> 8) as u8
-        out[(base + 7) as usize] = lv as u8
+        out[base as usize] = ((hv >> 24) & 255) as u8
+        out[(base + 1) as usize] = ((hv >> 16) & 255) as u8
+        out[(base + 2) as usize] = ((hv >> 8) & 255) as u8
+        out[(base + 3) as usize] = (hv & 255) as u8
+        out[(base + 4) as usize] = ((lv >> 24) & 255) as u8
+        out[(base + 5) as usize] = ((lv >> 16) & 255) as u8
+        out[(base + 6) as usize] = ((lv >> 8) & 255) as u8
+        out[(base + 7) as usize] = (lv & 255) as u8
         i = i + 1
     }
     out

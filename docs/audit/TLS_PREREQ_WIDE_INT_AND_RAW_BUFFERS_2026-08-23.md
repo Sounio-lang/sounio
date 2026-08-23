@@ -507,3 +507,45 @@ neither represents a regression. They are recorded here so the eventual
 TLS/bignum implementation plan does not silently assume either capability
 works when it verifiably does not yet, in the same spirit as the prior
 compiler lineage's `docs/compiler/KNOWN_LIMITATIONS.md` entries.
+
+## Finding 14 — a narrowing `i64 as u8` cast does not truncate to the low 8 bits when the source value exceeds 255
+
+Discovered while implementing SHA-1's digest-byte-extraction (`stdlib/hash/
+sha1.sio`), which needs to take an `i64`-stored 32-bit word and write it out
+as 4 individual bytes via `(word >> shift) as u8`-style narrowing casts —
+the universal, standard idiom for big-endian byte extraction in essentially
+every C-family language. On Madaros, this idiom silently produces a
+corrupted result whenever the value being cast exceeds 255: the cast does
+not mask to the low 8 bits, and the out-of-range bits appear to leak into
+adjacent storage (observed as if reading the "byte" back later returned a
+16-bit value, spilling into a neighboring array element).
+
+```sio
+fn shr32(x: i64, n: i64) -> i64 { x >> n }
+fn main() with IO {
+    var out: [u8; 4] = [0; 4]
+    let h: i64 = 3661210606   // 0xDA39A3EE
+    out[1] = shr32(h, 16) as u8   // should store 0x39 (57) -- the byte at
+                                    // bit position 16-23 of h
+    println(out[1] as i64)         // ACTUAL: 55865 (0xDA39, i.e. 16 bits,
+                                    // not truncated to 8) -- WRONG
+}
+```
+
+**Workaround: always mask explicitly with `& 255` immediately before an
+`as u8` cast, whenever the source value could exceed 255** — do not rely on
+the cast itself to truncate, regardless of how standard that idiom is in
+other languages:
+
+```sio
+out[1] = (shr32(h, 16) & 255) as u8   // CORRECT: prints 57
+```
+
+Confirmed the masked form produces the correct byte value; confirmed the
+unmasked form reproduces the corruption deterministically (not a flaky/
+timing-dependent issue). Not yet tested whether this generalizes to other
+narrowing casts (e.g. `i64 as u16`, `i64 as i32`) — only the `as u8` case
+that this project's hash-functions sub-project actually needed was
+isolated. **Any future Sounio code doing narrowing-cast-based byte
+extraction (serializing a wide integer to bytes) must mask explicitly
+before every narrowing cast, never rely on the cast to truncate.**
