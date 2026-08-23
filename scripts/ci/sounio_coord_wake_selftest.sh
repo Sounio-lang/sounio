@@ -168,6 +168,25 @@ grep -q "^WAKE_DELIVERED message_id=$session_message .*address=$claude_pane disc
 wait_for_text "$CLAUDE_LOG" "$session_message" || \
   fail 'session-history wake did not reach the physical harness pane'
 
+coord "$SECOND" claim --agent claude --lane "$session_lane" \
+  --intent 'expired session endpoint rediscovery sabotage' \
+  --files expired-session-endpoint.test >/dev/null
+coord "$SECOND" endpoint-register --agent claude --lane "$session_lane" \
+  --harness claude --transport tmux --address "$claude_pane" --socket "$SOCKET" \
+  --ttl-seconds 1 >/dev/null
+sleep 2
+output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sender \
+  --lane origin --to-agent claude --to-lane "$session_lane" --kind request \
+  --message 'expired endpoint must rediscover the verified physical session')"
+expired_session_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+[[ -n "$expired_session_message" ]] || fail 'expired session endpoint send returned no message id'
+grep -q "^WAKE_DELIVERED message_id=$expired_session_message .*address=$claude_pane discovery=session-history$" \
+  <<< "$output" || fail 'expired endpoint blocked verified session-history rediscovery'
+wait_for_text "$CLAUDE_LOG" "$expired_session_message" || \
+  fail 'expired endpoint rediscovery did not reach the physical harness pane'
+coord "$SECOND" release --agent claude --lane "$session_lane" \
+  --reason 'expired endpoint rediscovery sabotage complete' >/dev/null
+
 SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent grok-cli2 \
   --lane legacy-grok --to-agent sender --to-lane origin --kind info \
   --message 'establish a historical Grok endpoint' >/dev/null
