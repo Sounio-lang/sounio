@@ -1,9 +1,17 @@
 <!-- docs:meta
 topic_id: repo.docs.research.zd-e5-qbinomial-mechanism-2026-08-10
-authority: research-active
+authority: historical
 audience: researchers
-last_validated: 2026-08-10
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.zd-e5-qbinomial-mechanism-2026-08-10
 -->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
 
 # E5 — where the q-binomial actually lives
 
