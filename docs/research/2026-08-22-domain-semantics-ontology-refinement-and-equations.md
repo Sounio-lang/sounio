@@ -872,6 +872,46 @@ across `SounioWarrantHolonomy.lean`, `SounioAntiGarblingModel.lean`,
 `noise_symbols.sio`. The bridge's central theorem is machine-checked over the graded
 model; only the octonion-channel fidelity step and the wired compiler NS remain.
 
+## 19. Octonion fidelity — the grading proven faithful to the real product
+
+`docs/research/lean/SounioOctonionFidelity.lean` (new). Closes **half** of §18's scope
+caveat: that the grading predicate `isFanoTriple` is faithful to `[α]=0` computed from
+the actual octonion multiplication — not assumed. Independently re-verified here:
+`EXIT=0`, **zero sorry**; `#print axioms` = only `native_decide`'s `ofReduceBool` (no
+`sorryAx`). Honest trust note: unlike the smaller files (kernel-checked `decide`,
+axiom-free), the 343-triple enumerations here need `native_decide` (compiler-trusted),
+so the fidelity theorems rest on `ofReduceBool`, not the bare kernel.
+
+- **Self-certified octonion table** (so fidelity does not rest on hand-checked signs):
+  `square_neg_one` (eᵢ²=−1), `anticomm` (eᵢeⱼ=−eⱼeᵢ), `alternativity`
+  ((eᵢeᵢ)eⱼ = eᵢ(eᵢeⱼ)) — these ARE the certificate that the table is a genuine
+  octonion algebra. (A `posProd` sign transcription error was caught precisely by
+  `alternativity` failing — the point of self-certifying.)
+- **`fidelity_all`** — on distinct triples, `[α]=0 ⟺ isFanoTriple`, computed from the
+  table. **`assoc_zero_or_four`** — ‖α‖² is exactly 0 or 4 (matches product_nonassoc
+  4.25−0.25=4). **`nonassoc_count = 168`** — cross-checks
+  `SounioBidirectionalBridge.nonassoc_iff_not_fano`.
+- The table's associative lines are the Baez quadratic-residue set
+  `{1,2,4},{2,3,5},{3,4,6},{4,5,7},{1,5,6},{2,6,7},{1,3,7}` (a valid Fano plane,
+  relabelling of the earlier convention). **`SounioBlackwellBridge.fanoLines` was
+  synced to this certified set**; `lemma_i_full` re-verified zero-sorry after the swap
+  (its proof is parametric over `isFanoTriple`'s value, not the labels).
+
+**Net:** `lemma_i_full` is now graded by an octonion-**certified** classification, not a
+posited one. What remains of the §18 caveat is narrower and explicit: that the
+experiment *pair* is a function of the ‖α‖² class (all non-Fano triples → the one
+incomparable witness). `assoc_zero_or_four` shows the class is genuinely 2-valued;
+deriving each triple's specific 2×2 channel from its octonion products is the last
+modelling step (stated, not a sorry).
+
+**Session tally — twelve kernel/compiler-checked theorems** (`SounioWarrantHolonomy`,
+`SounioAntiGarblingModel`, `SounioBlackwellBridge`, `SounioOctonionFidelity` — all
+zero-sorry, Mathlib-free) **+ one executing Sounio prototype** (`noise_symbols.sio`).
+The central theorem (reassociation preserves warrant ⟺ [α]=0) is machine-checked with
+an octonion-certified grading; the one open modelling step is the per-triple channel
+derivation, and the wired compiler NS (interprocedural summaries) remains the compiler
+task.
+
 ## References (in-tree)
 
 - `self-hosted/check/effects.sio` — effect registry (ids 0–22)

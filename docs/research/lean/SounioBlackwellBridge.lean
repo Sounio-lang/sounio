@@ -34,13 +34,18 @@
     classification (`isFanoTriple`), anchored to
     `SounioBidirectionalBridge.nonassoc_iff_not_fano` (168 non-Fano, proven).
 
-  SCOPE (honest, NOT a sorry): the experiment pair is the ‖α‖²-GRADED model — the
-  epistemic content of a triple is its associator-norm class (crux #3), 0 (Fano) or
-  nonzero (non-Fano), and all non-Fano triples map to the one incomparable witness
-  (they share ‖α‖²=4 and are G2-equivalent). The remaining modelling-FIDELITY step —
-  deriving each specific triple's channel from the literal octonion product rather
-  than from its ‖α‖² class — is future work, stated here as scope, not hidden as a
-  sorry. Within the graded model the ∀-triple theorem is complete.
+  SCOPE (honest, NOT a sorry) — one half now CLOSED:
+  - CLOSED: that `isFanoTriple` (the grading predicate, now the octonion-derived
+    Baez lines) is faithful to `[α]=0` — proven from a SELF-CERTIFIED octonion table
+    in `SounioOctonionFidelity.lean` (`fidelity_all`: [α]=0 ⟺ isFanoTriple on distinct
+    triples; `assoc_zero_or_four`: ‖α‖²∈{0,4}; `nonassoc_count = 168`). The table is
+    self-certified (`square_neg_one`, `anticomm`, `alternativity`), so this does not
+    rest on hand-checked signs. `fanoLines` here is synced to that certified set.
+  - REMAINING (model, not sorry): that the experiment PAIR is a function of the ‖α‖²
+    class — all non-Fano triples use the one incomparable witness `Eleft`/`Eright`.
+    `assoc_zero_or_four` shows the class is genuinely 2-valued (0 or 4), supporting
+    this; deriving each triple's specific 2×2 channel from its octonion products is
+    the last modelling step. Within the graded model the ∀-triple theorem is complete.
 
   STATUS: CHECKED under Lean 4.33.1 (leanprover/lean4:stable), 2026-08-22.
   ZERO sorry; `#print axioms` on every theorem = only `propext`/`Quot.sound`
@@ -154,7 +159,9 @@ theorem lemma_i_hard_general (fano : Bool) (r1 r2 : Bool)
     The classification's fidelity to octonion non-associativity is anchored by
     `SounioBidirectionalBridge.nonassoc_iff_not_fano` (168 non-Fano triples, proven). -/
 def fanoLines : List (List Nat) :=
-  [[1,2,3],[1,4,5],[1,6,7],[2,4,6],[2,5,7],[3,4,7],[3,5,6]]
+  -- Octonion-derived associative lines (Baez quadratic-residue orientation), the exact
+  -- set certified by SounioOctonionFidelity.fidelity_all: [α]=0 ⟺ on one of these lines.
+  [[1,2,4],[2,3,5],[3,4,6],[4,5,7],[1,5,6],[2,6,7],[1,3,7]]
 
 /-- A triple of DISTINCT imaginary units lies on a common Fano line ⟺ [α]=0. -/
 def isFanoTriple (i j k : Nat) : Bool :=
