@@ -236,6 +236,58 @@ spike. General pattern: import paths are relative to the directory a file
 lives in for sibling imports, and `net::`-prefixed (relative to `stdlib/`)
 only when crossing into `stdlib/net/` from outside it.
 
+## Finding 9 — destructuring a linear value before a branch lets each arm rebuild it fresh, sidestepping the "both/neither arm" restriction
+
+Finding 4's second paragraph is exactly as strict as stated: even fully
+symmetric consumption (`if c { tcp_close(x) } else { tcp_close(x) }`) fails
+with `error[E039]` if `x` is a linear binding alive *before* the `if`. This
+blocks any branch (e.g. `fork()`'s `if pid == 0 { ... } else { ... }`) that
+needs to use an already-held linear resource differently in each arm.
+
+**Workaround**: destructure the linear value into its plain (non-linear)
+payload field(s) ONCE, unconditionally, before the branch — then branch
+freely on ordinary values, and reconstruct a FRESH instance of the linear
+type from the saved payload inside each arm that needs it:
+
+```sio
+let (listener, listen_err) = tcp_listen(&server_ip, port, 1)
+let TcpSocket { fd: listener_fd } = listener   // plain i64, not linear anymore
+
+let pid = syscall6(57, 0, 0, 0, 0, 0, 0)   // fork()
+if pid == 0 {
+    let child_listener = TcpSocket { fd: listener_fd }   // fresh, arm-local
+    // ... use child_listener, consume it fully within this arm ...
+} 
+let parent_listener = TcpSocket { fd: listener_fd }   // fresh, this-side-local
+// ... use parent_listener ...
+```
+
+Each `TcpSocket { fd: listener_fd }` literal is created and fully consumed
+entirely within its own scope (never a binding alive across the `if`), so
+neither trips the both/neither-arm restriction. Also confirmed: constructing
+a struct literal for a type whose field has no explicit `pub` marker
+compiles cleanly from OUTSIDE the defining module even though the struct
+itself is `pub` — Madaros does not appear to enforce field-level privacy
+independent of the struct's own visibility.
+
+## Known gap (not a compiler bug) — `stdlib/net/socket.sio`'s `tcp_listen` has no `SO_REUSEADDR`, causing real TIME_WAIT port-reuse flakiness
+
+Running a test that calls `tcp_listen` on a fixed port, then immediately
+reruns the same test on the same port with no delay, fails the second run's
+`tcp_listen` with a nonzero error — confirmed via `ss -tan` showing lingering
+TIME_WAIT entries on both the client and server side after a run (both ends
+actively close in quick succession, a simultaneous-close pattern). This
+clears within a few seconds on its own (well under the traditional 60s
+default), so it is NOT a hang — but any test suite that reruns fixed-port
+socket tests back-to-back can flake. **Mitigations available today**: use
+distinct ports across test files likely to run close together in time (the
+approach used so far). **Real fix, not yet done** (would require editing
+`stdlib/net/socket.sio`'s `tcp_listen`, which is out of scope for whichever
+task last touched this doc — flag it as a small, well-understood follow-up):
+add a `setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &1, 4)` syscall (`setsockopt`
+= syscall number 54 on x86-64 Linux) between `socket()` and `bind()` in
+`tcp_listen`.
+
 ## Scope note
 
 Neither finding blocks this project — both have workarounds (hand-rolled
