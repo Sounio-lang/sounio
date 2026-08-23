@@ -44,6 +44,56 @@ def repo_root(cwd: str) -> Path | None:
     return Path(result.stdout.strip())
 
 
+def target_path(cwd: str, value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path(cwd) / path
+    return Path(os.path.abspath(path))
+
+
+def target_repo_root(path: Path) -> Path | None:
+    probe = path if path.is_dir() else path.parent
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return repo_root(str(probe))
+
+
+def git_common_dir(root: Path) -> Path | None:
+    result = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    common = Path(result.stdout.strip())
+    if not common.is_absolute():
+        common = root / common
+    return common.resolve()
+
+
+def paths_for_target(
+    cwd: str, session_root: Path, paths: list[str]
+) -> tuple[Path, list[str]] | None:
+    roots: dict[Path, list[str]] = {}
+    session_common = git_common_dir(session_root)
+    for value in paths:
+        absolute = target_path(cwd, value)
+        root = target_repo_root(absolute)
+        if root is None or git_common_dir(root) != session_common:
+            return None
+        try:
+            relative = absolute.relative_to(root)
+        except ValueError:
+            return None
+        roots.setdefault(root, []).append(str(relative))
+    if len(roots) != 1:
+        return None
+    root, relative_paths = next(iter(roots.items()))
+    return root, list(dict.fromkeys(relative_paths))
+
+
 def safe_token(value: str, limit: int = 24) -> str:
     token = re.sub(r"[^A-Za-z0-9._-]", "_", value)[:limit]
     return token or "unknown"
@@ -70,14 +120,16 @@ def worktree_token(root: Path) -> str:
     return safe_token(hashlib.sha1(str(root.resolve()).encode()).hexdigest()[:10])
 
 
-def run_coord(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def run_coord(
+    root: Path, *args: str, worktree: Path | None = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["SOUNIO_COORD_TTL_SECONDS"] = env.get(
         "SOUNIO_COORD_HOOK_TTL_SECONDS", "1800"
     )
     return subprocess.run(
         [str(root / "bin" / "sounio-coord"), *args],
-        cwd=root,
+        cwd=worktree or root,
         env=env,
         check=False,
         capture_output=True,
@@ -184,9 +236,31 @@ def main() -> int:
         paths = extract_paths(event)
         if not paths:
             return 0
-        result = run_coord(root, "scope", *common, "--files", *paths)
+        target = paths_for_target(cwd, root, paths)
+        if target is None:
+            sys.stderr.write(
+                "coordination refused: write paths must resolve to one worktree "
+                "attached to the current Sounio repository\n"
+            )
+            return 2
+        target_root, target_paths = target
+
+        result = run_coord(
+            root,
+            "authorize",
+            "--agent",
+            agent,
+            "--files",
+            *target_paths,
+            worktree=target_root,
+        )
+        if result.returncode == 0:
+            return 0
+
+        if target_root == root:
+            result = run_coord(root, "scope", *common, "--files", *target_paths)
         if result.returncode != 0:
-            notify_conflict(root, agent, lane, paths, result.stderr)
+            notify_conflict(root, agent, lane, target_paths, result.stderr)
             sys.stderr.write(result.stderr or "coordination scope update failed\n")
             return 2
         return 0

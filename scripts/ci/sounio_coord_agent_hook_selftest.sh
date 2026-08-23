@@ -67,6 +67,30 @@ output="$(run_coord "$REPO" brief --max-rows 4)"
 grep -q 'files=self-hosted/parser/ast.sio,self-hosted/parser/items.sio' <<< "$output" || \
   fail 'automatic write scope did not accumulate files'
 
+run_coord "$SECOND" claim --agent codex --lane cross-worktree --ttl-seconds 600 \
+  --intent 'cross-worktree target owned explicitly' \
+  --files self-hosted/parser/cross-new.sio >/dev/null
+cp "$SECOND/bin/sounio-coord" "$SECOND/bin/sounio-coord.target-copy"
+printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/bin/sounio-coord"
+chmod +x "$SECOND/bin/sounio-coord"
+run_hook codex "$REPO" \
+  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/cross-new.sio\"}}"
+mv "$SECOND/bin/sounio-coord.target-copy" "$SECOND/bin/sounio-coord"
+output="$(run_coord "$SECOND" brief --max-rows 6)"
+grep -Fq "ACTIVE claim_id=codex--cross-worktree" <<< "$output" || \
+  fail 'cross-worktree claim disappeared during target authorization'
+grep -Fq "worktree=$SECOND" <<< "$output" || \
+  fail 'cross-worktree claim was not retained on the target worktree'
+
+set +e
+cross_output="$(run_hook codex "$REPO" \
+  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/unclaimed-new.sio\"}}" 2>&1)"
+cross_rc=$?
+set -e
+[[ "$cross_rc" -eq 2 ]] || fail "unclaimed cross-worktree write returned $cross_rc instead of 2"
+grep -q 'no active claim in worktree' <<< "$cross_output" || \
+  fail 'unclaimed cross-worktree write did not explain the missing target claim'
+
 output="$(run_hook claude "$SECOND" \
   "{\"session_id\":\"claude-b\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}")"
 grep -q 'agent=claude lane=session-claude-b' <<< "$output" || \
@@ -105,6 +129,9 @@ run_hook claude "$SECOND" \
 output="$(run_coord "$SECOND" brief --max-rows 4)"
 grep -q 'ACTIVE claim_id=claude--session-claude-b' <<< "$output" && \
   fail 'Claude session claim survived SessionEnd'
+
+run_coord "$SECOND" release --agent codex --lane cross-worktree \
+  --reason 'cross-worktree selftest complete' >/dev/null
 
 run_coord "$REPO" send --agent codex --lane "$CODEX_LANE" --kind info \
   --ttl-seconds 1 --message 'ephemeral selftest message' >/dev/null
