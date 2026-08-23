@@ -142,3 +142,22 @@ Wrapper probes are **not** in the census pin for that reason. Closing that quest
 - Does not promote the silent-OK probes into `tests/run-pass/` — they are receipts of current behaviour, not features. The day `source.sio` starts failing check, the census fails and the gap has moved.
 - Does not claim the shipped ELF matches this checkout’s `self-hosted/` bit-for-bit.
 - Does not reopen #2015's lag verdict.
+
+## Addendum 2026-08-23 (E241) — unknown components refuse
+
+The silent Ident-epsilon / skip sinks are closed in `self-hosted/parser/types.sio`. Still no `Source` / `Literature` / `Input` keywords.
+
+| Input | Before (shipped ELF) | After (source, E241) |
+|---|---|---|
+| `Knowledge[f64, Source]` | check OK (Ident → default CmpLt 0.0) | `error[E241]` |
+| `Knowledge[f64, Sourc]` | check OK | `error[E241]` |
+| `Knowledge[f64, 123]` | check OK (skip) | `error[E241]` |
+| `Knowledge[f64, Source < 0.05]` | check OK (epsilon bound) | check OK (unchanged) |
+| `Knowledge[f64, Derived]` | check OK | check OK (unchanged) |
+
+Clocks:
+
+- **STATIC** (Contracts): `bash scripts/dev/knowledge_annotation_parser_coverage.sh` — 3-of-6 still holds; E241 helper present; skip comment gone.
+- **DYNAMIC / source-built** (Madaros Witness): `bash scripts/ci/knowledge_unknown_component_live_refuse.sh` against `MADAROS_RAW_BIN`. The committed ELF is expected to still swallow these until it is rebuilt.
+
+`tests/compile-fail/knowledge_unknown_component_{ident,int}.sio` are `//@ requires: madaros` so the default suite does not score them against the stale ELF.
