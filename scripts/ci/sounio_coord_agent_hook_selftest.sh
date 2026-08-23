@@ -22,7 +22,11 @@ fail() {
 mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/self-hosted/parser"
 cp "$ROOT_DIR/bin/sounio-coord" "$REPO/bin/sounio-coord"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
-chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/sounio_coord_agent_hook.py"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
+chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/sounio_coord_agent_hook.py" \
+  "$REPO/scripts/dev/sounio_coord_runtime.sh" \
+  "$REPO/scripts/dev/sounio_coord_agent_hook_runtime.py"
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Hook Selftest'
 git -C "$REPO" config user.email 'coord-hook-selftest@sounio.local'

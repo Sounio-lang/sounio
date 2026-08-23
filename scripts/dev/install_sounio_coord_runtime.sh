@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+CLIENT_PROTOCOL=3
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/dev/install_sounio_coord_runtime.sh [options]
+
+Install and atomically activate the coordination runtime shared by every
+worktree attached to this repository.
+
+Options:
+  --source-root PATH       source bundle root (default: current worktree)
+  --runtime-dir PATH       shared runtime root override
+  --activate RUNTIME_ID    activate an already installed version
+  --list                   list installed versions
+  -h, --help               show this help
+USAGE
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+manifest_value() {
+  local manifest="$1" key="$2"
+  sed -n "s/^${key}=//p" "$manifest" | head -1
+}
+
+activate_runtime() {
+  local runtime_id="$1" version_dir manifest protocol link_tmp
+  version_dir="$RUNTIME_ROOT/versions/$runtime_id"
+  manifest="$version_dir/manifest"
+  [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" && \
+    -f "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" ]] || \
+    die "installed runtime is incomplete: $runtime_id"
+  protocol="$(manifest_value "$manifest" protocol_version)"
+  [[ "$protocol" == "$CLIENT_PROTOCOL" ]] || \
+    die "cannot activate protocol $protocol with installer protocol $CLIENT_PROTOCOL"
+  [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
+    die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
+  link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
+  ln -s "versions/$runtime_id" "$link_tmp"
+  mv -Tf "$link_tmp" "$RUNTIME_ROOT/current"
+  printf 'ACTIVATED runtime_id=%s protocol=%s path=%s\n' \
+    "$runtime_id" "$protocol" "$version_dir"
+}
+
+WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$WORKTREE" ]] || die "run this installer from a Git worktree"
+WORKTREE="$(cd "$WORKTREE" && pwd -P)"
+GIT_COMMON_DIR="$(git -C "$WORKTREE" rev-parse --git-common-dir 2>/dev/null || true)"
+[[ -n "$GIT_COMMON_DIR" ]] || die "cannot resolve the shared Git directory"
+case "$GIT_COMMON_DIR" in
+  /*) ;;
+  *) GIT_COMMON_DIR="$(cd "$WORKTREE/$GIT_COMMON_DIR" && pwd -P)" ;;
+esac
+
+SOURCE_ROOT="$WORKTREE"
+RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
+action=install
+activate_id=''
+while (($#)); do
+  case "$1" in
+    --source-root) (($# >= 2)) || die "$1 requires a value"; SOURCE_ROOT="$2"; shift 2 ;;
+    --runtime-dir) (($# >= 2)) || die "$1 requires a value"; RUNTIME_ROOT="$2"; shift 2 ;;
+    --activate) (($# >= 2)) || die "$1 requires a value"; action=activate; activate_id="$2"; shift 2 ;;
+    --list) action=list; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown installer option: $1" ;;
+  esac
+done
+
+SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd -P)"
+mkdir -p "$RUNTIME_ROOT/versions"
+RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd -P)"
+exec 9>"$RUNTIME_ROOT/.install.lock"
+flock 9
+
+if [[ "$action" == list ]]; then
+  current=''
+  [[ ! -e "$RUNTIME_ROOT/current" ]] || current="$(basename "$(readlink -f "$RUNTIME_ROOT/current")")"
+  version_paths=("$RUNTIME_ROOT"/versions/*)
+  for version_dir in "${version_paths[@]}"; do
+    [[ -d "$version_dir" && -f "$version_dir/manifest" ]] || continue
+    runtime_id="$(basename "$version_dir")"
+    marker=no
+    [[ "$runtime_id" != "$current" ]] || marker=yes
+    printf 'RUNTIME runtime_id=%s current=%s protocol=%s runtime_version=%s source_sha=%s\n' \
+      "$runtime_id" "$marker" \
+      "$(manifest_value "$version_dir/manifest" protocol_version)" \
+      "$(manifest_value "$version_dir/manifest" runtime_version)" \
+      "$(manifest_value "$version_dir/manifest" source_sha)"
+  done
+  exit 0
+fi
+
+if [[ "$action" == activate ]]; then
+  activate_runtime "$activate_id"
+  exit 0
+fi
+
+runtime_source="$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
+hook_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agent_hook_runtime.py"
+[[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
+[[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
+
+version_output="$(cd "$WORKTREE" && "$runtime_source" runtime-version)"
+protocol="$(sed -n 's/^protocol_version=//p' <<< "$version_output" | head -1)"
+runtime_version="$(sed -n 's/^runtime_version=//p' <<< "$version_output" | head -1)"
+[[ "$protocol" == "$CLIENT_PROTOCOL" ]] || \
+  die "source protocol $protocol is incompatible with installer protocol $CLIENT_PROTOCOL"
+[[ -n "$runtime_version" ]] || die "source runtime did not report a version"
+
+bundle_sha="$(
+  sha256sum "$runtime_source" "$hook_source" | awk '{print $1}' | sha256sum | awk '{print $1}'
+)"
+safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
+runtime_id="p${protocol}-${safe_version}-${bundle_sha:0:12}"
+version_dir="$RUNTIME_ROOT/versions/$runtime_id"
+source_sha="$(git -C "$SOURCE_ROOT" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)"
+
+if [[ -d "$version_dir" ]]; then
+  installed_sha="$(manifest_value "$version_dir/manifest" bundle_sha256)"
+  [[ "$installed_sha" == "$bundle_sha" ]] || \
+    die "runtime id collision with different bundle: $runtime_id"
+else
+  stage="$(mktemp -d "$RUNTIME_ROOT/.install.XXXXXX")"
+  cleanup_stage() {
+    [[ -z "${stage:-}" ]] || rm -rf "$stage"
+  }
+  trap cleanup_stage EXIT
+  mkdir -p "$stage/bin" "$stage/hooks"
+  install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
+  install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
+  {
+    printf 'runtime_id=%s\n' "$runtime_id"
+    printf 'protocol_version=%s\n' "$protocol"
+    printf 'runtime_version=%s\n' "$runtime_version"
+    printf 'bundle_sha256=%s\n' "$bundle_sha"
+    printf 'source_sha=%s\n' "$source_sha"
+    printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$stage/manifest"
+  mv "$stage" "$version_dir"
+  stage=''
+  trap - EXIT
+  printf 'INSTALLED runtime_id=%s protocol=%s path=%s\n' \
+    "$runtime_id" "$protocol" "$version_dir"
+fi
+
+activate_runtime "$runtime_id"

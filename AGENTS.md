@@ -178,6 +178,27 @@ automatically. Use
 coordinate work in progress; durable blockers still require the blocker
 contract.
 
+### Shared coordination runtime
+
+`bin/sounio-coord` and `scripts/dev/sounio_coord_agent_hook.py` are stable
+launchers. After the one-time launcher migration reaches a worktree, both select
+the versioned runtime installed under the repository's shared Git directory:
+
+- `<git-common-dir>/sounio-coord-runtime/current`
+
+Install or upgrade it atomically from a source worktree with
+`bin/sounio-coord install-runtime`. Inspect the selected implementation with
+`bin/sounio-coord runtime-info`, list installed versions with
+`bin/sounio-coord install-runtime --list`, and roll back with
+`bin/sounio-coord install-runtime --activate <runtime-id>`. Launchers require an
+exact protocol-major match and refuse a broken or incomplete shared runtime;
+they do not silently fall back after a shared runtime has been activated.
+
+Before the first shared install, launchers use their worktree-local bundled
+runtime. `SOUNIO_COORD_RUNTIME_MODE=local` forces that fallback for diagnosis and
+selftests. Do not edit the shared runtime directory by hand. Runtime installs use
+immutable content-addressed version directories and an atomic `current` symlink.
+
 If an agent leaves a blocker for another agent, it must use that contract's
 Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,
 and next-action fields.
