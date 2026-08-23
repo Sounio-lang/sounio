@@ -2224,3 +2224,652 @@ fn mf_pow(nc: NativeCompiler, out: i64, xs: i64, ys: i64,
     }
     c
 }
+
+// ---------------------------------------------------------------------------
+// ld0t — an indexed load out of a .rodata TABLE, the oracle's m.ld0t.
+//
+// This is the one rodata access mf_ld0c cannot express: the index is a runtime
+// value (tgamma's factorial row picks FACT[trunc(x)-1]) and movsd has no
+// rip+index addressing mode on this backend — the ModRM byte 05 that
+// emit_movsd_xmm0_rip_disp32 writes IS rip-relative-no-index. So the base is
+// materialised with `lea rax, [rip+0]` and the element is read through
+// `mov rax, [rax + rbx*8]`, then moved across to xmm0.
+//
+// The relocation contract is mf_ld0c's, unchanged and for the same reason: the
+// displacement written into the instruction is ZERO and the real offset is
+// registered with add_rip_reloc. The patch site is lea_pos + 3, not + 4,
+// because `48 8D 05` is a three-byte prefix where movsd's `F2 0F 10 05` is
+// four — and apply_relocations computes the displacement against
+// patch_offset + 4, which is the end of the instruction in both cases. This is
+// the same offset codegen_x86_linux.sio passes for its own string leas.
+//
+// off must be the offset of ELEMENT ZERO of a table the caller registered
+// CONTIGUOUSLY; element i is read from off + 8*i.
+//
+// On entry rax holds the index. Clobbers rax, rbx. Leaves the element in xmm0,
+// like mf_ld0c, so a caller follows with mf_st0.
+fn mf_ld0_table(nc: NativeCompiler, off: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_mov_rbx_rax(c.code)                   // rbx = index
+    let pos = c.code.len
+    c.code = emit_lea_rax_rip_disp32(c.code, 0)
+    c.relocs = add_rip_reloc(c.relocs, pos + 3, off)    // lea: 3-byte prefix
+    c.code = emit_mov_rax_mem_rax_rbx8(c.code)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c
+}
+
+// ---------------------------------------------------------------------------
+// scale_general — oracle scale_general (line 967).
+//
+//   out = qs * 2^n for a qs that is NOT confined to [2^-1/2, 2^1/2].
+//   mf_scale_2n cannot be called directly for this: tgamma's core hands back a
+//   mantissa up to ~40 (and, on the reflection and recurrence branches, a
+//   quotient of two of them) against an n that reaches ~1130, and
+//   mf_pow2_slot's biased exponent only survives while the pair has already
+//   been renormalised. So the exponent of qs is surgically extracted, added to
+//   n, and the mantissa — now in [1,2) and positive — is handed to
+//   mf_scale_2n with the combined exponent.
+//
+//   Every step of the surgery is exact. The only roundings in the whole
+//   routine are the ones mf_scale_2n's two tails perform, one each.
+//
+//   Four things happen in order and the order is not free:
+//
+//     1. zero, infinity and NaN pass STRAIGHT through, before any exponent is
+//        read. Their exponent field is not an exponent, and the pass-through
+//        also skips the closing sign flip — the sign is already in the value.
+//     2. a subnormal qs is pre-scaled by 2^54 (exact) and n is reduced by 54,
+//        so the exponent read below is always a normal one.
+//     3. e = exponent(qs) + n is formed BEFORE the range decision, so an
+//        oversized qs against an undersized n cancels instead of overflowing.
+//     4. e > 1023 is +inf and e < -1076 is zero, decided here rather than in
+//        mf_scale_2n, which is what keeps that routine's arms 1 and 2 out of
+//        reach and its shift inside eleven bits.
+//
+// 4 temps. Oracle: scale_general, ~40 instructions.
+//
+//   t0 qm  the mantissa, |qs| forced into [1,2)
+//   t1 es  the combined exponent          (INTEGER)
+//   t2 sg  the sign bit of qs, 0 or 1     (INTEGER)
+//   t3     the inner block mf_scale_2n wants (1 temp)
+//
+// .rodata: zero_off (0.0), p54_off (2^54), twom54_off (2^-54), inf_off (+inf).
+// ns is an INTEGER slot holding n; it is READ, never written — the working
+// copy lives in t1, because the caller's n is still wanted after a tail.
+// out must be distinct from qs and from every temp.
+// GPRs clobbered: rax, rbx, rcx, rdx.
+fn mf_scale_general(nc: NativeCompiler, out: i64, qs: i64, ns: i64,
+                    zero_off: i64, p54_off: i64, twom54_off: i64, inf_off: i64,
+                    tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let qm = mf_t(tb, 0)
+    let es = mf_t(tb, 1)
+    let sg = mf_t(tb, 2)
+    let inner = mf_t(tb, 3)
+
+    // The sign is read from the ORIGINAL qs: the mantissa surgery below masks
+    // bit 63 away, so by the time out is written there is nothing left to read.
+    c = mf_sign_bit_rax(c, qs)
+    c.code = emit_store_rax_rbp_disp32(c.code, sg)
+
+    // ---- 1. zero, infinity and NaN pass through ----------------------------
+    // Two conditions, one arm: `ab == 0` jumps INTO the arm, `ab >= inf-bits`
+    // falls into it, and anything else jumps over. mf_abs_bits_rbx leaves the
+    // masked value in rax as well as rbx, so the zero test needs no reload.
+    c = mf_abs_bits_rbx(c, qs)
+    c.code = emit_test_rax_rax(c.code)
+    let pt_zjz = c.code.len
+    c.code = emit_jz_rel32(c.code)                      // ab == 0 -> pass through
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)                   // signed is honest: ab < 2^63
+    c.code = emit_setge_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let pt_ijz = c.code.len
+    c.code = emit_jz_rel32(c.code)                      // finite nonzero -> on
+    let pt_fire = c.code.len
+    c.code = patch_u32_le(c.code, pt_zjz + 2, pt_fire - (pt_zjz + 6))
+    c = mf_mov_slot(c, out, qs)
+    let pt_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)                     // past the sign flip
+    let pt_t = c.code.len
+    c.code = patch_u32_le(c.code, pt_ijz + 2, pt_t - (pt_ijz + 6))
+
+    // ---- 2. working copies, and the subnormal pre-scale --------------------
+    c = mf_mov_slot(c, qm, qs)
+    c.code = emit_load_rbp_disp32_rax(c.code, ns)
+    c.code = emit_store_rax_rbp_disp32(c.code, es)      // es = n
+    c = mf_abs_bits_rbx(c, qs)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x0010000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)                       // subnormal?
+    c.code = emit_test_al_al(c.code)
+    let sn_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0(c, qm); c = mf_ld1c(c, p54_off)
+    c.code = emit_mulsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, qm)                                   // qm *= 2^54, exact
+    c.code = emit_load_rbp_disp32_rax(c.code, es)
+    c.code = emit_mov_reg_imm(c.code, 3, 54)
+    c.code = emit_sub_rax_rbx(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, es)      // es = n - 54
+    let sn_t = c.code.len
+    c.code = patch_u32_le(c.code, sn_jz + 2, sn_t - (sn_jz + 6))
+
+    // ---- 3. e = exponent(qm) + es, then qm forced into [1,2) ---------------
+    // The bits are read from qm, not qs: on the subnormal path the pre-scale
+    // has already moved them, and on the normal path the two are identical.
+    c = mf_ld0(c, qm)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_mov_rdx_rax(c.code)                   // rdx keeps the bits
+    c.code = emit_mov_reg_imm(c.code, 1, 52)
+    c.code = emit_shr_rax_cl(c.code)                    // LOGICAL: qs may be < 0
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FF)
+    c.code = emit_and_rax_rbx(c.code)                   // biased exponent
+    c.code = emit_mov_reg_imm(c.code, 3, 1023)
+    c.code = emit_sub_rax_rbx(c.code)                   // qe
+    c.code = emit_load_rbp_disp32_rbx(c.code, es)
+    c.code = emit_add_rax_rbx(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, es)      // es = qe + n
+    c.code = emit_mov_rax_rdx(c.code)
+    c.code = emit_mov_reg_imm(c.code, 3, 0x000FFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)                   // drops the sign too
+    c.code = emit_mov_reg_imm(c.code, 3, 0x3FF0000000000000)
+    c.code = emit_or_rax_rbx(c.code)
+    c.code = emit_movq_xmm0_rax(c.code)
+    c = mf_st0(c, qm)                                   // qm in [1,2), positive
+
+    // ---- 4. the three ranges -----------------------------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, es)
+    c.code = emit_mov_reg_imm(c.code, 0, 1023)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setg_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let ov_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    let ov_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let ov_t = c.code.len
+    c.code = patch_u32_le(c.code, ov_jz + 2, ov_t - (ov_jz + 6))
+
+    c.code = emit_load_rbp_disp32_rbx(c.code, es)
+    c.code = emit_mov_reg_imm(c.code, 0, -1076)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setl_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let un_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)
+    let un_jmp = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    let un_t = c.code.len
+    c.code = patch_u32_le(c.code, un_jz + 2, un_t - (un_jz + 6))
+
+    // -1076 <= es <= 1023 here, so mf_scale_2n's arms 1 and 2 are unreachable
+    // and arm 3 sees es + 54 >= -1022: its shift stays inside eleven bits.
+    c = mf_scale_2n(c, out, qm, es, zero_off, p54_off, twom54_off, inner)
+
+    let join = c.code.len
+    c.code = patch_u32_le(c.code, ov_jmp + 1, join - (ov_jmp + 5))
+    c.code = patch_u32_le(c.code, un_jmp + 1, join - (un_jmp + 5))
+    c = mf_fneg_slot_if(c, out, sg)
+
+    let fin = c.code.len
+    c.code = patch_u32_le(c.code, pt_jmp + 1, fin - (pt_jmp + 5))
+    c
+}
+
+// ---------------------------------------------------------------------------
+// is_int — oracle is_int (line 1118).
+//
+//   Writes 1 into the INTEGER slot r_out when xs is an integral value, 0
+//   otherwise. tgamma asks this twice: design 2.4 row 6 (a negative integer is
+//   a pole, so the answer is NaN) and row 8 (a small positive integer takes the
+//   exact factorial table).
+//
+//   `ucomisd; sete` is the whole test and it has NO branch, which is why this
+//   is four instructions rather than mf_y_parity's twenty-two: the oracle's
+//   `not fcmp(T, xs, 'ne')` is exactly sete, including its behaviour on NaN.
+//   sete fires for ORDERED-EQUAL and for UNORDERED alike (finding F3), so a
+//   NaN x is reported as an integer. That matches the oracle bit for bit, and
+//   both rely on the caller having taken NaN first — mf_tgamma's row 1 does,
+//   before either call site.
+//
+//   roundsd, not cvttsd2si: the truncation has to be correct for every finite
+//   double, and cvttsd2si returns the 0x8000000000000000 indefinite value
+//   above 2^63. mf_y_parity's header has the long form of the same argument.
+//
+// 1 temp: t0, the truncation. Oracle: is_int, 9 instructions, 1 slot.
+// No .rodata. r_out is an INTEGER slot. GPRs clobbered: rax.
+fn mf_is_int(nc: NativeCompiler, r_out: i64, xs: i64,
+             tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let t = mf_t(tb, 0)
+    c = mf_ld0(c, xs)
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 11)    // mode 3 trunc, inexact muted
+    c = mf_st0(c, t)
+    c = mf_ld0(c, t); c = mf_ld1(c, xs)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_movzx_rax_al(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, r_out)
+    c
+}
+
+// ---------------------------------------------------------------------------
+// tgamma — design 2.4 special cases then design 2.3. Oracle: tgamma_ (line
+// 1128).
+//
+//   Nine special rows in the oracle's order, then one of three numeric
+//   branches. The order of the rows is load-bearing in the same way pow's is:
+//   row 1 must claim NaN before any ucomisd is trusted, rows 2 and 3 must see
+//   an x that is not NaN, row 6 must claim the negative integers before row 9
+//   hands one of them a signed zero, and row 7 must claim the overflow before
+//   row 8 indexes a table with it.
+//
+//   THE REFLECTION. Design 2.4 row 9 is the textbook
+//
+//       Gamma(x) = pi / (sin(pi x) * Gamma(1-x))
+//
+//   and this routine does NOT compute 1-x. It uses
+//
+//       Gamma(1-x) = (-x) * Gamma(-x)
+//
+//   so the argument handed to the core is y = -x, an EXACT sign flip, where
+//   1-x is a rounded subtraction. That single line is the difference between
+//   3 ulp and 300: Gamma's condition number is |x * psi(x)| ~ x*ln x, so at
+//   x ~ -127 a half-ulp error in the argument alone comes out as 312 ulp in
+//   the answer. There is nothing downstream that can recover it. If you ever
+//   find yourself writing `1.0 - x` here, this is the paragraph that says why
+//   the measured 4.15 ulp becomes three hundred.
+//
+//   tgamma(1) and tgamma(2) are 1.0 EXACTLY, and the general path — ~3 ulp —
+//   will not deliver that. Row 8 is the reason the exact factorial table
+//   exists: 23 entries, Gamma(i) = (i-1)! for i = 1..23, read by index. Above
+//   23 the factorial is no longer exactly representable and the general path
+//   is correct to its own budget.
+//
+//   Finding F9 is row 9's tail. The reflection is only evaluable while
+//   Gamma(-x) fits an exponent; below about x = -185 the core argument runs
+//   off scale and the answer is a signed zero, the sign being (-1)^(n+1) on
+//   the interval (-n-1, -n). It is an explicit branch, not something the
+//   arithmetic falls into. x = -184.5 (design 3.2 row 27) is deliberately on
+//   the other side of it: that one goes through the real reflection and
+//   underflows to -0.0 on its own, which is the stronger test of the two.
+//
+//   Finding F4 is why mf_split_pow2 exists and why the recurrence branch calls
+//   it. Gamma(x) = Gamma(x+1)/x divides by x, and at x = 1e-300 (design 3.2
+//   row 20) the double-double quotient's leading word is 3.2e301; TwoProd
+//   inside mf_dd_div would then form SPLIT * that, which overflows, and the
+//   answer comes back NaN with nothing anywhere to notice. Dividing by the
+//   MANTISSA of x and folding its exponent into the one the core already
+//   returns keeps every operand O(1). The division by the mantissa is a
+//   division by a positive number in [1,2), so the sign of x is carried
+//   separately and reapplied — mf_split_pow2 hands both back.
+//
+// 100 temps. Oracle: tgamma_, 1598 instructions on the primary branch, 1746 on
+// the recurrence, 2052 on the reflection, 44 on the table row, 10 on a
+// special-case row; peak 49 slots.
+//
+//   t0  xbits  bits(x)          (INTEGER)   t12 qd_hi \ the quotient of the
+//   t1  neg    x < 0            (INTEGER)   t13 qd_lo / recurrence/reflection
+//   t2  isint  mf_is_int        (INTEGER)   t14 y     = -x, reflection
+//   t3  nn     gamma_core's n   (INTEGER)   t15 sp    = sinpi(x)
+//   t4  ex     split_pow2's e   (INTEGER)   t16 d1_hi \ m * sinpi(x)
+//   t5  sgnx   split_pow2's sgn (INTEGER)   t17 d1_lo /
+//   t6  es     n for scale_gen  (INTEGER)   t18 d2_hi \ m * sinpi(x) * y
+//   t7  mm_hi \ the core's      t19 d2_lo /
+//   t8  mm_lo / mantissa        t20 pd_hi \ pi as a dd
+//   t9  x1     = x + 1          t21 pd_lo /
+//   t10 mx     mantissa of x    t22..t99 inner block (78, sized for
+//   t11 zs     0.0                    mf_gamma_core, the largest callee)
+//
+// .rodata offsets from data_section_add_f64. The first twelve are what
+// mf_log2_dd and mf_exp2_core_dd want and are passed straight through, and the
+// next six are mf_gamma_core's own:
+//   split_off, one_off, zero_off, half_off, two_off, sqrt2_off, p54_off,
+//   atanh_off, third_off, tl2e_off, ln2_off, expe_off,
+//   sqrt2pi_off, lz_off, lzk_off, c3375_off, log2e_off, log2e_dd_off
+// then mf_sinpi's:
+//   pi_off     pi as a dd: hi at pi_off, lo at pi_off + 8, contiguous
+//   sinq_off   NINE doubles, contiguous: coefficient i at sinq_off + 8*i
+//   cosq_off   NINE doubles, contiguous: coefficient i at cosq_off + 8*i
+// and tgamma's own:
+//   inf_off      +inf
+//   ninf_off     -inf
+//   nan_off      a quiet NaN            (rows 3 and 6)
+//   nzero_off    -0.0
+//   twom54_off   2^-54                  (mf_scale_2n's subnormal tail)
+//   gamovf_off   0x406573FAE561F647, the largest x with a finite Gamma
+//   neg185_off   -185.0                 (finding F9's cut-off)
+//   neghalf_off  -0.5
+//   twenty3_off  23.0
+//   fact_off     Gamma(i) = (i-1)! for i = 1..23, TWENTY-THREE doubles the
+//                caller must have registered CONTIGUOUSLY: Gamma(i) is read
+//                from fact_off + 8*(i-1).
+//
+// out must be distinct from xs and from every temp.
+// GPRs clobbered: rax, rbx, rcx, rdx, rsi.
+//
+// Deviations from the oracle, all the same one: its branches are HOST branches
+// taken while emitting, so it emits only the arm it takes. Here every
+// predicate is a runtime value, so every arm is emitted and the special-case
+// rows all jump to one exit at the bottom. `neg`, `isint`, the core's n and
+// split_pow2's exponent and sign are host integers there and integer slots
+// here, because a GPR does not survive the next kernel.
+fn mf_tgamma(nc: NativeCompiler, out: i64, xs: i64,
+             split_off: i64, one_off: i64, zero_off: i64, half_off: i64,
+             two_off: i64, sqrt2_off: i64, p54_off: i64,
+             atanh_off: i64, third_off: i64, tl2e_off: i64,
+             ln2_off: i64, expe_off: i64,
+             sqrt2pi_off: i64, lz_off: i64, lzk_off: i64, c3375_off: i64,
+             log2e_off: i64, log2e_dd_off: i64,
+             pi_off: i64, sinq_off: i64, cosq_off: i64,
+             inf_off: i64, ninf_off: i64, nan_off: i64, nzero_off: i64,
+             twom54_off: i64, gamovf_off: i64, neg185_off: i64,
+             neghalf_off: i64, twenty3_off: i64, fact_off: i64,
+             tb: i64) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    let xbits = mf_t(tb, 0)
+    let neg = mf_t(tb, 1)
+    let isint = mf_t(tb, 2)
+    let nn = mf_t(tb, 3)
+    let ex = mf_t(tb, 4)
+    let sgnx = mf_t(tb, 5)
+    let es = mf_t(tb, 6)
+    let mm_hi = mf_t(tb, 7)
+    let mm_lo = mf_t(tb, 8)
+    let x1 = mf_t(tb, 9)
+    let mx = mf_t(tb, 10)
+    let zs = mf_t(tb, 11)
+    let qd_hi = mf_t(tb, 12)
+    let qd_lo = mf_t(tb, 13)
+    let y = mf_t(tb, 14)
+    let sp = mf_t(tb, 15)
+    let d1_hi = mf_t(tb, 16)
+    let d1_lo = mf_t(tb, 17)
+    let d2_hi = mf_t(tb, 18)
+    let d2_lo = mf_t(tb, 19)
+    let pd_hi = mf_t(tb, 20)
+    let pd_lo = mf_t(tb, 21)
+    let inner = mf_t(tb, 22)
+
+    // Every row that fires stores its answer and jumps to the single exit at
+    // the bottom; the positions are collected here and patched in one pass,
+    // exactly as mf_pow does.
+    var exit_at: [i64; 32] = [0; 32]
+    var nex: i64 = 0
+
+    c = mf_ld0(c, xs)
+    c.code = emit_movq_rax_xmm0(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, xbits)
+    c = mf_sign_bit_rax(c, xbits)
+    c.code = emit_store_rax_rbp_disp32(c.code, neg)
+
+    // ---- row 1: NaN -> x + x, which quietens the payload -------------------
+    // An integer compare on the magnitude, not `ucomisd; setb`: both are
+    // correct here, and this one matches the oracle's `ab > 0x7FF0…` line.
+    // ab is masked to 63 bits so the signed setg is honest.
+    c = mf_abs_bits_rbx(c, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_setg_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r1_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0(c, xs); c = mf_ld1(c, xs)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r1_t = c.code.len
+    c.code = patch_u32_le(c.code, r1_jz + 2, r1_t - (r1_jz + 6))
+
+    // ---- row 2: +inf -> +inf ------------------------------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0x7FF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r2_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r2_t = c.code.len
+    c.code = patch_u32_le(c.code, r2_jz + 2, r2_t - (r2_jz + 6))
+
+    // ---- row 3: -inf -> NaN, the invalid operation --------------------------
+    c.code = emit_load_rbp_disp32_rbx(c.code, xbits)
+    c.code = emit_mov_reg_imm(c.code, 0, 0xFFF0000000000000)
+    c.code = emit_cmp_rbx_rax(c.code)
+    c.code = emit_sete_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r3_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, nan_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r3_t = c.code.len
+    c.code = patch_u32_le(c.code, r3_jz + 2, r3_t - (r3_jz + 6))
+
+    // ---- rows 4-5: +-0 is the pole, and the SIGN of the zero picks the side -
+    c = mf_abs_bits_rbx(c, xbits)
+    c.code = emit_test_rax_rax(c.code)
+    let r4_jnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, neg)
+    c.code = emit_test_rax_rax(c.code)
+    let r4_sjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, ninf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r4_st = c.code.len
+    c.code = patch_u32_le(c.code, r4_sjz + 2, r4_st - (r4_sjz + 6))
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r4_t = c.code.len
+    c.code = patch_u32_le(c.code, r4_jnz + 2, r4_t - (r4_jnz + 6))
+
+    // ---- row 6: a negative integer is a pole -> NaN, invalid ----------------
+    c.code = emit_load_rbp_disp32_rax(c.code, neg)
+    c.code = emit_test_rax_rax(c.code)
+    let r6_pjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_is_int(c, isint, xs, inner)
+    c.code = emit_load_rbp_disp32_rax(c.code, isint)
+    c.code = emit_test_rax_rax(c.code)
+    let r6_ijz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, nan_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r6_t = c.code.len
+    c.code = patch_u32_le(c.code, r6_pjz + 2, r6_t - (r6_pjz + 6))
+    c.code = patch_u32_le(c.code, r6_ijz + 2, r6_t - (r6_ijz + 6))
+
+    // ---- row 7: above 0x406573FAE561F647 the answer does not fit -----------
+    // Ordered `>`: NaN went out at row 1, so seta is honest.
+    c = mf_ld0(c, xs); c = mf_ld1c(c, gamovf_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_seta_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r7_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, inf_off); c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r7_t = c.code.len
+    c.code = patch_u32_le(c.code, r7_jz + 2, r7_t - (r7_jz + 6))
+
+    // ---- row 8: 1 <= x <= 23, integral -> the exact factorial table --------
+    // Four conditions, all of which must hold; each failure jumps to the same
+    // place. cvttsd2si is safe here and only here: the bound is 23.
+    c.code = emit_load_rbp_disp32_rax(c.code, neg)
+    c.code = emit_test_rax_rax(c.code)
+    let r8_njnz = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c = mf_ld0(c, xs); c = mf_ld1c(c, twenty3_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setbe_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r8_hjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0(c, xs); c = mf_ld1c(c, one_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setae_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r8_ljz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_is_int(c, isint, xs, inner)
+    c.code = emit_load_rbp_disp32_rax(c.code, isint)
+    c.code = emit_test_rax_rax(c.code)
+    let r8_ijz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0(c, xs)
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)            // 1 <= i <= 23
+    c.code = emit_mov_reg_imm(c.code, 3, 1)
+    c.code = emit_sub_rax_rbx(c.code)                   // index = i - 1
+    c = mf_ld0_table(c, fact_off)
+    c = mf_st0(c, out)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r8_t = c.code.len
+    c.code = patch_u32_le(c.code, r8_njnz + 2, r8_t - (r8_njnz + 6))
+    c.code = patch_u32_le(c.code, r8_hjz + 2, r8_t - (r8_hjz + 6))
+    c.code = patch_u32_le(c.code, r8_ljz + 2, r8_t - (r8_ljz + 6))
+    c.code = patch_u32_le(c.code, r8_ijz + 2, r8_t - (r8_ijz + 6))
+
+    // ---- row 9 tail, finding F9: x <= -185 is a certain signed zero --------
+    // The sign on (-n-1, -n) is (-1)^(n+1). With fl = floor(x) the interval is
+    // (fl, fl+1) = (-n-1, -n) at n = -fl-1, so n is even exactly when fl is
+    // odd, and an even n is the negative zero. Two's complement makes `fl & 1`
+    // the honest parity of a negative fl.
+    c = mf_ld0(c, xs); c = mf_ld1c(c, neg185_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setbe_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let r9_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0(c, xs)
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 9)     // mode 1 floor, inexact muted
+    c.code = emit_cvttsd2si_rax_xmm0(c.code)            // |fl| <= 2^53 here
+    c.code = emit_mov_reg_imm(c.code, 3, 1)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let r9_pjz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0c(c, nzero_off); c = mf_st0(c, out)       // fl odd  -> n even -> -0.0
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r9_pt = c.code.len
+    c.code = patch_u32_le(c.code, r9_pjz + 2, r9_pt - (r9_pjz + 6))
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, out)        // fl even -> n odd  -> +0.0
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let r9_t = c.code.len
+    c.code = patch_u32_le(c.code, r9_jz + 2, r9_t - (r9_jz + 6))
+
+    // ---- branch A: x >= 1/2, the primary Lanczos evaluation ----------------
+    c = mf_ld0(c, xs); c = mf_ld1c(c, half_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_setae_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let ba_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_gamma_core(c, mm_hi, mm_lo, nn, xs,
+                      split_off, one_off, zero_off, half_off, two_off,
+                      sqrt2_off, p54_off, atanh_off, third_off, tl2e_off,
+                      ln2_off, expe_off, sqrt2pi_off, lz_off, lzk_off,
+                      c3375_off, log2e_off, log2e_dd_off, inner)
+    c = mf_scale_general(c, out, mm_hi, nn, zero_off, p54_off, twom54_off,
+                         inf_off, inner)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let ba_t = c.code.len
+    c.code = patch_u32_le(c.code, ba_jz + 2, ba_t - (ba_jz + 6))
+
+    // ---- branch B: |x| < 1/2, the recurrence Gamma(x) = Gamma(x+1)/x -------
+    // x is not zero (row 4 took it) and not an integer of any sign in this
+    // range, so mf_split_pow2's precondition holds.
+    c = mf_ld0(c, xs); c = mf_ld1c(c, neghalf_off)
+    c.code = emit_ucomisd_xmm0_xmm1(c.code)
+    c.code = emit_seta_al(c.code)
+    c.code = emit_test_al_al(c.code)
+    let bb_jz = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = mf_ld0(c, xs); c = mf_ld1c(c, one_off)
+    c.code = emit_addsd_xmm0_xmm1(c.code)
+    c = mf_st0(c, x1)                                   // x + 1, in (1/2, 3/2)
+    c = mf_gamma_core(c, mm_hi, mm_lo, nn, x1,
+                      split_off, one_off, zero_off, half_off, two_off,
+                      sqrt2_off, p54_off, atanh_off, third_off, tl2e_off,
+                      ln2_off, expe_off, sqrt2pi_off, lz_off, lzk_off,
+                      c3375_off, log2e_off, log2e_dd_off, inner)
+    // finding F4: divide by the MANTISSA of x, never by x. mx is in [1,2), so
+    // both operands of the TwoProd inside mf_dd_div stay O(1) and the 2^ex is
+    // folded into the exponent the core already handed back.
+    c = mf_split_pow2(c, mx, ex, sgnx, xs, p54_off)
+    c = mf_ld0c(c, zero_off); c = mf_st0(c, zs)
+    c = mf_dd_div(c, qd_hi, qd_lo, mm_hi, mm_lo, mx, zs, split_off, inner)
+    c = mf_fneg_slot_if(c, qd_hi, sgnx)                 // x's sign, reapplied
+    c.code = emit_load_rbp_disp32_rax(c.code, nn)
+    c.code = emit_load_rbp_disp32_rbx(c.code, ex)
+    c.code = emit_sub_rax_rbx(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, es)      // es = n - ex
+    c = mf_scale_general(c, out, qd_hi, es, zero_off, p54_off, twom54_off,
+                         inf_off, inner)
+    exit_at[nex as usize] = c.code.len
+    c.code = emit_jmp_rel32(c.code)
+    nex = nex + 1
+    let bb_t = c.code.len
+    c.code = patch_u32_le(c.code, bb_jz + 2, bb_t - (bb_jz + 6))
+
+    // ---- branch C: x <= -1/2, the reflection --------------------------------
+    //   Gamma(x) = pi / (sin(pi x) * Gamma(1-x)),  Gamma(1-x) = y * Gamma(y)
+    // with y = -x. The sign flip is exact where 1-x is a rounded subtraction;
+    // see the header. -185 < x <= -1/2 here, so y is in [1/2, 185) and every
+    // operand below is far inside TwoProd's 2^996.
+    c = mf_fneg_slot(c, y, xs)                          // y = -x, EXACT
+    c = mf_gamma_core(c, mm_hi, mm_lo, nn, y,
+                      split_off, one_off, zero_off, half_off, two_off,
+                      sqrt2_off, p54_off, atanh_off, third_off, tl2e_off,
+                      ln2_off, expe_off, sqrt2pi_off, lz_off, lzk_off,
+                      c3375_off, log2e_off, log2e_dd_off, inner)
+    c = mf_sinpi(c, sp, xs, split_off, one_off, two_off, half_off,
+                 pi_off, sinq_off, cosq_off, inner)
+    c = mf_dd_mul_d(c, d1_hi, d1_lo, mm_hi, mm_lo, sp, split_off, inner)
+    c = mf_dd_mul_d(c, d2_hi, d2_lo, d1_hi, d1_lo, y, split_off, inner)
+    c = mf_ld0c(c, pi_off); c = mf_st0(c, pd_hi)
+    c = mf_ld0c(c, pi_off + 8); c = mf_st0(c, pd_lo)
+    c = mf_dd_div(c, qd_hi, qd_lo, pd_hi, pd_lo, d2_hi, d2_lo, split_off, inner)
+    c.code = emit_load_rbp_disp32_rax(c.code, nn)
+    c.code = emit_neg_rax(c.code)
+    c.code = emit_store_rax_rbp_disp32(c.code, es)      // es = -n
+    c = mf_scale_general(c, out, qd_hi, es, zero_off, p54_off, twom54_off,
+                         inf_off, inner)
+
+    // ---- the single exit every row and both earlier branches jump to -------
+    let fin = c.code.len
+    var q: i64 = 0
+    while q < nex {
+        let at = exit_at[q as usize]
+        c.code = patch_u32_le(c.code, at + 1, fin - (at + 5))
+        q = q + 1
+    }
+    c
+}
