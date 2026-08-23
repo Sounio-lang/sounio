@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.6
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.7
 
 usage() {
   cat <<'USAGE'
@@ -664,7 +664,8 @@ coord_inbox_launcher() {
 discover_history_endpoint() {
   local target_agent="$1" target_lane="$2" harness='' best_file='' best_epoch=0
   local message_file candidate_worktree candidate_branch candidate_common socket
-  local pane_id pane_pid pane_command pane_path pane_root matches=0
+  local pane_id pane_pid pane_command pane_path pane_root pane_common pane_lines matches=0
+  local history_branch_matches=0
   local -a message_paths=()
 
   harness="$(harness_for_agent "$target_agent")" || return 1
@@ -694,24 +695,47 @@ discover_history_endpoint() {
   if [[ -z "$candidate_branch" ]]; then
     candidate_branch="detached@$(git -C "$candidate_worktree" rev-parse --short=12 HEAD 2>/dev/null || true)"
   fi
-  [[ "$candidate_branch" == "$M_FROM_BRANCH" ]] || return 1
+  if [[ "$candidate_branch" == "$M_FROM_BRANCH" ]]; then
+    history_branch_matches=1
+  fi
 
   socket="${SOUNIO_COORD_DISCOVERY_SOCKET:-${TMUX%%,*}}"
   [[ -n "$socket" && -S "$socket" ]] || return 1
-  while IFS='|' read -r pane_id pane_pid pane_command pane_path; do
-    [[ -n "$pane_id" && "$pane_pid" =~ ^[1-9][0-9]*$ ]] || continue
-    harness_command_matches "$harness" "$pane_command" || continue
-    pane_root="$(git -C "$pane_path" rev-parse --show-toplevel 2>/dev/null || true)"
-    [[ -n "$pane_root" ]] || continue
-    pane_root="$(cd "$pane_root" && pwd -P)"
-    [[ "$pane_root" == "$candidate_worktree" ]] || continue
-    matches=$((matches + 1))
-    D_ADDRESS="$pane_id"
-  done < <(tmux -S "$socket" list-panes -a -F \
-    '#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)
-  [[ "$matches" == 1 ]] || return 1
+  pane_lines="$(tmux -S "$socket" list-panes -a -F \
+    '#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
+  if ((history_branch_matches)); then
+    while IFS='|' read -r pane_id pane_pid pane_command pane_path; do
+      [[ -n "$pane_id" && "$pane_pid" =~ ^[1-9][0-9]*$ ]] || continue
+      harness_command_matches "$harness" "$pane_command" || continue
+      pane_root="$(git -C "$pane_path" rev-parse --show-toplevel 2>/dev/null || true)"
+      [[ -n "$pane_root" ]] || continue
+      pane_root="$(cd "$pane_root" && pwd -P)"
+      [[ "$pane_root" == "$candidate_worktree" ]] || continue
+      matches=$((matches + 1))
+      D_ADDRESS="$pane_id"
+    done <<< "$pane_lines"
+  fi
+  ((matches <= 1)) || return 1
+  if ((matches == 1)); then
+    D_DISCOVERY='history'
+  else
+    while IFS='|' read -r pane_id pane_pid pane_command pane_path; do
+      [[ -n "$pane_id" && "$pane_pid" =~ ^[1-9][0-9]*$ ]] || continue
+      harness_command_matches "$harness" "$pane_command" || continue
+      pane_root="$(git -C "$pane_path" rev-parse --show-toplevel 2>/dev/null || true)"
+      [[ -n "$pane_root" ]] || continue
+      pane_root="$(cd "$pane_root" && pwd -P)"
+      [[ "${pane_root##*/}" == "$target_agent" ]] || continue
+      pane_common="$(git -C "$pane_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+      [[ "$pane_common" == "$GIT_COMMON_DIR" ]] || continue
+      matches=$((matches + 1))
+      D_ADDRESS="$pane_id"
+    done <<< "$pane_lines"
+    [[ "$matches" == 1 ]] || return 1
+    D_DISCOVERY='identity-root'
+  fi
 
-  D_ENDPOINT_ID="history-$(claim_id_for "$target_agent" "$target_lane")"
+  D_ENDPOINT_ID="$D_DISCOVERY-$(claim_id_for "$target_agent" "$target_lane")"
   D_AGENT="$target_agent"
   D_LANE="$target_lane"
   D_SOCKET="$socket"
@@ -778,8 +802,8 @@ attempt_message_wake() {
     receipt_file="$(wake_receipt_path "$M_ID" "$D_ENDPOINT_ID")"
     if [[ -f "$receipt_file" ]]; then
       WAKE_STATUS='deduplicated'
-      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s reason=already-delivered discovery=history\n' \
-        "$M_ID" "$D_ENDPOINT_ID"
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s reason=already-delivered discovery=%s\n' \
+        "$M_ID" "$D_ENDPOINT_ID" "$D_DISCOVERY"
       return 0
     fi
     launcher="$(coord_inbox_launcher)"
@@ -787,19 +811,20 @@ attempt_message_wake() {
     if ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" -l "$prompt" 2>/dev/null || \
       ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" Enter 2>/dev/null; then
       WAKE_STATUS='failed'
-      printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=tmux discovery=history\n' \
-        "$M_ID" "$D_ENDPOINT_ID" >&2
+      printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=tmux discovery=%s\n' \
+        "$M_ID" "$D_ENDPOINT_ID" "$D_DISCOVERY" >&2
       return 1
     fi
     tmp_file="$(mktemp "$WAKES_DIR/.wake-write.XXXXXX")"
-    printf 'utc=%s message_id=%s endpoint_id=%s transport=tmux address=%s discovery=history\n' \
-      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" > "$tmp_file"
+    printf 'utc=%s message_id=%s endpoint_id=%s transport=tmux address=%s discovery=%s\n' \
+      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$D_DISCOVERY" > "$tmp_file"
     mv "$tmp_file" "$receipt_file"
-    printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s discovery=history\n' \
-      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" "$D_ADDRESS" >> "$EVENT_LOG"
+    printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s discovery=%s\n' \
+      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" "$D_ADDRESS" \
+      "$D_DISCOVERY" >> "$EVENT_LOG"
     WAKE_STATUS='delivered'
-    printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=tmux address=%s discovery=history\n' \
-      "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS"
+    printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=tmux address=%s discovery=%s\n' \
+      "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$D_DISCOVERY"
     return 0
   fi
   load_endpoint "$endpoint_file"
