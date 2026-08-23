@@ -490,7 +490,10 @@ def main() -> int:
         )
         if result.returncode != 0:
             result = run_coord(tool_root, "scope", *common, worktree=root)
-    if result.returncode != 0:
+    claim_is_in_attached_worktree = (
+        result.returncode != 0 and "claim belongs to worktree " in result.stderr
+    )
+    if result.returncode != 0 and not claim_is_in_attached_worktree:
         sys.stderr.write(f"sounio coordination warning: {result.stderr}")
         return 0
 

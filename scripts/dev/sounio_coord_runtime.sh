@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.9
 
 usage() {
   cat <<'USAGE'
@@ -698,6 +698,91 @@ harness_for_agent() {
   esac
 }
 
+RECOVERY_HARNESS=''
+RECOVERY_SESSION_ID=''
+RECOVERY_WORKTREE=''
+RECOVERY_HISTORY_FILE=''
+discover_resume_identity() {
+  local agent="$1" lane="$2" prefix candidate session_id history_cwd candidate_root candidate_common identity_key
+  local passwd_home history_home
+  local -a history_homes=() matches=() valid=() valid_keys=()
+  RECOVERY_HARNESS=''
+  RECOVERY_SESSION_ID=''
+  RECOVERY_WORKTREE=''
+  RECOVERY_HISTORY_FILE=''
+  [[ "$lane" == session-* ]] || return 1
+  prefix="${lane#session-}"
+  ((${#prefix} >= 8)) || return 1
+  RECOVERY_HARNESS="$(harness_for_agent "$agent")" || return 1
+
+  history_homes+=("${SOUNIO_COORD_HISTORY_HOME:-$HOME}")
+  if [[ "$HOME" == */.agents/* ]]; then
+    history_home="${HOME%%/.agents/*}"
+    if ! array_contains "$history_home" "${history_homes[@]}"; then
+      history_homes+=("$history_home")
+    fi
+  fi
+  passwd_home="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)"
+  if [[ -n "$passwd_home" ]] && ! array_contains "$passwd_home" "${history_homes[@]}"; then
+    history_homes+=("$passwd_home")
+  fi
+
+  case "$RECOVERY_HARNESS" in
+    claude)
+      for history_home in "${history_homes[@]}"; do
+        [[ -d "$history_home/.claude/projects" ]] || continue
+        for candidate in "$history_home/.claude/projects"/*/"$prefix"*.jsonl; do
+          [[ -f "$candidate" ]] && matches+=("$candidate")
+        done
+      done
+      ;;
+    codex)
+      for history_home in "${history_homes[@]}"; do
+        if [[ "$history_home" == "$HOME" && -n "${CODEX_HOME:-}" ]]; then
+          history_home="$CODEX_HOME"
+        else
+          history_home="$history_home/.codex"
+        fi
+        [[ -d "$history_home/sessions" ]] || continue
+        for candidate in "$history_home/sessions"/*/*/*/*"$prefix"*.jsonl; do
+          [[ -f "$candidate" ]] && matches+=("$candidate")
+        done
+      done
+      ;;
+    *) return 1 ;;
+  esac
+
+  if ((${#matches[@]})); then
+    mapfile -t matches < <(printf '%s\n' "${matches[@]}" | sort -u)
+  fi
+  for candidate in "${matches[@]}"; do
+    case "$RECOVERY_HARNESS" in
+      claude) session_id="$(basename "$candidate" .jsonl)" ;;
+      codex)
+        session_id="$(basename "$candidate" | grep -oE \
+          '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1)"
+        ;;
+    esac
+    [[ "$session_id" == "$prefix"* ]] || continue
+    history_cwd="$(grep -m1 -o '"cwd":"[^"]*"' "$candidate" 2>/dev/null | \
+      sed 's/^"cwd":"//; s/"$//' || true)"
+    [[ -n "$history_cwd" ]] || continue
+    candidate_root="$(git -C "$history_cwd" rev-parse --show-toplevel 2>/dev/null || true)"
+    [[ -n "$candidate_root" ]] || continue
+    candidate_root="$(cd "$candidate_root" && pwd -P)"
+    candidate_common="$(git -C "$candidate_root" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    [[ "$candidate_common" == "$GIT_COMMON_DIR" ]] || continue
+    identity_key="$session_id|$candidate_root"
+    if ! array_contains "$identity_key" "${valid_keys[@]}"; then
+      valid_keys+=("$identity_key")
+      valid+=("$identity_key|$candidate")
+    fi
+  done
+  ((${#valid[@]} == 1)) || return 1
+  IFS='|' read -r RECOVERY_SESSION_ID RECOVERY_WORKTREE RECOVERY_HISTORY_FILE <<< "${valid[0]}"
+  return 0
+}
+
 coord_inbox_launcher() {
   local shared_runtime
   shared_runtime="$GIT_COMMON_DIR/sounio-coord-runtime/current/bin/sounio-coord-runtime"
@@ -778,8 +863,24 @@ discover_history_endpoint() {
       matches=$((matches + 1))
       D_ADDRESS="$pane_id"
     done <<< "$pane_lines"
-    [[ "$matches" == 1 ]] || return 1
-    D_DISCOVERY='identity-root'
+    if [[ "$matches" == 1 ]]; then
+      D_DISCOVERY='identity-root'
+    else
+      matches=0
+      discover_resume_identity "$target_agent" "$target_lane" || return 1
+      while IFS='|' read -r pane_id pane_pid pane_command pane_path; do
+        [[ -n "$pane_id" && "$pane_pid" =~ ^[1-9][0-9]*$ ]] || continue
+        harness_command_matches "$harness" "$pane_command" || continue
+        pane_root="$(git -C "$pane_path" rev-parse --show-toplevel 2>/dev/null || true)"
+        [[ -n "$pane_root" ]] || continue
+        pane_root="$(cd "$pane_root" && pwd -P)"
+        [[ "$pane_root" == "$RECOVERY_WORKTREE" ]] || continue
+        matches=$((matches + 1))
+        D_ADDRESS="$pane_id"
+      done <<< "$pane_lines"
+      [[ "$matches" == 1 ]] || return 1
+      D_DISCOVERY='session-history'
+    fi
   fi
 
   D_ENDPOINT_ID="$D_DISCOVERY-$(claim_id_for "$target_agent" "$target_lane")"
@@ -822,7 +923,6 @@ remove_endpoint_for_lane() {
   [[ -f "$endpoint_file" ]] || return 0
   load_endpoint "$endpoint_file"
   [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" ]] || die "endpoint owner mismatch"
-  [[ "$E_WORKTREE" == "$worktree" ]] || die "endpoint belongs to worktree $E_WORKTREE"
   unlink "$endpoint_file"
   printf 'utc=%s event=ENDPOINT_UNREGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s reason=%s\n' \
     "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$reason" >> "$EVENT_LOG"
@@ -946,7 +1046,6 @@ remove_presence_for_lane() {
   [[ -f "$presence_file" ]] || return 0
   load_presence "$presence_file"
   [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" ]] || die "presence owner mismatch"
-  [[ "$P_WORKTREE" == "$worktree" ]] || die "presence belongs to worktree $P_WORKTREE"
   unlink "$presence_file"
   append_presence_event PRESENCE_UNREGISTERED "$reason"
 }
@@ -1467,7 +1566,7 @@ authorize_command() {
 
 endpoint_register_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' harness='' transport='' address='' socket=''
-  local ttl="${SOUNIO_COORD_ENDPOINT_TTL_SECONDS:-1800}" claim_file endpoint_file created_utc
+  local ttl="${SOUNIO_COORD_ENDPOINT_TTL_SECONDS:-1800}" claim_file endpoint_file presence_file created_utc
   local existing_endpoint
   local -a endpoint_paths=()
   while (($#)); do
@@ -1513,7 +1612,15 @@ endpoint_register_command() {
   load_claim "$claim_file"
   claim_expired && die "claim expired before endpoint registration: $C_ID"
   [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" ]] || die "claim owner mismatch"
-  [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+  if [[ "$C_WORKTREE" != "$WORKTREE" ]]; then
+    presence_file="$(presence_path "$agent" "$lane")"
+    [[ -f "$presence_file" ]] || \
+      die "cross-worktree endpoint requires verified process presence"
+    load_presence "$presence_file"
+    presence_state || die "cross-worktree process presence is $PRESENCE_STATE: $PRESENCE_REASON"
+    [[ "$P_WORKTREE" == "$WORKTREE" ]] || \
+      die "process presence belongs to worktree $P_WORKTREE"
+  fi
   endpoint_paths=("$ENDPOINTS_DIR"/*.endpoint)
   for existing_endpoint in "${endpoint_paths[@]}"; do
     [[ -f "$existing_endpoint" && "$existing_endpoint" != "$endpoint_file" ]] || continue
@@ -1605,7 +1712,7 @@ presence_register_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' harness='' session_id='' host=''
   local boot_id='' pid_namespace='' pid='' pid_start=''
   local ttl="${SOUNIO_COORD_PRESENCE_TTL_SECONDS:-1800}"
-  local claim_file presence_file created_utc event='PRESENCE_REGISTERED' generation=1
+  local claim_file presence_file claim_common created_utc event='PRESENCE_REGISTERED' generation=1
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
@@ -1647,7 +1754,9 @@ presence_register_command() {
   load_claim "$claim_file"
   claim_expired && die "claim expired before presence registration: $C_ID"
   [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" ]] || die "claim owner mismatch"
-  [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+  claim_common="$(git -C "$C_WORKTREE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [[ "$claim_common" == "$GIT_COMMON_DIR" ]] || \
+    die "claim worktree is no longer attached to this repository: $C_WORKTREE"
 
   created_utc="$NOW_UTC"
   if [[ -f "$presence_file" ]]; then
@@ -1742,8 +1851,8 @@ recover_one() {
   local agent="$1" lane="$2" compact="$3"
   local claim_file presence_file endpoint_file claim_state='missing' presence='unbound'
   local presence_reason='no-presence-record' delivery='unavailable' lane_state='missing'
-  local worktree='' branch='' sha='' intent='' files='' resources='' last_seen=''
-  local harness='' session_id='' generation=0 pid=0 pending=0 actual_branch='' actual_sha='' dirty='missing'
+  local worktree='' session_worktree='' branch='' sha='' intent='' files='' resources='' last_seen=''
+  local harness='' session_id='' resume_source='none' generation=0 pid=0 pending=0 actual_branch='' actual_sha='' dirty='missing'
 
   claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
   if [[ -f "$claim_file" ]]; then
@@ -1766,9 +1875,18 @@ recover_one() {
     presence_reason="$PRESENCE_REASON"
     harness="$P_HARNESS"
     session_id="$P_SESSION_ID"
+    resume_source='process-presence'
     generation="$P_GENERATION"
     pid="$P_PID"
+    session_worktree="$P_WORKTREE"
     [[ -n "$worktree" ]] || worktree="$P_WORKTREE"
+  elif discover_resume_identity "$agent" "$lane"; then
+    harness="$RECOVERY_HARNESS"
+    session_id="$RECOVERY_SESSION_ID"
+    resume_source='session-history'
+    presence_reason='session-history-verified'
+    session_worktree="$RECOVERY_WORKTREE"
+    [[ -n "$worktree" ]] || worktree="$RECOVERY_WORKTREE"
   fi
 
   endpoint_file="$(endpoint_path "$agent" "$lane")"
@@ -1784,7 +1902,8 @@ recover_one() {
     unresponsive) lane_state='unresponsive' ;;
     orphaned) lane_state='orphaned' ;;
     unbound)
-      if [[ "$claim_state" == active ]]; then lane_state='legacy-unbound';
+      if [[ "$resume_source" == session-history ]]; then lane_state='legacy-recoverable';
+      elif [[ "$claim_state" == active ]]; then lane_state='legacy-unbound';
       elif [[ "$claim_state" == stale ]]; then lane_state='stale-unbound'; fi
       ;;
   esac
@@ -1818,6 +1937,8 @@ recover_one() {
   printf 'delivery_state=%s\n' "$delivery"
   printf 'harness=%s\n' "${harness:--}"
   printf 'resume_session_id=%s\n' "${session_id:--}"
+  printf 'resume_source=%s\n' "$resume_source"
+  printf 'session_worktree=%s\n' "${session_worktree:--}"
   printf 'worktree=%s\n' "${worktree:--}"
   printf 'recorded_branch=%s\n' "${branch:--}"
   printf 'actual_branch=%s\n' "${actual_branch:--}"
@@ -1831,7 +1952,7 @@ recover_one() {
   printf 'inbox_next=bin/sounio-coord inbox --agent %s --lane %s --directed-only --newest-first\n' "$agent" "$lane"
   if [[ "$lane_state" == orphaned ]]; then
     printf 'recovery_next=resume harness=%s session_id=%s in worktree=%s; the next hook boundary will fence generation %s\n' \
-      "${harness:--}" "${session_id:--}" "${worktree:--}" "$((generation + 1))"
+      "${harness:--}" "${session_id:--}" "${session_worktree:-${worktree:--}}" "$((generation + 1))"
   fi
 }
 

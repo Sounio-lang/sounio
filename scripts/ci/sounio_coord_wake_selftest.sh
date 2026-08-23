@@ -6,17 +6,22 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-coord-wake-selftest.XXXXXX")"
 REPO="$TEST_ROOT/repo"
 SECOND="$TEST_ROOT/second-worktree"
+BACKGROUND="$TEST_ROOT/background-worktree"
 GROK_HOME="$TEST_ROOT/grok-cli2"
+HISTORY_HOME="$TEST_ROOT/history-home"
 STATE="$TEST_ROOT/state"
 SOCKET="$TEST_ROOT/tmux.sock"
 RECEIVER="$TEST_ROOT/receiver.js"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
 GROK_BIN="$TEST_ROOT/grok"
+CLAUDE_BIN="$TEST_ROOT/claude"
+CLAUDE_LOG="$TEST_ROOT/claude-receiver.log"
 RUNTIME="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh"
 
 cleanup() {
   tmux -S "$SOCKET" kill-server >/dev/null 2>&1 || true
   git -C "$REPO" worktree remove --force "$GROK_HOME" >/dev/null 2>&1 || true
+  git -C "$REPO" worktree remove --force "$BACKGROUND" >/dev/null 2>&1 || true
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
   rm -rf "$TEST_ROOT"
 }
@@ -42,6 +47,7 @@ git -C "$REPO" config user.email 'coord-wake-selftest@sounio.local'
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
 git -C "$REPO" worktree add -q -b recipient-lane "$SECOND"
+git -C "$REPO" worktree add -q -b background-lane "$BACKGROUND"
 git -C "$REPO" worktree add -q -b grok-session "$GROK_HOME"
 
 cat > "$RECEIVER" <<'JS'
@@ -55,7 +61,8 @@ JS
 coord() {
   local worktree="$1"
   shift
-  (cd "$worktree" && SOUNIO_COORD_DIR="$STATE" "$RUNTIME" "$@")
+  (cd "$worktree" && SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" "$RUNTIME" "$@")
 }
 
 wait_for_text() {
@@ -82,6 +89,11 @@ tmux -S "$SOCKET" new-window -d -t recipient -n grok -c "$GROK_HOME" \
   "$GROK_BIN 300"
 grok_pane="$(tmux -S "$SOCKET" display-message -p -t recipient:grok '#{pane_id}')"
 [[ -n "$grok_pane" ]] || fail 'grok compatibility pane was not created'
+cp "$(command -v node)" "$CLAUDE_BIN"
+tmux -S "$SOCKET" new-window -d -t recipient -n claude-session -c "$SECOND" \
+  "$CLAUDE_BIN '$RECEIVER' '$CLAUDE_LOG'"
+claude_pane="$(tmux -S "$SOCKET" display-message -p -t recipient:claude-session '#{pane_id}')"
+[[ -n "$claude_pane" ]] || fail 'Claude session-history pane was not created'
 
 output="$(coord "$SECOND" endpoint-register --agent codex --lane recipient \
   --harness codex --transport tmux --address "$pane" --socket "$SOCKET" \
@@ -137,6 +149,24 @@ wait_for_text "$RECEIVER_LOG" "$legacy_message" || \
 if grep -q "$legacy_secret" "$RECEIVER_LOG"; then
   fail 'history-discovered wake injected raw message content'
 fi
+
+session_id='6d7a2c7b-b721-447f-8f18-d8265889a6b7'
+session_lane="session-${session_id:0:24}"
+mkdir -p "$HISTORY_HOME/.claude/projects/physical-session"
+printf '{"cwd":"%s","sessionId":"%s"}\n' "$SECOND" "$session_id" > \
+  "$HISTORY_HOME/.claude/projects/physical-session/$session_id.jsonl"
+SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$BACKGROUND" send --agent claude \
+  --lane "$session_lane" --to-agent sender --to-lane origin --kind info \
+  --message 'ownership is in a background worktree' >/dev/null
+output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sender \
+  --lane origin --to-agent claude --to-lane "$session_lane" --kind request \
+  --message 'wake the physical session, not its background claim')"
+session_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+[[ -n "$session_message" ]] || fail 'session-history send did not return a message id'
+grep -q "^WAKE_DELIVERED message_id=$session_message .*address=$claude_pane discovery=session-history$" \
+  <<< "$output" || fail 'session history did not bridge the physical and ownership worktrees'
+wait_for_text "$CLAUDE_LOG" "$session_message" || \
+  fail 'session-history wake did not reach the physical harness pane'
 
 SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$SECOND" send --agent grok-cli2 \
   --lane legacy-grok --to-agent sender --to-lane origin --kind info \
