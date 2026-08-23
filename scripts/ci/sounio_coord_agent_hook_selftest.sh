@@ -103,6 +103,8 @@ CLAUDE_LANE="$(sed -n 's/.*agent=claude lane=\(session-claude-b[A-Za-z0-9_-]*\).
 [[ -n "$CLAUDE_LANE" ]] || fail 'could not read the claude lane from hook output'
 # The two lanes must differ: SECOND is a different worktree than REPO.
 [[ "$CLAUDE_LANE" != "$CODEX_LANE" ]] || fail 'lanes in different worktrees collided'
+run_coord "$REPO" send --agent observer --lane announcements --kind info \
+  --message 'broadcast hook exclusion marker' >/dev/null
 send_output="$(run_coord "$REPO" send --agent codex --lane "$CODEX_LANE" \
   --to-agent claude --to-lane "$CLAUDE_LANE" --kind request \
   --message 'Please review the parser ownership boundary')"
@@ -112,8 +114,10 @@ message_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$send_output")"
 output="$(run_hook claude "$SECOND" \
   "{\"session_id\":\"claude-b\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{}}")"
 grep -q "MESSAGE id=$message_id" <<< "$output" || fail 'message was not delivered to Claude'
+grep -q 'broadcast hook exclusion marker' <<< "$output" && \
+  fail 'hook injected a broadcast alongside directed work'
 run_coord "$SECOND" ack --agent claude --lane "$CLAUDE_LANE" --message "$message_id" >/dev/null
-output="$(run_coord "$SECOND" inbox --agent claude --lane "$CLAUDE_LANE")"
+output="$(run_coord "$SECOND" inbox --agent claude --lane "$CLAUDE_LANE" --directed-only)"
 grep -q '^inbox_messages=0$' <<< "$output" || fail 'acknowledged message remained unread'
 
 set +e
