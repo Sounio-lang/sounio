@@ -225,5 +225,6 @@ kill -0 "$harness_pid" 2>/dev/null && fail 'supervisor stop left the harness ali
 coord release --agent sender --lane origin --reason 'agentd selftest complete' >/dev/null
 
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_selftest.sh"
+"$ROOT_DIR/scripts/ci/sounio_coord_fleetd_selftest.sh"
 
 echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed raw_body=absent'

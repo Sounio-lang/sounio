@@ -22,10 +22,12 @@ fail() {
 }
 
 mkdir -p "$REPO/bin" "$REPO/scripts/dev"
-cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" "$REPO/bin/"
+cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" \
+  "$ROOT_DIR/bin/sounio-fleet" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
@@ -53,12 +55,18 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the detached agent supervisor'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-agent-runtime" ]] || \
   fail 'installed runtime omitted the fleet launcher'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-runtime" ]] || \
+  fail 'installed runtime omitted the fleet reconciler'
 grep -q '^capability=crash-recovery-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the crash-recovery capability'
 grep -q '^capability=agentd-transport-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the agentd transport capability'
 grep -q '^capability=fleet-launcher-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the fleet-launcher capability'
+grep -q '^capability=fleet-event-log-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed runtime omitted the fleet-event-log capability'
+grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed runtime omitted the fleet-reconciler capability'
 
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'second worktree did not select shared runtime'
@@ -68,6 +76,9 @@ grep -q "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" <<< "$output
 output="$(cd "$SECOND" && bin/sounio-agentd runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'agentd launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'agentd selected a different runtime id'
+output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
+grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
+grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'fleet selected a different runtime id'
 
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/scripts/dev/sounio_coord_runtime.sh"
 printf '#!/usr/bin/env python3\nraise SystemExit(98)\n' > \
@@ -101,6 +112,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$ALT/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$ALT/scripts/dev/"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$ALT/scripts/dev/"*
@@ -122,6 +134,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$BAD/scripts/dev/
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$BAD/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$BAD/scripts/dev/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \
   "$BAD/scripts/dev/sounio_coord_runtime.sh"
 chmod +x "$BAD/scripts/dev/"*
@@ -146,6 +159,9 @@ if (cd "$REPO" && bin/sounio-coord runtime-info) >/dev/null 2>&1; then
 fi
 if (cd "$REPO" && bin/sounio-agentd runtime-info) >/dev/null 2>&1; then
   fail 'agentd launcher silently fell back across a broken shared-runtime link'
+fi
+if (cd "$REPO" && bin/sounio-fleet runtime-info) >/dev/null 2>&1; then
+  fail 'fleet launcher silently fell back across a broken shared-runtime link'
 fi
 if (
   cd "$REPO"
