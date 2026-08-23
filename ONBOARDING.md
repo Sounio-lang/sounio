@@ -73,17 +73,21 @@ IR ou claims científicas, leia também
 
 - Múltiplas sessões Opus/Codex rodam concorrentes neste repo.
 - O `./sounio-whereami --quick` já mostra o resumo vivo de coordenação.
-- Antes da primeira edição, reserve a lane e seu conjunto de escrita:
-  `bin/sounio-coord claim --agent <id> --lane <id> --intent "<objetivo>" --files <caminhos...>`.
+- Antes da primeira edição, reserve a lane, seu conjunto de escrita e os recursos
+  semânticos que precisam de um único owner:
+  `bin/sounio-coord claim --agent <id> --lane <id> --intent "<objetivo>" --resources concept:<id> diagnostic:<id> --files <caminhos...>`.
 - Mantenha tarefas longas vivas com
   `bin/sounio-coord heartbeat --agent <id> --lane <id>`.
-- Ao terminar, abortar ou entregar a lane, rode
-  `bin/sounio-coord release --agent <id> --lane <id> --reason "<resultado ou handoff>"`.
+- Ao terminar ou abortar a lane, rode
+  `bin/sounio-coord release --agent <id> --lane <id> --reason "<resultado ou motivo>"`.
 - Use `bin/sounio-coord check` antes de editar uma superfície compartilhada.
 - Claims são leases operacionais, não prova de atividade eterna. O TTL padrão é quatro horas;
   claims vencidos aparecem como `STALE` e podem ser removidos com `bin/sounio-coord prune`.
-- Coloque `--files` por último e proteja globs com aspas, por exemplo
-  `'self-hosted/compiler/**'`.
+- Recursos tipados usam `concept:`, `diagnostic:`, `gate:` ou `api:`. Eles
+  detectam colisão de significado mesmo quando os arquivos são diferentes; `/**`
+  reserva uma subárvore semântica. Coloque `--resources` antes de `--files`,
+  `--files` por último, e proteja globs com aspas, por exemplo
+  `'concept:epistemic/**'` e `'self-hosted/compiler/**'`.
 - Hooks de projeto registram automaticamente sessões Claude/Codex e reservam arquivos antes de
   `Write`, `Edit` e `apply_patch`. No Codex, abra `/hooks` e aprove o hook quando seu hash mudar.
 - Escritas feitas dentro de comandos Bash continuam exigindo claim manual, pois o hook não pode
@@ -92,6 +96,11 @@ IR ou claims científicas, leia também
 - Para conversar com outra lane durante o trabalho, use `bin/sounio-coord send`; mensagens não
   lidas entram automaticamente no próximo turno ou passo de ferramenta do destinatário. Consulte com
   `bin/sounio-coord inbox` e confirme o tratamento com `bin/sounio-coord ack`.
+- Para uma entrega aceita, use `bin/sounio-coord handoff` com `--commit HEAD`,
+  um ou mais `--gate <nome>=PASS` e ao menos um `--evidence <caminho>`. O comando
+  publica commit, gates, evidências e o snapshot da ownership antes de liberar a
+  claim. Qualquer recusa mantém a claim ativa e não publica handoff. Um simples
+  `send --kind handoff` continua disponível, mas é apenas mensagem não estruturada.
 - `bin/sounio-coord` e o hook de agente são launchers estáveis. Depois da migração inicial da
   branch, ambos executam o mesmo runtime versionado em
   `<git-common-dir>/sounio-coord-runtime/current`, independentemente da worktree.
