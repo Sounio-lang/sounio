@@ -23,6 +23,8 @@ Commands:
                                  refresh an existing claim
   release --agent ID --lane ID --reason TEXT
                                  release a claim and record the handoff event
+  authorize --agent ID [--lane ID] --files PATH [PATH ...]
+                                 verify that an active claim in this worktree covers the files
   send    --agent ID --lane ID [--to-agent ID] [--to-lane ID]
           --kind KIND --message TEXT
                                  send a message to another lane or broadcast
@@ -234,6 +236,16 @@ paths_overlap() {
   [[ "$left" == "$right" ]] && return 0
   [[ "$left" == "$right"/* ]] && return 0
   [[ "$right" == "$left"/* ]] && return 0
+  return 1
+}
+
+path_covers() {
+  local claimed requested
+  claimed="$(path_scope "$1")"
+  requested="$(path_scope "$2")"
+  [[ -n "$claimed" && -n "$requested" ]] || return 1
+  [[ "$claimed" == "$requested" ]] && return 0
+  [[ "$requested" == "$claimed"/* ]] && return 0
   return 1
 }
 
@@ -568,6 +580,75 @@ release_command() {
   printf 'RELEASED claim_id=%s reason=%s\n' "$C_ID" "${reason:-unspecified}"
 }
 
+authorize_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' requested claim_file claimed_file covered
+  local conflict=0
+  local files=()
+
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --files)
+        shift
+        while (($#)); do files+=("$(normalize_path "$1")"); shift; done
+        ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown authorize option: $1 (put paths after --files)" ;;
+    esac
+  done
+
+  [[ -n "$agent" ]] || die "authorize requires --agent or SOUNIO_AGENT_ID"
+  ((${#files[@]} > 0)) || die "authorize requires at least one path after --files"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  for requested in "${files[@]}"; do validate_value file "$requested"; done
+
+  refresh_claim_paths
+  for claim_file in "${claim_paths[@]}"; do
+    [[ -f "$claim_file" ]] || continue
+    load_claim "$claim_file"
+    claim_expired && continue
+    [[ "$C_AGENT" == "$agent" ]] || continue
+    [[ -z "$lane" || "$C_LANE" == "$lane" ]] || continue
+    [[ "$C_WORKTREE" == "$WORKTREE" ]] || continue
+    [[ "$C_BRANCH" == "$(current_branch)" ]] || continue
+
+    covered=1
+    for requested in "${files[@]}"; do
+      for claimed_file in "${C_FILES[@]}"; do
+        if path_covers "$claimed_file" "$requested"; then
+          continue 2
+        fi
+      done
+      covered=0
+      break
+    done
+    if ((covered)); then
+      printf 'AUTHORIZED claim_id=%s agent=%s lane=%s worktree=%s branch=%s\n' \
+        "$C_ID" "$C_AGENT" "$C_LANE" "$C_WORKTREE" "$C_BRANCH"
+      return 0
+    fi
+  done
+
+  for claim_file in "${claim_paths[@]}"; do
+    [[ -f "$claim_file" ]] || continue
+    load_claim "$claim_file"
+    claim_expired && continue
+    for requested in "${files[@]}"; do
+      for claimed_file in "${C_FILES[@]}"; do
+        if paths_overlap "$requested" "$claimed_file"; then
+          printf 'CONFLICT existing_claim=%s agent=%s lane=%s path=%s requested_by=%s requested_lane=%s\n' \
+            "$C_ID" "$C_AGENT" "$C_LANE" "$claimed_file" "$agent" "${lane:-any}" >&2
+          conflict=1
+        fi
+      done
+    done
+  done
+  ((conflict == 0)) || die "requested file set overlaps an active claim but is not authorized"
+  die "no active claim in worktree $WORKTREE covers the requested file set for agent $agent"
+}
+
 send_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane=''
   local kind='info' message='' ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
@@ -892,6 +973,7 @@ case "$command" in
   scope) scope_command "$@" ;;
   heartbeat) heartbeat_command "$@" ;;
   release) release_command "$@" ;;
+  authorize) authorize_command "$@" ;;
   send) send_command "$@" ;;
   inbox) inbox_command "$@" ;;
   ack) ack_command "$@" ;;
@@ -900,5 +982,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try brief, status, check, claim, scope, heartbeat, release, send, inbox, ack, or prune)" ;;
+  *) die "unknown command: $command (try brief, status, check, claim, scope, heartbeat, release, authorize, send, inbox, ack, or prune)" ;;
 esac
