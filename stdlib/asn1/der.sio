@@ -1,0 +1,172 @@
+// stdlib/asn1/der.sio
+//
+// Generic ASN.1 DER (Distinguished Encoding Rules) decoder. Cursor-based,
+// not tree-based: DerReader is a flat { pointer, pos, end } over a RawBuf's
+// bytes, and "entering" a constructed value (SEQUENCE, SET, an explicit
+// context-specific wrapper) just narrows that range into a fresh child
+// cursor -- no heap-allocated tree of decoded nodes is ever built. See
+// docs/superpowers/specs/2026-08-23-madaros-asn1-der-design.md.
+//
+// This decoder has no X.509-specific knowledge: it hands back raw tag/
+// length/value information and typed readers for the ASN.1 universal types
+// X.509 uses, leaving semantic interpretation (which OID means what, which
+// context tag means what) to a separate X.509 layer built on top.
+//
+// DER, not BER: indefinite-length encoding and non-minimal length forms are
+// both rejected as malformed input, never tolerated.
+
+use bignum::bigint::*
+use net::socket::*
+
+pub struct DerReader {
+    buf_ptr: *mut u8,   // NOT a RawBuf -- see this plan's Global Constraints
+                          // for why the raw pointer is stored directly
+    pos: i64,             // current read position, absolute offset into the buffer
+    end: i64,             // exclusive upper bound of this cursor's valid range
+}
+
+pub struct DerTag {
+    class: i32,          // 0=UNIVERSAL, 1=APPLICATION, 2=CONTEXT-SPECIFIC, 3=PRIVATE
+    constructed: bool,    // true for SEQUENCE/SET/explicit wrappers; false for primitives
+    tag_number: i32,      // universal tag number, or the raw context-specific [N] number
+    content_start: i64,   // absolute offset where this tag's value bytes begin
+    content_len: i64,     // length of the value in bytes
+}
+
+pub const DER_TAG_BOOLEAN: i32 = 1
+pub const DER_TAG_INTEGER: i32 = 2
+pub const DER_TAG_BIT_STRING: i32 = 3
+pub const DER_TAG_OCTET_STRING: i32 = 4
+pub const DER_TAG_NULL: i32 = 5
+pub const DER_TAG_OBJECT_IDENTIFIER: i32 = 6
+pub const DER_TAG_UTF8_STRING: i32 = 12
+pub const DER_TAG_SEQUENCE: i32 = 16
+pub const DER_TAG_SET: i32 = 17
+pub const DER_TAG_PRINTABLE_STRING: i32 = 19
+pub const DER_TAG_IA5_STRING: i32 = 22
+pub const DER_TAG_UTC_TIME: i32 = 23
+pub const DER_TAG_GENERALIZED_TIME: i32 = 24
+
+pub const DER_CLASS_UNIVERSAL: i32 = 0
+pub const DER_CLASS_APPLICATION: i32 = 1
+pub const DER_CLASS_CONTEXT: i32 = 2
+pub const DER_CLASS_PRIVATE: i32 = 3
+
+pub const DER_MAX_LENGTH: i64 = 65536
+
+pub const DER_OK: i64 = 0
+pub const DER_ERR_TRUNCATED: i64 = 0 - 1
+pub const DER_ERR_BAD_LENGTH_FORM: i64 = 0 - 2
+pub const DER_ERR_LENGTH_TOO_LARGE: i64 = 0 - 3
+pub const DER_ERR_NOT_CONSTRUCTED: i64 = 0 - 4
+pub const DER_ERR_NESTING_TOO_DEEP: i64 = 0 - 5
+
+pub fn der_reader_new(buf: &RawBuf, start: i64, end: i64) -> DerReader {
+    DerReader { buf_ptr: buf.ptr, pos: start, end: end }
+}
+
+// Reads one byte at an absolute offset within the underlying buffer.
+// Mirrors stdlib/net/socket.sio's rawbuf_get body exactly (masking with
+// & 255 per Finding 3: a raw pointer dereference reads a full 8-byte word,
+// not one byte), just parameterized on DerReader's own buf_ptr field.
+fn der_byte_at(r: &DerReader, offset: i64) -> i64 with IO {
+    let addr = r.buf_ptr as i64
+    let p = (addr + offset) as *mut u8
+    ((*p) as i64) & 255
+}
+
+fn der_tag_zero() -> DerTag {
+    DerTag { class: 0, constructed: false, tag_number: 0, content_start: 0, content_len: 0 }
+}
+
+pub fn der_at_end(r: &DerReader) -> bool {
+    r.pos >= r.end
+}
+
+// Decodes the tag+length header starting at r.pos, WITHOUT advancing r.pos
+// (the caller inspects the returned DerTag and decides what to do next via
+// der_read_tlv/der_enter/der_skip/one of the der_read_* functions).
+pub fn der_peek_tag(r: &DerReader) -> (DerTag, i64) with IO {
+    if r.pos >= r.end {
+        return (der_tag_zero(), DER_ERR_TRUNCATED)
+    }
+    let b0 = der_byte_at(r, r.pos)
+
+    // b0 is a single byte, 0-255 -- every shift/mask below operates on a
+    // value far below bit 63, so Finding 11 does not apply.
+    let class_bits = (b0 >> 6) & 3
+    let constructed_bit = (b0 >> 5) & 1
+    let constructed = constructed_bit == 1
+    let tag_num = b0 & 31
+    // tag_num == 31 would mean a multi-byte tag number (bits 4-0 all set);
+    // this decoder does not parse multi-byte tag numbers -- no field this
+    // project needs ever uses one. Recording the truncated low-5-bits value
+    // here is a documented limitation, not a silent misparse.
+
+    var p = r.pos + 1
+    if p >= r.end {
+        return (der_tag_zero(), DER_ERR_TRUNCATED)
+    }
+    let len_byte = der_byte_at(r, p)
+    p = p + 1
+
+    var content_len: i64 = 0
+    if (len_byte & 128) == 0 {
+        // Short form: len_byte itself is the length, 0-127.
+        content_len = len_byte
+    } else {
+        let num_len_bytes = len_byte & 127
+        if num_len_bytes == 0 {
+            // 0x80 alone is BER's indefinite-length marker; DER forbids it.
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if num_len_bytes > 4 {
+            // More than 4 length bytes could only encode a value far past
+            // DER_MAX_LENGTH (65536 fits in 3 bytes); reject before even
+            // reading them so the accumulator below never needs more than
+            // 32 bits, let alone approaches bit 63 (Finding 11's boundary).
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if p + num_len_bytes > r.end {
+            return (der_tag_zero(), DER_ERR_TRUNCATED)
+        }
+        let first_len_byte = der_byte_at(r, p)
+        var acc: i64 = 0
+        var i: i64 = 0
+        while i < num_len_bytes {
+            let lb = der_byte_at(r, p + i)
+            // acc accumulates at most 4 bytes -> at most 32 bits; << 8 | lb
+            // never approaches bit 63.
+            acc = (acc << 8) | lb
+            i = i + 1
+        }
+        p = p + num_len_bytes
+        // DER requires minimal long-form encoding: a leading zero length
+        // byte (when more than one length byte is used), or a long-form
+        // encoding of a value that would fit in short form (<128), is
+        // non-minimal and therefore malformed DER.
+        if num_len_bytes > 1 && first_len_byte == 0 {
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        if acc < 128 {
+            return (der_tag_zero(), DER_ERR_BAD_LENGTH_FORM)
+        }
+        content_len = acc
+    }
+
+    if content_len > DER_MAX_LENGTH {
+        return (der_tag_zero(), DER_ERR_LENGTH_TOO_LARGE)
+    }
+    if p + content_len > r.end {
+        return (der_tag_zero(), DER_ERR_TRUNCATED)
+    }
+
+    let tag = DerTag {
+        class: class_bits as i32,
+        constructed: constructed,
+        tag_number: tag_num as i32,
+        content_start: p,
+        content_len: content_len,
+    }
+    (tag, DER_OK)
+}
