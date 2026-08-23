@@ -93,6 +93,8 @@ output="$(run_hook claude "$SECOND" \
   "{\"session_id\":\"claude-b\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}")"
 grep -q 'agent=claude lane=session-claude-b' <<< "$output" || \
   fail 'Claude session identity was not injected'
+run_coord "$REPO" send --agent observer --lane announcements --kind info \
+  --message 'broadcast hook exclusion marker' >/dev/null
 send_output="$(run_coord "$REPO" send --agent codex --lane session-codex-a \
   --to-agent claude --to-lane session-claude-b --kind request \
   --message 'Please review the parser ownership boundary')"
@@ -102,8 +104,10 @@ message_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$send_output")"
 output="$(run_hook claude "$SECOND" \
   "{\"session_id\":\"claude-b\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{}}")"
 grep -q "MESSAGE id=$message_id" <<< "$output" || fail 'message was not delivered to Claude'
+grep -q 'broadcast hook exclusion marker' <<< "$output" && \
+  fail 'hook injected a broadcast alongside directed work'
 run_coord "$SECOND" ack --agent claude --lane session-claude-b --message "$message_id" >/dev/null
-output="$(run_coord "$SECOND" inbox --agent claude --lane session-claude-b)"
+output="$(run_coord "$SECOND" inbox --agent claude --lane session-claude-b --directed-only)"
 grep -q '^inbox_messages=0$' <<< "$output" || fail 'acknowledged message remained unread'
 
 set +e

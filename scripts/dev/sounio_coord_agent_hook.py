@@ -290,12 +290,29 @@ def main() -> int:
             agent,
             "--lane",
             lane,
+            "--directed-only",
+            "--newest-first",
+            "--limit",
+            "12",
             worktree=root,
         )
         lines = [line for line in inbox.stdout.splitlines() if line.startswith("MESSAGE ")]
+        omitted = 0
+        for line in inbox.stdout.splitlines():
+            if line.startswith("inbox_omitted="):
+                try:
+                    omitted = int(line.partition("=")[2])
+                except ValueError:
+                    omitted = 0
         if lines:
-            print("Sounio lane messages waiting for this agent:")
+            print("Recent directed Sounio lane messages waiting for this agent:")
             print("\n".join(lines))
+            if omitted:
+                print(
+                    f"{omitted} older directed message(s) omitted. Inspect them with "
+                    f"`bin/sounio-coord inbox --agent {agent} --lane {lane} "
+                    "--directed-only --newest-first`."
+                )
             print(
                 "After handling one, acknowledge it with "
                 f"bin/sounio-coord ack --agent {agent} --lane {lane} --message <id>."
