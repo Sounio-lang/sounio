@@ -5,6 +5,9 @@ recoverable guardian owns the PTY generation, child process, durable output, and
 custody journal. The kernel owns semantic input authority and disposable client
 connections. Clients or the entire kernel can disappear and recover without
 changing the guardian, child, or generation identity.
+Persisted descriptors are revalidated against process birth identity: an absent
+kernel with a live Guardian is shown as `recoverable`, while loss of both is
+shown as `lost` rather than being laundered as an active lane.
 
 ## Build
 

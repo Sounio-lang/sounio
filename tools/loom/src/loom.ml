@@ -2107,6 +2107,26 @@ let snapshot_command cli =
   output_string Stdlib.stdout data;
   flush Stdlib.stdout
 
+let descriptor_process_alive values pid_field start_field =
+  let expected_start = table_value values start_field in
+  if expected_start = "" then false
+  else
+    try
+      let pid = int_of_string (table_value values pid_field) in
+      pid > 0 && process_start pid = expected_start
+    with _ -> false
+
+let effective_session_state values =
+  match table_value values "state" with
+  | "active" | "recoverable" ->
+      if descriptor_process_alive values "daemon_pid" "daemon_pid_start" then
+        "active"
+      else if
+        descriptor_process_alive values "guardian_pid" "guardian_pid_start"
+      then "recoverable"
+      else "lost"
+  | state -> state
+
 let session_descriptors root =
   let sessions = Filename.concat root "sessions" in
   if not (Sys.file_exists sessions) then []
@@ -2114,13 +2134,19 @@ let session_descriptors root =
     Sys.readdir sessions |> Array.to_list |> List.sort String.compare
     |> List.filter_map (fun name ->
            let path = Filename.concat (Filename.concat sessions name) "session.state" in
-           if Sys.file_exists path then Some (path, parse_key_values path) else None)
+           if Sys.file_exists path then
+             let values = parse_key_values path in
+             Hashtbl.replace values "state" (effective_session_state values);
+             Some (path, values)
+           else None)
     |> List.sort (fun (_, left) (_, right) ->
            let state_rank values =
              match table_value values "state" with
              | "active" -> 0
              | "recoverable" -> 1
-             | _ -> 2
+             | "lost" -> 2
+             | "exited" -> 3
+             | _ -> 4
            in
            let rank = compare (state_rank left) (state_rank right) in
            if rank <> 0 then rank
@@ -2217,7 +2243,7 @@ let html =
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:0;height:100vh;overflow:hidden}
 header{height:48px;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 16px;gap:18px;background:#101315}header strong{font-size:15px;color:#fff}header span{color:var(--muted)}#connection{margin-left:auto;color:var(--green)}
 main{display:grid;grid-template-columns:minmax(260px,340px) 1fr;height:calc(100vh - 48px)}aside{border-right:1px solid var(--line);overflow:auto;background:var(--panel)}
-.lane{width:100%;display:grid;grid-template-columns:12px 1fr auto;gap:10px;text-align:left;padding:12px 14px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}.lane:hover,.lane.active{background:#1b2123}.dot{width:8px;height:8px;background:var(--green);margin-top:4px}.lane.exited .dot{background:var(--red)}.lane small{display:block;color:var(--muted);margin-top:4px}.cursor{color:var(--cyan);font-size:11px}
+.lane{width:100%;display:grid;grid-template-columns:12px 1fr auto;gap:10px;text-align:left;padding:12px 14px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--text);cursor:pointer}.lane:hover,.lane.active{background:#1b2123}.dot{width:8px;height:8px;background:var(--green);margin-top:4px}.lane.recoverable .dot{background:var(--amber)}.lane.exited .dot,.lane.lost .dot{background:var(--red)}.lane small{display:block;color:var(--muted);margin-top:4px}.cursor{color:var(--cyan);font-size:11px}
 section{min-width:0;display:grid;grid-template-rows:44px 1fr}.meta{border-bottom:1px solid var(--line);display:flex;align-items:center;gap:22px;padding:0 15px;color:var(--muted)}.meta b{color:var(--text);font-weight:500}.terminal{margin:0;padding:16px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.45;color:#dbe6e6;background:#0a0c0d}.empty{padding:22px;color:var(--muted)}
 @media(max-width:700px){main{grid-template-columns:1fr;grid-template-rows:190px 1fr}aside{border-right:0;border-bottom:1px solid var(--line)}header span{display:none}.meta{gap:10px;overflow:auto}}
 </style>
