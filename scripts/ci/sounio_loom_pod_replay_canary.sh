@@ -231,7 +231,7 @@ phase_one() {
     --intent 'separate-Pod pending inbox replay canary' >/dev/null
   send_output="$(coord_retry send --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
     --to-agent "$AGENT" --to-lane "$LANE" --kind request \
-    --message 'separate Pod replay canary: ACK only in successor generation')"
+    --message 'separate Pod replay canary: ACK only after third-generation depth control')"
   message_id="$(sed -n 's/.*message_id=\([^ ]*\).*/\1/p' <<< "$send_output" | head -1)"
   [[ -n "$message_id" ]] || fail 'send omitted the durable message identity'
   snapshot="$(wait_snapshot "$message_id")"
@@ -291,7 +291,6 @@ phase_two() {
     fail 'successor Pod lost the first generation receipt'
   grep -q "generation=$generation$" <<< "$message_status" || \
     fail 'successor Pod omitted its own generation receipt'
-  coord_retry ack --agent "$AGENT" --lane "$LANE" --message "$message_id" >/dev/null
   write_state "phase=two
 message_id=$message_id
 pod_name_one=$pod_name_one
@@ -302,7 +301,7 @@ pod_uid_two=$POD_UID
 generation_two=$generation"
   printf 'receipt_one=%s\nreceipt_two=%s\nadapter_digest=%s\n' \
     "$receipt_one" "$receipt_two" "$adapter_digest" >> "$STATE_FILE"
-  printf 'CANARY_PHASE_TWO pod=%s pod_uid=%s generation=%s predecessor_generation=%s message_id=%s wake=replayed retry=deduplicated ack=durable receipts=2\n' \
+  printf 'CANARY_PHASE_TWO pod=%s pod_uid=%s generation=%s predecessor_generation=%s message_id=%s wake=replayed retry=deduplicated ack=absent receipts=2\n' \
     "$POD_NAME" "$POD_UID" "$generation" "$generation_one" "$message_id"
 }
 
@@ -311,8 +310,8 @@ phase_three() {
   [[ "${phase:-}" == two ]] || fail "phase three requires phase=two, got ${phase:-missing}"
   [[ "$POD_UID" != "$pod_uid_one" && "$POD_UID" != "$pod_uid_two" ]] || \
     fail 'phase three did not enter a distinct Pod UID'
-  local generation retry snapshot message_status receipt_count result
-  local receipt_three current_adapter_digest message_status_digest
+  local generation wake retry snapshot message_status receipt_count
+  local receipt_three current_adapter_digest
   generation="$(start_generation)"
   [[ "$generation" != "$generation_one" && "$generation" != "$generation_two" ]] || \
     fail 'third Pod retained a predecessor Loom generation'
@@ -321,22 +320,80 @@ phase_three() {
     fail 'third Pod reused a predecessor native Sounio continuity receipt'
   current_adapter_digest="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyRuntimeDigest)"
   [[ "$current_adapter_digest" == "$adapter_digest" ]] || \
+    fail 'native Sounio policy runtime changed before the depth-control generation'
+  wake="$(coord_retry wake --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
+    --message "$message_id")"
+  [[ "$wake" == *'WAKE_DELIVERED'* && "$wake" == *"generation=$generation"* ]] || \
+    fail "unacknowledged message did not reach the third-generation depth control: $wake"
+  snapshot="$(wait_snapshot "$message_id")"
+  [[ "$snapshot" == *"$message_id"* ]] || \
+    fail 'third-generation depth control snapshot omitted the replay'
+  retry="$(coord_retry wake --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
+    --message "$message_id")"
+  [[ "$retry" == *'WAKE_SKIPPED'* && "$retry" == *'reason=already-delivered'* && \
+     "$retry" == *"generation=$generation"* ]] || \
+    fail "third-generation depth control did not deduplicate its retry: $retry"
+  message_status="$(coord_retry message-status --agent "$SENDER_AGENT" \
+    --lane "$SENDER_LANE" --message "$message_id")"
+  receipt_count="$(grep -c "^WAKE_RECEIPT message_id=$message_id " <<< "$message_status")"
+  [[ "$message_status" == *'acknowledged=0'* && "$message_status" == *'wakes=3'* && \
+     "$receipt_count" -eq 3 ]] || \
+    fail "third-generation depth control omitted a wake receipt: $message_status"
+  for admitted in "$generation_one" "$generation_two" "$generation"; do
+    grep -q "generation=$admitted$" <<< "$message_status" || \
+      fail "third-generation depth control lost wake generation $admitted"
+  done
+  coord_retry ack --agent "$AGENT" --lane "$LANE" --message "$message_id" >/dev/null
+  write_state "phase=three
+message_id=$message_id
+pod_name_one=$pod_name_one
+pod_uid_one=$pod_uid_one
+generation_one=$generation_one
+pod_name_two=$pod_name_two
+pod_uid_two=$pod_uid_two
+generation_two=$generation_two
+pod_name_three=$POD_NAME
+pod_uid_three=$POD_UID
+generation_three=$generation"
+  printf 'receipt_one=%s\nreceipt_two=%s\nreceipt_three=%s\nadapter_digest=%s\n' \
+    "$receipt_one" "$receipt_two" "$receipt_three" "$adapter_digest" >> "$STATE_FILE"
+  printf 'CANARY_PHASE_THREE pod=%s pod_uid=%s generation=%s message_id=%s wake=replayed depth_control=delivered retry=deduplicated ack=durable receipts=3\n' \
+    "$POD_NAME" "$POD_UID" "$generation" "$message_id"
+}
+
+phase_four() {
+  load_state
+  [[ "${phase:-}" == three ]] || fail "phase four requires phase=three, got ${phase:-missing}"
+  [[ "$POD_UID" != "$pod_uid_one" && "$POD_UID" != "$pod_uid_two" && \
+     "$POD_UID" != "$pod_uid_three" ]] || fail 'phase four did not enter a distinct Pod UID'
+  local generation retry snapshot message_status receipt_count result
+  local receipt_four current_adapter_digest message_status_digest
+  generation="$(start_generation)"
+  [[ "$generation" != "$generation_one" && "$generation" != "$generation_two" && \
+     "$generation" != "$generation_three" ]] || \
+    fail 'fourth Pod retained a predecessor Loom generation'
+  receipt_four="$(continuity_receipt_digest "$generation")"
+  [[ "$receipt_four" != "$receipt_one" && "$receipt_four" != "$receipt_two" && \
+     "$receipt_four" != "$receipt_three" ]] || \
+    fail 'fourth Pod reused a predecessor native Sounio continuity receipt'
+  current_adapter_digest="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyRuntimeDigest)"
+  [[ "$current_adapter_digest" == "$adapter_digest" ]] || \
     fail 'native Sounio policy runtime changed before the ACK control generation'
   retry="$(coord_retry wake --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
     --message "$message_id")"
   [[ "$retry" == *'WAKE_SKIPPED'* && "$retry" == *'reason=acknowledged'* ]] || \
-    fail "durable ACK did not suppress third-Pod replay: $retry"
+    fail "durable ACK did not suppress fourth-Pod replay: $retry"
   sleep 0.2
   snapshot="$(SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" snapshot \
     --state-dir "$LOOM_DIR" --cwd "$ROOT_DIR" --agent "$AGENT" \
     --lane "$LANE" --cursor 0 2>/dev/null || true)"
   [[ "$snapshot" != *"$message_id"* ]] || \
-    fail 'acknowledged message was injected into the third Pod'
+    fail 'acknowledged message was injected into the fourth Pod'
   message_status="$(coord_retry message-status --agent "$SENDER_AGENT" \
     --lane "$SENDER_LANE" --message "$message_id")"
   receipt_count="$(grep -c "^WAKE_RECEIPT message_id=$message_id " <<< "$message_status")"
-  [[ "$message_status" == *'acknowledged=1'* && "$message_status" == *'wakes=2'* && \
-     "$receipt_count" -eq 2 ]] || \
+  [[ "$message_status" == *'acknowledged=1'* && "$message_status" == *'wakes=3'* && \
+     "$receipt_count" -eq 3 ]] || \
     fail "ACK control changed the durable receipts: $message_status"
   message_status_digest="$(printf '%s\n' "$message_status" | sha256sum | awk '{print $1}')"
   result="SOUNIO_LOOM_SEPARATE_POD_REPLAY_PASS=true
@@ -349,19 +406,26 @@ generation_one=$generation_one
 pod_name_two=$pod_name_two
 pod_uid_two=$pod_uid_two
 generation_two=$generation_two
-pod_name_three=$POD_NAME
-pod_uid_three=$POD_UID
-generation_three=$generation
+pod_name_three=$pod_name_three
+pod_uid_three=$pod_uid_three
+generation_three=$generation_three
+pod_name_four=$POD_NAME
+pod_uid_four=$POD_UID
+generation_four=$generation
 native_sounio_policy_runtime_sha256=$adapter_digest
 native_sounio_receipt_one_sha256=$receipt_one
 native_sounio_receipt_two_sha256=$receipt_two
 native_sounio_receipt_three_sha256=$receipt_three
+native_sounio_receipt_four_sha256=$receipt_four
 message_status_sha256=$message_status_digest
-wake_receipts=2
+wake_receipts=3
 unacked_successor_replay=delivered
+unacked_third_generation_control=delivered
 same_generation_retries=deduplicated
 durable_ack=recorded
-acked_third_generation_replay=suppressed"
+acked_fourth_generation_replay=suppressed
+consumer_idempotency_required=true
+ack_durability_scope=retained-pvc"
   printf '%s\n' "$result" > "$RESULT_FILE"
   write_state "phase=complete
 message_id=$message_id
@@ -369,12 +433,14 @@ pod_uid_one=$pod_uid_one
 generation_one=$generation_one
 pod_uid_two=$pod_uid_two
 generation_two=$generation_two
-pod_uid_three=$POD_UID
-generation_three=$generation"
+pod_uid_three=$pod_uid_three
+generation_three=$generation_three
+pod_uid_four=$POD_UID
+generation_four=$generation"
   SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" stop --state-dir "$LOOM_DIR" \
     --cwd "$ROOT_DIR" --agent "$AGENT" --lane "$LANE" >/dev/null
   stop_bridge
-  printf 'CANARY_PHASE_THREE pod=%s pod_uid=%s generation=%s message_id=%s wake=ack-suppressed receipts=2 result=%s\n' \
+  printf 'CANARY_PHASE_FOUR pod=%s pod_uid=%s generation=%s message_id=%s wake=ack-suppressed receipts=3 result=%s\n' \
     "$POD_NAME" "$POD_UID" "$generation" "$message_id" "$RESULT_FILE"
 }
 
@@ -387,6 +453,7 @@ case "$command" in
   phase-one) prepare_runtime; phase_one ;;
   phase-two) prepare_runtime; phase_two ;;
   phase-three) prepare_runtime; phase_three ;;
+  phase-four) prepare_runtime; phase_four ;;
   report) [[ -f "$RESULT_FILE" ]] || fail 'final result is missing'; cat "$RESULT_FILE" ;;
-  *) fail 'usage: sounio_loom_pod_replay_canary.sh phase-one|phase-two|phase-three|report' ;;
+  *) fail 'usage: sounio_loom_pod_replay_canary.sh phase-one|phase-two|phase-three|phase-four|report' ;;
 esac
