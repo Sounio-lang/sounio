@@ -11,11 +11,11 @@ shown as `lost` rather than being laundered as an active lane.
 
 ## Build
 
-The local build requires OCaml, Dune, findlib, and Cryptokit. On Debian or
+The local build requires OCaml, Dune, findlib, Cryptokit, and OpenSSL. On Debian or
 Ubuntu the corresponding packages are:
 
 ```sh
-sudo apt-get install ocaml-nox ocaml-dune ocaml-findlib libcryptokit-ocaml-dev
+sudo apt-get install ocaml-nox ocaml-dune ocaml-findlib libcryptokit-ocaml-dev openssl
 scripts/dev/build_sounio_loom.sh
 ```
 
@@ -36,6 +36,8 @@ bin/sounio-loom list
 bin/sounio-loom tui
 bin/sounio-loom serve --bind 127.0.0.1 --port 8787
 bin/sounio-loom beagle-serve --bind 127.0.0.1 --port 4372
+bin/sounio-loom verify-continuity-receipt \
+  --receipt PATH --public-key PUBLIC.pem --adapter PATH
 ```
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
@@ -68,6 +70,17 @@ predecessor instead of presenting a replacement process as the old one. See
 `docs/internal/concepts/loom-multiplexer.contract` for the authority matrix and
 canary rules.
 
+Set `SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS=1`,
+`SOUNIO_LOOM_SIGNING_KEY`, and `SOUNIO_LOOM_VERIFY_KEY` to activate the
+fail-closed Ed25519 receipt protocol. The private key signs a canonical payload
+containing the native Sounio verdict, adapter digest, continuity facts, and
+predecessor receipt token. `verify-continuity-receipt` needs only the public key
+and adapter: it verifies the signature, canonical encoding, adapter identity,
+and a replay of the Sounio policy. A signed successor refuses an unsigned
+predecessor, a different-generation receipt signed by the same key, or an
+incomplete keypair. With signing unset, Loom retains receipt v1 compatibility;
+that mode carries no authenticity claim.
+
 ## Evidence Boundary
 
 Loom-1.4 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
@@ -76,28 +89,26 @@ and semantically revokes input leases whose sockets died with the old kernel.
 It cannot re-adopt the same PTY after Guardian or host loss. It can detect that
 loss and reconcile a Beagle pane into a new generation whose append-only
 lineage receipt binds both verified predecessor journal heads. The Kubernetes
-startup hook activates that one-shot reconciliation after Pod loss, and the
-local coordination gate now kills three complete Loom generations to show
-generation-scoped replay of an unacknowledged wake, deduplication within one
-generation, and durable ACK suppression in the next. This is at-least-once wake
-delivery, not exactly-once execution of the work named by the message. A
-separate-Pod pending-inbox canary is still required.
+startup hook activates that one-shot reconciliation after Pod loss. The local
+coordination gate and a source-pinned Kubernetes canary now exercise four
+complete generations: an unacknowledged wake reaches generations one through
+three, same-generation retries deduplicate, and an ACK recorded after the
+independent third-generation depth control suppresses generation four. This is
+at-least-once wake delivery, not exactly-once execution of the work named by the
+message.
 Existing fleet generations therefore retain the Python `agentd` launch adapter
 during migration.
-The Beagle bridge passed its source gate, an isolated second-process canary
-against the live Workspace Agent image, and a source-derived separate-Pod
-canary with a dedicated PVC. The replacement Pod retained two Beagle blocks,
-created a new physical instance, and exposed a verified link to the unclean
-predecessor. Project Cockpit source now derives a fail-closed continuity view
-from those fields and renders the generation lineage, while a Sounio nominal
-kernel keeps initial generation, clean respawn, and Pod resurrection promotion
-states distinct. The source gates refuse a mutated lineage, an incomplete
-predecessor, a forged derived UI receipt, wrong-state promotion, and direct use
-of the private linear host-admission seal. Targeted sabotage makes that host
-admission public and removes the `E175` refusal, proving which rule closes the
-laundering route. The Cockpit and Sounio classifiers have not yet been joined
-by a production host adapter. Loom has not replaced production authority or
-passed deployed Cockpit, canonical-memory, Warp, cross-node, or separate-Pod
-pending-inbox gates; see the 2026-08-24 receipts under `tools/loom/evidence/`.
+The Beagle bridge passed its source gate, an isolated second-process canary,
+and a source-derived four-Pod canary with a dedicated retained PVC. The native
+Sounio adapter keeps initial generation, clean respawn, and Pod resurrection
+promotion states distinct. The Ed25519 gate additionally refuses missing keys,
+payload and signature mutation, the wrong public key, and a validly signed
+receipt spliced from another generation. These controls establish bounded
+receipt authenticity under the mounted key and adapter, not signer hardware
+attestation or protection against compromise of the signing authority. The
+current real-Pod witness remains single-node. Cross-node PVC reattachment,
+deployed Cockpit, canonical-memory, Warp, Madaros parity, and exactly-once
+external effects remain separate gates; see the 2026-08-24 receipts under
+`tools/loom/evidence/`.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.

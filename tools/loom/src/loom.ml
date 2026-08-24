@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.5"
+let runtime_version = "2026.08.24.6"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -53,6 +53,13 @@ let string_of_hex value =
 let sha256 value =
   Cryptokit.hash_string (Cryptokit.Hash.sha256 ()) value
   |> Cryptokit.transform_string (Cryptokit.Hexa.encode ())
+
+let base64_encode value =
+  Cryptokit.transform_string (Cryptokit.Base64.encode_compact_pad ()) value
+
+let base64_decode value =
+  try Cryptokit.transform_string (Cryptokit.Base64.decode ()) value
+  with _ -> failf "continuity-signature-invalid-base64"
 
 let random_hex byte_count =
   let descriptor = Unix.openfile "/dev/urandom" [ O_RDONLY ] 0 in
@@ -219,6 +226,14 @@ let process_exchange command arguments input =
           failf "command signaled: %s signal=%d output=%s" command signal text
       | Some (WSTOPPED signal) ->
           failf "command stopped: %s signal=%d output=%s" command signal text)
+
+let process_quiet command arguments =
+  let null = Unix.openfile "/dev/null" [ O_RDWR ] 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close null)
+    (fun () ->
+      let pid = Unix.create_process command arguments null null null in
+      match snd (Unix.waitpid [] pid) with WEXITED 0 -> true | _ -> false)
 
 let process_start pid =
   let value = read_file (Printf.sprintf "/proc/%d/stat" pid) in
@@ -2827,6 +2842,9 @@ type sounio_continuity_status = {
   policy_verified : bool;
   receipt_digest : string;
   runtime_digest : string;
+  signature_verified : bool;
+  signer_key_id : string;
+  predecessor_receipt_digest : string;
 }
 
 let beagle_generation_journals paths instance =
@@ -3034,6 +3052,157 @@ let sounio_continuity_token domain value =
 let sounio_optional_token domain value =
   if value = "" then "0" else sounio_continuity_token domain value
 
+type continuity_signing =
+  | Unsigned_continuity
+  | Ed25519_continuity of {
+      private_key : string;
+      public_key : string;
+      key_id : string;
+    }
+
+type verified_signed_receipt = {
+  signed_receipt_digest : string;
+  signed_key_id : string;
+  signed_facts : string;
+  signed_facts_digest : string;
+}
+
+let openssl_command () =
+  match Sys.getenv_opt "SOUNIO_LOOM_OPENSSL" with
+  | Some path when path <> "" -> path
+  | _ -> "/usr/bin/openssl"
+
+let continuity_key_path label path =
+  if path = "" || not (Sys.file_exists path) then
+    failf "sounio-continuity-%s-key-missing:%s" label path;
+  let resolved = Unix.realpath path in
+  if (Unix.stat resolved).st_kind <> S_REG then
+    failf "sounio-continuity-%s-key-not-regular:%s" label resolved;
+  resolved
+
+let continuity_signing () =
+  let required =
+    match Sys.getenv_opt "SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS" with
+    | None | Some "" | Some "0" | Some "false" -> false
+    | Some "1" | Some "true" -> true
+    | Some value -> failf "sounio-continuity-invalid-signing-requirement:%s" value
+  in
+  match
+    ( Sys.getenv_opt "SOUNIO_LOOM_SIGNING_KEY",
+      Sys.getenv_opt "SOUNIO_LOOM_VERIFY_KEY" )
+  with
+  | None, None when not required -> Unsigned_continuity
+  | Some private_key, Some public_key when private_key <> "" && public_key <> "" ->
+      let private_key = continuity_key_path "private" private_key in
+      let public_key = continuity_key_path "public" public_key in
+      let openssl = openssl_command () in
+      if not (Sys.file_exists openssl) then
+        failf "sounio-continuity-openssl-missing:%s" openssl;
+      Ed25519_continuity
+        { private_key; public_key; key_id = sha256 (read_file public_key) }
+  | _ -> failf "sounio-continuity-signing-keypair-incomplete"
+
+let remove_noerr path = try Sys.remove path with _ -> ()
+
+let with_continuity_temp_files directory operation =
+  let payload_path = Filename.temp_file ~temp_dir:directory "loom-payload-" ".bin" in
+  let signature_path = Filename.temp_file ~temp_dir:directory "loom-signature-" ".bin" in
+  Fun.protect
+    ~finally:(fun () -> remove_noerr payload_path; remove_noerr signature_path)
+    (fun () -> operation payload_path signature_path)
+
+let ed25519_sign signing directory payload =
+  match signing with
+  | Unsigned_continuity -> failf "sounio-continuity-signing-not-configured"
+  | Ed25519_continuity keys ->
+      with_continuity_temp_files directory (fun payload_path signature_path ->
+          atomic_write payload_path payload;
+          let openssl = openssl_command () in
+          let arguments =
+            [| openssl; "pkeyutl"; "-sign"; "-rawin"; "-inkey";
+               keys.private_key; "-in"; payload_path; "-out"; signature_path |]
+          in
+          if not (process_quiet openssl arguments) then
+            failf "sounio-continuity-ed25519-signature-failed";
+          let signature = read_file signature_path in
+          if String.length signature <> 64 then
+            failf "sounio-continuity-ed25519-signature-size:%d"
+              (String.length signature);
+          base64_encode signature)
+
+let ed25519_verify public_key directory payload signature_base64 =
+  with_continuity_temp_files directory (fun payload_path signature_path ->
+      atomic_write payload_path payload;
+      atomic_write signature_path (base64_decode signature_base64);
+      let openssl = openssl_command () in
+      let arguments =
+        [| openssl; "pkeyutl"; "-verify"; "-pubin"; "-rawin"; "-inkey";
+           public_key; "-in"; payload_path; "-sigfile"; signature_path |]
+      in
+      process_quiet openssl arguments)
+
+let signed_continuity_payload key_id runtime_digest facts_digest facts verdict =
+  Printf.sprintf
+    "schema=loom-native-continuity-signed-payload-v1\nalgorithm=ed25519\nkey_id=%s\nadapter_sha256=%s\nfacts_sha256=%s\nfacts=%s\nverdict=%s\n"
+    key_id runtime_digest facts_digest facts verdict
+
+let signed_continuity_receipt key_id runtime_digest facts_digest facts verdict
+    payload_digest signature =
+  Printf.sprintf
+    "schema=loom-native-continuity-receipt-v2\nalgorithm=ed25519\nkey_id=%s\nadapter_sha256=%s\nfacts_sha256=%s\nfacts=%s\nverdict=%s\nsigned_payload_sha256=%s\nsignature_base64=%s\n"
+    key_id runtime_digest facts_digest facts verdict payload_digest signature
+
+let verify_signed_continuity_receipt ~adapter ~runtime_digest ~public_key path =
+  if not (Sys.file_exists path) then
+    failf "sounio-continuity-predecessor-receipt-missing:%s" path;
+  let stored = read_file path in
+  let fields = parse_key_values path in
+  let schema = table_value fields "schema" in
+  let algorithm = table_value fields "algorithm" in
+  let key_id = table_value fields "key_id" in
+  let stored_adapter = table_value fields "adapter_sha256" in
+  let facts_digest = table_value fields "facts_sha256" in
+  let facts = table_value fields "facts" in
+  let verdict = table_value fields "verdict" in
+  let payload_digest = table_value fields "signed_payload_sha256" in
+  let signature = table_value fields "signature_base64" in
+  let expected_key_id = sha256 (read_file public_key) in
+  let payload =
+    signed_continuity_payload key_id stored_adapter facts_digest facts verdict
+  in
+  let canonical =
+    signed_continuity_receipt key_id stored_adapter facts_digest facts verdict
+      payload_digest signature
+  in
+  if schema <> "loom-native-continuity-receipt-v2"
+     || algorithm <> "ed25519" || key_id <> expected_key_id
+     || stored_adapter <> runtime_digest || facts = ""
+     || facts_digest <> sha256 (facts ^ "\n")
+     || verdict
+        <> "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519"
+     || payload_digest <> sha256 payload || signature = "" || stored <> canonical
+  then failf "sounio-continuity-signed-receipt-mismatch";
+  if not (ed25519_verify public_key (Filename.dirname path) payload signature) then
+    failf "sounio-continuity-signature-invalid";
+  let replayed =
+    try process_exchange adapter [| adapter |] (facts ^ "\n")
+    with Loom_error error -> failf "sounio-continuity-replay-refused:%s" error
+  in
+  if replayed <> verdict then
+    failf "sounio-continuity-replay-mismatch:%s" replayed;
+  { signed_receipt_digest = sha256 stored; signed_key_id = key_id;
+    signed_facts = facts; signed_facts_digest = facts_digest }
+
+let verify_predecessor_binding lineage receipt =
+  let facts = split_on ' ' receipt.signed_facts in
+  if List.length facts <> 15 then
+    failf "sounio-continuity-predecessor-fact-count";
+  let expected_generation =
+    sounio_continuity_token "generation" lineage.predecessor_instance
+  in
+  if List.nth facts 2 <> expected_generation || List.nth facts 14 <> "1" then
+    failf "sounio-continuity-predecessor-receipt-splice"
+
 let verify_sounio_continuity paths pane_id session_id instance fingerprint
     semantic_head guardian_head lineage =
   let transition_kind =
@@ -3046,15 +3215,40 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
   let evidence_set_token =
     sounio_continuity_token "evidence-set" (pane_id ^ "\000" ^ session_id)
   in
+  let adapter = sounio_continuity_adapter () in
+  if not (Sys.file_exists adapter) then
+    failf "sounio-continuity-adapter-missing:%s" adapter;
+  let adapter = Unix.realpath adapter in
+  let runtime_digest = sha256 (read_file adapter) in
+  let signing = continuity_signing () in
+  let predecessor_receipt_digest, signer_key_id, public_key =
+    match (signing, lineage.predecessor_instance) with
+    | Unsigned_continuity, _ -> ("", "", "")
+    | Ed25519_continuity keys, "" -> ("", keys.key_id, keys.public_key)
+    | Ed25519_continuity keys, predecessor ->
+        let predecessor_path =
+          Filename.concat
+            (Filename.concat
+               (Filename.concat paths.session_dir "generations") predecessor)
+            "sounio-continuity.receipt"
+        in
+        let receipt =
+          verify_signed_continuity_receipt ~adapter ~runtime_digest
+            ~public_key:keys.public_key predecessor_path
+        in
+        verify_predecessor_binding lineage receipt;
+        (receipt.signed_receipt_digest, receipt.signed_key_id, keys.public_key)
+  in
   let chain_material =
     String.concat "\000"
       [ pane_id; session_id; instance; fingerprint; semantic_head; guardian_head;
         lineage.lineage_head; lineage.predecessor_instance;
         lineage.predecessor_semantic_head; lineage.predecessor_guardian_head;
         lineage.latest_transition; string_of_int lineage.transition_count;
-        string_of_int lineage.pod_resurrection_count ]
+        string_of_int lineage.pod_resurrection_count;
+        predecessor_receipt_digest ]
   in
-  let facts =
+  let legacy_facts =
     [ evidence_set_token;
       sounio_continuity_token "receipt-chain" chain_material;
       sounio_continuity_token "generation" instance;
@@ -3072,34 +3266,65 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
       string_of_int lineage.transition_count;
       string_of_int lineage.pod_resurrection_count ]
   in
-  let adapter = sounio_continuity_adapter () in
-  if not (Sys.file_exists adapter) then
-    failf "sounio-continuity-adapter-missing:%s" adapter;
-  let adapter = Unix.realpath adapter in
-  let runtime_digest = sha256 (read_file adapter) in
+  let signed_mode =
+    match signing with Unsigned_continuity -> false | Ed25519_continuity _ -> true
+  in
+  let facts =
+    if signed_mode then
+      legacy_facts
+      @ [ sounio_optional_token "predecessor-receipt"
+            predecessor_receipt_digest;
+          "1" ]
+    else legacy_facts
+  in
   let fact_frame = String.concat " " facts ^ "\n" in
   let verdict =
     try process_exchange adapter [| adapter |] fact_frame
     with Loom_error error -> failf "sounio-continuity-policy-refused:%s" error
   in
   let expected =
-    "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1"
+    if signed_mode then
+      "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519"
+    else "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1"
   in
   if verdict <> expected then
     failf "sounio-continuity-verdict-mismatch:%s" verdict;
-  let fresh_receipt =
-    Printf.sprintf
-      "schema=loom-native-continuity-receipt-v1\nadapter_sha256=%s\nfacts_sha256=%s\nfacts=%s\nverdict=%s\n"
-      runtime_digest (sha256 fact_frame) (trim fact_frame) verdict
-  in
   let generation_dir =
     Filename.concat (Filename.concat paths.session_dir "generations") instance
   in
   let receipt_path = Filename.concat generation_dir "sounio-continuity.receipt" in
+  let fresh_receipt =
+    match signing with
+    | Unsigned_continuity ->
+        Printf.sprintf
+          "schema=loom-native-continuity-receipt-v1\nadapter_sha256=%s\nfacts_sha256=%s\nfacts=%s\nverdict=%s\n"
+          runtime_digest (sha256 fact_frame) (trim fact_frame) verdict
+    | Ed25519_continuity keys ->
+        let facts = trim fact_frame in
+        let facts_digest = sha256 fact_frame in
+        let payload =
+          signed_continuity_payload keys.key_id runtime_digest facts_digest facts
+            verdict
+        in
+        let signature = ed25519_sign signing generation_dir payload in
+        if not (ed25519_verify keys.public_key generation_dir payload signature) then
+          failf "sounio-continuity-signing-keypair-mismatch";
+        signed_continuity_receipt keys.key_id runtime_digest facts_digest facts
+          verdict (sha256 payload) signature
+  in
   let receipt =
     if not (Sys.file_exists receipt_path) then (
       atomic_write receipt_path fresh_receipt;
       fresh_receipt)
+    else if signed_mode then (
+      let verified =
+        verify_signed_continuity_receipt ~adapter ~runtime_digest ~public_key
+          receipt_path
+      in
+      if verified.signed_facts <> trim fact_frame
+         || verified.signed_key_id <> signer_key_id
+      then failf "sounio-continuity-signed-replay-facts-mismatch";
+      read_file receipt_path)
     else
       let stored = read_file receipt_path in
       let fields = parse_key_values receipt_path in
@@ -3115,7 +3340,7 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
           schema stored_adapter stored_facts_digest stored_facts stored_verdict
       in
       if schema <> "loom-native-continuity-receipt-v1"
-         || stored_adapter = "" || stored_facts = ""
+         || stored_adapter <> runtime_digest || stored_facts = ""
          || stored_facts_digest <> sha256 stored_frame
          || stored_verdict <> expected || stored <> canonical
       then failf "sounio-continuity-receipt-mismatch";
@@ -3128,7 +3353,29 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
         failf "sounio-continuity-replay-mismatch:%s" replayed;
       stored
   in
-  { policy_verified = true; receipt_digest = sha256 receipt; runtime_digest }
+  { policy_verified = true; receipt_digest = sha256 receipt; runtime_digest;
+    signature_verified = signed_mode; signer_key_id;
+    predecessor_receipt_digest }
+
+let verify_continuity_receipt_command cli =
+  let receipt_path = Unix.realpath (required cli "--receipt") in
+  let public_key =
+    continuity_key_path "public" (required cli "--public-key")
+  in
+  let adapter =
+    match optional cli "--adapter" with
+    | Some path -> Unix.realpath path
+    | None -> Unix.realpath (sounio_continuity_adapter ())
+  in
+  let runtime_digest = sha256 (read_file adapter) in
+  let verified =
+    verify_signed_continuity_receipt ~adapter ~runtime_digest ~public_key
+      receipt_path
+  in
+  Printf.printf
+    "LOOM_CONTINUITY_RECEIPT_VERIFIED schema=loom-native-continuity-receipt-v2 algorithm=ed25519 key_id=%s receipt_sha256=%s facts_sha256=%s\n%!"
+    verified.signed_key_id verified.signed_receipt_digest
+    verified.signed_facts_digest
 
 let beagle_descriptor root pane_id =
   let paths = beagle_paths root pane_id in
@@ -3178,10 +3425,12 @@ let beagle_status_json root pane_id =
       verify_sounio_continuity paths pane_id session_id instance
         generation_fingerprint semantic_head guardian_head lineage
     else
-      { policy_verified = false; receipt_digest = ""; runtime_digest = "" }
+      { policy_verified = false; receipt_digest = ""; runtime_digest = "";
+        signature_verified = false; signer_key_id = "";
+        predecessor_receipt_digest = "" }
   in
   Printf.sprintf
-    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s}}"
+    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s,\"sounioPolicySignatureVerified\":%s,\"sounioPolicySignerKeyId\":%s,\"sounioPolicyPredecessorReceipt\":%s}}"
     (json_quote pane_id) (json_quote session_id)
     (table_value ~default:"0" descriptor "harness_pid") (json_quote status)
     (json_quote
@@ -3210,6 +3459,9 @@ let beagle_status_json root pane_id =
     (if continuity.policy_verified then "true" else "false")
     (json_quote continuity.receipt_digest)
     (json_quote continuity.runtime_digest)
+    (if continuity.signature_verified then "true" else "false")
+    (json_quote continuity.signer_key_id)
+    (json_quote continuity.predecessor_receipt_digest)
 
 let beagle_metadata_for paths pane_id session_id instance cols rows =
   let previous = read_beagle_meta paths in
@@ -3560,6 +3812,7 @@ let serve_beagle_bridge cli =
       match Unix.fork () with
       | 0 ->
           Unix.close server;
+          Sys.set_signal Sys.sigchld Sys.Signal_default;
           beagle_handle_connection root client;
           Unix.close client;
           Unix._exit 0
@@ -3923,7 +4176,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n"
     runtime_version
 
 let arguments_after_command () =
@@ -3962,6 +4215,7 @@ let main () =
     | "fleet-reconcile" -> fleet_reconcile_command cli; 0
     | "verify-journal" -> verify_command cli; 0
     | "verify-guardian-journal" -> verify_guardian_command cli; 0
+    | "verify-continuity-receipt" -> verify_continuity_receipt_command cli; 0
     | "_forge-duplicate-lease" -> forge_duplicate_lease cli; 0
     | _ -> usage (); 2
 

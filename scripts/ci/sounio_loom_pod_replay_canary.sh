@@ -20,6 +20,7 @@ SENDER_LANE="${SOUNIO_LOOM_POD_CANARY_SENDER_LANE:-pending-inbox-replay}"
 SESSION_ID="${SOUNIO_LOOM_POD_CANARY_SESSION_ID:-loom-pod-replay-v1}"
 POD_UID="${POD_UID:-}"
 POD_NAME="${POD_NAME:-}"
+SIGNING_REQUIRED="${SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS:-0}"
 
 fail() {
   printf 'sounio-loom-pod-replay-canary: FAIL: %s\n' "$*" >&2
@@ -119,6 +120,13 @@ continuity_receipt_digest() {
   api_digest="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyReceipt)"
   [[ "${#api_digest}" -eq 64 && "$(hash_file "${matches[0]}")" == "$api_digest" ]] || \
     fail "generation $generation API receipt does not match its native Sounio artifact"
+  if [[ "$SIGNING_REQUIRED" == 1 || "$SIGNING_REQUIRED" == true ]]; then
+    SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" verify-continuity-receipt \
+      --receipt "${matches[0]}" \
+      --public-key "$SOUNIO_LOOM_VERIFY_KEY" \
+      --adapter "$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime" \
+      >/dev/null || fail "generation $generation failed independent public verification"
+  fi
   printf '%s\n' "$api_digest"
 }
 
@@ -165,6 +173,13 @@ prepare_runtime() {
     fail 'POD_UID and POD_NAME must come from the Kubernetes downward API'
   [[ -x "$LOOM" && -x "$RUNTIME" ]] || fail "incomplete source checkout: $ROOT_DIR"
   command -v curl >/dev/null || fail 'curl is required inside the canary Pod'
+  if [[ "$SIGNING_REQUIRED" == 1 || "$SIGNING_REQUIRED" == true ]]; then
+    command -v openssl >/dev/null || fail 'OpenSSL is required for signed receipts'
+    [[ -f "${SOUNIO_LOOM_SIGNING_KEY:-}" && -f "${SOUNIO_LOOM_VERIFY_KEY:-}" ]] || \
+      fail 'signed receipts require mounted private and public keys'
+  elif [[ "$SIGNING_REQUIRED" != 0 && "$SIGNING_REQUIRED" != false ]]; then
+    fail "invalid SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS=$SIGNING_REQUIRED"
+  fi
   if ! "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >"$CANARY_ROOT/build.log" 2>&1; then
     tail -120 "$CANARY_ROOT/build.log" >&2 || true
     fail 'could not build the OCaml Loom plus native Sounio adapter in the canary Pod'
@@ -183,17 +198,23 @@ HARNESS
 }
 
 start_generation() {
-  local base_url spawn_file spawn_body status generation policy_runtime adapter_digest
+  local base_url spawn_file spawn_body status generation policy_runtime adapter_digest signer_key_id
   base_url="$(start_bridge)"
   spawn_file="$CANARY_ROOT/spawn-$POD_UID.json"
   spawn_body="{\"sessionId\":\"$SESSION_ID\",\"paneId\":\"$PANE_ID\",\"cwd\":\"$ROOT_DIR\",\"shell\":\"$HARNESS\",\"cols\":100,\"rows\":30}"
-  if ! curl --fail --silent --show-error --request POST \
+  if ! curl --fail-with-body --silent --show-error --request POST \
     --header 'content-type: application/json' --data "$spawn_body" \
     "$base_url/v1/spawn" > "$spawn_file"; then
     fail "Beagle spawn refused the Pod generation: $(cat "$spawn_file" 2>/dev/null || true)"
   fi
   grep -q '"sounioPolicyVerified":true' "$spawn_file" || \
     fail 'Beagle spawn did not receive native Sounio policy authority'
+  if [[ "$SIGNING_REQUIRED" == 1 || "$SIGNING_REQUIRED" == true ]]; then
+    grep -q '"sounioPolicySignatureVerified":true' "$spawn_file" || \
+      fail 'Beagle spawn omitted Ed25519 receipt verification'
+    signer_key_id="$(json_string_value "$spawn_file" sounioPolicySignerKeyId)"
+    [[ "${#signer_key_id}" -eq 64 ]] || fail 'Beagle spawn omitted the signer key identity'
+  fi
   policy_runtime="$(json_string_value "$spawn_file" sounioPolicyRuntimeDigest)"
   adapter_digest="$(hash_file "$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime")"
   [[ "${#policy_runtime}" -eq 64 && "$policy_runtime" == "$adapter_digest" ]] || \
@@ -223,10 +244,16 @@ load_state() {
 phase_one() {
   [[ ! -e "$STATE_FILE" ]] || fail 'phase one refuses an existing canary state'
   local generation send_output message_id message_status first_receipt retry snapshot
-  local receipt_one adapter_digest
+  local receipt_one adapter_digest signer_key_id predecessor_receipt
   generation="$(start_generation)"
   receipt_one="$(continuity_receipt_digest "$generation")"
   adapter_digest="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyRuntimeDigest)"
+  signer_key_id="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicySignerKeyId)"
+  predecessor_receipt="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyPredecessorReceipt)"
+  if [[ "$SIGNING_REQUIRED" == 1 || "$SIGNING_REQUIRED" == true ]]; then
+    [[ -n "$signer_key_id" && -z "$predecessor_receipt" ]] || \
+      fail 'signed initial generation unexpectedly claimed a predecessor receipt'
+  fi
   coord_retry scope --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
     --intent 'separate-Pod pending inbox replay canary' >/dev/null
   send_output="$(coord_retry send --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
@@ -252,7 +279,8 @@ message_id=$message_id
 pod_name_one=$POD_NAME
 pod_uid_one=$POD_UID
 generation_one=$generation"
-  printf 'receipt_one=%s\nadapter_digest=%s\n' "$receipt_one" "$adapter_digest" >> "$STATE_FILE"
+  printf 'receipt_one=%s\nadapter_digest=%s\nsigner_key_id=%s\n' \
+    "$receipt_one" "$adapter_digest" "$signer_key_id" >> "$STATE_FILE"
   printf 'CANARY_PHASE_ONE pod=%s pod_uid=%s generation=%s message_id=%s wake=delivered retry=deduplicated ack=absent\n' \
     "$POD_NAME" "$POD_UID" "$generation" "$message_id"
 }
@@ -262,6 +290,7 @@ phase_two() {
   [[ "${phase:-}" == one ]] || fail "phase two requires phase=one, got ${phase:-missing}"
   [[ "$POD_UID" != "$pod_uid_one" ]] || fail 'phase two is still running in the first Pod UID'
   local generation wake snapshot retry message_status receipt_count receipt_two current_adapter_digest
+  local current_signer_key_id predecessor_receipt
   generation="$(start_generation)"
   [[ "$generation" != "$generation_one" ]] || \
     fail 'successor Pod retained the predecessor Loom generation'
@@ -271,6 +300,12 @@ phase_two() {
   current_adapter_digest="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyRuntimeDigest)"
   [[ "$current_adapter_digest" == "$adapter_digest" ]] || \
     fail 'native Sounio policy runtime changed between Pod generations'
+  current_signer_key_id="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicySignerKeyId)"
+  predecessor_receipt="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyPredecessorReceipt)"
+  if [[ "$SIGNING_REQUIRED" == 1 || "$SIGNING_REQUIRED" == true ]]; then
+    [[ "$current_signer_key_id" == "$signer_key_id" && "$predecessor_receipt" == "$receipt_one" ]] || \
+      fail 'signed successor did not bind the first generation receipt and signer'
+  fi
   wake="$(coord_retry wake --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
     --message "$message_id")"
   [[ "$wake" == *'WAKE_DELIVERED'* && "$wake" == *"generation=$generation"* ]] || \
@@ -299,8 +334,8 @@ generation_one=$generation_one
 pod_name_two=$POD_NAME
 pod_uid_two=$POD_UID
 generation_two=$generation"
-  printf 'receipt_one=%s\nreceipt_two=%s\nadapter_digest=%s\n' \
-    "$receipt_one" "$receipt_two" "$adapter_digest" >> "$STATE_FILE"
+  printf 'receipt_one=%s\nreceipt_two=%s\nadapter_digest=%s\nsigner_key_id=%s\n' \
+    "$receipt_one" "$receipt_two" "$adapter_digest" "$signer_key_id" >> "$STATE_FILE"
   printf 'CANARY_PHASE_TWO pod=%s pod_uid=%s generation=%s predecessor_generation=%s message_id=%s wake=replayed retry=deduplicated ack=absent receipts=2\n' \
     "$POD_NAME" "$POD_UID" "$generation" "$generation_one" "$message_id"
 }
@@ -311,7 +346,7 @@ phase_three() {
   [[ "$POD_UID" != "$pod_uid_one" && "$POD_UID" != "$pod_uid_two" ]] || \
     fail 'phase three did not enter a distinct Pod UID'
   local generation wake retry snapshot message_status receipt_count
-  local receipt_three current_adapter_digest
+  local receipt_three current_adapter_digest current_signer_key_id predecessor_receipt
   generation="$(start_generation)"
   [[ "$generation" != "$generation_one" && "$generation" != "$generation_two" ]] || \
     fail 'third Pod retained a predecessor Loom generation'
@@ -321,6 +356,12 @@ phase_three() {
   current_adapter_digest="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyRuntimeDigest)"
   [[ "$current_adapter_digest" == "$adapter_digest" ]] || \
     fail 'native Sounio policy runtime changed before the depth-control generation'
+  current_signer_key_id="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicySignerKeyId)"
+  predecessor_receipt="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyPredecessorReceipt)"
+  if [[ "$SIGNING_REQUIRED" == 1 || "$SIGNING_REQUIRED" == true ]]; then
+    [[ "$current_signer_key_id" == "$signer_key_id" && "$predecessor_receipt" == "$receipt_two" ]] || \
+      fail 'signed depth control did not bind the second generation receipt and signer'
+  fi
   wake="$(coord_retry wake --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
     --message "$message_id")"
   [[ "$wake" == *'WAKE_DELIVERED'* && "$wake" == *"generation=$generation"* ]] || \
@@ -355,8 +396,9 @@ generation_two=$generation_two
 pod_name_three=$POD_NAME
 pod_uid_three=$POD_UID
 generation_three=$generation"
-  printf 'receipt_one=%s\nreceipt_two=%s\nreceipt_three=%s\nadapter_digest=%s\n' \
-    "$receipt_one" "$receipt_two" "$receipt_three" "$adapter_digest" >> "$STATE_FILE"
+  printf 'receipt_one=%s\nreceipt_two=%s\nreceipt_three=%s\nadapter_digest=%s\nsigner_key_id=%s\n' \
+    "$receipt_one" "$receipt_two" "$receipt_three" "$adapter_digest" \
+    "$signer_key_id" >> "$STATE_FILE"
   printf 'CANARY_PHASE_THREE pod=%s pod_uid=%s generation=%s message_id=%s wake=replayed depth_control=delivered retry=deduplicated ack=durable receipts=3\n' \
     "$POD_NAME" "$POD_UID" "$generation" "$message_id"
 }
@@ -368,6 +410,7 @@ phase_four() {
      "$POD_UID" != "$pod_uid_three" ]] || fail 'phase four did not enter a distinct Pod UID'
   local generation retry snapshot message_status receipt_count result
   local receipt_four current_adapter_digest message_status_digest
+  local current_signer_key_id predecessor_receipt signature_algorithm signature_chain_status
   generation="$(start_generation)"
   [[ "$generation" != "$generation_one" && "$generation" != "$generation_two" && \
      "$generation" != "$generation_three" ]] || \
@@ -379,6 +422,16 @@ phase_four() {
   current_adapter_digest="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyRuntimeDigest)"
   [[ "$current_adapter_digest" == "$adapter_digest" ]] || \
     fail 'native Sounio policy runtime changed before the ACK control generation'
+  current_signer_key_id="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicySignerKeyId)"
+  predecessor_receipt="$(json_string_value "$CANARY_ROOT/spawn-$POD_UID.json" sounioPolicyPredecessorReceipt)"
+  signature_algorithm=none
+  signature_chain_status=not-requested
+  if [[ "$SIGNING_REQUIRED" == 1 || "$SIGNING_REQUIRED" == true ]]; then
+    [[ "$current_signer_key_id" == "$signer_key_id" && "$predecessor_receipt" == "$receipt_three" ]] || \
+      fail 'signed ACK control did not bind the third generation receipt and signer'
+    signature_algorithm=ed25519
+    signature_chain_status=verified
+  fi
   retry="$(coord_retry wake --agent "$SENDER_AGENT" --lane "$SENDER_LANE" \
     --message "$message_id")"
   [[ "$retry" == *'WAKE_SKIPPED'* && "$retry" == *'reason=acknowledged'* ]] || \
@@ -397,7 +450,7 @@ phase_four() {
     fail "ACK control changed the durable receipts: $message_status"
   message_status_digest="$(printf '%s\n' "$message_status" | sha256sum | awk '{print $1}')"
   result="SOUNIO_LOOM_SEPARATE_POD_REPLAY_PASS=true
-schema=sounio-loom-separate-pod-replay-v1
+schema=sounio-loom-separate-pod-replay-v2
 source_commit=$(git -C "$ROOT_DIR" rev-parse HEAD)
 message_id=$message_id
 pod_name_one=$pod_name_one
@@ -417,6 +470,11 @@ native_sounio_receipt_one_sha256=$receipt_one
 native_sounio_receipt_two_sha256=$receipt_two
 native_sounio_receipt_three_sha256=$receipt_three
 native_sounio_receipt_four_sha256=$receipt_four
+signed_receipts_required=$SIGNING_REQUIRED
+signature_algorithm=$signature_algorithm
+signer_key_id=$signer_key_id
+signed_predecessor_chain=$signature_chain_status
+public_receipt_verification=$signature_chain_status
 message_status_sha256=$message_status_digest
 wake_receipts=3
 unacked_successor_replay=delivered

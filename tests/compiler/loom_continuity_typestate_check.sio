@@ -11,6 +11,9 @@ use coordination::loom_continuity::{
     verify_clean_respawn,
     verify_initial_generation,
     verify_pod_resurrection,
+    verify_signed_clean_respawn,
+    verify_signed_initial_generation,
+    verify_signed_pod_resurrection,
 }
 
 fn initial_case(observed: ObservedContinuity) -> bool {
@@ -32,6 +35,8 @@ fn initial_shape(observed: ObservedContinuity) -> i64 {
     if observed.predecessor_generation_token != 0 { return 29 }
     if observed.predecessor_semantic_head_token != 0 { return 30 }
     if observed.predecessor_guardian_head_token != 0 { return 31 }
+    if observed.predecessor_receipt_token != 0 { return 38 }
+    if observed.authenticity_mode != 1 { return 39 }
     if observed.transition_kind != 1 { return 32 }
     if observed.transition_count != 0 { return 33 }
     if observed.pod_resurrection_count != 0 { return 34 }
@@ -39,6 +44,39 @@ fn initial_shape(observed: ObservedContinuity) -> i64 {
     if !observed.journal_verified { return 36 }
     if !observed.lineage_verified { return 37 }
     0
+}
+
+fn signed_initial_case(observed: ObservedContinuity) -> bool {
+    match verify_signed_initial_generation(observed) {
+        Some(receipt) => promote_initial_generation(receipt) == 201,
+        None => false,
+    }
+}
+
+fn signed_clean_respawn_case(observed: ObservedContinuity) -> bool {
+    match verify_signed_clean_respawn(observed) {
+        Some(receipt) => promote_clean_respawn(receipt) == 201,
+        None => false,
+    }
+}
+
+fn signed_pod_resurrection_case(observed: ObservedContinuity) -> bool {
+    match verify_signed_pod_resurrection(observed) {
+        Some(receipt) => {
+            let (generation, evidence, lineage, predecessor, transitions, pods) =
+                promote_pod_resurrection(receipt)
+            generation == 201 && evidence == 101 && lineage == 602 &&
+                predecessor == 702 && transitions == 2 && pods == 2
+        },
+        None => false,
+    }
+}
+
+fn missing_signed_predecessor_refuses(observed: ObservedContinuity) -> bool {
+    match verify_signed_pod_resurrection(observed) {
+        Some(receipt) => false,
+        None => true,
+    }
 }
 
 fn clean_respawn_case(observed: ObservedContinuity) -> bool {
@@ -93,39 +131,44 @@ fn main() -> i64 with IO, LoomHostTrust, Panic {
     let (bridge1, initial_receipt) =
         admit_runtime_continuity(
             bridge0, 1, 101, 111, 201, 301, 401, 501,
-            0, 0, 0, 0, 1, 0, 0, true, true, true,
+            0, 0, 0, 0, 0, 1, 1, 0, 0, true, true, true,
         )
     let (bridge2, clean_receipt) =
         admit_runtime_continuity(
             bridge1, 2, 101, 111, 201, 301, 401, 501,
-            601, 701, 801, 901, 2, 2, 1, true, true, true,
+            601, 701, 801, 901, 1001, 1, 2, 2, 1, true, true, true,
         )
     let (bridge3, pod_receipt) =
         admit_runtime_continuity(
             bridge2, 3, 101, 111, 201, 301, 401, 501,
-            602, 702, 802, 902, 3, 2, 2, true, true, true,
+            602, 702, 802, 902, 1002, 1, 3, 2, 2, true, true, true,
         )
     let (bridge4, incomplete_receipt) =
         admit_runtime_continuity(
             bridge3, 4, 101, 111, 201, 301, 401, 501,
-            603, 703, 0, 903, 3, 1, 1, true, true, true,
+            603, 703, 0, 903, 1003, 1, 3, 1, 1, true, true, true,
         )
     let (bridge5, zero_count_receipt) =
         admit_runtime_continuity(
             bridge4, 5, 101, 111, 201, 301, 401, 501,
-            604, 704, 804, 904, 3, 1, 0, true, true, true,
+            604, 704, 804, 904, 1004, 1, 3, 1, 0, true, true, true,
         )
     let (bridge6, wrong_kind_receipt) =
         admit_runtime_continuity(
             bridge5, 6, 101, 111, 201, 301, 401, 501,
-            605, 705, 805, 905, 2, 1, 0, true, true, true,
+            605, 705, 805, 905, 0, 0, 2, 1, 0, true, true, true,
         )
     let (bridge7, foreign_receipt) =
         admit_runtime_continuity(
             bridge6, 7, 101, 111, 201, 301, 401, 501,
-            606, 706, 806, 906, 3, 1, 1, false, true, true,
+            606, 706, 806, 906, 1006, 1, 3, 1, 1, false, true, true,
         )
-    close_host_trust_bridge(bridge7)
+    let (bridge8, missing_signed_predecessor_receipt) =
+        admit_runtime_continuity(
+            bridge7, 8, 101, 111, 201, 301, 401, 501,
+            607, 707, 807, 907, 0, 1, 3, 1, 1, true, true, true,
+        )
+    close_host_trust_bridge(bridge8)
 
     let initial = import_host_continuity(initial_receipt)
     let clean = import_host_continuity(clean_receipt)
@@ -134,16 +177,22 @@ fn main() -> i64 with IO, LoomHostTrust, Panic {
     let zero_count = import_host_continuity(zero_count_receipt)
     let wrong_kind = import_host_continuity(wrong_kind_receipt)
     let foreign = import_host_continuity(foreign_receipt)
+    let missing_signed_predecessor =
+        import_host_continuity(missing_signed_predecessor_receipt)
 
     let shape_rc = initial_shape(initial)
     if shape_rc != 0 { return shape_rc }
     if !initial_case(initial) { return 11 }
+    if !signed_initial_case(initial) { return 18 }
     if !clean_respawn_case(clean) { return 12 }
+    if !signed_clean_respawn_case(clean) { return 19 }
     if !pod_resurrection_case(pod) { return 13 }
+    if !signed_pod_resurrection_case(pod) { return 20 }
     if !incomplete_predecessor_refuses(incomplete) { return 14 }
     if !zero_pod_count_refuses(zero_count) { return 15 }
     if !wrong_kind_refuses(wrong_kind) { return 16 }
     if !foreign_authority_refuses(foreign) { return 17 }
-    println("loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 predecessor=refused count=refused kind=refused authority=refused")
+    if !missing_signed_predecessor_refuses(missing_signed_predecessor) { return 40 }
+    println("loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 signed=1 predecessor=refused signed_predecessor=refused count=refused kind=refused authority=refused")
     0
 }
