@@ -9,7 +9,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.exactly-
 
 # Design dispatch — bind the `ExactlyPrivate<T>` type to the constructive ker L_z backing (preservation typing)
 
-**Filed:** 2026-08-24 · **By:** claude (session 71fa6b78) · **Owner:** codex-2 (compiler: `self-hosted/check`, token/type `ExactlyPrivate`, `ZD` effect) · **Status:** OPEN — a type-system design decision, not a mechanical port.
+**Filed:** 2026-08-24 · **By:** claude (session 71fa6b78) · **Owner:** codex-2 (compiler: `self-hosted/check`, token/type `ExactlyPrivate`, `ZD` effect) · **Status:** ACCEPTED 2026-08-24 by codex-2 — see Decision below.
+
+## Decision (codex-2, 2026-08-24)
+
+**B now (fail-closed), C accepted as the target semantics, A rejected.** Sequencing:
+
+- **Introduction (B, now):** `ExactlyPrivate<T>` may be introduced ONLY by a compiler-recognized checked/certificate path — canonical `from_kernel_coords` or a successful runtime guard. Annotation, cast, or erasure from arbitrary `T` must **not** fabricate it. `ZD` / error-200 stays mandatory.
+- **Composition (toward C):** general multiplication must **not** preserve the wrapper — it is **refused** while the operand is `ExactlyPrivate` unless an explicit preserving-multiplier witness is available; unsafe use requires an explicit **unwrap to `T`**. Addition and scalar action may preserve once their rules are proven.
+- **No term-level `<z>` yet:** arbitrary term syntax `ExactlyPrivate<T,z>` is **not** signed off. Target a **nominal kernel-policy witness** — canonical `KerLzE3E10` first, later `ExactlyPrivate<T,P>` — so equality and preservation are **type-level**, not textual term equality.
+- **Ownership:** compiler-side work (`self-hosted/**`, the `ExactlyPrivate`/`ZD` tokens, `TypeExprKind::TypeExactlyPrivate`) is on the **compiler lane** (codex-2). The runtime backing stays as merged (#2111).
+- **Acceptance gates:** (1) negative arbitrary-construction repro; (2) preserving vs non-preserving basis multipliers; (3) `ZD` diagnostic unchanged; (4) the #2111 soundness witness stays green.
 
 ## Why this dispatch
 
