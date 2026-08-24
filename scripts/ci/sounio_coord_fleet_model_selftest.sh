@@ -54,8 +54,8 @@ fi
 
 catalog="$($GENERATOR --model "$MODEL" --config "$CONFIG" \
   --check-test "$RUNTIME_TEST" --check-test "$FLEET_TEST")"
-[[ "$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["sabotages"]))' <<< "$catalog")" == 8 ]] || \
-  fail 'model-derived sabotage catalog does not contain eight controls'
+[[ "$(python3 -c 'import json,sys; print(len(json.load(sys.stdin)["sabotages"]))' <<< "$catalog")" == 10 ]] || \
+  fail 'model-derived sabotage catalog does not contain ten controls'
 
 "$TRACE_TEST"
 
@@ -75,4 +75,30 @@ grep -q 'Model checking completed. No error has been found.' "$work/tlc.log" || 
   fail 'TLC did not establish all configured invariants'
 }
 
-echo 'sounio-coord-fleet-model-selftest: PASS tlc=exhaustive invariants=8 model_controls=8 crash_steps=2 refinement_labels=bound runtime_witnesses=bound'
+cat >"$work/StopReachability.cfg" <<'CFG'
+CONSTANTS
+    MaxEvents = 9
+    MaxCapabilities = 2
+
+SPECIFICATION Spec
+
+INVARIANT NoIntentionalStop
+
+CHECK_DEADLOCK FALSE
+CFG
+if (
+  cd "$work"
+  "$JAVA" -cp "$TLA_JAR" tlc2.TLC -cleanup -workers 1 \
+    -config StopReachability.cfg SounioFleet.tla \
+    >stop-reachability.log 2>&1
+); then
+  cat "$work/stop-reachability.log" >&2
+  fail 'TLC could not reach an intentional stop transition'
+fi
+grep -q 'Invariant NoIntentionalStop is violated' \
+  "$work/stop-reachability.log" || {
+  cat "$work/stop-reachability.log" >&2
+  fail 'TLC stop reachability control failed for an unexpected reason'
+}
+
+echo 'sounio-coord-fleet-model-selftest: PASS tlc=exhaustive invariants=9 model_controls=10 stop_reachability=counterexample crash_steps=2 refinement_labels=bound runtime_witnesses=bound'

@@ -3,12 +3,20 @@ EXTENDS Naturals, Integers, TLC
 
 CONSTANTS MaxEvents, MaxCapabilities
 
+ASSUME /\ MaxEvents \in Nat
+       /\ MaxEvents > 0
+       /\ MaxCapabilities \in Nat
+       /\ MaxCapabilities > 0
+
 VARIABLES online,
           phase,
           desired,
           startCapsIssued,
           startCapsConsumed,
           starts,
+          stopCapsIssued,
+          stopCapsConsumed,
+          stops,
           argvAttested,
           decision,
           logSeq,
@@ -22,12 +30,13 @@ VARIABLES online,
           handoffCapsConsumed
 
 vars == << online, phase, desired, startCapsIssued, startCapsConsumed, starts,
+           stopCapsIssued, stopCapsConsumed, stops,
            argvAttested, decision, logSeq, anchorSeq, anchorVerified,
            checkpoint, checkpointSeq, handoff, handoffSeq,
            handoffCapsIssued, handoffCapsConsumed >>
 
 PhaseSet == {"Absent", "Active", "Drifted"}
-DecisionSet == {"start", "noop", "blocked"}
+DecisionSet == {"start", "stop", "noop", "blocked"}
 CheckpointSet == {"None", "Draft", "Verified"}
 HandoffSet == {"None", "Prepared", "Accepted"}
 
@@ -38,6 +47,9 @@ Init ==
     /\ startCapsIssued = 0
     /\ startCapsConsumed = 0
     /\ starts = 0
+    /\ stopCapsIssued = 0
+    /\ stopCapsConsumed = 0
+    /\ stops = 0
     /\ argvAttested = FALSE
     /\ decision = "start"
     /\ logSeq = 0
@@ -55,11 +67,13 @@ CanAppend == logSeq < MaxEvents
 DisableDesired ==
     /\ CanAppend
     /\ desired
-    /\ phase = "Absent"
     /\ desired' = FALSE
-    /\ decision' = "noop"
+    /\ decision' = IF phase = "Active" THEN "stop"
+                    ELSE IF phase = "Drifted" THEN "blocked"
+                    ELSE "noop"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, startCapsIssued, startCapsConsumed, starts,
+                     stopCapsIssued, stopCapsConsumed, stops,
                      argvAttested, anchorSeq, anchorVerified, checkpoint,
                      checkpointSeq, handoff, handoffSeq, handoffCapsIssued,
                      handoffCapsConsumed >>
@@ -68,9 +82,12 @@ EnableDesired ==
     /\ CanAppend
     /\ ~desired
     /\ desired' = TRUE
-    /\ decision' = "start"
+    /\ decision' = IF phase = "Absent" THEN "start"
+                    ELSE IF phase = "Drifted" THEN "blocked"
+                    ELSE "noop"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, startCapsIssued, startCapsConsumed, starts,
+                     stopCapsIssued, stopCapsConsumed, stops,
                      argvAttested, anchorSeq, anchorVerified, checkpoint,
                      checkpointSeq, handoff, handoffSeq, handoffCapsIssued,
                      handoffCapsConsumed >>
@@ -84,6 +101,7 @@ IssueStartCapability ==
     /\ logSeq' = logSeq + 1
     /\ decision' = "start"
     /\ UNCHANGED << phase, desired, startCapsConsumed, starts,
+                     stopCapsIssued, stopCapsConsumed, stops,
                      argvAttested, anchorSeq, anchorVerified, checkpoint,
                      checkpointSeq, handoff, handoffSeq,
                      handoffCapsIssued, handoffCapsConsumed >>
@@ -99,7 +117,8 @@ StartWithLinearCapability ==
     /\ argvAttested' = TRUE
     /\ decision' = "noop"
     /\ logSeq' = logSeq + 1
-    /\ UNCHANGED << desired, startCapsIssued, anchorSeq, anchorVerified,
+    /\ UNCHANGED << desired, startCapsIssued, stopCapsIssued,
+                     stopCapsConsumed, stops, anchorSeq, anchorVerified,
                      checkpoint, checkpointSeq, handoff, handoffSeq,
                      handoffCapsIssued, handoffCapsConsumed >>
 
@@ -111,18 +130,63 @@ RefuseStartWithoutCapability ==
     /\ decision' = "blocked"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, anchorSeq, anchorVerified,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, anchorSeq, anchorVerified,
                      checkpoint, checkpointSeq, handoff, handoffSeq,
                      handoffCapsIssued, handoffCapsConsumed >>
 
-ObserveStop ==
+IssueStopCapability ==
+    /\ CanAppend
+    /\ ~desired
+    /\ phase = "Active"
+    /\ stopCapsIssued < MaxCapabilities
+    /\ stopCapsIssued' = stopCapsIssued + 1
+    /\ decision' = "stop"
+    /\ logSeq' = logSeq + 1
+    /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
+                     starts, stopCapsConsumed, stops, argvAttested,
+                     anchorSeq, anchorVerified, checkpoint, checkpointSeq,
+                     handoff, handoffSeq, handoffCapsIssued,
+                     handoffCapsConsumed >>
+
+StopWithLinearCapability ==
+    /\ CanAppend
+    /\ ~desired
+    /\ phase = "Active"
+    /\ stopCapsConsumed < stopCapsIssued
+    /\ stopCapsConsumed' = stopCapsConsumed + 1
+    /\ stops' = stops + 1
+    /\ phase' = "Absent"
+    /\ argvAttested' = FALSE
+    /\ decision' = "noop"
+    /\ logSeq' = logSeq + 1
+    /\ UNCHANGED << desired, startCapsIssued, startCapsConsumed, starts,
+                     stopCapsIssued, anchorSeq, anchorVerified, checkpoint,
+                     checkpointSeq, handoff, handoffSeq, handoffCapsIssued,
+                     handoffCapsConsumed >>
+
+RefuseStopWithoutCapability ==
+    /\ CanAppend
+    /\ ~desired
+    /\ phase = "Active"
+    /\ stopCapsConsumed = stopCapsIssued
+    /\ decision' = "blocked"
+    /\ logSeq' = logSeq + 1
+    /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, anchorSeq, anchorVerified, checkpoint,
+                     checkpointSeq, handoff, handoffSeq, handoffCapsIssued,
+                     handoffCapsConsumed >>
+
+ObserveExit ==
     /\ CanAppend
     /\ phase = "Active"
     /\ phase' = "Absent"
     /\ argvAttested' = FALSE
-    /\ decision' = "start"
+    /\ decision' = IF desired THEN "start" ELSE "noop"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << desired, startCapsIssued, startCapsConsumed, starts,
+                     stopCapsIssued, stopCapsConsumed, stops,
                      anchorSeq, anchorVerified, checkpoint, checkpointSeq,
                      handoff, handoffSeq, handoffCapsIssued,
                      handoffCapsConsumed >>
@@ -135,6 +199,7 @@ ObserveArgvDrift ==
     /\ decision' = "blocked"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << desired, startCapsIssued, startCapsConsumed, starts,
+                     stopCapsIssued, stopCapsConsumed, stops,
                      anchorSeq, anchorVerified, checkpoint, checkpointSeq,
                      handoff, handoffSeq, handoffCapsIssued,
                      handoffCapsConsumed >>
@@ -147,6 +212,7 @@ RestoreAttestation ==
     /\ decision' = "noop"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << desired, startCapsIssued, startCapsConsumed, starts,
+                     stopCapsIssued, stopCapsConsumed, stops,
                      anchorSeq, anchorVerified, checkpoint, checkpointSeq,
                      handoff, handoffSeq, handoffCapsIssued,
                      handoffCapsConsumed >>
@@ -159,7 +225,8 @@ CreateCheckpoint ==
     /\ checkpoint' = "Draft"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, decision, anchorSeq,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, decision, anchorSeq,
                      anchorVerified, checkpointSeq, handoff, handoffSeq,
                      handoffCapsIssued, handoffCapsConsumed >>
 
@@ -170,7 +237,8 @@ VerifyCheckpoint ==
     /\ checkpointSeq' = logSeq + 1
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, decision, anchorSeq,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, decision, anchorSeq,
                      anchorVerified, handoff, handoffSeq,
                      handoffCapsIssued, handoffCapsConsumed >>
 
@@ -184,7 +252,8 @@ PrepareHandoff ==
     /\ handoffCapsIssued' = handoffCapsIssued + 1
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, decision, anchorSeq,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, decision, anchorSeq,
                      anchorVerified, checkpoint, checkpointSeq,
                      handoffCapsConsumed >>
 
@@ -193,7 +262,8 @@ AnchorVerifiedPrefix ==
     /\ anchorSeq' = logSeq
     /\ anchorVerified' = TRUE
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, decision, logSeq, checkpoint,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, decision, logSeq, checkpoint,
                      checkpointSeq, handoff, handoffSeq, handoffCapsIssued,
                      handoffCapsConsumed >>
 
@@ -207,7 +277,8 @@ ObserveAnchorRemoval ==
     /\ decision' = "blocked"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, checkpoint, checkpointSeq, handoff,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, checkpoint, checkpointSeq, handoff,
                      handoffSeq, handoffCapsIssued, handoffCapsConsumed >>
 
 ObserveSignatureSubstitution ==
@@ -219,7 +290,8 @@ ObserveSignatureSubstitution ==
     /\ decision' = "blocked"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, anchorSeq, checkpoint, checkpointSeq,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, anchorSeq, checkpoint, checkpointSeq,
                      handoff, handoffSeq, handoffCapsIssued,
                      handoffCapsConsumed >>
 
@@ -233,7 +305,8 @@ AcceptAnchoredHandoff ==
     /\ handoffCapsConsumed' = handoffCapsConsumed + 1
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, decision, anchorSeq,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, decision, anchorSeq,
                      anchorVerified, checkpoint, checkpointSeq, handoffSeq,
                      handoffCapsIssued >>
 
@@ -245,7 +318,8 @@ RefuseUnanchoredHandoff ==
     /\ decision' = "blocked"
     /\ logSeq' = logSeq + 1
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, anchorSeq, anchorVerified,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, anchorSeq, anchorVerified,
                      checkpoint, checkpointSeq, handoff, handoffSeq,
                      handoffCapsIssued, handoffCapsConsumed >>
 
@@ -255,7 +329,10 @@ PersistentStep ==
     \/ IssueStartCapability
     \/ StartWithLinearCapability
     \/ RefuseStartWithoutCapability
-    \/ ObserveStop
+    \/ IssueStopCapability
+    \/ StopWithLinearCapability
+    \/ RefuseStopWithoutCapability
+    \/ ObserveExit
     \/ ObserveArgvDrift
     \/ RestoreAttestation
     \/ CreateCheckpoint
@@ -271,7 +348,8 @@ Crash ==
     /\ online
     /\ online' = FALSE
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, decision, logSeq, anchorSeq,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, decision, logSeq, anchorSeq,
                      anchorVerified, checkpoint, checkpointSeq, handoff,
                      handoffSeq, handoffCapsIssued, handoffCapsConsumed >>
 
@@ -279,7 +357,8 @@ Recover ==
     /\ ~online
     /\ online' = TRUE
     /\ UNCHANGED << phase, desired, startCapsIssued, startCapsConsumed,
-                     starts, argvAttested, decision, logSeq, anchorSeq,
+                     starts, stopCapsIssued, stopCapsConsumed, stops,
+                     argvAttested, decision, logSeq, anchorSeq,
                      anchorVerified, checkpoint, checkpointSeq, handoff,
                      handoffSeq, handoffCapsIssued, handoffCapsConsumed >>
 
@@ -299,6 +378,9 @@ TypeOK ==
     /\ startCapsIssued \in 0..MaxCapabilities
     /\ startCapsConsumed \in 0..MaxCapabilities
     /\ starts \in 0..MaxCapabilities
+    /\ stopCapsIssued \in 0..MaxCapabilities
+    /\ stopCapsConsumed \in 0..MaxCapabilities
+    /\ stops \in 0..MaxCapabilities
     /\ argvAttested \in BOOLEAN
     /\ decision \in DecisionSet
     /\ logSeq \in 0..MaxEvents
@@ -314,6 +396,10 @@ TypeOK ==
 LinearStartAuthority ==
     /\ startCapsConsumed <= startCapsIssued
     /\ starts = startCapsConsumed
+
+LinearStopAuthority ==
+    /\ stopCapsConsumed <= stopCapsIssued
+    /\ stops = stopCapsConsumed
 
 ActiveProcessHasFullArgvAttestation ==
     argvAttested <=> phase = "Active"
@@ -341,12 +427,18 @@ AcceptedHandoffIsAnchored ==
         /\ anchorSeq >= handoffSeq
         /\ checkpointSeq < handoffSeq
 
+\* A focused model gate negates this predicate to prove intentional stop is
+\* reachable. It is not a safety invariant of Spec.
+NoIntentionalStop == stops = 0
+
 \* Concrete capability publication, action requests, and crash recovery map
 \* to stuttering steps. Issue/commit/verify/accept events map to the named
 \* persistent actions above; Crash and Recover change no persisted fact.
 
 \* @sabotage id=start-without-capability invariant=LinearStartAuthority control=capability_required
 \* @sabotage id=capability-reuse invariant=LinearStartAuthority control=capability_reuse
+\* @sabotage id=stop-without-capability invariant=LinearStopAuthority control=stop_capability_required
+\* @sabotage id=stop-capability-reuse invariant=LinearStopAuthority control=stop_capability_reuse
 \* @sabotage id=argv-substitution invariant=ActiveProcessHasFullArgvAttestation control=argv_sabotage
 \* @sabotage id=generation-substitution invariant=DriftFailsClosed control=generation_sabotage
 \* @sabotage id=anchor-removal invariant=SignedAnchorIsLogPrefix control=anchor_removal

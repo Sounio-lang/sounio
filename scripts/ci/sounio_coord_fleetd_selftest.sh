@@ -10,6 +10,7 @@ STATE="$TEST_ROOT/agentd-state"
 DB="$TEST_ROOT/fleet.db"
 CONFIG="$TEST_ROOT/fleet.toml"
 OMIT_CONFIG="$TEST_ROOT/fleet-omitted.toml"
+DISABLED_CONFIG="$TEST_ROOT/fleet-disabled.toml"
 RECEIVER="$TEST_ROOT/receiver.py"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
 SLOT='proof-lane'
@@ -17,6 +18,12 @@ SESSION_ID='11111111-2222-4333-8444-555555555555'
 CAPABILITY="$TEST_ROOT/start.capability.json"
 BAD_CAPABILITY="$TEST_ROOT/start.capability.bad.json"
 SECOND_CAPABILITY="$TEST_ROOT/start-2.capability.json"
+THIRD_CAPABILITY="$TEST_ROOT/start-3.capability.json"
+STOP_CAPABILITY="$TEST_ROOT/stop.capability.json"
+BAD_STOP_CAPABILITY="$TEST_ROOT/stop.capability.bad.json"
+RECOVERY_BUDGET="$TEST_ROOT/recovery-budget.json"
+BAD_RECOVERY_BUDGET="$TEST_ROOT/recovery-budget.bad.json"
+RENEWED_RECOVERY_BUDGET="$TEST_ROOT/recovery-budget-renewed.json"
 PRIVATE_KEY="$TEST_ROOT/anchor-private.pem"
 PUBLIC_KEY="$TEST_ROOT/anchor-public.pem"
 WRONG_PRIVATE_KEY="$TEST_ROOT/wrong-private.pem"
@@ -27,6 +34,9 @@ CHECKPOINT_EVIDENCE="$TEST_ROOT/checkpoint-evidence.txt"
 HANDOFF_CAPABILITY="$TEST_ROOT/handoff.capability.json"
 TRACE_CERTIFICATE="$TEST_ROOT/trace-certificate.json"
 TRACE_SABOTAGE_DB="$TEST_ROOT/trace-sabotage.db"
+STOP_TRACE_SABOTAGE_DB="$TEST_ROOT/stop-trace-sabotage.db"
+BUDGET_TRACE_SABOTAGE_DB="$TEST_ROOT/budget-trace-sabotage.db"
+BACKOFF_TRACE_SABOTAGE_DB="$TEST_ROOT/backoff-trace-sabotage.db"
 
 cleanup() {
   if [[ -x "$RUNTIME/sounio-fleet-agent-runtime" && -d "$REPO" ]]; then
@@ -125,6 +135,8 @@ session_id = "$SESSION_ID"
 identity = "exact"
 command = ["$RECEIVER", "$RECEIVER_LOG"]
 EOF
+
+sed '0,/enabled = true/s//enabled = false/' "$CONFIG" > "$DISABLED_CONFIG"
 
 fleetd() {
   SOUNIO_AGENTD_DIR="$STATE" \
@@ -324,8 +336,47 @@ grep -q 'decision=blocked reason=desired-session_id-mismatch' \
 mv "$CONFIG.good" "$CONFIG"
 fleetd reconcile --config "$CONFIG" >/dev/null
 
-SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
-  stop --cwd "$REPO" --slot "$SLOT" >/dev/null
+# MODEL_CONTROL:stop_capability_required
+if fleetd reconcile --config "$DISABLED_CONFIG" --apply \
+  >"$TEST_ROOT/no-stop-capability" 2>&1; then
+  fail 'reconcile --apply stopped an active slot without linear stop authority'
+fi
+grep -q 'action=stop status=refused reason=linear-stop-capability-required' \
+  "$TEST_ROOT/no-stop-capability" || \
+  fail 'missing stop authority was not attributed to the stop-capability rule'
+[[ "$(grep -c '^START pid=' "$RECEIVER_LOG")" == 1 ]] || \
+  fail 'missing stop authority changed the active generation'
+
+output="$(fleetd authorize --config "$DISABLED_CONFIG" --slot "$SLOT" \
+  --action stop --out "$STOP_CAPABILITY")"
+grep -q 'FLEET_CAPABILITY_ISSUED .*action=stop .*generation=' <<< "$output" || \
+  fail 'authorize did not bind stop authority to the active generation'
+cp "$STOP_CAPABILITY" "$BAD_STOP_CAPABILITY"
+python3 - "$BAD_STOP_CAPABILITY" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["generation"] = "sabotaged-stop-generation"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+chmod 600 "$BAD_STOP_CAPABILITY"
+if fleetd reconcile --config "$DISABLED_CONFIG" --apply \
+  --capability "$BAD_STOP_CAPABILITY" >"$TEST_ROOT/bad-stop-generation" 2>&1; then
+  fail 'stop accepted authority for a different generation'
+fi
+grep -q 'action=stop status=refused reason=.*binding-was-altered' \
+  "$TEST_ROOT/bad-stop-generation" || \
+  fail 'stop generation sabotage was not attributed to capability binding'
+output="$(fleetd reconcile --config "$DISABLED_CONFIG" --apply \
+  --capability "$STOP_CAPABILITY")"
+grep -q 'FLEET_ACTION .*action=stop status=committed' <<< "$output" || \
+  fail 'authorized stop did not commit'
+[[ ! -e "$STATE/fleet-slots/$SLOT.json" ]] || \
+  fail 'authorized stop retained the fleet slot mapping'
+
 # MODEL_CONTROL:capability_reuse
 if fleetd reconcile --config "$CONFIG" --apply --capability "$CAPABILITY" \
   >"$TEST_ROOT/reused-capability" 2>&1; then
@@ -341,6 +392,86 @@ fleetd reconcile --config "$CONFIG" --apply \
   --capability "$SECOND_CAPABILITY" >/dev/null
 wait_for 'second linear capability did not restore the stopped slot' \
   "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 2"
+
+# MODEL_CONTROL:stop_capability_reuse
+if fleetd reconcile --config "$DISABLED_CONFIG" --apply \
+  --capability "$STOP_CAPABILITY" >"$TEST_ROOT/reused-stop-capability" 2>&1; then
+  fail 'reconciler accepted a consumed stop capability for a later generation'
+fi
+grep -q 'action=stop status=refused reason=.*already-consumed' \
+  "$TEST_ROOT/reused-stop-capability" || \
+  fail 'stop capability reuse was not attributed to linear consumption'
+[[ "$(grep -c '^START pid=' "$RECEIVER_LOG")" == 2 ]] || \
+  fail 'reused stop capability changed the later generation'
+
+output="$(fleetd authorize-recovery --config "$CONFIG" --slot "$SLOT" \
+  --out "$RECOVERY_BUDGET" --max-starts 2 --backoff-seconds 2 --ttl 600)"
+grep -q 'FLEET_RECOVERY_BUDGET_ISSUED .*max_starts=2 .*backoff_seconds=2' \
+  <<< "$output" || fail 'bounded recovery authorization omitted its budget'
+cp "$RECOVERY_BUDGET" "$BAD_RECOVERY_BUDGET"
+python3 - "$BAD_RECOVERY_BUDGET" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path, encoding="utf-8"))
+value["token"] = "sabotaged-recovery-secret"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, sort_keys=True, separators=(",", ":"))
+    handle.write("\n")
+PY
+chmod 600 "$BAD_RECOVERY_BUDGET"
+
+SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+  stop --cwd "$REPO" --slot "$SLOT" >/dev/null
+if fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$BAD_RECOVERY_BUDGET" \
+  >"$TEST_ROOT/bad-recovery-budget" 2>&1; then
+  fail 'watch accepted a recovery budget with a sabotaged secret'
+fi
+grep -q 'action=start status=refused reason=.*secret-does-not-match' \
+  "$TEST_ROOT/bad-recovery-budget" || \
+  fail 'recovery secret sabotage was not attributed to budget verification'
+
+fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$RECOVERY_BUDGET" >/dev/null
+wait_for 'first recovery unit did not restart the stopped slot' \
+  "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 3"
+SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+  stop --cwd "$REPO" --slot "$SLOT" >/dev/null
+output="$(fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$RECOVERY_BUDGET")"
+grep -q 'status=deferred reason=recovery-backoff-active' <<< "$output" || \
+  fail 'recovery budget ignored its temporal backoff'
+[[ "$(grep -c '^START pid=' "$RECEIVER_LOG")" == 3 ]] || \
+  fail 'backoff created a premature restart'
+sleep 2.1
+fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$RECOVERY_BUDGET" >/dev/null
+wait_for 'second recovery unit did not restart the stopped slot' \
+  "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 4"
+SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+  stop --cwd "$REPO" --slot "$SLOT" >/dev/null
+sleep 2.1
+if fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$RECOVERY_BUDGET" \
+  >"$TEST_ROOT/exhausted-recovery-budget" 2>&1; then
+  fail 'watch exceeded the bounded restart budget'
+fi
+grep -q 'status=refused reason=recovery-budget-exhausted' \
+  "$TEST_ROOT/exhausted-recovery-budget" || \
+  fail 'budget exhaustion was not attributed to the temporal authority'
+[[ "$(grep -c '^START pid=' "$RECEIVER_LOG")" == 4 ]] || \
+  fail 'exhausted recovery budget launched an extra generation'
+fleetd authorize-recovery --config "$CONFIG" --slot "$SLOT" \
+  --out "$RENEWED_RECOVERY_BUDGET" --max-starts 1 --backoff-seconds 0 \
+  --ttl 600 >/dev/null || fail 'exhausted recovery budget could not be renewed'
+
+fleetd authorize --config "$CONFIG" --slot "$SLOT" \
+  --out "$THIRD_CAPABILITY" >/dev/null
+fleetd reconcile --config "$CONFIG" --apply \
+  --capability "$THIRD_CAPABILITY" >/dev/null
+wait_for 'manual authority did not restore the slot after budget exhaustion' \
+  "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 5"
 
 output="$(fleetd checkpoint-create --config "$CONFIG" --slot "$SLOT" \
   --kind cognitive --summary-file "$CHECKPOINT_SUMMARY" \
@@ -470,7 +601,7 @@ grep -q 'anchor public-key identity mismatch' "$TEST_ROOT/key-substitution" || \
 output="$("$RUNTIME/sounio-fleet-trace-verify" --db "$DB" \
   --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
   --certificate "$TRACE_CERTIFICATE")"
-grep -q 'FLEET_TRACE_CONFORMS .*accepted=1 .*invariants=8 ' <<< "$output" || \
+grep -q 'FLEET_TRACE_CONFORMS .*accepted=1 .*invariants=10 ' <<< "$output" || \
   fail 'independent trace verifier did not certify the accepted handoff'
 [[ -s "$TRACE_CERTIFICATE" ]] || \
   fail 'independent trace verifier omitted its refinement certificate'
@@ -536,6 +667,117 @@ grep -q 'accepted handoff capability mismatch' \
   "$TEST_ROOT/trace-semantic-sabotage" || \
   fail 'semantic sabotage was not attributed to the independent handoff rule'
 
+python3 - "$DB" "$STOP_TRACE_SABOTAGE_DB" "$BUDGET_TRACE_SABOTAGE_DB" \
+  "$BACKOFF_TRACE_SABOTAGE_DB" <<'PY'
+import hashlib
+import json
+import sqlite3
+import sys
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+def digest(value):
+    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+
+def rewrite(source_path, target_path, event_type, predicate, mutate):
+    source = sqlite3.connect(source_path)
+    target = sqlite3.connect(target_path)
+    source.backup(target)
+    source.close()
+    target.row_factory = sqlite3.Row
+    selected = None
+    for row in target.execute(
+        "SELECT * FROM events WHERE event_type = ? ORDER BY seq", (event_type,)
+    ).fetchall():
+        payload = json.loads(row["payload"])
+        if predicate(payload):
+            selected = (row, payload)
+            break
+    assert selected is not None, event_type
+    row, payload = selected
+    mutate(payload, target)
+    target.execute(
+        "UPDATE events SET payload = ? WHERE seq = ?", (canonical(payload), row["seq"])
+    )
+    previous = target.execute(
+        "SELECT event_hash FROM events WHERE seq = ?", (row["seq"] - 1,)
+    ).fetchone()[0]
+    for current in target.execute(
+        "SELECT * FROM events WHERE seq >= ? ORDER BY seq", (row["seq"],)
+    ).fetchall():
+        material = {
+            "causal_key": current["causal_key"],
+            "event_type": current["event_type"],
+            "occurred_utc": current["occurred_utc"],
+            "payload": current["payload"],
+            "prev_hash": previous,
+            "seq": current["seq"],
+            "slot": current["slot"],
+        }
+        event_hash = digest(material)
+        target.execute(
+            "UPDATE events SET prev_hash = ?, event_hash = ?, event_id = ? WHERE seq = ?",
+            (previous, event_hash, f"evt-{event_hash[:24]}", current["seq"]),
+        )
+        previous = event_hash
+    target.commit()
+    target.close()
+
+rewrite(
+    sys.argv[1],
+    sys.argv[2],
+    "ACTION_COMMITTED",
+    lambda payload: payload.get("action") == "stop",
+    lambda payload, _target: payload.__setitem__(
+        "generation", "rehashed-wrong-stop-generation"
+    ),
+)
+rewrite(
+    sys.argv[1],
+    sys.argv[3],
+    "RECOVERY_BUDGET_SPENT",
+    lambda payload: payload.get("ordinal") == 2,
+    lambda payload, _target: payload.__setitem__("ordinal", 3),
+)
+
+def reuse_first_spend_time(payload, target):
+    first = target.execute(
+        "SELECT payload FROM events WHERE event_type = 'RECOVERY_BUDGET_SPENT' "
+        "ORDER BY seq LIMIT 1"
+    ).fetchone()
+    assert first is not None
+    payload["spent_unix"] = json.loads(first[0])["spent_unix"]
+
+rewrite(
+    sys.argv[1],
+    sys.argv[4],
+    "RECOVERY_BUDGET_SPENT",
+    lambda payload: payload.get("ordinal") == 2,
+    reuse_first_spend_time,
+)
+PY
+if "$RUNTIME/sounio-fleet-trace-verify" --db "$STOP_TRACE_SABOTAGE_DB" \
+  >"$TEST_ROOT/stop-trace-sabotage" 2>&1; then
+  fail 'independent trace verifier accepted a rehashed stop-generation substitution'
+fi
+grep -q 'committed stop generation mismatch' "$TEST_ROOT/stop-trace-sabotage" || \
+  fail 'stop trace sabotage was not attributed to exact-generation binding'
+if "$RUNTIME/sounio-fleet-trace-verify" --db "$BUDGET_TRACE_SABOTAGE_DB" \
+  >"$TEST_ROOT/budget-trace-sabotage" 2>&1; then
+  fail 'independent trace verifier accepted a rehashed recovery-budget overflow'
+fi
+grep -q 'recovery budget ordinal is not contiguous' \
+  "$TEST_ROOT/budget-trace-sabotage" || \
+  fail 'budget trace sabotage was not attributed to bounded temporal authority'
+if "$RUNTIME/sounio-fleet-trace-verify" --db "$BACKOFF_TRACE_SABOTAGE_DB" \
+  >"$TEST_ROOT/backoff-trace-sabotage" 2>&1; then
+  fail 'independent trace verifier accepted a rehashed recovery-budget backoff bypass'
+fi
+grep -q 'recovery budget backoff was violated' \
+  "$TEST_ROOT/backoff-trace-sabotage" || \
+  fail 'backoff sabotage was not attributed to temporal budget authority'
+
 if fleetd watch --config "$CONFIG" --cycles 1 --apply \
   >"$TEST_ROOT/watch-apply" 2>&1; then
   fail 'watch accepted reusable mutation authority'
@@ -575,4 +817,4 @@ fi
 grep -q 'event 1 hash mismatch' "$TEST_ROOT/log-sabotage" || \
   fail 'log sabotage was not attributed to the hash-chain rule'
 
-echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked generation_authority_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused trace_refinement=verified semantic_rehash_sabotage=refused replay=reconstructed hash_sabotage=refused'
+echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused stop_capability_required=1 stop_capability_reuse=refused stop_generation_sabotage=refused stop_semantic_rehash=refused recovery_budget=2 recovery_backoff=enforced recovery_exhaustion=refused budget_semantic_rehash=refused backoff_semantic_rehash=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked generation_authority_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused trace_refinement=verified semantic_rehash_sabotage=refused replay=reconstructed hash_sabotage=refused'
