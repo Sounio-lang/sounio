@@ -5961,6 +5961,30 @@ fn checker_check_binary_with_operand_types_inplace(c: *mut Checker, e: Expr, lef
             let hc = check_hyper_binary(*c, e.span, e.bin_op, left_inner, right_inner)
             checker_store_from_value(c, hc.0)
         }
+        // Knowledge (x) Knowledge arithmetic typechecks here but has no lowering:
+        // lower_binary_expr_ref (ir/lower.sio) has no Knowledge arm, so both
+        // operands lower as scalars -- and a Knowledge operand lowers to the
+        // object handle. `kA * kB` therefore multiplies two pointers, and
+        // `.value` on the result dereferences an arbitrary address. Measured on
+        // Madaros: `*` returns the right operand's value (silently wrong), while
+        // `+`, `-` and `/` segfault at runtime. Refuse it rather than answer
+        // wrongly. The mixed Knowledge/scalar forms are already refused above,
+        // and lean_single implements all of this correctly -- see #1706.
+        let kk_both = is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+        let kk_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+            || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
+            || e.bin_op == BinaryOp::OpRem
+        // Hypercomplex inners take the check_hyper_binary path above, so spare them
+        // rather than refuse on an untested guess. Measured caveat: this guard is
+        // narrower than it looks. `Knowledge<Octonion>` built from the
+        // algebra::octonion STRUCT does not carry TyHyper inners, so it does NOT
+        // take this exemption and IS refused below -- correctly, since it has no
+        // lowering either. What the guard actually spares is only inners the
+        // checker itself classifies as TyHyper, and that case remains unmeasured.
+        let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
+        if kk_both && kk_arith && !kk_hyper {
+            checker_report_error_at_inplace(c, e.span, 220, 0, 0, 0)
+        }
         let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
         if knowledge_result.kind == TypeKind::TyError {
             checker_report_error_at_inplace(c, e.span, 36, 0, 0, 0)
@@ -13785,6 +13809,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 175 { print("function is private in its defining module") }
     else if code == 176 { print("struct constructor is private in its defining module") }
     else if code == 177 { print("enum constructor is private in its defining module") }
+    else if code == 220 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
     else if code == 202 { print("Editable<T> requires ZD effect: locality-bounded edits (G5) require ZD-based kernel annihilation. Ripple-free editing is not achievable via rank-1 or mask-based updates. Add `with ZD` to your function signature.") }
@@ -14077,6 +14102,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 171 {
         print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
+    }
+    else if code == 220 {
+        print("   |\n   = help: peel first -- `let a = kA.value` and `let b = kB.value`, then combine `a` and `b`; `variance_of(a op b)` propagates the uncertainty and is the supported path on this engine\n")
     }
     else if code == 217 {
         print("   |\n   = help: wait for explicit from_bits/conversion operations; no f64 cast is a valid f128/f256 implementation\n")
