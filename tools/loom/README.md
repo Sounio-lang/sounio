@@ -80,12 +80,13 @@ Kubernetes startup hook activates that one-shot reconciliation after Pod loss,
 but pending-inbox replay across the new generation still needs its own gate.
 Existing fleet generations therefore retain the Python `agentd` launch adapter
 during migration.
-The Beagle bridge passed its source gate and an isolated second-process canary
-against the live Workspace Agent image. That canary covered blocks, redaction,
-Workspace Agent restart, and Loom kernel loss. A source gate additionally kills
-bridge, kernel, Guardian, and harness together, proves linked resurrection, and
-refuses a mutated lineage before spawn. It has not replaced production
-authority or passed real separate-Pod deletion, canonical-memory, Cockpit, or Warp
-gates; see `tools/loom/evidence/beagle-workspace-agent-canary-20260824.txt`.
+The Beagle bridge passed its source gate, an isolated second-process canary
+against the live Workspace Agent image, and a source-derived separate-Pod
+canary with a dedicated PVC. The replacement Pod retained two Beagle blocks,
+created a new physical instance, and exposed a verified link to the unclean
+predecessor. The source gate also refuses a mutated lineage before spawn. Loom
+has not replaced production authority or passed canonical-memory, Cockpit,
+Warp, cross-node, or pending-inbox gates; see the receipts under
+`tools/loom/evidence/beagle-workspace-agent-*-20260824.txt`.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.
