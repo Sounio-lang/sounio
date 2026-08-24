@@ -10,6 +10,9 @@ STATE="$TEST_ROOT/state"
 ALT="$TEST_ROOT/upgrade-source"
 BAD="$TEST_ROOT/bad-source"
 
+"$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime"
+
 cleanup() {
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
   rm -rf "$TEST_ROOT"
@@ -36,11 +39,17 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" "$REPO/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
+  "$REPO/scripts/dev/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$REPO/tools/loom/src/"
+mkdir -p "$REPO/stdlib/coordination"
+cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$REPO/stdlib/coordination/"
 chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Runtime Selftest'
@@ -64,6 +73,8 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the detached agent supervisor'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime" ]] || \
   fail 'installed runtime omitted the OCaml Loom kernel'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-continuity-runtime" ]] || \
+  fail 'installed runtime omitted the native Sounio continuity adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-agent-runtime" ]] || \
   fail 'installed runtime omitted the fleet launcher'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-runtime" ]] || \
@@ -87,6 +98,7 @@ grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/man
 for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
+  loom-native-sounio-continuity-v1 \
   loom-exclusive-input-lease-v1 loom-read-only-gui-v1 loom-coord-transport-v1 \
   coord-generation-scoped-wake-v1 \
   loom-recoverable-guardian-v1 loom-kernel-recovery-v1 loom-dual-journal-v1 \
@@ -151,11 +163,17 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" "$ALT/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
+  "$ALT/scripts/dev/"
 mkdir -p "$ALT/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$ALT/tools/loom/src/"
+mkdir -p "$ALT/stdlib/coordination"
+cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$ALT/formal/tla/"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
@@ -182,11 +200,17 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" "$BAD/scripts/dev/"
+cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
+  "$BAD/scripts/dev/"
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$BAD/tools/loom/src/"
+mkdir -p "$BAD/stdlib/coordination"
+cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \

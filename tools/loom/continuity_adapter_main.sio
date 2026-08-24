@@ -1,0 +1,110 @@
+//! Native policy adapter for OCaml Loom continuity facts.
+//!
+//! The build composes this entrypoint with `loom_continuity.sio`, keeping the
+//! host seal and admission constructor private inside one native program. The
+//! OCaml host sends thirteen canonical decimal fields over stdin. Sounio owns
+//! both parsing and the transition-policy decision through native builtins.
+
+fn decimal_field(raw: string, start: i64) -> (i64, i64, i64) with Mut, Div, Panic {
+    var offset = start
+    var value: i64 = 0
+    var seen: bool = false
+    while offset < 256 {
+        let code = str_char_at(raw, offset)
+        if code <= 0 { return (if seen { 1 } else { 0 }, value, offset) }
+        if code == 32 {
+            if !seen { return (0, 0, offset) }
+            return (1, value, offset + 1)
+        }
+        if code < 48 || code > 57 { return (0, 0, offset) }
+        value = value * 10 + (code - 48)
+        seen = true
+        offset = offset + 1
+    }
+    (0, 0, offset)
+}
+
+fn policy_accepts(observed: ObservedContinuity, transition_kind: i64) -> bool {
+    if transition_kind == 1 {
+        return match verify_initial_generation(observed) {
+            Some(receipt) => promote_initial_generation(receipt) > 0,
+            None => false,
+        }
+    }
+    if transition_kind == 2 {
+        return match verify_clean_respawn(observed) {
+            Some(receipt) => promote_clean_respawn(receipt) > 0,
+            None => false,
+        }
+    }
+    if transition_kind == 3 {
+        return match verify_pod_resurrection(observed) {
+            Some(receipt) => {
+                let (generation, evidence, lineage, predecessor, transitions, pods) =
+                    promote_pod_resurrection(receipt)
+                generation > 0 && evidence > 0 && lineage > 0 &&
+                    predecessor > 0 && transitions > 0 && pods > 0
+            },
+            None => false,
+        }
+    }
+    false
+}
+
+fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
+    let input = read_line()
+    let (ok1, evidence_set_token, p1) = decimal_field(input, 0)
+    let (ok2, receipt_chain_token, p2) = decimal_field(input, p1)
+    let (ok3, current_generation_token, p3) = decimal_field(input, p2)
+    let (ok4, generation_fingerprint_token, p4) = decimal_field(input, p3)
+    let (ok5, semantic_journal_head_token, p5) = decimal_field(input, p4)
+    let (ok6, guardian_journal_head_token, p6) = decimal_field(input, p5)
+    let (ok7, lineage_head_token, p7) = decimal_field(input, p6)
+    let (ok8, predecessor_generation_token, p8) = decimal_field(input, p7)
+    let (ok9, predecessor_semantic_head_token, p9) = decimal_field(input, p8)
+    let (ok10, predecessor_guardian_head_token, p10) = decimal_field(input, p9)
+    let (ok11, transition_kind, p11) = decimal_field(input, p10)
+    let (ok12, transition_count, p12) = decimal_field(input, p11)
+    let (ok13, pod_resurrection_count, ending) = decimal_field(input, p12)
+    let trailing = str_char_at(input, ending)
+    let ended_after_separator = ending > 0 && str_char_at(input, ending - 1) == 32
+    if ok1 != 1 || ok2 != 1 || ok3 != 1 || ok4 != 1 || ok5 != 1 ||
+        ok6 != 1 || ok7 != 1 || ok8 != 1 || ok9 != 1 || ok10 != 1 ||
+        ok11 != 1 || ok12 != 1 || ok13 != 1 ||
+        trailing > 0 || ended_after_separator {
+        println("SOUNIO_CONTINUITY_REFUSE reason=canonical-input")
+        return 64
+    }
+
+    let bridge0 = open_host_trust_bridge(evidence_set_token, receipt_chain_token)
+    let (bridge1, host_receipt) = admit_runtime_continuity(
+        bridge0,
+        1,
+        evidence_set_token,
+        receipt_chain_token,
+        current_generation_token,
+        generation_fingerprint_token,
+        semantic_journal_head_token,
+        guardian_journal_head_token,
+        lineage_head_token,
+        predecessor_generation_token,
+        predecessor_semantic_head_token,
+        predecessor_guardian_head_token,
+        transition_kind,
+        transition_count,
+        pod_resurrection_count,
+        true,
+        true,
+        true,
+    )
+    close_host_trust_bridge(bridge1)
+    let observed = import_host_continuity(host_receipt)
+
+    if !policy_accepts(observed, transition_kind) {
+        println("SOUNIO_CONTINUITY_REFUSE reason=typestate")
+        return 42
+    }
+
+    println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1")
+    0
+}
