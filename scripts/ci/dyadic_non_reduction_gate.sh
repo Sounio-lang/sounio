@@ -24,7 +24,7 @@ bin/souc --version >"$TMP_DIR/version.log" 2>&1 || {
     cat "$TMP_DIR/version.log" >&2
     fail "canonical bin/souc did not report its version"
 }
-grep -Eq "Madares|Madaros" "$TMP_DIR/version.log" || {
+grep -Fq "Madaros" "$TMP_DIR/version.log" || {
     cat "$TMP_DIR/version.log" >&2
     fail "canonical bin/souc did not resolve to Madaros"
 }

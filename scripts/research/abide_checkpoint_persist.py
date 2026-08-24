@@ -650,7 +650,7 @@ def generate_native_verifier_source(ckpt: dict[str, Any], manifest_path: Path, r
         before_emit, rest = prefix.split(ckpt_emit_start, 1)
         _, after_emit = rest.split(ckpt_emit_end, 1)
         # The verifier loads an already-persisted checkpoint, so native CKPT
-        # emission helpers are dead code here. Dropping them avoids a Madares
+        # emission helpers are dead code here. Dropping them avoids a Madaros
         # backend crash in the unused checkpoint dispatch path.
         prefix = before_emit + ckpt_emit_end + after_emit
     ckpt_print_start = "fn print_i64_array("
