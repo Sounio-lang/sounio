@@ -75,9 +75,13 @@ host. `recover` reconciles bytes fsynced by the guardian while no kernel existed
 and semantically revokes input leases whose sockets died with the old kernel.
 It cannot re-adopt the same PTY after Guardian or host loss. It can detect that
 loss and reconcile a Beagle pane into a new generation whose append-only
-lineage receipt binds both verified predecessor journal heads. The
-Kubernetes startup hook activates that one-shot reconciliation after Pod loss,
-but pending-inbox replay across the new generation still needs its own gate.
+lineage receipt binds both verified predecessor journal heads. The Kubernetes
+startup hook activates that one-shot reconciliation after Pod loss, and the
+local coordination gate now kills three complete Loom generations to show
+generation-scoped replay of an unacknowledged wake, deduplication within one
+generation, and durable ACK suppression in the next. This is at-least-once wake
+delivery, not exactly-once execution of the work named by the message. A
+separate-Pod pending-inbox canary is still required.
 Existing fleet generations therefore retain the Python `agentd` launch adapter
 during migration.
 The Beagle bridge passed its source gate, an isolated second-process canary
@@ -88,10 +92,12 @@ predecessor. Project Cockpit source now derives a fail-closed continuity view
 from those fields and renders the generation lineage, while a Sounio nominal
 kernel keeps initial generation, clean respawn, and Pod resurrection promotion
 states distinct. The source gates refuse a mutated lineage, an incomplete
-predecessor, a forged derived UI receipt, and wrong-state promotion. The
-Cockpit and Sounio classifiers have not yet been joined by a production host
-adapter. Loom has not replaced production authority or passed deployed
-Cockpit, canonical-memory, Warp, cross-node, or pending-inbox gates; see the
-2026-08-24 receipts under `tools/loom/evidence/`.
+predecessor, a forged derived UI receipt, wrong-state promotion, and direct use
+of the private linear host-admission seal. Targeted sabotage makes that host
+admission public and removes the `E175` refusal, proving which rule closes the
+laundering route. The Cockpit and Sounio classifiers have not yet been joined
+by a production host adapter. Loom has not replaced production authority or
+passed deployed Cockpit, canonical-memory, Warp, cross-node, or separate-Pod
+pending-inbox gates; see the 2026-08-24 receipts under `tools/loom/evidence/`.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.
