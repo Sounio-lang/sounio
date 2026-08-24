@@ -99,6 +99,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
   loom-native-sounio-continuity-v1 \
+  loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
   loom-exclusive-input-lease-v1 loom-read-only-gui-v1 loom-coord-transport-v1 \
   coord-generation-scoped-wake-v1 \
   loom-recoverable-guardian-v1 loom-kernel-recovery-v1 loom-dual-journal-v1 \
