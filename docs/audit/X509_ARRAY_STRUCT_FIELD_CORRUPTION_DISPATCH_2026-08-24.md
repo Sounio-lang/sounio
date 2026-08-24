@@ -130,6 +130,45 @@ first two bytes; every other field is correct.
 | `GeneralNameL` (mirrors `GeneralName`) | 32 | `[u8;253]` + `[u8;20]` (+ nested `X509Name`) | ~281+ | ~9 KB+ | Broken with the OLD whole-struct pattern (Finding 22); Task 6's real usage with the field-by-field fix still fails at runtime (implementer's report) |
 | `ExtL` (mirrors `ExtensionEntry`) | 32 | `[u8;20]` + `[u8;512]` | ~537 | ~17 KB | **Broken**, confirmed above, WITH the field-by-field fix applied |
 
+## Follow-up measurement 2026-08-24 — it is NOT a size threshold
+
+The dispatch's framing ("once the struct/array crosses a size threshold") does
+not survive a direct test. The repro above was run unchanged, plus two variants
+that change exactly one dimension each:
+
+| variant | array len | `value` field | output | verdict |
+|---|---|---|---|---|
+| repro as filed | 32 | `[u8;512]` | `170 187 2 1 170 187 204 512` | corrupt |
+| **8 elements** | **8** | `[u8;512]` | `170 187 2 1 170 187 204 512` | **corrupt** |
+| **small field** | 32 | **`[u8;64]`** | `170 187 2 1 170 187 204 64` | **corrupt** |
+
+Dropping the array from 32 to 8 does not cure it. Dropping the field from 512 to
+64 bytes does not cure it. `oid` receives `0xAA 0xBB` -- `value`'s bytes -- in all
+three. So the defect is the `array[i].field = buffer` pattern with `[u8;N]`
+itself, independent of scale.
+
+Both compilers agree: built from source at `main` AND at this branch's
+`e6b3cc8d98`, all three variants produce byte-identical wrong output. The branch
+differs from main in `self-hosted/native/` (71 commits), so this is not a
+main-vs-branch artifact.
+
+Consequence for the scale table below: the `SctEntryL` row marked **Correct** at
+8 entries is not evidence of a lower bound. Its rows mix two different write
+patterns (whole-struct vs field-by-field), and the field-by-field pattern fails
+at 8 entries too. The table measures the patterns, not a threshold.
+
+### One cause ruled out
+
+`struct_deep_copy_instr_headroom` (`lower.sio`) degrades a deep copy to the
+#1475 FLAT copy -- which shares the handle -- when the projected instruction cost
+would not fit under `IR_MAX_INSTRS`. That is a mechanism which would produce
+exactly this symptom (two fields aliasing one buffer) and would look
+size-dependent. It is **not** firing here: `SOUNIO_LOWER_LIVE_TRACE=1` emits no
+deep-copy trace for any of the three variants.
+
+Method note: measured, not inferred. Each variant was compiled with
+`--native-v2-compile` and executed; the numbers above are program output.
+
 ## Impact if unaddressed
 
 Blocks `stdlib/x509/cert.sio`'s `x509_parse_extensions` and
