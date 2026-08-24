@@ -28,10 +28,11 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.2"
+RUNTIME_VERSION = "2026.08.24.1"
 MAX_CONTROL_BYTES = 65536
 MAX_PROMPT_BYTES = 8192
 RING_BYTES = 65536
+TUI_SUBMIT_DELAY_SECONDS = 0.075
 SAFE_TOKEN = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -393,7 +394,9 @@ class Supervisor:
                 send_json(client.connection, {"ok": False, "error": "prompt-too-large"})
                 self.close_client(file_descriptor)
                 return
-            os.write(self.master_fd, encoded.rstrip(b"\r\n") + b"\r")
+            os.write(self.master_fd, encoded.rstrip(b"\r\n"))
+            time.sleep(TUI_SUBMIT_DELAY_SECONDS)
+            os.write(self.master_fd, b"\r")
             send_json(
                 client.connection,
                 {
