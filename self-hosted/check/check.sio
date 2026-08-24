@@ -1638,11 +1638,13 @@ fn checker_lower_named_type_mut(c: *mut Checker, path: AstPath) -> TypeEntry wit
         // this looked like a let/var bug for hours.
         //
         // A binding that carries no information must not outrank a type that
-        // does.
+        // does. Imported names are bound as TyUnknown even when the struct is
+        // not yet in this module's table — treating that Unknown as informative
+        // made `fn forge() -> Epistemic { 1.0 }` typecheck. Match the
+        // by-value spine: Unknown/Error/Never fall through to ty_named.
         let bound_is_informative = bound_ty.kind != TypeKind::TyError
-            && !(bound_ty.kind == TypeKind::TyUnknown
-                 && (struct_table_find((*c).structs, name) >= 0
-                     || enum_table_find((*c).enums, name) >= 0))
+            && bound_ty.kind != TypeKind::TyUnknown
+            && bound_ty.kind != TypeKind::TyNever
         if bound_is_informative || bound_ty.ontology_id >= 0 {
             bound_ty
         } else {
@@ -4147,6 +4149,40 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("log"))
     checker_bind_import_unknown_inplace(c, make_name("sin"))
     checker_bind_import_unknown_inplace(c, make_name("cos"))
+    checker_bind_import_unknown_inplace(c, make_name("tan"))
+    checker_bind_import_unknown_inplace(c, make_name("atan"))
+    checker_bind_import_unknown_inplace(c, make_name("tanh"))
+    checker_bind_import_unknown_inplace(c, make_name("asin"))
+    checker_bind_import_unknown_inplace(c, make_name("acos"))
+    checker_bind_import_unknown_inplace(c, make_name("pow"))
+    // Track A extern "C" wrapper intrinsics (docs/audit/MADAROS_EXTERN_C_
+    // BUILTIN_PORT_DISPATCH_2026-08-16): the parser rewrites an extern
+    // declaration into a fn forwarding to ffi_<name>; these entries let the
+    // inner call resolve.
+    //
+    // The list is closed and the parser knows it. parser/items.sio's
+    // extern_name_has_ffi_intrinsic carries the same twelve names and rewrites
+    // ONLY them, so an extern that is absent here never grows a wrapper body
+    // and never trips E137 on an unbound ffi_<name>. It keeps the bodyless
+    // declaration instead: legal to declare, refused at the CALL by E219.
+    // An earlier draft rewrote every declaration and, with is_extern false on
+    // the wrapper, E219 could no longer fire at all -- the refusal moved to
+    // the declaration site and a bindings module stopped compiling.
+    // scripts/ci/extern_builtin_mirror_gate.sh diffs the two lists against the
+    // backend registry arms that actually emit these intrinsics.
+    checker_bind_import_unknown_inplace(c, make_name("ffi_getpid"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_getppid"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_exit"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_abort"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_malloc"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_free"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_system"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_sqrt"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_floor"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_ceil"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_pow"))
+    checker_bind_import_unknown_inplace(c, make_name("ffi_tgamma"))
+    checker_bind_import_unknown_inplace(c, make_name("hessian_diag_of"))
     checker_bind_import_unknown_inplace(c, make_name("assert"))
     // Standard enum constructors used like values/functions by user code.
     checker_bind_import_unknown_inplace(c, make_name("Some"))
@@ -5133,7 +5169,22 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             // proven path ships. Revisit direct-read with a real return-mismatch
             // gate once `return <expr>` no longer crashes the check spine.
             (*c).current_fn_name = (*fd).name
-            let sig_id = fn_sig_table_find((*c).fn_sigs, (*fd).name)
+            // Defect B (docs/audit/MADAROS_PBPK28_NN_TENSOR_COMPILE_RUNTIME_DIVERGENCE_2026-08-17.md):
+            // a bare-name fn_sig_table_find here is the exact same disease the
+            // fn_sig_table_find_prefer_module doc comment describes for E175 --
+            // "the later module's body calls resolve to the earlier module's
+            // private sig" -- just for effect-checking (E035) rather than
+            // visibility. Two modules each declaring their own `fn main` (a
+            // real shape: an entry file importing specific names from a module
+            // that also happens to define its own main) collide on this
+            // self-lookup: whichever module's `main` sits earlier in the shared
+            // fn_sigs table wins, so the OTHER module's `main` gets checked
+            // against the wrong function's declared effects/return type.
+            // current_module_id is already correctly tracked per-module by
+            // this pass's caller (check_modules_verdict_boot4_with_visibility)
+            // -- prefer it, exactly as the sibling E175 fix already does at
+            // check.sio:7120.
+            let sig_id = fn_sig_table_find_prefer_module((*c).fn_sigs, (*fd).name, (*c).current_module_id)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
                 (*c).current_return_type = sig.return_type
@@ -8324,11 +8375,16 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         // #1622: calling an `extern "C"` name the native backend does not
         // implement. Refuse here rather than emit a call that reads 0.
-        // Checked at the CALL, not at the declaration: ffi_libm_call.sio
-        // declares tgamma/pow/floor/ceil and calls only sqrt, and
+        // Checked at the CALL, not at the declaration. A bindings module
+        // declares many names and a program calls few, so a declaration-site
+        // refusal would break the declarations for no gain:
         // parser_card_a_raw_pointer_types.sio declares malloc and never calls
-        // it -- both compile and pass today, and a declaration-site refusal
-        // would break them for no gain.
+        // it, and tests/run-pass/ffi_declared_never_called_is_legal.sio pins
+        // the case this rule exists for -- a declared, never-called name with
+        // no intrinsic at all. That fixture is also the guard on the parser:
+        // it only holds while parser/items.sio leaves such a declaration
+        // bodyless instead of giving it a ffi_<name> forwarding body, because
+        // a wrapper body carries is_extern false and this arm never fires.
         var refused_unimplemented = false
         if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
             checker_report_error_at_inplace(c, e.span, 219, 0, 0, 0)
@@ -14857,6 +14913,23 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("write_f64")) { return true }        // id 36
     if name_eq(n, make_name("acknowledge")) { return true }      // id 37
     if name_eq(n, make_name("require_confidence")) { return true } // id 38
+    // libm names this backend answers with an exact hardware instruction:
+    // sqrt (id 14, already allowlisted above as a plain builtin) plus these
+    // two. Both are ROUNDSD with an explicit rounding mode, correctly rounded
+    // by the ISA including -0.0, the infinities and NaN, so neither carries an
+    // error budget. pow and tgamma are deliberately NOT here -- they are
+    // approximations and belong behind their own witnesses.
+    if name_eq(n, make_name("floor")) { return true }            // id 47
+    if name_eq(n, make_name("ceil")) { return true }             // id 48
+    // pow and tgamma. These two ARE approximations, so the paragraph above
+    // deliberately excluded them; they are listed now because they finally
+    // have emitters -- emit_builtin_ffi_pow / emit_builtin_ffi_tgamma in
+    // native::math_ffi_emitters, wrapping the native::math_ffi kernels. The
+    // oracle measures 0.76 ulp (pow) and 3.64 ulp (tgamma), so both still
+    // belong behind their own reference vectors; what changes here is only
+    // that a call no longer fabricates 0.
+    if name_eq(n, make_name("pow")) { return true }              // id 49
+    if name_eq(n, make_name("tgamma")) { return true }           // id 50
     false
 }
 
@@ -22081,11 +22154,9 @@ impl Checker {
             }
             // #1622: calling an `extern "C"` name the native backend does not
             // implement. Refuse here rather than emit a call that reads 0.
-            // Checked at the CALL, not at the declaration: ffi_libm_call.sio
-            // declares tgamma/pow/floor/ceil and calls only sqrt, and
-            // parser_card_a_raw_pointer_types.sio declares malloc and never
-            // calls it — both compile and pass today, and a declaration-site
-            // refusal would break them for no gain.
+            // Checked at the CALL, not at the declaration -- see the same note
+            // on the in-place arm above, and the fixture that pins it,
+            // tests/run-pass/ffi_declared_never_called_is_legal.sio.
             var refused_unimplemented = false
             if sig.is_extern && !name_is_native_backend_builtin(sig.name) {
                 c = c.report_error_at(e.span, 219, 0, 0, 0)
