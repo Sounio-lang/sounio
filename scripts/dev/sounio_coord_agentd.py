@@ -28,12 +28,13 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.24.1"
+RUNTIME_VERSION = "2026.08.24.2"
 MAX_CONTROL_BYTES = 65536
 MAX_PROMPT_BYTES = 8192
 RING_BYTES = 65536
 TUI_SUBMIT_DELAY_SECONDS = 0.075
 SAFE_TOKEN = re.compile(r"[^A-Za-z0-9._-]+")
+ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 class AgentdError(RuntimeError):
@@ -144,6 +145,17 @@ def command_argv_digest(command: list[str]) -> str:
         command, ensure_ascii=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def logical_command_name(command: list[str]) -> str:
+    if Path(command[0]).name != "env":
+        return Path(command[0]).name
+    index = 1
+    while index < len(command) and ENV_ASSIGNMENT.match(command[index]):
+        index += 1
+    if index == len(command):
+        return "env"
+    return Path(command[index]).name
 
 
 def token_from(path: Path) -> str:
@@ -317,7 +329,7 @@ class Supervisor:
             "daemon_pid_start": process_start(daemon_pid),
             "harness_pid": self.child_pid,
             "harness_pid_start": process_start(self.child_pid),
-            "command": Path(self.command[0]).name,
+            "command": logical_command_name(self.command),
             "argv_digest": command_argv_digest(self.command),
             "socket": str(self.paths["socket"]),
             "token_file": str(self.paths["token"]),
@@ -586,7 +598,7 @@ def start_command(args: argparse.Namespace) -> int:
             if (
                 response.get("session_id") != args.session_id
                 or Path(str(response.get("worktree", ""))).resolve() != cwd
-                or response.get("command") != Path(command[0]).name
+                or response.get("command") != logical_command_name(command)
                 or response.get("argv_digest") != command_argv_digest(command)
             ):
                 raise AgentdError(
