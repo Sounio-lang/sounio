@@ -441,3 +441,59 @@ Every quantity is now a group order. The relativistic spin-factor dimension `6` 
 (Euclidean/Carrollian/Lorentzian) is the causal type of `z`. The whole tower is
 closed: proven where a clean proof exists, and where it does not (the universal
 cocycle formula), shown *why* — the level-4 sign cocycle is irreducibly complex.
+
+---
+
+## DEEPER: the derivation algebra is a KINEMATIC Lie algebra
+
+Beneath the Jordan/spin-factor layer sits a Lie algebra: `Der(P_z)`, the derivations
+of the Jordan product (equivalently, via Kantor–Koecher–Tits, the structure Lie
+algebra of the spin factor). Computed directly (solve `D(a∘b)=Da∘b+a∘Db`,
+`D(e0)=0`), with the Killing form identifying the real form:
+
+| causal type of `z` | `P_z` | `Der(P_z)` | Killing | Lie algebra |
+|---|---|---|---|---|
+| spacelike (`Q<0`) | `J_spin(5)`   | dim 10, semisimple | sig `(0,10)`   | **compact `so(5)`** (rotations) |
+| timelike (`Q>0`)  | `J_spin(4,1)` | dim 10, semisimple | sig `(4,6)`    | **`so(4,1)`** (de Sitter / Lorentz) |
+| null (`Q=0`)      | Carrollian    | dim 12, **non-semisimple** | rank 9, **radical dim 3** | **contraction**: (dim-9 semisimple) `⋉` (3-dim abelian radical = the null translations) |
+
+**Reading.** The three preservation geometries lift to the three families of the
+**Bacry–Lévy-Leblond kinematic algebra** classification:
+- moving from a **spacelike** to a **timelike** locus changes the *real form* of the
+  derivation algebra (compact `so(5)`, Killing `(0,10)` → non-compact `so(4,1)`,
+  Killing `(4,6)`) — same complexification `so(5,ℂ)=sp(4,ℂ)`, different real form;
+- moving to a **null** locus **contracts** it (İnönü–Wigner): the algebra becomes
+  non-semisimple, dim 12, with a **3-dimensional abelian radical** — precisely the
+  three null directions of the degenerate `(1,0,3)` form, acting as *null
+  translations*. This is the same mechanism that produces Carroll/Galilei spacetimes
+  from de Sitter/Poincaré.
+
+So **the preservation algebra of an exact-invariant carries a kinematic symmetry
+Lie algebra, and the causal type of the zero-divisor selects which** — rotational
+`so(5)` (spacelike), de Sitter `so(4,1)` (timelike), or a null-contracted
+Carroll-type algebra (null). Non-associativity is what makes the null case a
+contraction: the associator (concentrated on the doubling `e8`, §step 4) is the
+obstruction whose degeneration produces the abelian radical.
+
+### The stack, all the way down
+
+```
+zero-divisor z (with causal type under the square-form Q)
+   │  rung law
+   ▼
+signature (Euclidean / Carrollian / Lorentzian)          [geometry]
+   │  monomial kernel ⇒ dim = 2³−2 = 6
+   ▼
+spin factor  J_spin(5) / degenerate / J_spin(4,1)        [Jordan algebra]
+   │  Der / Kantor–Koecher–Tits
+   ▼
+kinematic Lie algebra  so(5) / Carroll-contraction / so(4,1)   [Lie symmetry]
+```
+
+Three layers — geometry, Jordan algebra, Lie symmetry — all indexed by one datum:
+the causal type of the privacy locus `z`. The universal open thread remains the
+closed-form cocycle (§last millimeter, proven non-existent in low degree); the new
+open thread is the exact Levi type of the null contraction (dim-9 semisimple part)
+and whether the `so(4,1)` / `so(3,2)` de Sitter vs anti-de Sitter split (base-split
+vs doubly-split, §ladder) corresponds to a physical dS/AdS distinction of the
+invariant's composition causality.
