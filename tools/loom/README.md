@@ -161,10 +161,16 @@ witness. Separate decision and measurement types reject role collapse with
 `E009`, and external agreement construction rejects with `E176`.
 This establishes source-separated measurement of four retained artifacts and
 identifies the Sounio equality rule as load-bearing. It does not establish the
-semantic correctness of those journals, organizational/process/hardware
-independence, collusion resistance, or trusted key custody. The compact 60-bit
-principal tokens also carry an accepted approximately 2^-60 false-refusal risk;
-collisions fail closed rather than creating false independence. The real-Pod
+semantic correctness of those journals or independence from an authority that
+controls journal writes at event time; a consistent-but-false journal and
+matching receipt still agree. It also does not establish organizational,
+process, or hardware independence, collusion resistance, or trusted key
+custody. Compact 60-bit principal-token collisions fail closed with an
+approximately 2^-60 false-refusal risk. The four fact-vector fields are also
+represented as 60-bit tokens: a collision in a genuinely differing field can
+fail open as false agreement, approximately 2^-60 for a one-field mismatch.
+Full-digest equality and separately supervised journal-write authority are the
+next integrity boundary. The real-Pod
 witness relocated
 compute from `t560-proxmox` to `r740-proxmox` over one retained Ceph RBD RWOP
 PVC. It is not state replication, simultaneous multi-node execution, or a
