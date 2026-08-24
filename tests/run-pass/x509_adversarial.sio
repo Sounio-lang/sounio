@@ -365,6 +365,41 @@ fn case_d_rdn_value_too_long() -> i64 with IO {
     0
 }
 
+// Case (e): oid_eq must not read past the end of its fixed [u8;20] arrays
+// when a_len/b_len is oversized. Found during the final whole-plan review
+// (2026-08-24): cert.sio records an OID's DER-encoded content_len as the
+// _len field even at call sites where the byte COPY into the [u8;20]
+// buffer is capped at 20 -- so a malformed/adversarial certificate with a
+// signature-algorithm OID longer than 20 bytes could reach oid_eq (used
+// for x509_parse_certificate's outer-vs-inner signature-algorithm
+// cross-check) with a_len/b_len > 20. Before the fix, `while i < a_len`
+// read a[i]/b[i] out of bounds on both fixed-size arrays. This is a
+// direct unit test of the fix in oid_eq itself (stdlib/x509/oid.sio),
+// independent of building a full oversized-OID certificate fixture --
+// the defensive bound belongs in oid_eq regardless of which caller might
+// pass an oversized length, so testing it there covers every caller.
+fn case_e_oid_eq_oversized_len() -> i64 with IO {
+    var a: [u8; 20] = [0; 20]
+    var b: [u8; 20] = [0; 20]
+    a[0] = 1
+    b[0] = 1
+    // Deliberately pass a length exceeding the 20-byte array size on both
+    // sides -- must be rejected (false), not read out of bounds.
+    if oid_eq(&a, 25, &b, 25) != false {
+        return 501
+    }
+    // Sanity: still correctly matches at the boundary (a_len == 20, the
+    // full array) and correctly rejects a genuine mismatch within bounds.
+    if oid_eq(&a, 20, &b, 20) != true {
+        return 502
+    }
+    b[1] = 9
+    if oid_eq(&a, 20, &b, 20) != false {
+        return 503
+    }
+    0
+}
+
 fn main() -> i64 with IO {
     let a = case_a_sig_alg_mismatch()
     if a != 0 {
@@ -390,6 +425,12 @@ fn main() -> i64 with IO {
         return 1
     }
 
-    println("x509_adversarial: sig-alg mismatch / tampered-TBS / too-many-extensions / RDN-value-too-long all correctly rejected")
+    let e = case_e_oid_eq_oversized_len()
+    if e != 0 {
+        print_int(e)
+        return 1
+    }
+
+    println("x509_adversarial: sig-alg mismatch / tampered-TBS / too-many-extensions / RDN-value-too-long / oid_eq-oversized-len all correctly rejected")
     return 0
 }

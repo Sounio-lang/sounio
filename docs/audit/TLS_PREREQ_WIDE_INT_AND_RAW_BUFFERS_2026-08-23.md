@@ -1205,3 +1205,100 @@ is broken until a decisive fix, mirroring Finding 24's, lands and is
 independently re-verified against repro (2) above (the field-by-field
 variant, since it is the form most likely to be reached for first as a
 "safe" workaround and is NOT safe).
+
+## Finding 27 (application-level, FIXED, NOT a Madaros compiler defect) — an uncapped OID copy loop and an uncapped OID-comparison loop bound, both reachable from an adversarial/malformed certificate
+
+Found during the final whole-plan review of the X.509 sub-project
+(2026-08-24), not by any individual task's own reviewer. Unlike Findings
+11-26, this is a bug in `stdlib/x509/{cert,oid}.sio` application code, not
+in the Madaros compiler itself -- flagged here anyway since it's directly
+adjacent to this doc's other X.509-related findings and future readers of
+this sub-project's audit trail should see the complete picture in one
+place.
+
+**Bug 1 (write side, `stdlib/x509/cert.sio`, `x509_parse_tbs_after_serial`'s
+signature-algorithm OID read):** the copy loop filling a fixed `oid_buf:
+[u8;20]` from a DER-decoded OID's raw bytes had no upper bound on the loop
+index beyond the OID's own (attacker-controlled, for a malformed
+certificate) `content_len`:
+
+```sio
+var oid_buf: [u8; 20] = [0; 20]
+var oi: i64 = 0
+while oi < oid_tag.content_len {              // WRONG -- no `&& oi < 20`
+    oid_buf[oi as usize] = (rawbuf_get(buf, oid_tag.content_start + oi) & 255) as u8
+    oi = oi + 1
+}
+```
+
+Every OTHER OID-reading loop in this file (four of them, at what were then
+lines 529, 895, 1119 before this fix) already had the correct `&& oi < 20`
+guard -- this one call site, from Task 5, was the sole exception, missed
+by two rounds of per-task review and by the controller's own repeated
+interface cross-checks (none of which specifically diffed sibling loops
+against each other for a missing guard). A certificate with a
+signature-algorithm OID longer than 20 bytes would silently write past
+`oid_buf`'s end. **Fixed** by adding the same `&& oi < 20` guard, matching
+the file's own established pattern everywhere else.
+
+**Bug 2 (read side, `stdlib/x509/oid.sio`, `pub fn oid_eq`):** the
+generic (non-width-specific) OID-equality function loops up to `a_len`
+(and, since `a_len == b_len` is checked first, `b_len`) directly, with no
+cap against the fixed `[u8;20]` array size:
+
+```sio
+pub fn oid_eq(a: &[u8; 20], a_len: i32, b: &[u8; 20], b_len: i32) -> bool {
+    if a_len != b_len { return false }
+    var i: i32 = 0
+    while i < a_len {                          // WRONG -- a_len uncapped
+        if a[i as usize] != b[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+```
+
+`a_len`/`b_len` are recorded from a DER OID's own `content_len` field at
+every call site in `cert.sio` -- and, critically, `content_len` is NOT
+capped to 20 even at call sites where the byte COPY into the `[u8;20]`
+buffer IS capped (this file's own established pattern only bounds the
+copy, never the recorded length -- confirmed at all four correctly-capped
+call sites: the length field always stores the raw, uncapped
+`content_len`). `oid_eq` is used by `x509_parse_certificate`'s outer-vs-
+inner signature-algorithm cross-check
+(`oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, ...)`), so a
+malformed certificate with either signature-algorithm OID longer than 20
+bytes reaches this function with an oversized length, reading past both
+20-byte arrays.
+
+**Confirmed via a minimal probe that Sounio's fixed-size arrays have no
+runtime bounds checking** -- an out-of-range index silently reads
+adjacent stack memory rather than panicking or clamping (`a[20]` through
+`a[24]` on a freshly-declared, zero-initialized `[u8;20]` local read back
+`255, 160, 20, 2, 1` -- clearly uninitialized/adjacent stack content, not
+zeros, and no crash). This confirms the read is a genuine out-of-bounds
+memory access, not a no-op.
+
+**Fixed** by adding `if a_len < 0 || a_len > 20 { return false }` before
+the comparison loop in `oid_eq` -- this closes the vulnerability
+regardless of which call site an oversized length originates from, rather
+than requiring every `_len`-recording site in `cert.sio` to be
+individually re-audited and capped. `oid_eq3`/`oid_eq8`/`oid_eq9`/
+`oid_eq10` were independently confirmed NOT to share this bug: their
+comparison loops use a hardcoded width (3/8/9/10) as the loop bound,
+never the caller-supplied length.
+
+**Regression test**: `tests/run-pass/x509_adversarial.sio`'s new case (e)
+unit-tests `oid_eq` directly with an oversized length (25 > 20) and
+confirms it returns `false` rather than reading out of bounds, plus two
+in-bounds sanity checks (exact-match at the full 20-byte boundary, and a
+genuine mismatch). Note for future readers: because the underlying defect
+is undefined behavior (reading uninitialized/adjacent stack memory, not a
+deterministic wrong answer), a before/after comparative test against the
+literal fix is not a reliable verification method on its own -- in one
+observed compiled build, `oid_eq(&a, 25, &b, 25)` happened to still return
+`false` even WITHOUT the fix, because the specific garbage bytes read past
+each array's end happened to differ between `a` and `b`. The probe above
+(confirming array indexing itself has no bounds checking) is what
+establishes the vulnerability is real, independent of whether any single
+compiled build's stack layout happens to mask it.
