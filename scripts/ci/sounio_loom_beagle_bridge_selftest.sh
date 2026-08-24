@@ -126,6 +126,8 @@ kernel_one="$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.loomKernelPid')
 guardian_one="$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.loomGuardianPid')"
 harness_one="$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.pid')"
 fingerprint_one="$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.generationFingerprint')"
+policy_receipt_one="$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.authorityStatus.sounioPolicyReceipt')"
+policy_runtime_one="$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.authorityStatus.sounioPolicyRuntimeDigest')"
 [[ "$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.status')" == running ]] || \
   fail 'spawned pane is not running'
 [[ "$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.cols')" == 101 ]] || \
@@ -138,12 +140,18 @@ fingerprint_one="$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.generation
   fail 'fresh generation lineage did not verify'
 [[ "$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.authorityStatus.generationTransitionCount')" == 0 ]] || \
   fail 'fresh generation reported a predecessor'
+[[ "$(json_value "$TEST_ROOT/spawn-one.json" 'value.pane.authorityStatus.sounioPolicyVerified')" == true ]] || \
+  fail 'fresh generation was not promoted by native Sounio policy'
+[[ "${#policy_receipt_one}" == 64 && "${#policy_runtime_one}" == 64 ]] || \
+  fail 'fresh generation omitted its native Sounio receipt identity'
 
 post_json /v1/spawn "$spawn_body" "$TEST_ROOT/spawn-idempotent.json"
 [[ "$(json_value "$TEST_ROOT/spawn-idempotent.json" 'value.pane.loomInstanceId')" == "$instance_one" ]] || \
   fail 'idempotent spawn replaced the physical generation'
 [[ "$(json_value "$TEST_ROOT/spawn-idempotent.json" 'value.pane.pid')" == "$harness_one" ]] || \
   fail 'idempotent spawn replaced the harness'
+[[ "$(json_value "$TEST_ROOT/spawn-idempotent.json" 'value.pane.authorityStatus.sounioPolicyReceipt')" == "$policy_receipt_one" ]] || \
+  fail 'journal growth rewrote the immutable generation-promotion receipt'
 
 conflict_code="$(curl --silent --output "$TEST_ROOT/conflict.json" --write-out '%{http_code}' \
   --request POST --header 'content-type: application/json' \
@@ -245,6 +253,7 @@ wait_state exited "$TEST_ROOT/exited.json"
 post_json /v1/spawn "$spawn_body" "$TEST_ROOT/spawn-two.json"
 instance_two="$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.loomInstanceId')"
 fingerprint_two="$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.generationFingerprint')"
+policy_receipt_two="$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.authorityStatus.sounioPolicyReceipt')"
 kernel_two="$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.loomKernelPid')"
 guardian_two="$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.loomGuardianPid')"
 harness_two="$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.pid')"
@@ -258,6 +267,10 @@ harness_two="$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.pid')"
   fail 'clean respawn omitted its predecessor'
 [[ "$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.authorityStatus.podResurrectionCount')" == 0 ]] || \
   fail 'clean respawn was misclassified as Pod resurrection'
+[[ "$(json_value "$TEST_ROOT/spawn-two.json" 'value.pane.authorityStatus.sounioPolicyVerified')" == true ]] || \
+  fail 'clean respawn was not promoted by native Sounio policy'
+[[ "$policy_receipt_two" != "$policy_receipt_one" ]] || \
+  fail 'clean respawn reused the predecessor Sounio receipt'
 
 post_json "/v1/panes/$PANE_PATH/input" '{"data":"printf '\''BEFORE_POD_DEATH_OK\\n'\''\n"}' \
   "$TEST_ROOT/input-before-pod-death.json"
@@ -286,6 +299,7 @@ grep -q 'pane-cwd-conflict' "$TEST_ROOT/lost-cwd.json" || \
 
 post_json /v1/spawn "$spawn_body" "$TEST_ROOT/spawn-pod-resurrected.json"
 instance_three="$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.loomInstanceId')"
+policy_receipt_three="$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.authorityStatus.sounioPolicyReceipt')"
 kernel_three="$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.loomKernelPid')"
 guardian_three="$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.loomGuardianPid')"
 harness_three="$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.pid')"
@@ -303,6 +317,22 @@ harness_three="$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.
   fail 'Pod resurrection counter was not incremented'
 [[ -n "$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.authorityStatus.generationLineageHead')" ]] || \
   fail 'Pod resurrection omitted its hash-chain receipt'
+[[ "$(json_value "$TEST_ROOT/spawn-pod-resurrected.json" 'value.pane.authorityStatus.sounioPolicyVerified')" == true ]] || \
+  fail 'Pod resurrection was not promoted by native Sounio policy'
+[[ "$policy_receipt_three" != "$policy_receipt_two" ]] || \
+  fail 'Pod resurrection reused the clean-respawn Sounio receipt'
+
+receipt_three="$(find "$STATE_DIR" -path "*/generations/$instance_three/sounio-continuity.receipt" -print -quit)"
+[[ -f "$receipt_three" ]] || fail 'Pod resurrection omitted its durable Sounio receipt'
+cp "$receipt_three" "$TEST_ROOT/sounio-continuity.receipt.backup"
+printf 'tamper=1\n' >> "$receipt_three"
+receipt_sabotage_code="$(curl --silent --output "$TEST_ROOT/sounio-receipt-sabotage.json" \
+  --write-out '%{http_code}' "$BASE_URL/v1/panes/$PANE_PATH/snapshot")"
+[[ "$receipt_sabotage_code" == 409 ]] || \
+  fail "Sounio receipt sabotage returned HTTP $receipt_sabotage_code instead of 409"
+grep -q 'sounio-continuity-receipt-mismatch' "$TEST_ROOT/sounio-receipt-sabotage.json" || \
+  fail 'Sounio receipt sabotage omitted its refusal reason'
+cp "$TEST_ROOT/sounio-continuity.receipt.backup" "$receipt_three"
 
 lineage_journal="$(find "$STATE_DIR" -name beagle.lineage.tsv -print -quit)"
 [[ -f "$lineage_journal" ]] || fail 'generation lineage journal is missing'
@@ -325,4 +355,4 @@ generations_after_refusal="$(find "$STATE_DIR" -path '*/generations/*' -type d |
 [[ "$generations_after_refusal" == "$generations_before_refusal" ]] || \
   fail 'lineage sabotage created an unproven generation before refusal'
 
-echo "sounio-loom-beagle-bridge-selftest: PASS protocol=beagle-pty-supervisor-v1 authority=loom kernel_recovery=same-generation pod_resurrection=proof-linked laundering=refused sabotage=refused-before-spawn websocket=pass journals=verified"
+echo "sounio-loom-beagle-bridge-selftest: PASS protocol=beagle-pty-supervisor-v1 authority=loom+sounio kernel_recovery=same-generation pod_resurrection=proof-linked native_policy=verified receipt_sabotage=refused laundering=refused lineage_sabotage=refused-before-spawn websocket=pass journals=verified"

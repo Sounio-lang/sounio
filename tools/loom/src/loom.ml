@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.4"
+let runtime_version = "2026.08.24.5"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -170,6 +170,55 @@ let process_output command arguments =
   match Unix.close_process_in input with
   | WEXITED 0 -> trim output
   | _ -> failf "command failed: %s" command
+
+let process_exchange command arguments input =
+  let stdin_read, stdin_write = Unix.pipe () in
+  let stdout_read, stdout_write = Unix.pipe () in
+  Unix.set_close_on_exec stdin_write;
+  Unix.set_close_on_exec stdout_read;
+  let pid =
+    try
+      Unix.create_process command arguments stdin_read stdout_write stdout_write
+    with error ->
+      Unix.close stdin_read;
+      Unix.close stdin_write;
+      Unix.close stdout_read;
+      Unix.close stdout_write;
+      raise error
+  in
+  Unix.close stdin_read;
+  Unix.close stdout_write;
+  let output = Buffer.create 512 in
+  let bytes = Bytes.create 4096 in
+  let close_noerr descriptor = try Unix.close descriptor with _ -> () in
+  Fun.protect
+    ~finally:(fun () ->
+      close_noerr stdin_write;
+      close_noerr stdout_read)
+    (fun () ->
+      write_all stdin_write input;
+      Unix.close stdin_write;
+      let rec drain () =
+        match Unix.read stdout_read bytes 0 (Bytes.length bytes) with
+        | 0 -> ()
+        | count -> Buffer.add_subbytes output bytes 0 count; drain ()
+      in
+      drain ();
+      let status =
+        try
+          let _, status = Unix.waitpid [] pid in
+          Some status
+        with Unix_error (ECHILD, _, _) -> None
+      in
+      let text = trim (Buffer.contents output) in
+      match status with
+      | None | Some (WEXITED 0) -> text
+      | Some (WEXITED code) ->
+          failf "command failed: %s rc=%d output=%s" command code text
+      | Some (WSIGNALED signal) ->
+          failf "command signaled: %s signal=%d output=%s" command signal text
+      | Some (WSTOPPED signal) ->
+          failf "command stopped: %s signal=%d output=%s" command signal text)
 
 let process_start pid =
   let value = read_file (Printf.sprintf "/proc/%d/stat" pid) in
@@ -2770,6 +2819,12 @@ type beagle_lineage_status = {
   pod_resurrection_count : int;
 }
 
+type sounio_continuity_status = {
+  policy_verified : bool;
+  receipt_digest : string;
+  runtime_digest : string;
+}
+
 let beagle_generation_journals paths instance =
   let generation_dir =
     Filename.concat (Filename.concat paths.session_dir "generations") instance
@@ -2959,6 +3014,118 @@ let beagle_lineage_status paths pane_id session_id current_instance =
       predecessor_semantic_head = ""; predecessor_guardian_head = "";
       transition_count = 0; pod_resurrection_count = 0 }
 
+let sounio_continuity_adapter () =
+  match Sys.getenv_opt "SOUNIO_LOOM_CONTINUITY_ADAPTER" with
+  | Some path when path <> "" -> path
+  | _ ->
+      let executable = Unix.realpath Sys.executable_name in
+      Filename.concat (Filename.dirname executable)
+        "sounio-loom-continuity-runtime"
+
+let sounio_continuity_token domain value =
+  let digest = sha256 (domain ^ "\000" ^ value) in
+  let bounded = Int64.of_string ("0x" ^ String.sub digest 0 15) in
+  Int64.to_string (Int64.add bounded 1L)
+
+let sounio_optional_token domain value =
+  if value = "" then "0" else sounio_continuity_token domain value
+
+let verify_sounio_continuity paths pane_id session_id instance fingerprint
+    semantic_head guardian_head lineage =
+  let transition_kind =
+    match lineage.latest_transition with
+    | "initial" -> 1
+    | "clean-respawn" -> 2
+    | "pod-resurrected" -> 3
+    | transition -> failf "sounio-continuity-transition-refused:%s" transition
+  in
+  let evidence_set_token =
+    sounio_continuity_token "evidence-set" (pane_id ^ "\000" ^ session_id)
+  in
+  let chain_material =
+    String.concat "\000"
+      [ pane_id; session_id; instance; fingerprint; semantic_head; guardian_head;
+        lineage.lineage_head; lineage.predecessor_instance;
+        lineage.predecessor_semantic_head; lineage.predecessor_guardian_head;
+        lineage.latest_transition; string_of_int lineage.transition_count;
+        string_of_int lineage.pod_resurrection_count ]
+  in
+  let facts =
+    [ evidence_set_token;
+      sounio_continuity_token "receipt-chain" chain_material;
+      sounio_continuity_token "generation" instance;
+      sounio_continuity_token "generation-fingerprint" fingerprint;
+      sounio_continuity_token "semantic-head" semantic_head;
+      sounio_continuity_token "guardian-head" guardian_head;
+      sounio_optional_token "lineage-head" lineage.lineage_head;
+      sounio_optional_token "predecessor-generation"
+        lineage.predecessor_instance;
+      sounio_optional_token "predecessor-semantic-head"
+        lineage.predecessor_semantic_head;
+      sounio_optional_token "predecessor-guardian-head"
+        lineage.predecessor_guardian_head;
+      string_of_int transition_kind;
+      string_of_int lineage.transition_count;
+      string_of_int lineage.pod_resurrection_count ]
+  in
+  let adapter = sounio_continuity_adapter () in
+  if not (Sys.file_exists adapter) then
+    failf "sounio-continuity-adapter-missing:%s" adapter;
+  let adapter = Unix.realpath adapter in
+  let runtime_digest = sha256 (read_file adapter) in
+  let fact_frame = String.concat " " facts ^ "\n" in
+  let verdict =
+    try process_exchange adapter [| adapter |] fact_frame
+    with Loom_error error -> failf "sounio-continuity-policy-refused:%s" error
+  in
+  let expected =
+    "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1"
+  in
+  if verdict <> expected then
+    failf "sounio-continuity-verdict-mismatch:%s" verdict;
+  let fresh_receipt =
+    Printf.sprintf
+      "schema=loom-native-continuity-receipt-v1\nadapter_sha256=%s\nfacts_sha256=%s\nfacts=%s\nverdict=%s\n"
+      runtime_digest (sha256 fact_frame) (trim fact_frame) verdict
+  in
+  let generation_dir =
+    Filename.concat (Filename.concat paths.session_dir "generations") instance
+  in
+  let receipt_path = Filename.concat generation_dir "sounio-continuity.receipt" in
+  let receipt =
+    if not (Sys.file_exists receipt_path) then (
+      atomic_write receipt_path fresh_receipt;
+      fresh_receipt)
+    else
+      let stored = read_file receipt_path in
+      let fields = parse_key_values receipt_path in
+      let schema = table_value fields "schema" in
+      let stored_adapter = table_value fields "adapter_sha256" in
+      let stored_facts = table_value fields "facts" in
+      let stored_facts_digest = table_value fields "facts_sha256" in
+      let stored_verdict = table_value fields "verdict" in
+      let stored_frame = stored_facts ^ "\n" in
+      let canonical =
+        Printf.sprintf
+          "schema=%s\nadapter_sha256=%s\nfacts_sha256=%s\nfacts=%s\nverdict=%s\n"
+          schema stored_adapter stored_facts_digest stored_facts stored_verdict
+      in
+      if schema <> "loom-native-continuity-receipt-v1"
+         || stored_adapter = "" || stored_facts = ""
+         || stored_facts_digest <> sha256 stored_frame
+         || stored_verdict <> expected || stored <> canonical
+      then failf "sounio-continuity-receipt-mismatch";
+      let replayed =
+        try process_exchange adapter [| adapter |] stored_frame
+        with Loom_error error ->
+          failf "sounio-continuity-replay-refused:%s" error
+      in
+      if replayed <> expected then
+        failf "sounio-continuity-replay-mismatch:%s" replayed;
+      stored
+  in
+  { policy_verified = true; receipt_digest = sha256 receipt; runtime_digest }
+
 let beagle_descriptor root pane_id =
   let paths = beagle_paths root pane_id in
   if not (Sys.file_exists paths.descriptor_path) then failf "pane-not-found";
@@ -3002,8 +3169,15 @@ let beagle_status_json root pane_id =
       (true, semantic_head, guardian_head, recovery_count)
     with _ -> (false, "", "", 0)
   in
+  let continuity =
+    if journal_verified && lineage.lineage_verified then
+      verify_sounio_continuity paths pane_id session_id instance
+        generation_fingerprint semantic_head guardian_head lineage
+    else
+      { policy_verified = false; receipt_digest = ""; runtime_digest = "" }
+  in
   Printf.sprintf
-    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s}}"
+    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s}}"
     (json_quote pane_id) (json_quote session_id)
     (table_value ~default:"0" descriptor "harness_pid") (json_quote status)
     (json_quote
@@ -3029,6 +3203,9 @@ let beagle_status_json root pane_id =
     (json_quote lineage.predecessor_instance)
     (json_quote lineage.predecessor_semantic_head)
     (json_quote lineage.predecessor_guardian_head)
+    (if continuity.policy_verified then "true" else "false")
+    (json_quote continuity.receipt_digest)
+    (json_quote continuity.runtime_digest)
 
 let beagle_metadata_for paths pane_id session_id instance cols rows =
   let previous = read_beagle_meta paths in
@@ -3322,6 +3499,7 @@ let beagle_handle_connection root descriptor =
         if message = "pane-not-found" then "404 Not Found"
         else if starts_with message "generation-lineage-proof-invalid:" then
           "409 Conflict"
+        else if starts_with message "sounio-continuity-" then "409 Conflict"
         else if
           List.mem message
             [ "pane-identity-conflict"; "pane-cwd-conflict";
