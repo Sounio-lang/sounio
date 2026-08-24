@@ -163,7 +163,7 @@ output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sen
   --message 'wake the physical session, not its background claim')"
 session_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$session_message" ]] || fail 'session-history send did not return a message id'
-grep -q "^WAKE_DELIVERED message_id=$session_message .*address=$claude_pane discovery=session-history$" \
+grep -q "^WAKE_DELIVERED message_id=$session_message .*address=$claude_pane .*discovery=session-history$" \
   <<< "$output" || fail 'session history did not bridge the physical and ownership worktrees'
 wait_for_text "$CLAUDE_LOG" "$session_message" || \
   fail 'session-history wake did not reach the physical harness pane'
@@ -180,7 +180,7 @@ output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sen
   --message 'expired endpoint must rediscover the verified physical session')"
 expired_session_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$expired_session_message" ]] || fail 'expired session endpoint send returned no message id'
-grep -q "^WAKE_DELIVERED message_id=$expired_session_message .*address=$claude_pane discovery=session-history$" \
+grep -q "^WAKE_DELIVERED message_id=$expired_session_message .*address=$claude_pane .*discovery=session-history$" \
   <<< "$output" || fail 'expired endpoint blocked verified session-history rediscovery'
 wait_for_text "$CLAUDE_LOG" "$expired_session_message" || \
   fail 'expired endpoint rediscovery did not reach the physical harness pane'
@@ -195,7 +195,7 @@ output="$(SOUNIO_COORD_DISCOVERY_SOCKET="$SOCKET" coord "$REPO" send --agent sen
   --message 'wake the Grok-compatible lane')"
 grok_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$grok_message" ]] || fail 'cross-harness send did not return a message id'
-grep -q "^WAKE_DELIVERED message_id=$grok_message .*address=$grok_pane discovery=identity-root$" \
+grep -q "^WAKE_DELIVERED message_id=$grok_message .*address=$grok_pane .*discovery=identity-root$" \
   <<< "$output" || fail 'Grok lane was not woken through verified history'
 
 tmux -S "$SOCKET" new-window -d -t recipient -n grok-duplicate -c "$GROK_HOME" \

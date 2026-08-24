@@ -467,23 +467,49 @@ coord_retry() {
   done
   fail "coordination operation did not clear lock contention: $output"
 }
-SOUNIO_COORD_COMMAND="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" \
-SOUNIO_COORD_DIR="$TEST_ROOT/coord-bus" SOUNIO_COORD_RUNTIME_MODE=local \
-  "$LOOM" start --state-dir "$TEST_ROOT/coord-loom" --agent "$COORD_AGENT" \
-  --lane "$COORD_LANE" --session-id loom-coord-selftest --cwd "$ROOT_DIR" -- \
-  "$TEST_ROOT/codex-test" >/dev/null
+start_coord_generation() {
+  SOUNIO_COORD_COMMAND="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" \
+  SOUNIO_COORD_DIR="$TEST_ROOT/coord-bus" SOUNIO_COORD_RUNTIME_MODE=local \
+    "$LOOM" start --state-dir "$TEST_ROOT/coord-loom" --agent "$COORD_AGENT" \
+    --lane "$COORD_LANE" --session-id loom-coord-selftest --cwd "$ROOT_DIR" -- \
+    "$TEST_ROOT/codex-test" >/dev/null
+}
+coord_loom_status() {
+  SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" status \
+    --state-dir "$TEST_ROOT/coord-loom" --cwd "$ROOT_DIR" \
+    --agent "$COORD_AGENT" --lane "$COORD_LANE"
+}
+wait_coord_endpoint() {
+  local output='' attempt
+  for attempt in $(seq 1 100); do
+    output="$(coord endpoint-status --agent "$COORD_AGENT" --lane "$COORD_LANE" 2>/dev/null || true)"
+    [[ "$output" == *'state=active'* && "$output" == *'transport=loom'* ]] && {
+      printf '%s\n' "$output"
+      return 0
+    }
+    sleep 0.05
+  done
+  fail "Loom coordination endpoint did not become active: $output"
+}
+kill_coord_generation() {
+  local status="$1" pid output='' attempt
+  for pid in "$(field daemon_pid "$status")" "$(field guardian_pid "$status")" \
+    "$(field harness_pid "$status")"; do
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || fail "coordination generation omitted a process identity: $status"
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  for attempt in $(seq 1 100); do
+    output="$(coord endpoint-status --agent "$COORD_AGENT" --lane "$COORD_LANE" 2>&1 || true)"
+    [[ "$output" != *'state=active'* ]] && return 0
+    sleep 0.05
+  done
+  fail "dead coordination generation retained an active endpoint: $output"
+}
+
+start_coord_generation
 COORD_LOOM_ACTIVE=1
-endpoint=''
-for _ in $(seq 1 100); do
-  endpoint="$(coord endpoint-status --agent "$COORD_AGENT" --lane "$COORD_LANE" 2>/dev/null || true)"
-  [[ "$endpoint" == *'state=active'* && "$endpoint" == *'transport=loom'* ]] && break
-  sleep 0.05
-done
-[[ "$endpoint" == *'state=active'* && "$endpoint" == *'transport=loom'* ]] || \
-  fail "Loom did not auto-register a live coordination endpoint: $endpoint"
-coord_before="$(SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" status \
-  --state-dir "$TEST_ROOT/coord-loom" --cwd "$ROOT_DIR" \
-  --agent "$COORD_AGENT" --lane "$COORD_LANE")"
+endpoint="$(wait_coord_endpoint)"
+coord_before="$(coord_loom_status)"
 coord_guardian="$(field guardian_pid "$coord_before")"
 coord_harness="$(field harness_pid "$coord_before")"
 coord_instance="$(field instance_id "$coord_before")"
@@ -508,17 +534,8 @@ SOUNIO_COORD_COMMAND="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" \
 SOUNIO_COORD_DIR="$TEST_ROOT/coord-bus" SOUNIO_COORD_RUNTIME_MODE=local \
   "$LOOM" recover --state-dir "$TEST_ROOT/coord-loom" --cwd "$ROOT_DIR" \
     --agent "$COORD_AGENT" --lane "$COORD_LANE" >/dev/null
-endpoint=''
-for _ in $(seq 1 100); do
-  endpoint="$(coord endpoint-status --agent "$COORD_AGENT" --lane "$COORD_LANE" 2>/dev/null || true)"
-  [[ "$endpoint" == *'state=active'* && "$endpoint" == *'transport=loom'* ]] && break
-  sleep 0.05
-done
-[[ "$endpoint" == *'state=active'* && "$endpoint" == *'transport=loom'* ]] || \
-  fail "recovered Loom kernel did not restore its coordination endpoint: $endpoint"
-coord_after="$(SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" status \
-  --state-dir "$TEST_ROOT/coord-loom" --cwd "$ROOT_DIR" \
-  --agent "$COORD_AGENT" --lane "$COORD_LANE")"
+endpoint="$(wait_coord_endpoint)"
+coord_after="$(coord_loom_status)"
 [[ "$(field guardian_pid "$coord_after")" == "$coord_guardian" && \
   "$(field harness_pid "$coord_after")" == "$coord_harness" && \
   "$(field instance_id "$coord_after")" == "$coord_instance" ]] || \
@@ -541,6 +558,81 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 [[ "$coord_output" == *'Sounio coordination wake:'* ]] || fail 'bus wake did not reach the Loom-owned PTY'
+
+first_receipt="$(grep "^WAKE_RECEIPT message_id=$message_id " <<< "$message_status")"
+[[ "$(field generation "$first_receipt")" == "$coord_instance" ]] || \
+  fail 'first wake receipt was not bound to the live Loom generation'
+same_generation_retry="$(coord_retry wake --agent loom-sender --lane transport-test \
+  --message "$message_id")"
+[[ "$same_generation_retry" == *'WAKE_SKIPPED'* && \
+  "$same_generation_retry" == *"generation=$coord_instance"* && \
+  "$same_generation_retry" == *'reason=already-delivered'* ]] || \
+  fail "same-generation retry was not deduplicated: $same_generation_retry"
+
+kill_coord_generation "$coord_after"
+start_coord_generation
+endpoint="$(wait_coord_endpoint)"
+coord_generation_two="$(coord_loom_status)"
+coord_instance_two="$(field instance_id "$coord_generation_two")"
+[[ -n "$coord_instance_two" && "$coord_instance_two" != "$coord_instance" ]] || \
+  fail 'full generation death did not produce a successor identity'
+generation_two_wake="$(coord_retry wake --agent loom-sender --lane transport-test \
+  --message "$message_id")"
+[[ "$generation_two_wake" == *'WAKE_DELIVERED'* && \
+  "$generation_two_wake" == *"generation=$coord_instance_two"* ]] || \
+  fail "unacknowledged message did not replay into the successor generation: $generation_two_wake"
+generation_two_output=''
+for _ in $(seq 1 100); do
+  generation_two_output="$(SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" snapshot \
+    --state-dir "$TEST_ROOT/coord-loom" --cwd "$ROOT_DIR" \
+    --agent "$COORD_AGENT" --lane "$COORD_LANE" --cursor 0 2>/dev/null || true)"
+  [[ "$generation_two_output" == *"$message_id"* ]] && break
+  sleep 0.05
+done
+[[ "$generation_two_output" == *"$message_id"* ]] || \
+  fail 'successor generation PTY omitted the replayed wake'
+generation_two_retry="$(coord_retry wake --agent loom-sender --lane transport-test \
+  --message "$message_id")"
+[[ "$generation_two_retry" == *'WAKE_SKIPPED'* && \
+  "$generation_two_retry" == *"generation=$coord_instance_two"* && \
+  "$generation_two_retry" == *'reason=already-delivered'* ]] || \
+  fail "successor generation retry was not deduplicated: $generation_two_retry"
+
+message_status="$(coord_retry message-status --agent loom-sender --lane transport-test \
+  --message "$message_id")"
+[[ "$message_status" == *'wakes=2'* ]] || \
+  fail "cross-generation status did not retain two wake receipts: $message_status"
+[[ "$(grep -c "^WAKE_RECEIPT message_id=$message_id " <<< "$message_status")" -eq 2 ]] || \
+  fail 'cross-generation status did not expose exactly two receipt generations'
+grep -q "generation=$coord_instance$" <<< "$message_status" || \
+  fail 'cross-generation status lost the predecessor wake generation'
+grep -q "generation=$coord_instance_two$" <<< "$message_status" || \
+  fail 'cross-generation status lost the successor wake generation'
+
+coord_retry ack --agent "$COORD_AGENT" --lane "$COORD_LANE" \
+  --message "$message_id" >/dev/null
+kill_coord_generation "$coord_generation_two"
+start_coord_generation
+endpoint="$(wait_coord_endpoint)"
+coord_generation_three="$(coord_loom_status)"
+coord_instance_three="$(field instance_id "$coord_generation_three")"
+[[ -n "$coord_instance_three" && "$coord_instance_three" != "$coord_instance_two" ]] || \
+  fail 'ACK control did not start a distinct third generation'
+acked_retry="$(coord_retry wake --agent loom-sender --lane transport-test \
+  --message "$message_id")"
+[[ "$acked_retry" == *'WAKE_SKIPPED'* && "$acked_retry" == *'reason=acknowledged'* ]] || \
+  fail "durable ACK did not suppress third-generation replay: $acked_retry"
+sleep 0.1
+generation_three_output="$(SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" snapshot \
+  --state-dir "$TEST_ROOT/coord-loom" --cwd "$ROOT_DIR" \
+  --agent "$COORD_AGENT" --lane "$COORD_LANE" --cursor 0 2>/dev/null || true)"
+[[ "$generation_three_output" != *"$message_id"* ]] || \
+  fail 'acknowledged message was injected into the third generation'
+message_status="$(coord_retry message-status --agent loom-sender --lane transport-test \
+  --message "$message_id")"
+[[ "$message_status" == *'acknowledged=1'* && "$message_status" == *'wakes=2'* ]] || \
+  fail "ACK control changed the durable wake count: $message_status"
+
 SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" stop --state-dir "$TEST_ROOT/coord-loom" \
   --cwd "$ROOT_DIR" --agent "$COORD_AGENT" --lane "$COORD_LANE" >/dev/null
 COORD_LOOM_ACTIVE=0
@@ -650,9 +742,10 @@ grep -q 'configured fleet agent command is unavailable' \
   "$TEST_ROOT/fleet-adapter.out" || \
   fail 'unavailable configured fleet adapter was refused for the wrong reason'
 
-if rg -n '\btmux\b' "$ROOT_DIR/tools/loom" "$ROOT_DIR/bin/sounio-loom" \
+if rg -n '\btmux\b' "$ROOT_DIR/tools/loom/src" "$ROOT_DIR/tools/loom/dune-project" \
+  "$ROOT_DIR/bin/sounio-loom" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null; then
   fail 'Loom attach path contains a tmux dependency'
 fi
 
-echo "sounio-loom-selftest: PASS language=OCaml protocol=1 instance=$instance_id guardian_instance=$guard_instance kernel_crashes=6 post_pod_reconcile=idempotent"
+echo "sounio-loom-selftest: PASS language=OCaml protocol=1 instance=$instance_id guardian_instance=$guard_instance kernel_crashes=6 coord_generations=3 unacked_replay=delivered acked_replay=suppressed post_pod_reconcile=idempotent"
