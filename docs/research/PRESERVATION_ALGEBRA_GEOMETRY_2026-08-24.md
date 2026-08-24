@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.preservation-algebra-geometry-2026-08-24
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -101,3 +102,54 @@ depending on the ambient — a genuinely new axis for invariant-type design.
 `scratchpad/pz_frontier.py` (division, exact rational), `scratchpad/family_sig.py`
 (family + Composable intersection), `scratchpad/splitfast.py` (split, numpy scan
 of all 84).
+
+---
+
+## UPDATE (same day): the ladder closes — Lorentzian appears under base-split
+
+Extending to a **fully parametrized Cayley–Dickson** (doubling-sign vector `μ⃗`,
+`scratchpad/ladder.py`) and scanning generic ZDs settles the open question: the
+preservation-signature ladder is **complete**, and which rung you land on is set
+by *where* you split and *which* zero-divisor you pick.
+
+```
+μ⃗ = (−,−,−,−)  division      : (0,5,0)×84                          all Euclidean
+μ⃗ = (−,−,−,+)  last-split    : (1,0,3)×84                          all Carrollian
+μ⃗ = (−,−,+,−)  BASE-SPLIT    : (0,5,0)×12 + (1,0,3)×48 + (4,1,0)×24   ALL THREE coexist
+μ⃗ = (−,−,+,+)  doubly-split  : (1,0,3)×36 + (3,2,0)×48             Carrollian + Lorentzian
+```
+
+`(4,1,0)` is a **nondegenerate Lorentzian** spin factor `J_spin(4,1)` — the 5D
+Minkowski/de-Sitter signature, whose structure group is `SO(4,1)`. Verified
+**exactly** (rational arithmetic, `scratchpad/verify_lorentz.py`): for base-split
+`z=e4+e13`, `ker L_z` dim 4 (genuine two-sided ZD), `P_z` dim 6, imaginary dim 5,
+**Jordan-closed and spin-factor**, signature `(4,1,0)`.
+
+### The finding
+
+The preservation algebra of an exact-invariant realizes the **complete signature
+ladder of relativistic geometry — Euclidean → Carrollian → Lorentzian** — as a
+function of the Cayley–Dickson split-vector and the zero-divisor. Crucially, a
+**single base-split algebra hosts all three simultaneously**: 12 Euclidean, 48
+Carrollian, 24 Lorentzian pair-type loci. So within one algebra, *the choice of
+privacy-locus `z` selects the composition geometry of the invariant.*
+
+### Sounio consequence (sharpened)
+
+`ExactlyPrivate<T, z>` is not one type — it is a **family whose composition
+geometry is chosen by `z`**: pick a Euclidean locus and privacy composes freely
+and definitely; pick a Lorentzian locus and composition-safety acquires a genuine
+light-cone (`SO(4,1)` de-Sitter causal structure among preserving operations —
+timelike vs spacelike operation-types, a causal order on capability composition).
+This makes the ambient-split-vector and the ZD-locus *two type-level knobs* on the
+causal/metric character of how invariants compose — an axis with, as far as the
+literature scanned shows, no prior owner.
+
+### Remaining open
+
+- Is the rung a **closed-form function** of `(μ⃗, z)`? The base-split split of
+  84 into 12/48/24 suggests the ZD-orbit under the split `G2`-analogue indexes the
+  rung; not yet derived.
+- Does `(4,1)` vs `(3,2)` correspond to a physically meaningful distinction
+  (de Sitter vs anti-de Sitter-like) of the invariant's composition causal order?
+- Lean formalization of "base-split `z=e4+e13` ⇒ `P_z ≅ J_spin(4,1)`".
