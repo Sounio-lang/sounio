@@ -62,6 +62,30 @@ expect_accept_measurement_pre_spawn() {
     fail "$label returned a non-canonical measured pre-spawn verdict: $output"
 }
 
+expect_accept_observation_authority() {
+  local label="$1" facts="$2" output
+  output="$(printf '%s\n' "$facts" | "$ADAPTER")" || \
+    fail "$label was refused"
+  [[ "$output" == \
+    'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v3 authority=three-principals+full-sha256-agreement' ]] || \
+    fail "$label returned a non-canonical observation-authority verdict: $output"
+}
+
+observation_authority_frame() {
+  local measured_semantic_start="${1:-21}" journal_principal="${2:-1301}"
+  local values=(
+    9005 1002 1101 1201 "$journal_principal" 1401 1501 1
+    2101 2201 2301 2401 2101 2201 2301 2401
+  )
+  local start offset
+  for start in 1 11 21 31 1 11 "$measured_semantic_start" 31; do
+    for offset in 0 1 2 3 4 5 6 7; do
+      values+=("$((start + offset))")
+    done
+  done
+  printf '%s' "${values[*]}"
+}
+
 expect_refuse() {
   local label="$1" facts="$2" expected_rc="$3" output rc=0
   set +e
@@ -89,6 +113,12 @@ expect_accept_independent independently-observed-clean \
 expect_accept_pre_spawn independent-pre-spawn '9003 1002 1101 1201 1301'
 expect_accept_measurement_pre_spawn independently-measured-pre-spawn \
   '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401'
+authority_match="$(observation_authority_frame)"
+authority_digest_mismatch="$(observation_authority_frame 22)"
+authority_collapsed_principal="$(observation_authority_frame 21 1201)"
+read -r -a authority_fields <<< "$authority_match"
+authority_missing_field="${authority_fields[*]:0:${#authority_fields[@]}-1}"
+expect_accept_observation_authority observation-authority "$authority_match"
 expect_refuse predecessor-missing \
   '101 111 203 303 403 503 602 702 0 902 3 2 1' 42
 expect_refuse pod-count-zero \
@@ -106,6 +136,11 @@ expect_refuse measured-semantic-disagreement \
   '9004 1002 1101 1201 1301 2101 2201 2302 2401 2101 2201 2301 2401' 42
 expect_refuse measured-pre-spawn-missing-field \
   '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301' 64
+expect_refuse observation-authority-full-digest-disagreement \
+  "$authority_digest_mismatch" 42
+expect_refuse observation-authority-collapsed-journal-principal \
+  "$authority_collapsed_principal" 42
+expect_refuse observation-authority-missing-field "$authority_missing_field" 64
 expect_refuse missing-independent-observation \
   '101 111 214 314 414 514 613 713 813 913 3 3 2 1002 2 1101 1201 0' 42
 expect_refuse extra-field \
@@ -248,4 +283,46 @@ measurement_mutant_output="$(
   'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v2 authority=disjoint-principals+measured-fact-agreement' ]] || \
   fail 'mutated measurement policy did not admit the formerly refused disagreement'
 
-echo 'sounio-loom-continuity-adapter-selftest: PASS language=Sounio engine=lean_single transport=stdin initial=accept clean=accept pod=accept signed=accept independent_pod=accept independent_clean=accept pre_spawn=accept measured_pre_spawn=accept predecessor=refused signed_predecessor=refused collapsed_principal=refused collapsed_pre_spawn=refused measurement_disagreement=refused missing_observation=refused count=refused kind=refused canonical=refused sabotage_predecessor_guard=exposed sabotage_signed_predecessor=exposed sabotage_principal_disjointness=exposed sabotage_measurement_agreement=exposed'
+digest_mutated="$WORK/loom_continuity_digest_mutated.sio"
+awk '
+  BEGIN { in_function=0; skip_body=0; changed=0 }
+  $0 == "fn full_digest_vectors_agree(" {
+    in_function=1
+    print
+    next
+  }
+  in_function && !skip_body {
+    print
+    if ($0 == ") -> bool {") {
+      print "    true"
+      skip_body=1
+      changed=changed + 1
+    }
+    next
+  }
+  skip_body {
+    if ($0 == "}") {
+      print
+      in_function=0
+      skip_body=0
+    }
+    next
+  }
+  { print }
+  END { if (changed != 1) exit 42 }
+' "$MODULE" > "$digest_mutated" || \
+  fail 'could not apply full-digest-agreement sabotage'
+
+digest_mutant="$WORK/sounio-loom-continuity-digest-mutant"
+SOUNIO_LOOM_CONTINUITY_PREBUILT= \
+SOUNIO_LOOM_CONTINUITY_MODULE="$digest_mutated" \
+SOUNIO_LOOM_CONTINUITY_OUTPUT="$digest_mutant" \
+  "$BUILD" >/dev/null
+digest_mutant_output="$(
+  printf '%s\n' "$authority_digest_mismatch" | "$digest_mutant"
+)" || fail 'full-digest sabotage did not expose the aliased disagreement witness'
+[[ "$digest_mutant_output" == \
+  'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v3 authority=three-principals+full-sha256-agreement' ]] || \
+  fail 'mutated full-digest policy did not admit the formerly refused alias witness'
+
+echo 'sounio-loom-continuity-adapter-selftest: PASS language=Sounio engine=lean_single transport=stdin initial=accept clean=accept pod=accept signed=accept independent_pod=accept independent_clean=accept pre_spawn=accept measured_pre_spawn=accept observation_authority=accept predecessor=refused signed_predecessor=refused collapsed_principal=refused collapsed_pre_spawn=refused measurement_disagreement=refused full_digest_disagreement=refused collapsed_journal_principal=refused missing_observation=refused count=refused kind=refused canonical=refused sabotage_predecessor_guard=exposed sabotage_signed_predecessor=exposed sabotage_principal_disjointness=exposed sabotage_measurement_agreement=exposed sabotage_full_digest_agreement=exposed'
