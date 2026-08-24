@@ -22,7 +22,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.24.5"
+RUNTIME_VERSION = "2026.08.24.6"
 UUID_RE = re.compile(
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -41,6 +41,7 @@ class LaunchPlan:
     session_id: str
     identity: str
     command: list[str]
+    home: Path | None = None
 
 
 def slug(value: str, limit: int = 96) -> str:
@@ -116,16 +117,21 @@ def command_argv_digest(command: list[str]) -> str:
 
 
 def capability_wrapped_command(
-    command: list[str], start_capability_id: str | None
+    command: list[str], start_capability_id: str | None, home: Path | None
 ) -> list[str]:
-    if start_capability_id is None:
+    assignments: list[str] = []
+    if home is not None:
+        assignments.append(f"HOME={home}")
+    if start_capability_id is not None:
+        assignments.append(f"SOUNIO_FLEET_START_CAPABILITY_ID={start_capability_id}")
+    if not assignments:
         return command
     env_command = shutil.which("env")
     if env_command is None:
         raise FleetError("env is required to bind a fleet start capability")
     return [
         str(Path(env_command).resolve()),
-        f"SOUNIO_FLEET_START_CAPABILITY_ID={start_capability_id}",
+        *assignments,
         *command,
     ]
 
@@ -313,7 +319,9 @@ def resolve_kind(kind: str, home: Path, slot: str, cwd: Path) -> LaunchPlan:
                 "user,local",
             ]
             identity = "exact"
-        return LaunchPlan("claude", session_lane(session_id), session_id, identity, command)
+        return LaunchPlan(
+            "claude", session_lane(session_id), session_id, identity, command, home
+        )
 
     if kind == "codex":
         executable = require_program(["codex"])
@@ -331,7 +339,9 @@ def resolve_kind(kind: str, home: Path, slot: str, cwd: Path) -> LaunchPlan:
             session_id = str(uuid.uuid4())
             command = [executable]
             identity = "bootstrap"
-        return LaunchPlan("codex", session_lane(session_id), session_id, identity, command)
+        return LaunchPlan(
+            "codex", session_lane(session_id), session_id, identity, command, home
+        )
 
     if kind == "kimi":
         executable = require_program(["kimi", "kimi-cli"])
@@ -342,13 +352,14 @@ def resolve_kind(kind: str, home: Path, slot: str, cwd: Path) -> LaunchPlan:
             session_id,
             "standalone",
             [executable, "--continue"],
+            home,
         )
 
     if kind == "grok":
         executable = require_program(["grok"])
         session_id = str(uuid.uuid4())
         return LaunchPlan(
-            "grok", f"fleet-{slug(slot)}", session_id, "standalone", [executable]
+            "grok", f"fleet-{slug(slot)}", session_id, "standalone", [executable], home
         )
 
     if kind == "cursor":
@@ -361,14 +372,14 @@ def resolve_kind(kind: str, home: Path, slot: str, cwd: Path) -> LaunchPlan:
             executable,
         ]
         return LaunchPlan(
-            "cursor", f"fleet-{slug(slot)}", session_id, "standalone", command
+            "cursor", f"fleet-{slug(slot)}", session_id, "standalone", command, home
         )
 
     if kind == "empryo":
         executable = require_program(["em", "empryo"])
         session_id = str(uuid.uuid4())
         return LaunchPlan(
-            "empryo", f"fleet-{slug(slot)}", session_id, "standalone", [executable]
+            "empryo", f"fleet-{slug(slot)}", session_id, "standalone", [executable], home
         )
 
     raise FleetError(f"unsupported fleet agent kind: {kind}")
@@ -431,7 +442,7 @@ def start_or_reuse(
             paths["mapping"].unlink(missing_ok=True)
 
         supervised_command = capability_wrapped_command(
-            plan.command, start_capability_id
+            plan.command, start_capability_id, plan.home
         )
         result = run_agentd(
             [

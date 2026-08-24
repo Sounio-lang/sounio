@@ -15,12 +15,16 @@ TMUX_SOCKET="$TEST_ROOT/tmux.sock"
 SESSION_ID='01a02a17-f139-7613-98a1-76a7d516f4d7'
 LANE='session-01a02a17-f139-7613-98a1-'
 SLOT='codex-9'
+KIND_SLOT='claude-home'
+KIND_LOG="$TEST_ROOT/claude-home.log"
 
 cleanup() {
   tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
   if [[ -x "$RUNTIME/sounio-fleet-agent-runtime" && -d "$REPO" ]]; then
     SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
       stop --cwd "$REPO" --slot "$SLOT" >/dev/null 2>&1 || true
+    SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+      stop --cwd "$REPO" --slot "$KIND_SLOT" >/dev/null 2>&1 || true
   fi
   rm -rf "$TEST_ROOT"
 }
@@ -54,7 +58,7 @@ import sys
 
 log = sys.argv[1]
 with open(log, "a", encoding="utf-8") as handle:
-    handle.write(f"START pid={os.getpid()}\n")
+    handle.write(f"START pid={os.getpid()} HOME={os.environ.get('HOME', '-')}\n")
     handle.flush()
 print("RECEIVER_READY", flush=True)
 for line in sys.stdin:
@@ -70,6 +74,9 @@ exit 0
 SH
 cat > "$FAKE_BIN/claude" <<'SH'
 #!/usr/bin/env bash
+if [[ -n "${FLEET_FAKE_RECEIVER:-}" && -n "${FLEET_FAKE_LOG:-}" ]]; then
+  exec "$FLEET_FAKE_RECEIVER" "$FLEET_FAKE_LOG"
+fi
 exit 0
 SH
 cat > "$FAKE_BIN/em" <<'SH'
@@ -171,6 +178,16 @@ SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-agentd-runtime" wake \
 wait_for 'reattached harness did not receive a wake' \
   "grep -q 'INPUT FLEET_WAKE_SELFTEST' '$RECEIVER_LOG'"
 
+FLEET_FAKE_RECEIVER="$RECEIVER" FLEET_FAKE_LOG="$KIND_LOG" \
+  PATH="$FAKE_BIN:$PATH" fleet launch-kind --slot "$KIND_SLOT" --kind claude \
+  --home "$HOME_ROOT" --cwd "$REPO" --start-capability-id cap-home-isolation \
+  --no-attach >/dev/null
+wait_for 'kind launch did not start its supervised harness' \
+  "grep -q '^START ' '$KIND_LOG' 2>/dev/null"
+grep -q "HOME=$HOME_ROOT" "$KIND_LOG" || \
+  fail 'kind launch inherited the reconciler HOME instead of its lane HOME'
+fleet stop --cwd "$REPO" --slot "$KIND_SLOT" >/dev/null
+
 kill -KILL "$harness_pid"
 wait_for 'terminated harness was not classified as a proven absence' \
   "fleet status --cwd '$REPO' --slot '$SLOT' >'$TEST_ROOT/exited-status' 2>&1 || true; grep -q 'state=absent' '$TEST_ROOT/exited-status'"
@@ -231,4 +248,4 @@ tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
 fleet stop --cwd "$REPO" --slot "$SLOT" >/dev/null
 [[ ! -e "$mapping" ]] || fail 'stop left the slot mapping behind'
 
-echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived harness_exit=proven-absent crash_relaunch=new-capability reattach=same-generation duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'
+echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived harness_exit=proven-absent crash_relaunch=new-capability lane_home=isolated reattach=same-generation duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'

@@ -78,6 +78,7 @@ grep -q '^capability=fleet-event-log-v1$' "$RUNTIME_ROOT/versions/$first_id/mani
 grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the fleet-reconciler capability'
 for capability in agentd-argv-attestation-v1 fleet-linear-capability-v1 \
+  fleet-home-isolation-v1 \
   fleet-proven-exit-v1 fleet-ed25519-anchor-v1 \
   fleet-checkpoint-handoff-v1 fleet-tla-model-v1 \
   fleet-trace-refinement-v1 fleet-temporal-authority-v1; do
