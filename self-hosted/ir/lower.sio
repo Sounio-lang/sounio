@@ -4909,6 +4909,54 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     }
 }
 
+// Returns the element struct's name for `[StructT; N]` (and its
+// `&`/`&!`-wrapped forms), or an empty name for anything else (array of a
+// primitive, non-array type, etc). Companion to lower_type_expr_is_array_of_f64
+// above, but for named/struct element types instead of f64.
+//
+// This closes a real corruption bug: `field_idx_for_base_ref` only resolves a
+// field access's owning struct type when the access base is a plain
+// identifier (`x.field`). For `arr[i].field`, the base is an ExprIndex, not
+// an ExprIdent, so the array-of-struct case fell through to
+// `field_idx_from_name_simple` -- a GLOBAL, name-only, first-match lookup
+// across every registered struct layout. Since the built-in `Knowledge`
+// struct is registered early with a `value` field at index 0, any user
+// struct with a field literally named `value` (or any other name that
+// happens to collide with an earlier-registered struct's field) silently
+// resolved to the WRONG field index, and `arr[i].value = x` clobbered
+// whatever field actually lives at that wrong index instead of `value`'s own
+// slot. See docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+// This helper is step one of the fix: give `lower_let_stmt_ref` a way to
+// learn and record an array-typed local's ELEMENT struct type, so
+// `field_idx_for_base_ref` can resolve `arr[i].field` the same struct-scoped
+// way it already resolves `x.field`.
+fn lower_type_expr_array_struct_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner_ty) => return lower_type_expr_array_struct_elem_name(&(*inner_ty)),
+            None => return ir_empty_name(),
+        }
+    }
+    if (*te).kind != TypeExprKind::TypeArray { return ir_empty_name() }
+    match (*te).inner {
+        Some(inner_ty) => {
+            if (*inner_ty).kind == TypeExprKind::TypeNamed {
+                ir_path_first_name((*inner_ty).path)
+            } else {
+                ir_empty_name()
+            }
+        }
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_opt_type_array_struct_elem_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_array_struct_elem_name(&(*te)),
+        None => ir_empty_name(),
+    }
+}
+
 fn lower_type_expr_is_array(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
         match (*te).inner {
@@ -10567,6 +10615,38 @@ impl Lowerer {
         }
     }
 
+    // `arr[i].field`: the field-access base is the ExprIndex node itself, not
+    // a plain identifier, so field_idx_for_base_ref's ExprIdent branch never
+    // fires and it falls to the name-only global fallback -- which silently
+    // collides across unrelated structs that happen to share a field name
+    // (see lower_type_expr_array_struct_elem_name's comment for the full
+    // corruption bug this closes). This resolves the ARRAY's own identifier
+    // (arr[i].left) and looks up its element struct type -- bound by
+    // lower_let_stmt_ref via lower_opt_type_array_struct_elem_name -- so the
+    // caller can route through the struct-scoped field_idx_from_name instead.
+    // Returns -1 when it cannot resolve (caller falls back to the previous
+    // behavior). Kept as its own small function, not inlined into
+    // field_idx_for_base_ref, deliberately: this compiler's own codegen is
+    // documented-fragile around large/complex functions (stack-frame-size
+    // warnings throughout this file), and growing field_idx_for_base_ref's
+    // own body in place perturbed self-compilation enough to SIGSEGV an
+    // unrelated Knowledge-array test (tests/run-pass/knowledge_array.sio) --
+    // confirmed via bisection: the exact same logic, extracted to a separate
+    // function, does not.
+    fn field_idx_for_array_index_base(self, base_expr: &Expr, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        if (*base_expr).kind != ExprKind::ExprIndex { return 0 - 1 }
+        let arr_opt = &(*base_expr).left
+        match *arr_opt {
+            Some(arr_expr) => {
+                if (*arr_expr).kind != ExprKind::ExprIdent { return 0 - 1 }
+                let elem_type_name = self.lookup_local_struct_type((*arr_expr).name)
+                if elem_type_name.len <= 0 { return 0 - 1 }
+                self.field_idx_from_name(elem_type_name, field_name)
+            }
+            _ => 0 - 1,
+        }
+    }
+
     fn field_array_elem_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(owner_expr) => {
@@ -13042,6 +13122,30 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // Record an array-of-struct local's ELEMENT struct type (e.g. `var
+        // extensions: [ExtensionEntry; 32] = ...`) so `field_idx_for_base_ref`
+        // can resolve `extensions[i].field` through the correct struct's own
+        // layout instead of falling back to the name-only global lookup that
+        // collides with same-named fields in unrelated structs (see
+        // lower_type_expr_array_struct_elem_name's comment for the full
+        // corruption this closes). struct_types[] is otherwise unused for
+        // array-typed locals, so this reuses the existing slot/mechanism.
+        //
+        // TypeExprKind::TypeNamed is the generic catch-all -- primitive
+        // element types (`[i64; N]`, `[u8; N]`, `[bool; N]`, ...) parse as
+        // TypeNamed too, since there is no dedicated primitive-type kind.
+        // Gate on the candidate name actually being a REGISTERED struct
+        // layout before binding, or every primitive-element array local in
+        // the whole compiled program gets falsely tagged with a bogus
+        // "struct type" (measured regression: tests/run-pass/
+        // knowledge_array.sio SIGSEGV'd once this bound `struct_types["buf"]
+        // = "i64"` for `var buf: [i64; 800]` and unrelated struct-shaped
+        // codegen paths keyed off "is this local struct-typed" started
+        // firing for it).
+        let array_struct_elem_name = lower_opt_type_array_struct_elem_name(&s.ty)
+        if array_struct_elem_name.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), array_struct_elem_name) >= 0 {
+            lo = lo.bind_local_struct_type(s.name, array_struct_elem_name)
+        }
         // #1502: record which slots of a tuple-typed local are f64.
         let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
         if annotated_tuple_mask != 0 {
@@ -13392,7 +13496,12 @@ impl Lowerer {
                                 } else {
                                     false
                                 }
-                                let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                let fidx_arr = lo.field_idx_for_array_index_base(&(*base_expr), (*target_expr).name)
+                                let fidx = if fidx_arr >= 0 {
+                                    fidx_arr
+                                } else {
+                                    lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                }
                                 let pair_base = lo.lower_expr_ref(&(*base_expr))
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
@@ -15793,7 +15902,15 @@ impl Lowerer {
             // by-name scan across registered structs resolves the field.
             lo1.field_idx_from_name_simple(e.name)
         } else {
-            lo1.field_idx_for_base_ref(&e.left, e.name)
+            let fidx_arr_get = match e.left {
+                Some(base_expr_for_arr) => lo1.field_idx_for_array_index_base(&(*base_expr_for_arr), e.name),
+                _ => 0 - 1,
+            }
+            if fidx_arr_get >= 0 {
+                fidx_arr_get
+            } else {
+                lo1.field_idx_for_base_ref(&e.left, e.name)
+            }
         }
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
         // means .0/.1 are f64 even without a struct layout entry.
