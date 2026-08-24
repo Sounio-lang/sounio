@@ -22,7 +22,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.4"
+RUNTIME_VERSION = "2026.08.24.5"
 UUID_RE = re.compile(
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -172,7 +172,7 @@ def run_agentd(
     )
 
 
-def probe_mapping(mapping: dict[str, Any], root: Path) -> tuple[str, dict[str, str]]:
+def probe_mapping(mapping: dict[str, Any], root: Path) -> tuple[str, dict[str, Any]]:
     required = (
         "agent",
         "lane",
@@ -184,6 +184,15 @@ def probe_mapping(mapping: dict[str, Any], root: Path) -> tuple[str, dict[str, s
     )
     if any(not isinstance(mapping.get(key), str) or not mapping[key] for key in required):
         return "drifted", {}
+    immutable = {
+        "agent": mapping["agent"],
+        "lane": mapping["lane"],
+        "session_id": mapping["session_id"],
+        "worktree": str(Path(mapping["worktree"]).resolve()),
+        "instance_id": mapping["instance_id"],
+        "command": mapping["command"],
+        "argv_digest": mapping["argv_digest"],
+    }
     result = run_agentd(
         [
             "status",
@@ -198,17 +207,27 @@ def probe_mapping(mapping: dict[str, Any], root: Path) -> tuple[str, dict[str, s
         ]
     )
     if result.returncode != 0:
+        descriptor_path = (
+            root
+            / "sessions"
+            / f"{slug(mapping['agent'])}--{slug(mapping['lane'])}"
+            / "session.json"
+        )
+        if descriptor_path.is_symlink() or not descriptor_path.is_file():
+            return "unreachable", {}
+        try:
+            descriptor = read_json(descriptor_path)
+        except FleetError:
+            return "unreachable", {}
+        observed = dict(descriptor)
+        if observed.get("worktree"):
+            observed["worktree"] = str(Path(str(observed["worktree"])).resolve())
+        if any(observed.get(key) != value for key, value in immutable.items()):
+            return "drifted", descriptor
+        if descriptor.get("state") == "exited":
+            return "absent", descriptor
         return "unreachable", {}
     status = parse_status(result.stdout)
-    immutable = {
-        "agent": mapping["agent"],
-        "lane": mapping["lane"],
-        "session_id": mapping["session_id"],
-        "worktree": str(Path(mapping["worktree"]).resolve()),
-        "instance_id": mapping["instance_id"],
-        "command": mapping["command"],
-        "argv_digest": mapping["argv_digest"],
-    }
     observed = dict(status)
     if observed.get("worktree"):
         observed["worktree"] = str(Path(observed["worktree"]).resolve())
