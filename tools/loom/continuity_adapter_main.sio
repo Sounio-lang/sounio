@@ -2,8 +2,8 @@
 //!
 //! The build composes this entrypoint with `loom_continuity.sio`, keeping the
 //! host seal and admission constructor private inside one native program. The
-//! OCaml host sends thirteen canonical decimal fields over stdin. Sounio owns
-//! both parsing and the transition-policy decision through native builtins.
+//! The OCaml host sends thirteen legacy fields or fifteen authenticated fields
+//! over stdin. Sounio owns parsing and the transition-policy decision.
 
 fn decimal_field(raw: string, start: i64) -> (i64, i64, i64) with Mut, Div, Panic {
     var offset = start
@@ -24,21 +24,40 @@ fn decimal_field(raw: string, start: i64) -> (i64, i64, i64) with Mut, Div, Pani
     (0, 0, offset)
 }
 
-fn policy_accepts(observed: ObservedContinuity, transition_kind: i64) -> bool {
+fn policy_accepts(
+    observed: ObservedContinuity,
+    transition_kind: i64,
+    authenticity_mode: i64,
+) -> bool {
     if transition_kind == 1 {
-        return match verify_initial_generation(observed) {
+        let verified = if authenticity_mode == 1 {
+            verify_signed_initial_generation(observed)
+        } else {
+            verify_initial_generation(observed)
+        }
+        return match verified {
             Some(receipt) => promote_initial_generation(receipt) > 0,
             None => false,
         }
     }
     if transition_kind == 2 {
-        return match verify_clean_respawn(observed) {
+        let verified = if authenticity_mode == 1 {
+            verify_signed_clean_respawn(observed)
+        } else {
+            verify_clean_respawn(observed)
+        }
+        return match verified {
             Some(receipt) => promote_clean_respawn(receipt) > 0,
             None => false,
         }
     }
     if transition_kind == 3 {
-        return match verify_pod_resurrection(observed) {
+        let verified = if authenticity_mode == 1 {
+            verify_signed_pod_resurrection(observed)
+        } else {
+            verify_pod_resurrection(observed)
+        }
+        return match verified {
             Some(receipt) => {
                 let (generation, evidence, lineage, predecessor, transitions, pods) =
                     promote_pod_resurrection(receipt)
@@ -65,16 +84,27 @@ fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
     let (ok10, predecessor_guardian_head_token, p10) = decimal_field(input, p9)
     let (ok11, transition_kind, p11) = decimal_field(input, p10)
     let (ok12, transition_count, p12) = decimal_field(input, p11)
-    let (ok13, pod_resurrection_count, ending) = decimal_field(input, p12)
-    let trailing = str_char_at(input, ending)
-    let ended_after_separator = ending > 0 && str_char_at(input, ending - 1) == 32
+    let (ok13, pod_resurrection_count, p13) = decimal_field(input, p12)
+    let (ok14, predecessor_receipt_token, p14) = decimal_field(input, p13)
+    let (ok15, authenticity_mode, p15) = decimal_field(input, p14)
+    let legacy_input = ok14 == 0 && str_char_at(input, p13) <= 0 &&
+        !(p13 > 0 && str_char_at(input, p13 - 1) == 32)
+    let signed_input = ok14 == 1 && ok15 == 1 && authenticity_mode == 1 &&
+        str_char_at(input, p15) <= 0 &&
+        !(p15 > 0 && str_char_at(input, p15 - 1) == 32)
     if ok1 != 1 || ok2 != 1 || ok3 != 1 || ok4 != 1 || ok5 != 1 ||
         ok6 != 1 || ok7 != 1 || ok8 != 1 || ok9 != 1 || ok10 != 1 ||
         ok11 != 1 || ok12 != 1 || ok13 != 1 ||
-        trailing > 0 || ended_after_separator {
+        (!legacy_input && !signed_input) {
         println("SOUNIO_CONTINUITY_REFUSE reason=canonical-input")
         return 64
     }
+    let admitted_predecessor_receipt = if signed_input {
+        predecessor_receipt_token
+    } else {
+        0
+    }
+    let admitted_authenticity_mode = if signed_input { 1 } else { 0 }
 
     let bridge0 = open_host_trust_bridge(evidence_set_token, receipt_chain_token)
     let (bridge1, host_receipt) = admit_runtime_continuity(
@@ -90,6 +120,8 @@ fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
         predecessor_generation_token,
         predecessor_semantic_head_token,
         predecessor_guardian_head_token,
+        admitted_predecessor_receipt,
+        admitted_authenticity_mode,
         transition_kind,
         transition_count,
         pod_resurrection_count,
@@ -100,11 +132,15 @@ fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
     close_host_trust_bridge(bridge1)
     let observed = import_host_continuity(host_receipt)
 
-    if !policy_accepts(observed, transition_kind) {
+    if !policy_accepts(observed, transition_kind, admitted_authenticity_mode) {
         println("SOUNIO_CONTINUITY_REFUSE reason=typestate")
         return 42
     }
 
-    println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1")
+    if admitted_authenticity_mode == 1 {
+        println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519")
+    } else {
+        println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1")
+    }
     0
 }

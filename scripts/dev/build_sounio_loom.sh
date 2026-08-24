@@ -16,6 +16,10 @@ ocamlfind query cryptokit >/dev/null 2>&1 || {
   echo 'error: the OCaml cryptokit package is required to build Sounio Loom' >&2
   exit 1
 }
+command -v openssl >/dev/null 2>&1 || {
+  echo 'error: OpenSSL is required for Loom Ed25519 receipt verification' >&2
+  exit 1
+}
 
 dune build --root "$ROOT_DIR/tools/loom" src/loom.exe
 "$SCRIPT_DIR/build_sounio_loom_continuity_adapter.sh"

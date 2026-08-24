@@ -111,5 +111,14 @@ report="$(SOUNIO_CANARY_SOURCE_ROOT=/missing \
   fail 'final report omitted per-generation native Sounio receipts'
 [[ "$(sed -n 's/^native_sounio_receipt_.*_sha256=//p' <<< "$report" | sort -u | wc -l | tr -d ' ')" -eq 4 ]] || \
   fail 'final report did not bind four distinct Sounio continuity receipts'
+if [[ "${SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS:-0}" == 1 || \
+      "${SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS:-0}" == true ]]; then
+  [[ "$report" == *'signature_algorithm=ed25519'* && \
+     "$report" == *'signed_predecessor_chain=verified'* && \
+     "$report" == *'public_receipt_verification=verified'* ]] || \
+    fail 'final report omitted the signed receipt chain proof'
+  [[ "$(sed -n 's/^signer_key_id=//p' <<< "$report")" =~ ^[0-9a-f]{64}$ ]] || \
+    fail 'final report omitted the Ed25519 signer identity'
+fi
 
-echo 'sounio-loom-pod-replay-canary-selftest: PASS simulated_pod_uids=4 native_sounio_receipts=4 unacked_depth_control=delivered ack_control=suppressed'
+echo "sounio-loom-pod-replay-canary-selftest: PASS simulated_pod_uids=4 native_sounio_receipts=4 signed_receipts=${SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS:-0} unacked_depth_control=delivered ack_control=suppressed"
