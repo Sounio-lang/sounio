@@ -1,0 +1,433 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Role-aware EL+ boolean closure demo — an executable mirror of the
+// verified saturation engine of formal/OntologyELPlusClosureComplete.lean
+// (round 8 of the ontology-frontiers line: the complete fixpoint closure
+// closeSatF with subBPlusC_iff / conflictBPlusC_iff over conceptUniv),
+// instantiated on the SNOMED-flavoured TBox of formal/OntologyELPlus.lean
+// (Fin 8 x Fin 3).
+//
+//   Classes: 0 Inflammation  1 Disorder  2 Lung   3 Organ
+//            4 Pneumonia    5 Drug      6 InflammatoryLesion
+//            7 DrugInducedDisorder
+//   Roles:   0 RoleGroup     1 DirectSite   2 PartOf
+//
+//   TBox (snomedTBox):
+//     Pneumonia ⊑ Inflammation            Inflammation ⊑ Disorder
+//     Lung ⊑ Organ
+//     Pneumonia ⊑ ∃DirectSite.(Lung ⊓ Inflammation)
+//     DirectSite ⊑ RoleGroup              DirectSite ∘ PartOf ⊑ RoleGroup
+//     Lung ⊑ ∃PartOf.Organ                Disorder ⊥ Drug
+//     DrugInducedDisorder ⊑ Disorder      DrugInducedDisorder ⊑ Drug
+//     InflammatoryLesion ⊑ Inflammation
+//
+// Interned concept universe (ckind: 0 atom, 1 top, 2 conj, 3 ex):
+//   0..7  atoms (id = class id)          8  top
+//   9     Lung ⊓ Inflammation
+//   10    ∃DirectSite.(Lung ⊓ Inflammation)   11 ∃PartOf.Organ
+//   12    ∃DirectSite.Lung                   13 ∃RoleGroup.(Lung ⊓ Inflammation)
+//   14    ∃RoleGroup.Organ
+// Base concepts (role-edge fillers) are ids 0..11, matching Lean's
+// baseConcepts (top, the 8 atoms, and the TBox-mentioned compounds).
+// Ids 12..14 are the role variants of conceptUniv that the queries below
+// need; Lean's full conceptUniv has every role variant of every base
+// concept — restricting the variant set only prunes derivations that
+// cannot affect these queries, so the four answers are unchanged.
+//
+// Relations (parallel primitive arrays with splat init; no struct
+// arrays, no where clauses — see the note in
+// artifacts/ontology-frontiers/el-grounding/el_conflict_demo.sio):
+//   S[c*15+d]          subsumption pairs over the universe
+//   R[(r*15+c)*12+f]   role edges (r, C, D) with filler D < 12 (base)
+//   rclos[r*3+s]       role-hierarchy closure (reflexive + transitive
+//                      over DirectSite ⊑ RoleGroup)
+//   exid[r*12+f]       interned id of ∃r.(base f), or -1
+//
+// The fixpoint round mirrors crStep (and iterates to a genuine fixpoint
+// like closeSatF, not a fixed round count): transitivity on S,
+// ⊓-elimination/introduction, stoR/RtoS between S and R,
+// ∃-monotonicity, roleSub chaining via rclos, and composition chaining
+// via DirectSite ∘ PartOf ⊑ RoleGroup.
+//
+// Checked queries (subBPlusC / conflictBPlusC of the Lean file):
+//   Pneumonia ⊑ ∃RoleGroup.Organ            = true  (composition chain)
+//   Pneumonia ⊑ ∃RoleGroup.(Lung ⊓ Infl.)   = true  (roleSub widening)
+//   Pneumonia ⊑ Disorder                    = true  (transitivity)
+//   conflict(Pneumonia, Drug)               = true  (Disorder ⊥ Drug)
+//   conflict(DrugInducedDisorder, itself)   = true  (incoherence witness)
+//   Organ ⊑ Disorder                        = false (no derivation)
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── Concept interning table ─────────────────────────────────────────
+    var ckind: [i64; 15] = [0; 15]
+    var carg1: [i64; 15] = [0; 15]
+    var carg2: [i64; 15] = [0; 15]
+    var ci: i64 = 0
+    while ci < 8 {
+        ckind[ci] = 0
+        carg1[ci] = ci
+        ci = ci + 1
+    }
+    ckind[8] = 1
+    ckind[9] = 2
+    carg1[9] = 2
+    carg2[9] = 0
+    ckind[10] = 3
+    carg1[10] = 1
+    carg2[10] = 9
+    ckind[11] = 3
+    carg1[11] = 2
+    carg2[11] = 3
+    ckind[12] = 3
+    carg1[12] = 1
+    carg2[12] = 2
+    ckind[13] = 3
+    carg1[13] = 0
+    carg2[13] = 9
+    ckind[14] = 3
+    carg1[14] = 0
+    carg2[14] = 3
+
+    // ── exid[r*12+f] = interned id of ∃r.(base f), or -1 ───────────────
+    var exid: [i64; 36] = [0; 36]
+    ci = 0
+    while ci < 36 {
+        exid[ci] = 0 - 1
+        ci = ci + 1
+    }
+    ci = 0
+    while ci < 15 {
+        if ckind[ci] == 3 {
+            exid[carg1[ci] * 12 + carg2[ci]] = ci
+        }
+        ci = ci + 1
+    }
+
+    // ── Role hierarchy closure rclos (refl + DirectSite ⊑ RoleGroup) ───
+    var rclos: [bool; 9] = [false; 9]
+    rclos[0 * 3 + 0] = true
+    rclos[1 * 3 + 1] = true
+    rclos[2 * 3 + 2] = true
+    rclos[1 * 3 + 0] = true
+    var rchanged = true
+    var ra: i64 = 0
+    var rb: i64 = 0
+    var rc: i64 = 0
+    while rchanged {
+        rchanged = false
+        ra = 0
+        while ra < 3 {
+            rb = 0
+            while rb < 3 {
+                rc = 0
+                while rc < 3 {
+                    if rclos[ra * 3 + rb] && rclos[rb * 3 + rc] {
+                        if !rclos[ra * 3 + rc] {
+                            rclos[ra * 3 + rc] = true
+                            rchanged = true
+                        }
+                    }
+                    rc = rc + 1
+                }
+                rb = rb + 1
+            }
+            ra = ra + 1
+        }
+    }
+
+    // ── Disjointness axioms: Disorder ⊥ Drug ────────────────────────────
+    var disj: [bool; 225] = [false; 225]
+    disj[1 * 15 + 5] = true
+    disj[5 * 15 + 1] = true
+
+    // ── Seed S: reflexivity, top, and the stated inclusions ────────────
+    var S: [bool; 225] = [false; 225]
+    ci = 0
+    while ci < 15 {
+        S[ci * 15 + ci] = true
+        S[ci * 15 + 8] = true
+        ci = ci + 1
+    }
+    S[4 * 15 + 0] = true
+    S[0 * 15 + 1] = true
+    S[2 * 15 + 3] = true
+    S[4 * 15 + 10] = true
+    S[2 * 15 + 11] = true
+    S[7 * 15 + 1] = true
+    S[7 * 15 + 5] = true
+    S[6 * 15 + 0] = true
+
+    var R: [bool; 540] = [false; 540]
+
+    // ── Fixpoint (crStep mirror, iterated to stability) ────────────────
+    var changed = true
+    var rounds: i64 = 0
+    var a: i64 = 0
+    var k: i64 = 0
+    var d: i64 = 0
+    var c: i64 = 0
+    var r: i64 = 0
+    var s: i64 = 0
+    var f: i64 = 0
+    var d2: i64 = 0
+    var f2: i64 = 0
+    var x: i64 = 0
+    var idx: i64 = 0
+    while changed {
+        changed = false
+        rounds = rounds + 1
+
+        // (T) transitivity on S
+        a = 0
+        while a < 15 {
+            k = 0
+            while k < 15 {
+                if S[a * 15 + k] {
+                    d = 0
+                    while d < 15 {
+                        if S[k * 15 + d] && !S[a * 15 + d] {
+                            S[a * 15 + d] = true
+                            changed = true
+                        }
+                        d = d + 1
+                    }
+                }
+                k = k + 1
+            }
+            a = a + 1
+        }
+
+        // (CE) ⊓-elimination and (CI) ⊓-introduction (conj = kind 2)
+        a = 0
+        while a < 15 {
+            d = 0
+            while d < 15 {
+                if ckind[d] == 2 {
+                    if S[a * 15 + d] {
+                        if !S[a * 15 + carg1[d]] {
+                            S[a * 15 + carg1[d]] = true
+                            changed = true
+                        }
+                        if !S[a * 15 + carg2[d]] {
+                            S[a * 15 + carg2[d]] = true
+                            changed = true
+                        }
+                    }
+                    if S[a * 15 + carg1[d]] && S[a * 15 + carg2[d]] {
+                        if !S[a * 15 + d] {
+                            S[a * 15 + d] = true
+                            changed = true
+                        }
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (S2R) stoR: C ⊑ ∃r.D becomes edge (r, C, D)
+        a = 0
+        while a < 15 {
+            d = 0
+            while d < 15 {
+                if ckind[d] == 3 && S[a * 15 + d] {
+                    idx = (carg1[d] * 15 + a) * 12 + carg2[d]
+                    if !R[idx] {
+                        R[idx] = true
+                        changed = true
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (RM) Rmono: edge (r,C,D) and D ⊑ D' give (r,C,D'), D' base
+        r = 0
+        while r < 3 {
+            c = 0
+            while c < 15 {
+                f = 0
+                while f < 12 {
+                    if R[(r * 15 + c) * 12 + f] {
+                        d2 = 0
+                        while d2 < 12 {
+                            if S[f * 15 + d2] && exid[r * 12 + d2] >= 0 {
+                                idx = (r * 15 + c) * 12 + d2
+                                if !R[idx] {
+                                    R[idx] = true
+                                    changed = true
+                                }
+                            }
+                            d2 = d2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            r = r + 1
+        }
+
+        // (RS) roleSub: edge (r,C,D) and r ⊑* s (rclos) give (s,C,D)
+        r = 0
+        while r < 3 {
+            s = 0
+            while s < 3 {
+                if rclos[r * 3 + s] {
+                    c = 0
+                    while c < 15 {
+                        f = 0
+                        while f < 12 {
+                            if R[(r * 15 + c) * 12 + f] && exid[s * 12 + f] >= 0 {
+                                idx = (s * 15 + c) * 12 + f
+                                if !R[idx] {
+                                    R[idx] = true
+                                    changed = true
+                                }
+                            }
+                            f = f + 1
+                        }
+                        c = c + 1
+                    }
+                }
+                s = s + 1
+            }
+            r = r + 1
+        }
+
+        // (RC) composition: edges (1,C,D) and (2,D,E) give (0,C,E)
+        // (the one stated chain: DirectSite ∘ PartOf ⊑ RoleGroup)
+        c = 0
+        while c < 15 {
+            f = 0
+            while f < 12 {
+                if R[(1 * 15 + c) * 12 + f] {
+                    f2 = 0
+                    while f2 < 12 {
+                        if R[(2 * 15 + f) * 12 + f2] && exid[0 * 12 + f2] >= 0 {
+                            idx = (0 * 15 + c) * 12 + f2
+                            if !R[idx] {
+                                R[idx] = true
+                                changed = true
+                            }
+                        }
+                        f2 = f2 + 1
+                    }
+                }
+                f = f + 1
+            }
+            c = c + 1
+        }
+
+        // (R2S) RtoS: edge (r,C,D) gives C ⊑ ∃r.D
+        r = 0
+        while r < 3 {
+            c = 0
+            while c < 15 {
+                f = 0
+                while f < 12 {
+                    if R[(r * 15 + c) * 12 + f] {
+                        x = exid[r * 12 + f]
+                        if x >= 0 && !S[c * 15 + x] {
+                            S[c * 15 + x] = true
+                            changed = true
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            r = r + 1
+        }
+    }
+
+    println("closure rounds:")
+    println(rounds)
+
+    // ── Query 1: Pneumonia ⊑ ∃RoleGroup.Organ (composition chain) ──────
+    if S[4 * 15 + 14] {
+        println("subBPlus 4 (ex 0 (atom 3)) = true")
+    } else {
+        println("FAIL: subBPlus 4 (ex 0 (atom 3)) should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 2: Pneumonia ⊑ ∃RoleGroup.(Lung ⊓ Inflammation) ──────────
+    if S[4 * 15 + 13] {
+        println("subBPlus 4 (ex 0 (conj 2 0)) = true")
+    } else {
+        println("FAIL: subBPlus 4 (ex 0 (conj 2 0)) should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 3: Pneumonia ⊑ Disorder (transitivity) ───────────────────
+    if S[4 * 15 + 1] {
+        println("subBPlus 4 1 = true")
+    } else {
+        println("FAIL: subBPlus 4 1 should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 4: conflictBPlus 4 5 (Pneumonia vs Drug) ─────────────────
+    var hit = false
+    d = 0
+    while d < 15 {
+        if S[4 * 15 + d] {
+            d2 = 0
+            while d2 < 15 {
+                if S[5 * 15 + d2] && disj[d * 15 + d2] {
+                    hit = true
+                }
+                d2 = d2 + 1
+            }
+        }
+        d = d + 1
+    }
+    if hit {
+        println("conflictBPlus 4 5 = true")
+    } else {
+        println("FAIL: conflictBPlus 4 5 should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 5: conflictBPlus 7 7 (DrugInducedDisorder incoherent) ────
+    hit = false
+    d = 0
+    while d < 15 {
+        if S[7 * 15 + d] {
+            d2 = 0
+            while d2 < 15 {
+                if S[7 * 15 + d2] && disj[d * 15 + d2] {
+                    hit = true
+                }
+                d2 = d2 + 1
+            }
+        }
+        d = d + 1
+    }
+    if hit {
+        println("conflictBPlus 7 7 = true")
+    } else {
+        println("FAIL: conflictBPlus 7 7 should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 6: Organ is NOT subsumed by Disorder ──────────────────────
+    if S[3 * 15 + 1] {
+        println("FAIL: subBPlus 3 1 should be false")
+        n_fail = n_fail + 1
+    } else {
+        println("subBPlus 3 1 = false")
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

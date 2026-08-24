@@ -114,6 +114,18 @@ compile "$W/wf_abort.sio" "$TMPDIR/wf_abort.elf" >/dev/null 2>&1
 AOUT="$("$TMPDIR/wf_abort.elf" 2>&1)"; ARC=$?
 { [[ "$ARC" -eq 134 ]] && ! echo "$AOUT" | grep -q 'UNREACHABLE'; } && pass "abort() -> status 134" || fail "abort (status=$ARC)"
 
+# exit(1) reached transitively through a stdlib constructor: sed_ker_lz_gen(k)
+# with k out of [0,3] must hard-refuse via process_exit(1), not fabricate a
+# zero. Observed exit status 1, UNREACHABLE absent. (Fail-closed guard for
+# stdlib/algebra/sedenion_kernel.sio; the zero it used to return trivially
+# passed the kernel predicate while being no generator.)
+compile "$W/sed_ker_lz_gen_refuse.sio" "$TMPDIR/skg_refuse.elf" >/dev/null 2>&1
+chmod +x "$TMPDIR/skg_refuse.elf" 2>/dev/null || true
+KOUT="$("$TMPDIR/skg_refuse.elf" 2>&1)"; KRC=$?
+{ [[ "$KRC" -eq 1 ]] && echo "$KOUT" | grep -q 'SKG before' && ! echo "$KOUT" | grep -q 'UNREACHABLE'; } \
+  && pass "sed_ker_lz_gen(99) -> process_exit(1) (status 1, UNREACHABLE absent)" \
+  || fail "sed_ker_lz_gen refuse (status=$KRC)"
+
 # system(): observable side effect (sentinel file) AND real wait status (768).
 rm -f "$TMPDIR/p0f_system_sentinel"
 SOUT="$(run "$W/wf_system.sio")"

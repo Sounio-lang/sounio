@@ -5714,12 +5714,27 @@ fn captured_expr_misuses_value(e: &Expr, scan: CapturedClosureValueScan, in_call
 fn so_name_is_hessian_of_ident(e: &Expr) -> bool with Mut, Panic, Div {
     if (*e).kind != ExprKind::ExprIdent { return false }
     let n = (*e).name
-    n.len == 10
+    if n.len == 10
         && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
         && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
         && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
         && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
-        && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
+        && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8 { return true }
+    // `second_order_mean` reads the same Hessian, so it must switch the
+    // second-order walk on too. Without this line the builtin still compiles
+    // and still runs -- so_enabled stays false, every so_expr_hess slot stays
+    // -1, and the E2 correction evaluates to exactly zero with no diagnostic.
+    // "second_order_mean" = 17 chars
+    n.len == 17
+        && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 99 as i8 && n.buf[3] == 111 as i8
+        && n.buf[4] == 110 as i8 && n.buf[5] == 100 as i8
+        && n.buf[6] == 95 as i8 && n.buf[7] == 111 as i8
+        && n.buf[8] == 114 as i8 && n.buf[9] == 100 as i8
+        && n.buf[10] == 101 as i8 && n.buf[11] == 114 as i8
+        && n.buf[12] == 95 as i8 && n.buf[13] == 109 as i8
+        && n.buf[14] == 101 as i8 && n.buf[15] == 97 as i8
+        && n.buf[16] == 110 as i8
 }
 
 fn so_opt_expr_uses_hessian(opt: &Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc {
@@ -8059,6 +8074,20 @@ impl Lowerer {
         && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
     }
 
+    // second_order_mean(expr) -> E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
+    fn name_is_second_order_mean(self, n: Name) -> bool with Div {
+        n.len == 17
+        && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 99 as i8 && n.buf[3] == 111 as i8
+        && n.buf[4] == 110 as i8 && n.buf[5] == 100 as i8
+        && n.buf[6] == 95 as i8 && n.buf[7] == 111 as i8
+        && n.buf[8] == 114 as i8 && n.buf[9] == 100 as i8
+        && n.buf[10] == 101 as i8 && n.buf[11] == 114 as i8
+        && n.buf[12] == 95 as i8 && n.buf[13] == 109 as i8
+        && n.buf[14] == 101 as i8 && n.buf[15] == 97 as i8
+        && n.buf[16] == 110 as i8
+    }
+
     fn name_is_uncertainty_of(self, n: Name) -> bool with Div {
         n.len == 14
         && n.buf[0] == 117 as i8 && n.buf[1] == 110 as i8
@@ -9037,6 +9066,9 @@ impl Lowerer {
             }
         }
         let s0 = lo.fo_snapshot_expr_sens()
+        // Snapshot the argument's Hessian alongside its sensitivity: the kind-6
+        // chain rule below needs H(g) before the call overwrites so_expr_hess.
+        let h0 = lo.so_snapshot_expr_hess()
         if kind == 1 {
             lo = lo.fo_restore_expr_sens(s0)
             if v0 >= 0 {
@@ -9095,6 +9127,97 @@ impl Lowerer {
             }
             // s_k <- factor * s_k for every live channel. fo_combine_sens_mul
             // computes R*dL + L*dR; with the left sens empty this is factor * s0.
+            // Second order: H_jk(f(g)) = f''(g)*s_j*s_k + f'(g)*H_jk(g).
+            //
+            // f'' needs no new table. The transfer entry for f' composed with
+            // itself gives it and the signs multiply: sin' = cos and cos' =
+            // -sin so sin'' = -sin; cos'' = -cos; exp'' = exp. Deriving it
+            // rather than tabulating means a fourth transcendental added to
+            // fo_xfer_seed_transcendentals gets its Hessian for free, and
+            // cannot acquire a first derivative without a second.
+            //
+            // Before this, hessian_of(sin(x)) returned a confident 0.0 while
+            // hessian_of(x*x) returned the correct 2.0: the second-order
+            // machinery had storage and a product rule but no chain rule, so
+            // every transcendental silently contributed nothing.
+            if lo.so_enabled {
+                let idx2 = fo_xfer_global_lookup(dname)
+                let d2name = fo_xfer_derivative_name(idx2)
+                if d2name.len > 0 {
+                    let sign2 = FO_XFER_LIT[idx as usize] * FO_XFER_LIT[idx2 as usize]
+                    let d2fn_id = lowerer_find_or_add_fn_id_mut(&! lo, d2name)
+                    let d2args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(argv)))
+                    let d2p = lo.fresh_reg()
+                    lo = d2p.0
+                    let d2reg = d2p.1
+                    var d2call = ir_call(d2reg, d2fn_id, d2name, d2args, 1)
+                    d2call.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(d2call)
+                    lo = lo.emit(ir_mark_float_reg(d2reg))
+                    var f2 = d2reg
+                    if sign2 < 0.0 {
+                        let s2p = lo.emit_f64_const(sign2)
+                        lo = s2p.0
+                        let m2 = lo.fresh_reg()
+                        lo = m2.0
+                        f2 = m2.1
+                        lo = lo.emit(ir_binop_typed(f2, d2reg, BinaryOp::OpMul, s2p.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(f2))
+                    }
+                    // Read the argument's Hessian HERE, not from the snapshot taken
+                    // before fo_lower_nth_arg_value re-walked the argument: measured,
+                    // the earlier snapshot holds a partial cross term rather than the
+                    // finished H, and the chain rule then multiplies f' by s_u^2.
+                    let hNow = lo.so_snapshot_expr_hess()
+                    // Only when the argument carries no Hessian of its own. Then
+                    // H(f(g)) = f''(g)*s_g^2 exactly, and that is measured: with a
+                    // leaf or linear inner the results are exact to six places.
+                    //
+                    // With a compound inner -- exp(sin x), exp(x*x) -- the f'(g)*H(g)
+                    // term reads s_g^2 where H_g belongs, and the answer comes out
+                    // wrong: 2.487814 against 0.469556 for exp(sin x). I do not yet
+                    // know why; hNow and the earlier snapshot agree, so it is not
+                    // the read point. Refusing that case leaves it returning the 0.0
+                    // it returned before, which is honestly wrong rather than
+                    // plausibly wrong -- a confident 2.487814 is much harder to catch
+                    // than a zero. Same reasoning as log's absence from
+                    // fo_xfer_seed_transcendentals, one comment above.
+                    var arg_has_hess = false
+                    var hq: i64 = 0
+                    while hq < 36 {
+                        if hNow[hq as usize] >= 0 { arg_has_hess = true }
+                        hq = hq + 1
+                    }
+                    // Refusing means CLEARING, not skipping. Measured: with the
+                    // write skipped, so_expr_hess still holds the ARGUMENT's Hessian
+                    // and hessian_of reports it as the outer expression's --
+                    // hessian_of(exp(x*x)) came back 2.0, which is H(x*x) wearing the
+                    // wrong name and looks entirely respectable. Clearing puts it back
+                    // to the honest 0.0 this case returned before any of this.
+                    var hj: i64 = 0
+                    if arg_has_hess {
+                        hj = 8
+                        lo = lo.so_clear_expr_hess()
+                    }
+                    while hj < 8 {
+                        var hk: i64 = hj
+                        while hk < 8 {
+                            let hid = lo.so_hess_idx(hj, hk)
+                            let t1 = lo.so_mul_or_none(factor, hNow[hid as usize])
+                            lo = t1.0
+                            let sp2 = lo.so_mul_or_none(s0[hj as usize], s0[hk as usize])
+                            lo = sp2.0
+                            let t2 = lo.so_mul_or_none(f2, sp2.1)
+                            lo = t2.0
+                            let hacc = lo.so_add_or_take(t1.1, t2.1)
+                            lo = hacc.0
+                            lo.so_expr_hess[hid as usize] = hacc.1
+                            hk = hk + 1
+                        }
+                        hj = hj + 1
+                    }
+                }
+            }
             var sZ: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sZ, s0, factor, factor)
             return lo.fo_emit_var_from_sens()
@@ -10299,15 +10422,29 @@ impl Lowerer {
                 // of the table before falling back to the legacy hash path;
                 // partially seeded layouts must not collapse every miss to .0.
                 var sj: i64 = 0
+                // Same Knowledge-preseed shadow as field_idx_from_name_simple:
+                // defer the synthetic layout so a user struct's own field wins.
+                let kname = make_name("Knowledge")
+                var kidx: i64 = -1
                 while sj < (*self.struct_layouts).count {
+                    let sj_is_knowledge = ir_name_eq((*self.struct_layouts).entries[sj as usize].type_name, kname)
                     var fj: i64 = 0
                     while fj < (*self.struct_layouts).entries[sj as usize].field_count {
                         if ir_name_eq(ir_name_at((*self.struct_layouts).entries[sj as usize].fields[fj as usize].name_id), field_name) {
-                            return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
+                            if sj_is_knowledge {
+                                if kidx < 0 {
+                                    kidx = (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
+                                }
+                            } else {
+                                return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
+                            }
                         }
                         fj = fj + 1
                     }
                     sj = sj + 1
+                }
+                if kidx >= 0 {
+                    return kidx
                 }
                 if field_name.len <= 0 {
                     return 0
@@ -10332,16 +10469,36 @@ impl Lowerer {
         if n.len == 1 && first_byte >= 48 && first_byte <= 57 {
             return first_byte - 48
         }
+        // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
+        // preseeded as entry 0, before any user struct is registered, and its
+        // field names — value / variance / confidence — are ordinary user
+        // identifiers. Scanned in table order it shadowed every user struct
+        // carrying one of them, so `arr[i].value` resolved to Knowledge's slot 0
+        // and silently clobbered whatever field really lives there. Defer it:
+        // a user layout always wins, and Knowledge answers only if nothing else
+        // does (genuine Knowledge<T> access through an untyped base).
+        let knowledge_name = make_name("Knowledge")
+        var knowledge_idx: i64 = -1
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let is_knowledge = ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, knowledge_name)
             var fi: i64 = 0
             while fi < (*self.struct_layouts).entries[si as usize].field_count {
                 if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                    if is_knowledge {
+                        if knowledge_idx < 0 {
+                            knowledge_idx = (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                        }
+                    } else {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                    }
                 }
                 fi = fi + 1
             }
             si = si + 1
+        }
+        if knowledge_idx >= 0 {
+            return knowledge_idx
         }
         // Last-resort legacy compatibility for unregistered dynamic/foreign shapes.
         if n.len <= 0 {
@@ -10616,6 +10773,27 @@ impl Lowerer {
                         return true
                     }
                 }
+                // The offset half of this lives in field_idx_for_base_ref, and both
+                // used to stop at ExprIdent. Fixing only the offset gives a value
+                // that PRINTS correctly and computes as an integer: with a user
+                // struct spelling `value`, print_f64(ks[0].value) showed 1.000000
+                // while ks[0].value - 1.0 evaluated to 4607182418800017408 -- the
+                // bit pattern of the double 1.0, read as an int because the float
+                // marking never arrived. Same family as the println scalar-kind
+                // loss: the value survives, the kind does not.
+                if (*base_expr).kind == ExprKind::ExprIndex {
+                    match (*base_expr).left {
+                        Some(arr_expr) => {
+                            if (*arr_expr).kind == ExprKind::ExprIdent {
+                                let elem_type = self.lookup_local_struct_type((*arr_expr).name)
+                                if self.field_is_float_for_struct(elem_type, field_name) {
+                                    return true
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 false
             }
             _ => false,
@@ -10629,6 +10807,32 @@ impl Lowerer {
                     let type_name = self.lookup_local_struct_type((*base_expr).name)
                     if type_name.len > 0 {
                         return self.field_idx_from_name(type_name, field_name)
+                    }
+                }
+                // `arr[i].field`: the receiver is an index, not an ident, so this
+                // used to fall to the global name scan -- and the scan returns the
+                // FIRST layout carrying that name, whichever it is.
+                //
+                // #2126 fixed one direction of that (the synthetic Knowledge layout
+                // shadowing user structs) by deferring Knowledge. It reversed the
+                // victim rather than removing the ambiguity: with a user struct
+                // holding `value` at slot 1, `ks[i].value` on a [Knowledge<f64>; N]
+                // returned 0.010000 -- the VARIANCE -- where 1.000000 belongs. Both
+                // directions are "first name wins".
+                //
+                // The array's element type is on the local, so ask it. Identity is a
+                // property of (receiver layout, field), not of the lexeme.
+                if (*base_expr).kind == ExprKind::ExprIndex {
+                    match (*base_expr).left {
+                        Some(arr_expr) => {
+                            if (*arr_expr).kind == ExprKind::ExprIdent {
+                                let elem_type = self.lookup_local_struct_type((*arr_expr).name)
+                                if elem_type.len > 0 {
+                                    return self.field_idx_from_name(elem_type, field_name)
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 self.field_idx_from_name_simple(field_name)
@@ -10893,6 +11097,7 @@ impl Lowerer {
                     if self.name_is_variance_of(callee_name)
                         || self.name_is_uncertainty_of(callee_name)
                         || self.name_is_sensitivity_of(callee_name)
+                        || self.name_is_second_order_mean(callee_name)
                         || self.name_is_hessian_of(callee_name) {
                         return true
                     }
@@ -13249,6 +13454,38 @@ impl Lowerer {
             }
             _ => {}
         }
+        // An ARRAY local records its ELEMENT type, so `arr[i].field` can be
+        // resolved by (layout, field) instead of by scanning every layout for
+        // the name and taking the first hit.
+        //
+        // Without this, member resolution depends on declaration order: with
+        // `struct A { value }` before `struct B { pad, value }`, bs[i].value read
+        // A.value@0 and returned B's pad; swapping the two declarations moved the
+        // error onto A and made as_[1].value read slot 1 of a one-field struct.
+        // #2126 fixed the Knowledge half of this by deferring the synthetic layout,
+        // which reversed the victim -- ks[i].value on [Knowledge<f64>; N] then
+        // returned the variance. Precedence in either direction is still first
+        // name wins; the element type is the missing identity.
+        match s.ty {
+            Some(arr_ty) => {
+                if (*arr_ty).kind == TypeExprKind::TypeArray {
+                    match (*arr_ty).inner {
+                        Some(el) => {
+                            if (*el).kind == TypeExprKind::TypeKnowledge {
+                                lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                            } else if (*el).kind == TypeExprKind::TypeNamed {
+                                let el_name = ir_path_first_name((*el).path)
+                                if el_name.len > 0 {
+                                    lo = lo.bind_local_struct_type(s.name, el_name)
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
         match s.expr {
             Some(expr_box) => {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
@@ -14903,6 +15140,69 @@ impl Lowerer {
         }
     }
 
+    // second_order_mean(expr): E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
+    //
+    // Built on this tree's own second-order machinery rather than imported: the
+    // FO/SO walk in lower_expr_variance_ref populates so_expr_hess, so_hess_idx
+    // addresses it, and fo_sigma2 holds each channel's variance. Channels are
+    // capped at 8 here because so_hess_idx is defined over 8x8.
+    fn lower_second_order_mean_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                // Walk first, so the Hessian and the sigmas exist to read.
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_v.0
+                let zp = lo.emit_f64_const(0.0)
+                lo = zp.0
+                var acc = zp.1
+                let hp = lo.emit_f64_const(0.5)
+                lo = hp.0
+                let half = hp.1
+                var k: i64 = 0
+                while k < 8 {
+                    let idx = lo.so_hess_idx(k, k)
+                    let hreg = lo.so_expr_hess[idx as usize]
+                    let sig = lo.fo_sigma2[k as usize]
+                    if hreg >= 0 && sig >= 0 {
+                        let t1p = lo.fresh_reg()
+                        lo = t1p.0
+                        let t1 = t1p.1
+                        lo = lo.emit(ir_binop_typed(t1, hreg, BinaryOp::OpMul, sig, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t1))
+                        let t2p = lo.fresh_reg()
+                        lo = t2p.0
+                        let t2 = t2p.1
+                        lo = lo.emit(ir_binop_typed(t2, half, BinaryOp::OpMul, t1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2))
+                        let ap = lo.fresh_reg()
+                        lo = ap.0
+                        let nacc = ap.1
+                        lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, t2, true, true))
+                        lo = lo.emit(ir_mark_float_reg(nacc))
+                        acc = nacc
+                    }
+                    k = k + 1
+                }
+                // First-order mean: the expression evaluated at the seed means.
+                let vp = lo.lower_expr_ref(&(*list).head)
+                lo = vp.0
+                let mean1 = vp.1
+                let dp = lo.fresh_reg()
+                lo = dp.0
+                let dst = dp.1
+                lo = lo.emit(ir_binop_typed(dst, mean1, BinaryOp::OpAdd, acc, true, true))
+                lo = lo.emit(ir_mark_float_reg(dst))
+                (lo, dst)
+            }
+            _ => {
+                let z = self.emit_f64_const(0.0)
+                var lo_z = z.0
+                lo_z = lo_z.emit(ir_mark_float_reg(z.1))
+                (lo_z, z.1)
+            }
+        }
+    }
+
     fn lower_uncertainty_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_v = self.lower_variance_of_call_ref(args)
         var lo = pair_v.0
@@ -15443,6 +15743,9 @@ impl Lowerer {
         }
         if self.name_is_hessian_of(callee_name) {
             return self.lower_hessian_of_call_ref(&e.args)
+        }
+        if self.name_is_second_order_mean(callee_name) {
+            return self.lower_second_order_mean_call_ref(&e.args)
         }
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
