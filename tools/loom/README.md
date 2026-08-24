@@ -1,8 +1,10 @@
 # Sounio Loom
 
-Loom is Sounio's native OCaml session kernel and terminal multiplexer. The
-kernel, not a TUI or browser, owns the PTY generation. Clients can disappear and
-reattach at a durable output cursor without changing the child process identity.
+Loom is Sounio's native OCaml session kernel and terminal multiplexer. A
+recoverable guardian owns the PTY generation, child process, durable output, and
+custody journal. The kernel owns semantic input authority and disposable client
+connections. Clients or the entire kernel can disappear and recover without
+changing the guardian, child, or generation identity.
 
 ## Build
 
@@ -22,10 +24,11 @@ source-worktree build for diagnosis.
 
 ```sh
 bin/sounio-loom start --agent codex --lane experiment -- COMMAND ARG...
+bin/sounio-loom recover --agent codex --lane experiment
+bin/sounio-loom guardian-status --agent codex --lane experiment
 bin/sounio-loom list
 bin/sounio-loom tui
-bin/sounio-loom serve --listen 127.0.0.1 --port 8787
-bin/sounio-loom verify --agent codex --lane experiment
+bin/sounio-loom serve --bind 127.0.0.1 --port 8787
 ```
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
@@ -34,9 +37,11 @@ local capabilities and must remain private to the owning user.
 
 ## Evidence Boundary
 
-Loom-0 tolerates observer, interactive-client, and GUI loss on one Unix host.
-It does not yet re-adopt a PTY after kernel-daemon or host loss. Existing fleet
-generations therefore remain on the Python `agentd` compatibility path until a
-separate live-migration gate preserves generation identity and pending delivery.
+Loom-1 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
+host. `recover` reconciles bytes fsynced by the guardian while no kernel existed
+and semantically revokes input leases whose sockets died with the old kernel.
+It does not yet recover after guardian or host loss. Existing fleet generations
+therefore remain on the Python `agentd` compatibility path until a separate
+live-migration gate preserves generation identity and pending delivery.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.

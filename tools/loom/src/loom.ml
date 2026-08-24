@@ -3,7 +3,8 @@ open Unix
 exception Loom_error of string
 
 let protocol_version = 1
-let runtime_version = "2026.08.24.0"
+let guardian_protocol_version = 1
+let runtime_version = "2026.08.24.1"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -244,10 +245,14 @@ let state_root ?override cwd =
 type paths = {
   session_dir : string;
   socket_path : string;
+  guardian_socket_path : string;
   token_path : string;
   descriptor_path : string;
+  guardian_descriptor_path : string;
   lock_path : string;
+  guardian_lock_path : string;
   daemon_log_path : string;
+  guardian_log_path : string;
   cursor_path : string;
 }
 
@@ -267,10 +272,14 @@ let session_paths root agent lane =
   {
     session_dir;
     socket_path = Filename.concat socket_root socket_name;
+    guardian_socket_path = Filename.concat socket_root ("guardian-" ^ socket_name);
     token_path = Filename.concat session_dir "capability";
     descriptor_path = Filename.concat session_dir "session.state";
+    guardian_descriptor_path = Filename.concat session_dir "guardian.state";
     lock_path = Filename.concat session_dir "daemon.lock";
+    guardian_lock_path = Filename.concat session_dir "guardian.lock";
     daemon_log_path = Filename.concat session_dir "daemon.log";
+    guardian_log_path = Filename.concat session_dir "guardian.log";
     cursor_path = Filename.concat cursor_dir (key ^ ".cursor");
   }
 
@@ -324,11 +333,21 @@ let parse_event line =
 
 type journal_phase = Initial | Active | Exited
 
+let parse_output_span payload =
+  match split_on ':' payload with
+  | start :: ending :: _ ->
+      let parse name value =
+        try int_of_string value with _ -> failf "semantic:%s-is-not-an-integer" name
+      in
+      (parse "output-start" start, parse "output-end" ending)
+  | _ -> failf "semantic:invalid-output-span"
+
 let verify_events events =
   let expected_seq = ref 1 in
   let expected_previous = ref (String.make 64 '0') in
   let phase = ref Initial in
   let lease = ref None in
+  let output_cursor = ref 0 in
   List.iter
     (fun (event : journal_event) ->
       if event.seq <> !expected_seq then
@@ -355,8 +374,14 @@ let verify_events events =
           | Some holder when holder = payload -> lease := None
           | None -> failf "semantic:release-without-input-lease seq=%d" event.seq
           | Some _ -> failf "semantic:wrong-input-lease-holder seq=%d" event.seq)
-      | ( "OUTPUT" | "INPUT" | "WAKE" | "OBSERVER_ATTACHED" | "OBSERVER_DETACHED" ),
-        Active -> ()
+      | ("OUTPUT" | "OUTPUT_RECONCILED"), Active ->
+          let start, ending = parse_output_span payload in
+          if start <> !output_cursor || ending < start then
+            failf "semantic:non-contiguous-output expected=%d actual=%d:%d seq=%d"
+              !output_cursor start ending event.seq;
+          output_cursor := ending
+      | "KERNEL_RECOVERED", Active -> lease := None
+      | ( "INPUT" | "WAKE" | "OBSERVER_ATTACHED" | "OBSERVER_DETACHED" ), Active -> ()
       | _, Initial -> failf "semantic:event-before-session-start seq=%d" event.seq
       | _, Exited -> failf "semantic:event-after-session-exit seq=%d" event.seq
       | _ -> failf "semantic:unknown-event kind=%s seq=%d" event.kind event.seq);
@@ -364,6 +389,18 @@ let verify_events events =
       incr expected_seq)
     events;
   (!phase, !expected_previous)
+
+let semantic_output_cursor events =
+  List.fold_left
+    (fun cursor (event : journal_event) ->
+      match event.kind with
+      | "OUTPUT" | "OUTPUT_RECONCILED" ->
+          let start, ending = parse_output_span (string_of_hex event.payload_hex) in
+          if start <> cursor then
+            failf "semantic:non-contiguous-output expected=%d actual=%d" cursor start;
+          ending
+      | _ -> cursor)
+    0 events
 
 let load_and_verify_journal path =
   let events = read_lines path |> List.filter (fun line -> trim line <> "") |> List.map parse_event in
@@ -376,6 +413,625 @@ let open_journal path =
   Unix.set_close_on_exec descriptor;
   let channel = Unix.out_channel_of_descr descriptor in
   { channel; descriptor; seq = 0; previous = String.make 64 '0' }
+
+let resume_journal path =
+  let events, phase, digest = load_and_verify_journal path in
+  if phase <> Active then failf "cannot recover a non-active semantic journal";
+  let descriptor = Unix.openfile path [ O_WRONLY; O_APPEND ] 0o600 in
+  Unix.set_close_on_exec descriptor;
+  let channel = Unix.out_channel_of_descr descriptor in
+  ({ channel; descriptor; seq = List.length events; previous = digest }, events)
+
+let field_escape value =
+  let buffer = Buffer.create (String.length value) in
+  String.iter
+    (fun character ->
+      match character with
+      | '\t' | '\n' | '\r' | '%' ->
+          Buffer.add_string buffer (Printf.sprintf "%%%02X" (Char.code character))
+      | _ -> Buffer.add_char buffer character)
+    value;
+  Buffer.contents buffer
+
+let field_unescape value =
+  let buffer = Buffer.create (String.length value) in
+  let rec loop index =
+    if index < String.length value then
+      if value.[index] = '%' && index + 2 < String.length value then (
+        Buffer.add_char buffer
+          (Char.chr
+             ((hex_value value.[index + 1] lsl 4)
+             lor hex_value value.[index + 2]));
+        loop (index + 3))
+      else (
+        Buffer.add_char buffer value.[index];
+        loop (index + 1))
+  in
+  loop 0;
+  Buffer.contents buffer
+
+let control_line fields = String.concat "\t" fields ^ "\n"
+
+let parse_nonnegative name value =
+  let parsed = try int_of_string value with _ -> failf "invalid-%s" name in
+  if parsed < 0 then failf "invalid-%s" name;
+  parsed
+
+type guardian_client_mode = Guardian_awaiting | Guardian_bridge
+
+type guardian_client = {
+  guardian_fd : file_descr;
+  guardian_input : Buffer.t;
+  mutable guardian_mode : guardian_client_mode;
+  mutable guardian_pending : string;
+  mutable guardian_pending_offset : int;
+}
+
+type guardian = {
+  guardian_paths : paths;
+  guardian_agent : string;
+  guardian_lane : string;
+  guardian_session_id : string;
+  guardian_cwd : string;
+  guardian_command : string array;
+  guardian_instance_id : string;
+  guardian_output_path : string;
+  guardian_journal_path : string;
+  guardian_token : string;
+  guardian_listener : file_descr;
+  guardian_master_fd : file_descr;
+  guardian_pid_start : string;
+  guardian_harness_pid : int;
+  guardian_harness_pid_start : string;
+  guardian_started_utc : string;
+  guardian_output_channel : out_channel;
+  guardian_output_descriptor : file_descr;
+  guardian_journal : journal;
+  guardian_clients : (file_descr, guardian_client) Hashtbl.t;
+  mutable guardian_bridge : file_descr option;
+  mutable guardian_output_cursor : int;
+  mutable guardian_stopping : bool;
+  mutable guardian_harness_exit : int option;
+}
+
+let guardian_queue client value =
+  let remaining = String.length client.guardian_pending - client.guardian_pending_offset in
+  let pending =
+    if remaining = 0 then value
+    else
+      String.sub client.guardian_pending client.guardian_pending_offset remaining ^ value
+  in
+  if String.length pending > max_pending_bytes then
+    failf "guardian bridge exceeded its durable replay window";
+  client.guardian_pending <- pending;
+  client.guardian_pending_offset <- 0
+
+let guardian_flush client =
+  let remaining = String.length client.guardian_pending - client.guardian_pending_offset in
+  if remaining > 0 then
+    try
+      let count =
+        Unix.write_substring client.guardian_fd client.guardian_pending
+          client.guardian_pending_offset remaining
+      in
+      client.guardian_pending_offset <- client.guardian_pending_offset + count;
+      if client.guardian_pending_offset = String.length client.guardian_pending then (
+        client.guardian_pending <- "";
+        client.guardian_pending_offset <- 0)
+    with Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
+
+let guardian_descriptor_fields guardian state =
+  [
+    ("protocol", string_of_int guardian_protocol_version);
+    ("runtime_version", runtime_version);
+    ("state", state);
+    ("agent", guardian.guardian_agent);
+    ("lane", guardian.guardian_lane);
+    ("session_id", guardian.guardian_session_id);
+    ("worktree", guardian.guardian_cwd);
+    ("instance_id", guardian.guardian_instance_id);
+    ("guardian_pid", string_of_int (Unix.getpid ()));
+    ("guardian_pid_start", guardian.guardian_pid_start);
+    ("harness_pid", string_of_int guardian.guardian_harness_pid);
+    ("harness_pid_start", guardian.guardian_harness_pid_start);
+    ("guardian_socket", guardian.guardian_paths.guardian_socket_path);
+    ("output_file", guardian.guardian_output_path);
+    ("guardian_journal_file", guardian.guardian_journal_path);
+    ("output_cursor", string_of_int guardian.guardian_output_cursor);
+    ("command", logical_command_name guardian.guardian_command);
+    ("argv_digest", command_argv_digest guardian.guardian_command);
+    ("started_utc", guardian.guardian_started_utc);
+    ( "exit_code",
+      match guardian.guardian_harness_exit with
+      | Some value -> string_of_int value
+      | None -> "" );
+  ]
+
+let write_guardian_descriptor guardian state =
+  atomic_write guardian.guardian_paths.guardian_descriptor_path
+    (descriptor_text (guardian_descriptor_fields guardian state))
+
+let create_unix_listener path =
+  (try Unix.unlink path with Unix_error (ENOENT, _, _) -> ());
+  let listener = Unix.socket PF_UNIX SOCK_STREAM 0 in
+  Unix.set_close_on_exec listener;
+  Unix.bind listener (ADDR_UNIX path);
+  Unix.chmod path 0o600;
+  Unix.listen listener 32;
+  Unix.set_nonblock listener;
+  listener
+
+let redirect_process_log path =
+  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
+  let null = Unix.openfile "/dev/null" [ O_RDONLY ] 0 in
+  Unix.dup2 null Unix.stdin;
+  Unix.dup2 descriptor Unix.stdout;
+  Unix.dup2 descriptor Unix.stderr;
+  Unix.close null;
+  if descriptor <> Unix.stdout && descriptor <> Unix.stderr then Unix.close descriptor
+
+let guardian_close_client guardian descriptor =
+  match Hashtbl.find_opt guardian.guardian_clients descriptor with
+  | None -> ()
+  | Some client ->
+      if client.guardian_mode = Guardian_bridge
+         && guardian.guardian_bridge = Some descriptor
+      then guardian.guardian_bridge <- None;
+      Hashtbl.remove guardian.guardian_clients descriptor;
+      (try Unix.close descriptor with _ -> ())
+
+let guardian_output_range guardian cursor limit =
+  if cursor < 0 || cursor > guardian.guardian_output_cursor then
+    failf "cursor-ahead cursor=%d end=%d" cursor guardian.guardian_output_cursor;
+  let length = min limit (guardian.guardian_output_cursor - cursor) in
+  let descriptor = Unix.openfile guardian.guardian_output_path [ O_RDONLY ] 0 in
+  let bytes = Bytes.create length in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      ignore (Unix.lseek descriptor cursor SEEK_SET);
+      let rec fill offset =
+        if offset < length then
+          let count = Unix.read descriptor bytes offset (length - offset) in
+          if count = 0 then failf "guardian output ended before its durable cursor"
+          else fill (offset + count)
+      in
+      fill 0;
+      Bytes.unsafe_to_string bytes)
+
+let guardian_status_fields guardian =
+  [
+    ("state", "active");
+    ("agent", guardian.guardian_agent);
+    ("lane", guardian.guardian_lane);
+    ("session_id", guardian.guardian_session_id);
+    ("instance_id", guardian.guardian_instance_id);
+    ("guardian_pid", string_of_int (Unix.getpid ()));
+    ("guardian_pid_start", guardian.guardian_pid_start);
+    ("harness_pid", string_of_int guardian.guardian_harness_pid);
+    ("harness_pid_start", guardian.guardian_harness_pid_start);
+    ("output_cursor", string_of_int guardian.guardian_output_cursor);
+    ("bridge_clients", if guardian.guardian_bridge = None then "0" else "1");
+    ("worktree", guardian.guardian_cwd);
+    ("command", logical_command_name guardian.guardian_command);
+    ("argv_digest", command_argv_digest guardian.guardian_command);
+  ]
+
+let guardian_handle_request guardian client line =
+  let refuse code = guardian_queue client (control_line [ "ERR"; code ]) in
+  match split_on '\t' line with
+  | magic :: token :: operation :: arguments
+    when magic = Printf.sprintf "GUARD/%d" guardian_protocol_version
+         && token = guardian.guardian_token -> (
+      match (operation, arguments) with
+      | "STATUS", [] ->
+          let fields =
+            guardian_status_fields guardian
+            |> List.map (fun (key, value) -> key ^ "=" ^ field_escape value)
+          in
+          guardian_queue client (control_line ("OK" :: "STATUS" :: fields))
+      | "STREAM", [ cursor ] -> (
+          try
+            let cursor = parse_nonnegative "guardian-cursor" cursor in
+            if guardian.guardian_bridge <> None then failf "kernel-bridge-active";
+            let length = guardian.guardian_output_cursor - cursor in
+            if length < 0 then
+              failf "cursor-ahead cursor=%d end=%d" cursor guardian.guardian_output_cursor;
+            if length > max_pending_bytes - max_control_bytes then
+              failf "replay-window-too-large";
+            let replay = guardian_output_range guardian cursor length in
+            guardian.guardian_bridge <- Some client.guardian_fd;
+            client.guardian_mode <- Guardian_bridge;
+            guardian_queue client
+              (control_line
+                 [ "OK"; "STREAM"; guardian.guardian_instance_id;
+                   string_of_int cursor; string_of_int guardian.guardian_output_cursor;
+                   string_of_int length ]);
+            guardian_queue client replay
+          with Loom_error error -> refuse error)
+      | "STOP", [] ->
+          guardian_queue client (control_line [ "OK"; "STOPPING" ]);
+          guardian_flush client;
+          guardian.guardian_stopping <- true
+      | _ -> refuse "unknown-operation")
+  | magic :: _
+    when magic <> Printf.sprintf "GUARD/%d" guardian_protocol_version ->
+      refuse "protocol-refused"
+  | _ -> refuse "authentication-refused"
+
+let guardian_read_client guardian descriptor =
+  match Hashtbl.find_opt guardian.guardian_clients descriptor with
+  | None -> ()
+  | Some client ->
+      let bytes = Bytes.create 65536 in
+      (try
+         let count = Unix.read descriptor bytes 0 (Bytes.length bytes) in
+         if count = 0 then guardian_close_client guardian descriptor
+         else
+           match client.guardian_mode with
+           | Guardian_bridge ->
+               let value = Bytes.sub_string bytes 0 count in
+               ignore
+                 (append_event guardian.guardian_journal "INPUT"
+                    (Printf.sprintf "%d:%s" count (sha256 value)));
+               write_all guardian.guardian_master_fd value
+           | Guardian_awaiting ->
+               Buffer.add_subbytes client.guardian_input bytes 0 count;
+               if Buffer.length client.guardian_input > max_control_bytes then
+                 guardian_close_client guardian descriptor
+               else
+                 let value = Buffer.contents client.guardian_input in
+                 (match String.index_opt value '\n' with
+                 | None -> ()
+                 | Some index ->
+                     if index <> String.length value - 1 then
+                       guardian_close_client guardian descriptor
+                     else
+                       guardian_handle_request guardian client
+                         (String.sub value 0 index))
+       with
+      | Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
+      | Unix_error _ -> guardian_close_client guardian descriptor)
+
+let guardian_accept_client guardian =
+  try
+    let descriptor, _ = Unix.accept guardian.guardian_listener in
+    Unix.set_close_on_exec descriptor;
+    Unix.set_nonblock descriptor;
+    Hashtbl.add guardian.guardian_clients descriptor
+      {
+        guardian_fd = descriptor;
+        guardian_input = Buffer.create 256;
+        guardian_mode = Guardian_awaiting;
+        guardian_pending = "";
+        guardian_pending_offset = 0;
+      }
+  with Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
+
+let guardian_read_pty guardian =
+  let bytes = Bytes.create 65536 in
+  try
+    let count = Unix.read guardian.guardian_master_fd bytes 0 (Bytes.length bytes) in
+    if count > 0 then (
+      let value = Bytes.sub_string bytes 0 count in
+      let start = guardian.guardian_output_cursor in
+      output_string guardian.guardian_output_channel value;
+      flush guardian.guardian_output_channel;
+      Unix.fsync guardian.guardian_output_descriptor;
+      guardian.guardian_output_cursor <- start + count;
+      ignore
+        (append_event guardian.guardian_journal "OUTPUT"
+           (Printf.sprintf "%d:%d:%s" start guardian.guardian_output_cursor
+              (sha256 value)));
+      write_guardian_descriptor guardian "active";
+      match guardian.guardian_bridge with
+      | None -> ()
+      | Some descriptor -> (
+          match Hashtbl.find_opt guardian.guardian_clients descriptor with
+          | None -> guardian.guardian_bridge <- None
+          | Some client ->
+              (try guardian_queue client value
+               with Loom_error _ -> guardian_close_client guardian descriptor)))
+  with Unix_error ((EAGAIN | EWOULDBLOCK | EIO), _, _) -> ()
+
+let process_exit_code = function
+  | WEXITED code -> code
+  | WSIGNALED signal -> 128 + abs signal
+  | WSTOPPED signal -> 128 + abs signal
+
+let guardian_child_status guardian =
+  match Unix.waitpid [ WNOHANG ] guardian.guardian_harness_pid with
+  | 0, _ -> None
+  | _, status -> Some status
+  | exception Unix_error (ECHILD, _, _) -> Some (WEXITED 0)
+
+let guardian_stop_child guardian =
+  if guardian.guardian_harness_exit = None then (
+    (try Unix.kill guardian.guardian_harness_pid Sys.sigterm with _ -> ());
+    let deadline = Unix.gettimeofday () +. 2.0 in
+    let rec wait () =
+      match guardian_child_status guardian with
+      | Some status -> guardian.guardian_harness_exit <- Some (process_exit_code status)
+      | None when Unix.gettimeofday () < deadline -> Unix.sleepf 0.05; wait ()
+      | None ->
+          (try Unix.kill guardian.guardian_harness_pid Sys.sigkill with _ -> ());
+          let _, status = Unix.waitpid [] guardian.guardian_harness_pid in
+          guardian.guardian_harness_exit <- Some (process_exit_code status)
+    in
+    wait ())
+
+let run_guardian paths agent lane session_id cwd command instance_id output_path
+    guardian_journal_path =
+  let lock = Unix.openfile paths.guardian_lock_path [ O_WRONLY; O_CREAT ] 0o600 in
+  Unix.set_close_on_exec lock;
+  (try Unix.lockf lock F_TLOCK 0
+   with Unix_error _ -> failf "another guardian owns this Loom generation");
+  let output_descriptor =
+    Unix.openfile output_path [ O_WRONLY; O_CREAT; O_TRUNC ] 0o600
+  in
+  Unix.set_close_on_exec output_descriptor;
+  let output_channel = Unix.out_channel_of_descr output_descriptor in
+  let journal = open_journal guardian_journal_path in
+  let listener = create_unix_listener paths.guardian_socket_path in
+  let child_pid, master_fd = forkpty () in
+  if child_pid = 0 then (
+    Unix.chdir cwd;
+    let environment =
+      Array.append (Unix.environment ())
+        [| Printf.sprintf "SOUNIO_LOOM_GUARDIAN_SOCKET=%s"
+             paths.guardian_socket_path;
+           Printf.sprintf "SOUNIO_LOOM_TOKEN_FILE=%s" paths.token_path;
+           Printf.sprintf "SOUNIO_LOOM_AGENT=%s" agent;
+           Printf.sprintf "SOUNIO_LOOM_LANE=%s" lane;
+           Printf.sprintf "SOUNIO_LOOM_SESSION_ID=%s" session_id |]
+    in
+    Unix.execvpe command.(0) command environment);
+  Unix.set_close_on_exec master_fd;
+  Unix.set_nonblock master_fd;
+  (try set_winsize master_fd 40 140 with _ -> ());
+  let guardian =
+    {
+      guardian_paths = paths;
+      guardian_agent = agent;
+      guardian_lane = lane;
+      guardian_session_id = session_id;
+      guardian_cwd = cwd;
+      guardian_command = command;
+      guardian_instance_id = instance_id;
+      guardian_output_path = output_path;
+      guardian_journal_path;
+      guardian_token = trim (read_file paths.token_path);
+      guardian_listener = listener;
+      guardian_master_fd = master_fd;
+      guardian_pid_start = process_start (Unix.getpid ());
+      guardian_harness_pid = child_pid;
+      guardian_harness_pid_start = process_start child_pid;
+      guardian_started_utc = utc_now ();
+      guardian_output_channel = output_channel;
+      guardian_output_descriptor = output_descriptor;
+      guardian_journal = journal;
+      guardian_clients = Hashtbl.create 8;
+      guardian_bridge = None;
+      guardian_output_cursor = 0;
+      guardian_stopping = false;
+      guardian_harness_exit = None;
+    }
+  in
+  write_guardian_descriptor guardian "active";
+  ignore
+    (append_event journal "GUARDIAN_STARTED"
+       (Printf.sprintf "%s:%d" instance_id child_pid));
+  let signal_stop _ = guardian.guardian_stopping <- true in
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle signal_stop);
+  Sys.set_signal Sys.sigint (Sys.Signal_handle signal_stop);
+  while
+    not guardian.guardian_stopping && guardian.guardian_harness_exit = None
+  do
+    let client_fds =
+      Hashtbl.fold
+        (fun fd _ values -> fd :: values)
+        guardian.guardian_clients []
+    in
+    let write_fds =
+      Hashtbl.fold
+        (fun fd client values ->
+          if
+            client.guardian_pending_offset < String.length client.guardian_pending
+          then fd :: values
+          else values)
+        guardian.guardian_clients []
+    in
+    let readable, writable, _ =
+      Unix.select
+        (guardian.guardian_listener :: guardian.guardian_master_fd :: client_fds)
+        write_fds [] 0.2
+    in
+    List.iter
+      (fun descriptor ->
+        if descriptor = guardian.guardian_listener then
+          guardian_accept_client guardian
+        else if descriptor = guardian.guardian_master_fd then
+          guardian_read_pty guardian
+        else guardian_read_client guardian descriptor)
+      readable;
+    List.iter
+      (fun descriptor ->
+        match Hashtbl.find_opt guardian.guardian_clients descriptor with
+        | Some client ->
+            (try guardian_flush client
+             with _ -> guardian_close_client guardian descriptor)
+        | None -> ())
+      writable;
+    match guardian_child_status guardian with
+    | Some status -> guardian.guardian_harness_exit <- Some (process_exit_code status)
+    | None -> ()
+  done;
+  if guardian.guardian_stopping then guardian_stop_child guardian;
+  let clients =
+    Hashtbl.fold
+      (fun fd _ values -> fd :: values)
+      guardian.guardian_clients []
+  in
+  List.iter (guardian_close_client guardian) clients;
+  let code = Option.value ~default:0 guardian.guardian_harness_exit in
+  ignore (append_event journal "GUARDIAN_EXITED" (string_of_int code));
+  write_guardian_descriptor guardian "exited";
+  (try Unix.unlink paths.guardian_socket_path with _ -> ());
+  close_out_noerr output_channel;
+  close_out_noerr journal.channel;
+  Unix.close listener;
+  Unix.close master_fd;
+  Unix.close lock;
+  code
+
+type guardian_phase = Guardian_initial | Guardian_active | Guardian_exited
+
+let verify_guardian_events events =
+  let expected_seq = ref 1 in
+  let expected_previous = ref (String.make 64 '0') in
+  let phase = ref Guardian_initial in
+  let output_cursor = ref 0 in
+  List.iter
+    (fun (event : journal_event) ->
+      if event.seq <> !expected_seq then
+        failf "guardian-hash:non-contiguous-sequence expected=%d actual=%d"
+          !expected_seq event.seq;
+      if event.previous <> !expected_previous then
+        failf "guardian-hash:previous-digest-mismatch seq=%d" event.seq;
+      let expected_hash =
+        sha256
+          (event_material event.seq event.previous event.utc event.kind
+             event.payload_hex)
+      in
+      if event.hash <> expected_hash then
+        failf "guardian-hash:event-digest-mismatch seq=%d" event.seq;
+      let payload = string_of_hex event.payload_hex in
+      (match (event.kind, !phase) with
+      | "GUARDIAN_STARTED", Guardian_initial -> phase := Guardian_active
+      | "GUARDIAN_STARTED", _ ->
+          failf "guardian-semantic:duplicate-start seq=%d" event.seq
+      | "OUTPUT", Guardian_active ->
+          let start, ending = parse_output_span payload in
+          if start <> !output_cursor || ending < start then
+            failf
+              "guardian-semantic:non-contiguous-output expected=%d actual=%d:%d seq=%d"
+              !output_cursor start ending event.seq;
+          output_cursor := ending
+      | "INPUT", Guardian_active -> ()
+      | "GUARDIAN_EXITED", Guardian_active -> phase := Guardian_exited
+      | _, Guardian_initial ->
+          failf "guardian-semantic:event-before-start seq=%d" event.seq
+      | _, Guardian_exited ->
+          failf "guardian-semantic:event-after-exit seq=%d" event.seq
+      | _ ->
+          failf "guardian-semantic:unknown-event kind=%s seq=%d" event.kind
+            event.seq);
+      expected_previous := event.hash;
+      incr expected_seq)
+    events;
+  (!phase, !output_cursor, !expected_previous)
+
+let load_and_verify_guardian_journal path =
+  let events =
+    read_lines path
+    |> List.filter (fun line -> trim line <> "")
+    |> List.map parse_event
+  in
+  if events = [] then failf "guardian journal is empty";
+  let phase, cursor, digest = verify_guardian_events events in
+  (events, phase, cursor, digest)
+
+let connect_unix path =
+  let descriptor = Unix.socket PF_UNIX SOCK_STREAM 0 in
+  Unix.set_close_on_exec descriptor;
+  try
+    Unix.connect descriptor (ADDR_UNIX path);
+    descriptor
+  with error ->
+    Unix.close descriptor;
+    raise error
+
+let read_protocol_line descriptor =
+  let buffer = Buffer.create 256 in
+  let byte = Bytes.create 1 in
+  let rec loop () =
+    let count = Unix.read descriptor byte 0 1 in
+    if count = 0 then failf "connection closed before protocol header";
+    let character = Bytes.get byte 0 in
+    if character = '\n' then Buffer.contents buffer
+    else if Buffer.length buffer >= max_control_bytes then
+      failf "protocol header too large"
+    else (
+      Buffer.add_char buffer character;
+      loop ())
+  in
+  loop ()
+
+let read_protocol_exact descriptor length =
+  let bytes = Bytes.create length in
+  let rec loop offset =
+    if offset < length then
+      let count = Unix.read descriptor bytes offset (length - offset) in
+      if count = 0 then failf "connection closed during protocol payload"
+      else loop (offset + count)
+  in
+  loop 0;
+  Bytes.unsafe_to_string bytes
+
+let guardian_request_line token operation arguments =
+  control_line
+    (Printf.sprintf "GUARD/%d" guardian_protocol_version :: token :: operation
+   :: arguments)
+
+let guardian_parse_ok line operation =
+  match split_on '\t' line with
+  | "ERR" :: error :: _ -> failf "%s" error
+  | "OK" :: actual :: fields when actual = operation -> fields
+  | _ -> failf "invalid guardian %s response" operation
+
+let guardian_status_request paths token =
+  let descriptor = connect_unix paths.guardian_socket_path in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor (guardian_request_line token "STATUS" []);
+      let fields = guardian_parse_ok (read_protocol_line descriptor) "STATUS" in
+      let values = Hashtbl.create 24 in
+      List.iter
+        (fun field ->
+          match String.index_opt field '=' with
+          | None -> ()
+          | Some index ->
+              Hashtbl.replace values (String.sub field 0 index)
+                (field_unescape
+                   (String.sub field (index + 1)
+                      (String.length field - index - 1))))
+        fields;
+      values)
+
+let guardian_open_stream paths token cursor =
+  let descriptor = connect_unix paths.guardian_socket_path in
+  write_all descriptor
+    (guardian_request_line token "STREAM" [ string_of_int cursor ]);
+  match guardian_parse_ok (read_protocol_line descriptor) "STREAM" with
+  | [ instance; start; ending; length ] ->
+      let start = int_of_string start in
+      let ending = int_of_string ending in
+      let length = int_of_string length in
+      let replay = read_protocol_exact descriptor length in
+      Unix.set_nonblock descriptor;
+      (descriptor, instance, start, ending, replay)
+  | _ ->
+      Unix.close descriptor;
+      failf "invalid guardian STREAM response fields"
+
+let guardian_stop_request paths token =
+  let descriptor = connect_unix paths.guardian_socket_path in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor (guardian_request_line token "STOP" []);
+      ignore (guardian_parse_ok (read_protocol_line descriptor) "STOPPING"))
 
 type stream_mode = Awaiting | Observer | Interactive of string
 
@@ -394,19 +1050,21 @@ type kernel = {
   lane : string;
   session_id : string;
   cwd : string;
-  command : string array;
+  command_name : string;
+  command_digest : string;
   instance_id : string;
   output_path : string;
   journal_path : string;
   token : string;
   listener : file_descr;
-  master_fd : file_descr;
+  guardian_fd : file_descr;
+  guardian_pid : int;
+  guardian_pid_start : string;
+  guardian_journal_path : string;
   daemon_pid_start : string;
   harness_pid : int;
   harness_pid_start : string;
   started_utc : string;
-  output_channel : out_channel;
-  output_descriptor : file_descr;
   journal : journal;
   clients : (file_descr, client) Hashtbl.t;
   mutable next_client : int;
@@ -416,6 +1074,7 @@ type kernel = {
   mutable harness_exit : int option;
   mutable next_coord_refresh : float;
   mutable coord_pid : int option;
+  mutable crash_at : string option;
 }
 
 let queue client value =
@@ -453,13 +1112,17 @@ let descriptor_fields kernel state =
     ("daemon_pid_start", kernel.daemon_pid_start);
     ("harness_pid", string_of_int kernel.harness_pid);
     ("harness_pid_start", kernel.harness_pid_start);
+    ("guardian_pid", string_of_int kernel.guardian_pid);
+    ("guardian_pid_start", kernel.guardian_pid_start);
+    ("guardian_socket", kernel.paths.guardian_socket_path);
     ("socket", kernel.paths.socket_path);
     ("token_file", kernel.paths.token_path);
     ("output_file", kernel.output_path);
     ("journal_file", kernel.journal_path);
+    ("guardian_journal_file", kernel.guardian_journal_path);
     ("output_cursor", string_of_int kernel.output_cursor);
-    ("command", logical_command_name kernel.command);
-    ("argv_digest", command_argv_digest kernel.command);
+    ("command", kernel.command_name);
+    ("argv_digest", kernel.command_digest);
     ("started_utc", kernel.started_utc);
   ]
 
@@ -481,40 +1144,17 @@ let status_fields kernel =
     ("daemon_pid_start", kernel.daemon_pid_start);
     ("harness_pid", string_of_int kernel.harness_pid);
     ("harness_pid_start", kernel.harness_pid_start);
+    ("guardian_pid", string_of_int kernel.guardian_pid);
+    ("guardian_pid_start", kernel.guardian_pid_start);
     ("output_cursor", string_of_int kernel.output_cursor);
     ("interactive_clients", if kernel.input_holder = None then "0" else "1");
     ("observer_clients", string_of_int !observers);
     ("journal", kernel.journal_path);
     ("output", kernel.output_path);
     ("worktree", kernel.cwd);
-    ("command", logical_command_name kernel.command);
-    ("argv_digest", command_argv_digest kernel.command);
+    ("command", kernel.command_name);
+    ("argv_digest", kernel.command_digest);
   ]
-
-let field_escape value =
-  let buffer = Buffer.create (String.length value) in
-  String.iter
-    (fun character ->
-      match character with
-      | '\t' | '\n' | '\r' | '%' -> Buffer.add_string buffer (Printf.sprintf "%%%02X" (Char.code character))
-      | _ -> Buffer.add_char buffer character)
-    value;
-  Buffer.contents buffer
-
-let field_unescape value =
-  let buffer = Buffer.create (String.length value) in
-  let rec loop index =
-    if index < String.length value then
-      if value.[index] = '%' && index + 2 < String.length value then (
-        Buffer.add_char buffer
-          (Char.chr ((hex_value value.[index + 1] lsl 4) lor hex_value value.[index + 2]));
-        loop (index + 3))
-      else (Buffer.add_char buffer value.[index]; loop (index + 1))
-  in
-  loop 0;
-  Buffer.contents buffer
-
-let control_line fields = String.concat "\t" fields ^ "\n"
 
 let close_client kernel descriptor =
   match Hashtbl.find_opt kernel.clients descriptor with
@@ -546,11 +1186,6 @@ let read_output_range kernel cursor limit =
       in
       fill 0;
       Bytes.unsafe_to_string bytes)
-
-let parse_nonnegative name value =
-  let parsed = try int_of_string value with _ -> failf "invalid-%s" name in
-  if parsed < 0 then failf "invalid-%s" name;
-  parsed
 
 let handle_request kernel client line =
   let refuse code =
@@ -585,7 +1220,8 @@ let handle_request kernel client line =
             if cursor > kernel.output_cursor then
               failf "cursor-ahead cursor=%d end=%d" cursor kernel.output_cursor;
             let replay_length = kernel.output_cursor - cursor in
-            if replay_length > max_pending_bytes then failf "replay-window-too-large";
+            if replay_length > max_pending_bytes - max_control_bytes then
+              failf "replay-window-too-large";
             let replay = read_output_range kernel cursor replay_length in
             if mode = "interactive" then (
               if kernel.input_holder <> None then failf "interactive-client-active";
@@ -610,9 +1246,9 @@ let handle_request kernel client line =
             if prompt = "" || String.length prompt > 16 * 1024
                || String.contains prompt '\000'
             then failf "invalid-prompt";
-            write_all kernel.master_fd prompt;
+            write_all kernel.guardian_fd prompt;
             Unix.sleepf 0.025;
-            write_all kernel.master_fd "\r";
+            write_all kernel.guardian_fd "\r";
             ignore
               (append_event kernel.journal "WAKE"
                  (Printf.sprintf "%s:%s" message_id (sha256 prompt)));
@@ -623,6 +1259,13 @@ let handle_request kernel client line =
           queue client (control_line [ "OK"; "STOPPING" ]);
           flush_client client;
           kernel.stopping <- true
+      | "CRASH", [ point ]
+        when List.mem point
+               [ "now"; "after_guardian_read"; "after_output_journal";
+                 "after_broadcast" ] ->
+          queue client (control_line [ "OK"; "CRASH_ARMED"; point ]);
+          flush_client client;
+          if point = "now" then Unix._exit 86 else kernel.crash_at <- Some point
       | _ -> refuse "unknown-operation")
   | magic :: _ when magic <> Printf.sprintf "LOOM/%d" protocol_version -> refuse "protocol-refused"
   | _ -> refuse "authentication-refused"
@@ -642,7 +1285,7 @@ let read_client kernel descriptor =
                ignore
                  (append_event kernel.journal "INPUT"
                     (Printf.sprintf "%s:%d:%s" holder count (sha256 value)));
-               write_all kernel.master_fd value
+               write_all kernel.guardian_fd value
            | Observer -> close_client kernel descriptor
            | Awaiting ->
                Buffer.add_subbytes client.input bytes 0 count;
@@ -677,21 +1320,29 @@ let accept_client kernel =
     Hashtbl.add kernel.clients descriptor client
   with Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
 
-let read_pty kernel =
+let crash_if_armed kernel point =
+  if kernel.crash_at = Some point then Unix._exit 86
+
+let read_guardian_stream kernel =
   let bytes = Bytes.create 65536 in
   try
-    let count = Unix.read kernel.master_fd bytes 0 (Bytes.length bytes) in
-    if count = 0 then ()
+    let count = Unix.read kernel.guardian_fd bytes 0 (Bytes.length bytes) in
+    if count = 0 then (
+      let values = parse_key_values kernel.paths.guardian_descriptor_path in
+      let code =
+        try int_of_string (table_value ~default:"255" values "exit_code")
+        with _ -> 255
+      in
+      kernel.harness_exit <- Some code)
     else
       let value = Bytes.sub_string bytes 0 count in
       let start = kernel.output_cursor in
-      output_string kernel.output_channel value;
-      flush kernel.output_channel;
-      Unix.fsync kernel.output_descriptor;
       kernel.output_cursor <- start + count;
+      crash_if_armed kernel "after_guardian_read";
       ignore
         (append_event kernel.journal "OUTPUT"
            (Printf.sprintf "%d:%d:%s" start kernel.output_cursor (sha256 value)));
+      crash_if_armed kernel "after_output_journal";
       let slow = ref [] in
       Hashtbl.iter
         (fun descriptor client ->
@@ -700,29 +1351,27 @@ let read_pty kernel =
               (try queue client value with Loom_error _ -> slow := descriptor :: !slow)
           | Awaiting -> ())
         kernel.clients;
-      List.iter (close_client kernel) !slow
+      List.iter (close_client kernel) !slow;
+      crash_if_armed kernel "after_broadcast"
   with Unix_error ((EAGAIN | EWOULDBLOCK | EIO), _, _) -> ()
 
-let child_status kernel =
-  match Unix.waitpid [ WNOHANG ] kernel.harness_pid with
-  | 0, _ -> None
-  | _, status -> Some status
-  | exception Unix_error (ECHILD, _, _) -> Some (WEXITED 0)
-
-let exit_code = function WEXITED code -> code | WSIGNALED signal -> 128 + signal | WSTOPPED signal -> 128 + signal
-
-let stop_child kernel =
+let stop_guardian kernel =
   if kernel.harness_exit = None then (
-    (try Unix.kill kernel.harness_pid Sys.sigterm with _ -> ());
-    let deadline = Unix.gettimeofday () +. 2.0 in
+    (try guardian_stop_request kernel.paths kernel.token with _ -> ());
+    let deadline = Unix.gettimeofday () +. 4.0 in
     let rec wait () =
-      match child_status kernel with
-      | Some status -> kernel.harness_exit <- Some (exit_code status)
-      | None when Unix.gettimeofday () < deadline -> Unix.sleepf 0.05; wait ()
-      | None ->
-          (try Unix.kill kernel.harness_pid Sys.sigkill with _ -> ());
-          let _, status = Unix.waitpid [] kernel.harness_pid in
-          kernel.harness_exit <- Some (exit_code status)
+      let values = parse_key_values kernel.paths.guardian_descriptor_path in
+      if table_value values "state" = "exited" then
+        kernel.harness_exit <-
+          Some
+            (try int_of_string (table_value ~default:"255" values "exit_code")
+             with _ -> 255)
+      else if Unix.gettimeofday () < deadline then (
+        Unix.sleepf 0.05;
+        wait ())
+      else (
+        (try Unix.kill kernel.guardian_pid Sys.sigkill with _ -> ());
+        kernel.harness_exit <- Some 255)
     in
     wait ())
 
@@ -771,7 +1420,7 @@ let run_quiet cwd command arguments =
        with _ -> exit 127)
   | pid ->
       let _, status = Unix.waitpid [] pid in
-      exit_code status
+      process_exit_code status
 
 let coord_call kernel arguments =
   match coordination_command kernel with
@@ -845,9 +1494,6 @@ let unregister_coordination kernel =
 
 let run_kernel kernel =
   write_descriptor kernel "active";
-  ignore
-    (append_event kernel.journal "SESSION_STARTED"
-       (Printf.sprintf "%s:%d" kernel.instance_id kernel.harness_pid));
   if Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0" then spawn_coordination_refresh kernel;
   let signal_stop _ = kernel.stopping <- true in
   Sys.set_signal Sys.sigterm (Sys.Signal_handle signal_stop);
@@ -857,9 +1503,6 @@ let run_kernel kernel =
     if Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0"
        && Unix.gettimeofday () >= kernel.next_coord_refresh
     then spawn_coordination_refresh kernel;
-    (match child_status kernel with
-    | Some status -> kernel.harness_exit <- Some (exit_code status)
-    | None -> ());
     let client_fds = Hashtbl.fold (fun fd _ values -> fd :: values) kernel.clients [] in
     let write_fds =
       Hashtbl.fold
@@ -868,12 +1511,14 @@ let run_kernel kernel =
         kernel.clients []
     in
     let readable, writable, _ =
-      Unix.select (kernel.listener :: kernel.master_fd :: client_fds) write_fds [] 0.2
+      Unix.select
+        (kernel.listener :: kernel.guardian_fd :: client_fds)
+        write_fds [] 0.2
     in
     List.iter
       (fun descriptor ->
         if descriptor = kernel.listener then accept_client kernel
-        else if descriptor = kernel.master_fd then read_pty kernel
+        else if descriptor = kernel.guardian_fd then read_guardian_stream kernel
         else read_client kernel descriptor)
       readable;
     List.iter
@@ -883,7 +1528,7 @@ let run_kernel kernel =
         | None -> ())
       writable
   done;
-  if kernel.stopping then stop_child kernel;
+  if kernel.stopping then stop_guardian kernel;
   let clients = Hashtbl.fold (fun fd _ values -> fd :: values) kernel.clients [] in
   List.iter (close_client kernel) clients;
   (match kernel.coord_pid with
@@ -899,99 +1544,200 @@ let run_kernel kernel =
   code
 
 let create_listener path =
-  (try Unix.unlink path with Unix_error (ENOENT, _, _) -> ());
-  let listener = Unix.socket PF_UNIX SOCK_STREAM 0 in
-  Unix.set_close_on_exec listener;
-  Unix.bind listener (ADDR_UNIX path);
-  Unix.chmod path 0o600;
-  Unix.listen listener 32;
-  Unix.set_nonblock listener;
-  listener
+  create_unix_listener path
 
 let redirect_daemon_log path =
-  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
-  let null = Unix.openfile "/dev/null" [ O_RDONLY ] 0 in
-  Unix.dup2 null Unix.stdin;
-  Unix.dup2 descriptor Unix.stdout;
-  Unix.dup2 descriptor Unix.stderr;
-  Unix.close null;
-  if descriptor <> Unix.stdout && descriptor <> Unix.stderr then Unix.close descriptor
+  redirect_process_log path
 
-let serve_session paths agent lane session_id cwd command =
+let acquire_kernel_lock paths =
   mkdir_p paths.session_dir;
   let lock = Unix.openfile paths.lock_path [ O_WRONLY; O_CREAT ] 0o600 in
   Unix.set_close_on_exec lock;
-  (try Unix.lockf lock F_TLOCK 0 with Unix_error _ -> failf "another Loom generation owns this lane");
+  (try Unix.lockf lock F_TLOCK 0
+   with Unix_error _ -> failf "another Loom kernel owns this lane");
+  lock
+
+let launch_guardian paths agent lane session_id cwd command instance_id
+    output_path guardian_journal_path kernel_lock =
+  (try Unix.unlink paths.guardian_descriptor_path with _ -> ());
+  match Unix.fork () with
+  | 0 ->
+      Unix.close kernel_lock;
+      ignore (Unix.setsid ());
+      Sys.set_signal Sys.sighup Sys.Signal_ignore;
+      redirect_process_log paths.guardian_log_path;
+      let code =
+        try
+          run_guardian paths agent lane session_id cwd command instance_id
+            output_path guardian_journal_path
+        with
+        | Loom_error error ->
+            Printf.eprintf "guardian error: %s\n%!" error;
+            1
+        | Unix_error (error, function_name, argument) ->
+            Printf.eprintf "guardian error: %s: %s(%s)\n%!"
+              (Unix.error_message error) function_name argument;
+            1
+      in
+      exit code
+  | guardian_pid ->
+      let deadline = Unix.gettimeofday () +. 8.0 in
+      let rec wait () =
+        if Unix.gettimeofday () >= deadline then (
+          (try Unix.kill guardian_pid Sys.sigkill with _ -> ());
+          failf "Loom guardian did not become ready");
+        if Sys.file_exists paths.guardian_descriptor_path then
+          let values = parse_key_values paths.guardian_descriptor_path in
+          if
+            table_value values "state" = "active"
+            && table_value values "guardian_pid" = string_of_int guardian_pid
+            && table_value values "instance_id" = instance_id
+          then values
+          else (
+            Unix.sleepf 0.05;
+            wait ())
+        else (
+          Unix.sleepf 0.05;
+          wait ())
+      in
+      wait ()
+
+let build_kernel paths agent lane session_id cwd instance_id output_path
+    journal_path guardian_journal_path journal semantic_cursor =
+  let token = trim (read_file paths.token_path) in
+  let guardian_values = guardian_status_request paths token in
+  if table_value guardian_values "state" <> "active" then
+    failf "guardian is not active";
+  if table_value guardian_values "instance_id" <> instance_id then
+    failf "guardian generation identity changed";
+  let guardian_fd, stream_instance, start_cursor, ending, replay =
+    guardian_open_stream paths token semantic_cursor
+  in
+  if stream_instance <> instance_id || start_cursor <> semantic_cursor then (
+    Unix.close guardian_fd;
+    failf "guardian stream identity or cursor changed");
+  if ending < semantic_cursor || String.length replay <> ending - semantic_cursor then (
+    Unix.close guardian_fd;
+    failf "guardian replay length does not match its durable cursor");
+  if ending > semantic_cursor then
+    ignore
+      (append_event journal "OUTPUT_RECONCILED"
+         (Printf.sprintf "%d:%d:%s" semantic_cursor ending (sha256 replay)));
+  let int_field name =
+    try int_of_string (table_value guardian_values name)
+    with _ -> failf "guardian status omitted %s" name
+  in
+  let listener = create_listener paths.socket_path in
+  {
+    paths;
+    agent;
+    lane;
+    session_id;
+    cwd;
+    command_name = table_value guardian_values "command";
+    command_digest = table_value guardian_values "argv_digest";
+    instance_id;
+    output_path;
+    journal_path;
+    token;
+    listener;
+    guardian_fd;
+    guardian_pid = int_field "guardian_pid";
+    guardian_pid_start = table_value guardian_values "guardian_pid_start";
+    guardian_journal_path;
+    daemon_pid_start = process_start (Unix.getpid ());
+    harness_pid = int_field "harness_pid";
+    harness_pid_start = table_value guardian_values "harness_pid_start";
+    started_utc = utc_now ();
+    journal;
+    clients = Hashtbl.create 16;
+    next_client = 0;
+    input_holder = None;
+    output_cursor = ending;
+    stopping = false;
+    harness_exit = None;
+    next_coord_refresh = 0.0;
+    coord_pid = None;
+    crash_at = None;
+  }
+
+let close_kernel kernel lock =
+  (try Unix.unlink kernel.paths.socket_path with _ -> ());
+  close_out_noerr kernel.journal.channel;
+  (try Unix.close kernel.listener with _ -> ());
+  (try Unix.close kernel.guardian_fd with _ -> ());
+  Unix.close lock
+
+let serve_session paths agent lane session_id cwd command =
+  let lock = acquire_kernel_lock paths in
   let instance_id = random_hex 16 in
   let generation_dir = Filename.concat (Filename.concat paths.session_dir "generations") instance_id in
   mkdir_p generation_dir;
   let output_path = Filename.concat generation_dir "output.bin" in
   let journal_path = Filename.concat generation_dir "journal.tsv" in
-  let output_descriptor = Unix.openfile output_path [ O_WRONLY; O_CREAT; O_TRUNC ] 0o600 in
-  Unix.set_close_on_exec output_descriptor;
-  let output_channel = Unix.out_channel_of_descr output_descriptor in
+  let guardian_journal_path = Filename.concat generation_dir "guardian.tsv" in
+  ignore
+    (launch_guardian paths agent lane session_id cwd command instance_id output_path
+       guardian_journal_path lock);
   let journal = open_journal journal_path in
-  let listener = create_listener paths.socket_path in
-  let child_pid, master_fd = forkpty () in
-  if child_pid = 0 then (
-    Unix.chdir cwd;
-    let environment =
-      Array.append (Unix.environment ())
-        [| Printf.sprintf "SOUNIO_LOOM_SOCKET=%s" paths.socket_path;
-           Printf.sprintf "SOUNIO_LOOM_TOKEN_FILE=%s" paths.token_path;
-           Printf.sprintf "SOUNIO_LOOM_AGENT=%s" agent;
-           Printf.sprintf "SOUNIO_LOOM_LANE=%s" lane;
-           Printf.sprintf "SOUNIO_LOOM_SESSION_ID=%s" session_id |]
-    in
-    Unix.execvpe command.(0) command environment);
-  Unix.set_close_on_exec master_fd;
-  Unix.set_nonblock master_fd;
-  (try set_winsize master_fd 40 140 with _ -> ());
+  ignore
+    (append_event journal "SESSION_STARTED"
+       (Printf.sprintf "%s:%s" instance_id
+          (table_value (parse_key_values paths.guardian_descriptor_path)
+             "harness_pid")));
   let kernel =
-    {
-      paths;
-      agent;
-      lane;
-      session_id;
-      cwd;
-      command;
-      instance_id;
-      output_path;
-      journal_path;
-      token = trim (read_file paths.token_path);
-      listener;
-      master_fd;
-      daemon_pid_start = process_start (Unix.getpid ());
-      harness_pid = child_pid;
-      harness_pid_start = process_start child_pid;
-      started_utc = utc_now ();
-      output_channel;
-      output_descriptor;
-      journal;
-      clients = Hashtbl.create 16;
-      next_client = 0;
-      input_holder = None;
-      output_cursor = 0;
-      stopping = false;
-      harness_exit = None;
-      next_coord_refresh = 0.0;
-      coord_pid = None;
-    }
+    build_kernel paths agent lane session_id cwd instance_id output_path
+      journal_path guardian_journal_path journal 0
   in
   let code =
     try run_kernel kernel
     with error ->
-      kernel.stopping <- true;
-      stop_child kernel;
-      (try write_descriptor kernel "failed" with _ -> ());
+      (try write_descriptor kernel "recoverable" with _ -> ());
+      close_kernel kernel lock;
       raise error
   in
-  (try Unix.unlink paths.socket_path with _ -> ());
-  close_out_noerr output_channel;
-  close_out_noerr journal.channel;
-  Unix.close listener;
-  Unix.close master_fd;
-  Unix.close lock;
+  close_kernel kernel lock;
+  code
+
+let recover_session paths =
+  let descriptor = parse_key_values paths.descriptor_path in
+  let agent = table_value descriptor "agent" in
+  let lane = table_value descriptor "lane" in
+  let session_id = table_value descriptor "session_id" in
+  let cwd = table_value descriptor "worktree" in
+  let instance_id = table_value descriptor "instance_id" in
+  let output_path = table_value descriptor "output_file" in
+  let journal_path = table_value descriptor "journal_file" in
+  let guardian_journal_path = table_value descriptor "guardian_journal_file" in
+  if
+    List.exists (( = ) "")
+      [ agent; lane; session_id; cwd; instance_id; output_path; journal_path;
+        guardian_journal_path ]
+  then failf "session descriptor is not recoverable";
+  let lock = acquire_kernel_lock paths in
+  let journal, events = resume_journal journal_path in
+  let semantic_cursor = semantic_output_cursor events in
+  let token = trim (read_file paths.token_path) in
+  let guardian_values = guardian_status_request paths token in
+  if table_value guardian_values "instance_id" <> instance_id then
+    failf "guardian identity does not match the semantic journal";
+  ignore
+    (append_event journal "KERNEL_RECOVERED"
+       (Printf.sprintf "%s:%s:%d:%s" instance_id
+          (table_value guardian_values "guardian_pid") (Unix.getpid ())
+          (process_start (Unix.getpid ()))));
+  let kernel =
+    build_kernel paths agent lane session_id cwd instance_id output_path
+      journal_path guardian_journal_path journal semantic_cursor
+  in
+  let code =
+    try run_kernel kernel
+    with error ->
+      (try write_descriptor kernel "recoverable" with _ -> ());
+      close_kernel kernel lock;
+      raise error
+  in
+  close_kernel kernel lock;
   code
 
 type cli = {
@@ -1121,6 +1867,17 @@ let start_command cli =
     try ignore (status_request paths); true with _ -> false
   in
   if already_active then failf "an active Loom generation already owns %s/%s" agent lane;
+  let recoverable_guardian_active =
+    if not (Sys.file_exists paths.token_path) then false
+    else
+      try
+        let token = trim (read_file paths.token_path) in
+        let values = guardian_status_request paths token in
+        table_value values "state" = "active"
+      with _ -> false
+  in
+  if recoverable_guardian_active then
+    failf "a recoverable Guardian still owns %s/%s; use recover" agent lane;
   atomic_write paths.token_path (random_hex 32 ^ "\n");
   (try Unix.unlink paths.descriptor_path with _ -> ());
   match Unix.fork () with
@@ -1146,6 +1903,60 @@ let start_command cli =
       Printf.printf "LOOM_STARTED agent=%s lane=%s instance=%s daemon_pid=%d harness_pid=%s\n%!"
         agent lane (table_value values "instance_id") daemon_pid (table_value values "harness_pid")
 
+let recover_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let agent = required cli "--agent" in
+  let lane = required cli "--lane" in
+  let paths = session_paths root agent lane in
+  (try
+     ignore (status_request paths);
+     failf "an active Loom kernel already owns %s/%s" agent lane
+   with
+  | Loom_error message when starts_with message "an active Loom kernel" ->
+      raise (Loom_error message)
+  | _ -> ());
+  let descriptor = parse_key_values paths.descriptor_path in
+  if table_value descriptor "agent" <> agent || table_value descriptor "lane" <> lane then
+    failf "recover target does not match the persisted lane identity";
+  let token = trim (read_file paths.token_path) in
+  let deadline = Unix.gettimeofday () +. 4.0 in
+  let rec wait_bridge () =
+    let values = guardian_status_request paths token in
+    if table_value values "bridge_clients" = "0" then values
+    else if Unix.gettimeofday () >= deadline then failf "previous kernel bridge is still active"
+    else (
+      Unix.sleepf 0.05;
+      wait_bridge ())
+  in
+  let guardian_before = wait_bridge () in
+  match Unix.fork () with
+  | 0 ->
+      ignore (Unix.setsid ());
+      Sys.set_signal Sys.sighup Sys.Signal_ignore;
+      redirect_daemon_log paths.daemon_log_path;
+      let code = recover_session paths in
+      exit code
+  | daemon_pid ->
+      let deadline = Unix.gettimeofday () +. 8.0 in
+      let rec wait () =
+        if Unix.gettimeofday () >= deadline then failf "recovered Loom kernel did not become ready";
+        let values = parse_key_values paths.descriptor_path in
+        if
+          table_value values "state" = "active"
+          && table_value values "daemon_pid" = string_of_int daemon_pid
+        then values
+        else (
+          Unix.sleepf 0.05;
+          wait ())
+      in
+      let values = wait () in
+      Printf.printf
+        "LOOM_RECOVERED agent=%s lane=%s instance=%s daemon_pid=%d guardian_pid=%s harness_pid=%s cursor=%s\n%!"
+        agent lane (table_value values "instance_id") daemon_pid
+        (table_value guardian_before "guardian_pid")
+        (table_value values "harness_pid") (table_value values "output_cursor")
+
 let status_command cli =
   let _, paths = session_locator cli in
   let fields = status_request paths in
@@ -1161,6 +1972,19 @@ let status_command cli =
       fields
   else Printf.printf "LOOM_STATUS %s\n%!" (String.concat " " fields)
 
+let guardian_status_command cli =
+  let _, paths = session_locator cli in
+  let token = trim (read_file paths.token_path) in
+  let values = guardian_status_request paths token in
+  let fields =
+    [ "state"; "agent"; "lane"; "session_id"; "instance_id";
+      "guardian_pid"; "guardian_pid_start"; "harness_pid";
+      "harness_pid_start"; "output_cursor"; "bridge_clients"; "worktree";
+      "command"; "argv_digest" ]
+    |> List.map (fun key -> key ^ "=" ^ field_escape (table_value values key))
+  in
+  Printf.printf "LOOM_GUARDIAN_STATUS %s\n%!" (String.concat " " fields)
+
 let wake_command cli =
   let _, paths = session_locator cli in
   let session_id = required cli "--session-id" in
@@ -1175,6 +1999,20 @@ let wake_command cli =
       | [ instance; delivered_message ] when delivered_message = message_id ->
           Printf.printf "LOOM_WAKE state=delivered instance=%s message_id=%s\n%!" instance message_id
       | _ -> failf "invalid WAKE response fields")
+
+let crash_kernel_command cli =
+  let _, paths = session_locator cli in
+  let point = required cli "--at" in
+  let token = trim (read_file paths.token_path) in
+  let descriptor = connect paths in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor (request_line token "CRASH" [ point ]);
+      match parse_ok_header (read_line_fd descriptor) "CRASH_ARMED" with
+      | [ actual ] when actual = point ->
+          Printf.printf "LOOM_CRASH_ARMED point=%s\n%!" point
+      | _ -> failf "invalid CRASH response fields")
 
 let stop_command cli =
   let _, paths = session_locator cli in
@@ -1297,6 +2135,19 @@ let verify_command cli =
   let events, phase, digest = load_and_verify_journal path in
   let phase_name = match phase with Initial -> "initial" | Active -> "active" | Exited -> "exited" in
   Printf.printf "JOURNAL_OK events=%d phase=%s digest=%s\n%!" (List.length events) phase_name digest
+
+let verify_guardian_command cli =
+  let path = required cli "--journal" in
+  let events, phase, cursor, digest = load_and_verify_guardian_journal path in
+  let phase_name =
+    match phase with
+    | Guardian_initial -> "initial"
+    | Guardian_active -> "active"
+    | Guardian_exited -> "exited"
+  in
+  Printf.printf
+    "GUARDIAN_JOURNAL_OK events=%d phase=%s cursor=%d digest=%s\n%!"
+    (List.length events) phase_name cursor digest
 
 let forge_duplicate_lease cli =
   let input_path = required cli "--journal" in
@@ -1544,7 +2395,7 @@ let tui_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  status|stop|attach|observe|snapshot --agent A --lane L [options]\n  list|tui|serve [--state-dir DIR]\n  verify-journal --journal PATH\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  list|tui|serve [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n"
     runtime_version
 
 let arguments_after_command () =
@@ -1562,8 +2413,11 @@ let main () =
         Printf.printf "protocol_version=%d\nruntime_version=%s\nlanguage=OCaml\n" protocol_version runtime_version;
         0
     | "start" -> start_command cli; 0
+    | "recover" -> recover_command cli; 0
     | "status" -> status_command cli; 0
+    | "guardian-status" -> guardian_status_command cli; 0
     | "wake" -> wake_command cli; 0
+    | "crash-kernel" -> crash_kernel_command cli; 0
     | "stop" -> stop_command cli; 0
     | "attach" -> stream_command cli true; 0
     | "observe" -> stream_command cli false; 0
@@ -1572,6 +2426,7 @@ let main () =
     | "tui" -> tui_command cli; 0
     | "serve" -> serve_http cli; 0
     | "verify-journal" -> verify_command cli; 0
+    | "verify-guardian-journal" -> verify_guardian_command cli; 0
     | "_forge-duplicate-lease" -> forge_duplicate_lease cli; 0
     | _ -> usage (); 2
 

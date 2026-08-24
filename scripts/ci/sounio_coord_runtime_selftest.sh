@@ -88,6 +88,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
   loom-exclusive-input-lease-v1 loom-read-only-gui-v1 loom-coord-transport-v1 \
+  loom-recoverable-guardian-v1 loom-kernel-recovery-v1 loom-dual-journal-v1 \
   fleet-linear-capability-v1 \
   fleet-home-isolation-v1 \
   fleet-proven-exit-v1 fleet-ed25519-anchor-v1 \
