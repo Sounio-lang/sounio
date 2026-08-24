@@ -75,7 +75,7 @@ mkdir -p "${PHW_STAGE_DIR}"
 
 echo "[1/5] building sampler + runner"
 cc -O2 -Wall "${ROOT_DIR}/scripts/gpu/kaxi_pbpk_sampler.c" -lm -o "${PHW_STAGE_DIR}/sampler"
-cc -O2 -Wall "${ROOT_DIR}/scripts/gpu/kaxi_ptx_runner.c"   -ldl -o "${PHW_STAGE_DIR}/runner"
+cc -O2 -Wall "${ROOT_DIR}/scripts/gpu/kaxi_ptx_runner.c"   -ldl -lm -o "${PHW_STAGE_DIR}/runner"
 
 echo "[2/5] sampling cohort=${PHW_COHORT} seed=${PHW_SEED} type=${PHW_TYPE}"
 "${PHW_STAGE_DIR}/sampler" --out-dir "${PHW_STAGE_DIR}" --cohort "${PHW_COHORT}" --seed "${PHW_SEED}" --type "${PHW_TYPE}" >/dev/null

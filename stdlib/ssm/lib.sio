@@ -42,10 +42,17 @@ var SSM_RNG_B: i64 = 0
 // UTILITY MATH
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// exp(x) via 20-term Taylor series; splits at ±15 to avoid overflow.
+/// exp(x) via a 20-term Taylor series after range reduction.
+///
+/// Reflect negative inputs before evaluating the series: the un-reduced Taylor
+/// polynomial suffers catastrophic cancellation for moderate negative values.
+/// Positive values are halved until the core runs on [0, 2].
 pub fn ssm_exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 15.0 { return ssm_exp(7.5) * ssm_exp(x - 7.5) }
-    if x < 0.0 - 15.0 { return 0.0 }
+    if x < 0.0 { return 1.0 / ssm_exp(0.0 - x) }
+    if x > 2.0 {
+        let half = ssm_exp(x / 2.0)
+        return half * half
+    }
     var sum = 1.0; var term = 1.0; var i = 1
     while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
     sum
@@ -383,6 +390,19 @@ fn test_erase_input() with IO, Mut, Div, Panic {
     t_check(13, if abs_f(h[6] - 0.5) < 0.0001 && abs_f(h[15] - (0.0 - 0.5)) < 0.0001 { 1 } else { 0 })
 }
 
+fn test_exp_negative_tail() with IO, Mut, Div, Panic {
+    // Oracle: true exp(-13.855) ≈ 9.612801030980067e-7, exp(-16) ≈ 1.1253517471925912e-7.
+    // Old ssm_exp flushed |x| > 15 to 0.0 and cancelled moderate negative Taylor tails.
+    let expected_13855 = 9.612801030980067e-7
+    let expected_16 = 1.1253517471925912e-7
+    let tail_13855 = ssm_exp(0.0 - 13.855)
+    let tail_16 = ssm_exp(0.0 - 16.0)
+    let round_trip = tail_13855 * ssm_exp(13.855)
+    let rel_13855 = abs_f(tail_13855 - expected_13855) / expected_13855
+    let rel_16 = abs_f(tail_16 - expected_16) / expected_16
+    t_check(14, if rel_13855 < 1.0e-8 && rel_16 < 1.0e-8 && abs_f(round_trip - 1.0) < 1.0e-8 { 1 } else { 0 })
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic {
     T_PASS = 0; T_FAIL = 0
     print("─── stdlib/ssm tests ───\n")
@@ -400,6 +420,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     test_sed_identity()
     test_sed_zd_pair()
     test_erase_input()
+    test_exp_negative_tail()
 
     print("─── "); print(T_PASS); print("/"); print(T_PASS + T_FAIL); print(" PASS ───\n")
     if T_FAIL == 0 {
