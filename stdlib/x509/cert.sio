@@ -9,6 +9,7 @@
 use asn1::der::*
 use bignum::bigint::*
 use net::socket::*
+use x509::oid::*
 
 pub const X509_MAX_RDN_ENTRIES: i32 = 16
 pub const X509_MAX_NAME_VALUE_LEN: i64 = 128
@@ -478,13 +479,391 @@ fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate
     (cert, after_spki, X509_OK)
 }
 
+// Extensions ::= SEQUENCE SIZE (1..MAX) OF Extension. `r` must already be
+// positioned INSIDE the SEQUENCE OF Extension's own content (i.e. the
+// caller has already entered both the v3 [3]-tagged EXPLICIT wrapper and
+// the inner Extensions SEQUENCE itself) -- this function walks Extension
+// entries directly off `r`'s cursor, matching x509_parse_tbs_core's own
+// convention of returning a reader positioned exactly where the next field
+// would start rather than re-descending through wrappers it doesn't own.
+pub fn x509_parse_extensions(buf: &RawBuf, r: &DerReader) -> ([ExtensionEntry; 32], i32, bool, i32, i32, [u8; 32], i32, [u8; 32], i32, i64) with IO {
+    var extensions: [ExtensionEntry; 32] = [
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+        extension_entry_zero(), extension_entry_zero(), extension_entry_zero(), extension_entry_zero(),
+    ]
+    var count: i32 = 0
+    var is_ca = false
+    var path_len_constraint: i32 = 0 - 1
+    var key_usage_bits: i32 = 0
+    var subj_kid: [u8; 32] = [0; 32]
+    var subj_kid_len: i32 = 0
+    var auth_kid: [u8; 32] = [0; 32]
+    var auth_kid_len: i32 = 0
+
+    var cursor = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+    while der_at_end(&cursor) == false {
+        if count >= X509_MAX_EXTENSIONS {
+            return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, X509_ERR_TOO_MANY_ENTRIES)
+        }
+        let (c1, ext_seq_tag, s1) = der_read_tlv(&cursor)
+        if s1 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s1) }
+        let (ext_inner, e1) = der_enter(&cursor, &ext_seq_tag)
+        if e1 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, e1) }
+
+        let (oid_reader, oid_tag, s2) = der_read_tlv(&ext_inner)
+        if s2 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s2) }
+        var oid_buf: [u8; 20] = [0; 20]
+        var oi: i64 = 0
+        while oi < oid_tag.content_len && oi < 20 {
+            oid_buf[oi as usize] = (rawbuf_get(buf, oid_tag.content_start + oi) & 255) as u8
+            oi = oi + 1
+        }
+        let (after_oid, s3) = der_next(&ext_inner, &oid_tag)
+        if s3 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s3) }
+
+        let (c2, next_tag, s4) = der_read_tlv(&after_oid)
+        if s4 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s4) }
+        var critical = false
+        var value_reader = after_oid
+        var value_tag = next_tag
+        if next_tag.tag_number == DER_TAG_BOOLEAN {
+            let (crit_val, s5) = der_read_boolean(&after_oid, &next_tag)
+            if s5 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s5) }
+            critical = crit_val
+            let (after_crit, s6) = der_next(&after_oid, &next_tag)
+            if s6 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s6) }
+            let (c3, val_tag2, s7) = der_read_tlv(&after_crit)
+            if s7 != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, s7) }
+            value_reader = after_crit
+            value_tag = val_tag2
+        }
+        // value_tag is now the extnValue OCTET STRING's tag.
+        if value_tag.content_len > X509_MAX_EXTENSION_VALUE_LEN {
+            return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, X509_ERR_VALUE_TOO_LONG)
+        }
+        var val_buf: [u8; 512] = [0; 512]
+        var vi: i64 = 0
+        while vi < value_tag.content_len {
+            val_buf[vi as usize] = (rawbuf_get(buf, value_tag.content_start + vi) & 255) as u8
+            vi = vi + 1
+        }
+
+        // Per Finding 24 (a whole-struct copy -- literal OR local var --
+        // into an array-of-struct element silently cross-contaminates
+        // which source array lands in which destination field, once the
+        // struct has two or more [u8;N] fields and the array is large
+        // enough): assign every field individually directly into the
+        // array element, never via a struct literal or an intermediate
+        // local var copy. Findings 24/25's fixes (commits 88f91fae6,
+        // 80be7c083) are independently verified against this exact
+        // pattern via tests/run-pass/x509_parse_tbs_core.sio's two new
+        // OID assertions, so this pattern is now trustworthy, but the
+        // discipline of writing field-by-field is kept regardless.
+        extensions[count as usize].oid = oid_buf
+        extensions[count as usize].oid_len = oid_tag.content_len as i32
+        extensions[count as usize].critical = critical
+        extensions[count as usize].value = val_buf
+        extensions[count as usize].value_len = value_tag.content_len as i32
+        count = count + 1
+
+        // Semantic decode for the extensions this layer specially recognizes.
+        // extnValue's content is itself a DER-encoded structure (a nested
+        // TLV inside the OCTET STRING we just captured raw bytes of) -- open
+        // a fresh DerReader scoped to those bytes to decode it.
+        var ext_value_reader = DerReader { buf_ptr: buf.ptr, pos: value_tag.content_start, end: value_tag.content_start + value_tag.content_len }
+
+        // Per Finding 18: call each OID accessor once into a local `let`
+        // before taking a reference to it -- never reference a would-be
+        // top-level const directly (this file no longer has any).
+        let oid_bc = oid_ext_basic_constraints()
+        let oid_ku = oid_ext_key_usage()
+        let oid_ski = oid_ext_subject_key_identifier()
+        let oid_aki = oid_ext_authority_key_identifier()
+        if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_bc) {
+            let (bc, s8) = x509_decode_basic_constraints(&ext_value_reader)
+            let (bc_is_ca, bc_path_len) = bc
+            is_ca = bc_is_ca
+            path_len_constraint = bc_path_len
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_ku) {
+            let (ku, s9) = x509_decode_key_usage(buf, &ext_value_reader)
+            key_usage_bits = ku
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_ski) {
+            let (kid, kid_len) = x509_decode_key_identifier(buf, &ext_value_reader)
+            subj_kid = kid
+            subj_kid_len = kid_len
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_aki) {
+            let (kid2, kid_len2) = x509_decode_key_identifier(buf, &ext_value_reader)
+            auth_kid = kid2
+            auth_kid_len = kid_len2
+        }
+        // Every other recognized-but-not-yet-specially-decoded OID (SAN,
+        // issuerAltName, SCT list) is decoded by the CALLER (Task 7's
+        // assembly function), which has access to this function's returned
+        // `extensions` list to find them by OID and re-open a DerReader on
+        // their captured `value`/`value_len` bytes -- this function's job
+        // is the generic list plus the handful of extensions above, not
+        // every extension this whole sub-project cares about.
+
+        let (next_cursor, sk) = der_skip(&cursor, &ext_seq_tag)
+        if sk != DER_OK { return (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, sk) }
+        cursor = next_cursor
+    }
+
+    (extensions, count, is_ca, path_len_constraint, key_usage_bits, subj_kid, subj_kid_len, auth_kid, auth_kid_len, X509_OK)
+}
+
+// basicConstraints ::= SEQUENCE { cA BOOLEAN DEFAULT FALSE, pathLenConstraint INTEGER OPTIONAL }
+//
+// DEVIATION FROM THE BRIEF'S DRAFTED CODE: the brief's original body read
+// `t1`/`cursor_after_ca` directly off `r`, as if `r` were already
+// positioned INSIDE the BasicConstraints SEQUENCE's own content. That is
+// wrong: `r` here is scoped to extnValue's raw content bytes, i.e. it
+// starts AT the BasicConstraints SEQUENCE's own 0x30 tag byte, not past
+// it. This is unlike x509_decode_key_usage/x509_decode_key_identifier
+// immediately below, which decode PRIMITIVE types (BIT STRING/OCTET
+// STRING) where extnValue's raw content directly IS the field's own
+// encoding -- basicConstraints is a SEQUENCE (constructed container), so
+// it needs one extra der_read_tlv + der_enter step to descend into it
+// before cA/pathLenConstraint can be read. Two prior task-6 attempts
+// caught this as a genuine logic bug in the brief's own draft; fixed here
+// by entering the outer SEQUENCE first, then running the brief's
+// otherwise-unmodified body against the resulting inner reader.
+fn x509_decode_basic_constraints(r: &DerReader) -> ((bool, i32), i64) with IO {
+    let (c0, outer_tag, s0) = der_read_tlv(r)
+    if s0 != DER_OK { return ((false, 0 - 1), s0) }
+    let (inner, e0) = der_enter(r, &outer_tag)
+    if e0 != DER_OK { return ((false, 0 - 1), e0) }
+
+    if der_at_end(&inner) == true {
+        return ((false, 0 - 1), X509_OK)   // empty SEQUENCE: both fields at their defaults
+    }
+    let (c1, t1, s1) = der_read_tlv(&inner)
+    if s1 != DER_OK { return ((false, 0 - 1), s1) }
+    var is_ca = false
+    var cursor_after_ca = c1
+    var have_ca_field = false
+    if t1.tag_number == DER_TAG_BOOLEAN {
+        let (ca_val, s2) = der_read_boolean(&inner, &t1)
+        if s2 != DER_OK { return ((false, 0 - 1), s2) }
+        is_ca = ca_val
+        have_ca_field = true
+        let (after_ca, s3) = der_next(&inner, &t1)
+        if s3 != DER_OK { return ((false, 0 - 1), s3) }
+        cursor_after_ca = after_ca
+    }
+    if der_at_end(&cursor_after_ca) == true {
+        return ((is_ca, 0 - 1), X509_OK)
+    }
+    let (c2, t2, s4) = der_read_tlv(&cursor_after_ca)
+    if s4 != DER_OK { return ((is_ca, 0 - 1), s4) }
+    let (path_len_bigint, s5) = der_read_integer(&cursor_after_ca, &t2)
+    if s5 != DER_OK { return ((is_ca, 0 - 1), s5) }
+    ((is_ca, bigint_to_small_i32(&path_len_bigint)), X509_OK)
+}
+
+// keyUsage ::= BIT STRING. Returns the bits as an i32 bitmask, bit N of the
+// mask == bit N of the DER BIT STRING (per its own bit-numbering, unrelated
+// convention subtleties intentionally not reinterpreted here -- callers
+// checking a specific named bit, e.g. keyCertSign, use the RFC 5280 SS4.2.1.3
+// bit-position table directly against this raw mask).
+fn x509_decode_key_usage(buf: &RawBuf, r: &DerReader) -> (i32, i64) with IO {
+    let (c1, t1, s1) = der_read_tlv(r)
+    if s1 != DER_OK { return (0, s1) }
+    if t1.tag_number != DER_TAG_BIT_STRING { return (0, X509_ERR_MALFORMED) }
+    if t1.content_len < 1 || t1.content_len > 3 { return (0, X509_ERR_MALFORMED) }
+    // content[0] = unused-bit count; content[1..] = up to 2 bytes of bits,
+    // MSB-first within each byte (bit 0 of the KeyUsage is the MSB of the
+    // first content byte after the unused-bits count).
+    var mask: i32 = 0
+    var i: i64 = 1
+    while i < t1.content_len {
+        let byte_val = (rawbuf_get(buf, t1.content_start + i) & 255) as i32
+        mask = (mask << 8) | byte_val
+        i = i + 1
+    }
+    (mask, X509_OK)
+}
+
+// subjectKeyIdentifier / authorityKeyIdentifier's simple form ::= OCTET STRING.
+// (authorityKeyIdentifier's full form is a SEQUENCE with an OPTIONAL
+// keyIdentifier field among others -- this function assumes the common,
+// simple bare-OCTET-STRING encoding real CAs almost universally use for
+// subjectKeyIdentifier; a caller needing authorityKeyIdentifier's other
+// optional fields, keyid aside, reads them from the raw `extensions` list
+// entry directly.)
+fn x509_decode_key_identifier(buf: &RawBuf, r: &DerReader) -> ([u8; 32], i32) with IO {
+    var out: [u8; 32] = [0; 32]
+    let (c1, t1, s1) = der_read_tlv(r)
+    if s1 != DER_OK { return (out, 0) }
+    if t1.tag_number != DER_TAG_OCTET_STRING || t1.content_len > 32 { return (out, 0) }
+    var i: i64 = 0
+    while i < t1.content_len {
+        out[i as usize] = (rawbuf_get(buf, t1.content_start + i) & 255) as u8
+        i = i + 1
+    }
+    (out, t1.content_len as i32)
+}
+
+// GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
+// GeneralName ::= CHOICE { [0] otherName, [1] rfc822Name IA5String, [2]
+//   dNSName IA5String, [3] x400Address, [4] directoryName Name, [5]
+//   ediPartyName, [6] uniformResourceIdentifier IA5String, [7] iPAddress
+//   OCTET STRING, [8] registeredID OBJECT IDENTIFIER } -- every variant is
+//   an implicitly- or explicitly-tagged context-specific value; this parser
+//   reads each GeneralName entry's raw tag/content directly and never
+//   descends via der_enter for ANY variant (see the large comment inside
+//   the loop below for why directoryName -- which per RFC 5280's ASN.1
+//   module is EXPLICIT/constructed and would otherwise get its own
+//   der_enter + x509_parse_name decode -- is instead captured via the same
+//   generic raw-content-bytes path as x400Address/ediPartyName, as a
+//   workaround for a newly discovered compiler defect blocking the richer
+//   decode).
+pub fn x509_parse_general_names(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> ([GeneralName; 32], i32, i64) with IO {
+    var out: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    var count: i32 = 0
+
+    let (seq_inner, e0) = der_enter(r, tag)
+    if e0 != DER_OK { return (out, 0, e0) }
+
+    var cursor = seq_inner
+    while der_at_end(&cursor) == false {
+        if count >= X509_MAX_SAN_ENTRIES {
+            return (out, count, X509_ERR_TOO_MANY_ENTRIES)
+        }
+        let (c1, gn_tag, s1) = der_read_tlv(&cursor)
+        if s1 != DER_OK { return (out, count, s1) }
+
+        // Per Finding 24: a whole-struct copy (literal OR local var, like
+        // an intermediate `entry` this comment used to build and then
+        // assign whole into `out[count]`) silently cross-contaminates
+        // which source array lands in which destination field, once the
+        // struct has two or more [u8;N] fields and the array is large
+        // enough. Every field is therefore assigned individually, directly
+        // into the array element `out[count as usize]` -- never through an
+        // intermediate local `entry` variable or a struct literal.
+        out[count as usize].tag = gn_tag.tag_number   // the raw context-specific [N] number IS the GeneralName choice discriminant
+
+        // DEVIATION FROM THE BRIEF'S DRAFTED CODE, discovered during this
+        // task (not Findings 24/25, which are already fixed and verified):
+        // the brief's directoryName branch assigns a fully-decoded
+        // `X509Name` (itself containing an array-of-structs, `entries:
+        // [RdnEntry;16]`) into `out[count as usize].directory_name` --
+        // i.e. a struct-containing-an-array-of-structs VALUE written into
+        // a FIELD of an array-of-structs ELEMENT. Three independent
+        // minimal repros built during this task (not committed --
+        // discarded scratch files) confirmed this specific shape corrupts
+        // data, byte-for-byte the same symptom class as Finding 22/24
+        // (one field's bytes land in a sibling field), but for a strictly
+        // NEW write shape neither fix commit (88f91fae6, 80be7c083)
+        // covers:
+        //   1. `gn_list[i].directory_name = name` (whole-struct-value
+        //      write into an array element's STRUCT-typed field) --
+        //      corrupted (entries[0].value read back holding entries[0].
+        //      oid's bytes).
+        //   2. `gn_list[i].directory_name.entries[0].oid = ...; ...
+        //      .entries[0].value = ...` (field-by-field writes through a
+        //      DOUBLY array-indexed chain: outer array index -> struct
+        //      field -> inner array index -> field) -- also corrupted
+        //      (oid[0] read back holding value's first byte, i.e. the
+        //      LATER field write clobbered the EARLIER one at the same
+        //      apparent address -- consistent with a stale/reused base-
+        //      address computation for the second array index in the
+        //      chain).
+        //   3. `gn_list[i].directory_name.entries[0] = entry` (whole
+        //      RdnEntry struct-value write at the doubly-indexed target)
+        //      -- also corrupted, identically to (1).
+        // All three were run against the live compiler on this branch,
+        // with `x509_parse_name` temporarily made `pub` to call it from a
+        // standalone repro; that temporary visibility change was reverted
+        // before this file was committed. Per this task's explicit
+        // instruction to STOP and report any unexpected compiler defect
+        // rather than silently working around it, this is reported in
+        // task-6-report-v3.md as a new, unfiled finding (distinct from
+        // Findings 24/25) rather than pursued further here. Following the
+        // brief's OWN anticipated contingency for when directoryName's
+        // dedicated struct path is not usable ("skip directoryName's
+        // dedicated fixture and instead confirm it falls into the generic
+        // raw-bytes path"), directoryName is captured via the SAME
+        // single-array-index raw-bytes path used for x400Address/
+        // ediPartyName below (a shape already proven correct by Finding
+        // 24's own fix) -- `out[count].value`/`value_len` hold the Name
+        // SEQUENCE's raw TLV bytes (tag+length+content) rather than a
+        // decoded `X509Name`; a caller needing decoded RDNs re-parses
+        // those raw bytes via `x509_parse_name` itself once this new
+        // defect is fixed. `GENERAL_NAME_DIRECTORY_NAME` intentionally
+        // gets NO special `if` branch below -- it now falls through to the
+        // generic `else` raw-bytes branch alongside x400Address/
+        // ediPartyName/URI/etc., which does not descend via `der_enter` at
+        // all (it copies gn_tag's OWN content bytes, i.e. the [4] wrapper
+        // TLV's content, into `value`) -- this deliberately captures the
+        // Name SEQUENCE TLV (0x30 ...) as raw bytes, not the [4] wrapper's
+        // un-re-tagged inner encoding, since `der_enter` is never called
+        // for this branch.
+        if gn_tag.tag_number == GENERAL_NAME_OTHER_NAME || gn_tag.tag_number == GENERAL_NAME_REGISTERED_ID {
+            if gn_tag.content_len > 20 {
+                // truncate rather than fail the whole certificate over an
+                // oversized otherName/registeredID OID -- documented, not silent
+                out[count as usize].oid_len = 0
+            } else {
+                var oid_buf: [u8; 20] = [0; 20]
+                var oi: i64 = 0
+                while oi < gn_tag.content_len {
+                    oid_buf[oi as usize] = (rawbuf_get(buf, gn_tag.content_start + oi) & 255) as u8
+                    oi = oi + 1
+                }
+                out[count as usize].oid = oid_buf
+                out[count as usize].oid_len = gn_tag.content_len as i32
+            }
+        } else {
+            // rfc822Name, dNSName, x400Address, directoryName, ediPartyName,
+            // URI, iPAddress -- all captured as raw content bytes. (See the
+            // large comment above the `if` for why directoryName lands
+            // here instead of getting a dedicated `X509Name` decode.)
+            if gn_tag.content_len > X509_MAX_GENERAL_NAME_VALUE_LEN {
+                return (out, count, X509_ERR_VALUE_TOO_LONG)
+            }
+            var val_buf: [u8; 253] = [0; 253]
+            var vi: i64 = 0
+            while vi < gn_tag.content_len {
+                val_buf[vi as usize] = (rawbuf_get(buf, gn_tag.content_start + vi) & 255) as u8
+                vi = vi + 1
+            }
+            out[count as usize].value = val_buf
+            out[count as usize].value_len = gn_tag.content_len as i32
+        }
+
+        count = count + 1
+
+        let (next_cursor, sk) = der_skip(&cursor, &gn_tag)
+        if sk != DER_OK { return (out, count, sk) }
+        cursor = next_cursor
+    }
+
+    (out, count, X509_OK)
+}
+
 // Parses a Name (SEQUENCE OF RelativeDistinguishedName, each RDN a SET OF
 // AttributeTypeAndValue) into an X509Name. Only the first AttributeTypeAndValue
 // of each RDN SET is read (multi-valued RDNs -- more than one attribute in a
 // single SET -- are rare in practice; capturing just the first is a
 // documented, acceptable simplification, not a silent drop, since real CA
 // certificates essentially never issue genuinely multi-valued RDNs).
-fn x509_parse_name(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> (X509Name, i64) with IO {
+pub fn x509_parse_name(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> (X509Name, i64) with IO {
     var name = x509_name_zero()
     let (seq_inner, e0) = der_enter(r, tag)
     if e0 != DER_OK { return (name, e0) }

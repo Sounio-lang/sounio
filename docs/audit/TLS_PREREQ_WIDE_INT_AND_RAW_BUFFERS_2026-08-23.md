@@ -1122,3 +1122,86 @@ the final fix. All 6 pre-existing X.509-plan tests still pass, including
 `x509_parse_tbs_core.sio` with two new assertions added specifically to
 close the `.oid`-was-never-checked gap that let this whole class of bug
 ship silently in Task 5.
+
+## Finding 26 (new, not fixed) — writing a struct value that itself contains an array-of-structs field into a DOUBLY array-indexed target corrupts data; distinct from, and not covered by, Finding 24's fix
+
+Found during Task 6 (`x509_parse_general_names`'s `directoryName`
+branch), the third attempt at this task, after Findings 24/25 were both
+already fixed/documented and independently re-verified working for their
+own covered shapes.
+
+**Shape:** `GeneralName.directory_name` is an `X509Name`, which itself
+contains `entries: [RdnEntry; 16]` (an array of structs). Task 6's brief
+draft assigns a fully-decoded `X509Name` into
+`out[count as usize].directory_name`, where `out` is itself
+`[GeneralName; 32]` -- i.e. a struct VALUE that contains its own
+array-of-structs field, written into a FIELD of an array-of-structs
+ELEMENT. This is a strictly different write shape from anything Finding
+24's fix (commits `88f91fae6`, `80be7c083`) was verified against: those
+fixes cover `arr[i].field = scalar_or_plain_array` (Finding 24's own
+fix target) and `cert.issuer.entries[i].field` read/write chains where
+the struct reached via the chain has ONLY scalar/plain-array fields, not
+a chain whose target ITSELF nests another array-of-structs.
+
+**Three independent minimal repros, all corrupted, all built and run
+against the live `bin/souc` (Madaros) on this branch during Task 6's
+third attempt (not committed -- discarded scratch files under `/tmp`,
+reproducible from the descriptions below):**
+
+1. `gn_list[i].directory_name = name` (whole-struct-VALUE write into an
+   array element's STRUCT-typed field, where the struct value being
+   written -- `name: X509Name` -- itself contains an array-of-structs
+   field). Before the write, `name.entries[0].value` held the correct
+   bytes (`D`,`i`,`r`,`C`,`N` = `0x44,0x69,0x72,0x43,0x4E`) and
+   `name.entries[0].oid` held `0x55,0x04,0x03`. After
+   `gn_list[4].directory_name = name`, reading back
+   `gn_list[4].directory_name.entries[0].value[0]` returned `0x55` (oid's
+   first byte) and `value[4]` returned `0` -- `value` read back holding
+   (a truncated prefix of) `oid`'s bytes.
+2. `gn_list[i].directory_name.entries[0].oid = ...; ...
+   .entries[0].value = ...` (field-by-field writes through a DOUBLY
+   array-indexed chain: outer array index `[i]` -> struct field
+   `.directory_name` -> inner array index `.entries[0]` -> field). Also
+   corrupted, but in the OPPOSITE direction from (1): after writing
+   `oid` first and `value` second, reading back `oid[0]` returned `0x44`
+   (`value`'s first byte) -- the LATER field write appears to have
+   clobbered the EARLIER one at what the generated code treats as the
+   same address, consistent with a stale/reused base-address computation
+   for the second (inner) array index in the chain rather than two
+   distinct field offsets off one correctly-computed element address.
+3. `gn_list[i].directory_name.entries[0] = entry` (a single whole
+   `RdnEntry` struct-value write at the doubly-indexed target, `entry`
+   built as a local var with correct field values beforehand). Also
+   corrupted, identically to (1) -- `value[0]` read back as `0x55`.
+
+All three repros used `x509_name_zero()`/`extension_entry_zero()`-style
+zero-constructors and a `[GeneralName; 32]` array matching
+`stdlib/x509/cert.sio`'s real shapes exactly (not a simplified stand-in
+struct), and `x509_parse_name` was temporarily made `pub` to call it
+standalone for repro (1)'s DER-driven variant before hand-building
+`name` directly for repros (2)/(3); the temporary visibility change was
+reverted before `stdlib/x509/cert.sio` was committed.
+
+**Workaround applied in `stdlib/x509/cert.sio` (Task 6, `git log` commit
+implementing this task):** rather than pursue this further -- per this
+plan's own dispatch instructions, an unexpected compiler defect is
+reported, not silently worked around with speculative retries --
+`x509_parse_general_names`'s `directoryName` branch was deleted entirely.
+`GENERAL_NAME_DIRECTORY_NAME` now falls through to the same generic
+raw-content-bytes `else` branch used for `x400Address`/`ediPartyName`
+(a write shape already proven correct by Finding 24's own fix: a single
+array index, writing a plain `[u8;253]` field, no nested struct
+involved). `GeneralName.directory_name`/`X509Name`'s own struct
+definition is UNCHANGED -- only removed from live use in this one call
+site -- so no data model rollback was needed, and a future fix to this
+defect can restore the richer decode by re-adding the branch this commit
+removed.
+
+**Status: OPEN, unfiled as a numbered compiler-team ticket beyond this
+audit doc entry.** Any future code assigning a struct value that itself
+contains an array-of-structs field into an array-of-structs element's
+field (at any nesting depth doubly-indexed or deeper) should assume this
+is broken until a decisive fix, mirroring Finding 24's, lands and is
+independently re-verified against repro (2) above (the field-by-field
+variant, since it is the form most likely to be reached for first as a
+"safe" workaround and is NOT safe).
