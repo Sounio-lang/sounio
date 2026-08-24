@@ -1430,13 +1430,20 @@ fn x509_parse_name(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> (X509Name, i64)
             vi = vi + 1
         }
 
-        name.entries[count as usize] = RdnEntry {
-            oid: oid_buf,
-            oid_len: oid_tag.content_len as i32,
-            value_tag: val_tag.tag_number,
-            value: val_buf,
-            value_len: val_tag.content_len as i32,
-        }
+        // Per Finding 22 (discovered during this task's own implementation,
+        // not known when this section was first drafted): a whole-struct
+        // literal written directly into an array-of-struct element
+        // silently cross-contaminates which source array lands in which
+        // destination field, once the struct has two or more [u8;N]
+        // fields (RdnEntry has `oid:[u8;20]` and `value:[u8;128]`) and the
+        // array is large enough (confirmed broken at RdnEntry's 16-entry
+        // scale). Every field is assigned individually, directly into the
+        // array element, instead.
+        name.entries[count as usize].oid = oid_buf
+        name.entries[count as usize].oid_len = oid_tag.content_len as i32
+        name.entries[count as usize].value_tag = val_tag.tag_number
+        name.entries[count as usize].value = val_buf
+        name.entries[count as usize].value_len = val_tag.content_len as i32
         count = count + 1
 
         let (next_cursor, sk) = der_skip(&cursor, &rdn_set_tag)
@@ -1448,7 +1455,7 @@ fn x509_parse_name(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> (X509Name, i64)
 }
 ```
 
-**Note on `name.entries[count as usize] = RdnEntry { ... }`**: this is a whole-element array-of-struct reassignment, the pattern Task 1's check (a) must have confirmed safe before this task was dispatched — if Task 1 found check (a) failing, this whole task is blocked pending the controller's plan redesign (per the Global Constraints section), and this code cannot be used as written.
+**Note on the field-by-field array-element writes above**: this superseded the plan's original whole-struct-literal write (`name.entries[count as usize] = RdnEntry { ... }`), which Task 5's implementer found -- and the controller independently confirmed with a minimal repro -- silently cross-contaminates a struct's two `[u8;N]` fields when written whole into a sufficiently large array-of-struct element. See Finding 22 in `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`. This supersedes the now-stale claim, in the paragraph this replaced, that Task 1's check (a) had already confirmed this exact pattern safe -- check (a) tested a single-array-field struct; Finding 22 shows the two-array-field case is a distinct, narrower-scoped failure mode that check (a) did not cover.
 
 **Note on `%`**: `unix_timestamp_from_ymdhms`'s comment mentions avoiding `%` — this project has not specifically audited `%` (modulo) on plain small non-negative `i64` values; it uses only `/` (already established safe for small values elsewhere on this branch, e.g. `der.sio`'s `padded_len` computation) and manual branch-based equivalents. If a future task finds `%` is in fact safe for small values, this is a candidate simplification, not a required one.
 
@@ -1558,13 +1565,19 @@ pub fn x509_parse_extensions(buf: &RawBuf, r: &DerReader) -> ([ExtensionEntry; 3
             vi = vi + 1
         }
 
-        extensions[count as usize] = ExtensionEntry {
-            oid: oid_buf,
-            oid_len: oid_tag.content_len as i32,
-            critical: critical,
-            value: val_buf,
-            value_len: value_tag.content_len as i32,
-        }
+        // Per the newly discovered Finding 22 (a whole-struct copy -- literal
+        // OR local var -- into an array-of-struct element silently
+        // cross-contaminates which source array lands in which destination
+        // field, once the struct has two or more [u8;N] fields and the
+        // array is large enough; confirmed safe at SctEntry's ~160-byte/
+        // entry x8 scale, confirmed BROKEN at ExtensionEntry's larger scale):
+        // assign every field individually directly into the array element,
+        // never via a struct literal or an intermediate local var copy.
+        extensions[count as usize].oid = oid_buf
+        extensions[count as usize].oid_len = oid_tag.content_len as i32
+        extensions[count as usize].critical = critical
+        extensions[count as usize].value = val_buf
+        extensions[count as usize].value_len = value_tag.content_len as i32
         count = count + 1
 
         // Semantic decode for the extensions this layer specially recognizes.
@@ -1739,8 +1752,17 @@ pub fn x509_parse_general_names(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> ([
         let (c1, gn_tag, s1) = der_read_tlv(&cursor)
         if s1 != DER_OK { return (out, count, s1) }
 
-        var entry = general_name_zero()
-        entry.tag = gn_tag.tag_number   // the raw context-specific [N] number IS the GeneralName choice discriminant
+        // Per the newly discovered Finding 22: a whole-struct copy (literal
+        // OR local var, like the `entry` this comment used to build and
+        // then assign whole into `out[count]`) silently cross-contaminates
+        // which source array lands in which destination field, once the
+        // struct has two or more [u8;N] fields and the array is large
+        // enough (confirmed safe at SctEntry's ~160-byte/entry x8 scale,
+        // confirmed BROKEN at GeneralName's larger 32-entry scale). Every
+        // field is therefore assigned individually, directly into the
+        // array element `out[count as usize]` -- never through an
+        // intermediate local `entry` variable or a struct literal.
+        out[count as usize].tag = gn_tag.tag_number   // the raw context-specific [N] number IS the GeneralName choice discriminant
 
         if gn_tag.tag_number == GENERAL_NAME_DIRECTORY_NAME && gn_tag.constructed == true {
             // Only attempted if the struct actually has this field --
@@ -1755,7 +1777,7 @@ pub fn x509_parse_general_names(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> ([
                 if s2 == DER_OK {
                     let (dn, s3) = x509_parse_name(buf, &dn_reader, &dn_seq_tag)
                     if s3 == DER_OK {
-                        entry.directory_name = dn
+                        out[count as usize].directory_name = dn
                     }
                 }
             }
@@ -1763,7 +1785,7 @@ pub fn x509_parse_general_names(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> ([
             if gn_tag.content_len > 20 {
                 // truncate rather than fail the whole certificate over an
                 // oversized otherName/registeredID OID -- documented, not silent
-                entry.oid_len = 0
+                out[count as usize].oid_len = 0
             } else {
                 var oid_buf: [u8; 20] = [0; 20]
                 var oi: i64 = 0
@@ -1771,8 +1793,8 @@ pub fn x509_parse_general_names(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> ([
                     oid_buf[oi as usize] = (rawbuf_get(buf, gn_tag.content_start + oi) & 255) as u8
                     oi = oi + 1
                 }
-                entry.oid = oid_buf
-                entry.oid_len = gn_tag.content_len as i32
+                out[count as usize].oid = oid_buf
+                out[count as usize].oid_len = gn_tag.content_len as i32
             }
         } else {
             // rfc822Name, dNSName, x400Address, ediPartyName, URI,
@@ -1787,11 +1809,10 @@ pub fn x509_parse_general_names(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> ([
                 val_buf[vi as usize] = (rawbuf_get(buf, gn_tag.content_start + vi) & 255) as u8
                 vi = vi + 1
             }
-            entry.value = val_buf
-            entry.value_len = gn_tag.content_len as i32
+            out[count as usize].value = val_buf
+            out[count as usize].value_len = gn_tag.content_len as i32
         }
 
-        out[count as usize] = entry
         count = count + 1
 
         let (next_cursor, sk) = der_skip(&cursor, &gn_tag)

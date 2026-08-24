@@ -856,3 +856,105 @@ cause is real, so no code changes hinge on resolving this discrepancy. If
 a future session reproduces top-limb corruption on a cross-module
 `bigint_modpow` call, this entry should be upgraded to a confirmed
 finding with the actual trigger condition documented.
+
+## Finding 22 — writing a WHOLE struct (literal or local var) into an array-of-struct element cross-contaminates its `[u8;N]` fields once the struct has two or more such fields and the array is large enough
+
+Found by Task 5's implementer while building `x509_parse_name` (RdnEntry
+array). Confirmed independently by the controller with three separate
+minimal repros, and the threshold behavior cross-checked against an
+already-shipped, already-reviewed case that turns out NOT to trigger it.
+
+```sio
+struct TwoArrayFields {
+    oid: [u8; 20],
+    oid_len: i32,
+    value: [u8; 128],
+    value_len: i32,
+}
+// ... array of 16 of these, each populated via a local `var entry = ...`
+// with entry.oid = oid_buf (first byte 0x55) and entry.value = val_buf
+// (first byte 0x54), then written whole:
+arr[i] = entry
+// or equivalently, via a struct literal directly:
+arr[i] = TwoArrayFields { oid: oid_buf, oid_len: 1, value: val_buf, value_len: 7 }
+
+// WRONG in both forms: arr[i].value[0] reads back 0x55 (oid_buf's byte),
+// not 0x54 (val_buf's own byte) -- the value field silently receives the
+// oid field's array bytes. Scalar fields (oid_len, value_len) are
+// unaffected and read back correctly.
+```
+
+**This is a size-threshold bug, not universal.** Confirmed SAFE at
+`SctEntry`-scale (8-element array, two `[u8;N]` fields of 32+128 bytes,
+~188 bytes/entry, ~1.5KB total array — this is the pattern Task 4 already
+shipped and reviewed, `stdlib/x509/sct.sio`'s `out[count as usize] =
+SctEntry { ... }`; independently re-tested at that exact scale and found
+correct, so Task 4's shipped code needs no fix). Confirmed BROKEN at
+`RdnEntry`-scale (16-element array, `[u8;20]`+`[u8;128]` fields, ~156
+bytes/entry, ~2.5KB total array) and at `GeneralName`-scale (32-element
+array, `[u8;253]`+`[u8;20]` fields, ~281 bytes/entry, ~9KB total array).
+The exact threshold was not pinned down further (out of scope for this
+task's effort budget) — treat any array-of-struct with 2+ `[u8;N]` fields
+as at-risk regardless of apparent size unless independently verified safe.
+
+**Workaround: assign every field of an array-of-struct element
+individually, directly into the array element** (`arr[i].field = value`
+for each field), never via a struct literal and never via an intermediate
+local variable copied whole into the array slot. This is a narrower,
+corrected scope for what Task 1's original array-of-struct audit (check
+(a): "flat array-of-struct, whole-element write + field read via index")
+actually covers — check (a)'s fixture used a single-array-field struct;
+this finding shows a SECOND `[u8;N]` field in the same struct changes the
+failure mode entirely. Any future array-of-struct write involving a
+struct with two or more `[u8;N]` fields (`GeneralName`, `ExtensionEntry`,
+`RdnEntry` all qualify) must use field-by-field assignment into the array
+element as the default, not an exception.
+
+## Finding 23 (implementer-diagnosed, partially independently confirmed) — a large aggregate (order of 10⁵ bytes) returned through a multi-element tuple across nested function calls silently zeroes a non-first scalar field
+
+Found by Task 5's implementer while building `x509_parse_tbs_core`, which
+returns `(Certificate, DerReader, i64)` through two levels of nested
+function calls. With `Certificate.version: i32` in its originally
+committed position (non-first field, between `outer_signature_len` and
+`serial_number: BigInt`), the field was correctly set inside the deepest
+function (confirmed via an instrumented print immediately before that
+function's `return`) but read back as `0` in the top-level caller after
+the value crossed two function-return boundaries.
+
+The implementer isolated this with five standalone repro files: a
+~600-byte struct with the same field non-first survived the same return
+path correctly; only at `Certificate`'s true scale (all its 32/8-element
+fixed arrays of nested structs present, roughly 150-200KB) did the
+non-first scalar field get silently zeroed, independent of source-level
+assignment order or adjacency to the struct's `BigInt` fields. Moving the
+field to be the struct's literal first field made it survive reliably.
+
+**Controller verification:** re-running the fix on the real, now-committed
+`Certificate` struct (`version` moved to first field) through an
+equivalent two-level nested-tuple-return repro confirmed both a non-first
+`i64` field (`not_before_unix`) and another (`not_after_unix`) survive
+correctly on the real struct at its true scale. A separate ~75KB
+synthetic struct with a non-first scalar field, built specifically to
+try to reproduce the ORIGINAL (pre-fix) failure, did NOT reproduce
+corruption — consistent with a size threshold somewhere between ~75KB and
+`Certificate`'s true ~150-200KB scale, but this was not pinned down
+further (the fix is already correct and low-cost regardless of the exact
+threshold, so further bisection was not pursued).
+
+**Disposition:** treated as a real, load-bearing finding despite the
+controller not reproducing the pre-fix failure state directly — the
+implementer's isolation was methodical (five repros, ruled out
+assignment-order and BigInt-adjacency as confounds) and the controller's
+own test independently confirms the FIX is correct at true scale, which
+is what matters going forward. **Workaround, now applied project-wide as
+a rule for this plan: any large (order of 10^4+ bytes) struct returned
+through a multi-element tuple across a function-call boundary should keep
+any single scalar field that must survive the round-trip as the struct's
+first field**, or (safer, if more than one such field exists) avoid
+returning the whole large struct through nested tuple-returning calls at
+all — return only the fields that changed and let the caller merge them,
+or restructure so the large struct is only ever mutated in place via a
+single non-nested function. `Certificate.version` was moved to the first
+field as the minimal fix for this task; any future task adding new
+scalar fields to `Certificate` that must survive a similar nested-return
+path should be aware of this risk.
