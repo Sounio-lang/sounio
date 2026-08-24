@@ -81,7 +81,7 @@ SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$combined" >"$runtime_log" 2>&1 || {
   fail 'single-module Loom continuity witness did not run'
 }
 rg -Fxq \
-  'loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 signed=1 independent_pod=1 independent_clean=1 pre_spawn=1 predecessor=refused signed_predecessor=refused collapsed_principal=refused pre_spawn_collapsed=refused missing_observation=refused count=refused kind=refused authority=refused' \
+  'loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 signed=1 independent_pod=1 independent_clean=1 pre_spawn=1 measurement=1 measurement_roles=distinct measurement_disagreement=refused predecessor=refused signed_predecessor=refused collapsed_principal=refused pre_spawn_collapsed=refused missing_observation=refused count=refused kind=refused authority=refused' \
   "$runtime_log" || {
     cat "$runtime_log" >&2
     fail 'Loom continuity witness omitted its exact receipt'
@@ -99,8 +99,12 @@ expect_rejection private-signed-proof \
   "$PRIVACY/loom_continuity_private_signed_struct_main.sio" E176
 expect_composed_rejection decision-as-independent-observation \
   "$PRIVACY/loom_continuity_decision_as_observation_main.sio" E009
+expect_composed_rejection decision-facts-as-measurement \
+  "$PRIVACY/loom_continuity_decision_facts_as_measurement_main.sio" E009
 expect_rejection private-disjoint-principals \
   "$PRIVACY/loom_continuity_private_disjoint_principals_main.sio" E176
+expect_rejection private-measurement-agreement \
+  "$PRIVACY/loom_continuity_private_measurement_agreement_main.sio" E176
 expect_composed_rejection linear-reuse \
   "$PRIVACY/loom_continuity_linear_reuse_main.sio" E039
 
@@ -242,4 +246,50 @@ if [[ "$principal_sabotage_rc" -eq 0 ]]; then
   fail 'removing the principal-disjointness guard did not expose the collapsed-principal witness'
 fi
 
-echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 signed-type-separation=E009 signed-proof-private=E176 role-collapse=E009 disjoint-proof-private=E176 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1 sabotage-principal-disjointness=1"
+mkdir -p "$WORK/measurement-stdlib/coordination"
+cp "$MODULE" "$WORK/measurement-stdlib/coordination/loom_continuity.sio"
+measurement_module="$WORK/measurement-stdlib/coordination/loom_continuity.sio"
+awk '
+  BEGIN { in_function=0; skip_body=0; changed=0 }
+  $0 == "fn measurement_tokens_agree(" {
+    in_function=1
+    print
+    next
+  }
+  in_function && !skip_body {
+    print
+    if ($0 == ") -> bool {") {
+      print "    true"
+      skip_body=1
+      changed=changed + 1
+    }
+    next
+  }
+  skip_body {
+    if ($0 == "}") {
+      print
+      in_function=0
+      skip_body=0
+    }
+    next
+  }
+  { print }
+  END { if (changed != 1) exit 42 }
+' "$measurement_module" > "$WORK/measurement-mutated.sio" || \
+  fail 'could not apply the measurement-agreement mutation'
+mv "$WORK/measurement-mutated.sio" "$measurement_module"
+
+measurement_sabotage_program="$WORK/measurement_sabotage_kernel.sio"
+compose_witness "$measurement_module" "$measurement_sabotage_program"
+measurement_sabotage_log="$WORK/measurement-sabotage.log"
+set +e
+SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$measurement_sabotage_program" \
+  >"$measurement_sabotage_log" 2>&1
+measurement_sabotage_rc=$?
+set -e
+if [[ "$measurement_sabotage_rc" -eq 0 ]]; then
+  cat "$measurement_sabotage_log" >&2
+  fail 'forcing measurement agreement did not expose the disagreement witness'
+fi
+
+echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 signed-type-separation=E009 signed-proof-private=E176 role-collapse=E009 measurement-role-collapse=E009 disjoint-proof-private=E176 measurement-agreement-private=E176 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1 sabotage-principal-disjointness=1 sabotage-measurement-agreement=1"

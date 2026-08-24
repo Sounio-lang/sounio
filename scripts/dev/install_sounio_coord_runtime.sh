@@ -65,6 +65,12 @@ activate_runtime() {
         -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
       die "installed runtime declares principal independence without signed Loom and native Sounio admission: $runtime_id"
   fi
+  if grep -q '^capability=loom-independent-measurement-v1$' "$manifest"; then
+    grep -q '^capability=loom-principal-independence-v1$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
+      die "installed runtime declares independent measurement without principal independence and native Sounio admission: $runtime_id"
+  fi
   if grep -q '^capability=loom-cross-node-replay-v1$' "$manifest"; then
     grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest" && \
       grep -q '^capability=loom-separate-pod-inbox-replay-v1$' "$manifest" || \
@@ -235,6 +241,13 @@ loom_continuity_probe="$(
 )"
 [[ "$loom_continuity_probe" == 'SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1' ]] || \
   die "Loom native Sounio continuity adapter failed its install probe"
+loom_measurement_probe="$(
+  printf '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401\n' | \
+    "$loom_continuity_binary"
+)"
+[[ "$loom_measurement_probe" == \
+  'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v2 authority=disjoint-principals+measured-fact-agreement' ]] || \
+  die "Loom native Sounio independent-measurement adapter failed its install probe"
 
 bundle_sha="$(
   sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
@@ -300,6 +313,7 @@ else
     printf 'capability=loom-separate-pod-inbox-replay-v1\n'
     printf 'capability=loom-signed-continuity-receipt-v2\n'
     printf 'capability=loom-principal-independence-v1\n'
+    printf 'capability=loom-independent-measurement-v1\n'
     printf 'capability=loom-cross-node-replay-v1\n'
     printf 'capability=loom-cursor-replay-v1\n'
     printf 'capability=loom-exclusive-input-lease-v1\n'

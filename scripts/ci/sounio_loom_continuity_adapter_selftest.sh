@@ -53,6 +53,15 @@ expect_accept_pre_spawn() {
     fail "$label returned a non-canonical pre-spawn verdict: $output"
 }
 
+expect_accept_measurement_pre_spawn() {
+  local label="$1" facts="$2" output
+  output="$(printf '%s\n' "$facts" | "$ADAPTER")" || \
+    fail "$label was refused"
+  [[ "$output" == \
+    'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v2 authority=disjoint-principals+measured-fact-agreement' ]] || \
+    fail "$label returned a non-canonical measured pre-spawn verdict: $output"
+}
+
 expect_refuse() {
   local label="$1" facts="$2" expected_rc="$3" output rc=0
   set +e
@@ -78,6 +87,8 @@ expect_accept_independent independently-observed-pod \
 expect_accept_independent independently-observed-clean \
   '101 111 215 315 415 515 614 714 814 914 2 3 2 1003 2 1101 1201 1302'
 expect_accept_pre_spawn independent-pre-spawn '9003 1002 1101 1201 1301'
+expect_accept_measurement_pre_spawn independently-measured-pre-spawn \
+  '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401'
 expect_refuse predecessor-missing \
   '101 111 203 303 403 503 602 702 0 902 3 2 1' 42
 expect_refuse pod-count-zero \
@@ -91,6 +102,10 @@ expect_refuse signed-initial-has-predecessor \
 expect_refuse collapsed-principal \
   '101 111 214 314 414 514 613 713 813 913 3 3 2 1002 2 1101 1101 1301' 42
 expect_refuse collapsed-pre-spawn '9003 1002 1101 1101 1301' 42
+expect_refuse measured-semantic-disagreement \
+  '9004 1002 1101 1201 1301 2101 2201 2302 2401 2101 2201 2301 2401' 42
+expect_refuse measured-pre-spawn-missing-field \
+  '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301' 64
 expect_refuse missing-independent-observation \
   '101 111 214 314 414 514 613 713 813 913 3 3 2 1002 2 1101 1201 0' 42
 expect_refuse extra-field \
@@ -189,4 +204,48 @@ principal_mutant_output="$(
   'SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v3 authenticity=ed25519+independent-observer' ]] || \
   fail 'mutated independent policy did not admit the collapsed principal'
 
-echo 'sounio-loom-continuity-adapter-selftest: PASS language=Sounio engine=lean_single transport=stdin initial=accept clean=accept pod=accept signed=accept independent_pod=accept independent_clean=accept pre_spawn=accept predecessor=refused signed_predecessor=refused collapsed_principal=refused collapsed_pre_spawn=refused missing_observation=refused count=refused kind=refused canonical=refused sabotage_predecessor_guard=exposed sabotage_signed_predecessor=exposed sabotage_principal_disjointness=exposed'
+measurement_mutated="$WORK/loom_continuity_measurement_mutated.sio"
+awk '
+  BEGIN { in_function=0; skip_body=0; changed=0 }
+  $0 == "fn measurement_tokens_agree(" {
+    in_function=1
+    print
+    next
+  }
+  in_function && !skip_body {
+    print
+    if ($0 == ") -> bool {") {
+      print "    true"
+      skip_body=1
+      changed=changed + 1
+    }
+    next
+  }
+  skip_body {
+    if ($0 == "}") {
+      print
+      in_function=0
+      skip_body=0
+    }
+    next
+  }
+  { print }
+  END { if (changed != 1) exit 42 }
+' "$MODULE" > "$measurement_mutated" || \
+  fail 'could not apply measurement-agreement sabotage'
+
+measurement_mutant="$WORK/sounio-loom-continuity-measurement-mutant"
+SOUNIO_LOOM_CONTINUITY_PREBUILT= \
+SOUNIO_LOOM_CONTINUITY_MODULE="$measurement_mutated" \
+SOUNIO_LOOM_CONTINUITY_OUTPUT="$measurement_mutant" \
+  "$BUILD" >/dev/null
+measurement_mutant_output="$(
+  printf '%s\n' \
+    '9004 1002 1101 1201 1301 2101 2201 2302 2401 2101 2201 2301 2401' | \
+    "$measurement_mutant"
+)" || fail 'measurement-agreement sabotage did not expose the disagreement witness'
+[[ "$measurement_mutant_output" == \
+  'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v2 authority=disjoint-principals+measured-fact-agreement' ]] || \
+  fail 'mutated measurement policy did not admit the formerly refused disagreement'
+
+echo 'sounio-loom-continuity-adapter-selftest: PASS language=Sounio engine=lean_single transport=stdin initial=accept clean=accept pod=accept signed=accept independent_pod=accept independent_clean=accept pre_spawn=accept measured_pre_spawn=accept predecessor=refused signed_predecessor=refused collapsed_principal=refused collapsed_pre_spawn=refused measurement_disagreement=refused missing_observation=refused count=refused kind=refused canonical=refused sabotage_predecessor_guard=exposed sabotage_signed_predecessor=exposed sabotage_principal_disjointness=exposed sabotage_measurement_agreement=exposed'

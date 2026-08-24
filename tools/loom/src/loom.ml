@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.7"
+let runtime_version = "2026.08.24.8"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -1423,7 +1423,10 @@ let descriptor_fields kernel state =
   ]
 
 let write_descriptor kernel state =
-  atomic_write kernel.paths.descriptor_path (descriptor_text (descriptor_fields kernel state))
+  let text = descriptor_text (descriptor_fields kernel state) in
+  atomic_write kernel.paths.descriptor_path text;
+  atomic_write (Filename.concat (Filename.dirname kernel.output_path) "session.state")
+    text
 
 let status_fields kernel =
   let observers = ref 0 in
@@ -2847,6 +2850,7 @@ type sounio_continuity_status = {
   signer_principal_id : string;
   predecessor_receipt_digest : string;
   independent_observation_verified : bool;
+  independent_measurement_verified : bool;
   observer_key_id : string;
   observer_principal_id : string;
   independent_observation_digest : string;
@@ -2858,6 +2862,19 @@ let beagle_generation_journals paths instance =
   in
   ( Filename.concat generation_dir "journal.tsv",
     Filename.concat generation_dir "guardian.tsv" )
+
+let beagle_generation_descriptor paths instance =
+  Filename.concat
+    (Filename.concat (Filename.concat paths.session_dir "generations") instance)
+    "session.state"
+
+let beagle_generation_fingerprint pane_id descriptor =
+  sha256
+    (String.concat "\000"
+       [ pane_id; table_value descriptor "session_id";
+         table_value descriptor "instance_id";
+         table_value descriptor "harness_pid_start";
+         table_value descriptor "argv_digest" ])
 
 let beagle_generation_evidence paths instance =
   if instance = "" then failf "generation-lineage-empty-predecessor";
@@ -3084,6 +3101,21 @@ type verified_independent_observation = {
   observation_digest : string;
 }
 
+type independently_measured_generation = {
+  measured_generation : string;
+  measured_generation_fingerprint : string;
+  measured_semantic_head : string;
+  measured_guardian_head : string;
+  measured_semantic_journal_digest : string;
+  measured_guardian_journal_digest : string;
+  measured_descriptor_digest : string;
+}
+
+type verified_independent_measurement = {
+  measured_observation : verified_independent_observation;
+  measured_generation_facts : independently_measured_generation;
+}
+
 let openssl_command () =
   match Sys.getenv_opt "SOUNIO_LOOM_OPENSSL" with
   | Some path when path <> "" -> path
@@ -3134,12 +3166,23 @@ let continuity_signing () =
           principal_id = ed25519_principal_id public_key }
   | _ -> failf "sounio-continuity-signing-keypair-incomplete"
 
-let independent_observer_required () =
+let independent_measurement_required () =
+  match Sys.getenv_opt "SOUNIO_LOOM_REQUIRE_INDEPENDENT_MEASUREMENT" with
+  | None | Some "" | Some "0" | Some "false" -> false
+  | Some "1" | Some "true" -> true
+  | Some value ->
+      failf "sounio-continuity-invalid-independent-measurement-requirement:%s"
+        value
+
+let independent_observer_explicitly_required () =
   match Sys.getenv_opt "SOUNIO_LOOM_REQUIRE_INDEPENDENT_OBSERVER" with
   | None | Some "" | Some "0" | Some "false" -> false
   | Some "1" | Some "true" -> true
   | Some value ->
       failf "sounio-continuity-invalid-independent-observer-requirement:%s" value
+
+let independent_observer_required () =
+  independent_observer_explicitly_required () || independent_measurement_required ()
 
 let independent_observer_public_key () =
   if not (independent_observer_required ()) then None
@@ -3207,6 +3250,33 @@ let signed_continuity_expected_verdict facts =
     Some "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v3 authenticity=ed25519+independent-observer"
   else None
 
+let independently_measure_generation paths pane_id generation =
+  if generation = "" then failf "sounio-continuity-measurement-empty-generation";
+  let descriptor_path = beagle_generation_descriptor paths generation in
+  if not (Sys.file_exists descriptor_path) then
+    failf "sounio-continuity-measurement-descriptor-missing";
+  let descriptor_text = read_file descriptor_path in
+  let descriptor = parse_key_values descriptor_path in
+  if table_value descriptor "instance_id" <> generation then
+    failf "sounio-continuity-measurement-generation-mismatch";
+  if table_value descriptor "session_id" = "" then
+    failf "sounio-continuity-measurement-session-missing";
+  let semantic_path, guardian_path =
+    beagle_generation_journals paths generation
+  in
+  let semantic_text = read_file semantic_path in
+  let guardian_text = read_file guardian_path in
+  let _, _, semantic_head = load_and_verify_journal semantic_path in
+  let _, _, _, guardian_head = load_and_verify_guardian_journal guardian_path in
+  { measured_generation = generation;
+    measured_generation_fingerprint =
+      beagle_generation_fingerprint pane_id descriptor;
+    measured_semantic_head = semantic_head;
+    measured_guardian_head = guardian_head;
+    measured_semantic_journal_digest = sha256 semantic_text;
+    measured_guardian_journal_digest = sha256 guardian_text;
+    measured_descriptor_digest = sha256 descriptor_text }
+
 let independent_observation_payload observer_key_id observer_principal_id
     subject_signer_key_id subject_principal_id subject_receipt_digest
     subject_facts_digest subject_adapter_digest =
@@ -3224,6 +3294,34 @@ let independent_observation_receipt observer_key_id observer_principal_id
     observer_key_id observer_principal_id subject_signer_key_id
     subject_principal_id subject_receipt_digest subject_facts_digest
     subject_adapter_digest payload_digest signature
+
+let independent_measurement_payload observer_key_id observer_principal_id
+    subject_signer_key_id subject_principal_id subject_receipt_digest
+    subject_facts_digest subject_adapter_digest measurement =
+  Printf.sprintf
+    "schema=loom-independent-measurement-payload-v1\nalgorithm=ed25519\nobserver_key_id=%s\nobserver_principal_id=%s\nsubject_signer_key_id=%s\nsubject_principal_id=%s\nsubject_receipt_sha256=%s\nsubject_facts_sha256=%s\nsubject_adapter_sha256=%s\nmeasurement_source=verified-generation-artifacts-v1\nmeasured_generation=%s\nmeasured_generation_fingerprint=%s\nmeasured_semantic_head=%s\nmeasured_guardian_head=%s\nsemantic_journal_sha256=%s\nguardian_journal_sha256=%s\ndescriptor_sha256=%s\nobservation=independent-generation-measurement\n"
+    observer_key_id observer_principal_id subject_signer_key_id
+    subject_principal_id subject_receipt_digest subject_facts_digest
+    subject_adapter_digest measurement.measured_generation
+    measurement.measured_generation_fingerprint measurement.measured_semantic_head
+    measurement.measured_guardian_head
+    measurement.measured_semantic_journal_digest
+    measurement.measured_guardian_journal_digest
+    measurement.measured_descriptor_digest
+
+let independent_measurement_receipt observer_key_id observer_principal_id
+    subject_signer_key_id subject_principal_id subject_receipt_digest
+    subject_facts_digest subject_adapter_digest measurement payload_digest signature =
+  Printf.sprintf
+    "schema=loom-independent-measurement-attestation-v1\nalgorithm=ed25519\nobserver_key_id=%s\nobserver_principal_id=%s\nsubject_signer_key_id=%s\nsubject_principal_id=%s\nsubject_receipt_sha256=%s\nsubject_facts_sha256=%s\nsubject_adapter_sha256=%s\nmeasurement_source=verified-generation-artifacts-v1\nmeasured_generation=%s\nmeasured_generation_fingerprint=%s\nmeasured_semantic_head=%s\nmeasured_guardian_head=%s\nsemantic_journal_sha256=%s\nguardian_journal_sha256=%s\ndescriptor_sha256=%s\nobservation=independent-generation-measurement\nsigned_payload_sha256=%s\nsignature_base64=%s\n"
+    observer_key_id observer_principal_id subject_signer_key_id
+    subject_principal_id subject_receipt_digest subject_facts_digest
+    subject_adapter_digest measurement.measured_generation
+    measurement.measured_generation_fingerprint measurement.measured_semantic_head
+    measurement.measured_guardian_head
+    measurement.measured_semantic_journal_digest
+    measurement.measured_guardian_journal_digest
+    measurement.measured_descriptor_digest payload_digest signature
 
 let verify_signed_continuity_receipt ~adapter ~runtime_digest ~public_key path =
   if not (Sys.file_exists path) then
@@ -3319,7 +3417,92 @@ let verify_independent_observation_attestation ~subject ~subject_public_key
     subject_principal_id; subject_receipt_digest;
     observation_digest = sha256 stored }
 
-let verify_independent_pre_spawn_admission paths predecessor =
+let verify_independent_measurement_attestation ~subject ~subject_public_key
+    ~observer_public_key ~paths ~pane_id ~predecessor path =
+  if not (Sys.file_exists path) then
+    failf "sounio-continuity-independent-measurement-missing:%s" path;
+  let stored = read_file path in
+  let fields = parse_key_values path in
+  let schema = table_value fields "schema" in
+  let algorithm = table_value fields "algorithm" in
+  let observer_key_id = table_value fields "observer_key_id" in
+  let observer_principal_id = table_value fields "observer_principal_id" in
+  let subject_signer_key_id = table_value fields "subject_signer_key_id" in
+  let subject_principal_id = table_value fields "subject_principal_id" in
+  let subject_receipt_digest = table_value fields "subject_receipt_sha256" in
+  let subject_facts_digest = table_value fields "subject_facts_sha256" in
+  let subject_adapter_digest = table_value fields "subject_adapter_sha256" in
+  let measurement_source = table_value fields "measurement_source" in
+  let measurement =
+    { measured_generation = table_value fields "measured_generation";
+      measured_generation_fingerprint =
+        table_value fields "measured_generation_fingerprint";
+      measured_semantic_head = table_value fields "measured_semantic_head";
+      measured_guardian_head = table_value fields "measured_guardian_head";
+      measured_semantic_journal_digest =
+        table_value fields "semantic_journal_sha256";
+      measured_guardian_journal_digest =
+        table_value fields "guardian_journal_sha256";
+      measured_descriptor_digest = table_value fields "descriptor_sha256" }
+  in
+  let observation = table_value fields "observation" in
+  let payload_digest = table_value fields "signed_payload_sha256" in
+  let signature = table_value fields "signature_base64" in
+  let expected_observer_key_id = sha256 (read_file observer_public_key) in
+  let expected_observer_principal_id = ed25519_principal_id observer_public_key in
+  let expected_subject_principal_id = ed25519_principal_id subject_public_key in
+  let expected_measurement =
+    independently_measure_generation paths pane_id predecessor
+  in
+  let payload =
+    independent_measurement_payload observer_key_id observer_principal_id
+      subject_signer_key_id subject_principal_id subject_receipt_digest
+      subject_facts_digest subject_adapter_digest measurement
+  in
+  let canonical =
+    independent_measurement_receipt observer_key_id observer_principal_id
+      subject_signer_key_id subject_principal_id subject_receipt_digest
+      subject_facts_digest subject_adapter_digest measurement payload_digest
+      signature
+  in
+  if schema <> "loom-independent-measurement-attestation-v1"
+     || algorithm <> "ed25519"
+     || measurement_source <> "verified-generation-artifacts-v1"
+     || observation <> "independent-generation-measurement"
+     || observer_key_id <> expected_observer_key_id
+     || observer_principal_id <> expected_observer_principal_id
+     || subject_signer_key_id <> subject.signed_key_id
+     || subject_principal_id <> subject.signed_principal_id
+     || subject_principal_id <> expected_subject_principal_id
+     || subject_receipt_digest <> subject.signed_receipt_digest
+     || subject_facts_digest <> subject.signed_facts_digest
+     || subject_adapter_digest <> subject.signed_adapter_digest
+     || measurement.measured_generation
+        <> expected_measurement.measured_generation
+     || measurement.measured_generation_fingerprint
+        <> expected_measurement.measured_generation_fingerprint
+     || measurement.measured_semantic_head
+        <> expected_measurement.measured_semantic_head
+     || measurement.measured_guardian_head
+        <> expected_measurement.measured_guardian_head
+     || measurement.measured_semantic_journal_digest
+        <> expected_measurement.measured_semantic_journal_digest
+     || measurement.measured_guardian_journal_digest
+        <> expected_measurement.measured_guardian_journal_digest
+     || measurement.measured_descriptor_digest
+        <> expected_measurement.measured_descriptor_digest
+     || payload_digest <> sha256 payload || signature = "" || stored <> canonical
+  then failf "sounio-continuity-independent-measurement-mismatch";
+  if not
+       (ed25519_verify observer_public_key (Filename.dirname path) payload signature)
+  then failf "sounio-continuity-independent-measurement-signature-invalid";
+  { measured_observation =
+      { observer_key_id; observer_principal_id; subject_signer_key_id;
+        subject_principal_id; subject_receipt_digest;
+        observation_digest = sha256 stored };
+    measured_generation_facts = measurement }
+
+let verify_independent_pre_spawn_admission paths pane_id predecessor =
   if not (independent_observer_required ()) then ()
   else
     let adapter = Unix.realpath (sounio_continuity_adapter ()) in
@@ -3349,32 +3532,68 @@ let verify_independent_pre_spawn_admission paths predecessor =
     if (List.length facts <> 15 && List.length facts <> 18)
        || List.nth facts 2 <> sounio_continuity_token "generation" predecessor
     then failf "sounio-continuity-pre-spawn-predecessor-splice";
-    let observation =
-      verify_independent_observation_attestation ~subject
-        ~subject_public_key:signer_public_key ~observer_public_key
-        (Filename.concat predecessor_dir
-           "sounio-continuity.observer-attestation")
+    let attestation_path =
+      Filename.concat predecessor_dir "sounio-continuity.observer-attestation"
     in
-    let frame =
-      String.concat " "
-        [ "9003";
-          sounio_continuity_token "predecessor-receipt"
-            subject.signed_receipt_digest;
-          sounio_continuity_token "principal-authority"
-            subject.signed_principal_id;
-          sounio_continuity_token "principal-authority"
-            observation.observer_principal_id;
-          sounio_continuity_token "independent-observation"
-            observation.observation_digest ]
-      ^ "\n"
+    let measurement_required = independent_measurement_required () in
+    let observation, measurement =
+      if measurement_required then
+        let verified =
+          verify_independent_measurement_attestation ~subject
+            ~subject_public_key:signer_public_key ~observer_public_key ~paths
+            ~pane_id ~predecessor attestation_path
+        in
+        (verified.measured_observation,
+         Some verified.measured_generation_facts)
+      else
+        (verify_independent_observation_attestation ~subject
+           ~subject_public_key:signer_public_key ~observer_public_key
+           attestation_path,
+         None)
+    in
+    let common_frame =
+      [ sounio_continuity_token "predecessor-receipt"
+          subject.signed_receipt_digest;
+        sounio_continuity_token "principal-authority"
+          subject.signed_principal_id;
+        sounio_continuity_token "principal-authority"
+          observation.observer_principal_id;
+        sounio_continuity_token "independent-observation"
+          observation.observation_digest ]
+    in
+    let frame, expected =
+      match measurement with
+      | None ->
+          (String.concat " " ("9003" :: common_frame) ^ "\n",
+           "SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v1 authority=disjoint-principals")
+      | Some measured ->
+          let measured_tokens =
+            [ sounio_continuity_token "generation"
+                measured.measured_generation;
+              sounio_continuity_token "generation-fingerprint"
+                measured.measured_generation_fingerprint;
+              sounio_continuity_token "semantic-head"
+                measured.measured_semantic_head;
+              sounio_continuity_token "guardian-head"
+                measured.measured_guardian_head ]
+          in
+          let decision_tokens =
+            [ List.nth facts 2; List.nth facts 3; List.nth facts 4;
+              List.nth facts 5 ]
+          in
+          (String.concat " "
+             ("9004" :: common_frame @ decision_tokens @ measured_tokens)
+           ^ "\n",
+           "SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v2 authority=disjoint-principals+measured-fact-agreement")
     in
     let verdict =
       try process_exchange adapter [| adapter |] frame
       with Loom_error error ->
-        failf "sounio-continuity-pre-spawn-policy-refused:%s" error
+        if measurement_required then
+          failf "sounio-continuity-pre-spawn-measurement-policy-refused:%s" error
+        else failf "sounio-continuity-pre-spawn-policy-refused:%s" error
     in
-    if verdict
-       <> "SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v1 authority=disjoint-principals"
+    if verdict <> expected
     then failf "sounio-continuity-pre-spawn-verdict-mismatch:%s" verdict
 
 let verify_predecessor_binding lineage receipt =
@@ -3409,6 +3628,7 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
   let runtime_digest = sha256 (read_file adapter) in
   let signing = continuity_signing () in
   let independent_required = independent_observer_required () in
+  let measurement_required = independent_measurement_required () in
   let observer_public_key = independent_observer_public_key () in
   let predecessor_receipt_digest, signer_key_id, signer_principal_id,
       public_key, observer_key_id, observer_principal_id,
@@ -3441,9 +3661,15 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
                   "sounio-continuity.observer-attestation"
               in
               let observation =
-                verify_independent_observation_attestation ~subject:receipt
-                  ~subject_public_key:keys.public_key
-                  ~observer_public_key:observer_key observation_path
+                if measurement_required then
+                  (verify_independent_measurement_attestation ~subject:receipt
+                     ~subject_public_key:keys.public_key
+                     ~observer_public_key:observer_key ~paths ~pane_id
+                     ~predecessor observation_path).measured_observation
+                else
+                  verify_independent_observation_attestation ~subject:receipt
+                    ~subject_public_key:keys.public_key
+                    ~observer_public_key:observer_key observation_path
               in
               (observation.observer_key_id, observation.observer_principal_id,
                observation.observation_digest)
@@ -3486,6 +3712,9 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
   in
   let independently_observed_mode =
     independent_required && lineage.predecessor_instance <> ""
+  in
+  let independently_measured_mode =
+    measurement_required && lineage.predecessor_instance <> ""
   in
   let facts =
     if independently_observed_mode then
@@ -3586,6 +3815,7 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
     signature_verified = signed_mode; signer_key_id; signer_principal_id;
     predecessor_receipt_digest;
     independent_observation_verified = independently_observed_mode;
+    independent_measurement_verified = independently_measured_mode;
     observer_key_id; observer_principal_id; independent_observation_digest }
 
 let verify_continuity_receipt_command cli =
@@ -3669,6 +3899,76 @@ let attest_continuity_receipt_command cli =
     verified.subject_signer_key_id verified.subject_principal_id
     verified.subject_receipt_digest verified.observation_digest
 
+let measure_continuity_generation_command cli =
+  let state_dir = Unix.realpath (required cli "--state-dir") in
+  let pane_id = required cli "--pane-id" in
+  let generation = required cli "--generation" in
+  let receipt_path = Unix.realpath (required cli "--receipt") in
+  let subject_public_key =
+    continuity_key_path "subject-public" (required cli "--subject-public-key")
+  in
+  let observer_private_key =
+    continuity_key_path "observer-private" (required cli "--observer-private-key")
+  in
+  let observer_public_key =
+    continuity_key_path "observer-public" (required cli "--observer-public-key")
+  in
+  let output_path = required cli "--out" in
+  let adapter =
+    match optional cli "--adapter" with
+    | Some path -> Unix.realpath path
+    | None -> Unix.realpath (sounio_continuity_adapter ())
+  in
+  let runtime_digest = sha256 (read_file adapter) in
+  let subject =
+    verify_signed_continuity_receipt ~adapter ~runtime_digest
+      ~public_key:subject_public_key receipt_path
+  in
+  let paths = beagle_paths state_dir pane_id in
+  let measurement = independently_measure_generation paths pane_id generation in
+  let observer_key_id = sha256 (read_file observer_public_key) in
+  let observer_principal_id = ed25519_principal_id observer_public_key in
+  let signing =
+    Ed25519_continuity
+      { private_key = observer_private_key; public_key = observer_public_key;
+        key_id = observer_key_id; principal_id = observer_principal_id }
+  in
+  let payload =
+    independent_measurement_payload observer_key_id observer_principal_id
+      subject.signed_key_id subject.signed_principal_id
+      subject.signed_receipt_digest subject.signed_facts_digest
+      subject.signed_adapter_digest measurement
+  in
+  let directory = Filename.dirname output_path in
+  if not (Sys.file_exists directory) || (Unix.stat directory).st_kind <> S_DIR then
+    failf "sounio-continuity-measurement-output-directory-missing:%s" directory;
+  let signature = ed25519_sign signing directory payload in
+  if not (ed25519_verify observer_public_key directory payload signature) then
+    failf "sounio-continuity-measurement-keypair-mismatch";
+  let attestation =
+    independent_measurement_receipt observer_key_id observer_principal_id
+      subject.signed_key_id subject.signed_principal_id
+      subject.signed_receipt_digest subject.signed_facts_digest
+      subject.signed_adapter_digest measurement (sha256 payload) signature
+  in
+  if Sys.file_exists output_path then (
+    if read_file output_path <> attestation then
+      failf "sounio-continuity-independent-measurement-output-conflict")
+  else atomic_write output_path attestation;
+  let verified =
+    verify_independent_measurement_attestation ~subject ~subject_public_key
+      ~observer_public_key ~paths ~pane_id ~predecessor:generation output_path
+  in
+  Printf.printf
+    "LOOM_CONTINUITY_INDEPENDENT_MEASUREMENT_ATTESTED schema=loom-independent-measurement-attestation-v1 observer_principal_id=%s subject_principal_id=%s measured_generation=%s measured_generation_fingerprint=%s measured_semantic_head=%s measured_guardian_head=%s observation_sha256=%s\n%!"
+    verified.measured_observation.observer_principal_id
+    verified.measured_observation.subject_principal_id
+    verified.measured_generation_facts.measured_generation
+    verified.measured_generation_facts.measured_generation_fingerprint
+    verified.measured_generation_facts.measured_semantic_head
+    verified.measured_generation_facts.measured_guardian_head
+    verified.measured_observation.observation_digest
+
 let beagle_descriptor root pane_id =
   let paths = beagle_paths root pane_id in
   if not (Sys.file_exists paths.descriptor_path) then failf "pane-not-found";
@@ -3685,12 +3985,7 @@ let beagle_status_json root pane_id =
   let status = if loom_state = "active" then "running" else loom_state in
   let instance = table_value descriptor "instance_id" in
   let session_id = table_value descriptor "session_id" in
-  let generation_fingerprint =
-    sha256
-      (String.concat "\000"
-         [ pane_id; session_id; instance; table_value descriptor "harness_pid_start";
-           table_value descriptor "argv_digest" ])
-  in
+  let generation_fingerprint = beagle_generation_fingerprint pane_id descriptor in
   let lineage =
     beagle_lineage_status paths pane_id session_id instance
   in
@@ -3720,11 +4015,12 @@ let beagle_status_json root pane_id =
       { policy_verified = false; receipt_digest = ""; runtime_digest = "";
         signature_verified = false; signer_key_id = ""; signer_principal_id = "";
         predecessor_receipt_digest = "";
-        independent_observation_verified = false; observer_key_id = "";
+        independent_observation_verified = false;
+        independent_measurement_verified = false; observer_key_id = "";
         observer_principal_id = ""; independent_observation_digest = "" }
   in
   Printf.sprintf
-    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s,\"sounioPolicySignatureVerified\":%s,\"sounioPolicySignerKeyId\":%s,\"sounioPolicySignerPrincipalId\":%s,\"sounioPolicyPredecessorReceipt\":%s,\"sounioPolicyIndependentObservationVerified\":%s,\"sounioPolicyObserverKeyId\":%s,\"sounioPolicyObserverPrincipalId\":%s,\"sounioPolicyIndependentObservation\":%s}}"
+    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s,\"sounioPolicySignatureVerified\":%s,\"sounioPolicySignerKeyId\":%s,\"sounioPolicySignerPrincipalId\":%s,\"sounioPolicyPredecessorReceipt\":%s,\"sounioPolicyIndependentObservationVerified\":%s,\"sounioPolicyIndependentMeasurementVerified\":%s,\"sounioPolicyObserverKeyId\":%s,\"sounioPolicyObserverPrincipalId\":%s,\"sounioPolicyIndependentObservation\":%s}}"
     (json_quote pane_id) (json_quote session_id)
     (table_value ~default:"0" descriptor "harness_pid") (json_quote status)
     (json_quote
@@ -3758,6 +4054,7 @@ let beagle_status_json root pane_id =
     (json_quote continuity.signer_principal_id)
     (json_quote continuity.predecessor_receipt_digest)
     (if continuity.independent_observation_verified then "true" else "false")
+    (if continuity.independent_measurement_verified then "true" else "false")
     (json_quote continuity.observer_key_id)
     (json_quote continuity.observer_principal_id)
     (json_quote continuity.independent_observation_digest)
@@ -3841,7 +4138,7 @@ let ensure_beagle_pane root body =
       let descriptor = parse_key_values paths.descriptor_path in
       let predecessor = table_value descriptor "instance_id" in
       beagle_preflight_transition paths pane_id session_id predecessor;
-      verify_independent_pre_spawn_admission paths predecessor;
+      verify_independent_pre_spawn_admission paths pane_id predecessor;
       start_command
         { cli with
           rest =
@@ -4476,7 +4773,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version
 
 let arguments_after_command () =
@@ -4517,6 +4814,8 @@ let main () =
     | "verify-guardian-journal" -> verify_guardian_command cli; 0
     | "verify-continuity-receipt" -> verify_continuity_receipt_command cli; 0
     | "attest-continuity-receipt" -> attest_continuity_receipt_command cli; 0
+    | "measure-continuity-generation" ->
+        measure_continuity_generation_command cli; 0
     | "_forge-duplicate-lease" -> forge_duplicate_lease cli; 0
     | _ -> usage (); 2
 
