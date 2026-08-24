@@ -606,3 +606,62 @@ turns on (three central charges). Non-associativity (associator on the doubling
 extensions. Verified: `scratchpad/h2.py` (H² dims + Whitehead check + charge
 sectors). Open: the physical meaning of *three* charges (BMS₃ has two), and H³
 (deformations) as the next layer.
+
+---
+
+## SIXTH: deformations — universal rigidity, and the anomaly/rigidity decoupling
+
+Infinitesimal deformations of a Lie algebra live in `H²(g;g)` (adjoint coefficients);
+`H³(g;g)` holds the obstructions. Computed (Chevalley–Eilenberg, adjoint; code
+validated: `so(3)→0` rigid, Heisenberg `h₃→5` deformable):
+
+| causal type | conformal algebra | `H²(g;g)` (deformations) |
+|---|---|---|
+| spacelike | `so(7,1)` | **0** — rigid (Whitehead) |
+| timelike | `so(5,3)` | **0** — rigid (Whitehead) |
+| null | BMS-type `so(2,2)⋉ℝ¹²` | **0** — **rigid (computed)** |
+
+**All three conformal algebras are infinitesimally RIGID.** For the semisimple two
+this is Whitehead's lemma; for the BMS-type it is a genuine (validated) computation
+and it is **non-obvious** — non-semisimple algebras are typically deformable (the
+Heisenberg algebra has `dim H²=5`), yet this particular contraction is rigid. Since
+`H²(g;g)=0`, there are **no infinitesimal deformations to obstruct**, so `H³(g;g)`
+is vacuous *as deformation theory* — rigidity is already settled at `H²`.
+
+### The decoupling (the real content of the sixth layer)
+
+The two second-cohomologies measure orthogonal things, and separate the loci
+differently:
+
+```
+H²(g;ℝ)  [trivial coeffs — central charges / anomaly]:  null = 3,  non-null = 0   →  NULL-EXCLUSIVE
+H²(g;g)  [adjoint coeffs — deformations / rigidity]:     all three = 0             →  UNIVERSAL
+```
+
+So the null (Carrollian/BMS) locus is **anomalous but not soft**: it carries a
+3-dimensional space of central charges, yet it is as rigid as the semisimple
+spacelike/timelike algebras. The three loci are therefore **rigid, isolated points
+in the moduli of Lie algebras** — connected only by *contraction* (a one-way
+degeneration / boundary limit: `so(5,3)` contracts *to* the BMS-type, which does not
+deform back), never by smooth deformation. Anomaly and rigidity are decoupled: the
+causal type of `z` controls the anomaly (via `H²(g;ℝ)`) but not the rigidity (`H²(g;g)`
+is uniformly zero).
+
+### The complete stack — six verified layers
+
+```
+z (causal type under Q)
+  ▼ signature        Euclidean   Carrollian          Lorentzian    [GEOMETRY]
+  ▼ Jordan           J_spin(5)   degenerate          J_spin(4,1)   [JORDAN]
+  ▼ kinematic Lie    so(5)       Carroll-contraction so(4,1)       [KINEMATIC]
+  ▼ conformal Lie    so(7,1)     so(2,2)⋉ℝ¹² (BMS)   so(5,3)       [CONFORMAL]
+  ▼ H²(g;ℝ) anomaly  0           3 central charges   0             [ANOMALY]      ← null-exclusive
+  ▼ H²(g;g) deform   0           0                   0             [RIGIDITY]     ← universal
+```
+
+Six layers, one datum. The story terminates cleanly: the tower is built from the
+causal type of the privacy locus, the null branch is where contraction and anomaly
+live, and every conformal algebra in it is rigid — a stable, isolated point. Open
+past here: the actual central-charge values and the identification of the null
+algebra with a named BMS_d variant; `H³(g;ℝ)` (higher anomalies) if one wants to keep
+climbing the trivial-coefficient tower.
