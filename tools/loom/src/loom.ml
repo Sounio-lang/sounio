@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.2"
+let runtime_version = "2026.08.24.3"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -201,6 +201,184 @@ let json_quote value =
   Buffer.add_char buffer '"';
   Buffer.contents buffer
 
+type json_value =
+  | Json_object of (string * json_value) list
+  | Json_array of json_value list
+  | Json_string of string
+  | Json_number of string
+  | Json_bool of bool
+  | Json_null
+
+let parse_json value =
+  let length = String.length value in
+  let index = ref 0 in
+  let fail message = failf "invalid-json:%s at=%d" message !index in
+  let rec whitespace () =
+    if !index < length then
+      match value.[!index] with
+      | ' ' | '\t' | '\n' | '\r' -> incr index; whitespace ()
+      | _ -> ()
+  and string_literal () =
+    if !index >= length || value.[!index] <> '"' then fail "expected-string";
+    incr index;
+    let output = Buffer.create 32 in
+    let rec loop () =
+      if !index >= length then fail "unterminated-string";
+      match value.[!index] with
+      | '"' -> incr index; Buffer.contents output
+      | '\\' ->
+          incr index;
+          if !index >= length then fail "unterminated-escape";
+          let escaped = value.[!index] in
+          incr index;
+          (match escaped with
+          | '"' | '\\' | '/' -> Buffer.add_char output escaped
+          | 'b' -> Buffer.add_char output '\b'
+          | 'f' -> Buffer.add_char output '\012'
+          | 'n' -> Buffer.add_char output '\n'
+          | 'r' -> Buffer.add_char output '\r'
+          | 't' -> Buffer.add_char output '\t'
+          | 'u' ->
+              if !index + 4 > length then fail "short-unicode-escape";
+              let code =
+                (hex_value value.[!index] lsl 12)
+                lor (hex_value value.[!index + 1] lsl 8)
+                lor (hex_value value.[!index + 2] lsl 4)
+                lor hex_value value.[!index + 3]
+              in
+              index := !index + 4;
+              if code <= 0x7f then Buffer.add_char output (Char.chr code)
+              else if code <= 0x7ff then (
+                Buffer.add_char output (Char.chr (0xc0 lor (code lsr 6)));
+                Buffer.add_char output (Char.chr (0x80 lor (code land 0x3f))))
+              else (
+                Buffer.add_char output (Char.chr (0xe0 lor (code lsr 12)));
+                Buffer.add_char output
+                  (Char.chr (0x80 lor ((code lsr 6) land 0x3f)));
+                Buffer.add_char output (Char.chr (0x80 lor (code land 0x3f))))
+          | _ -> fail "unknown-escape");
+          loop ()
+      | character when Char.code character < 32 -> fail "control-in-string"
+      | character -> Buffer.add_char output character; incr index; loop ()
+    in
+    loop ()
+  and number_literal () =
+    let start = !index in
+    if !index < length && value.[!index] = '-' then incr index;
+    let digits () =
+      let before = !index in
+      while !index < length && value.[!index] >= '0' && value.[!index] <= '9' do
+        incr index
+      done;
+      if before = !index then fail "expected-number"
+    in
+    digits ();
+    if !index < length && value.[!index] = '.' then (incr index; digits ());
+    if !index < length && (value.[!index] = 'e' || value.[!index] = 'E') then (
+      incr index;
+      if !index < length && (value.[!index] = '+' || value.[!index] = '-') then
+        incr index;
+      digits ());
+    String.sub value start (!index - start)
+  and keyword literal parsed =
+    let ending = !index + String.length literal in
+    if ending > length || String.sub value !index (String.length literal) <> literal
+    then fail ("expected-" ^ literal);
+    index := ending;
+    parsed
+  and item () =
+    whitespace ();
+    if !index >= length then fail "expected-value";
+    match value.[!index] with
+    | '{' -> object_literal ()
+    | '[' -> array_literal ()
+    | '"' -> Json_string (string_literal ())
+    | 't' -> keyword "true" (Json_bool true)
+    | 'f' -> keyword "false" (Json_bool false)
+    | 'n' -> keyword "null" Json_null
+    | '-' | '0' .. '9' -> Json_number (number_literal ())
+    | _ -> fail "unexpected-token"
+  and object_literal () =
+    incr index;
+    whitespace ();
+    let rec members values =
+      whitespace ();
+      if !index < length && value.[!index] = '}' then (
+        incr index;
+        Json_object (List.rev values))
+      else
+        let key = string_literal () in
+        whitespace ();
+        if !index >= length || value.[!index] <> ':' then fail "expected-colon";
+        incr index;
+        let member = item () in
+        whitespace ();
+        if !index < length && value.[!index] = ',' then (
+          incr index;
+          members ((key, member) :: values))
+        else if !index < length && value.[!index] = '}' then (
+          incr index;
+          Json_object (List.rev ((key, member) :: values)))
+        else fail "expected-object-separator"
+    in
+    members []
+  and array_literal () =
+    incr index;
+    whitespace ();
+    let rec elements values =
+      whitespace ();
+      if !index < length && value.[!index] = ']' then (
+        incr index;
+        Json_array (List.rev values))
+      else
+        let element = item () in
+        whitespace ();
+        if !index < length && value.[!index] = ',' then (
+          incr index;
+          elements (element :: values))
+        else if !index < length && value.[!index] = ']' then (
+          incr index;
+          Json_array (List.rev (element :: values)))
+        else fail "expected-array-separator"
+    in
+    elements []
+  in
+  let parsed = item () in
+  whitespace ();
+  if !index <> length then fail "trailing-data";
+  parsed
+
+let json_object_field object_value name =
+  match object_value with
+  | Json_object fields -> List.assoc_opt name fields
+  | _ -> failf "invalid-json:expected-object"
+
+let json_string_field ?default object_value names =
+  let rec find = function
+    | [] -> Option.value ~default:"" default
+    | name :: tail -> (
+        match json_object_field object_value name with
+        | Some (Json_string value) -> value
+        | Some Json_null -> Option.value ~default:"" default
+        | Some _ -> failf "invalid-json:%s-must-be-string" name
+        | None -> find tail)
+  in
+  find names
+
+let json_int_field ~default object_value names =
+  let rec find = function
+    | [] -> default
+    | name :: tail -> (
+        match json_object_field object_value name with
+        | Some (Json_number value) -> (
+            try int_of_string value
+            with _ -> failf "invalid-json:%s-must-be-integer" name)
+        | Some Json_null -> default
+        | Some _ -> failf "invalid-json:%s-must-be-integer" name
+        | None -> find tail)
+  in
+  find names
+
 let command_argv_digest command =
   command |> Array.to_list |> List.map json_quote |> String.concat ","
   |> Printf.sprintf "[%s]" |> sha256
@@ -381,7 +559,8 @@ let verify_events events =
               !output_cursor start ending event.seq;
           output_cursor := ending
       | "KERNEL_RECOVERED", Active -> lease := None
-      | ( "INPUT" | "WAKE" | "OBSERVER_ATTACHED" | "OBSERVER_DETACHED" ), Active -> ()
+      | ( "INPUT" | "WAKE" | "RESIZE" | "SIGNAL" | "OBSERVER_ATTACHED"
+        | "OBSERVER_DETACHED" ), Active -> ()
       | _, Initial -> failf "semantic:event-before-session-start seq=%d" event.seq
       | _, Exited -> failf "semantic:event-after-session-exit seq=%d" event.seq
       | _ -> failf "semantic:unknown-event kind=%s seq=%d" event.kind event.seq);
@@ -653,6 +832,36 @@ let guardian_handle_request guardian client line =
           guardian_queue client (control_line [ "OK"; "STOPPING" ]);
           guardian_flush client;
           guardian.guardian_stopping <- true
+      | "RESIZE", [ cols; rows ] -> (
+          try
+            let cols = parse_nonnegative "cols" cols in
+            let rows = parse_nonnegative "rows" rows in
+            if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 then
+              failf "invalid-terminal-size";
+            set_winsize guardian.guardian_master_fd cols rows;
+            ignore
+              (append_event guardian.guardian_journal "RESIZE"
+                 (Printf.sprintf "%d:%d" cols rows));
+            guardian_queue client
+              (control_line
+                 [ "OK"; "RESIZED"; guardian.guardian_instance_id;
+                   string_of_int cols; string_of_int rows ])
+          with Loom_error error -> refuse error)
+      | "SIGNAL", [ signal ] -> (
+          try
+            (match signal with
+            | "SIGINT" -> write_all guardian.guardian_master_fd "\003"
+            | "SIGTERM" ->
+                Unix.kill guardian.guardian_harness_pid Sys.sigterm
+            | "SIGHUP" -> Unix.kill guardian.guardian_harness_pid Sys.sighup
+            | _ -> failf "unsupported-signal");
+            ignore (append_event guardian.guardian_journal "SIGNAL" signal);
+            guardian_queue client
+              (control_line
+                 [ "OK"; "SIGNALED"; guardian.guardian_instance_id; signal ])
+          with
+          | Loom_error error -> refuse error
+          | Unix_error _ -> refuse "signal-failed")
       | _ -> refuse "unknown-operation")
   | magic :: _
     when magic <> Printf.sprintf "GUARD/%d" guardian_protocol_version ->
@@ -917,7 +1126,7 @@ let verify_guardian_events events =
               "guardian-semantic:non-contiguous-output expected=%d actual=%d:%d seq=%d"
               !output_cursor start ending event.seq;
           output_cursor := ending
-      | "INPUT", Guardian_active -> ()
+      | ("INPUT" | "RESIZE" | "SIGNAL"), Guardian_active -> ()
       | "GUARDIAN_EXITED", Guardian_active -> phase := Guardian_exited
       | _, Guardian_initial ->
           failf "guardian-semantic:event-before-start seq=%d" event.seq
@@ -1032,6 +1241,29 @@ let guardian_stop_request paths token =
     (fun () ->
       write_all descriptor (guardian_request_line token "STOP" []);
       ignore (guardian_parse_ok (read_protocol_line descriptor) "STOPPING"))
+
+let guardian_resize_request paths token cols rows =
+  let descriptor = connect_unix paths.guardian_socket_path in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor
+        (guardian_request_line token "RESIZE"
+           [ string_of_int cols; string_of_int rows ]);
+      match guardian_parse_ok (read_protocol_line descriptor) "RESIZED" with
+      | [ instance; actual_cols; actual_rows ] ->
+          (instance, int_of_string actual_cols, int_of_string actual_rows)
+      | _ -> failf "invalid guardian RESIZED response fields")
+
+let guardian_signal_request paths token signal =
+  let descriptor = connect_unix paths.guardian_socket_path in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor (guardian_request_line token "SIGNAL" [ signal ]);
+      match guardian_parse_ok (read_protocol_line descriptor) "SIGNALED" with
+      | [ instance; actual ] when actual = signal -> instance
+      | _ -> failf "invalid guardian SIGNALED response fields")
 
 type stream_mode = Awaiting | Observer | Interactive of string
 
@@ -1254,6 +1486,33 @@ let handle_request kernel client line =
                  (Printf.sprintf "%s:%s" message_id (sha256 prompt)));
             queue client
               (control_line [ "OK"; "WAKE"; kernel.instance_id; message_id ])
+          with Loom_error error -> refuse error)
+      | "RESIZE", [ cols; rows ] -> (
+          try
+            let cols = parse_nonnegative "cols" cols in
+            let rows = parse_nonnegative "rows" rows in
+            if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 then
+              failf "invalid-terminal-size";
+            let instance, actual_cols, actual_rows =
+              guardian_resize_request kernel.paths kernel.token cols rows
+            in
+            if instance <> kernel.instance_id then failf "guardian-identity-mismatch";
+            ignore
+              (append_event kernel.journal "RESIZE"
+                 (Printf.sprintf "%d:%d" actual_cols actual_rows));
+            queue client
+              (control_line
+                 [ "OK"; "RESIZED"; instance; string_of_int actual_cols;
+                   string_of_int actual_rows ])
+          with Loom_error error -> refuse error)
+      | "SIGNAL", [ signal ] -> (
+          try
+            if not (List.mem signal [ "SIGINT"; "SIGTERM"; "SIGHUP" ]) then
+              failf "unsupported-signal";
+            let instance = guardian_signal_request kernel.paths kernel.token signal in
+            if instance <> kernel.instance_id then failf "guardian-identity-mismatch";
+            ignore (append_event kernel.journal "SIGNAL" signal);
+            queue client (control_line [ "OK"; "SIGNALED"; instance; signal ])
           with Loom_error error -> refuse error)
       | "STOP", [] ->
           queue client (control_line [ "OK"; "STOPPING" ]);
@@ -1853,6 +2112,62 @@ let snapshot_request paths cursor limit =
           (instance, start, ending, read_exact descriptor length)
       | _ -> failf "invalid SNAPSHOT response fields")
 
+let protocol_fields values =
+  let table = Hashtbl.create 24 in
+  List.iter
+    (fun field ->
+      match String.index_opt field '=' with
+      | None -> ()
+      | Some index ->
+          Hashtbl.replace table (String.sub field 0 index)
+            (field_unescape
+               (String.sub field (index + 1)
+                  (String.length field - index - 1))))
+    values;
+  table
+
+let resize_request paths cols rows =
+  let token = trim (read_file paths.token_path) in
+  let descriptor = connect paths in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor
+        (request_line token "RESIZE" [ string_of_int cols; string_of_int rows ]);
+      match parse_ok_header (read_line_fd descriptor) "RESIZED" with
+      | [ instance; actual_cols; actual_rows ] ->
+          (instance, int_of_string actual_cols, int_of_string actual_rows)
+      | _ -> failf "invalid RESIZED response fields")
+
+let signal_request paths signal =
+  let token = trim (read_file paths.token_path) in
+  let descriptor = connect paths in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor (request_line token "SIGNAL" [ signal ]);
+      match parse_ok_header (read_line_fd descriptor) "SIGNALED" with
+      | [ instance; actual ] when actual = signal -> instance
+      | _ -> failf "invalid SIGNALED response fields")
+
+let input_request paths data =
+  let status = status_request paths |> protocol_fields in
+  let cursor = table_value status "output_cursor" |> parse_nonnegative "cursor" in
+  let token = trim (read_file paths.token_path) in
+  let descriptor = connect paths in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      write_all descriptor
+        (request_line token "ATTACH" [ "interactive"; string_of_int cursor ]);
+      match parse_ok_header (read_line_fd descriptor) "ATTACHED" with
+      | [ instance; start; ending; "interactive" ] ->
+          let replay_length = int_of_string ending - int_of_string start in
+          if replay_length > 0 then ignore (read_exact descriptor replay_length);
+          write_all descriptor data;
+          instance
+      | _ -> failf "invalid interactive ATTACHED response fields")
+
 let start_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
@@ -2300,6 +2615,541 @@ let parse_query uri =
              | None -> ());
       (String.sub uri 0 index, table)
 
+type http_request = {
+  http_method : string;
+  http_target : string;
+  http_headers : (string, string) Hashtbl.t;
+  http_body : string;
+}
+
+let find_string value needle start =
+  let value_length = String.length value and needle_length = String.length needle in
+  let rec loop index =
+    if index + needle_length > value_length then None
+    else if String.sub value index needle_length = needle then Some index
+    else loop (index + 1)
+  in
+  loop start
+
+let read_http_request descriptor =
+  let maximum = 1024 * 1024 in
+  let buffer = Buffer.create 4096 in
+  let bytes = Bytes.create 16384 in
+  let rec read_headers () =
+    match find_string (Buffer.contents buffer) "\r\n\r\n" 0 with
+    | Some ending -> ending
+    | None ->
+        if Buffer.length buffer >= maximum then failf "http-request-too-large";
+        let count = Unix.read descriptor bytes 0 (Bytes.length bytes) in
+        if count = 0 then failf "http-request-ended-before-headers";
+        Buffer.add_subbytes buffer bytes 0 count;
+        read_headers ()
+  in
+  let header_ending = read_headers () in
+  let raw = Buffer.contents buffer in
+  let header_text = String.sub raw 0 header_ending in
+  let lines = split_on '\n' header_text |> List.map trim in
+  let request_line, header_lines =
+    match lines with line :: rest -> (line, rest) | [] -> failf "empty-http-request"
+  in
+  let http_method, http_target =
+    match split_on ' ' request_line with
+    | method_name :: target :: _ -> (method_name, target)
+    | _ -> failf "invalid-http-request-line"
+  in
+  let headers = Hashtbl.create 16 in
+  List.iter
+    (fun line ->
+      match String.index_opt line ':' with
+      | None -> ()
+      | Some index ->
+          let name =
+            String.sub line 0 index |> trim |> String.lowercase_ascii
+          in
+          let value =
+            String.sub line (index + 1) (String.length line - index - 1)
+            |> trim
+          in
+          Hashtbl.replace headers name value)
+    header_lines;
+  let content_length =
+    match Hashtbl.find_opt headers "content-length" with
+    | None -> 0
+    | Some value -> parse_nonnegative "content-length" value
+  in
+  if content_length > maximum then failf "http-body-too-large";
+  let body_start = header_ending + 4 in
+  let initial_body = String.length raw - body_start in
+  let rec read_body () =
+    if Buffer.length buffer - body_start >= content_length then ()
+    else
+      let count = Unix.read descriptor bytes 0 (Bytes.length bytes) in
+      if count = 0 then failf "http-request-ended-before-body"
+      else (Buffer.add_subbytes buffer bytes 0 count; read_body ())
+  in
+  if initial_body < content_length then read_body ();
+  let raw = Buffer.contents buffer in
+  {
+    http_method;
+    http_target;
+    http_headers = headers;
+    http_body = String.sub raw body_start content_length;
+  }
+
+let json_response ?(headers = []) status body =
+  http_response ~headers status "application/json; charset=utf-8" body
+
+let beagle_bridge_protocol = "beagle-pty-supervisor-v1"
+let beagle_bridge_runtime = "sounio-loom-beagle-bridge-v1"
+let beagle_agent = "beagle-workbench"
+
+let beagle_lane_of_pane pane_id = "pane-" ^ hex_of_string pane_id
+
+let beagle_pane_of_lane lane =
+  if starts_with lane "pane-" then
+    try Some (string_of_hex (String.sub lane 5 (String.length lane - 5)))
+    with _ -> None
+  else None
+
+let beagle_meta_path paths = Filename.concat paths.session_dir "beagle.meta"
+
+let read_beagle_meta paths = parse_key_values (beagle_meta_path paths)
+
+let write_beagle_meta paths fields =
+  atomic_write (beagle_meta_path paths)
+    (descriptor_text
+       (List.map (fun (key, value) -> (key, field_escape value)) fields))
+
+let beagle_meta_value ?default metadata key =
+  table_value ?default metadata key |> field_unescape
+
+let read_range path cursor length =
+  if length <= 0 then ""
+  else
+    let descriptor = Unix.openfile path [ O_RDONLY ] 0 in
+    let bytes = Bytes.create length in
+    Fun.protect
+      ~finally:(fun () -> Unix.close descriptor)
+      (fun () ->
+        ignore (Unix.lseek descriptor cursor SEEK_SET);
+        let rec fill offset =
+          if offset < length then
+            let count = Unix.read descriptor bytes offset (length - offset) in
+            if count > 0 then fill (offset + count)
+        in
+        fill 0;
+        Bytes.unsafe_to_string bytes)
+
+let read_tail path limit =
+  let ending = file_size path in
+  let start = max 0 (ending - limit) in
+  (start, ending, read_range path start (ending - start))
+
+let beagle_paths root pane_id =
+  session_paths root beagle_agent (beagle_lane_of_pane pane_id)
+
+let beagle_descriptor root pane_id =
+  let paths = beagle_paths root pane_id in
+  if not (Sys.file_exists paths.descriptor_path) then failf "pane-not-found";
+  let descriptor = parse_key_values paths.descriptor_path in
+  Hashtbl.replace descriptor "state" (effective_session_state descriptor);
+  (paths, descriptor)
+
+let beagle_status_json root pane_id =
+  let paths, descriptor = beagle_descriptor root pane_id in
+  let metadata = read_beagle_meta paths in
+  let output_path = table_value descriptor "output_file" in
+  let _, cursor, snapshot = read_tail output_path 12000 in
+  let loom_state = table_value descriptor "state" in
+  let status = if loom_state = "active" then "running" else loom_state in
+  let instance = table_value descriptor "instance_id" in
+  let session_id = table_value descriptor "session_id" in
+  let generation_fingerprint =
+    sha256
+      (String.concat "\000"
+         [ pane_id; session_id; instance; table_value descriptor "harness_pid_start";
+           table_value descriptor "argv_digest" ])
+  in
+  let journal_verified, semantic_head, guardian_head, recovery_count =
+    try
+      let events, _, semantic_head =
+        load_and_verify_journal (table_value descriptor "journal_file")
+      in
+      let _, _, _, guardian_head =
+        load_and_verify_guardian_journal
+          (table_value descriptor "guardian_journal_file")
+      in
+      let recovery_count =
+        List.fold_left
+          (fun count (event : journal_event) ->
+            if event.kind = "KERNEL_RECOVERED" then count + 1 else count)
+          0 events
+      in
+      (true, semantic_head, guardian_head, recovery_count)
+    with _ -> (false, "", "", 0)
+  in
+  Printf.sprintf
+    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d}}"
+    (json_quote pane_id) (json_quote session_id)
+    (table_value ~default:"0" descriptor "harness_pid") (json_quote status)
+    (json_quote
+       (beagle_meta_value ~default:(table_value descriptor "started_utc")
+          metadata "created_at"))
+    (json_quote
+       (beagle_meta_value ~default:(table_value descriptor "started_utc")
+          metadata "updated_at"))
+    (json_quote (table_value descriptor "worktree"))
+    (beagle_meta_value ~default:"120" metadata "cols")
+    (beagle_meta_value ~default:"34" metadata "rows")
+    (json_quote snapshot) (json_quote beagle_bridge_runtime)
+    (json_quote beagle_bridge_protocol) (json_quote instance)
+    (table_value ~default:"0" descriptor "daemon_pid")
+    (table_value ~default:"0" descriptor "guardian_pid")
+    (json_quote loom_state) cursor (json_quote generation_fingerprint)
+    (if journal_verified then "true" else "false")
+    (json_quote semantic_head) (json_quote guardian_head) recovery_count
+
+let beagle_metadata_for paths pane_id session_id instance cols rows =
+  let previous = read_beagle_meta paths in
+  let now = utc_now () in
+  let created_at =
+    if beagle_meta_value previous "instance_id" = instance then
+      beagle_meta_value ~default:now previous "created_at"
+    else now
+  in
+  write_beagle_meta paths
+    [ ("pane_id", pane_id); ("session_id", session_id);
+      ("instance_id", instance); ("created_at", created_at);
+      ("updated_at", now); ("cols", string_of_int cols);
+      ("rows", string_of_int rows) ]
+
+let beagle_cli root cwd pane_id session_id rest =
+  let options = Hashtbl.create 8 in
+  Hashtbl.replace options "--agent" beagle_agent;
+  Hashtbl.replace options "--lane" (beagle_lane_of_pane pane_id);
+  Hashtbl.replace options "--session-id" session_id;
+  Hashtbl.replace options "--cwd" cwd;
+  Hashtbl.replace options "--state-dir" root;
+  { options; flags = Hashtbl.create 0; rest }
+
+let ensure_beagle_pane root body =
+  let pane_id = json_string_field body [ "paneId"; "pane_id" ] in
+  if pane_id = "" || String.length pane_id > 512 || String.contains pane_id '\000'
+  then failf "invalid-pane-id";
+  let session_id =
+    json_string_field ~default:pane_id body [ "sessionId"; "session_id" ]
+  in
+  if session_id = "" || String.length session_id > 512
+     || String.contains session_id '\000'
+  then failf "invalid-session-id";
+  let requested_cwd =
+    json_string_field ~default:(Unix.getcwd ()) body [ "cwd" ]
+  in
+  let cwd = Unix.realpath requested_cwd in
+  if (Unix.stat cwd).st_kind <> S_DIR then failf "cwd-is-not-a-directory";
+  let shell =
+    json_string_field
+      ~default:(Option.value ~default:"/bin/bash" (Sys.getenv_opt "SHELL"))
+      body [ "shell" ]
+  in
+  if not (Sys.file_exists shell) then failf "shell-not-found";
+  let cols = json_int_field ~default:120 body [ "cols" ] in
+  let rows = json_int_field ~default:34 body [ "rows" ] in
+  if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 then
+    failf "invalid-terminal-size";
+  let paths = beagle_paths root pane_id in
+  let state =
+    if Sys.file_exists paths.descriptor_path then
+      let descriptor = parse_key_values paths.descriptor_path in
+      let existing_session = table_value descriptor "session_id" in
+      let existing_cwd = table_value descriptor "worktree" in
+      if effective_session_state descriptor <> "lost"
+         && existing_session <> session_id
+      then failf "pane-identity-conflict";
+      if effective_session_state descriptor <> "lost" && existing_cwd <> cwd then
+        failf "pane-cwd-conflict";
+      effective_session_state descriptor
+    else "absent"
+  in
+  let cli = beagle_cli root cwd pane_id session_id [] in
+  (match state with
+  | "active" -> ()
+  | "recoverable" -> recover_command cli
+  | "absent" | "lost" | "exited" ->
+      start_command
+        { cli with
+          rest =
+            [ "env"; "TERM=xterm-256color"; "COLORTERM=truecolor";
+              "BEAGLE_WORKBENCH=1"; "BEAGLE_PTY_SUPERVISOR=loom";
+              "WORKSPACE_ROOT=" ^ cwd; shell; "-l" ] }
+  | actual -> failf "pane-state-refused:%s" actual);
+  let _, descriptor = beagle_descriptor root pane_id in
+  let instance, actual_cols, actual_rows = resize_request paths cols rows in
+  if instance <> table_value descriptor "instance_id" then
+    failf "resize-generation-mismatch";
+  beagle_metadata_for paths pane_id session_id instance actual_cols actual_rows;
+  beagle_status_json root pane_id
+
+let update_beagle_metadata paths update =
+  let metadata = read_beagle_meta paths in
+  let value key fallback = beagle_meta_value ~default:fallback metadata key in
+  let fields =
+    [ ("pane_id", value "pane_id" "");
+      ("session_id", value "session_id" "");
+      ("instance_id", value "instance_id" "");
+      ("created_at", value "created_at" (utc_now ()));
+      ("updated_at", utc_now ());
+      ("cols", value "cols" "120"); ("rows", value "rows" "34") ]
+  in
+  write_beagle_meta paths (update fields)
+
+let replace_field name replacement fields =
+  List.map (fun (key, value) -> if key = name then (key, replacement) else (key, value)) fields
+
+let websocket_accept key =
+  let digest =
+    Cryptokit.hash_string (Cryptokit.Hash.sha1 ())
+      (key ^ "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
+  in
+  Cryptokit.transform_string (Cryptokit.Base64.encode_compact_pad ()) digest
+
+let websocket_frame payload =
+  let length = String.length payload in
+  let header =
+    if length < 126 then Bytes.init 2 (function 0 -> Char.chr 0x81 | _ -> Char.chr length)
+    else if length <= 0xffff then
+      Bytes.init 4 (function
+        | 0 -> Char.chr 0x81
+        | 1 -> Char.chr 126
+        | 2 -> Char.chr ((length lsr 8) land 0xff)
+        | _ -> Char.chr (length land 0xff))
+    else
+      Bytes.init 10 (function
+        | 0 -> Char.chr 0x81
+        | 1 -> Char.chr 127
+        | index ->
+            let shift = (9 - index) * 8 in
+            Char.chr ((length lsr shift) land 0xff))
+  in
+  Bytes.unsafe_to_string header ^ payload
+
+let websocket_send descriptor payload = write_all descriptor (websocket_frame payload)
+
+let beagle_websocket_stream root pane_id descriptor request =
+  let key =
+    match Hashtbl.find_opt request.http_headers "sec-websocket-key" with
+    | Some value -> value
+    | None -> failf "websocket-key-required"
+  in
+  let paths, state = beagle_descriptor root pane_id in
+  let output_path = table_value state "output_file" in
+  write_all descriptor
+    (Printf.sprintf
+       "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n"
+       (websocket_accept key));
+  let _, ending, snapshot = read_tail output_path 12000 in
+  let cursor = ref ending in
+  websocket_send descriptor
+    (Printf.sprintf
+       "{\"type\":\"ready\",\"paneId\":%s,\"sessionId\":%s,\"at\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomCursor\":%d,\"snapshot\":%s}"
+       (json_quote pane_id) (json_quote (table_value state "session_id"))
+       (json_quote (utc_now ())) (json_quote beagle_bridge_runtime)
+       (json_quote beagle_bridge_protocol)
+       (json_quote (table_value state "instance_id")) ending
+       (json_quote snapshot));
+  let running = ref true and exit_sent = ref false in
+  while !running do
+    let readable, _, _ = Unix.select [ descriptor ] [] [] 0.05 in
+    if readable <> [] then (
+      let probe = Bytes.create 256 in
+      let count = Unix.read descriptor probe 0 (Bytes.length probe) in
+      if count = 0 || count > 0 then running := false)
+    else
+      let current = file_size output_path in
+      if current > !cursor then (
+        let length = min 65536 (current - !cursor) in
+        let data = read_range output_path !cursor length in
+        cursor := !cursor + String.length data;
+        websocket_send descriptor
+          (Printf.sprintf
+             "{\"type\":\"raw_output\",\"paneId\":%s,\"sessionId\":%s,\"at\":%s,\"data\":%s,\"loomCursor\":%d,\"loomInstanceId\":%s}"
+             (json_quote pane_id) (json_quote (table_value state "session_id"))
+             (json_quote (utc_now ())) (json_quote data) !cursor
+             (json_quote (table_value state "instance_id"))));
+      let current_state =
+        parse_key_values paths.descriptor_path |> effective_session_state
+      in
+      if current_state = "exited" && !cursor >= file_size output_path
+         && not !exit_sent
+      then (
+        exit_sent := true;
+        let guardian = parse_key_values paths.guardian_descriptor_path in
+        let exit_code = table_value ~default:"0" guardian "exit_code" in
+        websocket_send descriptor
+          (Printf.sprintf
+             "{\"type\":\"exit\",\"paneId\":%s,\"sessionId\":%s,\"at\":%s,\"exitCode\":%s,\"signal\":\"\",\"detail\":%s}"
+             (json_quote pane_id) (json_quote (table_value state "session_id"))
+             (json_quote (utc_now ())) exit_code
+             (json_quote ("pty exited (" ^ exit_code ^ ")")));
+        running := false)
+  done
+
+let beagle_pane_route target =
+  let path, _ = parse_query target in
+  match split_on '/' path with
+  | [ ""; "v1"; "panes"; pane_id; action ] ->
+      Some (percent_decode pane_id, action)
+  | _ -> None
+
+let beagle_handle_http root descriptor request =
+  let path, _ = parse_query request.http_target in
+  let respond status body = write_all descriptor (json_response status body) in
+  if request.http_method = "GET"
+     && (path = "/health" || path = "/v1/health")
+  then
+    let panes =
+      session_descriptors root
+      |> List.filter (fun (_, values) -> table_value values "agent" = beagle_agent)
+      |> List.length
+    in
+    respond "200 OK"
+      (Printf.sprintf
+         "{\"status\":\"ok\",\"supervisor\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"panes\":%d,\"authority\":\"loom\"}"
+         (json_quote beagle_bridge_runtime) (json_quote beagle_bridge_runtime)
+         (json_quote beagle_bridge_protocol) panes)
+  else if request.http_method = "GET" && path = "/v1/panes" then
+    let panes =
+      session_descriptors root
+      |> List.filter_map (fun (_, values) ->
+             if table_value values "agent" <> beagle_agent then None
+             else
+               beagle_pane_of_lane (table_value values "lane")
+               |> Option.map (beagle_status_json root))
+      |> String.concat ","
+    in
+    respond "200 OK" ("{\"panes\":[" ^ panes ^ "]}")
+  else if request.http_method = "POST" && path = "/v1/spawn" then
+    let pane = ensure_beagle_pane root (parse_json request.http_body) in
+    respond "200 OK" ("{\"pane\":" ^ pane ^ "}")
+  else
+    match beagle_pane_route request.http_target with
+    | Some (pane_id, "snapshot") when request.http_method = "GET" ->
+        respond "200 OK"
+          ("{\"pane\":" ^ beagle_status_json root pane_id ^ "}")
+    | Some (pane_id, action) when request.http_method = "POST" ->
+        let paths, _ = beagle_descriptor root pane_id in
+        let body = parse_json request.http_body in
+        (match action with
+        | "input" ->
+            let data = json_string_field ~default:"" body [ "data" ] in
+            ignore (input_request paths data)
+        | "resize" ->
+            let metadata = read_beagle_meta paths in
+            let cols =
+              json_int_field
+                ~default:(int_of_string
+                            (beagle_meta_value ~default:"120" metadata "cols"))
+                body [ "cols" ]
+            in
+            let rows =
+              json_int_field
+                ~default:(int_of_string
+                            (beagle_meta_value ~default:"34" metadata "rows"))
+                body [ "rows" ]
+            in
+            let _, actual_cols, actual_rows = resize_request paths cols rows in
+            update_beagle_metadata paths (fun fields ->
+                fields |> replace_field "cols" (string_of_int actual_cols)
+                |> replace_field "rows" (string_of_int actual_rows))
+        | "signal" ->
+            let signal = json_string_field ~default:"SIGINT" body [ "signal" ] in
+            ignore (signal_request paths signal)
+        | "terminate" ->
+            let token = trim (read_file paths.token_path) in
+            guardian_stop_request paths token
+        | _ -> failf "unknown-pane-action");
+        respond "200 OK"
+          ("{\"pane\":" ^ beagle_status_json root pane_id ^ "}")
+    | _ -> respond "404 Not Found" "{\"error\":\"not_found\"}"
+
+let beagle_handle_connection root descriptor =
+  try
+    let request = read_http_request descriptor in
+    match beagle_pane_route request.http_target with
+    | Some (pane_id, "stream")
+      when String.lowercase_ascii
+             (Option.value ~default:""
+                (Hashtbl.find_opt request.http_headers "upgrade"))
+           = "websocket" ->
+        beagle_websocket_stream root pane_id descriptor request
+    | _ -> beagle_handle_http root descriptor request
+  with
+  | Loom_error message ->
+      let status =
+        if message = "pane-not-found" then "404 Not Found"
+        else if
+          List.mem message
+            [ "pane-identity-conflict"; "pane-cwd-conflict";
+              "interactive-client-active" ]
+        then "409 Conflict"
+        else "400 Bad Request"
+      in
+      (try
+         write_all descriptor
+           (json_response status
+              (Printf.sprintf "{\"error\":%s}" (json_quote message)))
+       with _ -> ())
+  | Unix_error _ -> ()
+  | error ->
+      (try
+         write_all descriptor
+           (json_response "500 Internal Server Error"
+              (Printf.sprintf "{\"error\":%s}"
+                 (json_quote (Printexc.to_string error))))
+       with _ -> ())
+
+let serve_beagle_bridge cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let bind = optional cli "--bind" |> Option.value ~default:"127.0.0.1" in
+  if bind <> "127.0.0.1" && bind <> "localhost"
+     && not (flag cli "--allow-remote")
+  then failf "remote Beagle bridge bind requires --allow-remote";
+  let port = optional cli "--port" |> Option.value ~default:"4372" |> int_of_string in
+  let address =
+    try Unix.inet_addr_of_string bind
+    with _ -> (Unix.gethostbyname bind).h_addr_list.(0)
+  in
+  let server = Unix.socket PF_INET SOCK_STREAM 0 in
+  Unix.setsockopt server SO_REUSEADDR true;
+  Unix.bind server (ADDR_INET (address, port));
+  Unix.listen server 64;
+  let actual_port =
+    match Unix.getsockname server with ADDR_INET (_, value) -> value | _ -> port
+  in
+  let running = ref true in
+  let stop _ = running := false in
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle stop);
+  Sys.set_signal Sys.sigint (Sys.Signal_handle stop);
+  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
+  Sys.set_signal Sys.sigchld Sys.Signal_ignore;
+  Printf.printf
+    "LOOM_BEAGLE_BRIDGE url=http://%s:%d protocol=%s runtime=%s authority=loom\n%!"
+    bind actual_port beagle_bridge_protocol beagle_bridge_runtime;
+  while !running do
+    let readable, _, _ = Unix.select [ server ] [] [] 0.25 in
+    if readable <> [] then
+      let client, _ = Unix.accept server in
+      match Unix.fork () with
+      | 0 ->
+          Unix.close server;
+          beagle_handle_connection root client;
+          Unix.close client;
+          Unix._exit 0
+      | _ -> Unix.close client
+  done;
+  Unix.close server
+
 let snapshot_from_files root query =
   let agent = table_value query "agent" and lane = table_value query "lane" in
   let cursor = table_value ~default:"0" query "cursor" |> parse_nonnegative "cursor" in
@@ -2656,7 +3506,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n"
     runtime_version
 
 let arguments_after_command () =
@@ -2689,6 +3539,7 @@ let main () =
     | "list" -> list_command cli; 0
     | "tui" -> tui_command cli; 0
     | "serve" -> serve_http cli; 0
+    | "beagle-serve" -> serve_beagle_bridge cli; 0
     | "fleet-enroll" -> fleet_enroll_command cli; 0
     | "fleet-disable" -> fleet_disable_command cli; 0
     | "fleet-reconcile" -> fleet_reconcile_command cli; 0

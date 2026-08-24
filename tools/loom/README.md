@@ -35,6 +35,7 @@ bin/sounio-loom fleet-reconcile --apply
 bin/sounio-loom list
 bin/sounio-loom tui
 bin/sounio-loom serve --bind 127.0.0.1 --port 8787
+bin/sounio-loom beagle-serve --bind 127.0.0.1 --port 4372
 ```
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
@@ -55,6 +56,15 @@ than `OnDelete`, runs reconciliation as the lane-owning user instead of the
 container's root user, and verifies that applying the template did not replace
 the current Pod. Use `--dry-run` to inspect the strategic merge patch.
 
+`beagle-serve` is a loopback compatibility backend for the existing Beagle
+Workspace Agent. It implements `beagle-pty-supervisor-v1` without changing the
+external `beagle-terminal-v1` client protocol. Beagle retains agent routing,
+sessions, blocks, redaction, and memory policy; Loom owns PTY custody, process
+identity, input authority, replay, and recovery. The bridge exposes verified
+local journal heads and recovery counts as additive response fields. See
+`docs/internal/concepts/loom-multiplexer.contract` for the authority matrix and
+canary rules.
+
 ## Evidence Boundary
 
 Loom-1 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
@@ -66,5 +76,7 @@ Kubernetes startup hook activates that one-shot reconciliation after Pod loss,
 but pending-inbox replay across the new generation still needs its own gate.
 Existing fleet generations therefore retain the Python `agentd` launch adapter
 during migration.
+The Beagle bridge is source-tested but not yet deployed into a Beagle workspace
+or proven through Pod-loss, block-provenance, and memory-redaction gates.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.
