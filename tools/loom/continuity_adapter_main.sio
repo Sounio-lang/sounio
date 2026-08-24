@@ -2,14 +2,15 @@
 //!
 //! The build composes this entrypoint with `loom_continuity.sio`, keeping the
 //! host seal and admission constructor private inside one native program. The
-//! The OCaml host sends thirteen legacy fields or fifteen authenticated fields
-//! over stdin. Sounio owns parsing and the transition-policy decision.
+//! The OCaml host sends thirteen legacy fields, fifteen signer-authenticated
+//! fields, or eighteen independently observed fields over stdin. Sounio owns
+//! parsing, nominal proof separation, and the transition-policy decision.
 
 fn decimal_field(raw: string, start: i64) -> (i64, i64, i64) with Mut, Div, Panic {
     var offset = start
     var value: i64 = 0
     var seen: bool = false
-    while offset < 256 {
+    while offset < 512 {
         let code = str_char_at(raw, offset)
         if code <= 0 { return (if seen { 1 } else { 0 }, value, offset) }
         if code == 32 {
@@ -22,6 +23,24 @@ fn decimal_field(raw: string, start: i64) -> (i64, i64, i64) with Mut, Div, Pani
         offset = offset + 1
     }
     (0, 0, offset)
+}
+
+fn pre_spawn_policy_accepts(
+    predecessor_receipt_token: i64,
+    signer_authority_token: i64,
+    observer_authority_token: i64,
+    independent_observation_token: i64,
+) -> bool with LoomHostTrust, Panic {
+    let observed = admit_pre_spawn_principal_evidence(
+        predecessor_receipt_token,
+        signer_authority_token,
+        observer_authority_token,
+        independent_observation_token,
+    )
+    match verify_independent_pre_spawn_admission(observed) {
+        Some(receipt) => promote_independent_pre_spawn_admission(receipt) > 0,
+        None => false,
+    }
 }
 
 fn policy_accepts(
@@ -42,6 +61,12 @@ fn policy_accepts(
         }
     }
     if transition_kind == 2 {
+        if authenticity_mode == 2 {
+            return match verify_independently_signed_clean_respawn(observed) {
+                Some(receipt) => promote_independently_signed_clean_respawn(receipt) > 0,
+                None => false,
+            }
+        }
         if authenticity_mode == 1 {
             return match verify_signed_clean_respawn(observed) {
                 Some(receipt) => promote_signed_clean_respawn(receipt) > 0,
@@ -54,6 +79,17 @@ fn policy_accepts(
         }
     }
     if transition_kind == 3 {
+        if authenticity_mode == 2 {
+            return match verify_independently_signed_pod_resurrection(observed) {
+                Some(receipt) => {
+                    let (generation, evidence, lineage, predecessor, transitions, pods) =
+                        promote_independently_signed_pod_resurrection(receipt)
+                    generation > 0 && evidence > 0 && lineage > 0 &&
+                        predecessor > 0 && transitions > 0 && pods > 0
+                },
+                None => false,
+            }
+        }
         if authenticity_mode == 1 {
             return match verify_signed_pod_resurrection(observed) {
                 Some(receipt) => {
@@ -85,6 +121,26 @@ fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
     let (ok3, current_generation_token, p3) = decimal_field(input, p2)
     let (ok4, generation_fingerprint_token, p4) = decimal_field(input, p3)
     let (ok5, semantic_journal_head_token, p5) = decimal_field(input, p4)
+    if evidence_set_token == 9003 {
+        let canonical_pre_spawn = ok1 == 1 && ok2 == 1 && ok3 == 1 &&
+            ok4 == 1 && ok5 == 1 && str_char_at(input, p5) <= 0 &&
+            !(p5 > 0 && str_char_at(input, p5 - 1) == 32)
+        if !canonical_pre_spawn {
+            println("SOUNIO_CONTINUITY_REFUSE reason=canonical-pre-spawn-input")
+            return 64
+        }
+        if !pre_spawn_policy_accepts(
+            receipt_chain_token,
+            current_generation_token,
+            generation_fingerprint_token,
+            semantic_journal_head_token,
+        ) {
+            println("SOUNIO_CONTINUITY_REFUSE reason=principal-independence")
+            return 42
+        }
+        println("SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v1 authority=disjoint-principals")
+        return 0
+    }
     let (ok6, guardian_journal_head_token, p6) = decimal_field(input, p5)
     let (ok7, lineage_head_token, p7) = decimal_field(input, p6)
     let (ok8, predecessor_generation_token, p8) = decimal_field(input, p7)
@@ -95,24 +151,47 @@ fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
     let (ok13, pod_resurrection_count, p13) = decimal_field(input, p12)
     let (ok14, predecessor_receipt_token, p14) = decimal_field(input, p13)
     let (ok15, authenticity_mode, p15) = decimal_field(input, p14)
+    let (ok16, signer_authority_token, p16) = decimal_field(input, p15)
+    let (ok17, observer_authority_token, p17) = decimal_field(input, p16)
+    let (ok18, independent_observation_token, p18) = decimal_field(input, p17)
     let legacy_input = ok14 == 0 && str_char_at(input, p13) <= 0 &&
         !(p13 > 0 && str_char_at(input, p13 - 1) == 32)
     let signed_input = ok14 == 1 && ok15 == 1 && authenticity_mode == 1 &&
         str_char_at(input, p15) <= 0 &&
         !(p15 > 0 && str_char_at(input, p15 - 1) == 32)
+    let independently_observed_input =
+        ok14 == 1 && ok15 == 1 && authenticity_mode == 2 &&
+        ok16 == 1 && ok17 == 1 && ok18 == 1 &&
+        str_char_at(input, p18) <= 0 &&
+        !(p18 > 0 && str_char_at(input, p18 - 1) == 32)
     if ok1 != 1 || ok2 != 1 || ok3 != 1 || ok4 != 1 || ok5 != 1 ||
         ok6 != 1 || ok7 != 1 || ok8 != 1 || ok9 != 1 || ok10 != 1 ||
         ok11 != 1 || ok12 != 1 || ok13 != 1 ||
-        (!legacy_input && !signed_input) {
+        (!legacy_input && !signed_input && !independently_observed_input) {
         println("SOUNIO_CONTINUITY_REFUSE reason=canonical-input")
         return 64
     }
-    let admitted_predecessor_receipt = if signed_input {
+    let admitted_predecessor_receipt = if signed_input || independently_observed_input {
         predecessor_receipt_token
     } else {
         0
     }
-    let admitted_authenticity_mode = if signed_input { 1 } else { 0 }
+    let admitted_authenticity_mode = if independently_observed_input {
+        2
+    } else if signed_input {
+        1
+    } else {
+        0
+    }
+    let admitted_signer_authority = if independently_observed_input {
+        signer_authority_token
+    } else { 0 }
+    let admitted_observer_authority = if independently_observed_input {
+        observer_authority_token
+    } else { 0 }
+    let admitted_independent_observation = if independently_observed_input {
+        independent_observation_token
+    } else { 0 }
 
     let bridge0 = open_host_trust_bridge(evidence_set_token, receipt_chain_token)
     let (bridge1, host_receipt) = admit_runtime_continuity(
@@ -130,6 +209,9 @@ fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
         predecessor_guardian_head_token,
         admitted_predecessor_receipt,
         admitted_authenticity_mode,
+        admitted_signer_authority,
+        admitted_observer_authority,
+        admitted_independent_observation,
         transition_kind,
         transition_count,
         pod_resurrection_count,
@@ -145,7 +227,9 @@ fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
         return 42
     }
 
-    if admitted_authenticity_mode == 1 {
+    if admitted_authenticity_mode == 2 {
+        println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v3 authenticity=ed25519+independent-observer")
+    } else if admitted_authenticity_mode == 1 {
         println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519")
     } else {
         println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1")

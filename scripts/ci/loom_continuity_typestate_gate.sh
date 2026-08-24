@@ -81,7 +81,7 @@ SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$combined" >"$runtime_log" 2>&1 || {
   fail 'single-module Loom continuity witness did not run'
 }
 rg -Fxq \
-  'loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 signed=1 predecessor=refused signed_predecessor=refused count=refused kind=refused authority=refused' \
+  'loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 signed=1 independent_pod=1 independent_clean=1 pre_spawn=1 predecessor=refused signed_predecessor=refused collapsed_principal=refused pre_spawn_collapsed=refused missing_observation=refused count=refused kind=refused authority=refused' \
   "$runtime_log" || {
     cat "$runtime_log" >&2
     fail 'Loom continuity witness omitted its exact receipt'
@@ -97,6 +97,10 @@ expect_rejection unsealed-host-admission \
   "$PRIVACY/loom_continuity_unsealed_admission_main.sio" E175
 expect_rejection private-signed-proof \
   "$PRIVACY/loom_continuity_private_signed_struct_main.sio" E176
+expect_composed_rejection decision-as-independent-observation \
+  "$PRIVACY/loom_continuity_decision_as_observation_main.sio" E009
+expect_rejection private-disjoint-principals \
+  "$PRIVACY/loom_continuity_private_disjoint_principals_main.sio" E176
 expect_composed_rejection linear-reuse \
   "$PRIVACY/loom_continuity_linear_reuse_main.sio" E039
 
@@ -169,17 +173,17 @@ mkdir -p "$WORK/signed-stdlib/coordination"
 cp "$MODULE" "$WORK/signed-stdlib/coordination/loom_continuity.sio"
 signed_module="$WORK/signed-stdlib/coordination/loom_continuity.sio"
 signed_mutation_count="$(
-  rg -c '^    if observed\.authenticity_mode != 1 \|\| observed\.predecessor_receipt_token <= 0 \{$' \
+  rg -c '^    if \(observed\.authenticity_mode != 1 && observed\.authenticity_mode != 2\) \|\| observed\.predecessor_receipt_token <= 0 \{$' \
     "$signed_module"
 )"
 [[ "$signed_mutation_count" -eq 2 ]] || \
   fail "expected two signed predecessor guards before mutation, got $signed_mutation_count"
 awk '
   BEGIN { seen=0; changed=0 }
-  $0 == "    if observed.authenticity_mode != 1 || observed.predecessor_receipt_token <= 0 {" {
+  $0 == "    if (observed.authenticity_mode != 1 && observed.authenticity_mode != 2) || observed.predecessor_receipt_token <= 0 {" {
     seen++
     if (seen == 2) {
-      print "    if observed.authenticity_mode != 1 {"
+      print "    if observed.authenticity_mode != 1 && observed.authenticity_mode != 2 {"
       changed=1
       next
     }
@@ -203,4 +207,39 @@ if [[ "$signed_sabotage_rc" -eq 0 ]]; then
   fail 'removing the signed predecessor guard did not expose the negative witness'
 fi
 
-echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 signed-type-separation=E009 signed-proof-private=E176 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1"
+mkdir -p "$WORK/principal-stdlib/coordination"
+cp "$MODULE" "$WORK/principal-stdlib/coordination/loom_continuity.sio"
+principal_module="$WORK/principal-stdlib/coordination/loom_continuity.sio"
+principal_mutation_count="$(
+  rg -c '^    if signer_authority_token == observer_authority_token \{ return false \}$' \
+    "$principal_module"
+)"
+[[ "$principal_mutation_count" -eq 1 ]] || \
+  fail "expected one principal-disjointness guard before mutation, got $principal_mutation_count"
+awk '
+  BEGIN { changed=0 }
+  !changed && $0 == "    if signer_authority_token == observer_authority_token { return false }" {
+    print "    if false { return false }"
+    changed=1
+    next
+  }
+  { print }
+  END { if (changed != 1) exit 42 }
+' "$principal_module" > "$WORK/principal-mutated.sio" || \
+  fail 'could not apply the principal-disjointness mutation'
+mv "$WORK/principal-mutated.sio" "$principal_module"
+
+principal_sabotage_program="$WORK/principal_sabotage_kernel.sio"
+compose_witness "$principal_module" "$principal_sabotage_program"
+principal_sabotage_log="$WORK/principal-sabotage.log"
+set +e
+SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$principal_sabotage_program" \
+  >"$principal_sabotage_log" 2>&1
+principal_sabotage_rc=$?
+set -e
+if [[ "$principal_sabotage_rc" -eq 0 ]]; then
+  cat "$principal_sabotage_log" >&2
+  fail 'removing the principal-disjointness guard did not expose the collapsed-principal witness'
+fi
+
+echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 signed-type-separation=E009 signed-proof-private=E176 role-collapse=E009 disjoint-proof-private=E176 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1 sabotage-principal-disjointness=1"

@@ -11,6 +11,7 @@ STATE_FILE="$CANARY_ROOT/phase.env"
 RESULT_FILE="$CANARY_ROOT/result.txt"
 HARNESS="$CANARY_ROOT/beagle-pod-canary"
 LOOM="$ROOT_DIR/bin/sounio-loom"
+ADAPTER="${SOUNIO_LOOM_CONTINUITY_ADAPTER:-$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime}"
 RUNTIME="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh"
 PANE_ID="${SOUNIO_LOOM_POD_CANARY_PANE_ID:-loom-pod-replay:terminal}"
 AGENT=beagle-workbench
@@ -124,7 +125,7 @@ continuity_receipt_digest() {
     SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" verify-continuity-receipt \
       --receipt "${matches[0]}" \
       --public-key "$SOUNIO_LOOM_VERIFY_KEY" \
-      --adapter "$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime" \
+      --adapter "$ADAPTER" \
       >/dev/null || fail "generation $generation failed independent public verification"
   fi
   printf '%s\n' "$api_digest"
@@ -216,7 +217,7 @@ start_generation() {
     [[ "${#signer_key_id}" -eq 64 ]] || fail 'Beagle spawn omitted the signer key identity'
   fi
   policy_runtime="$(json_string_value "$spawn_file" sounioPolicyRuntimeDigest)"
-  adapter_digest="$(hash_file "$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime")"
+  adapter_digest="$(hash_file "$ADAPTER")"
   [[ "${#policy_runtime}" -eq 64 && "$policy_runtime" == "$adapter_digest" ]] || \
     fail 'Beagle policy runtime digest does not match the native Sounio adapter'
   generation="$(json_string_value "$spawn_file" loomInstanceId)"
