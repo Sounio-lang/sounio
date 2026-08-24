@@ -9,6 +9,7 @@ RUNTIME="$TEST_ROOT/runtime"
 STATE="$TEST_ROOT/agentd-state"
 DB="$TEST_ROOT/fleet.db"
 CONFIG="$TEST_ROOT/fleet.toml"
+DISABLED_CONFIG="$TEST_ROOT/fleet-disabled.toml"
 RECEIVER="$TEST_ROOT/receiver.py"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
 SUMMARY="$TEST_ROOT/summary.txt"
@@ -17,6 +18,7 @@ PRIVATE_KEY="$TEST_ROOT/private.pem"
 PUBLIC_KEY="$TEST_ROOT/public.pem"
 ANCHORS="$TEST_ROOT/anchors"
 CERTIFICATE="$TEST_ROOT/crash-certificate.json"
+RECOVERY_BUDGET="$TEST_ROOT/recovery-budget.json"
 SLOT='crash-lane'
 
 cleanup() {
@@ -121,6 +123,7 @@ session_id = "11111111-2222-4333-8444-555555555555"
 identity = "exact"
 command = ["$RECEIVER", "$RECEIVER_LOG"]
 EOF
+sed '0,/enabled = true/s//enabled = false/' "$CONFIG" > "$DISABLED_CONFIG"
 
 fleetd init --config "$CONFIG" >/dev/null
 
@@ -168,6 +171,45 @@ expect_crash 'start-action:launched' "$TEST_ROOT/start-launched.log" \
 wait_for_starts 5
 fleetd reconcile --config "$CONFIG" --apply >/dev/null
 wait_for_starts 5
+
+fleetd authorize-recovery --config "$CONFIG" --slot "$SLOT" \
+  --out "$RECOVERY_BUDGET" --max-starts 1 --backoff-seconds 0 --ttl 600 \
+  >/dev/null
+stop_slot
+expect_crash 'recovery-budget:spent' "$TEST_ROOT/recovery-budget-spent.log" \
+  watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$RECOVERY_BUDGET"
+fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$RECOVERY_BUDGET" >/dev/null
+wait_for_starts 6
+
+stop_cap1="$TEST_ROOT/stop-requested.json"
+fleetd authorize --config "$DISABLED_CONFIG" --slot "$SLOT" --action stop \
+  --out "$stop_cap1" >/dev/null
+expect_crash 'stop-action:requested' "$TEST_ROOT/stop-requested.log" \
+  reconcile --config "$DISABLED_CONFIG" --apply --capability "$stop_cap1"
+fleetd reconcile --config "$DISABLED_CONFIG" --apply >/dev/null
+[[ ! -e "$STATE/fleet-slots/$SLOT.json" ]] || \
+  fail 'requested-stop recovery retained the slot mapping'
+
+cap6="$TEST_ROOT/start-after-stop-requested.json"
+fleetd authorize --config "$CONFIG" --slot "$SLOT" --out "$cap6" >/dev/null
+fleetd reconcile --config "$CONFIG" --apply --capability "$cap6" >/dev/null
+wait_for_starts 7
+
+stop_cap2="$TEST_ROOT/stop-stopped.json"
+fleetd authorize --config "$DISABLED_CONFIG" --slot "$SLOT" --action stop \
+  --out "$stop_cap2" >/dev/null
+expect_crash 'stop-action:stopped' "$TEST_ROOT/stop-stopped.log" \
+  reconcile --config "$DISABLED_CONFIG" --apply --capability "$stop_cap2"
+fleetd reconcile --config "$DISABLED_CONFIG" --apply >/dev/null
+[[ ! -e "$STATE/fleet-slots/$SLOT.json" ]] || \
+  fail 'post-stop recovery reconstructed a removed generation'
+
+cap7="$TEST_ROOT/start-after-stop-stopped.json"
+fleetd authorize --config "$CONFIG" --slot "$SLOT" --out "$cap7" >/dev/null
+fleetd reconcile --config "$CONFIG" --apply --capability "$cap7" >/dev/null
+wait_for_starts 8
 
 fleetd keygen --private-key "$PRIVATE_KEY" --public-key "$PUBLIC_KEY" >/dev/null
 
@@ -228,7 +270,7 @@ fleetd anchor-log --private-key "$PRIVATE_KEY" --public-key "$PUBLIC_KEY" \
 output="$("$RUNTIME/sounio-fleet-trace-verify" --db "$DB" \
   --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
   --certificate "$CERTIFICATE")"
-grep -q 'FLEET_TRACE_CONFORMS .*accepted=2 .*invariants=8 ' <<< "$output" || \
+grep -q 'FLEET_TRACE_CONFORMS .*accepted=2 .*invariants=10 ' <<< "$output" || \
   fail 'crash-recovered Event Log does not refine the abstract fleet machine'
 
 python3 - "$DB" <<'PY'
@@ -247,4 +289,4 @@ assert len(consumed) == len(set(consumed)), consumed
 assert len(accepted) == len(set(accepted)) == 2, accepted
 PY
 
-echo 'sounio-fleet-crash-selftest: PASS failpoints=10 starts=5 duplicate_starts=0 duplicate_capability_consumption=0 prepared_recovery=3 accepted_recovery=2 trace_refinement=PASS'
+echo 'sounio-fleet-crash-selftest: PASS failpoints=13 starts=8 duplicate_starts=0 duplicate_capability_consumption=0 recovery_budget_replay=1 stop_recovery=2 prepared_recovery=3 accepted_recovery=2 trace_refinement=PASS'

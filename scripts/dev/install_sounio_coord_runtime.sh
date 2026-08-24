@@ -63,6 +63,11 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-fleet-trace-verify" ]] || \
       die "installed runtime declares fleet trace refinement but omits its verifier: $runtime_id"
   fi
+  if grep -q '^capability=fleet-temporal-authority-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-fleet-runtime" && \
+      -x "$version_dir/bin/sounio-fleet-trace-verify" ]] || \
+      die "installed runtime declares temporal fleet authority but omits its implementation: $runtime_id"
+  fi
   [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
     die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
   link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
@@ -221,6 +226,7 @@ else
     printf 'capability=fleet-checkpoint-handoff-v1\n'
     printf 'capability=fleet-tla-model-v1\n'
     printf 'capability=fleet-trace-refinement-v1\n'
+    printf 'capability=fleet-temporal-authority-v1\n'
     printf 'installed_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } > "$stage/manifest"
   mv "$stage" "$version_dir"

@@ -14,17 +14,17 @@ Semantic-Lane-ID: codex-verifiable-fleet-transaction-20260823
 Owner: codex/session-01a02a17-f139-7613-98a1-
 Concept-IDs: SOUNIO-VERIFIABLE-FLEET-TRANSACTION (proposed)
 Intent-Preserved: execution authority, cognitive state, scientific evidence, and transfer acceptance remain distinguishable but compose in one event history
-Transformation: textual mutation intent becomes a published one-shot capability, crash-recoverable event transaction, and nominal typestate transition
+Transformation: textual mutation intent becomes a published one-shot capability, exact-generation stop authority, bounded temporal restart budget, crash-recoverable event transaction, and nominal typestate transition
 Types-Changed: new linear StartCapability, ActiveSlot, Checkpoint, and Handoff states
-Effects-Changed: fleet mutation consumes explicit authority; acceptance consumes recipient authority
+Effects-Changed: fleet start and exact-generation stop consume explicit one-shot authority; autonomous restart spends a finite temporal budget; acceptance consumes recipient authority
 IR-Changed: none
-Claims-Introduced: only one capability-bound argv-attested generation can draft a checkpoint; only verified evidence can prepare a handoff; only an independently trace-conforming anchored preparation can be accepted; ten named process-crash boundaries recover without duplicate start, capability consumption, or acceptance in the bounded laboratory
+Claims-Introduced: only one capability-bound argv-attested generation can draft a checkpoint; intentional stop names and consumes authority for one exact generation; autonomous restart is limited by an expiring count budget and temporal backoff; only verified evidence can prepare a handoff; only an independently trace-conforming anchored preparation can be accepted; thirteen named process-crash boundaries recover without duplicate start, stop, capability consumption, or acceptance in the bounded laboratory
 Claims-Forbidden: Byzantine safety, public non-repudiation, host-loss recovery, global exactly-once execution, machine-checked Python-to-Sounio refinement, PL/CS novelty or priority
 Assumptions: SQLite single-writer locking works; Ed25519 private key remains private; SHA-256 and OpenSSL behave as specified; host file receipts name the intended evidence
 Write-Set: coordination runtime, stdlib/coordination/fleet_transaction.sio, TLA+ model, and focused gates
 Read-Set: agentd descriptors, fleet slot mappings, signed anchor directory, and evidence files
-Positive-Witness: one published capability starts one argv-attested generation, drafts and verifies a capability-bound checkpoint, survives named process crashes, and transfers it through an independently checked anchored handoff
-Negative-Witness: missing/reused/unpublished authority, argv drift, draft handoff, evidence drift, unanchored acceptance, signature substitution, anchor removal, raw HostTrust admission, and a fully rehashed semantic substitution refuse
+Positive-Witness: published capabilities start and stop exact argv-attested generations; an expiring two-unit budget automatically restores two stopped generations with enforced backoff and then refuses a third; the resulting generation drafts and verifies a checkpoint, survives named process crashes, and transfers it through an independently checked anchored handoff
+Negative-Witness: missing/reused/unpublished start or stop authority, wrong stop generation, recovery-budget secret substitution, backoff bypass, budget overflow, argv drift, draft handoff, evidence drift, unanchored acceptance, signature substitution, anchor removal, raw HostTrust admission, and fully rehashed semantic substitutions refuse
 Acceptance-Gate: scripts/ci/sounio_coord_agentd_selftest.sh, scripts/ci/sounio_coord_fleet_crash_selftest.sh, scripts/ci/sounio_coord_fleet_trace_selftest.sh, and scripts/ci/causal_receipt_typestate_gate.sh
 Integration-Target: shared sounio-coord runtime and stdlib coordination kernel
 Authoritative-Only-If: TLC, runtime sabotage catalog, linear compiler controls, replay, and Ed25519 verification all pass
@@ -39,6 +39,11 @@ Observed(Absent, desired) -> StartCapability<Issued>
 StartCapability<Issued> -> StartCapability<Published>
 StartCapability<Published> -> StartCapability<Consumed>
     -> StartAction<Requested> -> Active<ArgvAttested, CapabilityBound>
+Active + Desired(Disabled) -> StopCapability<Published, ExactGeneration>
+StopCapability<Consumed> -> StopAction<Requested> -> Observed(Absent)
+RecoveryBudget<Published, expires, maxStarts, backoff>
+    -> RecoveryBudget<Spent[n]> -> StartCapability<Published, Child[n]>
+    -> Active<ArgvAttested, CapabilityBound>
 Active<ArgvAttested> -> Checkpoint<Draft>
 Checkpoint<Draft> + unchanged evidence -> Checkpoint<Verified>
 Checkpoint<Verified> -> Handoff<Prepared> -> AcceptCapability<Published>
@@ -51,6 +56,17 @@ Capability secrets never enter the Event Log. The log stores their SHA-256
 commitment, publication receipt, and terminal state. Ed25519 anchors are
 detached files signed over a canonical log-prefix receipt and chained to the
 previous anchor digest.
+
+A recovery budget is intentionally not an unbounded reusable start capability.
+Its secret-bearing document authorizes only the count, expiry, desired-state
+digest, and minimum restart interval recorded at issuance. Each spend has a
+contiguous ordinal and deterministically names a normal one-shot child start
+capability. SQLite single-writer serialization makes concurrent spend attempts
+linear; a crash after spend recovers the same child identity. Exhaustion refuses
+until an operator publishes a replacement budget. Stop capabilities bind the
+target generation, full argv digest, and originating start capability; issuance
+and consumption reconstruct that start authority from the Event Log rather than
+trusting the supervisor descriptor alone.
 
 The Sounio kernel admits each complete host assertion as a distinct linear
 runtime receipt under an explicit `HostTrust` effect and a private linear seal.
@@ -83,6 +99,8 @@ events refine to explicit stuttering steps. The checked invariants are:
 - type closure;
 - start capability consumption never exceeds issuance;
 - each modeled start corresponds to one capability consumption;
+- stop capability consumption never exceeds issuance;
+- each modeled intentional stop corresponds to one stop capability consumption;
 - an active process has a full-argv attestation;
 - drift selects the blocked decision;
 - a signed anchor is a prefix of the Event Log;
@@ -95,10 +113,12 @@ events refine to explicit stuttering steps. The checked invariants are:
 `scripts/dev/sounio_fleet_trace_verify.py` is an independently implemented,
 read-only concrete-trace checker: it imports no producer code, recalculates the
 Event Log hash chain, verifies the Ed25519 anchor chain, reconstructs linear
-capability/checkpoint/handoff bindings, and emits a canonical refinement
+capability/recovery-budget/stop/checkpoint/handoff bindings, and emits a canonical refinement
 certificate. Its formal labels are checked against action names in the TLA+
-source. A sabotage control changes the accepted capability and then recomputes
-the complete remaining hash chain; the independent semantic rule still refuses.
+source. Sabotage controls change an accepted capability, an intentional stop's
+generation, a recovery spend ordinal, and a recovery-spend timestamp, then
+recompute the complete remaining hash chain; the independent semantic rules
+still refuse both cardinality overflow and backoff bypass.
 
 The annotations in the TLA+ source generate the sabotage catalog. The model gate
 refuses an annotation whose invariant is not checked or whose executable control
@@ -108,6 +128,10 @@ marker is absent from the runtime tests.
 
 - `reconcile --apply` starts a process without consuming an issued capability;
 - one capability starts two supervisor generations;
+- an intentional stop occurs without one capability bound to the exact active generation;
+- one stop capability terminates two generations;
+- autonomous restart exceeds its count, expiry, or temporal backoff;
+- a recovery spend does not produce the uniquely named child start capability;
 - changing one argv element preserves the active attestation;
 - a draft or evidence-drifted checkpoint prepares or completes a handoff;
 - a handoff is accepted by a different recipient;
@@ -119,8 +143,9 @@ marker is absent from the runtime tests.
 - safe promotion accepts mismatched slot, evidence, recipient, or anchor-prefix IDs;
 - finalization returns raw authority that can be replayed into a host import.
 - an imported caller can invoke raw host admission by declaring `HostTrust`;
-- a process crash after issuance, publication, consumption, request, launch,
-  preparation, or acceptance creates duplicate authority or duplicate execution;
+- a process crash after issuance, publication, budget spend, start/stop
+  consumption, request, launch/stop, preparation, or acceptance creates
+  duplicate authority or duplicate execution;
 - a rehashed but semantically altered Event Log receives a refinement certificate.
 
 ## Evidence Boundary
@@ -132,9 +157,10 @@ typestate execution currently uses `lean_single`; Madaros supplies the negative
 diagnostic controls but presently reports false-positive `E039` errors on valid
 linear pass-through programs. That compiler discrepancy is retained as a
 separate integration limitation rather than hidden by the bootstrap path.
-The crash laboratory covers ten named failpoints on one host and one SQLite
+The crash laboratory covers thirteen named failpoints on one host and one SQLite
 database. It does not simulate disk loss, database corruption, host loss,
-network partitions, or malicious concurrent writers. Capability-gated stop,
-crash-loop backoff/circuit breaking, external transparency witnesses, a wired
+network partitions, or malicious concurrent writers. The restart budget is a
+bounded local circuit breaker, not a distributed availability guarantee.
+Automatic boot after pod or host loss, external transparency witnesses, a wired
 native sealed-host adapter, and a machine-checked refinement from the Python
 Event Log to the Sounio receipt algebra are not established by this release.

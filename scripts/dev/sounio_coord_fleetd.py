@@ -27,7 +27,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.3"
+RUNTIME_VERSION = "2026.08.23.4"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -1062,7 +1062,7 @@ def decide(
         return "blocked", "probe-unreachable-start-not-authorized"
     if not spec.enabled:
         if state == "active":
-            return "hold", "disabled-active-stop-policy-not-authorized"
+            return "stop", "disabled-active-requires-stop-capability"
         return "noop", "disabled"
     if state == "active":
         return "noop", "desired-state-satisfied"
@@ -1254,6 +1254,200 @@ def recover_unpublished_capabilities(connection: sqlite3.Connection) -> int:
     return recovered
 
 
+def recovery_budget_events(
+    connection: sqlite3.Connection, budget_id: str
+) -> list[tuple[sqlite3.Row, dict[str, Any]]]:
+    matched: list[tuple[sqlite3.Row, dict[str, Any]]] = []
+    for row in connection.execute(
+        """
+        SELECT * FROM events
+        WHERE event_type IN (
+            'RECOVERY_BUDGET_ISSUED', 'RECOVERY_BUDGET_PUBLISHED',
+            'RECOVERY_BUDGET_SPENT', 'RECOVERY_BUDGET_REVOKED'
+        ) ORDER BY seq
+        """
+    ):
+        payload = json.loads(row["payload"])
+        if payload.get("budget_id") == budget_id:
+            matched.append((row, payload))
+    return matched
+
+
+def validate_recovery_budget_document(
+    issued_event: sqlite3.Row,
+    authority: dict[str, Any],
+    document: dict[str, Any],
+) -> None:
+    budget_id = authority.get("budget_id")
+    token = document.get("token")
+    if not isinstance(budget_id, str) or not isinstance(token, str):
+        raise FleetdError("recovery budget omits its identity or secret")
+    required = {
+        key: value
+        for key, value in authority.items()
+        if key not in {"issued_unix", "token_hash"}
+    }
+    required["issued_event_hash"] = issued_event["event_hash"]
+    required["version"] = 1
+    if any(document.get(key) != value for key, value in required.items()):
+        raise FleetdError(f"recovery budget {budget_id} binding was altered")
+    observed_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(observed_hash, str(authority.get("token_hash", ""))):
+        raise FleetdError(f"recovery budget {budget_id} secret does not match issuance")
+
+
+def publish_recovery_budget(
+    connection: sqlite3.Connection,
+    issued_event: sqlite3.Row,
+    authority: dict[str, Any],
+    document: dict[str, Any],
+    output_path: Path,
+) -> sqlite3.Row:
+    validate_recovery_budget_document(issued_event, authority, document)
+    payload = {
+        "budget_id": authority["budget_id"],
+        "document_path": str(output_path),
+        "document_sha256": capability_document_digest(document),
+        "issued_event_hash": issued_event["event_hash"],
+        "issued_event_seq": issued_event["seq"],
+        "slot": authority["slot"],
+    }
+    event, _ = append_event(
+        connection,
+        "RECOVERY_BUDGET_PUBLISHED",
+        authority["slot"],
+        f"recovery-budget-published:{authority['budget_id']}",
+        payload,
+    )
+    return event
+
+
+def recover_unpublished_recovery_budgets(connection: sqlite3.Connection) -> int:
+    recovered = 0
+    issued_rows = connection.execute(
+        "SELECT * FROM events WHERE event_type = 'RECOVERY_BUDGET_ISSUED' ORDER BY seq"
+    ).fetchall()
+    for issued_event in issued_rows:
+        authority = json.loads(issued_event["payload"])
+        budget_id = authority.get("budget_id")
+        raw_path = authority.get("budget_path")
+        if not isinstance(budget_id, str) or not isinstance(raw_path, str):
+            continue
+        events = recovery_budget_events(connection, budget_id)
+        kinds = [row["event_type"] for row, _ in events]
+        if "RECOVERY_BUDGET_PUBLISHED" in kinds or "RECOVERY_BUDGET_REVOKED" in kinds:
+            continue
+        path = absolute_without_symlink_resolution(raw_path)
+        if not path.is_file() or path.is_symlink():
+            append_event(
+                connection,
+                "RECOVERY_BUDGET_REVOKED",
+                authority["slot"],
+                f"recovery-budget-revoked:{budget_id}:crash-before-publish",
+                {
+                    "budget_id": budget_id,
+                    "reason": "crash-before-recovery-budget-publish",
+                },
+            )
+            recovered += 1
+            continue
+        document = read_capability_file(path)
+        validate_recovery_budget_document(issued_event, authority, document)
+        publish_recovery_budget(connection, issued_event, authority, document, path)
+        recovered += 1
+    return recovered
+
+
+def outstanding_recovery_budget_exists(
+    connection: sqlite3.Connection, slot: str, desired_hash: str
+) -> bool:
+    for row in connection.execute(
+        "SELECT * FROM events WHERE event_type = 'RECOVERY_BUDGET_ISSUED' ORDER BY seq"
+    ):
+        authority = json.loads(row["payload"])
+        if authority.get("slot") != slot or authority.get("desired_hash") != desired_hash:
+            continue
+        budget_id = authority.get("budget_id")
+        if not isinstance(budget_id, str):
+            continue
+        events = recovery_budget_events(connection, budget_id)
+        kinds = [event["event_type"] for event, _ in events]
+        spent = sum(
+            1
+            for event, _ in events
+            if event["event_type"] == "RECOVERY_BUDGET_SPENT"
+        )
+        is_live = (
+            "RECOVERY_BUDGET_REVOKED" not in kinds
+            and int(authority.get("expires_unix", 0)) >= int(time.time())
+            and spent < int(authority.get("max_starts", 0))
+        )
+        if is_live:
+            return True
+    return False
+
+
+def issue_recovery_budget(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    output_path: Path,
+    ttl_seconds: int,
+    max_starts: int,
+    backoff_seconds: int,
+) -> str:
+    if ttl_seconds < 1 or ttl_seconds > 604800:
+        raise FleetdError("recovery budget TTL must be between 1 and 604800 seconds")
+    if max_starts < 1 or max_starts > 64:
+        raise FleetdError("recovery budget max starts must be between 1 and 64")
+    if backoff_seconds < 0 or backoff_seconds > 86400:
+        raise FleetdError("recovery budget backoff must be between 0 and 86400 seconds")
+    if outstanding_recovery_budget_exists(connection, spec.slot, spec.desired_hash):
+        raise FleetdError(f"an unexpired recovery budget already exists for slot {spec.slot}")
+    budget_id = f"budget-{uuid.uuid4()}"
+    token = secrets.token_urlsafe(48)
+    issued_unix = int(time.time())
+    payload = {
+        "action": "recover-start",
+        "backoff_seconds": backoff_seconds,
+        "budget_id": budget_id,
+        "budget_path": str(output_path),
+        "desired_hash": spec.desired_hash,
+        "expires_unix": issued_unix + ttl_seconds,
+        "issued_unix": issued_unix,
+        "max_starts": max_starts,
+        "slot": spec.slot,
+        "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+    }
+    event, _ = append_event(
+        connection,
+        "RECOVERY_BUDGET_ISSUED",
+        spec.slot,
+        f"recovery-budget-issued:{budget_id}",
+        payload,
+    )
+    failpoint("recovery-budget:issued")
+    document = {
+        key: value for key, value in payload.items() if key not in {"issued_unix", "token_hash"}
+    }
+    document.update(
+        {"issued_event_hash": event["event_hash"], "token": token, "version": 1}
+    )
+    try:
+        atomic_write_secret_json(output_path, document)
+        failpoint("recovery-budget:file-written")
+        publish_recovery_budget(connection, event, payload, document, output_path)
+    except Exception:
+        append_event(
+            connection,
+            "RECOVERY_BUDGET_REVOKED",
+            spec.slot,
+            f"recovery-budget-revoked:{budget_id}:write-failed",
+            {"budget_id": budget_id, "reason": "recovery-budget-file-write-failed"},
+        )
+        raise
+    return budget_id
+
+
 def outstanding_capability_exists(
     connection: sqlite3.Connection,
     slot: str,
@@ -1281,6 +1475,7 @@ def outstanding_capability_exists(
     now = int(time.time())
     return any(
         capability_id not in terminal
+        and payload.get("action") == "start"
         and payload.get("slot") == slot
         and payload.get("desired_hash") == desired_hash
         and payload.get("observation_fingerprint") == observation_fingerprint
@@ -1296,6 +1491,11 @@ def issue_start_capability(
     observation_seq: int,
     output_path: Path,
     ttl_seconds: int,
+    *,
+    capability_id: str | None = None,
+    token: str | None = None,
+    parent_recovery_budget_id: str | None = None,
+    recovery_ordinal: int | None = None,
 ) -> str:
     if ttl_seconds < 1 or ttl_seconds > 86400:
         raise FleetdError("capability TTL must be between 1 and 86400 seconds")
@@ -1305,8 +1505,8 @@ def issue_start_capability(
         raise FleetdError(
             f"an unconsumed start capability already exists for slot {spec.slot}"
         )
-    capability_id = f"cap-{uuid.uuid4()}"
-    token = secrets.token_urlsafe(48)
+    capability_id = capability_id or f"cap-{uuid.uuid4()}"
+    token = token or secrets.token_urlsafe(48)
     issued_unix = int(time.time())
     payload = {
         "action": "start",
@@ -1320,6 +1520,9 @@ def issue_start_capability(
         "slot": spec.slot,
         "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
     }
+    if parent_recovery_budget_id is not None:
+        payload["parent_recovery_budget_id"] = parent_recovery_budget_id
+        payload["recovery_ordinal"] = recovery_ordinal
     event, _ = append_event(
         connection,
         "CAPABILITY_ISSUED",
@@ -1340,6 +1543,9 @@ def issue_start_capability(
         "token": token,
         "version": 1,
     }
+    if parent_recovery_budget_id is not None:
+        document["parent_recovery_budget_id"] = parent_recovery_budget_id
+        document["recovery_ordinal"] = recovery_ordinal
     try:
         atomic_write_secret_json(output_path, document)
         failpoint("start-capability:file-written")
@@ -1354,6 +1560,69 @@ def issue_start_capability(
                 "capability_id": capability_id,
                 "reason": "capability-file-write-failed",
             },
+        )
+        raise
+    return capability_id
+
+
+def issue_stop_capability(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    observation: dict[str, Any],
+    observation_seq: int,
+    output_path: Path,
+    ttl_seconds: int,
+) -> str:
+    if ttl_seconds < 1 or ttl_seconds > 86400:
+        raise FleetdError("stop capability TTL must be between 1 and 86400 seconds")
+    if observation.get("state") != "active":
+        raise FleetdError("stop capability requires an active generation")
+    active_start_authority(connection, spec.slot, observation)
+    capability_id = f"cap-{uuid.uuid4()}"
+    token = secrets.token_urlsafe(48)
+    issued_unix = int(time.time())
+    payload = {
+        "action": "stop",
+        "argv_digest": observation.get("argv_digest"),
+        "capability_id": capability_id,
+        "capability_path": str(output_path),
+        "desired_hash": spec.desired_hash,
+        "expires_unix": issued_unix + ttl_seconds,
+        "generation": observation.get("generation"),
+        "issued_unix": issued_unix,
+        "observation_fingerprint": observation["fingerprint"],
+        "observation_seq": observation_seq,
+        "slot": spec.slot,
+        "start_capability_id": observation.get("start_capability_id"),
+        "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+    }
+    event, _ = append_event(
+        connection,
+        "CAPABILITY_ISSUED",
+        spec.slot,
+        f"capability-issued:{capability_id}",
+        payload,
+    )
+    failpoint("stop-capability:issued")
+    document = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"issued_unix", "observation_seq", "token_hash"}
+    }
+    document.update(
+        {"issued_event_hash": event["event_hash"], "token": token, "version": 1}
+    )
+    try:
+        atomic_write_secret_json(output_path, document)
+        failpoint("stop-capability:file-written")
+        publish_capability(connection, event, payload, document, output_path)
+    except Exception:
+        append_event(
+            connection,
+            "CAPABILITY_REVOKED",
+            spec.slot,
+            f"capability-revoked:{capability_id}:write-failed",
+            {"capability_id": capability_id, "reason": "capability-file-write-failed"},
         )
         raise
     return capability_id
@@ -1389,6 +1658,160 @@ def load_capability_documents(paths: list[str]) -> dict[str, dict[str, Any]]:
         document["_path"] = str(path)
         documents[slot] = document
     return documents
+
+
+def load_recovery_budget_documents(paths: list[str]) -> dict[str, dict[str, Any]]:
+    documents: dict[str, dict[str, Any]] = {}
+    for raw_path in paths:
+        path = absolute_without_symlink_resolution(raw_path)
+        document = read_capability_file(path)
+        slot = document.get("slot")
+        if not isinstance(slot, str) or not slot:
+            raise FleetdError(f"recovery budget has no slot: {path}")
+        if slot in documents:
+            raise FleetdError(f"multiple recovery budgets target slot {slot}")
+        document["_path"] = str(path)
+        documents[slot] = document
+    return documents
+
+
+def validate_recovery_budget(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    document: dict[str, Any],
+) -> tuple[str, dict[str, Any], list[tuple[sqlite3.Row, dict[str, Any]]]]:
+    budget_id = document.get("budget_id")
+    if not isinstance(budget_id, str):
+        raise FleetdError("recovery budget omits its identity")
+    events = recovery_budget_events(connection, budget_id)
+    issued = [(row, payload) for row, payload in events if row["event_type"] == "RECOVERY_BUDGET_ISSUED"]
+    published = [(row, payload) for row, payload in events if row["event_type"] == "RECOVERY_BUDGET_PUBLISHED"]
+    spent = [(row, payload) for row, payload in events if row["event_type"] == "RECOVERY_BUDGET_SPENT"]
+    if len(issued) != 1 or len(published) != 1:
+        raise FleetdError(f"recovery budget {budget_id} was not uniquely published")
+    if any(row["event_type"] == "RECOVERY_BUDGET_REVOKED" for row, _ in events):
+        raise FleetdError(f"recovery budget {budget_id} was revoked")
+    issued_event, authority = issued[0]
+    validate_recovery_budget_document(issued_event, authority, document)
+    if authority.get("slot") != spec.slot or authority.get("desired_hash") != spec.desired_hash:
+        raise FleetdError(f"recovery budget {budget_id} does not authorize this desired state")
+    if int(authority.get("expires_unix", 0)) < int(time.time()):
+        raise FleetdError(f"recovery budget {budget_id} expired")
+    if published[0][1].get("document_sha256") != capability_document_digest(document):
+        raise FleetdError(f"recovery budget {budget_id} publication digest drifted")
+    return budget_id, authority, spent
+
+
+def recovery_child_identity(budget_id: str, ordinal: int) -> str:
+    suffix = hashlib.sha256(f"{budget_id}:{ordinal}".encode("utf-8")).hexdigest()[:32]
+    return f"cap-recovery-{suffix}"
+
+
+def recovery_child_token(
+    budget_token: str, budget_id: str, ordinal: int, capability_id: str
+) -> str:
+    material = f"{budget_id}:{ordinal}:{capability_id}".encode("utf-8")
+    return hmac.new(budget_token.encode("utf-8"), material, hashlib.sha256).hexdigest()
+
+
+def recovery_child_path(
+    connection: sqlite3.Connection, budget_id: str, ordinal: int
+) -> Path:
+    database = connection.execute("PRAGMA database_list").fetchone()
+    if database is None or not database["file"]:
+        raise FleetdError("recovery budget requires a persistent fleet database")
+    directory = Path(database["file"]).resolve().parent / "recovery-capabilities"
+    return directory / f"{slug(budget_id)}-{ordinal:04d}.json"
+
+
+def ensure_recovery_start_document(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    observation: dict[str, Any],
+    observation_seq: int,
+    budget_document: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    budget_id, authority, spent = validate_recovery_budget(
+        connection, spec, budget_document
+    )
+    token = str(budget_document["token"])
+    for _, spending in spent:
+        capability_id = str(spending.get("capability_id", ""))
+        if not capability_id:
+            raise FleetdError(f"recovery budget {budget_id} has a malformed spend event")
+        events = capability_events(connection, capability_id)
+        kinds = [kind for kind, _ in events]
+        if "CAPABILITY_CONSUMED" in kinds or "CAPABILITY_REVOKED" in kinds:
+            continue
+        ordinal = int(spending["ordinal"])
+        output_path = absolute_without_symlink_resolution(str(spending["capability_path"]))
+        if "CAPABILITY_ISSUED" not in kinds:
+            stored_observation = {
+                "fingerprint": spending["observation_fingerprint"]
+            }
+            issue_start_capability(
+                connection,
+                spec,
+                stored_observation,
+                int(spending["observation_seq"]),
+                output_path,
+                min(86400, max(1, int(authority["expires_unix"]) - int(time.time()))),
+                capability_id=capability_id,
+                token=recovery_child_token(token, budget_id, ordinal, capability_id),
+                parent_recovery_budget_id=budget_id,
+                recovery_ordinal=ordinal,
+            )
+        document = read_capability_file(output_path)
+        document["_path"] = str(output_path)
+        return document, "recovered-pending-recovery-child"
+
+    max_starts = int(authority["max_starts"])
+    if len(spent) >= max_starts:
+        return None, "recovery-budget-exhausted"
+    now = int(time.time())
+    if spent:
+        last_spent = int(spent[-1][1]["spent_unix"])
+        if now < last_spent + int(authority["backoff_seconds"]):
+            return None, "recovery-backoff-active"
+    ordinal = len(spent) + 1
+    capability_id = recovery_child_identity(budget_id, ordinal)
+    output_path = recovery_child_path(connection, budget_id, ordinal)
+    spending = {
+        "backoff_seconds": authority["backoff_seconds"],
+        "budget_id": budget_id,
+        "capability_id": capability_id,
+        "capability_path": str(output_path),
+        "desired_hash": spec.desired_hash,
+        "max_starts": max_starts,
+        "observation_fingerprint": observation["fingerprint"],
+        "observation_seq": observation_seq,
+        "ordinal": ordinal,
+        "slot": spec.slot,
+        "spent_unix": now,
+    }
+    append_event(
+        connection,
+        "RECOVERY_BUDGET_SPENT",
+        spec.slot,
+        f"recovery-budget-spent:{budget_id}:{ordinal}",
+        spending,
+    )
+    failpoint("recovery-budget:spent")
+    issue_start_capability(
+        connection,
+        spec,
+        observation,
+        observation_seq,
+        output_path,
+        min(86400, max(1, int(authority["expires_unix"]) - now)),
+        capability_id=capability_id,
+        token=recovery_child_token(token, budget_id, ordinal, capability_id),
+        parent_recovery_budget_id=budget_id,
+        recovery_ordinal=ordinal,
+    )
+    document = read_capability_file(output_path)
+    document["_path"] = str(output_path)
+    return document, "recovery-budget-spent"
 
 
 def consume_start_capability(
@@ -1450,6 +1873,69 @@ def consume_start_capability(
         },
     )
     failpoint("start-action:authority-consumed")
+    return capability_id
+
+
+def consume_stop_capability(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    observation: dict[str, Any],
+    document: dict[str, Any],
+) -> str:
+    capability_id = document.get("capability_id")
+    token = document.get("token")
+    if not isinstance(capability_id, str) or not isinstance(token, str):
+        raise FleetdError("stop capability omits its identity or secret")
+    active_start_authority(connection, spec.slot, observation)
+    events = capability_events(connection, capability_id)
+    issued = [payload for kind, payload in events if kind == "CAPABILITY_ISSUED"]
+    published = [payload for kind, payload in events if kind == "CAPABILITY_PUBLISHED"]
+    if len(issued) != 1 or len(published) != 1:
+        raise FleetdError(f"stop capability {capability_id} was not uniquely published")
+    if any(kind == "CAPABILITY_CONSUMED" for kind, _ in events):
+        raise FleetdError(f"stop capability {capability_id} was already consumed")
+    if any(kind == "CAPABILITY_REVOKED" for kind, _ in events):
+        raise FleetdError(f"stop capability {capability_id} was revoked")
+    authority = issued[0]
+    required = {
+        "action": "stop",
+        "argv_digest": observation.get("argv_digest"),
+        "capability_id": capability_id,
+        "desired_hash": spec.desired_hash,
+        "generation": observation.get("generation"),
+        "observation_fingerprint": observation["fingerprint"],
+        "slot": spec.slot,
+        "start_capability_id": observation.get("start_capability_id"),
+    }
+    if any(authority.get(key) != value for key, value in required.items()):
+        raise FleetdError(f"stop capability {capability_id} does not authorize this generation")
+    if any(document.get(key) != value for key, value in required.items()):
+        raise FleetdError(f"stop capability {capability_id} binding was altered")
+    if int(authority.get("expires_unix", 0)) < int(time.time()):
+        raise FleetdError(f"stop capability {capability_id} expired")
+    observed_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(observed_hash, str(authority.get("token_hash", ""))):
+        raise FleetdError(f"stop capability {capability_id} secret does not match issuance")
+    if published[0].get("document_sha256") != capability_document_digest(document):
+        raise FleetdError(f"stop capability {capability_id} publication digest drifted")
+    append_event(
+        connection,
+        "CAPABILITY_CONSUMED",
+        spec.slot,
+        f"capability-consumed:{capability_id}",
+        {
+            "action": "stop",
+            "argv_digest": observation.get("argv_digest"),
+            "capability_id": capability_id,
+            "desired_hash": spec.desired_hash,
+            "generation": observation.get("generation"),
+            "observation_fingerprint": observation["fingerprint"],
+            "observation_seq": authority.get("observation_seq"),
+            "slot": spec.slot,
+            "start_capability_id": observation.get("start_capability_id"),
+        },
+    )
+    failpoint("stop-action:authority-consumed")
     return capability_id
 
 
@@ -2276,6 +2762,117 @@ def apply_start(
     return return_code == 0
 
 
+def stop_action_id(
+    slot: str,
+    desired_hash: str,
+    observation_fingerprint: str,
+    generation: str,
+    capability_id: str,
+) -> str:
+    return digest_json(
+        {
+            "action": "stop",
+            "capability_id": capability_id,
+            "desired_hash": desired_hash,
+            "generation": generation,
+            "observation": observation_fingerprint,
+            "slot": slot,
+        }
+    )
+
+
+def apply_stop(
+    connection: sqlite3.Connection,
+    spec: LaneSpec,
+    observation: dict[str, Any],
+    observation_seq: int,
+    capability_id: str,
+) -> bool:
+    generation = str(observation.get("generation", ""))
+    action_id = stop_action_id(
+        spec.slot,
+        spec.desired_hash,
+        observation["fingerprint"],
+        generation,
+        capability_id,
+    )
+    requested = {
+        "action": "stop",
+        "action_id": action_id,
+        "argv_digest": observation.get("argv_digest"),
+        "capability_id": capability_id,
+        "desired_hash": spec.desired_hash,
+        "generation": generation,
+        "observation_fingerprint": observation["fingerprint"],
+        "observation_seq": observation_seq,
+        "start_capability_id": observation.get("start_capability_id"),
+    }
+    append_event(
+        connection,
+        "ACTION_REQUESTED",
+        spec.slot,
+        f"action-request:{action_id}",
+        requested,
+    )
+    failpoint("stop-action:requested")
+    try:
+        result = subprocess.run(
+            [
+                str(fleet_agent_command()),
+                "stop",
+                "--cwd",
+                str(spec.cwd),
+                "--slot",
+                spec.slot,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+        )
+        return_code = result.returncode
+        output = (result.stdout or result.stderr).strip()
+    except subprocess.TimeoutExpired as exc:
+        return_code = 124
+        timeout_output = exc.stdout or exc.stderr or "fleet stop timed out"
+        output = (
+            timeout_output.decode("utf-8", errors="replace")
+            if isinstance(timeout_output, bytes)
+            else timeout_output
+        ).strip()
+    failpoint("stop-action:stopped")
+    after = observe_spec(spec)
+    if return_code == 0 and after.get("state") != "absent":
+        return_code = 125
+        output = f"{output}\nstop did not remove the exact fleet generation".strip()
+    outcome = {
+        "action": "stop",
+        "action_id": action_id,
+        "argv_digest": observation.get("argv_digest"),
+        "capability_id": capability_id,
+        "desired_hash": spec.desired_hash,
+        "exit_code": return_code,
+        "generation": generation,
+        "observed_state": after.get("state"),
+        "output_digest": hashlib.sha256(output.encode("utf-8")).hexdigest(),
+        "start_capability_id": observation.get("start_capability_id"),
+        "status": "committed" if return_code == 0 else "failed",
+    }
+    append_event(
+        connection,
+        "ACTION_COMMITTED" if return_code == 0 else "ACTION_FAILED",
+        spec.slot,
+        f"action-result:{action_id}:{return_code}:{outcome['output_digest']}",
+        outcome,
+    )
+    print(
+        "FLEET_ACTION "
+        f"slot={spec.slot} action=stop status={outcome['status']} "
+        f"action_id={action_id[:16]} exit_code={return_code}"
+    )
+    return return_code == 0
+
+
 def recover_start_actions(
     connection: sqlite3.Connection, specs: list[LaneSpec]
 ) -> int:
@@ -2377,20 +2974,112 @@ def recover_start_actions(
     return failed
 
 
+def recover_stop_actions(
+    connection: sqlite3.Connection, specs: list[LaneSpec]
+) -> int:
+    specs_by_slot = {spec.slot: spec for spec in specs}
+    failed = 0
+    for row in connection.execute(
+        "SELECT * FROM events WHERE event_type = 'CAPABILITY_CONSUMED' ORDER BY seq"
+    ):
+        consumption = json.loads(row["payload"])
+        if consumption.get("action") != "stop":
+            continue
+        capability_id = str(consumption.get("capability_id", ""))
+        slot = str(consumption.get("slot", ""))
+        spec = specs_by_slot.get(slot)
+        if spec is None:
+            raise FleetdError(f"pending stop action has no configured slot: {capability_id}")
+        action_id = stop_action_id(
+            slot,
+            str(consumption.get("desired_hash", "")),
+            str(consumption.get("observation_fingerprint", "")),
+            str(consumption.get("generation", "")),
+            capability_id,
+        )
+        action_rows = events_with_identity(
+            connection,
+            ("ACTION_REQUESTED", "ACTION_COMMITTED", "ACTION_FAILED"),
+            "action_id",
+            action_id,
+        )
+        if any(
+            event["event_type"] in {"ACTION_COMMITTED", "ACTION_FAILED"}
+            for event, _ in action_rows
+        ):
+            continue
+        if consumption.get("desired_hash") != spec.desired_hash:
+            raise FleetdError(f"pending stop action desired state drifted: {capability_id}")
+        observation = observe_spec(spec)
+        if observation.get("state") == "absent":
+            outcome = {
+                "action": "stop",
+                "action_id": action_id,
+                "argv_digest": consumption.get("argv_digest"),
+                "capability_id": capability_id,
+                "desired_hash": spec.desired_hash,
+                "exit_code": 0,
+                "generation": consumption.get("generation"),
+                "observed_state": "absent",
+                "output_digest": digest_json(observation),
+                "recovered_after_crash": True,
+                "start_capability_id": consumption.get("start_capability_id"),
+                "status": "committed",
+            }
+            append_event(
+                connection,
+                "ACTION_COMMITTED",
+                slot,
+                f"action-result:{action_id}:recovered:{outcome['output_digest']}",
+                outcome,
+            )
+            print(
+                "FLEET_ACTION_RECOVERED "
+                f"slot={slot} action=stop action_id={action_id[:16]}"
+            )
+            continue
+        exact_generation = (
+            observation.get("state") == "active"
+            and observation.get("generation") == consumption.get("generation")
+            and observation.get("argv_digest") == consumption.get("argv_digest")
+            and observation.get("start_capability_id")
+            == consumption.get("start_capability_id")
+        )
+        if not exact_generation:
+            raise FleetdError(
+                f"pending stop action no longer names the exact generation: {capability_id}"
+            )
+        if not apply_stop(
+            connection,
+            spec,
+            observation,
+            int(consumption.get("observation_seq", row["seq"])),
+            capability_id,
+        ):
+            failed += 1
+    return failed
+
+
 def cycle(
     connection: sqlite3.Connection,
     specs: list[LaneSpec],
     *,
     apply: bool,
     capabilities: dict[str, dict[str, Any]] | None = None,
+    recovery_budgets: dict[str, dict[str, Any]] | None = None,
     emit: bool = True,
 ) -> int:
     verify_state(connection)
     recover_unpublished_capabilities(connection)
+    recover_unpublished_recovery_budgets(connection)
     verify_config_coverage(connection, specs)
     blocked = 0
-    failed = recover_start_actions(connection, specs) if apply else 0
+    failed = 0
+    if apply:
+        failed += recover_start_actions(connection, specs)
+        failed += recover_stop_actions(connection, specs)
     capabilities = capabilities or {}
+    recovery_budgets = recovery_budgets or {}
     used_capabilities: set[str] = set()
     for spec in specs:
         declare_desired(connection, spec)
@@ -2418,6 +3107,88 @@ def cycle(
             blocked += 1
         elif decision == "start" and apply:
             document = capabilities.get(spec.slot)
+            authority_reason = "manual-start-capability"
+            if document is None and spec.slot in recovery_budgets:
+                try:
+                    document, authority_reason = ensure_recovery_start_document(
+                        connection,
+                        spec,
+                        observation,
+                        int(observation_event["seq"]),
+                        recovery_budgets[spec.slot],
+                    )
+                except FleetdError as exc:
+                    failed += 1
+                    refusal_reason = slug(str(exc), limit=160)
+                    append_event(
+                        connection,
+                        "RECOVERY_BUDGET_REFUSED",
+                        spec.slot,
+                        transition_key(
+                            connection,
+                            "recovery-budget-refused",
+                            spec.slot,
+                            {"reason": refusal_reason},
+                        ),
+                        {"reason": refusal_reason},
+                    )
+                    print(
+                        "FLEET_ACTION "
+                        f"slot={spec.slot} action=start status=refused "
+                        f"reason={refusal_reason}"
+                    )
+                    continue
+            if document is None and authority_reason == "recovery-backoff-active":
+                append_event(
+                    connection,
+                    "ACTION_DEFERRED",
+                    spec.slot,
+                    transition_key(
+                        connection,
+                        "action-deferred",
+                        spec.slot,
+                        {
+                            "action": "start",
+                            "observation_fingerprint": observation["fingerprint"],
+                            "reason": authority_reason,
+                        },
+                    ),
+                    {
+                        "action": "start",
+                        "observation_fingerprint": observation["fingerprint"],
+                        "reason": authority_reason,
+                    },
+                )
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=start status=deferred reason={authority_reason}"
+                )
+                continue
+            if document is None and authority_reason == "recovery-budget-exhausted":
+                failed += 1
+                append_event(
+                    connection,
+                    "RECOVERY_BUDGET_EXHAUSTED",
+                    spec.slot,
+                    transition_key(
+                        connection,
+                        "recovery-budget-exhausted",
+                        spec.slot,
+                        {
+                            "observation_fingerprint": observation["fingerprint"],
+                            "reason": authority_reason,
+                        },
+                    ),
+                    {
+                        "observation_fingerprint": observation["fingerprint"],
+                        "reason": authority_reason,
+                    },
+                )
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=start status=refused reason={authority_reason}"
+                )
+                continue
             if document is None:
                 failed += 1
                 append_event(
@@ -2446,7 +3217,8 @@ def cycle(
                     "reason=linear-capability-required"
                 )
                 continue
-            used_capabilities.add(spec.slot)
+            if spec.slot in capabilities:
+                used_capabilities.add(spec.slot)
             try:
                 capability_id = consume_start_capability(
                     connection, spec, observation, document
@@ -2502,12 +3274,99 @@ def cycle(
                     failed += 1
             else:
                 failed += 1
+        elif decision == "stop" and apply:
+            document = capabilities.get(spec.slot)
+            if document is None:
+                failed += 1
+                append_event(
+                    connection,
+                    "ACTION_REFUSED",
+                    spec.slot,
+                    transition_key(
+                        connection,
+                        "action-refused",
+                        spec.slot,
+                        {
+                            "action": "stop",
+                            "generation": observation.get("generation"),
+                            "reason": "linear-stop-capability-required",
+                        },
+                    ),
+                    {
+                        "action": "stop",
+                        "generation": observation.get("generation"),
+                        "reason": "linear-stop-capability-required",
+                    },
+                )
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=stop status=refused "
+                    "reason=linear-stop-capability-required"
+                )
+                continue
+            used_capabilities.add(spec.slot)
+            try:
+                capability_id = consume_stop_capability(
+                    connection, spec, observation, document
+                )
+            except FleetdError as exc:
+                failed += 1
+                refusal_reason = slug(str(exc), limit=160)
+                refusal_payload = {
+                    "action": "stop",
+                    "capability_id": str(document.get("capability_id", "unknown")),
+                    "generation": observation.get("generation"),
+                    "reason": refusal_reason,
+                }
+                append_event(
+                    connection,
+                    "CAPABILITY_REFUSED",
+                    spec.slot,
+                    transition_key(
+                        connection,
+                        "capability-refused",
+                        spec.slot,
+                        refusal_payload,
+                    ),
+                    refusal_payload,
+                )
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=stop status=refused "
+                    f"reason={refusal_reason}"
+                )
+                continue
+            if apply_stop(
+                connection,
+                spec,
+                observation,
+                int(observation_event["seq"]),
+                capability_id,
+            ):
+                after = observe_spec(spec)
+                after_event, _ = record_observation(connection, spec, after)
+                after_decision, after_reason = decide(
+                    connection, spec, after, int(after_event["seq"])
+                )
+                record_plan(
+                    connection,
+                    spec,
+                    after,
+                    int(after_event["seq"]),
+                    after_decision,
+                    after_reason,
+                )
+                if after["state"] != "absent":
+                    failed += 1
+            else:
+                failed += 1
     unused = sorted(set(capabilities) - used_capabilities)
     for slot in unused:
         failed += 1
+        action = str(capabilities[slot].get("action", "unknown"))
         print(
             "FLEET_ACTION "
-            f"slot={slot} action=start status=refused reason=capability-not-applicable"
+            f"slot={slot} action={action} status=refused reason=capability-not-applicable"
         )
     return 2 if failed else (1 if blocked else 0)
 
@@ -2576,6 +3435,110 @@ def authorize_start(
     print(
         "FLEET_CAPABILITY_ISSUED "
         f"capability_id={capability_id} slot={slot} action=start "
+        f"expires_unix={int(time.time()) + ttl_seconds} path={output_path}"
+    )
+    return 0
+
+
+def authorize_stop(
+    connection: sqlite3.Connection,
+    specs: list[LaneSpec],
+    slot: str,
+    output_path: Path,
+    ttl_seconds: int,
+) -> int:
+    verify_state(connection)
+    recover_unpublished_capabilities(connection)
+    verify_config_coverage(connection, specs)
+    matches = [spec for spec in specs if spec.slot == slot]
+    if len(matches) != 1:
+        raise FleetdError(f"fleet config has no unique slot: {slot}")
+    spec = matches[0]
+    declare_desired(connection, spec)
+    observation = observe_spec(spec)
+    observation_event, _ = record_observation(connection, spec, observation)
+    decision, reason = decide(
+        connection, spec, observation, int(observation_event["seq"])
+    )
+    record_plan(
+        connection,
+        spec,
+        observation,
+        int(observation_event["seq"]),
+        decision,
+        reason,
+    )
+    if decision != "stop":
+        raise FleetdError(
+            f"slot {slot} is not stop-authorizable: decision={decision} reason={reason}"
+        )
+    capability_id = issue_stop_capability(
+        connection,
+        spec,
+        observation,
+        int(observation_event["seq"]),
+        output_path,
+        ttl_seconds,
+    )
+    print(
+        "FLEET_CAPABILITY_ISSUED "
+        f"capability_id={capability_id} slot={slot} action=stop "
+        f"generation={observation.get('generation')} "
+        f"expires_unix={int(time.time()) + ttl_seconds} path={output_path}"
+    )
+    return 0
+
+
+def authorize_recovery_budget(
+    connection: sqlite3.Connection,
+    specs: list[LaneSpec],
+    slot: str,
+    output_path: Path,
+    ttl_seconds: int,
+    max_starts: int,
+    backoff_seconds: int,
+) -> int:
+    verify_state(connection)
+    recover_unpublished_recovery_budgets(connection)
+    verify_config_coverage(connection, specs)
+    matches = [spec for spec in specs if spec.slot == slot]
+    if len(matches) != 1:
+        raise FleetdError(f"fleet config has no unique slot: {slot}")
+    spec = matches[0]
+    if not spec.enabled or spec.restart == "never":
+        raise FleetdError(
+            f"slot {slot} must be enabled with a restart policy before recovery authorization"
+        )
+    declare_desired(connection, spec)
+    observation = observe_spec(spec)
+    observation_event, _ = record_observation(connection, spec, observation)
+    decision, reason = decide(
+        connection, spec, observation, int(observation_event["seq"])
+    )
+    record_plan(
+        connection,
+        spec,
+        observation,
+        int(observation_event["seq"]),
+        decision,
+        reason,
+    )
+    if decision == "blocked":
+        raise FleetdError(
+            f"slot {slot} is not recovery-authorizable: decision={decision} reason={reason}"
+        )
+    budget_id = issue_recovery_budget(
+        connection,
+        spec,
+        output_path,
+        ttl_seconds,
+        max_starts,
+        backoff_seconds,
+    )
+    print(
+        "FLEET_RECOVERY_BUDGET_ISSUED "
+        f"budget_id={budget_id} slot={slot} max_starts={max_starts} "
+        f"backoff_seconds={backoff_seconds} "
         f"expires_unix={int(time.time()) + ttl_seconds} path={output_path}"
     )
     return 0
@@ -2674,17 +3637,27 @@ def parser() -> argparse.ArgumentParser:
         if name == "reconcile":
             command.add_argument("--apply", action="store_true")
             command.add_argument("--capability", action="append", default=[])
+            command.add_argument("--recovery-budget", action="append", default=[])
     authorize_parser = subparsers.add_parser("authorize")
     authorize_parser.add_argument("--config", default="fleet.toml")
     authorize_parser.add_argument("--slot", required=True)
-    authorize_parser.add_argument("--action", choices=("start",), default="start")
+    authorize_parser.add_argument("--action", choices=("start", "stop"), default="start")
     authorize_parser.add_argument("--out", required=True)
     authorize_parser.add_argument("--ttl", type=int, default=600)
+    recovery_parser = subparsers.add_parser("authorize-recovery")
+    recovery_parser.add_argument("--config", default="fleet.toml")
+    recovery_parser.add_argument("--slot", required=True)
+    recovery_parser.add_argument("--out", required=True)
+    recovery_parser.add_argument("--ttl", type=int, default=3600)
+    recovery_parser.add_argument("--max-starts", type=int, default=3)
+    recovery_parser.add_argument("--backoff-seconds", type=int, default=30)
     watch_parser = subparsers.add_parser("watch")
     watch_parser.add_argument("--config", default="fleet.toml")
     watch_parser.add_argument("--interval", type=float, default=2.0)
     watch_parser.add_argument("--cycles", type=int, default=0)
     watch_parser.add_argument("--apply", action="store_true")
+    watch_parser.add_argument("--apply-recovery", action="store_true")
+    watch_parser.add_argument("--recovery-budget", action="append", default=[])
     events_parser = subparsers.add_parser("events")
     events_parser.add_argument("--slot")
     events_parser.add_argument("--limit", type=int, default=50)
@@ -2843,12 +3816,32 @@ def main() -> int:
             if not output_path.is_absolute():
                 output_path = Path.cwd() / output_path
             with writer_lock(db_path):
-                return authorize_start(
+                if args.action == "start":
+                    return authorize_start(
+                        connection,
+                        specs,
+                        args.slot,
+                        output_path.absolute(),
+                        args.ttl,
+                    )
+                return authorize_stop(
                     connection,
                     specs,
                     args.slot,
                     output_path.absolute(),
                     args.ttl,
+                )
+        if args.command_name == "authorize-recovery":
+            output_path = absolute_without_symlink_resolution(args.out)
+            with writer_lock(db_path):
+                return authorize_recovery_budget(
+                    connection,
+                    specs,
+                    args.slot,
+                    output_path,
+                    args.ttl,
+                    args.max_starts,
+                    args.backoff_seconds,
                 )
         if args.command_name == "checkpoint-create":
             with writer_lock(db_path):
@@ -2871,14 +3864,22 @@ def main() -> int:
                 if args.command_name == "reconcile"
                 else {}
             )
+            recovery_budgets = (
+                load_recovery_budget_documents(args.recovery_budget)
+                if args.command_name == "reconcile"
+                else {}
+            )
             if capabilities and not apply:
                 raise FleetdError("capability files require reconcile --apply")
+            if recovery_budgets and not apply:
+                raise FleetdError("recovery budgets require reconcile --apply")
             with writer_lock(db_path):
                 return cycle(
                     connection,
                     specs,
                     apply=apply,
                     capabilities=capabilities,
+                    recovery_budgets=recovery_budgets,
                 )
         if args.command_name == "watch":
             if args.interval <= 0:
@@ -2888,11 +3889,27 @@ def main() -> int:
                     "watch cannot hold reusable mutation authority; use one-shot "
                     "reconcile --apply --capability"
                 )
+            if args.apply_recovery and not args.recovery_budget:
+                raise FleetdError(
+                    "watch --apply-recovery requires at least one bounded recovery budget"
+                )
+            if args.recovery_budget and not args.apply_recovery:
+                raise FleetdError(
+                    "recovery budgets require watch --apply-recovery"
+                )
             cycles = 0
             while True:
                 specs = load_config(config_path)
+                recovery_budgets = load_recovery_budget_documents(
+                    args.recovery_budget
+                )
                 with writer_lock(db_path):
-                    result = cycle(connection, specs, apply=False)
+                    result = cycle(
+                        connection,
+                        specs,
+                        apply=args.apply_recovery,
+                        recovery_budgets=recovery_budgets,
+                    )
                 cycles += 1
                 if args.cycles and cycles >= args.cycles:
                     return result

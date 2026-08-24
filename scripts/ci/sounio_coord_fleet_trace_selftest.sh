@@ -41,6 +41,8 @@ actions = set(re.findall(r"^([A-Z][A-Za-z0-9_]*)\s*==", model, re.MULTILINE))
 required = {
     "IssueStartCapability",
     "StartWithLinearCapability",
+    "IssueStopCapability",
+    "StopWithLinearCapability",
     "CreateCheckpoint",
     "VerifyCheckpoint",
     "PrepareHandoff",
@@ -53,4 +55,4 @@ assert labels - {"Stutter"} <= actions, (labels, actions)
 assert {"Crash", "Recover", "PersistentStep"} <= actions, actions
 PY
 
-echo 'sounio-fleet-trace-selftest: PASS independence=producer-import-absent refinement_actions=7 crash_steps=2 stutter=explicit'
+echo 'sounio-fleet-trace-selftest: PASS independence=producer-import-absent refinement_actions=9 crash_steps=2 stutter=explicit'
