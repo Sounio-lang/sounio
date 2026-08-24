@@ -7,12 +7,13 @@
 #   B.6 multi-invariant equivalence spectrum
 #   B.7 iterated trajectory drift between different-z pairs
 #
-# This is *evidence-recording* -- the test always asserts ALL PASS as long
-# as it runs cleanly. The synthesis block at the end is the durable artifact
-# downstream readers (and future butterfly-shapers) consume.
+# The test asserts ALL PASS as long as it runs cleanly; that string alone is
+# not evidence, so this gate additionally pins the headline B.4 census. The
+# synthesis block at the end is the durable artifact downstream readers (and
+# future butterfly-shapers) consume.
 #
-# Reference baseline (2026-05-09):
-#   - 92 primitive ZDs enumerated
+# Reference baseline (count corrected 2026-08-23; see ZD_EXPECTED below):
+#   - 84 primitive ZDs enumerated
 #   - trivial dedup (same-z): structural, 2 per z, h-stable
 #   - cross-z dedup: h-coincidental; diverges ~2x per iterated step
 #   - recommendation: z-canonical hash, not orbit-class metadata
@@ -54,8 +55,27 @@ if [[ "$rc" -ne 0 ]]; then echo "FAIL: test exited $rc" >&2; exit 1; fi
 grep -q "ALL PASS" "$OUT_LOG" || { echo "FAIL: 'ALL PASS' missing" >&2; exit 1; }
 grep -q "Synthesis" "$OUT_LOG" || { echo "FAIL: synthesis block missing" >&2; exit 1; }
 
-# Surface the headline numbers for grep-ability.
+# Assert the headline number, not just the "ALL PASS" string. B.4 enumerates
+# z = e_i+e_j against w = e_k-e_l over i<j, k<l in 1..15 and must find exactly
+# 84 zero divisors. 84 is not this run's output taken as the baseline: it is
+# machine-checked in formal/lean4/SounioZeroDivisorBridge.lean
+# (`theorem prim_count_84 : validPrims.length = 84 := by native_decide`), it is
+# what tests/math/test_zd_deep_dive.sio's own header cites from the literature,
+# and it factors as the 42 distinct z values x 2 w-companions that B.5 reports.
+# The "92" this header carried from the gate's first commit (2c853c3088) matched
+# none of those and was never produced by the test, whose source has not changed
+# since that same commit -- it was a wrong comment, not a regression.
+ZD_EXPECTED=84
+
 zd_count="$(grep -E '^  ZDs found:' "$OUT_LOG" | awk '{print $NF}' | tr -d '\n')"
+if [[ ! "$zd_count" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: could not extract the B.4 ZD count from the test output" >&2
+    exit 1
+fi
+if [[ "$zd_count" -ne "$ZD_EXPECTED" ]]; then
+    echo "FAIL: B.4 enumerated $zd_count zero divisors, expected $ZD_EXPECTED" >&2
+    exit 1
+fi
 echo "Phase B deep-dive: ZDs=$zd_count, $(grep -m1 recommendation "$OUT_LOG" | sed 's/^[[:space:]]*//')"
 
 exit 0

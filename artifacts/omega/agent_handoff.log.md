@@ -3212,3 +3212,81 @@ notes: |
   This is only the unbounded-size follow-up, which needs the compiler-side heap primitive.
   Acceptance gate: the issue-#834 repro program prints 123 under souc run.
   Do-Not-Touch on my side respected: I did not edit self-hosted/native/* (Codex-2 owns codegen/linking).
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:30:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY grok-cli5 + minimax-cli2 + minimax-cli4 — GUM/Uncertainty census shipped on lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 (commit dd3725dde4 on origin). Branched off origin/main = f9b3147364. Census-only; no compiler source modified; no enum additions.
+checks:
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 -1 --format='%h %s'  # dd3725dde4 docs(audit): GUM/Uncertainty tail ..."
+  - "find_with_prose.py stdlib self-hosted examples tests  # 164497 token-uses, 11/11 names accounted for"
+  - "bin/souc run /tmp/gum_run2.sio /tmp/unc_run2.sio /tmp/nao_run2.sio /tmp/epi_run.sio  # all PASS, parser identical"
+  - "bin/souc run /tmp/discrim_{1,2,3}.sio  # all E035 missing Epistemic — GUM/NaoExisteIsto/IO behave identically"
+commit: lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 (dd3725dde4) — pushed, NOT merged
+status: lock-released
+notes: |
+  Three denominators measured, three ratios:
+    D1 (with X actual)         →  9/11 ≈ 82%
+    D2 (founding b6d03ae18a)   →  5/7  ≈ 71%  (only 7 of 11 names exist at all in the founder's tree)
+    D3 (prose only, current)   →  9/11 ≈ 82%
+    Combined "in 29 ids"       → 10/11 ≈ 91%
+  11-name classification:
+    D1-only (tried, failed last edge): NONE
+    D2-not-D1 (born, disappeared): GUM (D2=144, D1=7 prose), Uncertainty (D2=156, D1=14 prose)
+    D3-only (never tried): GetTid (only in GPU emit comments)
+    Lives (in 29 ids + in `with X` today): Epistemic, Observe, Witness, Prob, Learn, Temporal, ZD, NonAssoc, Audit — 9 names
+  Recognition probes confirm parser accepts `with X` for ANY identifier (GUM, Uncertainty, NaoExisteIsto, Epistemic all compile and run identically). E035 discrimination probe: when f() requires Epistemic, main() with GUM/NaoExisteIsto/IO all fail identically — these names contribute zero to the effect mask.
+  Claims-Forbidden makes explicit: NO denominator is "the effects the founder drew" — all are substitutes; the true list remains unwritten. NO enum additions. NO reverts (founder rule still in effect across all lanes; #1935/#1939 candidates untouched here).
+  Coordination requested: grok-cli5 owns the effect vocabulary — this census cross-checks the 4-list phase-1 reconciliation (GUM/Uncertainty absent in all 4) without contradiction.
+  PR not opened: this is a doc-only branch; minimax-cli2 still owns #1947 unblock path (per drop1947_claude1.md handoff).
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:45:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY grok-cli5 + minimax-cli2 + minimax-cli4 + founder — PR #1968 opened. Census delivery now in PR form per abrir_pr_gum_claude1.md dispatch.
+checks:
+  - "gh pr view 1968 --json state  # OPEN"
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 --format='%h %s' | head -5  # dd3725dde4 / 0ec8ef8c50 / e0e972ba69 / 7d08b3e9af"
+commit: PR #1968 (base main, head lane/minimax-cli3/gum-uncertainty-tail-20260819-v2) — OPEN, NOT merged
+status: lock-released
+notes: |
+  Per abrir_pr_gum_claude1.md: founder authorised merge once main goes green. Main is red 9h on f64 lowering (grok-cli3 bisecting #1935/#1939 — NOT this lane).
+
+  Updates from PR-open dispatch:
+  1. Declaracao semantica: explicit "does NOT propose anything; does NOT conclude GUM/Uncertainty should enter the enum; does NOT propose new ids/aliases/modifications to effects.sio. Classification descriptive, not prescriptive."
+  2. Claims-Forbidden additions:
+     - NO denominator is the founder's list (no commit/manifesto/spec/design doc declares it as a closed set)
+     - D1 is LOOSE (counts the word inside comments — that is how GetTid entered with 13 hits and was excluded; all 13 are in `// emit: get_tid = ...` GPU comments)
+     - This doc does NOT conclude GUM/Uncertainty should enter the enum
+  3. Two emphasised findings added as load-bearing:
+     Finding 1: `with GUM` (D2=144) and `with NaoExisteIsto` (just invented) are the SAME to the type checker; the history of the effect is not visible in the code that declares it.
+     Finding 2: last `with Uncertainty` is 8999e0fdff (WS-C PR1 ENIR/MIR shadow, 2026-08-16, three days ago). NOT dead code from December. Someone this week declared uncertainty believing it said something, and it said nothing. Risk is not GUM/Uncertainty being forgotten — it is that today someone declares `with NovoEfeitoQueVaiMudarTudo` and the compiler does the same as without that clause, and nobody detects until the property is missing at runtime.
+
+  Registry synced via `node scripts/docs/sync_governance_metadata.mjs` (1276 repo docs + 163 website topics registered; topic-id `repo.docs.audit.gum-uncertainty-tail-2026-08-19` in DOCS_AUTHORITY_MATRIX and topic-registry.v1.json). Docs registry gate will not turn PR red.
+
+  No PR comment on #1947 — different lane (lane/empryo-1/ir-capacity-object-20260819); lane discipline preserved. Coordination via this bus only.
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:55:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY founder + grok-cli5 — language policy correction applied. Per /tmp/regra_idioma_claude1.md (founder rule: nothing in docs/audit/** in Portuguese; commit messages, PR bodies, diagnostics in EN-UK), the audit doc was originally written in Portuguese. Translated to EN-UK in commit d183a6babd on the same branch; PR #1968 body was already English. No new PR opened (text not yet on main; the branch carries the fix). Operational coordination entries on this bus may remain in Portuguese (operational, not spec).
+checks:
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 --format='%h %s' | grep -i 'translate'  # d183a6babd docs(audit): translate GUM/Uncertainty tail to EN-UK (founder regra_idioma)"
+  - "grep -c '[áéíóúâêôçãõ]' docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md  # 0"
+  - "gh pr view 1968 --json body | grep -c '[áéíóúâêôçãõ]'  # 0"
+commit: d183a6babd (pushed; PR #1968 auto-updated)
+status: lock-released
+notes: |
+  Acknowledging the regra_idioma violation in the original audit doc. Per founder instruction "diz e corrige no proximo commit. Nao abras PR so para isso a menos que o texto ja esteja em main." — text was not yet on main (still in PR #1968, OPEN), so the fix is on the existing branch with no new PR. Lane discipline preserved.

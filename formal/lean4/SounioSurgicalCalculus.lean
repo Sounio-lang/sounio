@@ -161,6 +161,70 @@ theorem gate_disjoint_from_unlearn :
   native_decide
 
 -- ================================================================
+-- §3b. Structure stronger than cardinality (native_decide)
+-- ================================================================
+-- applyOp returns `List PrimSed`. There is no Mathlib `Multiset` / `Finset`
+-- in this package. Ordered list equality would claim a concatenation order
+-- that the definitions do not share:
+--   compose / gate walk `validPrims`;
+--   unlearn walks `orderedZDPairs`.
+-- The correct Mathlib-free encoding of disjoint union is therefore
+-- membership (set) equality plus disjointness, via `List.contains`.
+
+/-- Membership-equality of two primitive lists (order-insensitive, no Mathlib). -/
+def listSetEq (xs ys : List PrimSed) : Bool :=
+  xs.all (fun x => ys.contains x) && ys.all (fun y => xs.contains y)
+
+/-- Membership-disjointness of two primitive lists. -/
+def listDisjoint (xs ys : List PrimSed) : Bool :=
+  xs.all (fun x => !(ys.contains x))
+
+/-- COMPOSE u is the disjoint union of UNLEARN u and GATE u as *sets*.
+    Already-known one-sided disjointness is `gate_disjoint_from_unlearn`;
+    this packages both directions plus the two inclusions. -/
+theorem compose_is_disjoint_union_of_unlearn_and_gate :
+    validPrims.all (fun u =>
+      listDisjoint (applyOp .unlearn u) (applyOp .gate u) &&
+      listSetEq (applyOp .compose u)
+                (applyOp .unlearn u ++ applyOp .gate u)) := by
+  native_decide
+
+/-- Ordered concatenation is *not* the action of COMPOSE: UNLEARN's
+    pair-list order is not a prefix of the `validPrims` walk. -/
+theorem compose_not_ordered_unlearn_append_gate :
+    ¬ validPrims.all (fun u =>
+        applyOp .compose u == applyOp .unlearn u ++ applyOp .gate u) := by
+  native_decide
+
+/-- AUDIT u is definitionally `u :: UNLEARN u` (same filter/map). -/
+theorem audit_eq_cons_unlearn :
+    validPrims.all (fun u =>
+      applyOp .audit u == u :: applyOp .unlearn u) := by
+  native_decide
+
+/-- The cardinality slogan `length(AUDIT) = length(UNLEARN)+1` does *not*
+    lift to `AUDIT u = UNLEARN u ++ [u]`: cons and snoc differ. -/
+theorem audit_not_unlearn_snoc :
+    ¬ validPrims.all (fun u =>
+        applyOp .audit u == applyOp .unlearn u ++ [u]) := by
+  native_decide
+
+/-- Every valid primitive is a counter-example to the snoc slogan:
+    `u :: xs` equals `xs ++ [u]` only in degenerate cases, and the
+    4-element UNLEARN kernel is never that case. -/
+theorem audit_unlearn_snoc_fails_everywhere :
+    validPrims.all (fun u =>
+      !(applyOp .audit u == applyOp .unlearn u ++ [u])) := by
+  native_decide
+
+/-- Same for ordered COMPOSE concatenation: the pair-list order of
+    UNLEARN is never a prefix of the `validPrims` walk that COMPOSE uses. -/
+theorem compose_ordered_concat_fails_everywhere :
+    validPrims.all (fun u =>
+      !(applyOp .compose u == applyOp .unlearn u ++ applyOp .gate u)) := by
+  native_decide
+
+-- ================================================================
 -- §4. The hexadic closure theorem
 -- ================================================================
 
