@@ -10638,8 +10638,17 @@ impl Lowerer {
         let arr_opt = &(*base_expr).left
         match *arr_opt {
             Some(arr_expr) => {
-                if (*arr_expr).kind != ExprKind::ExprIdent { return 0 - 1 }
-                let elem_type_name = self.lookup_local_struct_type((*arr_expr).name)
+                // The array being indexed may be a bare local
+                // (`extensions[i].field`) or an arbitrarily deep field-access
+                // chain ending in an array-typed field
+                // (`cert.issuer.entries[i].field`). array_index_base_elem_struct_type
+                // resolves the element's struct type for either shape,
+                // recursively. Omitting the chained case left `arr[i].field`
+                // writes through anything but a bare local array falling back
+                // to the buggy name-only global lookup exactly like the bug
+                // this function exists to fix, just one or more levels
+                // deeper. See docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+                let elem_type_name = self.array_index_base_elem_struct_type(&(*arr_expr))
                 if elem_type_name.len <= 0 { return 0 - 1 }
                 self.field_idx_from_name(elem_type_name, field_name)
             }
@@ -10751,6 +10760,74 @@ impl Lowerer {
             si = si + 1
         }
         ir_empty_name()
+    }
+
+    // Sibling of field_array_elem_type_name_for_struct, but for a plain
+    // (non-array) struct-typed field: `Certificate.issuer: X509Name`'s
+    // "issuer" field's named_type_name_id is "X509Name".
+    fn field_named_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        if type_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
+    // Resolves the struct TYPE of an arbitrary, possibly-chained field-access
+    // base expression, recursively: `cert` (ident) -> lookup_local_struct_type;
+    // `cert.issuer` (field access) -> resolve `cert`'s type via this same
+    // function, then look up "issuer"'s named type within it. This is what
+    // makes `cert.issuer.entries[i].field` resolve correctly regardless of
+    // chain depth -- a one-level-only resolver (matching only `ident.field`)
+    // covers `name.entries[i].field` but not a further `.field` hop before
+    // the array. See docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+    fn expr_struct_type_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*expr).name)
+        }
+        if (*expr).kind == ExprKind::ExprFieldAccess {
+            match (*expr).left {
+                Some(base_expr) => {
+                    let owner_type = self.expr_struct_type_ref(&(*base_expr))
+                    if owner_type.len <= 0 { return ir_empty_name() }
+                    return self.field_named_type_for_struct(owner_type, (*expr).name)
+                }
+                _ => ir_empty_name(),
+            }
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    // Array-element struct type for `arr_expr[i]`'s `arr_expr`, whether
+    // `arr_expr` is a bare local (`extensions`) or an arbitrarily deep
+    // field-access chain ending in an array-typed field (`cert.issuer.entries`).
+    fn array_index_base_elem_struct_type(self, arr_expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*arr_expr).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*arr_expr).name)
+        }
+        if (*arr_expr).kind == ExprKind::ExprFieldAccess {
+            match (*arr_expr).left {
+                Some(owner_expr) => {
+                    let owner_type = self.expr_struct_type_ref(&(*owner_expr))
+                    if owner_type.len <= 0 { return ir_empty_name() }
+                    return self.field_array_elem_type_name_for_struct(owner_type, (*arr_expr).name)
+                }
+                _ => ir_empty_name(),
+            }
+        } else {
+            ir_empty_name()
+        }
     }
 
     fn field_array_elem_type_name_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
@@ -13377,6 +13454,30 @@ impl Lowerer {
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st)
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprIndex {
+                    // `let e = arr[i]` (bare local array) or `let e = obj.field[i]`
+                    // (array-typed struct field): propagate the ELEMENT's struct
+                    // type to the new local, so a later `e.field` resolves
+                    // through the correct struct instead of falling to the
+                    // name-only global lookup (field_idx_from_name_simple) that
+                    // collides across unrelated structs sharing a field name.
+                    // This is the read-side sibling of the write-side bug fixed
+                    // in commit 88f91fae6 (Finding 24): that fix made
+                    // `arr[i].field` resolve correctly, but a whole-value copy
+                    // out of the array element FIRST (`let e = arr[i]`, THEN
+                    // `e.field`) never recorded `e`'s struct type at all, so it
+                    // fell straight back to the same buggy global lookup from a
+                    // different call site. See docs/audit/
+                    // X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+                    match (*expr_box).left {
+                        Some(idx_base_expr) => {
+                            let elem_type_name = lo.array_index_base_elem_struct_type(&(*idx_base_expr))
+                            if elem_type_name.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), elem_type_name) >= 0 {
+                                lo = lo.bind_local_struct_type(s.name, elem_type_name)
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

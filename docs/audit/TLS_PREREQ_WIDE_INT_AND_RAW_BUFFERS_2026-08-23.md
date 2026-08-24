@@ -1041,3 +1041,84 @@ executable unilaterally within a single SDD task:
    allocated `RawBuf` rather than fixed inline arrays. This is a
    revision to Task 2's already-twice-reviewed data model and is out of
    scope for a single task to decide.
+
+## Finding 25 (deferred, not fixed) — a tuple-destructured local (`let (a, b) = f()`) does not propagate a struct-typed element's own type, leaving it exposed to Finding 24's class of corruption
+
+Found while verifying the fix for Finding 24 (commit series starting
+`88f91fae6`, culminating in the array-index/field-access struct-type
+resolution described below). `let (cert, after_spki, status) =
+x509_parse_tbs_core(...)` desugars (per `self-hosted/parser/stmts.sio`'s
+`parse_let_stmt`) to `let __tup0 = x509_parse_tbs_core(...)` plus
+`let cert = __tup0.0`, `let after_spki = __tup0.1`, `let status =
+__tup0.2`. Neither step propagates `cert`'s struct type ("Certificate"):
+`__tup0`'s own struct-type binding via the `ExprCall` branch resolves only
+a function's *single*-struct return type (`return_struct_name_for_fn_id`),
+which is empty for a tuple-typed return; and `let cert = __tup0.0`'s RHS
+is an `ExprFieldAccess` with a numeric ("tuple index") field name, which
+`lower_let_stmt_ref`'s struct-type-binding `match s.expr` only handles for
+Box-tagging, not general struct-type propagation.
+
+**Consequence:** `cert.field` accesses (including the nested
+`cert.issuer.entries[0].field` chains the fix below resolves correctly
+when `cert`'s own type IS known) fall back to the unresolved-global-lookup
+path whenever `cert` came from a tuple-destructured `let`, remaining
+exposed to Finding 24's corruption for exactly the same reason arrays and
+struct fields were before that fix -- `field_idx_from_name_simple`
+collides across structs sharing a field name (most commonly `value`,
+against the built-in `Knowledge` struct's `value` at index 0).
+
+**Why this was not fixed alongside Finding 24:** closing it requires new
+infrastructure this compiler does not have at all -- per-function tuple
+*element* struct-type tracking, analogous to how `elem_type_name_id`/
+`named_type_name_id` already track a struct FIELD's array-element or
+named type. No existing table records "function X's Nth tuple-typed
+return-value element has struct type Y"; building it is a distinct,
+larger piece of work than the array-of-struct field-access fix.
+
+**Workaround, applied in `tests/run-pass/x509_parse_tbs_core.sio`:**
+declare the struct-typed local FIRST via a plain call whose single-struct
+return type IS resolved correctly (e.g. `var cert = certificate_zero()`,
+which binds `cert`'s struct type to "Certificate" via the already-working
+`ExprCall` path), then overwrite its *value* with the tuple-destructured
+result via a plain assignment (`cert = cert_raw`) rather than a `let`/`var`
+declaration -- assignment does not touch the struct-type binding table,
+only declarations do, so the correct binding survives the overwrite.
+
+**Status: OPEN.** Any future code that tuple-destructures a function
+returning `(SomeStruct, ...)` and then does nested field/array access on
+the struct element should either apply this same workaround or avoid the
+pattern until proper tuple-element struct-type tracking is built.
+
+## Fix landed for Finding 24 (commit series `88f91fae6` and after)
+
+The write-side fix (`88f91fae6`) covered only `arr[i].field` where `arr`
+is a bare local. Verifying it surfaced two further gaps in the same bug
+class, both fixed in the same session:
+
+1. **Read side**: `let e = arr[i]` (copying a whole struct element out of
+   an array) never recorded `e`'s struct type at all -- a pre-existing gap
+   in `lower_let_stmt_ref`'s RHS-kind matching (no `ExprIndex` case),
+   independent of the write-side bug but exposing the identical
+   `field_idx_from_name_simple` collision on every subsequent `e.field`
+   read. Confirmed to silently affect the already-merged
+   `x509_parse_tbs_core` test (Task 5), which only ever asserted
+   `.value`, never `.oid`, so the corruption went undetected until a
+   later task's test happened to check the field that was actually wrong.
+2. **Chained bases**: both the write-side and read-side fixes initially
+   only resolved a bare local array (`extensions[i]`) or a single-level
+   struct-field array (`name.entries[i]`) -- not an arbitrarily deep
+   field-access chain ending in an array-typed field
+   (`cert.issuer.entries[i]`). Generalized via two new recursive helpers,
+   `expr_struct_type_ref` (resolves the struct type of an arbitrary
+   `ident` / `ident.field.field...` expression) and
+   `array_index_base_elem_struct_type` (resolves the array-element struct
+   type for whatever expression is being indexed, bare local or chained),
+   both in `self-hosted/ir/lower.sio`.
+
+All four decisive repros (bare-local array, both read and write; a
+single-level struct-field array, both read and write; the two-level
+`cert.issuer.entries[0]` chain) independently re-verified correct after
+the final fix. All 6 pre-existing X.509-plan tests still pass, including
+`x509_parse_tbs_core.sio` with two new assertions added specifically to
+close the `.oid`-was-never-checked gap that let this whole class of bug
+ship silently in Task 5.

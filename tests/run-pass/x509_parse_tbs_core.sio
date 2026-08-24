@@ -142,7 +142,21 @@ fn main() -> i64 with IO {
     }
     assert(e0 == DER_OK)
 
-    let (cert, after_spki, status) = x509_parse_tbs_core(&buf, &tbs_inner)
+    // Per docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md's
+    // residual gap: a tuple-destructured binding (`let (cert, ...) = f()`)
+    // does not propagate the struct type of a tuple-typed element the way a
+    // plain `let x = expr` does, so `cert`'s own struct type would stay
+    // unresolved and any later `cert.field` access falls back to the
+    // name-collision-prone global lookup. Work around it without further
+    // compiler changes: declare `cert` first via a plain call that DOES
+    // resolve its struct type correctly (certificate_zero() -> Certificate,
+    // matching the existing ExprCall struct-type-binding path), then
+    // overwrite its VALUE with the real parsed result via plain assignment
+    // -- assignment doesn't touch the struct-type binding table, only `let`/
+    // `var` declarations do, so `cert`'s type stays "Certificate" throughout.
+    var cert = certificate_zero()
+    let (cert_raw, after_spki, status) = x509_parse_tbs_core(&buf, &tbs_inner)
+    cert = cert_raw
     if status != X509_OK {
         print_int(4)
         return 1
@@ -179,42 +193,61 @@ fn main() -> i64 with IO {
     }
     assert(cert.issuer.count == 1)
 
-    let issuer_entry = cert.issuer.entries[0]
-    if issuer_entry.value_len != 7 {
+    // Per docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md's
+    // residual gap: `cert` here is bound via tuple destructure (`let (cert,
+    // after_spki, status) = x509_parse_tbs_core(...)` above), and tuple-
+    // destructure bindings do not (yet) propagate a struct's type the way a
+    // plain `let x = expr` does -- so a further `let entry = cert.issuer.
+    // entries[0]` copy-out would fall back to the unresolved global lookup.
+    // Index the array directly at every assertion site instead of binding an
+    // intermediate `let`, matching this whole plan's established
+    // field-by-field/direct-index discipline on the write side.
+    if cert.issuer.entries[0].value_len != 7 {
         print_int(9)
         return 1
     }
-    assert(issuer_entry.value_len == 7)
-    if (issuer_entry.value[0] as i64) != 0x54 {
+    assert(cert.issuer.entries[0].value_len == 7)
+    if (cert.issuer.entries[0].value[0] as i64) != 0x54 {
         print_int(10)
         return 1
     }
-    if (issuer_entry.value[1] as i64) != 0x65 {
+    if (cert.issuer.entries[0].value[1] as i64) != 0x65 {
         print_int(11)
         return 1
     }
-    if (issuer_entry.value[2] as i64) != 0x73 {
+    if (cert.issuer.entries[0].value[2] as i64) != 0x73 {
         print_int(12)
         return 1
     }
-    if (issuer_entry.value[3] as i64) != 0x74 {
+    if (cert.issuer.entries[0].value[3] as i64) != 0x74 {
         print_int(13)
         return 1
     }
-    if (issuer_entry.value[4] as i64) != 0x20 {
+    if (cert.issuer.entries[0].value[4] as i64) != 0x20 {
         print_int(14)
         return 1
     }
-    if (issuer_entry.value[5] as i64) != 0x43 {
+    if (cert.issuer.entries[0].value[5] as i64) != 0x43 {
         print_int(15)
         return 1
     }
-    if (issuer_entry.value[6] as i64) != 0x41 {
+    if (cert.issuer.entries[0].value[6] as i64) != 0x41 {
         print_int(16)
         return 1
     }
-    assert((issuer_entry.value[0] as i64) == 0x54)
-    assert((issuer_entry.value[6] as i64) == 0x41)
+    assert((cert.issuer.entries[0].value[0] as i64) == 0x54)
+    assert((cert.issuer.entries[0].value[6] as i64) == 0x41)
+
+    // OID check, deliberately added: this is the field a prior version of
+    // this test never verified, which let the read-side corruption in
+    // docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md
+    // go undetected (only .value was checked; .oid held .value's bytes).
+    let issuer_cn_oid = oid_common_name()
+    if oid_eq3(&cert.issuer.entries[0].oid, cert.issuer.entries[0].oid_len, &issuer_cn_oid) == false {
+        print_int(28)
+        return 1
+    }
+    assert(oid_eq3(&cert.issuer.entries[0].oid, cert.issuer.entries[0].oid_len, &issuer_cn_oid) == true)
 
     // validity: not_before < not_after, both nonzero
     if cert.not_before_unix == 0 {
@@ -240,25 +273,31 @@ fn main() -> i64 with IO {
     }
     assert(cert.subject.count == 1)
 
-    let subject_entry = cert.subject.entries[0]
-    if subject_entry.value_len != 9 {
+    if cert.subject.entries[0].value_len != 9 {
         print_int(21)
         return 1
     }
-    assert(subject_entry.value_len == 9)
-    if (subject_entry.value[0] as i64) != 0x54 {
+    assert(cert.subject.entries[0].value_len == 9)
+    if (cert.subject.entries[0].value[0] as i64) != 0x54 {
         print_int(22)
         return 1
     }
-    if (subject_entry.value[5] as i64) != 0x4C {
+    if (cert.subject.entries[0].value[5] as i64) != 0x4C {
         print_int(23)
         return 1
     }
-    if (subject_entry.value[8] as i64) != 0x66 {
+    if (cert.subject.entries[0].value[8] as i64) != 0x66 {
         print_int(24)
         return 1
     }
-    assert((subject_entry.value[8] as i64) == 0x66)
+    assert((cert.subject.entries[0].value[8] as i64) == 0x66)
+
+    let subject_cn_oid = oid_common_name()
+    if oid_eq3(&cert.subject.entries[0].oid, cert.subject.entries[0].oid_len, &subject_cn_oid) == false {
+        print_int(29)
+        return 1
+    }
+    assert(oid_eq3(&cert.subject.entries[0].oid, cert.subject.entries[0].oid_len, &subject_cn_oid) == true)
 
     // subjectPublicKeyInfo: modulus == 3233, publicExponent == 17
     let expected_modulus = bigint_from_u32(3233)
