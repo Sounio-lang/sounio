@@ -212,6 +212,31 @@ output="$(
 grep -q "request_state=answered .*responses=1 latest_response=$reply_id" <<< "$output" || \
   fail 'replied request was not reported answered'
 
+info_request_output="$(
+  cd "$REPO"
+  run_coord send --agent agent-a --lane parser --to-agent agent-b --to-lane codegen \
+    --kind request --message 'request answered with an informal kind'
+)"
+info_request_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$info_request_output")"
+info_reply_output="$(
+  cd "$TEST_ROOT/second-worktree"
+  run_coord send --agent agent-b --lane codegen --kind info \
+    --reply-to "$info_request_id" --message 'correlated informal response'
+)"
+info_reply_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$info_reply_output")"
+output="$(
+  cd "$REPO"
+  run_coord wait --agent agent-a --lane parser --message "$info_request_id" --timeout-seconds 0
+)"
+grep -q "^WAIT_RESPONSE request_id=$info_request_id request_state=answered$" <<< "$output" || \
+  fail 'explicit reply-to did not answer an informal response'
+output="$(
+  cd "$REPO"
+  run_coord message-status --agent agent-a --lane parser --message "$info_request_id"
+)"
+grep -q "request_state=answered .*responses=1 latest_response=$info_reply_id" <<< "$output" || \
+  fail 'message status ignored an informal response with explicit reply-to'
+
 blocked_output="$(
   cd "$REPO"
   run_coord send --agent agent-a --lane parser --to-agent agent-b --to-lane codegen \
