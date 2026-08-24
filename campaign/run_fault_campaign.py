@@ -25,9 +25,9 @@ SOUC = ROOT / "bin" / "souc"
 ZD_SOURCE = ROOT / "tests" / "run-pass" / "sedenion_zd_census_168.sio"
 PY_ORACLE = ROOT / "scripts" / "research" / "verify_zd168_oracle.py"
 LEAN_SOURCE = ROOT / "formal" / "lean4" / "SounioZeroDivisorBridge.lean"
-BASE_COMMIT = subprocess.check_output(
-    ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
-).strip()
+# The campaign is defined against this frozen source revision. Do not derive it
+# from HEAD: the harness and receipts live on a descendant campaign branch.
+BASE_COMMIT = "c90e6cd7d3053a129cb501487f72a656c384094b"
 
 
 def sha256_text(text: str) -> str:

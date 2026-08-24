@@ -1,6 +1,6 @@
 # Fault-injection results
 
-Base commit: `7c67f41ed53d2637b60f7944fdc69e0937a85f13`
+Base commit: `c90e6cd7d3053a129cb501487f72a656c384094b`
 
 | Mutation | Sounio | Python | Cross-diff | Formal audit | Claim gate | Detected |
 |---|---|---|---|---|---|---|
