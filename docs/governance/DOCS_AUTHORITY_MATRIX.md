@@ -354,6 +354,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.provenance-keyword-coverage-dispatch-2026-08-19 | repo_only | docs/audit/PROVENANCE_KEYWORD_COVERAGE_DISPATCH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.provenance-layer-staircase-2026-08-19 | repo_only | docs/audit/PROVENANCE_LAYER_STAIRCASE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.provenance-ontology-reasoner-bridge-2026-08-19 | repo_only | docs/audit/PROVENANCE_ONTOLOGY_REASONER_BRIDGE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.qualified-import-miscompile-2026-08-02 | repo_only | docs/audit/QUALIFIED_IMPORT_MISCOMPILE_2026-08-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r1-i256-i512-limbs-2026-08-20 | repo_only | docs/audit/R1_I256_I512_LIMBS_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.dispatch | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/DISPATCH.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.r2-3-compiler-tuple-return-bug.fix.proposed-fix | repo_only | docs/audit/r2_3_compiler_tuple_return_bug/fix/PROPOSED_FIX.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -925,11 +926,19 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.brain-ossm.validation-plan | historical | docs/research/brain-ossm/VALIDATION_PLAN.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.categorical-knowledge-monad | historical | docs/research/categorical_knowledge_monad.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cayley-dickson-zd-kernel-spectrum-2026-07-26 | historical | docs/research/cayley_dickson_zd_kernel_spectrum_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-bdi-dugger-isaksen-gate-2026-08-07 | historical | docs/research/cd_tower_bdi_dugger_isaksen_gate_2026-08-07.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-nullity-histogram-law-spec-2026-07-26 | historical | docs/research/cd_tower_nullity_histogram_law_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-seam | historical | docs/research/cd_tower_seam.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-seam-vs-dddd-criterion-2026-08-07 | historical | docs/research/cd_tower_seam_vs_dddd_criterion_2026-08-07.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-antisymmetry-lemma-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-collapse-l1l2-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_collapse_l1l2_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-l1-reduction-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_l1_reduction_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-l2-reduction-spec-2026-08-01 | historical | docs/research/cd_tower_zd_fiber_l2_reduction_spec_2026-08-01.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-l2-switching-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_l2_switching_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-signed-localization-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_signed_localization_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-spectral-classifier-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_classifier_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-fiber-spectral-forall-n-progress-2026-07-26 | historical | docs/research/cd_tower_zd_fiber_spectral_forall_n_progress_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.cd-tower-zd-fiber-v1-reduction-spec-2026-07-31 | historical | docs/research/cd_tower_zd_fiber_v1_reduction_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cd-tower-zd-graph-invariants-spec-2026-07-26 | historical | docs/research/cd_tower_zd_graph_invariants_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chi5-mathlib-free-novelty-2026-05-30 | historical | docs/research/chi5-mathlib-free-novelty-2026-05-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.chingon-zd-falsifiers-2026-07-25 | historical | docs/research/chingon_zd_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -944,6 +953,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.dyadic-non-reduction-spec-2026-07-14 | historical | docs/research/dyadic_non_reduction_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.dyadic-relational-associator-ontology-spec-2026-07-14 | historical | docs/research/dyadic_relational_associator_ontology_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.e-series-semantic-germ-spec-2026-07-26 | historical | docs/research/e_series_semantic_germ_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.elplus-applications-2026-08-05 | historical | docs/research/elplus_applications_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-algebra-review | repo_only | docs/research/epistemic_algebra_review.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-calculus-value-carrying-redesign | historical | docs/research/epistemic_calculus_value_carrying_redesign.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.epistemic-self-reference-design | historical | docs/research/epistemic_self_reference_design.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1120,6 +1130,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.octonion-tree-fold-scaling-2026-08-06 | historical | docs/research/octonion_tree_fold_scaling_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.octonion-validation-report | historical | docs/research/OCTONION_VALIDATION_REPORT.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.onn-benchmark-analysis | historical | docs/research/ONN_BENCHMARK_ANALYSIS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.ontology-elplus-complete-universe-open-question-2026-08-03 | historical | docs/research/ontology_elplus_complete_universe_open_question_2026-08-03.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-1627-close-2026-08-06 | historical | docs/research/particle_e175_1627_close_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-amp-import-2026-08-05 | historical | docs/research/particle_e175_amp_import_2026-08-05.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.particle-e175-trilogy-2026-08-06 | historical | docs/research/particle_e175_trilogy_2026-08-06.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1145,6 +1156,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.prereg-piloto1-addendum2 | historical | docs/research/PREREG-piloto1-addendum2.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.prereg-piloto1-semantic-barriers | historical | docs/research/PREREG-piloto1-semantic-barriers.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.primitive-zd-gap-resolution | historical | docs/research/PRIMITIVE_ZD_GAP_RESOLUTION.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.prior-art-k3-signed-switching-2026-08-04 | historical | docs/research/prior_art_k3_signed_switching_2026-08-04.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.private-evidence-envelope-2026-06-23 | historical | docs/research/private-evidence-envelope-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-corrected-protocol | historical | docs/research/probe-corrected-protocol.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.probe-preprint-draft | historical | docs/research/probe-preprint-draft.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1256,9 +1268,13 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.subptx-fmad-invariance | historical | docs/research/subptx_fmad_invariance.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-phase-h-complete | historical | docs/research/subptx_phase_h_complete.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.subptx-sinkhorn16-2iter | historical | docs/research/subptx_sinkhorn16_2iter.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-architecture-robustness-spec-2026-07-31 | historical | docs/research/suffering_aware_architecture_robustness_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-deep-architecture-spec-2026-07-28 | historical | docs/research/suffering_aware_deep_architecture_spec_2026-07-28.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-expanded-channels-spec-2026-07-31 | historical | docs/research/suffering_aware_expanded_channels_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-extreme-depth-spec-2026-07-31 | historical | docs/research/suffering_aware_extreme_depth_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-game-theory-spec-2026-07-31 | historical | docs/research/suffering_aware_game_theory_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.suffering-aware-large-architecture-spec-2026-07-31 | historical | docs/research/suffering_aware_large_architecture_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-multi-agent-scale-spec-2026-07-31 | historical | docs/research/suffering_aware_multi_agent_scale_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-multi-agent-sophisticated-spec-2026-07-31 | historical | docs/research/suffering_aware_multi_agent_sophisticated_spec_2026-07-31.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.suffering-aware-multi-agent-spec-2026-07-30 | historical | docs/research/suffering_aware_multi_agent_spec_2026-07-30.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

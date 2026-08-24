@@ -1,0 +1,297 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// EL-grounded conflict oracle — deriving alignment conflicts from a mini
+// EL TBox instead of a hardcoded oracle.
+//
+// Frontier: el-grounding (see FRONTIER.md)
+//
+// Literature anchors:
+//   - Bayoudhi et al. 2018 (doi:10.1111/exsy.12355) — grounding ontology
+//     matching in logical structure rather than heuristics alone.
+//   - Jimenez-Ruiz, Cuenca Grau, Horrocks 2011
+//     (doi:10.1186/2041-1480-2-s1-s2) — logic-based compatibility
+//     assessment of UMLS sources.
+//
+// In the epistemic-alignment-repair frontier the conflict relation was a
+// HARDCODED oracle (`fn conflicts` over mapping ids). Here the oracle is
+// DERIVED from a miniature EL TBox:
+//
+//   Classes (ids 0..7):
+//     0 lymphokine   1 protein   2 molecule   3 heart
+//     4 organ        5 muscleonly 6 drugclass 7 (unused)
+//   Subsumptions:
+//     lymphokine(0) sqsubseteq protein(1)
+//     protein(1)    sqsubseteq molecule(2)
+//     heart(3)      sqsubseteq organ(4)
+//   Disjointness:
+//     organ(4)   disjoint muscleonly(5)
+//     protein(1) disjoint drugclass(6)
+//
+// Derivation rule: mappings a, b asserting the SAME entity under classes
+// c_a, c_b conflict iff there exist d1, d2 with
+//   closure[c_a, d1] and closure[c_b, d2] and disjoint(d1, d2),
+// where closure is the reflexive-transitive closure of subsumption
+// (computed by a while-loop fixpoint over a flattened 8x8 Boolean matrix).
+// The soundness of this derivation is proved by the sibling artifact
+// formal/OntologyELReasoner.lean.
+//
+// The demo then feeds the DERIVED pairs into the alignment-repair scenario
+// of the first frontier (same 5 mappings, confidences
+// 0.30/0.06/0.95/0.40/0.80) and checks that the derived oracle coincides
+// EXACTLY with the original hardcoded oracle on the shared instance:
+//   conflicts = {m0-m1, m2-m3}, survivors after greedy repair = {m0,m2,m4}.
+//
+// NOTE: arrays of structs and arrays without splat initialization segfault
+// in the current runtime, and `where` refinement clauses do not parse, so
+// everything is modelled with parallel primitive arrays with splat init
+// and runtime assertions.
+
+fn fabs(a: f64) -> f64 {
+    if a < 0.0 { return 0.0 - a }
+    return a
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── TBox encoding ───────────────────────────────────────────────────
+    // Subsumption edges (src, dst): 0->1, 1->2, 3->4
+    var sub_src: [i64; 3] = [0; 3]
+    var sub_dst: [i64; 3] = [0; 3]
+    sub_src[0] = 0
+    sub_dst[0] = 1
+    sub_src[1] = 1
+    sub_dst[1] = 2
+    sub_src[2] = 3
+    sub_dst[2] = 4
+
+    // Disjointness pairs: (4,5), (1,6)
+    var disj: [bool; 64] = [false; 64]
+    disj[4 * 8 + 5] = true
+    disj[5 * 8 + 4] = true
+    disj[1 * 8 + 6] = true
+    disj[6 * 8 + 1] = true
+
+    // ── Reflexive-transitive subsumption closure (fixpoint) ─────────────
+    var clos: [bool; 64] = [false; 64]
+    var c: i64 = 0
+    while c < 8 {
+        clos[c * 8 + c] = true
+        c = c + 1
+    }
+    var e: i64 = 0
+    while e < 3 {
+        clos[sub_src[e] * 8 + sub_dst[e]] = true
+        e = e + 1
+    }
+    var changed = true
+    while changed {
+        changed = false
+        var a: i64 = 0
+        while a < 8 {
+            var b: i64 = 0
+            while b < 8 {
+                if clos[a * 8 + b] {
+                    var d: i64 = 0
+                    while d < 8 {
+                        if clos[b * 8 + d] {
+                            if !clos[a * 8 + d] {
+                                clos[a * 8 + d] = true
+                                changed = true
+                            }
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+
+    // Closure sanity checks: lymphokine reaches molecule transitively;
+    // heart does NOT reach drugclass.
+    if !clos[0 * 8 + 2] {
+        println("FAIL: closure missing lymphokine sqsubseteq molecule")
+        n_fail = n_fail + 1
+    }
+    if clos[3 * 8 + 6] {
+        println("FAIL: closure wrongly has heart sqsubseteq drugclass")
+        n_fail = n_fail + 1
+    }
+
+    // ── Alignment scenario (same 5 mappings as frontier 1) ──────────────
+    // Entities: 0 = lymphokine, 1 = heart, 2 = protein (as asserted entity)
+    // Mapping k asserts entity ent[k] under class cls[k] with conf[k]:
+    //   m0: lymphokine under protein(1),    0.30
+    //   m1: lymphokine under drugclass(6),  0.06
+    //   m2: heart      under organ(4),      0.95
+    //   m3: heart      under muscleonly(5), 0.40
+    //   m4: protein    under molecule(2),   0.80
+    var ent: [i64; 5] = [0; 5]
+    ent[0] = 0
+    ent[1] = 0
+    ent[2] = 1
+    ent[3] = 1
+    ent[4] = 2
+
+    var cls: [i64; 5] = [0; 5]
+    cls[0] = 1
+    cls[1] = 6
+    cls[2] = 4
+    cls[3] = 5
+    cls[4] = 2
+
+    var conf: [f64; 5] = [0.0; 5]
+    conf[0] = 0.30
+    conf[1] = 0.06
+    conf[2] = 0.95
+    conf[3] = 0.40
+    conf[4] = 0.80
+
+    // ── DERIVED conflict oracle ─────────────────────────────────────────
+    // conf_pair[a*5+b] = true iff mappings a,b share an entity and their
+    // asserted classes reach a disjoint pair through the closure.
+    var conf_pair: [bool; 25] = [false; 25]
+    var i: i64 = 0
+    while i < 5 {
+        var j: i64 = 0
+        while j < 5 {
+            if i != j {
+                if ent[i] == ent[j] {
+                    var hit = false
+                    var d1: i64 = 0
+                    while d1 < 8 {
+                        if clos[cls[i] * 8 + d1] {
+                            var d2: i64 = 0
+                            while d2 < 8 {
+                                if clos[cls[j] * 8 + d2] {
+                                    if disj[d1 * 8 + d2] {
+                                        hit = true
+                                    }
+                                }
+                                d2 = d2 + 1
+                            }
+                        }
+                        d1 = d1 + 1
+                    }
+                    if hit {
+                        conf_pair[i * 5 + j] = true
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check: derived oracle == original hardcoded oracle ─────────────
+    // Expected conflicts: exactly {0-1} and {2-3} (symmetric).
+    if !conf_pair[0 * 5 + 1] { println("FAIL: derived oracle misses 0-1"); n_fail = n_fail + 1 }
+    if !conf_pair[1 * 5 + 0] { println("FAIL: derived oracle misses 1-0"); n_fail = n_fail + 1 }
+    if !conf_pair[2 * 5 + 3] { println("FAIL: derived oracle misses 2-3"); n_fail = n_fail + 1 }
+    if !conf_pair[3 * 5 + 2] { println("FAIL: derived oracle misses 3-2"); n_fail = n_fail + 1 }
+    var n_conf: i64 = 0
+    i = 0
+    while i < 5 {
+        var j: i64 = 0
+        while j < 5 {
+            if conf_pair[i * 5 + j] {
+                n_conf = n_conf + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n_conf != 4 {
+        println("FAIL: derived oracle has spurious conflicts")
+        n_fail = n_fail + 1
+    }
+
+    // ── Greedy epistemic repair with the DERIVED oracle ─────────────────
+    var keep: [bool; 5] = [true; 5]
+    i = 0
+    while i < 5 {
+        var j: i64 = i + 1
+        while j < 5 {
+            if keep[i] && keep[j] {
+                if conf_pair[i * 5 + j] {
+                    if conf[i] >= conf[j] {
+                        keep[j] = false
+                    } else {
+                        keep[i] = false
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (1): retained set is conflict-free (under derived oracle) ─
+    i = 0
+    while i < 5 {
+        var j: i64 = i + 1
+        while j < 5 {
+            if keep[i] && keep[j] {
+                if conf_pair[i * 5 + j] {
+                    println("FAIL: retained set still has a conflict")
+                    n_fail = n_fail + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Check (2): every dropped mapping has a maximality witness ───────
+    i = 0
+    while i < 5 {
+        if !keep[i] {
+            var witnessed = false
+            var j: i64 = 0
+            while j < 5 {
+                if keep[j] {
+                    if conf_pair[i * 5 + j] {
+                        if conf[j] >= conf[i] {
+                            witnessed = true
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if !witnessed {
+                println("FAIL: dropped mapping lacks witness")
+                n_fail = n_fail + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // ── Expected survivors: m0 (0.30 > 0.06), m2 (0.95 > 0.40), m4 ──────
+    if !keep[0] { println("FAIL: m0 should survive"); n_fail = n_fail + 1 }
+    if keep[1]  { println("FAIL: m1 should be dropped"); n_fail = n_fail + 1 }
+    if !keep[2] { println("FAIL: m2 should survive"); n_fail = n_fail + 1 }
+    if keep[3]  { println("FAIL: m3 should be dropped"); n_fail = n_fail + 1 }
+    if !keep[4] { println("FAIL: m4 should survive"); n_fail = n_fail + 1 }
+
+    // ── Check (3): weakest-link derived subsumption still holds ─────────
+    // lymphokine -m0-> protein (0.30), protein -m4-> molecule (0.80)
+    // derived: lymphokine -> molecule with weakest-link confidence 0.30
+    var wl = conf[0]
+    if conf[4] < wl {
+        wl = conf[4]
+    }
+    if fabs(wl - 0.30) > 0.0001 {
+        println("FAIL: weakest-link confidence wrong")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

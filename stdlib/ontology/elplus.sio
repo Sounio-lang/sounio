@@ -1,0 +1,916 @@
+//! stdlib/ontology/elplus.sio
+//!
+//! Role-aware EL+ boolean closure, packaged from the verified
+//! ontology-frontiers research line (round 8 demo
+//! examples/ontology_elplus_closure_demo.sio; round 9 real-data
+//! integration artifacts/ontology-frontiers/real-data/scale/).
+//!
+//! Model: a finite concept universe of interned EL+ concepts
+//! (atom | top | conjunction | existential restriction), described by a
+//! parallel-array concept table:
+//!
+//!   ckind[c]  0 atom, 1 top, 2 conjunction, 3 existential
+//!   carg1[c]  atom id (atom) | first conjunct (conj) | role (ex)
+//!   carg2[c]  second conjunct (conj) | filler base concept (ex)
+//!
+//! Relations, all flattened Boolean arrays (row-major):
+//!
+//!   S[c*64+d]           subsumption pairs over the universe
+//!   R[(r*64+c)*64+f]    role edges (r, C, f): C <= ex r.f, f base
+//!   rclos[r*8+s]        role-hierarchy closure (reflexive + transitive)
+//!   exid[r*64+f]        interned id of ex r.f, or -1 if not in universe
+//!
+//! Two computation variants:
+//!
+//!   DENSE (demos / small TBoxes): `elplus_fixpoint` iterates the 8
+//!   completion rules to a genuine fixpoint over capacities of 64
+//!   concepts, 8 roles, 8 composition chains.
+//!
+//!   SPARSE (scale): no concept matrix at all for the role layer.  For
+//!   TBoxes with the OAEI Anatomy profile (no conjunctions, a single
+//!   active role, no role hierarchy/composition) the least fixpoint
+//!   satisfies  E(c) = union over ancestors a of c of the ancestor sets
+//!   of the stated fillers of a,  so the role-edge fillers of every
+//!   class are computed by ancestor-set expansion over packed adjacency:
+//!   per-class BFS (`elplus_sparse_bfs`), stated-filler seeding
+//!   (`elplus_sparse_seed_edges`), in-place expansion
+//!   (`elplus_sparse_expand`).  Capacities: 4096 classes (incl. the top
+//!   slot), 4096 stated edges per kind; the two workspace matrices
+//!   (`elplus_clos`, `elplus_emat`, 4096-stride) are module-level because
+//!   module-level arrays passed through `&!` parameters miscompile on the
+//!   current lane (see the sparse section header).  TBoxes
+//!   with conjunctions, role hierarchies or composition must use the
+//!   dense variant (or a future stratified sparse variant); the round-9
+//!   python mirror (scale/gen_elplus_data.py) runs the GENERAL 8-rule
+//!   fixpoint and aborts unless it agrees with this reduction exactly.
+//!
+//! Formal companions (Lean 4, verified):
+//!   - formal/OntologyELPlus.lean                 (EL+ syntax/semantics,
+//!     9-rule deductive system, der_sound, incoherentP_empty)
+//!   - formal/OntologyELPlusClosureComplete.lean  (crStep / closeSatF;
+//!     subBPlusC_iff / conflictBPlusC_iff: the boolean fixpoint coincides
+//!     with the deductive system over conceptUniv, both directions)
+//!
+//! The 8 completion rules mirrored here (crStep generators):
+//!   transitivity on S; conjElim; conjIntro; stoR (C <= ex r.D becomes
+//!   edge (r,C,D)); Rmono (edge (r,C,D) and D <= D' give (r,C,D'));
+//!   roleSub (edge (r,C,D) and r <=* s give (s,C,D)); roleComp (edges
+//!   (r1,C,D) and (r2,D,E) with chain r1 o r2 <= r3 give (r3,C,E));
+//!   RtoS (edge (r,C,D) gives C <= ex r.D).
+//!
+//! NOTE (compiler limitations, see
+//! artifacts/ontology-frontiers/compiler-repros/REPORT.md): arrays of
+//! structs and arrays without splat initialization segfault at runtime,
+//! and `where` refinement clauses do not parse, so everything is modelled
+//! with parallel primitive arrays with splat init and runtime checks.
+//!
+//! NOTE: use NAMED imports (`use ontology::elplus::{...}`). The qualified
+//! form (`use ontology::elplus; elplus::f(...)`) miscompiles on the
+//! current Madaros imported-module native lane (see
+//! docs/compiler/KNOWN_LIMITATIONS.md).
+//!
+//! Repair integration (round 10): `elplus_derive_conflicts` derives the
+//! mapping-pair conflict relation from a closed dense EL+ matrix (same
+//! 256-stride output shape as ontology::closure::derive_conflicts, so
+//! ontology::repair plugs in unchanged), and `elplus_subsumes_sparse` /
+//! `elplus_edge_sparse` are O(1) read-only accessors over the sparse
+//! workspace matrices so repair drivers can query the role-aware closure
+//! without crossing a `&!` boundary with the module-level arrays.
+//! `elplus_subsumes_dense` / `elplus_edge_dense` are the O(1) dense
+//! counterparts over the `elplus_fixpoint` output matrices, used by the
+//! SNOMED mini-closure adapter (ontology::biomedical::snomed).
+
+// ── Dense variant capacities ─────────────────────────────────────────────
+// Maximum number of interned concepts (atoms + top + conjs + existentials).
+pub const ELPLUS_MAXC: i64 = 64
+// Maximum number of roles.
+pub const ELPLUS_MAXR: i64 = 8
+// Maximum number of composition chains r1 o r2 <= r3.
+pub const ELPLUS_MAXCH: i64 = 8
+
+// ── Sparse variant capacities ────────────────────────────────────────────
+// Maximum number of classes including the top slot (matrix rows/cols used).
+const ELPLUS_SC: i64 = 4096
+// Maximum number of stated edges per kind (sub or exsub).
+const ELPLUS_SE: i64 = 4096
+
+/// Role-hierarchy closure: seed reflexivity, then transitive saturation
+/// over the stated cells of rclos.  Existing stated cells are kept.
+///
+/// # Parameters
+/// - `rclos`: flattened 8 x 8 role matrix (mutated in place).
+/// - `nr`: number of roles (0 <= nr <= 8).
+///
+/// # Complexity
+/// O(nr^3) per pass, at most nr passes.
+pub fn elplus_role_closure(rclos: &![bool; 64], nr: i64) with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < nr {
+        rclos[r * ELPLUS_MAXR + r] = true
+        r = r + 1
+    }
+    var changed = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed {
+        changed = false
+        a = 0
+        while a < nr {
+            b = 0
+            while b < nr {
+                if rclos[a * ELPLUS_MAXR + b] {
+                    d = 0
+                    while d < nr {
+                        if rclos[b * ELPLUS_MAXR + d] {
+                            if !rclos[a * ELPLUS_MAXR + d] {
+                                rclos[a * ELPLUS_MAXR + d] = true
+                                changed = true
+                            }
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+}
+
+/// Initialise a subsumption matrix: every cell false, then reflexivity
+/// and the top axiom (c <= top for every concept c).
+///
+/// # Parameters
+/// - `s`: flattened 64 x 64 matrix (mutated in place).
+/// - `nc`: number of interned concepts (0 <= nc <= 64).
+/// - `top`: id of the top concept (0 <= top < nc).
+///
+/// # Complexity
+/// O(64^2)
+pub fn elplus_seed(s: &![bool; 4096], nc: i64, top: i64) with Mut, Div, Panic {
+    var a: i64 = 0
+    while a < ELPLUS_MAXC {
+        var b: i64 = 0
+        while b < ELPLUS_MAXC {
+            s[a * ELPLUS_MAXC + b] = false
+            b = b + 1
+        }
+        a = a + 1
+    }
+    var c: i64 = 0
+    while c < nc {
+        s[c * ELPLUS_MAXC + c] = true
+        s[c * ELPLUS_MAXC + top] = true
+        c = c + 1
+    }
+}
+
+/// The 8-rule EL+ completion step iterated to a genuine fixpoint
+/// (executable mirror of crStep / closeSatF).  S must be seeded (see
+/// `elplus_seed`) with the stated inclusions before the call; R is fully
+/// derived here (pass it splat-false).  Returns the number of rounds
+/// taken.  Terminates: the matrices are finite and cells only flip
+/// false -> true.
+///
+/// # Parameters
+/// - `s`: flattened 64 x 64 subsumption matrix (mutated in place).
+/// - `r`: flattened 8 x 64 x 64 role-edge cube (mutated in place);
+///   index (role*64 + source)*64 + filler.
+/// - `ckind`, `carg1`, `carg2`: concept table (see module header).
+/// - `exid`: r*64 + f -> interned id of ex r.f, or -1 if absent; rules
+///   that would create a non-interned existential are skipped (this is
+///   the `conceptUniv` restriction of the Lean development).
+/// - `rclos`: role-hierarchy closure (from `elplus_role_closure`).
+/// - `ch1`, `ch2`, `ch3`, `nchain`: composition chains
+///   ch1[k] o ch2[k] <= ch3[k] (0 <= nchain <= 8).
+/// - `nc`: number of interned concepts (0 <= nc <= 64).
+/// - `nb`: number of base concepts (fillers range over 0..nb-1).
+/// - `nr`: number of roles (0 <= nr <= 8).
+///
+/// # Complexity
+/// O(rounds * (nc^3 + nr*nc^2*nb + nr^2*nc*nb + nchain*nc*nb^2)); with
+/// the 64/8 capacities this is bounded and intended for small TBoxes.
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorems
+///   `closeSatF_trans` ... `closeSatF_RtoS` (fixpoint is closed under
+///   every rule) and `subBPlusC_iff` / `conflictBPlusC_iff` (the boolean
+///   closure IS the deductive relation over conceptUniv).
+pub fn elplus_fixpoint(
+    s: &![bool; 4096],
+    r: &![bool; 32768],
+    ckind: &[i64; 64],
+    carg1: &[i64; 64],
+    carg2: &[i64; 64],
+    exid: &[i64; 512],
+    rclos: &[bool; 64],
+    ch1: &[i64; 8],
+    ch2: &[i64; 8],
+    ch3: &[i64; 8],
+    nchain: i64,
+    nc: i64,
+    nb: i64,
+    nr: i64
+) -> i64 with Mut, Div, Panic {
+    var pack: [i64; 704] = [0; 704]
+    var chains: [i64; 24] = [0; 24]
+    var dims: [i64; 4] = [0; 4]
+    var i: i64 = 0
+    while i < 64 {
+        pack[i] = ckind[i]
+        pack[64 + i] = carg1[i]
+        pack[128 + i] = carg2[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 512 {
+        pack[192 + i] = exid[i]
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        chains[i] = ch1[i]
+        chains[8 + i] = ch2[i]
+        chains[16 + i] = ch3[i]
+        i = i + 1
+    }
+    dims[0] = nchain
+    dims[1] = nc
+    dims[2] = nb
+    dims[3] = nr
+    return elplus_fixpoint_packed(s, r, &pack, rclos, &chains, &dims)
+}
+
+/// Cross-module packaging of `elplus_fixpoint` and the PRIMARY home of
+/// the 8-rule loop: identical semantics, but 6 parameters instead of
+/// 14.  Imported calls with more than 8 parameters fail native codegen
+/// on the current Madaros lane (thin-link produces no ELF for
+/// 9+-parameter callees unless the caller is the main module's `main`;
+/// probe 2026-08), so the public 14-parameter `elplus_fixpoint` above
+/// is now a thin pack-and-delegate wrapper around this function, and
+/// importers that run the dense fixpoint outside their own `main`
+/// (e.g. the SNOMED adapter in ontology::biomedical::snomed) call this
+/// wrapper directly.
+///
+/// # Parameters
+/// - `s`, `r`: as in `elplus_fixpoint` (mutated in place).
+/// - `pack`: concept tables concatenated — ckind[0..64) then
+///   carg1[0..64) then carg2[0..64) then exid[0..512).
+/// - `rclos`: role-hierarchy closure (from `elplus_role_closure`).
+/// - `chains`: ch1[0..8) then ch2[0..8) then ch3[0..8).
+/// - `dims`: [nchain, nc, nb, nr].
+///
+/// # Complexity
+/// Same as `elplus_fixpoint`, plus one O(704) unpack.
+pub fn elplus_fixpoint_packed(
+    s: &![bool; 4096],
+    r: &![bool; 32768],
+    pack: &[i64; 704],
+    rclos: &[bool; 64],
+    chains: &[i64; 24],
+    dims: &[i64; 4]
+) -> i64 with Mut, Div, Panic {
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+    var i: i64 = 0
+    while i < 64 {
+        ckind[i] = pack[i]
+        carg1[i] = pack[64 + i]
+        carg2[i] = pack[128 + i]
+        i = i + 1
+    }
+    i = 0
+    while i < 512 {
+        exid[i] = pack[192 + i]
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        ch1[i] = chains[i]
+        ch2[i] = chains[8 + i]
+        ch3[i] = chains[16 + i]
+        i = i + 1
+    }
+    var nchain: i64 = dims[0]
+    var nc: i64 = dims[1]
+    var nb: i64 = dims[2]
+    var nr: i64 = dims[3]
+    var changed = true
+    var rounds: i64 = 0
+    var a: i64 = 0
+    var k: i64 = 0
+    var d: i64 = 0
+    var c: i64 = 0
+    var rr: i64 = 0
+    var ss: i64 = 0
+    var f: i64 = 0
+    var d2: i64 = 0
+    var f2: i64 = 0
+    var x: i64 = 0
+    var idx: i64 = 0
+    var r1: i64 = 0
+    var r2: i64 = 0
+    var r3: i64 = 0
+    while changed {
+        changed = false
+        rounds = rounds + 1
+
+        // (T) transitivity on S
+        a = 0
+        while a < nc {
+            k = 0
+            while k < nc {
+                if s[a * ELPLUS_MAXC + k] {
+                    d = 0
+                    while d < nc {
+                        if s[k * ELPLUS_MAXC + d] && !s[a * ELPLUS_MAXC + d] {
+                            s[a * ELPLUS_MAXC + d] = true
+                            changed = true
+                        }
+                        d = d + 1
+                    }
+                }
+                k = k + 1
+            }
+            a = a + 1
+        }
+
+        // (CE) conjunction elimination and (CI) introduction (kind 2)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if ckind[d] == 2 {
+                    if s[a * ELPLUS_MAXC + d] {
+                        if !s[a * ELPLUS_MAXC + carg1[d]] {
+                            s[a * ELPLUS_MAXC + carg1[d]] = true
+                            changed = true
+                        }
+                        if !s[a * ELPLUS_MAXC + carg2[d]] {
+                            s[a * ELPLUS_MAXC + carg2[d]] = true
+                            changed = true
+                        }
+                    }
+                    if s[a * ELPLUS_MAXC + carg1[d]] && s[a * ELPLUS_MAXC + carg2[d]] {
+                        if !s[a * ELPLUS_MAXC + d] {
+                            s[a * ELPLUS_MAXC + d] = true
+                            changed = true
+                        }
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (S2R) stoR: C <= ex r.D becomes edge (r, C, D)
+        a = 0
+        while a < nc {
+            d = 0
+            while d < nc {
+                if ckind[d] == 3 && s[a * ELPLUS_MAXC + d] {
+                    idx = (carg1[d] * ELPLUS_MAXC + a) * ELPLUS_MAXC + carg2[d]
+                    if !r[idx] {
+                        r[idx] = true
+                        changed = true
+                    }
+                }
+                d = d + 1
+            }
+            a = a + 1
+        }
+
+        // (RM) Rmono: edge (r,C,D) and D <= D' give (r,C,D'), D' base
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        d2 = 0
+                        while d2 < nb {
+                            if s[f * ELPLUS_MAXC + d2] && exid[rr * ELPLUS_MAXC + d2] >= 0 {
+                                idx = (rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + d2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            d2 = d2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RS) roleSub: edge (r,C,D) and r <=* s (rclos) give (s,C,D)
+        rr = 0
+        while rr < nr {
+            ss = 0
+            while ss < nr {
+                if rclos[rr * ELPLUS_MAXR + ss] {
+                    c = 0
+                    while c < nc {
+                        f = 0
+                        while f < nb {
+                            if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] && exid[ss * ELPLUS_MAXC + f] >= 0 {
+                                idx = (ss * ELPLUS_MAXC + c) * ELPLUS_MAXC + f
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            f = f + 1
+                        }
+                        c = c + 1
+                    }
+                }
+                ss = ss + 1
+            }
+            rr = rr + 1
+        }
+
+        // (RC) roleComp: edges (r1,C,D) and (r2,D,E) with chain
+        // r1 o r2 <= r3 give (r3,C,E)
+        k = 0
+        while k < nchain {
+            r1 = ch1[k]
+            r2 = ch2[k]
+            r3 = ch3[k]
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(r1 * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        f2 = 0
+                        while f2 < nb {
+                            if r[(r2 * ELPLUS_MAXC + f) * ELPLUS_MAXC + f2] && exid[r3 * ELPLUS_MAXC + f2] >= 0 {
+                                idx = (r3 * ELPLUS_MAXC + c) * ELPLUS_MAXC + f2
+                                if !r[idx] {
+                                    r[idx] = true
+                                    changed = true
+                                }
+                            }
+                            f2 = f2 + 1
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            k = k + 1
+        }
+
+        // (R2S) RtoS: edge (r,C,D) gives C <= ex r.D
+        rr = 0
+        while rr < nr {
+            c = 0
+            while c < nc {
+                f = 0
+                while f < nb {
+                    if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                        x = exid[rr * ELPLUS_MAXC + f]
+                        if x >= 0 && !s[c * ELPLUS_MAXC + x] {
+                            s[c * ELPLUS_MAXC + x] = true
+                            changed = true
+                        }
+                    }
+                    f = f + 1
+                }
+                c = c + 1
+            }
+            rr = rr + 1
+        }
+    }
+    return rounds
+}
+
+/// Count the set cells of a subsumption matrix (restricted to the
+/// nc x nc used region).
+///
+/// # Complexity
+/// O(nc^2)
+pub fn elplus_s_count(s: &[bool; 4096], nc: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var a: i64 = 0
+    while a < nc {
+        var b: i64 = 0
+        while b < nc {
+            if s[a * ELPLUS_MAXC + b] {
+                n = n + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    return n
+}
+
+/// Count the set cells of the role-edge cube (restricted to the used
+/// nr x nc x nb region).
+///
+/// # Complexity
+/// O(nr*nc*nb)
+pub fn elplus_r_count(r: &[bool; 32768], nr: i64, nc: i64, nb: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var rr: i64 = 0
+    while rr < nr {
+        var c: i64 = 0
+        while c < nc {
+            var f: i64 = 0
+            while f < nb {
+                if r[(rr * ELPLUS_MAXC + c) * ELPLUS_MAXC + f] {
+                    n = n + 1
+                }
+                f = f + 1
+            }
+            c = c + 1
+        }
+        rr = rr + 1
+    }
+    return n
+}
+
+/// Dense closure query: does concept `a` subsume to concept `b` in a
+/// CLOSED dense subsumption matrix (output of `elplus_fixpoint`)?
+/// Dense counterpart of `elplus_subsumes_sparse`; read-only accessor so
+/// adapters (e.g. ontology::biomedical::snomed) never reimplement the
+/// row-major indexing.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_subsumes_dense(s: &[bool; 4096], a: i64, b: i64) -> bool with Div, Panic {
+    return s[a * ELPLUS_MAXC + b]
+}
+
+/// Dense role-edge query: does concept `c` have a derived role edge
+/// (role, c, f) in the CLOSED dense role-edge cube (output of
+/// `elplus_fixpoint`)?  Dense counterpart of `elplus_edge_sparse`.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_edge_dense(r: &[bool; 32768], role: i64, c: i64, f: i64) -> bool with Div, Panic {
+    return r[(role * ELPLUS_MAXC + c) * ELPLUS_MAXC + f]
+}
+
+/// DERIVE conflict between two concepts from a closed subsumption matrix
+/// and an atomic disjointness matrix: conflict(a, b) iff there exist
+/// d1, d2 with s[a][d1], s[b][d2] and disj[d1][d2].
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorem
+///   `conflictBPlusC_iff`: this boolean oracle IS the deductive
+///   conflict relation.
+///
+/// # Complexity
+/// O(nc^2)
+pub fn elplus_conflict(s: &[bool; 4096], disj: &[bool; 4096], nc: i64, a: i64, b: i64) -> bool with Div, Panic {
+    var hit = false
+    var d1: i64 = 0
+    while d1 < nc {
+        if s[a * ELPLUS_MAXC + d1] {
+            var d2: i64 = 0
+            while d2 < nc {
+                if s[b * ELPLUS_MAXC + d2] && disj[d1 * ELPLUS_MAXC + d2] {
+                    hit = true
+                }
+                d2 = d2 + 1
+            }
+        }
+        d1 = d1 + 1
+    }
+    return hit
+}
+
+// ── Repair-integration exports ─────────────────────────────────────────
+// Mapping-pair matrices use the same 256 stride as
+// ontology::closure::derive_conflicts, so the repair module
+// (ontology::repair) plugs into the EL+-derived oracle unchanged.
+
+// Maximum number of candidate mappings for conflict derivation.
+const ELPLUS_MAXM: i64 = 256
+
+/// DERIVE the conflict relation between candidate mappings from a CLOSED
+/// EL+ subsumption matrix (output of `elplus_fixpoint`) and a
+/// disjointness matrix over the interned concept universe — the
+/// role-aware counterpart of ontology::closure::derive_conflicts.
+///
+/// Mapping k asserts entity `ent[k]` under concept `cls[k]`.  Mappings
+/// a, b conflict iff they assert the SAME entity and
+/// `elplus_conflict(s, disj, nc, cls[a], cls[b])`, i.e. their asserted
+/// concepts reach a disjoint pair through the EL+ closure (roles
+/// included: existential targets produced by stoR/RtoS/Rmono/roleSub/
+/// roleComp participate via the interned concept rows of `s`).
+///
+/// The result is symmetric: `conf_pair[a * 256 + b]` and
+/// `conf_pair[b * 256 + a]` are both set (diagonal excluded).
+///
+/// # Parameters
+/// - `conf_pair`: flattened m x m output matrix (fully overwritten).
+/// - `m`: number of mappings (0 <= m <= 256).
+/// - `ent`: entity id asserted by each mapping (index < m used).
+/// - `cls`: concept id under which each mapping asserts its entity.
+/// - `s`: closed EL+ subsumption matrix (from `elplus_fixpoint`).
+/// - `disj`: disjointness matrix over the interned universe (symmetric).
+/// - `nc`: number of interned concepts (0 <= nc <= 64).
+///
+/// # Complexity
+/// O(m^2 * nc^2)
+///
+/// # References
+/// - formal/OntologyELPlusClosureComplete.lean, theorem
+///   `conflictBPlusC_iff`: the boolean conflict oracle IS the deductive
+///   conflict relation over conceptUniv.
+pub fn elplus_derive_conflicts(
+    conf_pair: &![bool; 65536],
+    m: i64,
+    ent: &[i64; 256],
+    cls: &[i64; 256],
+    s: &[bool; 4096],
+    disj: &[bool; 4096],
+    nc: i64
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = 0
+        while j < m {
+            conf_pair[i * ELPLUS_MAXM + j] = false
+            if i != j {
+                if ent[i] == ent[j] {
+                    if elplus_conflict(s, disj, nc, cls[i], cls[j]) {
+                        conf_pair[i * ELPLUS_MAXM + j] = true
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ── Sparse variant (scale; Anatomy profile: no conjunctions, single
+//    active role, no role hierarchy/composition) ────────────────────────
+//
+// The two workspace matrices are module-level ON PURPOSE: passing a
+// module-level array through a `&!` parameter miscompiles on the current
+// Madaros lane (mutations land in a linker stub; large index spreads
+// segfault — probe: round 9 bisect).  Functions here mutate their OWN
+// module globals, which is the pattern the generated data modules
+// already rely on (init_chunk_* functions).  Importers therefore pay
+// ~33MB of BSS; only the scale driver should import this module with the
+// sparse functions in scope.
+//
+// elplus_emat plays a double role: it is seeded with the stated-filler
+// unions (e[c] |= clos[f] for each stated edge (c, f)) and then expanded
+// IN PLACE (e[c] |= e[a] for every ancestor a of c).  A single in-place
+// pass in any class order is NOT exact: if c is processed before one of
+// its ancestors a, and a's own ancestors have not yet been folded into
+// e[a], then e[c] misses seed[a'].  Iteration to fixpoint is required
+// unless class ids are topologically sorted (ancestors before
+// descendants), so the pass computes exactly
+//   e[c] = union over ancestors a of c of seed[a].
+
+/// Sparse closure matrix: clos[c*4096 + d] = class c subsumes to d
+/// (columns 0..w-1; column w-1 is the top slot).
+pub var elplus_clos: [bool; 16777216] = [false; 16777216]
+
+/// Sparse role-edge filler matrix: after seeding + expansion,
+/// elplus_emat[c*4096 + f] = class c has a derived role edge with
+/// filler f (f base; column w-1 = existential onto top).
+pub var elplus_emat: [bool; 16777216] = [false; 16777216]
+
+/// Fixup writes for the garbage leading cells of the two module-level
+/// splat matrices (known compiler pitfall: cells 0..2 of module-level
+/// bool splat arrays can be dirty).  Call once before any other sparse
+/// function.
+pub fn elplus_sparse_init_mats() with Mut, Div, Panic {
+    elplus_clos[0] = false
+    elplus_clos[1] = false
+    elplus_clos[2] = false
+    elplus_emat[0] = false
+    elplus_emat[1] = false
+    elplus_emat[2] = false
+}
+
+/// Build a packed parent adjacency (counting sort) from packed sub edges
+/// child*10000+parent.  After the call, the parents of class c are
+/// plist[poff[c] .. poff[c+1]-1].
+///
+/// # Parameters
+/// - `pack`: packed edges (index < ne used; ids must be < 10000).
+/// - `ne`: number of edges (0 <= ne <= 4096).
+/// - `poff`: offsets output, size h+1 (fully overwritten for 0..h).
+/// - `pcount`: scratch cursor array (overwritten).
+/// - `plist`: adjacency output (first ne cells overwritten).
+/// - `h`: number of classes (0 <= h <= 4096).
+///
+/// # Complexity
+/// O(h + ne)
+pub fn elplus_sparse_build_adj(pack: &[i64; 4096], ne: i64, poff: &![i64; 4097], pcount: &![i64; 4096], plist: &![i64; 4096], h: i64) with Mut, Div, Panic {
+    var c: i64 = 0
+    while c <= h {
+        poff[c] = 0
+        c = c + 1
+    }
+    var e: i64 = 0
+    while e < ne {
+        c = pack[e] / 10000
+        poff[c + 1] = poff[c + 1] + 1
+        e = e + 1
+    }
+    c = 0
+    while c < h {
+        poff[c + 1] = poff[c + 1] + poff[c]
+        c = c + 1
+    }
+    c = 0
+    while c < h {
+        pcount[c] = poff[c]
+        c = c + 1
+    }
+    e = 0
+    while e < ne {
+        c = pack[e] / 10000
+        plist[pcount[c]] = pack[e] - c * 10000
+        pcount[c] = pcount[c] + 1
+        e = e + 1
+    }
+}
+
+/// Per-class BFS over the packed parent adjacency: fills the clos rows
+/// of every class c < h with its subsumption ancestors (reflexive), sets
+/// the top column (index w-1) of every row, and sets the top row
+/// (row w-1) to {top}.  Returns the atom closure edge count (reflexive
+/// ancestors, excluding the top column).
+///
+/// # Parameters
+/// - `poff`, `plist`: parent adjacency from `elplus_sparse_build_adj`.
+/// - `vis`, `queue`: scratch arrays (overwritten).
+/// - `h`: number of classes (0 <= h <= 4095).
+/// - `w`: matrix width used (h + 1; the top slot is index w-1).
+///
+/// # Complexity
+/// O(sum_c |ancestors(c)| + h)
+pub fn elplus_sparse_bfs(poff: &[i64; 4097], plist: &[i64; 4096], vis: &![i64; 4096], queue: &![i64; 4096], h: i64, w: i64) -> i64 with Mut, Div, Panic {
+    var total: i64 = 0
+    var s: i64 = 0
+    var head: i64 = 0
+    var tail: i64 = 0
+    var b: i64 = 0
+    var t: i64 = 0
+    var p: i64 = 0
+    while s < h {
+        head = 0
+        tail = 0
+        queue[tail] = s
+        tail = tail + 1
+        vis[s] = s + 1
+        elplus_clos[s * ELPLUS_SC + s] = true
+        while head < tail {
+            b = queue[head]
+            head = head + 1
+            t = poff[b]
+            while t < poff[b + 1] {
+                p = plist[t]
+                if vis[p] != s + 1 {
+                    vis[p] = s + 1
+                    queue[tail] = p
+                    tail = tail + 1
+                    elplus_clos[s * ELPLUS_SC + p] = true
+                }
+                t = t + 1
+            }
+        }
+        total = total + tail
+        elplus_clos[s * ELPLUS_SC + w - 1] = true
+        s = s + 1
+    }
+    elplus_clos[(w - 1) * ELPLUS_SC + w - 1] = true
+    return total
+}
+
+/// Seed the role-edge filler matrix with the stated existential edges:
+/// e[c] |= clos[f] for every stated edge (c, f) (role dimension
+/// collapsed; valid for the Anatomy profile where all stated
+/// restrictions use the single active role).  Cells are only ever set —
+/// call `elplus_sparse_init_mats` first.
+///
+/// # Complexity
+/// O(nex * w)
+pub fn elplus_sparse_seed_edges(exc: &[i64; 4096], exf: &[i64; 4096], nex: i64, w: i64) with Mut, Div, Panic {
+    var k: i64 = 0
+    var c: i64 = 0
+    var f: i64 = 0
+    var j: i64 = 0
+    while k < nex {
+        c = exc[k]
+        f = exf[k]
+        j = 0
+        while j < w {
+            if elplus_clos[f * ELPLUS_SC + j] {
+                elplus_emat[c * ELPLUS_SC + j] = true
+            }
+            j = j + 1
+        }
+        k = k + 1
+    }
+}
+
+/// Ancestor expansion of the role-edge fillers to fixpoint:
+/// e[c] |= e[a] for every ancestor a of c, iterated until stable.
+/// A single arbitrary-order pass is NOT exact (see the math-review note);
+/// iteration is required unless class ids are topologically sorted.
+/// This is the least fixpoint of stoR + RtoS + transitivity + Rmono for
+/// the Anatomy profile.
+///
+/// # Complexity
+/// O(passes * h^2 + (sum_c |ancestors(c)|) * w); passes ≤ h + 1.
+pub fn elplus_sparse_expand(h: i64, w: i64) with Mut, Div, Panic {
+    var c: i64 = 0
+    var a: i64 = 0
+    var j: i64 = 0
+    var changed: bool = true
+    while changed {
+        changed = false
+        c = 0
+        while c < h {
+            a = 0
+            while a < h {
+                if elplus_clos[c * ELPLUS_SC + a] {
+                    j = 0
+                    while j < w {
+                        if elplus_emat[a * ELPLUS_SC + j] && !elplus_emat[c * ELPLUS_SC + j] {
+                            elplus_emat[c * ELPLUS_SC + j] = true
+                            changed = true
+                        }
+                        j = j + 1
+                    }
+                }
+                a = a + 1
+            }
+            c = c + 1
+        }
+    }
+}
+
+/// Sparse closure query: does class `c` subsume to `d` (columns
+/// 0..w-1 of the workspace closure matrix; column w-1 is the top slot)?
+/// Read-only accessor so importers never pass the module-level matrices
+/// through a `&!` boundary (see the sparse section header); repair
+/// drivers use this in place of direct closure-matrix indexing.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_subsumes_sparse(c: i64, d: i64) -> bool with Div, Panic {
+    return elplus_clos[c * ELPLUS_SC + d]
+}
+
+/// Sparse role-edge query: does class `c` have a derived role edge with
+/// filler `f` (after `elplus_sparse_seed_edges` + `elplus_sparse_expand`)?
+/// Column w-1 means an existential onto top.
+///
+/// # Complexity
+/// O(1)
+pub fn elplus_edge_sparse(c: i64, f: i64) -> bool with Div, Panic {
+    return elplus_emat[c * ELPLUS_SC + f]
+}
+
+/// Count the set cells of one workspace matrix row (columns 0..w-1).
+///
+/// # Parameters
+/// - `which`: 0 for the closure matrix, anything else for the role-edge
+///   filler matrix.
+/// - `row`: row index (0 <= row < w).
+///
+/// # Complexity
+/// O(w)
+pub fn elplus_sparse_row_count(which: i64, row: i64, w: i64) -> i64 with Div, Panic {
+    var n: i64 = 0
+    var j: i64 = 0
+    if which == 0 {
+        while j < w {
+            if elplus_clos[row * ELPLUS_SC + j] {
+                n = n + 1
+            }
+            j = j + 1
+        }
+    } else {
+        while j < w {
+            if elplus_emat[row * ELPLUS_SC + j] {
+                n = n + 1
+            }
+            j = j + 1
+        }
+    }
+    return n
+}
