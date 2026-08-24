@@ -29474,7 +29474,15 @@ theorem dev_check_j1_m3 :
 set_option maxRecDepth 1000000 in
 /-- **NEGATIVE CONTROL.**  Off the power-of-two labels the law fails: at level 4, `W = 12` gives
     `D = 4608`, and `4608 = 1728·8^i·[j,3]₂` has no solution (it needs `8^i·[j,3]₂ = 8/3`).
-    The restriction to `W = 2^j` in `deviation_law` is therefore doing real work. -/
+    The restriction to `W = 2^j` in `deviation_law` is therefore doing real work.
+
+    **`W = 2^j` means EXACTLY `2^j` — not a multiple of one, and not a divisor.**  The two
+    measurements in the section header are what force that reading, and they pull in opposite
+    directions: `W = 24` is a multiple of `8` and DOES reproduce `W = 8`'s deviation (13824),
+    while `W = 12` is a multiple of `4` and does NOT reproduce `W = 4`'s (which is `0`, since
+    `[2,3]₂ = 0`) — it gives `4608`.  So neither "multiples of a power of two inherit its
+    deviation" nor "they do not" is true in general, and this theorem is the second half of that
+    pair.  Read the hypothesis as an equality on `W`, never as a divisibility condition. -/
 theorem dev_control_W12_m4 :
     tri3 (2^5) (fun x y => P3 x y 12 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 4608 := by
   decide
