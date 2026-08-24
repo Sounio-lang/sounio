@@ -88,6 +88,16 @@ NEW_WORDS=""
 if git rev-parse --verify -q origin/main >/dev/null 2>&1; then
   NEW_WORDS=$(python3 scripts/ci/lib/keyword_newly_declared.py 2>/dev/null || true)
 fi
+# Words the DRIFT gate already owns. With a committed binary these two gates ask
+# the same question -- can the shipped ELF do what the source declares -- and
+# only one of them can answer whose fault it is. madaros_binary_source_drift_gate.sh
+# names the binary; this gate would name the source, and be wrong.
+if [[ -f scripts/ci/madaros_binary_source_drift_gate.sh ]]; then
+  DRIFT_OWNED=$(grep -oE 'check_row "([a-z_]+) is a contextual identifier"' \
+                scripts/ci/madaros_binary_source_drift_gate.sh 2>/dev/null \
+                | grep -oE '"[a-z_]+ is' | grep -oE '^"[a-z_]+' | tr -d '"' | tr '\n' ' ')
+  NEW_WORDS="$NEW_WORDS $DRIFT_OWNED"
+fi
 [[ -n "$NEW_WORDS" ]] && echo "  declared in this diff, undecidable with the shipped binary: $NEW_WORDS"
 
 total=0; failed=0; pending=0
