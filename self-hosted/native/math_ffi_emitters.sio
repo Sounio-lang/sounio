@@ -1,0 +1,417 @@
+// self-hosted::native::math_ffi_emitters -- GENERATED, DO NOT EDIT.
+//
+// Regenerate with:  python3 scripts/dev/gen_math_ffi_emitters.py
+// Source of truth:  scripts/research/pow_tgamma_oracle.py (dict K)
+//
+// The two kernels in native::math_ffi are transliterations of that oracle and
+// take every constant as a .rodata byte offset. This file registers those
+// constants and wraps each kernel in the scalar-builtin calling shape, so
+// ffi_pow and ffi_tgamma become reachable builtin ids.
+//
+// Every hex literal below came out of the oracle's own K dict through its own
+// d2b. None was typed. A hand-copied bit pattern is a transcription error in
+// the one place a reference test would CERTIFY it rather than catch it: the
+// oracle and the emitter would then be measured against each other while both
+// carried the same typo.
+//
+// CONTIGUITY. data_section_add_f64 aligns to 8 and appends 8 bytes, so
+// consecutive calls land exactly 8 apart. Every table below (atanh 12, expe 12,
+// lz 14, lzk 14, sinq 9, cosq 9, fact 23) and every dd pair (third, tl2e, ln2,
+// pi, log2e_dd) is registered as consecutive calls and only its FIRST offset is
+// captured -- the kernels read element i at off + 8*i and are given no
+// per-element offset. Registering anything between the elements of a table
+// breaks it silently: the reads still assemble, link and run, and return
+// whatever now sits at off + 8*i.
+
+use native::encode::*
+use native::elf::{data_section_add_f64}
+use native::codegen_x86_linux::{NativeCompiler}
+use native::math_ffi::{mf_pow, mf_tgamma}
+
+
+// pow(x, y) -- the ffi_pow builtin.
+//
+// Oracle-measured 0.76 ulp. This is an APPROXIMATION, unlike ffi_sqrt /
+// ffi_floor / ffi_ceil, which are single correctly-rounded instructions; it
+// carries an error budget and belongs behind its own reference vectors.
+//
+// Frame, all rbp-relative and negative:
+//   [rbp-8]  x, as bits then as a double
+//   [rbp-16] y
+//   [rbp-24] the result
+//   [rbp-32] tb, the base of mf_pow's 72-slot temp block, which runs DOWN
+//            to [rbp-600]. sub rsp,1024 reserves 424 bytes past that.
+//
+// Calling shape: the f64 argument arrives in rdi as raw BITS, not in
+// xmm0 -- and the second in rsi -- which is what every scalar builtin in
+// this backend does (see emit_builtin_ffi_sqrt). The result goes back in
+// rax the same way, via movq.
+//
+// GPRs the kernel clobbers: rax, rbx, rcx, rdx, rsi. rbx is not preserved,
+// matching emit_builtin_exp, which clobbers it the same way.
+pub fn emit_builtin_ffi_pow(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // ---- .rodata ------------------------------------------------------
+    c.rodata = data_section_add_f64(c.rodata, 0x41A0000002000000)
+    let split_off = c.rodata.last_offset          // SPLIT = 2^27+1
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)
+    let one_off = c.rodata.last_offset          // 1.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x0000000000000000)
+    let zero_off = c.rodata.last_offset          // 0.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)
+    let half_off = c.rodata.last_offset          // 0.5
+
+    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)
+    let two_off = c.rodata.last_offset          // 2.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF6A09E667F3BCD)
+    let sqrt2_off = c.rodata.last_offset          // fl(sqrt 2)
+
+    c.rodata = data_section_add_f64(c.rodata, 0x4350000000000000)
+    let p54_off = c.rodata.last_offset          // 2^54, denormal pre-scale
+
+    // C2 coefficients 1/(2j+3), j = 1..12: 12 doubles, atanh_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC999999999999A)   // [0]
+    let atanh_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC2492492492492)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FBC71C71C71C71C)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB745D1745D1746)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB3B13B13B13B14)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB1111111111111)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FAE1E1E1E1E1E1E)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FAAF286BCA1AF28)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA8618618618618)   // [8]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA642C8590B2164)   // [9]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA47AE147AE147B)   // [10]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA2F684BDA12F68)   // [11]
+
+    // 1/3 as a dd: hi at third_off, lo at third_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FD5555555555555)   // hi
+    let third_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C75555555555555)   // lo
+
+    // 2*log2(e) as a dd: hi at tl2e_off, lo at tl2e_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x40071547652B82FE)   // hi
+    let tl2e_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C8777D0FFDA0D24)   // lo
+
+    // ln 2 as a dd: hi at ln2_off, lo at ln2_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE62E42FEFA39EF)   // hi
+    let ln2_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C7ABC9E3B39803F)   // lo
+
+    // E coefficients 1/(j+2)!, j = 0..11: 12 doubles, expe_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // [0]
+    let expe_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EFA01A01A01A01A)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EC71DE3A556C734)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0x3E927E4FB7789F5C)   // [8]
+    c.rodata = data_section_add_f64(c.rodata, 0x3E5AE64567F544E4)   // [9]
+    c.rodata = data_section_add_f64(c.rodata, 0x3E21EED8EFF8D898)   // [10]
+    c.rodata = data_section_add_f64(c.rodata, 0x3DE6124613A86D09)   // [11]
+
+    c.rodata = data_section_add_f64(c.rodata, 0x7FF0000000000000)
+    let inf_off = c.rodata.last_offset          // +inf
+
+    c.rodata = data_section_add_f64(c.rodata, 0xFFF0000000000000)
+    let ninf_off = c.rodata.last_offset          // -inf
+
+    c.rodata = data_section_add_f64(c.rodata, 0x8000000000000000)
+    let nzero_off = c.rodata.last_offset          // -0.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x4090000000000000)
+    let rovf_off = c.rodata.last_offset          // 1024.0, r_hi above this overflows
+
+    c.rodata = data_section_add_f64(c.rodata, 0xC090E00000000000)
+    let runf_off = c.rodata.last_offset          // -1080.0, below this the result is zero
+
+    c.rodata = data_section_add_f64(c.rodata, 0x43E0000000000000)
+    let ybig_off = c.rodata.last_offset          // 2^63, finding F5's guard
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3C90000000000000)
+    let twom54_off = c.rodata.last_offset          // 2^-54, mf_scale_2n's subnormal tail
+
+    // ---- prologue -----------------------------------------------------
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 1024)
+
+    c.code = emit_mov_reg_reg(c.code, 0, 7)              // rax = rdi = bits(x)
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 8)
+    c.code = emit_mov_reg_reg(c.code, 0, 6)              // rax = rsi = bits(y)
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 16)
+
+    // ---- the kernel ---------------------------------------------------
+    c = mf_pow(c, 0 - 24, 0 - 8, 0 - 16, split_off, one_off, zero_off, half_off, two_off,
+               sqrt2_off, p54_off, atanh_off, third_off, tl2e_off, ln2_off, expe_off, inf_off,
+               ninf_off, nzero_off, rovf_off, runf_off, ybig_off, twom54_off, 0 - 32)
+
+    // ---- epilogue -----------------------------------------------------
+    c.code = emit_movsd_xmm0_rbp_disp32(c.code, 0 - 24)
+    c.code = emit_movq_rax_xmm0(c.code)                  // movq rax, xmm0
+    c.code = emit_add_rsp_imm32(c.code, 1024)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// tgamma(x) -- the ffi_tgamma builtin.
+//
+// Oracle-measured 3.64 ulp against mpmath at 60 digits. Note finding F8: glibc's
+// own tgamma measures up to 5.16 ulp on the same bands and is 1 ulp off on the
+// exactly-representable factorials, so libm is NOT a valid reference for this.
+//
+// Frame, all rbp-relative and negative:
+//   [rbp-8]  x, as bits then as a double
+//   [rbp-16] the result
+//   [rbp-24] tb, the base of mf_tgamma's 100-slot temp block, which runs DOWN
+//            to [rbp-816]. sub rsp,1280 reserves 464 bytes past that.
+//
+// Calling shape: the f64 argument arrives in rdi as raw BITS, not in
+// xmm0, which is what every scalar builtin in this backend does (see
+// emit_builtin_ffi_sqrt). The result goes back in
+// rax the same way, via movq.
+//
+// GPRs the kernel clobbers: rax, rbx, rcx, rdx, rsi. rbx is not preserved,
+// matching emit_builtin_exp, which clobbers it the same way.
+pub fn emit_builtin_ffi_tgamma(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // ---- .rodata ------------------------------------------------------
+    c.rodata = data_section_add_f64(c.rodata, 0x41A0000002000000)
+    let split_off = c.rodata.last_offset          // SPLIT = 2^27+1
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)
+    let one_off = c.rodata.last_offset          // 1.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x0000000000000000)
+    let zero_off = c.rodata.last_offset          // 0.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)
+    let half_off = c.rodata.last_offset          // 0.5
+
+    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)
+    let two_off = c.rodata.last_offset          // 2.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF6A09E667F3BCD)
+    let sqrt2_off = c.rodata.last_offset          // fl(sqrt 2)
+
+    c.rodata = data_section_add_f64(c.rodata, 0x4350000000000000)
+    let p54_off = c.rodata.last_offset          // 2^54, denormal pre-scale
+
+    // C2 coefficients 1/(2j+3), j = 1..12: 12 doubles, atanh_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC999999999999A)   // [0]
+    let atanh_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC2492492492492)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FBC71C71C71C71C)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB745D1745D1746)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB3B13B13B13B14)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FB1111111111111)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FAE1E1E1E1E1E1E)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FAAF286BCA1AF28)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA8618618618618)   // [8]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA642C8590B2164)   // [9]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA47AE147AE147B)   // [10]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA2F684BDA12F68)   // [11]
+
+    // 1/3 as a dd: hi at third_off, lo at third_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FD5555555555555)   // hi
+    let third_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C75555555555555)   // lo
+
+    // 2*log2(e) as a dd: hi at tl2e_off, lo at tl2e_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x40071547652B82FE)   // hi
+    let tl2e_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C8777D0FFDA0D24)   // lo
+
+    // ln 2 as a dd: hi at ln2_off, lo at ln2_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE62E42FEFA39EF)   // hi
+    let ln2_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C7ABC9E3B39803F)   // lo
+
+    // E coefficients 1/(j+2)!, j = 0..11: 12 doubles, expe_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FE0000000000000)   // [0]
+    let expe_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FC5555555555555)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F56C16C16C16C17)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F2A01A01A01A01A)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EFA01A01A01A01A)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EC71DE3A556C734)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0x3E927E4FB7789F5C)   // [8]
+    c.rodata = data_section_add_f64(c.rodata, 0x3E5AE64567F544E4)   // [9]
+    c.rodata = data_section_add_f64(c.rodata, 0x3E21EED8EFF8D898)   // [10]
+    c.rodata = data_section_add_f64(c.rodata, 0x3DE6124613A86D09)   // [11]
+
+    c.rodata = data_section_add_f64(c.rodata, 0x40040D931FF62706)
+    let sqrt2pi_off = c.rodata.last_offset          // sqrt(2*pi), NOT sqrt(fl(2*pi))
+
+    // Lanczos c_k, k = 0..13: 14 doubles, lz_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // [0]
+    let lz_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x40356B2890315079)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0xC02F6592454AC363)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x3FFBFBEFA21D8B63)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0xBF69A6D4864C504D)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F27BF21FAB7ADF5)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0xBF31A9BDE18F45C7)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F34D8E7DFE68F46)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0xBF33E5DEBE38E9CF)   // [8]
+    c.rodata = data_section_add_f64(c.rodata, 0x3F2B92C03FC6915A)   // [9]
+    c.rodata = data_section_add_f64(c.rodata, 0xBF1861E209CC9548)   // [10]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EF47E4911F82CE7)   // [11]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EB32B453738ECB2)   // [12]
+    c.rodata = data_section_add_f64(c.rodata, 0xBEB087F10CEA8931)   // [13]
+
+    // the integers 0.0 .. 13.0: 14 doubles, lzk_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0x0000000000000000)   // [0]
+    let lzk_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x4008000000000000)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0x4010000000000000)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x4014000000000000)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0x4018000000000000)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x401C000000000000)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0x4020000000000000)   // [8]
+    c.rodata = data_section_add_f64(c.rodata, 0x4022000000000000)   // [9]
+    c.rodata = data_section_add_f64(c.rodata, 0x4024000000000000)   // [10]
+    c.rodata = data_section_add_f64(c.rodata, 0x4026000000000000)   // [11]
+    c.rodata = data_section_add_f64(c.rodata, 0x4028000000000000)   // [12]
+    c.rodata = data_section_add_f64(c.rodata, 0x402A000000000000)   // [13]
+
+    c.rodata = data_section_add_f64(c.rodata, 0x400B000000000000)
+    let c3375_off = c.rodata.last_offset          // 3.375 = 27/8 = g - 1/2
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF71547652B82FE)
+    let log2e_off = c.rodata.last_offset          // log2(e), for the w_lo correction
+
+    // log2(e) as a dd: hi at log2e_dd_off, lo at log2e_dd_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF71547652B82FE)   // hi
+    let log2e_dd_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3C7777D0FFDA0D24)   // lo
+
+    // pi as a dd: hi at pi_off, lo at pi_off + 8. CONTIGUOUS.
+    c.rodata = data_section_add_f64(c.rodata, 0x400921FB54442D18)   // hi
+    let pi_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3CA1A62633145C07)   // lo
+
+    // Q coefficients (-1)^j/(2j+1)!, j = 1..9: 9 doubles, sinq_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0xBFC5555555555555)   // [0]
+    let sinq_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3F81111111111111)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0xBF2A01A01A01A01A)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EC71DE3A556C734)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0xBE5AE64567F544E4)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x3DE6124613A86D09)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0xBD6AE7F3E733B81F)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x3CE952C77030AD4A)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0xBC62F49B46814157)   // [8]
+
+    // C coefficients (-1)^j/(2j)!, j = 1..9: 9 doubles, cosq_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0xBFE0000000000000)   // [0]
+    let cosq_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FA5555555555555)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0xBF56C16C16C16C17)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x3EFA01A01A01A01A)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0xBE927E4FB7789F5C)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x3E21EED8EFF8D898)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0xBDA93974A8C07C9D)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x3D2AE7F3E733B81F)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0xBCA6827863B97D97)   // [8]
+
+    c.rodata = data_section_add_f64(c.rodata, 0x7FF0000000000000)
+    let inf_off = c.rodata.last_offset          // +inf
+
+    c.rodata = data_section_add_f64(c.rodata, 0xFFF0000000000000)
+    let ninf_off = c.rodata.last_offset          // -inf
+
+    c.rodata = data_section_add_f64(c.rodata, 0x7FF8000000000000)
+    let nan_off = c.rodata.last_offset          // a quiet NaN
+
+    c.rodata = data_section_add_f64(c.rodata, 0x8000000000000000)
+    let nzero_off = c.rodata.last_offset          // -0.0
+
+    c.rodata = data_section_add_f64(c.rodata, 0x3C90000000000000)
+    let twom54_off = c.rodata.last_offset          // 2^-54, mf_scale_2n's subnormal tail
+
+    c.rodata = data_section_add_f64(c.rodata, 0x406573FAE561F647)
+    let gamovf_off = c.rodata.last_offset          // largest x with a finite Gamma
+
+    c.rodata = data_section_add_f64(c.rodata, 0xC067200000000000)
+    let neg185_off = c.rodata.last_offset          // -185.0, finding F9's cut-off
+
+    c.rodata = data_section_add_f64(c.rodata, 0xBFE0000000000000)
+    let neghalf_off = c.rodata.last_offset          // -0.5
+
+    c.rodata = data_section_add_f64(c.rodata, 0x4037000000000000)
+    let twenty3_off = c.rodata.last_offset          // 23.0
+
+    // Gamma(i) = (i-1)! for i = 1..23: 23 doubles, fact_off + 8*i. CONTIGUOUS -- only the
+    // first offset is captured; the kernel derives the rest.
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // [0]
+    let fact_off = c.rodata.last_offset
+    c.rodata = data_section_add_f64(c.rodata, 0x3FF0000000000000)   // [1]
+    c.rodata = data_section_add_f64(c.rodata, 0x4000000000000000)   // [2]
+    c.rodata = data_section_add_f64(c.rodata, 0x4018000000000000)   // [3]
+    c.rodata = data_section_add_f64(c.rodata, 0x4038000000000000)   // [4]
+    c.rodata = data_section_add_f64(c.rodata, 0x405E000000000000)   // [5]
+    c.rodata = data_section_add_f64(c.rodata, 0x4086800000000000)   // [6]
+    c.rodata = data_section_add_f64(c.rodata, 0x40B3B00000000000)   // [7]
+    c.rodata = data_section_add_f64(c.rodata, 0x40E3B00000000000)   // [8]
+    c.rodata = data_section_add_f64(c.rodata, 0x4116260000000000)   // [9]
+    c.rodata = data_section_add_f64(c.rodata, 0x414BAF8000000000)   // [10]
+    c.rodata = data_section_add_f64(c.rodata, 0x418308A800000000)   // [11]
+    c.rodata = data_section_add_f64(c.rodata, 0x41BC8CFC00000000)   // [12]
+    c.rodata = data_section_add_f64(c.rodata, 0x41F7328CC0000000)   // [13]
+    c.rodata = data_section_add_f64(c.rodata, 0x42344C3B28000000)   // [14]
+    c.rodata = data_section_add_f64(c.rodata, 0x4273077775800000)   // [15]
+    c.rodata = data_section_add_f64(c.rodata, 0x42B3077775800000)   // [16]
+    c.rodata = data_section_add_f64(c.rodata, 0x42F437EEECD80000)   // [17]
+    c.rodata = data_section_add_f64(c.rodata, 0x4336BEECCA730000)   // [18]
+    c.rodata = data_section_add_f64(c.rodata, 0x437B02B930689000)   // [19]
+    c.rodata = data_section_add_f64(c.rodata, 0x43C0E1B3BE415A00)   // [20]
+    c.rodata = data_section_add_f64(c.rodata, 0x4406283BE9B5C620)   // [21]
+    c.rodata = data_section_add_f64(c.rodata, 0x444E77526159F06C)   // [22]
+
+    // ---- prologue -----------------------------------------------------
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 1280)
+
+    c.code = emit_mov_reg_reg(c.code, 0, 7)              // rax = rdi = bits(x)
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 8)
+
+    // ---- the kernel ---------------------------------------------------
+    c = mf_tgamma(c, 0 - 16, 0 - 8, split_off, one_off, zero_off, half_off, two_off, sqrt2_off,
+                  p54_off, atanh_off, third_off, tl2e_off, ln2_off, expe_off, sqrt2pi_off,
+                  lz_off, lzk_off, c3375_off, log2e_off, log2e_dd_off, pi_off, sinq_off,
+                  cosq_off, inf_off, ninf_off, nan_off, nzero_off, twom54_off, gamovf_off,
+                  neg185_off, neghalf_off, twenty3_off, fact_off, 0 - 24)
+
+    // ---- epilogue -----------------------------------------------------
+    c.code = emit_movsd_xmm0_rbp_disp32(c.code, 0 - 16)
+    c.code = emit_movq_rax_xmm0(c.code)                  // movq rax, xmm0
+    c.code = emit_add_rsp_imm32(c.code, 1280)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}

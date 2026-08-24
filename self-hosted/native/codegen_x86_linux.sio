@@ -24,6 +24,11 @@ use native::runtime_context::*
 use native::stack_maps::*
 use native::target_policy::*
 use native::codegen_plan::*
+// GENERATED emitters for the two approximating libm intrinsics. The kernels
+// live in native::math_ffi; native::math_ffi_emitters registers their .rodata
+// and wraps them in the scalar-builtin calling shape. Regenerate with
+// scripts/dev/gen_math_ffi_emitters.py -- do not hand-edit the constants.
+use native::math_ffi_emitters::{emit_builtin_ffi_pow, emit_builtin_ffi_tgamma}
 // Sprint 40: IR-level dual-path transformation for Instrumented strategy
 use ir::opt_strategy::{ir_opt_apply_strategy}
 // io::trace is a lightweight extraction of io::file_write's trace helpers.
@@ -1026,6 +1031,185 @@ fn name_is_heap_alloc(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+// ── Track A: extern "C" FFI intrinsics ────────────────────────────────
+// MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16. The parser rewrites an
+// `extern "C" { fn getpid() -> T }` declaration into a Sounio wrapper whose
+// body calls ffi_getpid(); these recognisers route that call (by name, via
+// ir_module_ensure_builtin_call_targets) to the hand-coded emitters below.
+
+fn name_is_ffi_sqrt(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }              // "ffi_sqrt"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 115 as i8 { return false }     // 's'
+    if n.buf[5] != 113 as i8 { return false }     // 'q'
+    if n.buf[6] != 114 as i8 { return false }     // 'r'
+    if n.buf[7] != 116 as i8 { return false }     // 't'
+    true
+}
+
+fn name_is_ffi_floor(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }              // "ffi_floor"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 102 as i8 { return false }     // 'f'
+    if n.buf[5] != 108 as i8 { return false }     // 'l'
+    if n.buf[6] != 111 as i8 { return false }     // 'o'
+    if n.buf[7] != 111 as i8 { return false }     // 'o'
+    if n.buf[8] != 114 as i8 { return false }     // 'r'
+    true
+}
+
+fn name_is_ffi_ceil(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }              // "ffi_ceil"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 99 as i8 { return false }      // 'c'
+    if n.buf[5] != 101 as i8 { return false }     // 'e'
+    if n.buf[6] != 105 as i8 { return false }     // 'i'
+    if n.buf[7] != 108 as i8 { return false }     // 'l'
+    true
+}
+
+// pow and tgamma. Unlike sqrt/floor/ceil above these are APPROXIMATIONS -- the
+// kernels in native::math_ffi, transliterated from
+// scripts/research/pow_tgamma_oracle.py and measured there at 0.76 ulp (pow)
+// and 3.64 ulp (tgamma). They carry an error budget, so they are recognised
+// here but must stay behind their own reference vectors.
+fn name_is_ffi_pow(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 7 { return false }            // "ffi_pow"
+    if n.buf[0] != 102 as i8 { return false }  // 'f'
+    if n.buf[1] != 102 as i8 { return false }  // 'f'
+    if n.buf[2] != 105 as i8 { return false }  // 'i'
+    if n.buf[3] != 95 as i8 { return false }   // '_'
+    if n.buf[4] != 112 as i8 { return false }  // 'p'
+    if n.buf[5] != 111 as i8 { return false }  // 'o'
+    if n.buf[6] != 119 as i8 { return false }  // 'w'
+    true
+}
+
+fn name_is_ffi_tgamma(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 10 { return false }           // "ffi_tgamma"
+    if n.buf[0] != 102 as i8 { return false }  // 'f'
+    if n.buf[1] != 102 as i8 { return false }  // 'f'
+    if n.buf[2] != 105 as i8 { return false }  // 'i'
+    if n.buf[3] != 95 as i8 { return false }   // '_'
+    if n.buf[4] != 116 as i8 { return false }  // 't'
+    if n.buf[5] != 103 as i8 { return false }  // 'g'
+    if n.buf[6] != 97 as i8 { return false }   // 'a'
+    if n.buf[7] != 109 as i8 { return false }  // 'm'
+    if n.buf[8] != 109 as i8 { return false }  // 'm'
+    if n.buf[9] != 97 as i8 { return false }   // 'a'
+    true
+}
+
+fn name_is_ffi_getpid(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 10 { return false }               // "ffi_getpid"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 103 as i8 { return false }     // 'g'
+    if n.buf[5] != 101 as i8 { return false }     // 'e'
+    if n.buf[6] != 116 as i8 { return false }     // 't'
+    if n.buf[7] != 112 as i8 { return false }     // 'p'
+    if n.buf[8] != 105 as i8 { return false }     // 'i'
+    if n.buf[9] != 100 as i8 { return false }     // 'd'
+    true
+}
+
+fn name_is_ffi_getppid(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 11 { return false }               // "ffi_getppid"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 103 as i8 { return false }     // 'g'
+    if n.buf[5] != 101 as i8 { return false }     // 'e'
+    if n.buf[6] != 116 as i8 { return false }     // 't'
+    if n.buf[7] != 112 as i8 { return false }     // 'p'
+    if n.buf[8] != 112 as i8 { return false }     // 'p'
+    if n.buf[9] != 105 as i8 { return false }     // 'i'
+    if n.buf[10] != 100 as i8 { return false }    // 'd'
+    true
+}
+
+fn name_is_ffi_exit(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }                // "ffi_exit"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 101 as i8 { return false }     // 'e'
+    if n.buf[5] != 120 as i8 { return false }     // 'x'
+    if n.buf[6] != 105 as i8 { return false }     // 'i'
+    if n.buf[7] != 116 as i8 { return false }     // 't'
+    true
+}
+
+fn name_is_ffi_abort(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 9 { return false }                // "ffi_abort"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 97 as i8 { return false }      // 'a'
+    if n.buf[5] != 98 as i8 { return false }      // 'b'
+    if n.buf[6] != 111 as i8 { return false }     // 'o'
+    if n.buf[7] != 114 as i8 { return false }     // 'r'
+    if n.buf[8] != 116 as i8 { return false }     // 't'
+    true
+}
+
+fn name_is_ffi_malloc(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 10 { return false }               // "ffi_malloc"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 109 as i8 { return false }     // 'm'
+    if n.buf[5] != 97 as i8 { return false }      // 'a'
+    if n.buf[6] != 108 as i8 { return false }     // 'l'
+    if n.buf[7] != 108 as i8 { return false }     // 'l'
+    if n.buf[8] != 111 as i8 { return false }     // 'o'
+    if n.buf[9] != 99 as i8 { return false }      // 'c'
+    true
+}
+
+fn name_is_ffi_free(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 8 { return false }                // "ffi_free"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 102 as i8 { return false }     // 'f'
+    if n.buf[5] != 114 as i8 { return false }     // 'r'
+    if n.buf[6] != 101 as i8 { return false }     // 'e'
+    if n.buf[7] != 101 as i8 { return false }     // 'e'
+    true
+}
+
+fn name_is_ffi_system(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 10 { return false }               // "ffi_system"
+    if n.buf[0] != 102 as i8 { return false }     // 'f'
+    if n.buf[1] != 102 as i8 { return false }     // 'f'
+    if n.buf[2] != 105 as i8 { return false }     // 'i'
+    if n.buf[3] != 95 as i8 { return false }      // '_'
+    if n.buf[4] != 115 as i8 { return false }     // 's'
+    if n.buf[5] != 121 as i8 { return false }     // 'y'
+    if n.buf[6] != 115 as i8 { return false }     // 's'
+    if n.buf[7] != 116 as i8 { return false }     // 't'
+    if n.buf[8] != 101 as i8 { return false }     // 'e'
+    if n.buf[9] != 109 as i8 { return false }     // 'm'
+    true
+}
+
 fn name_is_heap_free(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 9 { return false }
     if n.buf[0] != 104 as i8 { return false }     // 'h'
@@ -1190,6 +1374,25 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_write_f64((*func).name) { return 36 }
     if name_is_acknowledge((*func).name) { return 37 }
     if name_is_require_confidence((*func).name) { return 38 }
+        // COLLISION RESOLVED 2026-08-23. main ids 23..38 are all taken
+        // (heap_alloc 23 .. require_confidence 38). The branch assigned the ffi_*
+        // intrinsics 31,32,34,35,36,37, which on current main are abort, system,
+        // write_i64, read_f64, write_f64 and acknowledge -- taking its side verbatim
+        // would have silently reassigned six live builtins. Renumbered above 38.
+        // Same shape as the effect-id 29 collision resolved earlier the same day.
+        // ffi_* intrinsics renumbered above main's highest id (38) for that reason.
+        if name_is_ffi_getpid((*func).name) { return 39 }
+        if name_is_ffi_getppid((*func).name) { return 40 }
+        if name_is_ffi_exit((*func).name) { return 41 }
+        if name_is_ffi_abort((*func).name) { return 42 }
+        if name_is_ffi_malloc((*func).name) { return 43 }
+        if name_is_ffi_free((*func).name) { return 44 }
+        if name_is_ffi_system((*func).name) { return 45 }
+        if name_is_ffi_sqrt((*func).name) { return 46 }
+        if name_is_ffi_floor((*func).name) { return 47 }
+        if name_is_ffi_ceil((*func).name) { return 48 }
+        if name_is_ffi_pow((*func).name) { return 49 }
+        if name_is_ffi_tgamma((*func).name) { return 50 }
     0
 }
 
@@ -4781,6 +4984,61 @@ fn emit_builtin_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div 
     c
 }
 
+// ffi_sqrt / ffi_floor / ffi_ceil — the three libm entry points this backend
+// can answer EXACTLY, with one instruction each and no approximation.
+//
+// The calling shape is the one every scalar builtin here uses: the f64
+// argument arrives in rdi as raw bits, not in xmm0, so it is moved across with
+// movq before the operation and back after it.
+//
+// These three are grouped because they share a property the rest of libm does
+// not: each is a single IEEE-754-defined operation the hardware implements
+// correctly-rounded, so there is no error budget to state and no reference
+// vector that can fail by an ulp. pow and tgamma are a different kind of
+// object and do not belong beside them.
+
+fn emit_builtin_ffi_sqrt(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    c.code = emit_sqrtsd_xmm0_xmm0(c.code)            // sqrtsd xmm0, xmm0
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// floor: ROUNDSD mode 1 (toward -inf), 0x08 set to suppress the inexact
+// exception exactly as libm's floor does.
+fn emit_builtin_ffi_floor(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 9)   // roundsd xmm0, xmm0, 0x09
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
+// ceil: ROUNDSD mode 2 (toward +inf), same inexact suppression.
+fn emit_builtin_ffi_ceil(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+    c.code = emit_roundsd_xmm0_xmm0_imm8(c.code, 10)  // roundsd xmm0, xmm0, 0x0A
+    c.code = emit_movq_rax_xmm0(c.code)               // movq rax, xmm0
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 // f64_to_bits / bits_to_f64 — pure IEEE-754 reinterpret. The 64-bit value is
 // identical whether read as f64 or i64, and this backend passes the argument in
 // rdi and returns in rax (same convention as emit_builtin_sqrt), so the body is
@@ -6721,6 +6979,116 @@ fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &Machine
     }
 }
 
+pub // Track A: getpid()/getppid() as raw syscalls (39/110). The wrapper fn the
+// parser emits for an `extern "C"` getpid/getppid declaration tail-calls
+// these; result in RAX per the Sounio integer-return convention.
+fn emit_builtin_ffi_getpid_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rax_imm(nc, 39)
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_ffi_getppid_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rax_imm(nc, 110)
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
+// exit(code): exit_group(231) so every thread dies; rdi already carries the
+// wrapper's code argument. The ret is unreachable but keeps the body shape
+// every builtin emitter has.
+fn emit_builtin_ffi_exit_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rax_imm(nc, 231)
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
+// abort(): exit_group(134) — 128+SIGABRT, the code a shell reports for an
+// aborted process. No signal machinery exists in this runtime to raise a
+// real SIGABRT.
+fn emit_builtin_ffi_abort_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_reg_imm(nc, 7, 134)
+    nc_emit_mov_rax_imm(nc, 231)
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
+// system(cmd): fork/execve("/bin/sh","-c",cmd)/wait4, returning the raw
+// wait status word in rax (libc's system() convention). cmd arrives in rdi
+// already NUL-terminated (Sounio strings are C strings here), so no data
+// relocation is needed — only "/bin/sh\0" and "-c\0" are materialised, and
+// both fit in a single 64-bit immediate pushed to the stack.
+//
+// Register discipline: the ONLY path that returns to the Sounio caller is
+// the parent branch, and it touches only caller-saved rax/rdi/rsi/rdx/r10 —
+// rbx/rcx and the child-only rdx-holds-cmd trick live entirely after the
+// fork's child branch, which either execve's (image replaced) or exits, so
+// clobbering callee-saved state there is unobservable. Nothing callee-saved
+// (rbx, r12-r15) is written on the returning path. cmd is kept in rdx (a
+// low register, so nc_emit_mov_reg_reg's REX.W-only encoding suffices) from
+// child entry until it is pushed into argv.
+fn emit_builtin_ffi_system_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // fork()
+    nc_emit_mov_rax_imm(nc, 57)
+    nc_emit_syscall(nc)
+    nc_emit_test_rax_rax(nc)
+    // jz child (patched once the child offset is known)
+    let child_patch = (*nc).code.len + 2
+    nc_emit_jz_rel32(nc)
+
+    // --- parent: rax = child pid; wait4(pid, &status, 0, 0) ---
+    // Reserve the status slot with a push of a zeroed rax rather than
+    // `sub rsp, imm`: an explicit rsp subtraction gets a stack-clash probe
+    // injected that reads rbp, which a prologue-less builtin never sets up.
+    // A push needs no probe and the zeroed slot keeps the high 32 bits clean
+    // (wait4 writes only the low 32-bit status word).
+    nc_emit_mov_reg_reg(nc, 7, 0)          // mov rdi, rax   (pid)
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_push_rax(nc)                   // status slot (zeroed, 8 bytes)
+    nc_emit_mov_reg_reg(nc, 6, 4)          // mov rsi, rsp   (&status)
+    nc_emit_xor_rdx_rdx(nc)                // options = 0
+    nc_emit_byte(nc, 0x4d)                 // xor r10, r10   (rusage = NULL)
+    nc_emit_byte(nc, 0x31)
+    nc_emit_byte(nc, 0xd2)
+    nc_emit_mov_rax_imm(nc, 61)            // wait4
+    nc_emit_syscall(nc)
+    nc_emit_byte(nc, 0x48)                 // mov rax, [rsp] (status word)
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x04)
+    nc_emit_byte(nc, 0x24)
+    nc_emit_add_rsp_8(nc)                  // pop status slot
+    nc_emit_ret(nc)
+
+    // --- child ---
+    let child_offset = (*nc).code.len
+    nc_patch_u32_le(nc, child_patch, child_offset - (child_patch + 4))
+    nc_emit_mov_reg_reg(nc, 2, 7)          // mov rdx, rdi   (rdx = cmd, held to argv)
+    // "/bin/sh\0" = little-endian 0x0068732f6e69622f
+    nc_emit_mov_reg_imm64(nc, 0, 29400045130965551)
+    nc_emit_push_rax(nc)                   // [rsp] = "/bin/sh"
+    nc_emit_mov_reg_reg(nc, 3, 4)          // mov rbx, rsp   (path)
+    // "-c\0" = 0x632d
+    nc_emit_mov_reg_imm64(nc, 0, 25389)
+    nc_emit_push_rax(nc)                   // [rsp] = "-c"
+    nc_emit_mov_reg_reg(nc, 1, 4)          // mov rcx, rsp   ("-c")
+    // argv = [path, "-c", cmd, NULL], pushed in reverse
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_push_rax(nc)                   // NULL
+    nc_emit_byte(nc, 0x52)                 // push rdx       (cmd)
+    nc_emit_byte(nc, 0x51)                 // push rcx       ("-c")
+    nc_emit_byte(nc, 0x53)                 // push rbx       (path)
+    nc_emit_mov_reg_reg(nc, 6, 4)          // mov rsi, rsp   (argv)
+    nc_emit_mov_reg_reg(nc, 7, 3)          // mov rdi, rbx   (path)
+    nc_emit_xor_rdx_rdx(nc)                // envp = NULL
+    nc_emit_mov_rax_imm(nc, 59)            // execve
+    nc_emit_syscall(nc)
+    // execve only returns on failure: exit(127)
+    nc_emit_mov_reg_imm(nc, 7, 127)
+    nc_emit_mov_rax_imm(nc, 60)            // exit
+    nc_emit_syscall(nc)
+    nc_emit_ret(nc)
+}
+
 pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
     if name_is_print_char(name) { return 2 }
@@ -6761,6 +7129,22 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_write_i64(name) { return 34 }
     if name_is_read_f64(name) { return 35 }
     if name_is_write_f64(name) { return 36 }
+        // Second of the two dispatch tables, and the ids MUST match the first
+        // one (the by-func variant). A builtin that resolves to a different id
+        // depending on which path reached it is worse than one that does not
+        // resolve at all. Same collision with main ids 23..38, same renumbering.
+        if name_is_ffi_getpid(name) { return 39 }
+        if name_is_ffi_getppid(name) { return 40 }
+        if name_is_ffi_exit(name) { return 41 }
+        if name_is_ffi_abort(name) { return 42 }
+        if name_is_ffi_malloc(name) { return 43 }
+        if name_is_ffi_free(name) { return 44 }
+        if name_is_ffi_system(name) { return 45 }
+        if name_is_ffi_sqrt(name) { return 46 }
+        if name_is_ffi_floor(name) { return 47 }
+        if name_is_ffi_ceil(name) { return 48 }
+        if name_is_ffi_pow(name) { return 49 }
+        if name_is_ffi_tgamma(name) { return 50 }
     0
 }
 
@@ -6780,10 +7164,30 @@ pub fn native_v2_builtin_returns_float(builtin_id: i64) -> bool {
     if builtin_id == 35 { return true }  // read_f64 (Defect A)
     if builtin_id == 37 { return true }  // acknowledge(Knowledge<f64>, reason)
     if builtin_id == 38 { return true }  // require_confidence(Knowledge<f64>, min)
+    if builtin_id == 46 { return true }  // ffi_sqrt
+    if builtin_id == 47 { return true }  // ffi_floor
+    if builtin_id == 48 { return true }  // ffi_ceil
+    if builtin_id == 49 { return true }  // ffi_pow
+    if builtin_id == 50 { return true }  // ffi_tgamma
     false
 }
 
 fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) with Mut, Panic, Div {
+    if builtin_id == 39 { emit_builtin_ffi_getpid_into(nc); return }
+    if builtin_id == 40 { emit_builtin_ffi_getppid_into(nc); return }
+    if builtin_id == 41 { emit_builtin_ffi_exit_into(nc); return }
+    if builtin_id == 42 { emit_builtin_ffi_abort_into(nc); return }
+    // ffi_malloc/ffi_free reuse the mmap-backed heap builtins: same
+    // signature shape (rdi in, rax out) and a matched pair — heap_free
+    // recovers the mapping length heap_alloc stores at ptr-8.
+    if builtin_id == 43 { emit_builtin_heap_alloc_into(nc); return }
+    if builtin_id == 44 { emit_builtin_heap_free_into(nc); return }
+    if builtin_id == 45 { emit_builtin_ffi_system_into(nc); return }
+    if builtin_id == 46 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_sqrt((*nc))); return }
+    if builtin_id == 47 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_floor((*nc))); return }
+    if builtin_id == 48 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_ceil((*nc))); return }
+    if builtin_id == 49 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_pow((*nc))); return }
+    if builtin_id == 50 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_tgamma((*nc))); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
     if builtin_id == 2 { emit_builtin_print_char_into(nc); return }
     if builtin_id == 3 {
@@ -8441,6 +8845,11 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
             if IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 {
                 nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                if IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG {
+                    nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                } else {
+                    nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                }
             }
         } else if instr_op == IrOpcode::IrNop {
             // no-op
@@ -11463,6 +11872,16 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     // above so callers can tell the two tiers apart.
     if nc.reloc_overflow {
         return 20
+    }
+    // The OTHER relocation table. nc_add_flat_reloc guards the flat table above;
+    // reloc.sio's RelocationTable is a separate structure with its own four add_*
+    // functions, and until 2026-08-23 they dropped silently past 256 against a
+    // declared capacity of 4096. The guard now matches the declaration and sets
+    // this flag when it is reached, so the two tiers finally behave the same way:
+    // a dropped relocation refuses the binary instead of shipping one that reads
+    // the start of .rodata where a constant should be.
+    if nc.relocs.overflow {
+        return 21
     }
     // A label or a jump patch exceeded nc_v2_label_capacity(). The dropped entry
     // leaves a jz/jmp rel32 operand at the placeholder 0, so the branch falls
