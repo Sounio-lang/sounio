@@ -287,6 +287,32 @@ Six further facts fall out of the same measurement, and each is a defect:
   lean_single resolves **by name** and aliases `epsilon` to `confidence`. Both
   therefore land `c[i]` in the confidence slot *under the field order this file
   happens to use* — Madaros by arithmetic, lean_single by meaning.
+- **CORRECTION 2026-08-20 — one name is validated, and it licenses the rest.**
+  The bullet below says Madaros validates no constructor field name. Measured
+  again, that is wrong in a way a reader would act on. The builtin recognises
+  **exactly one** name, `value`, and its presence admits every other name in the
+  literal, at any position:
+
+  | literal | result |
+  |---|---|
+  | `Knowledge { value: 1.0 }` | `check: OK` |
+  | `Knowledge { variance: 1.0 }` | **`error[E012]`** |
+  | `Knowledge { confidence: 1.0 }` | **`error[E012]`** |
+  | `Knowledge { epsilon: 1.0 }` | **`error[E012]`** |
+  | `Knowledge { provenance: 1.0 }` | **`error[E012]`** |
+  | `Knowledge { qualquer: 1.0, coisa: 2.0 }` | **`error[E012]`** |
+  | `Knowledge { value: 1.0, epsilom: 0.42 }` | `check: OK` |
+  | `Knowledge { epsilom: 0.42, value: 1.0 }` | `check: OK` |
+
+  So a wholly-invented literal **is** refused. What is not refused is an invented
+  name travelling beside `value`. The defect is not absent validation — it is
+  validation satisfied by a single witness.
+
+  This matters for §8.2.5's own subject: the dissertation literal opens with
+  `value:`, which licenses `variance`, `epsilon` and `provenance` to be accepted
+  without any of them being recognised. `epsilon:` is admitted and bound to
+  nothing, which is why `.epsilon` reads `0.0`.
+
 - **Madaros does not validate constructor field names at all.** Negative control
   (`docs/audit/repro/epsilon/neg_epsilom.sio`): a literal writing the invented
   name `epsilom: 0.42` is accepted by Madaros with `check: OK`, rc=0, and **no
