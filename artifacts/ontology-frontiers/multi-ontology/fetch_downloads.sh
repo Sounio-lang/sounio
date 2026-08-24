@@ -33,10 +33,28 @@
 # returns 200, and regenerating from it reproduces the committed pato_* artifacts BYTE FOR
 # BYTE in 2 s (gen_chebi_data.py --only pato).  So it is fetched and checksummed like cl.
 #
-# UNPINNED (chebi only).  Its versionIRI names release 254, and obo/chebi/254/chebi.owl is
-# a 404; the undated purl serves EBI's current file, which turns over every ChEBI release.
-# So there is no URL that reliably returns the input the committed chebi_* artifacts came
-# from.  Skipped unless you pass --unpinned, and what you get is whatever is current.
+# UNPINNED (chebi only), and MEASURED to be unrecoverable — 2026-08-24.  Its versionIRI
+# names release 254, obo/chebi/254/chebi.owl is a 404, and the undated purl serves EBI's
+# current file, which turns over each release.  The question of whether "current" happens
+# to be the input behind the committed chebi_* artifacts was settled by running it:
+#
+#   downloaded chebi.owl   865,772,908 bytes, sha256 4557df5b6683...,
+#                          versionIRI .../chebi/254/chebi.owl
+#   regenerated (76 s)     chebi_classes.tsv, chebi_elplus_tbox.txt, chebi_packed.txt
+#                          ALL THREE DIFFER from the committed copies
+#   classes                218,254 committed vs 218,421 from release 254  (+167)
+#   packed header          role-edge counts move ~10%, e.g. 29,846,298 -> 26,844,129
+#                          and 22,643,261 -> 19,631,739
+#
+# So the committed chebi_* artifacts came from an OLDER, UNRECORDED release, and release
+# 254 is not a substitute: the derived closure counts are what the drivers report and what
+# RESULTS.md and the technical note quote.  Nothing in this repository names the release
+# used, and EBI does not serve old ones at a stable URL.
+#
+# CONSEQUENCE: chebi.owl cannot be pinned, and the chebi_* artifacts must stay committed —
+# they are the only surviving record of that input.  Deleting them loses information.
+# Adopting 254 is possible but is a measurement change, not a cleanup: regenerate, then
+# update every number quoted from them.
 
 set -euo pipefail
 
