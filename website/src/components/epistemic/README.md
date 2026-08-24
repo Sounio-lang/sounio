@@ -24,6 +24,22 @@ Gate ladder **E0 → E5** with a per-card **ceiling** and **verdict**:
 - E0 Syntax · E1 HIR Type · E2 Effect Lattice · E3 GUM Variance Bounds ·
   E4 Lean 4 Formal Proof · E5 Closed-form Theorem
 
+Verdict tokens bind via `data-verdict` on the root — no inline colour styles.
+
+### Sizes
+
+| `size` | Use |
+|--------|-----|
+| `default` | Playground and standalone exhibits (`/proof`) |
+| `compact` | Dense panels (`HonestyArgument`) — hides step labels visually, keeps `aria-label` on each step |
+
+### Accessibility
+
+- Screen-reader summary + `aria-labelledby` on the card
+- Ladder steps: `aria-current="step"` on the ceiling gate
+- Unreached steps: dashed border (not colour alone)
+- External link: `aria-label` includes “opens in new tab”
+
 Used on `/proof` (`EpistemicGateExhibit`) and `/honesty` (`HonestyArgument`).
 
 ## Sibling components
