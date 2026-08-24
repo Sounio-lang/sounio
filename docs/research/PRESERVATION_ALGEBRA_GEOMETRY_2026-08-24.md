@@ -497,3 +497,62 @@ open thread is the exact Levi type of the null contraction (dim-9 semisimple par
 and whether the `so(4,1)` / `so(3,2)` de Sitter vs anti-de Sitter split (base-split
 vs doubly-split, §ladder) corresponds to a physical dS/AdS distinction of the
 invariant's composition causality.
+
+---
+
+## DEEPEST: the conformal (Kantor–Koecher–Tits) algebra — Carrollian is BMS
+
+The TKK conformal Lie algebra `co(P_z) = g₋₁ ⊕ g₀ ⊕ g₊₁` (`g₀ = str(P_z)`,
+Jordan-triple brackets) was constructed directly and **verified as a genuine Lie
+algebra (Jacobi = 0 exactly, both triple-product conventions)**. The earlier
+attempt failed Jacobi; the fix was to carry each `g₀` element as the *pair* of
+actions `(V(a,b), −V(b,a))` on `g₋₁`/`g₊₁` (not `−V(a,b)ᵀ`). Real forms identified
+by Killing signature:
+
+| causal type of `z` | `Der(P_z)` (kinematic) | `co(P_z)` (conformal / KKT) |
+|---|---|---|
+| spacelike → Euclidean | `so(5)` | **`so(7,1)`** — dim 28, semisimple, Killing `(7,21)` |
+| timelike → Lorentzian | `so(4,1)` | **`so(5,3)`** — dim 28, semisimple, Killing `(15,13)` |
+| null → Carrollian | Carroll-contraction | **`so(2,2) ⋉ ℝ¹²`** — dim 18, **radical abelian** (BMS-type) |
+
+**The findings.**
+- The two nondegenerate conformal algebras `so(7,1)` and `so(5,3)` are **distinct
+  real forms of the same complexification `so(8,ℂ)`**. Moving a privacy locus from
+  spacelike to timelike changes the *real form* of its conformal symmetry — the
+  same phenomenon seen one floor down (`so(5)`→`so(4,1)`), now at the conformal
+  level.
+- The **null (Carrollian) conformal algebra is BMS-type**: non-semisimple, dim 18,
+  Levi part `so(2,2) ≅ sl(2,ℝ)⊕sl(2,ℝ)` acting on a **12-dimensional ABELIAN
+  radical** (verified: max internal bracket `≈ 1.8·10⁻¹⁵`). That is precisely the
+  structure of a Bondi–Metzner–Sachs / conformal-Carroll algebra: a finite
+  "superrotation" part semidirect an abelian ideal of "supertranslations." So the
+  preservation symmetry at a **null** privacy locus is a BMS-type **asymptotic
+  symmetry algebra** — the algebra of flat-space holography and gravitational
+  asymptotics — arising here by İnönü–Wigner contraction driven by the associator.
+
+### The full stack — four verified layers, one datum
+
+```
+zero-divisor z  (causal type under the square-form Q)
+   │ rung law (84/84)
+   ▼ signature            Euclidean         Carrollian            Lorentzian     [GEOMETRY]
+   │ monomial kernel ⇒ dim 2³−2=6
+   ▼ Jordan spin factor   J_spin(5)         degenerate            J_spin(4,1)    [JORDAN]
+   │ Der (KKT g₀ part)
+   ▼ kinematic Lie        so(5)             Carroll-contraction   so(4,1)        [KINEMATIC]
+   │ Kantor–Koecher–Tits
+   ▼ conformal Lie        so(7,1)           so(2,2)⋉ℝ¹² (BMS)     so(5,3)        [CONFORMAL]
+```
+
+Four algebraic layers — geometry, Jordan algebra, kinematic Lie symmetry, conformal
+Lie symmetry — **all indexed by one datum: the causal type of the privacy locus
+`z`.** Spacelike↔timelike is a *real-form change* at every level; spacelike/timelike
+↔ null is an *İnönü–Wigner contraction* at every level (semisimple → non-semisimple
+with abelian radical), driven by the non-associativity concentrated on the doubling
+generator. The Carrollian branch lands on the BMS algebra of asymptotic gravity.
+
+Verified: `scratchpad/tkk3.py` (Jacobi = 0, Killing signatures), `carroll.py`
+(abelian radical). Open: the exact BMS-level identification (which conformal-Carroll
+/ BMS_d variant), and whether the `so(7,1)`↔`so(5,3)` real-form pair and the dS/AdS
+question (base-split vs doubly-split) carry physical meaning for composition
+causality.
