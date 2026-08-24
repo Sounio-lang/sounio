@@ -83,6 +83,7 @@ pub struct SctEntry {
 }
 
 pub struct Certificate {
+    version: i32,
     tbs_start: i64,
     tbs_len: i64,
     outer_sig_alg_oid: [u8; 20],
@@ -90,7 +91,6 @@ pub struct Certificate {
     outer_signature: [u8; 512],
     outer_signature_len: i32,
 
-    version: i32,
     serial_number: BigInt,
     tbs_sig_alg_oid: [u8; 20],
     tbs_sig_alg_oid_len: i32,
@@ -207,13 +207,13 @@ pub fn certificate_zero() -> Certificate {
     ]
 
     Certificate {
+        version: 0,
         tbs_start: 0,
         tbs_len: 0,
         outer_sig_alg_oid: [0; 20],
         outer_sig_alg_oid_len: 0,
         outer_signature: [0; 512],
         outer_signature_len: 0,
-        version: 0,
         serial_number: bigint_zero(),
         tbs_sig_alg_oid: [0; 20],
         tbs_sig_alg_oid_len: 0,
@@ -240,3 +240,303 @@ pub fn certificate_zero() -> Certificate {
         sct_count: 0,
     }
 }
+
+// UTCTime (YYMMDDHHMMSSZ) -> Unix timestamp. Per RFC 5280 SS4.1.2.5.1, a
+// two-digit year YY is 20YY if YY < 50, else 19YY -- this project only ever
+// decodes CURRENT/recent certificates, so every real YY it sees is < 50
+// (20xx), but the rule is implemented per the standard regardless. Uses
+// only additions and small-constant multiplications on i64 day/second
+// counts -- no operation here approaches bit 63.
+fn parse_utc_time_to_unix(buf: &RawBuf, start: i64, len: i64) -> i64 with IO {
+    // "YYMMDDHHMMSSZ" is exactly 13 bytes.
+    if len != 13 {
+        return 0 - 1
+    }
+    let yy = ((rawbuf_get(buf, start) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 1) & 255) - 48)
+    let year_full = if yy < 50 { 2000 + yy } else { 1900 + yy }
+    let mm = ((rawbuf_get(buf, start + 2) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 3) & 255) - 48)
+    let dd = ((rawbuf_get(buf, start + 4) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 5) & 255) - 48)
+    let hh = ((rawbuf_get(buf, start + 6) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 7) & 255) - 48)
+    let min = ((rawbuf_get(buf, start + 8) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 9) & 255) - 48)
+    let ss = ((rawbuf_get(buf, start + 10) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 11) & 255) - 48)
+    unix_timestamp_from_ymdhms(year_full, mm, dd, hh, min, ss)
+}
+
+// Days-from-civil algorithm (Howard Hinnant's well-known public-domain
+// civil_from_days inverse), avoiding any library date function this
+// project doesn't have. All intermediate values stay far below 2^32, let
+// alone i64's bit 63.
+fn unix_timestamp_from_ymdhms(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    var y = year
+    if month <= 2 {
+        y = y - 1
+    }
+    let era = if y >= 0 { y } else { y - 399 }
+    let era_div = era / 400
+    let yoe = y - era_div * 400
+    var mp: i64 = month + 9
+    if mp >= 12 {
+        mp = mp - 12
+    } else {
+        mp = month - 3
+    }
+    // (month+9)%12 computed via the branch above since this project avoids
+    // relying on '%' with any operand shape not already proven safe.
+    let doy = (153 * mp + 2) / 5 + day - 1
+    let yoe_leap_adj = yoe / 4 - yoe / 100
+    let doe = yoe * 365 + yoe_leap_adj + doy
+    let days_since_epoch = era_div * 146097 + doe - 719468
+    days_since_epoch * 86400 + hour * 3600 + minute * 60 + second
+}
+
+// Returns, alongside the parsed Certificate, the DerReader positioned
+// immediately after subjectPublicKeyInfo -- i.e. exactly where an optional
+// [3] extensions field would begin, if present. Task 7's outer-assembly
+// function needs this position to find the extensions block without
+// re-walking the same fields a second time.
+pub fn x509_parse_tbs_core(buf: &RawBuf, tbs_reader: &DerReader) -> (Certificate, DerReader, i64) with IO {
+    var cert = certificate_zero()
+    var cursor = DerReader { buf_ptr: tbs_reader.buf_ptr, pos: tbs_reader.pos, end: tbs_reader.end }
+
+    let (r1, t1, s1) = der_read_tlv(&cursor)
+    if s1 != DER_OK {
+        return (cert, cursor, s1)
+    }
+
+    var version: i32 = 0
+    var after_version = cursor
+    if t1.class == DER_CLASS_CONTEXT && t1.tag_number == 0 {
+        // Explicit [0] version wrapper -- descend, read the inner INTEGER.
+        let (inner, e0) = der_enter(&cursor, &t1)
+        if e0 != DER_OK {
+            return (cert, cursor, e0)
+        }
+        let (inner2, ver_tag, s2) = der_read_tlv(&inner)
+        if s2 != DER_OK {
+            return (cert, cursor, s2)
+        }
+        let (ver_bigint, s3) = der_read_integer(&inner, &ver_tag)
+        if s3 != DER_OK {
+            return (cert, cursor, s3)
+        }
+        version = bigint_to_small_i32(&ver_bigint)
+        let (adv, s4) = der_next(&cursor, &t1)
+        if s4 != DER_OK {
+            return (cert, cursor, s4)
+        }
+        after_version = adv
+        let (r2, t2, s5) = der_read_tlv(&after_version)
+        if s5 != DER_OK {
+            return (cert, cursor, s5)
+        }
+        let (serial, s6) = der_read_integer(&after_version, &t2)
+        if s6 != DER_OK {
+            return (cert, cursor, s6)
+        }
+        cert.serial_number = serial
+        let (after_serial, s7) = der_next(&after_version, &t2)
+        if s7 != DER_OK {
+            return (cert, cursor, s7)
+        }
+        return x509_parse_tbs_after_serial(buf, &after_serial, cert, version)
+    } else {
+        // No [0] wrapper: version defaults to 0 (v1), and t1/r1 IS the
+        // serialNumber INTEGER already read.
+        let (serial, s6) = der_read_integer(&cursor, &t1)
+        if s6 != DER_OK {
+            return (cert, cursor, s6)
+        }
+        cert.serial_number = serial
+        let (after_serial, s7) = der_next(&cursor, &t1)
+        if s7 != DER_OK {
+            return (cert, cursor, s7)
+        }
+        return x509_parse_tbs_after_serial(buf, &after_serial, cert, 0)
+    }
+}
+
+fn bigint_to_small_i32(v: &BigInt) -> i32 {
+    if v.len == 0 {
+        return 0
+    }
+    v.limbs[0] as i32   // version is always 0/1/2 -- fits in the low limb trivially
+}
+
+fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate, version: i32) -> (Certificate, DerReader, i64) with IO {
+    var cert = cert_in
+    // Never copy a struct via `*r` (this branch's established discipline) --
+    // rebuild a fresh DerReader by reading r's fields individually whenever
+    // an error return needs "the reader unchanged" as its second tuple slot.
+    let r_copy = DerReader { buf_ptr: r.buf_ptr, pos: r.pos, end: r.end }
+
+    // signature AlgorithmIdentifier
+    let (r1, t1, s1) = der_read_tlv(r)
+    if s1 != DER_OK { return (cert, r_copy, s1) }
+    let (alg_inner, e1) = der_enter(r, &t1)
+    if e1 != DER_OK { return (cert, r_copy, e1) }
+    let (alg_inner2, oid_tag, s2) = der_read_tlv(&alg_inner)
+    if s2 != DER_OK { return (cert, r_copy, s2) }
+    if oid_tag.tag_number != DER_TAG_OBJECT_IDENTIFIER { return (cert, r_copy, X509_ERR_MALFORMED) }
+    var oid_buf: [u8; 20] = [0; 20]
+    var oi: i64 = 0
+    while oi < oid_tag.content_len {
+        oid_buf[oi as usize] = (rawbuf_get(buf, oid_tag.content_start + oi) & 255) as u8
+        oi = oi + 1
+    }
+    cert.tbs_sig_alg_oid = oid_buf
+    cert.tbs_sig_alg_oid_len = oid_tag.content_len as i32
+    let (after_sig_alg, s3) = der_next(r, &t1)
+    if s3 != DER_OK { return (cert, r_copy, s3) }
+
+    // issuer Name
+    let (r2, t2, s4) = der_read_tlv(&after_sig_alg)
+    if s4 != DER_OK { return (cert, after_sig_alg, s4) }
+    let (issuer, s5) = x509_parse_name(buf, &after_sig_alg, &t2)
+    if s5 != DER_OK { return (cert, after_sig_alg, s5) }
+    cert.issuer = issuer
+    let (after_issuer, s6) = der_next(&after_sig_alg, &t2)
+    if s6 != DER_OK { return (cert, after_sig_alg, s6) }
+
+    // validity SEQUENCE { Time, Time }
+    let (r3, t3, s7) = der_read_tlv(&after_issuer)
+    if s7 != DER_OK { return (cert, after_issuer, s7) }
+    let (validity_inner, e2) = der_enter(&after_issuer, &t3)
+    if e2 != DER_OK { return (cert, after_issuer, e2) }
+    let (v1, nb_tag, s8) = der_read_tlv(&validity_inner)
+    if s8 != DER_OK { return (cert, after_issuer, s8) }
+    cert.not_before_unix = parse_utc_time_to_unix(buf, nb_tag.content_start, nb_tag.content_len)
+    let (after_nb, s9) = der_next(&validity_inner, &nb_tag)
+    if s9 != DER_OK { return (cert, after_issuer, s9) }
+    let (v2, na_tag, s10) = der_read_tlv(&after_nb)
+    if s10 != DER_OK { return (cert, after_issuer, s10) }
+    cert.not_after_unix = parse_utc_time_to_unix(buf, na_tag.content_start, na_tag.content_len)
+    let (after_validity, s11) = der_next(&after_issuer, &t3)
+    if s11 != DER_OK { return (cert, after_issuer, s11) }
+
+    // subject Name
+    let (r4, t4, s12) = der_read_tlv(&after_validity)
+    if s12 != DER_OK { return (cert, after_validity, s12) }
+    let (subject, s13) = x509_parse_name(buf, &after_validity, &t4)
+    if s13 != DER_OK { return (cert, after_validity, s13) }
+    cert.subject = subject
+    let (after_subject, s14) = der_next(&after_validity, &t4)
+    if s14 != DER_OK { return (cert, after_validity, s14) }
+
+    // subjectPublicKeyInfo SEQUENCE { AlgorithmIdentifier, BIT STRING }
+    let (r5, t5, s15) = der_read_tlv(&after_subject)
+    if s15 != DER_OK { return (cert, after_subject, s15) }
+    let (spki_inner, e3) = der_enter(&after_subject, &t5)
+    if e3 != DER_OK { return (cert, after_subject, e3) }
+    let (spki_inner2, spki_alg_tag, s16) = der_read_tlv(&spki_inner)
+    if s16 != DER_OK { return (cert, after_subject, s16) }
+    let (after_spki_alg, s17) = der_next(&spki_inner, &spki_alg_tag)
+    if s17 != DER_OK { return (cert, after_subject, s17) }
+    let (spki_inner3, bitstr_tag, s18) = der_read_tlv(&after_spki_alg)
+    if s18 != DER_OK { return (cert, after_subject, s18) }
+    if bitstr_tag.tag_number != DER_TAG_BIT_STRING { return (cert, after_subject, X509_ERR_MALFORMED) }
+    // BIT STRING's first content byte is the "unused bits" count (always 0
+    // for a byte-aligned RSAPublicKey); the RSAPublicKey DER starts at the
+    // next byte.
+    let rsa_key_start = bitstr_tag.content_start + 1
+    let rsa_key_len = bitstr_tag.content_len - 1
+    let rsa_key_reader = DerReader { buf_ptr: after_spki_alg.buf_ptr, pos: rsa_key_start, end: rsa_key_start + rsa_key_len }
+    let (r6, rsa_seq_tag, s19) = der_read_tlv(&rsa_key_reader)
+    if s19 != DER_OK { return (cert, after_subject, s19) }
+    let (rsa_inner, e4) = der_enter(&rsa_key_reader, &rsa_seq_tag)
+    if e4 != DER_OK { return (cert, after_subject, e4) }
+    let (rsa_inner2, mod_tag, s20) = der_read_tlv(&rsa_inner)
+    if s20 != DER_OK { return (cert, after_subject, s20) }
+    let (modulus, s21) = der_read_integer(&rsa_inner, &mod_tag)
+    if s21 != DER_OK { return (cert, after_subject, s21) }
+    cert.modulus = modulus
+    let (after_mod, s22) = der_next(&rsa_inner, &mod_tag)
+    if s22 != DER_OK { return (cert, after_subject, s22) }
+    let (rsa_inner3, exp_tag, s23) = der_read_tlv(&after_mod)
+    if s23 != DER_OK { return (cert, after_subject, s23) }
+    let (exponent, s24) = der_read_integer(&after_mod, &exp_tag)
+    if s24 != DER_OK { return (cert, after_subject, s24) }
+    cert.public_exponent = exponent
+    // The BIT STRING (containing the RSAPublicKey) was read via a SEPARATE
+    // child reader (rsa_key_reader) scoped inside the BIT STRING's own
+    // content -- advancing past the whole subjectPublicKeyInfo field in the
+    // OUTER cursor uses der_skip on after_subject/t5 (the SPKI SEQUENCE's
+    // own tag), not anything derived from rsa_key_reader.
+    let (after_spki, s25) = der_skip(&after_subject, &t5)
+    if s25 != DER_OK { return (cert, after_subject, s25) }
+    cert.version = version
+
+    (cert, after_spki, X509_OK)
+}
+
+// Parses a Name (SEQUENCE OF RelativeDistinguishedName, each RDN a SET OF
+// AttributeTypeAndValue) into an X509Name. Only the first AttributeTypeAndValue
+// of each RDN SET is read (multi-valued RDNs -- more than one attribute in a
+// single SET -- are rare in practice; capturing just the first is a
+// documented, acceptable simplification, not a silent drop, since real CA
+// certificates essentially never issue genuinely multi-valued RDNs).
+fn x509_parse_name(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> (X509Name, i64) with IO {
+    var name = x509_name_zero()
+    let (seq_inner, e0) = der_enter(r, tag)
+    if e0 != DER_OK { return (name, e0) }
+
+    var cursor = seq_inner
+    var count: i32 = 0
+    while der_at_end(&cursor) == false {
+        if count >= X509_MAX_RDN_ENTRIES {
+            return (name, X509_ERR_TOO_MANY_ENTRIES)
+        }
+        let (c1, rdn_set_tag, s1) = der_read_tlv(&cursor)
+        if s1 != DER_OK { return (name, s1) }
+        let (rdn_inner, e1) = der_enter(&cursor, &rdn_set_tag)
+        if e1 != DER_OK { return (name, e1) }
+        let (atv_inner, atv_tag, s2) = der_read_tlv(&rdn_inner)
+        if s2 != DER_OK { return (name, s2) }
+        let (atv_seq_inner, e2) = der_enter(&rdn_inner, &atv_tag)
+        if e2 != DER_OK { return (name, e2) }
+        let (oid_inner, oid_tag, s3) = der_read_tlv(&atv_seq_inner)
+        if s3 != DER_OK { return (name, s3) }
+        var oid_buf: [u8; 20] = [0; 20]
+        var oi: i64 = 0
+        while oi < oid_tag.content_len && oi < 20 {
+            oid_buf[oi as usize] = (rawbuf_get(buf, oid_tag.content_start + oi) & 255) as u8
+            oi = oi + 1
+        }
+        let (after_oid, s4) = der_next(&atv_seq_inner, &oid_tag)
+        if s4 != DER_OK { return (name, s4) }
+        let (val_inner, val_tag, s5) = der_read_tlv(&after_oid)
+        if s5 != DER_OK { return (name, s5) }
+        if val_tag.content_len > X509_MAX_NAME_VALUE_LEN {
+            return (name, X509_ERR_VALUE_TOO_LONG)
+        }
+        var val_buf: [u8; 128] = [0; 128]
+        var vi: i64 = 0
+        while vi < val_tag.content_len {
+            val_buf[vi as usize] = (rawbuf_get(buf, val_tag.content_start + vi) & 255) as u8
+            vi = vi + 1
+        }
+
+        // NOTE: a whole-element array-of-struct reassignment
+        // (name.entries[count] = RdnEntry { ... }) was measured on
+        // 2026-08-24 to corrupt the destination -- the `value` field of
+        // the written element ends up holding `oid`'s first byte instead
+        // of `value`'s own content (see task-5-report.md for the full
+        // repro). This contradicts the array-of-nested-struct audit this
+        // struct's own comment cites as having passed. Field-by-field
+        // assignment into the existing array element (below) avoids the
+        // whole-struct-literal write path and was independently verified
+        // correct byte-for-byte.
+        name.entries[count as usize].oid = oid_buf
+        name.entries[count as usize].oid_len = oid_tag.content_len as i32
+        name.entries[count as usize].value_tag = val_tag.tag_number
+        name.entries[count as usize].value = val_buf
+        name.entries[count as usize].value_len = val_tag.content_len as i32
+        count = count + 1
+
+        let (next_cursor, sk) = der_skip(&cursor, &rdn_set_tag)
+        if sk != DER_OK { return (name, sk) }
+        cursor = next_cursor
+    }
+    name.count = count
+    (name, X509_OK)
+}
+
