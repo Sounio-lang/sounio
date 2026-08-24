@@ -747,3 +747,112 @@ byte-array constant whose value (not just individual bytes) will be
 copied or passed by reference — OID byte sequences, magic-number byte
 prefixes, fixed binary headers — must use this function form, never a bare
 `const [u8; N]`, regardless of how few elements it has.**
+
+## Finding 19 — a multi-element array literal returned directly from a function body mistypes as `[i64;N]`, even when the function's declared return type is a narrower element type
+
+Found by Task 3's implementer while building `stdlib/crypto/pkcs1.sio` (RFC 8017
+DigestInfo prefix constants). Confirmed independently by the controller with a
+minimal repro.
+
+```sio
+fn f() -> [u8; 3] {
+    [1, 2, 3]     // WRONG -- error[E008]: return value does not match
+                  // function's declared return type. The compiler infers
+                  // the bare literal as [i64; 3], not [u8; 3], and never
+                  // reconciles it against the function's declared return
+                  // type.
+}
+```
+
+**Workaround:** bind the literal to an explicitly-typed `let` first, then
+return the binding:
+
+```sio
+fn f() -> [u8; 3] {
+    let r: [u8; 3] = [1, 2, 3]
+    r
+}
+```
+
+This is the same shape of fix as Finding 18's workaround (type annotation
+on an intermediate binding forces the correct element type), but the
+trigger here is a `return`-position literal, not a `const` declaration.
+
+## Finding 20 — `rawbuf_set(buf, i, v)` writes one correct byte and zeroes the next 7
+
+Found by Task 3's implementer while building `bigint_to_bytes_be` in
+`stdlib/crypto/pkcs1.sio`. Confirmed independently by the controller with a
+minimal repro: fill a 20-byte `RawBuf` with sentinel `200` at every
+position via a loop, then call `rawbuf_set(&out, 5, 77)` and read back all
+20 positions.
+
+Actual: positions 0-4 stayed `200` (untouched); position 5 became `77`
+(correct); positions 6-12 (the next 7 bytes) became `0`; positions 13-19
+stayed `200` (untouched). This is the write-side counterpart to the
+already-documented Finding 3 (`rawbuf_get`/pointer dereference reads a
+full 8-byte word, hence the existing `& 255` mask on reads) — the write
+path performs a full 8-byte store at the target address instead of a
+single-byte store, clobbering the 7 bytes above the target with zero
+while leaving the target byte itself correct.
+
+**Workaround:** when filling a buffer byte-by-byte, write in ASCENDING
+address order (lowest index first). Under this bug, every write to index
+`i` zeroes indices `i+1..i+7`; writing ascending means each later write's
+clobber lands only on bytes that haven't been meaningfully written yet
+(or that a still-later write will overwrite correctly). Writing in
+DESCENDING order (as `bigint_to_bytes_be`'s natural big-endian, most-
+significant-limb-last derivation would otherwise do) causes every
+earlier, more-significant-byte write to be zeroed by every subsequent
+write, corrupting nearly the whole buffer.
+
+**Unresolved residual risk, not yet acted on:** the final write in any
+ascending-order loop can still clobber up to 7 bytes PAST THE END of a
+tightly-sized buffer. `pkcs1_v15_verify`'s use of
+`rawbuf_new(modulus_byte_len)` (e.g. exactly 256 bytes for RSA-2048) adds
+no headroom for this. It did not manifest observably in the shipped
+RSA-2048 test (the allocator evidently had slack past the requested size)
+but is a real, unaddressed out-of-bounds-write risk in `rawbuf_set` itself
+— anyone doing a security/safety pass over `stdlib/net/socket.sio` (where
+`rawbuf_set` lives) should budget every call site's buffer with 7 bytes of
+trailing slack, or fix `rawbuf_set` to perform a true single-byte store.
+
+## Finding 21 (unconfirmed — reported by implementer, not independently reproduced by controller) — claimed cross-module corruption of `bignum::bigint::bigint_modpow`'s top limb on a real RSA-2048 vector
+
+Task 3's implementer reported that calling the imported, unmodified,
+already-shipped-and-reviewed `bigint_modpow` (from the BigInt sub-project)
+across a module boundary on the real RSA-2048/SHA-256 test vector (see
+`tests/run-pass/pkcs1_verify.sio`) returned a `BigInt` whose top limb
+(`.limbs[127]`) was `144` instead of the mathematically correct `1`, while
+other spot-checked limbs (0, 1, 126) were correct. The implementer's
+diagnosis was methodical: an instrumented local copy of the identical
+square-and-multiply algorithm, run side-by-side against an independent
+Python oracle replicating the same 32-iteration algorithm, matched the
+oracle exactly at every iteration including the final one — yet the real
+imported `bigint_modpow` on the identical inputs allegedly returned 144
+once the call crossed the module boundary.
+
+**Controller verification, three independent runs, all clean:** using the
+exact same real 128-limb modulus/signature literals from
+`tests/run-pass/pkcs1_verify.sio`, calling the real unmodified
+`bignum::bigint::bigint_modpow` directly (bypassing the implementer's
+`pkcs1_modpow` workaround entirely) — first with a minimal one-import
+scratch file, then again after adding the fuller `hash::sha256` /
+`net::socket` import set to match `pkcs1.sio`'s real module-import graph
+— consistently returned `em.limbs[127] == 1` (correct), `em.limbs[0] ==
+37992`, `em.limbs[126] == 65535`. No corruption reproduced in any of the
+three runs.
+
+**Disposition:** this finding does NOT meet this document's "confirmed
+independently, twice" bar and is recorded here as unconfirmed rather than
+as a verified compiler defect. The controller was unable to identify a
+distinguishing trigger condition (import graph was ruled out as a factor).
+No further investigation is planned: the implementer's already-shipped
+workaround (a private `pkcs1_modpow` in `stdlib/crypto/pkcs1.sio`, a
+byte-for-byte copy of `bigint_modpow`'s orchestrating loop, still calling
+the imported leaf operations `bigint_mul`/`bigint_mod`/`bigint_from_u32`
+cross-module) is harmless and independently verified correct end-to-end
+against the real RSA-2048 vector regardless of whether Finding 21's root
+cause is real, so no code changes hinge on resolving this discrepancy. If
+a future session reproduces top-limb corruption on a cross-module
+`bigint_modpow` call, this entry should be upgraded to a confirmed
+finding with the actual trigger condition documented.
