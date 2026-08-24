@@ -32,7 +32,7 @@ Commands:
   authorize --agent ID [--lane ID] [--resources RESOURCE ...] [--files PATH ...]
                                  verify that a local active claim covers the requested ownership
   endpoint-register --agent ID --lane ID --harness claude|codex|grok|cursor|kimi
-          --transport tmux|agentd --address ADDRESS --socket PATH
+          --transport tmux|agentd|loom --address ADDRESS --socket PATH
           [--token-file PATH] [--ttl-seconds N]
                                  register an expiring, verified delivery endpoint
   endpoint-unregister --agent ID --lane ID
@@ -256,6 +256,19 @@ agentd_runtime_command() {
     die "agent supervisor runtime is not installed beside ${BASH_SOURCE[0]}"
   fi
   "$helper" "$@"
+}
+
+loom_runtime_command() {
+  local script_dir helper
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  if [[ -x "$script_dir/sounio-loom-runtime" ]]; then
+    helper="$script_dir/sounio-loom-runtime"
+  elif [[ -x "$script_dir/../../bin/sounio-loom" ]]; then
+    helper="$script_dir/../../bin/sounio-loom"
+  else
+    die "Loom runtime is not installed beside ${BASH_SOURCE[0]}"
+  fi
+  (cd "$WORKTREE" && "$helper" "$@")
 }
 
 slug() {
@@ -752,6 +765,43 @@ agentd_endpoint_snapshot() {
     -n "$A_COMMAND" ]]
 }
 
+loom_endpoint_snapshot() {
+  local agent="$1" lane="$2" socket="$3" token_file="$4" output line
+  A_STATE=''
+  A_AGENT=''
+  A_LANE=''
+  A_SESSION_ID=''
+  A_WORKTREE=''
+  A_INSTANCE_ID=''
+  A_DAEMON_PID=''
+  A_DAEMON_PID_START=''
+  A_HARNESS_PID=''
+  A_HARNESS_PID_START=''
+  A_COMMAND=''
+  output="$(loom_runtime_command status --machine --agent "$agent" --lane "$lane" \
+    --cwd "$WORKTREE" --socket "$socket" --token-file "$token_file" 2>/dev/null)" || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      state=*) A_STATE="${line#state=}" ;;
+      agent=*) A_AGENT="${line#agent=}" ;;
+      lane=*) A_LANE="${line#lane=}" ;;
+      session_id=*) A_SESSION_ID="${line#session_id=}" ;;
+      worktree=*) A_WORKTREE="${line#worktree=}" ;;
+      instance_id=*) A_INSTANCE_ID="${line#instance_id=}" ;;
+      daemon_pid=*) A_DAEMON_PID="${line#daemon_pid=}" ;;
+      daemon_pid_start=*) A_DAEMON_PID_START="${line#daemon_pid_start=}" ;;
+      harness_pid=*) A_HARNESS_PID="${line#harness_pid=}" ;;
+      harness_pid_start=*) A_HARNESS_PID_START="${line#harness_pid_start=}" ;;
+      command=*) A_COMMAND="${line#command=}" ;;
+    esac
+  done <<< "$output"
+  [[ "$A_STATE" == active && "$A_AGENT" == "$agent" && "$A_LANE" == "$lane" && \
+    -n "$A_SESSION_ID" && -n "$A_WORKTREE" && -n "$A_INSTANCE_ID" && \
+    "$A_DAEMON_PID" =~ ^[1-9][0-9]*$ && "$A_DAEMON_PID_START" =~ ^[1-9][0-9]*$ && \
+    "$A_HARNESS_PID" =~ ^[1-9][0-9]*$ && "$A_HARNESS_PID_START" =~ ^[1-9][0-9]*$ && \
+    -n "$A_COMMAND" ]]
+}
+
 harness_command_matches() {
   local harness="$1" command="$2"
   case "$harness" in
@@ -994,9 +1044,14 @@ endpoint_state() {
         return 1
       fi
       ;;
-    agentd)
+    agentd|loom)
       [[ -S "$E_SOCKET" && -f "$E_TOKEN_FILE" ]] || return 1
-      if ! agentd_endpoint_snapshot "$E_AGENT" "$E_LANE" "$E_SOCKET" "$E_TOKEN_FILE"; then
+      if [[ "$E_TRANSPORT" == agentd ]]; then
+        agentd_endpoint_snapshot "$E_AGENT" "$E_LANE" "$E_SOCKET" "$E_TOKEN_FILE" || {
+          ENDPOINT_STATE='drifted'
+          return 1
+        }
+      elif ! loom_endpoint_snapshot "$E_AGENT" "$E_LANE" "$E_SOCKET" "$E_TOKEN_FILE"; then
         ENDPOINT_STATE='drifted'
         return 1
       fi
@@ -1024,6 +1079,11 @@ deliver_registered_endpoint() {
       agentd_runtime_command wake --agent "$E_AGENT" --lane "$E_LANE" \
         --session-id "$E_SESSION_ID" --message-id "$message_id" --prompt "$prompt" \
         --socket "$E_SOCKET" --token-file "$E_TOKEN_FILE" >/dev/null 2>&1
+      ;;
+    loom)
+      loom_runtime_command wake --agent "$E_AGENT" --lane "$E_LANE" \
+        --session-id "$E_SESSION_ID" --message-id "$message_id" --prompt "$prompt" \
+        --cwd "$WORKTREE" --socket "$E_SOCKET" --token-file "$E_TOKEN_FILE" >/dev/null 2>&1
       ;;
     *) return 1 ;;
   esac
@@ -1703,7 +1763,7 @@ endpoint_register_command() {
   [[ -n "$lane" ]] || die "endpoint-register requires --lane"
   [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi)$ ]] || \
     die "--harness must be claude, codex, grok, cursor, or kimi"
-  [[ "$transport" =~ ^(tmux|agentd)$ ]] || die "--transport must be tmux or agentd"
+  [[ "$transport" =~ ^(tmux|agentd|loom)$ ]] || die "--transport must be tmux, agentd, or loom"
   [[ -n "$address" ]] || die "endpoint-register requires --address"
   [[ -n "$socket" ]] || die "endpoint-register requires --socket"
   [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "--ttl-seconds must be a positive integer"
@@ -1729,23 +1789,28 @@ endpoint_register_command() {
       registered_pid="$T_PANE_PID"
       registered_command="$T_COMMAND"
       ;;
-    agentd)
-      [[ -n "$token_file" ]] || die "agentd endpoints require --token-file"
+    agentd|loom)
+      [[ -n "$token_file" ]] || die "$transport endpoints require --token-file"
       token_file="$(readlink -f "$token_file" 2>/dev/null || true)"
       [[ -n "$token_file" && -f "$token_file" ]] || \
-        die "agentd capability file is not available: ${token_file:-missing}"
+        die "$transport capability file is not available: ${token_file:-missing}"
       token_owner="$(stat -c %u "$token_file" 2>/dev/null || true)"
       token_mode="$(stat -c %a "$token_file" 2>/dev/null || true)"
       [[ "$token_owner" == "$(id -u)" && "$token_mode" == 600 ]] || \
-        die "agentd capability file must be owned by the current uid with mode 600"
+        die "$transport capability file must be owned by the current uid with mode 600"
       [[ "$(readlink -f "$address" 2>/dev/null || true)" == "$socket" ]] || \
-        die "agentd address must name its control socket"
-      agentd_endpoint_snapshot "$agent" "$lane" "$socket" "$token_file" || \
-        die "agentd endpoint did not return a verified live identity"
+        die "$transport address must name its control socket"
+      if [[ "$transport" == agentd ]]; then
+        agentd_endpoint_snapshot "$agent" "$lane" "$socket" "$token_file" || \
+          die "agentd endpoint did not return a verified live identity"
+      else
+        loom_endpoint_snapshot "$agent" "$lane" "$socket" "$token_file" || \
+          die "Loom endpoint did not return a verified live identity"
+      fi
       [[ "$A_WORKTREE" == "$WORKTREE" ]] || \
-        die "agentd endpoint belongs to worktree $A_WORKTREE"
+        die "$transport endpoint belongs to worktree $A_WORKTREE"
       harness_command_matches "$harness" "$A_COMMAND" || \
-        die "agentd command $A_COMMAND does not match harness $harness"
+        die "$transport command $A_COMMAND does not match harness $harness"
       registered_address="$socket"
       registered_pid="$A_DAEMON_PID"
       registered_command="$A_COMMAND"
@@ -1759,7 +1824,7 @@ endpoint_register_command() {
   load_claim "$claim_file"
   claim_expired && die "claim expired before endpoint registration: $C_ID"
   [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" ]] || die "claim owner mismatch"
-  if [[ "$transport" == agentd || "$C_WORKTREE" != "$WORKTREE" ]]; then
+  if [[ "$transport" == agentd || "$transport" == loom || "$C_WORKTREE" != "$WORKTREE" ]]; then
     presence_file="$(presence_path "$agent" "$lane")"
     [[ -f "$presence_file" ]] || \
       die "$transport endpoint requires verified process presence"
@@ -1767,11 +1832,11 @@ endpoint_register_command() {
     presence_state || die "$transport process presence is $PRESENCE_STATE: $PRESENCE_REASON"
     [[ "$P_WORKTREE" == "$WORKTREE" ]] || \
       die "process presence belongs to worktree $P_WORKTREE"
-    if [[ "$transport" == agentd ]]; then
+    if [[ "$transport" == agentd || "$transport" == loom ]]; then
       [[ "$PRESENCE_STATE" == live && "$P_HARNESS" == "$harness" && \
         "$P_SESSION_ID" == "$A_SESSION_ID" && "$P_PID" == "$A_HARNESS_PID" && \
         "$P_PID_START" == "$A_HARNESS_PID_START" ]] || \
-        die "agentd identity does not match the live process-presence generation"
+        die "$transport identity does not match the live process-presence generation"
     fi
   fi
   endpoint_paths=("$ENDPOINTS_DIR"/*.endpoint)
