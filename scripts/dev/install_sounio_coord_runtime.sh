@@ -45,6 +45,10 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-agentd-runtime" ]] || \
       die "installed runtime declares agentd transport but omits its implementation: $runtime_id"
   fi
+  if grep -q '^capability=loom-kernel-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" ]] || \
+      die "installed runtime declares Loom but omits its OCaml kernel: $runtime_id"
+  fi
   if grep -q '^capability=fleet-launcher-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-fleet-agent-runtime" ]] || \
       die "installed runtime declares the fleet launcher but omits its implementation: $runtime_id"
@@ -149,6 +153,8 @@ fleet_model_source="$SOURCE_ROOT/formal/tla/SounioFleet.tla"
 fleet_model_config="$SOURCE_ROOT/formal/tla/SounioFleet.cfg"
 fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
+loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
+loom_project="$SOURCE_ROOT/tools/loom"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -161,6 +167,10 @@ fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
   die "fleet model sabotage generator missing or not executable: $fleet_model_generator"
 [[ -x "$fleet_trace_verifier" ]] || \
   die "fleet trace verifier missing or not executable: $fleet_trace_verifier"
+[[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
+[[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_pty_stubs.c" && \
+  -f "$loom_project/src/dune" && -f "$loom_project/dune-project" ]] || \
+  die "Loom OCaml source bundle is incomplete: $loom_project"
 
 version_output="$(cd "$WORKTREE" && "$runtime_source" runtime-version)"
 protocol="$(sed -n 's/^protocol_version=//p' <<< "$version_output" | head -1)"
@@ -181,10 +191,21 @@ fleetd_version_output="$($fleetd_source runtime-version)"
 fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output" | head -1)"
 [[ "$fleetd_protocol" == 1 ]] || die "fleet reconciler protocol must be 1"
 
+"$loom_build_source" >/dev/null
+loom_binary="$loom_project/_build/default/src/loom.exe"
+[[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+loom_version_output="$($loom_binary runtime-version)"
+loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
+loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
+[[ "$loom_protocol" == 1 && "$loom_language" == OCaml ]] || \
+  die "Loom kernel must report protocol 1 and language OCaml"
+
 bundle_sha="$(
   sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
     "$fleet_source" "$fleetd_source" "$fleet_model_source" \
-    "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier" | \
+    "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier" \
+    "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune" \
+    "$loom_project/src/loom.ml" "$loom_project/src/loom_pty_stubs.c" | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
@@ -210,6 +231,7 @@ else
   install -m 0755 "$fleetd_source" "$stage/bin/sounio-fleet-runtime"
   install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
   install -m 0755 "$fleet_trace_verifier" "$stage/bin/sounio-fleet-trace-verify"
+  install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -219,6 +241,7 @@ else
     printf 'agentd_protocol_version=%s\n' "$agentd_protocol"
     printf 'fleet_protocol_version=%s\n' "$fleet_protocol"
     printf 'fleetd_protocol_version=%s\n' "$fleetd_protocol"
+    printf 'loom_protocol_version=%s\n' "$loom_protocol"
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
@@ -229,6 +252,11 @@ else
     printf 'capability=agentd-tui-submit-v1\n'
     printf 'capability=agentd-logical-command-v1\n'
     printf 'capability=agentd-runtime-registration-v1\n'
+    printf 'capability=loom-kernel-v1\n'
+    printf 'capability=loom-cursor-replay-v1\n'
+    printf 'capability=loom-exclusive-input-lease-v1\n'
+    printf 'capability=loom-read-only-gui-v1\n'
+    printf 'capability=loom-coord-transport-v1\n'
     printf 'capability=coord-reply-correlation-v1\n'
     printf 'capability=fleet-launcher-v1\n'
     printf 'capability=fleet-proven-exit-v1\n'
