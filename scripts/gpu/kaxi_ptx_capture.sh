@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
-# Capture golden PTX for all (pattern × mode) combinations from the K-AXI→PTX
+# CAPTURE TOOL -- NOT A GATE. It writes golden PTX and cannot fail.
 ulimit -s unlimited 2>/dev/null || true
-# transpilers in self-hosted/gpu/kaxi_to_ptx.sio. This is the drift oracle
-# for Phase C (5-transpiler unification) -- capture once, then assert
-# byte-identical PTX after refactor via kaxi_ptx_golden_gate.sh.
+#
+# For every (pattern x mode) combination of the K-AXI->PTX transpilers in
+# self-hosted/gpu/kaxi_to_ptx.sio this script records the emitted PTX as a
+# golden file. Combinations that already have a golden are KEPT untouched, and
+# an emitter failure is recorded as a `.unsupported` marker rather than raised.
+# Both are deliberate: capturing must be idempotent and must be able to record
+# an unsupported combination. The consequence is that this script exits 0 no
+# matter what the emitter does, so it is worthless as a check and must never be
+# counted as one. It lived in scripts/ci/ until 2026-08-23 and was counted as a
+# passing gate by the sweep in docs/audit/ZERO_SECOND_GATE_SABOTAGE_2026-08-23.md;
+# replacing bin/kretikos with a script that fails every time AND deleting a
+# golden pair still exited 0.
+#
+# THE ASSERTION LIVES IN scripts/ci/kaxi_ptx_golden_gate.sh. That gate re-emits
+# every combination and demands a byte-identical match against these goldens
+# (and that an `.unsupported` combination has not silently started working).
+# Under the same sabotage it reports FAIL: 318 and exits 1. Do not duplicate
+# that comparison here -- an asserting capture tool could not capture.
 #
 # Usage:
-#   scripts/ci/kaxi_ptx_capture.sh             # only write missing golden files
-#   scripts/ci/kaxi_ptx_capture.sh --force     # overwrite existing goldens
+#   scripts/gpu/kaxi_ptx_capture.sh             # only write missing golden files
+#   scripts/gpu/kaxi_ptx_capture.sh --force     # overwrite existing goldens
 #
 # Output layout:
 #   tests/golden/kaxi_ptx/<mode>/<pattern>.ptx          (when supported)
