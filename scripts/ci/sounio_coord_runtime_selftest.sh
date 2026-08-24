@@ -102,6 +102,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
   loom-signed-continuity-receipt-v2 loom-principal-independence-v1 \
   loom-independent-measurement-v1 \
+  loom-observation-authority-v1 \
   loom-cross-node-replay-v1 \
   loom-exclusive-input-lease-v1 loom-read-only-gui-v1 loom-coord-transport-v1 \
   coord-generation-scoped-wake-v1 \

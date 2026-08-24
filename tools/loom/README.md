@@ -49,6 +49,11 @@ bin/sounio-loom measure-continuity-generation \
   --observer-private-key OBSERVER-PRIVATE.pem \
   --observer-public-key OBSERVER-PUBLIC.pem \
   --out PATH --adapter PATH
+bin/sounio-loom journal-authority-serve \
+  --socket PATH --state-dir PATH \
+  --private-key JOURNAL-PRIVATE.pem --public-key JOURNAL-PUBLIC.pem \
+  --epoch 1
+bin/sounio-loom journal-authority-status --socket PATH
 ```
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
@@ -116,6 +121,28 @@ join them, and only when all four tokens agree. Any disagreement refuses before
 receipts and independent-observer mode and requires the same signer and observer
 key configuration.
 
+Set `SOUNIO_LOOM_REQUIRE_OBSERVATION_AUTHORITY=1` to add a third, write-time
+authority. This mode implies signed receipts, independent measurement, and
+journal authority. Configure `SOUNIO_LOOM_JOURNAL_AUTHORITY_SOCKET`,
+`SOUNIO_LOOM_JOURNAL_AUTHORITY_VERIFY_KEY`, and
+`SOUNIO_LOOM_JOURNAL_AUTHORITY_EPOCH`; run `journal-authority-serve` with the
+matching private key in a separately supervised process. Every semantic and
+Guardian event receives an epoch-scoped Ed25519 signature before append. The
+authority persists one monotonic `(sequence, head)` state per journal context,
+so retries are idempotent but rewrites and forks are refused. Set
+`SOUNIO_LOOM_JOURNAL_AUTHORITY_REVOKED_EPOCHS` to a comma-separated denylist
+when verifying retired or compromised epochs.
+
+Receipt v3 signs the raw generation, fingerprint, semantic checkpoint, and
+Guardian checkpoint together with their domain-separated SHA-256 digests. The
+observer verifies that both signed journal heads occur in the fully verified
+append-only streams, then measures the same checkpoint while binding current
+journal and descriptor digests. Native Sounio receives each SHA-256 value as
+eight canonical 32-bit limbs and admits only exact equality plus pairwise
+disjoint signer, observer, and journal principals. Older receipt v2,
+measurement v1, and pre-spawn `9003`/`9004` modes remain available when the new
+mode is not requested; they make no observation-authority claim.
+
 ## Evidence Boundary
 
 Loom-1.6 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
@@ -160,17 +187,20 @@ refuses the disagreement before spawn; replacing only
 witness. Separate decision and measurement types reject role collapse with
 `E009`, and external agreement construction rejects with `E176`.
 This establishes source-separated measurement of four retained artifacts and
-identifies the Sounio equality rule as load-bearing. It does not establish the
-semantic correctness of those journals or independence from an authority that
-controls journal writes at event time; a consistent-but-false journal and
-matching receipt still agree. It also does not establish organizational,
-process, or hardware independence, collusion resistance, or trusted key
-custody. Compact 60-bit principal-token collisions fail closed with an
-approximately 2^-60 false-refusal risk. The four fact-vector fields are also
-represented as 60-bit tokens: a collision in a genuinely differing field can
-fail open as false agreement, approximately 2^-60 for a one-field mismatch.
-Full-digest equality and separately supervised journal-write authority are the
-next integrity boundary. The real-Pod
+identifies the Sounio equality rule as load-bearing. Observation-authority mode
+closes two bounded weaknesses in that result: fact agreement uses lossless
+SHA-256 values rather than only compact aliases, and journal history requires a
+third principal at write time. In the retained causal controls, a rehashed
+semantic journal plus newly signed decision and observer artifacts is refused
+before spawn because its per-event authority signatures are stale; replacing
+only `journal_authority_signature_is_valid` admits the same witness. A separate
+alias witness is refused by full-digest equality; replacing only
+`full_digest_vectors_agree` admits it. The controls establish that both rules
+are load-bearing. They do not establish organizational, process, hardware, or
+network independence, compromise resistance of the journal key, Byzantine
+consensus, or trusted key custody. Compact 60-bit principal-token collisions
+remain fail-closed false-refusal risks at approximately 2^-60; fact equality no
+longer relies on those compact tokens. The real-Pod
 witness relocated
 compute from `t560-proxmox` to `r740-proxmox` over one retained Ceph RBD RWOP
 PVC. It is not state replication, simultaneous multi-node execution, or a
