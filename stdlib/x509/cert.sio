@@ -8,8 +8,14 @@
 
 use asn1::der::*
 use bignum::bigint::*
+use crypto::pkcs1::*
+use hash::sha1::*
+use hash::sha256::*
+use hash::sha384::*
+use hash::sha512::*
 use net::socket::*
 use x509::oid::*
+use x509::sct::*
 
 pub const X509_MAX_RDN_ENTRIES: i32 = 16
 pub const X509_MAX_NAME_VALUE_LEN: i64 = 128
@@ -927,5 +933,331 @@ pub fn x509_parse_name(buf: &RawBuf, r: &DerReader, tag: &DerTag) -> (X509Name, 
     }
     name.count = count
     (name, X509_OK)
+}
+
+// Certificate ::= SEQUENCE { tbsCertificate TBSCertificate,
+//   signatureAlgorithm AlgorithmIdentifier, signatureValue BIT STRING }
+// (RFC 5280 SS4.1). This is the outer assembly: it wraps
+// x509_parse_tbs_core (Task 5) and x509_parse_extensions/
+// x509_parse_general_names (Task 6), records the exact byte range the
+// signature is computed over (tbs_start/tbs_len), reads the outer
+// signatureAlgorithm + signatureValue, and cross-checks the outer
+// algorithm OID against the TBS's own inner signature algorithm OID (RFC
+// 5280 SS4.1.1.2 requires these two fields to be identical).
+pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with IO {
+    let top = der_reader_new(buf, 0, len)
+    let (top2, cert_seq_tag, s1) = der_read_tlv(&top)
+    if s1 != DER_OK { return (certificate_zero(), s1) }
+    if cert_seq_tag.constructed == false { return (certificate_zero(), X509_ERR_MALFORMED) }
+
+    let (cert_inner, e0) = der_enter(&top, &cert_seq_tag)
+    if e0 != DER_OK { return (certificate_zero(), e0) }
+
+    // Capture the TBSCertificate's own tag-byte position BEFORE der_read_tlv
+    // advances past it -- this position, together with the TLV's own
+    // content_start+content_len below, IS the exact byte range RFC 5280
+    // SS4.1.1.3 says gets hashed for signature verification.
+    let tbs_start_pos = cert_inner.pos
+    let (tbs_reader, tbs_tag, s2) = der_read_tlv(&cert_inner)
+    if s2 != DER_OK { return (certificate_zero(), s2) }
+
+    // DEVIATION FROM THE BRIEF'S DRAFTED CODE (new finding, discovered
+    // during this task): the brief's own code passed `&cert_inner`
+    // directly to x509_parse_tbs_core below. But `cert_inner` at this
+    // point is still positioned AT the TBSCertificate SEQUENCE's own tag
+    // byte (der_read_tlv above does not mutate its input reader -- it only
+    // returns a NEW reader, `tbs_reader`, already advanced past the
+    // header). x509_parse_tbs_core's own contract (see its doc comment and
+    // tests/run-pass/x509_parse_tbs_core.sio's caller) expects a reader
+    // already `der_enter`-ed INTO the TBSCertificate's content (positioned
+    // at the version/serialNumber field, with `end` bounded to the TBS
+    // content only) -- passing the un-entered `cert_inner` instead made
+    // x509_parse_tbs_core try to read the whole TBSCertificate SEQUENCE
+    // tag itself as if it were the version/serialNumber field, corrupting
+    // every subsequent read and eventually manifesting as a spurious
+    // X509_ERR_TOO_MANY_ENTRIES from the issuer/subject RDN loop.
+    // Confirmed via instrumented debug prints during this task (removed
+    // before commit) that this was the first status/error to go non-OK.
+    // Fixed by `der_enter`-ing into `tbs_tag` first, matching Task 5's own
+    // test's calling convention exactly (`der_enter(&top, &tbs_tag)` before
+    // `x509_parse_tbs_core(&buf, &tbs_inner)`) -- also, unlike
+    // `tbs_reader` (der_read_tlv's own returned reader, whose `end` stays
+    // at the OUTER cert_inner's end, not bounded to the TBS content), only
+    // `der_enter`'s result correctly bounds `end` to the TBS's own content,
+    // which x509_parse_tbs_core's `der_at_end(&after_spki)` extensions
+    // check relies on.
+    let (tbs_content_reader, e_tbs) = der_enter(&cert_inner, &tbs_tag)
+    if e_tbs != DER_OK { return (certificate_zero(), e_tbs) }
+
+    // Per Finding 25 (this task's brief): a tuple-destructured local (`let
+    // (parsed, ...) = x509_parse_tbs_core(...)`) does not propagate
+    // `parsed`'s struct type, which would leave every later
+    // `cert.field`/`cert.extensions[i].field` access in THIS function
+    // exposed to Finding 24's corruption. Work around it the same way
+    // tests/run-pass/x509_parse_tbs_core.sio does: declare `cert` FIRST via
+    // a plain call whose single-struct return type IS resolved correctly
+    // (certificate_zero() -> Certificate), then overwrite its value via
+    // plain assignment (not `let`/`var`) -- assignment doesn't touch the
+    // struct-type binding table, so the correct binding survives.
+    var cert = certificate_zero()
+    let (parsed, after_spki, s3) = x509_parse_tbs_core(buf, &tbs_content_reader)
+    if s3 != DER_OK { return (certificate_zero(), s3) }
+    cert = parsed
+    cert.tbs_start = tbs_start_pos
+    cert.tbs_len = (tbs_tag.content_start + tbs_tag.content_len) - tbs_start_pos
+
+    // Optional [3] extensions -- present iff cert.version == 2 (v3) and
+    // after_spki isn't already at the end of the TBSCertificate's content.
+    if cert.version == 2 && der_at_end(&after_spki) == false {
+        let (ec, ext_wrap_tag, es) = der_read_tlv(&after_spki)
+        if es != DER_OK { return (certificate_zero(), es) }
+        if ext_wrap_tag.class == DER_CLASS_CONTEXT && ext_wrap_tag.tag_number == 3 {
+            let (ext_wrap_inner, ee) = der_enter(&after_spki, &ext_wrap_tag)
+            if ee != DER_OK { return (certificate_zero(), ee) }
+            let (ext_list_inner_pre, ext_seq_tag, ess) = der_read_tlv(&ext_wrap_inner)
+            if ess != DER_OK { return (certificate_zero(), ess) }
+            let (ext_list_inner, eei) = der_enter(&ext_wrap_inner, &ext_seq_tag)
+            if eei != DER_OK { return (certificate_zero(), eei) }
+
+            let (extensions, ext_count, is_ca, path_len, key_usage, subj_kid, subj_kid_len, auth_kid, auth_kid_len, ext_status) = x509_parse_extensions(buf, &ext_list_inner)
+            if ext_status != DER_OK { return (certificate_zero(), ext_status) }
+            cert.extensions = extensions
+            cert.extension_count = ext_count
+            cert.is_ca = is_ca
+            cert.path_len_constraint = path_len
+            cert.key_usage_bits = key_usage
+            cert.subject_key_id = subj_kid
+            cert.subject_key_id_len = subj_kid_len
+            cert.authority_key_id = auth_kid
+            cert.authority_key_id_len = auth_kid_len
+
+            // Find SAN/issuerAltName/SCT among the raw extensions list by
+            // OID, copy each one's captured bytes into a fresh small RawBuf
+            // (der_reader_new needs a RawBuf, and ExtensionEntry.value is a
+            // plain [u8;512] array, not one), and decode it.
+            var xi: i32 = 0
+            while xi < ext_count {
+                let entry = cert.extensions[xi as usize]
+                // DEVIATION FROM THE BRIEF'S DRAFTED CODE (new finding,
+                // discovered during this task): the brief's own code
+                // allocated entry_buf at EXACTLY entry.value_len bytes.
+                // rawbuf_set's documented write-side bug (see
+                // stdlib/crypto/pkcs1.sio's bigint_to_bytes_be comment,
+                // "Finding 20"/write-clobber) means each single-byte write
+                // also clobbers the FOLLOWING 7 bytes -- writing this
+                // buffer's own bytes in ascending order is safe for bytes
+                // strictly inside the buffer (each write's clobber is
+                // corrected by the very next iteration's write), but the
+                // LAST byte's clobber reaches 7 bytes PAST an exactly-sized
+                // buffer's end, corrupting whatever the allocator placed
+                // next (observed: this corrupted enough state to make a
+                // LATER, unrelated der_at_end loop never terminate,
+                // manifesting as X509_ERR_TOO_MANY_ENTRIES). Fixed by
+                // allocating 8 bytes of trailing slack, matching this
+                // whole plan's established buffer-padding discipline (e.g.
+                // tests/run-pass/x509_parse_tbs_core.sio's `total_len + 8`).
+                let entry_buf = rawbuf_new((entry.value_len as i64) + 8)
+                var cbi: i64 = 0
+                while cbi < (entry.value_len as i64) {
+                    rawbuf_set(&entry_buf, cbi, (entry.value[cbi as usize] as i64) & 255)
+                    cbi = cbi + 1
+                }
+                let entry_reader = der_reader_new(&entry_buf, 0, entry.value_len as i64)
+
+                // Per Finding 18: call each OID accessor once into a local
+                // `let` before taking a reference to it.
+                let oid_san = oid_ext_subject_alt_name()
+                let oid_ian = oid_ext_issuer_alt_name()
+                let oid_sct = oid_ext_sct_list()
+                if oid_eq3(&entry.oid, entry.oid_len, &oid_san) {
+                    let (san_c, san_tag, san_s) = der_read_tlv(&entry_reader)
+                    if san_s == DER_OK {
+                        let (san_list, san_count, san_status) = x509_parse_general_names(&entry_buf, &entry_reader, &san_tag)
+                        if san_status == DER_OK {
+                            cert.san_entries = san_list
+                            cert.san_count = san_count
+                        }
+                    }
+                } else if oid_eq3(&entry.oid, entry.oid_len, &oid_ian) {
+                    let (ian_c, ian_tag, ian_s) = der_read_tlv(&entry_reader)
+                    if ian_s == DER_OK {
+                        let (ian_list, ian_count, ian_status) = x509_parse_general_names(&entry_buf, &entry_reader, &ian_tag)
+                        if ian_status == DER_OK {
+                            cert.issuer_alt_names = ian_list
+                            cert.issuer_alt_name_count = ian_count
+                        }
+                    }
+                } else if oid_eq10(&entry.oid, entry.oid_len, &oid_sct) {
+                    // extnValue is itself an OCTET STRING wrapping the
+                    // actual RFC 6962 length-prefixed bytes -- one more
+                    // DER unwrap before sct_list_decode sees the real data.
+                    let (sct_c, sct_octet_tag, sct_s) = der_read_tlv(&entry_reader)
+                    if sct_s == DER_OK {
+                        let (scts, sct_count, sct_status) = sct_list_decode(&entry_buf, sct_octet_tag.content_start, sct_octet_tag.content_len)
+                        if sct_status == DER_OK {
+                            cert.sct_entries = scts
+                            cert.sct_count = sct_count
+                        }
+                    }
+                }
+                xi = xi + 1
+            }
+        }
+    }
+
+    let (after_tbs, sk1) = der_skip(&cert_inner, &tbs_tag)
+    if sk1 != DER_OK { return (certificate_zero(), sk1) }
+
+    let (c2, outer_alg_tag, s4) = der_read_tlv(&after_tbs)
+    if s4 != DER_OK { return (certificate_zero(), s4) }
+    let (outer_alg_inner, e1) = der_enter(&after_tbs, &outer_alg_tag)
+    if e1 != DER_OK { return (certificate_zero(), e1) }
+    let (outer_oid_reader, outer_oid_tag, s5) = der_read_tlv(&outer_alg_inner)
+    if s5 != DER_OK { return (certificate_zero(), s5) }
+    var outer_oid_buf: [u8; 20] = [0; 20]
+    var ooi: i64 = 0
+    while ooi < outer_oid_tag.content_len && ooi < 20 {
+        outer_oid_buf[ooi as usize] = (rawbuf_get(buf, outer_oid_tag.content_start + ooi) & 255) as u8
+        ooi = ooi + 1
+    }
+    cert.outer_sig_alg_oid = outer_oid_buf
+    cert.outer_sig_alg_oid_len = outer_oid_tag.content_len as i32
+
+    if oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &cert.tbs_sig_alg_oid, cert.tbs_sig_alg_oid_len) == false {
+        return (cert, X509_ERR_SIG_ALG_MISMATCH)
+    }
+
+    let (after_outer_alg, sk2) = der_skip(&after_tbs, &outer_alg_tag)
+    if sk2 != DER_OK { return (certificate_zero(), sk2) }
+
+    let (c3, sig_tag, s6) = der_read_tlv(&after_outer_alg)
+    if s6 != DER_OK { return (certificate_zero(), s6) }
+    if sig_tag.tag_number != DER_TAG_BIT_STRING { return (certificate_zero(), X509_ERR_MALFORMED) }
+    // Skip the leading "unused bits" byte, same as the RSAPublicKey BIT
+    // STRING handling in Task 5.
+    let sig_bytes_start = sig_tag.content_start + 1
+    let sig_bytes_len = sig_tag.content_len - 1
+    if sig_bytes_len > X509_MAX_SIGNATURE_LEN { return (certificate_zero(), X509_ERR_VALUE_TOO_LONG) }
+    var sig_buf: [u8; 512] = [0; 512]
+    var si: i64 = 0
+    while si < sig_bytes_len {
+        sig_buf[si as usize] = (rawbuf_get(buf, sig_bytes_start + si) & 255) as u8
+        si = si + 1
+    }
+    cert.outer_signature = sig_buf
+    cert.outer_signature_len = sig_bytes_len as i32
+
+    (cert, X509_OK)
+}
+
+pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer_modulus: &BigInt, issuer_exponent: &BigInt) -> bool with IO {
+    var hash_algorithm: i32 = 0
+    // Per Finding 18: call each OID accessor once into a local `let`
+    // before taking a reference to it.
+    let oid_s1 = oid_sha1_with_rsa()
+    let oid_s256 = oid_sha256_with_rsa()
+    let oid_s384 = oid_sha384_with_rsa()
+    let oid_s512 = oid_sha512_with_rsa()
+    if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s1) {
+        hash_algorithm = PKCS1_HASH_SHA1
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s256) {
+        hash_algorithm = PKCS1_HASH_SHA256
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s384) {
+        hash_algorithm = PKCS1_HASH_SHA384
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s512) {
+        hash_algorithm = PKCS1_HASH_SHA512
+    } else {
+        return false   // unsupported algorithm -- see spec Non-Goals (no ECDSA/Ed25519)
+    }
+
+    var message_hash: [u8; 64] = [0; 64]
+    var message_hash_len: i64 = 0
+
+    // stdlib/hash/*'s shaN(buf, len) functions always hash starting at
+    // buf's own offset 0 -- they have no "start offset" parameter. Since
+    // the TBSCertificate bytes to hash live at cert.tbs_start > 0 inside a
+    // larger buffer, copy exactly that byte range into a fresh RawBuf
+    // (offset 0) before hashing, rather than extending stdlib/hash/*'s
+    // signatures (which would touch already-reviewed, already-shipped code
+    // outside this plan's scope for no other benefit).
+    // Same trailing-slack fix as entry_buf above (rawbuf_set's write-side
+    // clobber reaches 7 bytes past an exactly-sized buffer's end).
+    let tbs_copy = rawbuf_new(cert.tbs_len + 8)
+    var ci: i64 = 0
+    while ci < cert.tbs_len {
+        rawbuf_set(&tbs_copy, ci, rawbuf_get(buf, cert.tbs_start + ci))
+        ci = ci + 1
+    }
+    if hash_algorithm == PKCS1_HASH_SHA1 {
+        let h = sha1(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 20 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 20
+    } else if hash_algorithm == PKCS1_HASH_SHA256 {
+        let h = sha256(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 32 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 32
+    } else if hash_algorithm == PKCS1_HASH_SHA384 {
+        let h = sha384(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 48 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 48
+    } else {
+        let h = sha512(&tbs_copy, cert.tbs_len)
+        var hi: i64 = 0
+        while hi < 64 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 64
+    }
+
+    // Same trailing-slack fix as entry_buf above.
+    let sig_buf = rawbuf_new((cert.outer_signature_len as i64) + 8)
+    var sbi: i64 = 0
+    while sbi < (cert.outer_signature_len as i64) {
+        rawbuf_set(&sig_buf, sbi, (cert.outer_signature[sbi as usize] as i64) & 255)
+        sbi = sbi + 1
+    }
+    let signature_bigint = bytes_be_to_bigint(&sig_buf, cert.outer_signature_len as i64)
+
+    let modulus_byte_len = bigint_byte_length(issuer_modulus)
+    pkcs1_v15_verify(&signature_bigint, issuer_modulus, issuer_exponent, modulus_byte_len, hash_algorithm, &message_hash, message_hash_len)
+}
+
+// Big-endian bytes -> BigInt. Same byte-by-byte bigint_mul-by-256-then-
+// bigint_add composition stdlib/asn1/der.sio's der_read_integer already
+// uses for the identical conceptual conversion -- reused here rather than
+// re-derived, since it's already proven correct and safe (Finding 11-aware:
+// every intermediate stays within BigInt's own limb-bounded arithmetic).
+fn bytes_be_to_bigint(buf: &RawBuf, len: i64) -> BigInt with IO {
+    var acc = bigint_zero()
+    let base256 = bigint_from_u32(256)
+    var i: i64 = 0
+    while i < len {
+        let byte_val = rawbuf_get(buf, i) & 255
+        let digit = bigint_from_u32(byte_val as u32)
+        let scaled = bigint_mul(&acc, &base256)
+        acc = bigint_add(&scaled, &digit)
+        i = i + 1
+    }
+    acc
+}
+
+// The minimal big-endian byte length of v's magnitude -- v.len limbs is
+// 2*v.len bytes UNLESS the most-significant limb's own high byte is zero,
+// in which case the true minimal encoding is one byte shorter. This is
+// PKCS#1's `k` parameter: the modulus's own encoded byte length, which
+// must be exact (not merely "wide enough"), since pkcs1_v15_verify pads
+// the recovered EM to exactly this many bytes.
+fn bigint_byte_length(v: &BigInt) -> i64 {
+    if v.len == 0 {
+        return 0
+    }
+    let top_limb = v.limbs[(v.len - 1) as usize]
+    let top_byte = (top_limb as i64) >> 8
+    if top_byte == 0 {
+        (v.len as i64) * 2 - 1
+    } else {
+        (v.len as i64) * 2
+    }
 }
 
