@@ -45,7 +45,7 @@ stdlib/x509/sct.sio          -- Task 4: RFC 6962 SCT list decoder
 - Test: `tests/run-pass/x509_array_of_struct_audit.sio`, `tests/run-pass/x509_oid_compare.sio`
 
 **Interfaces:**
-- Produces: OID byte constants (see Step 3) and `fn oid_eq(a: &[u8; 20], a_len: i32, b: &[u8; 20], b_len: i32) -> bool`.
+- Produces: OID byte constants (see Step 3) and `fn oid_eq(a: &[u8; 20], a_len: i32, b: &[u8; 20], b_len: i32) -> bool` (for comparing two already-decoded OIDs) plus `oid_eq3`/`oid_eq8`/`oid_eq9`/`oid_eq10` (for comparing a decoded OID against one of this file's fixed-width constants, matching the constant's own declared width).
 
 - [ ] **Step 1: Write the array-of-struct audit test**
 
@@ -102,6 +102,22 @@ fn main() with IO {
     assert(via_index[0].a == 99)
     println("check (c) field write through array index: PASSED")
 
+    // Check (d): whole-element copy-by-index-READ into a local `let` --
+    // e.g. `let entry = arr[i]` -- distinct from checks (a)/(c) above,
+    // which read/write individual FIELDS through an index, not the whole
+    // struct value at once. This exact pattern is used later in this
+    // plan (Task 7's extension-list walk: `let entry = cert.extensions[xi
+    // as usize]`). Low risk if (a)/(c) both passed, but worth its own
+    // direct check rather than assuming it transfers.
+    var copy_src: [FlatEntry; 2] = [
+        FlatEntry { a: 111, b: [1, 1, 1, 1] },
+        FlatEntry { a: 222, b: [2, 2, 2, 2] },
+    ]
+    let copied = copy_src[1]
+    assert(copied.a == 222)
+    assert(copied.b[0] == 2)
+    println("check (d) whole-element copy-by-index-read: PASSED")
+
     println("x509_array_of_struct_audit: all checks passed")
 }
 ```
@@ -115,7 +131,7 @@ Run the test. Three independent outcomes are possible for checks (a)/(b)/(c) —
 - **If check (a) FAILS**: STOP immediately. Report BLOCKED. This means arrays of structs do not work AT ALL on this compiler, which invalidates this entire plan's data-structure design (`RdnEntry`, `ExtensionEntry`, `SctEntry` are all flat structs used in arrays) — this is a controller-level plan redesign, not something to improvise a workaround for yourself. Do not proceed to Step 3 or any later task.
 - **If check (a) PASSES but check (b) FAILS**: proceed with the plan as designed, EXCEPT `GeneralName.directory_name: X509Name` (Task 2, Step 3) must use the documented fallback: drop the `directory_name: X509Name` field entirely and let `directoryName`-tagged SAN entries fall through to the same raw-bytes handling as `x400Address`/`ediPartyName` (i.e. `GeneralName` becomes a purely flat struct, no nested struct field, consistent with what check (a) proved safe). Record this ruling in your report; the controller will carry it into Task 2's dispatch.
 - **If both (a) and (b) PASS**: proceed with the plan exactly as designed, including the nested `X509Name` field in `GeneralName`.
-- **Check (c)'s result does not gate anything** — it only determines whether later tasks may use `arr[i].field = x` directly (if it passed) or must use whole-element reassignment (if it failed, which is already proven safe by checks (a)/(b) passing). Record which form works so later task briefs can be precise about which pattern to use.
+- **Checks (c) and (d)'s results do not gate anything** — they only determine which exact access forms later tasks may use directly. If check (c) failed, use whole-element reassignment instead of `arr[i].field = x` (already proven safe by (a)/(b) passing). If check (d) failed (whole-element copy-by-index-read, `let entry = arr[i]`, does not work even though (a)/(b) do), Task 7's extension-list walk (`let entry = cert.extensions[xi as usize]`) must instead access fields directly off the indexed expression without an intermediate copy (`cert.extensions[xi as usize].oid`, `cert.extensions[xi as usize].oid_len`, etc., matching whatever check (a)/(c) already proved works) — record this in your report so Task 7's dispatch can be precise about which form to use. Record which of (c)/(d) work so later task briefs can be precise.
 
 - [ ] **Step 3: Implement `stdlib/x509/oid.sio`**
 
@@ -186,7 +202,67 @@ pub fn oid_eq(a: &[u8; 20], a_len: i32, b: &[u8; 20], b_len: i32) -> bool {
 }
 ```
 
-Note: `oid_eq` takes fixed `&[u8; 20]` for both sides, but the constants above are `[u8; N]` for varying `N` (3, 8, 9, or 10) — a caller comparing a decoded OID (stored in a `[u8; 20]` field, per the spec's `X509_MAX_OID_BYTES = 20`) against e.g. `OID_COMMON_NAME` (`[u8; 3]`) cannot pass `OID_COMMON_NAME` directly to `oid_eq` without first copying it into a `[u8; 20]`-shaped local. Task 2 defines a small helper for this (`oid_const_into_buf`) once the array-of-struct audit's outcome is known and the rest of the data model is being written — this task does not need to solve that yet, since `oid_eq` alone (comparing two already-`[u8;20]`-shaped buffers) is independently testable now.
+`oid_eq` alone only compares two already-`[u8;20]`-shaped buffers — every OID constant above is a differently-sized `[u8;N]` (`N` = 3, 8, 9, or 10), which cannot be passed directly where `oid_eq` expects `&[u8;20]` (Sounio array types are size-distinct: `[u8;3]` and `[u8;20]` are different types). Add one small width-specific comparison function per width this file's constants actually use, appended to the same code block above:
+
+```sio
+pub fn oid_eq3(a: &[u8; 20], a_len: i32, b: &[u8; 3]) -> bool {
+    if a_len != 3 {
+        return false
+    }
+    var i: i32 = 0
+    while i < 3 {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn oid_eq8(a: &[u8; 20], a_len: i32, b: &[u8; 8]) -> bool {
+    if a_len != 8 {
+        return false
+    }
+    var i: i32 = 0
+    while i < 8 {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn oid_eq9(a: &[u8; 20], a_len: i32, b: &[u8; 9]) -> bool {
+    if a_len != 9 {
+        return false
+    }
+    var i: i32 = 0
+    while i < 9 {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn oid_eq10(a: &[u8; 20], a_len: i32, b: &[u8; 10]) -> bool {
+    if a_len != 10 {
+        return false
+    }
+    var i: i32 = 0
+    while i < 10 {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+```
+
+`oid_eq` (the original, `[u8;20]`-vs-`[u8;20]`) stays too — it's the right tool for comparing two ALREADY-DECODED OIDs against each other (e.g. Task 7's outer-vs-inner signature-algorithm cross-check, `cert.outer_sig_alg_oid` vs `cert.tbs_sig_alg_oid`, both `[u8;20]` fields), which none of the width-specific functions above handle.
 
 - [ ] **Step 4: Write and run the OID comparison test**
 
@@ -1368,19 +1444,19 @@ pub fn x509_parse_extensions(buf: &RawBuf, r: &DerReader) -> ([ExtensionEntry; 3
         // a fresh DerReader scoped to those bytes to decode it.
         var ext_value_reader = DerReader { buf_ptr: buf.ptr, pos: value_tag.content_start, end: value_tag.content_start + value_tag.content_len }
 
-        if oid_eq(&oid_buf, oid_tag.content_len as i32, &OID_EXT_BASIC_CONSTRAINTS, 3) {
+        if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_BASIC_CONSTRAINTS) {
             let (bc, s8) = x509_decode_basic_constraints(&ext_value_reader)
             let (bc_is_ca, bc_path_len) = bc
             is_ca = bc_is_ca
             path_len_constraint = bc_path_len
-        } else if oid_eq(&oid_buf, oid_tag.content_len as i32, &OID_EXT_KEY_USAGE, 3) {
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_KEY_USAGE) {
             let (ku, s9) = x509_decode_key_usage(buf, &ext_value_reader)
             key_usage_bits = ku
-        } else if oid_eq(&oid_buf, oid_tag.content_len as i32, &OID_EXT_SUBJECT_KEY_IDENTIFIER, 3) {
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_SUBJECT_KEY_IDENTIFIER) {
             let (kid, kid_len) = x509_decode_key_identifier(buf, &ext_value_reader)
             subj_kid = kid
             subj_kid_len = kid_len
-        } else if oid_eq(&oid_buf, oid_tag.content_len as i32, &OID_EXT_AUTHORITY_KEY_IDENTIFIER, 3) {
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_AUTHORITY_KEY_IDENTIFIER) {
             let (kid2, kid_len2) = x509_decode_key_identifier(buf, &ext_value_reader)
             auth_kid = kid2
             auth_kid_len = kid_len2
@@ -1694,7 +1770,7 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                 }
                 let entry_reader = der_reader_new(&entry_buf, 0, entry.value_len as i64)
 
-                if oid_eq(&entry.oid, entry.oid_len, &OID_EXT_SUBJECT_ALT_NAME, 3) {
+                if oid_eq3(&entry.oid, entry.oid_len, &OID_EXT_SUBJECT_ALT_NAME) {
                     let (san_c, san_tag, san_s) = der_read_tlv(&entry_reader)
                     if san_s == DER_OK {
                         let (san_list, san_count, san_status) = x509_parse_general_names(&entry_buf, &entry_reader, &san_tag)
@@ -1703,7 +1779,7 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                             cert.san_count = san_count
                         }
                     }
-                } else if oid_eq(&entry.oid, entry.oid_len, &OID_EXT_ISSUER_ALT_NAME, 3) {
+                } else if oid_eq3(&entry.oid, entry.oid_len, &OID_EXT_ISSUER_ALT_NAME) {
                     let (ian_c, ian_tag, ian_s) = der_read_tlv(&entry_reader)
                     if ian_s == DER_OK {
                         let (ian_list, ian_count, ian_status) = x509_parse_general_names(&entry_buf, &entry_reader, &ian_tag)
@@ -1712,7 +1788,7 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                             cert.issuer_alt_name_count = ian_count
                         }
                     }
-                } else if oid_eq(&entry.oid, entry.oid_len, &OID_EXT_SCT_LIST, 10) {
+                } else if oid_eq10(&entry.oid, entry.oid_len, &OID_EXT_SCT_LIST) {
                     // extnValue is itself an OCTET STRING wrapping the
                     // actual RFC 6962 length-prefixed bytes -- one more
                     // DER unwrap before sct_list_decode sees the real data.
@@ -1777,13 +1853,13 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
 
 pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer_modulus: &BigInt, issuer_exponent: &BigInt) -> bool with IO {
     var hash_algorithm: i32 = 0
-    if oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA1_WITH_RSA, 9) {
+    if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA1_WITH_RSA) {
         hash_algorithm = PKCS1_HASH_SHA1
-    } else if oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA256_WITH_RSA, 9) {
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA256_WITH_RSA) {
         hash_algorithm = PKCS1_HASH_SHA256
-    } else if oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA384_WITH_RSA, 9) {
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA384_WITH_RSA) {
         hash_algorithm = PKCS1_HASH_SHA384
-    } else if oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA512_WITH_RSA, 9) {
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA512_WITH_RSA) {
         hash_algorithm = PKCS1_HASH_SHA512
     } else {
         return false   // unsupported algorithm -- see spec Non-Goals (no ECDSA/Ed25519)
