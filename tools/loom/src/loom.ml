@@ -354,6 +354,59 @@ let journal_authority_socket () =
   | Some path when path <> "" -> path
   | _ -> failf "sounio-journal-authority-socket-missing"
 
+type journal_authority_member = {
+  member_socket : string;
+  member_public_key : string;
+  member_principal_id : string;
+}
+
+type journal_authority_configuration =
+  | Single_journal_authority of journal_authority_member
+  | Journal_authority_quorum of {
+      required : int;
+      members : journal_authority_member list;
+    }
+
+let indexed_journal_authority_member index =
+  let socket_name =
+    Printf.sprintf "SOUNIO_LOOM_JOURNAL_AUTHORITY_%d_SOCKET" index
+  in
+  let key_name =
+    Printf.sprintf "SOUNIO_LOOM_JOURNAL_AUTHORITY_%d_VERIFY_KEY" index
+  in
+  let socket =
+    match Sys.getenv_opt socket_name with
+    | Some path when path <> "" -> path
+    | _ -> failf "sounio-journal-authority-quorum-member-%d-socket-missing" index
+  in
+  let public_key =
+    match Sys.getenv_opt key_name with
+    | Some path when path <> "" -> regular_key_path "public" path
+    | _ -> failf "sounio-journal-authority-quorum-member-%d-key-missing" index
+  in
+  { member_socket = socket; member_public_key = public_key;
+    member_principal_id = journal_principal_id public_key }
+
+let journal_authority_configuration () =
+  match Sys.getenv_opt "SOUNIO_LOOM_JOURNAL_AUTHORITY_QUORUM" with
+  | None | Some "" ->
+      let public_key = journal_authority_public_key () in
+      Single_journal_authority
+        { member_socket = journal_authority_socket (); member_public_key = public_key;
+          member_principal_id = journal_principal_id public_key }
+  | Some value ->
+      let required = positive_epoch "quorum" value in
+      if required <> 2 then failf "sounio-journal-authority-quorum-must-be-two";
+      let members =
+        [ indexed_journal_authority_member 1;
+          indexed_journal_authority_member 2;
+          indexed_journal_authority_member 3 ]
+      in
+      let principals = List.map (fun member -> member.member_principal_id) members in
+      if List.length (List.sort_uniq String.compare principals) <> 3 then
+        failf "sounio-journal-authority-quorum-principals-not-disjoint";
+      Journal_authority_quorum { required; members }
+
 let journal_authority_payload context_digest epoch principal_id seq previous
     event_hash =
   Printf.sprintf
@@ -414,6 +467,9 @@ let json_quote value =
     value;
   Buffer.add_char buffer '"';
   Buffer.contents buffer
+
+let json_string_list values =
+  "[" ^ String.concat "," (List.map json_quote values) ^ "]"
 
 type json_value =
   | Json_object of (string * json_value) list
@@ -680,6 +736,29 @@ let descriptor_text fields =
   |> List.map (fun (key, value) -> key ^ "=" ^ value ^ "\n")
   |> String.concat ""
 
+type journal_authority_stamp = {
+  context_digest : string;
+  epoch : int;
+  principal_id : string;
+  signature : string;
+}
+
+type journal_authority_member_stamp = {
+  quorum_principal_id : string;
+  quorum_signature : string option;
+}
+
+type journal_authority_quorum_certificate = {
+  quorum_context_digest : string;
+  quorum_epoch : int;
+  quorum_required : int;
+  quorum_members : journal_authority_member_stamp list;
+}
+
+type journal_authority_proof =
+  | Single_authority_stamp of journal_authority_stamp
+  | Quorum_authority_certificate of journal_authority_quorum_certificate
+
 type journal_event = {
   seq : int;
   previous : string;
@@ -687,14 +766,7 @@ type journal_event = {
   utc : string;
   kind : string;
   payload_hex : string;
-  authority : journal_authority_stamp option;
-}
-
-and journal_authority_stamp = {
-  context_digest : string;
-  epoch : int;
-  principal_id : string;
-  signature : string;
+  authority : journal_authority_proof option;
 }
 
 type journal = {
@@ -714,11 +786,25 @@ let encode_event (event : journal_event) =
   | None ->
       Printf.sprintf "%d\t%s\t%s\t%s\t%s\t%s\n" event.seq event.previous
         event.hash event.utc event.kind event.payload_hex
-  | Some stamp ->
+  | Some (Single_authority_stamp stamp) ->
       Printf.sprintf "%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n"
         event.seq event.previous event.hash event.utc event.kind
         event.payload_hex stamp.context_digest stamp.epoch stamp.principal_id
         stamp.signature
+  | Some (Quorum_authority_certificate certificate) ->
+      let fields =
+        List.fold_left
+          (fun fields member ->
+            fields
+            @ [ member.quorum_principal_id;
+                (match member.quorum_signature with Some value -> value | None -> "-") ])
+          [ string_of_int event.seq; event.previous; event.hash; event.utc;
+            event.kind; event.payload_hex; certificate.quorum_context_digest;
+            string_of_int certificate.quorum_epoch; "quorum-v1";
+            string_of_int certificate.quorum_required ]
+          certificate.quorum_members
+      in
+      String.concat "\t" fields ^ "\n"
 
 let journal_context_digest path =
   let generation_dir = Filename.dirname path in
@@ -735,40 +821,78 @@ let journal_authority_context path =
     | "journal.tsv" | "guardian.tsv" -> Some (journal_context_digest path)
     | _ -> None
 
-let request_journal_authority_stamp directory context_digest seq previous
-    event_hash =
-  let epoch = journal_authority_expected_epoch () in
-  if journal_authority_epoch_is_revoked epoch then
-    failf "sounio-journal-authority-epoch-revoked:%d" epoch;
-  let public_key = journal_authority_public_key () in
-  let expected_principal = journal_principal_id public_key in
+let request_journal_authority_member_stamp directory context_digest epoch seq
+    previous event_hash member =
   let request =
     String.concat "\t"
       [ "SOUNIO_JOURNAL_AUTHORITY_V1"; "SIGN"; context_digest;
         string_of_int seq; previous; event_hash ]
     ^ "\n"
   in
-  let response =
-    journal_authority_exchange (journal_authority_socket ()) request
-  in
+  let response = journal_authority_exchange member.member_socket request in
   match split_on '\t' response with
   | [ "OK"; "SIGNED"; stored_epoch; principal_id; signature ] ->
       let stored_epoch = positive_epoch "response-epoch" stored_epoch in
       if stored_epoch <> epoch then
         failf "sounio-journal-authority-epoch-mismatch";
-      if principal_id <> expected_principal then
+      if principal_id <> member.member_principal_id then
         failf "sounio-journal-authority-principal-mismatch";
       let payload =
         journal_authority_payload context_digest epoch principal_id seq previous
           event_hash
       in
       if not
-           (journal_authority_signature_is_valid public_key directory payload
+           (journal_authority_signature_is_valid member.member_public_key directory payload
               signature)
       then failf "sounio-journal-authority-signature-invalid";
-      Some { context_digest; epoch; principal_id; signature }
+      signature
   | [ "REFUSE"; reason ] -> failf "sounio-journal-authority-refused:%s" reason
   | _ -> failf "sounio-journal-authority-invalid-response"
+
+let request_journal_authority_stamp directory context_digest seq previous
+    event_hash =
+  let epoch = journal_authority_expected_epoch () in
+  if journal_authority_epoch_is_revoked epoch then
+    failf "sounio-journal-authority-epoch-revoked:%d" epoch;
+  match journal_authority_configuration () with
+  | Single_journal_authority member ->
+      let signature =
+        request_journal_authority_member_stamp directory context_digest epoch seq
+          previous event_hash member
+      in
+      Some
+        (Single_authority_stamp
+           { context_digest; epoch; principal_id = member.member_principal_id;
+             signature })
+  | Journal_authority_quorum { required; members } ->
+      let quorum_members =
+        List.map
+          (fun member ->
+            let signature =
+              try
+                Some
+                  (request_journal_authority_member_stamp directory context_digest
+                     epoch seq previous event_hash member)
+              with
+              | Unix_error _ | Sys_error _ | Loom_error _ -> None
+            in
+            { quorum_principal_id = member.member_principal_id;
+              quorum_signature = signature })
+          members
+      in
+      let valid =
+        List.fold_left
+          (fun count member ->
+            match member.quorum_signature with Some _ -> count + 1 | None -> count)
+          0 quorum_members
+      in
+      if valid < required then
+        failf "sounio-journal-authority-quorum-unsatisfied:valid=%d:required=%d"
+          valid required;
+      Some
+        (Quorum_authority_certificate
+           { quorum_context_digest = context_digest; quorum_epoch = epoch;
+             quorum_required = required; quorum_members })
 
 let append_event journal kind payload =
   let seq = journal.seq + 1 in
@@ -806,15 +930,44 @@ let parse_event line =
       let epoch = positive_epoch "event-epoch" epoch in
       { seq; previous; hash; utc; kind; payload_hex;
         authority =
-          Some { context_digest; epoch; principal_id; signature } }
-  | _ -> failf "journal record does not have six or ten fields"
+          Some
+            (Single_authority_stamp
+               { context_digest; epoch; principal_id; signature }) }
+  | [ seq; previous; hash; utc; kind; payload_hex; context_digest; epoch;
+      "quorum-v1"; required; principal_a; signature_a; principal_b;
+      signature_b; principal_c; signature_c ] ->
+      let seq =
+        try int_of_string seq
+        with _ -> failf "journal sequence is not an integer"
+      in
+      let epoch = positive_epoch "event-epoch" epoch in
+      let required = positive_epoch "event-quorum" required in
+      let member principal signature =
+        { quorum_principal_id = principal;
+          quorum_signature = if signature = "-" then None else Some signature }
+      in
+      { seq; previous; hash; utc; kind; payload_hex;
+        authority =
+          Some
+            (Quorum_authority_certificate
+               { quorum_context_digest = context_digest; quorum_epoch = epoch;
+                 quorum_required = required;
+                 quorum_members =
+                   [ member principal_a signature_a;
+                     member principal_b signature_b;
+                     member principal_c signature_c ] }) }
+  | _ -> failf "journal record does not have six, ten, or sixteen fields"
 
 let verify_journal_event_authority path (event : journal_event) =
   match (journal_authority_required (), event.authority) with
   | false, None -> ()
   | true, None ->
       failf "sounio-journal-authority-event-unsigned seq=%d" event.seq
-  | _, Some stamp ->
+  | _, Some (Single_authority_stamp stamp) ->
+      (match Sys.getenv_opt "SOUNIO_LOOM_JOURNAL_AUTHORITY_QUORUM" with
+      | Some value when value <> "" ->
+          failf "sounio-journal-authority-event-single-proof-in-quorum-mode"
+      | _ -> ());
       let public_key = journal_authority_public_key () in
       let expected_principal = journal_principal_id public_key in
       let expected_epoch = journal_authority_expected_epoch () in
@@ -834,6 +987,59 @@ let verify_journal_event_authority path (event : journal_event) =
            (journal_authority_signature_is_valid public_key
               (Filename.dirname path) payload stamp.signature)
       then failf "sounio-journal-authority-event-signature-invalid seq=%d" event.seq
+  | _, Some (Quorum_authority_certificate certificate) ->
+      let required, configured =
+        match journal_authority_configuration () with
+        | Single_journal_authority _ ->
+            failf "sounio-journal-authority-event-quorum-proof-in-single-mode"
+        | Journal_authority_quorum config -> (config.required, config.members)
+      in
+      let expected_epoch = journal_authority_expected_epoch () in
+      if journal_authority_epoch_is_revoked certificate.quorum_epoch then
+        failf "sounio-journal-authority-epoch-revoked:%d"
+          certificate.quorum_epoch;
+      if certificate.quorum_epoch <> expected_epoch then
+        failf "sounio-journal-authority-event-epoch-mismatch seq=%d" event.seq;
+      if certificate.quorum_required <> required then
+        failf "sounio-journal-authority-event-quorum-mismatch seq=%d" event.seq;
+      if certificate.quorum_context_digest <> journal_context_digest path then
+        failf "sounio-journal-authority-event-context-mismatch seq=%d" event.seq;
+      let rec verify_members valid configured stamped =
+        match (configured, stamped) with
+        | [], [] -> valid
+        | member :: configured_tail, stamp :: stamped_tail ->
+            if stamp.quorum_principal_id <> member.member_principal_id then
+              failf
+                "sounio-journal-authority-event-principal-mismatch seq=%d"
+                event.seq;
+            let valid =
+              match stamp.quorum_signature with
+              | None -> valid
+              | Some signature ->
+                  let payload =
+                    journal_authority_payload certificate.quorum_context_digest
+                      certificate.quorum_epoch stamp.quorum_principal_id event.seq
+                      event.previous event.hash
+                  in
+                  if not
+                       (journal_authority_signature_is_valid member.member_public_key
+                          (Filename.dirname path) payload signature)
+                  then
+                    failf
+                      "sounio-journal-authority-event-signature-invalid seq=%d"
+                      event.seq;
+                  valid + 1
+            in
+            verify_members valid configured_tail stamped_tail
+        | _ ->
+            failf "sounio-journal-authority-event-member-count-mismatch seq=%d"
+              event.seq
+      in
+      let valid = verify_members 0 configured certificate.quorum_members in
+      if valid < required then
+        failf
+          "sounio-journal-authority-event-quorum-unsatisfied seq=%d valid=%d required=%d"
+          event.seq valid required
 
 type journal_phase = Initial | Active | Exited
 
@@ -3296,6 +3502,10 @@ type sounio_continuity_status = {
   observation_authority_verified : bool;
   full_digest_agreement_verified : bool;
   journal_authority_principal_id : string;
+  journal_authority_principal_ids : string list;
+  journal_authority_required_quorum : int;
+  journal_authority_min_valid_signatures : int;
+  journal_authority_quorum_verified : bool;
   journal_authority_epoch : int;
   journal_authority_checkpoint_digest : string;
 }
@@ -3602,6 +3812,9 @@ type independently_measured_generation = {
   measured_descriptor_digest : string;
   measured_fact_digests : continuity_fact_digests;
   measured_journal_authority_principal_id : string;
+  measured_journal_authority_principal_ids : string list;
+  measured_journal_authority_required_quorum : int;
+  measured_journal_authority_min_valid_signatures : int;
   measured_journal_authority_epoch : int;
   measured_journal_authority_checkpoint_digest : string;
 }
@@ -3763,26 +3976,71 @@ let signed_continuity_expected_verdict facts =
     Some "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v3 authenticity=ed25519+independent-observer"
   else None
 
+type journal_authority_stream_identity = {
+  stream_principal_ids : string list;
+  stream_epoch : int;
+  stream_required_quorum : int;
+  stream_min_valid_signatures : int;
+}
+
+let journal_authority_proof_identity = function
+  | Single_authority_stamp stamp ->
+      { stream_principal_ids = [ stamp.principal_id ]; stream_epoch = stamp.epoch;
+        stream_required_quorum = 1; stream_min_valid_signatures = 1 }
+  | Quorum_authority_certificate certificate ->
+      let principals =
+        List.map (fun member -> member.quorum_principal_id)
+          certificate.quorum_members
+      in
+      let valid =
+        List.fold_left
+          (fun count member ->
+            match member.quorum_signature with Some _ -> count + 1 | None -> count)
+          0 certificate.quorum_members
+      in
+      { stream_principal_ids = principals;
+        stream_epoch = certificate.quorum_epoch;
+        stream_required_quorum = certificate.quorum_required;
+        stream_min_valid_signatures = valid }
+
 let journal_event_authority_identity events =
   let saw_unsigned, identity =
     List.fold_left
       (fun (saw_unsigned, identity) (event : journal_event) ->
         match (identity, event.authority) with
         | None, None -> (true, None)
-        | None, Some stamp ->
+        | None, Some proof ->
             if saw_unsigned then
               failf "sounio-journal-authority-partially-signed-journal";
-            (false, Some (stamp.principal_id, stamp.epoch))
+            (false, Some (journal_authority_proof_identity proof))
         | Some _, None ->
             failf "sounio-journal-authority-partially-signed-journal"
-        | Some (principal, epoch), Some stamp ->
-            if stamp.principal_id <> principal || stamp.epoch <> epoch then
+        | Some current, Some proof ->
+            let next = journal_authority_proof_identity proof in
+            if next.stream_principal_ids <> current.stream_principal_ids
+               || next.stream_epoch <> current.stream_epoch
+               || next.stream_required_quorum <> current.stream_required_quorum
+            then
               failf "sounio-journal-authority-mixed-identity";
-            (false, identity))
+            ( false,
+              Some
+                { current with
+                  stream_min_valid_signatures =
+                    min current.stream_min_valid_signatures
+                      next.stream_min_valid_signatures } ))
       (false, None) events
   in
   ignore saw_unsigned;
   identity
+
+type measured_journal_authority = {
+  measured_authority_principal_id : string;
+  measured_authority_principal_ids : string list;
+  measured_authority_epoch : int;
+  measured_authority_required_quorum : int;
+  measured_authority_min_valid_signatures : int;
+  measured_authority_checkpoint : string;
+}
 
 let measured_journal_authority semantic_events guardian_events
     semantic_journal_digest guardian_journal_digest descriptor_digest =
@@ -3790,20 +4048,49 @@ let measured_journal_authority semantic_events guardian_events
     ( journal_event_authority_identity semantic_events,
       journal_event_authority_identity guardian_events )
   with
-  | None, None when not (observation_authority_required ()) -> ("", 0, "")
-  | Some (semantic_principal, semantic_epoch),
-    Some (guardian_principal, guardian_epoch) ->
-      if semantic_principal <> guardian_principal
-         || semantic_epoch <> guardian_epoch
+  | None, None when not (observation_authority_required ()) ->
+      { measured_authority_principal_id = "";
+        measured_authority_principal_ids = [];
+        measured_authority_epoch = 0; measured_authority_required_quorum = 0;
+        measured_authority_min_valid_signatures = 0;
+        measured_authority_checkpoint = "" }
+  | Some semantic, Some guardian ->
+      if semantic.stream_principal_ids <> guardian.stream_principal_ids
+         || semantic.stream_epoch <> guardian.stream_epoch
+         || semantic.stream_required_quorum <> guardian.stream_required_quorum
       then failf "sounio-journal-authority-stream-identity-mismatch";
-      let checkpoint =
-        sha256
-          (String.concat "\000"
-             [ "loom-journal-authority-checkpoint-v1"; semantic_principal;
-               string_of_int semantic_epoch; semantic_journal_digest;
-               guardian_journal_digest; descriptor_digest ])
+      let principal_id =
+        match semantic.stream_principal_ids with
+        | [ principal ] when semantic.stream_required_quorum = 1 -> principal
+        | principals ->
+            sha256
+              (String.concat "\000"
+                 ("loom-journal-authority-principal-set-v1"
+                 :: string_of_int semantic.stream_required_quorum :: principals))
       in
-      (semantic_principal, semantic_epoch, checkpoint)
+      let checkpoint =
+        let material =
+          if semantic.stream_required_quorum = 1 then
+            [ "loom-journal-authority-checkpoint-v1"; principal_id;
+              string_of_int semantic.stream_epoch; semantic_journal_digest;
+              guardian_journal_digest; descriptor_digest ]
+          else
+            [ "loom-journal-authority-quorum-checkpoint-v1"; principal_id;
+              string_of_int semantic.stream_epoch;
+              string_of_int semantic.stream_required_quorum;
+              semantic_journal_digest; guardian_journal_digest;
+              descriptor_digest ]
+        in
+        sha256 (String.concat "\000" material)
+      in
+      { measured_authority_principal_id = principal_id;
+        measured_authority_principal_ids = semantic.stream_principal_ids;
+        measured_authority_epoch = semantic.stream_epoch;
+        measured_authority_required_quorum = semantic.stream_required_quorum;
+        measured_authority_min_valid_signatures =
+          min semantic.stream_min_valid_signatures
+            guardian.stream_min_valid_signatures;
+        measured_authority_checkpoint = checkpoint }
   | _ -> failf "sounio-journal-authority-required-stream-missing"
 
 let independently_measure_generation ?decision_facts paths pane_id generation =
@@ -3860,7 +4147,7 @@ let independently_measure_generation ?decision_facts paths pane_id generation =
     continuity_fact_digests measured_generation measured_fingerprint
       measured_semantic_head measured_guardian_head
   in
-  let journal_principal, journal_epoch, journal_checkpoint =
+  let journal_authority =
     measured_journal_authority semantic_events guardian_events
       semantic_journal_digest guardian_journal_digest descriptor_digest
   in
@@ -3872,9 +4159,18 @@ let independently_measure_generation ?decision_facts paths pane_id generation =
     measured_guardian_journal_digest = guardian_journal_digest;
     measured_descriptor_digest = descriptor_digest;
     measured_fact_digests = fact_digests;
-    measured_journal_authority_principal_id = journal_principal;
-    measured_journal_authority_epoch = journal_epoch;
-    measured_journal_authority_checkpoint_digest = journal_checkpoint }
+    measured_journal_authority_principal_id =
+      journal_authority.measured_authority_principal_id;
+    measured_journal_authority_principal_ids =
+      journal_authority.measured_authority_principal_ids;
+    measured_journal_authority_required_quorum =
+      journal_authority.measured_authority_required_quorum;
+    measured_journal_authority_min_valid_signatures =
+      journal_authority.measured_authority_min_valid_signatures;
+    measured_journal_authority_epoch =
+      journal_authority.measured_authority_epoch;
+    measured_journal_authority_checkpoint_digest =
+      journal_authority.measured_authority_checkpoint }
 
 let independent_observation_payload observer_key_id observer_principal_id
     subject_signer_key_id subject_principal_id subject_receipt_digest
@@ -3908,6 +4204,29 @@ let independent_measurement_payload observer_key_id observer_principal_id
       measurement.measured_semantic_journal_digest
       measurement.measured_guardian_journal_digest
       measurement.measured_descriptor_digest
+  else if measurement.measured_journal_authority_required_quorum = 2 then
+    let digests = measurement.measured_fact_digests in
+    let principal_a, principal_b, principal_c =
+      match measurement.measured_journal_authority_principal_ids with
+      | [ a; b; c ] -> (a, b, c)
+      | _ -> failf "sounio-journal-authority-quorum-member-count-mismatch"
+    in
+    Printf.sprintf
+      "schema=loom-independent-measurement-payload-v3\nalgorithm=ed25519\nobserver_key_id=%s\nobserver_principal_id=%s\nsubject_signer_key_id=%s\nsubject_principal_id=%s\nsubject_receipt_sha256=%s\nsubject_facts_sha256=%s\nsubject_adapter_sha256=%s\nmeasurement_source=quorum-write-authorized-generation-artifacts-v3\nmeasured_generation=%s\nmeasured_generation_fingerprint=%s\nmeasured_semantic_head=%s\nmeasured_guardian_head=%s\nmeasured_generation_sha256=%s\nmeasured_generation_fingerprint_sha256=%s\nmeasured_semantic_head_sha256=%s\nmeasured_guardian_head_sha256=%s\nsemantic_journal_sha256=%s\nguardian_journal_sha256=%s\ndescriptor_sha256=%s\njournal_authority_principal_id=%s\njournal_authority_principal_id_1=%s\njournal_authority_principal_id_2=%s\njournal_authority_principal_id_3=%s\njournal_authority_required_quorum=%d\njournal_authority_min_valid_signatures=%d\njournal_authority_epoch=%d\njournal_authority_checkpoint_sha256=%s\nobservation=quorum-write-authorized-generation-measurement\n"
+      observer_key_id observer_principal_id subject_signer_key_id
+      subject_principal_id subject_receipt_digest subject_facts_digest
+      subject_adapter_digest measurement.measured_generation
+      measurement.measured_generation_fingerprint measurement.measured_semantic_head
+      measurement.measured_guardian_head digests.generation_digest
+      digests.fingerprint_digest digests.semantic_head_digest
+      digests.guardian_head_digest measurement.measured_semantic_journal_digest
+      measurement.measured_guardian_journal_digest
+      measurement.measured_descriptor_digest
+      measurement.measured_journal_authority_principal_id principal_a principal_b
+      principal_c measurement.measured_journal_authority_required_quorum
+      measurement.measured_journal_authority_min_valid_signatures
+      measurement.measured_journal_authority_epoch
+      measurement.measured_journal_authority_checkpoint_digest
   else
     let digests = measurement.measured_fact_digests in
     Printf.sprintf
@@ -3939,6 +4258,29 @@ let independent_measurement_receipt observer_key_id observer_principal_id
       measurement.measured_semantic_journal_digest
       measurement.measured_guardian_journal_digest
       measurement.measured_descriptor_digest payload_digest signature
+  else if measurement.measured_journal_authority_required_quorum = 2 then
+    let digests = measurement.measured_fact_digests in
+    let principal_a, principal_b, principal_c =
+      match measurement.measured_journal_authority_principal_ids with
+      | [ a; b; c ] -> (a, b, c)
+      | _ -> failf "sounio-journal-authority-quorum-member-count-mismatch"
+    in
+    Printf.sprintf
+      "schema=loom-independent-measurement-attestation-v3\nalgorithm=ed25519\nobserver_key_id=%s\nobserver_principal_id=%s\nsubject_signer_key_id=%s\nsubject_principal_id=%s\nsubject_receipt_sha256=%s\nsubject_facts_sha256=%s\nsubject_adapter_sha256=%s\nmeasurement_source=quorum-write-authorized-generation-artifacts-v3\nmeasured_generation=%s\nmeasured_generation_fingerprint=%s\nmeasured_semantic_head=%s\nmeasured_guardian_head=%s\nmeasured_generation_sha256=%s\nmeasured_generation_fingerprint_sha256=%s\nmeasured_semantic_head_sha256=%s\nmeasured_guardian_head_sha256=%s\nsemantic_journal_sha256=%s\nguardian_journal_sha256=%s\ndescriptor_sha256=%s\njournal_authority_principal_id=%s\njournal_authority_principal_id_1=%s\njournal_authority_principal_id_2=%s\njournal_authority_principal_id_3=%s\njournal_authority_required_quorum=%d\njournal_authority_min_valid_signatures=%d\njournal_authority_epoch=%d\njournal_authority_checkpoint_sha256=%s\nobservation=quorum-write-authorized-generation-measurement\nsigned_payload_sha256=%s\nsignature_base64=%s\n"
+      observer_key_id observer_principal_id subject_signer_key_id
+      subject_principal_id subject_receipt_digest subject_facts_digest
+      subject_adapter_digest measurement.measured_generation
+      measurement.measured_generation_fingerprint measurement.measured_semantic_head
+      measurement.measured_guardian_head digests.generation_digest
+      digests.fingerprint_digest digests.semantic_head_digest
+      digests.guardian_head_digest measurement.measured_semantic_journal_digest
+      measurement.measured_guardian_journal_digest
+      measurement.measured_descriptor_digest
+      measurement.measured_journal_authority_principal_id principal_a principal_b
+      principal_c measurement.measured_journal_authority_required_quorum
+      measurement.measured_journal_authority_min_valid_signatures
+      measurement.measured_journal_authority_epoch
+      measurement.measured_journal_authority_checkpoint_digest payload_digest signature
   else
     let digests = measurement.measured_fact_digests in
     Printf.sprintf
@@ -4128,8 +4470,12 @@ let verify_independent_measurement_attestation ~subject ~subject_public_key
   in
   let measured_semantic_head = table_value fields "measured_semantic_head" in
   let measured_guardian_head = table_value fields "measured_guardian_head" in
+  let quorum_attestation =
+    schema = "loom-independent-measurement-attestation-v3"
+  in
   let authority_attestation =
     schema = "loom-independent-measurement-attestation-v2"
+    || quorum_attestation
   in
   let measured_fact_digests =
     if authority_attestation then
@@ -4158,6 +4504,24 @@ let verify_independent_measurement_attestation ~subject ~subject_public_key
       measured_fact_digests;
       measured_journal_authority_principal_id =
         table_value fields "journal_authority_principal_id";
+      measured_journal_authority_principal_ids =
+        if quorum_attestation then
+          [ table_value fields "journal_authority_principal_id_1";
+            table_value fields "journal_authority_principal_id_2";
+            table_value fields "journal_authority_principal_id_3" ]
+        else if authority_attestation then
+          [ table_value fields "journal_authority_principal_id" ]
+        else [];
+      measured_journal_authority_required_quorum =
+        if quorum_attestation then
+          positive_epoch "attestation-quorum"
+            (table_value fields "journal_authority_required_quorum")
+        else if authority_attestation then 1 else 0;
+      measured_journal_authority_min_valid_signatures =
+        if quorum_attestation then
+          positive_epoch "attestation-valid-signatures"
+            (table_value fields "journal_authority_min_valid_signatures")
+        else if authority_attestation then 1 else 0;
       measured_journal_authority_epoch =
         if authority_attestation then
           positive_epoch "attestation-epoch"
@@ -4199,9 +4563,12 @@ let verify_independent_measurement_attestation ~subject ~subject_public_key
     (schema = "loom-independent-measurement-attestation-v1"
      && measurement_source = "verified-generation-artifacts-v1"
      && observation = "independent-generation-measurement")
-    || (authority_attestation
+    || (schema = "loom-independent-measurement-attestation-v2"
         && measurement_source = "write-authorized-generation-artifacts-v2"
         && observation = "write-authorized-generation-measurement")
+    || (quorum_attestation
+        && measurement_source = "quorum-write-authorized-generation-artifacts-v3"
+        && observation = "quorum-write-authorized-generation-measurement")
   in
   if not schema_valid || algorithm <> "ed25519"
      || observer_key_id <> expected_observer_key_id
@@ -4236,6 +4603,12 @@ let verify_independent_measurement_attestation ~subject ~subject_public_key
         <> expected_measurement.measured_fact_digests.guardian_head_digest
      || measurement.measured_journal_authority_principal_id
         <> expected_measurement.measured_journal_authority_principal_id
+     || measurement.measured_journal_authority_principal_ids
+        <> expected_measurement.measured_journal_authority_principal_ids
+     || measurement.measured_journal_authority_required_quorum
+        <> expected_measurement.measured_journal_authority_required_quorum
+     || measurement.measured_journal_authority_min_valid_signatures
+        <> expected_measurement.measured_journal_authority_min_valid_signatures
      || measurement.measured_journal_authority_epoch
         <> expected_measurement.measured_journal_authority_epoch
      || measurement.measured_journal_authority_checkpoint_digest
@@ -4344,27 +4717,60 @@ let verify_independent_pre_spawn_admission paths pane_id predecessor =
                     (valid_sha256
                        measured.measured_journal_authority_checkpoint_digest)
             then failf "sounio-continuity-journal-authority-evidence-missing";
-            let authority_frame =
-              [ sounio_continuity_token "predecessor-receipt"
-                  subject.signed_receipt_digest;
-                sounio_continuity_token "principal-authority"
-                  subject.signed_principal_id;
-                sounio_continuity_token "principal-authority"
-                  observation.observer_principal_id;
-                sounio_continuity_token "principal-authority"
-                  measured.measured_journal_authority_principal_id;
-                sounio_continuity_token "independent-observation"
-                  observation.observation_digest;
-                sounio_continuity_token "journal-authority-checkpoint"
-                  measured.measured_journal_authority_checkpoint_digest;
-                string_of_int measured.measured_journal_authority_epoch ]
-            in
-            (String.concat " "
-               ("9005" :: authority_frame @ decision_tokens @ measured_tokens
-                @ fact_digest_limbs decision_digests
-                @ fact_digest_limbs measured.measured_fact_digests)
-             ^ "\n",
-             "SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v3 authority=three-principals+full-sha256-agreement")
+            if measured.measured_journal_authority_required_quorum = 2 then
+              let principal_a, principal_b, principal_c =
+                match measured.measured_journal_authority_principal_ids with
+                | [ a; b; c ] -> (a, b, c)
+                | _ ->
+                    failf "sounio-continuity-journal-quorum-member-count"
+              in
+              let authority_frame =
+                [ sounio_continuity_token "predecessor-receipt"
+                    subject.signed_receipt_digest;
+                  sounio_continuity_token "principal-authority"
+                    subject.signed_principal_id;
+                  sounio_continuity_token "principal-authority"
+                    observation.observer_principal_id;
+                  sounio_continuity_token "principal-authority" principal_a;
+                  sounio_continuity_token "principal-authority" principal_b;
+                  sounio_continuity_token "principal-authority" principal_c;
+                  string_of_int measured.measured_journal_authority_required_quorum;
+                  string_of_int
+                    measured.measured_journal_authority_min_valid_signatures;
+                  sounio_continuity_token "independent-observation"
+                    observation.observation_digest;
+                  sounio_continuity_token "journal-authority-checkpoint"
+                    measured.measured_journal_authority_checkpoint_digest;
+                  string_of_int measured.measured_journal_authority_epoch ]
+              in
+              (String.concat " "
+                 ("9006" :: authority_frame @ decision_tokens @ measured_tokens
+                  @ fact_digest_limbs decision_digests
+                  @ fact_digest_limbs measured.measured_fact_digests)
+               ^ "\n",
+               "SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v4 authority=five-principals+2-of-3-journal-quorum+full-sha256-agreement")
+            else
+              let authority_frame =
+                [ sounio_continuity_token "predecessor-receipt"
+                    subject.signed_receipt_digest;
+                  sounio_continuity_token "principal-authority"
+                    subject.signed_principal_id;
+                  sounio_continuity_token "principal-authority"
+                    observation.observer_principal_id;
+                  sounio_continuity_token "principal-authority"
+                    measured.measured_journal_authority_principal_id;
+                  sounio_continuity_token "independent-observation"
+                    observation.observation_digest;
+                  sounio_continuity_token "journal-authority-checkpoint"
+                    measured.measured_journal_authority_checkpoint_digest;
+                  string_of_int measured.measured_journal_authority_epoch ]
+              in
+              (String.concat " "
+                 ("9005" :: authority_frame @ decision_tokens @ measured_tokens
+                  @ fact_digest_limbs decision_digests
+                  @ fact_digest_limbs measured.measured_fact_digests)
+               ^ "\n",
+               "SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v3 authority=three-principals+full-sha256-agreement")
           else
             (String.concat " "
                ("9004" :: common_frame @ decision_tokens @ measured_tokens)
@@ -4418,15 +4824,17 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
   let predecessor_receipt_digest, signer_key_id, signer_principal_id,
       public_key, observer_key_id, observer_principal_id,
       independent_observation_digest, journal_authority_principal_id,
-      journal_authority_epoch, journal_authority_checkpoint_digest =
+      journal_authority_principal_ids, journal_authority_required_quorum,
+      journal_authority_min_valid_signatures, journal_authority_epoch,
+      journal_authority_checkpoint_digest =
     match (signing, lineage.predecessor_instance) with
     | Unsigned_continuity, _ when independent_required ->
         failf "sounio-continuity-independent-observer-requires-signed-receipts"
     | Unsigned_continuity, _ ->
-        ("", "", "", "", "", "", "", "", 0, "")
+        ("", "", "", "", "", "", "", "", [], 0, 0, 0, "")
     | Ed25519_continuity keys, "" ->
         ("", keys.key_id, keys.principal_id, keys.public_key, "", "", "", "",
-         0, "")
+         [], 0, 0, 0, "")
     | Ed25519_continuity keys, predecessor ->
         let predecessor_dir =
           Filename.concat
@@ -4441,15 +4849,17 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
         in
         verify_predecessor_binding lineage receipt;
         let observer_key_id, observer_principal_id, observation_digest,
-            journal_principal, journal_epoch, journal_checkpoint =
+            journal_principal, journal_principals, journal_required,
+            journal_min_valid, journal_epoch, journal_checkpoint =
           match observer_public_key with
-          | None -> ("", "", "", "", 0, "")
+          | None -> ("", "", "", "", [], 0, 0, 0, "")
           | Some observer_key ->
               let observation_path =
                 Filename.concat predecessor_dir
                   "sounio-continuity.observer-attestation"
               in
-              let observation, journal_principal, journal_epoch,
+              let observation, journal_principal, journal_principals,
+                  journal_required, journal_min_valid, journal_epoch,
                   journal_checkpoint =
                 if measurement_required then
                   let verified =
@@ -4461,22 +4871,27 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
                   let measured = verified.measured_generation_facts in
                   (verified.measured_observation,
                    measured.measured_journal_authority_principal_id,
+                   measured.measured_journal_authority_principal_ids,
+                   measured.measured_journal_authority_required_quorum,
+                   measured.measured_journal_authority_min_valid_signatures,
                    measured.measured_journal_authority_epoch,
                    measured.measured_journal_authority_checkpoint_digest)
                 else
                   (verify_independent_observation_attestation ~subject:receipt
                      ~subject_public_key:keys.public_key
                      ~observer_public_key:observer_key observation_path,
-                   "", 0, "")
+                   "", [], 0, 0, 0, "")
               in
               (observation.observer_key_id, observation.observer_principal_id,
-               observation.observation_digest, journal_principal, journal_epoch,
-               journal_checkpoint)
+               observation.observation_digest, journal_principal,
+               journal_principals, journal_required, journal_min_valid,
+               journal_epoch, journal_checkpoint)
         in
         (receipt.signed_receipt_digest, receipt.signed_key_id,
          receipt.signed_principal_id, keys.public_key, observer_key_id,
          observer_principal_id, observation_digest, journal_principal,
-         journal_epoch, journal_checkpoint)
+         journal_principals, journal_required, journal_min_valid, journal_epoch,
+         journal_checkpoint)
   in
   let chain_values =
     [ pane_id; session_id; instance; fingerprint; semantic_head; guardian_head;
@@ -4490,7 +4905,10 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
   let chain_values =
     if observation_authority_required () then
       chain_values
+      @ journal_authority_principal_ids
       @ [ journal_authority_principal_id;
+          string_of_int journal_authority_required_quorum;
+          string_of_int journal_authority_min_valid_signatures;
           string_of_int journal_authority_epoch;
           journal_authority_checkpoint_digest ]
     else chain_values
@@ -4649,7 +5067,12 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
       observation_authority_required () && independently_measured_mode;
     full_digest_agreement_verified =
       observation_authority_required () && independently_measured_mode;
-    journal_authority_principal_id; journal_authority_epoch;
+    journal_authority_principal_id; journal_authority_principal_ids;
+    journal_authority_required_quorum; journal_authority_min_valid_signatures;
+    journal_authority_quorum_verified =
+      journal_authority_required_quorum = 2
+      && journal_authority_min_valid_signatures >= 2;
+    journal_authority_epoch;
     journal_authority_checkpoint_digest }
 
 let verify_continuity_receipt_command cli =
@@ -4805,6 +5228,23 @@ let measure_continuity_generation_command cli =
       measured.measured_generation measured.measured_generation_fingerprint
       measured.measured_semantic_head measured.measured_guardian_head
       verified.measured_observation.observation_digest
+  else if measured.measured_journal_authority_required_quorum = 2 then
+    Printf.printf
+      "LOOM_CONTINUITY_INDEPENDENT_MEASUREMENT_ATTESTED schema=loom-independent-measurement-attestation-v3 observer_principal_id=%s subject_principal_id=%s journal_authority_principal_set_id=%s journal_authority_required_quorum=%d journal_authority_min_valid_signatures=%d journal_authority_epoch=%d journal_authority_checkpoint_sha256=%s measured_generation=%s measured_generation_fingerprint=%s measured_semantic_head=%s measured_guardian_head=%s measured_generation_sha256=%s measured_generation_fingerprint_sha256=%s measured_semantic_head_sha256=%s measured_guardian_head_sha256=%s observation_sha256=%s\n%!"
+      verified.measured_observation.observer_principal_id
+      verified.measured_observation.subject_principal_id
+      measured.measured_journal_authority_principal_id
+      measured.measured_journal_authority_required_quorum
+      measured.measured_journal_authority_min_valid_signatures
+      measured.measured_journal_authority_epoch
+      measured.measured_journal_authority_checkpoint_digest
+      measured.measured_generation measured.measured_generation_fingerprint
+      measured.measured_semantic_head measured.measured_guardian_head
+      measured.measured_fact_digests.generation_digest
+      measured.measured_fact_digests.fingerprint_digest
+      measured.measured_fact_digests.semantic_head_digest
+      measured.measured_fact_digests.guardian_head_digest
+      verified.measured_observation.observation_digest
   else
     Printf.printf
       "LOOM_CONTINUITY_INDEPENDENT_MEASUREMENT_ATTESTED schema=loom-independent-measurement-attestation-v2 observer_principal_id=%s subject_principal_id=%s journal_authority_principal_id=%s journal_authority_epoch=%d journal_authority_checkpoint_sha256=%s measured_generation=%s measured_generation_fingerprint=%s measured_semantic_head=%s measured_guardian_head=%s measured_generation_sha256=%s measured_generation_fingerprint_sha256=%s measured_semantic_head_sha256=%s measured_guardian_head_sha256=%s observation_sha256=%s\n%!"
@@ -4872,11 +5312,16 @@ let beagle_status_json root pane_id =
         observer_principal_id = ""; independent_observation_digest = "";
         observation_authority_verified = false;
         full_digest_agreement_verified = false;
-        journal_authority_principal_id = ""; journal_authority_epoch = 0;
+        journal_authority_principal_id = "";
+        journal_authority_principal_ids = [];
+        journal_authority_required_quorum = 0;
+        journal_authority_min_valid_signatures = 0;
+        journal_authority_quorum_verified = false;
+        journal_authority_epoch = 0;
         journal_authority_checkpoint_digest = "" }
   in
   Printf.sprintf
-    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s,\"sounioPolicySignatureVerified\":%s,\"sounioPolicySignerKeyId\":%s,\"sounioPolicySignerPrincipalId\":%s,\"sounioPolicyPredecessorReceipt\":%s,\"sounioPolicyIndependentObservationVerified\":%s,\"sounioPolicyIndependentMeasurementVerified\":%s,\"sounioPolicyObserverKeyId\":%s,\"sounioPolicyObserverPrincipalId\":%s,\"sounioPolicyIndependentObservation\":%s,\"sounioPolicyObservationAuthorityVerified\":%s,\"sounioPolicyFullDigestAgreementVerified\":%s,\"sounioPolicyJournalAuthorityPrincipalId\":%s,\"sounioPolicyJournalAuthorityEpoch\":%d,\"sounioPolicyJournalAuthorityCheckpoint\":%s}}"
+    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s,\"sounioPolicySignatureVerified\":%s,\"sounioPolicySignerKeyId\":%s,\"sounioPolicySignerPrincipalId\":%s,\"sounioPolicyPredecessorReceipt\":%s,\"sounioPolicyIndependentObservationVerified\":%s,\"sounioPolicyIndependentMeasurementVerified\":%s,\"sounioPolicyObserverKeyId\":%s,\"sounioPolicyObserverPrincipalId\":%s,\"sounioPolicyIndependentObservation\":%s,\"sounioPolicyObservationAuthorityVerified\":%s,\"sounioPolicyFullDigestAgreementVerified\":%s,\"sounioPolicyJournalAuthorityPrincipalId\":%s,\"sounioPolicyJournalAuthorityPrincipalIds\":%s,\"sounioPolicyJournalAuthorityRequiredQuorum\":%d,\"sounioPolicyJournalAuthorityMinValidSignatures\":%d,\"sounioPolicyJournalAuthorityQuorumVerified\":%s,\"sounioPolicyJournalAuthorityEpoch\":%d,\"sounioPolicyJournalAuthorityCheckpoint\":%s}}"
     (json_quote pane_id) (json_quote session_id)
     (table_value ~default:"0" descriptor "harness_pid") (json_quote status)
     (json_quote
@@ -4917,6 +5362,10 @@ let beagle_status_json root pane_id =
     (if continuity.observation_authority_verified then "true" else "false")
     (if continuity.full_digest_agreement_verified then "true" else "false")
     (json_quote continuity.journal_authority_principal_id)
+    (json_string_list continuity.journal_authority_principal_ids)
+    continuity.journal_authority_required_quorum
+    continuity.journal_authority_min_valid_signatures
+    (if continuity.journal_authority_quorum_verified then "true" else "false")
     continuity.journal_authority_epoch
     (json_quote continuity.journal_authority_checkpoint_digest)
 
