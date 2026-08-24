@@ -55,8 +55,10 @@ run_phase() {
     SOUNIO_CANARY_SOURCE_ROOT="$ROOT_DIR" \
     SOUNIO_LOOM_POD_CANARY_ROOT="$CANARY_ROOT" \
     SOUNIO_LOOM_REQUIRE_SIGNED_RECEIPTS=1 \
+    SOUNIO_LOOM_REQUIRE_INDEPENDENT_OBSERVER=1 \
     SOUNIO_LOOM_SIGNING_KEY="$KEY_ROOT/private.pem" \
     SOUNIO_LOOM_VERIFY_KEY="$KEY_ROOT/public.pem" \
+    SOUNIO_LOOM_OBSERVER_VERIFY_KEY="$KEY_ROOT/observer-public.pem" \
     bash "$CANARY" "$phase"
 }
 
@@ -82,12 +84,22 @@ command -v openssl >/dev/null || fail 'OpenSSL is required'
 mkdir -p "$KEY_ROOT"
 openssl genpkey -algorithm ED25519 -out "$KEY_ROOT/private.pem"
 openssl pkey -in "$KEY_ROOT/private.pem" -pubout -out "$KEY_ROOT/public.pem"
+openssl genpkey -algorithm ED25519 -out "$KEY_ROOT/observer-private.pem"
+openssl pkey -in "$KEY_ROOT/observer-private.pem" -pubout \
+  -out "$KEY_ROOT/observer-public.pem"
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 
 phase_one="$(run_phase wrong-facts-pod-one phase-one)"
 [[ "$phase_one" == *'CANARY_PHASE_ONE'* ]] || fail 'signed predecessor did not start'
 receipt="$(receipt_path)"
 original_receipt_sha256="$(sha256sum "$receipt" | awk '{print $1}')"
+attestation="$(dirname "$receipt")/sounio-continuity.observer-attestation"
+SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" attest-continuity-receipt \
+  --receipt "$receipt" --subject-public-key "$KEY_ROOT/public.pem" \
+  --observer-private-key "$KEY_ROOT/observer-private.pem" \
+  --observer-public-key "$KEY_ROOT/observer-public.pem" \
+  --out "$attestation" --adapter "$ADAPTER" >/dev/null
+[[ -s "$attestation" ]] || fail 'independent predecessor commitment was not created'
 facts="$(key_value facts "$receipt")"
 original_semantic_head="$(awk '{print $5}' <<< "$facts")"
 forged_facts="$(awk '{$5="777777777777777777"; print}' <<< "$facts")"
@@ -135,31 +147,25 @@ verification="$(
   fail "legitimate signature did not verify: $verification"
 
 kill_generation
+generation_count_before="$(find "$CANARY_ROOT/loom" \
+  -name sounio-continuity.receipt -type f -print | wc -l)"
 set +e
 phase_two="$(run_phase wrong-facts-pod-two phase-two 2>&1)"
 phase_two_rc=$?
 set -e
 [[ "$phase_two_rc" -ne 0 && \
-   "$phase_two" == *'signed successor did not bind the first generation receipt and signer'* ]] || \
-  fail "independent canary control did not catch the semantic forgery: rc=$phase_two_rc output=$phase_two"
-successor_spawn="$CANARY_ROOT/spawn-wrong-facts-pod-two.json"
-[[ -f "$successor_spawn" ]] || fail 'successor admission omitted its spawn receipt'
-grep -q '"sounioPolicyVerified":true' "$successor_spawn" || \
-  fail 'native Sounio typestate refused the forged successor before the control'
-grep -q '"sounioPolicySignatureVerified":true' "$successor_spawn" || \
-  fail 'signature verification refused the forged successor before the control'
-bound_predecessor="$(
-  sed -n 's/.*"sounioPolicyPredecessorReceipt":"\([^"]*\)".*/\1/p' \
-    "$successor_spawn" | head -1
-)"
-[[ "$bound_predecessor" == "$forged_receipt_sha256" ]] || \
-  fail 'successor did not bind the forged predecessor receipt'
+   "$phase_two" == *'sounio-continuity-independent-observation-mismatch'* ]] || \
+  fail "pre-spawn independent observation did not catch the semantic forgery: rc=$phase_two_rc output=$phase_two"
+generation_count_after="$(find "$CANARY_ROOT/loom" \
+  -name sounio-continuity.receipt -type f -print | wc -l)"
+[[ "$generation_count_after" -eq "$generation_count_before" ]] || \
+  fail 'wrong-facts refusal created a successor generation'
 
-printf '%s\n' 'SOUNIO_LOOM_CORRECT_SIGNATURE_WRONG_FACTS_FALSIFIER=EXPOSED'
-printf 'signature=valid adapter_policy=accepted successor_typestate_admission=accepted\n'
-printf 'independent_canary_control=refused_after_spawn\n'
+printf '%s\n' 'SOUNIO_LOOM_CORRECT_SIGNATURE_WRONG_FACTS_FALSIFIER=REFUSED_PRESPAWN'
+printf 'signature=valid independent_observation=receipt-digest-mismatch successor_created=0\n'
+printf 'pre_spawn_control=refused_before-successor-creation\n'
 printf 'wrong_fact=predecessor_semantic_head original=%s forged=%s\n' \
   "$original_semantic_head" "$forged_semantic_head"
 printf 'original_receipt_sha256=%s forged_receipt_sha256=%s\n' \
   "$original_receipt_sha256" "$forged_receipt_sha256"
-printf 'scope=faulty-keyholder stronger_authentic-decision-claim=falsified bounded_integrity-claim=unchanged\n'
+printf 'scope=post-observation-faulty-keyholder bounded_precommitted-observation-claim=supported signer-correctness-claim=unsupported\n'

@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.6"
+let runtime_version = "2026.08.24.7"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -2844,7 +2844,12 @@ type sounio_continuity_status = {
   runtime_digest : string;
   signature_verified : bool;
   signer_key_id : string;
+  signer_principal_id : string;
   predecessor_receipt_digest : string;
+  independent_observation_verified : bool;
+  observer_key_id : string;
+  observer_principal_id : string;
+  independent_observation_digest : string;
 }
 
 let beagle_generation_journals paths instance =
@@ -3058,13 +3063,25 @@ type continuity_signing =
       private_key : string;
       public_key : string;
       key_id : string;
+      principal_id : string;
     }
 
 type verified_signed_receipt = {
   signed_receipt_digest : string;
   signed_key_id : string;
+  signed_principal_id : string;
   signed_facts : string;
   signed_facts_digest : string;
+  signed_adapter_digest : string;
+}
+
+type verified_independent_observation = {
+  observer_key_id : string;
+  observer_principal_id : string;
+  subject_signer_key_id : string;
+  subject_principal_id : string;
+  subject_receipt_digest : string;
+  observation_digest : string;
 }
 
 let openssl_command () =
@@ -3079,6 +3096,20 @@ let continuity_key_path label path =
   if (Unix.stat resolved).st_kind <> S_REG then
     failf "sounio-continuity-%s-key-not-regular:%s" label resolved;
   resolved
+
+let ed25519_principal_id public_key =
+  let der_path = Filename.temp_file "loom-public-" ".der" in
+  Fun.protect
+    ~finally:(fun () -> try Sys.remove der_path with _ -> ())
+    (fun () ->
+      let openssl = openssl_command () in
+      let arguments =
+        [| openssl; "pkey"; "-pubin"; "-in"; public_key; "-outform";
+           "DER"; "-out"; der_path |]
+      in
+      if not (process_quiet openssl arguments) then
+        failf "sounio-continuity-public-key-canonicalization-failed";
+      sha256 (read_file der_path))
 
 let continuity_signing () =
   let required =
@@ -3099,8 +3130,24 @@ let continuity_signing () =
       if not (Sys.file_exists openssl) then
         failf "sounio-continuity-openssl-missing:%s" openssl;
       Ed25519_continuity
-        { private_key; public_key; key_id = sha256 (read_file public_key) }
+        { private_key; public_key; key_id = sha256 (read_file public_key);
+          principal_id = ed25519_principal_id public_key }
   | _ -> failf "sounio-continuity-signing-keypair-incomplete"
+
+let independent_observer_required () =
+  match Sys.getenv_opt "SOUNIO_LOOM_REQUIRE_INDEPENDENT_OBSERVER" with
+  | None | Some "" | Some "0" | Some "false" -> false
+  | Some "1" | Some "true" -> true
+  | Some value ->
+      failf "sounio-continuity-invalid-independent-observer-requirement:%s" value
+
+let independent_observer_public_key () =
+  if not (independent_observer_required ()) then None
+  else
+    match Sys.getenv_opt "SOUNIO_LOOM_OBSERVER_VERIFY_KEY" with
+    | Some path when path <> "" ->
+        Some (continuity_key_path "observer-public" path)
+    | _ -> failf "sounio-continuity-independent-observer-key-missing"
 
 let remove_noerr path = try Sys.remove path with _ -> ()
 
@@ -3152,6 +3199,32 @@ let signed_continuity_receipt key_id runtime_digest facts_digest facts verdict
     "schema=loom-native-continuity-receipt-v2\nalgorithm=ed25519\nkey_id=%s\nadapter_sha256=%s\nfacts_sha256=%s\nfacts=%s\nverdict=%s\nsigned_payload_sha256=%s\nsignature_base64=%s\n"
     key_id runtime_digest facts_digest facts verdict payload_digest signature
 
+let signed_continuity_expected_verdict facts =
+  let values = split_on ' ' facts in
+  if List.length values = 15 && List.nth values 14 = "1" then
+    Some "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519"
+  else if List.length values = 18 && List.nth values 14 = "2" then
+    Some "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v3 authenticity=ed25519+independent-observer"
+  else None
+
+let independent_observation_payload observer_key_id observer_principal_id
+    subject_signer_key_id subject_principal_id subject_receipt_digest
+    subject_facts_digest subject_adapter_digest =
+  Printf.sprintf
+    "schema=loom-independent-observation-payload-v1\nalgorithm=ed25519\nobserver_key_id=%s\nobserver_principal_id=%s\nsubject_signer_key_id=%s\nsubject_principal_id=%s\nsubject_receipt_sha256=%s\nsubject_facts_sha256=%s\nsubject_adapter_sha256=%s\nobservation=precommitted-receipt-digest\n"
+    observer_key_id observer_principal_id subject_signer_key_id
+    subject_principal_id subject_receipt_digest subject_facts_digest
+    subject_adapter_digest
+
+let independent_observation_receipt observer_key_id observer_principal_id
+    subject_signer_key_id subject_principal_id subject_receipt_digest
+    subject_facts_digest subject_adapter_digest payload_digest signature =
+  Printf.sprintf
+    "schema=loom-independent-observation-attestation-v1\nalgorithm=ed25519\nobserver_key_id=%s\nobserver_principal_id=%s\nsubject_signer_key_id=%s\nsubject_principal_id=%s\nsubject_receipt_sha256=%s\nsubject_facts_sha256=%s\nsubject_adapter_sha256=%s\nobservation=precommitted-receipt-digest\nsigned_payload_sha256=%s\nsignature_base64=%s\n"
+    observer_key_id observer_principal_id subject_signer_key_id
+    subject_principal_id subject_receipt_digest subject_facts_digest
+    subject_adapter_digest payload_digest signature
+
 let verify_signed_continuity_receipt ~adapter ~runtime_digest ~public_key path =
   if not (Sys.file_exists path) then
     failf "sounio-continuity-predecessor-receipt-missing:%s" path;
@@ -3174,12 +3247,13 @@ let verify_signed_continuity_receipt ~adapter ~runtime_digest ~public_key path =
     signed_continuity_receipt key_id stored_adapter facts_digest facts verdict
       payload_digest signature
   in
+  let expected_verdict = signed_continuity_expected_verdict facts in
   if schema <> "loom-native-continuity-receipt-v2"
      || algorithm <> "ed25519" || key_id <> expected_key_id
      || stored_adapter <> runtime_digest || facts = ""
      || facts_digest <> sha256 (facts ^ "\n")
-     || verdict
-        <> "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519"
+     || expected_verdict = None
+     || verdict <> Option.value ~default:"" expected_verdict
      || payload_digest <> sha256 payload || signature = "" || stored <> canonical
   then failf "sounio-continuity-signed-receipt-mismatch";
   if not (ed25519_verify public_key (Filename.dirname path) payload signature) then
@@ -3191,16 +3265,129 @@ let verify_signed_continuity_receipt ~adapter ~runtime_digest ~public_key path =
   if replayed <> verdict then
     failf "sounio-continuity-replay-mismatch:%s" replayed;
   { signed_receipt_digest = sha256 stored; signed_key_id = key_id;
-    signed_facts = facts; signed_facts_digest = facts_digest }
+    signed_principal_id = ed25519_principal_id public_key;
+    signed_facts = facts; signed_facts_digest = facts_digest;
+    signed_adapter_digest = stored_adapter }
+
+let verify_independent_observation_attestation ~subject ~subject_public_key
+    ~observer_public_key path =
+  if not (Sys.file_exists path) then
+    failf "sounio-continuity-independent-observation-missing:%s" path;
+  let stored = read_file path in
+  let fields = parse_key_values path in
+  let schema = table_value fields "schema" in
+  let algorithm = table_value fields "algorithm" in
+  let observer_key_id = table_value fields "observer_key_id" in
+  let observer_principal_id = table_value fields "observer_principal_id" in
+  let subject_signer_key_id = table_value fields "subject_signer_key_id" in
+  let subject_principal_id = table_value fields "subject_principal_id" in
+  let subject_receipt_digest = table_value fields "subject_receipt_sha256" in
+  let subject_facts_digest = table_value fields "subject_facts_sha256" in
+  let subject_adapter_digest = table_value fields "subject_adapter_sha256" in
+  let observation = table_value fields "observation" in
+  let payload_digest = table_value fields "signed_payload_sha256" in
+  let signature = table_value fields "signature_base64" in
+  let expected_observer_key_id = sha256 (read_file observer_public_key) in
+  let expected_observer_principal_id = ed25519_principal_id observer_public_key in
+  let expected_subject_principal_id = ed25519_principal_id subject_public_key in
+  let payload =
+    independent_observation_payload observer_key_id observer_principal_id
+      subject_signer_key_id subject_principal_id subject_receipt_digest
+      subject_facts_digest subject_adapter_digest
+  in
+  let canonical =
+    independent_observation_receipt observer_key_id observer_principal_id
+      subject_signer_key_id subject_principal_id subject_receipt_digest
+      subject_facts_digest subject_adapter_digest payload_digest signature
+  in
+  if schema <> "loom-independent-observation-attestation-v1"
+     || algorithm <> "ed25519" || observation <> "precommitted-receipt-digest"
+     || observer_key_id <> expected_observer_key_id
+     || observer_principal_id <> expected_observer_principal_id
+     || subject_signer_key_id <> subject.signed_key_id
+     || subject_principal_id <> subject.signed_principal_id
+     || subject_principal_id <> expected_subject_principal_id
+     || subject_receipt_digest <> subject.signed_receipt_digest
+     || subject_facts_digest <> subject.signed_facts_digest
+     || subject_adapter_digest <> subject.signed_adapter_digest
+     || payload_digest <> sha256 payload || signature = "" || stored <> canonical
+  then failf "sounio-continuity-independent-observation-mismatch";
+  if not
+       (ed25519_verify observer_public_key (Filename.dirname path) payload signature)
+  then failf "sounio-continuity-independent-observation-signature-invalid";
+  { observer_key_id; observer_principal_id; subject_signer_key_id;
+    subject_principal_id; subject_receipt_digest;
+    observation_digest = sha256 stored }
+
+let verify_independent_pre_spawn_admission paths predecessor =
+  if not (independent_observer_required ()) then ()
+  else
+    let adapter = Unix.realpath (sounio_continuity_adapter ()) in
+    let runtime_digest = sha256 (read_file adapter) in
+    let signer_public_key =
+      match continuity_signing () with
+      | Unsigned_continuity ->
+          failf "sounio-continuity-independent-observer-requires-signed-receipts"
+      | Ed25519_continuity keys -> keys.public_key
+    in
+    let observer_public_key =
+      match independent_observer_public_key () with
+      | Some path -> path
+      | None -> failf "sounio-continuity-independent-observer-key-missing"
+    in
+    let predecessor_dir =
+      Filename.concat (Filename.concat paths.session_dir "generations") predecessor
+    in
+    let predecessor_path =
+      Filename.concat predecessor_dir "sounio-continuity.receipt"
+    in
+    let subject =
+      verify_signed_continuity_receipt ~adapter ~runtime_digest
+        ~public_key:signer_public_key predecessor_path
+    in
+    let facts = split_on ' ' subject.signed_facts in
+    if (List.length facts <> 15 && List.length facts <> 18)
+       || List.nth facts 2 <> sounio_continuity_token "generation" predecessor
+    then failf "sounio-continuity-pre-spawn-predecessor-splice";
+    let observation =
+      verify_independent_observation_attestation ~subject
+        ~subject_public_key:signer_public_key ~observer_public_key
+        (Filename.concat predecessor_dir
+           "sounio-continuity.observer-attestation")
+    in
+    let frame =
+      String.concat " "
+        [ "9003";
+          sounio_continuity_token "predecessor-receipt"
+            subject.signed_receipt_digest;
+          sounio_continuity_token "principal-authority"
+            subject.signed_principal_id;
+          sounio_continuity_token "principal-authority"
+            observation.observer_principal_id;
+          sounio_continuity_token "independent-observation"
+            observation.observation_digest ]
+      ^ "\n"
+    in
+    let verdict =
+      try process_exchange adapter [| adapter |] frame
+      with Loom_error error ->
+        failf "sounio-continuity-pre-spawn-policy-refused:%s" error
+    in
+    if verdict
+       <> "SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v1 authority=disjoint-principals"
+    then failf "sounio-continuity-pre-spawn-verdict-mismatch:%s" verdict
 
 let verify_predecessor_binding lineage receipt =
   let facts = split_on ' ' receipt.signed_facts in
-  if List.length facts <> 15 then
+  if List.length facts <> 15 && List.length facts <> 18 then
     failf "sounio-continuity-predecessor-fact-count";
   let expected_generation =
     sounio_continuity_token "generation" lineage.predecessor_instance
   in
-  if List.nth facts 2 <> expected_generation || List.nth facts 14 <> "1" then
+  let authenticity_mode = List.nth facts 14 in
+  if List.nth facts 2 <> expected_generation
+     || (authenticity_mode <> "1" && authenticity_mode <> "2")
+  then
     failf "sounio-continuity-predecessor-receipt-splice"
 
 let verify_sounio_continuity paths pane_id session_id instance fingerprint
@@ -3221,23 +3408,49 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
   let adapter = Unix.realpath adapter in
   let runtime_digest = sha256 (read_file adapter) in
   let signing = continuity_signing () in
-  let predecessor_receipt_digest, signer_key_id, public_key =
+  let independent_required = independent_observer_required () in
+  let observer_public_key = independent_observer_public_key () in
+  let predecessor_receipt_digest, signer_key_id, signer_principal_id,
+      public_key, observer_key_id, observer_principal_id,
+      independent_observation_digest =
     match (signing, lineage.predecessor_instance) with
-    | Unsigned_continuity, _ -> ("", "", "")
-    | Ed25519_continuity keys, "" -> ("", keys.key_id, keys.public_key)
+    | Unsigned_continuity, _ when independent_required ->
+        failf "sounio-continuity-independent-observer-requires-signed-receipts"
+    | Unsigned_continuity, _ -> ("", "", "", "", "", "", "")
+    | Ed25519_continuity keys, "" ->
+        ("", keys.key_id, keys.principal_id, keys.public_key, "", "", "")
     | Ed25519_continuity keys, predecessor ->
-        let predecessor_path =
+        let predecessor_dir =
           Filename.concat
-            (Filename.concat
-               (Filename.concat paths.session_dir "generations") predecessor)
-            "sounio-continuity.receipt"
+            (Filename.concat paths.session_dir "generations") predecessor
+        in
+        let predecessor_path =
+          Filename.concat predecessor_dir "sounio-continuity.receipt"
         in
         let receipt =
           verify_signed_continuity_receipt ~adapter ~runtime_digest
             ~public_key:keys.public_key predecessor_path
         in
         verify_predecessor_binding lineage receipt;
-        (receipt.signed_receipt_digest, receipt.signed_key_id, keys.public_key)
+        let observer_key_id, observer_principal_id, observation_digest =
+          match observer_public_key with
+          | None -> ("", "", "")
+          | Some observer_key ->
+              let observation_path =
+                Filename.concat predecessor_dir
+                  "sounio-continuity.observer-attestation"
+              in
+              let observation =
+                verify_independent_observation_attestation ~subject:receipt
+                  ~subject_public_key:keys.public_key
+                  ~observer_public_key:observer_key observation_path
+              in
+              (observation.observer_key_id, observation.observer_principal_id,
+               observation.observation_digest)
+        in
+        (receipt.signed_receipt_digest, receipt.signed_key_id,
+         receipt.signed_principal_id, keys.public_key, observer_key_id,
+         observer_principal_id, observation_digest)
   in
   let chain_material =
     String.concat "\000"
@@ -3246,7 +3459,9 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
         lineage.predecessor_semantic_head; lineage.predecessor_guardian_head;
         lineage.latest_transition; string_of_int lineage.transition_count;
         string_of_int lineage.pod_resurrection_count;
-        predecessor_receipt_digest ]
+        predecessor_receipt_digest; signer_principal_id; observer_key_id;
+        observer_principal_id;
+        independent_observation_digest ]
   in
   let legacy_facts =
     [ evidence_set_token;
@@ -3269,8 +3484,20 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
   let signed_mode =
     match signing with Unsigned_continuity -> false | Ed25519_continuity _ -> true
   in
+  let independently_observed_mode =
+    independent_required && lineage.predecessor_instance <> ""
+  in
   let facts =
-    if signed_mode then
+    if independently_observed_mode then
+      legacy_facts
+      @ [ sounio_continuity_token "predecessor-receipt"
+            predecessor_receipt_digest;
+          "2";
+          sounio_continuity_token "principal-authority" signer_principal_id;
+          sounio_continuity_token "principal-authority" observer_principal_id;
+          sounio_continuity_token "independent-observation"
+            independent_observation_digest ]
+    else if signed_mode then
       legacy_facts
       @ [ sounio_optional_token "predecessor-receipt"
             predecessor_receipt_digest;
@@ -3283,7 +3510,9 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
     with Loom_error error -> failf "sounio-continuity-policy-refused:%s" error
   in
   let expected =
-    if signed_mode then
+    if independently_observed_mode then
+      "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v3 authenticity=ed25519+independent-observer"
+    else if signed_mode then
       "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519"
     else "SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1"
   in
@@ -3354,8 +3583,10 @@ let verify_sounio_continuity paths pane_id session_id instance fingerprint
       stored
   in
   { policy_verified = true; receipt_digest = sha256 receipt; runtime_digest;
-    signature_verified = signed_mode; signer_key_id;
-    predecessor_receipt_digest }
+    signature_verified = signed_mode; signer_key_id; signer_principal_id;
+    predecessor_receipt_digest;
+    independent_observation_verified = independently_observed_mode;
+    observer_key_id; observer_principal_id; independent_observation_digest }
 
 let verify_continuity_receipt_command cli =
   let receipt_path = Unix.realpath (required cli "--receipt") in
@@ -3376,6 +3607,67 @@ let verify_continuity_receipt_command cli =
     "LOOM_CONTINUITY_RECEIPT_VERIFIED schema=loom-native-continuity-receipt-v2 algorithm=ed25519 key_id=%s receipt_sha256=%s facts_sha256=%s\n%!"
     verified.signed_key_id verified.signed_receipt_digest
     verified.signed_facts_digest
+
+let attest_continuity_receipt_command cli =
+  let receipt_path = Unix.realpath (required cli "--receipt") in
+  let subject_public_key =
+    continuity_key_path "subject-public" (required cli "--subject-public-key")
+  in
+  let observer_private_key =
+    continuity_key_path "observer-private" (required cli "--observer-private-key")
+  in
+  let observer_public_key =
+    continuity_key_path "observer-public" (required cli "--observer-public-key")
+  in
+  let output_path = required cli "--out" in
+  let adapter =
+    match optional cli "--adapter" with
+    | Some path -> Unix.realpath path
+    | None -> Unix.realpath (sounio_continuity_adapter ())
+  in
+  let runtime_digest = sha256 (read_file adapter) in
+  let subject =
+    verify_signed_continuity_receipt ~adapter ~runtime_digest
+      ~public_key:subject_public_key receipt_path
+  in
+  let observer_key_id = sha256 (read_file observer_public_key) in
+  let observer_principal_id = ed25519_principal_id observer_public_key in
+  let signing =
+    Ed25519_continuity
+      { private_key = observer_private_key; public_key = observer_public_key;
+        key_id = observer_key_id; principal_id = observer_principal_id }
+  in
+  let payload =
+    independent_observation_payload observer_key_id observer_principal_id
+      subject.signed_key_id subject.signed_principal_id
+      subject.signed_receipt_digest subject.signed_facts_digest
+      subject.signed_adapter_digest
+  in
+  let directory = Filename.dirname output_path in
+  if not (Sys.file_exists directory) || (Unix.stat directory).st_kind <> S_DIR then
+    failf "sounio-continuity-observation-output-directory-missing:%s" directory;
+  let signature = ed25519_sign signing directory payload in
+  if not (ed25519_verify observer_public_key directory payload signature) then
+    failf "sounio-continuity-observer-keypair-mismatch";
+  let attestation =
+    independent_observation_receipt observer_key_id observer_principal_id
+      subject.signed_key_id subject.signed_principal_id
+      subject.signed_receipt_digest subject.signed_facts_digest
+      subject.signed_adapter_digest (sha256 payload) signature
+  in
+  if Sys.file_exists output_path then (
+    if read_file output_path <> attestation then
+      failf "sounio-continuity-independent-observation-output-conflict")
+  else atomic_write output_path attestation;
+  let verified =
+    verify_independent_observation_attestation ~subject ~subject_public_key
+      ~observer_public_key output_path
+  in
+  Printf.printf
+    "LOOM_CONTINUITY_INDEPENDENT_OBSERVATION_ATTESTED schema=loom-independent-observation-attestation-v1 observer_key_id=%s observer_principal_id=%s subject_signer_key_id=%s subject_principal_id=%s subject_receipt_sha256=%s observation_sha256=%s\n%!"
+    verified.observer_key_id verified.observer_principal_id
+    verified.subject_signer_key_id verified.subject_principal_id
+    verified.subject_receipt_digest verified.observation_digest
 
 let beagle_descriptor root pane_id =
   let paths = beagle_paths root pane_id in
@@ -3426,11 +3718,13 @@ let beagle_status_json root pane_id =
         generation_fingerprint semantic_head guardian_head lineage
     else
       { policy_verified = false; receipt_digest = ""; runtime_digest = "";
-        signature_verified = false; signer_key_id = "";
-        predecessor_receipt_digest = "" }
+        signature_verified = false; signer_key_id = ""; signer_principal_id = "";
+        predecessor_receipt_digest = "";
+        independent_observation_verified = false; observer_key_id = "";
+        observer_principal_id = ""; independent_observation_digest = "" }
   in
   Printf.sprintf
-    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s,\"sounioPolicySignatureVerified\":%s,\"sounioPolicySignerKeyId\":%s,\"sounioPolicyPredecessorReceipt\":%s}}"
+    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s,\"sounioPolicyVerified\":%s,\"sounioPolicyReceipt\":%s,\"sounioPolicyRuntimeDigest\":%s,\"sounioPolicySignatureVerified\":%s,\"sounioPolicySignerKeyId\":%s,\"sounioPolicySignerPrincipalId\":%s,\"sounioPolicyPredecessorReceipt\":%s,\"sounioPolicyIndependentObservationVerified\":%s,\"sounioPolicyObserverKeyId\":%s,\"sounioPolicyObserverPrincipalId\":%s,\"sounioPolicyIndependentObservation\":%s}}"
     (json_quote pane_id) (json_quote session_id)
     (table_value ~default:"0" descriptor "harness_pid") (json_quote status)
     (json_quote
@@ -3461,7 +3755,12 @@ let beagle_status_json root pane_id =
     (json_quote continuity.runtime_digest)
     (if continuity.signature_verified then "true" else "false")
     (json_quote continuity.signer_key_id)
+    (json_quote continuity.signer_principal_id)
     (json_quote continuity.predecessor_receipt_digest)
+    (if continuity.independent_observation_verified then "true" else "false")
+    (json_quote continuity.observer_key_id)
+    (json_quote continuity.observer_principal_id)
+    (json_quote continuity.independent_observation_digest)
 
 let beagle_metadata_for paths pane_id session_id instance cols rows =
   let previous = read_beagle_meta paths in
@@ -3542,6 +3841,7 @@ let ensure_beagle_pane root body =
       let descriptor = parse_key_values paths.descriptor_path in
       let predecessor = table_value descriptor "instance_id" in
       beagle_preflight_transition paths pane_id session_id predecessor;
+      verify_independent_pre_spawn_admission paths predecessor;
       start_command
         { cli with
           rest =
@@ -4176,7 +4476,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version
 
 let arguments_after_command () =
@@ -4216,6 +4516,7 @@ let main () =
     | "verify-journal" -> verify_command cli; 0
     | "verify-guardian-journal" -> verify_guardian_command cli; 0
     | "verify-continuity-receipt" -> verify_continuity_receipt_command cli; 0
+    | "attest-continuity-receipt" -> attest_continuity_receipt_command cli; 0
     | "_forge-duplicate-lease" -> forge_duplicate_lease cli; 0
     | _ -> usage (); 2
 

@@ -59,6 +59,12 @@ activate_runtime() {
       -x /usr/bin/openssl ]] || \
       die "installed runtime declares signed continuity but omits Loom, its adapter, or OpenSSL: $runtime_id"
   fi
+  if grep -q '^capability=loom-principal-independence-v1$' "$manifest"; then
+    grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
+      die "installed runtime declares principal independence without signed Loom and native Sounio admission: $runtime_id"
+  fi
   if grep -q '^capability=loom-cross-node-replay-v1$' "$manifest"; then
     grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest" && \
       grep -q '^capability=loom-separate-pod-inbox-replay-v1$' "$manifest" || \
@@ -293,6 +299,7 @@ else
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'
     printf 'capability=loom-separate-pod-inbox-replay-v1\n'
     printf 'capability=loom-signed-continuity-receipt-v2\n'
+    printf 'capability=loom-principal-independence-v1\n'
     printf 'capability=loom-cross-node-replay-v1\n'
     printf 'capability=loom-cursor-replay-v1\n'
     printf 'capability=loom-exclusive-input-lease-v1\n'

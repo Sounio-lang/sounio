@@ -38,6 +38,11 @@ bin/sounio-loom serve --bind 127.0.0.1 --port 8787
 bin/sounio-loom beagle-serve --bind 127.0.0.1 --port 4372
 bin/sounio-loom verify-continuity-receipt \
   --receipt PATH --public-key PUBLIC.pem --adapter PATH
+bin/sounio-loom attest-continuity-receipt \
+  --receipt PATH --subject-public-key SIGNER.pem \
+  --observer-private-key OBSERVER-PRIVATE.pem \
+  --observer-public-key OBSERVER-PUBLIC.pem \
+  --out PATH --adapter PATH
 ```
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
@@ -81,9 +86,20 @@ predecessor, a different-generation receipt signed by the same key, or an
 incomplete keypair. With signing unset, Loom retains receipt v1 compatibility;
 that mode carries no authenticity claim.
 
+Set `SOUNIO_LOOM_REQUIRE_INDEPENDENT_OBSERVER=1` and
+`SOUNIO_LOOM_OBSERVER_VERIFY_KEY` to require a second principal before a lost or
+exited generation is replaced. The observer attestation binds the exact signed
+predecessor receipt, fact digest, signer identity, and adapter digest. Before
+`start_command`, the OCaml preflight verifies both signatures and asks the
+native Sounio adapter to produce a private disjoint-principal proof. Principal
+identity is the SHA-256 digest of the canonical SubjectPublicKeyInfo DER, not the
+PEM file bytes or role label. Reusing the signer key as the observer key is
+therefore refused before a successor generation exists even when the same key
+has a different PEM serialization.
+
 ## Evidence Boundary
 
-Loom-1.4 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
+Loom-1.6 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
 host. `recover` reconciles bytes fsynced by the guardian while no kernel existed
 and semantically revokes input leases whose sockets died with the old kernel.
 It cannot re-adopt the same PTY after Guardian or host loss. It can detect that
@@ -102,18 +118,22 @@ The Beagle bridge passed its source gate, an isolated second-process canary,
 and a source-derived four-Pod canary with a dedicated retained PVC. The native
 Sounio adapter keeps initial generation, clean respawn, and Pod resurrection
 promotion states distinct. Signed promotion additionally requires a private
-`VerifiedSignedPodResurrection` proof type; an unsigned verified proof is
-rejected by the checker with `E009`, and external construction is rejected with
-`E176`. The Ed25519 gate additionally refuses missing keys,
+`VerifiedSignedPodResurrection` proof type; independent admission additionally
+requires nominally distinct decision and observation proof terms plus a private
+`VerifiedDisjointPrincipals` value. Role collapse is rejected with `E009`, and
+external disjointness construction is rejected with `E176`. The Ed25519 gate
+additionally refuses missing keys,
 payload and signature mutation, the wrong public key, and a validly signed
 receipt spliced from another generation. These controls establish bounded
 receipt integrity and keyholder authorship under the mounted key and adapter,
-not semantic truth against a faulty signer, hardware attestation, or protection
-against compromise of the signing authority. The
-`sounio_loom_correct_signature_wrong_facts_probe.sh` falsifier confirms that a
-legitimate key can sign policy-acceptable false facts and reach signed typestate
-admission; the current independent canary commitment catches the change only
-after spawn. The real-Pod witness relocated
+not semantic truth against colluding authorities, hardware attestation, or
+protection against compromise of both keys. The
+`sounio_loom_correct_signature_wrong_facts_probe.sh` now precommits an
+independently signed digest before a legitimate signer rewrites and re-signs the
+facts; the mismatch is refused before successor creation. This proves bounded
+post-observation tamper detection, not that the observer measured the semantic
+facts independently or would reject an initially false receipt. The real-Pod
+witness relocated
 compute from `t560-proxmox` to `r740-proxmox` over one retained Ceph RBD RWOP
 PVC. It is not state replication, simultaneous multi-node execution, or a
 partition/consensus witness. Deployed Cockpit, canonical-memory, Warp, Madaros
