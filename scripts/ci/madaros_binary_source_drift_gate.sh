@@ -86,6 +86,17 @@ check_row "E215 EpistemicComplete floor" \
           tests/compile-fail/dissertation_pbpk28_overclaim.sio \
           refuse
 
+# `on` as a contextual identifier. The source declares it IDENTIFIER_OK and puts
+# TokenKind::On in tk_is_contextual_ident; the shipped binary predates that.
+# This row is why keyword_identifier_capability_gate.sh must NOT also fail on it:
+# with a committed binary those two gates would be answering the same question
+# and one of them would be wrong about whose fault it is.
+check_row "on is a contextual identifier" \
+          'TokenKind::On => true' \
+          self-hosted/lexer/token.sio \
+          tests/run-pass/keyword_on_is_identifier_capable.sio \
+          accept
+
 echo
 echo "  capabilities probed: $total   behind: $behind   skipped: $skipped"
 
