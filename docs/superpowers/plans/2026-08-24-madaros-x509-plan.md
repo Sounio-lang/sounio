@@ -1652,7 +1652,7 @@ fn x509_decode_basic_constraints(r: &DerReader) -> ((bool, i32), i64) with IO {
     if s4 != DER_OK { return ((is_ca, 0 - 1), s4) }
     let (path_len_bigint, s5) = der_read_integer(&cursor_after_ca, &t2)
     if s5 != DER_OK { return ((is_ca, 0 - 1), s5) }
-    (is_ca, bigint_to_small_i32(&path_len_bigint)), X509_OK)
+    ((is_ca, bigint_to_small_i32(&path_len_bigint)), X509_OK)
 }
 
 // keyUsage ::= BIT STRING. Returns the bits as an i32 bitmask, bit N of the
