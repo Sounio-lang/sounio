@@ -958,3 +958,86 @@ single non-nested function. `Certificate.version` was moved to the first
 field as the minimal fix for this task; any future task adding new
 scalar fields to `Certificate` that must survive a similar nested-return
 path should be aware of this risk.
+
+## Finding 24 — Finding 22's field-by-field-into-array-element workaround does NOT fully fix the underlying defect; it only raises the corruption threshold, and `ExtensionEntry`/`GeneralName`'s true scale is still above it
+
+Found by Task 6's implementer (characterized initially as correlating with
+total merged IR function count, ~63-79 threshold) while building
+`x509_parse_extensions`/`x509_parse_general_names`. The controller
+independently re-investigated the implementer's specific causal claim and
+found it does not hold in isolation, but confirmed a real, more precisely
+characterized defect underneath it.
+
+**Implementer's claim, independently tested and NOT reproduced in the
+form stated:** padding a program with 105 trivial filler functions
+(pushing total merged IR functions to 110 — well past the implementer's
+reported 63-79 failure range) around an already-known-safe `SctEntry`-
+scale array-of-struct write did NOT corrupt it. Same result with the
+array write moved into a function carrying 25 sequential 3-tuple
+destructures (75 extra live locals) ahead of it, mimicking
+`x509_parse_extensions`'s real shape. **Total program function count and
+a single function's own local-variable count are not, by themselves, the
+trigger.**
+
+**What the controller confirmed IS still broken:** the Finding 22
+workaround (assign every field individually, directly into the array
+element — `arr[i].field = value`, no intermediate local, no struct
+literal) was verified correct in Finding 22's own write-up only at
+`RdnEntry`/`GeneralName` scale using the OLD vulnerable whole-struct-copy
+pattern as the point of comparison — Finding 22 never independently
+re-tested whether the FIXED field-by-field pattern itself holds up at
+`ExtensionEntry`'s scale (32-element array, `oid:[u8;20]` +
+`value:[u8;512]`, ~532 bytes/entry, ~17KB total array — nearly 7x
+`RdnEntry`'s ~2.5KB and nearly 2x `GeneralName`'s ~9KB). It does not:
+
+```sio
+struct ExtL { oid: [u8;20], oid_len: i32, critical: bool, value: [u8;512], value_len: i32 }
+// ... array of 32, zero-initialized, then:
+extensions[count as usize].oid = oid_buf         // oid_buf[0] = 0x55
+extensions[count as usize].oid_len = 2
+extensions[count as usize].critical = true
+extensions[count as usize].value = val_buf       // val_buf[0] = 0xAA
+extensions[count as usize].value_len = 512
+
+// WRONG: extensions[0].oid[0] reads back 0xAA (val_buf's byte), not
+// 0x55 (its own byte). extensions[0].value[0] reads back correctly
+// (0xAA). oid_len/critical/value_len (scalars) all read back correctly.
+```
+
+This is the SAME qualitative failure as Finding 20 (`rawbuf_set`'s
+write-side 7-byte clobber) and Finding 22 (whole-struct-copy
+cross-contamination): a later field write corrupting an earlier field's
+already-written bytes, at a struct+array total-byte scale above whatever
+this codegen path's actual capacity threshold is — but Finding 22's
+prescribed workaround (field-by-field assignment) does NOT raise that
+threshold far enough to cover `ExtensionEntry`'s real usage in this plan.
+The exact threshold (bytes? field count? distinct from function count,
+per the controller's filler-function and tuple-destructure repros both
+coming back clean) was not pinned down further — this needs its own
+forensic dispatch, per `CLAUDE.md` §8, rather than continued ad hoc
+X.509-layer workarounds. `GeneralName` (32-element array, additionally
+carrying a nested `X509Name` struct with its own `[RdnEntry;16]`) is at
+least as exposed, and the implementer's attempt to work around it via a
+flat-parallel-array redesign produced a runtime segfault rather than a
+clean fix — see Task 6's report
+(`.superpowers/sdd/2026-08-24-madaros-x509-plan/task-6-report.md`) for
+the full technique-by-technique trail (9 approaches tried and rejected).
+
+**Status: BLOCKING.** No workaround at the X.509 source-code level was
+found that keeps `ExtensionEntry`'s and `GeneralName`'s current struct
+shapes (two or more embedded `[u8;N]` fields per array element, at their
+real array sizes) intact and correct. This blocks Task 6 and, by
+extension, Task 7 (outer Certificate assembly, which must build these
+same arrays at real scale plus more). Two paths forward, neither
+executable unilaterally within a single SDD task:
+1. A compiler fix, via this repo's forensic dispatch protocol
+   (`docs/audit/`) — root cause still uncharacterized beyond "large
+   struct/array, field-write codegen, not explained by function count or
+   local-variable count in isolation."
+2. A data-model redesign of `ExtensionEntry`/`GeneralName` (and possibly
+   `Certificate` itself) to avoid embedding two or more large `[u8;N]`
+   arrays in the same struct-in-array element — e.g., storing `oid`/
+   `value` bytes as offset+length pairs into a shared, separately
+   allocated `RawBuf` rather than fixed inline arrays. This is a
+   revision to Task 2's already-twice-reviewed data model and is out of
+   scope for a single task to decide.
