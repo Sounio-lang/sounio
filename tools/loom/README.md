@@ -49,15 +49,22 @@ being relaunched. The current launcher boundary delegates process creation to
 the compatibility `agentd` adapter while desired-state parsing and reconciliation
 policy live in the OCaml runtime.
 
+`scripts/dev/install_sounio_loom_kubernetes_hook.sh` installs the one-shot
+reconciler in the workspace StatefulSet. It refuses any update strategy other
+than `OnDelete`, runs reconciliation as the lane-owning user instead of the
+container's root user, and verifies that applying the template did not replace
+the current Pod. Use `--dry-run` to inspect the strategic merge patch.
+
 ## Evidence Boundary
 
 Loom-1 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
 host. `recover` reconciles bytes fsynced by the guardian while no kernel existed
 and semantically revokes input leases whose sockets died with the old kernel.
 It cannot re-adopt the same PTY after Guardian or host loss. It can detect that
-loss and reconcile an enrolled lane into a new verified generation, but the
-Kubernetes startup hook is not yet activated and pending-inbox replay across that
-new generation still needs its own gate. Existing fleet generations therefore
-retain the Python `agentd` launch adapter during migration.
+loss and reconcile an enrolled lane into a new verified generation. The
+Kubernetes startup hook activates that one-shot reconciliation after Pod loss,
+but pending-inbox replay across the new generation still needs its own gate.
+Existing fleet generations therefore retain the Python `agentd` launch adapter
+during migration.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.
