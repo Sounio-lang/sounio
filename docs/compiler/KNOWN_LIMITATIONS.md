@@ -86,6 +86,30 @@ Editor-tooling details:
 
 ### Active Known Bugs / Architectural Gaps
 
+**`i256` is `i64`, and the Lorenz certificate's products exceed `i64` by nine orders of magnitude (2026-08-20, OPEN).**
+No integer width in Sounio carries semantics: `i8` gives `200` for `100 + 100`
+where `-56` is due, and `i256` on `5e18 + 5e18` returns the exact `i64`
+wraparound. `fn i256_*` occurs **zero** times in all of `stdlib/`, so there is no
+limb implementation underneath the annotation.
+
+`stdlib/systems/` — 56,327 lines, 220 importers, almost entirely the Lorenz i256
+certification — carries **733** `i256` annotations on the certificate's own
+quantities. Measured on an independently source-built compiler with an exact
+arbitrary-precision replay (#2046): the maximum intermediate actually reached is
+**8,007,432,506,888,905,229,835,698,176**, which is **868,167,572×** the signed
+`i64` ceiling, at `y_lte_source * den` in
+`stdlib/systems/lorenz_i256_cert_step5.sio:2310`. **That product wraps.**
+
+Coverage is bounded and declared: steps 1–6, the step and trajectory-5
+certificates, children 0–1, the refinement ledger. Children 2–4, bridge families
+and long loops are marked `NOT EXECUTABLE` for that receipt.
+
+**Do not state that any certificate conclusion is wrong.** That is unaudited: an
+overflowed product inside a comparison can still land on the correct side. The
+honest statement is **the arithmetic is unsound and the conclusions are
+unaudited**. Spec: `docs/spec/S12_NUMERIC_TOWER.md` §12.2.6, ruling §12.4-6.
+
+
 **ε has opposite polarities in the two engines — a patient-safety compile-fail test passes under the default compiler (2026-08-19, OPEN).**
 `tests/compile-fail/vancomycin_low_conf.sio` is refused by `lean_single` with
 `error[P0003] ... Knowledge ε boundary violation at line 27` and **accepted by
@@ -194,7 +218,7 @@ This file previously claimed several rows as "Production" that the public-claim 
 
 ### Fixed in Self-Hosted Compiler — All Bugs Closed
 
-**`extern "C"` integer FFI return register** (fixed, **lean_single only** — see engine split below): `strip_extern_blocks()` (`self-hosted/compiler/lean_single.sio`) now emits Sounio stub functions (OS syscalls for integer-returning `getpid`/`getppid`, `heap_alloc`/`heap_free` for `malloc`/`free`, `__native_*_f64` intrinsics for math). Stubs use Sounio's internal calling convention (RAX), bypassing the XMM0/RAX confusion entirely. Unblocks `stdlib/os/`, `stdlib/mem/`, `stdlib/sync/`. Regression test: `tests/run-pass/ffi_integer_return.sio`.
+**`extern "C"` integer FFI return register** (fixed, **lean_single**; the default engine is covered by the entry below as of 2026-08-23 — see engine split): `strip_extern_blocks()` (`self-hosted/compiler/lean_single.sio`) now emits Sounio stub functions (OS syscalls for integer-returning `getpid`/`getppid`, `heap_alloc`/`heap_free` for `malloc`/`free`, `__native_*_f64` intrinsics for math). Stubs use Sounio's internal calling convention (RAX), bypassing the XMM0/RAX confusion entirely. Unblocks `stdlib/os/`, `stdlib/mem/`, `stdlib/sync/`. Regression test: `tests/run-pass/ffi_integer_return.sio`.
 
 **Engine split (verified 2026-08-17).** This entry names no engine, but `strip_extern_blocks()` is lean_single-specific. Under the default Madaros engine, this surface had a *separate, later* history: `docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md` found `system()`/`getpid()` calls under Madaros were **silently non-functional** — they claimed success (returned 0) while doing nothing, with no diagnostic — and recorded Track A (Madaros) as open and unpatched. That gap is now closed for a specific, allowlisted set of names by P0-F (#1755, commit `1e8d48cdc8`, merged to `main` 2026-08-17): `getpid`, `getppid`, `malloc`, `free`, `exit`, `abort`, `system` now have real emitters in `self-hosted/native/codegen_x86_linux.sio`, each backed by a per-name execution witness (not just a clean `check`) in `scripts/ci/ffi_posix_builtin_gate.sh`. Any `extern "C"` name outside that allowlist still fails closed under Madaros with `error[E219]` rather than silently fabricating a result — see `name_is_native_backend_builtin` in `self-hosted/check/check.sio`.
 
@@ -202,6 +226,8 @@ This file previously claimed several rows as "Production" that the public-claim 
 
 - **#1798 (CLOSED):** Madaros accepted a forward ontology `inverse_of` that lean_single rejected with **E158**; Madaros was aligned to lean_single declaration-order (`scripts/ci/madaros_ontology_enforcement_gate.sh`).
 - **#1792 (OPEN):** Madaros prints `var=0.000000` where lean_single shows ~1e-5 on dissertation adaptive witnesses (plus ep28 confidence bit-pattern fabrication). Detect-only gate: `scripts/ci/epistemic_fabrication_detect_gate.sh`. Full variance-slot / multi-module f64 ABI repair is a separate compiler lane.
+
+**`extern "C"` FFI on the default Madaros engine** (fixed 2026-08-16, Track A): under lean_single, `strip_extern_blocks()` emits Sounio stub functions using the internal RAX convention. Under **default Madaros** the same capability now exists via the `ffi_` builtin registry: the parser rewrites each `extern "C"` declaration into a wrapper forwarding to an `ffi_<name>` intrinsic (brace-form blocks handled re-entrantly, one declaration per item — no dropped declarations), the checker binds the implemented intrinsics, and `codegen_x86_linux.sio` emits them (`getpid`/`getppid` syscalls, `exit`/`abort` via `exit_group`, `malloc`/`free` via the mmap heap, `system` via fork/execve/wait4). **Fail-closed:** an `extern` whose intrinsic is unimplemented now fails at check time with E137 instead of silently returning a fabricated 0. Unblocks `stdlib/os/`, `stdlib/mem/`, `stdlib/sync/` on the default engine. Regression tests: `tests/run-pass/ffi_integer_return.sio`, `ffi_getppid_return.sio`, `ffi_extern_block_multi_decl.sio`, `ffi_exit_terminates.sio`, `ffi_malloc_free_roundtrip.sio`, `ffi_system_exec.sio`; compile-fail `ffi_unimplemented_extern_must_reject.sio`. **Residual:** a reference-to-aggregate extern parameter (`&[i8;N]`) forwards an empty pointer through the signatureless `ffi_` path (a `string`/pointer-scalar arg works) — `//@ known-failure` `ffi_system_array_arg.sio`; see `docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md`.
 
 **Observation boundary coverage** (fixed): `Observe` now enforced for comparison, IO-arg, FFI-arg, and pattern-match scrutinee in both x86-64 and ARM64 codepaths. Self-hosted compiler and multi-file checker are now aligned. Test: `tests/compile-fail/observe_io_boundary.sio`.
 
