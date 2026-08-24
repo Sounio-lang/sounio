@@ -1065,11 +1065,10 @@ pub fn sct_list_decode(buf: &RawBuf, start: i64, len: i64) -> ([SctEntry; 8], i3
         }
         let sct_start = pos
 
-        if sct_len < 43 {
+        if sct_len < 47 {
             // 1 (version) + 32 (log_id) + 8 (timestamp) + 2 (ext_len) + 1
             // (hash alg) + 1 (sig alg) + 2 (sig_len) = 47 bytes minimum
-            // structure BEFORE any extension/signature bytes -- wait, this
-            // is actually 1+32+8+2+1+1+2 = 47, not 43; use 47 here.
+            // structure BEFORE any extension/signature bytes.
             return (out, count, X509_ERR_MALFORMED)
         }
 
