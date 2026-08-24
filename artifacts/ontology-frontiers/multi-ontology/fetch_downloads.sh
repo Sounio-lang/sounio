@@ -29,11 +29,14 @@
 # uberon_* artifacts, and the numbers in RESULTS.md and the technical note were measured
 # against 2026-06-19.  Decide, then regenerate, then update the docs.
 #
-# UNPINNED (chebi, pato).  No release is recorded anywhere in this repository, and
-# `purl.obolibrary.org` redirects both to MOVING targets (EBI's current chebi.owl;
-# pato's master branch on GitHub).  Skipped unless you pass --unpinned, and what you get
-# is whatever upstream publishes today — NOT known to be the version the committed
-# chebi_*/pato_* artifacts came from.
+# PATO moved into PINNED (2026-08-24).  Its versionIRI names release 2025-05-14, that URL
+# returns 200, and regenerating from it reproduces the committed pato_* artifacts BYTE FOR
+# BYTE in 2 s (gen_chebi_data.py --only pato).  So it is fetched and checksummed like cl.
+#
+# UNPINNED (chebi only).  Its versionIRI names release 254, and obo/chebi/254/chebi.owl is
+# a 404; the undated purl serves EBI's current file, which turns over every ChEBI release.
+# So there is no URL that reliably returns the input the committed chebi_* artifacts came
+# from.  Skipped unless you pass --unpinned, and what you get is whatever is current.
 
 set -euo pipefail
 
@@ -45,6 +48,7 @@ DEST="$DIR/downloads"
 PINNED=(
   "cl|http://purl.obolibrary.org/obo/cl/releases/2026-06-08/cl.owl|6abe12f1569d077507e03c1ad0168ebbb9ed725973a7eddba8ab3b9aeaf7a68d"
   "ro|http://purl.obolibrary.org/obo/ro/releases/2025-12-17/ro.owl|a9f644d4a865747e0b4aba7ca3f19aac1e0b072cab89e24a2e476df3abb10aaf"
+  "pato|http://purl.obolibrary.org/obo/pato/releases/2025-05-14/pato.owl|73a80487130a81a3696f1e03c551288f741ed1be5a07639e69e7ecd8b6f0371c"
 )
 # UNDATED url — the digest, not the url, pins the version (release 2026-06-19).
 # A mismatch here means upstream released a new uberon; see the header before touching it.
@@ -53,7 +57,6 @@ MOVING=(
 )
 UNPINNED=(
   "chebi|http://purl.obolibrary.org/obo/chebi.owl|-"
-  "pato|http://purl.obolibrary.org/obo/pato.owl|-"
 )
 
 MODE=fetch
@@ -129,7 +132,6 @@ if [[ "$WANT_UNPINNED" == 1 ]]; then
   for e in "${UNPINNED[@]}"; do process "$e"; done
 else
   printf '  %-7s skipped (unpinned; pass --unpinned)\n' "chebi"
-  printf '  %-7s skipped (unpinned; pass --unpinned)\n' "pato"
 fi
 
 if [[ $rc -ne 0 ]]; then
