@@ -223,7 +223,7 @@ parse_ednc() {
       fi
       ;;
   esac
-  # reason must be specific enough (founder: "ainda nao" is not a reason)
+  # reason must be specific enough (founder: vacuous reasons like "not yet" / PT "ainda nao" are rejected)
   if [[ -n "$EDNC_REASON" && ${#EDNC_REASON} -lt 12 ]]; then
     miss+=("Reason(too_short)")
   fi
