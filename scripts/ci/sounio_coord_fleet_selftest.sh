@@ -186,6 +186,14 @@ wait_for 'kind launch did not start its supervised harness' \
   "grep -q '^START ' '$KIND_LOG' 2>/dev/null"
 grep -q "HOME=$HOME_ROOT" "$KIND_LOG" || \
   fail 'kind launch inherited the reconciler HOME instead of its lane HOME'
+kind_status="$(fleet status --cwd "$REPO" --slot "$KIND_SLOT")"
+kind_lane="$(sed -n 's/.* lane=\([^ ]*\).*/\1/p' <<< "$kind_status")"
+kind_agentd_status="$(
+  SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-agentd-runtime" status \
+    --agent claude --lane "$kind_lane" --cwd "$REPO"
+)"
+grep -q '^command=claude$' <<< "$kind_agentd_status" || \
+  fail 'agentd attested env instead of the wrapped Claude harness'
 fleet stop --cwd "$REPO" --slot "$KIND_SLOT" >/dev/null
 
 kill -KILL "$harness_pid"
@@ -248,4 +256,4 @@ tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
 fleet stop --cwd "$REPO" --slot "$SLOT" >/dev/null
 [[ ! -e "$mapping" ]] || fail 'stop left the slot mapping behind'
 
-echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived harness_exit=proven-absent crash_relaunch=new-capability lane_home=isolated reattach=same-generation duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'
+echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived harness_exit=proven-absent crash_relaunch=new-capability lane_home=isolated wrapped_command=attested reattach=same-generation duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'

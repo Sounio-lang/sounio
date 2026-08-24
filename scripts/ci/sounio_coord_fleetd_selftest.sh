@@ -405,8 +405,8 @@ grep -q 'action=stop status=refused reason=.*already-consumed' \
   fail 'reused stop capability changed the later generation'
 
 output="$(fleetd authorize-recovery --config "$CONFIG" --slot "$SLOT" \
-  --out "$RECOVERY_BUDGET" --max-starts 2 --backoff-seconds 2 --ttl 600)"
-grep -q 'FLEET_RECOVERY_BUDGET_ISSUED .*max_starts=2 .*backoff_seconds=2' \
+  --out "$RECOVERY_BUDGET" --max-starts 2 --backoff-seconds 5 --ttl 600)"
+grep -q 'FLEET_RECOVERY_BUDGET_ISSUED .*max_starts=2 .*backoff_seconds=5' \
   <<< "$output" || fail 'bounded recovery authorization omitted its budget'
 cp "$RECOVERY_BUDGET" "$BAD_RECOVERY_BUDGET"
 python3 - "$BAD_RECOVERY_BUDGET" <<'PY'
@@ -444,14 +444,14 @@ grep -q 'status=deferred reason=recovery-backoff-active' <<< "$output" || \
   fail 'recovery budget ignored its temporal backoff'
 [[ "$(grep -c '^START pid=' "$RECEIVER_LOG")" == 3 ]] || \
   fail 'backoff created a premature restart'
-sleep 2.1
+sleep 5.1
 fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
   --apply-recovery --recovery-budget "$RECOVERY_BUDGET" >/dev/null
 wait_for 'second recovery unit did not restart the stopped slot' \
   "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 4"
 SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
   stop --cwd "$REPO" --slot "$SLOT" >/dev/null
-sleep 2.1
+sleep 5.1
 if fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
   --apply-recovery --recovery-budget "$RECOVERY_BUDGET" \
   >"$TEST_ROOT/exhausted-recovery-budget" 2>&1; then

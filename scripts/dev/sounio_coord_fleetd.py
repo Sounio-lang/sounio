@@ -27,7 +27,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.23.4"
+RUNTIME_VERSION = "2026.08.24.1"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -933,7 +933,7 @@ def desired_mapping_mismatch(spec: LaneSpec, mapping: dict[str, Any]) -> str | N
                 f"SOUNIO_FLEET_START_CAPABILITY_ID={start_capability_id}",
                 *spec.command,
             ]
-            expected["command"] = Path(env_command).name
+            expected["command"] = Path(spec.command[0]).name
             expected["argv_digest"] = hashlib.sha256(
                 canonical_json(wrapped).encode("utf-8")
             ).hexdigest()
