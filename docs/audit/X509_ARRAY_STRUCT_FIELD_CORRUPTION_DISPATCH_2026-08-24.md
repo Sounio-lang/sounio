@@ -4,11 +4,17 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-24
 validated_by: controller (tls-on-madaros branch, X.509 sub-project)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.x509-array-struct-field-corruption-dispatch-2026-08-24
 -->
 
-# Forensic dispatch — array-of-struct field writes silently corrupt sibling `[u8;N]` fields once the struct/array crosses a size threshold, and the known workaround does not fully cure it
+# Forensic dispatch — a struct field named `value` was silently clobbered by its sibling, because a synthetic `Knowledge` layout shadows user field names
 
-**Filed:** 2026-08-24 · **Status:** OPEN (root cause not yet characterized) · **Protocol:** CLAUDE.md §8.
+> **Title and framing corrected 2026-08-24.** This dispatch was filed as a size
+> threshold on array-of-struct writes. It is not one. The trigger is the
+> identifier `value`; size, array length and index form are all irrelevant.
+> See "Root cause" below. Fix: PR #2126.
+
+**Filed:** 2026-08-24 · **Status:** ROOT-CAUSED, fix in PR #2126 · **Protocol:** CLAUDE.md §8.
 
 Branch: `tls-on-madaros`. Discovered while building the X.509 semantic layer
 (`docs/superpowers/plans/2026-08-24-madaros-x509-plan.md`, Tasks 5-6). Blocks
@@ -20,7 +26,50 @@ Already-catalogued sibling findings this escalates: Findings 20, 22, 23 in
 `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`. This dispatch
 records Finding 24 from that doc as a standalone, actionable bug report.
 
-## The defect
+## Root cause (2026-08-24) — the synthetic `Knowledge` layout shadows user field names
+
+`ir_register_knowledge_layout` (`self-hosted/ir/lower.sio`) preseeds a synthetic
+`Knowledge` struct layout — `value@0`, `variance@1`, `confidence@2` — as **entry
+0** of the struct layout table, before any user struct is registered.
+`field_idx_from_name_simple` resolves a field *name* to a slot by scanning the
+whole table in order and returning the first hit **in any struct**. That path
+runs whenever the base is not a typed local, and `arr[i].f` reaches it because
+array locals record a length but no element type.
+
+So `extensions[0].value` resolved to Knowledge's slot 0 — **the same slot as
+`oid`**. The second store overwrote the first, and both reads went to slot 0 as
+well. That is why `value` read back correct, why `value[511]` looked fine, and
+why only `oid` appeared corrupt: every byte in the measured output follows from
+one wrong slot index. `field_idx_from_name`'s cross-table fallback carries the
+identical shadow.
+
+**The trigger is the identifier, not the shape.** Confirmed two ways,
+independently:
+
+- renaming **only** the field `value` to `val` in the failing program makes it
+  correct — `85 29 170 187 204`;
+- renaming a working program's field to `value` breaks it.
+
+Everything else was measured and ruled out: total size, array length,
+per-element size, dynamic vs literal index, stack aliasing of the source
+buffers, interleaved scalar fields, and the number of writes into the source
+buffers. It also fails on the `normal` compile path, so it is **not**
+native-v2-specific.
+
+This is why the nine source-level workarounds in Task 6's report all failed —
+none of them changed a name. It is also why the scale table below reads the way
+it does: `SctEntryL` is clean and `ExtL` is broken because of what their fields
+are called, not how big they are.
+
+**Scope.** Any Sounio program with a struct field named `value`, `variance` or
+`confidence` accessed through a non-identifier base. Nothing about DER parsing,
+byte arrays or array-of-struct is required; the field type is irrelevant.
+
+**Fix.** PR #2126 consults the synthetic layout last: a user layout always wins,
+and `Knowledge` answers only if nothing else does, preserving genuine
+`Knowledge<T>` access through an untyped base.
+
+## The defect (as originally filed — the symptom is accurate, the size framing is not)
 
 Writing two or more `[u8;N]` fields of the **same array-of-struct element**
 silently corrupts one field with bytes belonging to the other, once the
@@ -183,33 +232,27 @@ future Sounio program building a moderately large `(array of struct)` where
 the struct carries two or more sizeable `[u8;N]`/byte-array-shaped fields —
 not specific to X.509 or DER parsing.
 
-## Suggested investigation starting points (not yet pursued — out of scope for the X.509 task that found this)
+## Superseded: the original investigation suggestions
 
-- Compare generated codegen (`self-hosted/native/`) for the array-element
-  field-store path at a passing scale (`SctEntryL`, 8×188B) vs. a failing
-  scale (`ExtL`, 32×537B) — the corruption's directionality (later write
-  clobbers earlier write's bytes at the SAME destination-array-element
-  address range) suggests either an incorrect stack-slot/temp-register
-  reuse between the two field stores, or an address computation that
-  aliases the destination offset for the second field's write onto part of
-  the first field's already-stored bytes.
-- Findings 3 and 20 (`rawbuf_get`/`rawbuf_set`'s word-granularity read/write
-  behavior) are a structurally similar failure mode (byte writes actually
-  touching more than their own byte) in a completely different code path
-  (a runtime buffer primitive, not struct-field codegen) — worth checking
-  whether they share a root cause (e.g. a shared byte-store/copy helper in
-  codegen) or are coincidentally similar in symptom only.
-- The `SctEntry`-scale (1.5KB total array) vs `ExtensionEntry`-scale (17KB
-  total array) boundary suggests the threshold is on the order of a few KB
-  per struct instance or per whole array — worth a binary search across
-  intermediate array lengths (e.g. 12, 16, 20, 24 elements of `ExtL`) to
-  pin down whether it's array-length-driven, total-byte-driven, or
-  per-element-size-driven.
+The three starting points filed here — compare codegen offsets at passing vs
+failing scale, look for a shared byte-store helper with Findings 3/20, and
+binary-search intermediate array lengths for a KB-scale threshold — all point
+away from the cause. They are kept only as a record: each presumes the defect
+scales with bytes, and it does not. A binary search across array lengths would
+have returned "corrupt at every length", which is what happened when it was
+finally run.
 
 ## Regression gate (once a fix lands)
 
-Re-run the repro above (save as a `tests/run-pass/` fixture) and confirm
-`170 187 2 1 170 187 204 512` becomes `85 29 2 1 170 187 204 512`. Then
+Landed with PR #2126 as `tests/madaros/source_to_elf/knowledge_field_shadow_exit0.sio`,
+registered in that gate's manifest — the gate compiles with Madaros and is run
+by CI (`ci.yml:765`). It was proven to discriminate: red on the unpatched tree,
+green on the patched one. A `tests/run-pass/` fixture is **not** sufficient on
+its own, because CI runs that suite under `souc-stage2`, which never carried the
+defect.
+
+Re-running the repro above confirms `170 187 2 1 170 187 204 512` becomes
+`85 29 2 1 170 187 204 512`. Then
 resume `docs/superpowers/plans/2026-08-24-madaros-x509-plan.md` Task 6 from
 its current WIP state (uncommitted in the `tls-on-madaros` worktree:
 `stdlib/x509/cert.sio` modified, `stdlib/x509/ext_build.sio` new,

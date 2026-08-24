@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-08-23-madaros-asn1-der-design
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-08-23-madaros-asn1-der-design
+-->
+
 # Madaros ASN.1 DER Decoder — Design Spec
 
 ## Context and Motivation
