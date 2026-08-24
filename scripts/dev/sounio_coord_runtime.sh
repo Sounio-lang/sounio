@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.15
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.24.1
 
 usage() {
   cat <<'USAGE'
@@ -2596,7 +2596,7 @@ message_status_command() {
     [[ -z "$original_to_lane" || "$M_FROM_LANE" == "$original_to_lane" ]] || continue
     [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$original_from_agent" ]] || continue
     [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$original_from_lane" ]] || continue
-    [[ "$M_KIND" =~ ^(reply|blocker|handoff)$ ]] || continue
+    [[ "$M_REPLY_TO" == "$message_id" || "$M_KIND" =~ ^(reply|blocker|handoff)$ ]] || continue
     responses=$((responses + 1))
     if ((M_CREATED_EPOCH > latest_epoch)) || \
       { ((M_CREATED_EPOCH == latest_epoch)) && [[ "$message_file" > "$latest_file" ]]; }; then
@@ -2699,7 +2699,7 @@ wait_command() {
       [[ -z "$original_to_lane" || "$M_FROM_LANE" == "$original_to_lane" ]] || continue
       [[ -z "$M_TO_AGENT" || "$M_TO_AGENT" == "$original_from_agent" ]] || continue
       [[ -z "$M_TO_LANE" || "$M_TO_LANE" == "$original_from_lane" ]] || continue
-      [[ "$M_KIND" =~ ^(reply|blocker|handoff)$ ]] || continue
+      [[ "$M_REPLY_TO" == "$message_id" || "$M_KIND" =~ ^(reply|blocker|handoff)$ ]] || continue
       response_file="$message_file"
     done
     if [[ -n "$response_file" ]]; then
