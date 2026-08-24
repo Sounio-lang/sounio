@@ -610,6 +610,12 @@ lean_lib «SounioFanoArcsBlocking» where
 @[default_target]
 lean_lib «SounioSunflower» where
 
+-- Measurement: seven xor-fibers of 12 as a partition of the 84, nested
+-- (not orthogonal) with the annihilator kernel. See
+-- docs/audit/SEVEN_FIBERS_OF_TWELVE_2026-08-19.md
+@[default_target]
+lean_lib «SounioSevenFibers» where
+
 -- Erdős [90] CLASSICAL planar attack: exact triangular-lattice (Eisenstein ℤ[ω]) lower
 -- bound u(n) ≥ ⌊3n−√(12n−3)⌋, witnessed. Baseline for the cluster search.
 -- See docs/research/erdos-90-planar-search-plan.md

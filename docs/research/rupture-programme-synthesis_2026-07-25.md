@@ -91,7 +91,7 @@ Do not collapse sensors.
 | **1a/1b** | associator / G₂ 3-form | 𝕆 | \(\|[a,b,c]\|\); non-Fano \(\|\cdot\|^2=4\) | `oct_associator`, `associator_field` |
 | **2** | \(\det L_x=0\) | 𝕊 | \(d_{\mathrm{sing}}\), tube mass | R2 full probe |
 | **2′** | annihilating pair | 𝕊 | fiber \(L=\mathrm{lo}\oplus\mathrm{hi}\) | `sedenion_zd_fibers`, R2 partial |
-| **2″** | composed annihilation | stacks | subspace **alignment** | probe-corrected-protocol (separate) |
+| **2″** | composed annihilation | stacks | subspace **alignment** | `ORD2_INSTRUMENT_OK` (gate) |
 | **3** | Massey / Borromean | topology | ternary class | #1225 lineage |
 | **M** | Ollivier–Ricci \(\kappa\) | graphs | curvature law | ORC / ECSS (parallel) |
 | **P** | bifurcation of \(V(\cdot;c)\) | control space | stratum type | Petitot / Φ_fp |
@@ -215,7 +215,9 @@ exactly why R4 exists.
 ## 8. Open edges (honest queue)
 
 1. **Functor F** — homology of meaning as a formal functor, not only path classes.  
-2. **Ord 2″** — subspace-alignment probe on **non-sedenion** models (LSTM/S4), with rotating control.  
+2. **Ord 2″ trained line complete for LSTM adding** — instrument OK; LSTM+S4
+   `NO_SIGNATURE`; protocol §5 **`ORD2_PERF_NO_LINK`** (long-T degrades but
+   uncorrelated with alignment). Full HiPPO-S4/Mamba optional.  
 3. **R2 continuous law as theorem** — lift measured \(t^{1/4}\) contact to a proof.  
 4. **#1237 merge / ADE–Wildgen** — literature map vs catastrophe-controversy landmine.  
 5. **External paper** — this synthesis is the skeleton; prose for arXiv still needs human voice and offload review under repo policy.
@@ -235,7 +237,9 @@ python3 scripts/research/rupture_r3_fano_restriction_probe.py
 python3 scripts/research/rupture_r4_fano_field_contract.py
 ```
 
-Merged landings: **#1432** (R3_GREEN + R4_GREEN), **#1446** (R2_FULL_MEASURED).
+Merged landings: **#1432** (R3_GREEN + R4_GREEN), **#1446** (R2_FULL_MEASURED),
+**#1448** (programme synthesis). Ord 2″ instrument: see PR for
+`rupture_ord2_alignment_contract.py`.
 
 ---
 

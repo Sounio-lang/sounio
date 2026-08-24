@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Proof-Carrying Endogenous Observability
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-ENDOGENOUS-OBSERVABILITY`
 
 ## Founder Intent

@@ -69,6 +69,17 @@ cap = int(
 if cap != expected:
     fail(f"ir_max_instrs_expected_{expected}_got_{cap}")
 
+max_funcs = int(
+    unique(
+        r"^pub let IR_MAX_FUNCS: i64 = ([0-9]+)\s*$", text, "ir_max_funcs", re.M
+    ).group(1)
+)
+max_strings = int(
+    unique(
+        r"^pub let IR_MAX_STRINGS: i64 = ([0-9]+)\s*$", text, "ir_max_strings", re.M
+    ).group(1)
+)
+
 # The inline array must stay GONE. Its return would restore the ~2 GB per-module
 # reservation and, under #1655, a global array of aggregates is a silent no-op.
 struct_body = unique(
@@ -109,6 +120,39 @@ for rel, capname, fnname in GUARDED:
         fail(f"{fnname}_truncates_at_{pass_cap}_without_refusing_cap_{cap}")
     receipts.append(f"{capname}={pass_cap}:{'refuses' if guarded else 'covers'}")
 
+# IrModule.functions and the SOIR deserializer function table are compile-time
+# literals. A handwritten 16384 that merely equals IR_MAX_FUNCS today is the
+# same defect class as the old [IrFunction; 1024]: it will not rise next time.
+# This gate is the bind — Sounio cannot write [IrFunction; IR_MAX_FUNCS].
+mod_fn = unique(
+    r"pub functions:\s*\[IrFunction;\s*([0-9]+)\]", text, "irmodule_functions_field"
+)
+if int(mod_fn.group(1)) != max_funcs:
+    fail(f"irmodule_functions_literal_{mod_fn.group(1)}_ne_ir_max_funcs_{max_funcs}")
+
+ser_path = root / "self-hosted/ir/serialize.sio"
+if not ser_path.is_file():
+    fail("serialize_source_missing")
+ser = ser_path.read_text(encoding="utf-8")
+ser_fn = unique(
+    r"var functions:\s*\[IrFunction;\s*([0-9]+)\]", ser, "serialize_functions_array"
+)
+if int(ser_fn.group(1)) != max_funcs:
+    fail(f"serialize_functions_literal_{ser_fn.group(1)}_ne_ir_max_funcs_{max_funcs}")
+ser_str = unique(
+    r"var string_table:\s*\[Name;\s*([0-9]+)\]", ser, "serialize_string_table"
+)
+if int(ser_str.group(1)) != max_strings:
+    fail(f"serialize_string_table_literal_{ser_str.group(1)}_ne_ir_max_strings_{max_strings}")
+
+# Capacity refuse must be DETECTABLE (counter), not a silent empty-module clamp.
+if not re.search(r"^pub var SOIR_DESER_REFUSAL_COUNT:\s*i64\s*=\s*0\s*$", ser, re.M):
+    fail("soir_deser_refusal_count_missing")
+if ser.count("soir_note_deser_refusal()") < 3:
+    fail(f"soir_note_deser_refusal_call_count_{ser.count('soir_note_deser_refusal()')}")
+if "fn_count < 0 || fn_count > IR_MAX_FUNCS" not in ser:
+    fail("serialize_fn_count_not_checked_against_ir_max_funcs")
+
 # The same failure class exists at REGISTER granularity in opt_cleanup, whose
 # peels carry register-indexed [_; 256] state, and it is NOT guarded here on
 # purpose. Refusing was tried twice and made things worse, measured: skipping the
@@ -120,7 +164,10 @@ for rel, capname, fnname in GUARDED:
 
 print(
     "IRFUNCTION_INSTR_CAPACITY_CHECK "
-    f"cap={cap} storage=arena_region inline_field=absent "
+    f"cap={cap} max_funcs={max_funcs} max_strings={max_strings} "
+    "storage=arena_region inline_field=absent "
+    f"serialize_functions={max_funcs} serialize_strings={max_strings} "
+    "soir_deser_refusal=detectable "
     + " ".join(receipts)
     + " coherent=pass"
 )
