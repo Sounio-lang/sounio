@@ -53,6 +53,17 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
       die "installed runtime declares native Sounio continuity but omits its adapter: $runtime_id"
   fi
+  if grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-continuity-runtime" && \
+      -x /usr/bin/openssl ]] || \
+      die "installed runtime declares signed continuity but omits Loom, its adapter, or OpenSSL: $runtime_id"
+  fi
+  if grep -q '^capability=loom-cross-node-replay-v1$' "$manifest"; then
+    grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest" && \
+      grep -q '^capability=loom-separate-pod-inbox-replay-v1$' "$manifest" || \
+      die "installed runtime declares cross-node replay without signed separate-Pod continuity: $runtime_id"
+  fi
   if grep -q '^capability=fleet-launcher-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-fleet-agent-runtime" ]] || \
       die "installed runtime declares the fleet launcher but omits its implementation: $runtime_id"
@@ -281,6 +292,8 @@ else
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'
     printf 'capability=loom-separate-pod-inbox-replay-v1\n'
+    printf 'capability=loom-signed-continuity-receipt-v2\n'
+    printf 'capability=loom-cross-node-replay-v1\n'
     printf 'capability=loom-cursor-replay-v1\n'
     printf 'capability=loom-exclusive-input-lease-v1\n'
     printf 'capability=loom-read-only-gui-v1\n'
