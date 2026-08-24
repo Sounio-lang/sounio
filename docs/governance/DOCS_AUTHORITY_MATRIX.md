@@ -951,6 +951,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.cpc2026-orc-group-preregistration-2026-07-11 | historical | docs/research/cpc2026_orc_group_preregistration_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cpc2026-yale-evidence-dossier-2026-07-11 | historical | docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.derivation-grammar-2026-08-24 | historical | docs/research/DERIVATION_GRAMMAR_2026-08-24.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.dyadic-non-reduction-spec-2026-07-14 | historical | docs/research/dyadic_non_reduction_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.dyadic-relational-associator-ontology-spec-2026-07-14 | historical | docs/research/dyadic_relational_associator_ontology_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.e-series-semantic-germ-spec-2026-07-26 | historical | docs/research/e_series_semantic_germ_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
