@@ -43,6 +43,12 @@ bin/sounio-loom attest-continuity-receipt \
   --observer-private-key OBSERVER-PRIVATE.pem \
   --observer-public-key OBSERVER-PUBLIC.pem \
   --out PATH --adapter PATH
+bin/sounio-loom measure-continuity-generation \
+  --state-dir PATH --pane-id ID --generation ID \
+  --receipt PATH --subject-public-key SIGNER.pem \
+  --observer-private-key OBSERVER-PRIVATE.pem \
+  --observer-public-key OBSERVER-PUBLIC.pem \
+  --out PATH --adapter PATH
 ```
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
@@ -97,6 +103,19 @@ PEM file bytes or role label. Reusing the signer key as the observer key is
 therefore refused before a successor generation exists even when the same key
 has a different PEM serialization.
 
+Set `SOUNIO_LOOM_REQUIRE_INDEPENDENT_MEASUREMENT=1` to strengthen that preflight
+from receipt precommitment to source-separated measurement. The observer signs
+a fact vector it derives from the retained generation descriptor plus the raw
+semantic and Guardian journals: generation ID, generation fingerprint, semantic
+journal head, and Guardian journal head. The OCaml host verifies the decision
+receipt and measurement attestation separately, recomputes the measured vector
+from those raw artifacts, and sends both vectors to Sounio without comparing
+them. Only the private Sounio `VerifiedMeasurementAgreement` constructor may
+join them, and only when all four tokens agree. Any disagreement refuses before
+`start_command`; no successor receipt is created. This mode implies signed
+receipts and independent-observer mode and requires the same signer and observer
+key configuration.
+
 ## Evidence Boundary
 
 Loom-1.6 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
@@ -132,7 +151,20 @@ protection against compromise of both keys. The
 independently signed digest before a legitimate signer rewrites and re-signs the
 facts; the mismatch is refused before successor creation. This proves bounded
 post-observation tamper detection, not that the observer measured the semantic
-facts independently or would reject an initially false receipt. The real-Pod
+facts independently or would reject an initially false receipt.
+Independent-measurement mode goes further: after a legitimate signer rewrites
+and re-signs the semantic-head decision fact, the observer derives the original
+head from the retained raw journal and signs that measurement. Normal Sounio
+refuses the disagreement before spawn; replacing only
+`measurement_tokens_agree` with unconditional `true` admits the unchanged
+witness. Separate decision and measurement types reject role collapse with
+`E009`, and external agreement construction rejects with `E176`.
+This establishes source-separated measurement of four retained artifacts and
+identifies the Sounio equality rule as load-bearing. It does not establish the
+semantic correctness of those journals, organizational/process/hardware
+independence, collusion resistance, or trusted key custody. The compact 60-bit
+principal tokens also carry an accepted approximately 2^-60 false-refusal risk;
+collisions fail closed rather than creating false independence. The real-Pod
 witness relocated
 compute from `t560-proxmox` to `r740-proxmox` over one retained Ceph RBD RWOP
 PVC. It is not state replication, simultaneous multi-node execution, or a
