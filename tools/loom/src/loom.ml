@@ -1690,6 +1690,7 @@ let harness_for_agent agent =
   else if starts_with value "grok" then Some "grok"
   else if starts_with value "cursor" then Some "cursor"
   else if starts_with value "kimi" then Some "kimi"
+  else if starts_with value "beagle" then Some "beagle"
   else None
 
 let coordination_command kernel =
@@ -1873,6 +1874,7 @@ let launch_guardian paths agent lane session_id cwd command instance_id
       Unix.close kernel_lock;
       ignore (Unix.setsid ());
       Sys.set_signal Sys.sighup Sys.Signal_ignore;
+      Sys.set_signal Sys.sigchld Sys.Signal_default;
       redirect_process_log paths.guardian_log_path;
       let code =
         try
@@ -2248,6 +2250,7 @@ let start_command cli =
   | 0 ->
       ignore (Unix.setsid ());
       Sys.set_signal Sys.sighup Sys.Signal_ignore;
+      Sys.set_signal Sys.sigchld Sys.Signal_default;
       redirect_daemon_log paths.daemon_log_path;
       let code = serve_session paths agent lane session_id cwd command in
       exit code
@@ -2298,6 +2301,7 @@ let recover_command cli =
   | 0 ->
       ignore (Unix.setsid ());
       Sys.set_signal Sys.sighup Sys.Signal_ignore;
+      Sys.set_signal Sys.sigchld Sys.Signal_default;
       redirect_daemon_log paths.daemon_log_path;
       let code = recover_session paths in
       exit code
