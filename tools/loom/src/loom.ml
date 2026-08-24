@@ -2115,6 +2115,19 @@ let session_descriptors root =
     |> List.filter_map (fun name ->
            let path = Filename.concat (Filename.concat sessions name) "session.state" in
            if Sys.file_exists path then Some (path, parse_key_values path) else None)
+    |> List.sort (fun (_, left) (_, right) ->
+           let state_rank values =
+             match table_value values "state" with
+             | "active" -> 0
+             | "recoverable" -> 1
+             | _ -> 2
+           in
+           let rank = compare (state_rank left) (state_rank right) in
+           if rank <> 0 then rank
+           else
+             compare
+               (table_value left "agent" ^ "\000" ^ table_value left "lane")
+               (table_value right "agent" ^ "\000" ^ table_value right "lane"))
 
 let list_command cli =
   let cwd = cwd_option cli in
@@ -2215,7 +2228,7 @@ section{min-width:0;display:grid;grid-template-rows:44px 1fr}.meta{border-bottom
 <script>
 const lanes=document.querySelector('#lanes'),term=document.querySelector('#terminal'),meta=document.querySelector('#meta');let selected=null,cursor=0,timer=null;
 const clean=s=>s.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g,'').replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g,'');
-async function refresh(){const list=await fetch('/api/sessions',{cache:'no-store'}).then(r=>r.json());lanes.replaceChildren();if(!selected&&list.length)choose(list[0]);for(const s of list){const b=document.createElement('button'),dot=document.createElement('i'),label=document.createElement('span'),detail=document.createElement('small'),size=document.createElement('em');b.className='lane '+s.state+(selected&&selected.instance_id===s.instance_id?' active':'');dot.className='dot';label.textContent=s.agent;detail.textContent=s.lane;size.className='cursor';size.textContent=s.cursor+' B';label.appendChild(detail);b.append(dot,label,size);b.onclick=()=>choose(s);lanes.appendChild(b)}if(!list.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No Loom sessions';lanes.appendChild(empty)}if(selected){const now=list.find(s=>s.instance_id===selected.instance_id);if(now)selected=now;await poll()}setTimeout(refresh,1000)}
+async function refresh(){const list=await fetch('/api/sessions',{cache:'no-store'}).then(r=>r.json());lanes.replaceChildren();if(!selected&&list.length)choose(list.find(s=>s.state==='active')||list[0]);for(const s of list){const b=document.createElement('button'),dot=document.createElement('i'),label=document.createElement('span'),detail=document.createElement('small'),size=document.createElement('em');b.className='lane '+s.state+(selected&&selected.instance_id===s.instance_id?' active':'');dot.className='dot';label.textContent=s.agent;detail.textContent=s.lane;size.className='cursor';size.textContent=s.cursor+' B';label.appendChild(detail);b.append(dot,label,size);b.onclick=()=>choose(s);lanes.appendChild(b)}if(!list.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No Loom sessions';lanes.appendChild(empty)}if(selected){const now=list.find(s=>s.instance_id===selected.instance_id);if(now)selected=now;await poll()}setTimeout(refresh,1000)}
 function metaField(label,value){const span=document.createElement('span'),name=document.createTextNode(label+' '),strong=document.createElement('b');strong.textContent=value;span.append(name,strong);return span}function choose(s){selected=s;cursor=0;term.textContent='';meta.replaceChildren(metaField('lane',s.lane),metaField('generation',s.instance_id.slice(0,12)),metaField('pid',s.harness_pid));}
 async function poll(){if(!selected)return;const q=new URLSearchParams({agent:selected.agent,lane:selected.lane,cursor:String(cursor)});const r=await fetch('/api/snapshot?'+q,{cache:'no-store'});if(!r.ok)return;const data=new Uint8Array(await r.arrayBuffer());cursor=Number(r.headers.get('x-loom-cursor')||cursor);if(data.length){term.textContent+=clean(new TextDecoder().decode(data));term.scrollTop=term.scrollHeight}}
 refresh();

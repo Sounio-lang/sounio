@@ -235,6 +235,13 @@ for _ in $(seq 1 100); do
 done
 [[ "$wake_replay" == *ECHO:wake-round-trip* ]] || fail 'authenticated wake did not reach the PTY'
 
+archived_dir="$STATE_DIR/sessions/aaa--archived"
+mkdir -p "$archived_dir"
+sed -e 's/^state=.*/state=exited/' \
+  -e 's/^agent=.*/agent=archived/' \
+  -e 's/^lane=.*/lane=old-lane/' \
+  -e 's/^instance_id=.*/instance_id=archived-generation/' \
+  "$descriptor" > "$archived_dir/session.state"
 "$LOOM" serve --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" --bind 127.0.0.1 --port 0 \
   > "$TEST_ROOT/gui.log" 2>&1 &
 GUI_PID=$!
@@ -245,9 +252,14 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 [[ -n "$gui_url" ]] || fail 'read-only GUI did not start'
-curl -fsS "$gui_url/" | grep -q 'SOUNIO LOOM' || fail 'GUI did not serve its operational view'
+gui_html="$(curl -fsS "$gui_url/")"
+grep -q 'SOUNIO LOOM' <<< "$gui_html" || fail 'GUI did not serve its operational view'
+grep -Fq "list.find(s=>s.state==='active')" <<< "$gui_html" || \
+  fail 'GUI does not explicitly select live work'
 sessions_json="$(curl -fsS "$gui_url/api/sessions")"
 [[ "$sessions_json" == *"\"instance_id\":\"$instance_id\""* ]] || fail 'GUI observed the wrong generation'
+[[ "$sessions_json" == "[{\"agent\":\"$AGENT\",\"lane\":\"$LANE\""* ]] || \
+  fail 'operator session list did not rank active work before archived work'
 curl -fsS "$gui_url/api/snapshot?agent=$AGENT&lane=$LANE&cursor=0" | grep -q 'BOOT_READY' || \
   fail 'GUI read path could not observe durable output'
 kill "$GUI_PID"
