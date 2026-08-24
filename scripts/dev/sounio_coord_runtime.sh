@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.24.1
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.24.2
 
 usage() {
   cat <<'USAGE'
@@ -31,7 +31,7 @@ Commands:
                                  release a claim and record the handoff event
   authorize --agent ID [--lane ID] [--resources RESOURCE ...] [--files PATH ...]
                                  verify that a local active claim covers the requested ownership
-  endpoint-register --agent ID --lane ID --harness claude|codex|grok|cursor|kimi
+  endpoint-register --agent ID --lane ID --harness claude|codex|grok|cursor|kimi|beagle
           --transport tmux|agentd|loom --address ADDRESS --socket PATH
           [--token-file PATH] [--ttl-seconds N]
                                  register an expiring, verified delivery endpoint
@@ -851,6 +851,8 @@ harness_command_matches() {
     grok) [[ "$command" == grok* ]] ;;
     cursor) [[ "$command" == cursor-agent* || "$command" == cursor* ]] ;;
     kimi) [[ "$command" == kimi-code* || "$command" == kimi* ]] ;;
+    beagle) [[ "$command" == bash || "$command" == sh || "$command" == zsh || \
+      "$command" == fish || "$command" == beagle-* ]] ;;
     *) return 1 ;;
   esac
 }
@@ -862,6 +864,7 @@ harness_for_agent() {
     grok|grok-*) printf 'grok' ;;
     cursor|cursor-*) printf 'cursor' ;;
     kimi|kimi-*) printf 'kimi' ;;
+    beagle|beagle-*) printf 'beagle' ;;
     *) return 1 ;;
   esac
 }
@@ -1826,8 +1829,8 @@ endpoint_register_command() {
   done
   [[ -n "$agent" ]] || die "endpoint-register requires --agent or SOUNIO_AGENT_ID"
   [[ -n "$lane" ]] || die "endpoint-register requires --lane"
-  [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi)$ ]] || \
-    die "--harness must be claude, codex, grok, cursor, or kimi"
+  [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi|beagle)$ ]] || \
+    die "--harness must be claude, codex, grok, cursor, kimi, or beagle"
   [[ "$transport" =~ ^(tmux|agentd|loom)$ ]] || die "--transport must be tmux, agentd, or loom"
   [[ -n "$address" ]] || die "endpoint-register requires --address"
   [[ -n "$socket" ]] || die "endpoint-register requires --socket"
@@ -2020,8 +2023,8 @@ presence_register_command() {
   done
   [[ -n "$agent" ]] || die "presence-register requires --agent or SOUNIO_AGENT_ID"
   [[ -n "$lane" ]] || die "presence-register requires --lane"
-  [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi)$ ]] || \
-    die "--harness must be claude, codex, grok, cursor, or kimi"
+  [[ "$harness" =~ ^(claude|codex|grok|cursor|kimi|beagle)$ ]] || \
+    die "--harness must be claude, codex, grok, cursor, kimi, or beagle"
   [[ -n "$session_id" ]] || die "presence-register requires --session-id"
   [[ -n "$host" ]] || die "presence-register requires --host"
   [[ -n "$boot_id" ]] || die "presence-register requires --boot-id"
