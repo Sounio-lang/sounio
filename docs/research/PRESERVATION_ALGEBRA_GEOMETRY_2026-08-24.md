@@ -665,3 +665,52 @@ live, and every conformal algebra in it is rigid — a stable, isolated point. O
 past here: the actual central-charge values and the identification of the null
 algebra with a named BMS_d variant; `H³(g;ℝ)` (higher anomalies) if one wants to keep
 climbing the trivial-coefficient tower.
+
+---
+
+## The exact BMS variant of the null-locus conformal algebra
+
+The null (Carrollian) conformal algebra `g = so(2,2) ⋉ ℝ¹²` was pinned to its exact
+representation-theoretic structure (computed):
+
+- **Levi = `so(2,2) ≅ sl(2,ℝ) ⊕ sl(2,ℝ)`** — the split-signature real form (Killing
+  `(4,2)`), i.e. the finite 2D conformal group / `AdS₃` isometry. Generic `ad`
+  eigenvalues `{±1.648, ±1.526, 0, 0}` confirm two independent `sl(2)` factors.
+- **Radical `ℝ¹²` is isotypic** (the `so(2,2)` Casimir is constant on all of it) with
+  **commutant dim `9 = 3²`**, so it is exactly **3 copies of one 4-dim irrep**. The two
+  `sl(2)` Casimirs are equal and nonzero ⇒ that irrep is the **`(½,½)` vector**
+  (not the chiral `(3/2,0)`).
+- So `g_null ≅ so(2,2) ⋉ (V ⊗ ℝ³)`, `V = (½,½)` the vector rep; abelian radical;
+  **3 central charges** (`H² = 3`), one per copy.
+
+**Where the `3` comes from.** The degenerate spin factor has a rank-1 metric on its
+4-dim imaginary part — signature `(1,0,3)`: **one timelike direction + three null
+directions**. The multiplicity-3 of the supertranslation vector is exactly those
+**three null directions** of the Carrollian structure; the three central charges are
+one per null direction. So the algebra is the **conformal Carroll algebra of the
+rank-1-degenerate spin factor**, with supertranslations `= (vector) ⊗ (3 null
+directions)`.
+
+**The exact variant.** In the Duval–Gibbons–Horvathy correspondence
+(conformal-Carroll_d ≅ BMS_{d+1}), `g_null` is a **finite, SPLIT-signature
+conformal-Carroll / BMS₄-type algebra**: a real form of finite `BMS₄` with
+**`so(2,2)` (split) superrotations** in place of physical `BMS₄`'s Lorentzian
+`so(3,1)`, and **multiplicity-3 (three-null-direction) supertranslations** rather
+than the single vector of physical `BMS₄`. It is therefore **not** physical
+Lorentzian `BMS₄` — it is its split real form on a 3-null-direction Carroll base,
+which is exactly what a *split-sedenion* (base-split, `μ⃗=(−,−,+,−)`) privacy locus
+must produce: the split ambient forces the split real form at every level
+(`so(7,1)/so(5,3)` conformal; `so(2,2)` superrotation), consistent with the whole
+tower being real-form-controlled by the Cayley–Dickson sign vector.
+
+Precise statement:
+```
+g_null  ≅  so(2,2)  ⋉  ( (½,½) ⊗ ℝ³ )      [abelian radical],   H²(g;ℝ) = 3
+        =  split-signature finite conformal-Carroll algebra of the rank-1
+           degenerate spin factor  =  the split real form of finite BMS₄ with
+           3-null-direction supertranslations.
+```
+
+Open: the published-literature name (if any) for this exact split multiplicity-3
+conformal-Carroll real form; and whether the 3 central charges match a known
+central extension of split BMS₄.
