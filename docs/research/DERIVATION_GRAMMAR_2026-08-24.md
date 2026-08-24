@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.derivation-grammar-2026-08-24
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -96,3 +97,40 @@ Open: promote `R2`'s dimension rule to read the kernel-dimension context (fixing
 the one non-generative rule); and run the null/timelike branches at *split* level 5
 to test rung-law generativity beyond the spacelike branch that division level 5
 allows.
+
+---
+
+## R2 promoted: the dimension rule is now generative
+
+The one non-generative rule (R2's output dimension) is promoted from a level-4
+constant to a **context-reading rule**, verified generative at level 5:
+
+> **`dim P_z = 1 + |Stab(z)|`**, where `Stab(z)` = the basis units preserving
+> `ker L_z`, equal to `|H| − |bad|` with `H = {k : k ⊕ supp(ker L_z) ⊆
+> supp(ker L_z)}` the XOR-stabilizer of the kernel support and `|bad|` the
+> sign-inconsistent coset.
+
+Verified at level 5 (computed, `scratchpad/level5.py`), `dim P_z = 1 + |Stab|` holds
+3/3:
+```
+ker 4  → |support|=8  |H|=8  |Stab|=5   dim P=6  = J_spin(5)
+ker 8  → |support|=16 |H|=16 |Stab|=11  dim P=12 = J_spin(11)
+ker 12 → |support|=24 |H|=8  |Stab|=5   dim P=6  = J_spin(5)
+```
+Key: `dim P_z` is set by the **support-stabilizer `|H|`, not the kernel dimension**
+— ker 4 and ker 12 both give `|H|=8 → J_spin(5)`; only ker 8 (support = a rank-4
+coset) gives `|H|=16 → J_spin(11)`. The rule reads the support geometry as context,
+so it now GENERATES a new level correctly.
+
+**Conjectured refinement (4 data points: level4 |H|=8; level5 |H|∈{8,16,8}):**
+`|bad| = |H|/4`, hence `dim P_z = (3/4)|H| = 3·2^{r−2}` for `H` of rank `r`, giving a
+**doubling ladder of spin factors** `J_spin(3·2^{k}−1) = J_spin(5), J_spin(11),
+J_spin(23), J_spin(47), …` — the preservation geometry grows through a fixed family
+as the support-stabilizer rank climbs. (Solid: `dim P = 1+|Stab|`, generative.
+Conjecture: the `|bad|=|H|/4` closed form.)
+
+**Grammar status: now generative at every layer** — signature (rung law, verified
+level 5), dimension (promoted R2, verified level 5), and the null-gated anomaly (the
+context-sensitive rule). The remaining test is the null/timelike branch at *split*
+level 5 (division level 5 is all-spacelike, so only the Euclidean branch was
+exercised).
