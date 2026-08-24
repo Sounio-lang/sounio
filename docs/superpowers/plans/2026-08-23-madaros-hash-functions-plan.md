@@ -1277,7 +1277,7 @@ Expected: prints `hash_sha384_vectors: all cases passed`, exits 0.
 - [ ] **Step 5: Run the full hash test group together**
 
 Run: `bash scripts/run_sio_test_suite.sh --filter-prefix hash_`
-Expected: 7/7 passing (`hash_word32_primitives`, `hash_sha1_vectors`, `hash_sha256_vectors`, `hash_word64_primitives`, `hash_sha512_vectors`, `hash_sha384_vectors`, plus this task's own — confirm the exact count matches the files actually present at this point).
+Expected: 6/6 passing (`hash_word32_primitives`, `hash_sha1_vectors`, `hash_sha256_vectors`, `hash_word64_primitives`, `hash_sha512_vectors`, `hash_sha384_vectors` — confirm the exact count matches the files actually present at this point). Note: Tasks 1-5's test files did not originally carry the `//@ run-pass` annotation this harness requires to recognize a test file (the same omission this plan made for its own earlier task text) — this must be added to all 5 pre-existing files (not just this task's own new one) before this step can show a real 6/6 rather than a false "0 found, 0 skipped" or a silent skip.
 
 - [ ] **Step 6: Commit**
 
