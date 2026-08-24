@@ -556,3 +556,53 @@ Verified: `scratchpad/tkk3.py` (Jacobi = 0, Killing signatures), `carroll.py`
 / BMS_d variant), and whether the `so(7,1)`↔`so(5,3)` real-form pair and the dS/AdS
 question (base-split vs doubly-split) carry physical meaning for composition
 causality.
+
+---
+
+## DEEPER THAN BMS: the anomaly layer — central charges exclusive to the null locus
+
+Above a Lie algebra sits its central-extension cohomology `H²(g;ℝ)` — the *central
+charges*, the quantum/anomaly layer. Computed (Chevalley–Eilenberg: cocycles mod
+coboundaries) for the three conformal algebras:
+
+| causal type | conformal algebra | `H²(g;ℝ)` | anomaly |
+|---|---|---|---|
+| spacelike | `so(7,1)` (semisimple) | **0** | RIGID — anomaly-free |
+| timelike | `so(5,3)` (semisimple) | **0** | RIGID — anomaly-free |
+| **null** | BMS-type `so(2,2)⋉ℝ¹²` | **3** | **THREE central charges** |
+
+`H²=0` for the two semisimple cases is *guaranteed* by Whitehead's lemma — an exact
+internal correctness check, and both came out 0. The BMS-type null algebra carries
+**exactly three independent central charges** (dim H² = 3), each supported in the
+`g₋₁⊗g₊₁` sector (the two Jordan/"supertranslation" copies) and `g₀∧g₀` (the
+structure algebra) — precisely the sectors where BMS central extensions live in
+gravity.
+
+**The statement.** *The quantum anomaly of an exact-invariant's symmetry is
+exclusive to the null (Carrollian/BMS) privacy locus: spacelike and timelike loci
+carry rigid, anomaly-free symmetry (`H²=0`), while a null locus carries a
+3-dimensional space of central charges.* The anomaly is a genuinely new invariant of
+the privacy locus, living at the deepest (cohomological) layer, and it is a
+null-only phenomenon — the same place the İnönü–Wigner contraction produced the
+abelian supertranslation ideal.
+
+### The full stack — five verified layers, one datum
+
+```
+zero-divisor z  (causal type under the square-form Q)
+   ▼ signature        Euclidean      Carrollian          Lorentzian     [GEOMETRY]
+   ▼ Jordan           J_spin(5)      degenerate          J_spin(4,1)    [JORDAN]
+   ▼ kinematic Lie    so(5)          Carroll-contraction so(4,1)        [KINEMATIC]
+   ▼ conformal Lie    so(7,1)        so(2,2)⋉ℝ¹² (BMS)   so(5,3)        [CONFORMAL]
+   ▼ H²(g) anomaly    0 (rigid)      3 central charges   0 (rigid)      [ANOMALY]
+```
+
+Five algebraic layers — geometry, Jordan algebra, kinematic symmetry, conformal
+symmetry, quantum anomaly — all indexed by one datum: the causal type of `z`.
+Spacelike↔timelike is a real-form change at every semisimple level and leaves the
+anomaly at 0; the null locus is where the contraction happens AND where the anomaly
+turns on (three central charges). Non-associativity (associator on the doubling
+`e8`) drives the contraction; the contraction is what makes room for the central
+extensions. Verified: `scratchpad/h2.py` (H² dims + Whitehead check + charge
+sectors). Open: the physical meaning of *three* charges (BMS₃ has two), and H³
+(deformations) as the next layer.
