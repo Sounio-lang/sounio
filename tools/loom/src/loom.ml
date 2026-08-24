@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.1"
+let runtime_version = "2026.08.24.2"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -2432,9 +2432,231 @@ let tui_command cli =
               | _ -> ()
         done)
 
+type fleet_spec = {
+  fleet_slot : string;
+  fleet_kind : string;
+  fleet_home : string;
+  fleet_cwd : string;
+  fleet_enabled : bool;
+}
+
+let fleet_kinds = [ "claude"; "codex"; "kimi"; "grok"; "cursor"; "empryo" ]
+
+let fleet_directory root = Filename.concat root "fleet"
+
+let fleet_spec_path root slot =
+  Filename.concat (fleet_directory root) (slug slot ^ ".state")
+
+let fleet_spec_fields spec =
+  [
+    ("version", "1");
+    ("enabled", if spec.fleet_enabled then "true" else "false");
+    ("slot", spec.fleet_slot);
+    ("kind", spec.fleet_kind);
+    ("home", spec.fleet_home);
+    ("cwd", spec.fleet_cwd);
+  ]
+
+let validate_fleet_atom name value =
+  if value = "" || String.exists (fun character -> character = '\n' || character = '\r') value
+  then failf "invalid fleet %s" name
+
+let fleet_spec_of_values path values =
+  if table_value values "version" <> "1" then
+    failf "fleet catalog version is not supported: %s" path;
+  let slot = table_value values "slot" in
+  let kind = table_value values "kind" in
+  let home = table_value values "home" in
+  let cwd = table_value values "cwd" in
+  List.iter (fun (name, value) -> validate_fleet_atom name value)
+    [ ("slot", slot); ("kind", kind); ("home", home); ("cwd", cwd) ];
+  if not (List.mem kind fleet_kinds) then
+    failf "unsupported fleet kind %s in %s" kind path;
+  if not ((not (Filename.is_relative home)) && Sys.file_exists home && Sys.is_directory home) then
+    failf "fleet home is unavailable for slot %s: %s" slot home;
+  if not ((not (Filename.is_relative cwd)) && Sys.file_exists cwd && Sys.is_directory cwd) then
+    failf "fleet cwd is unavailable for slot %s: %s" slot cwd;
+  let enabled =
+    match table_value values "enabled" with
+    | "true" -> true
+    | "false" -> false
+    | _ -> failf "invalid enabled state in %s" path
+  in
+  { fleet_slot = slot; fleet_kind = kind; fleet_home = home; fleet_cwd = cwd;
+    fleet_enabled = enabled }
+
+let load_fleet_specs root =
+  let directory = fleet_directory root in
+  if not (Sys.file_exists directory) then []
+  else
+    let seen = Hashtbl.create 32 in
+    Sys.readdir directory |> Array.to_list |> List.sort String.compare
+    |> List.filter (fun name -> Filename.check_suffix name ".state")
+    |> List.map (fun name ->
+           let path = Filename.concat directory name in
+           if (Unix.lstat path).st_kind <> S_REG then
+             failf "fleet catalog entry is not a regular file: %s" path;
+           let spec = fleet_spec_of_values path (parse_key_values path) in
+           if Hashtbl.mem seen spec.fleet_slot then
+             failf "duplicate fleet slot in catalog: %s" spec.fleet_slot;
+           Hashtbl.add seen spec.fleet_slot path;
+           spec)
+
+let fleet_enroll_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let slot = required cli "--slot" in
+  let kind = required cli "--kind" in
+  let home = Unix.realpath (required cli "--home") in
+  validate_fleet_atom "slot" slot;
+  if not (List.mem kind fleet_kinds) then failf "unsupported fleet kind: %s" kind;
+  let spec =
+    { fleet_slot = slot; fleet_kind = kind; fleet_home = home; fleet_cwd = cwd;
+      fleet_enabled = true }
+  in
+  let directory = fleet_directory root in
+  mkdir_p directory;
+  let path = fleet_spec_path root slot in
+  let desired = descriptor_text (fleet_spec_fields spec) in
+  if Sys.file_exists path then (
+    let existing = parse_key_values path in
+    let existing_spec = fleet_spec_of_values path existing in
+    if existing_spec <> spec && not (flag cli "--replace") then
+      failf "fleet slot %s already has different desired state" slot);
+  atomic_write path desired;
+  Printf.printf "LOOM_FLEET_ENROLLED slot=%s kind=%s cwd=%s state=enabled\n%!"
+    slot kind cwd
+
+let fleet_disable_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let slot = required cli "--slot" in
+  let path = fleet_spec_path root slot in
+  if not (Sys.file_exists path) then failf "fleet slot is not enrolled: %s" slot;
+  let spec = fleet_spec_of_values path (parse_key_values path) in
+  if spec.fleet_slot <> slot then failf "fleet slot path identity mismatch: %s" slot;
+  let disabled = { spec with fleet_enabled = false } in
+  atomic_write path (descriptor_text (fleet_spec_fields disabled));
+  Printf.printf "LOOM_FLEET_DISABLED slot=%s\n%!" slot
+
+type captured_process = { captured_code : int; captured_output : string }
+
+let run_captured executable arguments =
+  let reader, writer = Unix.pipe () in
+  Unix.set_close_on_exec reader;
+  match Unix.fork () with
+  | 0 ->
+      Unix.close reader;
+      Unix.dup2 writer Unix.stdout;
+      Unix.dup2 writer Unix.stderr;
+      if writer <> Unix.stdout && writer <> Unix.stderr then Unix.close writer;
+      (try Unix.execv executable (Array.of_list (executable :: arguments))
+       with _ -> Unix._exit 127)
+  | pid ->
+      Unix.close writer;
+      let output = Buffer.create 1024 in
+      let bytes = Bytes.create 4096 in
+      let rec read () =
+        match Unix.read reader bytes 0 (Bytes.length bytes) with
+        | 0 -> ()
+        | count -> Buffer.add_subbytes output bytes 0 count; read ()
+        | exception Unix_error (EINTR, _, _) -> read ()
+      in
+      Fun.protect ~finally:(fun () -> Unix.close reader) read;
+      let _, status = Unix.waitpid [] pid in
+      { captured_code = process_exit_code status; captured_output = Buffer.contents output }
+
+let fleet_agent_command () =
+  match Sys.getenv_opt "SOUNIO_LOOM_FLEET_AGENT_COMMAND" with
+  | Some path when Sys.file_exists path -> Unix.realpath path
+  | Some path -> failf "configured fleet agent command is unavailable: %s" path
+  | None ->
+      let sibling =
+        Filename.concat (Filename.dirname Sys.executable_name)
+          "sounio-fleet-agent-runtime"
+      in
+      if Sys.file_exists sibling then sibling
+      else failf "sounio-fleet-agent-runtime is not installed beside Loom"
+
+let fleet_observed_state output slot =
+  let status_prefix = "FLEET_SLOT_STATUS" in
+  let rec field name = function
+    | [] -> ""
+    | token :: rest ->
+        let prefix = name ^ "=" in
+        if starts_with token prefix then
+          String.sub token (String.length prefix) (String.length token - String.length prefix)
+        else field name rest
+  in
+  split_on '\n' output
+  |> List.find_map (fun line ->
+         let tokens = split_on ' ' (trim line) in
+         match tokens with
+         | prefix :: fields when prefix = status_prefix && field "slot" fields = slot ->
+             Some (field "state" fields)
+         | _ -> None)
+
+let fleet_probe helper spec =
+  let result =
+    run_captured helper
+      [ "status"; "--cwd"; spec.fleet_cwd; "--slot"; spec.fleet_slot ]
+  in
+  let state =
+    match fleet_observed_state result.captured_output spec.fleet_slot with
+    | Some state -> state
+    | None
+      when result.captured_code = 0
+           && List.exists
+                (fun line -> starts_with (trim line) "fleet_slots=0")
+                (split_on '\n' result.captured_output) ->
+        "absent"
+    | None ->
+        failf "fleet status failed for %s: %s" spec.fleet_slot
+          (trim result.captured_output)
+  in
+  if state = "drifted" then
+    failf "fleet slot %s has identity drift" spec.fleet_slot;
+  (state, result)
+
+let fleet_reconcile_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let apply = flag cli "--apply" in
+  let helper = fleet_agent_command () in
+  let specs = load_fleet_specs root |> List.filter (fun spec -> spec.fleet_enabled) in
+  let started = ref 0 and healthy = ref 0 in
+  List.iter
+    (fun spec ->
+      let state, _ = fleet_probe helper spec in
+      if state = "active" then (
+        incr healthy;
+        Printf.printf "LOOM_FLEET slot=%s state=active action=noop\n%!" spec.fleet_slot)
+      else if not apply then
+        Printf.printf "LOOM_FLEET slot=%s state=%s action=start mode=plan\n%!"
+          spec.fleet_slot state
+      else (
+        let result =
+          run_captured helper
+            [ "launch-kind"; "--slot"; spec.fleet_slot; "--kind";
+              spec.fleet_kind; "--home"; spec.fleet_home; "--cwd";
+              spec.fleet_cwd; "--no-attach" ]
+        in
+        if result.captured_code <> 0 then
+          failf "fleet launch failed for %s: %s" spec.fleet_slot
+            (trim result.captured_output);
+        let after, _ = fleet_probe helper spec in
+        if after <> "active" then
+          failf "fleet slot %s did not become active after launch" spec.fleet_slot;
+        incr started;
+        Printf.printf "LOOM_FLEET slot=%s state=active action=started\n%!"
+          spec.fleet_slot))
+    specs;
+  Printf.printf "loom_fleet_slots=%d healthy=%d started=%d mode=%s\n%!"
+    (List.length specs) !healthy !started (if apply then "apply" else "plan")
+
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  list|tui|serve [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n"
     runtime_version
 
 let arguments_after_command () =
@@ -2445,7 +2667,10 @@ let main () =
   if Array.length Sys.argv < 2 then (usage (); 2)
   else
     let command = Sys.argv.(1) in
-    let booleans = [ "--no-raw"; "--meta"; "--machine"; "--allow-remote" ] in
+    let booleans =
+      [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
+        "--replace" ]
+    in
     let cli = parse_cli booleans (arguments_after_command ()) in
     match command with
     | "runtime-version" ->
@@ -2464,6 +2689,9 @@ let main () =
     | "list" -> list_command cli; 0
     | "tui" -> tui_command cli; 0
     | "serve" -> serve_http cli; 0
+    | "fleet-enroll" -> fleet_enroll_command cli; 0
+    | "fleet-disable" -> fleet_disable_command cli; 0
+    | "fleet-reconcile" -> fleet_reconcile_command cli; 0
     | "verify-journal" -> verify_command cli; 0
     | "verify-guardian-journal" -> verify_guardian_command cli; 0
     | "_forge-duplicate-lease" -> forge_duplicate_lease cli; 0

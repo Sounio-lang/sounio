@@ -545,9 +545,114 @@ SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" stop --state-dir "$TEST_ROOT/coord-loom"
   --cwd "$ROOT_DIR" --agent "$COORD_AGENT" --lane "$COORD_LANE" >/dev/null
 COORD_LOOM_ACTIVE=0
 
+FAKE_FLEET_STATE="$TEST_ROOT/fake-fleet-state"
+FAKE_FLEET_AGENT="$TEST_ROOT/fake-fleet-agent"
+mkdir -p "$FAKE_FLEET_STATE"
+cat > "$FAKE_FLEET_AGENT" <<'FLEET_AGENT'
+#!/usr/bin/env bash
+set -euo pipefail
+command_name="${1:-}"
+shift || true
+slot=''
+while (($#)); do
+  case "$1" in
+    --slot) slot="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$slot" ]]
+active="$SOUNIO_FAKE_FLEET_STATE/$slot.active"
+case "$command_name" in
+  status)
+    if [[ -f "$active" ]]; then
+      echo "FLEET_SLOT_STATUS state=active slot=$slot"
+      echo 'fleet_slots=1 unhealthy=0'
+      exit 0
+    fi
+    echo "FLEET_SLOT_STATUS state=absent slot=$slot"
+    echo 'fleet_slots=1 unhealthy=1'
+    exit 1
+    ;;
+  launch-kind)
+    count_file="$SOUNIO_FAKE_FLEET_STATE/$slot.starts"
+    count="$(cat "$count_file" 2>/dev/null || echo 0)"
+    if [[ ! -f "$active" ]]; then
+      printf '%s\n' "$((count + 1))" > "$count_file"
+      : > "$active"
+      action=started
+    else
+      action=reattached
+    fi
+    echo "FLEET_SLOT action=$action slot=$slot"
+    ;;
+  *) exit 2 ;;
+esac
+FLEET_AGENT
+chmod +x "$FAKE_FLEET_AGENT"
+fleet_loom() {
+  SOUNIO_FAKE_FLEET_STATE="$FAKE_FLEET_STATE" \
+    SOUNIO_LOOM_FLEET_AGENT_COMMAND="$FAKE_FLEET_AGENT" "$LOOM" "$@"
+}
+FLEET_CATALOG_STATE="$TEST_ROOT/fleet-catalog"
+fleet_loom fleet-enroll --state-dir "$FLEET_CATALOG_STATE" \
+  --slot post-pod --kind claude --home "$TEST_ROOT" --cwd "$TEST_ROOT" >/dev/null
+fleet_loom fleet-enroll --state-dir "$FLEET_CATALOG_STATE" \
+  --slot post-pod --kind claude --home "$TEST_ROOT" --cwd "$TEST_ROOT" >/dev/null
+fleet_plan="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$TEST_ROOT")"
+[[ "$fleet_plan" == *'slot=post-pod state=absent action=start mode=plan'* ]] || \
+  fail 'fleet dry-run did not plan the absent post-Pod lane'
+[[ ! -e "$FAKE_FLEET_STATE/post-pod.starts" ]] || \
+  fail 'fleet dry-run mutated launch state'
+fleet_apply="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$TEST_ROOT" --apply)"
+[[ "$fleet_apply" == *'slot=post-pod state=active action=started'* && \
+  "$(cat "$FAKE_FLEET_STATE/post-pod.starts")" == 1 ]] || \
+  fail 'fleet apply did not start exactly one post-Pod generation'
+fleet_repeat="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$TEST_ROOT" --apply)"
+[[ "$fleet_repeat" == *'slot=post-pod state=active action=noop'* && \
+  "$(cat "$FAKE_FLEET_STATE/post-pod.starts")" == 1 ]] || \
+  fail 'repeated fleet reconciliation launched a duplicate generation'
+fleet_descriptor="$FLEET_CATALOG_STATE/fleet/post-pod.state"
+cp "$fleet_descriptor" "$FLEET_CATALOG_STATE/fleet/duplicate.state"
+if fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$TEST_ROOT" > "$TEST_ROOT/fleet-duplicate.out" 2>&1; then
+  fail 'fleet catalog accepted duplicate desired authority for one slot'
+fi
+grep -q 'duplicate fleet slot' "$TEST_ROOT/fleet-duplicate.out" || \
+  fail 'duplicate fleet authority was refused for the wrong reason'
+rm "$FLEET_CATALOG_STATE/fleet/duplicate.state"
+cp "$fleet_descriptor" "$TEST_ROOT/fleet-descriptor.backup"
+sed 's/^kind=.*/kind=forged/' "$fleet_descriptor" > "$fleet_descriptor.tmp"
+mv "$fleet_descriptor.tmp" "$fleet_descriptor"
+if fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$TEST_ROOT" > "$TEST_ROOT/fleet-kind.out" 2>&1; then
+  fail 'fleet catalog accepted a forged launcher kind'
+fi
+grep -q 'unsupported fleet kind' "$TEST_ROOT/fleet-kind.out" || \
+  fail 'forged fleet kind was refused for the wrong reason'
+mv "$TEST_ROOT/fleet-descriptor.backup" "$fleet_descriptor"
+fleet_loom fleet-disable --state-dir "$FLEET_CATALOG_STATE" \
+  --slot post-pod --cwd "$TEST_ROOT" >/dev/null
+rm "$FAKE_FLEET_STATE/post-pod.active"
+fleet_disabled="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$TEST_ROOT" --apply)"
+[[ "$fleet_disabled" == *'loom_fleet_slots=0'* && \
+  "$(cat "$FAKE_FLEET_STATE/post-pod.starts")" == 1 ]] || \
+  fail 'disabled fleet intent relaunched after simulated Pod loss'
+if SOUNIO_LOOM_FLEET_AGENT_COMMAND="$TEST_ROOT/missing-fleet-agent" \
+  "$LOOM" fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$TEST_ROOT" > "$TEST_ROOT/fleet-adapter.out" 2>&1; then
+  fail 'fleet reconciliation silently replaced an unavailable configured adapter'
+fi
+grep -q 'configured fleet agent command is unavailable' \
+  "$TEST_ROOT/fleet-adapter.out" || \
+  fail 'unavailable configured fleet adapter was refused for the wrong reason'
+
 if rg -n '\btmux\b' "$ROOT_DIR/tools/loom" "$ROOT_DIR/bin/sounio-loom" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null; then
   fail 'Loom attach path contains a tmux dependency'
 fi
 
-echo "sounio-loom-selftest: PASS language=OCaml protocol=1 instance=$instance_id guardian_instance=$guard_instance kernel_crashes=6"
+echo "sounio-loom-selftest: PASS language=OCaml protocol=1 instance=$instance_id guardian_instance=$guard_instance kernel_crashes=6 post_pod_reconcile=idempotent"
