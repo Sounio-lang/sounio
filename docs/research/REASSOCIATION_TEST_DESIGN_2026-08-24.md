@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.reassociation-test-design-2026-08-24
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -101,3 +102,38 @@ six-layer tower is a beautiful rewrite of matrices, and the honest move is to sa
 *Feasibility:* within-subject, counterbalanced L/R × coherent/incoherent × swap, N powered
 for a within-subject interaction (~40–60), behavioral+physiological, pre-registered. No
 hypercomplex assumption enters the measurement — only the *prediction* is algebraic.
+
+---
+
+## Two-scale instrument validation — FAILED on first attempt (honest log)
+
+Attempted (`scratchpad/twoscale.py`) to validate the two-scale discriminator on
+synthetic ground-truth *before* deploying it — testing whether the design can tell
+emergent (scale-dependent) from fundamental (scale-invariant) re-association. **It
+failed, and the failure is informative:**
+
+- **"Scale" was mis-operationalized as "number of active coordinates `k`."** The
+  sedenion (fundamental) defect then *grew* with `k` (0.73→1.31), not scale-invariant —
+  because more coordinates engage more of the algebra. That is algebra-size, not a
+  time/renormalization scale. The eigen-idea "two time scales" cannot be a dimensional
+  restriction.
+- **The "emergent" toy produced no emergent non-associativity** (`R≈0` everywhere): the
+  chosen associative op (circular convolution) is commutative-associative and the
+  post-projection did not break it as intended. The toy failed to instantiate the
+  phenomenon it was meant to show.
+
+**Consequence.** The design doc's "run at multiple temporal grains" is UNDERSPECIFIED.
+The correct operationalization is **temporal coarse-graining**: combine raw fast events
+(fine) vs combine block-averaged events (coarse), and ask whether re-association defect
+is *present at fine scale* (fundamental) or *appears only under coarse-graining*
+(emergent artifact of aggregation). My first code did the opposite, with a confounded
+axis.
+
+**Discipline note.** I stopped rather than tune the toy until it "worked" — engineering
+a synthetic system until it confirms the two-scale discriminator is exactly the
+apophenia the whole program must avoid. The honest status: **the two-scale axis is a
+real, unsolved operationalization problem, not a one-liner.** Before the human
+experiment can use "two time scales" as an emergent-vs-fundamental discriminator, that
+operationalization (a proper temporal renormalization of the affective-combination
+operator, with a validated recovery study on correct synthetic ground-truth) must be
+built and shown to actually discriminate. It is not yet.
