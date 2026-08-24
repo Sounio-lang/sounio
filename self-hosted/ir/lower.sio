@@ -9066,6 +9066,9 @@ impl Lowerer {
             }
         }
         let s0 = lo.fo_snapshot_expr_sens()
+        // Snapshot the argument's Hessian alongside its sensitivity: the kind-6
+        // chain rule below needs H(g) before the call overwrites so_expr_hess.
+        let h0 = lo.so_snapshot_expr_hess()
         if kind == 1 {
             lo = lo.fo_restore_expr_sens(s0)
             if v0 >= 0 {
@@ -9124,6 +9127,97 @@ impl Lowerer {
             }
             // s_k <- factor * s_k for every live channel. fo_combine_sens_mul
             // computes R*dL + L*dR; with the left sens empty this is factor * s0.
+            // Second order: H_jk(f(g)) = f''(g)*s_j*s_k + f'(g)*H_jk(g).
+            //
+            // f'' needs no new table. The transfer entry for f' composed with
+            // itself gives it and the signs multiply: sin' = cos and cos' =
+            // -sin so sin'' = -sin; cos'' = -cos; exp'' = exp. Deriving it
+            // rather than tabulating means a fourth transcendental added to
+            // fo_xfer_seed_transcendentals gets its Hessian for free, and
+            // cannot acquire a first derivative without a second.
+            //
+            // Before this, hessian_of(sin(x)) returned a confident 0.0 while
+            // hessian_of(x*x) returned the correct 2.0: the second-order
+            // machinery had storage and a product rule but no chain rule, so
+            // every transcendental silently contributed nothing.
+            if lo.so_enabled {
+                let idx2 = fo_xfer_global_lookup(dname)
+                let d2name = fo_xfer_derivative_name(idx2)
+                if d2name.len > 0 {
+                    let sign2 = FO_XFER_LIT[idx as usize] * FO_XFER_LIT[idx2 as usize]
+                    let d2fn_id = lowerer_find_or_add_fn_id_mut(&! lo, d2name)
+                    let d2args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(argv)))
+                    let d2p = lo.fresh_reg()
+                    lo = d2p.0
+                    let d2reg = d2p.1
+                    var d2call = ir_call(d2reg, d2fn_id, d2name, d2args, 1)
+                    d2call.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(d2call)
+                    lo = lo.emit(ir_mark_float_reg(d2reg))
+                    var f2 = d2reg
+                    if sign2 < 0.0 {
+                        let s2p = lo.emit_f64_const(sign2)
+                        lo = s2p.0
+                        let m2 = lo.fresh_reg()
+                        lo = m2.0
+                        f2 = m2.1
+                        lo = lo.emit(ir_binop_typed(f2, d2reg, BinaryOp::OpMul, s2p.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(f2))
+                    }
+                    // Read the argument's Hessian HERE, not from the snapshot taken
+                    // before fo_lower_nth_arg_value re-walked the argument: measured,
+                    // the earlier snapshot holds a partial cross term rather than the
+                    // finished H, and the chain rule then multiplies f' by s_u^2.
+                    let hNow = lo.so_snapshot_expr_hess()
+                    // Only when the argument carries no Hessian of its own. Then
+                    // H(f(g)) = f''(g)*s_g^2 exactly, and that is measured: with a
+                    // leaf or linear inner the results are exact to six places.
+                    //
+                    // With a compound inner -- exp(sin x), exp(x*x) -- the f'(g)*H(g)
+                    // term reads s_g^2 where H_g belongs, and the answer comes out
+                    // wrong: 2.487814 against 0.469556 for exp(sin x). I do not yet
+                    // know why; hNow and the earlier snapshot agree, so it is not
+                    // the read point. Refusing that case leaves it returning the 0.0
+                    // it returned before, which is honestly wrong rather than
+                    // plausibly wrong -- a confident 2.487814 is much harder to catch
+                    // than a zero. Same reasoning as log's absence from
+                    // fo_xfer_seed_transcendentals, one comment above.
+                    var arg_has_hess = false
+                    var hq: i64 = 0
+                    while hq < 36 {
+                        if hNow[hq as usize] >= 0 { arg_has_hess = true }
+                        hq = hq + 1
+                    }
+                    // Refusing means CLEARING, not skipping. Measured: with the
+                    // write skipped, so_expr_hess still holds the ARGUMENT's Hessian
+                    // and hessian_of reports it as the outer expression's --
+                    // hessian_of(exp(x*x)) came back 2.0, which is H(x*x) wearing the
+                    // wrong name and looks entirely respectable. Clearing puts it back
+                    // to the honest 0.0 this case returned before any of this.
+                    var hj: i64 = 0
+                    if arg_has_hess {
+                        hj = 8
+                        lo = lo.so_clear_expr_hess()
+                    }
+                    while hj < 8 {
+                        var hk: i64 = hj
+                        while hk < 8 {
+                            let hid = lo.so_hess_idx(hj, hk)
+                            let t1 = lo.so_mul_or_none(factor, hNow[hid as usize])
+                            lo = t1.0
+                            let sp2 = lo.so_mul_or_none(s0[hj as usize], s0[hk as usize])
+                            lo = sp2.0
+                            let t2 = lo.so_mul_or_none(f2, sp2.1)
+                            lo = t2.0
+                            let hacc = lo.so_add_or_take(t1.1, t2.1)
+                            lo = hacc.0
+                            lo.so_expr_hess[hid as usize] = hacc.1
+                            hk = hk + 1
+                        }
+                        hj = hj + 1
+                    }
+                }
+            }
             var sZ: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sZ, s0, factor, factor)
             return lo.fo_emit_var_from_sens()
