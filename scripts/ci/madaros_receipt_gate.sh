@@ -2,7 +2,8 @@
 # A binary that asserts its own identity must be telling the truth.
 #
 # artifacts/self-hosted/madaros.gate-receipt is TRACKED in git and claims a
-# sha256, a source_commit and a gate result for artifacts/self-hosted/madaros —
+# sha256, a source_commit and a gate result for whatever artifact it NAMES --
+# today bin/madaros-linux-x86_64, not the path in this file's own name --
 # which is NOT tracked (.gitignore:206). Measured 2026-08-04:
 #
 #     receipt sha256   5629c3a48b6c...    file sha256   6303ec70187b...
@@ -72,7 +73,24 @@ if ! git rev-parse --verify -q "${claimed_commit}^{commit}" >/dev/null 2>&1; the
   fi
 else
   if ! git merge-base --is-ancestor "$claimed_commit" HEAD 2>/dev/null; then
+    # A squash merge collapses a branch into one new commit, so a receipt
+    # written on the branch names a commit that never lands on the target.
+    # The bytes did arrive; only the commit id was rewritten. Distinguishing
+    # that from a false provenance claim needs evidence, not tolerance: accept
+    # only when the commit the receipt names carried the SAME artifact blob
+    # that HEAD carries. A receipt pointing at an unrelated commit still fails.
+    claimed_blob="$(git rev-parse -q --verify "$claimed_commit:$claimed_artifact" 2>/dev/null || true)"
+    head_blob="$(git rev-parse -q --verify "HEAD:$claimed_artifact" 2>/dev/null || true)"
+    if [[ -n "$claimed_blob" && "$claimed_blob" == "$head_blob" ]]; then
+      delivered="$(git log -1 --format=%H -- "$claimed_artifact" 2>/dev/null)"
+      echo "  receipt: source=$claimed_commit is not in this history -- squash merge rewrote it"
+      echo "  receipt: it carried the same $claimed_artifact blob ($claimed_blob), delivered here by ${delivered:-unknown}"
+      claimed_commit="${delivered:-$claimed_commit}"
+    else
+      echo "  receipt names $claimed_commit, whose $claimed_artifact blob is ${claimed_blob:-absent}"
+      echo "  HEAD carries ${head_blob:-absent} -- these are different artifacts, not a rewritten commit"
     gate_fail "receipt source_commit=$claimed_commit is not an ancestor of HEAD — the receipt describes a tree this branch is not on"
+    fi
   fi
   behind="$(git rev-list --count "${claimed_commit}..HEAD" 2>/dev/null || echo '?')"
   echo "  receipt: gate=$claimed_gate result=$claimed_result source=$claimed_commit (${behind} commits behind HEAD)"
@@ -100,11 +118,12 @@ if [[ "$actual_sha" != "$claimed_sha" ]]; then
   echo "  receipt claims $claimed_sha"
   echo "  file is       $actual_sha"
   echo
-  echo "  This ELF is not the one the receipt was written for. It is resolved as an"
-  echo "  oracle by ~82 scripts and preferred by scripts/install.sh over the committed"
-  echo "  bin/madaros-linux-x86_64. Rebuild and re-emit the receipt, or delete the ELF:"
-  echo "    make build-madaros && bash scripts/ci/madaros_write_receipt.sh"
-  gate_fail "artifacts/self-hosted/madaros does not match its own receipt"
+  echo "  This ELF is not the one the receipt was written for. Whatever the receipt"
+  echo "  names is resolved as an oracle by ~82 scripts, so a stale receipt lets every"
+  echo "  one of them attest a build nobody measured. Re-run the gate against the ELF"
+  echo "  that is actually there, then re-emit the receipt:"
+  echo "    bash scripts/ci/madaros_full_gate.sh && bash scripts/ci/madaros_write_receipt.sh"
+  gate_fail "$claimed_artifact does not match its own receipt"
 fi
 
 gate_pass "binary matches its receipt ($actual_sha)"
