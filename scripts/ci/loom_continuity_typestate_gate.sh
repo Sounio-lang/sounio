@@ -91,8 +91,12 @@ expect_rejection private-constructor \
   "$PRIVACY/loom_continuity_private_struct_main.sio" E176
 expect_composed_rejection wrong-state-promotion \
   "$PRIVACY/loom_continuity_wrong_state_main.sio" E009
+expect_composed_rejection unsigned-proof-for-signed-promotion \
+  "$PRIVACY/loom_continuity_unsigned_proof_for_signed_promotion_main.sio" E009
 expect_rejection unsealed-host-admission \
   "$PRIVACY/loom_continuity_unsealed_admission_main.sio" E175
+expect_rejection private-signed-proof \
+  "$PRIVACY/loom_continuity_private_signed_struct_main.sio" E176
 expect_composed_rejection linear-reuse \
   "$PRIVACY/loom_continuity_linear_reuse_main.sio" E039
 
@@ -199,4 +203,4 @@ if [[ "$signed_sabotage_rc" -eq 0 ]]; then
   fail 'removing the signed predecessor guard did not expose the negative witness'
 fi
 
-echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1"
+echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 signed-type-separation=E009 signed-proof-private=E176 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1"
