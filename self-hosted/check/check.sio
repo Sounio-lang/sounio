@@ -4184,6 +4184,7 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     checker_bind_import_unknown_inplace(c, make_name("ffi_tgamma"))
     checker_bind_import_unknown_inplace(c, make_name("hessian_diag_of"))
     checker_bind_import_unknown_inplace(c, make_name("second_order_mean"))
+    checker_bind_import_unknown_inplace(c, make_name("correlate"))
     checker_bind_import_unknown_inplace(c, make_name("assert"))
     // Standard enum constructors used like values/functions by user code.
     checker_bind_import_unknown_inplace(c, make_name("Some"))
@@ -7494,6 +7495,7 @@ fn call_expr_should_bridge_by_value(e: Expr) -> bool with Mut, Panic, Div, Alloc
     if call_expr_is_builtin_sensitivity_of(e.left) { return true }
     if call_expr_is_builtin_hessian_of(e.left) { return true }
     if call_expr_is_builtin_second_order_mean(e.left) { return true }
+    if call_expr_is_builtin_correlate(e.left) { return true }
     if call_expr_contest_witness_kind(e.left) >= 0 { return true }
     false
 }
@@ -7857,6 +7859,31 @@ fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeE
 }
 
 // hessian_of(x, j, k) -> f64. THREE arguments.
+
+// correlate(a, b, rho) -> f64. THREE arguments, all required. Neither the
+// variance form (one) nor the sensitivity form (two) will do: each reports E010
+// on the argument it does not expect. A missing rho must be an error rather
+// than a silent 0.0, which would read as "these are independent" -- the very
+// assumption this builtin exists to let you deny.
+fn checker_check_correlate_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match third_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
 // slice_len(s: &[T]) -> i64. Inplace transcription of check_slice_len_call_expr —
 // the by-value bridge SRET-smashed on populated enum tables (slice_fat_pointers crash).
 fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -8251,6 +8278,13 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     // metric -- one expression argument, f64 result, same as variance_of.
     if call_expr_is_builtin_second_order_mean(e.left) {
         return checker_check_variance_metric_expr_inplace(c, e)
+    }
+    // correlate(a, b, rho) is three arguments, not one. Routing it to
+    // checker_check_variance_metric_expr_inplace reports E010 on the second --
+    // exactly what the comment on checker_check_sensitivity_metric_expr_inplace
+    // warns about, and exactly what I did on the first attempt.
+    if call_expr_is_builtin_correlate(e.left) {
+        return checker_check_correlate_metric_expr_inplace(c, e)
     }
     if call_expr_is_builtin_slice_len(e.left) {
         return checker_check_slice_len_expr_inplace(c, e)
@@ -14859,6 +14893,19 @@ fn call_expr_is_builtin_hessian_of(opt: Option<Box<Expr> >) -> bool with Mut, Pa
                 return false
             }
             name_matches_str10((*expr).name, 104, 101, 115, 115, 105, 97, 110, 95, 111, 102)
+        }
+        None => false
+    }
+}
+
+fn call_expr_is_builtin_correlate(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(expr) => {
+            if (*expr).kind != ExprKind::ExprIdent {
+                return false
+            }
+            // "correlate"
+            name_matches_str9((*expr).name, 99, 111, 114, 114, 101, 108, 97, 116, 101)
         }
         None => false
     }
