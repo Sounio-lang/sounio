@@ -129,7 +129,11 @@ journal authority. Configure `SOUNIO_LOOM_JOURNAL_AUTHORITY_SOCKET`,
 matching private key in a separately supervised process. Every semantic and
 Guardian event receives an epoch-scoped Ed25519 signature before append. The
 authority persists one monotonic `(sequence, head)` state per journal context,
-so retries are idempotent but rewrites and forks are refused. Set
+revalidates that state's own signature on read, and fsyncs the containing
+directory after each atomic replacement, so retries are idempotent but rewrites
+and forks are refused. The authority state directory and private key must be in
+the authority supervisor's custody; giving the workload deletion access to both
+journal state and its restart boundary is outside this local protocol. Set
 `SOUNIO_LOOM_JOURNAL_AUTHORITY_REVOKED_EPOCHS` to a comma-separated denylist
 when verifying retired or compromised epochs.
 
@@ -198,7 +202,7 @@ alias witness is refused by full-digest equality; replacing only
 `full_digest_vectors_agree` admits it. The controls establish that both rules
 are load-bearing. They do not establish organizational, process, hardware, or
 network independence, compromise resistance of the journal key, Byzantine
-consensus, or trusted key custody. Compact 60-bit principal-token collisions
+consensus, or trusted key and monotonic-state custody. Compact 60-bit principal-token collisions
 remain fail-closed false-refusal risks at approximately 2^-60; fact equality no
 longer relies on those compact tokens. The real-Pod
 witness relocated

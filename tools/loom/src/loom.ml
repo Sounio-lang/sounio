@@ -2394,12 +2394,18 @@ let read_line_fd descriptor =
 let journal_authority_state_path state_dir context_digest =
   Filename.concat state_dir (context_digest ^ ".state")
 
+let fsync_directory path =
+  let descriptor = Unix.openfile path [ O_RDONLY ] 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () -> Unix.fsync descriptor)
+
 let journal_authority_response epoch principal signature =
   control_line
     [ "OK"; "SIGNED"; string_of_int epoch; principal; signature ]
 
-let journal_authority_sign_request state_dir private_key epoch principal_id
-    fields =
+let journal_authority_sign_request state_dir private_key public_key epoch
+    principal_id fields =
   match fields with
   | [ context_digest; sequence; previous; event_hash ] ->
       if not (valid_sha256 context_digest) then
@@ -2427,6 +2433,14 @@ let journal_authority_sign_request state_dir private_key epoch principal_id
            || stored_principal <> principal_id || not (valid_sha256 stored_head)
            || not (valid_sha256 stored_previous) || stored_signature = ""
         then failf "stored-state-invalid";
+        let stored_payload =
+          journal_authority_payload stored_context stored_epoch stored_principal
+            stored_sequence stored_previous stored_head
+        in
+        if not
+             (journal_authority_signature_is_valid public_key state_dir
+                stored_payload stored_signature)
+        then failf "stored-state-signature-invalid";
         if sequence = stored_sequence && event_hash = stored_head
            && previous = stored_previous
         then journal_authority_response epoch principal_id stored_signature
@@ -2445,6 +2459,7 @@ let journal_authority_sign_request state_dir private_key epoch principal_id
                "schema=loom-journal-authority-state-v1\njournal_context_sha256=%s\nepoch=%d\nauthority_principal_id=%s\nsequence=%d\nprevious_sha256=%s\nevent_sha256=%s\nsignature_base64=%s\n"
                context_digest epoch principal_id sequence previous event_hash
                signature);
+          fsync_directory state_dir;
           journal_authority_response epoch principal_id signature)
       else (
         if sequence <> 1 || previous <> String.make 64 '0' then
@@ -2459,18 +2474,19 @@ let journal_authority_sign_request state_dir private_key epoch principal_id
              "schema=loom-journal-authority-state-v1\njournal_context_sha256=%s\nepoch=%d\nauthority_principal_id=%s\nsequence=%d\nprevious_sha256=%s\nevent_sha256=%s\nsignature_base64=%s\n"
              context_digest epoch principal_id sequence previous event_hash
              signature);
+        fsync_directory state_dir;
         journal_authority_response epoch principal_id signature)
   | _ -> failf "invalid-sign-request"
 
-let handle_journal_authority_request state_dir private_key epoch principal_id
-    line =
+let handle_journal_authority_request state_dir private_key public_key epoch
+    principal_id line =
   match split_on '\t' line with
   | [ "SOUNIO_JOURNAL_AUTHORITY_V1"; "STATUS" ] ->
       control_line
         [ "OK"; "STATUS"; string_of_int epoch; principal_id ]
   | "SOUNIO_JOURNAL_AUTHORITY_V1" :: "SIGN" :: fields ->
-      journal_authority_sign_request state_dir private_key epoch principal_id
-        fields
+      journal_authority_sign_request state_dir private_key public_key epoch
+        principal_id fields
   | _ -> failf "invalid-request"
 
 let journal_authority_serve_command cli =
@@ -2524,8 +2540,8 @@ let journal_authority_serve_command cli =
             (fun () ->
               let response =
                 try
-                  handle_journal_authority_request state_dir private_key epoch
-                    principal_id (read_line_fd client)
+                  handle_journal_authority_request state_dir private_key
+                    public_key epoch principal_id (read_line_fd client)
                 with Loom_error reason -> control_line [ "REFUSE"; reason ]
               in
               write_all client response)

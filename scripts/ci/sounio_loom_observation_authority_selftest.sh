@@ -527,8 +527,44 @@ run_revocation() {
     'SOUNIO_LOOM_JOURNAL_AUTHORITY_REVOCATION=PASS active_epoch=1 revoked_epoch=1 verification=refused'
 }
 
+authority_request() {
+  local context="$1" sequence="$2" previous="$3" event_hash="$4"
+  printf 'SOUNIO_JOURNAL_AUTHORITY_V1\tSIGN\t%s\t%s\t%s\t%s\n' \
+    "$context" "$sequence" "$previous" "$event_hash" | \
+    socat -t 5 - "UNIX-CONNECT:$AUTHORITY_SOCKET"
+}
+
+run_authority_state() {
+  local context zero head_one head_two first retry refusal state temporary tampered
+  context="$(printf 'observation-authority-state-control' | sha256sum | awk '{print $1}')"
+  zero="$(printf '0%.0s' {1..64})"
+  head_one="$(printf 'authority-event-one' | sha256sum | awk '{print $1}')"
+  head_two="$(printf 'authority-event-two' | sha256sum | awk '{print $1}')"
+  first="$(authority_request "$context" 1 "$zero" "$head_one")"
+  [[ "$first" == $'OK\tSIGNED\t'* ]] || fail "first authority request failed: $first"
+  retry="$(authority_request "$context" 1 "$zero" "$head_one")"
+  [[ "$retry" == "$first" ]] || fail 'exact authority retry changed its signature'
+  refusal="$(authority_request "$context" 3 "$head_one" "$head_two")"
+  [[ "$refusal" == $'REFUSE\tnon-monotonic-event' ]] || \
+    fail "authority accepted a sequence gap: $refusal"
+  state="$AUTHORITY_STATE/$context.state"
+  temporary="$state.tampered"
+  awk '
+    /^signature_base64=/ { print "signature_base64=AAAAAAAA"; changed=1; next }
+    { print }
+    END { if (changed != 1) exit 42 }
+  ' "$state" > "$temporary" || fail 'could not tamper authority state signature'
+  mv "$temporary" "$state"
+  tampered="$(authority_request "$context" 1 "$zero" "$head_one")"
+  [[ "$tampered" == $'REFUSE\tstored-state-signature-invalid' ]] || \
+    fail "authority trusted a tampered durable state: $tampered"
+  printf '%s\n' \
+    'SOUNIO_LOOM_JOURNAL_AUTHORITY_STATE=PASS exact_retry=idempotent sequence_gap=refused stored_signature_tamper=refused file_and_directory_fsync=enabled'
+}
+
 initialize() {
   command -v openssl >/dev/null || fail 'OpenSSL is required'
+  command -v socat >/dev/null || fail 'socat is required for authority protocol controls'
   mkdir -p "$KEY_ROOT" "$AUTHORITY_STATE"
   local role
   for role in signer observer journal; do
@@ -558,12 +594,14 @@ initialize() {
 initialize
 case "${1:-all}" in
   positive) run_positive ;;
+  authority-state) run_authority_state ;;
   digest-treatment) run_digest_treatment ;;
   digest-control) run_digest_control ;;
   journal-treatment) run_journal_treatment ;;
   journal-control) run_journal_control ;;
   revocation) run_revocation ;;
   all)
+    run_authority_state
     run_positive
     run_digest_treatment
     run_digest_control
@@ -572,6 +610,6 @@ case "${1:-all}" in
     run_revocation
     ;;
   *)
-    fail 'usage: sounio_loom_observation_authority_selftest.sh [positive|digest-treatment|digest-control|journal-treatment|journal-control|revocation|all]'
+    fail 'usage: sounio_loom_observation_authority_selftest.sh [authority-state|positive|digest-treatment|digest-control|journal-treatment|journal-control|revocation|all]'
     ;;
 esac
