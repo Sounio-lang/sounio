@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.3"
+let runtime_version = "2026.08.24.4"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -2748,6 +2748,217 @@ let read_tail path limit =
 let beagle_paths root pane_id =
   session_paths root beagle_agent (beagle_lane_of_pane pane_id)
 
+let beagle_lineage_path paths =
+  Filename.concat paths.session_dir "beagle.lineage.tsv"
+
+type beagle_lineage_record = {
+  transition : string;
+  predecessor : string;
+  successor : string;
+  predecessor_semantic_head : string;
+  predecessor_guardian_head : string;
+}
+
+type beagle_lineage_status = {
+  lineage_verified : bool;
+  lineage_head : string;
+  latest_transition : string;
+  predecessor_instance : string;
+  predecessor_semantic_head : string;
+  predecessor_guardian_head : string;
+  transition_count : int;
+  pod_resurrection_count : int;
+}
+
+let beagle_generation_journals paths instance =
+  let generation_dir =
+    Filename.concat (Filename.concat paths.session_dir "generations") instance
+  in
+  ( Filename.concat generation_dir "journal.tsv",
+    Filename.concat generation_dir "guardian.tsv" )
+
+let beagle_generation_evidence paths instance =
+  if instance = "" then failf "generation-lineage-empty-predecessor";
+  let semantic_path, guardian_path = beagle_generation_journals paths instance in
+  let _, semantic_phase, semantic_head =
+    load_and_verify_journal semantic_path
+  in
+  let _, _, _, guardian_head =
+    load_and_verify_guardian_journal guardian_path
+  in
+  (semantic_phase, semantic_head, guardian_head)
+
+let parse_beagle_lineage_payload event =
+  if event.kind <> "GENERATION_LINKED" then
+    failf "generation-lineage-unknown-event:%s" event.kind;
+  match split_on ':' (string_of_hex event.payload_hex) with
+  | [ pane_hex; session_hex; transition; predecessor; successor;
+      semantic_head; guardian_head ] ->
+      (pane_hex, session_hex,
+       { transition; predecessor; successor;
+         predecessor_semantic_head = semantic_head;
+         predecessor_guardian_head = guardian_head })
+  | _ -> failf "generation-lineage-invalid-payload"
+
+let load_and_verify_beagle_lineage paths pane_id session_id =
+  let path = beagle_lineage_path paths in
+  if not (Sys.file_exists path) then ([], String.make 64 '0')
+  else
+    let events =
+      read_lines path
+      |> List.filter (fun line -> trim line <> "")
+      |> List.map parse_event
+    in
+    if events = [] then failf "generation-lineage-empty";
+    let expected_seq = ref 1 in
+    let expected_previous = ref (String.make 64 '0') in
+    let expected_predecessor = ref None in
+    let records =
+      List.map
+        (fun (event : journal_event) ->
+          if event.seq <> !expected_seq then
+            failf "generation-lineage-non-contiguous-sequence";
+          if event.previous <> !expected_previous then
+            failf "generation-lineage-previous-digest-mismatch";
+          let expected_hash =
+            sha256
+              (event_material event.seq event.previous event.utc event.kind
+                 event.payload_hex)
+          in
+          if event.hash <> expected_hash then
+            failf "generation-lineage-event-digest-mismatch";
+          let pane_hex, session_hex, record =
+            parse_beagle_lineage_payload event
+          in
+          if pane_hex <> hex_of_string pane_id then
+            failf "generation-lineage-pane-mismatch";
+          if session_hex <> hex_of_string session_id then
+            failf "generation-lineage-session-mismatch";
+          if record.predecessor = record.successor then
+            failf "generation-lineage-self-cycle";
+          if
+            record.transition <> "pod-resurrected"
+            && record.transition <> "clean-respawn"
+          then failf "generation-lineage-transition-invalid";
+          (match !expected_predecessor with
+          | Some expected when record.predecessor <> expected ->
+              failf "generation-lineage-generation-gap"
+          | _ -> ());
+          let semantic_phase, semantic_head, guardian_head =
+            beagle_generation_evidence paths record.predecessor
+          in
+          if semantic_head <> record.predecessor_semantic_head then
+            failf "generation-lineage-semantic-head-mismatch";
+          if guardian_head <> record.predecessor_guardian_head then
+            failf "generation-lineage-guardian-head-mismatch";
+          (match (record.transition, semantic_phase) with
+          | "pod-resurrected", Active -> ()
+          | "clean-respawn", Exited -> ()
+          | _ -> failf "generation-lineage-transition-phase-mismatch");
+          expected_predecessor := Some record.successor;
+          expected_previous := event.hash;
+          incr expected_seq;
+          record)
+        events
+    in
+    (records, !expected_previous)
+
+let beagle_preflight_transition paths pane_id session_id predecessor =
+  try
+    let metadata = read_beagle_meta paths in
+    let metadata_instance = beagle_meta_value metadata "instance_id" in
+    if metadata_instance <> "" && metadata_instance <> predecessor then
+      failf "generation-lineage-metadata-mismatch";
+    let records, _ =
+      load_and_verify_beagle_lineage paths pane_id session_id
+    in
+    (match List.rev records with
+    | latest :: _ when latest.successor <> predecessor ->
+        failf "generation-lineage-current-generation-mismatch"
+    | _ -> ());
+    ignore (beagle_generation_evidence paths predecessor)
+  with Loom_error error ->
+    failf "generation-lineage-proof-invalid:%s" error
+
+let append_beagle_lineage paths pane_id session_id predecessor successor =
+  let semantic_phase, semantic_head, guardian_head =
+    beagle_generation_evidence paths predecessor
+  in
+  let transition =
+    match semantic_phase with
+    | Active -> "pod-resurrected"
+    | Exited -> "clean-respawn"
+    | Initial -> failf "generation-lineage-predecessor-not-started"
+  in
+  let records, previous =
+    load_and_verify_beagle_lineage paths pane_id session_id
+  in
+  match List.rev records with
+  | latest :: _
+    when latest.predecessor = predecessor && latest.successor = successor ->
+      if
+        latest.transition <> transition
+        || latest.predecessor_semantic_head <> semantic_head
+        || latest.predecessor_guardian_head <> guardian_head
+      then failf "generation-lineage-idempotence-mismatch";
+      latest
+  | latest :: _ when latest.successor <> predecessor ->
+      failf "generation-lineage-generation-gap"
+  | _ ->
+      let path = beagle_lineage_path paths in
+      let descriptor =
+        Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600
+      in
+      Unix.set_close_on_exec descriptor;
+      let channel = Unix.out_channel_of_descr descriptor in
+      let journal =
+        { channel; descriptor; seq = List.length records; previous }
+      in
+      Fun.protect
+        ~finally:(fun () -> close_out_noerr channel)
+        (fun () ->
+          let payload =
+            String.concat ":"
+              [ hex_of_string pane_id; hex_of_string session_id; transition;
+                predecessor; successor; semantic_head; guardian_head ]
+          in
+          ignore (append_event journal "GENERATION_LINKED" payload);
+          { transition; predecessor; successor;
+            predecessor_semantic_head = semantic_head;
+            predecessor_guardian_head = guardian_head })
+
+let beagle_lineage_status paths pane_id session_id current_instance =
+  try
+    let records, head =
+      load_and_verify_beagle_lineage paths pane_id session_id
+    in
+    match List.rev records with
+    | [] ->
+        { lineage_verified = true; lineage_head = "";
+          latest_transition = "initial"; predecessor_instance = "";
+          predecessor_semantic_head = ""; predecessor_guardian_head = "";
+          transition_count = 0; pod_resurrection_count = 0 }
+    | latest :: _ ->
+        if latest.successor <> current_instance then
+          failf "generation-lineage-current-generation-mismatch";
+        { lineage_verified = true; lineage_head = head;
+          latest_transition = latest.transition;
+          predecessor_instance = latest.predecessor;
+          predecessor_semantic_head = latest.predecessor_semantic_head;
+          predecessor_guardian_head = latest.predecessor_guardian_head;
+          transition_count = List.length records;
+          pod_resurrection_count =
+            List.fold_left
+              (fun count record ->
+                if record.transition = "pod-resurrected" then count + 1
+                else count)
+              0 records }
+  with _ ->
+    { lineage_verified = false; lineage_head = "";
+      latest_transition = "unverified"; predecessor_instance = "";
+      predecessor_semantic_head = ""; predecessor_guardian_head = "";
+      transition_count = 0; pod_resurrection_count = 0 }
+
 let beagle_descriptor root pane_id =
   let paths = beagle_paths root pane_id in
   if not (Sys.file_exists paths.descriptor_path) then failf "pane-not-found";
@@ -2770,6 +2981,9 @@ let beagle_status_json root pane_id =
          [ pane_id; session_id; instance; table_value descriptor "harness_pid_start";
            table_value descriptor "argv_digest" ])
   in
+  let lineage =
+    beagle_lineage_status paths pane_id session_id instance
+  in
   let journal_verified, semantic_head, guardian_head, recovery_count =
     try
       let events, _, semantic_head =
@@ -2789,7 +3003,7 @@ let beagle_status_json root pane_id =
     with _ -> (false, "", "", 0)
   in
   Printf.sprintf
-    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d}}"
+    "{\"paneId\":%s,\"sessionId\":%s,\"pid\":%s,\"status\":%s,\"createdAt\":%s,\"updatedAt\":%s,\"cwd\":%s,\"cols\":%s,\"rows\":%s,\"snapshot\":%s,\"supervisorRuntime\":%s,\"supervisorProtocol\":%s,\"loomInstanceId\":%s,\"loomKernelPid\":%s,\"loomGuardianPid\":%s,\"loomState\":%s,\"loomCursor\":%d,\"generationFingerprint\":%s,\"authorityStatus\":{\"owner\":\"loom\",\"journalVerified\":%s,\"semanticJournalHead\":%s,\"guardianJournalHead\":%s,\"kernelRecoveryCount\":%d,\"lineageVerified\":%s,\"generationLineageHead\":%s,\"generationTransition\":%s,\"generationTransitionCount\":%d,\"podResurrectionCount\":%d,\"predecessorInstanceId\":%s,\"predecessorSemanticJournalHead\":%s,\"predecessorGuardianJournalHead\":%s}}"
     (json_quote pane_id) (json_quote session_id)
     (table_value ~default:"0" descriptor "harness_pid") (json_quote status)
     (json_quote
@@ -2808,12 +3022,23 @@ let beagle_status_json root pane_id =
     (json_quote loom_state) cursor (json_quote generation_fingerprint)
     (if journal_verified then "true" else "false")
     (json_quote semantic_head) (json_quote guardian_head) recovery_count
+    (if lineage.lineage_verified then "true" else "false")
+    (json_quote lineage.lineage_head)
+    (json_quote lineage.latest_transition) lineage.transition_count
+    lineage.pod_resurrection_count
+    (json_quote lineage.predecessor_instance)
+    (json_quote lineage.predecessor_semantic_head)
+    (json_quote lineage.predecessor_guardian_head)
 
 let beagle_metadata_for paths pane_id session_id instance cols rows =
   let previous = read_beagle_meta paths in
   let now = utc_now () in
+  let previous_instance = beagle_meta_value previous "instance_id" in
+  if previous_instance <> "" && previous_instance <> instance then
+    ignore
+      (append_beagle_lineage paths pane_id session_id previous_instance instance);
   let created_at =
-    if beagle_meta_value previous "instance_id" = instance then
+    if previous_instance = instance then
       beagle_meta_value ~default:now previous "created_at"
     else now
   in
@@ -2863,10 +3088,8 @@ let ensure_beagle_pane root body =
       let descriptor = parse_key_values paths.descriptor_path in
       let existing_session = table_value descriptor "session_id" in
       let existing_cwd = table_value descriptor "worktree" in
-      if effective_session_state descriptor <> "lost"
-         && existing_session <> session_id
-      then failf "pane-identity-conflict";
-      if effective_session_state descriptor <> "lost" && existing_cwd <> cwd then
+      if existing_session <> session_id then failf "pane-identity-conflict";
+      if existing_cwd <> cwd then
         failf "pane-cwd-conflict";
       effective_session_state descriptor
     else "absent"
@@ -2875,7 +3098,17 @@ let ensure_beagle_pane root body =
   (match state with
   | "active" -> ()
   | "recoverable" -> recover_command cli
-  | "absent" | "lost" | "exited" ->
+  | "absent" ->
+      start_command
+        { cli with
+          rest =
+            [ "env"; "TERM=xterm-256color"; "COLORTERM=truecolor";
+              "BEAGLE_WORKBENCH=1"; "BEAGLE_PTY_SUPERVISOR=loom";
+              "WORKSPACE_ROOT=" ^ cwd; shell; "-l" ] }
+  | "lost" | "exited" ->
+      let descriptor = parse_key_values paths.descriptor_path in
+      let predecessor = table_value descriptor "instance_id" in
+      beagle_preflight_transition paths pane_id session_id predecessor;
       start_command
         { cli with
           rest =
@@ -3087,6 +3320,8 @@ let beagle_handle_connection root descriptor =
   | Loom_error message ->
       let status =
         if message = "pane-not-found" then "404 Not Found"
+        else if starts_with message "generation-lineage-proof-invalid:" then
+          "409 Conflict"
         else if
           List.mem message
             [ "pane-identity-conflict"; "pane-cwd-conflict";

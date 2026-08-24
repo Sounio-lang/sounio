@@ -61,25 +61,31 @@ Workspace Agent. It implements `beagle-pty-supervisor-v1` without changing the
 external `beagle-terminal-v1` client protocol. Beagle retains agent routing,
 sessions, blocks, redaction, and memory policy; Loom owns PTY custody, process
 identity, input authority, replay, and recovery. The bridge exposes verified
-local journal heads and recovery counts as additive response fields. See
+local journal heads, recovery counts, and a hash-chained generation-lineage
+receipt as additive response fields. If kernel, Guardian, and harness all die,
+Loom truthfully creates a new physical generation linked to the verified
+predecessor instead of presenting a replacement process as the old one. See
 `docs/internal/concepts/loom-multiplexer.contract` for the authority matrix and
 canary rules.
 
 ## Evidence Boundary
 
-Loom-1 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
+Loom-1.4 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
 host. `recover` reconciles bytes fsynced by the guardian while no kernel existed
 and semantically revokes input leases whose sockets died with the old kernel.
 It cannot re-adopt the same PTY after Guardian or host loss. It can detect that
-loss and reconcile an enrolled lane into a new verified generation. The
+loss and reconcile a Beagle pane into a new generation whose append-only
+lineage receipt binds both verified predecessor journal heads. The
 Kubernetes startup hook activates that one-shot reconciliation after Pod loss,
 but pending-inbox replay across the new generation still needs its own gate.
 Existing fleet generations therefore retain the Python `agentd` launch adapter
 during migration.
 The Beagle bridge passed its source gate and an isolated second-process canary
 against the live Workspace Agent image. That canary covered blocks, redaction,
-Workspace Agent restart, and Loom kernel loss. It has not replaced production
-authority or passed separate-Pod deletion, canonical-memory, Cockpit, or Warp
+Workspace Agent restart, and Loom kernel loss. A source gate additionally kills
+bridge, kernel, Guardian, and harness together, proves linked resurrection, and
+refuses a mutated lineage before spawn. It has not replaced production
+authority or passed real separate-Pod deletion, canonical-memory, Cockpit, or Warp
 gates; see `tools/loom/evidence/beagle-workspace-agent-canary-20260824.txt`.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.
