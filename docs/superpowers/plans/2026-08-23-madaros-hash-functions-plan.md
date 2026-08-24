@@ -74,6 +74,7 @@ Actual: prints the BUG line. Expected (correct `u32` semantics): prints "correct
 Create `tests/run-pass/hash_word32_primitives.sio`:
 
 ```sio
+//@ run-pass
 use hash::word32::*
 
 fn main() with IO {
@@ -214,6 +215,7 @@ This project's standing discipline requires confirming these against their publi
 Create `tests/run-pass/hash_sha1_vectors.sio`:
 
 ```sio
+//@ run-pass
 use hash::sha1::*
 use net::socket::*
 
@@ -457,6 +459,7 @@ git commit -m "feat(hash): add SHA-1"
 Create `tests/run-pass/hash_sha256_vectors.sio`, structured identically to Task 2's `hash_sha1_vectors.sio` (same `write_str`/`hex_nibble_to_char` helpers, reimplemented locally in this file since Sounio test files don't share helper code across files on this branch) but calling `sha256` and asserting 32-byte (64 hex char) digests against the three re-verified values from Step 1:
 
 ```sio
+//@ run-pass
 use hash::sha256::*
 use net::socket::*
 
@@ -722,6 +725,7 @@ This test deliberately exercises values with the high (32nd) bit of each half se
 Create `tests/run-pass/hash_word64_primitives.sio`:
 
 ```sio
+//@ run-pass
 use hash::word64::*
 
 fn main() with IO {
