@@ -601,3 +601,53 @@ is declared changes. **Any future Sounio module needing a lookup table
 larger than 16 entries (round constants, S-boxes, permutation tables, etc.)
 must use this function-returning-a-literal form, never a bare top-level
 `const` array.**
+
+## Finding 16 — 64-bit-scale arithmetic audit for `stdlib/hash/word64.sio`: mitigated by construction, not independently re-triggered
+
+Task 4 of the hash-functions plan opened Phase 2 (SHA-384/512 prerequisites)
+by auditing whether Finding 11's failure pattern (`u64` right-shift/divide/
+modulo breaking when bit 63 is set) also shows up at the specific 64-bit-
+scale arithmetic a hash module needs (add, xor, and, not, logical right
+shift, rotate-right), and by building `stdlib/hash/word64.sio` to handle it
+regardless of outcome.
+
+`word64.sio` represents every 64-bit logical value as two independent `i64`
+scalars (`hi`, `lo`, each masked to `0..0xFFFFFFFF` after every operation
+that could exceed 32 bits) rather than a single 64-bit-wide value — the
+same 32-bit-half decomposition `bigint.sio` uses for 16-bit limbs, applied
+here at limb width 32. By construction, no intermediate value in any of
+`add64`, `xor64`, `and64`, `not64`, `shr64`, `shl64`, or `rotr64` ever
+approaches bit 63 of the underlying `i64` representation — the largest
+intermediate is `a_hi << 31` in `shr64`'s `n=1` case, which lands at bit 62
+at most, still one full bit below Finding 11's danger zone.
+
+`tests/run-pass/hash_word64_primitives.sio` exercises this deliberately at
+the case BigInt never needed: operands with the top bit of a half set
+(`2147483648` = `0x80000000`), plus the two carry-propagation cases
+(full 64-bit wraparound and a carry crossing exactly from the low half into
+the high half) and the two shift/rotate boundary cases (`shr64` crossing
+the 32-bit half boundary at `n=33`, `rotr64` at exactly `n=32` swapping
+halves, and `rotr64` at `n=1` carrying the low bit of the low half into the
+top bit of the high half). All nine assertions passed on the first attempt,
+with no need for any fix to the transcribed code:
+
+```
+$ export SOUNIO_STDLIB_PATH=<repo>/stdlib
+$ ./bin/souc run tests/run-pass/hash_word64_primitives.sio
+...
+hash_word64_primitives: all cases passed
+$ echo $?
+0
+```
+
+This is the **expected, defended-against outcome from Step 2's design**,
+not the alternative outcome flagged in the task brief (native `i64`/`u64`
+arithmetic being safe at this scale without masking). This run does **not**
+independently re-confirm Finding 11 at 64-bit scale, because the masking
+discipline in `word64.sio` means no operation here ever executes the
+unmasked, bit-63-adjacent arithmetic Finding 11 describes — the mitigation
+was applied unconditionally from the start rather than discovered by first
+observing a failure and then patching around it. Finding 11's original
+scope (`u64` right-shift/divide/modulo with bit 63 set) stands unchanged
+and is not re-tested or re-scoped by this finding. Evidence:
+`tests/run-pass/hash_word64_primitives.sio`.
