@@ -1302,3 +1302,101 @@ each array's end happened to differ between `a` and `b`. The probe above
 (confirming array indexing itself has no bounds checking) is what
 establishes the vulnerability is real, independent of whether any single
 compiled build's stack layout happens to mask it.
+
+## Finding 28 (application-level, FIXED, NOT a Madaros compiler defect) — `sct_list_decode`'s `ext_len`/`sig_len` were never bounded against the SCT entry's own declared length, allowing an out-of-bounds heap read from a malformed certificate
+
+Found by the final whole-plan reviewer's expanded, Finding-27-class bug
+hunt (2026-08-24), independently re-confirmed by the controller.
+
+`sct_list_decode` (`stdlib/x509/sct.sio`) reads a 16-bit, fully
+attacker-controlled `ext_len` field and immediately uses it to compute
+`after_ext = sct_start + 43 + ext_len`, then reads `hash_alg`/`sig_alg`/
+`sig_len` at that position -- with no check that `43 + ext_len + 4` (the
+fixed prefix plus the claimed extensions plus the 4 bytes read
+immediately after) actually fits within this entry's own declared
+`sct_len`. The only prior guard, `pos + sct_len > end` (bounding the
+*whole entry* within the caller's buffer), says nothing about whether
+`ext_len` itself is consistent with `sct_len`. The `sig_len > 128` check
+right after only bounds the *destination* `[u8;128]` array, not whether
+the entry's remaining bytes (per `sct_len`) actually contain `sig_len`
+more bytes to read from.
+
+**Confirmed via a decisive repro**: a crafted 47-byte SCT entry (the
+minimum valid structure size) declaring `ext_len = 100` in a 51-byte
+total buffer read at absolute offset 147 -- roughly 92 bytes past the
+allocation -- and returned `X509_OK` (not an error), before the fix. With
+a maximal `ext_len = 0xFFFF` (65535), the read would land roughly 65KB
+past a certificate's own SCT-list allocation (typically a few hundred
+bytes), a real out-of-bounds read reachable end-to-end from
+`x509_parse_certificate` parsing a malformed or adversarial certificate's
+SCT extension.
+
+**Fixed** by adding two explicit bounds checks: after reading `ext_len`,
+`43 + ext_len + 4 > sct_len` returns `X509_ERR_MALFORMED`; after reading
+`sig_len`, `43 + ext_len + 4 + sig_len > sct_len` also returns
+`X509_ERR_MALFORMED`. Regression test:
+`tests/run-pass/x509_adversarial.sio` case (f), reproducing the exact
+decisive repro above and asserting the corrected `X509_ERR_MALFORMED`/
+`count == 0` result.
+
+## Finding 29 (application-level, FIXED, NOT a Madaros compiler defect) — an inverted branch in `unix_timestamp_from_ymdhms` mis-decoded every January/February UTCTime validity date by close to a full year
+
+Found by the final whole-plan reviewer, independently re-confirmed by the
+controller both by tracing the arithmetic and by measuring against `date
+-u`.
+
+```sio
+var mp: i64 = month + 9
+if mp >= 12 {
+    mp = mp - 12
+} else {
+    mp = month - 3      // WRONG for month=1/2 -- only reached when
+                         // month+9 < 12, i.e. month is 1 or 2
+}
+```
+
+The intent, per this function's own comment, is `mp = (month+9) % 12`.
+For `month=1`: `mp` starts at `10` (already `< 12`, i.e. already its own
+mod-12 residue -- no adjustment needed), but the `else` branch
+overwrites it with `month - 3 = -2`. For `month=2`: `mp` starts at `11`
+(correct), overwritten with `month - 3 = -1`. The `else` branch's formula
+is a copy of what the `if` branch computes for a DIFFERENT input range
+(`month - 3` is exactly `(month+9) - 12`, the correct reduction for
+`month >= 3`) -- it should simply do nothing for `month` 1/2, since
+`month+9` is already `< 12` there.
+
+**Measured** (a temporarily-`pub`-exposed copy of the shipped function,
+called directly, compared against `date -u -d "<date> 00:00:00" +%s`):
+
+| Input | Expected | Pre-fix actual | Error |
+|---|---:|---:|---:|
+| 2026-08-24 | 1787529600 | 1787529600 | none (month 8, `if` branch) |
+| 2026-01-15 | 1768435200 | 1736812800 | −366 days |
+| 2026-02-15 | 1771113600 | 1739404800 | −367 days |
+| 2026-03-15 | 1773532800 | 1773532800 | none (month 3, `if` branch) |
+
+All four post-fix values match `date -u` exactly.
+
+**Consequence for the layer's declared purpose**: any certificate whose
+`notBefore`/`notAfter` falls in January or February -- roughly one sixth
+of all certificates, with no seasonal reason to expect otherwise --
+decoded a full year off. A `notAfter` in Jan/Feb read as expired a year
+early (fail-closed); a `notBefore` in Jan/Feb read as already valid a
+year early (fail-open for a not-yet-valid certificate -- the more
+dangerous direction for anything that will eventually gate trust
+decisions on this field).
+
+**Why it survived eight per-task reviews and the first attempt at the
+final whole-plan review** (which crashed before reaching this function):
+the only fixture using January dates anywhere in this plan
+(`tests/run-pass/x509_parse_tbs_core.sio`, `250101000000Z`/
+`260101000000Z`) asserted only that both dates were nonzero and correctly
+ordered -- both properties are invariant under a uniform one-year shift
+of both dates, so the bug produced a passing test.
+
+**Fixed** by removing the wrong `else` branch entirely -- `mp` needs no
+adjustment when it's already `< 12`. Regression test: added exact-
+timestamp assertions to `tests/run-pass/x509_parse_tbs_core.sio`
+(`not_before_unix == 1735689600`, `not_after_unix == 1767225600`,
+independently computed via `date -u`), so a regression of this exact
+shape would now fail that test directly rather than passing it.
