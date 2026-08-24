@@ -617,7 +617,48 @@ presence_path() {
 }
 
 wake_receipt_path() {
-  printf '%s/%s--%s.wake' "$WAKES_DIR" "$(slug "$1")" "$(slug "$2")"
+  local generation="${3:-}"
+  if [[ -n "$generation" ]]; then
+    printf '%s/%s--%s--%s.wake' "$WAKES_DIR" "$(slug "$1")" \
+      "$(slug "$2")" "$(slug "$generation")"
+  else
+    printf '%s/%s--%s.wake' "$WAKES_DIR" "$(slug "$1")" "$(slug "$2")"
+  fi
+}
+
+process_presence_delivery_generation() {
+  local agent="$1" lane="$2" worktree="$3" harness="$4" presence_file
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || return 1
+  load_presence "$presence_file"
+  presence_state || return 1
+  [[ "$PRESENCE_STATE" == live && "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" && \
+    "$P_WORKTREE" == "$worktree" && "$P_HARNESS" == "$harness" && \
+    -n "$P_SESSION_ID" && "$P_GENERATION" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf 'process-%s-g%s-%s-%s' "$P_SESSION_ID" "$P_GENERATION" "$P_PID" "$P_PID_START"
+}
+
+registered_delivery_generation() {
+  case "$E_TRANSPORT" in
+    agentd|loom)
+      [[ -n "$E_INSTANCE_ID" ]] || return 1
+      printf '%s' "$E_INSTANCE_ID"
+      ;;
+    tmux)
+      process_presence_delivery_generation \
+        "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$E_HARNESS" && return 0
+      [[ -n "$E_ADDRESS" && "$E_PANE_PID" =~ ^[1-9][0-9]*$ ]] || return 1
+      printf 'tmux-%s-%s' "$E_ADDRESS" "$E_PANE_PID"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+discovered_delivery_generation() {
+  process_presence_delivery_generation \
+    "$D_AGENT" "$D_LANE" "$D_WORKTREE" "$D_HARNESS" && return 0
+  [[ -n "$D_ADDRESS" && "$D_PANE_PID" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf 'tmux-%s-%s' "$D_ADDRESS" "$D_PANE_PID"
 }
 
 load_endpoint() {
@@ -927,6 +968,11 @@ discover_history_endpoint() {
   local history_branch_matches=0
   local -a message_paths=()
 
+  D_ADDRESS=''
+  D_PANE_PID=''
+  D_WORKTREE=''
+  D_HARNESS=''
+
   harness="$(harness_for_agent "$target_agent")" || return 1
 
   message_paths=("$MESSAGES_DIR"/*.message)
@@ -972,6 +1018,8 @@ discover_history_endpoint() {
       [[ "$pane_root" == "$candidate_worktree" ]] || continue
       matches=$((matches + 1))
       D_ADDRESS="$pane_id"
+      D_PANE_PID="$pane_pid"
+      D_WORKTREE="$pane_root"
     done <<< "$pane_lines"
   fi
   ((matches <= 1)) || return 1
@@ -989,6 +1037,8 @@ discover_history_endpoint() {
       [[ "$pane_common" == "$GIT_COMMON_DIR" ]] || continue
       matches=$((matches + 1))
       D_ADDRESS="$pane_id"
+      D_PANE_PID="$pane_pid"
+      D_WORKTREE="$pane_root"
     done <<< "$pane_lines"
     if [[ "$matches" == 1 ]]; then
       D_DISCOVERY='identity-root'
@@ -1004,6 +1054,8 @@ discover_history_endpoint() {
         [[ "$pane_root" == "$RECOVERY_WORKTREE" ]] || continue
         matches=$((matches + 1))
         D_ADDRESS="$pane_id"
+        D_PANE_PID="$pane_pid"
+        D_WORKTREE="$pane_root"
       done <<< "$pane_lines"
       [[ "$matches" == 1 ]] || return 1
       D_DISCOVERY='session-history'
@@ -1013,6 +1065,7 @@ discover_history_endpoint() {
   D_ENDPOINT_ID="$D_DISCOVERY-$(claim_id_for "$target_agent" "$target_lane")"
   D_AGENT="$target_agent"
   D_LANE="$target_lane"
+  D_HARNESS="$harness"
   D_SOCKET="$socket"
 }
 
@@ -1224,8 +1277,8 @@ remove_presence_for_lane() {
 
 WAKE_STATUS='unavailable'
 attempt_message_wake() {
-  local message_id="$1" message_file endpoint_file receipt_file prompt tmp_file
-  local target_agent target_lane discovered=0 launcher
+  local message_id="$1" message_file endpoint_file receipt_file prompt tmp_file ack_file
+  local target_agent target_lane delivery_generation discovered=0 launcher
   WAKE_STATUS='unavailable'
   message_file="$MESSAGES_DIR/$(slug "$message_id").message"
   [[ -f "$message_file" ]] || return 1
@@ -1233,6 +1286,12 @@ attempt_message_wake() {
   [[ -n "$M_TO_AGENT" && -n "$M_TO_LANE" ]] || return 1
   target_agent="$M_TO_AGENT"
   target_lane="$M_TO_LANE"
+  ack_file="$(message_ack_path "$M_ID" "$target_agent" "$target_lane")"
+  if [[ -f "$ack_file" ]]; then
+    WAKE_STATUS='acknowledged'
+    printf 'WAKE_SKIPPED message_id=%s reason=acknowledged\n' "$M_ID"
+    return 0
+  fi
   endpoint_file="$(endpoint_path "$M_TO_AGENT" "$M_TO_LANE")"
   if [[ -f "$endpoint_file" ]]; then
     load_endpoint "$endpoint_file"
@@ -1252,11 +1311,12 @@ attempt_message_wake() {
     fi
     load_message "$message_file"
     ((discovered)) || return 1
-    receipt_file="$(wake_receipt_path "$M_ID" "$D_ENDPOINT_ID")"
+    delivery_generation="$(discovered_delivery_generation)" || return 1
+    receipt_file="$(wake_receipt_path "$M_ID" "$D_ENDPOINT_ID" "$delivery_generation")"
     if [[ -f "$receipt_file" ]]; then
       WAKE_STATUS='deduplicated'
-      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s reason=already-delivered discovery=%s\n' \
-        "$M_ID" "$D_ENDPOINT_ID" "$D_DISCOVERY"
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered discovery=%s\n' \
+        "$M_ID" "$D_ENDPOINT_ID" "$delivery_generation" "$D_DISCOVERY"
       return 0
     fi
     launcher="$(coord_inbox_launcher)"
@@ -1269,22 +1329,25 @@ attempt_message_wake() {
       return 1
     fi
     tmp_file="$(mktemp "$WAKES_DIR/.wake-write.XXXXXX")"
-    printf 'utc=%s message_id=%s endpoint_id=%s transport=tmux address=%s discovery=%s\n' \
-      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$D_DISCOVERY" > "$tmp_file"
+    printf 'utc=%s message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$delivery_generation" \
+      "$D_DISCOVERY" > "$tmp_file"
     mv "$tmp_file" "$receipt_file"
-    printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s discovery=%s\n' \
+    printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s discovery=%s\n' \
       "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" "$D_ADDRESS" \
-      "$D_DISCOVERY" >> "$EVENT_LOG"
+      "$delivery_generation" "$D_DISCOVERY" >> "$EVENT_LOG"
     WAKE_STATUS='delivered'
-    printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=tmux address=%s discovery=%s\n' \
-      "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$D_DISCOVERY"
+    printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$delivery_generation" "$D_DISCOVERY"
     return 0
   fi
   load_endpoint "$endpoint_file"
-  receipt_file="$(wake_receipt_path "$M_ID" "$E_ID")"
+  delivery_generation="$(registered_delivery_generation)" || return 1
+  receipt_file="$(wake_receipt_path "$M_ID" "$E_ID" "$delivery_generation")"
   if [[ -f "$receipt_file" ]]; then
     WAKE_STATUS='deduplicated'
-    printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s reason=already-delivered\n' "$M_ID" "$E_ID"
+    printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered\n' \
+      "$M_ID" "$E_ID" "$delivery_generation"
     return 0
   fi
 
@@ -1298,14 +1361,16 @@ attempt_message_wake() {
   fi
 
   tmp_file="$(mktemp "$WAKES_DIR/.wake-write.XXXXXX")"
-  printf 'utc=%s message_id=%s endpoint_id=%s transport=%s address=%s\n' \
-    "$NOW_UTC" "$M_ID" "$E_ID" "$E_TRANSPORT" "$E_ADDRESS" > "$tmp_file"
+  printf 'utc=%s message_id=%s endpoint_id=%s transport=%s address=%s generation=%s\n' \
+    "$NOW_UTC" "$M_ID" "$E_ID" "$E_TRANSPORT" "$E_ADDRESS" \
+    "$delivery_generation" > "$tmp_file"
   mv "$tmp_file" "$receipt_file"
-  printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=%s address=%s\n' \
-    "$NOW_UTC" "$M_ID" "$E_ID" "$E_AGENT" "$E_LANE" "$E_TRANSPORT" "$E_ADDRESS" >> "$EVENT_LOG"
+  printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=%s address=%s generation=%s\n' \
+    "$NOW_UTC" "$M_ID" "$E_ID" "$E_AGENT" "$E_LANE" "$E_TRANSPORT" \
+    "$E_ADDRESS" "$delivery_generation" >> "$EVENT_LOG"
   WAKE_STATUS='delivered'
-  printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=%s address=%s\n' \
-    "$M_ID" "$E_ID" "$E_TRANSPORT" "$E_ADDRESS"
+  printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=%s address=%s generation=%s\n' \
+    "$M_ID" "$E_ID" "$E_TRANSPORT" "$E_ADDRESS" "$delivery_generation"
 }
 
 print_message_line() {
@@ -2614,8 +2679,9 @@ message_status_command() {
   local original_kind original_thread original_epoch request_state latest_response='-'
   local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0 wakes=0
   local receipt_utc receipt_agent receipt_lane token_utc token_agent token_lane
-  local token_message token_endpoint token_transport token_address
-  local -a message_paths=() injection_paths=() ack_paths=() wake_paths=()
+  local token token_message token_endpoint token_transport token_address token_generation
+  local receipt_generation
+  local -a message_paths=() injection_paths=() ack_paths=() wake_paths=() receipt_tokens=()
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
@@ -2708,10 +2774,29 @@ message_status_command() {
   done
   for receipt_file in "${wake_paths[@]}"; do
     [[ -f "$receipt_file" ]] || continue
-    read -r token_utc token_message token_endpoint token_transport token_address < "$receipt_file" || true
-    printf 'WAKE_RECEIPT message_id=%s utc=%s endpoint_id=%s transport=%s address=%s\n' \
+    token_utc=''
+    token_message=''
+    token_endpoint=''
+    token_transport=''
+    token_address=''
+    token_generation=''
+    receipt_tokens=()
+    read -r -a receipt_tokens < "$receipt_file" || true
+    for token in "${receipt_tokens[@]}"; do
+      case "$token" in
+        utc=*) token_utc="$token" ;;
+        message_id=*) token_message="$token" ;;
+        endpoint_id=*) token_endpoint="$token" ;;
+        transport=*) token_transport="$token" ;;
+        address=*) token_address="$token" ;;
+        generation=*) token_generation="$token" ;;
+      esac
+    done
+    receipt_generation="${token_generation#generation=}"
+    printf 'WAKE_RECEIPT message_id=%s utc=%s endpoint_id=%s transport=%s address=%s generation=%s\n' \
       "$message_id" "${token_utc#utc=}" "${token_endpoint#endpoint_id=}" \
-      "${token_transport#transport=}" "${token_address#address=}"
+      "${token_transport#transport=}" "${token_address#address=}" \
+      "${receipt_generation:--}"
   done
 }
 

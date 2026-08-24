@@ -257,6 +257,7 @@ else
     printf 'capability=loom-exclusive-input-lease-v1\n'
     printf 'capability=loom-read-only-gui-v1\n'
     printf 'capability=loom-coord-transport-v1\n'
+    printf 'capability=coord-generation-scoped-wake-v1\n'
     printf 'capability=loom-recoverable-guardian-v1\n'
     printf 'capability=loom-kernel-recovery-v1\n'
     printf 'capability=loom-dual-journal-v1\n'
