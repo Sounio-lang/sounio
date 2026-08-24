@@ -714,3 +714,31 @@ g_null  ≅  so(2,2)  ⋉  ( (½,½) ⊗ ℝ³ )      [abelian radical],   H²(g
 Open: the published-literature name (if any) for this exact split multiplicity-3
 conformal-Carroll real form; and whether the 3 central charges match a known
 central extension of split BMS₄.
+
+---
+
+## Literature match for the split variant (searched)
+
+Nearest published framework: **Afshar–Bekaert–Najafizadeh, "Classification of
+Conformal Carroll Algebras" (arXiv:2409.19953, 2024)** — the finite conformal
+Carroll algebras `cca_N(d+1) = so(d+1,1) ⋉ D_N`, where `D_N` is the rank-N
+symmetric-traceless-tensor rep (for `d=2`, `D_N = D_{N/2}⊗D_{N/2}` of `so(3,1)`,
+dim `(N+1)²`), built on **Duval–Gibbons–Horvathy (arXiv:1402.5894)** `ccarr₂ ≅ bms`.
+
+Our null-locus algebra sits in this universe (semisimple superrotation `⋉` abelian
+supertranslation, with central charges) but at a point the **physical
+classification does not name**:
+- **Split real form.** Their superrotation is Lorentzian `so(3,1)`; ours is
+  `so(2,2)` — the split real form of `so_ℂ(4)`. The physical cca_N uses `so(d+1,1)`;
+  ours is the ultrahyperbolic sibling.
+- **Reducible multiplicity-3 supertranslations.** Their `D_N` is a *single*
+  symmetric-tensor irrep; ours is `3·(½,½)` (isotypic, three copies of the vector),
+  and `dim 18` matches no single `cca_N(2+1)` (those are `10, 15, 22, …`).
+
+So there is **no exact published name**: our algebra is a *split-signature,
+multiplicity-3 variant* of the `cca_N(2+1)/ebms₄` family — the ultrahyperbolic
+corner the physical (Lorentzian, single-tensor) classification omits. This is
+itself informative: the **split-sedenion origin forces the construction OUT of the
+physically-studied cases into the ultrahyperbolic corner**, exactly as the whole
+tower's real forms are set by the Cayley–Dickson split vector `μ⃗`. The named
+relatives are `cca_N(2+1) ≅ iso(3,1)-type` and `ebms₄`; ours is their split kin.
