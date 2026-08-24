@@ -539,16 +539,29 @@ const SHA256_H7: i64 = 0x5be0cd19
 // against the published standard (or a second independent published
 // source) before trusting this transcription; any single wrong constant
 // is caught immediately by this task's own NIST vector tests failing.
-const SHA256_K: [i64; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-]
+//
+// NOTE (updated after Task 3 actually ran): a top-level `const [i64; 64]`
+// here does NOT compile -- Finding 15 (docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md)
+// found that any top-level `const` array with more than 16 elements breaks
+// Madaros's native-v2 IR lowering. Use a function returning the literal
+// instead, called once into a local at the top of sha256():
+fn sha256_k_table() -> [i64; 64] {
+    [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ]
+}
+// (This section documents what Task 3 actually shipped, commit 735a0cce8 --
+// the file created there uses `sha256_k()` as the function name and calls
+// it into a local `sha256_k_table` inside `sha256()`; the exact naming
+// used here is illustrative, match the already-shipped file if referring
+// to it, don't re-derive from this snippet.)
 
 fn sha256_padded_byte(buf: &RawBuf, len: i64, padded_len: i64, i: i64) -> i64 with IO {
     if i < len {
@@ -566,6 +579,7 @@ fn sha256_padded_byte(buf: &RawBuf, len: i64, padded_len: i64, i: i64) -> i64 wi
 }
 
 pub fn sha256(buf: &RawBuf, len: i64) -> [u8; 32] with IO {
+    let sha256_k = sha256_k_table()
     var h0 = SHA256_H0
     var h1 = SHA256_H1
     var h2 = SHA256_H2
@@ -612,7 +626,7 @@ pub fn sha256(buf: &RawBuf, len: i64) -> [u8; 32] with IO {
         while t < 64 {
             let s1 = xor32(xor32(rotr32(e, 6), rotr32(e, 11)), rotr32(e, 25))
             let ch = xor32(and32(e, f), and32(not32(e), g))
-            let temp1 = add32(add32(add32(add32(h, s1), ch), SHA256_K[t as usize]), w[t as usize])
+            let temp1 = add32(add32(add32(add32(h, s1), ch), sha256_k[t as usize]), w[t as usize])
             let s0 = xor32(xor32(rotr32(a, 2), rotr32(a, 13)), rotr32(a, 22))
             let maj = xor32(xor32(and32(a, b), and32(a, c)), and32(b, c))
             let temp2 = add32(s0, maj)
@@ -926,30 +940,43 @@ use net::socket::*
 // FIPS 180-4 Table 4.11 (Section 4.2.3). See this task's brief for why
 // these 80 public, standardized constants are sourced from the published
 // table directly rather than hand-derived, and why that's safe here.
-const SHA512_K_HI: [i64; 80] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-    0xca273ece, 0xd186b8c7, 0xeada7dd6, 0xf57d4f7f, 0x06f067aa, 0x0a637dc5, 0x113f9804, 0x1b710b35,
-    0x28db77f5, 0x32caab7b, 0x3c9ebe0a, 0x431d67c4, 0x4cc5d4be, 0x597f299c, 0x5fcb6fab, 0x6c44198c,
-]
-const SHA512_K_LO: [i64; 80] = [
-    0xd728ae22, 0x23ef65cd, 0xec4d3b2f, 0x8189dbbc, 0xf348b538, 0xb605d019, 0xaf194f9b, 0xda6d8118,
-    0xa3030242, 0x45706fbe, 0x4ee4b28c, 0xd5ffb4e2, 0xf27b896f, 0x3b1696b1, 0x25c71235, 0xcf692694,
-    0x9ef14ad2, 0x384f25e3, 0x8b8cd5b5, 0x77ac9c65, 0x592b0275, 0x6ea6e483, 0xbd41fbd4, 0x831153b5,
-    0xee66dfab, 0x2db43210, 0x98fb213f, 0xbeef0ee4, 0x3da88fc2, 0x930aa725, 0xe003826f, 0x0a0e6e70,
-    0x46d22ffc, 0x5c26c926, 0x5ac42aed, 0x9d95b3df, 0x8baf63de, 0x3c77b2a8, 0x47edaee6, 0x1482353b,
-    0x4cf10364, 0xbc423001, 0xd0f89791, 0x0654be30, 0xd6ef5218, 0x5565a910, 0x5771202a, 0x32bbd1b8,
-    0xb8d2d0c8, 0x5141ab53, 0xdf8eeb99, 0xe19b48a8, 0xc39c91f8, 0x2748774c, 0xdb0c2e0d, 0x1b3866f2,
-    0xbe22b28a, 0x9dfd0d10, 0xe7d0c2e2, 0xdff2f7dc, 0x74f9bec1, 0x9b5088cb, 0x64c704dd, 0xac2c6519,
-    0xefb2fbc9, 0xd487d1ad, 0x08cee2d1, 0x1c1a3b09, 0x67d92aab, 0x39d99bf3, 0x2fe5c5ea, 0x9ba7fbdb,
-    0x76f988da, 0x852ec3e6, 0xe8d4711d, 0xb0af9de6, 0x91e6a481, 0x5566c8f1, 0xdb1d9d0a, 0xf1b3d2ee,
-]
+//
+// NOTE: these are functions returning the array literal, NOT top-level
+// `const` arrays. Finding 15 (docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md)
+// found that a top-level `const` array with more than 16 elements breaks
+// Madaros's native-v2 IR lowering ("IR instruction arena contract
+// violated") -- discovered in Task 3 with SHA-256's 64-entry table, and
+// these 80-entry tables would hit the identical failure. Call each once
+// into a local binding at the top of sha512_compress (Step 3's usage
+// below already does this).
+fn sha512_k_hi_table() -> [i64; 80] {
+    [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0xca273ece, 0xd186b8c7, 0xeada7dd6, 0xf57d4f7f, 0x06f067aa, 0x0a637dc5, 0x113f9804, 0x1b710b35,
+        0x28db77f5, 0x32caab7b, 0x3c9ebe0a, 0x431d67c4, 0x4cc5d4be, 0x597f299c, 0x5fcb6fab, 0x6c44198c,
+    ]
+}
+fn sha512_k_lo_table() -> [i64; 80] {
+    [
+        0xd728ae22, 0x23ef65cd, 0xec4d3b2f, 0x8189dbbc, 0xf348b538, 0xb605d019, 0xaf194f9b, 0xda6d8118,
+        0xa3030242, 0x45706fbe, 0x4ee4b28c, 0xd5ffb4e2, 0xf27b896f, 0x3b1696b1, 0x25c71235, 0xcf692694,
+        0x9ef14ad2, 0x384f25e3, 0x8b8cd5b5, 0x77ac9c65, 0x592b0275, 0x6ea6e483, 0xbd41fbd4, 0x831153b5,
+        0xee66dfab, 0x2db43210, 0x98fb213f, 0xbeef0ee4, 0x3da88fc2, 0x930aa725, 0xe003826f, 0x0a0e6e70,
+        0x46d22ffc, 0x5c26c926, 0x5ac42aed, 0x9d95b3df, 0x8baf63de, 0x3c77b2a8, 0x47edaee6, 0x1482353b,
+        0x4cf10364, 0xbc423001, 0xd0f89791, 0x0654be30, 0xd6ef5218, 0x5565a910, 0x5771202a, 0x32bbd1b8,
+        0xb8d2d0c8, 0x5141ab53, 0xdf8eeb99, 0xe19b48a8, 0xc39c91f8, 0x2748774c, 0xdb0c2e0d, 0x1b3866f2,
+        0xbe22b28a, 0x9dfd0d10, 0xe7d0c2e2, 0xdff2f7dc, 0x74f9bec1, 0x9b5088cb, 0x64c704dd, 0xac2c6519,
+        0xefb2fbc9, 0xd487d1ad, 0x08cee2d1, 0x1c1a3b09, 0x67d92aab, 0x39d99bf3, 0x2fe5c5ea, 0x9ba7fbdb,
+        0x76f988da, 0x852ec3e6, 0xe8d4711d, 0xb0af9de6, 0x91e6a481, 0x5566c8f1, 0xdb1d9d0a, 0xf1b3d2ee,
+    ]
+}
 
 fn sha512_padded_byte(buf: &RawBuf, len: i64, padded_len: i64, i: i64) -> i64 with IO {
     // 1024-bit blocks, 128-bit length field -- but per this sub-project's
@@ -975,6 +1002,9 @@ fn sha512_padded_byte(buf: &RawBuf, len: i64, padded_len: i64, i: i64) -> i64 wi
 // parallel hi/lo arrays. The caller (sha384.sio / sha512.sio) supplies the
 // IV and decides how many of the resulting 64 bytes to keep.
 pub fn sha512_compress(buf: &RawBuf, len: i64, iv_hi: &[i64; 8], iv_lo: &[i64; 8]) -> ([i64; 8], [i64; 8]) with IO {
+    let sha512_k_hi = sha512_k_hi_table()
+    let sha512_k_lo = sha512_k_lo_table()
+
     var h_hi: [i64; 8] = [0; 8]
     var h_lo: [i64; 8] = [0; 8]
     var i: i64 = 0
@@ -1056,7 +1086,7 @@ pub fn sha512_compress(buf: &RawBuf, len: i64, iv_hi: &[i64; 8], iv_lo: &[i64; 8
 
             let (t1a_hi, t1a_lo) = add64(hh_hi, hh_lo, bigs1_hi, bigs1_lo)
             let (t1b_hi, t1b_lo) = add64(t1a_hi, t1a_lo, ch_hi, ch_lo)
-            let (t1c_hi, t1c_lo) = add64(t1b_hi, t1b_lo, SHA512_K_HI[t as usize], SHA512_K_LO[t as usize])
+            let (t1c_hi, t1c_lo) = add64(t1b_hi, t1b_lo, sha512_k_hi[t as usize], sha512_k_lo[t as usize])
             let (temp1_hi, temp1_lo) = add64(t1c_hi, t1c_lo, w_hi[t as usize], w_lo[t as usize])
 
             let (r28_hi, r28_lo) = rotr64(a_hi, a_lo, 28)

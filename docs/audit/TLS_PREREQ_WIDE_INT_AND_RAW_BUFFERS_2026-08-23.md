@@ -549,3 +549,55 @@ that this project's hash-functions sub-project actually needed was
 isolated. **Any future Sounio code doing narrowing-cast-based byte
 extraction (serializing a wide integer to bytes) must mask explicitly
 before every narrowing cast, never rely on the cast to truncate.**
+
+## Finding 15 — a top-level `const` array with more than 16 elements breaks Madaros's native-v2 IR lowering
+
+Discovered while implementing SHA-256's 64-entry round-constant table
+(`stdlib/hash/sha256.sio`). A top-level `const` array declaration compiles
+and runs correctly up to 16 elements; at 17 elements and above, compilation
+fails during native-v2 lowering with an internal compiler error, not a
+normal diagnostic:
+
+```sio
+const K17: [i64; 17] = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]
+fn main() with IO {
+    var sum: i64 = 0
+    var i: i64 = 0
+    while i < 17 { sum = sum + K17[i as usize]; i = i + 1 }
+    println(sum)
+}
+```
+Fails with:
+```
+error: IR instruction arena contract violated (invalid handle) on region slot 1 generation 1
+Error: refusing to write a binary built on a violated IR arena contract
+error: native-v2 bridge compilation failed
+```
+Confirmed independently (both by the implementer who found it and, separately,
+by the controller re-running the same minimal repro). A 16-element top-level
+const array compiles and runs fine; the failure appears exactly at 17. The
+same 64-element table embedded in a larger multi-module program failed with
+the identical error class at a different, deeper region slot — same root
+cause, not a coincidence of a small isolated repro.
+
+**Workaround: move any array with more than 16 literal elements out of a
+top-level `const` and into a function that returns the array literal**,
+called once into a local `let`/`var` binding at the point of use:
+
+```sio
+fn k17_table() -> [i64; 17] {
+    [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17]
+}
+fn main() with IO {
+    let k = k17_table()
+    // k[i] indexing works exactly as a top-level const array would
+}
+```
+Confirmed this form compiles and runs correctly for a 64-element array (the
+real `SHA256_K` table) and separately for a bare 64-element local literal.
+This is a placement-only workaround with no semantic change — the array's
+values, order, and indexing behavior are unaffected; only where the literal
+is declared changes. **Any future Sounio module needing a lookup table
+larger than 16 entries (round constants, S-boxes, permutation tables, etc.)
+must use this function-returning-a-literal form, never a bare top-level
+`const` array.**
