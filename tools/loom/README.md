@@ -84,9 +84,14 @@ The Beagle bridge passed its source gate, an isolated second-process canary
 against the live Workspace Agent image, and a source-derived separate-Pod
 canary with a dedicated PVC. The replacement Pod retained two Beagle blocks,
 created a new physical instance, and exposed a verified link to the unclean
-predecessor. The source gate also refuses a mutated lineage before spawn. Loom
-has not replaced production authority or passed canonical-memory, Cockpit,
-Warp, cross-node, or pending-inbox gates; see the receipts under
-`tools/loom/evidence/beagle-workspace-agent-*-20260824.txt`.
+predecessor. Project Cockpit source now derives a fail-closed continuity view
+from those fields and renders the generation lineage, while a Sounio nominal
+kernel keeps initial generation, clean respawn, and Pod resurrection promotion
+states distinct. The source gates refuse a mutated lineage, an incomplete
+predecessor, a forged derived UI receipt, and wrong-state promotion. The
+Cockpit and Sounio classifiers have not yet been joined by a production host
+adapter. Loom has not replaced production authority or passed deployed
+Cockpit, canonical-memory, Warp, cross-node, or pending-inbox gates; see the
+2026-08-24 receipts under `tools/loom/evidence/`.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.
