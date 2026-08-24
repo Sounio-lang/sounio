@@ -101,14 +101,23 @@ during migration.
 The Beagle bridge passed its source gate, an isolated second-process canary,
 and a source-derived four-Pod canary with a dedicated retained PVC. The native
 Sounio adapter keeps initial generation, clean respawn, and Pod resurrection
-promotion states distinct. The Ed25519 gate additionally refuses missing keys,
+promotion states distinct. Signed promotion additionally requires a private
+`VerifiedSignedPodResurrection` proof type; an unsigned verified proof is
+rejected by the checker with `E009`, and external construction is rejected with
+`E176`. The Ed25519 gate additionally refuses missing keys,
 payload and signature mutation, the wrong public key, and a validly signed
 receipt spliced from another generation. These controls establish bounded
-receipt authenticity under the mounted key and adapter, not signer hardware
-attestation or protection against compromise of the signing authority. The
-current real-Pod witness remains single-node. Cross-node PVC reattachment,
-deployed Cockpit, canonical-memory, Warp, Madaros parity, and exactly-once
-external effects remain separate gates; see the 2026-08-24 receipts under
-`tools/loom/evidence/`.
+receipt integrity and keyholder authorship under the mounted key and adapter,
+not semantic truth against a faulty signer, hardware attestation, or protection
+against compromise of the signing authority. The
+`sounio_loom_correct_signature_wrong_facts_probe.sh` falsifier confirms that a
+legitimate key can sign policy-acceptable false facts and reach signed typestate
+admission; the current independent canary commitment catches the change only
+after spawn. The real-Pod witness relocated
+compute from `t560-proxmox` to `r740-proxmox` over one retained Ceph RBD RWOP
+PVC. It is not state replication, simultaneous multi-node execution, or a
+partition/consensus witness. Deployed Cockpit, canonical-memory, Warp, Madaros
+parity, signer custody/rotation, and exactly-once external effects remain
+separate gates; see the 2026-08-24 receipts under `tools/loom/evidence/`.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.
