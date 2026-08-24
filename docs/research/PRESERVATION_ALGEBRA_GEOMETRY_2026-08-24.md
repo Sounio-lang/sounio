@@ -243,3 +243,46 @@ sidedly (checked as `z·(a·k)=0`, `z·(k·a)=0`); (§3) their doubled Jordan Gr
 job for elaboration confirmation. Maximality (`dim P_z = 6`) is the external
 rational computation; the Lean certifies the exhibited algebra's structure and
 Lorentzian signature.
+
+---
+
+## CLASSIFICATION (the collapse characterized, verified)
+
+The generic collapse is governed by **the monomiality of `ker L_z`** — equivalently
+by the size of its **basis-unit stabilizer** `Stab(z) := { e_k : e_k·ker L_z ⊆ ker L_z
+and ker L_z·e_k ⊆ ker L_z }`. Complete classification (base-split, computed):
+
+**Definite-arm loci (`|Q(z)| = 2`, timelike or spacelike).** `P_z` is **monomial**:
+`P_z = ℝ·e0 ⊕ span(Stab(z))`, `dim P_z = 1 + |Stab(z)|`. Two cases:
+- **`ker L_z` monomial** (spanned by ≤2-support XOR vectors) `⟺` symmetric/pair-type
+  locus `⟺` `|Stab(z)| = 5`  ⇒  `P_z` is a full spin factor:
+  **`J_spin(5)` Euclidean** (`Q<0`) or **`J_spin(4,1)` Lorentzian** (`Q>0`), `dim 6`.
+  *(Verified: all 36 definite-arm pair-type loci have `|Stab|=5`; `|Stab|=5 ⟺ monomial
+  kernel` holds 48/48.)*
+- **`ker L_z` non-monomial** (generic) `⟺` `|Stab(z)| = 0`  ⇒  **collapse** to
+  `dim P_z = 2` = `ℝ ⊕ ℝ` (scalars plus one residual dense timelike line).
+
+**Null loci (`Q(z) = 0`, Carrollian).** `P_z` is **non-monomial and robust**:
+`(1,0,3)`, `dim ≈ 5`, for *both* pair-type and generic — **symmetry-independent**.
+
+### The statement
+
+**The relativistic spin-factor geometry (Euclidean / Lorentzian) is a phenomenon
+of *monomial kernels* — the algebraically special, symmetric privacy loci — carried
+entirely by the kernel's basis-unit stabilizer `Stab(z)`, which is 5-dimensional
+there and vanishes generically. The Carrollian/null geometry is the *generic*
+behavior at the light cone.** So the "symmetry that supplies the extra preserving
+multipliers" is exactly `Stab(z)`, the monomial stabilizer of `ker L_z`; it is
+maximal precisely at the canonical loci (e.g. `e3+e10`, `e4+e13`) a type system
+names — and collapses everywhere else. This closes the scope question of §(B): the
+three-rung ladder with full spin factors is the *monomial-kernel* theorem, and the
+predicate "monomial kernel" is decidable and equals "`|Stab(z)| = 5`."
+
+### Map (base-split)
+
+```
+                     ker L_z monomial (|Stab|=5)      ker L_z generic (|Stab|=0)
+  Q(z) < 0 (space)   J_spin(5)   Euclidean  dim6       ℝ⊕ℝ         collapse   dim2
+  Q(z) = 0 (null)    Carrollian (1,0,3) dim5  ————  robust, symmetry-independent  ————
+  Q(z) > 0 (time)    J_spin(4,1) Lorentzian dim6       ℝ⊕ℝ         collapse   dim2
+```
