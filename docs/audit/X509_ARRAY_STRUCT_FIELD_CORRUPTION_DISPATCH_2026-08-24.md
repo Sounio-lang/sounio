@@ -8,7 +8,11 @@ validated_by: controller (tls-on-madaros branch, X.509 sub-project)
 
 # Forensic dispatch — array-of-struct field writes silently corrupt sibling `[u8;N]` fields once the struct/array crosses a size threshold, and the known workaround does not fully cure it
 
-**Filed:** 2026-08-24 · **Status:** OPEN (root cause not yet characterized) · **Protocol:** CLAUDE.md §8.
+**Filed:** 2026-08-24 · **Status:** RESOLVED (fixed in `self-hosted/ir/lower.sio`, commits `88f91fae6` and `80be7c083`) · **Protocol:** CLAUDE.md §8.
+
+**Root cause, as characterized after this dispatch was filed:** `field_idx_for_base_ref` only resolved a field access's owning struct type when the access base was a plain identifier (`x.field`); for `arr[i].field` the base is an `ExprIndex`, so it fell through to `field_idx_from_name_simple` -- a global, name-only, first-registered-match lookup across every struct layout, which collides with the built-in `Knowledge` struct's `value` field (registered at index 0) whenever a user struct also has a field literally named `value`. Not a size threshold, register-allocation, or codegen-fragility issue as originally suspected below -- a straightforward field-resolution bug once the actual trigger (the field name `value`) was isolated. Fix: resolve `arr[i].field`'s (and, after two further gaps found during verification, `let e = arr[i]`'s and arbitrarily-deep-chained bases' like `cert.issuer.entries[i].field`'s) struct type through the array element's own recorded struct layout instead of the name-only fallback. Full before/after verification, the two additional gaps found and fixed, and one further gap deliberately left open (Finding 25: tuple-destructured locals don't propagate struct types) are in `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`'s Findings 24-25, plus a third, distinct, still-open defect found afterward (Finding 26: a struct value that itself contains an array-of-structs field, written into a doubly array-indexed target, still corrupts -- not covered by this fix).
+
+The investigation trail below (repro, ruled-out theories about function count and local-variable count) is preserved as the historical record of how this was found; it predates the root-cause characterization above.
 
 Branch: `tls-on-madaros`. Discovered while building the X.509 semantic layer
 (`docs/superpowers/plans/2026-08-24-madaros-x509-plan.md`, Tasks 5-6). Blocks
