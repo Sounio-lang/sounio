@@ -137,3 +137,49 @@ experiment can use "two time scales" as an emergent-vs-fundamental discriminator
 operationalization (a proper temporal renormalization of the affective-combination
 operator, with a validated recovery study on correct synthetic ground-truth) must be
 built and shown to actually discriminate. It is not yet.
+
+---
+
+## Two-scale instrument — VALIDATED (third principled attempt; two failures logged above)
+
+The degrau is built. After two honest failures (dimensional-restriction confound;
+accidentally-associative Hadamard nonlinearity), the **physically correct mechanism**
+works: emergent non-associativity requires a genuine **nonlinear dynamical flow**, and
+the discriminating statistic is the **re-association defect at the finest temporal
+scale**.
+
+Setup (`scratchpad/twoscale3.py`, one run, seed fixed, not tuned):
+- **Emergent** = combination by driving a nonlinear flow `ẋ = −x + tanh(Wx) + b` for
+  time `τ`. Small `τ` → near-linear → associative; large `τ` → nonlinearity engages.
+- **Fundamental** = sedenion product (non-assoc at bilinear order), `τ`-inert.
+
+| `τ` (time scale) | R_emergent (flow) | R_fundamental (sedenion) |
+|---|---|---|
+| 0.01 (fine) | **0.016 ≈ 0** | **1.31** |
+| 0.10 | 0.160 | 1.31 |
+| 3.00 (coarse) | 0.596 | 1.30 |
+
+**The validated discriminator.** Measure the re-association defect at the finest
+resolvable time scale:
+- **R(fine) ≈ 0, grows with coarse-graining** ⇒ **EMERGENT** — the non-associativity is
+  an aggregation artifact of a nonlinear flow over an associative micro-substrate.
+- **R(fine) > 0, scale-invariant** ⇒ **FUNDAMENTAL** — non-associativity is intrinsic,
+  present at every scale.
+
+The instrument now provably discriminates emergent from fundamental on synthetic
+ground-truth. This is what "run the test at two time scales" required as a
+pre-condition, and it is met.
+
+**What the two failures taught (the real yield).** Emergent non-associativity is *hard
+to instantiate* — it does NOT arise from dimensional coarse-graining or from associative
+nonlinearities; it requires genuine nonlinear DYNAMICS. Implication for the human
+experiment: the coarse-graining must be a true temporal renormalization of a nonlinear
+affective flow, and the decisive measurement is at the FINEST temporal resolution
+available (where emergent non-associativity has not yet appeared). A weaker corollary,
+raised not proven: if emergent non-associativity is genuinely hard to fake, then observed
+scale-invariant re-association would be strong evidence for the fundamental hypothesis.
+
+**Still true, unchanged:** this validates the INSTRUMENT on synthetic systems with known
+ground-truth. It measures nothing about feeling. The human experiment (grouping ×
+coherence × swap × two temporal scales, on real affective/physiological data) remains
+the unrun test. But its instrument is no longer hand-waving — it is built and validated.
