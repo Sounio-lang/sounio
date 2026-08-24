@@ -91,18 +91,25 @@ phase_two="$(run_phase pod-uid-two loom-replay-0 phase-two)"
 
 kill_generation
 phase_three="$(run_phase pod-uid-three loom-replay-0 phase-three)"
-[[ "$phase_three" == *'CANARY_PHASE_THREE'* && "$phase_three" == *'wake=ack-suppressed'* ]] || \
-  fail "phase three did not suppress acknowledged replay: $phase_three"
+[[ "$phase_three" == *'CANARY_PHASE_THREE'* && "$phase_three" == *'depth_control=delivered'* && \
+   "$phase_three" == *'ack=durable'* ]] || \
+  fail "phase three did not establish the unacknowledged depth control: $phase_three"
+
+kill_generation
+phase_four="$(run_phase pod-uid-four loom-replay-0 phase-four)"
+[[ "$phase_four" == *'CANARY_PHASE_FOUR'* && "$phase_four" == *'wake=ack-suppressed'* ]] || \
+  fail "phase four did not suppress acknowledged replay: $phase_four"
 
 report="$(SOUNIO_CANARY_SOURCE_ROOT=/missing \
   SOUNIO_LOOM_POD_CANARY_ROOT="$CANARY_ROOT" bash "$CANARY" report)"
 [[ "$report" == *'SOUNIO_LOOM_SEPARATE_POD_REPLAY_PASS=true'* && \
    "$report" == *'unacked_successor_replay=delivered'* && \
-   "$report" == *'acked_third_generation_replay=suppressed'* ]] || \
+   "$report" == *'unacked_third_generation_control=delivered'* && \
+   "$report" == *'acked_fourth_generation_replay=suppressed'* ]] || \
   fail "final report omitted the replay proof: $report"
-[[ "$(grep -c '^native_sounio_receipt_.*_sha256=' <<< "$report")" -eq 3 ]] || \
+[[ "$(grep -c '^native_sounio_receipt_.*_sha256=' <<< "$report")" -eq 4 ]] || \
   fail 'final report omitted per-generation native Sounio receipts'
-[[ "$(sed -n 's/^native_sounio_receipt_.*_sha256=//p' <<< "$report" | sort -u | wc -l | tr -d ' ')" -eq 3 ]] || \
-  fail 'final report did not bind three distinct Sounio continuity receipts'
+[[ "$(sed -n 's/^native_sounio_receipt_.*_sha256=//p' <<< "$report" | sort -u | wc -l | tr -d ' ')" -eq 4 ]] || \
+  fail 'final report did not bind four distinct Sounio continuity receipts'
 
-echo 'sounio-loom-pod-replay-canary-selftest: PASS simulated_pod_uids=3 native_sounio_receipts=3 unacked_replay=delivered ack_control=suppressed'
+echo 'sounio-loom-pod-replay-canary-selftest: PASS simulated_pod_uids=4 native_sounio_receipts=4 unacked_depth_control=delivered ack_control=suppressed'
