@@ -32,8 +32,11 @@ field() {
 }
 
 coord() {
-  SOUNIO_COORD_WORKTREE="$ROOT_DIR" SOUNIO_COORD_DIR="$COORD_DIR" \
-    SOUNIO_COORD_RUNTIME_MODE=local "$RUNTIME" "$@"
+  (
+    cd "$ROOT_DIR"
+    SOUNIO_COORD_WORKTREE="$ROOT_DIR" SOUNIO_COORD_DIR="$COORD_DIR" \
+      SOUNIO_COORD_RUNTIME_MODE=local "$RUNTIME" "$@"
+  )
 }
 
 coord_retry() {
