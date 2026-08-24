@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-08-23-madaros-sockets-http-client-design
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-08-23-madaros-sockets-http-client-design
+-->
+
 # Madaros TCP Sockets + Plain-Text HTTP/1.1 Client — Design Spec
 
 ## Context and Motivation
