@@ -171,6 +171,18 @@ SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-agentd-runtime" wake \
 wait_for 'reattached harness did not receive a wake' \
   "grep -q 'INPUT FLEET_WAKE_SELFTEST' '$RECEIVER_LOG'"
 
+kill -KILL "$harness_pid"
+wait_for 'terminated harness was not classified as a proven absence' \
+  "fleet status --cwd '$REPO' --slot '$SLOT' >'$TEST_ROOT/exited-status' 2>&1 || true; grep -q 'state=absent' '$TEST_ROOT/exited-status'"
+fleet launch --slot "$SLOT" --agent codex --session-id "$SESSION_ID" \
+  --identity exact --cwd "$REPO" --start-capability-id cap-crash-recovery \
+  --no-attach -- "$RECEIVER" "$RECEIVER_LOG" >/dev/null
+wait_for 'proven harness exit did not permit a capability-bound replacement' \
+  "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 2"
+fleet status --cwd "$REPO" --slot "$SLOT" | \
+  grep -q 'state=active.*start_capability_id=cap-crash-recovery' || \
+  fail 'replacement harness omitted its new start authority'
+
 mkdir -p "$HOME_ROOT/.codex/sessions/2026/08/23"
 PATH="$FAKE_BIN:$PATH" fleet plan-kind --slot codex-new --kind codex \
   --home "$TEST_ROOT/empty-home" > "$TEST_ROOT/codex-bootstrap"
@@ -215,8 +227,8 @@ grep -q '^identity=standalone$' "$TEST_ROOT/empryo-standalone" || \
 grep -q 'command=.*/em$' "$TEST_ROOT/empryo-standalone" || \
   fail 'Empryo plan did not resolve the em launcher'
 
-tmux -S "$TMUX_SOCKET" kill-server
+tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
 fleet stop --cwd "$REPO" --slot "$SLOT" >/dev/null
 [[ ! -e "$mapping" ]] || fail 'stop left the slot mapping behind'
 
-echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived reattach=same-generation duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'
+echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived harness_exit=proven-absent crash_relaunch=new-capability reattach=same-generation duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'
