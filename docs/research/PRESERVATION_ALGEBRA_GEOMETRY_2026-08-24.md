@@ -202,3 +202,44 @@ the locus fixes the rung.
   vary; conjecture: rung still tracks `sign Q(z)` but the algebra is a larger/
   mixed `J_spin(p,q)`.
 - Lean: `Q(z)>0` (base-split `e4+e13`) ⇒ `P_z ≅ J_spin(4,1)`.
+
+---
+
+## (A) Why (4,1): the mechanism, explicit
+
+For the timelike locus `z = e4 + e13` (base-split), the five imaginary generators
+of `P_z` are **pure basis units**: `{e4, e5, e12, e13}` (all `+1`, timelike) and
+`e8` (`−1`, spacelike). The Jordan Gram is *exactly* `diag(1,1,−1,1,1)` (off-
+diagonal zero — distinct orthogonal basis units). So `(4,1)` is: a **timelike
+quadruple** (`z`'s two arms `e4,e13` plus the partner pair `e5,e12` fixed by the
+kernel) **⊕ one distinguished spacelike axis `e8`** — the Cayley–Dickson doubling
+generator. The single minus is structurally the doubling unit. That is the
+derivation of the `(4,1)` refinement (not just its existence).
+
+## (B) Scope: the full spin factors are a maximally-symmetric-locus phenomenon
+
+The clean 3-rung ladder (with full `J_spin(5)` / `J_spin(4,1)`) holds for
+**pair-type (maximally symmetric) loci**. Extending to **generic** ZDs:
+- **null** generic loci (`Q(z)=0`) robustly stay Carrollian `(1,0,3)` — law holds;
+- **timelike** generic loci mostly **collapse** to `dim P_z = 2`, signature
+  `(1,0,0)` (a 1-D positive line, `ℝ⊕ℝ`), because genericity breaks the symmetry
+  that supplies the extra preserving multipliers; a minority (e.g. `dim ker = 2`)
+  still give Lorentzian `(3,1,0)`.
+
+So the theorem's clean form is: **rung(P_z) = causal-type(z) for pair-type loci;**
+for generic loci the *rung character* still tracks `sign Q(z)` for the null case,
+but the preserving algebra shrinks off the symmetric loci. The rich Lorentzian
+geometry lives at the **canonical (symmetric) privacy loci** — exactly the loci a
+type system uses. This sharpens rather than weakens the Sounio consequence.
+
+## (C) Machine-checked witness
+
+`formal/lean4/SounioPreservationLorentzian.lean` (native_decide, no Mathlib, no
+sorry) certifies, for base-split `z = e4+e13`: (§1) it is a two-sided ZD with the
+stated 4-D kernel; (§2) the five exhibited multipliers preserve `ker L_z` two-
+sidedly (checked as `z·(a·k)=0`, `z·(k·a)=0`); (§3) their doubled Jordan Gram is
+`diag(2,2,−2,2,2)`; (§4) signature `(4,1)` — Lorentzian `J_spin(4,1)`. All four
+`native_decide` goals were cross-emulated to `True`; the file awaits the Lean CI
+job for elaboration confirmation. Maximality (`dim P_z = 6`) is the external
+rational computation; the Lean certifies the exhibited algebra's structure and
+Lorentzian signature.
