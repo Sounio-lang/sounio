@@ -1859,7 +1859,7 @@ Expected: FAIL to compile — `x509_parse_certificate` doesn't exist yet.
 
 - [ ] **Step 2: Implement `x509_parse_certificate`**
 
-This step first widens Task 5's `x509_parse_tbs_core` to also return the `DerReader` positioned immediately after `subjectPublicKeyInfo` (where an optional `[3]` extensions wrapper begins, if present) — go back to `stdlib/x509/cert.sio` and change its signature and every `return` inside it and its private helper `x509_parse_tbs_after_serial` from `(Certificate, i64)` to `(Certificate, DerReader, i64)`, threading the reader that was already being built up through each field (`after_mod`/`after_..` locals already exist for this purpose in Task 5's code — the final one, right after reading `public_exponent`, is the value to return). Every existing caller of `x509_parse_tbs_core` (Task 5's own test) must be updated to destructure the extra tuple element too.
+**Note (superseded by the time this task is dispatched):** this step was originally drafted to widen `x509_parse_tbs_core`'s return type to `(Certificate, DerReader, i64)`. That widening already shipped as part of Task 5 -- `stdlib/x509/cert.sio`'s `pub fn x509_parse_tbs_core(buf: &RawBuf, tbs_reader: &DerReader) -> (Certificate, DerReader, i64) with IO` already returns exactly this 3-tuple, with the reader positioned right after `subjectPublicKeyInfo`. No signature change is needed here -- just call it as shown in Step 2's code below (which already expects the 3-tuple).
 
 ```sio
 // -- append to stdlib/x509/cert.sio --
@@ -1881,9 +1881,20 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
     let (tbs_reader, tbs_tag, s2) = der_read_tlv(&cert_inner)
     if s2 != DER_OK { return (certificate_zero(), s2) }
 
+    // Per Finding 25 (docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md):
+    // a tuple-destructured local (`let (parsed, ...) = x509_parse_tbs_core(...)`)
+    // does not propagate `parsed`'s struct type, which would leave every
+    // later `cert.field`/`cert.extensions[i].field` access in THIS function
+    // exposed to Finding 24's corruption. Work around it the same way
+    // tests/run-pass/x509_parse_tbs_core.sio does: declare `cert` FIRST via
+    // a plain call whose single-struct return type IS resolved correctly
+    // (certificate_zero() -> Certificate), then overwrite its value via
+    // plain assignment (not `let`/`var`) -- assignment doesn't touch the
+    // struct-type binding table, so the correct binding survives.
+    var cert = certificate_zero()
     let (parsed, after_spki, s3) = x509_parse_tbs_core(buf, &cert_inner)
     if s3 != DER_OK { return (certificate_zero(), s3) }
-    var cert = parsed
+    cert = parsed
     cert.tbs_start = tbs_start_pos
     cert.tbs_len = (tbs_tag.content_start + tbs_tag.content_len) - tbs_start_pos
 
