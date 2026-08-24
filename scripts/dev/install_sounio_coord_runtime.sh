@@ -53,6 +53,10 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-fleet-agent-runtime" ]] || \
       die "installed runtime declares proven-exit recovery but omits its launcher: $runtime_id"
   fi
+  if grep -q '^capability=fleet-home-isolation-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-fleet-agent-runtime" ]] || \
+      die "installed runtime declares fleet HOME isolation but omits its launcher: $runtime_id"
+  fi
   if grep -q '^capability=fleet-event-log-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-fleet-runtime" ]] || \
       die "installed runtime declares fleet reconciliation but omits its implementation: $runtime_id"
@@ -224,6 +228,7 @@ else
     printf 'capability=agentd-argv-attestation-v1\n'
     printf 'capability=fleet-launcher-v1\n'
     printf 'capability=fleet-proven-exit-v1\n'
+    printf 'capability=fleet-home-isolation-v1\n'
     printf 'capability=fleet-event-log-v1\n'
     printf 'capability=fleet-reconciler-v1\n'
     printf 'capability=fleet-linear-capability-v1\n'
