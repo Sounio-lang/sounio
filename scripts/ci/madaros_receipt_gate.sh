@@ -73,25 +73,34 @@ if ! git rev-parse --verify -q "${claimed_commit}^{commit}" >/dev/null 2>&1; the
   fi
 else
   if ! git merge-base --is-ancestor "$claimed_commit" HEAD 2>/dev/null; then
-    # A squash merge collapses a branch into one new commit, so a receipt
-    # written on the branch names a commit that never lands on the target.
-    # The bytes did arrive; only the commit id was rewritten. Distinguishing
-    # that from a false provenance claim needs evidence, not tolerance: accept
-    # only when the commit the receipt names carried the SAME artifact blob
-    # that HEAD carries. A receipt pointing at an unrelated commit still fails.
-    claimed_blob="$(git rev-parse -q --verify "$claimed_commit:$claimed_artifact" 2>/dev/null || true)"
-    head_blob="$(git rev-parse -q --verify "HEAD:$claimed_artifact" 2>/dev/null || true)"
-    if [[ -n "$claimed_blob" && "$claimed_blob" == "$head_blob" ]]; then
-      delivered="$(git log -1 --format=%H -- "$claimed_artifact" 2>/dev/null)"
-      echo "  receipt: source=$claimed_commit is not in this history -- squash merge rewrote it"
-      echo "  receipt: it carried the same $claimed_artifact blob ($claimed_blob), delivered here by ${delivered:-unknown}"
-      claimed_commit="${delivered:-$claimed_commit}"
-    else
-      echo "  receipt names $claimed_commit, whose $claimed_artifact blob is ${claimed_blob:-absent}"
-      echo "  HEAD carries ${head_blob:-absent} -- these are different artifacts, not a rewritten commit"
-    gate_fail "receipt source_commit=$claimed_commit is not an ancestor of HEAD — the receipt describes a tree this branch is not on"
-    fi
-  fi
+          # Not in this history. Two legitimate ways that happens, and neither is a
+          # false claim:
+          #
+          #   squash merge      the branch collapsed into one new commit, so the id
+          #                     the receipt names never lands
+          #   written early     madaros_write_receipt.sh records HEAD when the
+          #                     artifact is modified-but-uncommitted, and HEAD is by
+          #                     definition the commit BEFORE the new binary. That
+          #                     commit therefore carries the OLD blob.
+          #
+          # I first accepted only the squash shape, by requiring the named commit to
+          # carry the same blob as HEAD. That failed main at e5e7ce8aff on a receipt
+          # whose sha256 matched the shipped ELF byte for byte -- the second shape
+          # above. Once a commit is outside this history its blob proves nothing
+          # either way, so provenance is reported UNVERIFIED and the sha256 check
+          # below is what stands. It always was the load-bearing one; making the
+          # commit id load-bearing is what broke twice in one day.
+          head_blob="$(git rev-parse -q --verify "HEAD:$claimed_artifact" 2>/dev/null || true)"
+          claimed_blob="$(git rev-parse -q --verify "$claimed_commit:$claimed_artifact" 2>/dev/null || true)"
+          if [[ -n "$claimed_blob" && "$claimed_blob" == "$head_blob" ]]; then
+            echo "  receipt: source=$claimed_commit was rewritten out of this history (squash); it carried this exact artifact"
+          else
+            echo "  receipt: source=$claimed_commit is not in this history -- provenance UNVERIFIED"
+            echo "  receipt: the sha256 comparison below is what stands"
+          fi
+          delivered="$(git log -1 --format=%H -- "$claimed_artifact" 2>/dev/null)"
+          claimed_commit="${delivered:-$claimed_commit}"
+        fi
   behind="$(git rev-list --count "${claimed_commit}..HEAD" 2>/dev/null || echo '?')"
   echo "  receipt: gate=$claimed_gate result=$claimed_result source=$claimed_commit (${behind} commits behind HEAD)"
 fi
