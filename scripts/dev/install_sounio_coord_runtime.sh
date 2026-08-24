@@ -279,6 +279,8 @@ else
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
+    printf 'capability=loom-beagle-coordination-endpoint-v1\n'
+    printf 'capability=loom-separate-pod-inbox-replay-v1\n'
     printf 'capability=loom-cursor-replay-v1\n'
     printf 'capability=loom-exclusive-input-lease-v1\n'
     printf 'capability=loom-read-only-gui-v1\n'
