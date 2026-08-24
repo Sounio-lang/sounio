@@ -23,13 +23,18 @@ fail() {
 
 compose_witness() {
   local module="$1" output="$2"
+  compose_source "$module" "$WITNESS" "$output"
+}
+
+compose_source() {
+  local module="$1" source="$2" output="$3"
   {
     cat "$module"
     awk '
       /^use coordination::loom_continuity::\{/ { skip=1; next }
       skip && /^\}/ { skip=0; next }
       !skip { print }
-    ' "$WITNESS"
+    ' "$source"
   } > "$output"
 }
 
@@ -44,19 +49,29 @@ expect_rejection() {
     cat "$log" >&2
     fail "$label must reject with rc=1, got rc=$rc"
   }
-  [[ "$(rg -c "error\[$code" "$log")" -eq 1 ]] || {
+  local count
+  count="$(rg -c "error\[$code" "$log" || true)"
+  if [[ "$code" == E039 || "$code" == E175 ]]; then
+    [[ "$count" -ge 1 ]] || {
+      cat "$log" >&2
+      fail "$label must emit at least one $code"
+    }
+    return
+  fi
+  [[ "$count" -eq 1 ]] || {
     cat "$log" >&2
     fail "$label must emit exactly one $code"
   }
 }
 
-[[ -x "$SOUC" ]] || fail "compiler is missing: $SOUC"
-
-modular_log="$WORK/modular.log"
-SOUNIO_STDLIB_PATH="$STDLIB" "$SOUC" check "$WITNESS" >"$modular_log" 2>&1 || {
-  cat "$modular_log" >&2
-  fail 'imported Loom continuity witness did not typecheck'
+expect_composed_rejection() {
+  local label="$1" source="$2" code="$3"
+  local program="$WORK/$label.sio"
+  compose_source "$MODULE" "$source" "$program"
+  expect_rejection "$label" "$program" "$code"
 }
+
+[[ -x "$SOUC" ]] || fail "compiler is missing: $SOUC"
 
 combined="$WORK/loom_continuity_kernel.sio"
 compose_witness "$MODULE" "$combined"
@@ -66,7 +81,7 @@ SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$combined" >"$runtime_log" 2>&1 || {
   fail 'single-module Loom continuity witness did not run'
 }
 rg -Fxq \
-  'loom-continuity-typestate: PASS initial=1 clean=1 pod=1 predecessor=refused count=refused kind=refused authority=refused' \
+  'loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 predecessor=refused count=refused kind=refused authority=refused' \
   "$runtime_log" || {
     cat "$runtime_log" >&2
     fail 'Loom continuity witness omitted its exact receipt'
@@ -74,13 +89,51 @@ rg -Fxq \
 
 expect_rejection private-constructor \
   "$PRIVACY/loom_continuity_private_struct_main.sio" E176
-expect_rejection wrong-state-promotion \
+expect_composed_rejection wrong-state-promotion \
   "$PRIVACY/loom_continuity_wrong_state_main.sio" E009
+expect_rejection unsealed-host-admission \
+  "$PRIVACY/loom_continuity_unsealed_admission_main.sio" E175
+expect_composed_rejection linear-reuse \
+  "$PRIVACY/loom_continuity_linear_reuse_main.sio" E039
 
-mkdir -p "$WORK/stdlib/coordination"
-cp "$MODULE" "$WORK/stdlib/coordination/loom_continuity.sio"
+cp -a "$STDLIB" "$WORK/visibility-stdlib"
+visibility_module="$WORK/visibility-stdlib/coordination/loom_continuity.sio"
+visibility_count="$(rg -c '^fn admit_runtime_continuity\($' "$visibility_module")"
+[[ "$visibility_count" -eq 1 ]] || \
+  fail "expected one private host admission before sabotage, got $visibility_count"
+awk '
+  BEGIN { changed=0 }
+  !changed && $0 == "fn admit_runtime_continuity(" {
+    print "pub fn admit_runtime_continuity("
+    changed=1
+    next
+  }
+  { print }
+  END { if (changed != 1) exit 42 }
+' "$visibility_module" > "$WORK/visibility-mutated.sio" || \
+  fail 'could not make host admission public for sabotage control'
+mv "$WORK/visibility-mutated.sio" "$visibility_module"
+visibility_log="$WORK/visibility-sabotage.log"
+set +e
+SOUNIO_STDLIB_PATH="$WORK/visibility-stdlib" "$SOUC" check \
+  "$PRIVACY/loom_continuity_unsealed_admission_main.sio" \
+  >"$visibility_log" 2>&1
+visibility_rc=$?
+set -e
+if rg -q 'error\[E175' "$visibility_log"; then
+  cat "$visibility_log" >&2
+  fail 'making host admission public did not remove the E175 refusal'
+fi
+if [[ "$visibility_rc" -ne 0 ]] && ! rg -q 'error\[E039' "$visibility_log"; then
+  cat "$visibility_log" >&2
+  fail 'visibility sabotage failed for a reason other than the known modular linear baseline'
+fi
+
+mkdir -p "$WORK/predecessor-stdlib/coordination"
+cp "$MODULE" "$WORK/predecessor-stdlib/coordination/loom_continuity.sio"
+predecessor_module="$WORK/predecessor-stdlib/coordination/loom_continuity.sio"
 mutation_count="$(rg -c '^    if observed\.predecessor_semantic_head_token == 0 \{ return None \}$' \
-  "$WORK/stdlib/coordination/loom_continuity.sio")"
+  "$predecessor_module")"
 [[ "$mutation_count" -eq 1 ]] || \
   fail "expected one Pod predecessor guard before mutation, got $mutation_count"
 awk '
@@ -92,12 +145,12 @@ awk '
   }
   { print }
   END { if (changed != 1) exit 42 }
-' "$WORK/stdlib/coordination/loom_continuity.sio" > "$WORK/mutated.sio" || \
+' "$predecessor_module" > "$WORK/predecessor-mutated.sio" || \
   fail 'could not apply the targeted predecessor-guard mutation'
-mv "$WORK/mutated.sio" "$WORK/stdlib/coordination/loom_continuity.sio"
+mv "$WORK/predecessor-mutated.sio" "$predecessor_module"
 
 sabotage_program="$WORK/sabotage_kernel.sio"
-compose_witness "$WORK/stdlib/coordination/loom_continuity.sio" "$sabotage_program"
+compose_witness "$predecessor_module" "$sabotage_program"
 sabotage_log="$WORK/sabotage.log"
 set +e
 SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$sabotage_program" >"$sabotage_log" 2>&1
@@ -108,4 +161,4 @@ if [[ "$sabotage_rc" -eq 0 ]]; then
   fail 'removing the Pod predecessor guard did not expose the negative witness'
 fi
 
-echo "loom-continuity-typestate: PASS positive_engine=$ENGINE private=E176 wrong-state=E009 sabotage-predecessor-guard=1"
+echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1"
