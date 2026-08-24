@@ -14439,6 +14439,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     else if code == 219 {
         print("   = note: there is no dynamic linker in this backend; an unimplemented extern compiles to an empty stub whose calls read 0\n")
     }
+    else if code == 220 {
+        print("   = note: the checker types this as Knowledge<T>, but lower_binary_expr_ref has no Knowledge arm, so both operands would lower as scalars and the result handle would be arithmetic on two pointers\n")
+    }
     else {
         // No note available for unknown errors
     }
@@ -21017,6 +21020,19 @@ impl Checker {
             if left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper {
                 let hyper_checked = check_hyper_binary(c, e.span, e.bin_op, left_inner, right_inner)
                 c = hyper_checked.0
+            }
+            // Mirror of the E220 refusal in
+            // checker_check_binary_with_operand_types_inplace. check.sio carries two
+            // parallel implementations of this rule; Madaros runs the in-place one and
+            // souc-stage2 runs this method form, so patching one alone leaves the
+            // other engine still accepting the expression (CI caught exactly that).
+            let kk_both = is_knowledge_type(left_ty) && is_knowledge_type(right_ty)
+            let kk_arith = e.bin_op == BinaryOp::OpAdd || e.bin_op == BinaryOp::OpSub
+                || e.bin_op == BinaryOp::OpMul || e.bin_op == BinaryOp::OpDiv
+                || e.bin_op == BinaryOp::OpRem
+            let kk_hyper = left_inner.kind == TypeKind::TyHyper && right_inner.kind == TypeKind::TyHyper
+            if kk_both && kk_arith && !kk_hyper {
+                c = c.report_error_at(e.span, 220, 0, 0, 0)
             }
             let knowledge_result = knowledge_binary_result(e.bin_op, left_ty, right_ty)
             if knowledge_result.kind == TypeKind::TyError {
