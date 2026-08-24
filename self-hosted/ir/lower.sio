@@ -10422,15 +10422,29 @@ impl Lowerer {
                 // of the table before falling back to the legacy hash path;
                 // partially seeded layouts must not collapse every miss to .0.
                 var sj: i64 = 0
+                // Same Knowledge-preseed shadow as field_idx_from_name_simple:
+                // defer the synthetic layout so a user struct's own field wins.
+                let kname = make_name("Knowledge")
+                var kidx: i64 = -1
                 while sj < (*self.struct_layouts).count {
+                    let sj_is_knowledge = ir_name_eq((*self.struct_layouts).entries[sj as usize].type_name, kname)
                     var fj: i64 = 0
                     while fj < (*self.struct_layouts).entries[sj as usize].field_count {
                         if ir_name_eq(ir_name_at((*self.struct_layouts).entries[sj as usize].fields[fj as usize].name_id), field_name) {
-                            return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
+                            if sj_is_knowledge {
+                                if kidx < 0 {
+                                    kidx = (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
+                                }
+                            } else {
+                                return (*self.struct_layouts).entries[sj as usize].fields[fj as usize].index
+                            }
                         }
                         fj = fj + 1
                     }
                     sj = sj + 1
+                }
+                if kidx >= 0 {
+                    return kidx
                 }
                 if field_name.len <= 0 {
                     return 0
@@ -10455,16 +10469,36 @@ impl Lowerer {
         if n.len == 1 && first_byte >= 48 && first_byte <= 57 {
             return first_byte - 48
         }
+        // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
+        // preseeded as entry 0, before any user struct is registered, and its
+        // field names — value / variance / confidence — are ordinary user
+        // identifiers. Scanned in table order it shadowed every user struct
+        // carrying one of them, so `arr[i].value` resolved to Knowledge's slot 0
+        // and silently clobbered whatever field really lives there. Defer it:
+        // a user layout always wins, and Knowledge answers only if nothing else
+        // does (genuine Knowledge<T> access through an untyped base).
+        let knowledge_name = make_name("Knowledge")
+        var knowledge_idx: i64 = -1
         var si: i64 = 0
         while si < (*self.struct_layouts).count {
+            let is_knowledge = ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, knowledge_name)
             var fi: i64 = 0
             while fi < (*self.struct_layouts).entries[si as usize].field_count {
                 if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), n) {
-                    return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                    if is_knowledge {
+                        if knowledge_idx < 0 {
+                            knowledge_idx = (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                        }
+                    } else {
+                        return (*self.struct_layouts).entries[si as usize].fields[fi as usize].index
+                    }
                 }
                 fi = fi + 1
             }
             si = si + 1
+        }
+        if knowledge_idx >= 0 {
+            return knowledge_idx
         }
         // Last-resort legacy compatibility for unregistered dynamic/foreign shapes.
         if n.len <= 0 {
