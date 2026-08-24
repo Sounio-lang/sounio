@@ -23,6 +23,7 @@
 - **Every test asserts a real, independently-reverified expected value** — for hash digests, this means an implementer must independently confirm each expected hex digest against its cited published source (FIPS 180-4 / RFC 3174 / a NIST test-vector page) before committing it, per this project's "measure, don't assume" discipline. This plan's own recollection of these digests (given below) is a best-effort starting point, not a substitute for that independent check.
 - **Both arithmetic audits (Task 1, Task 4) get recorded as new, explicitly-numbered findings in `docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`**, continuing that document's existing numbering (it currently ends at Finding 12).
 - **Task 1's `u32` audit already ran and found native `u32` broken (Finding 13)** — this is why Task 1's plan text below uses masked `i64`, not native `u32`. If Task 1's `hash_word32_primitives.sio` test STILL fails against the `i64`-masked design, that is a new, second surprise beyond Finding 13 — STOP and report BLOCKED, do not invent a further workaround; plain `i64` arithmetic bounded away from bit 63 has been extensively proven correct elsewhere on this branch (`BigInt`, `word64.sio`), so a failure here would need a controller ruling.
+- **No Sounio string literal in this plan (or any future code on this branch) may exceed ~120 characters.** Finding 17: literals over ~126 content characters are silently truncated at compile time (warning only, not an error) and can crash the compiler's output stage. Task 5 hit this with 128-hex-character SHA-512 digests and worked around it by splitting each into two 64-char halves compared separately. Task 6's SHA-384 digests (96 hex chars) are safely under this limit and need no such split — this note is for any future task/edit that might otherwise embed a longer literal.
 - **Every narrowing `as u8` cast in this whole plan is masked with `& 255` immediately beforehand** (e.g. `(shr32(h0, 16) & 255) as u8`, never bare `shr32(h0, 16) as u8`), even where the source value is already provably ≤255. This is **Finding 14**: Task 2's implementer discovered that `i64 as u8` on Madaros does not truncate to the low 8 bits when the source exceeds 255 — the standard big-endian-byte-extraction idiom every C-family language relies on is silently wrong here. Every digest-output-writing code block in this plan (Tasks 2, 3, 5, 6) has already been updated with this masking; if you find an unmasked `as u8` cast anywhere in this plan's remaining code blocks that this revision missed, add the mask yourself rather than trusting the literal text — do not treat this omission as evidence the cast is safe in that specific spot.
 
 ## File Structure
@@ -971,10 +972,23 @@ fn sha512_k_lo_table() -> [i64; 80] {
         0xee66dfab, 0x2db43210, 0x98fb213f, 0xbeef0ee4, 0x3da88fc2, 0x930aa725, 0xe003826f, 0x0a0e6e70,
         0x46d22ffc, 0x5c26c926, 0x5ac42aed, 0x9d95b3df, 0x8baf63de, 0x3c77b2a8, 0x47edaee6, 0x1482353b,
         0x4cf10364, 0xbc423001, 0xd0f89791, 0x0654be30, 0xd6ef5218, 0x5565a910, 0x5771202a, 0x32bbd1b8,
-        0xb8d2d0c8, 0x5141ab53, 0xdf8eeb99, 0xe19b48a8, 0xc39c91f8, 0x2748774c, 0xdb0c2e0d, 0x1b3866f2,
-        0xbe22b28a, 0x9dfd0d10, 0xe7d0c2e2, 0xdff2f7dc, 0x74f9bec1, 0x9b5088cb, 0x64c704dd, 0xac2c6519,
-        0xefb2fbc9, 0xd487d1ad, 0x08cee2d1, 0x1c1a3b09, 0x67d92aab, 0x39d99bf3, 0x2fe5c5ea, 0x9ba7fbdb,
-        0x76f988da, 0x852ec3e6, 0xe8d4711d, 0xb0af9de6, 0x91e6a481, 0x5566c8f1, 0xdb1d9d0a, 0xf1b3d2ee,
+        0xb8d2d0c8, 0x5141ab53, 0xdf8eeb99, 0xe19b48a8,
+        // Indices 52-79 corrected here (2026-08-23) -- the original draft
+        // of this table had a transcription error across this entire
+        // range, caught by Task 5's own independent re-derivation from
+        // FIPS 180-4's definition (fractional part of cube roots of the
+        // first 80 primes), confirmed via two independent high-precision
+        // methods by the implementer and re-confirmed by the controller
+        // via a third, independently-written computation. The values
+        // below are the corrected ones; do not revert to any earlier
+        // version of this table.
+        0xc5c95a63, 0xe3418acb, 0x7763e373, 0xd6b2b8a3,
+        0x5defb2fc, 0x43172f60, 0xa1f0ab72, 0x1a6439ec,
+        0x23631e28, 0xde82bde9, 0xb2c67915, 0xe372532b,
+        0xea26619c, 0x21c0c207, 0xcde0eb1e, 0xee6ed178,
+        0x72176fba, 0xa2c898a6, 0xbef90dae, 0x131c471b,
+        0x23047d84, 0x40c72493, 0x15c9bebc, 0x9c100d4c,
+        0xcb3e42b6, 0xfc657e2a, 0x3ad6faec, 0x4a475817,
     ]
 }
 

@@ -651,3 +651,43 @@ observing a failure and then patching around it. Finding 11's original
 scope (`u64` right-shift/divide/modulo with bit 63 set) stands unchanged
 and is not re-tested or re-scoped by this finding. Evidence:
 `tests/run-pass/hash_word64_primitives.sio`.
+
+## Finding 17 — a string literal longer than ~126 content characters is silently truncated at compile time, and can crash the compiler's own output stage
+
+Discovered while writing a test embedding a 128-hex-character SHA-512 digest
+(130 bytes including the surrounding quotes) as a single string-literal
+argument. This is well past any string length prior tasks' tests needed
+(SHA-256's 64-hex-char/66-byte literals never approached it).
+
+The compiler emits a warning, not an error, and still reports
+"Compilation successful!":
+```
+warning: 3 string literal(s) TRUNCATED; first at line 39, longest 130 bytes.
+         Name holds 128 including quotes, so the text past 126
+         characters is gone -- silently, at run time.
+```
+Confirmed independently with a minimal repro (a single 130-byte string
+literal assigned to a `let` and passed to `str_len`): the warning fires
+consistently, and in this specific minimal case **the compiler's own
+native-output stage segfaults** after printing "Compilation successful!"
+(`bin/madaros: line 681: <pid> Segmentation fault "$out" "$@"`) rather than
+running the resulting program at all. The exact runtime behavior for a
+truncated-but-not-crashing case (as apparently happened in the
+non-minimal Task 5 test file, which the implementer worked around before
+this was isolated) was not separately characterized here -- treat any
+string literal over roughly 126 characters as unconditionally unsafe,
+whether or not a given instance happens to crash immediately.
+
+**Workaround: never write a string literal longer than ~120 characters
+directly in Sounio source.** Split any longer text (a long hex digest, a
+PEM block, a long URL, etc.) into multiple shorter literals and
+concatenate/compare them piecewise at the call site — e.g. a 128-hex-char
+expected digest becomes two 64-hex-char literals compared against the
+first and second halves of the actual value separately. `tests/run-pass/
+hash_sha512_vectors.sio` does exactly this (`assert_digest_hex_half`
+called twice per digest, at byte offsets 0 and 32) and is the first
+committed code to depend on this workaround. **Any future Sounio code or
+test embedding a long fixed string (certificate PEM data, long URLs,
+multi-line templates) must apply the same split-and-compare/split-and-
+concatenate pattern** -- do not assume a "long string literal" is safe up
+to some larger, untested threshold.
