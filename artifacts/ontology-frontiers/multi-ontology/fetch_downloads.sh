@@ -17,13 +17,17 @@
 # URL resolves, and the download was verified byte-identical to the copy that used to be
 # committed.  These are fetched and checksummed.
 #
-# COMMITTED-ONLY (uberon).  Its versionIRI names release 2026-06-19, and that URL is a
-# 404 today: `purl.obolibrary.org/obo/<ont>/releases/<date>/` redirects to the project's
-# GitHub release tag, and `v2026-06-19` no longer exists in obophenotype/uberon.  The
-# exact input that produced the committed uberon_* artifacts is therefore NOT retrievable
-# from upstream, so uberon.owl must stay in the tree.  This script verifies its checksum
-# and never tries to fetch it.  Re-pinning it to a current release is possible but is a
-# real decision: the regenerated artifacts would no longer match the committed ones.
+# CHECKSUM-PINNED ON A MOVING URL (uberon).  Its versionIRI names release 2026-06-19 and
+# that dated URL is a 404 — `purl.obolibrary.org/obo/<ont>/releases/<date>/` redirects to
+# the project's GitHub release tag, and `v2026-06-19` is not there.  But the undated purl
+# serves that very release: the bytes it returns today are identical to the copy that was
+# committed, same sha256, same versionIRI.  So uberon is fetched from the undated URL and
+# the CHECKSUM is the authority, not the URL.
+#
+# That means a mismatch on uberon is not corruption — it is upstream having published a
+# NEW release.  Do not just update the digest: adopting a new uberon changes the generated
+# uberon_* artifacts, and the numbers in RESULTS.md and the technical note were measured
+# against 2026-06-19.  Decide, then regenerate, then update the docs.
 #
 # UNPINNED (chebi, pato).  No release is recorded anywhere in this repository, and
 # `purl.obolibrary.org` redirects both to MOVING targets (EBI's current chebi.owl;
@@ -37,13 +41,15 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$DIR/downloads"
 
 # name | url | sha256 ("-" = unpinned)
+# Dated release URLs; the digest confirms the download.
 PINNED=(
   "cl|http://purl.obolibrary.org/obo/cl/releases/2026-06-08/cl.owl|6abe12f1569d077507e03c1ad0168ebbb9ed725973a7eddba8ab3b9aeaf7a68d"
   "ro|http://purl.obolibrary.org/obo/ro/releases/2025-12-17/ro.owl|a9f644d4a865747e0b4aba7ca3f19aac1e0b072cab89e24a2e476df3abb10aaf"
 )
-# Verified if present, never fetched — its release is gone from upstream (see the header).
-COMMITTED=(
-  "uberon|http://purl.obolibrary.org/obo/uberon/releases/2026-06-19/uberon.owl|938f51e7c3fc9fcbe5a2863eb346da8033737e568af5836958891c4c6bfb1192"
+# UNDATED url — the digest, not the url, pins the version (release 2026-06-19).
+# A mismatch here means upstream released a new uberon; see the header before touching it.
+MOVING=(
+  "uberon|http://purl.obolibrary.org/obo/uberon.owl|938f51e7c3fc9fcbe5a2863eb346da8033737e568af5836958891c4c6bfb1192"
 )
 UNPINNED=(
   "chebi|http://purl.obolibrary.org/obo/chebi.owl|-"
@@ -108,38 +114,17 @@ process() {
     rm -f "$tmp"
     printf '  %-7s SHA MISMATCH after download\n           expected %s\n           actual   %s\n' \
       "$name" "$want" "$got" >&2
-    printf '           Upstream changed this release, or the download was truncated.\n           Do not pin the new digest without checking that the generated artifacts\n           still reproduce.\n' >&2
+    printf '           Either the download was truncated, or upstream published a new release.\n           For an entry whose url carries no release date, the second is the likely one.\n           Do not just update the digest: regenerate the artifacts and check the numbers\n           in RESULTS.md and the technical note, which were measured against the old one.\n' >&2
     rc=1; return 0
   fi
   mv "$tmp" "$file"
   printf '  %-7s fetched and verified\n' "$name"
 }
 
-committed_only() {   # verify, never fetch
-  local name url want file got
-  IFS='|' read -r name url want <<<"$1"
-  file="$DEST/$name.owl"
-  if [[ ! -f "$file" ]]; then
-    printf '  %-7s MISSING and NOT FETCHABLE\n' "$name" >&2
-    printf '           %s is a 404: that release tag no longer exists upstream.\n' "$url" >&2
-    printf '           This file must be restored from git history — it is the one input\n' >&2
-    printf '           that cannot be recovered from the network.\n' >&2
-    rc=1; return 0
-  fi
-  got="$(digest "$file")"
-  if [[ "$got" == "$want" ]]; then
-    printf '  %-7s ok (committed; upstream release retired)\n' "$name"
-  else
-    printf '  %-7s SHA MISMATCH\n           expected %s\n           actual   %s\n' "$name" "$want" "$got" >&2
-    printf '           Cannot refetch: the pinned release is a 404 upstream.\n' >&2
-    rc=1
-  fi
-}
-
 mkdir -p "$DEST"
 echo "ontology downloads -> $DEST"
 for e in "${PINNED[@]}"; do process "$e"; done
-for e in "${COMMITTED[@]}"; do committed_only "$e"; done
+for e in "${MOVING[@]}"; do process "$e"; done
 if [[ "$WANT_UNPINNED" == 1 ]]; then
   for e in "${UNPINNED[@]}"; do process "$e"; done
 else
