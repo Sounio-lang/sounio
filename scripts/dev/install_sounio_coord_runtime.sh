@@ -260,6 +260,8 @@ else
     printf 'capability=loom-recoverable-guardian-v1\n'
     printf 'capability=loom-kernel-recovery-v1\n'
     printf 'capability=loom-dual-journal-v1\n'
+    printf 'capability=loom-persistent-fleet-catalog-v1\n'
+    printf 'capability=loom-post-pod-reconcile-v1\n'
     printf 'capability=coord-reply-correlation-v1\n'
     printf 'capability=fleet-launcher-v1\n'
     printf 'capability=fleet-proven-exit-v1\n'
