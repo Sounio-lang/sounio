@@ -5714,12 +5714,27 @@ fn captured_expr_misuses_value(e: &Expr, scan: CapturedClosureValueScan, in_call
 fn so_name_is_hessian_of_ident(e: &Expr) -> bool with Mut, Panic, Div {
     if (*e).kind != ExprKind::ExprIdent { return false }
     let n = (*e).name
-    n.len == 10
+    if n.len == 10
         && n.buf[0] == 104 as i8 && n.buf[1] == 101 as i8
         && n.buf[2] == 115 as i8 && n.buf[3] == 115 as i8
         && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
         && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
-        && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
+        && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8 { return true }
+    // `second_order_mean` reads the same Hessian, so it must switch the
+    // second-order walk on too. Without this line the builtin still compiles
+    // and still runs -- so_enabled stays false, every so_expr_hess slot stays
+    // -1, and the E2 correction evaluates to exactly zero with no diagnostic.
+    // "second_order_mean" = 17 chars
+    n.len == 17
+        && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 99 as i8 && n.buf[3] == 111 as i8
+        && n.buf[4] == 110 as i8 && n.buf[5] == 100 as i8
+        && n.buf[6] == 95 as i8 && n.buf[7] == 111 as i8
+        && n.buf[8] == 114 as i8 && n.buf[9] == 100 as i8
+        && n.buf[10] == 101 as i8 && n.buf[11] == 114 as i8
+        && n.buf[12] == 95 as i8 && n.buf[13] == 109 as i8
+        && n.buf[14] == 101 as i8 && n.buf[15] == 97 as i8
+        && n.buf[16] == 110 as i8
 }
 
 fn so_opt_expr_uses_hessian(opt: &Option<Box<Expr> >) -> bool with Mut, Panic, Div, Alloc {
@@ -8057,6 +8072,20 @@ impl Lowerer {
         && n.buf[4] == 105 as i8 && n.buf[5] == 97 as i8
         && n.buf[6] == 110 as i8 && n.buf[7] == 95 as i8
         && n.buf[8] == 111 as i8 && n.buf[9] == 102 as i8
+    }
+
+    // second_order_mean(expr) -> E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
+    fn name_is_second_order_mean(self, n: Name) -> bool with Div {
+        n.len == 17
+        && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
+        && n.buf[2] == 99 as i8 && n.buf[3] == 111 as i8
+        && n.buf[4] == 110 as i8 && n.buf[5] == 100 as i8
+        && n.buf[6] == 95 as i8 && n.buf[7] == 111 as i8
+        && n.buf[8] == 114 as i8 && n.buf[9] == 100 as i8
+        && n.buf[10] == 101 as i8 && n.buf[11] == 114 as i8
+        && n.buf[12] == 95 as i8 && n.buf[13] == 109 as i8
+        && n.buf[14] == 101 as i8 && n.buf[15] == 97 as i8
+        && n.buf[16] == 110 as i8
     }
 
     fn name_is_uncertainty_of(self, n: Name) -> bool with Div {
@@ -10893,6 +10922,7 @@ impl Lowerer {
                     if self.name_is_variance_of(callee_name)
                         || self.name_is_uncertainty_of(callee_name)
                         || self.name_is_sensitivity_of(callee_name)
+                        || self.name_is_second_order_mean(callee_name)
                         || self.name_is_hessian_of(callee_name) {
                         return true
                     }
@@ -14903,6 +14933,69 @@ impl Lowerer {
         }
     }
 
+    // second_order_mean(expr): E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
+    //
+    // Built on this tree's own second-order machinery rather than imported: the
+    // FO/SO walk in lower_expr_variance_ref populates so_expr_hess, so_hess_idx
+    // addresses it, and fo_sigma2 holds each channel's variance. Channels are
+    // capped at 8 here because so_hess_idx is defined over 8x8.
+    fn lower_second_order_mean_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(list) => {
+                // Walk first, so the Hessian and the sigmas exist to read.
+                let pair_v = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_v.0
+                let zp = lo.emit_f64_const(0.0)
+                lo = zp.0
+                var acc = zp.1
+                let hp = lo.emit_f64_const(0.5)
+                lo = hp.0
+                let half = hp.1
+                var k: i64 = 0
+                while k < 8 {
+                    let idx = lo.so_hess_idx(k, k)
+                    let hreg = lo.so_expr_hess[idx as usize]
+                    let sig = lo.fo_sigma2[k as usize]
+                    if hreg >= 0 && sig >= 0 {
+                        let t1p = lo.fresh_reg()
+                        lo = t1p.0
+                        let t1 = t1p.1
+                        lo = lo.emit(ir_binop_typed(t1, hreg, BinaryOp::OpMul, sig, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t1))
+                        let t2p = lo.fresh_reg()
+                        lo = t2p.0
+                        let t2 = t2p.1
+                        lo = lo.emit(ir_binop_typed(t2, half, BinaryOp::OpMul, t1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2))
+                        let ap = lo.fresh_reg()
+                        lo = ap.0
+                        let nacc = ap.1
+                        lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, t2, true, true))
+                        lo = lo.emit(ir_mark_float_reg(nacc))
+                        acc = nacc
+                    }
+                    k = k + 1
+                }
+                // First-order mean: the expression evaluated at the seed means.
+                let vp = lo.lower_expr_ref(&(*list).head)
+                lo = vp.0
+                let mean1 = vp.1
+                let dp = lo.fresh_reg()
+                lo = dp.0
+                let dst = dp.1
+                lo = lo.emit(ir_binop_typed(dst, mean1, BinaryOp::OpAdd, acc, true, true))
+                lo = lo.emit(ir_mark_float_reg(dst))
+                (lo, dst)
+            }
+            _ => {
+                let z = self.emit_f64_const(0.0)
+                var lo_z = z.0
+                lo_z = lo_z.emit(ir_mark_float_reg(z.1))
+                (lo_z, z.1)
+            }
+        }
+    }
+
     fn lower_uncertainty_of_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let pair_v = self.lower_variance_of_call_ref(args)
         var lo = pair_v.0
@@ -15443,6 +15536,9 @@ impl Lowerer {
         }
         if self.name_is_hessian_of(callee_name) {
             return self.lower_hessian_of_call_ref(&e.args)
+        }
+        if self.name_is_second_order_mean(callee_name) {
+            return self.lower_second_order_mean_call_ref(&e.args)
         }
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
