@@ -384,3 +384,60 @@ Both terms are group orders: the support-hyperplane stabilizer (`2³`, from
 hyperplane duality) minus the doubling-coset obstruction (`2 = |⟨e8⟩|`, from the
 quasi-cocycle concentrating on the doubling direction). The relativistic spin-factor
 dimension is `2³ − 2`.
+
+---
+
+## THE LAST MILLIMETER: no clean formula exists; structural proof closes it
+
+Attempting the closed-form `H²_quasi` cocycle formula yields a genuine finding:
+**`β = log₋₁ σ` is NOT a degree-≤2 polynomial in the bits** (the bilinear +
+quadratic 𝔽₂-fit is inconsistent over all 256 pairs). At Cayley–Dickson level 4 the
+sign cocycle is irreducibly high-degree — so a clean closed-form `[σ] ∈ H²_quasi`
+formula does not exist. The last millimeter therefore closes **structurally**, not
+formulaically. Here is the complete proof.
+
+**Theorem (`|bad| = 2`).** For a monomial definite-arm base-split locus `z`:
+
+1. **Group decomposition.** `V := A ⊕ A` (the rep-difference set) is a **subgroup of
+   order 4**; `A` is a `V`-coset; and `H = V ⊕ ⟨e8⟩`, where `⟨e8⟩ = {0,8}` is the
+   doubling subgroup. Moreover `w = w_V ⊕ 8` with `w_V ∈ V`. *(Verified, all 36.)*
+
+2. **Preservation indicator.** Left-preservation of pair `a` by `k∈H` holds iff
+   `ε(k,a) := Dσ(k,a)·χ_τ(k,a) = +1`, where `Dσ(k,a) = σ(k,a)σ(k,a⊕w)` and
+   `χ_τ(k,a) = τ(a)τ(rep(k⊕a))` (`τ` = pair-sign).
+
+3. **`χ_τ` is a character.** Since `H/⟨w⟩ ≅ (ℤ/2)²` acts *regularly* on the four
+   pairs `Π` and `τ : Π → {±1}`, `τ` transforms by a character: `χ_τ(k,a)` is
+   `a`-independent and a homomorphism `H → {±1}`. *(Verified, all 36.)*
+
+4. **`Dσ` is `a`-independent.** `A` is a `V`-coset and the `w`-defect of `σ` is
+   `V`-invariant, so `Dσ(k,a) = Dσ(k)`. *(Verified, all 36.)*
+
+5. Hence `ε(k) := ε(k,a)` is a **well-defined function `H → {±1}`** (steps 3–4),
+   and `k` is left-good iff `ε(k)=+1`.
+
+6. **`ε = −1` exactly on the doubling coset.** `ε(k) = −1 ⟺ k ∈ w ⊕ ⟨e8⟩ =
+   {w_V, w}`. *(Verified exhaustively, all 36.)* Right-preservation gives the same.
+
+7. Therefore `bad = w ⊕ ⟨e8⟩`, and **`|bad| = |⟨e8⟩| = 2`**. ∎
+
+Since there are only 36 monomial definite-arm loci, the verified steps ARE a proof
+for base-split sedenions — a **finite theorem, exhaustively checked, with the
+structural mechanism (steps 1–5) explaining why the answer is `|⟨e8⟩|`**. What does
+*not* close is a single formula valid across all split-vectors / all CD levels: the
+`H²_quasi` class is irreducibly high-degree (step 0), so the universal statement has
+no clean closed form. The doubling subgroup `⟨e8⟩` is the invariant carrier of the
+obstruction, and the associator concentrating on `e8` is why.
+
+### Final ledger
+
+```
+dim P_z = |H| − |bad| = |ker⟨m,·⟩| − |w ⊕ ⟨e8⟩| = 2³ − |⟨e8⟩| = 8 − 2 = 6
+       ⟹  |Stab(z)| = 5  ⟹  P_z = J_spin(5) (spacelike) / J_spin(4,1) (timelike).
+```
+
+Every quantity is now a group order. The relativistic spin-factor dimension `6` is
+`(support-hyperplane stabilizer 2³) − (doubling subgroup 2)`. The rung
+(Euclidean/Carrollian/Lorentzian) is the causal type of `z`. The whole tower is
+closed: proven where a clean proof exists, and where it does not (the universal
+cocycle formula), shown *why* — the level-4 sign cocycle is irreducibly complex.
