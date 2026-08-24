@@ -242,6 +242,17 @@ sed -e 's/^state=.*/state=exited/' \
   -e 's/^lane=.*/lane=old-lane/' \
   -e 's/^instance_id=.*/instance_id=archived-generation/' \
   "$descriptor" > "$archived_dir/session.state"
+lost_dir="$STATE_DIR/sessions/aab--lost"
+mkdir -p "$lost_dir"
+sed -e 's/^state=.*/state=active/' \
+  -e 's/^agent=.*/agent=lost/' \
+  -e 's/^lane=.*/lane=pod-loss/' \
+  -e 's/^instance_id=.*/instance_id=lost-generation/' \
+  -e 's/^daemon_pid=.*/daemon_pid=99999999/' \
+  -e 's/^daemon_pid_start=.*/daemon_pid_start=1/' \
+  -e 's/^guardian_pid=.*/guardian_pid=99999998/' \
+  -e 's/^guardian_pid_start=.*/guardian_pid_start=1/' \
+  "$descriptor" > "$lost_dir/session.state"
 "$LOOM" serve --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" --bind 127.0.0.1 --port 0 \
   > "$TEST_ROOT/gui.log" 2>&1 &
 GUI_PID=$!
@@ -260,6 +271,8 @@ sessions_json="$(curl -fsS "$gui_url/api/sessions")"
 [[ "$sessions_json" == *"\"instance_id\":\"$instance_id\""* ]] || fail 'GUI observed the wrong generation'
 [[ "$sessions_json" == "[{\"agent\":\"$AGENT\",\"lane\":\"$LANE\""* ]] || \
   fail 'operator session list did not rank active work before archived work'
+[[ "$sessions_json" == *'"agent":"lost","lane":"pod-loss"'*'"state":"lost"'* ]] || \
+  fail 'operator session list laundered a dead generation as active'
 curl -fsS "$gui_url/api/snapshot?agent=$AGENT&lane=$LANE&cursor=0" | grep -q 'BOOT_READY' || \
   fail 'GUI read path could not observe durable output'
 kill "$GUI_PID"
