@@ -8166,48 +8166,6 @@ impl Lowerer {
     // ir_mark_float_reg on the seed itself. Three independent paths lose it.
     // Same family as the println scalar-kind loss: the value survives, the
     // float marking does not, and what comes back is plausible and wrong.
-    fn fo_emit_sigma(self, k: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        var lo = self
-        if k < 0 || k >= 32 {
-            return (lo, 0 - 1)
-        }
-        // Prefer sigma recorded at measure() time.
-        let carried = FO_SIGMA_REG[k as usize]
-        if carried >= 0 {
-            return (lo, carried)
-        }
-        // Otherwise launder sigma2 through a BINOP before the call.
-        //
-        // A five-cell matrix (#2129) says why the obvious routes fail: the seed
-        // register in fo_sigma2[k] holds the right value and multiplies
-        // correctly in a direct ir_binop_typed -- that cell returns sigma2
-        // exactly -- but reads as 1.0 through ir_copy, as 1.0 as a call
-        // argument, and as 1.0 as a call argument even after ir_mark_float_reg.
-        // The one path that preserves it is arithmetic, so multiply by 1.0 to
-        // get a register the call boundary will accept.
-        let v = lo.fo_sigma2[k as usize]
-        if v < 0 {
-            return (lo, 0 - 1)
-        }
-        let one = lo.emit_f64_const(1.0)
-        lo = one.0
-        let lp = lo.fresh_reg()
-        lo = lp.0
-        let laundered = lp.1
-        lo = lo.emit(ir_binop_typed(laundered, v, BinaryOp::OpMul, one.1, true, true))
-        lo = lo.emit(ir_mark_float_reg(laundered))
-        let sq_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
-        let sq_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(laundered)))
-        let dp = lo.fresh_reg()
-        lo = dp.0
-        let dst = dp.1
-        var instr = ir_call(dst, sq_id, make_name("sqrt"), sq_args, 1)
-        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
-        lo = lo.emit(instr)
-        lo = lo.emit(ir_mark_float_reg(dst))
-        (lo, dst)
-    }
-
     fn name_is_second_order_mean(self, n: Name) -> bool with Div {
         n.len == 17
         && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
@@ -8641,11 +8599,19 @@ impl Lowerer {
         }
         // Off-diagonal: 2 * sum_{i<j} s_i * s_j * rho_ij * sigma_i * sigma_j.
         //
-        // Without this, Var is the diagonal-only GUM form, which silently
-        // assumes every channel independent. correlate(a,b,rho) is what makes
-        // the assumption stateable, and this is where it is spent: for
-        // Var(x+y) with sigma_x = 0.1, sigma_y = 0.2 and rho = 1, the diagonal
-        // gives 0.05 and the true answer is (0.1+0.2)^2 = 0.09.
+        // Without this, Var is the diagonal-only GUM form, which silently assumes
+        // every channel independent. correlate(a,b,rho) is what makes that
+        // assumption deniable, and this is where it is spent: for Var(x+y) with
+        // sigma_x = 0.1, sigma_y = 0.2 and rho = 1, the diagonal gives 0.05 and
+        // the true answer is (0.1+0.2)^2 = 0.09.
+        //
+        // Everything here is INLINE and reads fo_sigma2 the same way the diagonal
+        // loop above does. Two earlier shapes failed and both are worth recording:
+        // a helper taking self by value read the SAME sigma for every channel (the
+        // last one seeded), and a module-global carry of the sigma register did the
+        // same. One sqrt of the product sigma2_i * sigma2_j, not two of the parts,
+        // because a seed register passed to a call reads back as 1.0 (#2129) and
+        // arithmetic is the one boundary that preserves it.
         var ci: i64 = 0
         while ci < 8 {
             var cj: i64 = ci + 1
@@ -8653,36 +8619,41 @@ impl Lowerer {
                 let rho = fo_cov_rho_get(ci, cj)
                 let si = lo.fo_expr_sens[ci as usize]
                 let sj = lo.fo_expr_sens[cj as usize]
-                if rho != 0.0 && si >= 0 && sj >= 0 {
-                    let gi = lo.fo_emit_sigma(ci)
-                    lo = gi.0
-                    let gj = lo.fo_emit_sigma(cj)
-                    lo = gj.0
-                    if gi.1 >= 0 && gj.1 >= 0 {
-                        let kp = lo.emit_f64_const(2.0 * rho)
-                        lo = kp.0
-                        let t1 = lo.fresh_reg()
-                        lo = t1.0
-                        lo = lo.emit(ir_binop_typed(t1.1, si, BinaryOp::OpMul, sj, true, true))
-                        lo = lo.emit(ir_mark_float_reg(t1.1))
-                        let t2 = lo.fresh_reg()
-                        lo = t2.0
-                        lo = lo.emit(ir_binop_typed(t2.1, t1.1, BinaryOp::OpMul, gi.1, true, true))
-                        lo = lo.emit(ir_mark_float_reg(t2.1))
-                        let t3 = lo.fresh_reg()
-                        lo = t3.0
-                        lo = lo.emit(ir_binop_typed(t3.1, t2.1, BinaryOp::OpMul, gj.1, true, true))
-                        lo = lo.emit(ir_mark_float_reg(t3.1))
-                        let t4 = lo.fresh_reg()
-                        lo = t4.0
-                        lo = lo.emit(ir_binop_typed(t4.1, t3.1, BinaryOp::OpMul, kp.1, true, true))
-                        lo = lo.emit(ir_mark_float_reg(t4.1))
-                        let ap = lo.fresh_reg()
-                        lo = ap.0
-                        lo = lo.emit(ir_binop_typed(ap.1, acc, BinaryOp::OpAdd, t4.1, true, true))
-                        lo = lo.emit(ir_mark_float_reg(ap.1))
-                        acc = ap.1
-                    }
+                let v_i = lo.fo_sigma2[ci as usize]
+                let v_j = lo.fo_sigma2[cj as usize]
+                if rho != 0.0 && si >= 0 && sj >= 0 && v_i >= 0 && v_j >= 0 {
+                    let pp = lo.fresh_reg()
+                    lo = pp.0
+                    lo = lo.emit(ir_binop_typed(pp.1, v_i, BinaryOp::OpMul, v_j, true, true))
+                    lo = lo.emit(ir_mark_float_reg(pp.1))
+                    let sq_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+                    let sq_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(pp.1)))
+                    let dp = lo.fresh_reg()
+                    lo = dp.0
+                    let sig_prod = dp.1
+                    var sqi = ir_call(sig_prod, sq_id, make_name("sqrt"), sq_args, 1)
+                    sqi.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                    lo = lo.emit(sqi)
+                    lo = lo.emit(ir_mark_float_reg(sig_prod))
+                    let kp = lo.emit_f64_const(2.0 * rho)
+                    lo = kp.0
+                    let t1 = lo.fresh_reg()
+                    lo = t1.0
+                    lo = lo.emit(ir_binop_typed(t1.1, si, BinaryOp::OpMul, sj, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t1.1))
+                    let t2 = lo.fresh_reg()
+                    lo = t2.0
+                    lo = lo.emit(ir_binop_typed(t2.1, t1.1, BinaryOp::OpMul, sig_prod, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t2.1))
+                    let t3 = lo.fresh_reg()
+                    lo = t3.0
+                    lo = lo.emit(ir_binop_typed(t3.1, t2.1, BinaryOp::OpMul, kp.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t3.1))
+                    let ap = lo.fresh_reg()
+                    lo = ap.0
+                    lo = lo.emit(ir_binop_typed(ap.1, acc, BinaryOp::OpAdd, t3.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(ap.1))
+                    acc = ap.1
                 }
                 cj = cj + 1
             }
@@ -15417,28 +15388,37 @@ impl Lowerer {
                         let rho = fo_cov_rho_get(oi, oj)
                         let hij = lo.so_expr_hess[lo.so_hess_idx(oi, oj) as usize]
                         if rho != 0.0 && hij >= 0 {
-                            let gi = lo.fo_emit_sigma(oi)
-                            lo = gi.0
-                            let gj = lo.fo_emit_sigma(oj)
-                            lo = gj.0
-                            if gi.1 >= 0 && gj.1 >= 0 {
+                            // Inline, for the same reason as the variance cross term: a helper
+                            // taking self by value read the SAME sigma for every channel.
+                            let ev_i = lo.fo_sigma2[oi as usize]
+                            let ev_j = lo.fo_sigma2[oj as usize]
+                            if ev_i >= 0 && ev_j >= 0 {
+                                let epp = lo.fresh_reg()
+                                lo = epp.0
+                                lo = lo.emit(ir_binop_typed(epp.1, ev_i, BinaryOp::OpMul, ev_j, true, true))
+                                lo = lo.emit(ir_mark_float_reg(epp.1))
+                                let esq = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+                                let eargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(epp.1)))
+                                let edp = lo.fresh_reg()
+                                lo = edp.0
+                                let esig = edp.1
+                                var eci = ir_call(esig, esq, make_name("sqrt"), eargs, 1)
+                                eci.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+                                lo = lo.emit(eci)
+                                lo = lo.emit(ir_mark_float_reg(esig))
                                 let rp = lo.emit_f64_const(rho)
                                 lo = rp.0
                                 let u1 = lo.fresh_reg()
                                 lo = u1.0
-                                lo = lo.emit(ir_binop_typed(u1.1, hij, BinaryOp::OpMul, gi.1, true, true))
+                                lo = lo.emit(ir_binop_typed(u1.1, hij, BinaryOp::OpMul, esig, true, true))
                                 lo = lo.emit(ir_mark_float_reg(u1.1))
                                 let u2 = lo.fresh_reg()
                                 lo = u2.0
-                                lo = lo.emit(ir_binop_typed(u2.1, u1.1, BinaryOp::OpMul, gj.1, true, true))
+                                lo = lo.emit(ir_binop_typed(u2.1, u1.1, BinaryOp::OpMul, rp.1, true, true))
                                 lo = lo.emit(ir_mark_float_reg(u2.1))
-                                let u3 = lo.fresh_reg()
-                                lo = u3.0
-                                lo = lo.emit(ir_binop_typed(u3.1, u2.1, BinaryOp::OpMul, rp.1, true, true))
-                                lo = lo.emit(ir_mark_float_reg(u3.1))
                                 let u4 = lo.fresh_reg()
                                 lo = u4.0
-                                lo = lo.emit(ir_binop_typed(u4.1, acc, BinaryOp::OpAdd, u3.1, true, true))
+                                lo = lo.emit(ir_binop_typed(u4.1, acc, BinaryOp::OpAdd, u2.1, true, true))
                                 lo = lo.emit(ir_mark_float_reg(u4.1))
                                 acc = u4.1
                             }
