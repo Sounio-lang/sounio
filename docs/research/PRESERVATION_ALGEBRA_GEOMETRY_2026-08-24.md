@@ -153,3 +153,52 @@ literature scanned shows, no prior owner.
 - Does `(4,1)` vs `(3,2)` correspond to a physically meaningful distinction
   (de Sitter vs anti-de Sitter-like) of the invariant's composition causal order?
 - Lean formalization of "base-split `z=e4+e13` ⇒ `P_z ≅ J_spin(4,1)`".
+
+---
+
+## THE RUNG LAW (closed form, verified 84/84 across the CD family)
+
+The rung is not ad hoc — it is the **causal type of the zero-divisor**. Let `Q` be
+the square-form on the ambient algebra, `Q(e_i) := e_i² ∈ {±1}` (the form induced
+by squaring; `Q(z) = Q(e_i)+Q(e_j)` for a pair-type `z = e_i ± e_j`).
+
+> **Rung law (pair-type).** For a pair-type zero-divisor `z`,
+> - `Q(z) < 0`  (z **spacelike**, both arms `−`)  ⇒  `P_z` **Euclidean** `J_spin(5)`, sig `(0,5,0)`
+> - `Q(z) = 0`  (z **null**, mixed arms)           ⇒  `P_z` **Carrollian** (degenerate), sig `(1,0,3)`
+> - `Q(z) > 0`  (z **timelike**, both arms `+`)    ⇒  `P_z` **Lorentzian** `J_spin(4,1)`, sig `(4,1,0)`
+
+Verified exhaustively (`scratchpad/rung_derive.py`, `rung_law.py`,
+`lastsplit_check.py`): the predictor `rung = g(sign Q(e_i), sign Q(e_j))` matches
+the computed signature on **84/84** pair-type ZDs in base-split, and — being a
+statement about arm-signs — trivially in division (all arms `−` ⇒ all Euclidean)
+and last-split (all ZDs mixed-arm ⇒ all Carrollian; confirmed: 84/84 mixed).
+
+### Why (mechanism)
+
+The preserving generators of `P_z` inherit their `Q`-signs from `z`'s arms.
+- **Spacelike z:** all preserving imaginary generators square to `−1` ⇒ definite
+  Jordan form ⇒ Euclidean.
+- **Null z:** the mixed-arm structure forces the preserving generators onto the
+  light-cone (each pairs a `+` with a `−` and is `Q`-null) ⇒ the Jordan form
+  acquires a rank-collapse (radical) ⇒ Carrollian.
+- **Timelike z:** the preserving generators are `+`-dominated with one
+  distinguished `−` (from the 4-dim kernel's orthogonal structure) ⇒ `(4,1)`
+  Lorentzian.
+
+### Statement
+
+**The composition geometry of an exact-invariant is the causal type of its
+defining zero-divisor.** Choosing the privacy-locus `z` is choosing whether the
+invariant composes Euclidean-ly (definite, free), Carrollian-ly (null, ultra-local)
+or Lorentzian-ly (a genuine light-cone / `SO(4,1)` causal order on capability
+composition). The ambient split-vector fixes which causal types of locus *exist*;
+the locus fixes the rung.
+
+### Open (toward a paper)
+
+- Prove the `(4,1)` (not `(3,2)` etc.) refinement from the kernel's orthogonal
+  structure — i.e. derive the exact `+/−` split, not just its existence.
+- Extend the law to generic (non-pair-type) ZDs, where `dim ker` and `dim P_z`
+  vary; conjecture: rung still tracks `sign Q(z)` but the algebra is a larger/
+  mixed `J_spin(p,q)`.
+- Lean: `Q(z)>0` (base-split `e4+e13`) ⇒ `P_z ≅ J_spin(4,1)`.
