@@ -691,3 +691,59 @@ test embedding a long fixed string (certificate PEM data, long URLs,
 multi-line templates) must apply the same split-and-compare/split-and-
 concatenate pattern** -- do not assume a "long string literal" is safe up
 to some larger, untested threshold.
+
+## Finding 18 — a top-level `const [u8; N]` array is corrupted whenever its whole value is used (copied to a `var`, or address-taken and passed by reference); direct indexed reads of the same const are correct
+
+Discovered while building `stdlib/x509/oid.sio`'s OID byte-constant table.
+Distinct from Finding 15 (which is about element COUNT exceeding 16) --
+this reproduces at as few as 3 elements, and is specific to element type
+`u8`; the identical pattern with `[i64; N]` is unaffected.
+
+```sio
+const LOCAL_CONST3D: [u8; 3] = [0x55, 0x04, 0x03]
+
+fn get_first(b: &[u8; 3]) -> u8 {
+    b[0]
+}
+
+fn main() with IO {
+    assert(LOCAL_CONST3D[0] == 0x55)      // CORRECT -- direct indexed read of the const
+    let v = get_first(&LOCAL_CONST3D)      // WRONG -- v is neither 0 nor 0x55, some other
+                                             // (uninspected) value; the const's bytes are
+                                             // corrupted the moment its whole value is used
+                                             // as an rvalue (address-taken here; a plain
+                                             // `var tmp: [u8;3] = LOCAL_CONST3D` whole-array
+                                             // copy reproduces identically)
+}
+```
+
+Confirmed independently, twice (once by the implementer who found it, once by the
+controller with the same minimal repro). Confirmed NOT an import/visibility
+issue (reproduces with a private, same-file `const` too). Confirmed specific
+to `u8` element type (the identical pattern with `const [i64; N]` works
+correctly, passed by reference, no corruption).
+
+**Workaround: never declare a top-level `const [u8; N]` array whose whole
+value (not just individual indexed elements) will be used.** Replace it
+with a `pub fn` that constructs the same array via a local `var` +
+element-by-element assignment and returns it:
+
+```sio
+pub fn local_const_3d() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55
+    r[1] = 0x04
+    r[2] = 0x03
+    r
+}
+```
+
+Call it once into a local `let`/`var` binding at each point of use before
+taking a reference to the result -- this is the same shape as this
+project's existing Finding-15 workaround (function-returning-a-literal
+instead of a bare `const`), but for a different root cause and a much
+lower element-count threshold. **Any Sounio module needing a fixed `u8`
+byte-array constant whose value (not just individual bytes) will be
+copied or passed by reference — OID byte sequences, magic-number byte
+prefixes, fixed binary headers — must use this function form, never a bare
+`const [u8; N]`, regardless of how few elements it has.**

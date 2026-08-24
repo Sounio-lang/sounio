@@ -146,43 +146,173 @@ This step does not depend on Step 2's outcome (OIDs are plain byte arrays, no st
 // source before being trusted here, per this project's "measure, don't
 // assume" discipline (see this task's brief for the cross-check instruction).
 
+// NOTE: every OID is a FUNCTION returning a freshly-built [u8;N] array, NOT
+// a top-level `const [u8;N]`. Finding 18 (docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md)
+// found that a top-level `const [u8;N]` is silently corrupted whenever its
+// WHOLE value is used (copied to a var, or address-taken and passed by
+// reference) -- only direct indexed reads of the const are safe, which is
+// useless for this file's actual purpose (comparing a decoded OID's bytes
+// against a whole known OID value via oid_eq3/8/9/10). Every call site
+// (Tasks 5-7) must call the function once into a local `let` before taking
+// a reference to the result -- see this task's brief for the exact pattern.
+
 // -- Signature/key algorithms (RFC 8017, arc 1.2.840.113549.1.1) --
-pub const OID_RSA_ENCRYPTION: [u8; 9] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01]
-pub const OID_SHA1_WITH_RSA: [u8; 9] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x05]
-pub const OID_SHA256_WITH_RSA: [u8; 9] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B]
-pub const OID_SHA384_WITH_RSA: [u8; 9] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0C]
-pub const OID_SHA512_WITH_RSA: [u8; 9] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0D]
+pub fn oid_rsa_encryption() -> [u8; 9] {
+    var r: [u8; 9] = [0; 9]
+    r[0] = 0x2A; r[1] = 0x86; r[2] = 0x48; r[3] = 0x86; r[4] = 0xF7
+    r[5] = 0x0D; r[6] = 0x01; r[7] = 0x01; r[8] = 0x01
+    r
+}
+pub fn oid_sha1_with_rsa() -> [u8; 9] {
+    var r: [u8; 9] = [0; 9]
+    r[0] = 0x2A; r[1] = 0x86; r[2] = 0x48; r[3] = 0x86; r[4] = 0xF7
+    r[5] = 0x0D; r[6] = 0x01; r[7] = 0x01; r[8] = 0x05
+    r
+}
+pub fn oid_sha256_with_rsa() -> [u8; 9] {
+    var r: [u8; 9] = [0; 9]
+    r[0] = 0x2A; r[1] = 0x86; r[2] = 0x48; r[3] = 0x86; r[4] = 0xF7
+    r[5] = 0x0D; r[6] = 0x01; r[7] = 0x01; r[8] = 0x0B
+    r
+}
+pub fn oid_sha384_with_rsa() -> [u8; 9] {
+    var r: [u8; 9] = [0; 9]
+    r[0] = 0x2A; r[1] = 0x86; r[2] = 0x48; r[3] = 0x86; r[4] = 0xF7
+    r[5] = 0x0D; r[6] = 0x01; r[7] = 0x01; r[8] = 0x0C
+    r
+}
+pub fn oid_sha512_with_rsa() -> [u8; 9] {
+    var r: [u8; 9] = [0; 9]
+    r[0] = 0x2A; r[1] = 0x86; r[2] = 0x48; r[3] = 0x86; r[4] = 0xF7
+    r[5] = 0x0D; r[6] = 0x01; r[7] = 0x01; r[8] = 0x0D
+    r
+}
 
 // -- RDN attribute types (arc 2.5.4) + PKCS#9 emailAddress --
-pub const OID_COMMON_NAME: [u8; 3] = [0x55, 0x04, 0x03]
-pub const OID_COUNTRY_NAME: [u8; 3] = [0x55, 0x04, 0x06]
-pub const OID_LOCALITY_NAME: [u8; 3] = [0x55, 0x04, 0x07]
-pub const OID_STATE_OR_PROVINCE_NAME: [u8; 3] = [0x55, 0x04, 0x08]
-pub const OID_ORGANIZATION_NAME: [u8; 3] = [0x55, 0x04, 0x0A]
-pub const OID_ORGANIZATIONAL_UNIT_NAME: [u8; 3] = [0x55, 0x04, 0x0B]
-pub const OID_EMAIL_ADDRESS: [u8; 9] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x01]
+pub fn oid_common_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x04; r[2] = 0x03
+    r
+}
+pub fn oid_country_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x04; r[2] = 0x06
+    r
+}
+pub fn oid_locality_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x04; r[2] = 0x07
+    r
+}
+pub fn oid_state_or_province_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x04; r[2] = 0x08
+    r
+}
+pub fn oid_organization_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x04; r[2] = 0x0A
+    r
+}
+pub fn oid_organizational_unit_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x04; r[2] = 0x0B
+    r
+}
+pub fn oid_email_address() -> [u8; 9] {
+    var r: [u8; 9] = [0; 9]
+    r[0] = 0x2A; r[1] = 0x86; r[2] = 0x48; r[3] = 0x86; r[4] = 0xF7
+    r[5] = 0x0D; r[6] = 0x01; r[7] = 0x09; r[8] = 0x01
+    r
+}
 
 // -- Standard v3 extensions (arc 2.5.29) --
-pub const OID_EXT_SUBJECT_DIRECTORY_ATTRIBUTES: [u8; 3] = [0x55, 0x1D, 0x09]
-pub const OID_EXT_SUBJECT_KEY_IDENTIFIER: [u8; 3] = [0x55, 0x1D, 0x0E]
-pub const OID_EXT_KEY_USAGE: [u8; 3] = [0x55, 0x1D, 0x0F]
-pub const OID_EXT_SUBJECT_ALT_NAME: [u8; 3] = [0x55, 0x1D, 0x11]
-pub const OID_EXT_ISSUER_ALT_NAME: [u8; 3] = [0x55, 0x1D, 0x12]
-pub const OID_EXT_BASIC_CONSTRAINTS: [u8; 3] = [0x55, 0x1D, 0x13]
-pub const OID_EXT_NAME_CONSTRAINTS: [u8; 3] = [0x55, 0x1D, 0x1E]
-pub const OID_EXT_CRL_DISTRIBUTION_POINTS: [u8; 3] = [0x55, 0x1D, 0x1F]
-pub const OID_EXT_CERTIFICATE_POLICIES: [u8; 3] = [0x55, 0x1D, 0x20]
-pub const OID_EXT_AUTHORITY_KEY_IDENTIFIER: [u8; 3] = [0x55, 0x1D, 0x23]
-pub const OID_EXT_POLICY_CONSTRAINTS: [u8; 3] = [0x55, 0x1D, 0x24]
-pub const OID_EXT_EXT_KEY_USAGE: [u8; 3] = [0x55, 0x1D, 0x25]
-pub const OID_EXT_FRESHEST_CRL: [u8; 3] = [0x55, 0x1D, 0x2E]
-pub const OID_EXT_INHIBIT_ANY_POLICY: [u8; 3] = [0x55, 0x1D, 0x36]
+pub fn oid_ext_subject_directory_attributes() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x09
+    r
+}
+pub fn oid_ext_subject_key_identifier() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x0E
+    r
+}
+pub fn oid_ext_key_usage() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x0F
+    r
+}
+pub fn oid_ext_subject_alt_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x11
+    r
+}
+pub fn oid_ext_issuer_alt_name() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x12
+    r
+}
+pub fn oid_ext_basic_constraints() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x13
+    r
+}
+pub fn oid_ext_name_constraints() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x1E
+    r
+}
+pub fn oid_ext_crl_distribution_points() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x1F
+    r
+}
+pub fn oid_ext_certificate_policies() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x20
+    r
+}
+pub fn oid_ext_authority_key_identifier() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x23
+    r
+}
+pub fn oid_ext_policy_constraints() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x24
+    r
+}
+pub fn oid_ext_ext_key_usage() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x25
+    r
+}
+pub fn oid_ext_freshest_crl() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x2E
+    r
+}
+pub fn oid_ext_inhibit_any_policy() -> [u8; 3] {
+    var r: [u8; 3] = [0; 3]
+    r[0] = 0x55; r[1] = 0x1D; r[2] = 0x36
+    r
+}
 
 // -- PKIX private extension (arc 1.3.6.1.5.5.7.1) --
-pub const OID_EXT_AUTHORITY_INFO_ACCESS: [u8; 8] = [0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x01, 0x01]
+pub fn oid_ext_authority_info_access() -> [u8; 8] {
+    var r: [u8; 8] = [0; 8]
+    r[0] = 0x2B; r[1] = 0x06; r[2] = 0x01; r[3] = 0x05
+    r[4] = 0x05; r[5] = 0x07; r[6] = 0x01; r[7] = 0x01
+    r
+}
 
 // -- RFC 6962 Certificate Transparency SCT extension --
-pub const OID_EXT_SCT_LIST: [u8; 10] = [0x2B, 0x06, 0x01, 0x04, 0x01, 0xD6, 0x79, 0x02, 0x04, 0x02]
+pub fn oid_ext_sct_list() -> [u8; 10] {
+    var r: [u8; 10] = [0; 10]
+    r[0] = 0x2B; r[1] = 0x06; r[2] = 0x01; r[3] = 0x04; r[4] = 0x01
+    r[5] = 0xD6; r[6] = 0x79; r[7] = 0x02; r[8] = 0x04; r[9] = 0x02
+    r
+}
 
 // Compares the first a_len bytes of a against the first b_len bytes of b --
 // equal only if both lengths AND all compared bytes match. Used to match a
@@ -1016,7 +1146,7 @@ Independently verify: the outer SEQUENCE's declared length equals the sum of its
 
 - [ ] **Step 2: Write the failing test**
 
-Create `tests/run-pass/x509_parse_tbs_core.sio` using the Step 1 fixture, asserting every field `x509_parse_tbs_core` returns: `version == 2`, `serial_number` compares equal to `bigint_from_u32(12345)`, `tbs_sig_alg_oid` matches `OID_SHA256_WITH_RSA` via `oid_eq`, `issuer.count == 1` and `issuer.entries[0].value` bytes match `"Test CA"`, `not_before_unix`/`not_after_unix` are non-zero and `not_before_unix < not_after_unix`, `subject.count == 1`, `modulus`/`public_exponent` compare equal to the small values encoded in the fixture.
+Create `tests/run-pass/x509_parse_tbs_core.sio` using the Step 1 fixture, asserting every field `x509_parse_tbs_core` returns: `version == 2`, `serial_number` compares equal to `bigint_from_u32(12345)`, `tbs_sig_alg_oid` matches `oid_sha256_with_rsa()` via `oid_eq9` (call the accessor into a local `let` first, per Finding 18), `issuer.count == 1` and `issuer.entries[0].value` bytes match `"Test CA"`, `not_before_unix`/`not_after_unix` are non-zero and `not_before_unix < not_after_unix`, `subject.count == 1`, `modulus`/`public_exponent` compare equal to the small values encoded in the fixture.
 
 Run: `./bin/souc run tests/run-pass/x509_parse_tbs_core.sio`
 Expected: FAIL to compile — `x509_parse_tbs_core` doesn't exist yet.
@@ -1444,19 +1574,26 @@ pub fn x509_parse_extensions(buf: &RawBuf, r: &DerReader) -> ([ExtensionEntry; 3
         // a fresh DerReader scoped to those bytes to decode it.
         var ext_value_reader = DerReader { buf_ptr: buf.ptr, pos: value_tag.content_start, end: value_tag.content_start + value_tag.content_len }
 
-        if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_BASIC_CONSTRAINTS) {
+        // Per Finding 18: call each OID accessor once into a local `let`
+        // before taking a reference to it -- never reference a would-be
+        // top-level const directly (this file no longer has any).
+        let oid_bc = oid_ext_basic_constraints()
+        let oid_ku = oid_ext_key_usage()
+        let oid_ski = oid_ext_subject_key_identifier()
+        let oid_aki = oid_ext_authority_key_identifier()
+        if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_bc) {
             let (bc, s8) = x509_decode_basic_constraints(&ext_value_reader)
             let (bc_is_ca, bc_path_len) = bc
             is_ca = bc_is_ca
             path_len_constraint = bc_path_len
-        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_KEY_USAGE) {
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_ku) {
             let (ku, s9) = x509_decode_key_usage(buf, &ext_value_reader)
             key_usage_bits = ku
-        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_SUBJECT_KEY_IDENTIFIER) {
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_ski) {
             let (kid, kid_len) = x509_decode_key_identifier(buf, &ext_value_reader)
             subj_kid = kid
             subj_kid_len = kid_len
-        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &OID_EXT_AUTHORITY_KEY_IDENTIFIER) {
+        } else if oid_eq3(&oid_buf, oid_tag.content_len as i32, &oid_aki) {
             let (kid2, kid_len2) = x509_decode_key_identifier(buf, &ext_value_reader)
             auth_kid = kid2
             auth_kid_len = kid_len2
@@ -1770,7 +1907,12 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                 }
                 let entry_reader = der_reader_new(&entry_buf, 0, entry.value_len as i64)
 
-                if oid_eq3(&entry.oid, entry.oid_len, &OID_EXT_SUBJECT_ALT_NAME) {
+                // Per Finding 18: call each OID accessor once into a local
+                // `let` before taking a reference to it.
+                let oid_san = oid_ext_subject_alt_name()
+                let oid_ian = oid_ext_issuer_alt_name()
+                let oid_sct = oid_ext_sct_list()
+                if oid_eq3(&entry.oid, entry.oid_len, &oid_san) {
                     let (san_c, san_tag, san_s) = der_read_tlv(&entry_reader)
                     if san_s == DER_OK {
                         let (san_list, san_count, san_status) = x509_parse_general_names(&entry_buf, &entry_reader, &san_tag)
@@ -1779,7 +1921,7 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                             cert.san_count = san_count
                         }
                     }
-                } else if oid_eq3(&entry.oid, entry.oid_len, &OID_EXT_ISSUER_ALT_NAME) {
+                } else if oid_eq3(&entry.oid, entry.oid_len, &oid_ian) {
                     let (ian_c, ian_tag, ian_s) = der_read_tlv(&entry_reader)
                     if ian_s == DER_OK {
                         let (ian_list, ian_count, ian_status) = x509_parse_general_names(&entry_buf, &entry_reader, &ian_tag)
@@ -1788,7 +1930,7 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                             cert.issuer_alt_name_count = ian_count
                         }
                     }
-                } else if oid_eq10(&entry.oid, entry.oid_len, &OID_EXT_SCT_LIST) {
+                } else if oid_eq10(&entry.oid, entry.oid_len, &oid_sct) {
                     // extnValue is itself an OCTET STRING wrapping the
                     // actual RFC 6962 length-prefixed bytes -- one more
                     // DER unwrap before sct_list_decode sees the real data.
@@ -1853,13 +1995,19 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
 
 pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer_modulus: &BigInt, issuer_exponent: &BigInt) -> bool with IO {
     var hash_algorithm: i32 = 0
-    if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA1_WITH_RSA) {
+    // Per Finding 18: call each OID accessor once into a local `let`
+    // before taking a reference to it.
+    let oid_s1 = oid_sha1_with_rsa()
+    let oid_s256 = oid_sha256_with_rsa()
+    let oid_s384 = oid_sha384_with_rsa()
+    let oid_s512 = oid_sha512_with_rsa()
+    if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s1) {
         hash_algorithm = PKCS1_HASH_SHA1
-    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA256_WITH_RSA) {
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s256) {
         hash_algorithm = PKCS1_HASH_SHA256
-    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA384_WITH_RSA) {
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s384) {
         hash_algorithm = PKCS1_HASH_SHA384
-    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &OID_SHA512_WITH_RSA) {
+    } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s512) {
         hash_algorithm = PKCS1_HASH_SHA512
     } else {
         return false   // unsupported algorithm -- see spec Non-Goals (no ECDSA/Ed25519)
