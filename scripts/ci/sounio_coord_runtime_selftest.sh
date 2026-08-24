@@ -79,6 +79,7 @@ grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/man
   fail 'installed runtime omitted the fleet-reconciler capability'
 for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
+  agentd-runtime-registration-v1 \
   fleet-linear-capability-v1 \
   fleet-home-isolation-v1 \
   fleet-proven-exit-v1 fleet-ed25519-anchor-v1 \
