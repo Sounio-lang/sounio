@@ -576,6 +576,55 @@ var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
 var FO_XFER_HASH: [i64; 64] = [0; 64]
+
+// Pairwise correlation between measurement channels, set by correlate(a,b,rho).
+//
+// 8x8 to match so_hess_idx's domain: the off-diagonal Hessian is the second
+// consumer of this, and a covariance the Hessian cannot index is a covariance
+// nothing can use. Variance walks 32 channels, so a pair above 7 is silently
+// uncorrelated -- fo_cov_rho_set refuses it rather than wrapping into another
+// pair's slot.
+// sigma per channel, as a register index -- not sigma squared, and not a
+// struct field.
+//
+// A field on Lowerer was written in the same place and the same shape as
+// fo_sigma2 and still read back as -1, so the covariance term silently
+// vanished. FO_COV_RHO beside it is a module global and reads correctly, so
+// this follows it -- consistent with this compiler's known limits on large
+// aggregates.
+var FO_SIGMA_REG: [i64; 32] = [-1; 32]
+
+var FO_COV_RHO: [f64; 64] = [0.0; 64]
+
+fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
+    var a = i
+    var b = j
+    if a > b {
+        a = j
+        b = i
+    }
+    a * 8 + b
+}
+
+fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        return
+    }
+    if i == j {
+        return
+    }
+    FO_COV_RHO[fo_cov_rho_idx(i, j) as usize] = rho
+}
+
+fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 {
+        return 0.0
+    }
+    if i == j {
+        return 0.0
+    }
+    FO_COV_RHO[fo_cov_rho_idx(i, j) as usize]
+}
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
 
 fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
@@ -6055,6 +6104,7 @@ impl Lowerer {
         var fci: i64 = 0
         while fci < 32 {
             lo.fo_sigma2[fci as usize] = -1
+            FO_SIGMA_REG[fci as usize] = -1
             lo.fo_expr_sens[fci as usize] = -1
             lo.fo_pending_sens[fci as usize] = -1
             fci = fci + 1
@@ -8075,6 +8125,54 @@ impl Lowerer {
     }
 
     // second_order_mean(expr) -> E2[f] = f(mu) + (1/2) * sum_k H_kk * sigma2_k
+    // correlate(a, b, rho) -- record Cov between the channels a and b carry.
+    fn name_is_correlate(self, n: Name) -> bool with Div {
+        n.len == 9
+        && n.buf[0] == 99 as i8 && n.buf[1] == 111 as i8
+        && n.buf[2] == 114 as i8 && n.buf[3] == 114 as i8
+        && n.buf[4] == 101 as i8 && n.buf[5] == 108 as i8
+        && n.buf[6] == 97 as i8 && n.buf[7] == 116 as i8
+        && n.buf[8] == 101 as i8
+    }
+
+    // The one live channel of the expression just walked, or -1.
+    //
+    // Ambiguity is refused, not guessed: `correlate(x + y, z, 0.5)` names two
+    // channels on the left and there is no honest answer for which one the
+    // correlation belongs to.
+    fn fo_primary_channel(self) -> i64 with Div {
+        var found: i64 = 0 - 1
+        var k: i64 = 0
+        while k < 8 {
+            if self.fo_expr_sens[k as usize] >= 0 {
+                if found >= 0 {
+                    return 0 - 1
+                }
+                found = k
+            }
+            k = k + 1
+        }
+        found
+    }
+
+    // sigma_k = sqrt(sigma2_k). The table stores the variance; every covariance
+    // term needs the standard deviation, so this is emitted per use.
+    // sigma_k, recorded at measure() time -- not sqrt(fo_sigma2[k]).
+    //
+    // A five-cell matrix says why. The seed register holds the right value and
+    // multiplies correctly in a direct ir_binop_typed -- that cell returns
+    // sigma2 exactly. It reads as 1.0 through ir_copy, as 1.0 through a call
+    // argument, and as 1.0 through a call argument even after
+    // ir_mark_float_reg on the seed itself. Three independent paths lose it.
+    // Same family as the println scalar-kind loss: the value survives, the
+    // float marking does not, and what comes back is plausible and wrong.
+    fn fo_emit_sigma(self, k: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if k < 0 || k >= 32 {
+            return (lo, 0 - 1)
+        }
+        (lo, FO_SIGMA_REG[k as usize])
+    }
     fn name_is_second_order_mean(self, n: Name) -> bool with Div {
         n.len == 17
         && n.buf[0] == 115 as i8 && n.buf[1] == 101 as i8
@@ -8294,7 +8392,7 @@ impl Lowerer {
     }
 
     // Ensure variance_reg is a FO channel; seed fo_expr_sens with 1.0 on that channel.
-    fn fo_seed_from_variance(self, variance_reg: i64) -> Lowerer with Mut, Panic, Div, IO {
+    fn fo_seed_from_variance(self, variance_reg: i64, sigma_reg: i64) -> Lowerer with Mut, Panic, Div, IO {
         var lo = self
         if variance_reg < 0 {
             return lo.fo_clear_expr_sens()
@@ -8317,6 +8415,7 @@ impl Lowerer {
         }
         let ch = lo.fo_nchan
         lo.fo_sigma2[ch as usize] = variance_reg
+        FO_SIGMA_REG[ch as usize] = sigma_reg
         lo.fo_nchan = ch + 1
         lo = lo.fo_clear_expr_sens()
         let one = lo.emit_f64_const(1.0)
@@ -8474,7 +8573,7 @@ impl Lowerer {
     }
 
     // Var = Σ_k s_k² · σ²_k from current fo_expr_sens.
-    fn fo_emit_var_from_sens(self) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    fn fo_emit_var_from_sens(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let z = self.emit_f64_const(0.0)
         var lo = z.0
         var acc = z.1
@@ -8504,6 +8603,55 @@ impl Lowerer {
                 acc = nacc
             }
             k = k + 1
+        }
+        // Off-diagonal: 2 * sum_{i<j} s_i * s_j * rho_ij * sigma_i * sigma_j.
+        //
+        // Without this, Var is the diagonal-only GUM form, which silently
+        // assumes every channel independent. correlate(a,b,rho) is what makes
+        // the assumption stateable, and this is where it is spent: for
+        // Var(x+y) with sigma_x = 0.1, sigma_y = 0.2 and rho = 1, the diagonal
+        // gives 0.05 and the true answer is (0.1+0.2)^2 = 0.09.
+        var ci: i64 = 0
+        while ci < 8 {
+            var cj: i64 = ci + 1
+            while cj < 8 {
+                let rho = fo_cov_rho_get(ci, cj)
+                let si = lo.fo_expr_sens[ci as usize]
+                let sj = lo.fo_expr_sens[cj as usize]
+                if rho != 0.0 && si >= 0 && sj >= 0 {
+                    let gi = lo.fo_emit_sigma(ci)
+                    lo = gi.0
+                    let gj = lo.fo_emit_sigma(cj)
+                    lo = gj.0
+                    if gi.1 >= 0 && gj.1 >= 0 {
+                        let kp = lo.emit_f64_const(2.0 * rho)
+                        lo = kp.0
+                        let t1 = lo.fresh_reg()
+                        lo = t1.0
+                        lo = lo.emit(ir_binop_typed(t1.1, si, BinaryOp::OpMul, sj, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t1.1))
+                        let t2 = lo.fresh_reg()
+                        lo = t2.0
+                        lo = lo.emit(ir_binop_typed(t2.1, t1.1, BinaryOp::OpMul, gi.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t2.1))
+                        let t3 = lo.fresh_reg()
+                        lo = t3.0
+                        lo = lo.emit(ir_binop_typed(t3.1, t2.1, BinaryOp::OpMul, gj.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t3.1))
+                        let t4 = lo.fresh_reg()
+                        lo = t4.0
+                        lo = lo.emit(ir_binop_typed(t4.1, t3.1, BinaryOp::OpMul, kp.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t4.1))
+                        let ap = lo.fresh_reg()
+                        lo = ap.0
+                        lo = lo.emit(ir_binop_typed(ap.1, acc, BinaryOp::OpAdd, t4.1, true, true))
+                        lo = lo.emit(ir_mark_float_reg(ap.1))
+                        acc = ap.1
+                    }
+                }
+                cj = cj + 1
+            }
+            ci = ci + 1
         }
         (lo, acc)
     }
@@ -9577,7 +9725,7 @@ impl Lowerer {
                         lo = lo.emit(ir_binop_typed(variance_reg, unc_reg, BinaryOp::OpMul, unc_reg, true, true))
                         lo = lo.emit(ir_mark_float_reg(variance_reg))
                         // Seed FO channel: ∂/∂this = 1 for a fresh measure.
-                        lo = lo.so_clear_expr_hess().fo_seed_from_variance(variance_reg)
+                        lo = lo.so_clear_expr_hess().fo_seed_from_variance(variance_reg, unc_reg)
                         return (lo, variance_reg)
                     }
                     // Inter-procedural FO via pure-fn transfer table.
@@ -9602,7 +9750,7 @@ impl Lowerer {
                 // Prefer bound multi-channel sens; else seed a channel from σ².
                 var lo = self.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo.fo_expr_has_sens() {
-                    lo = lo.so_clear_expr_hess().fo_seed_from_variance(local_v)
+                    lo = lo.so_clear_expr_hess().fo_seed_from_variance(local_v, 0 - 1)
                 }
                 return (lo, local_v)
             }
@@ -9612,7 +9760,7 @@ impl Lowerer {
             if kn_pair.1 >= 0 {
                 var lo2 = kn_pair.0.fo_load_local_sens((*e).name).so_load_local_hess((*e).name)
                 if !lo2.fo_expr_has_sens() {
-                    lo2 = lo2.so_clear_expr_hess().fo_seed_from_variance(kn_pair.1)
+                    lo2 = lo2.so_clear_expr_hess().fo_seed_from_variance(kn_pair.1, 0 - 1)
                 }
                 return (lo2, kn_pair.1)
             }
@@ -9630,7 +9778,7 @@ impl Lowerer {
                             let kn_pair = self.lower_knowledge_variance_for_ident((*base_expr).name)
                             if kn_pair.1 >= 0 {
                                 // Seed/reuse FO channel for this Knowledge seed.
-                                let lo = kn_pair.0.so_clear_expr_hess().fo_seed_from_variance(kn_pair.1)
+                                let lo = kn_pair.0.so_clear_expr_hess().fo_seed_from_variance(kn_pair.1, 0 - 1)
                                 return (lo, kn_pair.1)
                             }
                             return kn_pair
@@ -9649,7 +9797,7 @@ impl Lowerer {
                 let idx = lo_f.field_idx_from_name_simple((*e).name)
                 let fv = lo_f.lookup_variance_for_field(fbase.1, idx)
                 if fv >= 0 {
-                    lo_f = lo_f.so_clear_expr_hess().fo_seed_from_variance(fv)
+                    lo_f = lo_f.so_clear_expr_hess().fo_seed_from_variance(fv, 0 - 1)
                     return (lo_f, fv)
                 }
             }
@@ -14848,7 +14996,7 @@ impl Lowerer {
         lo11 = lo11.bind_variance_for_base_reg(dst_reg, variance_reg)
         lo11.pending_variance_reg = variance_reg
         // Seed FO channel so `let k = measure(...)` then k.value shares the same σ² channel.
-        lo11 = lo11.fo_seed_from_variance(variance_reg)
+        lo11 = lo11.fo_seed_from_variance(variance_reg, 0 - 1)
         var mk: i64 = 0
         while mk < 32 {
             lo11.fo_pending_sens[mk as usize] = lo11.fo_expr_sens[mk as usize]
@@ -14896,7 +15044,7 @@ impl Lowerer {
         var lo9 = lo8.emit(ir_field_set(dst_reg, 2, conf_reg, make_name("confidence")))
         lo9 = lo9.bind_variance_for_base_reg(dst_reg, variance_reg)
         lo9.pending_variance_reg = variance_reg
-        lo9 = lo9.fo_seed_from_variance(variance_reg)
+        lo9 = lo9.fo_seed_from_variance(variance_reg, 0 - 1)
         var mk: i64 = 0
         while mk < 32 {
             lo9.fo_pending_sens[mk as usize] = lo9.fo_expr_sens[mk as usize]
@@ -15033,6 +15181,44 @@ impl Lowerer {
     // FO/SO walk in lower_expr_variance_ref populates so_expr_hess, so_hess_idx
     // addresses it, and fo_sigma2 holds each channel's variance. Channels are
     // capped at 8 here because so_hess_idx is defined over 8x8.
+    // correlate(a, b, rho): record Cov between the channels a and b carry, and
+    // evaluate to rho so the call is usable as an expression.
+    //
+    // rho must be a float literal. A runtime rho would have to be threaded into
+    // both consumers as a register, and a correlation that is only known at
+    // runtime cannot be folded into the compile-time channel table at all --
+    // refusing is honest, silently reading 0.0 would not be.
+    fn lower_correlate_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match *args {
+            Some(l0) => {
+                let p0 = self.lower_expr_variance_ref(&(*l0).head)
+                var lo = p0.0
+                let ci = lo.fo_primary_channel()
+                match (*l0).tail {
+                    Some(l1) => {
+                        let p1 = lo.lower_expr_variance_ref(&(*l1).head)
+                        lo = p1.0
+                        let cj = lo.fo_primary_channel()
+                        var rho: f64 = 0.0
+                        match (*l1).tail {
+                            Some(l2) => {
+                                if (*l2).head.kind == ExprKind::ExprFloatLit {
+                                    rho = (*l2).head.float_val
+                                }
+                            }
+                            _ => {}
+                        }
+                        fo_cov_rho_set(ci, cj, rho)
+                        return lo.emit_f64_const(rho)
+                    }
+                    _ => {}
+                }
+                lo.emit_f64_const(0.0)
+            }
+            _ => self.emit_f64_const(0.0),
+        }
+    }
+
     fn lower_second_order_mean_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         match *args {
             Some(list) => {
@@ -15069,6 +15255,49 @@ impl Lowerer {
                         acc = nacc
                     }
                     k = k + 1
+                }
+                // Off-diagonal: sum_{i<j} H_ij * Cov_ij, with Cov = rho*sigma_i*sigma_j.
+                //
+                // No 1/2 here: the Taylor term is (1/2)*2*H_ij*Cov over the
+                // unordered pair, and the 2 cancels the half. Checked against
+                // the closed form for E2[(x+y)^2] with sigma_x = 0.1,
+                // sigma_y = 0.2: independent 9.05, rho = 1 gives 9.09.
+                var oi: i64 = 0
+                while oi < 8 {
+                    var oj: i64 = oi + 1
+                    while oj < 8 {
+                        let rho = fo_cov_rho_get(oi, oj)
+                        let hij = lo.so_expr_hess[lo.so_hess_idx(oi, oj) as usize]
+                        if rho != 0.0 && hij >= 0 {
+                            let gi = lo.fo_emit_sigma(oi)
+                            lo = gi.0
+                            let gj = lo.fo_emit_sigma(oj)
+                            lo = gj.0
+                            if gi.1 >= 0 && gj.1 >= 0 {
+                                let rp = lo.emit_f64_const(rho)
+                                lo = rp.0
+                                let u1 = lo.fresh_reg()
+                                lo = u1.0
+                                lo = lo.emit(ir_binop_typed(u1.1, hij, BinaryOp::OpMul, gi.1, true, true))
+                                lo = lo.emit(ir_mark_float_reg(u1.1))
+                                let u2 = lo.fresh_reg()
+                                lo = u2.0
+                                lo = lo.emit(ir_binop_typed(u2.1, u1.1, BinaryOp::OpMul, gj.1, true, true))
+                                lo = lo.emit(ir_mark_float_reg(u2.1))
+                                let u3 = lo.fresh_reg()
+                                lo = u3.0
+                                lo = lo.emit(ir_binop_typed(u3.1, u2.1, BinaryOp::OpMul, rp.1, true, true))
+                                lo = lo.emit(ir_mark_float_reg(u3.1))
+                                let u4 = lo.fresh_reg()
+                                lo = u4.0
+                                lo = lo.emit(ir_binop_typed(u4.1, acc, BinaryOp::OpAdd, u3.1, true, true))
+                                lo = lo.emit(ir_mark_float_reg(u4.1))
+                                acc = u4.1
+                            }
+                        }
+                        oj = oj + 1
+                    }
+                    oi = oi + 1
                 }
                 // First-order mean: the expression evaluated at the seed means.
                 let vp = lo.lower_expr_ref(&(*list).head)
@@ -15631,6 +15860,9 @@ impl Lowerer {
         if self.name_is_hessian_of(callee_name) {
             return self.lower_hessian_of_call_ref(&e.args)
         }
+        if self.name_is_correlate(callee_name) {
+            return self.lower_correlate_call_ref(&e.args)
+        }
         if self.name_is_second_order_mean(callee_name) {
             return self.lower_second_order_mean_call_ref(&e.args)
         }
@@ -16172,7 +16404,7 @@ impl Lowerer {
                         lo3 = vpair.0
                         if vpair.1 >= 0 {
                             lo3.pending_variance_reg = vpair.1
-                            lo3 = lo3.fo_seed_from_variance(vpair.1)
+                            lo3 = lo3.fo_seed_from_variance(vpair.1, 0 - 1)
                             var pk: i64 = 0
                             while pk < 32 {
                                 lo3.fo_pending_sens[pk as usize] = lo3.fo_expr_sens[pk as usize]
