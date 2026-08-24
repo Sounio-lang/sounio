@@ -96,6 +96,13 @@ lean_lib «SounioSedenionMeasurement» where
 @[default_target]
 lean_lib «SounioCDCocycle» where
 
+-- CD-tower ZD fibers: the fiber-antisymmetry development.  Mathlib-free, no `sorry`, no
+-- `native_decide`; imports only SounioCDCocycle.  Carries the deviation law
+-- (`deviation_law_all`) and both rows of the level transfer (`s3_level_recursion`,
+-- `cp2_level_recursion`).
+@[default_target]
+lean_lib «SounioZDFiberAntisym» where
+
 @[default_target]
 lean_lib «SounioCDTowerSeam» where
 
