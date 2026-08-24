@@ -7859,32 +7859,6 @@ fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeE
 }
 
 // hessian_of(x, j, k) -> f64. THREE arguments.
-fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let first_arg = expr_list_head(e.args)
-    match first_arg {
-        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        Some(_) => {}
-    }
-    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-    ty_f64()
-}
-
-// sensitivity_of(x, k) -> f64. TWO arguments, so it cannot reuse
-// checker_check_variance_metric_expr_inplace, which reports E010 on a second one.
-fn checker_check_sensitivity_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
-    let first_arg = expr_list_head(e.args)
-    let second_arg = expr_list_second(e.args)
-    match first_arg {
-        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        Some(_) => {}
-    }
-    match second_arg {
-        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        Some(_) => {}
-    }
-    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
-    ty_f64()
-}
 
 // correlate(a, b, rho) -> f64. THREE arguments, all required. Neither the
 // variance form (one) nor the sensitivity form (two) will do: each reports E010
@@ -7910,7 +7884,6 @@ fn checker_check_correlate_metric_expr_inplace(c: *mut Checker, e: Expr) -> Type
     checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
     ty_f64()
 }
-
 // slice_len(s: &[T]) -> i64. Inplace transcription of check_slice_len_call_expr —
 // the by-value bridge SRET-smashed on populated enum tables (slice_fat_pointers crash).
 fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -7929,6 +7902,106 @@ fn checker_check_assert_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
         checker_report_mismatch_inplace(c, e.span, 174, ty_bool(), cond_ty)
     }
     ty_unit()
+}
+
+// A compile-time channel index, or (false, 0) when it is not one.
+//
+// Two forms, because this dialect writes a negative literal as `0 - 1`: an
+// ExprIntLit, and an ExprBinary OpSub whose left is the literal 0. Reading only
+// the first let hessian_of(x*x, 0 - 1, 0) through -- the refusal gate caught it
+// on the very run that was meant to prove the gate green, which is the whole
+// point of writing the expected numbers down first.
+fn epistemic_index_literal(opt: Option<Box<Expr> >) -> (bool, i64) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => (false, 0)
+        Some(ex) => {
+            if (*ex).kind == ExprKind::ExprIntLit {
+                return (true, (*ex).int_val)
+            }
+            if (*ex).kind == ExprKind::ExprBinary && (*ex).bin_op == BinaryOp::OpSub {
+                let l = expr_opt_get((*ex).left)
+                let r = expr_opt_get((*ex).right)
+                if (*l).kind == ExprKind::ExprIntLit && (*r).kind == ExprKind::ExprIntLit {
+                    if (*l).int_val == 0 {
+                        return (true, 0 - (*r).int_val)
+                    }
+                }
+            }
+            (false, 0)
+        }
+    }
+}
+
+fn checker_check_hessian_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // hessian_of(expr, j, k) -> f64. THREE arguments, and j,k inside 0..8.
+    //
+    // It used to require only the first. hessian_of(x*x) then type-checked,
+    // lowered through `if j >= 0 && j < 8 && k >= 0 && k < 8` with j = k = -1,
+    // missed, and returned 0.0 -- while the true H_00 is 2.0. Out-of-range
+    // literals did the same. In this algebra a zero Hessian is the claim "no
+    // second-order dependence", which is the strongest thing the system can
+    // say, handed back silently in the case where it knows least.
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    let third_arg = expr_list_third(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(idx) => {
+            let lit_idx_7927 = epistemic_index_literal(Some(idx))
+            if lit_idx_7927.0 {
+                if lit_idx_7927.1 < 0 || lit_idx_7927.1 >= 8 {
+                    checker_report_error_at_inplace(c, e.span, 242, lit_idx_7927.1, 8, 0)
+                }
+            }
+        }
+    }
+    match third_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(idx2) => {
+            let lit_idx2_7937 = epistemic_index_literal(Some(idx2))
+            if lit_idx2_7937.0 {
+                if lit_idx2_7937.1 < 0 || lit_idx2_7937.1 >= 8 {
+                    checker_report_error_at_inplace(c, e.span, 242, lit_idx2_7937.1, 8, 0)
+                }
+            }
+        }
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
+}
+
+// sensitivity_of(x, k) -> f64. TWO arguments, so it cannot reuse
+// checker_check_variance_metric_expr_inplace, which reports E010 on a second one.
+fn checker_check_sensitivity_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    // sensitivity_of(x, k) -> f64, k inside 0..32.
+    //
+    // Same reason as hessian_of above: sensitivity_of(x, 99) lowered through
+    // `if chan >= 0 && chan < 32`, missed, and returned 0.0 -- "x does not
+    // depend on channel 99", stated with confidence about a channel that
+    // cannot exist.
+    let first_arg = expr_list_head(e.args)
+    let second_arg = expr_list_second(e.args)
+    match first_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(_) => {}
+    }
+    match second_arg {
+        None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+        Some(idx) => {
+            let lit_idx_7966 = epistemic_index_literal(Some(idx))
+            if lit_idx_7966.0 {
+                if lit_idx_7966.1 < 0 || lit_idx_7966.1 >= 32 {
+                    checker_report_error_at_inplace(c, e.span, 242, lit_idx_7966.1, 32, 0)
+                }
+            }
+        }
+    }
+    checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+    ty_f64()
 }
 
 fn checker_check_print_i64_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
@@ -13834,6 +13907,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
     else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
+    else if code == 242 { print("epistemic channel index is out of range") }
     else { print("unknown error") }
 }
 

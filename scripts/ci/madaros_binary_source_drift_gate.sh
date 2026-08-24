@@ -97,6 +97,19 @@ check_row "on is a contextual identifier" \
           tests/run-pass/keyword_on_is_identifier_capable.sio \
           accept
 
+# Epistemic index refusal. The checker bounds hessian_of's j,k to the 8 channels
+# so_hess_idx is defined over and sensitivity_of's k to 32, and reports E242
+# past them. Before that, hessian_of(x*x, 99, 0) answered 0.000000 -- and in
+# this algebra a zero Hessian is the claim "no second-order dependence", not a
+# neutral value. The shipped binary predates it, which is why
+# epistemic_refusal_coverage_gate.sh must defer to this row rather than fail
+# the source that already fixed it.
+check_row "epistemic channel index is refused" \
+          'epistemic channel index is out of range' \
+          self-hosted/check/check.sio \
+          tests/compile-fail/epistemic_index_must_refuse.sio \
+          refuse
+
 echo
 echo "  capabilities probed: $total   behind: $behind   skipped: $skipped"
 
