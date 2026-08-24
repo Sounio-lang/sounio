@@ -32,6 +32,7 @@ use bignum::bigint::*
 use net::socket::*
 use x509::cert::*
 use x509::oid::*
+use x509::sct::*
 
 fn build_bigint_128(values: [u16; 128]) -> BigInt {
     var result = bigint_zero()
@@ -400,6 +401,42 @@ fn case_e_oid_eq_oversized_len() -> i64 with IO {
     0
 }
 
+// Case (f): sct_list_decode must reject an SCT entry whose declared
+// ext_len claims more extension bytes than the entry's own sct_len
+// actually has room for, rather than reading past the entry (and,
+// unchecked, potentially past the whole buffer) to find hash_alg/sig_alg/
+// sig_len. Found during the final whole-plan review (2026-08-24) --
+// empirically confirmed (before the fix) to read tens of bytes past a
+// tightly-sized allocation and still report X509_OK. Fixture: total_len=49,
+// one SCT entry with sct_len=47 (the minimum valid structure size) but
+// ext_len=100 -- 43 (fixed prefix) + 100 (claimed extensions) + 4 (hash_alg/
+// sig_alg/sig_len) = 147, far exceeding this entry's own declared 47 bytes.
+fn case_f_sct_ext_len_overflow() -> i64 with IO {
+    let buf = rawbuf_new(60)
+    // Ascending-order rawbuf_set writes throughout (Finding 20's write-side
+    // 7-byte-forward clobber): every later write's clobber lands only on
+    // bytes this fixture wants zero anyway.
+    rawbuf_set(&buf, 0, 0)    // total_len hi
+    rawbuf_set(&buf, 1, 49)   // total_len lo (2 [sct_len field] + 47 [sct_bytes])
+    rawbuf_set(&buf, 2, 0)    // sct_len hi
+    rawbuf_set(&buf, 3, 47)   // sct_len lo
+    // sct_start = 4: version(1)=0 [4], log_id(32) zeros [5..37),
+    // timestamp(8) zeros [37..45), ext_len(2) at [45..47).
+    rawbuf_set(&buf, 45, 0)
+    rawbuf_set(&buf, 46, 100)
+    // Remaining bytes (hash_alg/sig_alg/sig_len, which a correct
+    // implementation must never reach for this entry) stay zero-init.
+
+    let (entries, count, status) = sct_list_decode(&buf, 0, 51)
+    if status != X509_ERR_MALFORMED {
+        return 601
+    }
+    if count != 0 {
+        return 602
+    }
+    0
+}
+
 fn main() -> i64 with IO {
     let a = case_a_sig_alg_mismatch()
     if a != 0 {
@@ -431,6 +468,12 @@ fn main() -> i64 with IO {
         return 1
     }
 
-    println("x509_adversarial: sig-alg mismatch / tampered-TBS / too-many-extensions / RDN-value-too-long / oid_eq-oversized-len all correctly rejected")
+    let f = case_f_sct_ext_len_overflow()
+    if f != 0 {
+        print_int(f)
+        return 1
+    }
+
+    println("x509_adversarial: sig-alg mismatch / tampered-TBS / too-many-extensions / RDN-value-too-long / oid_eq-oversized-len / sct-ext_len-overflow all correctly rejected")
     return 0
 }

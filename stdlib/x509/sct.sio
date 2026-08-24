@@ -76,6 +76,22 @@ pub fn sct_list_decode(buf: &RawBuf, start: i64, len: i64) -> ([SctEntry; 8], i3
         }
         let timestamp_ms = read_u64(buf, sct_start + 33)
         let ext_len = read_u16(buf, sct_start + 41)
+        // BUG FOUND during the final whole-plan review (2026-08-24), of
+        // exactly Finding 27's class: ext_len is a 16-bit, fully
+        // attacker-controlled field (up to 65535), and nothing previously
+        // checked it against this entry's own declared sct_len before
+        // using it to compute after_ext and read hash_alg/sig_alg/sig_len
+        // there -- reachable well past this entry's own bytes, and past
+        // the whole entry_buf allocation, for a crafted SCT extension.
+        // Empirically confirmed with a probe: a crafted entry with
+        // ext_len=100 in a 63-byte buffer read at absolute offset 147,
+        // ~92 bytes past the allocation, and still returned X509_OK. This
+        // check requires room for the 4 bytes (hash_alg, sig_alg,
+        // sig_len's 2 bytes) that get read immediately after the
+        // extensions, within this entry's own sct_len.
+        if 43 + ext_len + 4 > sct_len {
+            return (out, count, X509_ERR_MALFORMED)
+        }
         let after_ext = sct_start + 43 + ext_len
         let hash_alg = read_u8(buf, after_ext)
         let sig_alg = read_u8(buf, after_ext + 1)
@@ -83,6 +99,13 @@ pub fn sct_list_decode(buf: &RawBuf, start: i64, len: i64) -> ([SctEntry; 8], i3
         var signature: [u8; 128] = [0; 128]
         if sig_len > 128 {
             return (out, count, X509_ERR_VALUE_TOO_LONG)
+        }
+        // Same class of check for the signature bytes themselves -- the
+        // sig_len > 128 check above only bounds the destination array,
+        // not whether this entry's own sct_len actually has sig_len more
+        // bytes available to read from.
+        if 43 + ext_len + 4 + sig_len > sct_len {
+            return (out, count, X509_ERR_MALFORMED)
         }
         var si: i64 = 0
         while si < sig_len {

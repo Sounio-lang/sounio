@@ -137,7 +137,7 @@ pub struct Certificate {
     tbs_sig_alg_oid: [u8; 20],     // must match outer_sig_alg_oid -- a mismatch is a malformed/tampered certificate
     tbs_sig_alg_oid_len: i32,
     issuer: X509Name,
-    not_before_unix: i64,          // validity start, Unix timestamp (decoded from UTCTime/GeneralizedTime)
+    not_before_unix: i64,          // validity start, Unix timestamp (decoded from UTCTime only as shipped -- GeneralizedTime, needed for dates 2050+, is a documented gap; see stdlib/x509/cert.sio's parse_utc_time_to_unix)
     not_after_unix: i64,           // validity end, Unix timestamp
     subject: X509Name,
     modulus: BigInt,                // subjectPublicKeyInfo's RSA modulus

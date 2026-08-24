@@ -254,6 +254,23 @@ pub fn certificate_zero() -> Certificate {
 // (20xx), but the rule is implemented per the standard regardless. Uses
 // only additions and small-constant multiplications on i64 day/second
 // counts -- no operation here approaches bit 63.
+//
+// KNOWN LIMITATION, documented rather than fixed here (found during the
+// final whole-plan review, 2026-08-24; the design spec's own field comment
+// for Certificate.not_before_unix/not_after_unix says "decoded from
+// UTCTime/GeneralizedTime", which overstates what's shipped): this
+// function only accepts UTCTime's 13-byte YYMMDDHHMMSSZ form. RFC 5280
+// requires GeneralizedTime (15-byte YYYYMMDDHHMMSSZ, four-digit year) for
+// any certificate whose notBefore/notAfter falls in 2050 or later --
+// calling this function with GeneralizedTime bytes falls through the
+// `len != 13` check below and returns the sentinel -1, not a real
+// timestamp. Implementing GeneralizedTime support (four-digit year
+// parsing, a different fixed length) is a real, independent feature, not
+// a one-line fix -- out of scope for this review-response fix round.
+// x509_parse_certificate does not currently detect or report this case
+// specially; a caller relying on not_before_unix/not_after_unix for a
+// certificate with a GeneralizedTime-encoded validity period will see -1
+// and should treat that as "date not decoded", not "date is invalid".
 fn parse_utc_time_to_unix(buf: &RawBuf, start: i64, len: i64) -> i64 with IO {
     // "YYMMDDHHMMSSZ" is exactly 13 bytes.
     if len != 13 {
@@ -281,14 +298,29 @@ fn unix_timestamp_from_ymdhms(year: i64, month: i64, day: i64, hour: i64, minute
     let era = if y >= 0 { y } else { y - 399 }
     let era_div = era / 400
     let yoe = y - era_div * 400
+    // (month+9)%12 computed via the branch below since this project avoids
+    // relying on '%' with any operand shape not already proven safe. `mp`
+    // starts at month+9; if that's already < 12 (month is 1 or 2), no
+    // adjustment is needed -- the value IS its own mod-12 residue. Only
+    // when it's >= 12 (month 3-12) does it need one subtraction of 12.
+    //
+    // BUG FOUND during the final whole-plan review (2026-08-24), confirmed
+    // by tracing the arithmetic and by measuring real dates against `date
+    // -u`: the previous `else` branch wrongly recomputed `mp = month - 3`
+    // for month 1/2 (giving -2/-1) instead of leaving `mp` at its already-
+    // correct month+9 (10/11). This mis-decoded every January/February
+    // UTCTime validity date by very close to a full year -- a `notAfter`
+    // in Jan/Feb would read as expired a year early (fail-closed), and a
+    // `notBefore` in Jan/Feb would read as already valid a year early
+    // (fail-open for a not-yet-valid certificate). It survived every prior
+    // task review because the one fixture using a January date
+    // (tests/run-pass/x509_parse_tbs_core.sio) only ever asserted
+    // not_before/not_after are nonzero and correctly ordered -- both
+    // invariant under a uniform one-year shift of both dates.
     var mp: i64 = month + 9
     if mp >= 12 {
         mp = mp - 12
-    } else {
-        mp = month - 3
     }
-    // (month+9)%12 computed via the branch above since this project avoids
-    // relying on '%' with any operand shape not already proven safe.
     let doy = (153 * mp + 2) / 5 + day - 1
     let yoe_leap_adj = yoe / 4 - yoe / 100
     let doe = yoe * 365 + yoe_leap_adj + doy
@@ -1143,6 +1175,11 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
     // STRING handling in Task 5.
     let sig_bytes_start = sig_tag.content_start + 1
     let sig_bytes_len = sig_tag.content_len - 1
+    // An empty BIT STRING (content_len == 0, missing even the "unused
+    // bits" byte) would otherwise silently store outer_signature_len = -1
+    // -- a malformed certificate, not a valid zero-length signature.
+    // Found during the final whole-plan review (2026-08-24).
+    if sig_bytes_len < 0 { return (certificate_zero(), X509_ERR_MALFORMED) }
     if sig_bytes_len > X509_MAX_SIGNATURE_LEN { return (certificate_zero(), X509_ERR_VALUE_TOO_LONG) }
     var sig_buf: [u8; 512] = [0; 512]
     var si: i64 = 0
