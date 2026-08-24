@@ -10773,6 +10773,27 @@ impl Lowerer {
                         return true
                     }
                 }
+                // The offset half of this lives in field_idx_for_base_ref, and both
+                // used to stop at ExprIdent. Fixing only the offset gives a value
+                // that PRINTS correctly and computes as an integer: with a user
+                // struct spelling `value`, print_f64(ks[0].value) showed 1.000000
+                // while ks[0].value - 1.0 evaluated to 4607182418800017408 -- the
+                // bit pattern of the double 1.0, read as an int because the float
+                // marking never arrived. Same family as the println scalar-kind
+                // loss: the value survives, the kind does not.
+                if (*base_expr).kind == ExprKind::ExprIndex {
+                    match (*base_expr).left {
+                        Some(arr_expr) => {
+                            if (*arr_expr).kind == ExprKind::ExprIdent {
+                                let elem_type = self.lookup_local_struct_type((*arr_expr).name)
+                                if self.field_is_float_for_struct(elem_type, field_name) {
+                                    return true
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 false
             }
             _ => false,
@@ -10786,6 +10807,32 @@ impl Lowerer {
                     let type_name = self.lookup_local_struct_type((*base_expr).name)
                     if type_name.len > 0 {
                         return self.field_idx_from_name(type_name, field_name)
+                    }
+                }
+                // `arr[i].field`: the receiver is an index, not an ident, so this
+                // used to fall to the global name scan -- and the scan returns the
+                // FIRST layout carrying that name, whichever it is.
+                //
+                // #2126 fixed one direction of that (the synthetic Knowledge layout
+                // shadowing user structs) by deferring Knowledge. It reversed the
+                // victim rather than removing the ambiguity: with a user struct
+                // holding `value` at slot 1, `ks[i].value` on a [Knowledge<f64>; N]
+                // returned 0.010000 -- the VARIANCE -- where 1.000000 belongs. Both
+                // directions are "first name wins".
+                //
+                // The array's element type is on the local, so ask it. Identity is a
+                // property of (receiver layout, field), not of the lexeme.
+                if (*base_expr).kind == ExprKind::ExprIndex {
+                    match (*base_expr).left {
+                        Some(arr_expr) => {
+                            if (*arr_expr).kind == ExprKind::ExprIdent {
+                                let elem_type = self.lookup_local_struct_type((*arr_expr).name)
+                                if elem_type.len > 0 {
+                                    return self.field_idx_from_name(elem_type, field_name)
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 self.field_idx_from_name_simple(field_name)
@@ -13403,6 +13450,38 @@ impl Lowerer {
             Some(ann_ty) => {
                 if (*ann_ty).kind == TypeExprKind::TypeKnowledge {
                     lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                }
+            }
+            _ => {}
+        }
+        // An ARRAY local records its ELEMENT type, so `arr[i].field` can be
+        // resolved by (layout, field) instead of by scanning every layout for
+        // the name and taking the first hit.
+        //
+        // Without this, member resolution depends on declaration order: with
+        // `struct A { value }` before `struct B { pad, value }`, bs[i].value read
+        // A.value@0 and returned B's pad; swapping the two declarations moved the
+        // error onto A and made as_[1].value read slot 1 of a one-field struct.
+        // #2126 fixed the Knowledge half of this by deferring the synthetic layout,
+        // which reversed the victim -- ks[i].value on [Knowledge<f64>; N] then
+        // returned the variance. Precedence in either direction is still first
+        // name wins; the element type is the missing identity.
+        match s.ty {
+            Some(arr_ty) => {
+                if (*arr_ty).kind == TypeExprKind::TypeArray {
+                    match (*arr_ty).inner {
+                        Some(el) => {
+                            if (*el).kind == TypeExprKind::TypeKnowledge {
+                                lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                            } else if (*el).kind == TypeExprKind::TypeNamed {
+                                let el_name = ir_path_first_name((*el).path)
+                                if el_name.len > 0 {
+                                    lo = lo.bind_local_struct_type(s.name, el_name)
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
             _ => {}
