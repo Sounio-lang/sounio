@@ -78,7 +78,13 @@ const hook = spawnSync(
   },
 );
 fs.appendFileSync(log, `HOOK_RC=${hook.status}\n${hook.stdout}${hook.stderr}`);
-process.stdin.on("data", (chunk) => fs.appendFileSync(log, chunk));
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.on("data", (chunk) => {
+  fs.appendFileSync(
+    log,
+    `PTY_CHUNK hex=${chunk.toString("hex")} text=${JSON.stringify(chunk.toString())}\n`,
+  );
+});
 process.stdin.resume();
 setInterval(() => {}, 1000);
 JS
@@ -158,6 +164,8 @@ message_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
 grep -q "^WAKE_DELIVERED message_id=$message_id .*transport=agentd " <<< "$output" || \
   fail 'registered agentd endpoint did not receive the wake'
 wait_for_text "$RECEIVER_LOG" "$message_id" || fail 'agentd wake did not reach the harness PTY'
+wait_for_text "$RECEIVER_LOG" '^PTY_CHUNK hex=0d text=' || \
+  fail 'agentd wake did not submit as a distinct TUI input event'
 if grep -q "$secret" "$RECEIVER_LOG"; then
   fail 'agentd wake injected the raw message body'
 fi
@@ -245,4 +253,4 @@ coord release --agent sender --lane origin --reason 'agentd selftest complete' >
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_crash_selftest.sh"
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_model_selftest.sh"
 
-echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed fleet_crash_lab=PASS raw_body=absent'
+echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd tui_submit=distinct-event cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed fleet_crash_lab=PASS raw_body=absent'

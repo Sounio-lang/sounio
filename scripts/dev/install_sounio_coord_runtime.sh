@@ -226,6 +226,7 @@ else
     printf 'capability=crash-recovery-v1\n'
     printf 'capability=agentd-transport-v1\n'
     printf 'capability=agentd-argv-attestation-v1\n'
+    printf 'capability=agentd-tui-submit-v1\n'
     printf 'capability=fleet-launcher-v1\n'
     printf 'capability=fleet-proven-exit-v1\n'
     printf 'capability=fleet-home-isolation-v1\n'
