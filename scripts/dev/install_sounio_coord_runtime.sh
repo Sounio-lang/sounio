@@ -79,6 +79,13 @@ activate_runtime() {
         -x /usr/bin/openssl ]] || \
       die "installed runtime declares observation authority without signed Loom, independent measurement, native Sounio admission, and OpenSSL: $runtime_id"
   fi
+  if grep -q '^capability=loom-journal-authority-quorum-v1$' "$manifest"; then
+    grep -q '^capability=loom-observation-authority-v1$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-continuity-runtime" && \
+        -x /usr/bin/openssl ]] || \
+      die "installed runtime declares journal quorum without observation authority, native Sounio admission, and OpenSSL: $runtime_id"
+  fi
   if grep -q '^capability=loom-cross-node-replay-v1$' "$manifest"; then
     grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest" && \
       grep -q '^capability=loom-separate-pod-inbox-replay-v1$' "$manifest" || \
@@ -268,6 +275,18 @@ loom_authority_probe="$({
 [[ "$loom_authority_probe" == \
   'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v3 authority=three-principals+full-sha256-agreement' ]] || \
   die "Loom native Sounio observation-authority adapter failed its install probe"
+loom_quorum_probe="$({
+  printf '9006 1002 1101 1201 1301 1302 1303 2 2 1401 1501 1 2101 2201 2301 2401 2101 2201 2301 2401'
+  for start in 1 11 21 31 1 11 21 31; do
+    for offset in 0 1 2 3 4 5 6 7; do
+      printf ' %d' "$((start + offset))"
+    done
+  done
+  printf '\n'
+} | "$loom_continuity_binary")"
+[[ "$loom_quorum_probe" == \
+  'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v4 authority=five-principals+2-of-3-journal-quorum+full-sha256-agreement' ]] || \
+  die "Loom native Sounio journal-quorum adapter failed its install probe"
 
 bundle_sha="$(
   sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
@@ -335,6 +354,7 @@ else
     printf 'capability=loom-principal-independence-v1\n'
     printf 'capability=loom-independent-measurement-v1\n'
     printf 'capability=loom-observation-authority-v1\n'
+    printf 'capability=loom-journal-authority-quorum-v1\n'
     printf 'capability=loom-cross-node-replay-v1\n'
     printf 'capability=loom-cursor-replay-v1\n'
     printf 'capability=loom-exclusive-input-lease-v1\n'

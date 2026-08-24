@@ -137,6 +137,18 @@ journal state and its restart boundary is outside this local protocol. Set
 `SOUNIO_LOOM_JOURNAL_AUTHORITY_REVOKED_EPOCHS` to a comma-separated denylist
 when verifying retired or compromised epochs.
 
+Set `SOUNIO_LOOM_JOURNAL_AUTHORITY_QUORUM=2` to replace that legacy single
+authority with a fixed two-of-three certificate. Configure each member with
+`SOUNIO_LOOM_JOURNAL_AUTHORITY_{1,2,3}_SOCKET` and
+`SOUNIO_LOOM_JOURNAL_AUTHORITY_{1,2,3}_VERIFY_KEY`. The three canonical SPKI-DER
+principal identities must be pairwise distinct. Every sixteen-field journal
+record retains all three identities and either an Ed25519 signature or `-` for
+each member; append and replay require at least two valid signatures over the
+same context, epoch, sequence, previous head, and event hash. One unavailable
+daemon therefore does not stop progress. An authority that misses an event
+cannot rejoin automatically because its monotonic state is then behind; audited
+state transfer and member reconfiguration are separate future protocols.
+
 Receipt v3 signs the raw generation, fingerprint, semantic checkpoint, and
 Guardian checkpoint together with their domain-separated SHA-256 digests. The
 observer verifies that both signed journal heads occur in the fully verified
@@ -146,6 +158,18 @@ eight canonical 32-bit limbs and admits only exact equality plus pairwise
 disjoint signer, observer, and journal principals. Older receipt v2,
 measurement v1, and pre-spawn `9003`/`9004` modes remain available when the new
 mode is not requested; they make no observation-authority claim.
+
+Quorum measurement uses attestation v3 and pre-spawn frame `9006`. The observer
+binds the configured principal set, required quorum, and minimum valid signature
+count observed across both retained journals. The checkpoint also includes the
+SHA-256 digest of each literal journal. Because every 16-field journal record
+contains the ordered principal identities and its signature-or-absence slots,
+those journal digests commit every per-event quorum certificate and signer
+subset, not merely the aggregate minimum. Native Sounio constructs private
+`VerifiedJournalAuthorityQuorum` and
+`VerifiedObservationAuthorityQuorumAdmission` terms only when the minimum is at
+least two and signer, observer, and all three journal principals are pairwise
+disjoint. The single-authority `9005` proof remains a distinct legacy type.
 
 ## Evidence Boundary
 
@@ -211,5 +235,22 @@ PVC. It is not state replication, simultaneous multi-node execution, or a
 partition/consensus witness. Deployed Cockpit, canonical-memory, Warp, Madaros
 parity, signer custody/rotation, and exactly-once external effects remain
 separate gates; see the 2026-08-24 receipts under `tools/loom/evidence/`.
+
+Journal-quorum mode narrows one part of that custody boundary. A certificate
+cannot be produced or replay-verified by only one configured journal key, and
+the retained gate continues after one daemon is killed. The unchanged
+single-share frame is refused by native Sounio; replacing only
+`journal_quorum_is_satisfied` admits it. Reusing one key in two member slots is
+refused before certificate interpretation, external quorum construction refuses
+with `E176`, and substituting a legacy `VerifiedJournalAuthority` where a quorum
+is required refuses with `E009`. This is a cryptographic two-of-three
+authorization claim, not threshold-signature cryptography, Byzantine consensus,
+semantic review by the signers, or proof that the three keys are held by
+different organizations, machines, users, or hardware devices. A workload can
+still ask two structurally honest daemons to sign a new but semantically false
+event; quorum protects the chain from one-key custody failure, not event truth.
+The retained gate independently recomputes the authority checkpoint from the
+literal certificate-bearing journals and descriptor, so deleting or changing a
+signer slot changes the committed history before native admission.
 See `docs/internal/concepts/loom-multiplexer.contract` for the full semantic and
 falsification contract.

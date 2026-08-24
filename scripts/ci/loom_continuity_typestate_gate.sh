@@ -81,7 +81,7 @@ SOUNIO_SOUC_ENGINE="$ENGINE" "$SOUC" run "$combined" >"$runtime_log" 2>&1 || {
   fail 'single-module Loom continuity witness did not run'
 }
 rg -Fxq \
-  'loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 signed=1 independent_pod=1 independent_clean=1 pre_spawn=1 measurement=1 measurement_roles=distinct measurement_disagreement=refused observation_authority=1 observation_authority_roles=distinct full_digest_disagreement=refused journal_principal_collapse=refused predecessor=refused signed_predecessor=refused collapsed_principal=refused pre_spawn_collapsed=refused missing_observation=refused count=refused kind=refused authority=refused' \
+  'loom-continuity-typestate: PASS host_seal=1 linear=1 initial=1 clean=1 pod=1 signed=1 independent_pod=1 independent_clean=1 pre_spawn=1 measurement=1 measurement_roles=distinct measurement_disagreement=refused observation_authority=1 observation_authority_roles=distinct full_digest_disagreement=refused journal_principal_collapse=refused journal_quorum=2-of-3 single_share=refused quorum_principal_collapse=refused predecessor=refused signed_predecessor=refused collapsed_principal=refused pre_spawn_collapsed=refused missing_observation=refused count=refused kind=refused authority=refused' \
   "$runtime_log" || {
     cat "$runtime_log" >&2
     fail 'Loom continuity witness omitted its exact receipt'
@@ -109,6 +109,10 @@ expect_rejection private-measurement-agreement \
   "$PRIVACY/loom_continuity_private_measurement_agreement_main.sio" E176
 expect_rejection private-full-digest-agreement \
   "$PRIVACY/loom_continuity_private_full_digest_agreement_main.sio" E176
+expect_rejection private-journal-quorum \
+  "$PRIVACY/loom_continuity_private_journal_quorum_main.sio" E176
+expect_composed_rejection single-journal-authority-as-quorum \
+  "$PRIVACY/loom_continuity_single_journal_authority_as_quorum_main.sio" E009
 expect_composed_rejection linear-reuse \
   "$PRIVACY/loom_continuity_linear_reuse_main.sio" E039
 
@@ -342,4 +346,4 @@ if [[ "$full_digest_sabotage_rc" -eq 0 ]]; then
   fail 'forcing full-digest agreement did not expose the aliased digest witness'
 fi
 
-echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 signed-type-separation=E009 signed-proof-private=E176 role-collapse=E009 measurement-role-collapse=E009 full-digest-role-collapse=E009 disjoint-proof-private=E176 measurement-agreement-private=E176 full-digest-agreement-private=E176 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1 sabotage-principal-disjointness=1 sabotage-measurement-agreement=1 sabotage-full-digest-agreement=1"
+echo "loom-continuity-typestate: PASS positive_engine=$ENGINE negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009 signed-type-separation=E009 signed-proof-private=E176 role-collapse=E009 measurement-role-collapse=E009 full-digest-role-collapse=E009 journal-quorum-role-collapse=E009 disjoint-proof-private=E176 measurement-agreement-private=E176 full-digest-agreement-private=E176 journal-quorum-private=E176 linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1 sabotage-signed-predecessor=1 sabotage-principal-disjointness=1 sabotage-measurement-agreement=1 sabotage-full-digest-agreement=1"
