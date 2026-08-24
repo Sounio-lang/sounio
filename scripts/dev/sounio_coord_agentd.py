@@ -19,6 +19,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 import uuid
@@ -28,11 +29,12 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.24.2"
+RUNTIME_VERSION = "2026.08.24.3"
 MAX_CONTROL_BYTES = 65536
 MAX_PROMPT_BYTES = 8192
 RING_BYTES = 65536
 TUI_SUBMIT_DELAY_SECONDS = 0.075
+COORD_REFRESH_SECONDS = 300
 SAFE_TOKEN = re.compile(r"[^A-Za-z0-9._-]+")
 ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -158,6 +160,23 @@ def logical_command_name(command: list[str]) -> str:
     return Path(command[index]).name
 
 
+def harness_for_agent(agent: str) -> str | None:
+    for harness in ("claude", "codex", "grok", "cursor", "kimi"):
+        if agent == harness or agent.startswith(f"{harness}-"):
+            return harness
+    return None
+
+
+def coordination_runtime() -> Path | None:
+    override = os.environ.get("SOUNIO_COORD_RUNTIME_PATH")
+    candidate = (
+        Path(override).expanduser()
+        if override
+        else Path(__file__).resolve().parent / "sounio-coord-runtime"
+    )
+    return candidate.resolve() if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+
 def token_from(path: Path) -> str:
     try:
         token = path.read_text().strip()
@@ -278,6 +297,8 @@ class Supervisor:
         self.listener: socket.socket | None = None
         self.lock_handle: Any = None
         self.descriptor: dict[str, Any] = {}
+        self.coord_thread: threading.Thread | None = None
+        self.next_coord_refresh = 0.0
 
     def setup(self) -> None:
         self.paths["dir"].mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -342,6 +363,113 @@ class Supervisor:
         value["ok"] = True
         value["attached_clients"] = 1 if self.attached_fd is not None else 0
         return value
+
+    def run_coord(self, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        runtime = coordination_runtime()
+        if runtime is None:
+            raise AgentdError("coordination runtime is unavailable")
+        return subprocess.run(
+            [str(runtime), *arguments],
+            cwd=self.cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+        )
+
+    def refresh_coordination(self) -> None:
+        harness = harness_for_agent(self.args.agent)
+        if harness is None:
+            return
+        ttl = os.environ.get("SOUNIO_AGENTD_COORD_TTL_SECONDS", "1800")
+        try:
+            heartbeat = self.run_coord(
+                ["heartbeat", "--agent", self.args.agent, "--lane", self.args.lane]
+            )
+            if heartbeat.returncode != 0:
+                scoped = self.run_coord(
+                    [
+                        "scope",
+                        "--agent",
+                        self.args.agent,
+                        "--lane",
+                        self.args.lane,
+                        "--intent",
+                        f"agentd-supervised {harness} session",
+                    ]
+                )
+                if scoped.returncode != 0:
+                    raise AgentdError((scoped.stderr or scoped.stdout).strip())
+            presence = self.run_coord(
+                [
+                    "presence-register",
+                    "--agent",
+                    self.args.agent,
+                    "--lane",
+                    self.args.lane,
+                    "--harness",
+                    harness,
+                    "--session-id",
+                    self.args.session_id,
+                    "--pid",
+                    str(self.child_pid),
+                    "--pid-start",
+                    str(self.descriptor["harness_pid_start"]),
+                    "--boot-id",
+                    Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+                    "--pid-namespace",
+                    os.readlink(f"/proc/{self.child_pid}/ns/pid"),
+                    "--host",
+                    os.uname().nodename,
+                    "--ttl-seconds",
+                    ttl,
+                ]
+            )
+            if presence.returncode != 0:
+                raise AgentdError((presence.stderr or presence.stdout).strip())
+            endpoint = self.run_coord(
+                [
+                    "endpoint-register",
+                    "--agent",
+                    self.args.agent,
+                    "--lane",
+                    self.args.lane,
+                    "--harness",
+                    harness,
+                    "--transport",
+                    "agentd",
+                    "--address",
+                    str(self.paths["socket"]),
+                    "--socket",
+                    str(self.paths["socket"]),
+                    "--token-file",
+                    str(self.paths["token"]),
+                    "--ttl-seconds",
+                    ttl,
+                ]
+            )
+            if endpoint.returncode != 0:
+                raise AgentdError((endpoint.stderr or endpoint.stdout).strip())
+        except (AgentdError, OSError, subprocess.TimeoutExpired) as exc:
+            print(f"AGENTD_COORDINATION_WARNING error={exc}", file=sys.stderr, flush=True)
+
+    def maybe_refresh_coordination(self) -> None:
+        if os.environ.get("SOUNIO_AGENTD_COORD_AUTO", "1") == "0":
+            return
+        if coordination_runtime() is None or harness_for_agent(self.args.agent) is None:
+            return
+        if self.coord_thread is not None and self.coord_thread.is_alive():
+            return
+        now = time.monotonic()
+        if now < self.next_coord_refresh:
+            return
+        self.next_coord_refresh = now + COORD_REFRESH_SECONDS
+        self.coord_thread = threading.Thread(
+            target=self.refresh_coordination,
+            name=f"coord-refresh-{slug(self.args.agent)}-{slug(self.args.lane)}",
+            daemon=True,
+        )
+        self.coord_thread.start()
 
     def close_client(self, file_descriptor: int) -> None:
         client = self.clients.pop(file_descriptor, None)
@@ -556,6 +684,7 @@ class Supervisor:
         exit_code: int | None = None
         try:
             while not self.stopping:
+                self.maybe_refresh_coordination()
                 for key, _ in self.selector.select(timeout=0.25):
                     if key.data == "listener":
                         self.accept()

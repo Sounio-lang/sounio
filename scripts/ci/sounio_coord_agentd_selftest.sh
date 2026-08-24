@@ -10,9 +10,13 @@ COORD_STATE="$TEST_ROOT/coord-state"
 AGENTD_STATE="$TEST_ROOT/agentd-state"
 RECEIVER="$TEST_ROOT/receiver.js"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
+AUTO_RECEIVER="$TEST_ROOT/claude"
+AUTO_LOG="$TEST_ROOT/auto-receiver.log"
 TMUX_SOCKET="$TEST_ROOT/tmux.sock"
 SESSION_ID='c89fe8c8-7421-42c6-9321-agentd-selftest'
 LANE='session-c89fe8c8-7421-42c6-9321-'
+AUTO_SESSION_ID='71fa6b78-9532-404c-84fe-198240daf5e0'
+AUTO_LANE='session-71fa6b78-9532-404c-84fe-'
 
 cleanup() {
   if [[ -d "$REPO" ]]; then
@@ -20,6 +24,9 @@ cleanup() {
       cd "$REPO"
       SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_AGENTD_DIR="$AGENTD_STATE" \
         bin/sounio-agentd stop --agent codex --lane "$LANE" --cwd "$REPO" \
+        >/dev/null 2>&1 || true
+      SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_AGENTD_DIR="$AGENTD_STATE" \
+        bin/sounio-agentd stop --agent claude --lane "$AUTO_LANE" --cwd "$REPO" \
         >/dev/null 2>&1 || true
     )
   fi
@@ -89,6 +96,25 @@ process.stdin.resume();
 setInterval(() => {}, 1000);
 JS
 
+cat > "$AUTO_RECEIVER" <<'PY'
+#!/usr/bin/env python3
+import os
+import sys
+import tty
+
+tty.setraw(sys.stdin.fileno())
+with open(sys.argv[1], "a", encoding="utf-8") as handle:
+    handle.write(f"AUTO_READY pid={os.getpid()}\n")
+    handle.flush()
+    while True:
+        chunk = os.read(sys.stdin.fileno(), 4096)
+        if not chunk:
+            break
+        handle.write(chunk.decode("utf-8", errors="replace"))
+        handle.flush()
+PY
+chmod +x "$AUTO_RECEIVER"
+
 coord() {
   (
     cd "$REPO"
@@ -108,7 +134,7 @@ agentd() {
 start_output="$(
   cd "$REPO"
   SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DIR="$COORD_STATE" \
-    SOUNIO_AGENTD_DIR="$AGENTD_STATE" \
+    SOUNIO_AGENTD_DIR="$AGENTD_STATE" SOUNIO_AGENTD_COORD_AUTO=0 \
     bin/sounio-agentd start --agent codex --lane "$LANE" --session-id "$SESSION_ID" \
       --cwd "$REPO" -- node "$RECEIVER" "$REPO" "$CONTEXT" "$COORD_STATE" \
       "$RECEIVER_LOG" "$SESSION_ID"
@@ -234,6 +260,39 @@ grep -q "^WAKE_DELIVERED message_id=$post_crash_message .*transport=agentd " <<<
 wait_for_text "$RECEIVER_LOG" "$post_crash_message" || \
   fail 'post-crash wake did not reach the surviving harness'
 
+auto_start_output="$(
+  cd "$REPO"
+  SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DIR="$COORD_STATE" \
+    SOUNIO_AGENTD_DIR="$AGENTD_STATE" \
+    SOUNIO_COORD_RUNTIME_PATH="$REPO/scripts/dev/sounio_coord_runtime.sh" \
+    bin/sounio-agentd start --agent claude --lane "$AUTO_LANE" \
+      --session-id "$AUTO_SESSION_ID" --cwd "$REPO" -- \
+      "$AUTO_RECEIVER" "$AUTO_LOG"
+)"
+grep -q '^AGENTD_STARTED ' <<< "$auto_start_output" || \
+  fail 'hook-independent supervisor did not start'
+auto_endpoint=''
+for _ in $(seq 1 80); do
+  auto_endpoint="$(coord endpoint-status --agent claude --lane "$AUTO_LANE" 2>&1 || true)"
+  grep -q '^ENDPOINT_STATUS .* state=active .* transport=agentd ' \
+    <<< "$auto_endpoint" && break
+  sleep 0.1
+done
+grep -q '^ENDPOINT_STATUS .* state=active .* transport=agentd ' \
+  <<< "$auto_endpoint" || fail 'agentd did not publish its runtime-owned endpoint'
+auto_send="$(coord send --agent sender --lane origin --to-agent claude \
+  --to-lane "$AUTO_LANE" --kind info --message 'runtime-owned endpoint wake')"
+auto_message_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$auto_send")"
+grep -q "^WAKE_DELIVERED message_id=$auto_message_id .*transport=agentd " \
+  <<< "$auto_send" || fail 'runtime-owned endpoint did not deliver immediately'
+wait_for_text "$AUTO_LOG" "$auto_message_id" || \
+  fail 'runtime-owned endpoint wake did not reach the harness'
+coord endpoint-unregister --agent claude --lane "$AUTO_LANE" >/dev/null
+coord presence-unregister --agent claude --lane "$AUTO_LANE" >/dev/null
+coord release --agent claude --lane "$AUTO_LANE" \
+  --reason 'runtime registration selftest complete' >/dev/null
+agentd stop --agent claude --lane "$AUTO_LANE" --cwd "$REPO" >/dev/null
+
 agentd stop --agent codex --lane "$LANE" --cwd "$REPO" >/dev/null
 for _ in $(seq 1 50); do
   kill -0 "$harness_pid" 2>/dev/null || break
@@ -253,4 +312,4 @@ coord release --agent sender --lane origin --reason 'agentd selftest complete' >
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_crash_selftest.sh"
 "$ROOT_DIR/scripts/ci/sounio_coord_fleet_model_selftest.sh"
 
-echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd tui_submit=distinct-event cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed fleet_crash_lab=PASS raw_body=absent'
+echo 'sounio-coord-agentd-selftest: PASS tmux_crash=survived transport=agentd runtime_registration=hook-independent tui_submit=distinct-event cross_worktree=1 generation_sabotage=refused capability_drift=failed-closed fleet_crash_lab=PASS raw_body=absent'
