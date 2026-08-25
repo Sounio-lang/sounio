@@ -97,8 +97,8 @@ Example:
 ```
 
 The test runner understands the existing `//@ run-pass`, `//@ compile-fail`,
-`//@ check-only`, `//@ expect-stdout`, `//@ error-pattern`, and `//@ ignore`
-annotations.
+`//@ check-only`, `//@ expect-stdout`, `//@ expect-stdout-contains`,
+`//@ error-pattern`, and `//@ ignore` annotations.
 
 ## Resources
 

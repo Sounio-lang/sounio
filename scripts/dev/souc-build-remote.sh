@@ -138,6 +138,14 @@ for g in $GATES; do
       tail -3 "\$W/fpcheck.log" | sed 's/^/REMOTE: /'
       if [ \$fp_rc -ne 0 ] || [ "\${fp_err:-0}" -gt 0 ]; then exit 1; fi
       ;;
+    sabotage)
+      echo "REMOTE: --- witness declares its sabotage ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      SOUNIO_WITNESS_SABOTAGE_MADAROS="\$W/madaros.elf" \\
+        bash scripts/ci/witness_declares_its_sabotage_gate.sh 2>&1 | tail -30
+      echo "REMOTE: sabotage_gate rc=\$?"
+      ;;
     witness)
       echo "REMOTE: --- witness ---"
       export SOUNIO_STDLIB_PATH="\$W/stdlib"
@@ -194,7 +202,7 @@ REMOTE
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
 PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
-case "$GATES" in *full*|*corpus*|*witness*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+case "$GATES" in *full*|*corpus*|*witness*|*sabotage*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
