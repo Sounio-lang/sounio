@@ -54,11 +54,54 @@ bin/sounio-loom journal-authority-serve \
   --private-key JOURNAL-PRIVATE.pem --public-key JOURNAL-PUBLIC.pem \
   --epoch 1
 bin/sounio-loom journal-authority-status --socket PATH
+bin/sounio-loom obligation-list
+bin/sounio-loom obligation-tui
+bin/sounio-loom obligation-serve --bind 127.0.0.1 --port 8788
+bin/sounio-loom obligation-supervise --state-dir PATH
 ```
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
 refused unless `--allow-remote` is explicit. The session directory and token are
 local capabilities and must remain private to the owning user.
+
+## Durable Obligations
+
+A directed coordination `request` is now projected into a durable Loom
+obligation automatically. The message file digest becomes the immutable work
+identity. New requests carry `obligation_schema=loom-durable-obligation-v1`, so
+reconciliation ignores historical messages created before this contract. Set
+`SOUNIO_COORD_DURABLE_OBLIGATIONS=0` only when deliberately exercising the
+legacy message-only fallback. `obligation-consume` binds acceptance to a
+verified process generation under its own expiring lease;
+`obligation-claim` creates one renewable exclusive claim;
+`obligation-interrupt` fences that claim; `obligation-recover` changes the
+generation; and `obligation-complete` requires distinct, non-empty outcome and
+evidence files. The OCaml runtime replays the complete hash chain under a file
+lock, asks native Sounio frame `9007` to admit each transition, and fsyncs the
+event before reporting success.
+
+The authoritative state lives under the shared coordination directory in
+`loom-obligations/*/journal.tsv`. The TUI, GUI, JSON endpoint, and supervisor are
+disposable projections of those journals. Killing all Loom processes therefore
+does not close, acknowledge, or lose unfinished work. A new
+`obligation-supervise` process reconstructs every unclosed object by replay.
+`obligation-reconcile` repairs the bounded crash window between publishing a
+request message and opening its obligation.
+
+Use the coordination entrypoint for live lanes so generation identity comes
+from verified process presence:
+
+```sh
+bin/sounio-coord obligation-consume --agent codex --lane session-ID --message msg-ID
+bin/sounio-coord obligation-claim --agent codex --lane session-ID --message msg-ID
+bin/sounio-coord obligation-complete --agent codex --lane session-ID \
+  --message msg-ID --claim claim-ID --outcome PATH --evidence PATH
+```
+
+This is a single-filesystem crash-consistency and fencing claim. It is not
+exactly-once execution, replicated storage, partition tolerance, or distributed
+consensus. See `docs/internal/concepts/loom-obligation.contract` for the exact
+semantic boundary and preregistered sabotage control.
 
 `fleet-enroll` stores desired lane intent under the repository's persistent Git
 common directory. `fleet-reconcile` is a no-mutation plan by default; `--apply`

@@ -41,8 +41,11 @@ expect_accept open \
   "9007 1 0 1 101 0 0 0 0 $message $zeros $zeros" \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=open state=1'
 expect_accept consume \
-  "9007 2 1 2 101 201 301 0 0 $message $zeros $zeros" \
+  "9007 2 1 2 101 201 301 0 400 $message $zeros $zeros" \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=consume state=2'
+expect_accept interrupt-consumed \
+  "9007 5 2 4 101 201 301 0 400 $message $zeros $zeros" \
+  'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=interrupt state=4'
 expect_accept claim \
   "9007 3 2 3 101 201 301 401 500 $message $zeros $zeros" \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=claim state=3'
@@ -100,5 +103,43 @@ sabotage_output="$(printf '%s\n' "$evidence_less_frame" | "$sabotaged")" || \
 [[ "$sabotage_output" == \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=complete state=6' ]] || \
   fail "named-rule sabotage emitted: $sabotage_output"
+
+treatment_log="${SOUNIO_LOOM_OBLIGATION_TREATMENT_LOG:-}"
+control_log="${SOUNIO_LOOM_OBLIGATION_CONTROL_LOG:-}"
+if [[ -n "$treatment_log" || -n "$control_log" ]]; then
+  [[ -n "$treatment_log" && -n "$control_log" ]] || \
+    fail 'treatment and control evidence paths must be provided together'
+  [[ "$treatment_log" != "$control_log" ]] || \
+    fail 'treatment and control evidence paths must be distinct'
+  mkdir -p "$(dirname "$treatment_log")" "$(dirname "$control_log")"
+  treatment_rc=0
+  set +e
+  treatment_output="$(printf '%s\n' "$evidence_less_frame" | "$adapter")"
+  treatment_rc=$?
+  set -e
+  [[ "$treatment_rc" -eq 42 ]] || fail "evidence receipt treatment rc=$treatment_rc"
+  frame_sha256="$(printf '%s\n' "$evidence_less_frame" | sha256sum | awk '{print $1}')"
+  {
+    printf 'experiment=exp-loom-obligation-evidence-v1\n'
+    printf 'arm=treatment\n'
+    printf 'frame_sha256=%s\n' "$frame_sha256"
+    printf 'module_sha256=%s\n' "$(sha256sum "$MODULE" | awk '{print $1}')"
+    printf 'named_rule=completion_evidence_is_bound\n'
+    printf 'mutation=none\n'
+    printf 'return_code=%s\n' "$treatment_rc"
+    printf 'output=%s\n' "$treatment_output"
+  } > "$treatment_log"
+  {
+    printf 'experiment=exp-loom-obligation-evidence-v1\n'
+    printf 'arm=sabotage-control\n'
+    printf 'frame_sha256=%s\n' "$frame_sha256"
+    printf 'module_sha256=%s\n' "$(sha256sum "$mutated" | awk '{print $1}')"
+    printf 'named_rule=completion_evidence_is_bound\n'
+    printf 'mutation=replace_only_named_rule_body_with_true\n'
+    printf 'mutation_count=1\n'
+    printf 'return_code=0\n'
+    printf 'output=%s\n' "$sabotage_output"
+  } > "$control_log"
+fi
 
 printf 'loom-obligation-adapter: PASS frame=9007 transitions=7 malformed=refused evidence_less=refused sabotage=accepted same_frame=1\n'

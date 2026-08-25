@@ -53,6 +53,11 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
       die "installed runtime declares native Sounio continuity but omits its adapter: $runtime_id"
   fi
+  if grep -q '^capability=loom-durable-obligation-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-obligation-runtime" ]] || \
+      die "installed runtime declares durable obligations but omits Loom or native Sounio frame 9007: $runtime_id"
+  fi
   if grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-continuity-runtime" && \
@@ -197,9 +202,12 @@ fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
 loom_continuity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_continuity_adapter.sh"
+loom_obligation_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_obligation_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
+loom_obligation_entrypoint="$SOURCE_ROOT/tools/loom/obligation_adapter_main.sio"
+loom_obligation_module="$SOURCE_ROOT/stdlib/coordination/loom_obligation.sio"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -215,8 +223,12 @@ loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
 [[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
 [[ -x "$loom_continuity_build_source" ]] || \
   die "Loom continuity build entrypoint missing or not executable: $loom_continuity_build_source"
+[[ -x "$loom_obligation_build_source" ]] || \
+  die "Loom obligation build entrypoint missing or not executable: $loom_obligation_build_source"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
+[[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
+  die "Loom native Sounio obligation source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_pty_stubs.c" && \
   -f "$loom_project/src/dune" && -f "$loom_project/dune-project" ]] || \
   die "Loom OCaml source bundle is incomplete: $loom_project"
@@ -243,9 +255,12 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_continuity_binary="$loom_project/_build/default/src/sounio-loom-continuity-runtime"
+loom_obligation_binary="$loom_project/_build/default/src/sounio-loom-obligation-runtime"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
+[[ -x "$loom_obligation_binary" ]] || \
+  die "Loom build omitted its native Sounio obligation adapter"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
@@ -256,6 +271,13 @@ loom_continuity_probe="$(
 )"
 [[ "$loom_continuity_probe" == 'SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1' ]] || \
   die "Loom native Sounio continuity adapter failed its install probe"
+loom_obligation_probe="$(
+  printf '9007 1 0 1 101 0 0 0 0 1 2 3 4 5 6 7 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n' | \
+    "$loom_obligation_binary"
+)"
+[[ "$loom_obligation_probe" == \
+  'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=open state=1' ]] || \
+  die "Loom native Sounio obligation adapter failed its install probe"
 loom_measurement_probe="$(
   printf '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401\n' | \
     "$loom_continuity_binary"
@@ -295,7 +317,8 @@ bundle_sha="$(
     "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune" \
     "$loom_project/src/loom.ml" "$loom_project/src/loom_pty_stubs.c" \
     "$loom_continuity_build_source" "$loom_continuity_entrypoint" \
-    "$loom_continuity_module" | \
+    "$loom_continuity_module" "$loom_obligation_build_source" \
+    "$loom_obligation_entrypoint" "$loom_obligation_module" | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
@@ -324,6 +347,8 @@ else
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
   install -m 0755 "$loom_continuity_binary" \
     "$stage/bin/sounio-loom-continuity-runtime"
+  install -m 0755 "$loom_obligation_binary" \
+    "$stage/bin/sounio-loom-obligation-runtime"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -336,6 +361,8 @@ else
     printf 'loom_protocol_version=%s\n' "$loom_protocol"
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
+    printf 'loom_obligation_language=Sounio\n'
+    printf 'loom_obligation_frame=9007\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
@@ -348,6 +375,7 @@ else
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
+    printf 'capability=loom-durable-obligation-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'
     printf 'capability=loom-separate-pod-inbox-replay-v1\n'
     printf 'capability=loom-signed-continuity-receipt-v2\n'

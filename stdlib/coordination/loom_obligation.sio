@@ -47,6 +47,7 @@ linear struct ConsumedObligation {
     obligation_token: i64,
     actor_token: i64,
     generation_token: i64,
+    lease_deadline: i64,
     message_digest: ObligationDigest256,
 }
 
@@ -135,7 +136,8 @@ fn completion_evidence_is_bound(
     obligation_digest_is_canonical(outcome_digest) &&
     obligation_digest_is_canonical(evidence_digest) &&
     obligation_digest_is_nonzero(outcome_digest) &&
-    obligation_digest_is_nonzero(evidence_digest)
+    obligation_digest_is_nonzero(evidence_digest) &&
+    !obligation_digest_equal(outcome_digest, evidence_digest)
 }
 
 fn open_obligation_host_bridge(
@@ -171,18 +173,20 @@ fn transition_shape_is_canonical(
         lease_deadline == 0 && empty_result) ||
     (transition_kind == 2 && previous_state == 1 && next_state == 2 &&
         actor_token > 0 && generation_token > 0 && claim_token == 0 &&
-        lease_deadline == 0 && empty_result) ||
+        lease_deadline > 0 && empty_result) ||
     (transition_kind == 3 && (previous_state == 2 || previous_state == 5) &&
         next_state == 3 && actor_token > 0 && generation_token > 0 &&
         claim_token > 0 && lease_deadline > 0 && empty_result) ||
     (transition_kind == 4 && previous_state == 3 && next_state == 3 &&
         actor_token > 0 && generation_token > 0 && claim_token > 0 &&
         lease_deadline > 0 && empty_result) ||
-    (transition_kind == 5 && previous_state == 3 && next_state == 4 &&
-        actor_token > 0 && generation_token > 0 && claim_token > 0 &&
+    (transition_kind == 5 && (previous_state == 2 || previous_state == 3) &&
+        actor_token > 0 && generation_token > 0 &&
+        ((previous_state == 2 && claim_token == 0) ||
+         (previous_state == 3 && claim_token > 0)) &&
         lease_deadline > 0 && empty_result) ||
     (transition_kind == 6 && previous_state == 4 && next_state == 5 &&
-        actor_token > 0 && generation_token > 0 && claim_token > 0 &&
+        actor_token > 0 && generation_token > 0 && claim_token >= 0 &&
         lease_deadline == 0 && empty_result) ||
     (transition_kind == 7 && previous_state == 3 && next_state == 6 &&
         actor_token > 0 && generation_token > 0 && claim_token > 0 &&
@@ -283,13 +287,17 @@ pub fn consume_durable_obligation(
     durable: DurableObligation,
     actor_token: i64,
     generation_token: i64,
+    lease_deadline: i64,
 ) -> Option<ConsumedObligation> {
     let DurableObligation { obligation_token, message_digest } = durable
-    if actor_token <= 0 || generation_token <= 0 { return None }
+    if actor_token <= 0 || generation_token <= 0 || lease_deadline <= 0 {
+        return None
+    }
     Some(ConsumedObligation {
         obligation_token: obligation_token,
         actor_token: actor_token,
         generation_token: generation_token,
+        lease_deadline: lease_deadline,
         message_digest: message_digest,
     })
 }
@@ -300,7 +308,8 @@ pub fn claim_consumed_obligation(
     lease_deadline: i64,
 ) -> Option<ExclusiveWorkClaim> {
     let ConsumedObligation {
-        obligation_token, actor_token, generation_token, message_digest,
+        obligation_token, actor_token, generation_token, lease_deadline: _,
+        message_digest,
     } = consumed
     if claim_token <= 0 || lease_deadline <= 0 { return None }
     Some(ExclusiveWorkClaim {
@@ -311,6 +320,22 @@ pub fn claim_consumed_obligation(
         lease_deadline: lease_deadline,
         message_digest: message_digest,
     })
+}
+
+pub fn interrupt_consumed_obligation(
+    consumed: ConsumedObligation,
+) -> InterruptedObligation {
+    let ConsumedObligation {
+        obligation_token, actor_token, generation_token, lease_deadline: _,
+        message_digest,
+    } = consumed
+    InterruptedObligation {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        predecessor_claim_token: 0,
+        message_digest: message_digest,
+    }
 }
 
 pub fn renew_work_claim(
