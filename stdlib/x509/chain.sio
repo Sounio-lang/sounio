@@ -134,7 +134,16 @@ pub fn chain_build_candidates(
     // ITS tried-count instead).
     var tried: [i32; 11] = [0; 11]
 
-    while depth >= 1 && depth <= CHAIN_MAX_DEPTH && (result_count as i64) < MAX_CHAIN_CANDIDATES {
+    // NOTE (fix round, Findings 1+2 from adversarial review): the loop's
+    // exit condition must fire ONLY on `depth == 0` (search space fully
+    // explored) or `result_count >= MAX_CHAIN_CANDIDATES` (enough
+    // candidates already found) -- never on "some branch got too deep".
+    // The original `depth <= CHAIN_MAX_DEPTH` clause in this while-test
+    // made a branch that overran the depth cap ABORT THE WHOLE FUNCTION
+    // instead of backtracking, silently discarding every untried sibling
+    // candidate at shallower depths (Finding 1). The depth cap is now
+    // enforced inside the loop body instead, as an explicit backtrack.
+    while depth >= 1 && (result_count as i64) < MAX_CHAIN_CANDIDATES {
         let current = path_certs[(depth - 1) as usize]
         if chain_is_trusted_root(&current, trust_store) && depth > 1 {
             var rc = ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: depth as i32 }
@@ -149,9 +158,40 @@ pub fn chain_build_candidates(
             // Backtrack after recording: a trusted root is a leaf of the
             // search tree, never itself an issuer we recurse through.
             depth = depth - 1
+        } else if depth > CHAIN_MAX_DEPTH {
+            // Path already holds CHAIN_MAX_DEPTH+1 certs (every path_certs/
+            // path_pool_index/tried slot, indices 0..CHAIN_MAX_DEPTH, is in
+            // use) and `current` is not a trusted root: this branch is a
+            // dead end, since pushing one more cert would need index
+            // CHAIN_MAX_DEPTH+1, past the end of the fixed-size path
+            // arrays. Treat it exactly like "issuer candidates exhausted
+            // at this depth" (Finding 1's fix): backtrack so the parent's
+            // tried-counter can advance to ITS next untried candidate,
+            // instead of the whole search terminating here. No
+            // path_pool_index[depth]/tried[depth] bookkeeping is needed
+            // for this depth value: depth > CHAIN_MAX_DEPTH is only ever
+            // reached by a push (see the `depth <= CHAIN_MAX_DEPTH` guard
+            // below), never by a search-and-choose step at this same
+            // depth, so nothing was ever written to those arrays at this
+            // index in the first place.
+            depth = depth - 1
         } else {
             var candidate_indices: [i64; 520] = [0; 520]
-            let n = chain_find_issuer_candidates(&current, &pool_certs, &pool_bufs, pool_len, &path_pool_index, (depth - 1) as i32, &!candidate_indices)
+            // Finding 2's fix: exclude_len must be `depth`, not `depth -
+            // 1`. `path_pool_index[i]` records the pool index of the cert
+            // occupying path position `i`, and `current` (the cert whose
+            // issuer we are about to search for) occupies position
+            // `depth - 1` -- so the exclusion range must cover indices
+            // `0..depth-1` INCLUSIVE, i.e. `exclude_len = depth`. Passing
+            // `depth - 1` (the original code) left `current`'s own pool
+            // slot out of the excluded set, so a self-referential pool
+            // entry (issuer == subject, or AKI == own SKI) that was not
+            // itself in the trust store could be re-selected as its own
+            // issuer over and over -- an infinite self-loop that, combined
+            // with Finding 1's bug, could exhaust the whole search on a
+            // dead-end branch before ever trying the real sibling
+            // candidate sitting right next to it in `tried[]`.
+            let n = chain_find_issuer_candidates(&current, &pool_certs, &pool_bufs, pool_len, &path_pool_index, depth as i32, &!candidate_indices)
             if (tried[depth as usize] as i64) < (n as i64) {
                 let chosen = candidate_indices[tried[depth as usize] as usize]
                 tried[depth as usize] = tried[depth as usize] + 1
@@ -159,7 +199,20 @@ pub fn chain_build_candidates(
                 path_certs[depth as usize] = pool_certs[chosen as usize]
                 path_bufs[depth as usize] = pool_bufs[chosen as usize]
                 depth = depth + 1
-                tried[depth as usize] = 0
+                // Only reset the new depth's tried-counter when that depth
+                // is still within the searchable range (<= CHAIN_MAX_DEPTH
+                // + 1, i.e. it corresponds to a real path_certs slot that a
+                // future iteration might search FROM). When the push lands
+                // exactly on depth = CHAIN_MAX_DEPTH + 1 (path fully in
+                // use), the `depth > CHAIN_MAX_DEPTH` branch above handles
+                // that depth without ever consulting tried[]/
+                // path_pool_index[] at that index, so writing them here
+                // would be both unnecessary and (since those arrays are
+                // sized CHAIN_MAX_DEPTH + 1, indices 0..CHAIN_MAX_DEPTH)
+                // out of bounds.
+                if depth <= CHAIN_MAX_DEPTH {
+                    tried[depth as usize] = 0
+                }
             } else {
                 // Exhausted this depth's candidates -- backtrack. Also
                 // clear this depth's pool-index slot so it no longer
