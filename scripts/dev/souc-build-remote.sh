@@ -138,6 +138,14 @@ for g in $GATES; do
       tail -3 "\$W/fpcheck.log" | sed 's/^/REMOTE: /'
       if [ \$fp_rc -ne 0 ] || [ "\${fp_err:-0}" -gt 0 ]; then exit 1; fi
       ;;
+    silent)
+      echo "REMOTE: --- silent verdict measurement ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      SOUNIO_SILENT_VERDICT_MADAROS="\$W/madaros.elf" \\
+        bash scripts/dev/measure_silent_verdicts.sh 2>&1 | tail -40
+      echo "REMOTE: silent rc=\$?"
+      ;;
     sabotage)
       echo "REMOTE: --- witness declares its sabotage ---"
       export SOUNIO_STDLIB_PATH="\$W/stdlib"
@@ -202,9 +210,10 @@ REMOTE
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
 PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
-case "$GATES" in *full*|*corpus*|*witness*|*sabotage*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
+     --job-name="${SOUNIO_REMOTE_JOBNAME:-souc-${GATES:-build}-$$}" \
          --cpus-per-task="$CPUS" --time="$TIMELIMIT" bash -c "$REMOTE_SCRIPT" 2>&1 \
   | grep -vE "^srun: (job|Job)|couldn't chdir"
