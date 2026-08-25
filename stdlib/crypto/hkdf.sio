@@ -143,3 +143,104 @@ pub fn hmac_sha384(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u
 
     sha384(&outer_buf, SHA384_BLOCK_LEN + 48)
 }
+
+// -- HKDF-Extract / HKDF-Expand (RFC 5869) --------------------------------
+
+pub const HKDF_HASH_SHA256: i32 = 0
+pub const HKDF_HASH_SHA384: i32 = 1
+
+fn hkdf_hash_len(hash_algo: i32) -> i64 {
+    if hash_algo == HKDF_HASH_SHA256 { 32 } else { 48 }
+}
+
+// Dispatches to hmac_sha256/hmac_sha384, copying the fixed-size result
+// into a fresh RawBuf element-by-element (never `var x = *ref` on a
+// fixed-array reference -- see docs/handoff/souc_v0800_defects.md D8).
+fn hkdf_hmac(hash_algo: i32, key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> RawBuf with IO {
+    if hash_algo == HKDF_HASH_SHA256 {
+        let mac = hmac_sha256(key, key_len, msg, msg_len)
+        let out = rawbuf_new(32)
+        var i: i64 = 0
+        while i < 32 {
+            rawbuf_set(&out, i, mac[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    } else {
+        let mac = hmac_sha384(key, key_len, msg, msg_len)
+        let out = rawbuf_new(48)
+        var i: i64 = 0
+        while i < 48 {
+            rawbuf_set(&out, i, mac[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    }
+}
+
+pub fn hkdf_extract(hash_algo: i32, salt: &RawBuf, salt_len: i64, ikm: &RawBuf, ikm_len: i64) -> RawBuf with IO {
+    // RFC 5869 2.2: PRK = HMAC-Hash(salt, IKM). Per the RFC, if salt is
+    // not provided, it is set to a string of HashLen zeros -- this
+    // plan's callers (Task 3) always provide an explicit salt (even if
+    // it's a zero-filled buffer), so this function does not synthesize
+    // a default salt itself.
+    hkdf_hmac(hash_algo, salt, salt_len, ikm, ikm_len)
+}
+
+pub fn hkdf_expand(hash_algo: i32, prk: &RawBuf, prk_len: i64, info: &RawBuf, info_len: i64, out_len: i64) -> RawBuf with IO {
+    // RFC 5869 2.3: T(0) = empty string
+    //   T(i) = HMAC-Hash(PRK, T(i-1) | info | i)   for i = 1 .. N
+    //   N = ceil(out_len / HashLen)
+    //   OKM = T(1) | T(2) | ... | T(N), truncated to out_len bytes.
+    // The iteration counter i is a SINGLE byte (values 1..255), per the
+    // RFC -- this caps out_len at 255 * HashLen, which the RFC states
+    // explicitly and which this function does not otherwise enforce
+    // (callers in this plan never request more than a handful of bytes).
+    let hash_len = hkdf_hash_len(hash_algo)
+    let out = rawbuf_new(out_len)
+
+    var t_len: i64 = 0
+    let t_prev = rawbuf_new(hash_len)
+    var written: i64 = 0
+    var counter: i64 = 1
+
+    while written < out_len {
+        // Build this iteration's HMAC input: T(i-1) ++ info ++ counter-byte.
+        let block_in = rawbuf_new(t_len + info_len + 1)
+        var a: i64 = 0
+        while a < t_len {
+            rawbuf_set(&block_in, a, rawbuf_get(&t_prev, a))
+            a = a + 1
+        }
+        var b: i64 = 0
+        while b < info_len {
+            rawbuf_set(&block_in, t_len + b, rawbuf_get(info, b))
+            b = b + 1
+        }
+        rawbuf_set(&block_in, t_len + info_len, counter)
+
+        let t_cur = hkdf_hmac(hash_algo, prk, prk_len, &block_in, t_len + info_len + 1)
+
+        // Copy this block into the output, truncating the final block if
+        // it would overrun out_len.
+        var c: i64 = 0
+        while c < hash_len {
+            if written < out_len {
+                rawbuf_set(&out, written, rawbuf_get(&t_cur, c))
+                written = written + 1
+            }
+            c = c + 1
+        }
+
+        // t_prev <- t_cur, for the next iteration's input.
+        var d: i64 = 0
+        while d < hash_len {
+            rawbuf_set(&t_prev, d, rawbuf_get(&t_cur, d))
+            d = d + 1
+        }
+        t_len = hash_len
+        counter = counter + 1
+    }
+
+    out
+}
