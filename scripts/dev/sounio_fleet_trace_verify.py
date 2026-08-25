@@ -224,6 +224,8 @@ def verify_trace(
 
     capabilities: dict[str, dict[str, Any]] = {}
     recovery_budgets: dict[str, dict[str, Any]] = {}
+    recovery_latches: dict[str, tuple[sqlite3.Row, dict[str, Any]]] = {}
+    recovery_latch_ids: set[str] = set()
     actions: dict[str, dict[str, Any]] = {}
     checkpoints: dict[str, dict[str, Any]] = {}
     handoffs: dict[str, dict[str, Any]] = {}
@@ -272,7 +274,51 @@ def verify_trace(
             require(state is not None and state["revoked"] is None, f"recovery budget revocation is invalid: {budget_id}")
             require(not state["spent"], f"spent recovery budget was revoked: {budget_id}")
             state["revoked"] = (row, payload)
+        elif event_type == "RECOVERY_LATCH_SET":
+            latch_id = string_field(payload, "latch_id", f"event {seq}")
+            slot = str(row["slot"])
+            require(slot not in recovery_latches, f"recovery latch is already open: {slot}")
+            require(latch_id not in recovery_latch_ids, f"recovery latch identity was reused: {latch_id}")
+            require(
+                isinstance(payload.get("desired_hash"), str)
+                and len(payload["desired_hash"]) == 64,
+                f"recovery latch desired hash is invalid: {latch_id}",
+            )
+            string_field(payload, "path", f"recovery latch {latch_id}")
+            reason = string_field(payload, "reason", f"recovery latch {latch_id}")
+            if reason == "start-action-failed":
+                terminal_actions = [
+                    state
+                    for state in actions.values()
+                    if state["terminal"] is not None
+                    and state["requested"][0]["slot"] == slot
+                ]
+                require(bool(terminal_actions), f"recovery latch has no failed start action: {latch_id}")
+                latest = max(terminal_actions, key=lambda state: state["terminal"][0]["seq"])
+                require(
+                    latest["action"] == "start"
+                    and latest["terminal"][0]["event_type"] == "ACTION_FAILED",
+                    f"recovery latch is not caused by a failed start action: {latch_id}",
+                )
+            recovery_latches[slot] = (row, payload)
+            recovery_latch_ids.add(latch_id)
+        elif event_type == "RECOVERY_LATCH_CLEAR_REQUESTED":
+            slot = str(row["slot"])
+            opened = recovery_latches.get(slot)
+            require(opened is not None, f"recovery latch clear has no open latch: {slot}")
+            _, latch = opened
+            latch_id = string_field(payload, "latch_id", f"event {seq}")
+            for key in ("latch_id", "desired_hash", "path", "reason"):
+                require(
+                    payload.get(key) == latch.get(key),
+                    f"recovery latch clear {key} mismatch: {latch_id}",
+                )
+            del recovery_latches[slot]
         elif event_type == "RECOVERY_BUDGET_SPENT":
+            require(
+                row["slot"] not in recovery_latches,
+                f"recovery budget was spent through an open latch: {row['slot']}",
+            )
             budget_id = string_field(payload, "budget_id", f"event {seq}")
             state = recovery_budgets.get(budget_id)
             require(state is not None and state["published"] is not None and state["revoked"] is None, f"unpublished or revoked recovery budget was spent: {budget_id}")
@@ -376,6 +422,11 @@ def verify_trace(
             terminal = capability["terminal"]
             require(terminal is not None and terminal[0]["event_type"] == "CAPABILITY_CONSUMED", f"action uses unconsumed capability: {action_id}")
             action = string_field(payload, "action", f"action {action_id}")
+            if action == "start":
+                require(
+                    row["slot"] not in recovery_latches,
+                    f"start action crossed an open recovery latch: {row['slot']}",
+                )
             require(action == issued.get("action") and action in {"start", "stop"}, f"action kind does not match capability: {action_id}")
             identity = {
                     "action": "start",
@@ -544,6 +595,8 @@ def verify_trace(
         "capability_consumption_is_linear": True,
         "event_log_hash_chain_valid": True,
         "recovery_budget_spending_is_bounded": True,
+        "recovery_latch_clear_is_identity_bound": True,
+        "recovery_latch_prevents_new_start_authority": True,
         "signed_anchor_is_log_prefix": True,
         "stop_targets_one_exact_generation": True,
     }

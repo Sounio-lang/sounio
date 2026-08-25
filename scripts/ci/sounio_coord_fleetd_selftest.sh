@@ -40,6 +40,14 @@ TRACE_SABOTAGE_DB="$TEST_ROOT/trace-sabotage.db"
 STOP_TRACE_SABOTAGE_DB="$TEST_ROOT/stop-trace-sabotage.db"
 BUDGET_TRACE_SABOTAGE_DB="$TEST_ROOT/budget-trace-sabotage.db"
 BACKOFF_TRACE_SABOTAGE_DB="$TEST_ROOT/backoff-trace-sabotage.db"
+ISOLATION_DB="$TEST_ROOT/isolation.db"
+ISOLATION_STATE="$TEST_ROOT/isolation-agentd-state"
+ISOLATION_CONFIG="$TEST_ROOT/isolation-fleet.toml"
+ISOLATION_BUDGETS="$TEST_ROOT/isolation-budgets"
+ISOLATION_LATCHES="$TEST_ROOT/isolation-latches"
+ISOLATION_WRAPPER="$TEST_ROOT/isolation-wrapper.sh"
+CURSOR_FAIL_MARKER="$TEST_ROOT/cursor.fail"
+ISOLATION_TRACE_SABOTAGE_DB="$TEST_ROOT/isolation-trace-sabotage.db"
 
 cleanup() {
   if [[ -x "$RUNTIME/sounio-fleet-agent-runtime" && -d "$REPO" ]]; then
@@ -47,6 +55,10 @@ cleanup() {
       stop --cwd "$REPO" --slot "$SLOT" >/dev/null 2>&1 || true
     SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
       stop --cwd "$REPO" --slot retained-disabled-lane >/dev/null 2>&1 || true
+    SOUNIO_AGENTD_DIR="$ISOLATION_STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+      stop --cwd "$REPO" --slot cursor-hard >/dev/null 2>&1 || true
+    SOUNIO_AGENTD_DIR="$ISOLATION_STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+      stop --cwd "$REPO" --slot grok-hard >/dev/null 2>&1 || true
   fi
   rm -rf "$TEST_ROOT"
 }
@@ -150,6 +162,12 @@ fleetd() {
   SOUNIO_AGENTD_DIR="$STATE" \
   SOUNIO_FLEET_AGENT_COMMAND="$RUNTIME/sounio-fleet-agent-runtime" \
     "$RUNTIME/sounio-fleet-runtime" --db "$DB" "$@"
+}
+
+fleetd_isolation() {
+  SOUNIO_AGENTD_DIR="$ISOLATION_STATE" \
+  SOUNIO_FLEET_AGENT_COMMAND="$RUNTIME/sounio-fleet-agent-runtime" \
+    "$RUNTIME/sounio-fleet-runtime" --db "$ISOLATION_DB" "$@"
 }
 
 python3 - "$RUNTIME/sounio-fleet-runtime" "$TEST_ROOT/policy.db" <<'PY'
@@ -634,7 +652,7 @@ grep -q 'anchor public-key identity mismatch' "$TEST_ROOT/key-substitution" || \
 output="$("$RUNTIME/sounio-fleet-trace-verify" --db "$DB" \
   --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
   --certificate "$TRACE_CERTIFICATE")"
-grep -q 'FLEET_TRACE_CONFORMS .*accepted=1 .*invariants=10 ' <<< "$output" || \
+grep -q 'FLEET_TRACE_CONFORMS .*accepted=1 .*invariants=12 ' <<< "$output" || \
   fail 'independent trace verifier did not certify the accepted handoff'
 [[ -s "$TRACE_CERTIFICATE" ]] || \
   fail 'independent trace verifier omitted its refinement certificate'
@@ -818,6 +836,201 @@ fi
 grep -q 'watch cannot hold reusable mutation authority' "$TEST_ROOT/watch-apply" || \
   fail 'watch mutation refusal omitted the linear-authority reason'
 
+# Two hostile harness shapes share one recovery cycle. A deterministic Cursor
+# failure must spend and latch only Cursor while Grok still converges.
+cat > "$ISOLATION_WRAPPER" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+marker="$1"
+log="$2"
+receiver="$3"
+if [[ -e "$marker" ]]; then
+  exit 73
+fi
+exec "$receiver" "$log"
+SH
+chmod +x "$ISOLATION_WRAPPER"
+cat > "$ISOLATION_CONFIG" <<EOF
+version = 1
+
+[[lane]]
+slot = "cursor-hard"
+enabled = true
+restart = "always"
+cwd = "$REPO"
+agent = "cursor"
+lane = "fleet-cursor-hard"
+session_id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+identity = "standalone"
+command = ["$ISOLATION_WRAPPER", "$CURSOR_FAIL_MARKER", "$TEST_ROOT/cursor.log", "$RECEIVER"]
+
+[[lane]]
+slot = "grok-hard"
+enabled = true
+restart = "always"
+cwd = "$REPO"
+agent = "grok"
+lane = "fleet-grok-hard"
+session_id = "ffffffff-eeee-4ddd-8ccc-bbbbbbbbbbbb"
+identity = "standalone"
+command = ["$ISOLATION_WRAPPER", "$TEST_ROOT/grok.never-fails", "$TEST_ROOT/grok.log", "$RECEIVER"]
+EOF
+mkdir -m 700 "$ISOLATION_BUDGETS" "$ISOLATION_LATCHES"
+fleetd_isolation init --config "$ISOLATION_CONFIG" >/dev/null
+fleetd_isolation authorize-recovery --config "$ISOLATION_CONFIG" \
+  --slot cursor-hard --out "$ISOLATION_BUDGETS/cursor-hard.json" \
+  --max-starts 2 --backoff-seconds 0 --ttl 600 >/dev/null
+fleetd_isolation authorize-recovery --config "$ISOLATION_CONFIG" \
+  --slot grok-hard --out "$ISOLATION_BUDGETS/grok-hard.json" \
+  --max-starts 2 --backoff-seconds 0 --ttl 600 >/dev/null
+touch "$CURSOR_FAIL_MARKER"
+if fleetd_isolation watch --config "$ISOLATION_CONFIG" --cycles 1 \
+  --interval 0.01 --apply-recovery \
+  --recovery-budget-dir "$ISOLATION_BUDGETS" \
+  --recovery-latch-dir "$ISOLATION_LATCHES" \
+  >"$TEST_ROOT/isolation-first" 2>&1; then
+  fail 'isolated recovery did not report the sabotaged Cursor launch'
+fi
+grep -q 'slot=cursor-hard action=start status=failed' \
+  "$TEST_ROOT/isolation-first" || \
+  fail 'Cursor sabotage was not attributed to its start action'
+grep -q 'slot=cursor-hard status=set .*reason=start-action-failed' \
+  "$TEST_ROOT/isolation-first" || \
+  fail 'Cursor sabotage did not close its persistent recovery latch'
+grep -q 'slot=grok-hard action=start status=committed' \
+  "$TEST_ROOT/isolation-first" || \
+  fail 'Cursor sabotage prevented independent Grok convergence'
+[[ -f "$ISOLATION_LATCHES/cursor-hard.halted.json" ]] || \
+  fail 'Cursor recovery latch was not retained on disk'
+[[ "$(grep -c '^START pid=' "$TEST_ROOT/grok.log")" == 1 ]] || \
+  fail 'Grok did not start exactly once beside the Cursor failure'
+grok_generation="$(python3 - "$ISOLATION_STATE/fleet-slots/grok-hard.json" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["instance_id"])
+PY
+)"
+SOUNIO_AGENTD_DIR="$ISOLATION_STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+  stop --cwd "$REPO" --slot cursor-hard >/dev/null
+output="$(fleetd_isolation watch --config "$ISOLATION_CONFIG" --cycles 1 \
+  --interval 0.01 --apply-recovery \
+  --recovery-budget-dir "$ISOLATION_BUDGETS" \
+  --recovery-latch-dir "$ISOLATION_LATCHES")"
+grep -q 'slot=cursor-hard action=start status=held reason=recovery-latch-present' \
+  <<< "$output" || fail 'Cursor retried through its closed recovery latch'
+cursor_spends="$(python3 - "$ISOLATION_DB" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as connection:
+    print(connection.execute(
+        "SELECT count(*) FROM events WHERE slot = 'cursor-hard' "
+        "AND event_type = 'RECOVERY_BUDGET_SPENT'"
+    ).fetchone()[0])
+PY
+)"
+[[ "$cursor_spends" == 1 ]] || \
+  fail 'closed Cursor latch spent an additional recovery ordinal'
+rm "$CURSOR_FAIL_MARKER"
+fleetd_isolation recovery-latch-clear --config "$ISOLATION_CONFIG" \
+  --slot cursor-hard --recovery-latch-dir "$ISOLATION_LATCHES" \
+  >"$TEST_ROOT/isolation-clear"
+grep -q 'slot=cursor-hard status=cleared' "$TEST_ROOT/isolation-clear" || \
+  fail 'explicit Cursor recovery-latch clear was not audited'
+fleetd_isolation watch --config "$ISOLATION_CONFIG" --cycles 1 \
+  --interval 0.01 --apply-recovery \
+  --recovery-budget-dir "$ISOLATION_BUDGETS" \
+  --recovery-latch-dir "$ISOLATION_LATCHES" >/dev/null
+wait_for 'Cursor did not converge after an explicit latch clear' \
+  "test \"\$(grep -c '^START pid=' '$TEST_ROOT/cursor.log')\" = 1"
+[[ "$(python3 - "$ISOLATION_STATE/fleet-slots/grok-hard.json" <<'PY'
+import json
+import sys
+print(json.load(open(sys.argv[1], encoding="utf-8"))["instance_id"])
+PY
+)" == "$grok_generation" ]] || \
+  fail 'Cursor recovery replaced the independent Grok generation'
+chmod 755 "$ISOLATION_BUDGETS"
+if fleetd_isolation watch --config "$ISOLATION_CONFIG" --cycles 1 \
+  --interval 0.01 --apply-recovery \
+  --recovery-budget-dir "$ISOLATION_BUDGETS" \
+  --recovery-latch-dir "$ISOLATION_LATCHES" \
+  >"$TEST_ROOT/isolation-permissions" 2>&1; then
+  fail 'fleet recovery accepted a non-private budget directory'
+fi
+grep -q 'recovery budget directory permissions are not private' \
+  "$TEST_ROOT/isolation-permissions" || \
+  fail 'budget-directory sabotage was not attributed to directory authority'
+chmod 700 "$ISOLATION_BUDGETS"
+"$RUNTIME/sounio-fleet-trace-verify" --db "$ISOLATION_DB" \
+  --certificate "$TEST_ROOT/isolation-trace-certificate.json" \
+  >"$TEST_ROOT/isolation-trace"
+python3 - "$TEST_ROOT/isolation-trace-certificate.json" <<'PY' || \
+  fail 'independent trace verifier omitted the recovery-latch invariant'
+import json
+import sys
+certificate = json.load(open(sys.argv[1], encoding="utf-8"))
+assert certificate["invariants"]["recovery_latch_clear_is_identity_bound"] is True
+assert certificate["invariants"]["recovery_latch_prevents_new_start_authority"] is True
+PY
+python3 - "$ISOLATION_DB" "$ISOLATION_TRACE_SABOTAGE_DB" <<'PY'
+import hashlib
+import json
+import sqlite3
+import sys
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+def digest(value):
+    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
+
+source = sqlite3.connect(sys.argv[1])
+target = sqlite3.connect(sys.argv[2])
+source.backup(target)
+source.close()
+target.row_factory = sqlite3.Row
+row = target.execute(
+    "SELECT * FROM events WHERE event_type = 'RECOVERY_LATCH_CLEAR_REQUESTED' "
+    "ORDER BY seq LIMIT 1"
+).fetchone()
+assert row is not None
+payload = json.loads(row["payload"])
+payload["latch_id"] = "recovery-latch-rehashed-substitution"
+target.execute(
+    "UPDATE events SET payload = ? WHERE seq = ?", (canonical(payload), row["seq"])
+)
+previous = target.execute(
+    "SELECT event_hash FROM events WHERE seq = ?", (row["seq"] - 1,)
+).fetchone()[0]
+for current in target.execute(
+    "SELECT * FROM events WHERE seq >= ? ORDER BY seq", (row["seq"],)
+).fetchall():
+    material = {
+        "causal_key": current["causal_key"],
+        "event_type": current["event_type"],
+        "occurred_utc": current["occurred_utc"],
+        "payload": current["payload"],
+        "prev_hash": previous,
+        "seq": current["seq"],
+        "slot": current["slot"],
+    }
+    event_hash = digest(material)
+    target.execute(
+        "UPDATE events SET prev_hash = ?, event_hash = ?, event_id = ? WHERE seq = ?",
+        (previous, event_hash, f"evt-{event_hash[:24]}", current["seq"]),
+    )
+    previous = event_hash
+target.commit()
+target.close()
+PY
+if "$RUNTIME/sounio-fleet-trace-verify" --db "$ISOLATION_TRACE_SABOTAGE_DB" \
+  >"$TEST_ROOT/isolation-trace-sabotage" 2>&1; then
+  fail 'independent trace verifier accepted a rehashed recovery-latch clear'
+fi
+grep -q 'recovery latch clear latch_id mismatch' \
+  "$TEST_ROOT/isolation-trace-sabotage" || \
+  fail 'latch-clear sabotage was not attributed to exact latch identity'
+
 python3 - "$DB" <<'PY'
 import sqlite3
 import sys
@@ -850,4 +1063,4 @@ fi
 grep -q 'event 1 hash mismatch' "$TEST_ROOT/log-sabotage" || \
   fail 'log sabotage was not attributed to the hash-chain rule'
 
-echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused stop_capability_required=1 stop_capability_reuse=refused stop_generation_sabotage=refused stop_semantic_rehash=refused recovery_budget=2 recovery_start_only=held recovery_backoff=enforced recovery_exhaustion=refused budget_semantic_rehash=refused backoff_semantic_rehash=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked generation_authority_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused trace_refinement=verified semantic_rehash_sabotage=refused replay=reconstructed hash_sabotage=refused'
+echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused stop_capability_required=1 stop_capability_reuse=refused stop_generation_sabotage=refused stop_semantic_rehash=refused recovery_budget=2 recovery_start_only=held recovery_backoff=enforced recovery_exhaustion=refused recovery_directory=private recovery_latch=per-slot latch_trace=verified latch_clear_sabotage=refused cursor_sabotage=isolated grok_convergence=preserved budget_semantic_rehash=refused backoff_semantic_rehash=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked generation_authority_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused trace_refinement=verified semantic_rehash_sabotage=refused replay=reconstructed hash_sabotage=refused'

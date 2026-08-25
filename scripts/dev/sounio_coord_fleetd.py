@@ -27,7 +27,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.25.2"
+RUNTIME_VERSION = "2026.08.25.3"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -1660,10 +1660,30 @@ def load_capability_documents(paths: list[str]) -> dict[str, dict[str, Any]]:
     return documents
 
 
-def load_recovery_budget_documents(paths: list[str]) -> dict[str, dict[str, Any]]:
+def private_directory(raw_path: str, *, create: bool, label: str) -> Path:
+    path = absolute_without_symlink_resolution(raw_path)
+    if path.is_symlink():
+        raise FleetdError(f"{label} is a symlink: {path}")
+    if create and not path.exists():
+        path.mkdir(mode=0o700, parents=True)
+    if not path.is_dir():
+        raise FleetdError(f"{label} is not a directory: {path}")
+    if path.stat().st_mode & 0o077:
+        raise FleetdError(f"{label} permissions are not private: {path}")
+    return path
+
+
+def load_recovery_budget_documents(
+    paths: list[str], directories: list[str] | None = None
+) -> dict[str, dict[str, Any]]:
     documents: dict[str, dict[str, Any]] = {}
-    for raw_path in paths:
-        path = absolute_without_symlink_resolution(raw_path)
+    budget_paths = [absolute_without_symlink_resolution(path) for path in paths]
+    for raw_directory in directories or []:
+        directory = private_directory(
+            raw_directory, create=False, label="recovery budget directory"
+        )
+        budget_paths.extend(sorted(directory.glob("*.json")))
+    for path in budget_paths:
         document = read_capability_file(path)
         slot = document.get("slot")
         if not isinstance(slot, str) or not slot:
@@ -1673,6 +1693,105 @@ def load_recovery_budget_documents(paths: list[str]) -> dict[str, dict[str, Any]
         document["_path"] = str(path)
         documents[slot] = document
     return documents
+
+
+def recovery_latch_path(directory: Path, slot: str) -> Path:
+    return directory / f"{slug(slot)}.halted.json"
+
+
+def read_recovery_latch(directory: Path, spec: LaneSpec) -> dict[str, Any] | None:
+    path = recovery_latch_path(directory, spec.slot)
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise FleetdError(f"recovery latch is missing or a symlink: {path}")
+    if path.stat().st_mode & 0o077:
+        raise FleetdError(f"recovery latch permissions are not private: {path}")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FleetdError(f"cannot read recovery latch {path}: {exc}") from exc
+    if not isinstance(document, dict) or document.get("version") != 1:
+        raise FleetdError(f"unsupported recovery latch: {path}")
+    if document.get("slot") != spec.slot:
+        raise FleetdError(f"recovery latch slot binding was altered: {path}")
+    if document.get("desired_hash") != spec.desired_hash:
+        raise FleetdError(f"recovery latch desired state drifted: {path}")
+    return document
+
+
+def set_recovery_latch(
+    connection: sqlite3.Connection,
+    directory: Path,
+    spec: LaneSpec,
+    reason: str,
+) -> dict[str, Any]:
+    existing = read_recovery_latch(directory, spec)
+    if existing is not None:
+        return existing
+    document = {
+        "desired_hash": spec.desired_hash,
+        "latch_id": f"recovery-latch-{uuid.uuid4()}",
+        "reason": reason,
+        "set_utc": utc_now(),
+        "slot": spec.slot,
+        "version": 1,
+    }
+    path = recovery_latch_path(directory, spec.slot)
+    atomic_write_secret_json(path, document)
+    append_event(
+        connection,
+        "RECOVERY_LATCH_SET",
+        spec.slot,
+        f"recovery-latch-set:{document['latch_id']}",
+        {
+            "desired_hash": spec.desired_hash,
+            "latch_id": document["latch_id"],
+            "path": str(path),
+            "reason": reason,
+        },
+    )
+    print(
+        "FLEET_RECOVERY_LATCH "
+        f"slot={spec.slot} status=set latch_id={document['latch_id']} reason={reason}"
+    )
+    return document
+
+
+def clear_recovery_latch(
+    connection: sqlite3.Connection,
+    specs: list[LaneSpec],
+    slot: str,
+    raw_directory: str,
+) -> int:
+    matches = [spec for spec in specs if spec.slot == slot]
+    if len(matches) != 1:
+        raise FleetdError(f"fleet config has no unique slot: {slot}")
+    directory = private_directory(
+        raw_directory, create=False, label="recovery latch directory"
+    )
+    document = read_recovery_latch(directory, matches[0])
+    if document is None:
+        raise FleetdError(f"recovery latch does not exist for slot {slot}")
+    path = recovery_latch_path(directory, slot)
+    append_event(
+        connection,
+        "RECOVERY_LATCH_CLEAR_REQUESTED",
+        slot,
+        f"recovery-latch-clear:{document['latch_id']}",
+        {
+            "desired_hash": matches[0].desired_hash,
+            "latch_id": document["latch_id"],
+            "path": str(path),
+            "reason": document["reason"],
+        },
+    )
+    path.unlink()
+    print(
+        "FLEET_RECOVERY_LATCH "
+        f"slot={slot} status=cleared latch_id={document['latch_id']}"
+    )
+    return 0
 
 
 def validate_recovery_budget(
@@ -3068,6 +3187,7 @@ def cycle(
     recovery_only: bool = False,
     capabilities: dict[str, dict[str, Any]] | None = None,
     recovery_budgets: dict[str, dict[str, Any]] | None = None,
+    recovery_latch_dir: Path | None = None,
     emit: bool = True,
 ) -> int:
     verify_state(connection)
@@ -3107,6 +3227,25 @@ def cycle(
         if decision == "blocked":
             blocked += 1
         elif decision == "start" and apply:
+            if recovery_latch_dir is not None:
+                try:
+                    latch = read_recovery_latch(recovery_latch_dir, spec)
+                except FleetdError as exc:
+                    failed += 1
+                    print(
+                        "FLEET_ACTION "
+                        f"slot={spec.slot} action=start status=refused "
+                        f"reason={slug(str(exc), limit=160)}"
+                    )
+                    continue
+                if latch is not None:
+                    print(
+                        "FLEET_ACTION "
+                        f"slot={spec.slot} action=start status=held "
+                        "reason=recovery-latch-present "
+                        f"latch_id={latch['latch_id']}"
+                    )
+                    continue
             if recovery_only and spec.slot not in recovery_budgets:
                 print(
                     "FLEET_ACTION "
@@ -3145,6 +3284,17 @@ def cycle(
                         f"slot={spec.slot} action=start status=refused "
                         f"reason={refusal_reason}"
                     )
+                    if recovery_latch_dir is not None:
+                        try:
+                            set_recovery_latch(
+                                connection, recovery_latch_dir, spec, refusal_reason
+                            )
+                        except FleetdError as latch_exc:
+                            print(
+                                "FLEET_RECOVERY_LATCH "
+                                f"slot={spec.slot} status=refused "
+                                f"reason={slug(str(latch_exc), limit=160)}"
+                            )
                     continue
             if document is None and authority_reason == "recovery-backoff-active":
                 append_event(
@@ -3196,6 +3346,17 @@ def cycle(
                     "FLEET_ACTION "
                     f"slot={spec.slot} action=start status=refused reason={authority_reason}"
                 )
+                if recovery_latch_dir is not None:
+                    try:
+                        set_recovery_latch(
+                            connection, recovery_latch_dir, spec, authority_reason
+                        )
+                    except FleetdError as latch_exc:
+                        print(
+                            "FLEET_RECOVERY_LATCH "
+                            f"slot={spec.slot} status=refused "
+                            f"reason={slug(str(latch_exc), limit=160)}"
+                        )
                 continue
             if document is None:
                 failed += 1
@@ -3224,6 +3385,20 @@ def cycle(
                     f"slot={spec.slot} action=start status=refused "
                     "reason=linear-capability-required"
                 )
+                if recovery_latch_dir is not None:
+                    try:
+                        set_recovery_latch(
+                            connection,
+                            recovery_latch_dir,
+                            spec,
+                            "linear-capability-required",
+                        )
+                    except FleetdError as latch_exc:
+                        print(
+                            "FLEET_RECOVERY_LATCH "
+                            f"slot={spec.slot} status=refused "
+                            f"reason={slug(str(latch_exc), limit=160)}"
+                        )
                 continue
             if spec.slot in capabilities:
                 used_capabilities.add(spec.slot)
@@ -3257,6 +3432,17 @@ def cycle(
                     f"slot={spec.slot} action=start status=refused "
                     f"reason={refusal_reason}"
                 )
+                if recovery_latch_dir is not None:
+                    try:
+                        set_recovery_latch(
+                            connection, recovery_latch_dir, spec, refusal_reason
+                        )
+                    except FleetdError as latch_exc:
+                        print(
+                            "FLEET_RECOVERY_LATCH "
+                            f"slot={spec.slot} status=refused "
+                            f"reason={slug(str(latch_exc), limit=160)}"
+                        )
                 continue
             if apply_start(
                 connection,
@@ -3280,8 +3466,36 @@ def cycle(
                 )
                 if after["state"] != "active":
                     failed += 1
+                    if recovery_latch_dir is not None:
+                        try:
+                            set_recovery_latch(
+                                connection,
+                                recovery_latch_dir,
+                                spec,
+                                "post-commit-generation-exited",
+                            )
+                        except FleetdError as latch_exc:
+                            print(
+                                "FLEET_RECOVERY_LATCH "
+                                f"slot={spec.slot} status=refused "
+                                f"reason={slug(str(latch_exc), limit=160)}"
+                            )
             else:
                 failed += 1
+                if recovery_latch_dir is not None:
+                    try:
+                        set_recovery_latch(
+                            connection,
+                            recovery_latch_dir,
+                            spec,
+                            "start-action-failed",
+                        )
+                    except FleetdError as latch_exc:
+                        print(
+                            "FLEET_RECOVERY_LATCH "
+                            f"slot={spec.slot} status=refused "
+                            f"reason={slug(str(latch_exc), limit=160)}"
+                        )
         elif decision == "stop" and apply:
             if recovery_only:
                 print(
@@ -3653,6 +3867,8 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--apply", action="store_true")
             command.add_argument("--capability", action="append", default=[])
             command.add_argument("--recovery-budget", action="append", default=[])
+            command.add_argument("--recovery-budget-dir", action="append", default=[])
+            command.add_argument("--recovery-latch-dir")
     authorize_parser = subparsers.add_parser("authorize")
     authorize_parser.add_argument("--config", default="fleet.toml")
     authorize_parser.add_argument("--slot", required=True)
@@ -3666,6 +3882,10 @@ def parser() -> argparse.ArgumentParser:
     recovery_parser.add_argument("--ttl", type=int, default=3600)
     recovery_parser.add_argument("--max-starts", type=int, default=3)
     recovery_parser.add_argument("--backoff-seconds", type=int, default=30)
+    clear_latch_parser = subparsers.add_parser("recovery-latch-clear")
+    clear_latch_parser.add_argument("--config", default="fleet.toml")
+    clear_latch_parser.add_argument("--slot", required=True)
+    clear_latch_parser.add_argument("--recovery-latch-dir", required=True)
     watch_parser = subparsers.add_parser("watch")
     watch_parser.add_argument("--config", default="fleet.toml")
     watch_parser.add_argument("--interval", type=float, default=2.0)
@@ -3673,6 +3893,8 @@ def parser() -> argparse.ArgumentParser:
     watch_parser.add_argument("--apply", action="store_true")
     watch_parser.add_argument("--apply-recovery", action="store_true")
     watch_parser.add_argument("--recovery-budget", action="append", default=[])
+    watch_parser.add_argument("--recovery-budget-dir", action="append", default=[])
+    watch_parser.add_argument("--recovery-latch-dir")
     events_parser = subparsers.add_parser("events")
     events_parser.add_argument("--slot")
     events_parser.add_argument("--limit", type=int, default=50)
@@ -3858,6 +4080,14 @@ def main() -> int:
                     args.max_starts,
                     args.backoff_seconds,
                 )
+        if args.command_name == "recovery-latch-clear":
+            with writer_lock(db_path):
+                return clear_recovery_latch(
+                    connection,
+                    specs,
+                    args.slot,
+                    args.recovery_latch_dir,
+                )
         if args.command_name == "checkpoint-create":
             with writer_lock(db_path):
                 create_checkpoint(
@@ -3880,14 +4110,39 @@ def main() -> int:
                 else {}
             )
             recovery_budgets = (
-                load_recovery_budget_documents(args.recovery_budget)
+                load_recovery_budget_documents(
+                    args.recovery_budget, args.recovery_budget_dir
+                )
                 if args.command_name == "reconcile"
                 else {}
+            )
+            recovery_latch_dir = (
+                private_directory(
+                    args.recovery_latch_dir,
+                    create=True,
+                    label="recovery latch directory",
+                )
+                if args.command_name == "reconcile" and args.recovery_latch_dir
+                else None
             )
             if capabilities and not apply:
                 raise FleetdError("capability files require reconcile --apply")
             if recovery_budgets and not apply:
                 raise FleetdError("recovery budgets require reconcile --apply")
+            if (
+                args.command_name == "reconcile"
+                and args.recovery_budget_dir
+                and not args.recovery_latch_dir
+            ):
+                raise FleetdError(
+                    "recovery budget directories require --recovery-latch-dir"
+                )
+            if (
+                args.command_name == "reconcile"
+                and args.recovery_latch_dir
+                and not recovery_budgets
+            ):
+                raise FleetdError("recovery latches require recovery budgets")
             with writer_lock(db_path):
                 return cycle(
                     connection,
@@ -3895,6 +4150,7 @@ def main() -> int:
                     apply=apply,
                     capabilities=capabilities,
                     recovery_budgets=recovery_budgets,
+                    recovery_latch_dir=recovery_latch_dir,
                 )
         if args.command_name == "watch":
             if args.interval <= 0:
@@ -3904,19 +4160,40 @@ def main() -> int:
                     "watch cannot hold reusable mutation authority; use one-shot "
                     "reconcile --apply --capability"
                 )
-            if args.apply_recovery and not args.recovery_budget:
+            if args.apply_recovery and not (
+                args.recovery_budget or args.recovery_budget_dir
+            ):
                 raise FleetdError(
                     "watch --apply-recovery requires at least one bounded recovery budget"
                 )
-            if args.recovery_budget and not args.apply_recovery:
+            if (
+                args.recovery_budget or args.recovery_budget_dir
+            ) and not args.apply_recovery:
                 raise FleetdError(
                     "recovery budgets require watch --apply-recovery"
+                )
+            if args.recovery_budget_dir and not args.recovery_latch_dir:
+                raise FleetdError(
+                    "recovery budget directories require --recovery-latch-dir"
+                )
+            if args.recovery_latch_dir and not args.apply_recovery:
+                raise FleetdError(
+                    "recovery latches require watch --apply-recovery"
                 )
             cycles = 0
             while True:
                 specs = load_config(config_path)
                 recovery_budgets = load_recovery_budget_documents(
-                    args.recovery_budget
+                    args.recovery_budget, args.recovery_budget_dir
+                )
+                recovery_latch_dir = (
+                    private_directory(
+                        args.recovery_latch_dir,
+                        create=True,
+                        label="recovery latch directory",
+                    )
+                    if args.recovery_latch_dir
+                    else None
                 )
                 with writer_lock(db_path):
                     result = cycle(
@@ -3925,6 +4202,7 @@ def main() -> int:
                         apply=args.apply_recovery,
                         recovery_only=args.apply_recovery,
                         recovery_budgets=recovery_budgets,
+                        recovery_latch_dir=recovery_latch_dir,
                     )
                 cycles += 1
                 if args.cycles and cycles >= args.cycles:
