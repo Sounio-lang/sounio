@@ -8320,6 +8320,128 @@ impl Lowerer {
         (lo, d.1)
     }
 
+    fn so_sub_or_take(self, acc: i64, x: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if x < 0 {
+            return (lo, acc)
+        }
+        if acc < 0 {
+            // 0 - x: the IR has no unary negation, so an absent accumulator
+            // still has to emit a subtraction from a materialised zero.
+            let zp = lo.emit_f64_const(0.0)
+            lo = zp.0
+            let d = lo.fresh_reg()
+            lo = d.0
+            lo = lo.emit(ir_binop_typed(d.1, zp.1, BinaryOp::OpSub, x, true, true))
+            lo = lo.emit(ir_mark_float_reg(d.1))
+            return (lo, d.1)
+        }
+        let d = lo.fresh_reg()
+        lo = d.0
+        lo = lo.emit(ir_binop_typed(d.1, acc, BinaryOp::OpSub, x, true, true))
+        lo = lo.emit(ir_mark_float_reg(d.1))
+        (lo, d.1)
+    }
+
+    fn so_div_or_none(self, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if a < 0 || b < 0 {
+            return (lo, 0 - 1)
+        }
+        let d = lo.fresh_reg()
+        lo = d.0
+        lo = lo.emit(ir_binop_typed(d.1, a, BinaryOp::OpDiv, b, true, true))
+        lo = lo.emit(ir_mark_float_reg(d.1))
+        (lo, d.1)
+    }
+
+    // H(a/b)_jk = a_jk/b - (a_j*b_k + a_k*b_j)/b^2 - a*b_jk/b^2 + 2*a*b_j*b_k/b^3.
+    //
+    // The quotient is not the product rule wearing a reciprocal. The last term
+    // is cubic in b and has no counterpart in H(x*y); dropping it leaves a
+    // number that is right only where b_j*b_k vanishes -- that is, everywhere
+    // except the channels that made the denominator uncertain to begin with.
+    // hessian_of(a/b, kb, kb) is therefore the pin for this rule, not the
+    // mixed partial: the mixed one survives a two-term approximation.
+    fn so_combine_hess_div(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self.so_clear_expr_hess()
+        if lhs_v < 0 || rhs_v < 0 {
+            return lo
+        }
+        // b^2, b^3 and the constant 2.0, hoisted out of the channel loop.
+        let bb_p = lo.fresh_reg()
+        lo = bb_p.0
+        let bb = bb_p.1
+        lo = lo.emit(ir_binop_typed(bb, rhs_v, BinaryOp::OpMul, rhs_v, true, true))
+        lo = lo.emit(ir_mark_float_reg(bb))
+        let bbb_p = lo.fresh_reg()
+        lo = bbb_p.0
+        let bbb = bbb_p.1
+        lo = lo.emit(ir_binop_typed(bbb, bb, BinaryOp::OpMul, rhs_v, true, true))
+        lo = lo.emit(ir_mark_float_reg(bbb))
+        let two_p = lo.emit_f64_const(2.0)
+        lo = two_p.0
+        let two = two_p.1
+
+        var nch = lo.fo_nchan
+        if nch > 8 { nch = 8 }
+        var j: i64 = 0
+        while j < nch {
+            var k: i64 = j
+            while k < nch {
+                let idx = lo.so_hess_idx(j, k)
+                var acc: i64 = 0 - 1
+
+                // + a_jk / b
+                let t1 = lo.so_div_or_none(hL[idx as usize], rhs_v)
+                lo = t1.0
+                let a1 = lo.so_add_or_take(acc, t1.1)
+                lo = a1.0
+                acc = a1.1
+
+                // - (a_j*b_k + a_k*b_j) / b^2
+                let c1 = lo.so_mul_or_none(sL[j as usize], sR[k as usize])
+                lo = c1.0
+                let c2 = lo.so_mul_or_none(sL[k as usize], sR[j as usize])
+                lo = c2.0
+                let cs = lo.so_add_or_take(c1.1, c2.1)
+                lo = cs.0
+                let t2 = lo.so_div_or_none(cs.1, bb)
+                lo = t2.0
+                let a2 = lo.so_sub_or_take(acc, t2.1)
+                lo = a2.0
+                acc = a2.1
+
+                // - a*b_jk / b^2
+                let m3 = lo.so_mul_or_none(lhs_v, hR[idx as usize])
+                lo = m3.0
+                let t3 = lo.so_div_or_none(m3.1, bb)
+                lo = t3.0
+                let a3 = lo.so_sub_or_take(acc, t3.1)
+                lo = a3.0
+                acc = a3.1
+
+                // + 2*a*b_j*b_k / b^3
+                let p1 = lo.so_mul_or_none(sR[j as usize], sR[k as usize])
+                lo = p1.0
+                let p2 = lo.so_mul_or_none(p1.1, lhs_v)
+                lo = p2.0
+                let p3 = lo.so_mul_or_none(p2.1, two)
+                lo = p3.0
+                let t4 = lo.so_div_or_none(p3.1, bbb)
+                lo = t4.0
+                let a4 = lo.so_add_or_take(acc, t4.1)
+                lo = a4.0
+                acc = a4.1
+
+                lo.so_expr_hess[idx as usize] = acc
+                k = k + 1
+            }
+            j = j + 1
+        }
+        lo
+    }
+
     // H(x*y)_jk = Hx_jk*y + x*Hy_jk + Sx_j*Sy_k + Sx_k*Sy_j.
     //
     // The last two terms are why this cannot be derived from the gradient
@@ -9937,10 +10059,11 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
-                    // No second-order rule for division in this increment. Clear
-                    // rather than leave an operand's Hessian standing in for the
-                    // quotient's -- that would be a wrong number, not a missing one.
-                    lo = lo.so_clear_expr_hess()
+                    if lo.so_enabled {
+                        lo = lo.so_combine_hess_div(hL, hR, sL, sR, lhs_v, rhs_v)
+                    } else {
+                        lo = lo.so_clear_expr_hess()
+                    }
                     lo = lo.fo_combine_sens_div(sL, sR, lhs_v, rhs_v)
                     return lo.fo_emit_var_from_sens()
                 }
