@@ -206,5 +206,6 @@ case "$GATES" in *full*|*corpus*|*witness*|*sabotage*) PAYLOAD="$PAYLOAD tests b
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
+     --job-name="${SOUNIO_REMOTE_JOBNAME:-souc-${GATES:-build}-$$}" \
          --cpus-per-task="$CPUS" --time="$TIMELIMIT" bash -c "$REMOTE_SCRIPT" 2>&1 \
   | grep -vE "^srun: (job|Job)|couldn't chdir"
