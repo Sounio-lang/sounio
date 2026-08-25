@@ -98,7 +98,7 @@ WORK="$(mktemp -d /tmp/witness-sabotage.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 ulimit -s 524288 2>/dev/null || true
 
-total=0; passed=0; failed=0; unknown_token=0
+total=0; passed=0; failed=0; unknown_token=0; broken=0
 for row in "${declared[@]}"; do
   src="${row%%|*}"; tok="${row##*|}"
   total=$((total + 1))
@@ -124,7 +124,7 @@ for row in "${declared[@]}"; do
   out="$WORK/clean.elf"
   if ! timeout 300 "$MADAROS" build "$src" "$out" >"$WORK/b.log" 2>&1; then
     echo "  CLEAN-BUILD-FAIL  $src did not compile unsabotaged"
-    failed=$((failed + 1)); continue
+    broken=$((broken + 1)); failed=$((failed + 1)); continue
   fi
   chmod +x "$out"
   timeout 120 "$out" >"$WORK/r.log" 2>&1
@@ -132,7 +132,7 @@ for row in "${declared[@]}"; do
   if [[ $clean_rc -ne 0 ]] || { [[ -n "$marker" ]] && ! grep -qF "$marker" "$WORK/r.log"; }; then
     echo "  CLEAN-RUN-FAIL    $src fails without any sabotage (rc=$clean_rc)"
     sed 's/^/      clean| /' "$WORK/r.log" | head -8
-    failed=$((failed + 1)); continue
+    broken=$((broken + 1)); failed=$((failed + 1)); continue
   fi
 
   # Control B -- sabotaged, must FAIL. This is the whole gate.
@@ -176,8 +176,19 @@ echo "witness_declares_its_sabotage: status=$status declared=$n_decl passed=$pas
 if [[ $unknown_token -ne 0 ]]; then
   echo "  $unknown_token witness(es) name a sabotage token with no switch behind it"
 fi
+# Survival and brokenness are different accusations and must not be reported
+# as one. A witness that survives its sabotage is claiming more than it
+# measures; a witness that is already red says nothing either way, and calling
+# that "survived" points at the wrong defect.
+survived=$((failed - broken))
 if [[ $failed -ne 0 ]]; then
-  gate_fail "$failed witness(es) survived their own declared sabotage"
+  msg=""
+  [[ $survived -gt 0 ]] && msg="$survived survived their own declared sabotage"
+  if [[ $broken -gt 0 ]]; then
+    [[ -n "$msg" ]] && msg="$msg; "
+    msg="$msg$broken cannot be judged -- already failing with no sabotage at all"
+  fi
+  gate_fail "$msg"
 fi
 gate_pass "$passed/$total declared witnesses died as declared; $n_undecl of $total_w still unverified"
 exit 0
