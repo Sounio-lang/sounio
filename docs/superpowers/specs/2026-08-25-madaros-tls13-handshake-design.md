@@ -77,8 +77,14 @@ and tests only the client path.
 
 ## Architecture
 
-Six new files, each with one clear responsibility, plus one integration
-point in the existing `stdlib/net/http_client.sio`'s sibling position:
+Six new files, plus one small necessary extension to the existing X.509
+parser discovered during implementation planning: `stdlib/x509/cert.sio`
+currently has no representation for an EC public key at all (only RSA
+`modulus`/`public_exponent`), and neither it nor `stdlib/x509/oid.sio`
+recognizes the `id-ecPublicKey`/`prime256v1` OIDs — a certificate presenting
+an ECDSA public key has nowhere to be stored today. Since ECDSA P-256
+CertificateVerify is in scope, this is closed as part of this sub-project
+rather than deferred. Each file has one clear responsibility:
 
 | File | Responsibility |
 |---|---|
@@ -88,6 +94,7 @@ point in the existing `stdlib/net/http_client.sio`'s sibling position:
 | `stdlib/tls/transcript.sio` | A running transcript-hash accumulator: feeds raw handshake-message wire bytes in as they're sent/received, and exposes the current hash on demand for `hkdf.sio`'s `derive_secret` calls. Hash algorithm (SHA-256 vs SHA-384) is fixed by the negotiated cipher suite. |
 | `stdlib/tls/handshake.sio` | Wire encode/decode for every TLS 1.3 handshake message this sub-project touches: ClientHello, ServerHello, HelloRetryRequest, EncryptedExtensions, Certificate, CertificateVerify, Finished, NewSessionTicket (decode-and-discard only), KeyUpdate. Pure encode/decode — no I/O, no crypto, no state. |
 | `stdlib/tls/client.sio` | The orchestrator: `TlsConnection` struct, `tls_connect`/`tls_send`/`tls_recv`/`tls_close`. Drives the handshake state sequence, wires `record.sio` + `transcript.sio` + `handshake.sio` + the existing `x509_verify_chain` + `aead_seal`/`aead_open` + `x25519`/`x25519_base_point_mul` + `hkdf.sio`'s full ladder + `rsa_pss.sio`/`ecdsa_p256.sio` together against a real `TcpSocket`. |
+| `stdlib/x509/{oid.sio,cert.sio}` (extended, not new) | Adds `id-ecPublicKey`/`prime256v1` OID recognition and EC public-key-point extraction to the existing X.509 parser, so a certificate's `Certificate` struct can carry an `EcPoint` alongside its existing RSA fields. |
 
 ## Data Structures (key interfaces)
 
