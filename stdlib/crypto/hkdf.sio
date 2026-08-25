@@ -264,6 +264,27 @@ pub fn hkdf_expand(hash_algo: i32, prk: &RawBuf, prk_len: i64, info: &RawBuf, in
 // RFC 8446 section 7.1:
 //   struct { uint16 length; opaque label<7..255> = "tls13 " + Label;
 //             opaque context<0..255> = Context; } HkdfLabel;
+//
+// Precondition (NOT checked at runtime): `label_len <= 249` (so that
+// `6 + label_len <= 255`, satisfying the RFC's `opaque label<7..255>`
+// vector-length limit once the 6-byte "tls13 " prefix is added) and
+// `context_len <= 255` (satisfying `opaque context<0..255>` directly).
+// Violating either bound is NOT detected or rejected here: the
+// single-byte length-prefix fields at `info[2]` (the full "tls13 "+label
+// length) and `info[3+full_label_len]` (the context length) are written
+// via plain truncating byte stores, so a length that doesn't fit in a
+// byte silently wraps modulo 256 -- e.g. label_len=250 makes
+// full_label_len=256, which wraps the length-prefix byte to 0 -- producing
+// a malformed `HkdfLabel` (wrong length-prefix, but still all the label
+// and context bytes actually present in `info`) rather than a compile-
+// or run-time error. Every current caller in this module is far under
+// both limits: label literals are TLS 1.3 constants at most ~14 bytes
+// ("c ap traffic", "s hs traffic", "derived", "key", "iv", ...), and
+// contexts are transcript-hash outputs of 32 (SHA-256) or 48 (SHA-384)
+// bytes. See the final-review ledger (Finding 2) for the ruling that
+// keeps this a documented, tested, but unenforced precondition rather
+// than a signature-widening fix, since no reachable caller today or in
+// the planned handshake sub-project ever approaches either bound.
 pub fn hkdf_expand_label(
     hash_algo: i32,
     secret: &RawBuf,
