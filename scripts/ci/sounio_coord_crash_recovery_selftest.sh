@@ -8,6 +8,8 @@ REPO="$TEST_ROOT/repo"
 SECOND="$TEST_ROOT/supervisor-worktree"
 TMP_ROOT="$TEST_ROOT/tmp"
 HISTORY_HOME="$TEST_ROOT/history-home"
+LOOM_RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
+LOOM_OBLIGATION_ADAPTER="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 first_pid=''
 second_pid=''
 third_pid=''
@@ -28,6 +30,13 @@ fail() {
   printf 'sounio-coord-crash-recovery-selftest: FAIL: %s\n' "$*" >&2
   exit 1
 }
+
+"$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+[[ -x "$LOOM_RUNTIME" ]] || fail "Loom runtime was not built: $LOOM_RUNTIME"
+[[ -x "$LOOM_OBLIGATION_ADAPTER" ]] || \
+  fail "Loom obligation adapter was not built: $LOOM_OBLIGATION_ADAPTER"
+export SOUNIO_COORD_LOOM_RUNTIME="$LOOM_RUNTIME"
+export SOUNIO_LOOM_OBLIGATION_ADAPTER="$LOOM_OBLIGATION_ADAPTER"
 
 process_start() {
   local pid="$1" tail
