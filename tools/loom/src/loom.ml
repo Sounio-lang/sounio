@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.24.9"
+let runtime_version = "2026.08.24.10"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -5993,6 +5993,988 @@ let run_captured executable arguments =
       let _, status = Unix.waitpid [] pid in
       { captured_code = process_exit_code status; captured_output = Buffer.contents output }
 
+type obligation_paths = {
+  obligation_dir : string;
+  obligation_journal_path : string;
+  obligation_lock_path : string;
+}
+
+type obligation_view = {
+  obligation_message_id : string;
+  obligation_message_digest : string;
+  obligation_from_agent : string;
+  obligation_from_lane : string;
+  obligation_to_agent : string;
+  obligation_to_lane : string;
+  obligation_state : int;
+  obligation_actor : string;
+  obligation_lane : string;
+  obligation_generation : string;
+  obligation_claim : string;
+  obligation_predecessor_claim : string;
+  obligation_lease_deadline : int;
+  obligation_outcome_digest : string;
+  obligation_evidence_digest : string;
+  obligation_outcome_path : string;
+  obligation_evidence_path : string;
+  obligation_last_epoch : int;
+  obligation_sequence : int;
+  obligation_head : string;
+}
+
+let obligation_state_name = function
+  | 1 -> "durable"
+  | 2 -> "consumed"
+  | 3 -> "claimed"
+  | 4 -> "interrupted"
+  | 5 -> "recoverable"
+  | 6 -> "completed"
+  | value -> failf "obligation-invalid-state:%d" value
+
+let obligation_root root = Filename.concat root "loom-obligations"
+
+let obligation_paths root message_id =
+  if trim message_id = "" then failf "obligation-message-id-empty";
+  let key = slug message_id ^ "-" ^ String.sub (sha256 message_id) 0 16 in
+  let obligation_dir = Filename.concat (obligation_root root) key in
+  { obligation_dir;
+    obligation_journal_path = Filename.concat obligation_dir "journal.tsv";
+    obligation_lock_path = Filename.concat obligation_dir "obligation.lock" }
+
+let with_obligation_lock paths operation =
+  mkdir_p paths.obligation_dir;
+  Unix.chmod paths.obligation_dir 0o700;
+  let descriptor =
+    Unix.openfile paths.obligation_lock_path [ O_WRONLY; O_CREAT ] 0o600
+  in
+  Unix.set_close_on_exec descriptor;
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      operation ())
+
+let obligation_payload fields =
+  fields
+  |> List.map (fun (key, value) -> key ^ "=" ^ field_escape value ^ "\n")
+  |> String.concat ""
+
+let obligation_payload_table payload =
+  let table = Hashtbl.create 24 in
+  payload |> split_on '\n'
+  |> List.iter (fun line ->
+         if line <> "" then
+           match String.index_opt line '=' with
+           | None -> failf "obligation-payload-field-malformed"
+           | Some index ->
+               let key = String.sub line 0 index in
+               let value =
+                 String.sub line (index + 1) (String.length line - index - 1)
+                 |> field_unescape
+               in
+               if key = "" || Hashtbl.mem table key then
+                 failf "obligation-payload-field-duplicate:%s" key;
+               Hashtbl.add table key value);
+  table
+
+let obligation_field table key =
+  match Hashtbl.find_opt table key with
+  | Some value -> value
+  | None -> failf "obligation-payload-field-missing:%s" key
+
+let obligation_int label value =
+  try int_of_string value
+  with _ -> failf "obligation-%s-not-integer:%s" label value
+
+let obligation_positive_int label value =
+  let parsed = obligation_int label value in
+  if parsed <= 0 then failf "obligation-%s-not-positive:%d" label parsed;
+  parsed
+
+let obligation_event_epoch table =
+  obligation_positive_int "event-epoch" (obligation_field table "event_epoch")
+
+let obligation_require_nonempty label value =
+  if trim value = "" then failf "obligation-%s-empty" label;
+  value
+
+let obligation_owner_matches view actor lane generation =
+  actor = view.obligation_actor && lane = view.obligation_lane
+  && generation = view.obligation_generation
+
+let obligation_identity_matches view table =
+  let message_id = obligation_field table "message_id" in
+  let message_digest = obligation_field table "message_digest" in
+  if message_id <> view.obligation_message_id then
+    failf "obligation-message-id-drift";
+  if message_digest <> view.obligation_message_digest then
+    failf "obligation-message-digest-drift"
+
+let verify_obligation_hash_chain path events =
+  let expected_sequence = ref 1 in
+  let expected_previous = ref (String.make 64 '0') in
+  List.iter
+    (fun (event : journal_event) ->
+      verify_journal_event_authority path event;
+      if event.seq <> !expected_sequence then
+        failf "obligation-hash-non-contiguous-sequence:expected=%d:actual=%d"
+          !expected_sequence event.seq;
+      if event.previous <> !expected_previous then
+        failf "obligation-hash-previous-mismatch:seq=%d" event.seq;
+      let expected_hash =
+        sha256
+          (event_material event.seq event.previous event.utc event.kind
+             event.payload_hex)
+      in
+      if event.hash <> expected_hash then
+        failf "obligation-hash-event-mismatch:seq=%d" event.seq;
+      expected_previous := event.hash;
+      incr expected_sequence)
+    events;
+  !expected_previous
+
+let reduce_obligation_event current (event : journal_event) =
+  let table = obligation_payload_table (string_of_hex event.payload_hex) in
+  let epoch = obligation_event_epoch table in
+  match (current, event.kind) with
+  | None, "OBLIGATION_OPENED" ->
+      let message_id =
+        obligation_require_nonempty "message-id" (obligation_field table "message_id")
+      in
+      let message_digest = obligation_field table "message_digest" in
+      if not (valid_sha256 message_digest) then
+        failf "obligation-message-digest-invalid";
+      Some
+        { obligation_message_id = message_id;
+          obligation_message_digest = message_digest;
+          obligation_from_agent = obligation_field table "from_agent";
+          obligation_from_lane = obligation_field table "from_lane";
+          obligation_to_agent = obligation_field table "to_agent";
+          obligation_to_lane = obligation_field table "to_lane";
+          obligation_state = 1; obligation_actor = ""; obligation_lane = "";
+          obligation_generation = ""; obligation_claim = "";
+          obligation_predecessor_claim = ""; obligation_lease_deadline = 0;
+          obligation_outcome_digest = ""; obligation_evidence_digest = "";
+          obligation_outcome_path = ""; obligation_evidence_path = "";
+          obligation_last_epoch = epoch; obligation_sequence = event.seq;
+          obligation_head = event.hash }
+  | None, _ -> failf "obligation-first-event-must-open"
+  | Some view, _ ->
+      obligation_identity_matches view table;
+      if epoch < view.obligation_last_epoch then
+        failf "obligation-event-time-regressed:seq=%d" event.seq;
+      let updated state actor lane generation claim predecessor deadline outcome
+          evidence outcome_path evidence_path =
+        Some
+          { view with obligation_state = state; obligation_actor = actor;
+            obligation_lane = lane; obligation_generation = generation;
+            obligation_claim = claim;
+            obligation_predecessor_claim = predecessor;
+            obligation_lease_deadline = deadline;
+            obligation_outcome_digest = outcome;
+            obligation_evidence_digest = evidence;
+            obligation_outcome_path = outcome_path;
+            obligation_evidence_path = evidence_path;
+            obligation_last_epoch = epoch; obligation_sequence = event.seq;
+            obligation_head = event.hash }
+      in
+      (match event.kind with
+      | "OBLIGATION_CONSUMED" ->
+          if view.obligation_state <> 1 then
+            failf "obligation-consume-invalid-state:%s"
+              (obligation_state_name view.obligation_state);
+          let actor =
+            obligation_require_nonempty "actor" (obligation_field table "actor")
+          in
+          let lane =
+            obligation_require_nonempty "lane" (obligation_field table "lane")
+          in
+          let generation =
+            obligation_require_nonempty "generation"
+              (obligation_field table "generation")
+          in
+          let deadline =
+            obligation_positive_int "lease-deadline"
+              (obligation_field table "lease_deadline")
+          in
+          if deadline <= epoch then failf "obligation-consume-already-expired";
+          updated 2 actor lane generation "" "" deadline "" "" "" ""
+      | "OBLIGATION_CLAIMED" ->
+          if view.obligation_state <> 2 && view.obligation_state <> 5 then
+            failf "obligation-claim-invalid-state:%s"
+              (obligation_state_name view.obligation_state);
+          let actor = obligation_field table "actor" in
+          let lane = obligation_field table "lane" in
+          let generation = obligation_field table "generation" in
+          if not (obligation_owner_matches view actor lane generation) then
+            failf "obligation-claim-owner-mismatch";
+          if view.obligation_state = 2 && epoch > view.obligation_lease_deadline then
+            failf "obligation-consumer-lease-expired";
+          let claim =
+            obligation_require_nonempty "claim" (obligation_field table "claim")
+          in
+          if claim = view.obligation_predecessor_claim then
+            failf "obligation-claim-reuses-predecessor";
+          let deadline =
+            obligation_positive_int "lease-deadline"
+              (obligation_field table "lease_deadline")
+          in
+          if deadline <= epoch then failf "obligation-claim-already-expired";
+          updated 3 actor lane generation claim view.obligation_predecessor_claim
+            deadline "" "" "" ""
+      | "OBLIGATION_RENEWED" ->
+          if view.obligation_state <> 3 then
+            failf "obligation-renew-invalid-state:%s"
+              (obligation_state_name view.obligation_state);
+          let actor = obligation_field table "actor" in
+          let lane = obligation_field table "lane" in
+          let generation = obligation_field table "generation" in
+          let claim = obligation_field table "claim" in
+          if not (obligation_owner_matches view actor lane generation)
+             || claim <> view.obligation_claim then
+            failf "obligation-renew-claim-mismatch";
+          if epoch > view.obligation_lease_deadline then
+            failf "obligation-renew-after-expiry";
+          let deadline =
+            obligation_positive_int "lease-deadline"
+              (obligation_field table "lease_deadline")
+          in
+          if deadline <= epoch || deadline <= view.obligation_lease_deadline then
+            failf "obligation-renew-not-monotone";
+          updated 3 actor lane generation claim view.obligation_predecessor_claim
+            deadline "" "" "" ""
+      | "OBLIGATION_INTERRUPTED" ->
+          if view.obligation_state <> 2 && view.obligation_state <> 3 then
+            failf "obligation-interrupt-invalid-state:%s"
+              (obligation_state_name view.obligation_state);
+          let actor = obligation_field table "actor" in
+          let lane = obligation_field table "lane" in
+          let generation = obligation_field table "generation" in
+          let claim = obligation_field table "claim" in
+          if not (obligation_owner_matches view actor lane generation)
+             || claim <> view.obligation_claim then
+            failf "obligation-interrupt-claim-mismatch";
+          let interrupter_actor = obligation_field table "interrupter_actor" in
+          let interrupter_lane = obligation_field table "interrupter_lane" in
+          let interrupter_generation =
+            obligation_field table "interrupter_generation"
+          in
+          let self_interrupt =
+            obligation_owner_matches view interrupter_actor interrupter_lane
+              interrupter_generation
+          in
+          if (not self_interrupt) && epoch <= view.obligation_lease_deadline then
+            failf "obligation-live-claim-cannot-be-interrupted";
+          let reason_digest = obligation_field table "reason_digest" in
+          if not (valid_sha256 reason_digest) then
+            failf "obligation-interrupt-reason-digest-invalid";
+          updated 4 actor lane generation claim claim view.obligation_lease_deadline
+            "" "" "" ""
+      | "OBLIGATION_RECOVERED" ->
+          if view.obligation_state <> 4 then
+            failf "obligation-recover-invalid-state:%s"
+              (obligation_state_name view.obligation_state);
+          let actor =
+            obligation_require_nonempty "actor" (obligation_field table "actor")
+          in
+          let lane =
+            obligation_require_nonempty "lane" (obligation_field table "lane")
+          in
+          let generation =
+            obligation_require_nonempty "generation"
+              (obligation_field table "generation")
+          in
+          if obligation_owner_matches view actor lane generation then
+            failf "obligation-recovery-must-change-owner-generation";
+          let predecessor = obligation_field table "predecessor_claim" in
+          if predecessor <> view.obligation_claim then
+            failf "obligation-recovery-predecessor-mismatch";
+          updated 5 actor lane generation "" predecessor 0 "" "" "" ""
+      | "OBLIGATION_COMPLETED" ->
+          if view.obligation_state <> 3 then
+            failf "obligation-complete-invalid-state:%s"
+              (obligation_state_name view.obligation_state);
+          let actor = obligation_field table "actor" in
+          let lane = obligation_field table "lane" in
+          let generation = obligation_field table "generation" in
+          let claim = obligation_field table "claim" in
+          if not (obligation_owner_matches view actor lane generation)
+             || claim <> view.obligation_claim then
+            failf "obligation-complete-claim-mismatch";
+          if epoch > view.obligation_lease_deadline then
+            failf "obligation-complete-after-lease-expiry";
+          let outcome = obligation_field table "outcome_digest" in
+          let evidence = obligation_field table "evidence_digest" in
+          if not (valid_sha256 outcome) || not (valid_sha256 evidence)
+             || outcome = String.make 64 '0' || evidence = String.make 64 '0'
+             || outcome = evidence then
+            failf "obligation-completion-evidence-not-bound";
+          let outcome_path = obligation_field table "outcome_path" in
+          let evidence_path = obligation_field table "evidence_path" in
+          if outcome_path = evidence_path then
+            failf "obligation-completion-artifacts-not-distinct";
+          updated 6 actor lane generation claim view.obligation_predecessor_claim
+            view.obligation_lease_deadline outcome evidence outcome_path
+            evidence_path
+      | "OBLIGATION_OPENED" -> failf "obligation-open-duplicate"
+      | kind -> failf "obligation-event-unknown:%s" kind)
+
+let load_obligation_journal path =
+  if not (Sys.file_exists path) then failf "obligation-journal-missing:%s" path;
+  let events =
+    read_lines path |> List.filter (fun line -> trim line <> "")
+    |> List.map parse_event
+  in
+  if events = [] then failf "obligation-journal-empty:%s" path;
+  let head = verify_obligation_hash_chain path events in
+  let view = List.fold_left reduce_obligation_event None events in
+  match view with
+  | None -> failf "obligation-journal-has-no-state"
+  | Some value ->
+      if value.obligation_head <> head then failf "obligation-reducer-head-drift";
+      (events, value)
+
+let resume_obligation_journal path events view =
+  let descriptor = Unix.openfile path [ O_WRONLY; O_APPEND ] 0o600 in
+  Unix.set_close_on_exec descriptor;
+  let channel = Unix.out_channel_of_descr descriptor in
+  { channel; descriptor; seq = List.length events;
+    previous = view.obligation_head;
+    authority_context = journal_authority_context path;
+    authority_directory = Filename.dirname path }
+
+let obligation_event_fields view epoch fields =
+  [ ("message_id", view.obligation_message_id);
+    ("message_digest", view.obligation_message_digest);
+    ("event_epoch", string_of_int epoch) ]
+  @ fields
+
+let obligation_adapter () =
+  match Sys.getenv_opt "SOUNIO_LOOM_OBLIGATION_ADAPTER" with
+  | Some path when path <> "" -> path
+  | _ ->
+      Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+        "sounio-loom-obligation-runtime"
+
+let run_captured_input executable arguments input =
+  let stdin_reader, stdin_writer = Unix.pipe () in
+  let output_reader, output_writer = Unix.pipe () in
+  Unix.set_close_on_exec stdin_writer;
+  Unix.set_close_on_exec output_reader;
+  let pid =
+    Unix.create_process executable (Array.of_list (executable :: arguments))
+      stdin_reader output_writer output_writer
+  in
+  Unix.close stdin_reader;
+  Unix.close output_writer;
+  write_all stdin_writer input;
+  Unix.close stdin_writer;
+  let output = Buffer.create 512 in
+  let bytes = Bytes.create 4096 in
+  let rec drain () =
+    match Unix.read output_reader bytes 0 (Bytes.length bytes) with
+    | 0 -> ()
+    | count -> Buffer.add_subbytes output bytes 0 count; drain ()
+    | exception Unix_error (EINTR, _, _) -> drain ()
+  in
+  Fun.protect ~finally:(fun () -> Unix.close output_reader) drain;
+  let _, status = Unix.waitpid [] pid in
+  { captured_code = process_exit_code status;
+    captured_output = trim (Buffer.contents output) }
+
+let obligation_zero_digest = String.make 64 '0'
+
+let verify_obligation_native_transition transition previous next view actor lane
+    generation claim deadline outcome evidence =
+  let adapter = obligation_adapter () in
+  if not (Sys.file_exists adapter) then
+    failf "sounio-obligation-adapter-missing:%s" adapter;
+  let adapter = Unix.realpath adapter in
+  let transition_code =
+    match transition with
+    | "open" -> 1 | "consume" -> 2 | "claim" -> 3 | "renew" -> 4
+    | "interrupt" -> 5 | "recover" -> 6 | "complete" -> 7
+    | _ -> failf "obligation-transition-unknown:%s" transition
+  in
+  let token domain value =
+    if value = "" then "0" else sounio_continuity_token domain value
+  in
+  let frame =
+    let actor_token =
+      if actor = "" && lane = "" then "0"
+      else token "loom-obligation-actor" (actor ^ "\000" ^ lane)
+    in
+    [ "9007"; string_of_int transition_code; string_of_int previous;
+      string_of_int next;
+      token "loom-obligation-id" view.obligation_message_id;
+      actor_token;
+      token "loom-obligation-generation" generation;
+      token "loom-obligation-claim" claim; string_of_int deadline ]
+    @ digest256_limbs view.obligation_message_digest
+    @ digest256_limbs outcome @ digest256_limbs evidence
+    |> String.concat " "
+  in
+  let result = run_captured_input adapter [] (frame ^ "\n") in
+  let expected =
+    Printf.sprintf
+      "SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=%s state=%d"
+      transition next
+  in
+  if result.captured_code <> 0 || result.captured_output <> expected then
+    failf "sounio-obligation-transition-refused:%s:rc=%d:output=%s:frame=%s"
+      transition result.captured_code result.captured_output frame
+
+let obligation_now_epoch () = int_of_float (Unix.gettimeofday ())
+
+let obligation_ttl cli =
+  let ttl =
+    match optional cli "--ttl-seconds" with
+    | None -> 1800
+    | Some value -> obligation_positive_int "ttl-seconds" value
+  in
+  if ttl > 86400 then failf "obligation-ttl-seconds-too-large:%d" ttl;
+  ttl
+
+let obligation_regular_file label path =
+  if path = "" || not (Sys.file_exists path) then
+    failf "obligation-%s-missing:%s" label path;
+  let resolved = Unix.realpath path in
+  let stat = Unix.stat resolved in
+  if stat.st_kind <> S_REG then failf "obligation-%s-not-regular:%s" label resolved;
+  if stat.st_size <= 0 then failf "obligation-%s-empty:%s" label resolved;
+  resolved
+
+let obligation_initial_view message_id message_digest from_agent from_lane
+    to_agent to_lane epoch =
+  { obligation_message_id = message_id;
+    obligation_message_digest = message_digest;
+    obligation_from_agent = from_agent; obligation_from_lane = from_lane;
+    obligation_to_agent = to_agent; obligation_to_lane = to_lane;
+    obligation_state = 0; obligation_actor = ""; obligation_lane = "";
+    obligation_generation = ""; obligation_claim = "";
+    obligation_predecessor_claim = ""; obligation_lease_deadline = 0;
+    obligation_outcome_digest = ""; obligation_evidence_digest = "";
+    obligation_outcome_path = ""; obligation_evidence_path = "";
+    obligation_last_epoch = epoch; obligation_sequence = 0;
+    obligation_head = String.make 64 '0' }
+
+let append_obligation_transition paths events view kind fields =
+  let journal = resume_obligation_journal paths.obligation_journal_path events view in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr journal.channel)
+    (fun () -> ignore (append_event journal kind (obligation_payload fields)));
+  snd (load_obligation_journal paths.obligation_journal_path)
+
+let obligation_lease_state view now =
+  if view.obligation_state <> 2 && view.obligation_state <> 3 then "none"
+  else if now <= view.obligation_lease_deadline then "active"
+  else "expired"
+
+let print_obligation ?(prefix = "LOOM_OBLIGATION") view =
+  let now = obligation_now_epoch () in
+  Printf.printf
+    "%s message=%s state=%s state_code=%d unclosed=%s actor=%s lane=%s generation=%s claim=%s predecessor_claim=%s lease_deadline=%d lease=%s outcome_digest=%s evidence_digest=%s outcome_path=%s evidence_path=%s seq=%d head=%s\n%!"
+    prefix (field_escape view.obligation_message_id)
+    (obligation_state_name view.obligation_state) view.obligation_state
+    (if view.obligation_state = 6 then "no" else "yes")
+    (field_escape view.obligation_actor) (field_escape view.obligation_lane)
+    (field_escape view.obligation_generation) (field_escape view.obligation_claim)
+    (field_escape view.obligation_predecessor_claim)
+    view.obligation_lease_deadline (obligation_lease_state view now)
+    view.obligation_outcome_digest view.obligation_evidence_digest
+    (field_escape view.obligation_outcome_path)
+    (field_escape view.obligation_evidence_path)
+    view.obligation_sequence view.obligation_head
+
+let obligation_json view =
+  let now = obligation_now_epoch () in
+  Printf.sprintf
+    "{\"messageId\":%s,\"state\":%s,\"stateCode\":%d,\"unclosed\":%s,\"actor\":%s,\"lane\":%s,\"generation\":%s,\"claim\":%s,\"predecessorClaim\":%s,\"leaseDeadline\":%d,\"lease\":%s,\"outcomeDigest\":%s,\"evidenceDigest\":%s,\"outcomePath\":%s,\"evidencePath\":%s,\"sequence\":%d,\"head\":%s}"
+    (json_quote view.obligation_message_id)
+    (json_quote (obligation_state_name view.obligation_state))
+    view.obligation_state
+    (if view.obligation_state = 6 then "false" else "true")
+    (json_quote view.obligation_actor) (json_quote view.obligation_lane)
+    (json_quote view.obligation_generation) (json_quote view.obligation_claim)
+    (json_quote view.obligation_predecessor_claim)
+    view.obligation_lease_deadline
+    (json_quote (obligation_lease_state view now))
+    (json_quote view.obligation_outcome_digest)
+    (json_quote view.obligation_evidence_digest)
+    (json_quote view.obligation_outcome_path)
+    (json_quote view.obligation_evidence_path)
+    view.obligation_sequence (json_quote view.obligation_head)
+
+let obligation_views root =
+  let directory = obligation_root root in
+  if not (Sys.file_exists directory) then []
+  else
+    Sys.readdir directory |> Array.to_list |> List.sort String.compare
+    |> List.filter_map (fun name ->
+           let path = Filename.concat (Filename.concat directory name) "journal.tsv" in
+           if Sys.file_exists path then Some (snd (load_obligation_journal path))
+           else None)
+    |> List.sort (fun left right ->
+           String.compare left.obligation_message_id right.obligation_message_id)
+
+let obligation_open_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let message_id = required cli "--message" in
+  let message_digest = required cli "--message-digest" in
+  if not (valid_sha256 message_digest) || message_digest = obligation_zero_digest then
+    failf "obligation-message-digest-invalid";
+  let from_agent = required cli "--from-agent" in
+  let from_lane = required cli "--from-lane" in
+  let to_agent = required cli "--to-agent" in
+  let to_lane = required cli "--to-lane" in
+  List.iter
+    (fun (label, value) -> ignore (obligation_require_nonempty label value))
+    [ ("from-agent", from_agent); ("from-lane", from_lane);
+      ("to-agent", to_agent); ("to-lane", to_lane) ];
+  let paths = obligation_paths root message_id in
+  with_obligation_lock paths (fun () ->
+      if Sys.file_exists paths.obligation_journal_path then (
+        let _, view = load_obligation_journal paths.obligation_journal_path in
+        if view.obligation_message_id <> message_id
+           || view.obligation_message_digest <> message_digest
+           || view.obligation_from_agent <> from_agent
+           || view.obligation_from_lane <> from_lane
+           || view.obligation_to_agent <> to_agent
+           || view.obligation_to_lane <> to_lane then
+          failf "obligation-open-identity-conflict";
+        print_obligation ~prefix:"LOOM_OBLIGATION_OPEN idempotent=yes" view)
+      else (
+        let epoch = obligation_now_epoch () in
+        let initial =
+          obligation_initial_view message_id message_digest from_agent from_lane
+            to_agent to_lane epoch
+        in
+        verify_obligation_native_transition "open" 0 1 initial "" "" "" "" 0
+          obligation_zero_digest obligation_zero_digest;
+        let journal = open_journal paths.obligation_journal_path in
+        Fun.protect
+          ~finally:(fun () -> close_out_noerr journal.channel)
+          (fun () ->
+            ignore
+              (append_event journal "OBLIGATION_OPENED"
+                 (obligation_payload
+                    [ ("message_id", message_id);
+                      ("message_digest", message_digest);
+                      ("event_epoch", string_of_int epoch);
+                      ("from_agent", from_agent); ("from_lane", from_lane);
+                      ("to_agent", to_agent); ("to_lane", to_lane) ])));
+        fsync_directory paths.obligation_dir;
+        let _, view = load_obligation_journal paths.obligation_journal_path in
+        print_obligation ~prefix:"LOOM_OBLIGATION_OPEN idempotent=no" view))
+
+let with_existing_obligation cli operation =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let message_id = required cli "--message" in
+  let paths = obligation_paths root message_id in
+  with_obligation_lock paths (fun () ->
+      let events, view = load_obligation_journal paths.obligation_journal_path in
+      if view.obligation_message_id <> message_id then
+        failf "obligation-message-path-collision";
+      operation paths events view)
+
+let obligation_owner_options cli =
+  let actor = required cli "--actor" in
+  let lane = required cli "--lane" in
+  let generation = required cli "--generation" in
+  ignore (obligation_require_nonempty "actor" actor);
+  ignore (obligation_require_nonempty "lane" lane);
+  ignore (obligation_require_nonempty "generation" generation);
+  (actor, lane, generation)
+
+let obligation_consume_command cli =
+  let actor, lane, generation = obligation_owner_options cli in
+  let ttl = obligation_ttl cli in
+  with_existing_obligation cli (fun paths events view ->
+      if view.obligation_state <> 1 then
+        failf "obligation-consume-invalid-state:%s"
+          (obligation_state_name view.obligation_state);
+      let epoch = obligation_now_epoch () in
+      let deadline = epoch + ttl in
+      verify_obligation_native_transition "consume" 1 2 view actor lane generation
+        "" deadline obligation_zero_digest obligation_zero_digest;
+      let updated =
+        append_obligation_transition paths events view "OBLIGATION_CONSUMED"
+          (obligation_event_fields view epoch
+             [ ("actor", actor); ("lane", lane); ("generation", generation);
+               ("lease_deadline", string_of_int deadline) ])
+      in
+      print_obligation ~prefix:"LOOM_OBLIGATION_CONSUMED" updated)
+
+let obligation_claim_command cli =
+  let actor, lane, generation = obligation_owner_options cli in
+  let claim =
+    match optional cli "--claim" with
+    | Some value -> obligation_require_nonempty "claim" value
+    | None -> "claim-" ^ random_hex 16
+  in
+  let ttl = obligation_ttl cli in
+  with_existing_obligation cli (fun paths events view ->
+      if view.obligation_state <> 2 && view.obligation_state <> 5 then
+        failf "obligation-claim-invalid-state:%s"
+          (obligation_state_name view.obligation_state);
+      if not (obligation_owner_matches view actor lane generation) then
+        failf "obligation-claim-owner-mismatch";
+      let epoch = obligation_now_epoch () in
+      if view.obligation_state = 2 && epoch > view.obligation_lease_deadline then
+        failf "obligation-consumer-lease-expired";
+      if claim = view.obligation_predecessor_claim then
+        failf "obligation-claim-reuses-predecessor";
+      let deadline = epoch + ttl in
+      verify_obligation_native_transition "claim" view.obligation_state 3 view
+        actor lane generation claim deadline obligation_zero_digest
+        obligation_zero_digest;
+      let updated =
+        append_obligation_transition paths events view "OBLIGATION_CLAIMED"
+          (obligation_event_fields view epoch
+             [ ("actor", actor); ("lane", lane); ("generation", generation);
+               ("claim", claim); ("lease_deadline", string_of_int deadline) ])
+      in
+      print_obligation ~prefix:"LOOM_OBLIGATION_CLAIMED" updated)
+
+let obligation_renew_command cli =
+  let actor, lane, generation = obligation_owner_options cli in
+  let claim = required cli "--claim" in
+  let ttl = obligation_ttl cli in
+  with_existing_obligation cli (fun paths events view ->
+      if view.obligation_state <> 3
+         || not (obligation_owner_matches view actor lane generation)
+         || claim <> view.obligation_claim then
+        failf "obligation-renew-current-claim-required";
+      let epoch = obligation_now_epoch () in
+      if epoch > view.obligation_lease_deadline then
+        failf "obligation-renew-after-expiry";
+      let deadline = max (epoch + ttl) (view.obligation_lease_deadline + 1) in
+      verify_obligation_native_transition "renew" 3 3 view actor lane generation
+        claim deadline obligation_zero_digest obligation_zero_digest;
+      let updated =
+        append_obligation_transition paths events view "OBLIGATION_RENEWED"
+          (obligation_event_fields view epoch
+             [ ("actor", actor); ("lane", lane); ("generation", generation);
+               ("claim", claim); ("lease_deadline", string_of_int deadline) ])
+      in
+      print_obligation ~prefix:"LOOM_OBLIGATION_RENEWED" updated)
+
+let obligation_interrupt_command cli =
+  let interrupter_actor, interrupter_lane, interrupter_generation =
+    obligation_owner_options cli
+  in
+  let claim = Option.value ~default:"" (optional cli "--claim") in
+  let reason = Option.value ~default:"explicit-interruption" (optional cli "--reason") in
+  with_existing_obligation cli (fun paths events view ->
+      if (view.obligation_state <> 2 && view.obligation_state <> 3)
+         || claim <> view.obligation_claim then
+        failf "obligation-interrupt-current-claim-required";
+      let epoch = obligation_now_epoch () in
+      let self_interrupt =
+        obligation_owner_matches view interrupter_actor interrupter_lane
+          interrupter_generation
+      in
+      if (not self_interrupt) && epoch <= view.obligation_lease_deadline then
+        failf "obligation-live-claim-owned-by-another-generation";
+      verify_obligation_native_transition "interrupt" view.obligation_state 4 view
+        view.obligation_actor view.obligation_lane view.obligation_generation
+        view.obligation_claim view.obligation_lease_deadline
+        obligation_zero_digest obligation_zero_digest;
+      let updated =
+        append_obligation_transition paths events view "OBLIGATION_INTERRUPTED"
+          (obligation_event_fields view epoch
+             [ ("actor", view.obligation_actor); ("lane", view.obligation_lane);
+               ("generation", view.obligation_generation);
+               ("claim", view.obligation_claim);
+               ("interrupter_actor", interrupter_actor);
+               ("interrupter_lane", interrupter_lane);
+               ("interrupter_generation", interrupter_generation);
+               ("reason_digest", sha256 reason) ])
+      in
+      print_obligation ~prefix:"LOOM_OBLIGATION_INTERRUPTED" updated)
+
+let obligation_recover_command cli =
+  let actor, lane, generation = obligation_owner_options cli in
+  with_existing_obligation cli (fun paths events view ->
+      if view.obligation_state <> 4 then
+        failf "obligation-recover-invalid-state:%s"
+          (obligation_state_name view.obligation_state);
+      if obligation_owner_matches view actor lane generation then
+        failf "obligation-recovery-must-change-owner-generation";
+      let epoch = obligation_now_epoch () in
+      verify_obligation_native_transition "recover" 4 5 view actor lane generation
+        view.obligation_claim 0 obligation_zero_digest obligation_zero_digest;
+      let updated =
+        append_obligation_transition paths events view "OBLIGATION_RECOVERED"
+          (obligation_event_fields view epoch
+             [ ("actor", actor); ("lane", lane); ("generation", generation);
+               ("predecessor_claim", view.obligation_claim) ])
+      in
+      print_obligation ~prefix:"LOOM_OBLIGATION_RECOVERED" updated)
+
+let obligation_complete_command cli =
+  let actor, lane, generation = obligation_owner_options cli in
+  let claim = required cli "--claim" in
+  let outcome_path = obligation_regular_file "outcome" (required cli "--outcome") in
+  let evidence_path =
+    obligation_regular_file "evidence" (required cli "--evidence")
+  in
+  if outcome_path = evidence_path then
+    failf "obligation-completion-artifacts-not-distinct";
+  let outcome_digest = sha256 (read_file outcome_path) in
+  let evidence_digest = sha256 (read_file evidence_path) in
+  if outcome_digest = evidence_digest then
+    failf "obligation-completion-digests-not-distinct";
+  with_existing_obligation cli (fun paths events view ->
+      if view.obligation_state <> 3
+         || not (obligation_owner_matches view actor lane generation)
+         || claim <> view.obligation_claim then
+        failf "obligation-complete-current-claim-required";
+      let epoch = obligation_now_epoch () in
+      if epoch > view.obligation_lease_deadline then
+        failf "obligation-complete-after-lease-expiry";
+      verify_obligation_native_transition "complete" 3 6 view actor lane generation
+        claim view.obligation_lease_deadline outcome_digest evidence_digest;
+      let updated =
+        append_obligation_transition paths events view "OBLIGATION_COMPLETED"
+          (obligation_event_fields view epoch
+             [ ("actor", actor); ("lane", lane); ("generation", generation);
+               ("claim", claim); ("outcome_digest", outcome_digest);
+               ("evidence_digest", evidence_digest);
+               ("outcome_path", outcome_path); ("evidence_path", evidence_path) ])
+      in
+      print_obligation ~prefix:"LOOM_OBLIGATION_COMPLETED" updated)
+
+let obligation_status_command cli =
+  with_existing_obligation cli (fun _paths _events view ->
+      if flag cli "--json" then Printf.printf "%s\n%!" (obligation_json view)
+      else print_obligation view)
+
+let obligation_list_json root =
+  let views = obligation_views root in
+  let unclosed =
+    List.fold_left
+      (fun count view -> if view.obligation_state = 6 then count else count + 1)
+      0 views
+  in
+  Printf.sprintf
+    "{\"schema\":\"loom-obligation-list-v1\",\"count\":%d,\"unclosed\":%d,\"obligations\":[%s]}"
+    (List.length views) unclosed (String.concat "," (List.map obligation_json views))
+
+let obligation_list_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let views = obligation_views root in
+  let unclosed =
+    List.fold_left
+      (fun count view -> if view.obligation_state = 6 then count else count + 1)
+      0 views
+  in
+  if flag cli "--json" then
+    Printf.printf "%s\n%!" (obligation_list_json root)
+  else (
+    List.iter print_obligation views;
+    Printf.printf "LOOM_OBLIGATION_LIST count=%d unclosed=%d\n%!"
+      (List.length views) unclosed)
+
+let obligation_tui_command cli =
+  if not (Unix.isatty Unix.stdin) then obligation_list_command cli
+  else
+    let cwd = cwd_option cli in
+    let root = root_option cli cwd in
+    let original = set_terminal_raw Unix.stdin in
+    let running = ref true in
+    Fun.protect
+      ~finally:(fun () ->
+        Unix.tcsetattr Unix.stdin TCSANOW original;
+        print_string "\027[?25h\027[0m\n";
+        flush Stdlib.stdout)
+      (fun () ->
+        print_string "\027[?25l";
+        while !running do
+          let views = obligation_views root in
+          let unclosed =
+            List.fold_left
+              (fun count view ->
+                if view.obligation_state = 6 then count else count + 1)
+              0 views
+          in
+          Printf.printf
+            "\027[2J\027[H\027[1;37mSOUNIO LOOM / OBLIGATIONS\027[0m  %d total  %d unclosed\n"
+            (List.length views) unclosed;
+          Printf.printf
+            "\027[90m%-34s %-12s %-14s %-18s %-9s %s\027[0m\n"
+            "MESSAGE" "STATE" "ACTOR" "GENERATION" "LEASE" "CLAIM";
+          List.iter
+            (fun view ->
+              let message =
+                if String.length view.obligation_message_id > 32 then
+                  String.sub view.obligation_message_id 0 32
+                else view.obligation_message_id
+              in
+              let generation =
+                if String.length view.obligation_generation > 16 then
+                  String.sub view.obligation_generation 0 16
+                else view.obligation_generation
+              in
+              Printf.printf "%-34s %-12s %-14s %-18s %-9s %s\n" message
+                (obligation_state_name view.obligation_state)
+                view.obligation_actor generation
+                (obligation_lease_state view (obligation_now_epoch ()))
+                view.obligation_claim)
+            views;
+          print_string "\n\027[90mq quit   auto-refresh 1s\027[0m\n";
+          flush Stdlib.stdout;
+          let readable, _, _ = Unix.select [ Unix.stdin ] [] [] 1.0 in
+          if readable <> [] then
+            let byte = Bytes.create 1 in
+            if Unix.read Unix.stdin byte 0 1 = 1 && Bytes.get byte 0 = 'q' then
+              running := false
+        done)
+
+let obligation_html =
+  {|
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sounio Loom Obligations</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0d0e;--panel:#121617;--line:#293134;--text:#e8eeee;--muted:#8f9b9e;--cyan:#63c7d5;--green:#76d08a;--amber:#e1b65f;--red:#e27676}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:13px ui-monospace,SFMono-Regular,Consolas,monospace;letter-spacing:0;min-height:100vh}
+header{height:48px;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 16px;gap:18px;background:#101314;position:sticky;top:0}header strong{font-size:15px;color:#fff}header span{color:var(--muted)}#summary{margin-left:auto;color:var(--cyan)}
+main{overflow:auto}table{width:100%;border-collapse:collapse;table-layout:fixed}th{text-align:left;color:var(--muted);font-weight:500;background:var(--panel);position:sticky;top:48px}th,td{padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}tbody tr:hover{background:#171c1e}.state{color:var(--green)}.state.claimed,.state.recoverable{color:var(--amber)}.state.interrupted{color:var(--red)}.lease{color:var(--muted)}.empty{padding:28px;color:var(--muted)}
+@media(max-width:760px){.generation,.claim{display:none}th,td{padding:9px 8px}header span{display:none}}
+</style>
+</head>
+<body>
+<header><strong>SOUNIO LOOM</strong><span>durable obligations</span><b id="summary">LOCAL / READ ONLY</b></header>
+<main><table><thead><tr><th>MESSAGE</th><th>STATE</th><th>ACTOR</th><th class="generation">GENERATION</th><th>LEASE</th><th class="claim">CLAIM</th></tr></thead><tbody id="rows"></tbody></table><div class="empty" id="empty" hidden>No obligations</div></main>
+<script>
+const rows=document.querySelector('#rows'),empty=document.querySelector('#empty'),summary=document.querySelector('#summary');
+function cell(text,kind=''){const td=document.createElement('td');td.textContent=text||'';if(kind)td.className=kind;td.title=text||'';return td}
+async function refresh(){try{const data=await fetch('/api/obligations',{cache:'no-store'}).then(r=>r.json());rows.replaceChildren();summary.textContent=data.unclosed+' UNCLOSED / '+data.count+' TOTAL';empty.hidden=data.count!==0;for(const o of data.obligations){const tr=document.createElement('tr');tr.append(cell(o.messageId),cell(o.state,'state '+o.state),cell(o.actor),cell(o.generation,'generation'),cell(o.lease,'lease'),cell(o.claim,'claim'));rows.append(tr)}}finally{setTimeout(refresh,1000)}}refresh();
+</script>
+</body>
+</html>
+|}
+
+let obligation_serve_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let bind = optional cli "--bind" |> Option.value ~default:"127.0.0.1" in
+  if bind <> "127.0.0.1" && bind <> "localhost"
+     && not (flag cli "--allow-remote") then
+    failf "remote obligation GUI bind requires --allow-remote";
+  let port = optional cli "--port" |> Option.value ~default:"8788" |> int_of_string in
+  let address =
+    try Unix.inet_addr_of_string bind
+    with _ -> (Unix.gethostbyname bind).h_addr_list.(0)
+  in
+  let server = Unix.socket PF_INET SOCK_STREAM 0 in
+  Unix.setsockopt server SO_REUSEADDR true;
+  Unix.bind server (ADDR_INET (address, port));
+  Unix.listen server 32;
+  let actual_port =
+    match Unix.getsockname server with ADDR_INET (_, value) -> value | _ -> port
+  in
+  let running = ref true in
+  let stop _ = running := false in
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle stop);
+  Sys.set_signal Sys.sigint (Sys.Signal_handle stop);
+  Printf.printf
+    "LOOM_OBLIGATION_GUI url=http://%s:%d read_only=true authority=replayed-journal\n%!"
+    bind actual_port;
+  while !running do
+    let readable, _, _ = Unix.select [ server ] [] [] 0.25 in
+    if readable <> [] then
+      let client, _ = Unix.accept server in
+      (try
+         let bytes = Bytes.create 16384 in
+         let count = Unix.read client bytes 0 (Bytes.length bytes) in
+         let request = Bytes.sub_string bytes 0 count in
+         let first_line =
+           match split_on '\n' request with line :: _ -> trim line | [] -> ""
+         in
+         let response =
+           match split_on ' ' first_line with
+           | [ "GET"; uri; _ ] ->
+               let path, _query = parse_query uri in
+               if path = "/" then
+                 http_response "200 OK" "text/html; charset=utf-8" obligation_html
+               else if path = "/api/obligations" then
+                 http_response "200 OK" "application/json"
+                   (obligation_list_json root)
+               else http_response "404 Not Found" "text/plain" "not found\n"
+           | _ -> http_response "400 Bad Request" "text/plain" "bad request\n"
+         in
+         write_all client response
+       with _ -> ());
+      Unix.close client
+  done;
+  Unix.close server
+
+let obligation_verify_command cli =
+  with_existing_obligation cli (fun _paths events view ->
+      Printf.printf
+        "LOOM_OBLIGATION_VERIFY message=%s state=%s events=%d hash_chain=PASS semantics=PASS head=%s\n%!"
+        (field_escape view.obligation_message_id)
+        (obligation_state_name view.obligation_state) (List.length events)
+        view.obligation_head)
+
+let obligation_supervisor_state root =
+  Filename.concat root "obligation-supervisor.state"
+
+let obligation_supervise_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let interval =
+    match optional cli "--interval-seconds" with
+    | None -> 2
+    | Some value -> obligation_positive_int "supervisor-interval" value
+  in
+  if interval > 60 then failf "obligation-supervisor-interval-too-large";
+  let once = flag cli "--once" in
+  let rec replay () =
+    let views = obligation_views root in
+    let unclosed =
+      List.fold_left
+        (fun count view -> if view.obligation_state = 6 then count else count + 1)
+        0 views
+    in
+    atomic_write (obligation_supervisor_state root)
+      (descriptor_text
+         [ ("schema", "loom-obligation-supervisor-v1");
+           ("pid", string_of_int (Unix.getpid ()));
+           ("pid_start", process_start (Unix.getpid ()));
+           ("replayed_utc", utc_now ());
+           ("count", string_of_int (List.length views));
+           ("unclosed", string_of_int unclosed) ]);
+    Printf.printf "LOOM_OBLIGATION_SUPERVISOR replayed=%d unclosed=%d\n%!"
+      (List.length views) unclosed;
+    if not once then (Unix.sleep interval; replay ())
+  in
+  replay ()
+
+let obligation_supervisor_status_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let path = obligation_supervisor_state root in
+  if not (Sys.file_exists path) then failf "obligation-supervisor-state-missing";
+  let values = parse_key_values path in
+  if table_value values "schema" <> "loom-obligation-supervisor-v1" then
+    failf "obligation-supervisor-state-invalid";
+  let pid = obligation_positive_int "supervisor-pid" (table_value values "pid") in
+  let start = table_value values "pid_start" in
+  let live = try process_start pid = start with _ -> false in
+  Printf.printf
+    "LOOM_OBLIGATION_SUPERVISOR_STATUS state=%s pid=%d replayed_utc=%s count=%s unclosed=%s\n%!"
+    (if live then "live" else "stopped") pid (table_value values "replayed_utc")
+    (table_value values "count") (table_value values "unclosed")
+
 let fleet_agent_command () =
   match Sys.getenv_opt "SOUNIO_LOOM_FLEET_AGENT_COMMAND" with
   | Some path when Sys.file_exists path -> Unix.realpath path
@@ -6083,7 +7065,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version
 
 let arguments_after_command () =
@@ -6096,7 +7078,7 @@ let main () =
     let command = Sys.argv.(1) in
     let booleans =
       [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
-        "--replace" ]
+        "--replace"; "--json"; "--once" ]
     in
     let cli = parse_cli booleans (arguments_after_command ()) in
     match command with
@@ -6109,6 +7091,20 @@ let main () =
     | "guardian-status" -> guardian_status_command cli; 0
     | "wake" -> wake_command cli; 0
     | "crash-kernel" -> crash_kernel_command cli; 0
+    | "obligation-open" -> obligation_open_command cli; 0
+    | "obligation-consume" -> obligation_consume_command cli; 0
+    | "obligation-claim" -> obligation_claim_command cli; 0
+    | "obligation-renew" -> obligation_renew_command cli; 0
+    | "obligation-interrupt" -> obligation_interrupt_command cli; 0
+    | "obligation-recover" -> obligation_recover_command cli; 0
+    | "obligation-complete" -> obligation_complete_command cli; 0
+    | "obligation-status" -> obligation_status_command cli; 0
+    | "obligation-list" -> obligation_list_command cli; 0
+    | "obligation-tui" -> obligation_tui_command cli; 0
+    | "obligation-serve" -> obligation_serve_command cli; 0
+    | "obligation-verify" -> obligation_verify_command cli; 0
+    | "obligation-supervise" -> obligation_supervise_command cli; 0
+    | "obligation-supervisor-status" -> obligation_supervisor_status_command cli; 0
     | "journal-authority-serve" -> journal_authority_serve_command cli; 0
     | "journal-authority-status" -> journal_authority_status_command cli; 0
     | "stop" -> stop_command cli; 0

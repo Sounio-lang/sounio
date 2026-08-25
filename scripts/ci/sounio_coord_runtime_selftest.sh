@@ -12,6 +12,7 @@ BAD="$TEST_ROOT/bad-source"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime"
+export SOUNIO_LOOM_OBLIGATION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 
 cleanup() {
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
@@ -41,14 +42,18 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$REPO/scripts/dev/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$REPO/tools/loom/src/"
 mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$REPO/stdlib/coordination/"
 chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
@@ -75,6 +80,8 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the OCaml Loom kernel'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-continuity-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio continuity adapter'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-obligation-runtime" ]] || \
+  fail 'installed runtime omitted the native Sounio obligation adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-agent-runtime" ]] || \
   fail 'installed runtime omitted the fleet launcher'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-runtime" ]] || \
@@ -99,6 +106,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
   loom-native-sounio-continuity-v1 \
+  loom-durable-obligation-v1 \
   loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
   loom-signed-continuity-receipt-v2 loom-principal-independence-v1 \
   loom-independent-measurement-v1 \
@@ -133,6 +141,55 @@ grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'fleet selected a different runtime id'
+
+output="$(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord send --agent runtime-sender \
+    --lane source --to-agent runtime-worker --to-lane target --kind request \
+    --message 'runtime-distributed durable obligation'
+)"
+runtime_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+[[ -n "$runtime_message" ]] || fail 'shared runtime did not send its obligation request'
+grep -q '^LOOM_OBLIGATION_OPEN idempotent=no ' <<< "$output" || \
+  fail 'shared runtime did not atomically project the request into Loom'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
+grep -q '"count":1,"unclosed":1' <<< "$output" || \
+  fail 'shared runtime did not expose its durable obligation projection'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-reconcile)"
+grep -q '^LOOM_OBLIGATION_RECONCILE requests=1 state=PASS$' <<< "$output" || \
+  fail 'shared runtime obligation reconciliation failed'
+printf 'runtime outcome\n' > "$TEST_ROOT/runtime-outcome.txt"
+printf 'runtime evidence\n' > "$TEST_ROOT/runtime-evidence.txt"
+output="$(
+  cd "$SECOND"
+  runtime_pid="$BASHPID"
+  runtime_start="$(sed 's/^[^)]*) //' "/proc/$runtime_pid/stat" | awk '{print $20}')"
+  boot_id="$(cat /proc/sys/kernel/random/boot_id)"
+  pid_namespace="$(readlink /proc/self/ns/pid)"
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord claim \
+    --agent runtime-worker --lane target \
+    --intent 'complete installed-runtime durable obligation' \
+    --resources api:runtime-obligation-selftest
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord presence-register \
+    --agent runtime-worker --lane target --harness codex \
+    --session-id runtime-obligation-session --pid "$runtime_pid" \
+    --pid-start "$runtime_start" --boot-id "$boot_id" \
+    --pid-namespace "$pid_namespace" --host runtime-selftest --ttl-seconds 120
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-consume \
+    --agent runtime-worker --lane target --message "$runtime_message"
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-claim \
+    --agent runtime-worker --lane target --message "$runtime_message" \
+    --claim runtime-claim --ttl-seconds 120
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-complete \
+    --agent runtime-worker --lane target --message "$runtime_message" \
+    --claim runtime-claim --outcome "$TEST_ROOT/runtime-outcome.txt" \
+    --evidence "$TEST_ROOT/runtime-evidence.txt"
+)"
+grep -q '^LOOM_OBLIGATION_COMPLETED .*state=completed .*unclosed=no ' <<< "$output" || \
+  fail 'presence-derived shared-runtime obligation did not complete'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
+grep -q '"count":1,"unclosed":0' <<< "$output" || \
+  fail 'completed shared-runtime obligation remained unclosed'
 
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/scripts/dev/sounio_coord_runtime.sh"
 printf '#!/usr/bin/env python3\nraise SystemExit(98)\n' > \
@@ -171,14 +228,18 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ALT/scripts/dev/"
 mkdir -p "$ALT/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$ALT/tools/loom/src/"
 mkdir -p "$ALT/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$ALT/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$ALT/formal/tla/"
@@ -208,14 +269,18 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$BAD/scripts/dev/"
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$BAD/tools/loom/src/"
 mkdir -p "$BAD/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"

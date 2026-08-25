@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.24.5
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.24.6
 
 usage() {
   cat <<'USAGE'
@@ -47,6 +47,25 @@ Commands:
                                  remove the lane's process identity on a clean exit
   recover [--agent ID --lane ID] [--all]
                                  reconstruct one lane or audit the fleet after a crash
+  obligation-open --agent ID --lane ID --message ID
+                                 materialize one directed request as durable work
+  obligation-consume --agent ID --lane ID --message ID [--ttl-seconds N]
+                                 bind request consumption to the live process generation
+  obligation-claim --agent ID --lane ID --message ID [--claim ID] [--ttl-seconds N]
+  obligation-renew --agent ID --lane ID --message ID --claim ID [--ttl-seconds N]
+  obligation-interrupt --agent ID --lane ID --message ID [--claim ID] [--reason TEXT]
+  obligation-recover --agent ID --lane ID --message ID
+  obligation-complete --agent ID --lane ID --message ID --claim ID
+          --outcome PATH --evidence PATH
+                                 drive generation-fenced obligation transitions
+  obligation-status --agent ID --lane ID --message ID [--json]
+  obligation-list [--json]
+  obligation-tui
+  obligation-serve [--bind ADDRESS] [--port N] [--allow-remote]
+  obligation-reconcile           open any directed request missed by a crash window
+  obligation-supervise [--once] [--interval-seconds N]
+  obligation-supervisor-status
+                                 run or inspect the tmux-independent replay supervisor
   wake    --agent ID --lane ID --message MESSAGE_ID
                                  retry immediate delivery for a visible directed message
   experiment-open --agent ID --lane ID --receipt PATH --statement TEXT
@@ -90,6 +109,8 @@ Environment:
                                  delivery endpoint duration (default: 1800)
   SOUNIO_COORD_PRESENCE_TTL_SECONDS
                                  process heartbeat duration (default: 1800)
+  SOUNIO_COORD_DURABLE_OBLIGATIONS
+                                 set to 0 only for the explicit legacy message path
   SOUNIO_COORD_DIR               shared state directory override
 
 Examples:
@@ -121,6 +142,14 @@ require_arg() {
   local option="$1"
   (($# >= 2)) || die "$option requires a value"
   [[ -n "$2" ]] || die "$option requires a non-empty value"
+}
+
+coord_durable_obligations_enabled() {
+  case "${SOUNIO_COORD_DURABLE_OBLIGATIONS:-1}" in
+    1) return 0 ;;
+    0) return 1 ;;
+    *) die "SOUNIO_COORD_DURABLE_OBLIGATIONS must be 0 or 1" ;;
+  esac
 }
 
 WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || true)"
@@ -552,6 +581,7 @@ load_message() {
   M_TEXT=''
   M_THREAD_ID=''
   M_REPLY_TO=''
+  M_OBLIGATION_SCHEMA=''
   M_COMMIT_SHA=''
   M_EXPERIMENT_ID=''
   M_EXPERIMENT_PREREG=''
@@ -579,6 +609,7 @@ load_message() {
       text=*) M_TEXT="${line#text=}" ;;
       thread_id=*) M_THREAD_ID="${line#thread_id=}" ;;
       reply_to=*) M_REPLY_TO="${line#reply_to=}" ;;
+      obligation_schema=*) M_OBLIGATION_SCHEMA="${line#obligation_schema=}" ;;
       commit_sha=*) M_COMMIT_SHA="${line#commit_sha=}" ;;
       experiment_id=*) M_EXPERIMENT_ID="${line#experiment_id=}" ;;
       experiment_prereg=*) M_EXPERIMENT_PREREG="${line#experiment_prereg=}" ;;
@@ -2316,10 +2347,215 @@ wake_command() {
   return 3
 }
 
+coord_loom_obligation_runtime() {
+  local script_dir sibling local_binary
+  if [[ -n "${SOUNIO_COORD_LOOM_RUNTIME:-}" ]]; then
+    [[ -x "$SOUNIO_COORD_LOOM_RUNTIME" ]] || \
+      die "configured Loom runtime is not executable: $SOUNIO_COORD_LOOM_RUNTIME"
+    printf '%s' "$SOUNIO_COORD_LOOM_RUNTIME"
+    return 0
+  fi
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+  sibling="$script_dir/sounio-loom-runtime"
+  local_binary="$WORKTREE/tools/loom/_build/default/src/loom.exe"
+  if [[ -x "$sibling" ]]; then
+    printf '%s' "$sibling"
+  elif [[ -x "$local_binary" ]]; then
+    printf '%s' "$local_binary"
+  else
+    die "Sounio Loom runtime is unavailable; run scripts/dev/build_sounio_loom.sh"
+  fi
+}
+
+coord_obligation_invoke() {
+  local loom
+  loom="$(coord_loom_obligation_runtime)"
+  "$loom" "$@" --state-dir "$STATE_DIR"
+}
+
+coord_obligation_message() {
+  local message_id="$1" message_file
+  message_file="$MESSAGES_DIR/$(slug "$message_id").message"
+  [[ -f "$message_file" ]] || die "message not found: $message_id"
+  load_message "$message_file"
+  [[ "$M_ID" == "$message_id" ]] || die "message not found: $message_id"
+  [[ "$M_KIND" == request ]] || die "message is not a request: $message_id"
+  [[ -n "$M_TO_AGENT" && -n "$M_TO_LANE" ]] || \
+    die "durable obligations require an exactly directed request"
+  [[ "$M_OBLIGATION_SCHEMA" == loom-durable-obligation-v1 ]] || \
+    die "request predates the durable obligation schema: $message_id"
+  COORD_OBLIGATION_MESSAGE_FILE="$message_file"
+}
+
+coord_obligation_open_loaded_request() {
+  local message_file="$1" digest
+  digest="$(sha256sum "$message_file" | awk '{print $1}')"
+  coord_obligation_invoke obligation-open --message "$M_ID" \
+    --message-digest "$digest" --from-agent "$M_FROM_AGENT" \
+    --from-lane "$M_FROM_LANE" --to-agent "$M_TO_AGENT" --to-lane "$M_TO_LANE"
+}
+
+coord_obligation_live_generation() {
+  local agent="$1" lane="$2" presence_file
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || die "live process presence is required for $agent/$lane"
+  load_presence "$presence_file"
+  presence_state || true
+  [[ "$PRESENCE_STATE" == live ]] || \
+    die "process presence for $agent/$lane is $PRESENCE_STATE: $PRESENCE_REASON"
+  [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" ]] || \
+    die "process presence identity mismatch"
+  [[ "$P_WORKTREE" == "$WORKTREE" ]] || \
+    die "process presence belongs to worktree $P_WORKTREE"
+  printf 'process-%s-g%s-%s-%s' "$P_SESSION_ID" "$P_GENERATION" "$P_PID" "$P_PID_START"
+}
+
+coord_obligation_open_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message_id="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown obligation-open option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$message_id" ]] || \
+    die "obligation-open requires --agent, --lane, and --message"
+  coord_obligation_message "$message_id"
+  message_file="$COORD_OBLIGATION_MESSAGE_FILE"
+  [[ "$M_FROM_AGENT" == "$agent" && "$M_FROM_LANE" == "$lane" ]] || \
+    die "only the request sender may open its obligation"
+  coord_obligation_open_loaded_request "$message_file"
+}
+
+coord_obligation_recipient_command() {
+  local action="$1"; shift
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' claim='' ttl=''
+  local reason='' outcome='' evidence='' json=0 message_file generation
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --message) require_arg "$1" "$2"; message_id="$2"; shift 2 ;;
+      --claim) require_arg "$1" "$2"; claim="$2"; shift 2 ;;
+      --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --reason) require_arg "$1" "$2"; reason="$2"; shift 2 ;;
+      --outcome) require_arg "$1" "$2"; outcome="$2"; shift 2 ;;
+      --evidence) require_arg "$1" "$2"; evidence="$2"; shift 2 ;;
+      --json) json=1; shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown obligation-$action option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$message_id" ]] || \
+    die "obligation-$action requires --agent, --lane, and --message"
+  coord_obligation_message "$message_id"
+  message_file="$COORD_OBLIGATION_MESSAGE_FILE"
+  if [[ "$action" == status ]]; then
+    if [[ "$M_TO_AGENT" != "$agent" || "$M_TO_LANE" != "$lane" ]]; then
+      [[ "$M_FROM_AGENT" == "$agent" && "$M_FROM_LANE" == "$lane" ]] || \
+        die "obligation status is visible only to request sender or recipient"
+    fi
+    local -a status_args=(obligation-status --message "$message_id")
+    ((json == 0)) || status_args+=(--json)
+    coord_obligation_invoke "${status_args[@]}"
+    return 0
+  fi
+  [[ "$M_TO_AGENT" == "$agent" && "$M_TO_LANE" == "$lane" ]] || \
+    die "request is addressed to $M_TO_AGENT/$M_TO_LANE"
+  generation="$(coord_obligation_live_generation "$agent" "$lane")"
+  local -a args=("obligation-$action" --message "$message_id" --actor "$agent" \
+    --lane "$lane" --generation "$generation")
+  case "$action" in
+    consume)
+      [[ -z "$ttl" ]] || args+=(--ttl-seconds "$ttl")
+      ;;
+    claim)
+      [[ -z "$claim" ]] || args+=(--claim "$claim")
+      [[ -z "$ttl" ]] || args+=(--ttl-seconds "$ttl")
+      ;;
+    renew)
+      [[ -n "$claim" ]] || die "obligation-renew requires --claim"
+      args+=(--claim "$claim")
+      [[ -z "$ttl" ]] || args+=(--ttl-seconds "$ttl")
+      ;;
+    interrupt)
+      [[ -z "$claim" ]] || args+=(--claim "$claim")
+      [[ -z "$reason" ]] || args+=(--reason "$reason")
+      ;;
+    recover) ;;
+    complete)
+      [[ -n "$claim" && -n "$outcome" && -n "$evidence" ]] || \
+        die "obligation-complete requires --claim, --outcome, and --evidence"
+      args+=(--claim "$claim" --outcome "$outcome" --evidence "$evidence")
+      ;;
+    *) die "unknown obligation recipient action: $action" ;;
+  esac
+  coord_obligation_invoke "${args[@]}"
+}
+
+coord_obligation_list_command() {
+  local -a args=(obligation-list)
+  while (($#)); do
+    case "$1" in
+      --json) args+=(--json); shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown obligation-list option: $1" ;;
+    esac
+  done
+  coord_obligation_invoke "${args[@]}"
+}
+
+coord_obligation_projection_command() {
+  local action="$1"; shift
+  local -a args=("obligation-$action")
+  while (($#)); do
+    case "$1" in
+      --bind) require_arg "$1" "$2"; args+=(--bind "$2"); shift 2 ;;
+      --port) require_arg "$1" "$2"; args+=(--port "$2"); shift 2 ;;
+      --allow-remote) args+=(--allow-remote); shift ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown obligation-$action option: $1" ;;
+    esac
+  done
+  coord_obligation_invoke "${args[@]}"
+}
+
+coord_obligation_reconcile_command() {
+  (($# == 0)) || die "obligation-reconcile does not accept arguments"
+  local message_file opened=0
+  for message_file in "$MESSAGES_DIR"/*.message; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    [[ "$M_KIND" == request && -n "$M_TO_AGENT" && -n "$M_TO_LANE" && \
+      "$M_OBLIGATION_SCHEMA" == loom-durable-obligation-v1 ]] || continue
+    coord_obligation_open_loaded_request "$message_file" >/dev/null
+    opened=$((opened + 1))
+  done
+  printf 'LOOM_OBLIGATION_RECONCILE requests=%s state=PASS\n' "$opened"
+}
+
+coord_obligation_supervisor_command() {
+  local action="$1"; shift
+  local -a args=("obligation-$action")
+  while (($#)); do
+    case "$1" in
+      --once) args+=(--once); shift ;;
+      --interval-seconds) require_arg "$1" "$2"; args+=(--interval-seconds "$2"); shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown obligation-$action option: $1" ;;
+    esac
+  done
+  coord_obligation_invoke "${args[@]}"
+}
+
 send_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane=''
   local kind='info' message='' ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
   local thread_id='' reply_to='' message_id message_file tmp_file reply_file
+  local durable_obligation=0
 
   while (($#)); do
     case "$1" in
@@ -2368,6 +2604,10 @@ send_command() {
   [[ -n "$thread_id" ]] || thread_id="$message_id"
   validate_value to-agent "$to_agent"
   validate_value to-lane "$to_lane"
+  if [[ "$kind" == request && -n "$to_agent" && -n "$to_lane" ]] && \
+    coord_durable_obligations_enabled; then
+    durable_obligation=1
+  fi
   tmp_file="$(mktemp "$MESSAGES_DIR/.message-write.XXXXXX")"
   {
     printf 'message_id=%s\n' "$message_id"
@@ -2384,8 +2624,14 @@ send_command() {
     printf 'text=%s\n' "$message"
     printf 'thread_id=%s\n' "$thread_id"
     printf 'reply_to=%s\n' "$reply_to"
+    ((durable_obligation == 0)) || \
+      printf 'obligation_schema=loom-durable-obligation-v1\n'
   } > "$tmp_file"
   mv "$tmp_file" "$message_file"
+  if ((durable_obligation)); then
+    load_message "$message_file"
+    coord_obligation_open_loaded_request "$message_file"
+  fi
   printf 'utc=%s event=MESSAGE message_id=%s from_agent=%s from_lane=%s to_agent=%s to_lane=%s kind=%s\n' \
     "$NOW_UTC" "$message_id" "$agent" "$lane" "$to_agent" "$to_lane" "$kind" >> "$EVENT_LOG"
   printf 'SENT message_id=%s to_agent=%s to_lane=%s kind=%s thread_id=%s reply_to=%s\n' \
@@ -3212,6 +3458,20 @@ case "$command" in
   presence-register) presence_register_command "$@" ;;
   presence-unregister) presence_unregister_command "$@" ;;
   recover) recover_command "$@" ;;
+  obligation-open) coord_obligation_open_command "$@" ;;
+  obligation-consume) coord_obligation_recipient_command consume "$@" ;;
+  obligation-claim) coord_obligation_recipient_command claim "$@" ;;
+  obligation-renew) coord_obligation_recipient_command renew "$@" ;;
+  obligation-interrupt) coord_obligation_recipient_command interrupt "$@" ;;
+  obligation-recover) coord_obligation_recipient_command recover "$@" ;;
+  obligation-complete) coord_obligation_recipient_command complete "$@" ;;
+  obligation-status) coord_obligation_recipient_command status "$@" ;;
+  obligation-list) coord_obligation_list_command "$@" ;;
+  obligation-tui) coord_obligation_projection_command tui "$@" ;;
+  obligation-serve) coord_obligation_projection_command serve "$@" ;;
+  obligation-reconcile) coord_obligation_reconcile_command "$@" ;;
+  obligation-supervise) coord_obligation_supervisor_command supervise "$@" ;;
+  obligation-supervisor-status) coord_obligation_supervisor_command supervisor-status "$@" ;;
   wake) wake_command "$@" ;;
   experiment-open) causal_runtime_command open "$@" ;;
   experiment-close) causal_runtime_command close "$@" ;;
@@ -3228,5 +3488,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac
