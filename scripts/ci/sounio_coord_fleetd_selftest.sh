@@ -14,6 +14,7 @@ DISABLED_CONFIG="$TEST_ROOT/fleet-disabled.toml"
 RETAINED_ENABLED_CONFIG="$TEST_ROOT/fleet-retained-enabled.toml"
 RECEIVER="$TEST_ROOT/receiver.py"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
+LANE_HOME="$TEST_ROOT/lane-home"
 SLOT='proof-lane'
 SESSION_ID='11111111-2222-4333-8444-555555555555'
 CAPABILITY="$TEST_ROOT/start.capability.json"
@@ -87,7 +88,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
 PY
 }
 
-mkdir -p "$REPO" "$RUNTIME"
+mkdir -p "$REPO" "$RUNTIME" "$LANE_HOME"
 git -C "$REPO" init -q
 install -m 0755 "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" \
   "$RUNTIME/sounio-agentd-runtime"
@@ -121,6 +122,7 @@ slot = "$SLOT"
 enabled = true
 restart = "always"
 cwd = "$REPO"
+home = "$LANE_HOME"
 agent = "proof-agent"
 lane = "proof-runtime"
 session_id = "$SESSION_ID"
@@ -132,6 +134,7 @@ slot = "retained-disabled-lane"
 enabled = false
 restart = "never"
 cwd = "$REPO"
+home = "$LANE_HOME"
 agent = "retained-agent"
 session_id = "99999999-8888-4777-8666-555555555555"
 identity = "exact"
@@ -146,6 +149,7 @@ slot = "$SLOT"
 enabled = true
 restart = "always"
 cwd = "$REPO"
+home = "$LANE_HOME"
 agent = "proof-agent"
 lane = "proof-runtime"
 session_id = "$SESSION_ID"

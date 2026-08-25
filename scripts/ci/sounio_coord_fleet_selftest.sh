@@ -89,11 +89,13 @@ fleet() {
   SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" "$@"
 }
 
-launch_command="SOUNIO_AGENTD_DIR=$STATE $RUNTIME/sounio-fleet-agent-runtime launch --slot $SLOT --agent codex --session-id $SESSION_ID --identity exact --cwd $REPO -- $RECEIVER $RECEIVER_LOG"
+launch_command="SOUNIO_AGENTD_DIR=$STATE $RUNTIME/sounio-fleet-agent-runtime launch --slot $SLOT --agent codex --session-id $SESSION_ID --identity exact --cwd $REPO --home $HOME_ROOT -- $RECEIVER $RECEIVER_LOG"
 follow_command="SOUNIO_AGENTD_DIR=$STATE $RUNTIME/sounio-fleet-agent-runtime follow-slot --slot $SLOT --cwd $REPO --retry-seconds 0.05"
 tmux -S "$TMUX_SOCKET" new-session -d -s fleet "$launch_command"
 wait_for 'supervised receiver did not start' \
   "grep -q '^START pid=' '$RECEIVER_LOG' 2>/dev/null"
+grep -q "HOME=$HOME_ROOT" "$RECEIVER_LOG" || \
+  fail 'explicit launch did not bind its attested lane HOME'
 wait_for 'first tmux client did not attach' \
   "fleet status --cwd '$REPO' --slot '$SLOT' 2>/dev/null | grep -q 'state=active.*attached_clients=1'"
 
@@ -126,7 +128,7 @@ fi
 grep -q 'state=drifted' "$TEST_ROOT/drift-status" || \
   fail 'status did not classify the sabotaged generation as drifted'
 if fleet launch --slot "$SLOT" --agent codex --session-id "$SESSION_ID" \
-  --identity exact --cwd "$REPO" --no-attach -- "$RECEIVER" "$RECEIVER_LOG" \
+  --identity exact --cwd "$REPO" --home "$HOME_ROOT" --no-attach -- "$RECEIVER" "$RECEIVER_LOG" \
   >"$TEST_ROOT/drift-launch" 2>&1; then
   fail 'launcher replaced a sabotaged live slot generation'
 fi
@@ -154,7 +156,7 @@ fi
 grep -q 'state=drifted' "$TEST_ROOT/argv-drift" || \
   fail 'argv sabotage was not classified as drifted'
 if fleet launch --slot "$SLOT" --agent codex --session-id "$SESSION_ID" \
-  --identity exact --cwd "$REPO" --no-attach -- "$RECEIVER" "$RECEIVER_LOG" \
+  --identity exact --cwd "$REPO" --home "$HOME_ROOT" --no-attach -- "$RECEIVER" "$RECEIVER_LOG" \
   >"$TEST_ROOT/argv-launch" 2>&1; then
   fail 'launcher replaced a live slot with a sabotaged argv attestation'
 fi
@@ -211,7 +213,8 @@ kill -KILL "$harness_pid"
 wait_for 'terminated harness was not classified as a proven absence' \
   "fleet status --cwd '$REPO' --slot '$SLOT' >'$TEST_ROOT/exited-status' 2>&1 || true; grep -q 'state=absent' '$TEST_ROOT/exited-status'"
 fleet launch --slot "$SLOT" --agent codex --session-id "$SESSION_ID" \
-  --identity exact --cwd "$REPO" --start-capability-id cap-crash-recovery \
+  --identity exact --cwd "$REPO" --home "$HOME_ROOT" \
+  --start-capability-id cap-crash-recovery \
   --no-attach -- "$RECEIVER" "$RECEIVER_LOG" >/dev/null
 wait_for 'proven harness exit did not permit a capability-bound replacement' \
   "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 2"
@@ -267,4 +270,4 @@ tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
 fleet stop --cwd "$REPO" --slot "$SLOT" >/dev/null
 [[ ! -e "$mapping" ]] || fail 'stop left the slot mapping behind'
 
-echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived harness_exit=proven-absent crash_relaunch=new-capability lane_home=isolated wrapped_command=attested reattach=same-generation presentation_follow=non-mutating duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'
+echo 'sounio-coord-fleet-selftest: PASS tmux_crash=survived harness_exit=proven-absent crash_relaunch=new-capability lane_home=isolated explicit_home=attested wrapped_command=attested reattach=same-generation presentation_follow=non-mutating duplicate_harness=refused generation_sabotage=refused argv_sabotage=refused claude_identity=project-exact codex_resume=exact codex_fresh=bootstrap standalone=empryo'

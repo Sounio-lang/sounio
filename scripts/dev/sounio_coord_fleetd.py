@@ -27,7 +27,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.25.3"
+RUNTIME_VERSION = "2026.08.25.4"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -920,24 +920,33 @@ def desired_mapping_mismatch(spec: LaneSpec, mapping: dict[str, Any]) -> str | N
     if spec.identity:
         expected["identity"] = spec.identity
     if spec.command:
+        original_command = list(spec.command)
         original_digest = hashlib.sha256(
-            canonical_json(list(spec.command)).encode("utf-8")
+            canonical_json(original_command).encode("utf-8")
         ).hexdigest()
         start_capability_id = mapping.get("start_capability_id")
+        assignments: list[str] = []
+        if spec.home is not None:
+            assignments.append(f"HOME={spec.home}")
         if isinstance(start_capability_id, str) and start_capability_id:
+            assignments.append(
+                f"SOUNIO_FLEET_START_CAPABILITY_ID={start_capability_id}"
+            )
+        if assignments:
             env_command = shutil.which("env")
             if env_command is None:
                 return "capability-env-unavailable"
             wrapped = [
                 str(Path(env_command).resolve()),
-                f"SOUNIO_FLEET_START_CAPABILITY_ID={start_capability_id}",
-                *spec.command,
+                *assignments,
+                *original_command,
             ]
             expected["command"] = Path(spec.command[0]).name
             expected["argv_digest"] = hashlib.sha256(
                 canonical_json(wrapped).encode("utf-8")
             ).hexdigest()
-            expected["original_argv_digest"] = original_digest
+            if isinstance(start_capability_id, str) and start_capability_id:
+                expected["original_argv_digest"] = original_digest
         else:
             expected["command"] = Path(spec.command[0]).name
             expected["argv_digest"] = original_digest
@@ -2772,6 +2781,8 @@ def launch_arguments(spec: LaneSpec, capability_id: str) -> list[str]:
         capability_id,
         "--no-attach",
     ]
+    if spec.home is not None:
+        arguments.extend(["--home", str(spec.home)])
     if spec.lane:
         arguments.extend(["--lane", spec.lane])
     return [*arguments, "--", *spec.command]
