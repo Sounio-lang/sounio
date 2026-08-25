@@ -63,6 +63,21 @@ total_w=${#ALL_WITNESSES[@]}
 n_decl=${#declared[@]}
 n_undecl=${#undeclared[@]}
 
+# Non-vacuity, and it is not a formality.
+#
+# The first run of this gate reported `status=pass declared=0 ... of=0` and
+# printed OK, because tests/ was missing from the remote payload. A gate whose
+# entire purpose is refusing witnesses that measure nothing passed by measuring
+# nothing. There is no version of that which is acceptable, so an empty corpus
+# is a hard failure and a corpus with no declarations is one too: both mean the
+# gate ran and learned nothing.
+if [[ $total_w -eq 0 ]]; then
+  gate_fail "inspected ZERO witnesses -- tests/run-pass is missing or unreadable from $(pwd)"
+fi
+if [[ $n_decl -eq 0 ]]; then
+  gate_fail "$total_w witnesses found and not one declares a sabotage -- the declarations were lost, not absent"
+fi
+
 # The census is the point even when the builds are skipped.
 if [[ "${SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY:-0}" == "1" ]]; then
   printf '{"status":"pass","mode":"census","metrics":{"total":%d,"declared":%d,"unverified":%d,"passed":%d,"failed":0,"not_run":%d}}\n' \
