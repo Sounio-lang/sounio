@@ -606,11 +606,16 @@ fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
     a * 8 + b
 }
 
-fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div {
+fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div, IO {
     if i < 0 || j < 0 || i >= 8 || j >= 8 {
         return
     }
     if i == j {
+        return
+    }
+    // Declared sabotage: drop every correlation, silently reverting the
+    // propagation to the independence assumption.
+    if sab_correlate_rho() {
         return
     }
     FO_COV_RHO[fo_cov_rho_idx(i, j) as usize] = rho
@@ -1250,6 +1255,73 @@ fn lower_aggregate_diag_enabled() -> bool with IO, Mut, Panic, Div {
         }
     }
     LOWER_DIAG_AGG_ON == 1
+}
+
+// ─── Sabotage hooks: a witness that never fails is not a witness ────────────
+//
+// codegen_x86_linux.sio has carried exactly one of these since the i256 work
+// (SOUNIO_WIDE_MUL_SABOTAGE), with the right comment above it. One hook means
+// the witness gate can only certify one family: run an epistemic fixture under
+// it and the sabotage is inert, the fixture passes anyway, and the gate --
+// correctly -- refuses to certify. It was the only instrument in a long night
+// that told the truth about its own limits, and it was ignored four times
+// because there was no way to give it what it asked for.
+//
+// These hooks exist so a witness can declare, in its own header, the specific
+// mutilation it claims to detect. The gate then reads that declaration instead
+// of knowing about domains. A witness that declares nothing is not failed --
+// it is counted as UNVERIFIED, which is the honest state for most of them.
+//
+// Memoised for the reason in the block above: read_env allocates and the bump
+// allocator never reclaims. CHECKED is separate from the value because "off"
+// and "not read yet" are different states.
+
+var SAB_QUOTIENT_HESSIAN_ON: i64 = 0
+var SAB_QUOTIENT_HESSIAN_CHECKED: i64 = 0
+
+// Restores the pre-#2144 behaviour: division clears the Hessian instead of
+// applying the quotient rule. Kills any witness that asserts a non-zero
+// second-order term for a ratio.
+fn sab_quotient_hessian() -> bool with IO, Mut, Panic, Div {
+    if SAB_QUOTIENT_HESSIAN_CHECKED == 0 {
+        SAB_QUOTIENT_HESSIAN_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SABOTAGE_QUOTIENT_HESSIAN"), "1") {
+            SAB_QUOTIENT_HESSIAN_ON = 1
+        }
+    }
+    SAB_QUOTIENT_HESSIAN_ON == 1
+}
+
+var SAB_HESSIAN_CHAIN_ON: i64 = 0
+var SAB_HESSIAN_CHAIN_CHECKED: i64 = 0
+
+// Drops the transcendental chain rule, so hessian_of(sin(x)) returns the
+// confident 0.0 it returned before #2119. Kills any witness that asserts a
+// second-order term through sin, cos or exp.
+fn sab_hessian_chain() -> bool with IO, Mut, Panic, Div {
+    if SAB_HESSIAN_CHAIN_CHECKED == 0 {
+        SAB_HESSIAN_CHAIN_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SABOTAGE_HESSIAN_CHAIN"), "1") {
+            SAB_HESSIAN_CHAIN_ON = 1
+        }
+    }
+    SAB_HESSIAN_CHAIN_ON == 1
+}
+
+var SAB_CORRELATE_RHO_ON: i64 = 0
+var SAB_CORRELATE_RHO_CHECKED: i64 = 0
+
+// Discards every recorded correlation, so the covariance matrix stays zero and
+// the propagation silently reverts to assuming independence. Kills any witness
+// that asserts a cross term.
+fn sab_correlate_rho() -> bool with IO, Mut, Panic, Div {
+    if SAB_CORRELATE_RHO_CHECKED == 0 {
+        SAB_CORRELATE_RHO_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SABOTAGE_CORRELATE_RHO"), "1") {
+            SAB_CORRELATE_RHO_ON = 1
+        }
+    }
+    SAB_CORRELATE_RHO_ON == 1
 }
 
 fn ir_normalize_string_literal_name(n: Name) -> Name {
@@ -8349,6 +8421,10 @@ impl Lowerer {
     // mixed partial: the mixed one survives a two-term approximation.
     fn so_combine_hess_div(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         var lo = self.so_clear_expr_hess()
+        // Declared sabotage: revert to the pre-#2144 clear.
+        if sab_quotient_hessian() {
+            return lo
+        }
         if lhs_v < 0 || rhs_v < 0 {
             return lo
         }
@@ -9416,7 +9492,11 @@ impl Lowerer {
             // hessian_of(x*x) returned the correct 2.0: the second-order
             // machinery had storage and a product rule but no chain rule, so
             // every transcendental silently contributed nothing.
-            if lo.so_enabled {
+            //
+            // Declared sabotage: drop the chain rule and return that confident
+            // zero again, so a witness asserting H(sin(x)) has something to die
+            // of.
+            if lo.so_enabled && !sab_hessian_chain() {
                 let idx2 = fo_xfer_global_lookup(dname)
                 let d2name = fo_xfer_derivative_name(idx2)
                 if d2name.len > 0 {
