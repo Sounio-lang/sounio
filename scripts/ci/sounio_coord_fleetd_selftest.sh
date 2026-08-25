@@ -11,6 +11,7 @@ DB="$TEST_ROOT/fleet.db"
 CONFIG="$TEST_ROOT/fleet.toml"
 OMIT_CONFIG="$TEST_ROOT/fleet-omitted.toml"
 DISABLED_CONFIG="$TEST_ROOT/fleet-disabled.toml"
+RETAINED_ENABLED_CONFIG="$TEST_ROOT/fleet-retained-enabled.toml"
 RECEIVER="$TEST_ROOT/receiver.py"
 RECEIVER_LOG="$TEST_ROOT/receiver.log"
 SLOT='proof-lane'
@@ -21,6 +22,8 @@ SECOND_CAPABILITY="$TEST_ROOT/start-2.capability.json"
 THIRD_CAPABILITY="$TEST_ROOT/start-3.capability.json"
 STOP_CAPABILITY="$TEST_ROOT/stop.capability.json"
 BAD_STOP_CAPABILITY="$TEST_ROOT/stop.capability.bad.json"
+RETAINED_START_CAPABILITY="$TEST_ROOT/retained-start.capability.json"
+RETAINED_STOP_CAPABILITY="$TEST_ROOT/retained-stop.capability.json"
 RECOVERY_BUDGET="$TEST_ROOT/recovery-budget.json"
 BAD_RECOVERY_BUDGET="$TEST_ROOT/recovery-budget.bad.json"
 RENEWED_RECOVERY_BUDGET="$TEST_ROOT/recovery-budget-renewed.json"
@@ -42,6 +45,8 @@ cleanup() {
   if [[ -x "$RUNTIME/sounio-fleet-agent-runtime" && -d "$REPO" ]]; then
     SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
       stop --cwd "$REPO" --slot "$SLOT" >/dev/null 2>&1 || true
+    SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
+      stop --cwd "$REPO" --slot retained-disabled-lane >/dev/null 2>&1 || true
   fi
   rm -rf "$TEST_ROOT"
 }
@@ -137,6 +142,9 @@ command = ["$RECEIVER", "$RECEIVER_LOG"]
 EOF
 
 sed '0,/enabled = true/s//enabled = false/' "$CONFIG" > "$DISABLED_CONFIG"
+sed -e '0,/enabled = false/s//enabled = true/' \
+  -e '0,/restart = "never"/s//restart = "always"/' \
+  "$CONFIG" > "$RETAINED_ENABLED_CONFIG"
 
 fleetd() {
   SOUNIO_AGENTD_DIR="$STATE" \
@@ -393,6 +401,16 @@ fleetd reconcile --config "$CONFIG" --apply \
 wait_for 'second linear capability did not restore the stopped slot' \
   "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 2"
 
+# Keep a legacy lane active while the primary slot exercises bounded recovery.
+# Recovery mode must observe its stop decision without acquiring destructive
+# authority or degrading the recovery loop.
+fleetd authorize --config "$RETAINED_ENABLED_CONFIG" \
+  --slot retained-disabled-lane --out "$RETAINED_START_CAPABILITY" >/dev/null
+fleetd reconcile --config "$RETAINED_ENABLED_CONFIG" --apply \
+  --capability "$RETAINED_START_CAPABILITY" >/dev/null
+wait_for 'retained legacy lane did not start for the mixed-catalog control' \
+  "test \"\$(grep -c '^START pid=' '$TEST_ROOT/disabled.log')\" = 1"
+
 # MODEL_CONTROL:stop_capability_reuse
 if fleetd reconcile --config "$DISABLED_CONFIG" --apply \
   --capability "$STOP_CAPABILITY" >"$TEST_ROOT/reused-stop-capability" 2>&1; then
@@ -431,11 +449,26 @@ fi
 grep -q 'action=start status=refused reason=.*secret-does-not-match' \
   "$TEST_ROOT/bad-recovery-budget" || \
   fail 'recovery secret sabotage was not attributed to budget verification'
+grep -q 'slot=retained-disabled-lane action=stop status=held reason=recovery-mode-start-only' \
+  "$TEST_ROOT/bad-recovery-budget" || \
+  fail 'recovery mode did not hold a destructive legacy-lane stop decision'
 
-fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
-  --apply-recovery --recovery-budget "$RECOVERY_BUDGET" >/dev/null
+output="$(fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
+  --apply-recovery --recovery-budget "$RECOVERY_BUDGET")"
+grep -q 'slot=retained-disabled-lane action=stop status=held reason=recovery-mode-start-only' \
+  <<< "$output" || fail 'bounded recovery attempted to stop the retained legacy lane'
 wait_for 'first recovery unit did not restart the stopped slot' \
   "test \"\$(grep -c '^START pid=' '$RECEIVER_LOG')\" = 3"
+[[ "$(grep -c '^START pid=' "$TEST_ROOT/disabled.log")" == 1 ]] || \
+  fail 'bounded recovery changed the retained legacy lane generation'
+[[ -e "$STATE/fleet-slots/retained-disabled-lane.json" ]] || \
+  fail 'bounded recovery removed the retained legacy lane mapping'
+fleetd authorize --config "$CONFIG" --slot retained-disabled-lane \
+  --action stop --out "$RETAINED_STOP_CAPABILITY" >/dev/null
+fleetd reconcile --config "$CONFIG" --apply \
+  --capability "$RETAINED_STOP_CAPABILITY" >/dev/null
+[[ ! -e "$STATE/fleet-slots/retained-disabled-lane.json" ]] || \
+  fail 'manual stop authority did not clean up the retained legacy control'
 SOUNIO_AGENTD_DIR="$STATE" "$RUNTIME/sounio-fleet-agent-runtime" \
   stop --cwd "$REPO" --slot "$SLOT" >/dev/null
 output="$(fleetd watch --config "$CONFIG" --cycles 1 --interval 0.01 \
@@ -817,4 +850,4 @@ fi
 grep -q 'event 1 hash mismatch' "$TEST_ROOT/log-sabotage" || \
   fail 'log sabotage was not attributed to the hash-chain rule'
 
-echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused stop_capability_required=1 stop_capability_reuse=refused stop_generation_sabotage=refused stop_semantic_rehash=refused recovery_budget=2 recovery_backoff=enforced recovery_exhaustion=refused budget_semantic_rehash=refused backoff_semantic_rehash=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked generation_authority_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused trace_refinement=verified semantic_rehash_sabotage=refused replay=reconstructed hash_sabotage=refused'
+echo 'sounio-coord-fleetd-selftest: PASS dry_run=no-mutation capability_required=1 capability_secret_sabotage=refused capability_reuse=refused stop_capability_required=1 stop_capability_reuse=refused stop_generation_sabotage=refused stop_semantic_rehash=refused recovery_budget=2 recovery_start_only=held recovery_backoff=enforced recovery_exhaustion=refused budget_semantic_rehash=refused backoff_semantic_rehash=refused duplicate_start=refused unreachable_start=blocked initial_on_failure=start omission=blocked generation_sabotage=blocked generation_authority_sabotage=blocked identity_sabotage=blocked checkpoint=draft-verified evidence_drift=refused prepared_evidence_drift=refused handoff=prepared-anchored-accepted handoff_reuse=refused ed25519_anchor=verified anchor_removal=refused signature_sabotage=refused key_substitution=refused trace_refinement=verified semantic_rehash_sabotage=refused replay=reconstructed hash_sabotage=refused'

@@ -111,6 +111,15 @@ does not close, acknowledge, or lose unfinished work. A new
 `obligation-reconcile` repairs the bounded crash window between publishing a
 request message and opening its obligation.
 
+The Pod-external lane guardian uses the separate `sounio-fleet` authority
+boundary. `sounio-fleet watch --apply-recovery` is start-only: it may consume a
+bounded recovery budget to restore an enabled missing generation, but it holds
+all newly planned stop actions and all starts without a named budget. Manual
+`reconcile --apply` remains the only path that may consume a linear stop
+capability. This lets migrated lanes and still-running legacy lanes share one
+catalog during rollout without giving an unattended recovery loop destructive
+authority over the legacy processes.
+
 Use the coordination entrypoint for live lanes so generation identity comes
 from verified process presence:
 
