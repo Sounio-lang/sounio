@@ -79,14 +79,18 @@ adversarial gates.
 
 ## Remaining before submission
 
-1. ~~**§1 intro prose**~~ — ✅ done (`paper_A_section1_draft_2026-08-25.md`). Every section is
-   now full prose; the draft is content-complete.
-2. **Merge** the section files into one document in the order above; unify notation
-   (`m, v, Cov, ⟨·,·⟩`, `Knowledge⟨T, N⟩`) — already consistent across drafts.
-3. **Land the wire (N1–N4)** to convert the `[pending wire]` evaluation items into measured
-   numbers — the single biggest strengthener; coordinate per synthesis §26.
-4. **Figures:** (a) the two-formula defect (§2.1); (b) the noise-set dataflow on `x+x` vs
-   `x+y` (§5.3/§8.2); (c) the vancomycin CI crossing the 400 boundary and its contraction
-   under understatement (§8.4).
-5. **Prior-art gate sign-off** — the narrow novelty claim is CANDIDATE pending an explicit
-   adversarial prior-art pass beyond the two gates run here (per synthesis §24/§25).
+1. ~~**§1 intro prose**~~ — ✅ done (`paper_A_section1_draft_2026-08-25.md`). Content-complete.
+2. ~~**Merge**~~ — ✅ done: `paper_A_MERGED_2026-08-25.md` (single file, 11 sections + abstract
+   in order, 1114 lines; notation unified `m, v, Cov, ⟨·,·⟩, Knowledge⟨T,N⟩`).
+3. **Land the wire (N1–N4)** — ⛔ **prepped, blocked on handshake.** Free pre-code prep is
+   done in `paper_A_wire_N1_prep_2026-08-25.md` (E230 confirmed free, base confirmed, N1 diff
+   spec, lane declaration, 4 acceptance fixtures, gate script). Landing needs the §26
+   handshake (worktree `fable/ns-wire-20260823` from `06e85a6ada`, file claims, codex
+   pre-notification, xai review) — cannot be done from this FFI branch. Biggest remaining
+   strengthener (converts the `[pending wire]` §8 items to measured numbers).
+4. ~~**Figures**~~ — ✅ done, `figures/paper_A/`: `fig1_two_formula_defect.svg` (§2.1),
+   `fig2_noiseset_dataflow.svg` (§5.3/§8.2), `fig3_vancomycin_warn.svg` (§8.4).
+5. ~~**Prior-art gate sign-off**~~ — ✅ done: `paper_A_priorart_gate_signoff_2026-08-25.md`.
+   Three gates (affine arithmetic; QIF/Blackwell; a deep adversarial pass) — narrow claim
+   **survives in the intersection form**, assertable with attribution; residual (patents not
+   exhaustively searched) stated.
