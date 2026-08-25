@@ -115,9 +115,28 @@ total=0; passed=0; failed=0; unknown_token=0; broken=0
 # failures, so this classification changes no verdict today. It exists so the
 # first unclean death is visible on the day it appears rather than on the day
 # someone asks.
-d_run=0; d_compile=0; d_crash=0; d_timeout=0
+d_run=0; d_compile=0; d_crash=0; d_timeout=0; d_misattributed=0
 for row in "${declared[@]}"; do
   src="${row%%|*}"; tok="${row##*|}"
+
+  # What kind of death this witness claims, and optionally which diagnostic.
+  #
+  # Without this, ANY error[Ennn] under sabotage counted as the witness noticing.
+  # A quotient-Hessian switch that happens to provoke an unrelated E035 would be
+  # certified as a clean kill -- the failure would be real and the attribution
+  # invented. Declaring the expected class makes the attribution load-bearing:
+  #
+  #   //@ sabotage: quotient-hessian
+  #   //@ sabotage-expect: run-fail            (default when absent)
+  #   //@ sabotage-expect: compile-refused
+  #   //@ sabotage-error-pattern: E242         (implies compile-refused)
+  #
+  # Absent, it defaults to run-fail, which is what all five witnesses on main do
+  # today -- so this tightens without moving a single current verdict.
+  want_class="$(grep -m1 -oE '^//@ sabotage-expect:[[:space:]]*[a-z-]+' "$src" 2>/dev/null | awk '{print $NF}')"
+  want_diag="$(grep -m1 -oE '^//@ sabotage-error-pattern:[[:space:]]*[A-Za-z0-9_\[\]-]+' "$src" 2>/dev/null | awk '{print $NF}')"
+  [[ -n "$want_diag" && -z "$want_class" ]] && want_class="compile-refused"
+  [[ -z "$want_class" ]] && want_class="run-fail"
   total=$((total + 1))
   env_var="$(sab_env_for "$tok")"
   if [[ -z "$env_var" ]]; then
@@ -164,8 +183,17 @@ for row in "${declared[@]}"; do
       echo "  UNCLEAN  $src  compiler died by signal $((build_rc - 128)) under $tok"
       d_crash=$((d_crash + 1))
     elif grep -qE 'error\[E[0-9]+\]' "$WORK/b2.log"; then
-      echo "  ok       $src  refused at compile under $tok ($(grep -oE 'error\[E[0-9]+\]' "$WORK/b2.log" | head -1))"
-      d_compile=$((d_compile + 1)); passed=$((passed + 1))
+      got_diag="$(grep -oE 'error\[E[0-9]+\]' "$WORK/b2.log" | head -1)"
+      if [[ "$want_class" != "compile-refused" ]]; then
+        echo "  MISATTRIBUTED  $src declares $want_class but died at COMPILE with $got_diag under $tok"
+        d_misattributed=$((d_misattributed + 1))
+      elif [[ -n "$want_diag" ]] && ! grep -qF "$want_diag" "$WORK/b2.log"; then
+        echo "  MISATTRIBUTED  $src declares $want_diag but got $got_diag under $tok"
+        d_misattributed=$((d_misattributed + 1))
+      else
+        echo "  ok       $src  refused at compile under $tok ($got_diag)"
+        d_compile=$((d_compile + 1)); passed=$((passed + 1))
+      fi
     else
       echo "  UNCLEAN  $src  compile failed under $tok with no diagnostic (rc=$build_rc)"
       tail -3 "$WORK/b2.log" | sed 's/^/      /'
@@ -199,6 +227,9 @@ for row in "${declared[@]}"; do
   elif [[ $bad_rc -gt 128 ]]; then
     echo "  UNCLEAN  $src  died by signal $((bad_rc - 128)) under $tok, not by its own assertion"
     d_crash=$((d_crash + 1))
+  elif [[ "$want_class" != "run-fail" ]]; then
+    echo "  MISATTRIBUTED  $src declares $want_class but died at RUN under $tok"
+    d_misattributed=$((d_misattributed + 1))
   else
     echo "  ok       $src  died at run under $tok"
     d_run=$((d_run + 1)); passed=$((passed + 1))
@@ -223,7 +254,7 @@ UNJUDGEABLE_CEILING="${SOUNIO_WITNESS_UNJUDGEABLE_CEILING:-1}"
 # we cannot attribute to the witness noticing the sabotage. Same argument, same
 # treatment -- counted, ceilinged, and visible.
 UNCLEAN_CEILING="${SOUNIO_WITNESS_UNCLEAN_CEILING:-0}"
-unclean=$((d_crash + d_timeout))
+unclean=$((d_crash + d_timeout + d_misattributed))
 
 # The artifact must agree with the exit code. Survival, an unjudgeable count
 # over its ceiling, and an unclean death all fail below, so all three have to
@@ -231,15 +262,15 @@ unclean=$((d_crash + d_timeout))
 # same lie in a different file.
 status=pass
 if [[ $((failed - broken)) -ne 0 ]] || [[ $broken -gt ${SOUNIO_WITNESS_UNJUDGEABLE_CEILING:-1} ]] \
-   || [[ $((d_crash + d_timeout)) -gt ${SOUNIO_WITNESS_UNCLEAN_CEILING:-0} ]]; then
+   || [[ $((d_crash + d_timeout + d_misattributed)) -gt ${SOUNIO_WITNESS_UNCLEAN_CEILING:-0} ]]; then
   status=fail
 fi
-printf '{"status":"%s","mode":"full","metrics":{"total":%d,"declared":%d,"unverified":%d,"unjudgeable":%d,"passed":%d,"failed":%d,"not_run":%d},"deaths":{"run":%d,"compile_refused":%d,"crash":%d,"timeout":%d}}\n' \
+printf '{"status":"%s","mode":"full","metrics":{"total":%d,"declared":%d,"unverified":%d,"unjudgeable":%d,"passed":%d,"failed":%d,"not_run":%d},"deaths":{"run":%d,"compile_refused":%d,"crash":%d,"timeout":%d,"misattributed":%d}}\n' \
   "$status" "$total_w" "$n_decl" "$n_undecl" "$broken" "$passed" "$((failed - broken))" "$n_undecl" \
-  "$d_run" "$d_compile" "$d_crash" "$d_timeout" > "$ART"
+  "$d_run" "$d_compile" "$d_crash" "$d_timeout" "$d_misattributed" > "$ART"
 
 echo "witness_declares_its_sabotage: status=$status declared=$n_decl passed=$passed failed=$failed unverified=$n_undecl of=$total_w"
-echo "  deaths: run=$d_run compile-refused=$d_compile crash=$d_crash timeout=$d_timeout | unjudgeable=$broken (ceiling $UNJUDGEABLE_CEILING)"
+echo "  deaths: run=$d_run compile-refused=$d_compile crash=$d_crash timeout=$d_timeout misattributed=$d_misattributed | unjudgeable=$broken (ceiling $UNJUDGEABLE_CEILING)"
 if [[ $unknown_token -ne 0 ]]; then
   echo "  $unknown_token witness(es) name a sabotage token with no switch behind it"
 fi
@@ -273,7 +304,7 @@ if [[ $broken -gt $UNJUDGEABLE_CEILING ]]; then
   gate_fail "unjudgeable witnesses rose $UNJUDGEABLE_CEILING -> $broken; each one is excused before it is tested"
 fi
 if [[ $unclean -gt $UNCLEAN_CEILING ]]; then
-  gate_fail "$unclean death(s) were a crash or a timeout, not the witness noticing ($d_crash crash, $d_timeout timeout); ceiling is $UNCLEAN_CEILING"
+  gate_fail "$unclean death(s) were not the witness noticing the sabotage ($d_crash crash, $d_timeout timeout, $d_misattributed misattributed); ceiling is $UNCLEAN_CEILING"
 fi
 if [[ $survived -gt 0 ]]; then
   gate_fail "$survived witness(es) survived their own declared sabotage"
