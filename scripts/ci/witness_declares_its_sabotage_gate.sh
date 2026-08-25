@@ -80,8 +80,11 @@ fi
 
 # The census is the point even when the builds are skipped.
 if [[ "${SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY:-0}" == "1" ]]; then
-  printf '{"status":"pass","mode":"census","metrics":{"total":%d,"declared":%d,"unverified":%d,"passed":%d,"failed":0,"not_run":%d}}\n' \
-    "$total_w" "$n_decl" "$n_undecl" "$n_decl" "$n_decl" > "$ART"
+  # passed=0, not_run=total. Census mode executes nothing, and an artifact that
+  # reports passes it did not observe is the exact defect this gate exists to
+  # find -- it was written that way first, and caught in review of its own JSON.
+  printf '{"status":"pass","mode":"census","metrics":{"total":%d,"declared":%d,"unverified":%d,"passed":0,"failed":0,"not_run":%d}}\n' \
+    "$total_w" "$n_decl" "$n_undecl" "$total_w" > "$ART"
   echo "witness_declares_its_sabotage: census only -- $n_decl declared, $n_undecl unverified, of $total_w"
   gate_pass "census written to $ART"
   exit 0
@@ -168,9 +171,9 @@ for row in "${declared[@]}"; do
   fi
 done
 
-status=$([[ $failed -eq 0 ]] && echo pass || echo fail)
-printf '{"status":"%s","mode":"full","metrics":{"total":%d,"declared":%d,"unverified":%d,"passed":%d,"failed":%d,"not_run":%d}}\n' \
-  "$status" "$total_w" "$n_decl" "$n_undecl" "$passed" "$failed" "$n_undecl" > "$ART"
+status=$([[ $((failed - broken)) -eq 0 ]] && echo pass || echo fail)
+printf '{"status":"%s","mode":"full","metrics":{"total":%d,"declared":%d,"unverified":%d,"unjudgeable":%d,"passed":%d,"failed":%d,"not_run":%d}}\n' \
+  "$status" "$total_w" "$n_decl" "$n_undecl" "$broken" "$passed" "$((failed - broken))" "$n_undecl" > "$ART"
 
 echo "witness_declares_its_sabotage: status=$status declared=$n_decl passed=$passed failed=$failed unverified=$n_undecl of=$total_w"
 if [[ $unknown_token -ne 0 ]]; then
@@ -181,14 +184,28 @@ fi
 # measures; a witness that is already red says nothing either way, and calling
 # that "survived" points at the wrong defect.
 survived=$((failed - broken))
-if [[ $failed -ne 0 ]]; then
-  msg=""
-  [[ $survived -gt 0 ]] && msg="$survived survived their own declared sabotage"
-  if [[ $broken -gt 0 ]]; then
-    [[ -n "$msg" ]] && msg="$msg; "
-    msg="$msg$broken cannot be judged -- already failing with no sabotage at all"
-  fi
-  gate_fail "$msg"
+
+# What this gate blocks on, and what it only reports.
+#
+# It owns one question: does a witness that declares a sabotage actually die
+# under it? A witness that survives is claiming more than it measures, and that
+# blocks.
+#
+# A witness that cannot run at all answers a different question, and it is not
+# this gate's to enforce. Blocking on it would make this gate red on main from
+# the day it lands, and a gate that lives red gets ignored -- which is exactly
+# how madaros_corpus_regression_gate.sh spent twelve days telling every branch
+# it had broken 21 tests that were already broken. Introducing a second one of
+# those would cost more than it found.
+#
+# So they are counted, named, and written to the artifact, loudly enough that
+# nobody has to grep for them. #2148 is the first.
+if [[ $broken -gt 0 ]]; then
+  echo "  NOT JUDGED: $broken witness(es) fail with no sabotage applied and cannot be assessed here."
+  echo "              They are counted in the artifact as \"unjudgeable\"; each needs its own issue."
+fi
+if [[ $survived -gt 0 ]]; then
+  gate_fail "$survived witness(es) survived their own declared sabotage"
 fi
 gate_pass "$passed/$total declared witnesses died as declared; $n_undecl of $total_w still unverified"
 exit 0
