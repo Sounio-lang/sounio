@@ -1,0 +1,540 @@
+// stdlib/x509/ocsp.sio — RFC 6960 OCSP stapled-response parsing and
+// signature verification (Task 5 of the X.509 chain-validation plan).
+//
+// Scope (documented, not silent, per this task's brief):
+//   - Only the FIRST `SingleResponse` in `responses` is read. A stapled
+//     OCSP response, by construction, only ever covers the one certificate
+//     the TLS server stapled it for; a responder returning more than one
+//     SingleResponse in a staple is non-conformant and out of scope here.
+//   - `certID` matching uses `serialNumber` only, compared against
+//     `target.serial_number`. `issuerNameHash`/`issuerKeyHash`
+//     re-verification against `issuer`'s encoded name/key is NOT
+//     implemented -- it would require replicating whichever hash algorithm
+//     CertID.hashAlgorithm names against issuer's own encoded name/key,
+//     which is real independent scope for a check that mostly guards
+//     against a confused-deputy scenario already prevented by this
+//     response only ever being handed to `ocsp_verify_response` alongside
+//     the specific target/issuer pair the chain-verification caller
+//     already trusts.
+//   - The response is assumed signed directly by `issuer` (no delegated
+//     OCSP responder certificate). RFC 6960 SS4.2.2.2's delegated-responder
+//     path (a `certs` field carrying a responder cert chained to `issuer`)
+//     is not implemented.
+//
+// DEVIATION FROM THE BRIEF'S DRAFTED CODE #1 (found before writing any
+// signature-verification code, per this task's dispatch instructions): the
+// brief's Step 4 sketch calls a fictional `pkcs1_verify(&sig_bytes, ...)`
+// that does not exist anywhere in this codebase. The real, already-shipped
+// entry point is `crypto::pkcs1::pkcs1_v15_verify(signature: &BigInt,
+// modulus: &BigInt, exponent: &BigInt, modulus_byte_len: i64,
+// hash_algorithm: i32, message_hash: &[u8; 64], message_hash_len: i64) ->
+// bool with IO` (confirmed at stdlib/crypto/pkcs1.sio:208). It takes the
+// signature as a `&BigInt`, not raw bytes, and needs the modulus's own
+// minimal big-endian byte length as a separate argument. This file follows
+// the exact precedent `x509_verify_signature` (stdlib/x509/cert.sio
+// ~line 1403) already established: convert the signature BIT STRING's raw
+// bytes into a BigInt via `bytes_be_to_bigint`, compute the modulus's byte
+// length via `bigint_byte_length`, and determine `hash_algorithm` from the
+// signing OID via the same `oid_eq9`-against-`oid_shaN_with_rsa()` chain
+// `x509_verify_signature` uses for a certificate's `outer_sig_alg_oid`.
+//
+// `bytes_be_to_bigint` and `bigint_byte_length` are declared file-private
+// (not `pub`) in cert.sio, so they cannot be imported here. This file
+// DELIBERATELY duplicates both (they are ~15 and ~10 lines respectively)
+// rather than making already-reviewed, already-shipped cert.sio code
+// `pub` for a single new caller -- this matches the codebase's own
+// established style of small per-file utility duplication over cross-file
+// refactors of shipped code (see cert.sio's own header comments about
+// avoiding touching already-shipped code for a single new benefit).
+//
+// GeneralizedTime: RFC 6960 mandates GeneralizedTime (15-byte
+// YYYYMMDDHHMMSSZ, four-digit year) for producedAt/thisUpdate/nextUpdate --
+// NOT UTCTime. cert.sio's own `parse_utc_time_to_unix` only decodes
+// UTCTime's 13-byte YYMMDDHHMMSSZ form (see its own KNOWN LIMITATION
+// comment) and is file-private besides. This file therefore implements its
+// own GeneralizedTime decoder, duplicating cert.sio's proven
+// days-from-civil arithmetic (`unix_timestamp_from_ymdhms`, also
+// file-private) rather than widening cert.sio's already-shipped, narrowly
+// scoped UTCTime function to do double duty.
+//
+// DEVIATION FROM THE BRIEF'S DRAFTED CODE #2 (found while implementing,
+// NOT anticipated by the brief's own caveats): `der_read_tlv(r)` does NOT
+// advance its returned reader past a field's content -- per
+// stdlib/asn1/der.sio's own doc comment above `der_read_tlv`, the returned
+// reader is positioned at `tag.content_start` (the START of the value),
+// never past it. Advancing a cursor past a field once you're done with it
+// (to read the NEXT sibling field) requires `der_next(r, tag)` called with
+// the READER THAT WAS PASSED INTO der_read_tlv (not the reader it
+// returned) together with the tag it returned -- exactly the idiom
+// stdlib/x509/cert.sio's x509_parse_tbs_core/x509_parse_tbs_after_serial
+// already use throughout (e.g. `let (after_sig_alg, s3) = der_next(r, &t1)`
+// at cert.sio's TBS signature-algorithm field). The brief's own Step 4
+// sketch chains `der_read_tlv`'s returned reader directly into the next
+// `der_read_tlv` call as if it had already advanced past the prior field's
+// content -- this does not work: it leaves every subsequent sibling read
+// re-decoding bytes still inside the PREVIOUS field's content (confirmed
+// via instrumented debug prints during this task, removed before commit:
+// the first observed symptom was `der_read_tlv` on `responseBytes` failing
+// with a truncated/malformed read because it was being asked to decode a
+// tag+length header starting one byte before the actual header, inside the
+// ENUMERATED responseStatus's own content). Every sibling-to-sibling
+// advance in this file below therefore goes through `der_next` explicitly.
+
+use asn1::der::*
+use bignum::bigint::*
+use crypto::pkcs1::*
+use hash::sha1::*
+use hash::sha256::*
+use hash::sha384::*
+use hash::sha512::*
+use net::socket::*
+use x509::cert::*
+use x509::oid::*
+
+pub const OCSP_OK: i64 = 0
+pub const OCSP_ERR_PARSE: i64 = 0 - 1
+pub const OCSP_ERR_CERT_ID_MISMATCH: i64 = 0 - 2
+pub const OCSP_ERR_BAD_SIGNATURE: i64 = 0 - 3
+pub const OCSP_ERR_STALE: i64 = 0 - 4
+
+pub const OCSP_STATUS_GOOD: i64 = 0
+pub const OCSP_STATUS_REVOKED: i64 = 1
+pub const OCSP_STATUS_UNKNOWN: i64 = 2
+
+// Big-endian bytes -> BigInt. Duplicated from stdlib/x509/cert.sio's
+// file-private `bytes_be_to_bigint` (same byte-by-byte
+// bigint_mul-by-256-then-bigint_add composition stdlib/asn1/der.sio's
+// der_read_integer already uses for the identical conceptual conversion) --
+// see this file's header comment for why duplication, not a `pub` export,
+// is the intentional choice here.
+fn ocsp_bytes_be_to_bigint(buf: &RawBuf, len: i64) -> BigInt with IO {
+    var acc = bigint_zero()
+    let base256 = bigint_from_u32(256)
+    var i: i64 = 0
+    while i < len {
+        let byte_val = rawbuf_get(buf, i) & 255
+        let digit = bigint_from_u32(byte_val as u32)
+        let scaled = bigint_mul(&acc, &base256)
+        acc = bigint_add(&scaled, &digit)
+        i = i + 1
+    }
+    acc
+}
+
+// The minimal big-endian byte length of v's magnitude. Duplicated from
+// stdlib/x509/cert.sio's file-private `bigint_byte_length` -- see this
+// file's header comment.
+fn ocsp_bigint_byte_length(v: &BigInt) -> i64 {
+    if v.len == 0 {
+        return 0
+    }
+    let top_limb = v.limbs[(v.len - 1) as usize]
+    let top_byte = (top_limb as i64) >> 8
+    if top_byte == 0 {
+        (v.len as i64) * 2 - 1
+    } else {
+        (v.len as i64) * 2
+    }
+}
+
+// Days-from-civil algorithm (Howard Hinnant's well-known public-domain
+// civil_from_days inverse). Duplicated from stdlib/x509/cert.sio's
+// file-private `unix_timestamp_from_ymdhms` -- identical body, including
+// the Jan/Feb `mp` fix documented there. See this file's header comment
+// for why GeneralizedTime needs its own decoder rather than reuse of
+// cert.sio's UTCTime-only function.
+fn ocsp_unix_timestamp_from_ymdhms(year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) -> i64 {
+    var y = year
+    if month <= 2 {
+        y = y - 1
+    }
+    let era = if y >= 0 { y } else { y - 399 }
+    let era_div = era / 400
+    let yoe = y - era_div * 400
+    var mp: i64 = month + 9
+    if mp >= 12 {
+        mp = mp - 12
+    }
+    let doy = (153 * mp + 2) / 5 + day - 1
+    let yoe_leap_adj = yoe / 4 - yoe / 100
+    let doe = yoe * 365 + yoe_leap_adj + doy
+    let days_since_epoch = era_div * 146097 + doe - 719468
+    days_since_epoch * 86400 + hour * 3600 + minute * 60 + second
+}
+
+// GeneralizedTime (YYYYMMDDHHMMSSZ, 15 bytes, four-digit year) -> Unix
+// timestamp. Returns (timestamp, OCSP_OK) on success, (-1, OCSP_ERR_PARSE)
+// for any other encoding (e.g. a fractional-seconds or non-'Z' offset
+// variant this task does not need to support -- OCSP responses in this
+// deployment are all machine-generated with the plain 15-byte form, as
+// confirmed against Step 1's real openssl-generated response bytes).
+fn ocsp_generalized_time_to_unix(buf: &RawBuf, tag: &DerTag) -> (i64, i64) with IO {
+    if tag.tag_number != DER_TAG_GENERALIZED_TIME || tag.constructed || tag.content_len != 15 {
+        return (0 - 1, OCSP_ERR_PARSE)
+    }
+    let start = tag.content_start
+    let yyyy = ((rawbuf_get(buf, start) & 255) - 48) * 1000
+        + ((rawbuf_get(buf, start + 1) & 255) - 48) * 100
+        + ((rawbuf_get(buf, start + 2) & 255) - 48) * 10
+        + ((rawbuf_get(buf, start + 3) & 255) - 48)
+    let mm = ((rawbuf_get(buf, start + 4) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 5) & 255) - 48)
+    let dd = ((rawbuf_get(buf, start + 6) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 7) & 255) - 48)
+    let hh = ((rawbuf_get(buf, start + 8) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 9) & 255) - 48)
+    let min = ((rawbuf_get(buf, start + 10) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 11) & 255) - 48)
+    let ss = ((rawbuf_get(buf, start + 12) & 255) - 48) * 10 + ((rawbuf_get(buf, start + 13) & 255) - 48)
+    let last_byte = rawbuf_get(buf, start + 14) & 255
+    if last_byte != 90 {   // 'Z' == 90; anything else is an offset form this task doesn't parse.
+        return (0 - 1, OCSP_ERR_PARSE)
+    }
+    (ocsp_unix_timestamp_from_ymdhms(yyyy, mm, dd, hh, min, ss), OCSP_OK)
+}
+
+// Verifies a stapled OCSP `BasicOCSPResponse` (wrapped in its outer
+// OCSPResponse envelope) against `target`/`issuer`, at time `now_unix`.
+// Returns (ocsp_status, error_code); `ocsp_status` is only meaningful when
+// `error_code == OCSP_OK`.
+pub fn ocsp_verify_response(response: &RawBuf, response_len: i64, target: &Certificate, issuer: &Certificate, now_unix: i64) -> (i64, i64) with IO {
+    let top = der_reader_new(response, 0, response_len)
+
+    // OCSPResponse ::= SEQUENCE { responseStatus ENUMERATED, responseBytes [0] EXPLICIT ResponseBytes OPTIONAL }
+    let (r1, outer_tag, s1) = der_read_tlv(&top)
+    if s1 != DER_OK || outer_tag.tag_number != DER_TAG_SEQUENCE {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (envelope, e1) = der_enter(&top, &outer_tag)
+    if e1 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let (r2, status_tag, s2) = der_read_tlv(&envelope)
+    if s2 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    // responseStatus must be 0 (successful) -- any other value has no
+    // responseBytes to parse at all.
+    let status_byte = rawbuf_get(response, status_tag.content_start)
+    if status_byte != 0 {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_status, s2n) = der_next(&envelope, &status_tag)
+    if s2n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let (r3, response_bytes_outer_tag, s3) = der_read_tlv(&after_status)
+    if s3 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (rb0, e2) = der_enter(&after_status, &response_bytes_outer_tag)   // [0] EXPLICIT wrapper
+    if e2 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let (r4, response_bytes_seq_tag, s4) = der_read_tlv(&rb0)
+    if s4 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (rbi0, e3) = der_enter(&rb0, &response_bytes_seq_tag)
+    if e3 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let (r5, response_type_tag, s5) = der_read_tlv(&rbi0)   // responseType OID -- not branched on; this task only implements id-pkix-ocsp-basic
+    if s5 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_response_type, s5n) = der_next(&rbi0, &response_type_tag)
+    if s5n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (r6, response_octet_tag, s6) = der_read_tlv(&after_response_type)   // response OCTET STRING, containing DER-encoded BasicOCSPResponse
+    if s6 != DER_OK || response_octet_tag.tag_number != DER_TAG_OCTET_STRING {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    // BasicOCSPResponse ::= SEQUENCE { tbsResponseData, signatureAlgorithm, signature, certs OPTIONAL }
+    let basic0 = DerReader { buf_ptr: response.ptr, pos: response_octet_tag.content_start, end: response_octet_tag.content_start + response_octet_tag.content_len }
+    let (r7, basic_seq_tag, s7) = der_read_tlv(&basic0)
+    if s7 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (bi0, e4) = der_enter(&basic0, &basic_seq_tag)
+    if e4 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    // tbsResponseData: capture its raw TLV span (tag+length+content) before
+    // entering it, since the signature covers this whole encoded SEQUENCE.
+    // Confirmed via Step 1's real `openssl asn1parse` output: tbsResponseData's
+    // own tag byte sits at the position recorded here, and the signature
+    // is computed over [tbs_header_start, tbs_tag.content_start+content_len)
+    // -- exactly the pattern stdlib/x509/cert.sio's x509_parse_certificate
+    // already uses for TBSCertificate (`tbs_start_pos = cert_inner.pos`,
+    // recorded immediately before the der_read_tlv call). DerTag itself
+    // exposes no tag-start field (confirmed against its real struct
+    // definition), so the header start must be captured this way.
+    let tbs_header_start = bi0.pos
+    let (r8, tbs_tag, s8) = der_read_tlv(&bi0)
+    if s8 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let tbs_len = (tbs_tag.content_start + tbs_tag.content_len) - tbs_header_start
+    let (after_tbs, s8n) = der_next(&bi0, &tbs_tag)   // sibling cursor: signatureAlgorithm follows here
+    if s8n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let tbs_content = DerReader { buf_ptr: response.ptr, pos: tbs_tag.content_start, end: tbs_tag.content_start + tbs_tag.content_len }
+    // responderID (CHOICE, skip) and producedAt (GeneralizedTime, skip --
+    // not checked separately from thisUpdate/nextUpdate below) -- neither
+    // is verified in this task's scope, same limitation as
+    // issuerNameHash/issuerKeyHash noted in this file's header comment.
+    let (r9, responder_id_tag, s9) = der_read_tlv(&tbs_content)
+    if s9 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_responder_id, s9n) = der_next(&tbs_content, &responder_id_tag)
+    if s9n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (r10, produced_at_tag, s10) = der_read_tlv(&after_responder_id)
+    if s10 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_produced_at, s10n) = der_next(&after_responder_id, &produced_at_tag)
+    if s10n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let (r11, responses_seq_tag, s11) = der_read_tlv(&after_produced_at)   // responses SEQUENCE OF SingleResponse
+    if s11 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (resp_iter0, e6) = der_enter(&after_produced_at, &responses_seq_tag)
+    if e6 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    // First SingleResponse only -- see this file's header comment.
+    let (r12, single_response_tag, s12) = der_read_tlv(&resp_iter0)
+    if s12 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (sr0, e7) = der_enter(&resp_iter0, &single_response_tag)
+    if e7 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    // CertID ::= SEQUENCE { hashAlgorithm, issuerNameHash, issuerKeyHash, serialNumber }
+    let (r13, cert_id_tag, s13) = der_read_tlv(&sr0)
+    if s13 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (ci0, e8) = der_enter(&sr0, &cert_id_tag)
+    if e8 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_cert_id, s13n) = der_next(&sr0, &cert_id_tag)   // sibling cursor: certStatus follows here
+    if s13n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let (ci1, hash_alg_tag, s14) = der_read_tlv(&ci0)
+    if s14 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_hash_alg, s14n) = der_next(&ci0, &hash_alg_tag)
+    if s14n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (ci2, issuer_name_hash_tag, s15) = der_read_tlv(&after_hash_alg)   // NOT re-verified against issuer -- see this file's header comment
+    if s15 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_issuer_name_hash, s15n) = der_next(&after_hash_alg, &issuer_name_hash_tag)
+    if s15n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (ci3, issuer_key_hash_tag, s16) = der_read_tlv(&after_issuer_name_hash)   // NOT re-verified against issuer -- see this file's header comment
+    if s16 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_issuer_key_hash, s16n) = der_next(&after_issuer_name_hash, &issuer_key_hash_tag)
+    if s16n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (ci4, serial_tag, s17) = der_read_tlv(&after_issuer_key_hash)
+    if s17 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (response_serial, s18) = der_read_integer(&after_issuer_key_hash, &serial_tag)
+    if s18 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    if bigint_cmp(&response_serial, &target.serial_number) != 0 {
+        return (0, OCSP_ERR_CERT_ID_MISMATCH)
+    }
+
+    // certStatus ::= CHOICE { good[0] IMPLICIT NULL, revoked[1] IMPLICIT RevokedInfo, unknown[2] IMPLICIT NULL }
+    // For revoked, `status_choice_tag`'s own content (RevokedInfo's bytes)
+    // is captured as a single TLV by der_read_tlv above and simply skipped
+    // via der_next -- this task does not decode revocationTime/revocationReason.
+    let (r19, status_choice_tag, s19) = der_read_tlv(&after_cert_id)
+    if s19 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    var cert_status: i64 = OCSP_STATUS_UNKNOWN
+    if status_choice_tag.tag_number == 0 {
+        cert_status = OCSP_STATUS_GOOD
+    } else if status_choice_tag.tag_number == 1 {
+        cert_status = OCSP_STATUS_REVOKED
+    } else {
+        cert_status = OCSP_STATUS_UNKNOWN
+    }
+    let (after_cert_status, s19n) = der_next(&after_cert_id, &status_choice_tag)
+    if s19n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    let (r20, this_update_tag, s20) = der_read_tlv(&after_cert_status)
+    if s20 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (this_update_unix, s21) = ocsp_generalized_time_to_unix(response, &this_update_tag)
+    if s21 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    if now_unix < this_update_unix {
+        return (0, OCSP_ERR_STALE)
+    }
+    let (after_this_update, s20n) = der_next(&after_cert_status, &this_update_tag)
+    if s20n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    // nextUpdate is OPTIONAL -- only check staleness against it if a
+    // further TLV remains in the SingleResponse's own content range
+    // (`after_this_update.end`, inherited unchanged from `sr0.end` all the
+    // way down). This task does not attempt to distinguish "absent" from
+    // "parse error" beyond that presence check.
+    if after_this_update.pos < after_this_update.end {
+        let (r22, next_update_outer_tag, s22) = der_read_tlv(&after_this_update)
+        if s22 == DER_OK {
+            let (nu0, e9) = der_enter(&after_this_update, &next_update_outer_tag)   // [0] EXPLICIT wrapper
+            if e9 == DER_OK {
+                let (r23, next_update_tag, s23) = der_read_tlv(&nu0)
+                if s23 == DER_OK {
+                    let (next_update_unix, s24) = ocsp_generalized_time_to_unix(response, &next_update_tag)
+                    if s24 == DER_OK && now_unix > next_update_unix {
+                        return (0, OCSP_ERR_STALE)
+                    }
+                }
+            }
+        }
+    }
+
+    // Signature verification: hash tbsResponseData's full raw TLV bytes
+    // (tag+length+content) and PKCS#1-verify against `issuer`'s public
+    // key. `after_tbs` was left positioned right after tbsResponseData by
+    // the der_next call above -- signatureAlgorithm and signature are its
+    // siblings inside BasicOCSPResponse.
+    let tbs_copy = rawbuf_new(tbs_len + 8)   // +8: same trailing-slack fix cert.sio's own tbs_copy uses (rawbuf_set's write side clobbers up to 7 bytes past an exactly-sized buffer's end).
+    var tc: i64 = 0
+    while tc < tbs_len {
+        rawbuf_set(&tbs_copy, tc, rawbuf_get(response, tbs_header_start + tc))
+        tc = tc + 1
+    }
+
+    let (r25, sig_alg_tag, s25) = der_read_tlv(&after_tbs)
+    if s25 != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (after_sig_alg, s25n) = der_next(&after_tbs, &sig_alg_tag)
+    if s25n != DER_OK {
+        return (0, OCSP_ERR_PARSE)
+    }
+    let (r26, sig_tag, s26) = der_read_tlv(&after_sig_alg)
+    if s26 != DER_OK || sig_tag.tag_number != DER_TAG_BIT_STRING {
+        return (0, OCSP_ERR_PARSE)
+    }
+
+    // signatureAlgorithm's OID, read directly from `response` at
+    // sig_alg_tag's inner AlgorithmIdentifier -- same OID-matching pattern
+    // x509_verify_signature uses for a certificate's outer_sig_alg_oid.
+    // AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER, parameters ANY OPTIONAL }
+    let sig_alg_content = DerReader { buf_ptr: response.ptr, pos: sig_alg_tag.content_start, end: sig_alg_tag.content_start + sig_alg_tag.content_len }
+    let (r27, sig_alg_oid_tag, s27) = der_read_tlv(&sig_alg_content)
+    if s27 != DER_OK || sig_alg_oid_tag.tag_number != DER_TAG_OBJECT_IDENTIFIER {
+        return (0, OCSP_ERR_PARSE)
+    }
+    if sig_alg_oid_tag.content_len > 20 {
+        return (0, OCSP_ERR_PARSE)   // longer than any OID this task recognizes -- oid_eq9 below would reject it anyway
+    }
+    var sig_alg_oid: [u8; 20] = [0; 20]
+    var oi: i64 = 0
+    while oi < sig_alg_oid_tag.content_len {
+        sig_alg_oid[oi as usize] = rawbuf_get(response, sig_alg_oid_tag.content_start + oi) as u8
+        oi = oi + 1
+    }
+    let sig_alg_oid_len = sig_alg_oid_tag.content_len as i32
+
+    var hash_algorithm: i32 = 0
+    let oid_s1 = oid_sha1_with_rsa()
+    let oid_s256 = oid_sha256_with_rsa()
+    let oid_s384 = oid_sha384_with_rsa()
+    let oid_s512 = oid_sha512_with_rsa()
+    if oid_eq9(&sig_alg_oid, sig_alg_oid_len, &oid_s1) {
+        hash_algorithm = PKCS1_HASH_SHA1
+    } else if oid_eq9(&sig_alg_oid, sig_alg_oid_len, &oid_s256) {
+        hash_algorithm = PKCS1_HASH_SHA256
+    } else if oid_eq9(&sig_alg_oid, sig_alg_oid_len, &oid_s384) {
+        hash_algorithm = PKCS1_HASH_SHA384
+    } else if oid_eq9(&sig_alg_oid, sig_alg_oid_len, &oid_s512) {
+        hash_algorithm = PKCS1_HASH_SHA512
+    } else {
+        return (0, OCSP_ERR_BAD_SIGNATURE)   // unsupported algorithm -- same as x509_verify_signature's Non-Goals (no ECDSA/Ed25519)
+    }
+
+    var message_hash: [u8; 64] = [0; 64]
+    var message_hash_len: i64 = 0
+    if hash_algorithm == PKCS1_HASH_SHA1 {
+        let h = sha1(&tbs_copy, tbs_len)
+        var hi: i64 = 0
+        while hi < 20 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 20
+    } else if hash_algorithm == PKCS1_HASH_SHA256 {
+        let h = sha256(&tbs_copy, tbs_len)
+        var hi: i64 = 0
+        while hi < 32 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 32
+    } else if hash_algorithm == PKCS1_HASH_SHA384 {
+        let h = sha384(&tbs_copy, tbs_len)
+        var hi: i64 = 0
+        while hi < 48 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 48
+    } else {
+        let h = sha512(&tbs_copy, tbs_len)
+        var hi: i64 = 0
+        while hi < 64 { message_hash[hi as usize] = h[hi as usize]; hi = hi + 1 }
+        message_hash_len = 64
+    }
+
+    // BIT STRING's first content byte is the unused-bits count (always 0
+    // for a DER-encoded signature); the actual signature bytes follow.
+    let sig_byte_len = sig_tag.content_len - 1
+    let sig_raw_buf = rawbuf_new(sig_byte_len + 8)
+    var sb: i64 = 0
+    while sb < sig_byte_len {
+        rawbuf_set(&sig_raw_buf, sb, rawbuf_get(response, sig_tag.content_start + 1 + sb))
+        sb = sb + 1
+    }
+    let signature_bigint = ocsp_bytes_be_to_bigint(&sig_raw_buf, sig_byte_len)
+    let modulus_byte_len = ocsp_bigint_byte_length(&issuer.modulus)
+
+    let verified = pkcs1_v15_verify(&signature_bigint, &issuer.modulus, &issuer.public_exponent, modulus_byte_len, hash_algorithm, &message_hash, message_hash_len)
+    if !verified {
+        return (0, OCSP_ERR_BAD_SIGNATURE)
+    }
+
+    (cert_status, OCSP_OK)
+}
