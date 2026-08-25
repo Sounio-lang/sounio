@@ -55,6 +55,7 @@ sub-project's deliverables.
   own record-sequence-number-based nonce construction (the future
   handshake sub-project's job) is what guarantees uniqueness. Documented
   as an explicit, deliberate boundary, not a gap.
+- **Never use native `u32` arithmetic.** `stdlib/hash/word32.sio`'s own header comment documents "Finding 13" (`docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`): native `u32` `+`/`-` do not wrap mod 2^32 on Madaros at all — a more severe failure than the already-known Finding 11 (`u64` shift/divide/modulo breaking when bit 63 is set). Every 32-bit word this sub-project touches — ChaCha20's state words and counter, AES's key-schedule word rotation/XOR, GCM's counter-block low-32-bit increment — must be represented as a plain `i64` masked to `0..4294967295`, using `stdlib/hash/word32.sio`'s existing `add32`/`rotl32`/`xor32`/`and32`/`or32`/`not32` primitives (already used by this stdlib's SHA-1/SHA-256, already tested) rather than reimplementing 32-bit arithmetic from scratch or reaching for the native `u32` type anywhere in this sub-project's arithmetic. `rotr32` is NOT needed by anything in this spec (ChaCha20 and AES both only ever rotate left) but exists in the same module if a future need arises; note its documented precondition (`1 <= n <= 31`) if ever used. `chacha20_block`'s `counter` parameter is therefore typed `i64` (word32-bounded), not `u32` — see Data Structures below.
 - **Constant-time tag comparison.** `aead_open`'s tag-verification step
   must not branch or short-circuit per-byte on tag mismatch — accumulate a
   bitwise difference across all 16 tag bytes and compare the accumulator
@@ -163,12 +164,12 @@ pub const CHACHA20_NONCE_LEN: i64 = 12
 // gcm.sio has no equivalent -- AES's block size (16 bytes) differs from
 // ChaCha20's (64 bytes), so `aead.sio` composes each cipher's own natural
 // block size rather than forcing a shared block-size abstraction.
-pub fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64]
+pub fn chacha20_block(key: &[u8; 32], counter: i64, nonce: &[u8; 12]) -> [u8; 64]
 
 // XORs `data` with the keystream starting at `counter`, in place semantics
 // (returns a new RawBuf rather than mutating -- matches this stdlib's
 // existing value-semantics style for RawBuf-producing functions).
-pub fn chacha20_encrypt(key: &[u8; 32], counter: u32, nonce: &[u8; 12], data: &RawBuf, data_len: i64) -> RawBuf with IO
+pub fn chacha20_encrypt(key: &[u8; 32], counter: i64, nonce: &[u8; 12], data: &RawBuf, data_len: i64) -> RawBuf with IO
 ```
 
 ### `poly1305.sio`
