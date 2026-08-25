@@ -50,6 +50,7 @@
 // only two error consts Tasks 3/4 import verbatim). This is a deliberate
 // change from the brief: no looping, no silent truncation.
 
+use bignum::bigint::*
 use net::socket::*
 use x509::pem::*
 use x509::cert::*
@@ -96,6 +97,40 @@ pub fn trust_store_find_by_subject(store: &TrustStore, subject: &X509Name) -> i6
         i = i + 1
     }
     0 - 1
+}
+
+// Security-critical (see chain.sio's chain_is_trusted_root and the
+// forged-root-DN-collision finding from final-plan review, 2026-08-25):
+// `trust_store_find_by_subject` returns only the FIRST trust-store entry
+// whose subject matches, which is not sufficient to decide "is this
+// candidate cert genuinely a trust anchor" -- a subject DN is public
+// information (CA subject DNs are not secret), so an attacker can forge a
+// self-signed certificate with the exact same Subject DN as a real root and
+// a key of their own choosing. Accepting such a forgery as a trusted root
+// merely because SOME trust-store entry shares its subject is a chain-
+// validation bypass. This helper instead loops over EVERY trust-store entry
+// (the real system CA bundle legitimately contains cross-signed roots that
+// share a Subject DN with a different key, so "first match" is also wrong
+// on its own terms, not just insecure) and requires both subject equality
+// AND byte-identical RSA public key material (modulus and exponent) on the
+// SAME entry before treating the candidate as trusted.
+pub fn trust_store_has_matching_key_for_subject(
+    store: &TrustStore,
+    subject: &X509Name,
+    modulus: &BigInt,
+    exponent: &BigInt,
+) -> bool {
+    var i: i64 = 0
+    while i < (store.count as i64) {
+        let entry = store.certs[i as usize]
+        if x509_name_eq(&entry.subject, subject) {
+            if bigint_cmp(&entry.modulus, modulus) == 0 && bigint_cmp(&entry.public_exponent, exponent) == 0 {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
 }
 
 pub fn trust_store_find_by_ski(store: &TrustStore, ski: &[u8; 32], ski_len: i32) -> i64 {
