@@ -1,0 +1,145 @@
+// stdlib/crypto/hkdf.sio
+//
+// RawBuf-based HMAC-SHA256 / HMAC-SHA384 (FIPS 198-1 / RFC 2104), built on
+// top of stdlib/hash/sha256.sio and stdlib/hash/sha384.sio.
+//
+// This is a fresh, RawBuf-based implementation, deliberately separate from
+// stdlib/crypto/hmac.sio (which is a fixed-array, file-private HMAC-SHA256
+// with its own inlined SHA-256 internals). Tasks 2 (HKDF-Extract/Expand)
+// and 3 (TLS 1.3 key schedule) build on the two `pub fn` below and must not
+// need to touch hmac.sio.
+//
+// HMAC(K, m) = H((K' xor opad) || H((K' xor ipad) || m))
+// where K' is the key, hashed down to the output length if longer than the
+// hash function's BLOCK size, then zero-padded up to the block size if
+// shorter. ipad = 0x36 repeated, opad = 0x5c repeated, for the block size.
+//
+// Block size note (independently verified -- see task-1-report.md):
+//   - SHA-256 block size: 64 bytes.
+//   - SHA-384 block size: 128 bytes. SHA-384 is a SHA-512-family member
+//     (1024-bit / 128-byte blocks per FIPS 180-4), NOT 64 like SHA-256.
+//     Confirmed against Python's `hashlib.sha384().block_size` (== 128)
+//     in addition to the standard's own text.
+
+use net::socket::*
+use hash::sha256::*
+use hash::sha384::*
+
+const SHA256_BLOCK_LEN: i64 = 64
+const SHA384_BLOCK_LEN: i64 = 128
+
+const HMAC_IPAD: i64 = 0x36
+const HMAC_OPAD: i64 = 0x5c
+
+// Build the block-size-length key block K0 for HMAC-SHA256: if key_len
+// exceeds the block size, hash the key down to 32 bytes first (zero-padded
+// out to 64); otherwise copy the key bytes directly (zero-padded out to
+// 64).
+fn hmac_sha256_k0(key: &RawBuf, key_len: i64) -> RawBuf with IO {
+    let k0 = rawbuf_new(SHA256_BLOCK_LEN)
+    var i: i64 = 0
+    if key_len > SHA256_BLOCK_LEN {
+        let hashed = sha256(key, key_len)
+        while i < 32 {
+            rawbuf_set(&k0, i, hashed[i as usize] as i64)
+            i = i + 1
+        }
+    } else {
+        while i < key_len {
+            rawbuf_set(&k0, i, rawbuf_get(key, i))
+            i = i + 1
+        }
+    }
+    while i < SHA256_BLOCK_LEN {
+        rawbuf_set(&k0, i, 0)
+        i = i + 1
+    }
+    k0
+}
+
+// Build the block-size-length key block K0 for HMAC-SHA384 (block size
+// 128 bytes, hash-shortening via sha384 producing 48 bytes when
+// key_len > 128).
+fn hmac_sha384_k0(key: &RawBuf, key_len: i64) -> RawBuf with IO {
+    let k0 = rawbuf_new(SHA384_BLOCK_LEN)
+    var i: i64 = 0
+    if key_len > SHA384_BLOCK_LEN {
+        let hashed = sha384(key, key_len)
+        while i < 48 {
+            rawbuf_set(&k0, i, hashed[i as usize] as i64)
+            i = i + 1
+        }
+    } else {
+        while i < key_len {
+            rawbuf_set(&k0, i, rawbuf_get(key, i))
+            i = i + 1
+        }
+    }
+    while i < SHA384_BLOCK_LEN {
+        rawbuf_set(&k0, i, 0)
+        i = i + 1
+    }
+    k0
+}
+
+pub fn hmac_sha256(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8; 32] with IO {
+    let k0 = hmac_sha256_k0(key, key_len)
+
+    let inner_buf = rawbuf_new(SHA256_BLOCK_LEN + msg_len)
+    var i: i64 = 0
+    while i < SHA256_BLOCK_LEN {
+        rawbuf_set(&inner_buf, i, rawbuf_get(&k0, i) ^ HMAC_IPAD)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < msg_len {
+        rawbuf_set(&inner_buf, SHA256_BLOCK_LEN + j, rawbuf_get(msg, j))
+        j = j + 1
+    }
+    let inner_hash = sha256(&inner_buf, SHA256_BLOCK_LEN + msg_len)
+
+    let outer_buf = rawbuf_new(SHA256_BLOCK_LEN + 32)
+    var m: i64 = 0
+    while m < SHA256_BLOCK_LEN {
+        rawbuf_set(&outer_buf, m, rawbuf_get(&k0, m) ^ HMAC_OPAD)
+        m = m + 1
+    }
+    var n: i64 = 0
+    while n < 32 {
+        rawbuf_set(&outer_buf, SHA256_BLOCK_LEN + n, inner_hash[n as usize] as i64)
+        n = n + 1
+    }
+
+    sha256(&outer_buf, SHA256_BLOCK_LEN + 32)
+}
+
+pub fn hmac_sha384(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8; 48] with IO {
+    let k0 = hmac_sha384_k0(key, key_len)
+
+    let inner_buf = rawbuf_new(SHA384_BLOCK_LEN + msg_len)
+    var i: i64 = 0
+    while i < SHA384_BLOCK_LEN {
+        rawbuf_set(&inner_buf, i, rawbuf_get(&k0, i) ^ HMAC_IPAD)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < msg_len {
+        rawbuf_set(&inner_buf, SHA384_BLOCK_LEN + j, rawbuf_get(msg, j))
+        j = j + 1
+    }
+    let inner_hash = sha384(&inner_buf, SHA384_BLOCK_LEN + msg_len)
+
+    let outer_buf = rawbuf_new(SHA384_BLOCK_LEN + 48)
+    var m: i64 = 0
+    while m < SHA384_BLOCK_LEN {
+        rawbuf_set(&outer_buf, m, rawbuf_get(&k0, m) ^ HMAC_OPAD)
+        m = m + 1
+    }
+    var n: i64 = 0
+    while n < 48 {
+        rawbuf_set(&outer_buf, SHA384_BLOCK_LEN + n, inner_hash[n as usize] as i64)
+        n = n + 1
+    }
+
+    sha384(&outer_buf, SHA384_BLOCK_LEN + 48)
+}
