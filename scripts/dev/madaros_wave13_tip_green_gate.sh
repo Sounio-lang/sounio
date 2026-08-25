@@ -30,7 +30,8 @@
 #
 # Does not rebuild Madaros. Does not pin lean_single. Uses default bin/souc.
 # If stock prebuilt lags #1392 (cd_exact RED):
-#   scripts/dev/souc-build-lock.sh make build-madaros
+#   make build-madaros   # bare: it locks internally; wrapping it in
+#                        # souc-build-lock.sh deadlocks (see CLAUDE.md §4)
 #   MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash "$0"
 #
 # Usage:
@@ -348,7 +349,7 @@ if [[ $fail -eq 0 ]]; then
 fi
 if [[ "$cd_exact_status" != "pass" ]]; then
   echo "NOTE: cd_exact RED — if stock prebuilt lags #1392, rebuild:" >&2
-  echo "  scripts/dev/souc-build-lock.sh make build-madaros" >&2
+  echo "  make build-madaros   # bare; wrapping it in souc-build-lock.sh deadlocks" >&2
   echo "  MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash $0" >&2
 fi
 echo "MADAROS_WAVE13_TIP_GREEN_GATE_FAIL" >&2
