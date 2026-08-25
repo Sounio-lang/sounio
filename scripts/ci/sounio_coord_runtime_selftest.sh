@@ -131,6 +131,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-persistent-fleet-catalog-v1 loom-post-pod-reconcile-v1 \
   fleet-linear-capability-v1 \
   fleet-home-isolation-v1 \
+  fleet-presentation-follow-v1 \
   fleet-proven-exit-v1 fleet-ed25519-anchor-v1 \
   fleet-checkpoint-handoff-v1 fleet-tla-model-v1 \
   fleet-trace-refinement-v1 fleet-temporal-authority-v1 \

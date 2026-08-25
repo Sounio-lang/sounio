@@ -22,7 +22,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.24.6"
+RUNTIME_VERSION = "2026.08.25.7"
 UUID_RE = re.compile(
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -526,6 +526,48 @@ def attach(mapping: dict[str, Any], root: Path) -> int:
     return last_result.returncode if last_result is not None else 1
 
 
+def follow_slot_command(args: argparse.Namespace) -> int:
+    if args.retry_seconds <= 0:
+        raise FleetError("follow retry interval must be positive")
+    worktree = Path(args.cwd).resolve()
+    if not worktree.is_dir():
+        raise FleetError(f"worktree does not exist: {worktree}")
+    root = state_root(worktree)
+    mapping_path = slot_paths(root, args.slot)["mapping"]
+    last_state: str | None = None
+    while True:
+        if not mapping_path.is_file():
+            state = "absent"
+            mapping = None
+        else:
+            mapping = read_json(mapping_path)
+            if mapping.get("slot") != args.slot:
+                raise FleetError(f"fleet slot mapping binding drifted: {args.slot}")
+            if Path(str(mapping.get("worktree", ""))).resolve() != worktree:
+                raise FleetError(f"fleet slot worktree binding drifted: {args.slot}")
+            state, _ = probe_mapping(mapping, root)
+            if state == "drifted":
+                raise FleetError(
+                    f"fleet slot {args.slot} identity drifted; refusing to follow it"
+                )
+        if state != last_state:
+            print(
+                f"FLEET_SLOT_FOLLOW slot={args.slot} state={state}",
+                flush=True,
+            )
+            last_state = state
+        if state == "active" and mapping is not None:
+            print(
+                "FLEET_SLOT_FOLLOW "
+                f"slot={args.slot} state=attaching "
+                f"instance_id={mapping['instance_id']}",
+                flush=True,
+            )
+            attach(mapping, root)
+            last_state = None
+        time.sleep(args.retry_seconds)
+
+
 def launch(args: argparse.Namespace, plan: LaunchPlan) -> int:
     worktree = Path(args.cwd).resolve()
     if not worktree.is_dir():
@@ -701,6 +743,11 @@ def parser() -> argparse.ArgumentParser:
     stop_parser.add_argument("--cwd", default=os.getcwd())
     stop_parser.add_argument("--slot", required=True)
 
+    follow_parser = subparsers.add_parser("follow-slot")
+    follow_parser.add_argument("--cwd", default=os.getcwd())
+    follow_parser.add_argument("--slot", required=True)
+    follow_parser.add_argument("--retry-seconds", type=float, default=1.0)
+
     fallback_parser = subparsers.add_parser("_continue-fallback")
     fallback_parser.add_argument("arguments", nargs=argparse.REMAINDER)
     return root
@@ -728,6 +775,8 @@ def main() -> int:
         return status_command(args)
     if args.command_name == "stop":
         return stop_command(args)
+    if args.command_name == "follow-slot":
+        return follow_slot_command(args)
     if args.command_name == "_continue-fallback":
         return continue_fallback(args.arguments)
     raise FleetError(f"unknown command: {args.command_name}")
