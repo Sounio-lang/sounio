@@ -1355,38 +1355,35 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
     cert.outer_signature = sig_buf
     cert.outer_signature_len = sig_bytes_len as i32
 
-    // Deferred SAN commit -- UNRESOLVED, measured Madaros defect (Task 4,
-    // 2026-08-25). `cert.san_entries[i].value_len` reads back correctly
-    // in-function immediately after being written (verified repeatedly,
-    // right up to the statement directly preceding this function's own
-    // `(cert, X509_OK)` return), but comes back as 0 once this function
-    // returns to ANY caller, cross-module or same-module. Extensively
-    // bisected and NOT explained by any of: extension count or order
-    // (reproduces with SAN as the ONLY-plus-basicConstraints extension,
-    // matching tests/run-pass/x509_parse_full_certificate.sio's own
-    // known-good 2-extension shape byte-for-byte in count and relative
-    // order); write timing (reproduces whether the commit happens inside
-    // the extensions loop, right after it, or as the literal last
-    // statement before the function's return); RSA key size (reproduces
-    // at both 1024-bit and 2048-bit); or certificate generation tool
-    // (reproduces with both openssl(1) `x509 -req`/`ca`-generated
-    // certificates and Python `cryptography`-library-generated
-    // certificates). The one confirmed correlate: it reproduces for every
-    // REAL, realistically-sized certificate tried (513-838 bytes total,
-    // built from an actual RSA key and a real CA signature) and does NOT
-    // reproduce for x509_parse_full_certificate.sio's tiny (197-byte)
-    // hand-built structural fixture -- consistent with some fixed-capacity
-    // tracking structure in Madaros's return-value marshaling for large
-    // aggregates (in the spirit of, though not confirmed identical to,
-    // the `MF_AREBOX_CAP`/"call-arg scratch" bookkeeping in
-    // self-hosted/compiler/module_frontend.sio) silently dropping a
-    // deep-offset field's write once a certificate carries enough real
-    // data. This is reported in Task 4's completion report as a new,
-    // blocking, unfiled finding per the forensic-dispatch protocol --
-    // NOT patched in self-hosted/ here. The commit is still placed here,
-    // as the literal last write this function makes to `cert`, since that
-    // is provably no worse than committing earlier and rules out this
-    // function's OWN later writes as a contributing cause.
+    // Deferred SAN commit. The "callers read san_entries[i].value_len back
+    // as 0" defect that this deferral was written to work around was
+    // ROOT-CAUSED and FIXED on 2026-08-25 in self-hosted/ir/lower.sio:2555
+    // (the external-item preseed registered an imported struct's fields with
+    // an EMPTY array-element type name, so `owner.arrayfield[i].name` in a
+    // CONSUMING module fell back to the name-only global field lookup and
+    // resolved `value_len` against RdnEntry/ExtensionEntry's index 4 instead
+    // of GeneralName's index 2). Nothing was ever lost on the WRITE side, and
+    // certificate size -- the correlate the original bisection reported -- was
+    // a red herring: it tracked whether the observing test used the
+    // Finding-25 `var c = certificate_zero(); c = raw` binding, not how many
+    // bytes the certificate had. Full evidence, including the three-file
+    // minimal reproducer now committed as
+    // tests/run-pass/imported_array_struct_field.sio, is in
+    // docs/audit/X509_PARSE_CERTIFICATE_SAN_VALUE_LEN_LOSS_2026-08-25.md.
+    //
+    // The deferral is KEPT: it is correct, costs one extra local array, and
+    // keeps the SAN commit as the last write this function makes to `cert`.
+    //
+    // STILL OPEN (Defect A in that audit): a struct local bound by TUPLE
+    // DESTRUCTURING (`let (cert, st) = x509_parse_certificate(...)`) carries
+    // no struct type, so a DIRECT deep read like
+    // `cert.san_entries[0].value_len` in the caller is still wrong. Callers
+    // must use the documented Finding-25 form:
+    //     var cert = certificate_zero()
+    //     let (cert_raw, st) = x509_parse_certificate(&buf, len)
+    //     cert = cert_raw
+    // Passing `&cert` into a typed parameter (as x509_verify_chain does) is
+    // unaffected either way.
     if deferred_san_count >= 0 {
         var san_final_i: i32 = 0
         while san_final_i < deferred_san_count {

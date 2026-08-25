@@ -1,0 +1,53 @@
+//@ run-pass
+// Regression test for the imported-struct array-element field-index defect
+// found on 2026-08-25 while root-causing "x509_parse_certificate loses
+// san_entries[0].value_len".
+//
+// `lowerer_preseed_external_items_into_acc_mut` in self-hosted/ir/lower.sio
+// registered an imported struct's field entries with an EMPTY
+// `elem_type_name_id`, even though it read `named_type_name_id` off the very
+// same declared field type. Consequence:
+// `field_array_elem_type_name_for_struct` answered "" for every
+// array-of-struct field of an imported struct, so `owner.arrayfield[i].name`
+// in a CONSUMING module fell through to the name-only global field lookup and
+// resolved `name` against whichever registered struct declared it first.
+//
+// Measured before the fix: mid_read_value_len returned 64 (a byte out of
+// Leaf.value) instead of 21. The declaring module's own read returned 21
+// throughout -- the value is written correctly, only the consumer's offset was
+// wrong.
+//
+// See docs/audit/X509_PARSE_CERTIFICATE_SAN_VALUE_LEN_LOSS_2026-08-25.md.
+
+use imported_array_struct_field_decl::*
+use imported_array_struct_field_mid::*
+
+fn main() -> i64 with IO, Mut {
+    var o = owner_zero()
+    o = owner_filled()
+
+    // Field index 0 (`tag`) is correct under ANY misresolution -- control.
+    if mid_read_tag(&o) != 7 {
+        print_int(1)
+        return 1
+    }
+    assert(mid_read_tag(&o) == 7)
+
+    // Control: the DECLARING module resolves `value_len` correctly.
+    if owner_read_here(&o) != 21 {
+        print_int(2)
+        return 1
+    }
+    assert(owner_read_here(&o) == 21)
+
+    // The regression: an IMPORTING module must resolve `value_len` to Leaf's
+    // field index 2, not to Other's index 4.
+    if mid_read_value_len(&o) != 21 {
+        print_int(3)
+        return 1
+    }
+    assert(mid_read_value_len(&o) == 21)
+
+    println("imported_array_struct_field: imported array-element field index OK")
+    return 0
+}
