@@ -118,6 +118,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-native-sounio-continuity-v1 \
   loom-durable-obligation-v1 \
   loom-post-activation-request-bridge-v1 \
+  loom-recoverable-control-service-v1 \
   loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
   loom-signed-continuity-receipt-v2 loom-principal-independence-v1 \
   loom-independent-measurement-v1 \
@@ -210,23 +211,20 @@ output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-
 grep -q '"count":2,"unclosed":2' <<< "$output" || \
   fail 'post-activation stale request was not imported or historical control leaked in'
 
-(
-  cd "$SECOND"
-  exec env SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-supervise \
-    --interval-seconds 1
-) > "$TEST_ROOT/obligation-supervisor.log" 2>&1 &
-supervisor_pid=$!
-supervisor_live=0
-for _ in 1 2 3 4 5; do
-  output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
-    bin/sounio-coord obligation-supervisor-status 2>/dev/null || true)"
-  if grep -q 'state=live' <<< "$output"; then
-    supervisor_live=1
-    break
-  fi
-  sleep 1
-done
-((supervisor_live == 1)) || fail 'continuous obligation supervisor did not become live'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
+  fail 'control-service ensure did not start the obligation supervisor'
+supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
+[[ -n "$supervisor_pid" ]] || fail 'control-service ensure omitted its supervisor PID'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
+  fail 'control-service ensure was not idempotent'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-status)"
+grep -q "state=live pid=$supervisor_pid " <<< "$output" || \
+  fail 'ensured obligation supervisor did not become live'
 output="$(
   cd "$SECOND"
   SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
@@ -245,13 +243,79 @@ for _ in 1 2 3 4 5; do
   fi
   sleep 1
 done
-kill "$supervisor_pid" 2>/dev/null || true
-wait "$supervisor_pid" 2>/dev/null || true
 ((supervised_imported == 1)) || fail 'running supervisor did not import a new stale request'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-stop --timeout-seconds 5)"
+grep -q "state=stopped pid=$supervisor_pid " <<< "$output" || \
+  fail 'control-service stop did not identify the stopped supervisor'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-status 2>/dev/null || true)"
 grep -q 'state=stopped' <<< "$output" || \
   fail "terminated obligation supervisor left its OCaml child live: $output"
+cp "$STATE/obligation-supervisor.state" "$TEST_ROOT/stopped-supervisor-state.saved"
+sed -i '/^schema=/d' "$STATE/obligation-supervisor.state"
+set +e
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1 2>&1)"
+missing_schema_status=$?
+set -e
+((missing_schema_status != 0)) && grep -q 'invalid obligation supervisor process identity' \
+  <<< "$output" || fail 'missing supervisor state schema was not refused'
+cp "$TEST_ROOT/stopped-supervisor-state.saved" "$STATE/obligation-supervisor.state"
+
+unowned_pid="$BASHPID"
+unowned_start="$(sed 's/^[^)]*) //' "/proc/$unowned_pid/stat" | awk '{print $20}')"
+{
+  printf 'schema=loom-obligation-supervisor-v1\n'
+  printf 'pid=%s\n' "$unowned_pid"
+  printf 'pid_start=%s\n' "$unowned_start"
+  printf 'replayed_utc=2026-08-25T00:00:00Z\n'
+  printf 'count=0\n'
+  printf 'unclosed=0\n'
+} > "$STATE/obligation-supervisor.state"
+set +e
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1 2>&1)"
+unowned_pid_status=$?
+set -e
+((unowned_pid_status != 0)) && grep -q 'refusing to signal unowned obligation supervisor' \
+  <<< "$output" || fail 'unowned live PID in supervisor state was not fenced'
+kill -0 "$unowned_pid" 2>/dev/null || fail 'unowned PID sabotage killed the selftest shell'
+cp "$TEST_ROOT/stopped-supervisor-state.saved" "$STATE/obligation-supervisor.state"
+(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-supervisor-ensure \
+    --interval-seconds 1
+) > "$TEST_ROOT/concurrent-ensure-a.out" 2>&1 &
+ensure_a_pid=$!
+(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-supervisor-ensure \
+    --interval-seconds 1
+) > "$TEST_ROOT/concurrent-ensure-b.out" 2>&1 &
+ensure_b_pid=$!
+wait "$ensure_a_pid"
+wait "$ensure_b_pid"
+cat "$TEST_ROOT/concurrent-ensure-a.out" "$TEST_ROOT/concurrent-ensure-b.out" > \
+  "$TEST_ROOT/concurrent-ensure.out"
+[[ "$(grep -c 'state=started ' "$TEST_ROOT/concurrent-ensure.out")" == 1 &&
+  "$(grep -c 'state=already-running ' "$TEST_ROOT/concurrent-ensure.out")" == 1 ]] || \
+  fail 'concurrent ensure did not elect exactly one control-service starter'
+ensure_a_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' \
+  "$TEST_ROOT/concurrent-ensure-a.out")"
+ensure_b_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' \
+  "$TEST_ROOT/concurrent-ensure-b.out")"
+[[ -n "$ensure_a_supervisor_pid" && "$ensure_a_supervisor_pid" == "$ensure_b_supervisor_pid" ]] || \
+  fail 'concurrent ensure returned different supervisor identities'
+recovered_supervisor_pid="$ensure_a_supervisor_pid"
+[[ -n "$recovered_supervisor_pid" && "$recovered_supervisor_pid" != "$supervisor_pid" ]] || \
+  fail 'control-service resurrection did not produce a new supervisor generation'
+supervisor_pid="$recovered_supervisor_pid"
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-stop --timeout-seconds 5)"
+grep -q "state=stopped pid=$supervisor_pid " <<< "$output" || \
+  fail 'control-service stop did not terminate the resurrected supervisor'
+supervisor_pid=''
 
 FAIL_STATE="$TEST_ROOT/failing-supervisor-state"
 (
@@ -387,6 +451,11 @@ grep -q 'agent=claude lane=session-runtime-test' <<< "$output" || \
 output="$(cd "$SECOND" && bin/sounio-agentd runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared agentd runtime'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
+  fail 'pre-upgrade control service did not start'
+supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
 
 mkdir -p "$ALT/scripts/dev" "$ALT/formal/tla" "$ALT/tools"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
@@ -425,6 +494,14 @@ grep -q "^runtime_id=$second_id$" <<< "$output" || fail 'worktree did not observ
 grep -q '^runtime_version=2026.08.23.8-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
 [[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
   fail 'runtime upgrade rewrote the activation watermark'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$output" || \
+  fail 'runtime upgrade did not restart the control service onto the selected bundle'
+upgraded_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
+[[ -n "$upgraded_supervisor_pid" && "$upgraded_supervisor_pid" != "$supervisor_pid" ]] || \
+  fail 'runtime upgrade retained the old control-service generation'
+supervisor_pid="$upgraded_supervisor_pid"
 
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --activate "$first_id")"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'runtime rollback failed'
@@ -432,6 +509,19 @@ output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'worktree did not observe runtime rollback'
 [[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
   fail 'runtime rollback rewrote the activation watermark'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$output" || \
+  fail 'runtime rollback did not restart the control service onto the selected bundle'
+rolled_back_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
+[[ -n "$rolled_back_supervisor_pid" && "$rolled_back_supervisor_pid" != "$supervisor_pid" ]] || \
+  fail 'runtime rollback retained the upgraded control-service generation'
+supervisor_pid="$rolled_back_supervisor_pid"
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-stop --timeout-seconds 5)"
+grep -q "state=stopped pid=$supervisor_pid " <<< "$output" || \
+  fail 'control service did not stop after rollback validation'
+supervisor_pid=''
 
 mkdir -p "$BAD/scripts/dev" "$BAD/formal/tla" "$BAD/tools"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$BAD/scripts/dev/"
