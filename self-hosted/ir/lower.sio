@@ -4281,6 +4281,22 @@ fn lowerer_lower_fn_item_mut(
     fd: &FnDef
 ) with Mut, Panic, Div, Alloc, IO {
     ir_instr_overflow_begin_fn()
+    // Correlations are per-function. FO_COV_RHO is a module global while the
+    // channel ids that index it are Lowerer fields reset per function, so a
+    // `correlate(a, b, 1.0)` in one function silently supplied rho to the next
+    // one to reach the same channel pair -- fabricating a dependence no source
+    // line asked for. Measured: a function that never mentions correlation read
+    // Var(c+d) = 0.16 instead of 0.10, the previous function's number entire.
+    //
+    // This reset does NOT go in begin_function_body_lowering, which announces
+    // itself as "per-function reset of vreg-keyed float/variance tables" and
+    // has zero callers in the whole tree. Everything it resets -- fo_nchan,
+    // fo_sigma2, FO_SIGMA_REG, fo_expr_sens -- is therefore never reset by it.
+    var fo_cri: i64 = 0
+    while fo_cri < 64 {
+        FO_COV_RHO[fo_cri as usize] = 0.0
+        fo_cri = fo_cri + 1
+    }
     // Seed the transcendental chain-rule entries here, on the confirmed live path.
     //
     // fo_xfer_global_reset (:3578, :9019) and lowerer_lower_program_bodies_dedup_mut
@@ -15521,11 +15537,34 @@ impl Lowerer {
                         let p1 = lo.lower_expr_variance_ref(&(*l1).head)
                         lo = p1.0
                         let cj = lo.fo_primary_channel()
+                        // Both literal forms, matching the checker's
+                        // correlate_rho_literal: an ExprFloatLit, and the
+                        // `0.0 - x` ExprBinary this dialect uses to write a
+                        // negative literal. Reading only the first turned every
+                        // negative correlation into independence in silence --
+                        // and a negative rho is the case the builtin exists for.
                         var rho: f64 = 0.0
                         match (*l1).tail {
                             Some(l2) => {
                                 if (*l2).head.kind == ExprKind::ExprFloatLit {
                                     rho = (*l2).head.float_val
+                                }
+                                if (*l2).head.kind == ExprKind::ExprBinary && (*l2).head.bin_op == BinaryOp::OpSub {
+                                    match (*l2).head.left {
+                                        Some(lz) => {
+                                            match (*l2).head.right {
+                                                Some(rz) => {
+                                                    if (*lz).kind == ExprKind::ExprFloatLit && (*rz).kind == ExprKind::ExprFloatLit {
+                                                        if (*lz).float_val == 0.0 {
+                                                            rho = 0.0 - (*rz).float_val
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                             _ => {}
