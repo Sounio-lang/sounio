@@ -7889,6 +7889,34 @@ fn checker_check_variance_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeE
 // on the argument it does not expect. A missing rho must be an error rather
 // than a silent 0.0, which would read as "these are independent" -- the very
 // assumption this builtin exists to let you deny.
+// A compile-time correlation coefficient, or (false, 0.0) when it is not one.
+//
+// Same two forms as epistemic_index_literal, for the same reason: this dialect
+// writes a negative literal as `0.0 - 0.5`, an ExprBinary. The lowerer read
+// only ExprFloatLit, so a negative rho -- the one case in GUM where
+// correlation is interesting -- folded to 0.0 in silence, which is the exact
+// assumption `correlate` exists to deny.
+fn correlate_rho_literal(opt: Option<Box<Expr> >) -> (bool, f64) with Mut, Panic, Div, Alloc, IO {
+    match opt {
+        None => (false, 0.0)
+        Some(ex) => {
+            if (*ex).kind == ExprKind::ExprFloatLit {
+                return (true, (*ex).float_val)
+            }
+            if (*ex).kind == ExprKind::ExprBinary && (*ex).bin_op == BinaryOp::OpSub {
+                let l = expr_opt_get((*ex).left)
+                let r = expr_opt_get((*ex).right)
+                if (*l).kind == ExprKind::ExprFloatLit && (*r).kind == ExprKind::ExprFloatLit {
+                    if (*l).float_val == 0.0 {
+                        return (true, 0.0 - (*r).float_val)
+                    }
+                }
+            }
+            (false, 0.0)
+        }
+    }
+}
+
 fn checker_check_correlate_metric_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let first_arg = expr_list_head(e.args)
     let second_arg = expr_list_second(e.args)
@@ -7903,7 +7931,17 @@ fn checker_check_correlate_metric_expr_inplace(c: *mut Checker, e: Expr) -> Type
     }
     match third_arg {
         None => checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
-        Some(_) => {}
+        Some(rho_ex) => {
+            // rho must fold at compile time. The lowerer keeps a f64, not a
+            // register, so a runtime third argument never propagates -- it
+            // silently leaves rho at 0.0, fabricating the very independence
+            // this builtin exists to deny. There is no lowering to fall back
+            // on, so refusing is the only honest answer.
+            let rho_lit_7930 = correlate_rho_literal(Some(rho_ex))
+            if !rho_lit_7930.0 {
+                checker_report_error_at_inplace(c, e.span, 243, 0, 0, 0)
+            }
+        }
     }
     checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
     ty_f64()
@@ -13933,6 +13971,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
     else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else if code == 242 { print("epistemic channel index is out of range") }
+    else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
     else { print("unknown error") }
 }
 
