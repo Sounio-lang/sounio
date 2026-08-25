@@ -665,3 +665,71 @@ measurement, via `requires_proof`) is unchanged; the `eps` payload returns when 
 ### Suspected area
 Enum-variant struct-literal construction / field-name resolution in the checker
 (`self-hosted/compiler/lean_single.sio`, the E200 emit at ~14486 — the name-resolution fallthrough).
+
+---
+
+## D8 — dereferencing a fixed-array reference (`*arr`) aliases the caller's array [DISTINCT FROM D6]
+
+### Symptom
+`var x = *arr` (or `var x: [T;N] = *arr`), where `arr` is a `&[T;N]` reference parameter, ALIASES the
+caller's array rather than copying it — mutating `x` afterward silently corrupts the caller's original.
+**Silent data corruption, clean compile.** This is distinct from D6 (struct copy-then-mutate,
+Sounio-lang/sounio#643): D6 covers struct **parameters** copied by plain `var r = a` assignment; D8
+covers **array reference dereference** specifically (`*ref`, not plain array-to-array assignment).
+A reader of D6 alone would reasonably but incorrectly conclude arrays are safe from this bug class —
+they are not, via the `*`-dereference path. Discovered 2026-08-25 during the Madaros AEAD ciphers plan
+(`docs/superpowers/plans/2026-08-25-madaros-aead-ciphers-plan.md`), first as a real bug in
+`gcm_increment_counter` (`stdlib/crypto/gcm.sio`): `var result = *block` followed by mutating
+`result[12..15]` corrupted the caller's J0 counter block in place, producing a wrong tag against GCM
+Test Case 2 while GHASH and AES were both already independently verified correct. Every crypto
+primitive written under that plan (`gcm.sio`, `poly1305.sio`) now avoids `*ref` on fixed arrays,
+building fresh arrays element-by-element from scalar reads instead.
+
+### Minimal repro (CONFIRMED)
+`docs/handoff/repros/d8_array_deref_aliases.sio`:
+```sio
+fn mutate_alias(arr: &[u8;4]) -> u8 {
+    var x = *arr
+    x[0] = 99
+    return x[0]
+}
+fn main() -> i64 with IO {
+    var original: [u8;4] = [1, 2, 3, 4]
+    let r = mutate_alias(&original)
+    print_int(r as i64)
+    print_int(original[0] as i64)
+    return 0
+}
+```
+Expected (correct value semantics): prints `99` then `1`. Observed on Madaros v0.80.0 (2026-08-25):
+prints `99` then `99` — `original[0]` was silently corrupted to match `x[0]`.
+
+### Confirmed scope (2026-08-25)
+- **Not type-specific**: reproduces identically for `[u8;4]` (above) and `[i64;4]` (verified with an
+  equivalent repro swapping the element type) — the defect is in the array-reference-dereference
+  mechanism, not tied to any particular element type.
+- **A type annotation on the `var` does NOT suppress it**: `var x: [u8;16] = *ref` (or
+  `var x: [i64;4] = *arr`) aliases exactly the same as the untyped `var x = *ref` form.
+- **Plain array-to-array assignment is unaffected**: `var b = a` or `let c = a`, where `a` is already
+  a local array *value* (not a dereference of a reference), DOES copy correctly on this compiler —
+  verified: mutating `b` after `var b = a` leaves `a` untouched. The trigger is specifically the
+  `*`-dereference of a `&[T;N]` reference, not array assignment in general.
+
+### Impact
+Any future call site written against `&[T;N]` parameters that copies via `var x = *ref` and then
+mutates `x` while still needing the original is at risk of exactly this class of silent corruption.
+The AEAD ciphers plan's own `gcm.sio` and `poly1305.sio` were audited and confirmed to avoid this
+pattern throughout (see `gcm_increment_counter`'s own inline comment and `poly1305_mac`'s key-byte
+copy loop); `ghash_multiply` (`stdlib/crypto/gcm.sio`) was hardened during the plan's final review to
+copy element-by-element rather than via `var v: [u8;16] = *x`, even though its existing call sites
+never read the original afterward (harmless today, but a latent trap for a future call site).
+
+### Suspected area
+Same general family as D6: local init from a dereferenced aggregate value emits a pointer/alias
+instead of a value copy (missing memcpy) — likely `self-hosted/ir/lower.sio` (local init from a
+`*`-dereference expression) or the corresponding codegen path, but for the reference-dereference
+expression form specifically rather than plain identifier-to-identifier assignment.
+
+### Filed
+Not yet filed as a GitHub issue as of this entry (2026-08-25) — track alongside Sounio-lang/sounio#643
+(D6) as a related but distinct value-semantics defect.
