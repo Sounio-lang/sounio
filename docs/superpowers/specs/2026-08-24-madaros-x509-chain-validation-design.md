@@ -114,6 +114,11 @@ pub const TRUST_STORE_ERR_TOO_MANY_CERTS: i64 = -2
 
 pub struct TrustStore {
     certs: [Certificate; 512],   // TRUST_STORE_MAX_CERTS
+    bufs: [RawBuf; 512],         // certs[i]'s own raw DER bytes -- x509_verify_signature
+                                  // re-hashes cert.tbs_start..tbs_start+tbs_len out of the
+                                  // SAME buffer a cert was parsed from (verified against
+                                  // cert.sio's x509_verify_signature body), so every stored
+                                  // cert needs its source buffer kept alongside it.
     count: i32,
 }
 
@@ -160,7 +165,9 @@ pub const MAX_INTERMEDIATES: i64 = 8
 // `unix_timestamp_from_ymdhms`-based, caller-supplies-time convention).
 pub fn x509_verify_chain(
     leaf: &Certificate,
+    leaf_buf: &RawBuf,                  // leaf's own raw DER bytes -- see TrustStore.bufs' comment
     intermediates: &[Certificate; 8],   // MAX_INTERMEDIATES
+    intermediate_bufs: &[RawBuf; 8],    // intermediates[i]'s own raw DER bytes, same reason
     intermediate_count: i32,
     trust_store: &TrustStore,
     ocsp_response: &RawBuf,
@@ -218,8 +225,8 @@ pub fn ocsp_verify_response(
    `x509_parse_certificate`:
    `x509_verify_chain(&leaf, &intermediates, n, &store, &ocsp_bytes, ocsp_len, &hostname_buf, hostname_len, now)`.
 3. Inside `x509_verify_chain`:
-   - `chain_build_candidates` (file-private) treats `{leaf} ∪ intermediates ∪ store.certs` as the available cert pool and performs a depth-bounded (`CHAIN_MAX_DEPTH`) DFS from the leaf: at each step, find candidate issuers by matching the current cert's `authority_key_id` against a candidate's `subject_key_id` (preferred, when both are present), falling back to `issuer` DN == candidate's `subject` DN when AKI/SKI is absent on either side. Each candidate issuer not already on the current path is pushed; a self-signed cert found in `store.certs` (subject == issuer, found via `trust_store_find_by_subject`/`_by_ski`) terminates a path successfully. Backtracks (pops and tries the next candidate) when a branch dead-ends before reaching a trusted root within `CHAIN_MAX_DEPTH`.
-   - Each candidate path found is fed to `chain_verify_path` (file-private): walks the path from leaf to root checking, per link, `x509_verify_signature(cert, issuer.modulus, issuer.exponent)`, `now_unix` inside `[cert.not_before_unix, cert.not_after_unix]`, and — for every non-leaf link — `issuer.is_ca == true`, `issuer.key_usage_bits` has `keyCertSign` set when `key_usage_bits != 0` (absent key usage extension does not block, matching common real-world CA certs that omit it), and the number of CA certs between this link and the leaf does not exceed `issuer.path_len_constraint` when that field is set (`>= 0`; the existing parser encodes "absent" as a sentinel, matching the parser's established convention — verified against `cert.sio`'s parsing code, not assumed, during implementation).
+   - `chain_build_candidates` (file-private) treats `{leaf} ∪ intermediates ∪ store.certs` as the available cert pool (each entry carrying its `Certificate` alongside its own `RawBuf`, per the data-structure fix above) and performs a depth-bounded (`CHAIN_MAX_DEPTH`) DFS from the leaf: at each step, find candidate issuers by matching the current cert's `authority_key_id` against a candidate's `subject_key_id` (preferred, when both are present), falling back to `issuer` DN == candidate's `subject` DN when AKI/SKI is absent on either side. Each candidate issuer not already on the current path is pushed; a self-signed cert found in `store.certs` (subject == issuer, found via `trust_store_find_by_subject`/`_by_ski`) terminates a path successfully. Backtracks (pops and tries the next candidate) when a branch dead-ends before reaching a trusted root within `CHAIN_MAX_DEPTH`.
+   - Each candidate path found is fed to `chain_verify_path` (file-private): walks the path from leaf to root checking, per link, `x509_verify_signature(cert_buf, cert, issuer.modulus, issuer.exponent)` (using that link's own stored buffer — never the leaf's or another link's), `now_unix` inside `[cert.not_before_unix, cert.not_after_unix]`, and — for every non-leaf link — `issuer.is_ca == true`, `issuer.key_usage_bits` has `keyCertSign` set when `key_usage_bits != 0` (absent key usage extension does not block, matching common real-world CA certs that omit it), and the number of CA certs between this link and the leaf does not exceed `issuer.path_len_constraint` when that field is set (`>= 0`; the existing parser encodes "absent" as a sentinel, matching the parser's established convention — verified against `cert.sio`'s parsing code, not assumed, during implementation).
    - The **first fully-passing candidate path wins**; if none pass, the error reported is the failure reason from whichever candidate got furthest (most links verified before failing) — tracked as a running `(best_depth, best_error)` pair updated whenever a new candidate's failure depth exceeds the stored best.
    - On a winning path: `x509_verify_hostname(&leaf, hostname, hostname_len)` — SAN `dNSName` entries only (not deprecated CN-based fallback), exact or single-level-wildcard match.
    - If `ocsp_response_len > 0`: `ocsp_verify_response` against `(leaf, winning_path[1])` (the leaf's direct issuer) — `OCSP_STATUS_GOOD` and `OCSP_OK` required to pass; anything else fails the whole chain.
