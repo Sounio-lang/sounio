@@ -3754,14 +3754,57 @@ fn checker_lookup_user_effect_id_mut(c: *mut Checker, name_buf: [i8; 64], name_l
     0 - 1
 }
 
-fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div {
+// E210: an effect name the programmer wrote is being discarded. One code for
+// both faces because they are one mechanism (S06_EFFECTS_ROWS.md 6.1.0: the
+// unknown-name hole and the ninth-effect hole are the same `eff_id >= 0 &&
+// n < 8` guard; re-separating them was ruled a regression against 6.1.1).
+// face 0: the name is in no list - not the closed 30, not the user-effect
+//         registry, not the held transition list (effects.sio).
+// face 1: the name resolves, but the 8-slot signature table is full and this
+//         would be a 9th distinct effect.
+fn checker_emit_e210(c: *mut Checker, face: i64, name_buf: [i8; 64], name_len: i64) with Mut, IO, Panic, Div, Alloc {
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E210]")
+    print(" in ")
+    e035_print_module_path((*c).current_module)
+    print("::")
+    e035_print_ident((*c).current_fn_name)
+    print(": ")
+    if face == 0 {
+        print("unknown effect '")
+    } else {
+        print("effect '")
+    }
+    var i: i64 = 0
+    while i < name_len && i < 64 {
+        print_ascii_i8(name_buf[i as usize])
+        i = i + 1
+    }
+    print("'")
+    if face == 0 {
+        println(": not in the closed effect list (S06 6.1.0), not a declared user effect, not held")
+    } else {
+        println(": dropped, a signature holds 8 distinct effects and this is a 9th")
+    }
+}
+
+fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div, IO, Alloc {
     var effs = effects
     var n = count
     var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
     if eff_id < 0 {
         eff_id = checker_lookup_user_effect_id_mut(c, list.head.name_buf, list.head.name_len)
     }
-    if eff_id >= 0 && n < 8 {
+    if eff_id < 0 {
+        // Held names keep today's silent behaviour by the founder's hold
+        // ruling (effects.sio header, hold_mod_claude1): the corpus
+        // load-bearingly depends on them pending the misspelling audit.
+        // Anything else is refused instead of silently dropped.
+        if !effect_name_is_held(list.head.name_buf, list.head.name_len) {
+            checker_emit_e210(c, 0, list.head.name_buf, list.head.name_len)
+        }
+    } else {
         var already_present = false
         var i: i64 = 0
         while i < n {
@@ -3771,8 +3814,15 @@ fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64;
             i = i + 1
         }
         if !already_present {
-            effs[n as usize] = eff_id
-            n = n + 1
+            if n >= 8 {
+                // The ninth distinct effect: dropped silently before E210.
+                // Widening the slot table is a separate conversation; this
+                // refusal only stops the discard from being invisible.
+                checker_emit_e210(c, 1, list.head.name_buf, list.head.name_len)
+            } else {
+                effs[n as usize] = eff_id
+                n = n + 1
+            }
         }
     }
     match list.tail {
@@ -3781,7 +3831,7 @@ fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64;
     }
 }
 
-fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div {
+fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div, IO, Alloc {
     match opt {
         None => MutEffectsResult { effects: [0; 8], count: 0 }
         Some(list) => checker_collect_effects_mut(c, *list, [0; 8], 0)
@@ -3830,6 +3880,12 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
     match opt {
         Some(fd) => {
             let name = (*fd).name
+            // E210 identity: the effect collector reports module::fn, but
+            // current_fn_name was only recorded on impl-body paths. Record the
+            // fn being collected for the extraction window and restore it
+            // after, mirroring the saved_effects pair below.
+            let saved_fn_name = (*c).current_fn_name
+            (*c).current_fn_name = name
             // Effects must be current BEFORE parameter types lower. The ZD
             // family interrogates `with ZD` at the parameter; collecting the
             // signature with an empty effect set would refuse every `with ZD`
@@ -3849,6 +3905,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             }
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
+            (*c).current_fn_name = saved_fn_name
             let fn_effects = eff_pair.effects
             let fn_effect_count = eff_pair.count
             let epistemic_min_confidence = epistemic_min_confidence_from_effects((*fd).effects)
