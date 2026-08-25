@@ -305,6 +305,39 @@ done
 [[ "$state" == exited ]] || fail 'session did not record a terminal state'
 "$LOOM" verify-journal --journal "$journal" | grep -q 'phase=exited' || \
   fail 'terminal journal did not verify'
+offline="$($LOOM snapshot --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+  --agent "$AGENT" --lane "$LANE" --cursor 0 --meta \
+  2> "$TEST_ROOT/offline-snapshot.meta")"
+[[ "$offline" == *BOOT_READY* ]] || fail 'offline replay omitted durable output'
+grep -q "LOOM_SNAPSHOT instance=$instance_id .* source=offline" \
+  "$TEST_ROOT/offline-snapshot.meta" || fail 'terminal replay did not use verified offline custody'
+output_file="$(sed -n 's/^output_file=//p' \
+  "$STATE_DIR/sessions/$AGENT--$LANE/session.state")"
+ending="$(wc -c < "$output_file")"
+[[ "$ending" -gt 0 ]] || fail 'terminal output is empty before custody sabotage'
+clean_output="$TEST_ROOT/offline-output.clean"
+cp "$output_file" "$clean_output"
+printf 'X' | dd of="$output_file" bs=1 seek=0 conv=notrunc status=none
+[[ "$(wc -c < "$output_file")" == "$ending" ]] || \
+  fail 'same-size custody sabotage changed output length'
+if cmp -s "$output_file" "$clean_output"; then
+  fail 'same-size custody sabotage did not mutate output bytes'
+fi
+if "$LOOM" snapshot --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+  --agent "$AGENT" --lane "$LANE" --cursor 0 \
+  > "$TEST_ROOT/offline-custody.out" 2> "$TEST_ROOT/offline-custody.err"; then
+  fail 'offline replay accepted same-size durable-output mutation'
+fi
+grep -q 'guardian-output:digest-mismatch' "$TEST_ROOT/offline-custody.err" || \
+  fail 'same-size output sabotage was refused by the wrong rule'
+cp "$clean_output" "$output_file"
+if "$LOOM" snapshot --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+  --agent "$AGENT" --lane "$LANE" --cursor "$((ending + 1))" \
+  > "$TEST_ROOT/offline-cursor.out" 2> "$TEST_ROOT/offline-cursor.err"; then
+  fail 'offline replay accepted a cursor beyond durable output'
+fi
+grep -q 'cursor ahead of durable output' "$TEST_ROOT/offline-cursor.err" || \
+  fail 'offline replay cursor sabotage was refused by the wrong rule'
 
 "$LOOM" start --state-dir "$GUARD_STATE_DIR" --agent "$GUARD_AGENT" \
   --lane "$GUARD_LANE" --session-id loom-guardian-selftest --cwd "$TEST_ROOT" -- \

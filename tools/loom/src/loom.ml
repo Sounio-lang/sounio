@@ -113,6 +113,23 @@ let read_file path =
 let file_size path =
   try (Unix.stat path).st_size with _ -> 0
 
+let read_range path cursor length =
+  if length <= 0 then ""
+  else
+    let descriptor = Unix.openfile path [ O_RDONLY ] 0 in
+    let bytes = Bytes.create length in
+    Fun.protect
+      ~finally:(fun () -> Unix.close descriptor)
+      (fun () ->
+        ignore (Unix.lseek descriptor cursor SEEK_SET);
+        let rec fill offset =
+          if offset < length then
+            let count = Unix.read descriptor bytes offset (length - offset) in
+            if count > 0 then fill (offset + count)
+        in
+        fill 0;
+        Bytes.unsafe_to_string bytes)
+
 let atomic_write ?(mode = 0o600) path value =
   mkdir_p (Filename.dirname path);
   let temporary =
@@ -1688,6 +1705,72 @@ let load_and_verify_guardian_journal path =
   let phase, cursor, digest = verify_guardian_events path events in
   (events, phase, cursor, digest)
 
+let guardian_output_payload event =
+  let payload = string_of_hex event.payload_hex in
+  match split_on ':' payload with
+  | [ start_value; ending_value; digest ] ->
+      let parse label value =
+        try int_of_string value
+        with _ ->
+          failf "guardian-output:%s-is-not-an-integer seq=%d" label event.seq
+      in
+      let start = parse "start" start_value in
+      let ending = parse "end" ending_value in
+      if start < 0 || ending < start then
+        failf "guardian-output:invalid-span seq=%d" event.seq;
+      if not (valid_sha256 digest) then
+        failf "guardian-output:invalid-digest seq=%d" event.seq;
+      (start, ending, digest)
+  | _ -> failf "guardian-output:invalid-payload seq=%d" event.seq
+
+let read_guardian_output_chunk descriptor (event : journal_event) start ending =
+  let length = ending - start in
+  let bytes = Bytes.create length in
+  ignore (Unix.lseek descriptor start SEEK_SET);
+  let rec fill offset =
+    if offset < length then
+      let count = Unix.read descriptor bytes offset (length - offset) in
+      if count = 0 then
+        failf "guardian-output:unexpected-eof seq=%d offset=%d" event.seq
+          (start + offset)
+      else fill (offset + count)
+  in
+  fill 0;
+  Bytes.unsafe_to_string bytes
+
+let verified_guardian_output_range events output_path expected_size cursor length =
+  let descriptor = Unix.openfile output_path [ O_RDONLY ] 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      let stats = Unix.fstat descriptor in
+      if stats.st_kind <> S_REG then failf "guardian-output:not-regular-file";
+      if stats.st_size <> expected_size then
+        failf "guardian cursor does not match durable output";
+      let requested_end = cursor + length in
+      let output = Buffer.create length in
+      List.iter
+        (fun (event : journal_event) ->
+          if event.kind = "OUTPUT" then (
+            let start, ending, expected_digest = guardian_output_payload event in
+            let chunk = read_guardian_output_chunk descriptor event start ending in
+            let measured_digest = sha256 chunk in
+            if measured_digest <> expected_digest then
+              failf "guardian-output:digest-mismatch seq=%d" event.seq;
+            let overlap_start = max cursor start in
+            let overlap_end = min requested_end ending in
+            if overlap_end > overlap_start then
+              Buffer.add_substring output chunk (overlap_start - start)
+                (overlap_end - overlap_start)))
+        events;
+      if (Unix.fstat descriptor).st_size <> expected_size then
+        failf "guardian-output:size-changed-during-replay";
+      let value = Buffer.contents output in
+      if String.length value <> length then
+        failf "guardian-output:range-incomplete expected=%d actual=%d" length
+          (String.length value);
+      value)
+
 let connect_unix path =
   let descriptor = Unix.socket PF_UNIX SOCK_STREAM 0 in
   Unix.set_close_on_exec descriptor;
@@ -3126,13 +3209,51 @@ let stream_command cli interactive =
           readable
       done)
 
+let offline_snapshot paths cursor limit =
+  let values = parse_key_values paths.descriptor_path in
+  if table_value values "state" <> "exited" then
+    failf "offline snapshot requires an exited session";
+  let instance = table_value values "instance_id" in
+  let output_path = table_value values "output_file" in
+  let journal_path = table_value values "journal_file" in
+  let guardian_journal_path = table_value values "guardian_journal_file" in
+  if
+    List.exists (( = ) "")
+      [ instance; output_path; journal_path; guardian_journal_path ]
+  then failf "exited session descriptor is incomplete";
+  let _, semantic_phase, _ = load_and_verify_journal journal_path in
+  if semantic_phase <> Exited then failf "semantic journal is not terminal";
+  let guardian_events, guardian_phase, guardian_cursor, _ =
+    load_and_verify_guardian_journal guardian_journal_path
+  in
+  if guardian_phase <> Guardian_exited then failf "guardian journal is not terminal";
+  let ending = guardian_cursor in
+  if cursor > ending then failf "cursor ahead of durable output";
+  let length = min limit (ending - cursor) in
+  let data =
+    verified_guardian_output_range guardian_events output_path ending cursor length
+  in
+  (instance, cursor, cursor + length, data)
+
 let snapshot_command cli =
   let _, paths = session_locator cli in
   let cursor = optional cli "--cursor" |> Option.value ~default:"0" |> parse_nonnegative "cursor" in
-  let limit = optional cli "--limit" |> Option.value ~default:(string_of_int max_snapshot_bytes) |> parse_nonnegative "limit" in
-  let instance, start, ending, data = snapshot_request paths cursor limit in
+  let limit =
+    optional cli "--limit" |> Option.value ~default:(string_of_int max_snapshot_bytes)
+    |> parse_nonnegative "limit" |> min max_snapshot_bytes
+  in
+  let descriptor = parse_key_values paths.descriptor_path in
+  let source, (instance, start, ending, data) =
+    try ("kernel", snapshot_request paths cursor limit)
+    with error ->
+      if table_value descriptor "state" = "exited" then
+        ("offline", offline_snapshot paths cursor limit)
+      else raise error
+  in
   if flag cli "--meta" then
-    Printf.eprintf "LOOM_SNAPSHOT instance=%s start=%d end=%d bytes=%d\n%!" instance start ending (String.length data);
+    Printf.eprintf
+      "LOOM_SNAPSHOT instance=%s start=%d end=%d bytes=%d source=%s\n%!"
+      instance start ending (String.length data) source;
   output_string Stdlib.stdout data;
   flush Stdlib.stdout
 
@@ -3438,23 +3559,6 @@ let write_beagle_meta paths fields =
 
 let beagle_meta_value ?default metadata key =
   table_value ?default metadata key |> field_unescape
-
-let read_range path cursor length =
-  if length <= 0 then ""
-  else
-    let descriptor = Unix.openfile path [ O_RDONLY ] 0 in
-    let bytes = Bytes.create length in
-    Fun.protect
-      ~finally:(fun () -> Unix.close descriptor)
-      (fun () ->
-        ignore (Unix.lseek descriptor cursor SEEK_SET);
-        let rec fill offset =
-          if offset < length then
-            let count = Unix.read descriptor bytes offset (length - offset) in
-            if count > 0 then fill (offset + count)
-        in
-        fill 0;
-        Bytes.unsafe_to_string bytes)
 
 let read_tail path limit =
   let ending = file_size path in

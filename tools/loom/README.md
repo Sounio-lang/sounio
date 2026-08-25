@@ -29,6 +29,7 @@ source-worktree build for diagnosis.
 bin/sounio-loom start --agent codex --lane experiment -- COMMAND ARG...
 bin/sounio-loom recover --agent codex --lane experiment
 bin/sounio-loom guardian-status --agent codex --lane experiment
+bin/sounio-loom snapshot --agent codex --lane experiment --cursor 0 --meta
 bin/sounio-loom fleet-enroll --slot codex-1 --kind codex --home "$HOME" --cwd "$PWD"
 bin/sounio-loom fleet-reconcile
 bin/sounio-loom fleet-reconcile --apply
@@ -63,6 +64,16 @@ bin/sounio-loom obligation-supervise --state-dir PATH
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
 refused unless `--allow-remote` is explicit. The session directory and token are
 local capabilities and must remain private to the owning user.
+
+When a session has exited, `snapshot` falls back to terminal offline replay. It
+accepts that path only after both the semantic and Guardian journals reach their
+terminal states, the Guardian cursor equals the durable output length, and every
+output chunk still matches the SHA-256 digest recorded by the Guardian. The
+returned range is assembled from those verified chunks. A same-length mutation
+of `output.bin` is therefore refused by `guardian-output:digest-mismatch`, not by
+an incidental cursor or file-length check. This is an integrity check, not a
+monotonic-freshness proof against replaying an older, internally consistent
+output and journal pair.
 
 ## Durable Obligations
 
@@ -247,11 +258,30 @@ subset, not merely the aggregate minimum. Native Sounio constructs private
 least two and signer, observer, and all three journal principals are pairwise
 disjoint. The single-authority `9005` proof remains a distinct legacy type.
 
+## Three-Agent Recovery Canary
+
+`scripts/ci/sounio_loom_three_agent_recovery_canary.sh` runs Codex, Grok, and
+MiniMax through their real CLIs under three independent Loom Guardians. It kills
+all three disposable kernels, requires each lane to become `recoverable` with no
+stale Guardian bridge, then starts new kernels and checks that every Guardian
+PID, CLI PID, and Loom instance ID remains unchanged. Each agent must create a
+physical receipt through its Bash tool and its unique token must be present in
+durable replay; a model merely claiming success cannot satisfy the gate.
+
+The retained 2026-08-25 run passed with three replaced kernel PIDs, three stable
+Guardians, three stable CLI processes, three tool receipts, and three replay
+tokens. The measured sequential recovery interval was 549 ms. The preregistered
+inputs, status transitions, raw snapshots, outcome, and checksums are retained
+under `tools/loom/evidence/three-agent-recovery-20260825/`.
+
 ## Evidence Boundary
 
 Loom-1.6 tolerates observer, interactive-client, GUI, and kernel loss on one Unix
-host. `recover` reconciles bytes fsynced by the guardian while no kernel existed
-and semantically revokes input leases whose sockets died with the old kernel.
+host. The three-agent canary exercises concurrent real CLI processes on that
+same-host boundary; it does not establish Guardian, host, storage, provider-auth,
+or network-partition recovery. `recover` reconciles bytes fsynced by the guardian
+while no kernel existed and semantically revokes input leases whose sockets died
+with the old kernel.
 It cannot re-adopt the same PTY after Guardian or host loss. It can detect that
 loss and reconcile a Beagle pane into a new generation whose append-only
 lineage receipt binds both verified predecessor journal heads. The Kubernetes
