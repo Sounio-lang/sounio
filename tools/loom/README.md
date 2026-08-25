@@ -98,10 +98,11 @@ bin/sounio-coord obligation-complete --agent codex --lane session-ID \
   --message msg-ID --claim claim-ID --outcome PATH --evidence PATH
 ```
 
-This is a single-filesystem crash-consistency and fencing claim. It is not
-exactly-once execution, replicated storage, partition tolerance, or distributed
-consensus. See `docs/internal/concepts/loom-obligation.contract` for the exact
-semantic boundary and preregistered sabotage control.
+This is a single-filesystem crash-consistency and generation-fencing claim under
+bounded forward clock skew relative to lease TTLs. It is not exactly-once
+execution, replicated storage, partition tolerance, or distributed consensus.
+See `docs/internal/concepts/loom-obligation.contract` for the exact semantic
+boundary and preregistered sabotage control.
 
 `fleet-enroll` stores desired lane intent under the repository's persistent Git
 common directory. `fleet-reconcile` is a no-mutation plan by default; `--apply`
