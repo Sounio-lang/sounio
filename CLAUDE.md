@@ -139,15 +139,25 @@ active:
    ```
    Cheap `souc check <file>` does not need the lock.
 
-   > **Do NOT wrap `scripts/ci/build_modular_madaros.sh`** — it already takes the
-   > global lock itself (twice: for the seed derivation and for the main build).
-   > Wrapping it **self-deadlocks**, and the deadlock is silent: the outer wrapper
-   > waits for a lock its own child is waiting to acquire. Measured 2026-07-26 —
-   > one agent doing this blocked two others for ~27 minutes before the wedge was
-   > noticed. Call it directly:
+   > **Do NOT wrap the Madaros build** — neither `make build-madaros` nor the
+   > `scripts/ci/build_modular_madaros.sh` it calls. That script already takes the
+   > global lock itself (twice: for the seed derivation and for the main build),
+   > so run it bare and it serializes correctly on its own:
    > ```bash
-   > bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+   > make build-madaros                                  # correct
+   > bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros  # also correct
+   > scripts/dev/souc-build-lock.sh make build-madaros   # HANGS FOREVER
    > ```
+   > The lock lives on file descriptor 9, which survives `exec` — so a *directly*
+   > nested `souc-build-lock.sh` inherits the descriptor and proceeds. `make` does
+   > not pass fd 9 to its recipe shells, so an inner lock reached through a make
+   > target opens a fresh descriptor and blocks on the lock its own ancestor
+   > holds. It never times out and prints no further progress. Recognise it by
+   > **0% CPU and 00:00:00 CPU time while wall-clock climbs**, with
+   > `[souc-build-lock] another heavy build holds the lock; waiting...` as the last
+   > line of output — check `ps -o etime,time,pcpu` before concluding a long build
+   > is merely slow. Measured 2026-07-26: one agent blocked two others for ~27
+   > minutes. Measured 2026-08-25: 48 minutes of nothing wrapped, ~11 minutes bare.
    > Better still, when the cluster is reachable, keep the build off the pod
    > entirely — see `scripts/dev/souc-build-remote.sh`, which runs it on an idle
    > SLURM node and needs no lock at all, because it consumes no pod CPU.
