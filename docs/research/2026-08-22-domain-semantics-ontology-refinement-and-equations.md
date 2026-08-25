@@ -677,8 +677,21 @@ memory-reclamation gap. This is the concrete keystone-of-the-keystone.
 ### 14.4 Grounded vs conjecture (ruthless split)
 
 **Grounded (source or external math):**
-- #1: sorry-free `EpistemicEffectsV2.lean` `ep_*` twins; `gAddMeta_monotone` 2-line;
-  anti-garbling = ¬DISJ exactly.
+- #1: sorry-free `EpistemicEffectsV2.lean` `ep_*` twins (`gAddMeta`/`gMulMeta` = the
+  scalar `ep_add`/`ep_mul`), full mechanized progress + preservation, and
+  `gAddMeta_valid`/`gMulMeta_valid` (metadata **validity** preserved); the local
+  anti-garbling criterion (understatement = 2·⟨a,b⟩, exact iff zero-covariance) is
+  kernel-checked separately in `SounioAntiGarblingModel.lean`.
+  > **Correction (2026-08-25, Fable-1, grounding Paper A §6):** an earlier draft of this
+  > line claimed a `gAddMeta_monotone` "2-line" theorem in `EpistemicEffectsV2.lean` and
+  > "anti-garbling = ¬DISJ exactly". Neither is in the file. The 629-line file mechanizes
+  > progress/preservation + `gAddMeta_valid`/`gMulMeta_valid` (**validity**, i.e.
+  > `gumVar ≥ 0` — NOT variance-monotonicity, and it preserves an *understated* variance,
+  > which is the point of §6.1: validity ≠ soundness). `gAddMeta_monotone` remains a
+  > to-do (§14.5 step 2). And "anti-garbling = ¬DISJ" overstates it: the exact soundness
+  > condition is **zero covariance**; disjoint support is sufficient, not necessary
+  > (§16 codex correction). The grounded facts are the two above; the monotone-under-DISJ
+  > theorem is not yet mechanized.
 - #2: two engines in-tree (escape=boolean, `memory_analysis`=Andersen set); Kildall
   lfp existence/soundness; `source_id` present (scalar).
 - #3: `associator_field.sio` implements the seven-window object and **names HH³
@@ -701,7 +714,8 @@ memory-reclamation gap. This is the concrete keystone-of-the-keystone.
 
 1. **#2:** relabel the points-to engine → `NS` as a forward-propagated source-set.
 2. **#1:** DISJ check at binary ops using `NS`; prove `gAddMeta_monotone` +
-   linear-fragment DISJ-conditional variance-monotonicity (sorry-free). Retires
+   linear-fragment DISJ-conditional variance-monotonicity (sorry-free) — **not yet in
+   the file** (it currently has `gAddMeta_valid`; see the §14.4 correction). Retires
    §9.2(c). *Nonlinear ops (`ep_mul/div/square/sqrt`) are delta-method and drop
    2nd-order → residual anti-garbling even under DISJ; only "= true first-order
    variance" holds — do not overclaim.*
