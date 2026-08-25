@@ -19,7 +19,7 @@ proved-disjoint certificate). Kernel-checked core; running prototypes; specified
 | § | Title | File | Status |
 |---|---|---|---|
 | — | Abstract | `paper_A_antigarbling_skeleton_2026-08-25.md` | ✅ done (~200w) |
-| 1 | Introduction | `paper_A_antigarbling_skeleton_2026-08-25.md` | ◻ **skeleton only** — needs prose intro (contributions bullets + honest-delta ¶ are drafted) |
+| 1 | Introduction | `paper_A_section1_draft_2026-08-25.md` | ✅ full prose (skeleton file retains the original bullets/outline) |
 | 2 | The defect class, by example | `paper_A_section2_draft_2026-08-25.md` | ✅ full prose |
 | 3 | Preliminaries | `paper_A_sections3_10_11_draft_2026-08-25.md` | ✅ full prose |
 | 4 | Anti-garbling as the soundness criterion | `paper_A_sections4_5_draft_2026-08-25.md` | ✅ full prose |
@@ -79,8 +79,8 @@ adversarial gates.
 
 ## Remaining before submission
 
-1. **§1 intro prose** — expand the skeleton (the hook = the `ep_mul`/`ep_square` defect; the
-   contributions bullets and honest-delta paragraph are already drafted in the skeleton file).
+1. ~~**§1 intro prose**~~ — ✅ done (`paper_A_section1_draft_2026-08-25.md`). Every section is
+   now full prose; the draft is content-complete.
 2. **Merge** the section files into one document in the order above; unify notation
    (`m, v, Cov, ⟨·,·⟩`, `Knowledge⟨T, N⟩`) — already consistent across drafts.
 3. **Land the wire (N1–N4)** to convert the `[pending wire]` evaluation items into measured
