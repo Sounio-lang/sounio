@@ -44,6 +44,7 @@ run_legacy() {
   (
     cd "$REPO"
     SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DIR="$LEGACY_STATE" \
+      SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
       bin/sounio-coord "$@"
   )
 }
@@ -53,7 +54,8 @@ run_coord() {
     cd "$REPO"
     env -u TMUX -u TMUX_PANE TMPDIR="$TMP_ROOT" \
       SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" \
-      SOUNIO_COORD_RUNTIME_MODE=local bin/sounio-coord "$@"
+      SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+      bin/sounio-coord "$@"
   )
 }
 
@@ -63,6 +65,7 @@ run_hook() {
     env -u TMUX -u TMUX_PANE TMPDIR="$TMP_ROOT" \
       SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" \
       SOUNIO_COORD_RUNTIME_MODE=local \
+      SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
       "$REPO/scripts/dev/sounio_coord_agent_hook.py" --agent codex
 }
 

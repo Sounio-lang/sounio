@@ -62,7 +62,8 @@ coord() {
   local worktree="$1"
   shift
   (cd "$worktree" && SOUNIO_COORD_DIR="$STATE" \
-    SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" "$RUNTIME" "$@")
+    SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" \
+    SOUNIO_COORD_DURABLE_OBLIGATIONS=0 "$RUNTIME" "$@")
 }
 
 wait_for_text() {
