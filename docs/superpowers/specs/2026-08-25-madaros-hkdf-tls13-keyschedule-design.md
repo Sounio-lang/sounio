@@ -34,8 +34,9 @@ sub-project's deliverables.
   branch's established precedent (e.g. `stdlib/crypto/sha256.sio` was
   similarly left alone when the AEAD sub-project needed a RawBuf-based
   SHA-256, which already existed separately at `stdlib/hash/sha256.sio`).
-  This sub-project builds fresh, RawBuf-based `hmac_sha256`/`hmac_sha384`
-  functions on top of the already-existing, already-`pub`,
+  This sub-project builds fresh, RawBuf-based
+  `hmac_sha256_rawbuf`/`hmac_sha384_rawbuf` functions on top of the
+  already-existing, already-`pub`,
   already-RawBuf-based `stdlib/hash/sha256.sio`'s `sha256(buf: &RawBuf,
   len: i64) -> [u8;32]` and `stdlib/hash/sha384.sio`'s `sha384(buf:
   &RawBuf, len: i64) -> [u8;48]`.
@@ -81,7 +82,7 @@ One new module, `stdlib/crypto/hkdf.sio`, in three layers:
 
 | Layer | Responsibility |
 |---|---|
-| HMAC | `hmac_sha256`/`hmac_sha384` — fresh, RawBuf-based, built on `stdlib/hash/sha256.sio`/`sha384.sio`. |
+| HMAC | `hmac_sha256_rawbuf`/`hmac_sha384_rawbuf` — fresh, RawBuf-based, built on `stdlib/hash/sha256.sio`/`sha384.sio`. Named distinctly from the pre-existing, differently-shaped, fixed-array-based `pub fn hmac_sha256` in `stdlib/crypto/sha256.sio` to avoid a public-symbol collision (renamed at final review; see progress ledger). |
 | HKDF | `hkdf_extract`/`hkdf_expand` (RFC 5869 §2.2/2.3) — the generic HKDF primitives, hash-agnostic via the `hash_algo` parameter. |
 | TLS 1.3 key schedule | `hkdf_expand_label`/`derive_secret` (RFC 8446 §7.1's TLS-specific wrappers over HKDF-Expand), then `tls13_early_secret`/`tls13_handshake_secret`/`tls13_master_secret` (the minimal secret ladder) and `tls13_traffic_key_and_iv` (the final key/IV derivation, RFC 8446 §7.3). |
 
@@ -96,8 +97,8 @@ into for any key-derivation need.
 pub const HKDF_HASH_SHA256: i32 = 0
 pub const HKDF_HASH_SHA384: i32 = 1
 
-pub fn hmac_sha256(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8;32] with IO
-pub fn hmac_sha384(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8;48] with IO
+pub fn hmac_sha256_rawbuf(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8;32] with IO
+pub fn hmac_sha384_rawbuf(key: &RawBuf, key_len: i64, msg: &RawBuf, msg_len: i64) -> [u8;48] with IO
 
 // RFC 5869 section 2.2/2.3. `hash_algo` selects HMAC-SHA256 (output 32
 // bytes) or HMAC-SHA384 (output 48 bytes) internally; both functions
