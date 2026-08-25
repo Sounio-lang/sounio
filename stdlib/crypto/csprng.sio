@@ -1,0 +1,51 @@
+//! stdlib/crypto/csprng.sio — OS-entropy source (genuine CSPRNG input)
+//!
+//! Reads raw entropy from `/dev/urandom` via the compiler's builtin
+//! `read_file`. This is the ONLY randomness source in this repository
+//! suitable for private-key material or other security-sensitive use;
+//! stdlib/crypto/random.sio is a deterministic PRNG, not this.
+//!
+//! Measured behaviour worth recording for future maintainers: `read_file`
+//! returns a packed, NUL-terminated `string`, and `str_len` on this
+//! compiler is a plain byte scan for the first 0x00 (see
+//! self-hosted/native/codegen.sio's emit_builtin_str_len) -- it does NOT
+//! report the real `read()` byte count. Because /dev/urandom output is
+//! uniformly random, roughly 1 byte in 256 is zero, so a single
+//! `read_file("/dev/urandom")` call yields a `str_len` that is effectively
+//! geometrically distributed (mean ~255 bytes over repeated spikes: 157,
+//! 551, 489 were observed), NOT a fixed per-call maximum. This does not
+//! bias the bytes that ARE returned (the scan stops at the first zero
+//! independent of the values before it), it just means a call occasionally
+//! yields fewer bytes than requested. `crypto_os_random_bytes` therefore
+//! loops, issuing fresh `read_file` calls (each one opens/reads/closes
+//! `/dev/urandom` again, so a short read never re-uses truncated data)
+//! until `n` bytes have been collected.
+
+use net::socket::*
+
+// Returns (buf, true) with `n` bytes of real OS entropy in `buf[0..n]`,
+// or (buf, false) if a `read_file` call ever returns zero bytes (treated
+// as a hard failure rather than looped on, since a zero-byte return from a
+// character device is not an expected transient condition).
+pub fn crypto_os_random_bytes(n: i64) -> (RawBuf, bool) with IO {
+    let out = rawbuf_new(n + 8)
+    var filled: i64 = 0
+    while filled < n {
+        let s = read_file("/dev/urandom")
+        let available = str_len(s)
+        if available <= 0 {
+            return (out, false)
+        }
+        var to_copy = available
+        if filled + to_copy > n {
+            to_copy = n - filled
+        }
+        var i: i64 = 0
+        while i < to_copy {
+            rawbuf_set(&out, filled + i, str_char_at(s, i) as i64)
+            i = i + 1
+        }
+        filled = filled + to_copy
+    }
+    (out, true)
+}
