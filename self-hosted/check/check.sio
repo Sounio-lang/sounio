@@ -7027,6 +7027,57 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     }
                 }
             }
+            // The same array local may not initialise two fields.
+            //
+            // `Trajectory { speakers: zi, hashes: zi, ... }` reads as "both start
+            // zeroed" and is that under lean_single. Under Madaros the value copy
+            // is shallow, so the two fields are ONE array: traj_push's five writes
+            // landed in the same place and only the last survived, and every read
+            // of speakers returned the dim (#2152).
+            //
+            // The engines disagree about whether a struct literal copies an array
+            // field by value. That is a language decision and lean_single, the
+            // fixed point, already answers it -- but until Madaros copies deep,
+            // the honest move is that neither reading may be depended on. So the
+            // ambiguous form is refused rather than resolved silently either way.
+            //
+            // Cost of refusing, measured across stdlib/, self-hosted/ and tests/
+            // with both controls (Trajectory must appear, PBPKState28 must not):
+            // FIVE sites, three real, all already rewritten with one literal per
+            // field. Nothing legitimate is outlawed -- the fix is to write the
+            // literal twice, which is what the code meant.
+            var oi = e.fields
+            var odone = false
+            while !odone {
+                match oi {
+                    Some(ol) => {
+                        if (*ol).head.value.kind == ExprKind::ExprIdent {
+                            let oty = field_info_list_find(si.fields, (*ol).head.name)
+                            if oty.kind == TypeKind::TyArray {
+                                var ij = (*ol).tail
+                                var idone = false
+                                while !idone {
+                                    match ij {
+                                        Some(il) => {
+                                            if (*il).head.value.kind == ExprKind::ExprIdent && name_eq((*il).head.value.name, (*ol).head.value.name) {
+                                                checker_report_error_at_inplace(c, (*il).head.value.span, 232, 0, 0, 0)
+                                            }
+                                            ij = (*il).tail
+                                        }
+                                        None => {
+                                            idone = true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        oi = (*ol).tail
+                    }
+                    None => {
+                        odone = true
+                    }
+                }
+            }
             ty_named(struct_name)
         }
     } else {
@@ -14028,6 +14079,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
     else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
     else if code == 242 { print("epistemic channel index is out of range") }
+    else if code == 232 { print("the same array local initialises two fields; the value copy is shallow, so they would be one array -- give each field its own literal") }
     else if code == 243 { print("the correlation coefficient must be a compile-time literal; a runtime value silently becomes 0.0, which asserts independence") }
     else { print("unknown error") }
 }
