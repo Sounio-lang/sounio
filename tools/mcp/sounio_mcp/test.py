@@ -81,15 +81,33 @@ async def _run_one(souc: Path, path: Path) -> tuple[str, dict[str, Any] | None]:
 
     result = await run_command([souc, "run", path], timeout_sec=30)
     expected_stdout = ann.get("expect-stdout", [""])[0]
-    if result.returncode == 0 and (not expected_stdout or expected_stdout in result.stdout):
-        return "passed", None
-    return "failed", {
-        "name": name,
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "expected": expected_stdout or "exit 0",
-        "got": f"exit {result.returncode}",
-    }
+    expected_contains = [m for m in ann.get("expect-stdout-contains", []) if m]
+    if result.returncode != 0:
+        return "failed", {
+            "name": name,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "expected": expected_stdout or (expected_contains[0] if expected_contains else "exit 0"),
+            "got": f"exit {result.returncode}",
+        }
+    if expected_stdout and expected_stdout not in result.stdout:
+        return "failed", {
+            "name": name,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "expected": expected_stdout,
+            "got": f"exit {result.returncode}",
+        }
+    for marker in expected_contains:
+        if marker not in result.stdout:
+            return "failed", {
+                "name": name,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "expected": marker,
+                "got": f"exit {result.returncode}",
+            }
+    return "passed", None
 
 
 async def sounio_test(
