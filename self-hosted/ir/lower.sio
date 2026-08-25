@@ -577,6 +577,23 @@ var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
 var FO_XFER_HASH: [i64; 64] = [0; 64]
 
+// #1706: per-FIELD FO transfers for struct-returning functions.
+//
+// The scalar transfer table above answers "what does f do to its argument's
+// uncertainty". It cannot answer `make_d(x, v0).c.b.a.x`, because the value is
+// a struct and the question is about ONE FIELD of it. Per-field variance (#1711)
+// is keyed on a local's base register, and a call result has no local, so every
+// such chain read a silent 0.0.
+//
+// Keyed by (callee name hash, field PATH hash) so no name mangling is needed --
+// paths like `c.b.a.x` would not fit a fixed-size Name. Values are the same
+// kind/lit vocabulary as FO_XFER_*, so the apply side is shared, not duplicated.
+var FO_CTOR_COUNT: i64 = 0
+var FO_CTOR_FN_HASH: [i64; 256] = [0; 256]
+var FO_CTOR_PATH_HASH: [i64; 256] = [0; 256]
+var FO_CTOR_KIND: [i64; 256] = [0; 256]
+var FO_CTOR_LIT: [f64; 256] = [0.0; 256]
+
 // Pairwise correlation between measurement channels, set by correlate(a,b,rho).
 //
 // 8x8 to match so_hess_idx's domain: the off-diagonal Hessian is the second
@@ -636,6 +653,48 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
         i = i + 1
     }
     h + n.len
+}
+
+fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
+    acc * 33 + name_hash
+}
+
+fn fo_ctor_global_set(fn_hash: i64, path_hash: i64, kind: i64, lit: f64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_CTOR_COUNT {
+        if FO_CTOR_FN_HASH[i as usize] == fn_hash && FO_CTOR_PATH_HASH[i as usize] == path_hash {
+            FO_CTOR_KIND[i as usize] = kind
+            FO_CTOR_LIT[i as usize] = lit
+            return
+        }
+        i = i + 1
+    }
+    // Full table degrades to "unregistered", i.e. the pre-existing silent 0.0.
+    // Never wrap: a wrong nonzero is worse than the zero this replaces.
+    if FO_CTOR_COUNT >= 256 {
+        return
+    }
+    let idx = FO_CTOR_COUNT
+    FO_CTOR_FN_HASH[idx as usize] = fn_hash
+    FO_CTOR_PATH_HASH[idx as usize] = path_hash
+    FO_CTOR_KIND[idx as usize] = kind
+    FO_CTOR_LIT[idx as usize] = lit
+    FO_CTOR_COUNT = idx + 1
+}
+
+fn fo_ctor_global_lookup(fn_hash: i64, path_hash: i64) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < FO_CTOR_COUNT {
+        if FO_CTOR_FN_HASH[i as usize] == fn_hash && FO_CTOR_PATH_HASH[i as usize] == path_hash {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+pub fn fo_ctor_global_reset() with Mut {
+    FO_CTOR_COUNT = 0
 }
 
 pub fn fo_xfer_global_reset() with Mut {
@@ -8932,7 +8991,156 @@ impl Lowerer {
         if nparams <= 0 {
             return lo
         }
+        lo = lo.fo_ctor_register_body(name, &fd.body, p0, p1, nparams)
         lo.fo_classify_block_transfer(name, &fd.body, p0, p1, nparams)
+    }
+
+    // Classify ONE struct-literal field initialiser into the shared kind/lit
+    // vocabulary. Deliberately narrow: anything not listed stays UNREGISTERED, so
+    // the query keeps returning the pre-existing 0.0 rather than a confident wrong
+    // number. A field init that reads a global, or calls something unregistered,
+    // must not be guessed at.
+    fn fo_ctor_classify_leaf(self, fn_hash: i64, path: i64, e: &Expr, p0: Name, p1: Name, nparams: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        let lo = self
+        if (*e).kind == ExprKind::ExprIdent {
+            if nparams >= 1 && ir_name_eq((*e).name, p0) {
+                fo_ctor_global_set(fn_hash, path, 1, 0.0)
+                return lo
+            }
+            if nparams >= 2 && ir_name_eq((*e).name, p1) {
+                fo_ctor_global_set(fn_hash, path, 1, 1.0)
+                return lo
+            }
+            return lo
+        }
+        if (*e).kind == ExprKind::ExprBinary {
+            match (*e).left {
+                Some(le) => {
+                    match (*e).right {
+                        Some(re) => {
+                            let li = lo.fo_param_index(&(*le), p0, p1, nparams)
+                            let ri = lo.fo_param_index(&(*re), p0, p1, nparams)
+                            let ll = lo.fo_expr_as_lit(&(*le))
+                            let rl = lo.fo_expr_as_lit(&(*re))
+                            if (*e).bin_op == BinaryOp::OpMul {
+                                if ll.0 && ri == 0 { fo_ctor_global_set(fn_hash, path, 2, ll.1); return lo }
+                                if rl.0 && li == 0 { fo_ctor_global_set(fn_hash, path, 2, rl.1); return lo }
+                                if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
+                                    fo_ctor_global_set(fn_hash, path, 4, 0.0)
+                                    return lo
+                                }
+                            }
+                            if (*e).bin_op == BinaryOp::OpAdd {
+                                if nparams >= 2 && ((li == 0 && ri == 1) || (li == 1 && ri == 0)) {
+                                    fo_ctor_global_set(fn_hash, path, 3, 0.0)
+                                    return lo
+                                }
+                            }
+                            // Division is not commutative: only p0 / p1.
+                            if (*e).bin_op == BinaryOp::OpDiv {
+                                if nparams >= 2 && li == 0 && ri == 1 {
+                                    fo_ctor_global_set(fn_hash, path, 7, 0.0)
+                                    return lo
+                                }
+                            }
+                            return lo
+                        }
+                        _ => { return lo }
+                    }
+                }
+                _ => { return lo }
+            }
+        }
+        lo
+    }
+
+    // Walk a struct literal, registering one entry per LEAF field path.
+    // `make_d(x, v0) -> D { c: C { b: B { a: A { x: x } } }, v0: v0 }` yields
+    // path(c,b,a,x) -> kind 1 @ p0 and path(v0) -> kind 1 @ p1.
+    fn fo_ctor_walk_literal(self, fn_hash: i64, path: i64, e: &Expr, p0: Name, p1: Name, nparams: i64, depth: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if depth > 8 {
+            return lo
+        }
+        var current = &(*e).fields
+        while true {
+            match *current {
+                Some(list) => {
+                    let fname = (*list).head.name
+                    let sub = fo_ctor_path_fold(path, fo_name_hash(fname))
+                    let init = &(*list).head.value
+                    if (*init).kind == ExprKind::ExprStructLit {
+                        lo = lo.fo_ctor_walk_literal(fn_hash, sub, init, p0, p1, nparams, depth + 1)
+                    } else {
+                        lo = lo.fo_ctor_classify_leaf(fn_hash, sub, init, p0, p1, nparams)
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
+    }
+
+    // Find the struct literal a function's body returns, if any, and register its
+    // leaf field paths. Mirrors fo_classify_block_transfer's trailing-expression
+    // discovery, including the single-trailing-`let` substitution, so
+    // `let p = Pk { ... }; p` registers exactly like a bare literal would.
+    fn fo_ctor_register_body(self, name: Name, blk: &Block, p0: Name, p1: Name, nparams: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fn_hash = fo_name_hash(name)
+        var current = &(*blk).stmts
+        var last_let_name = ir_empty_name()
+        var last_let_expr: Option<Box<Expr>> = None
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtLet || stmt_ref.kind == StmtKind::StmtVar {
+                        match stmt_ref.expr {
+                            Some(te) => {
+                                last_let_name = stmt_ref.name
+                                last_let_expr = Some(te)
+                            }
+                            _ => {
+                                last_let_name = ir_empty_name()
+                                last_let_expr = None
+                            }
+                        }
+                    } else if stmt_ref.kind == StmtKind::StmtExpr {
+                        match stmt_ref.expr {
+                            Some(te) => {
+                                var e_ref: &Expr = &(*te)
+                                if (*te).kind == ExprKind::ExprReturn {
+                                    match (*te).left {
+                                        Some(inner) => { e_ref = &(*inner) }
+                                        _ => {}
+                                    }
+                                }
+                                if (*e_ref).kind == ExprKind::ExprStructLit {
+                                    lo = lo.fo_ctor_walk_literal(fn_hash, 5381, e_ref, p0, p1, nparams, 0)
+                                } else if (*e_ref).kind == ExprKind::ExprIdent && last_let_name.len > 0 {
+                                    if ir_name_eq((*e_ref).name, last_let_name) {
+                                        match last_let_expr {
+                                            Some(rhs) => {
+                                                if (*rhs).kind == ExprKind::ExprStructLit {
+                                                    lo = lo.fo_ctor_walk_literal(fn_hash, 5381, &(*rhs), p0, p1, nparams, 0)
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        lo
     }
 
     fn fo_classify_block_transfer(
@@ -9022,10 +9230,20 @@ impl Lowerer {
                 _ => { return lo }
             }
         }
-        // id: single param identity
+        // id: parameter identity. FO_XFER_LIT carries WHICH parameter the body
+        // returns -- 0 or 1. That slot is unused for kind 1 and reads back 0.0 on
+        // every pre-existing entry, so an old kind-1 entry keeps meaning "returns
+        // p0" and nothing has to be migrated.
+        //
+        // Before this, only `p0` registered. `fn make(a, b) -> S { S { v: b } }`
+        // has a field init that is the SECOND parameter, so the per-field ctor
+        // transfers below could not describe it at all.
         if (*e).kind == ExprKind::ExprIdent {
             if nparams >= 1 && ir_name_eq((*e).name, p0) {
                 return lo.fo_xfer_set(name, 1, 0.0, ir_empty_name())
+            }
+            if nparams >= 2 && ir_name_eq((*e).name, p1) {
+                return lo.fo_xfer_set(name, 1, 1.0, ir_empty_name())
             }
             return lo
         }
@@ -9196,8 +9414,29 @@ impl Lowerer {
         if depth > 8 || idx < 0 || idx >= FO_XFER_COUNT {
             return (self.fo_clear_expr_sens(), -1)
         }
-        let kind = FO_XFER_KIND[idx as usize]
+        self.fo_apply_transfer_kind(FO_XFER_KIND[idx as usize], FO_XFER_LIT[idx as usize], idx, args, depth)
+    }
+
+    // The kind dispatch, reached both from the scalar transfer table (above) and
+    // from the per-field ctor table (#1706), which shares this vocabulary rather
+    // than growing a second variance algebra beside it. `idx` is only consulted
+    // for kinds that need a table-resident detail (5 forwards by hash, 6 chases
+    // the derivative name); ctor entries never register those.
+    fn fo_apply_transfer_kind(
+        self,
+        kind: i64,
+        kind_lit: f64,
+        idx: i64,
+        args: &Option<Box<ExprList>>,
+        depth: i64
+    ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return (self.fo_clear_expr_sens(), -1)
+        }
         if kind <= 0 {
+            return (self.fo_clear_expr_sens(), -1)
+        }
+        if (kind == 5 || kind == 6) && (idx < 0 || idx >= FO_XFER_COUNT) {
             return (self.fo_clear_expr_sens(), -1)
         }
         // FWD: re-apply under same args (lookup target by hash).
@@ -9209,9 +9448,15 @@ impl Lowerer {
             }
             return self.fo_apply_call_transfer_at(fidx, args, depth + 1)
         }
-        // Lower arg0 FO
+        // Lower the subject argument's FO. For kind 1 that is the parameter the
+        // body returns (FO_XFER_LIT, see the classifier); every other kind is
+        // defined on arg0.
         var lo = self
-        let p0 = lo.fo_lower_nth_arg_variance(args, 0)
+        var subj: i64 = 0
+        if kind == 1 {
+            if kind_lit >= 0.5 && kind_lit < 1.5 { subj = 1 }
+        }
+        let p0 = lo.fo_lower_nth_arg_variance(args, subj)
         lo = p0.0
         let v0 = p0.1
         if v0 < 0 && kind != 3 && kind != 4 {
@@ -9234,7 +9479,7 @@ impl Lowerer {
             return (lo.fo_clear_expr_sens(), -1)
         }
         if kind == 2 {
-            let lit = FO_XFER_LIT[idx as usize]
+            let lit = kind_lit
             let c_pair = lo.emit_f64_const(lit)
             lo = c_pair.0
             var sL: [i64; 32] = [-1; 32]
@@ -9694,25 +9939,133 @@ impl Lowerer {
     // struct-valued fields recorded by bind_variance_for_field_base. `a.x` roots at
     // the local `a`; `c.a.x` roots at `c`, then hops `.a`. Depth-capped so a
     // pathological chain terminates rather than recursing without bound.
-    fn variance_field_chain_base(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        match (*e).left {
-            Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    return (self, self.lookup_local((*base_expr).name))
-                }
-                if (*base_expr).kind == ExprKind::ExprFieldAccess {
-                    let inner = self.variance_field_chain_base(&(*base_expr))
-                    var lo = inner.0
-                    if inner.1 < 0 {
-                        return (lo, -1)
-                    }
-                    let idx = lo.field_idx_from_name_simple((*base_expr).name)
-                    return (lo, lo.lookup_variance_for_field_base(inner.1, idx))
-                }
-                (self, -1)
+    // Resolve a base EXPRESSION to its variance base reg. Per-field variance
+    // (#1711) is keyed (base_reg, field_idx) where base_reg comes from a LOCAL,
+    // so any chain whose root is not an identifier used to fall straight to -1
+    // and variance_of read a silent 0.0 -- while the identical chain on a plain
+    // local read correctly.
+    fn variance_field_chain_base_of(self, base: &Expr, depth: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if depth > 8 {
+            return (self, -1)
+        }
+        if (*base).kind == ExprKind::ExprIdent {
+            return (self, self.lookup_local((*base).name))
+        }
+        if (*base).kind == ExprKind::ExprFieldAccess {
+            let inner = self.variance_field_chain_base_of_parent(base, depth + 1)
+            var lo = inner.0
+            if inner.1 < 0 {
+                return (lo, -1)
             }
+            let idx = lo.field_idx_from_name_simple((*base).name)
+            return (lo, lo.lookup_variance_for_field_base(inner.1, idx))
+        }
+        // #1706: a chain rooted at a CALL carrying an identity FO transfer.
+        // `id_d(d).c.b.a.x` IS `d.c.b.a.x`, so re-root on arg0 and let the
+        // per-field lookup above do the work.
+        //
+        // Only kind 1 is sound: every other transfer changes the value, so the
+        // result's fields are not the argument's fields. Re-rooting on arg0
+        // specifically is sound because kind 1 is registered at exactly one site
+        // (fo_classify_expr_transfer, the ExprIdent arm) and only when the body
+        // returns p0 -- never some other parameter. Checked, not assumed.
+        //
+        // Recursing here is what makes `id_d(make_d(...)).c.b.a.x` reachable:
+        // arg0 is itself a call, so the rewrite has to compose.
+        if (*base).kind == ExprKind::ExprCall {
+            match (*base).left {
+                Some(callee_expr) => {
+                    var lo_c = self
+                    let cname = lo_c.expr_to_callee_name_ref(&(*callee_expr))
+                    let xidx = lo_c.fo_xfer_lookup(cname)
+                    if xidx >= 0 && FO_XFER_KIND[xidx as usize] == 1 {
+                        // Re-root on the parameter the identity actually returns,
+                        // not blindly on arg0 -- kind 1 now records which.
+                        let li = FO_XFER_LIT[xidx as usize]
+                        var want: i64 = 0
+                        if li >= 0.5 && li < 1.5 { want = 1 }
+                        var acur = &(*base).args
+                        var ai: i64 = 0
+                        while true {
+                            match *acur {
+                                Some(al) => {
+                                    if ai == want {
+                                        return lo_c.variance_field_chain_base_of(&(*al).head, depth + 1)
+                                    }
+                                    ai = ai + 1
+                                    acur = &(*al).tail
+                                }
+                                _ => break
+                            }
+                        }
+                        return (lo_c, -1)
+                    }
+                    return (lo_c, -1)
+                }
+                _ => { return (self, -1) }
+            }
+        }
+        (self, -1)
+    }
+
+    // Same resolution, but given the PARENT of the base (reads (*e).left).
+    fn variance_field_chain_base_of_parent(self, e: &Expr, depth: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        match (*e).left {
+            Some(base_expr) => self.variance_field_chain_base_of(&(*base_expr), depth),
             _ => (self, -1),
         }
+    }
+
+    // #1706: `make_d(x, v0).c.b.a.x` -- a field chain rooted at a CALL that is not
+    // an identity. The result has no local to key per-field variance on, so this
+    // resolves the FIELD PATH against the callee's registered ctor entries and
+    // applies the same kind vocabulary the scalar table uses.
+    //
+    // Returns -1 (the pre-existing silent 0.0) whenever anything is unregistered.
+    // A path with no entry means the compiler could not describe that field's
+    // provenance, and inventing a number there would be worse than the zero.
+    fn fo_ctor_chain_apply(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        var hashes: [i64; 8] = [0; 8]
+        var n: i64 = 0
+        var cur: &Expr = e
+        while n < 8 {
+            if (*cur).kind != ExprKind::ExprFieldAccess {
+                break
+            }
+            hashes[n as usize] = fo_name_hash((*cur).name)
+            n = n + 1
+            match (*cur).left {
+                Some(b) => { cur = &(*b) }
+                _ => { return (lo, 0 - 1) }
+            }
+        }
+        if n <= 0 || (*cur).kind != ExprKind::ExprCall {
+            return (lo, 0 - 1)
+        }
+        // Registration walks root-to-leaf; this walk collected leaf-to-root, so
+        // fold back the other way or the hashes will never meet.
+        var h: i64 = 5381
+        var i: i64 = n - 1
+        while i >= 0 {
+            h = fo_ctor_path_fold(h, hashes[i as usize])
+            i = i - 1
+        }
+        match (*cur).left {
+            Some(callee_expr) => {
+                let cname = lo.expr_to_callee_name_ref(&(*callee_expr))
+                let cidx = fo_ctor_global_lookup(fo_name_hash(cname), h)
+                if cidx < 0 {
+                    return (lo, 0 - 1)
+                }
+                lo.fo_apply_transfer_kind(FO_CTOR_KIND[cidx as usize], FO_CTOR_LIT[cidx as usize], 0 - 1, &(*cur).args, 0)
+            }
+            _ => (lo, 0 - 1),
+        }
+    }
+
+    fn variance_field_chain_base(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        self.variance_field_chain_base_of_parent(e, 0)
     }
 
     fn lower_expr_variance_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -9806,6 +10159,11 @@ impl Lowerer {
                     lo_f = lo_f.so_clear_expr_hess().fo_seed_from_variance(fv, 0 - 1)
                     return (lo_f, fv)
                 }
+            }
+            // #1706: the chain may be rooted at a call rather than a local.
+            let cpair = self.fo_ctor_chain_apply(e)
+            if cpair.1 >= 0 {
+                return cpair
             }
             return (self.fo_clear_expr_sens().so_clear_expr_hess(), -1)
         }
