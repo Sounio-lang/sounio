@@ -64,7 +64,7 @@
 //! `1.7 * 2^60` in the worst case (e.g. `h2`'s ten summed cross-products
 //! in `fe25519_mul`) -- `1.7 * 2^60 ~= 2^60.77`, so the margin below the
 //! 2^63 danger threshold is `2^63 / 2^60.77 ~= 2^2.23`, i.e. about 2.2-2.3
-//! bits (~5.4x) of headroom, comfortably clear of bit 63 ever being set,
+//! bits (~4.7x) of headroom, comfortably clear of bit 63 ever being set,
 //! nowhere near overflowing even a *signed* 63-bit range, let alone
 //! wrapping. The reference implementation stores limbs as `int32_t`
 //! between calls purely to save memory on 32-bit targets; every limb
@@ -89,6 +89,26 @@
 //! exponent-dependent branch either (the exponent p-2 is a public
 //! constant), but that is a `for`-loop-count property already implicit in
 //! it being a straight-line, undata-dependent code path.
+
+// ============================================================================
+// NOT PUBLIC API. `FieldElement` and every `fe_*` function below are `pub`
+// ONLY because Madaros's cross-module visibility check (E175) requires it --
+// see the file header's "VISIBILITY (deviation ...)" note for the full
+// forensic explanation. They remain internal implementation details of this
+// module's Montgomery-ladder X25519 implementation, not a supported curve-
+// arithmetic API for other code to build on.
+//
+// Do NOT call these directly from outside this file. In particular, hand-
+// rolling curve operations from `fe_*` primitives skips the mandatory
+// low-order-point / all-zero-output rejection that lives ONLY inside
+// `x25519()` -- bypassing it silently reintroduces exactly the
+// small-subgroup / all-zero shared-secret failure mode RFC 7748 requires
+// implementations to reject. The only supported entry points for
+// consumers outside this file are:
+//   - `x25519_clamp`
+//   - `x25519_base_point_mul`
+//   - `x25519`
+// ============================================================================
 
 // GF(2^255-19) field element in radix-2^25.5 (10 limbs, alternating
 // 26-bit and 25-bit limbs -- limbs[0,2,4,6,8] hold up to 2^26-1,
@@ -373,7 +393,7 @@ pub fn fe_sub(a: &FieldElement, b: &FieldElement) -> FieldElement {
 // worst case; each `h0..h9` accumulator sums ten such terms, and the
 // reference's own inline analysis (reproduced in the file header) proves
 // the worst case (h2, before any carry pass) is bounded by `1.7*2^60`
-// (`~= 2^60.77`) -- about 2.2-2.3 bits (~5.4x) of headroom below the
+// (`~= 2^60.77`) -- about 2.2-2.3 bits (~4.7x) of headroom below the
 // 2^63 danger threshold, so no value in this function ever has bit 63
 // set.
 pub fn fe_mul(a: &FieldElement, b: &FieldElement) -> FieldElement {
@@ -962,11 +982,17 @@ pub fn x25519_base_point_mul(scalar: &[u8;32]) -> [u8;32] with IO {
 pub fn x25519(scalar: &[u8;32], u_coordinate: &[u8;32]) -> ([u8;32], bool) with IO {
     let clamped = x25519_clamp(scalar)
     let result = x25519_ladder(&clamped, u_coordinate)
-    var all_zero: bool = true
+    // Branchless all-zero check: `result` is secret key material (the
+    // computed shared secret), so this loop must not branch on any of its
+    // bytes -- an `if result[i] != 0 { .. }` here would be a data-dependent
+    // branch over secret bytes (a timing side-channel). OR-accumulate every
+    // byte unconditionally instead; `acc == 0` afterward is equivalent to
+    // "every byte was zero" with a single, non-secret-dependent comparison.
+    var acc: i64 = 0
     var i: i64 = 0
     while i < 32 {
-        if result[i as usize] != 0 { all_zero = false }
+        acc = acc | (result[i as usize] as i64)
         i = i + 1
     }
-    (result, !all_zero)
+    (result, acc != 0)
 }
