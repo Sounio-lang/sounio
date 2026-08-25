@@ -840,3 +840,133 @@ pub fn fe_cswap(swap: bool, a: &FieldElement, b: &FieldElement) -> (FieldElement
     }
     return (FieldElement { limbs: out_a }, FieldElement { limbs: out_b })
 }
+
+//! ---------------------------------------------------------------------
+//! Part 2 of 2 (Task 3, appended 2026-08-25): RFC 7748 section 5 scalar
+//! clamping, the Montgomery ladder, and the two public X25519 entry
+//! points. Everything below this line consumes only the `pub` FieldElement
+//! primitives above; it adds no new field-arithmetic algorithm of its
+//! own -- the ladder step is a direct transliteration of RFC 7748
+//! section 5's own pseudocode (the A/AA/B/BB/E/C/D/DA/CB naming is
+//! copied verbatim from the RFC, not from a secondary reference), fetched
+//! and read in full on 2026-08-25 from
+//! https://www.rfc-editor.org/rfc/rfc7748.txt (section 5, "For t =
+//! bits-1 down to 0: ..."). The constant a24 = (486662-2)/4 = 121665 is
+//! the RFC's own X25519-specific constant.
+//!
+//! All four numeric-vector test files under tests/run-pass/x25519_*.sio
+//! that reference RFC 7748 section 5.2 / 6.1 test vectors were populated
+//! from that same fetched, byte-length-verified (64 hex chars == 32
+//! bytes, checked with a Python one-liner, not eyeballed) copy of the
+//! RFC text -- not from memory, and not from this plan's brief (which
+//! deliberately omits the vectors).
+
+pub const X25519_KEY_LEN: i64 = 32
+
+// RFC 7748 section 5: clamp a raw 32-byte scalar for X25519.
+pub fn x25519_clamp(raw: &[u8;32]) -> [u8;32] {
+    var out: [u8;32] = [0;32]
+    var i: i64 = 0
+    while i < 32 { out[i as usize] = raw[i as usize]; i = i + 1 }
+    out[0] = out[0] & 248     // clear bits 0,1,2 (0xF8 mask)
+    out[31] = out[31] & 127   // clear bit 7 (0x7F mask)
+    out[31] = out[31] | 64    // set bit 6 (0x40)
+    out
+}
+
+// The shared Montgomery ladder core. `u_bytes` is the input u-coordinate
+// (either the fixed base point 9, or a peer's public key). `scalar_bytes`
+// MUST already be clamped by the caller (both public entry points below
+// clamp before calling this).
+fn x25519_ladder(scalar_bytes: &[u8;32], u_bytes: &[u8;32]) -> [u8;32] {
+    let x1 = fe_from_bytes(u_bytes)
+    var x2 = fe_one()
+    var z2 = fe_zero()
+    var x3 = x1
+    var z3 = fe_one()
+    var swap: bool = false
+
+    // a24 = (486662 - 2) / 4 = 121665, the X25519-specific Montgomery
+    // curve constant from RFC 7748 section 5. This is a public constant
+    // (not scalar/secret-derived), constructed directly as a
+    // FieldElement literal since this file defines the struct.
+    let a24 = FieldElement { limbs: [121665, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+
+    // RFC 7748's ladder iterates from bit 254 down to bit 0 (bit 255 is
+    // always 0 after clamping).
+    var pos: i64 = 254
+    while pos >= 0 {
+        let byte_index = pos / 8
+        let bit_index = pos % 8
+        let scalar_bit = ((scalar_bytes[byte_index as usize] >> (bit_index as u8)) & 1) != 0
+
+        let do_swap = scalar_bit != swap
+        let (sx2, sx3) = fe_cswap(do_swap, &x2, &x3)
+        let (sz2, sz3) = fe_cswap(do_swap, &z2, &z3)
+        x2 = sx2
+        x3 = sx3
+        z2 = sz2
+        z3 = sz3
+        swap = scalar_bit
+
+        // RFC 7748 section 5's own differential-addition-and-doubling
+        // step, naming preserved exactly:
+        //   A = x_2 + z_2 ; AA = A^2
+        //   B = x_2 - z_2 ; BB = B^2
+        //   E = AA - BB
+        //   C = x_3 + z_3
+        //   D = x_3 - z_3
+        //   DA = D * A
+        //   CB = C * B
+        //   x_3 = (DA + CB)^2
+        //   z_3 = x_1 * (DA - CB)^2
+        //   x_2 = AA * BB
+        //   z_2 = E * (AA + a24 * E)
+        let a_ = fe_add(&x2, &z2)
+        let aa = fe_sqr(&a_)
+        let b_ = fe_sub(&x2, &z2)
+        let bb = fe_sqr(&b_)
+        let e_ = fe_sub(&aa, &bb)
+        let c_ = fe_add(&x3, &z3)
+        let d_ = fe_sub(&x3, &z3)
+        let da = fe_mul(&d_, &a_)
+        let cb = fe_mul(&c_, &b_)
+        let da_plus_cb = fe_add(&da, &cb)
+        let da_minus_cb = fe_sub(&da, &cb)
+        let sq_sum = fe_sqr(&da_plus_cb)
+        let sq_diff = fe_sqr(&da_minus_cb)
+        x3 = sq_sum
+        z3 = fe_mul(&x1, &sq_diff)
+        x2 = fe_mul(&aa, &bb)
+        let a24e = fe_mul(&a24, &e_)
+        let aa_plus_a24e = fe_add(&aa, &a24e)
+        z2 = fe_mul(&e_, &aa_plus_a24e)
+
+        pos = pos - 1
+    }
+    let (final_x2, _final_x3) = fe_cswap(swap, &x2, &x3)
+    let (final_z2, _final_z3) = fe_cswap(swap, &z2, &z3)
+
+    let z2_inv = fe_invert(&final_z2)
+    let result = fe_mul(&final_x2, &z2_inv)
+    fe_to_bytes(&result)
+}
+
+pub fn x25519_base_point_mul(scalar: &[u8;32]) -> [u8;32] with IO {
+    let clamped = x25519_clamp(scalar)
+    var base: [u8;32] = [0;32]
+    base[0] = 9
+    x25519_ladder(&clamped, &base)
+}
+
+pub fn x25519(scalar: &[u8;32], u_coordinate: &[u8;32]) -> ([u8;32], bool) with IO {
+    let clamped = x25519_clamp(scalar)
+    let result = x25519_ladder(&clamped, u_coordinate)
+    var all_zero: bool = true
+    var i: i64 = 0
+    while i < 32 {
+        if result[i as usize] != 0 { all_zero = false }
+        i = i + 1
+    }
+    (result, !all_zero)
+}
