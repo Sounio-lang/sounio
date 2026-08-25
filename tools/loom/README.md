@@ -88,6 +88,19 @@ evidence files. The OCaml runtime replays the complete hash chain under a file
 lock, asks native Sounio frame `9007` to admit each transition, and fsyncs the
 event before reporting success.
 
+`obligation-supervisor-ensure` owns the tmux-free service lifecycle. It takes a
+state-local bootstrap lock, validates both PID and Linux process-start tick,
+refuses duplicate starts, and uses `setsid` to launch the physically selected
+immutable runtime bundle. If `current` moves during an upgrade or rollback,
+the next ensure replaces the old-bundle supervisor with a new generation.
+`obligation-supervisor-stop` terminates the verified OCaml process and waits
+until its identity is no longer live. Before sending any signal, both commands
+also require the executable to belong to an installed immutable Loom bundle (or
+the expected local build), so a corrupted state file cannot redirect lifecycle
+control at an unrelated reused PID. These commands are the inner control-plane
+API; a Pod-external guardian such as Beagle should call `ensure` after a Pod
+restart rather than manufacturing a tmux session.
+
 The authoritative state lives under the shared coordination directory in
 `loom-obligations/*/journal.tsv`. The TUI, GUI, JSON endpoint, and supervisor are
 disposable projections of those journals. Killing all Loom processes therefore

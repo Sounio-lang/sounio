@@ -106,6 +106,12 @@ activate_runtime() {
       die "installed runtime declares durable obligations but omits Loom or native Sounio frame 9007: $runtime_id"
     ensure_obligation_activation
   fi
+  if grep -q '^capability=loom-recoverable-control-service-v1$' "$manifest"; then
+    grep -q '^capability=loom-durable-obligation-v1$' "$manifest" &&
+      grep -q '^capability=loom-post-activation-request-bridge-v1$' "$manifest" &&
+      [[ -x /usr/bin/setsid ]] ||
+      die "installed runtime declares recoverable control service without durable bridge or setsid: $runtime_id"
+  fi
   if grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-continuity-runtime" && \
@@ -425,6 +431,7 @@ else
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-durable-obligation-v1\n'
     printf 'capability=loom-post-activation-request-bridge-v1\n'
+    printf 'capability=loom-recoverable-control-service-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'
     printf 'capability=loom-separate-pod-inbox-replay-v1\n'
     printf 'capability=loom-signed-continuity-receipt-v2\n'

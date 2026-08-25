@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.25.7
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.25.8
 
 usage() {
   cat <<'USAGE'
@@ -66,6 +66,9 @@ Commands:
   obligation-supervise [--once] [--interval-seconds N]
   obligation-supervisor-status
                                  run or inspect the tmux-independent replay supervisor
+  obligation-supervisor-ensure [--interval-seconds N]
+  obligation-supervisor-stop [--timeout-seconds N]
+                                 idempotently start or stop the detached control service
   wake    --agent ID --lane ID --message MESSAGE_ID
                                  retry immediate delivery for a visible directed message
   experiment-open --agent ID --lane ID --receipt PATH --statement TEXT
@@ -2623,6 +2626,130 @@ coord_obligation_supervisor_stop_children() {
   done
 }
 
+coord_obligation_supervisor_state() {
+  local state_file="$STATE_DIR/obligation-supervisor.state" line proc_tail current_start
+  COORD_OBLIGATION_SUPERVISOR_SCHEMA=''
+  COORD_OBLIGATION_SUPERVISOR_PID=''
+  COORD_OBLIGATION_SUPERVISOR_PID_START=''
+  COORD_OBLIGATION_SUPERVISOR_REPLAYED_UTC=''
+  [[ -f "$state_file" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      schema=loom-obligation-supervisor-v1)
+        COORD_OBLIGATION_SUPERVISOR_SCHEMA=loom-obligation-supervisor-v1
+        ;;
+      schema=*) die "invalid obligation supervisor state schema: $state_file" ;;
+      pid=*) COORD_OBLIGATION_SUPERVISOR_PID="${line#pid=}" ;;
+      pid_start=*) COORD_OBLIGATION_SUPERVISOR_PID_START="${line#pid_start=}" ;;
+      replayed_utc=*) COORD_OBLIGATION_SUPERVISOR_REPLAYED_UTC="${line#replayed_utc=}" ;;
+    esac
+  done < "$state_file"
+  [[ "$COORD_OBLIGATION_SUPERVISOR_SCHEMA" == loom-obligation-supervisor-v1 &&
+    "$COORD_OBLIGATION_SUPERVISOR_PID" =~ ^[1-9][0-9]*$ &&
+    "$COORD_OBLIGATION_SUPERVISOR_PID_START" =~ ^[1-9][0-9]*$ ]] ||
+    die "invalid obligation supervisor process identity: $state_file"
+  [[ -r "/proc/$COORD_OBLIGATION_SUPERVISOR_PID/stat" ]] || return 1
+  kill -0 "$COORD_OBLIGATION_SUPERVISOR_PID" 2>/dev/null || return 1
+  proc_tail="$(sed 's/^[^)]*) //' "/proc/$COORD_OBLIGATION_SUPERVISOR_PID/stat" 2>/dev/null || true)"
+  current_start="$(awk '{print $20}' <<< "$proc_tail")"
+  [[ "$current_start" == "$COORD_OBLIGATION_SUPERVISOR_PID_START" ]] || return 1
+}
+
+coord_obligation_supervisor_owned_executable() {
+  local executable="$1" runtime_root local_loom
+  runtime_root="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
+  runtime_root="$(readlink -f "$runtime_root" 2>/dev/null || true)"
+  local_loom="$(readlink -f "$WORKTREE/tools/loom/_build/default/src/loom.exe" 2>/dev/null || true)"
+  if [[ -n "$runtime_root" ]]; then
+    case "$executable" in
+      "$runtime_root"/versions/*/bin/sounio-loom-runtime) return 0 ;;
+    esac
+  fi
+  [[ -n "$local_loom" && "$executable" == "$local_loom" ]]
+}
+
+coord_obligation_supervisor_service_command() {
+  local action="$1"; shift
+  local interval=2 timeout=10 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
+  local runtime_self log_file attempt previous_pid='' previous_start=''
+  local expected_loom='' actual_loom='' ensured_state=started
+  while (($#)); do
+    case "$1" in
+      --interval-seconds)
+        [[ "$action" == ensure ]] || die "$1 is only valid for obligation-supervisor-ensure"
+        require_arg "$1" "$2"; interval="$2"; shift 2
+        ;;
+      --timeout-seconds)
+        [[ "$action" == stop ]] || die "$1 is only valid for obligation-supervisor-stop"
+        require_arg "$1" "$2"; timeout="$2"; shift 2
+        ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown obligation-supervisor-$action option: $1" ;;
+    esac
+  done
+  [[ "$interval" =~ ^[1-9][0-9]*$ ]] && ((interval <= 60)) ||
+    die "obligation supervisor interval must be between 1 and 60 seconds"
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && ((timeout <= 60)) ||
+    die "obligation supervisor timeout must be between 1 and 60 seconds"
+  mkdir -p "$STATE_DIR"
+  exec 6>"$lock_file"
+  flock 6
+  if coord_obligation_supervisor_state; then
+    previous_pid="$COORD_OBLIGATION_SUPERVISOR_PID"
+    previous_start="$COORD_OBLIGATION_SUPERVISOR_PID_START"
+    actual_loom="$(readlink -f "/proc/$previous_pid/exe" 2>/dev/null || true)"
+    coord_obligation_supervisor_owned_executable "$actual_loom" ||
+      die "refusing to signal unowned obligation supervisor pid=$previous_pid executable=${actual_loom:-unknown}"
+    if [[ "$action" == ensure ]]; then
+      expected_loom="$(readlink -f "$(coord_loom_obligation_runtime)")"
+      if [[ "$actual_loom" == "$expected_loom" ]]; then
+        printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=%s pid_start=%s replayed_utc=%s\n' \
+          "$previous_pid" "$previous_start" "$COORD_OBLIGATION_SUPERVISOR_REPLAYED_UTC"
+        flock -u 6
+        return 0
+      fi
+      ensured_state=restarted
+    fi
+    kill -TERM "$previous_pid" 2>/dev/null || true
+    for ((attempt = 0; attempt < timeout * 10; attempt++)); do
+      coord_obligation_supervisor_state || break
+      sleep 0.1
+    done
+    if coord_obligation_supervisor_state; then
+      die "obligation supervisor did not stop within ${timeout}s: pid=$previous_pid"
+    fi
+    if [[ "$action" == stop ]]; then
+      printf 'LOOM_OBLIGATION_SUPERVISOR_STOPPED state=stopped pid=%s pid_start=%s\n' \
+        "$previous_pid" "$previous_start"
+      flock -u 6
+      return 0
+    fi
+  fi
+  if [[ "$action" == stop ]]; then
+    printf 'LOOM_OBLIGATION_SUPERVISOR_STOPPED state=already-stopped pid=- pid_start=-\n'
+    flock -u 6
+    return 0
+  fi
+  [[ -x /usr/bin/setsid ]] || die "obligation supervisor ensure requires /usr/bin/setsid"
+  runtime_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  log_file="$STATE_DIR/obligation-supervisor.log"
+  touch "$log_file"
+  chmod 0600 "$log_file"
+  /usr/bin/setsid -f "$runtime_self" obligation-supervise \
+    --interval-seconds "$interval" >> "$log_file" 2>&1 </dev/null
+  for ((attempt = 0; attempt < timeout * 10; attempt++)); do
+    if coord_obligation_supervisor_state; then
+      printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=%s pid=%s pid_start=%s replayed_utc=%s log=%s\n' \
+        "$ensured_state" "$COORD_OBLIGATION_SUPERVISOR_PID" "$COORD_OBLIGATION_SUPERVISOR_PID_START" \
+        "$COORD_OBLIGATION_SUPERVISOR_REPLAYED_UTC" "$log_file"
+      flock -u 6
+      return 0
+    fi
+    sleep 0.1
+  done
+  die "obligation supervisor did not become live within ${timeout}s; log=$log_file"
+}
+
 coord_obligation_supervisor_command() {
   local action="$1"; shift
   local once=0 interval=2 bridge_pid='' loom_pid='' supervisor_status
@@ -3605,6 +3732,8 @@ case "$command" in
   obligation-reconcile) coord_obligation_reconcile_command "$@" ;;
   obligation-supervise) coord_obligation_supervisor_command supervise "$@" ;;
   obligation-supervisor-status) coord_obligation_supervisor_command supervisor-status "$@" ;;
+  obligation-supervisor-ensure) coord_obligation_supervisor_service_command ensure "$@" ;;
+  obligation-supervisor-stop) coord_obligation_supervisor_service_command stop "$@" ;;
   wake) wake_command "$@" ;;
   experiment-open) causal_runtime_command open "$@" ;;
   experiment-close) causal_runtime_command close "$@" ;;
@@ -3621,5 +3750,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac
