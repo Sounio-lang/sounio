@@ -27,7 +27,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.24.1"
+RUNTIME_VERSION = "2026.08.25.2"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -3065,6 +3065,7 @@ def cycle(
     specs: list[LaneSpec],
     *,
     apply: bool,
+    recovery_only: bool = False,
     capabilities: dict[str, dict[str, Any]] | None = None,
     recovery_budgets: dict[str, dict[str, Any]] | None = None,
     emit: bool = True,
@@ -3106,6 +3107,13 @@ def cycle(
         if decision == "blocked":
             blocked += 1
         elif decision == "start" and apply:
+            if recovery_only and spec.slot not in recovery_budgets:
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=start status=held "
+                    "reason=recovery-budget-not-provided"
+                )
+                continue
             document = capabilities.get(spec.slot)
             authority_reason = "manual-start-capability"
             if document is None and spec.slot in recovery_budgets:
@@ -3275,6 +3283,13 @@ def cycle(
             else:
                 failed += 1
         elif decision == "stop" and apply:
+            if recovery_only:
+                print(
+                    "FLEET_ACTION "
+                    f"slot={spec.slot} action=stop status=held "
+                    "reason=recovery-mode-start-only"
+                )
+                continue
             document = capabilities.get(spec.slot)
             if document is None:
                 failed += 1
@@ -3908,6 +3923,7 @@ def main() -> int:
                         connection,
                         specs,
                         apply=args.apply_recovery,
+                        recovery_only=args.apply_recovery,
                         recovery_budgets=recovery_budgets,
                     )
                 cycles += 1
