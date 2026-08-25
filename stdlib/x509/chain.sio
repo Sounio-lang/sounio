@@ -14,6 +14,7 @@
 
 use net::socket::*
 use x509::cert::*
+use x509::ocsp::*
 use x509::trust_store::*
 
 pub const CHAIN_MAX_DEPTH: i64 = 10
@@ -237,6 +238,8 @@ pub const CHAIN_ERR_NOT_CA: i64 = 0 - 4
 pub const CHAIN_ERR_PATH_LEN_EXCEEDED: i64 = 0 - 5
 pub const CHAIN_ERR_BAD_SIGNATURE: i64 = 0 - 6
 pub const CHAIN_ERR_HOSTNAME_MISMATCH: i64 = 0 - 7
+pub const CHAIN_ERR_OCSP_REVOKED: i64 = 0 - 8
+pub const CHAIN_ERR_OCSP_INVALID: i64 = 0 - 9
 
 // KeyUsage's DER BIT STRING is decoded by x509_decode_key_usage
 // (stdlib/x509/cert.sio) as: mask = byte0 when only one usage byte is
@@ -405,6 +408,8 @@ pub fn x509_verify_chain(
     hostname: &RawBuf,
     hostname_len: i64,
     now_unix: i64,
+    ocsp_response: &RawBuf,
+    ocsp_response_len: i64,
 ) -> i64 with IO, Mut {
     // --- inlined chain_build_candidates (see note above) ---
     var candidates: [ChainCandidate; 16] = [
@@ -491,6 +496,16 @@ pub fn x509_verify_chain(
         if result == CHAIN_OK {
             if !x509_verify_hostname(leaf, hostname, hostname_len) {
                 return CHAIN_ERR_HOSTNAME_MISMATCH
+            }
+            if ocsp_response_len > 0 {
+                let issuer_in_path = cand.certs[1]
+                let (ocsp_status, ocsp_err) = ocsp_verify_response(ocsp_response, ocsp_response_len, leaf, &issuer_in_path, now_unix)
+                if ocsp_err != OCSP_OK {
+                    return CHAIN_ERR_OCSP_INVALID
+                }
+                if ocsp_status != OCSP_STATUS_GOOD {
+                    return CHAIN_ERR_OCSP_REVOKED
+                }
             }
             return CHAIN_OK
         }
