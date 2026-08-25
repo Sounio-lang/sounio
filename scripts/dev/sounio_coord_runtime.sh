@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.25.8
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.25.9
 
 usage() {
   cat <<'USAGE'
@@ -2736,7 +2736,7 @@ coord_obligation_supervisor_service_command() {
   touch "$log_file"
   chmod 0600 "$log_file"
   /usr/bin/setsid -f "$runtime_self" obligation-supervise \
-    --interval-seconds "$interval" >> "$log_file" 2>&1 </dev/null
+    --interval-seconds "$interval" >> "$log_file" 2>&1 </dev/null 6>&-
   for ((attempt = 0; attempt < timeout * 10; attempt++)); do
     if coord_obligation_supervisor_state; then
       printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=%s pid=%s pid_start=%s replayed_utc=%s log=%s\n' \

@@ -217,6 +217,18 @@ grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
   fail 'control-service ensure did not start the obligation supervisor'
 supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
 [[ -n "$supervisor_pid" ]] || fail 'control-service ensure omitted its supervisor PID'
+supervisor_pid_start="$(sed -n 's/.* pid_start=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
+[[ -n "$supervisor_pid_start" ]] || fail 'control-service ensure omitted its process-start tick'
+bootstrap_lock="$STATE/.obligation-supervisor-bootstrap.lock"
+flock -n "$bootstrap_lock" -c true || \
+  fail 'detached obligation supervisor retained the bootstrap lock'
+supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$supervisor_pid/status")"
+for service_pid in "$supervisor_wrapper_pid" "$supervisor_pid"; do
+  for fd in "/proc/$service_pid/fd/"*; do
+    [[ "$(readlink -f "$fd" 2>/dev/null || true)" != "$(readlink -f "$bootstrap_lock")" ]] || \
+      fail 'detached control service inherited the bootstrap-lock descriptor'
+  done
+done
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
 grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
@@ -305,10 +317,13 @@ ensure_a_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' \
   "$TEST_ROOT/concurrent-ensure-a.out")"
 ensure_b_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' \
   "$TEST_ROOT/concurrent-ensure-b.out")"
+recovered_supervisor_start="$(sed -n 's/.* pid_start=\([0-9][0-9]*\) .*/\1/p' \
+  "$TEST_ROOT/concurrent-ensure-a.out")"
 [[ -n "$ensure_a_supervisor_pid" && "$ensure_a_supervisor_pid" == "$ensure_b_supervisor_pid" ]] || \
   fail 'concurrent ensure returned different supervisor identities'
 recovered_supervisor_pid="$ensure_a_supervisor_pid"
-[[ -n "$recovered_supervisor_pid" && "$recovered_supervisor_pid" != "$supervisor_pid" ]] || \
+[[ -n "$recovered_supervisor_pid" && "$recovered_supervisor_pid" != "$supervisor_pid" &&
+  -n "$recovered_supervisor_start" && "$recovered_supervisor_start" != "$supervisor_pid_start" ]] || \
   fail 'control-service resurrection did not produce a new supervisor generation'
 supervisor_pid="$recovered_supervisor_pid"
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \

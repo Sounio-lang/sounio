@@ -97,9 +97,11 @@ the next ensure replaces the old-bundle supervisor with a new generation.
 until its identity is no longer live. Before sending any signal, both commands
 also require the executable to belong to an installed immutable Loom bundle (or
 the expected local build), so a corrupted state file cannot redirect lifecycle
-control at an unrelated reused PID. These commands are the inner control-plane
-API; a Pod-external guardian such as Beagle should call `ensure` after a Pod
-restart rather than manufacturing a tmux session.
+control at an unrelated reused PID. The detached service explicitly closes the
+bootstrap-lock descriptor before `exec`; killing an `ensure` caller mid-start
+therefore cannot leave a surviving daemon that holds the election lock. These
+commands are the inner control-plane API; a Pod-external guardian such as Beagle
+should call `ensure` after a Pod restart rather than manufacturing a tmux session.
 
 The authoritative state lives under the shared coordination directory in
 `loom-obligations/*/journal.tsv`. The TUI, GUI, JSON endpoint, and supervisor are
