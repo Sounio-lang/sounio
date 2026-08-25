@@ -20,32 +20,67 @@
 //! loops, issuing fresh `read_file` calls (each one opens/reads/closes
 //! `/dev/urandom` again, so a short read never re-uses truncated data)
 //! until `n` bytes have been collected.
+//!
+//! One further edge case of the same NUL-scan behaviour: `str_len` returns
+//! exactly 0 whenever a call's very FIRST byte happens to be 0x00 -- this
+//! happens with probability exactly 1/256 (~0.39%) per `read_file` call,
+//! independent of `n`, and does NOT indicate anything is actually wrong
+//! with /dev/urandom. Treating a single zero-length read as a hard failure
+//! would make `crypto_os_random_bytes` spuriously fail on ~1-in-256 calls
+//! even when the OS entropy source is perfectly healthy -- unacceptable for
+//! a function future TLS key-generation code will call live. So a
+//! zero-length read is retried (fresh `read_file` calls are independent;
+//! a repeated leading zero byte is not "more of the same" data, it's a new
+//! coincidence that has to happen again to persist) rather than treated as
+//! fatal. A bounded consecutive-zero-length counter still exists as a
+//! genuine circuit-breaker for a truly broken source (permission denied,
+//! path missing, or a `read_file` that always returns empty) -- see
+//! MAX_CONSECUTIVE_EMPTY_READS below.
 
 use net::socket::*
 
+// Bound on CONSECUTIVE zero-length `read_file("/dev/urandom")` results
+// before giving up. A single zero-length result is expected background
+// noise (see module doc above, ~1/256 per call) and must not fail the
+// whole function. Ten in a row from a genuinely healthy source has
+// probability (1/256)^10 ~= 1.7e-24 -- indistinguishable from zero -- so
+// hitting this bound is strong evidence of a truly broken source (missing
+// device file, permission denied, etc.), not bad luck. The counter resets
+// to 0 on any read that returns available > 0, since only CONSECUTIVE
+// failures are evidence of a broken source.
+fn max_consecutive_empty_reads() -> i64 { 10 }
+
 // Returns (buf, true) with `n` bytes of real OS entropy in `buf[0..n]`,
-// or (buf, false) if a `read_file` call ever returns zero bytes (treated
-// as a hard failure rather than looped on, since a zero-byte return from a
-// character device is not an expected transient condition).
+// or (buf, false) only if `/dev/urandom` produces a zero-length
+// `read_file` result max_consecutive_empty_reads() times in a row (a
+// genuine circuit-breaker for a broken entropy source -- see module doc).
+// A single incidental zero-length read (the ~1/256 leading-zero-byte
+// coincidence) is retried, not treated as failure.
 pub fn crypto_os_random_bytes(n: i64) -> (RawBuf, bool) with IO {
     let out = rawbuf_new(n + 8)
     var filled: i64 = 0
+    var consecutive_empty: i64 = 0
     while filled < n {
         let s = read_file("/dev/urandom")
         let available = str_len(s)
         if available <= 0 {
-            return (out, false)
+            consecutive_empty = consecutive_empty + 1
+            if consecutive_empty >= max_consecutive_empty_reads() {
+                return (out, false)
+            }
+        } else {
+            consecutive_empty = 0
+            var to_copy = available
+            if filled + to_copy > n {
+                to_copy = n - filled
+            }
+            var i: i64 = 0
+            while i < to_copy {
+                rawbuf_set(&out, filled + i, str_char_at(s, i) as i64)
+                i = i + 1
+            }
+            filled = filled + to_copy
         }
-        var to_copy = available
-        if filled + to_copy > n {
-            to_copy = n - filled
-        }
-        var i: i64 = 0
-        while i < to_copy {
-            rawbuf_set(&out, filled + i, str_char_at(s, i) as i64)
-            i = i + 1
-        }
-        filled = filled + to_copy
     }
     (out, true)
 }
