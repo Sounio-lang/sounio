@@ -119,6 +119,7 @@ coord() {
   (
     cd "$REPO"
     SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DIR="$COORD_STATE" \
+      SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
       bin/sounio-coord "$@"
   )
 }
@@ -130,6 +131,38 @@ agentd() {
       bin/sounio-agentd "$@"
   )
 }
+
+python3 - "$REPO/scripts/dev/sounio_coord_agentd.py" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("sounio_coord_agentd", path)
+module = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+
+wrapped_cursor = [
+    "/usr/bin/env",
+    "HOME=/tmp/cursor-home",
+    "/usr/bin/python3",
+    "/runtime/bin/sounio-fleet-agent-runtime",
+    "_continue-fallback",
+    "/opt/cursor-agent",
+]
+assert module.logical_command_name(wrapped_cursor) == "cursor-agent"
+assert module.logical_command_name(
+    ["/usr/bin/python3", "-c", "print('cursor-agent')"]
+) == "python3"
+assert module.logical_command_name(
+    ["/tmp/not-sounio-fleet-agent-runtime", "_continue-fallback", "cursor-agent"]
+) == "not-sounio-fleet-agent-runtime"
+assert module.logical_command_name(
+    ["/usr/bin/python3", "/tmp/sounio-fleet-agent-runtime", "not-fallback", "cursor-agent"]
+) == "python3"
+PY
 
 start_output="$(
   cd "$REPO"

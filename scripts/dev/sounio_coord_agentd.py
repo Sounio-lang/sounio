@@ -29,7 +29,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.24.3"
+RUNTIME_VERSION = "2026.08.25.4"
 MAX_CONTROL_BYTES = 65536
 MAX_PROMPT_BYTES = 8192
 RING_BYTES = 65536
@@ -150,13 +150,23 @@ def command_argv_digest(command: list[str]) -> str:
 
 
 def logical_command_name(command: list[str]) -> str:
-    if Path(command[0]).name != "env":
-        return Path(command[0]).name
-    index = 1
-    while index < len(command) and ENV_ASSIGNMENT.match(command[index]):
+    index = 0
+    if Path(command[index]).name == "env":
         index += 1
+        while index < len(command) and ENV_ASSIGNMENT.match(command[index]):
+            index += 1
     if index == len(command):
         return "env"
+
+    wrapper_index = index
+    if Path(command[index]).name in {"python", "python3"}:
+        wrapper_index += 1
+    if (
+        wrapper_index + 2 < len(command)
+        and Path(command[wrapper_index]).name == "sounio-fleet-agent-runtime"
+        and command[wrapper_index + 1] == "_continue-fallback"
+    ):
+        return Path(command[wrapper_index + 2]).name
     return Path(command[index]).name
 
 
