@@ -226,3 +226,280 @@ pub fn chain_build_candidates(
 
     (results, result_count)
 }
+
+// --- Task 4: path verification, hostname check, public entry point ---
+
+pub const CHAIN_OK: i64 = 0
+pub const CHAIN_ERR_NO_PATH_TO_ROOT: i64 = 0 - 1
+pub const CHAIN_ERR_EXPIRED: i64 = 0 - 2
+pub const CHAIN_ERR_NOT_YET_VALID: i64 = 0 - 3
+pub const CHAIN_ERR_NOT_CA: i64 = 0 - 4
+pub const CHAIN_ERR_PATH_LEN_EXCEEDED: i64 = 0 - 5
+pub const CHAIN_ERR_BAD_SIGNATURE: i64 = 0 - 6
+pub const CHAIN_ERR_HOSTNAME_MISMATCH: i64 = 0 - 7
+
+// KeyUsage's DER BIT STRING is decoded by x509_decode_key_usage
+// (stdlib/x509/cert.sio) as: mask = byte0 when only one usage byte is
+// present (encipherOnly/decipherOnly absent), or mask = (byte0 << 8) | byte1
+// when a second usage byte is present. keyCertSign is RFC 5280 SS4.2.1.3's
+// named bit 5 (0-indexed from the MSB of byte0), i.e. byte0 & 0x04. In the
+// one-byte encoding that bit sits at mask & 0x04; in the two-byte encoding
+// it has been shifted left by 8 along with the rest of byte0, i.e.
+// mask & 0x0400 (0x04 << 8 == 1024). Both constants below test the SAME
+// bit, just at the two different positions mask can leave it in -- verified
+// against x509_decode_key_usage's actual `mask = (mask << 8) | byte_val`
+// packing (grep-confirmed 2026-08-24), not assumed from the plan brief.
+const KEY_USAGE_KEY_CERT_SIGN_BYTE0: i32 = 4    // 0x04: keyCertSign when keyUsage is 1 usage-byte (the common case)
+const KEY_USAGE_KEY_CERT_SIGN_BYTE0_SHIFTED: i32 = 1024  // 0x0400: same bit, when keyUsage is 2 usage-bytes (encipherOnly/decipherOnly present)
+
+fn key_usage_allows_cert_sign(key_usage_bits: i32) -> bool {
+    (key_usage_bits & KEY_USAGE_KEY_CERT_SIGN_BYTE0) != 0 || (key_usage_bits & KEY_USAGE_KEY_CERT_SIGN_BYTE0_SHIFTED) != 0
+}
+
+// Verifies one candidate path (path_certs[0] = leaf ... path_certs[len-1] =
+// trusted root) fully. Returns (CHAIN_OK, depth_reached) on success, or
+// (error_code, depth_reached) on the first failure -- depth_reached is how
+// many links verified successfully before the failure, used by
+// x509_verify_chain to pick the "most progress" candidate to report when
+// every candidate fails for a different reason.
+fn chain_verify_path(path_certs: &[Certificate; 11], path_bufs: &[RawBuf; 11], path_len: i32, now_unix: i64) -> (i64, i32) with IO {
+    var i: i32 = 0
+    while i < path_len {
+        let cert = path_certs[i as usize]
+        if now_unix < cert.not_before_unix {
+            return (CHAIN_ERR_NOT_YET_VALID, i)
+        }
+        if now_unix > cert.not_after_unix {
+            return (CHAIN_ERR_EXPIRED, i)
+        }
+        i = i + 1
+    }
+
+    var d: i32 = 0
+    while d < path_len - 1 {
+        let cert = path_certs[d as usize]
+        let cert_buf = path_bufs[d as usize]
+        let issuer = path_certs[(d + 1) as usize]
+
+        if !x509_verify_signature(&cert_buf, &cert, &issuer.modulus, &issuer.public_exponent) {
+            return (CHAIN_ERR_BAD_SIGNATURE, d)
+        }
+
+        if !issuer.is_ca {
+            return (CHAIN_ERR_NOT_CA, d + 1)
+        }
+        if issuer.key_usage_bits != 0 && !key_usage_allows_cert_sign(issuer.key_usage_bits) {
+            return (CHAIN_ERR_NOT_CA, d + 1)
+        }
+        if issuer.path_len_constraint >= 0 {
+            // Number of CA certs strictly between `issuer` and the leaf:
+            // path_certs[0..d] excludes the leaf itself (index 0) when d>0,
+            // so the count of intermediates below `issuer` is exactly `d`.
+            if (d as i64) > (issuer.path_len_constraint as i64) {
+                return (CHAIN_ERR_PATH_LEN_EXCEEDED, d + 1)
+            }
+        }
+
+        d = d + 1
+    }
+
+    (CHAIN_OK, path_len)
+}
+
+pub fn x509_verify_hostname(leaf: &Certificate, hostname: &RawBuf, hostname_len: i64) -> bool with IO {
+    var i: i32 = 0
+    while i < leaf.san_count {
+        let san = leaf.san_entries[i as usize]
+        if san.tag == GENERAL_NAME_DNS_NAME {
+            if (san.value_len as i64) == hostname_len {
+                var same: bool = true
+                var j: i64 = 0
+                while j < hostname_len {
+                    if san.value[j as usize] != rawbuf_get(hostname, j) as u8 { same = false }
+                    j = j + 1
+                }
+                if same { return true }
+            } else if san.value_len >= 2 && san.value[0] == (42 as u8) && san.value[1] == (46 as u8) {
+                // "*." prefix: match against the hostname's suffix starting
+                // right after its own first '.' -- and require the hostname
+                // to actually contain a '.' at all (a single-label hostname
+                // can never match a wildcard).
+                var dot_pos: i64 = 0 - 1
+                var k: i64 = 0
+                while k < hostname_len {
+                    if (rawbuf_get(hostname, k) as u8) == (46 as u8) && dot_pos == (0 - 1) {
+                        dot_pos = k
+                    }
+                    k = k + 1
+                }
+                if dot_pos >= 0 {
+                    let suffix_len = hostname_len - dot_pos - 1
+                    let pattern_suffix_len = (san.value_len as i64) - 2
+                    if suffix_len == pattern_suffix_len {
+                        var same2: bool = true
+                        var m: i64 = 0
+                        while m < suffix_len {
+                            if san.value[(2 + m) as usize] != (rawbuf_get(hostname, dot_pos + 1 + m) as u8) { same2 = false }
+                            m = m + 1
+                        }
+                        if same2 { return true }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+// IMPLEMENTATION NOTE (found during Task 4 implementation, 2026-08-24/25):
+// `x509_verify_chain` does NOT call `chain_build_candidates` as a
+// subroutine, even though that is the obvious, DRY way to write it (and is
+// exactly what an earlier draft of this function did). It instead inlines
+// `chain_build_candidates`'s full DFS body below.
+//
+// Why: measured, reproducible Madaros compiler defect. A minimal probe
+// (`pub fn probe(...) with IO, Mut { let (candidates, n) =
+// chain_build_candidates(...); candidates[0].len }`, added to THIS module
+// and called from a separate test module) returns a garbage `len` (observed
+// 92176 and 102550 across runs) for `candidates[0]` even though:
+//   - calling `chain_build_candidates` DIRECTLY from the test's own `main`
+//     (no intermediate function) returns the correct candidate every time
+//     (verified repeatedly, `len == 3` for the 3-level fixture below), and
+//   - a LOCAL helper function defined in the *same file as main* (i.e. in
+//     the test module, not in x509::chain) that calls `chain_build_candidates`
+//     and then `chain_verify_path` on the result also returns correct values
+//     every time.
+// So the corruption is specific to: a `pub fn` in x509::chain that is
+// reached via a CROSS-MODULE call (e.g. from a test's `main`) and that,
+// *from within its own module*, calls ANOTHER function in that same module
+// which returns a large fixed-size struct-array tuple
+// (`([ChainCandidate; 16], i32)`, each `ChainCandidate` holding
+// `[Certificate; 11]`). Confirmed NOT caused by the >8-argument call-arg
+// "scratch overflow" path (`lower_array: arena_reset_skipped`, see
+// `module_frontend.sio`'s `MF_AREBOX_*` machinery): the corruption
+// reproduces even when arena resets report fully OK (`arena_reset_totals
+// ok=18 skip=0`) and even with the 9-argument `x509_verify_chain` signature
+// removed from the module entirely. This is the same class of defect as
+// the "residual D3 family: multi-module memory-wall / exclusive-ref
+// fragile chains" already tracked in this repo's
+// `docs/compiler/KNOWN_LIMITATIONS.md` / CLAUDE.md SS13, now hit by a new,
+// more specific trigger (same-module nested call, from a cross-module
+// entry point, returning a large struct-array tuple) -- reported in this
+// task's completion report per the forensic-dispatch protocol; NOT
+// patched in `self-hosted/` here, per this repo's explicit rule against ad
+// hoc compiler patches.
+//
+// `chain_verify_path` (small `(i64, i32)` return) and `x509_verify_hostname`
+// (`bool` return) ARE called as ordinary nested same-module calls below and
+// were verified correct in this configuration -- only the large
+// struct-array-tuple return via `chain_build_candidates` triggers the
+// defect, so only that one call is inlined.
+pub fn x509_verify_chain(
+    leaf: &Certificate,
+    leaf_buf: &RawBuf,
+    intermediates: &[Certificate; 8],
+    intermediate_bufs: &[RawBuf; 8],
+    intermediate_count: i32,
+    trust_store: &TrustStore,
+    hostname: &RawBuf,
+    hostname_len: i64,
+    now_unix: i64,
+) -> i64 with IO, Mut {
+    // --- inlined chain_build_candidates (see note above) ---
+    var candidates: [ChainCandidate; 16] = [
+        ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: 0 };
+        16
+    ]
+    var candidate_count: i32 = 0
+
+    var pool_certs: [Certificate; 520] = [certificate_zero(); 520]
+    var pool_bufs: [RawBuf; 520] = [rawbuf_new(1); 520]
+    var pool_len: i64 = 0
+    var pi: i64 = 0
+    while pi < (intermediate_count as i64) {
+        pool_certs[pool_len as usize] = intermediates[pi as usize]
+        pool_bufs[pool_len as usize] = intermediate_bufs[pi as usize]
+        pool_len = pool_len + 1
+        pi = pi + 1
+    }
+    var ti: i64 = 0
+    while ti < (trust_store.count as i64) {
+        pool_certs[pool_len as usize] = trust_store.certs[ti as usize]
+        pool_bufs[pool_len as usize] = trust_store.bufs[ti as usize]
+        pool_len = pool_len + 1
+        ti = ti + 1
+    }
+
+    var path_certs: [Certificate; 11] = [certificate_zero(); 11]
+    var path_bufs: [RawBuf; 11] = [rawbuf_new(1); 11]
+    var path_pool_index: [i64; 11] = [0 - 1; 11]
+    var depth: i64 = 0
+    path_certs[0] = *leaf
+    path_bufs[0] = *leaf_buf
+    depth = 1
+
+    var tried: [i32; 11] = [0; 11]
+
+    while depth >= 1 && (candidate_count as i64) < MAX_CHAIN_CANDIDATES {
+        let current = path_certs[(depth - 1) as usize]
+        if chain_is_trusted_root(&current, trust_store) && depth > 1 {
+            var rc = ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: depth as i32 }
+            var ci: i64 = 0
+            while ci < depth {
+                rc.certs[ci as usize] = path_certs[ci as usize]
+                rc.bufs[ci as usize] = path_bufs[ci as usize]
+                ci = ci + 1
+            }
+            candidates[candidate_count as usize] = rc
+            candidate_count = candidate_count + 1
+            depth = depth - 1
+        } else if depth > CHAIN_MAX_DEPTH {
+            depth = depth - 1
+        } else {
+            var candidate_indices: [i64; 520] = [0; 520]
+            let n = chain_find_issuer_candidates(&current, &pool_certs, &pool_bufs, pool_len, &path_pool_index, depth as i32, &!candidate_indices)
+            if (tried[depth as usize] as i64) < (n as i64) {
+                let chosen = candidate_indices[tried[depth as usize] as usize]
+                tried[depth as usize] = tried[depth as usize] + 1
+                path_pool_index[depth as usize] = chosen
+                path_certs[depth as usize] = pool_certs[chosen as usize]
+                path_bufs[depth as usize] = pool_bufs[chosen as usize]
+                depth = depth + 1
+                if depth <= CHAIN_MAX_DEPTH {
+                    tried[depth as usize] = 0
+                }
+            } else {
+                tried[depth as usize] = 0
+                path_pool_index[depth as usize] = 0 - 1
+                depth = depth - 1
+            }
+        }
+    }
+    // --- end inlined chain_build_candidates ---
+
+    if candidate_count == 0 {
+        return CHAIN_ERR_NO_PATH_TO_ROOT
+    }
+
+    var best_depth: i32 = 0 - 1
+    var best_error: i64 = CHAIN_ERR_NO_PATH_TO_ROOT
+    var c: i32 = 0
+    while c < candidate_count {
+        let cand = candidates[c as usize]
+        let (result, depth_reached) = chain_verify_path(&cand.certs, &cand.bufs, cand.len, now_unix)
+        if result == CHAIN_OK {
+            if !x509_verify_hostname(leaf, hostname, hostname_len) {
+                return CHAIN_ERR_HOSTNAME_MISMATCH
+            }
+            return CHAIN_OK
+        }
+        if depth_reached > best_depth {
+            best_depth = depth_reached
+            best_error = result
+        }
+        c = c + 1
+    }
+
+    best_error
+}

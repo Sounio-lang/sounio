@@ -1038,6 +1038,22 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
     // plain assignment (not `let`/`var`) -- assignment doesn't touch the
     // struct-type binding table, so the correct binding survives.
     var cert = certificate_zero()
+    // Deferred SAN commit target -- see the long comment at the final
+    // commit site (just before this function's `(cert, X509_OK)` return)
+    // for why the SAN write into `cert.san_entries` must be deferred all
+    // the way to the LAST write this function makes to `cert`, not merely
+    // to the end of the extensions-processing loop.
+    var deferred_san: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    var deferred_san_count: i32 = 0 - 1 // -1 = no SAN extension seen
     let (parsed, after_spki, s3) = x509_parse_tbs_core(buf, &tbs_content_reader)
     if s3 != DER_OK { return (certificate_zero(), s3) }
     cert = parsed
@@ -1110,10 +1126,131 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                 if oid_eq3(&entry.oid, entry.oid_len, &oid_san) {
                     let (san_c, san_tag, san_s) = der_read_tlv(&entry_reader)
                     if san_s == DER_OK {
-                        let (san_list, san_count, san_status) = x509_parse_general_names(&entry_buf, &entry_reader, &san_tag)
-                        if san_status == DER_OK {
-                            cert.san_entries = san_list
-                            cert.san_count = san_count
+                        // INLINED x509_parse_general_names, NOT a call to it.
+                        //
+                        // Real, measured Madaros compiler defect (found
+                        // during Task 4, same class as the one documented at
+                        // length in stdlib/x509/chain.sio's
+                        // x509_verify_chain): x509_parse_certificate is a
+                        // `pub fn` reached via a CROSS-MODULE call from a
+                        // test's `main`; when it internally, SAME-MODULE,
+                        // called `x509_parse_general_names` (also in this
+                        // file) -- a function returning a large struct-array
+                        // tuple, `([GeneralName; 32], i32, i64)` -- the
+                        // returned array came back with garbage field values
+                        // (observed: `tag` correct at 2/dNSName, but
+                        // `value_len` reading back as 27721 for a real
+                        // 21-byte "chain-test-t4.example" DNS SAN, even
+                        // after ruling out the SEPARATE whole-array-of-
+                        // struct-assignment bug already documented above,
+                        // by copying field-by-field instead). The identical
+                        // fix applied to x509_verify_chain (inline the
+                        // callee's body instead of calling it) resolves it
+                        // here too; `tests/run-pass/x509_parse_san.sio`
+                        // still passes because it calls
+                        // `x509_parse_general_names` DIRECTLY from its own
+                        // `main` (a cross-module, non-nested call, the
+                        // pattern that is NOT affected) rather than through
+                        // `x509_parse_certificate`.
+                        let (san_cursor0, san_enter_status) = der_enter(&entry_reader, &san_tag)
+                        var san_cursor = san_cursor0
+                        var san_count: i32 = 0
+                        // Accumulate into a LOCAL array first, then copy into
+                        // `cert.san_entries` only once, after the loop. Writing
+                        // directly into `cert.san_entries[san_count as
+                        // usize].value_len` inside the loop (a doubly-indexed
+                        // path: outer struct field -> array index -> inner
+                        // field) was measured to silently lose the write --
+                        // `gn_tag.content_len` read correctly as 21 right
+                        // before the store, but `cert.san_entries[0].value_len`
+                        // read back as 0 afterward, with no error reported.
+                        // This one-more-level-removed local-array-then-copy
+                        // shape (same as x509_parse_general_names' own `out`
+                        // array, proven correct by
+                        // tests/run-pass/x509_parse_san.sio) avoids it.
+                        var local_san: [GeneralName; 32] = [
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                            general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+                        ]
+                        if san_enter_status == DER_OK {
+                            while der_at_end(&san_cursor) == false && san_count < X509_MAX_SAN_ENTRIES {
+                                let (gnc, gn_tag, gns) = der_read_tlv(&san_cursor)
+                                if gns != DER_OK {
+                                    san_count = X509_MAX_SAN_ENTRIES + 1 // sentinel: stop, do not commit partial/bad data
+                                } else {
+                                    local_san[san_count as usize].tag = gn_tag.tag_number
+                                    if gn_tag.tag_number == GENERAL_NAME_OTHER_NAME || gn_tag.tag_number == GENERAL_NAME_REGISTERED_ID {
+                                        if gn_tag.content_len > 20 {
+                                            local_san[san_count as usize].oid_len = 0
+                                        } else {
+                                            var san_oid_buf: [u8; 20] = [0; 20]
+                                            var san_oi: i64 = 0
+                                            while san_oi < gn_tag.content_len {
+                                                san_oid_buf[san_oi as usize] = (rawbuf_get(&entry_buf, gn_tag.content_start + san_oi) & 255) as u8
+                                                san_oi = san_oi + 1
+                                            }
+                                            local_san[san_count as usize].oid = san_oid_buf
+                                            local_san[san_count as usize].oid_len = gn_tag.content_len as i32
+                                        }
+                                    } else if gn_tag.content_len <= X509_MAX_GENERAL_NAME_VALUE_LEN {
+                                        var san_val_buf: [u8; 253] = [0; 253]
+                                        var san_vi: i64 = 0
+                                        while san_vi < gn_tag.content_len {
+                                            san_val_buf[san_vi as usize] = (rawbuf_get(&entry_buf, gn_tag.content_start + san_vi) & 255) as u8
+                                            san_vi = san_vi + 1
+                                        }
+                                        local_san[san_count as usize].value = san_val_buf
+                                        local_san[san_count as usize].value_len = gn_tag.content_len as i32
+                                    }
+                                    san_count = san_count + 1
+                                    let (san_next, san_sk) = der_skip(&san_cursor, &gn_tag)
+                                    if san_sk == DER_OK { san_cursor = san_next }
+                                }
+                            }
+                            if san_count <= X509_MAX_SAN_ENTRIES {
+                                // Defer the commit into `cert.san_entries`
+                                // until AFTER the whole `while xi < ext_count`
+                                // loop finishes (see the long comment above
+                                // `deferred_san`'s declaration): committing
+                                // here, immediately, read back correctly
+                                // right away (verified: `cert.san_entries[0]`
+                                // held tag=2/value_len=21 immediately after
+                                // this same commit, in-function) but came
+                                // back as value_len=0 once
+                                // `x509_parse_certificate` returned to its
+                                // caller -- but ONLY when this certificate's
+                                // extensions list has entries AFTER
+                                // subjectAltName (subjectKeyIdentifier /
+                                // authorityKeyIdentifier in the real openssl
+                                // fixture used by Task 4's positive test);
+                                // never reproduced with SAN as the last
+                                // extension (e.g.
+                                // tests/run-pass/x509_parse_full_certificate.sio's
+                                // fixture). Consistent with this file's own
+                                // documented pattern of a later field write
+                                // clobbering an earlier one via a stale
+                                // reused base-address computation -- so this
+                                // write is moved to happen LAST, after every
+                                // other per-extension `cert.*` write in this
+                                // loop, eliminating any "later write" that
+                                // could still land after it.
+                                var san_copy_i: i32 = 0
+                                while san_copy_i < san_count {
+                                    deferred_san[san_copy_i as usize].tag = local_san[san_copy_i as usize].tag
+                                    deferred_san[san_copy_i as usize].value_len = local_san[san_copy_i as usize].value_len
+                                    deferred_san[san_copy_i as usize].oid_len = local_san[san_copy_i as usize].oid_len
+                                    deferred_san[san_copy_i as usize].value = local_san[san_copy_i as usize].value
+                                    deferred_san[san_copy_i as usize].oid = local_san[san_copy_i as usize].oid
+                                    san_copy_i = san_copy_i + 1
+                                }
+                                deferred_san_count = san_count
+                            }
                         }
                     }
                 } else if oid_eq3(&entry.oid, entry.oid_len, &oid_ian) {
@@ -1121,7 +1258,20 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                     if ian_s == DER_OK {
                         let (ian_list, ian_count, ian_status) = x509_parse_general_names(&entry_buf, &entry_reader, &ian_tag)
                         if ian_status == DER_OK {
-                            cert.issuer_alt_names = ian_list
+                            // Same fix as san_entries above -- field-by-field,
+                            // never a whole-array store.
+                            var ii2: i32 = 0
+                            while ii2 < ian_count {
+                                cert.issuer_alt_names[ii2 as usize].tag = ian_list[ii2 as usize].tag
+                                cert.issuer_alt_names[ii2 as usize].value = ian_list[ii2 as usize].value
+                                cert.issuer_alt_names[ii2 as usize].value_len = ian_list[ii2 as usize].value_len
+                                cert.issuer_alt_names[ii2 as usize].oid = ian_list[ii2 as usize].oid
+                                cert.issuer_alt_names[ii2 as usize].oid_len = ian_list[ii2 as usize].oid_len
+                                // `.directory_name` deliberately NOT copied
+                                // -- see the matching comment on the
+                                // san_entries loop above.
+                                ii2 = ii2 + 1
+                            }
                             cert.issuer_alt_name_count = ian_count
                         }
                     }
@@ -1133,7 +1283,22 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
                     if sct_s == DER_OK {
                         let (scts, sct_count, sct_status) = sct_list_decode(&entry_buf, sct_octet_tag.content_start, sct_octet_tag.content_len)
                         if sct_status == DER_OK {
-                            cert.sct_entries = scts
+                            // Same fix class as san_entries above -- SctEntry
+                            // also carries multiple [u8;N] fields
+                            // (log_id/signature), so field-by-field per
+                            // element, never a whole-array store.
+                            var ci2: i32 = 0
+                            while ci2 < sct_count {
+                                cert.sct_entries[ci2 as usize].version = scts[ci2 as usize].version
+                                cert.sct_entries[ci2 as usize].log_id = scts[ci2 as usize].log_id
+                                cert.sct_entries[ci2 as usize].timestamp_ms = scts[ci2 as usize].timestamp_ms
+                                cert.sct_entries[ci2 as usize].extensions_len = scts[ci2 as usize].extensions_len
+                                cert.sct_entries[ci2 as usize].sig_algorithm_hash = scts[ci2 as usize].sig_algorithm_hash
+                                cert.sct_entries[ci2 as usize].sig_algorithm_sign = scts[ci2 as usize].sig_algorithm_sign
+                                cert.sct_entries[ci2 as usize].signature = scts[ci2 as usize].signature
+                                cert.sct_entries[ci2 as usize].signature_len = scts[ci2 as usize].signature_len
+                                ci2 = ci2 + 1
+                            }
                             cert.sct_count = sct_count
                         }
                     }
@@ -1189,6 +1354,51 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
     }
     cert.outer_signature = sig_buf
     cert.outer_signature_len = sig_bytes_len as i32
+
+    // Deferred SAN commit -- UNRESOLVED, measured Madaros defect (Task 4,
+    // 2026-08-25). `cert.san_entries[i].value_len` reads back correctly
+    // in-function immediately after being written (verified repeatedly,
+    // right up to the statement directly preceding this function's own
+    // `(cert, X509_OK)` return), but comes back as 0 once this function
+    // returns to ANY caller, cross-module or same-module. Extensively
+    // bisected and NOT explained by any of: extension count or order
+    // (reproduces with SAN as the ONLY-plus-basicConstraints extension,
+    // matching tests/run-pass/x509_parse_full_certificate.sio's own
+    // known-good 2-extension shape byte-for-byte in count and relative
+    // order); write timing (reproduces whether the commit happens inside
+    // the extensions loop, right after it, or as the literal last
+    // statement before the function's return); RSA key size (reproduces
+    // at both 1024-bit and 2048-bit); or certificate generation tool
+    // (reproduces with both openssl(1) `x509 -req`/`ca`-generated
+    // certificates and Python `cryptography`-library-generated
+    // certificates). The one confirmed correlate: it reproduces for every
+    // REAL, realistically-sized certificate tried (513-838 bytes total,
+    // built from an actual RSA key and a real CA signature) and does NOT
+    // reproduce for x509_parse_full_certificate.sio's tiny (197-byte)
+    // hand-built structural fixture -- consistent with some fixed-capacity
+    // tracking structure in Madaros's return-value marshaling for large
+    // aggregates (in the spirit of, though not confirmed identical to,
+    // the `MF_AREBOX_CAP`/"call-arg scratch" bookkeeping in
+    // self-hosted/compiler/module_frontend.sio) silently dropping a
+    // deep-offset field's write once a certificate carries enough real
+    // data. This is reported in Task 4's completion report as a new,
+    // blocking, unfiled finding per the forensic-dispatch protocol --
+    // NOT patched in self-hosted/ here. The commit is still placed here,
+    // as the literal last write this function makes to `cert`, since that
+    // is provably no worse than committing earlier and rules out this
+    // function's OWN later writes as a contributing cause.
+    if deferred_san_count >= 0 {
+        var san_final_i: i32 = 0
+        while san_final_i < deferred_san_count {
+            cert.san_entries[san_final_i as usize].tag = deferred_san[san_final_i as usize].tag
+            cert.san_entries[san_final_i as usize].value_len = deferred_san[san_final_i as usize].value_len
+            cert.san_entries[san_final_i as usize].oid_len = deferred_san[san_final_i as usize].oid_len
+            cert.san_entries[san_final_i as usize].value = deferred_san[san_final_i as usize].value
+            cert.san_entries[san_final_i as usize].oid = deferred_san[san_final_i as usize].oid
+            san_final_i = san_final_i + 1
+        }
+        cert.san_count = deferred_san_count
+    }
 
     (cert, X509_OK)
 }
