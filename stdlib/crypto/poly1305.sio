@@ -244,6 +244,40 @@ pub fn poly1305_mac(key: &[u8;32], msg: &RawBuf, msg_len: i64) -> [u8;16] with I
         pos = pos + 16
     }
 
+    // Full carry-propagation pass (poly1305-donna style) before the
+    // final reduction/packing below. The block-accumulation loop above
+    // ends each iteration with `h1 = h1 + c` (the carry folded out of
+    // h0 after the `* 5` wrap) and NO subsequent re-mask/re-carry of
+    // h1 -- so after the LAST iteration, h1 can be as large as
+    // `(2^26-1) + 1 = 2^26`, one past MASK26, while h2..h4 remain
+    // strictly < 2^26 from their own masked assignments inside the
+    // loop. This is not yet a problem for the numeric value of h (it
+    // is still correct as an unreduced sum), but the final packing
+    // step below merges adjacent limbs with bitwise OR (`h1 << 26`,
+    // `h1 >> 6`, etc.), which is only safe when every limb is truly
+    // confined to its 26-bit field -- an unmasked h1 == 2^26 has its
+    // bit 26 set, which collides with (and can be silently swallowed
+    // by, depending on h2's low bit) the OR against h2's shifted-in
+    // bits. Propagate any such carry all the way through before
+    // packing, exactly as poly1305-donna reference implementations do:
+    var carry26 = h1 >> 26
+    h1 = h1 & MASK26
+    h2 = h2 + carry26
+    carry26 = h2 >> 26
+    h2 = h2 & MASK26
+    h3 = h3 + carry26
+    carry26 = h3 >> 26
+    h3 = h3 & MASK26
+    h4 = h4 + carry26
+    carry26 = h4 >> 26
+    h4 = h4 & MASK26
+    h0 = h0 + carry26 * 5
+    carry26 = h0 >> 26
+    h0 = h0 & MASK26
+    h1 = h1 + carry26
+    // After this chain every limb h0..h4 is guaranteed < 2^26, so the
+    // OR-based bit-merging in the packing step below is safe.
+
     // Final full reduction mod 2^130-5: h is already < 2^130 (every
     // limb was masked to < 2^26 above), but may still be >= 2^130-5.
     // Compute g = h + 5 with carry propagation through all 5 limbs; if
