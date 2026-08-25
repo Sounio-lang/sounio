@@ -270,7 +270,7 @@ fleetd anchor-log --private-key "$PRIVATE_KEY" --public-key "$PUBLIC_KEY" \
 output="$("$RUNTIME/sounio-fleet-trace-verify" --db "$DB" \
   --public-key "$PUBLIC_KEY" --anchor-dir "$ANCHORS" \
   --certificate "$CERTIFICATE")"
-grep -q 'FLEET_TRACE_CONFORMS .*accepted=2 .*invariants=10 ' <<< "$output" || \
+grep -q 'FLEET_TRACE_CONFORMS .*accepted=2 .*invariants=12 ' <<< "$output" || \
   fail 'crash-recovered Event Log does not refine the abstract fleet machine'
 
 python3 - "$DB" <<'PY'
