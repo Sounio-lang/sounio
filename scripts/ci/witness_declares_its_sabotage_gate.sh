@@ -108,6 +108,17 @@ for row in "${declared[@]}"; do
     unknown_token=$((unknown_token + 1)); failed=$((failed + 1)); continue
   fi
 
+  # How this witness reports death.
+  #
+  # Not the exit code. Most of the corpus signals failure by printing a marker
+  # the suite matches with `//@ expect-stdout`, and returns 0 either way. The
+  # first version of this gate judged by exit status alone and reported
+  # SURVIVED for a witness whose sabotaged run printed
+  # MADAROS_HESSIAN_TRANSCENDENTAL_FAIL with h_sin=0.000000 -- it had died
+  # exactly as declared, said so, and was accused of not measuring anything.
+  # A wrong notion of death blames the measured thing for the instrument.
+  marker="$(grep -m1 -oE '^//@ expect-stdout(-contains)?:[[:space:]]*\S+' "$src" 2>/dev/null | awk '{print $NF}')"
+
   # Control A -- unsabotaged, must PASS. A witness that is already red proves
   # nothing when it goes red under sabotage.
   out="$WORK/clean.elf"
@@ -116,8 +127,11 @@ for row in "${declared[@]}"; do
     failed=$((failed + 1)); continue
   fi
   chmod +x "$out"
-  if ! timeout 120 "$out" >"$WORK/r.log" 2>&1; then
-    echo "  CLEAN-RUN-FAIL    $src fails without any sabotage"
+  timeout 120 "$out" >"$WORK/r.log" 2>&1
+  clean_rc=$?
+  if [[ $clean_rc -ne 0 ]] || { [[ -n "$marker" ]] && ! grep -qF "$marker" "$WORK/r.log"; }; then
+    echo "  CLEAN-RUN-FAIL    $src fails without any sabotage (rc=$clean_rc)"
+    sed 's/^/      clean| /' "$WORK/r.log" | head -8
     failed=$((failed + 1)); continue
   fi
 
@@ -129,8 +143,24 @@ for row in "${declared[@]}"; do
     passed=$((passed + 1)); continue
   fi
   chmod +x "$bad"
-  if env "$env_var=1" timeout 120 "$bad" >"$WORK/r2.log" 2>&1; then
+  env "$env_var=1" timeout 120 "$bad" >"$WORK/r2.log" 2>&1
+  bad_rc=$?
+  survived=0
+  if [[ $bad_rc -eq 0 ]]; then
+    if [[ -z "$marker" ]]; then
+      survived=1
+    elif grep -qF "$marker" "$WORK/r2.log"; then
+      survived=1
+    fi
+  fi
+  if [[ $survived -eq 1 ]]; then
     echo "  SURVIVED  $src passed with $tok sabotaged -- it does not measure what it declares"
+    # Print what it printed. A survival has two causes -- a witness that does
+    # not discriminate, or a switch that does not bite -- and they are not
+    # distinguishable without the numbers. Discarding this output would make
+    # the gate accuse the witness for the gate's own defect.
+    sed 's/^/      sabotaged| /' "$WORK/r2.log" | head -12
+    sed 's/^/      clean    | /' "$WORK/r.log" | head -12
     failed=$((failed + 1))
   else
     echo "  ok   $src  died at run under $tok"
