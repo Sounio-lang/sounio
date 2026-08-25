@@ -627,11 +627,16 @@ fn fo_cov_rho_idx(i: i64, j: i64) -> i64 with Div {
     a * 8 + b
 }
 
-fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div {
+fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut, Panic, Div, IO {
     if i < 0 || j < 0 || i >= 8 || j >= 8 {
         return
     }
     if i == j {
+        return
+    }
+    // Declared sabotage: drop every correlation, silently reverting the
+    // propagation to the independence assumption.
+    if sab_correlate_rho() {
         return
     }
     FO_COV_RHO[fo_cov_rho_idx(i, j) as usize] = rho
@@ -1315,6 +1320,73 @@ fn lower_aggregate_diag_enabled() -> bool with IO, Mut, Panic, Div {
         }
     }
     LOWER_DIAG_AGG_ON == 1
+}
+
+// ─── Sabotage hooks: a witness that never fails is not a witness ────────────
+//
+// codegen_x86_linux.sio has carried exactly one of these since the i256 work
+// (SOUNIO_WIDE_MUL_SABOTAGE), with the right comment above it. One hook means
+// the witness gate can only certify one family: run an epistemic fixture under
+// it and the sabotage is inert, the fixture passes anyway, and the gate --
+// correctly -- refuses to certify. It was the only instrument in a long night
+// that told the truth about its own limits, and it was ignored four times
+// because there was no way to give it what it asked for.
+//
+// These hooks exist so a witness can declare, in its own header, the specific
+// mutilation it claims to detect. The gate then reads that declaration instead
+// of knowing about domains. A witness that declares nothing is not failed --
+// it is counted as UNVERIFIED, which is the honest state for most of them.
+//
+// Memoised for the reason in the block above: read_env allocates and the bump
+// allocator never reclaims. CHECKED is separate from the value because "off"
+// and "not read yet" are different states.
+
+var SAB_QUOTIENT_HESSIAN_ON: i64 = 0
+var SAB_QUOTIENT_HESSIAN_CHECKED: i64 = 0
+
+// Restores the pre-#2144 behaviour: division clears the Hessian instead of
+// applying the quotient rule. Kills any witness that asserts a non-zero
+// second-order term for a ratio.
+fn sab_quotient_hessian() -> bool with IO, Mut, Panic, Div {
+    if SAB_QUOTIENT_HESSIAN_CHECKED == 0 {
+        SAB_QUOTIENT_HESSIAN_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SABOTAGE_QUOTIENT_HESSIAN"), "1") {
+            SAB_QUOTIENT_HESSIAN_ON = 1
+        }
+    }
+    SAB_QUOTIENT_HESSIAN_ON == 1
+}
+
+var SAB_HESSIAN_CHAIN_ON: i64 = 0
+var SAB_HESSIAN_CHAIN_CHECKED: i64 = 0
+
+// Drops the transcendental chain rule, so hessian_of(sin(x)) returns the
+// confident 0.0 it returned before #2119. Kills any witness that asserts a
+// second-order term through sin, cos or exp.
+fn sab_hessian_chain() -> bool with IO, Mut, Panic, Div {
+    if SAB_HESSIAN_CHAIN_CHECKED == 0 {
+        SAB_HESSIAN_CHAIN_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SABOTAGE_HESSIAN_CHAIN"), "1") {
+            SAB_HESSIAN_CHAIN_ON = 1
+        }
+    }
+    SAB_HESSIAN_CHAIN_ON == 1
+}
+
+var SAB_CORRELATE_RHO_ON: i64 = 0
+var SAB_CORRELATE_RHO_CHECKED: i64 = 0
+
+// Discards every recorded correlation, so the covariance matrix stays zero and
+// the propagation silently reverts to assuming independence. Kills any witness
+// that asserts a cross term.
+fn sab_correlate_rho() -> bool with IO, Mut, Panic, Div {
+    if SAB_CORRELATE_RHO_CHECKED == 0 {
+        SAB_CORRELATE_RHO_CHECKED = 1
+        if str_eq(read_env("SOUNIO_SABOTAGE_CORRELATE_RHO"), "1") {
+            SAB_CORRELATE_RHO_ON = 1
+        }
+    }
+    SAB_CORRELATE_RHO_ON == 1
 }
 
 fn ir_normalize_string_literal_name(n: Name) -> Name {
@@ -4274,6 +4346,22 @@ fn lowerer_lower_fn_item_mut(
     fd: &FnDef
 ) with Mut, Panic, Div, Alloc, IO {
     ir_instr_overflow_begin_fn()
+    // Correlations are per-function. FO_COV_RHO is a module global while the
+    // channel ids that index it are Lowerer fields reset per function, so a
+    // `correlate(a, b, 1.0)` in one function silently supplied rho to the next
+    // one to reach the same channel pair -- fabricating a dependence no source
+    // line asked for. Measured: a function that never mentions correlation read
+    // Var(c+d) = 0.16 instead of 0.10, the previous function's number entire.
+    //
+    // This reset does NOT go in begin_function_body_lowering, which announces
+    // itself as "per-function reset of vreg-keyed float/variance tables" and
+    // has zero callers in the whole tree. Everything it resets -- fo_nchan,
+    // fo_sigma2, FO_SIGMA_REG, fo_expr_sens -- is therefore never reset by it.
+    var fo_cri: i64 = 0
+    while fo_cri < 64 {
+        FO_COV_RHO[fo_cri as usize] = 0.0
+        fo_cri = fo_cri + 1
+    }
     // Seed the transcendental chain-rule entries here, on the confirmed live path.
     //
     // fo_xfer_global_reset (:3578, :9019) and lowerer_lower_program_bodies_dedup_mut
@@ -8369,6 +8457,132 @@ impl Lowerer {
         (lo, d.1)
     }
 
+    fn so_sub_or_take(self, acc: i64, x: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if x < 0 {
+            return (lo, acc)
+        }
+        if acc < 0 {
+            // 0 - x: the IR has no unary negation, so an absent accumulator
+            // still has to emit a subtraction from a materialised zero.
+            let zp = lo.emit_f64_const(0.0)
+            lo = zp.0
+            let d = lo.fresh_reg()
+            lo = d.0
+            lo = lo.emit(ir_binop_typed(d.1, zp.1, BinaryOp::OpSub, x, true, true))
+            lo = lo.emit(ir_mark_float_reg(d.1))
+            return (lo, d.1)
+        }
+        let d = lo.fresh_reg()
+        lo = d.0
+        lo = lo.emit(ir_binop_typed(d.1, acc, BinaryOp::OpSub, x, true, true))
+        lo = lo.emit(ir_mark_float_reg(d.1))
+        (lo, d.1)
+    }
+
+    fn so_div_or_none(self, a: i64, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if a < 0 || b < 0 {
+            return (lo, 0 - 1)
+        }
+        let d = lo.fresh_reg()
+        lo = d.0
+        lo = lo.emit(ir_binop_typed(d.1, a, BinaryOp::OpDiv, b, true, true))
+        lo = lo.emit(ir_mark_float_reg(d.1))
+        (lo, d.1)
+    }
+
+    // H(a/b)_jk = a_jk/b - (a_j*b_k + a_k*b_j)/b^2 - a*b_jk/b^2 + 2*a*b_j*b_k/b^3.
+    //
+    // The quotient is not the product rule wearing a reciprocal. The last term
+    // is cubic in b and has no counterpart in H(x*y); dropping it leaves a
+    // number that is right only where b_j*b_k vanishes -- that is, everywhere
+    // except the channels that made the denominator uncertain to begin with.
+    // hessian_of(a/b, kb, kb) is therefore the pin for this rule, not the
+    // mixed partial: the mixed one survives a two-term approximation.
+    fn so_combine_hess_div(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_v: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self.so_clear_expr_hess()
+        // Declared sabotage: revert to the pre-#2144 clear.
+        if sab_quotient_hessian() {
+            return lo
+        }
+        if lhs_v < 0 || rhs_v < 0 {
+            return lo
+        }
+        // b^2, b^3 and the constant 2.0, hoisted out of the channel loop.
+        let bb_p = lo.fresh_reg()
+        lo = bb_p.0
+        let bb = bb_p.1
+        lo = lo.emit(ir_binop_typed(bb, rhs_v, BinaryOp::OpMul, rhs_v, true, true))
+        lo = lo.emit(ir_mark_float_reg(bb))
+        let bbb_p = lo.fresh_reg()
+        lo = bbb_p.0
+        let bbb = bbb_p.1
+        lo = lo.emit(ir_binop_typed(bbb, bb, BinaryOp::OpMul, rhs_v, true, true))
+        lo = lo.emit(ir_mark_float_reg(bbb))
+        let two_p = lo.emit_f64_const(2.0)
+        lo = two_p.0
+        let two = two_p.1
+
+        var nch = lo.fo_nchan
+        if nch > 8 { nch = 8 }
+        var j: i64 = 0
+        while j < nch {
+            var k: i64 = j
+            while k < nch {
+                let idx = lo.so_hess_idx(j, k)
+                var acc: i64 = 0 - 1
+
+                // + a_jk / b
+                let t1 = lo.so_div_or_none(hL[idx as usize], rhs_v)
+                lo = t1.0
+                let a1 = lo.so_add_or_take(acc, t1.1)
+                lo = a1.0
+                acc = a1.1
+
+                // - (a_j*b_k + a_k*b_j) / b^2
+                let c1 = lo.so_mul_or_none(sL[j as usize], sR[k as usize])
+                lo = c1.0
+                let c2 = lo.so_mul_or_none(sL[k as usize], sR[j as usize])
+                lo = c2.0
+                let cs = lo.so_add_or_take(c1.1, c2.1)
+                lo = cs.0
+                let t2 = lo.so_div_or_none(cs.1, bb)
+                lo = t2.0
+                let a2 = lo.so_sub_or_take(acc, t2.1)
+                lo = a2.0
+                acc = a2.1
+
+                // - a*b_jk / b^2
+                let m3 = lo.so_mul_or_none(lhs_v, hR[idx as usize])
+                lo = m3.0
+                let t3 = lo.so_div_or_none(m3.1, bb)
+                lo = t3.0
+                let a3 = lo.so_sub_or_take(acc, t3.1)
+                lo = a3.0
+                acc = a3.1
+
+                // + 2*a*b_j*b_k / b^3
+                let p1 = lo.so_mul_or_none(sR[j as usize], sR[k as usize])
+                lo = p1.0
+                let p2 = lo.so_mul_or_none(p1.1, lhs_v)
+                lo = p2.0
+                let p3 = lo.so_mul_or_none(p2.1, two)
+                lo = p3.0
+                let t4 = lo.so_div_or_none(p3.1, bbb)
+                lo = t4.0
+                let a4 = lo.so_add_or_take(acc, t4.1)
+                lo = a4.0
+                acc = a4.1
+
+                lo.so_expr_hess[idx as usize] = acc
+                k = k + 1
+            }
+            j = j + 1
+        }
+        lo
+    }
+
     // H(x*y)_jk = Hx_jk*y + x*Hy_jk + Sx_j*Sy_k + Sx_k*Sy_j.
     //
     // The last two terms are why this cannot be derived from the gradient
@@ -9614,7 +9828,11 @@ impl Lowerer {
             // hessian_of(x*x) returned the correct 2.0: the second-order
             // machinery had storage and a product rule but no chain rule, so
             // every transcendental silently contributed nothing.
-            if lo.so_enabled {
+            //
+            // Declared sabotage: drop the chain rule and return that confident
+            // zero again, so a witness asserting H(sin(x)) has something to die
+            // of.
+            if lo.so_enabled && !sab_hessian_chain() {
                 let idx2 = fo_xfer_global_lookup(dname)
                 let d2name = fo_xfer_derivative_name(idx2)
                 if d2name.len > 0 {
@@ -10445,10 +10663,11 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
-                    // No second-order rule for division in this increment. Clear
-                    // rather than leave an operand's Hessian standing in for the
-                    // quotient's -- that would be a wrong number, not a missing one.
-                    lo = lo.so_clear_expr_hess()
+                    if lo.so_enabled {
+                        lo = lo.so_combine_hess_div(hL, hR, sL, sR, lhs_v, rhs_v)
+                    } else {
+                        lo = lo.so_clear_expr_hess()
+                    }
                     lo = lo.fo_combine_sens_div(sL, sR, lhs_v, rhs_v)
                     return lo.fo_emit_var_from_sens()
                 }
@@ -15905,11 +16124,34 @@ impl Lowerer {
                         let p1 = lo.lower_expr_variance_ref(&(*l1).head)
                         lo = p1.0
                         let cj = lo.fo_primary_channel()
+                        // Both literal forms, matching the checker's
+                        // correlate_rho_literal: an ExprFloatLit, and the
+                        // `0.0 - x` ExprBinary this dialect uses to write a
+                        // negative literal. Reading only the first turned every
+                        // negative correlation into independence in silence --
+                        // and a negative rho is the case the builtin exists for.
                         var rho: f64 = 0.0
                         match (*l1).tail {
                             Some(l2) => {
                                 if (*l2).head.kind == ExprKind::ExprFloatLit {
                                     rho = (*l2).head.float_val
+                                }
+                                if (*l2).head.kind == ExprKind::ExprBinary && (*l2).head.bin_op == BinaryOp::OpSub {
+                                    match (*l2).head.left {
+                                        Some(lz) => {
+                                            match (*l2).head.right {
+                                                Some(rz) => {
+                                                    if (*lz).kind == ExprKind::ExprFloatLit && (*rz).kind == ExprKind::ExprFloatLit {
+                                                        if (*lz).float_val == 0.0 {
+                                                            rho = 0.0 - (*rz).float_val
+                                                        }
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                             _ => {}

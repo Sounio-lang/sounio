@@ -12,12 +12,16 @@
 #   //@ ignore                — skip this test
 #   //@ check-only            — compile only, do not execute
 #   //@ expect-stdout: X      — stdout must contain X (run-pass only)
+#   //@ expect-stdout-contains: X — stdout must contain X (run-pass only)
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
 #   //@ requires: FEATURE     — feature dependency (e.g., requires: gpu)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
+#
+# Unknown `expect-*` / `expected-*` header keys fail the test. They used to
+# be skipped silently, so `expect-stdout-contains` asserted nothing.
 #
 # Usage:
 #   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
@@ -249,11 +253,33 @@ run_test() {
     local skip_if=""
     local requires=""
     local known_reason=""
+    local unknown_expect=""
     
     # Parse annotations
     while IFS= read -r line; do
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
+        fi
+        # Fail closed on invented stdout assertions. `expect-stdout-contains`
+        # was silently ignored because the harness only extracted
+        # `expect-stdout:`; the same hole would swallow `expected-output` or
+        # `expect-stdout-has`. Key extraction is identifier-only; the payload
+        # is still read by parameter expansion below (the vacuous-regex bug).
+        local expect_line="${line%"${line##*[![:space:]]}"}"
+        expect_line="${expect_line#"${expect_line%%[![:space:]]*}"}"
+        expect_line="${expect_line%$'\r'}"
+        if [[ "$expect_line" == "//@ expect"* || "$expect_line" == "//@ expected"* ]]; then
+            local expect_key="${expect_line#//@ }"
+            expect_key="${expect_key%%:*}"
+            expect_key="${expect_key%% *}"
+            case "$expect_key" in
+                expect-stdout|expect-stdout-contains) ;;
+                *)
+                    if [[ -z "$unknown_expect" ]]; then
+                        unknown_expect="$expect_key"
+                    fi
+                    ;;
+            esac
         fi
         case "$line" in
             *"//@ run-pass"*) is_run_pass=true ;;
@@ -301,6 +327,11 @@ run_test() {
 
     # Check filter
     if ! test_matches_filter "$basename"; then
+        return
+    fi
+
+    if [[ -n "$unknown_expect" ]]; then
+        echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"relfile\":\"$rel_file\",\"time\":0,\"output\":\"unknown annotation: $unknown_expect (expected: expect-stdout|expect-stdout-contains)\",\"idx\":$idx}" > "$output_file"
         return
     fi
     
@@ -357,6 +388,7 @@ run_test() {
     
     # Read expected patterns
     local expect_stdout=()
+    local expect_stdout_contains=()
     local error_patterns=()
     while IFS= read -r line; do
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
@@ -372,6 +404,9 @@ run_test() {
         # metacharacter class to get this wrong for either annotation.
         if [[ "$line" == "//@ expect-stdout: "* ]]; then
             expect_stdout+=("${line#*//@ expect-stdout: }")
+        fi
+        if [[ "$line" == "//@ expect-stdout-contains: "* ]]; then
+            expect_stdout_contains+=("${line#*//@ expect-stdout-contains: }")
         fi
         if [[ "$line" == "//@ error-pattern: "* ]]; then
             error_patterns+=("${line#*//@ error-pattern: }")
@@ -422,6 +457,15 @@ run_test() {
                     break
                 fi
             done
+            if [[ $exit_code -eq 0 ]]; then
+                for pattern in "${expect_stdout_contains[@]}"; do
+                    if ! grep -qF -- "$pattern" <<<"$output"; then
+                        exit_code=1
+                        test_output="missing stdout contains: $pattern"
+                        break
+                    fi
+                done
+            fi
         fi
         
     elif $is_compile_fail; then

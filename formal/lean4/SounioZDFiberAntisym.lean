@@ -25398,16 +25398,23 @@ theorem s3_recursion_pow2 (p j : Nat) :
     (from `2β = 8β + 264A`) and a CONSTANT that is not an integer — `γ = 8γ − 464` gives
     `γ = 464/7`.  That is why the theorem below is stated as `7 · s3 = …` rather than `s3 = …`:
     the honest closed form carries the geometric sum `(8^j − 1)/7`, and clearing the denominator
-    is cheaper than introducing a `Σ 8^i` definition.  Everything is integral — `8^j ≡ 1 mod 7`
-    makes `464 − 576·8^j` divisible by `7` at every `j`.
+    is cheaper than introducing a `Σ 8^i` definition.  Everything is integral, and the reason
+    takes TWO facts, not one: `8 ≡ 1 (mod 7)` so `8^j ≡ 1`, AND `464 ≡ 576 ≡ 2 (mod 7)`.
+    Together they give `464 − 576·8^j ≡ 2 − 2 ≡ 0 (mod 7)` at every `j`.  (Stating only the
+    `8^j ≡ 1` half, as an earlier draft of this docstring did, does not establish it: the
+    congruence of the two coefficients to each other is what makes the difference vanish.)
 
     Numeric checks against the E5 table (`X = 2^j`, `A = 2^(p+1)`):
       `p = 3, j = 0` (level 3, `H = 16`):  `s3 = 1456`   — the value Tier 136's docstring cites
       `p = 3, j = 1` (level 4):            `s3 = 9264`   — closed form and one recursion step agree
 
-    ⚠ SCOPE.  `p ≥ 1` (the theorem is indexed by `k` with `p = k+1`), because `s3_maximal_seam`
-    is stated at `W = 2^(k+1)`.  The remaining label is the REFERENCE `W = 1`, which is the
-    concurrent lane's base case, not this one's. -/
+    ⚠ SCOPE, and what KIND of bound it is.  `p ≥ 1` (the theorem is indexed by `k` with
+    `p = k+1`).  This is a DEPENDENCY bound, not a property of the formula: it is inherited from
+    `s3_maximal_seam` being stated at `W = 2^(k+1)`, and the closed form itself remains
+    meaningful at `p = 0` (`A = 2`, giving `S(0) = 8 − 48 + 56 − 16 = 0`).  So `p = 0` is not
+    excluded because the algebra breaks there — it is excluded because this tier's base case is
+    not stated there.  That remaining label is the REFERENCE `W = 1`, which is the concurrent
+    lane's base case (Tier 166), not this one's. -/
 
 /-- **`s3` IN CLOSED FORM** at `W = 2^(k+1)`, every level above it.  With `A = 2^(k+2)` and
     `X = 2^j`:  `7·s3 = (7A³ − 126A² + 504A − 576)·X³ + 42A²·X² − 308A·X + 464`.
@@ -29368,5 +29375,116 @@ theorem cp2_level_recursion (m W : Nat) (hW : W < 2^(m+1)) (hW0 : W ≠ 0) :
   rw [hD2split] at hD2
   rw [hsplit, h01, h10, h11, hC0, hR0, hD1, hkappa]
   grind
+
+/-! ### Tier 163 — the deviation law CROSS-CHECKED against the raw definition
+
+    Tier 161 proves the law through a chain: Tier 90's decomposition, Tiers 155/157's legs,
+    Tier 159's iteration, Tier 136's seam value and — for half the base case — the concurrent
+    lane's Tier 166.  A chain that long deserves a check that does not use any of it.
+
+    Each point below is stated TWICE with the same statement: once by `decide`, which evaluates
+    `tri3` straight from the `P3` definition in the kernel, and once from `deviation_law`.  If
+    either side ever drifts, one of the two proofs stops compiling.
+
+      `j = 3, m = 3`   `D = 1728`    `= 1728 · 8⁰ · [3,3]₂`,  `[3,3]₂ = 1`
+      `j = 3, m = 4`   `D = 13824`   `= 1728 · 8¹ · [3,3]₂`
+      `j = 4, m = 4`   `D = 25920`   `= 1728 · 8⁰ · [4,3]₂`,  `[4,3]₂ = 15`
+
+    The third is the one that matters: a DIFFERENT base `j`, so it exercises the q-binomial
+    factor — the part that fails first if the base case or the `8^(m−j)` channel is wrong.
+
+    **A NEGATIVE CONTROL** (`dev_control_W12_m4`).  The law is stated only for `W = 2^j`, and
+    that restriction is NOT vacuous: at level 4, `W = 12` gives `D = 4608`, which is not of the
+    form `1728·8^i·[j,3]₂` for any `i, j` — it would need `8^i·[j,3]₂ = 8/3`.  So the law really
+    does fail off the power-of-two labels, rather than holding there for uninteresting reasons.
+
+    Measured alongside it (`#eval`, MEASUREMENT not proof): at level 4, `W = 3` and `W = 5` give
+    `D = 0`, while `W = 24` gives `D = 13824` — the same value as `W = 8`.  `24 = 11000₂` and
+    `8 = 1000₂` share their lowest set bit; `12 = 1100₂` has lowest set bit `4` and does NOT
+    reproduce `W = 4`'s value (`D = 0`).  So the deviation is not a function of `lsb(W)` alone,
+    and no claim of that shape is made here.
+
+    Kernel cost: `2^4` runs in ~3 s, each `2^5` in ~16 s; this tier adds ~50 s to a full build.
+    Level 5 (`2^6`) is MEASUREMENT only — `#eval` gives `−53072` at the reference and `57520` at
+    `W = 8`, so `D = 110592 = 1728·8²` — and is deliberately NOT reproduced as a kernel `decide`:
+    it is not evidence of the same strength as the three checked points, and the build time is
+    not worth it.
+
+    The `decide` proofs depend on `[propext]` alone. -/
+
+set_option maxRecDepth 100000 in
+/-- `j = 3, m = 3`: `D = 1728`, by kernel evaluation of `P3`. -/
+theorem dev_check_j3_m3 :
+    tri3 (2^4) (fun x y => P3 x y 8 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 1728 := by
+  decide
+
+/-- The same value, from `deviation_law`. -/
+theorem dev_from_law_j3_m3 :
+    tri3 (2^4) (fun x y => P3 x y 8 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 1728 := by
+  have h := deviation_law 0 0
+  simp only [Nat.zero_add, Nat.add_zero, show 3+1 = 4 from rfl,
+    show (2:Nat)^3 = 8 from rfl] at h
+  have e0 : ((2^0 : Nat) : Int) = 1 := by decide
+  have e4 : ((2^4 : Nat) : Int) = 16 := by decide
+  rw [e0, e4] at h
+  omega
+
+set_option maxRecDepth 1000000 in
+/-- `j = 3, m = 4`: `D = 13824`, by kernel evaluation of `P3`. -/
+theorem dev_check_j3_m4 :
+    tri3 (2^5) (fun x y => P3 x y 8 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 13824 := by
+  decide
+
+/-- The same value, from `deviation_law` — the `8^(m−j)` channel at one step. -/
+theorem dev_from_law_j3_m4 :
+    tri3 (2^5) (fun x y => P3 x y 8 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 13824 := by
+  have h := deviation_law 0 1
+  simp only [Nat.zero_add, show 3+1+1 = 5 from rfl, show 3+1 = 4 from rfl,
+    show (2:Nat)^3 = 8 from rfl] at h
+  have e1 : ((2^1 : Nat) : Int) = 2 := by decide
+  have e4 : ((2^4 : Nat) : Int) = 16 := by decide
+  rw [e1, e4] at h
+  omega
+
+set_option maxRecDepth 1000000 in
+/-- `j = 4, m = 4`: `D = 25920 = 1728·15`, by kernel evaluation of `P3`.  **The q-binomial
+    check** — a different base `j`, so `[4,3]₂ = 15` has to come out right. -/
+theorem dev_check_j4_m4 :
+    tri3 (2^5) (fun x y => P3 x y 16 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 25920 := by
+  decide
+
+/-- The same value, from `deviation_law`. -/
+theorem dev_from_law_j4_m4 :
+    tri3 (2^5) (fun x y => P3 x y 16 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 25920 := by
+  have h := deviation_law 1 0
+  simp only [show 1+3 = 4 from rfl, show 4+1 = 5 from rfl,
+    show (2:Nat)^4 = 16 from rfl] at h
+  have e0 : ((2^0 : Nat) : Int) = 1 := by decide
+  have e5 : ((2^5 : Nat) : Int) = 32 := by decide
+  rw [e0, e5] at h
+  omega
+
+set_option maxRecDepth 100000 in
+/-- `j = 1, m = 3` — two steps of the `8^(m−j)` channel in the VANISHING branch: `[1,3]₂ = 0`,
+    so the law predicts `D = 0`, and it is. -/
+theorem dev_check_j1_m3 :
+    tri3 (2^4) (fun x y => P3 x y 2 3) - tri3 (2^4) (fun x y => P3 x y 1 3) = 0 := by
+  decide
+
+set_option maxRecDepth 1000000 in
+/-- **NEGATIVE CONTROL.**  Off the power-of-two labels the law fails: at level 4, `W = 12` gives
+    `D = 4608`, and `4608 = 1728·8^i·[j,3]₂` has no solution (it needs `8^i·[j,3]₂ = 8/3`).
+    The restriction to `W = 2^j` in `deviation_law` is therefore doing real work.
+
+    **`W = 2^j` means EXACTLY `2^j` — not a multiple of one, and not a divisor.**  The two
+    measurements in the section header are what force that reading, and they pull in opposite
+    directions: `W = 24` is a multiple of `8` and DOES reproduce `W = 8`'s deviation (13824),
+    while `W = 12` is a multiple of `4` and does NOT reproduce `W = 4`'s (which is `0`, since
+    `[2,3]₂ = 0`) — it gives `4608`.  So neither "multiples of a power of two inherit its
+    deviation" nor "they do not" is true in general, and this theorem is the second half of that
+    pair.  Read the hypothesis as an equality on `W`, never as a divisibility condition. -/
+theorem dev_control_W12_m4 :
+    tri3 (2^5) (fun x y => P3 x y 12 4) - tri3 (2^5) (fun x y => P3 x y 1 4) = 4608 := by
+  decide
 
 end SounioZDFiberAntisym
