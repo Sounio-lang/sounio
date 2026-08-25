@@ -1,11 +1,13 @@
 # Loom Three-Agent Recovery Canary
 
-Run ID: `20260825T200338Z-3761569`
+Run ID: `20260825T221959Z-685009`
 
 This retained canary tested three real agent CLI processes under independent
 Loom Guardians: Codex, Grok, and MiniMax through OpenCode. The hypothesis,
 control, and acceptance criteria were written to `prereg.json` before any kernel
-was destroyed.
+was destroyed. All three native processes were launched through the same
+`loom-provider-abi-v1` `provider-start` surface with explicit context isolation
+and unsafe-auto policy.
 
 ## Result
 
@@ -15,7 +17,7 @@ was destroyed.
 - Guardian, CLI, and Loom instance identities preserved: 3 of 3
 - physical tool receipts: 3
 - tokens recovered from durable replay: 3
-- sequential recovery interval: 549 ms
+- sequential recovery interval: 548 ms
 
 The physical receipt is the control against a model merely printing a success
 claim. The canonical `sounio_loom_selftest.sh` separately mutates one byte of an

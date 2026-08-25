@@ -22,6 +22,8 @@ scripts/dev/build_sounio_loom.sh
 The stable `bin/sounio-loom` launcher selects the content-addressed shared
 runtime when one is active. Set `SOUNIO_COORD_RUNTIME_MODE=local` to force the
 source-worktree build for diagnosis.
+`bin/loom` is the product-facing alias; `bin/sounio-loom` remains the compatible
+launcher used by existing automation.
 
 ## Operate
 
@@ -74,6 +76,38 @@ of `output.bin` is therefore refused by `guardian-output:digest-mismatch`, not b
 an incidental cursor or file-length check. This is an integrity check, not a
 monotonic-freshness proof against replaying an older, internally consistent
 output and journal pair.
+
+## Provider ABI v1
+
+Loom owns the public control surface while provider CLIs remain isolated native
+adapters. The first ABI exposes:
+
+```sh
+bin/loom provider-list --json
+bin/loom provider-status --provider codex --json
+bin/loom provider-plan --provider codex --session-id UUID --cwd DIR \
+  --prompt-file PROMPT --isolate-context --json
+bin/loom provider-start --provider codex --agent codex --lane work \
+  --session-id UUID --cwd DIR --prompt-file PROMPT --isolate-context
+bin/loom provider-auth-login --provider codex
+```
+
+`provider-plan` never emits the raw prompt. It publishes its byte length and
+SHA-256 digest and replaces the argv value with a digest-bearing placeholder.
+Provider credentials stay under the provider's native authority; Loom invokes
+the native status or login operation and never reads or copies token files.
+Dangerous auto-approval flags are absent unless `--unsafe-auto` is explicit.
+
+`provider-start` executes the selected CLI without a shell through an internal
+OCaml trampoline that closes stdin and removes inherited Codex, Claude, and tmux
+harness identity variables. `--isolate-context` maps provider-specific
+reductions in memory, rules, and subagent context; it is deliberately not
+described as a sandbox. The provider remains the Guardian-owned child, so kernel
+recovery does not replace its process identity. Codex, Claude Code, Grok, and
+OpenCode are supported. Their stream, authentication, and session-binding
+differences remain typed rather than being flattened into a false common
+denominator. The complete contract and current boundaries are in
+`tools/loom/PROVIDER_ABI_V1.md`.
 
 ## Durable Obligations
 

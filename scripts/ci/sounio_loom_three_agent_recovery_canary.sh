@@ -8,25 +8,21 @@ RUN_ID="${SOUNIO_LOOM_CANARY_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 RUN_ROOT="${SOUNIO_LOOM_CANARY_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-three-agent.${RUN_ID}.XXXXXX")}"
 STATE_DIR="$RUN_ROOT/state"
 EVIDENCE_DIR="$RUN_ROOT/evidence"
-LOOM="$ROOT_DIR/bin/sounio-loom"
+LOOM="$ROOT_DIR/bin/loom"
 WAIT_SECONDS="${SOUNIO_LOOM_CANARY_WAIT_SECONDS:-240}"
 SLEEP_SECONDS="${SOUNIO_LOOM_CANARY_AGENT_SLEEP_SECONDS:-12}"
 
 AGENTS=(codex grok minimax)
-CLEAN_AGENT_ENV=(
-  /usr/bin/env
-  -u CODEX_SESSION_ID
-  -u CODEX_THREAD_ID
-  -u CODEX_CI
-  -u TMUX
-  -u TMUX_PANE
-  -u TMUX_TMPDIR
-)
 declare -A lanes workdirs receipts tokens
 declare -A kernels_before kernels_after guardians harnesses instances
+declare -A providers models
 lanes[codex]='real-codex'
 lanes[grok]='real-grok'
 lanes[minimax]='real-minimax'
+providers[codex]='codex'
+providers[grok]='grok'
+providers[minimax]='opencode'
+models[minimax]='minimax/MiniMax-M2.7'
 
 mkdir -p "$STATE_DIR" "$EVIDENCE_DIR/snapshots" "$RUN_ROOT/work"
 
@@ -88,10 +84,11 @@ jq -n \
   --arg hypothesis 'Three real agent CLIs continue while all disposable Loom kernels are absent, then replay their work under recovered kernels without changing guardian, harness, or instance identity.' \
   --arg control 'Each agent must create a unique receipt through its own Bash tool; a textual imitation without the receipt fails.' \
   --arg acceptance 'All three receipts and replay tokens exist; every recovered kernel PID changes; every guardian PID, harness PID, and instance ID remains unchanged.' \
+  --arg launch_surface 'loom-provider-abi-v1' \
   --arg codex "$(command -v codex)" \
   --arg grok "$(command -v grok)" \
   --arg minimax "$(command -v opencode)" \
-  '{schema:$schema,run_id:$run_id,started_utc:$started_utc,hypothesis:$hypothesis,control:$control,acceptance:$acceptance,executables:{codex:$codex,grok:$grok,minimax_via_opencode:$minimax}}' \
+  '{schema:$schema,run_id:$run_id,started_utc:$started_utc,hypothesis:$hypothesis,control:$control,acceptance:$acceptance,launch_surface:$launch_surface,executables:{codex:$codex,grok:$grok,minimax_via_opencode:$minimax}}' \
   > "$EVIDENCE_DIR/prereg.json"
 
 agent_prompt() {
@@ -102,34 +99,25 @@ agent_prompt() {
 
 start_agent() {
   local agent="$1" prompt session_id
+  local -a arguments
   prompt="$(agent_prompt "$agent")"
   session_id="$(cat /proc/sys/kernel/random/uuid)"
-  case "$agent" in
-    codex)
-      loom start --state-dir "$STATE_DIR" --agent "$agent" --lane "${lanes[$agent]}" \
-        --session-id "$session_id" --cwd "${workdirs[$agent]}" -- \
-        /bin/bash -c 'exec "$@" </dev/null' loom-headless \
-          "${CLEAN_AGENT_ENV[@]}" codex exec --ephemeral --skip-git-repo-check \
-          --ignore-rules --dangerously-bypass-approvals-and-sandbox \
-          -C "${workdirs[$agent]}" "$prompt"
-      ;;
-    minimax)
-      loom start --state-dir "$STATE_DIR" --agent "$agent" --lane "${lanes[$agent]}" \
-        --session-id "$session_id" --cwd "${workdirs[$agent]}" -- \
-        /bin/bash -c 'exec "$@" </dev/null' loom-headless \
-          "${CLEAN_AGENT_ENV[@]}" opencode run --pure --auto \
-          -m minimax/MiniMax-M2.7 --dir "${workdirs[$agent]}" "$prompt"
-      ;;
-    grok)
-      loom start --state-dir "$STATE_DIR" --agent "$agent" --lane "${lanes[$agent]}" \
-        --session-id "$session_id" --cwd "${workdirs[$agent]}" -- \
-        /bin/bash -c 'exec "$@" </dev/null' loom-headless \
-          "${CLEAN_AGENT_ENV[@]}" grok --no-leader --cwd "${workdirs[$agent]}" \
-          --always-approve --no-memory --no-subagents \
-          --disable-web-search --max-turns 2 --output-format streaming-json -p "$prompt"
-      ;;
-    *) fail "unknown agent: $agent" ;;
-  esac
+  arguments=(
+    provider-start
+    --provider "${providers[$agent]}"
+    --state-dir "$STATE_DIR"
+    --agent "$agent"
+    --lane "${lanes[$agent]}"
+    --session-id "$session_id"
+    --cwd "${workdirs[$agent]}"
+    --prompt "$prompt"
+    --isolate-context
+    --unsafe-auto
+  )
+  if [[ -n "${models[$agent]:-}" ]]; then
+    arguments+=(--model "${models[$agent]}")
+  fi
+  loom "${arguments[@]}"
 }
 
 for agent in "${AGENTS[@]}"; do
@@ -226,7 +214,7 @@ jq -n \
   --arg codex_instance "${instances[codex]}" \
   --arg grok_instance "${instances[grok]}" \
   --arg minimax_instance "${instances[minimax]}" \
-  '{schema:$schema,run_id:$run_id,completed_utc:$completed_utc,pass:true,real_agents:["codex","grok","minimax"],presentation_kernels_destroyed:3,recovery_ms:$recovery_ms,identity_preserved:true,tool_receipts:3,replay_tokens:3,instances:{codex:$codex_instance,grok:$grok_instance,minimax:$minimax_instance}}' \
+  '{schema:$schema,run_id:$run_id,completed_utc:$completed_utc,pass:true,launch_surface:"loom-provider-abi-v1",real_agents:["codex","grok","minimax"],presentation_kernels_destroyed:3,recovery_ms:$recovery_ms,identity_preserved:true,tool_receipts:3,replay_tokens:3,instances:{codex:$codex_instance,grok:$grok_instance,minimax:$minimax_instance}}' \
   > "$EVIDENCE_DIR/outcome.json"
 
 (cd "$EVIDENCE_DIR" && sha256sum prereg.json runtime.txt pre-crash-status.txt \
