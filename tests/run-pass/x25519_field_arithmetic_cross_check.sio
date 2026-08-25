@@ -13,8 +13,11 @@
 //   1. (a+b)^2 = a^2 + b^2 + 2ab   -- relates fe_sqr, fe_add, fe_mul
 //   2. (a-b)+b = a and (a+b)-a = b -- relates fe_sub to fe_add
 //
-// Uses 5 non-trivial byte patterns (distinct from Step 1's simple
-// 1/2/42 values), each combined pairwise with the next for 4 pairs.
+// Uses 5 full-width field elements (distinct from Step 1's simple
+// 1/2/42 values, and -- per a 2026-08-25 review finding -- with every one
+// of their 32 encoded bytes non-zero, not just a handful of scattered
+// bytes, so all 10 limbs are actually exercised; see make_fe below), each
+// combined pairwise with the next for 4 pairs.
 use crypto::x25519::*
 
 fn fe_bytes_equal(x: &[u8;32], y: &[u8;32]) -> bool {
@@ -67,20 +70,25 @@ fn check_sub_identity(a: &FieldElement, b: &FieldElement) -> bool {
     fe_bytes_equal(&b_bytes, &back_to_b_bytes)
 }
 
+// make_fe: builds a FULL-WIDTH field element -- every one of the 32
+// bytes is non-zero and derived from all 5 seeds together, so all 10
+// limbs end up populated near their nominal 25/26-bit range rather than
+// mostly zero. This replaces an earlier version of this test that only
+// set 5 of 32 bytes (review finding, 2026-08-25): a post-hoc mutation
+// audit showed that sparse construction left several limbs at zero or
+// far below their nominal range, and the resulting test caught only 6 of
+// 7 injected arithmetic mutations. Every byte here is in [1,255] (never
+// zero) via `(...) % 255 + 1`, and depends on the byte position `i` as
+// well as all 5 seeds, so adjacent bytes differ and no byte is
+// coincidentally zero regardless of which seeds are passed.
 fn make_fe(b0: i64, b1: i64, b2: i64, b3: i64, b4: i64) -> FieldElement {
-    // Scatters 5 non-trivial byte values across a 32-byte little-endian
-    // buffer at fixed, spread-out offsets (0, 6, 13, 20, 29) chosen to
-    // cross several of the 10 limbs' bit boundaries (limb boundaries sit
-    // at bytes ~3.25, 6.5, 9.6, 13, 16, ... -- offsets 6, 13, 20, 29 each
-    // land inside a different limb than offset 0), so these values are
-    // genuinely non-trivial with respect to the limb decomposition, not
-    // just "large numbers that happen to fit in limb 0".
     var buf: [u8;32] = [0;32]
-    buf[0] = (b0 & 255) as u8
-    buf[6] = (b1 & 255) as u8
-    buf[13] = (b2 & 255) as u8
-    buf[20] = (b3 & 255) as u8
-    buf[29] = (b4 & 255) as u8
+    var i: i64 = 0
+    while i < 32 {
+        let v = (b0 * (i + 1) + b1 * (i + 2) + b2 * (i + 3) + b3 * (i + 5) + b4 * (i + 7) + i * 13 + 1) % 255 + 1
+        buf[i as usize] = (v & 255) as u8
+        i = i + 1
+    }
     fe_from_bytes(&buf)
 }
 
