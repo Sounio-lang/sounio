@@ -71,8 +71,16 @@ obligation automatically. The message file digest becomes the immutable work
 identity. New requests carry `obligation_schema=loom-durable-obligation-v1`, so
 reconciliation ignores historical messages created before this contract. Set
 `SOUNIO_COORD_DURABLE_OBLIGATIONS=0` only when deliberately exercising the
-legacy message-only fallback. `obligation-consume` binds acceptance to a
-verified process generation under its own expiring lease;
+legacy message-only fallback. The shared installer also writes an immutable
+`loom-obligation-activation.v1` watermark beside coordination state. Exactly
+directed requests emitted by pre-upgrade clients after that epoch are reconciled
+as obligations even when their stale launcher cannot write the schema field;
+older historical requests remain outside the obligation system. A current client
+using the fallback writes `obligation_opt_out=1`, making that exclusion explicit
+and auditable instead of indistinguishable from a stale client. Inbox hooks and
+the obligation supervisor run the bridge, so enforcement lives in shared
+authority rather than in the worktree-local launcher. `obligation-consume`
+binds acceptance to a verified process generation under its own expiring lease;
 `obligation-claim` creates one renewable exclusive claim;
 `obligation-interrupt` fences that claim; `obligation-recover` changes the
 generation; and `obligation-complete` requires distinct, non-empty outcome and

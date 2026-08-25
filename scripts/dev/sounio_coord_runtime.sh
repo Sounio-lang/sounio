@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.24.6
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.25.7
 
 usage() {
   cat <<'USAGE'
@@ -166,6 +166,7 @@ esac
 REPO_KEY="$(printf '%s' "$GIT_COMMON_DIR" | cksum | awk '{print $1}')"
 LEGACY_STATE_DIR="${TMPDIR:-/tmp}/sounio-coord/$REPO_KEY"
 DURABLE_STATE_DIR="$GIT_COMMON_DIR/sounio-coord-state"
+OBLIGATION_ACTIVATION_FILE="$DURABLE_STATE_DIR/loom-obligation-activation.v1"
 
 migrate_legacy_state() {
   local lock_file="$GIT_COMMON_DIR/.sounio-coord-state-migration.lock"
@@ -582,6 +583,7 @@ load_message() {
   M_THREAD_ID=''
   M_REPLY_TO=''
   M_OBLIGATION_SCHEMA=''
+  M_OBLIGATION_OPT_OUT=''
   M_COMMIT_SHA=''
   M_EXPERIMENT_ID=''
   M_EXPERIMENT_PREREG=''
@@ -610,6 +612,7 @@ load_message() {
       thread_id=*) M_THREAD_ID="${line#thread_id=}" ;;
       reply_to=*) M_REPLY_TO="${line#reply_to=}" ;;
       obligation_schema=*) M_OBLIGATION_SCHEMA="${line#obligation_schema=}" ;;
+      obligation_opt_out=*) M_OBLIGATION_OPT_OUT="${line#obligation_opt_out=}" ;;
       commit_sha=*) M_COMMIT_SHA="${line#commit_sha=}" ;;
       experiment_id=*) M_EXPERIMENT_ID="${line#experiment_id=}" ;;
       experiment_prereg=*) M_EXPERIMENT_PREREG="${line#experiment_prereg=}" ;;
@@ -2373,6 +2376,54 @@ coord_obligation_invoke() {
   "$loom" "$@" --state-dir "$STATE_DIR"
 }
 
+coord_obligation_exec() {
+  local loom
+  loom="$(coord_loom_obligation_runtime)"
+  exec "$loom" "$@" --state-dir "$STATE_DIR"
+}
+
+coord_load_obligation_activation() {
+  local line
+  COORD_OBLIGATION_ACTIVATION_SCHEMA=''
+  COORD_OBLIGATION_ACTIVATION_EPOCH=''
+  COORD_OBLIGATION_ACTIVATION_RUNTIME=''
+  [[ -f "$OBLIGATION_ACTIVATION_FILE" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      schema=*) COORD_OBLIGATION_ACTIVATION_SCHEMA="${line#schema=}" ;;
+      activated_epoch=*) COORD_OBLIGATION_ACTIVATION_EPOCH="${line#activated_epoch=}" ;;
+      runtime_id=*) COORD_OBLIGATION_ACTIVATION_RUNTIME="${line#runtime_id=}" ;;
+    esac
+  done < "$OBLIGATION_ACTIVATION_FILE"
+  [[ "$COORD_OBLIGATION_ACTIVATION_SCHEMA" == loom-obligation-activation-v1 &&
+    "$COORD_OBLIGATION_ACTIVATION_EPOCH" =~ ^[1-9][0-9]*$ &&
+    -n "$COORD_OBLIGATION_ACTIVATION_RUNTIME" ]] ||
+    die "invalid durable obligation activation watermark: $OBLIGATION_ACTIVATION_FILE"
+}
+
+coord_obligation_contract_loaded_message() {
+  COORD_OBLIGATION_CONTRACT_SOURCE=''
+  if [[ -n "$M_OBLIGATION_SCHEMA" && -n "$M_OBLIGATION_OPT_OUT" ]]; then
+    return 2
+  fi
+  if [[ -n "$M_OBLIGATION_SCHEMA" ]]; then
+    [[ "$M_OBLIGATION_SCHEMA" == loom-durable-obligation-v1 ]] || return 2
+    COORD_OBLIGATION_CONTRACT_SOURCE=marked
+    return 0
+  fi
+  if [[ -n "$M_OBLIGATION_OPT_OUT" ]]; then
+    [[ "$M_OBLIGATION_OPT_OUT" == 1 ]] || return 2
+    return 1
+  fi
+  coord_load_obligation_activation || return 1
+  [[ "$M_CREATED_EPOCH" =~ ^[0-9]+$ ]] || return 2
+  if ((M_CREATED_EPOCH >= COORD_OBLIGATION_ACTIVATION_EPOCH)); then
+    COORD_OBLIGATION_CONTRACT_SOURCE=legacy
+    return 0
+  fi
+  return 1
+}
+
 coord_obligation_message() {
   local message_id="$1" message_file
   message_file="$MESSAGES_DIR/$(slug "$message_id").message"
@@ -2382,8 +2433,20 @@ coord_obligation_message() {
   [[ "$M_KIND" == request ]] || die "message is not a request: $message_id"
   [[ -n "$M_TO_AGENT" && -n "$M_TO_LANE" ]] || \
     die "durable obligations require an exactly directed request"
-  [[ "$M_OBLIGATION_SCHEMA" == loom-durable-obligation-v1 ]] || \
-    die "request predates the durable obligation schema: $message_id"
+  if [[ -z "$M_OBLIGATION_SCHEMA" && "$M_OBLIGATION_OPT_OUT" == 1 ]]; then
+    die "request explicitly opted out of durable obligations: $message_id"
+  fi
+  local contract_status
+  if coord_obligation_contract_loaded_message; then
+    contract_status=0
+  else
+    contract_status=$?
+  fi
+  case "$contract_status" in
+    0) ;;
+    1) die "request is outside the durable obligation activation boundary: $message_id" ;;
+    *) die "request has an invalid durable obligation contract: $message_id" ;;
+  esac
   COORD_OBLIGATION_MESSAGE_FILE="$message_file"
 }
 
@@ -2525,37 +2588,101 @@ coord_obligation_projection_command() {
 
 coord_obligation_reconcile_command() {
   (($# == 0)) || die "obligation-reconcile does not accept arguments"
-  local message_file opened=0
+  local message_file opened=0 marked=0 legacy=0 ignored=0 contract_status
   for message_file in "$MESSAGES_DIR"/*.message; do
     [[ -f "$message_file" ]] || continue
     load_message "$message_file"
-    [[ "$M_KIND" == request && -n "$M_TO_AGENT" && -n "$M_TO_LANE" && \
-      "$M_OBLIGATION_SCHEMA" == loom-durable-obligation-v1 ]] || continue
+    [[ "$M_KIND" == request && -n "$M_TO_AGENT" && -n "$M_TO_LANE" ]] || continue
+    if coord_obligation_contract_loaded_message; then
+      contract_status=0
+    else
+      contract_status=$?
+    fi
+    case "$contract_status" in
+      0)
+        case "$COORD_OBLIGATION_CONTRACT_SOURCE" in
+          marked) marked=$((marked + 1)) ;;
+          legacy) legacy=$((legacy + 1)) ;;
+          *) die "internal durable obligation contract classification failure" ;;
+        esac
+        ;;
+      1) ignored=$((ignored + 1)); continue ;;
+      *) die "request has an invalid durable obligation contract: $M_ID" ;;
+    esac
     coord_obligation_open_loaded_request "$message_file" >/dev/null
     opened=$((opened + 1))
   done
-  printf 'LOOM_OBLIGATION_RECONCILE requests=%s state=PASS\n' "$opened"
+  printf 'LOOM_OBLIGATION_RECONCILE requests=%s marked=%s legacy=%s ignored=%s state=PASS\n' \
+    "$opened" "$marked" "$legacy" "$ignored"
+}
+
+coord_obligation_supervisor_stop_children() {
+  local child
+  for child in $(jobs -pr); do
+    kill "$child" 2>/dev/null || true
+  done
 }
 
 coord_obligation_supervisor_command() {
   local action="$1"; shift
+  local once=0 interval=2 bridge_pid='' loom_pid='' supervisor_status
   local -a args=("obligation-$action")
   while (($#)); do
     case "$1" in
-      --once) args+=(--once); shift ;;
-      --interval-seconds) require_arg "$1" "$2"; args+=(--interval-seconds "$2"); shift 2 ;;
+      --once) once=1; args+=(--once); shift ;;
+      --interval-seconds)
+        require_arg "$1" "$2"
+        interval="$2"
+        args+=(--interval-seconds "$2")
+        shift 2
+        ;;
       -h|--help) usage; return 0 ;;
       *) die "unknown obligation-$action option: $1" ;;
     esac
   done
-  coord_obligation_invoke "${args[@]}"
+  if [[ "$action" != supervise ]]; then
+    coord_obligation_invoke "${args[@]}"
+    return 0
+  fi
+  [[ "$interval" =~ ^[1-9][0-9]*$ ]] && ((interval <= 60)) ||
+    die "obligation supervisor interval must be between 1 and 60 seconds"
+  coord_obligation_reconcile_command >/dev/null
+  if ((once)); then
+    coord_obligation_invoke "${args[@]}"
+    return 0
+  fi
+  trap 'coord_obligation_supervisor_stop_children' EXIT
+  trap 'coord_obligation_supervisor_stop_children; exit 130' INT
+  trap 'coord_obligation_supervisor_stop_children; exit 143' TERM
+  (
+    while sleep "$interval"; do
+      if ! (coord_obligation_reconcile_command >/dev/null); then
+        kill -TERM "$$" 2>/dev/null || true
+        exit 1
+      fi
+    done
+  ) &
+  bridge_pid=$!
+  coord_obligation_exec "${args[@]}" &
+  loom_pid=$!
+  if wait "$loom_pid"; then
+    supervisor_status=0
+  else
+    supervisor_status=$?
+  fi
+  kill "$loom_pid" 2>/dev/null || true
+  wait "$loom_pid" 2>/dev/null || true
+  kill "$bridge_pid" 2>/dev/null || true
+  wait "$bridge_pid" 2>/dev/null || true
+  trap - EXIT INT TERM
+  return "$supervisor_status"
 }
 
 send_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' to_agent='' to_lane=''
   local kind='info' message='' ttl="${SOUNIO_COORD_MESSAGE_TTL_SECONDS:-604800}"
   local thread_id='' reply_to='' message_id message_file tmp_file reply_file
-  local durable_obligation=0
+  local durable_obligation=0 explicit_obligation_opt_out=0
 
   while (($#)); do
     case "$1" in
@@ -2604,9 +2731,12 @@ send_command() {
   [[ -n "$thread_id" ]] || thread_id="$message_id"
   validate_value to-agent "$to_agent"
   validate_value to-lane "$to_lane"
-  if [[ "$kind" == request && -n "$to_agent" && -n "$to_lane" ]] && \
-    coord_durable_obligations_enabled; then
-    durable_obligation=1
+  if [[ "$kind" == request && -n "$to_agent" && -n "$to_lane" ]]; then
+    if coord_durable_obligations_enabled; then
+      durable_obligation=1
+    else
+      explicit_obligation_opt_out=1
+    fi
   fi
   tmp_file="$(mktemp "$MESSAGES_DIR/.message-write.XXXXXX")"
   {
@@ -2626,6 +2756,7 @@ send_command() {
     printf 'reply_to=%s\n' "$reply_to"
     ((durable_obligation == 0)) || \
       printf 'obligation_schema=loom-durable-obligation-v1\n'
+    ((explicit_obligation_opt_out == 0)) || printf 'obligation_opt_out=1\n'
   } > "$tmp_file"
   mv "$tmp_file" "$message_file"
   if ((durable_obligation)); then
@@ -2834,6 +2965,8 @@ inbox_command() {
   validate_value from-agent "$from_agent"
   validate_value from-lane "$from_lane"
   validate_value thread "$thread_id"
+
+  coord_obligation_reconcile_command >/dev/null
 
   message_paths=("$MESSAGES_DIR"/*.message)
   for message_file in "${message_paths[@]}"; do
