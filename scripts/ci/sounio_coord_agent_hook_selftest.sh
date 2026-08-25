@@ -39,14 +39,16 @@ git -C "$REPO" worktree add -q -b second-lane "$SECOND"
 
 run_hook() {
   local agent="$1" cwd="$2" payload="$3"
-  printf '%s\n' "$payload" | SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+  printf '%s\n' "$payload" | SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
     python3 "$cwd/scripts/dev/sounio_coord_agent_hook.py" --agent "$agent"
 }
 
 run_coord() {
   local cwd="$1"
   shift
-  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord "$@")
+  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_DURABLE_OBLIGATIONS=0 bin/sounio-coord "$@")
 }
 
 output="$(run_hook codex "$REPO" \
@@ -83,6 +85,7 @@ printf '%s\n' \
   "{\"session_id\":\"codex-target\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/own-new.sio\"}}" | \
   SOUNIO_COORD_DIR="$STATE" \
   SOUNIO_COORD_RUNTIME_MODE=local \
+  SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
   python3 "$REPO/scripts/dev/sounio_coord_agent_hook.py" --agent codex
 mv "$SECOND/bin/sounio-coord.target-copy" "$SECOND/bin/sounio-coord"
 output="$(run_coord "$SECOND" brief --max-rows 6)"
