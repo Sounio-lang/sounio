@@ -1,0 +1,175 @@
+// stdlib/x509/chain.sio — certificate chain path building (Task 3 of the
+// X.509 chain-validation plan; part 1 of 2 -- Task 4 appends path
+// verification and the public entry point to this same file).
+//
+// `chain_build_candidates` performs a depth-bounded DFS with explicit-stack
+// backtracking over a pool of (intermediate ++ trust-store) certificates to
+// find every candidate leaf -> ... -> trusted-root path, given the pool may
+// be in ARBITRARY order (not leaf-to-root sorted). This is what makes it a
+// real path-building search rather than a naive linear scan: an
+// out-of-order intermediate pool (see
+// tests/run-pass/x509_chain_path_building_reordered.sio) must still be
+// found via the pool-index search + backtrack, not by assuming
+// `intermediates[i]` issues `intermediates[i+1]`.
+
+use net::socket::*
+use x509::cert::*
+use x509::trust_store::*
+
+pub const CHAIN_MAX_DEPTH: i64 = 10
+pub const MAX_INTERMEDIATES: i64 = 8
+const MAX_CHAIN_CANDIDATES: i64 = 16
+const CHAIN_POOL_CAP: i64 = 520 // MAX_INTERMEDIATES + TRUST_STORE_MAX_CERTS
+
+struct ChainCandidate {
+    certs: [Certificate; 11], // CHAIN_MAX_DEPTH + 1
+    bufs: [RawBuf; 11],
+    len: i32,
+}
+
+// Returns the count of pool indices (written into `out_indices`) that are
+// plausible issuers of `cert`: identified by AKI/SKI match when `cert`
+// carries an authorityKeyIdentifier, else by issuer-DN == candidate-subject
+// equality. `pool_certs`/`pool_bufs` is intermediates ++ trust_store.certs,
+// built once by the caller (not reconstructed per DFS step).
+fn chain_find_issuer_candidates(
+    cert: &Certificate,
+    pool_certs: &[Certificate; 520],
+    pool_bufs: &[RawBuf; 520],
+    pool_len: i64,
+    exclude_index: &[i64; 11],
+    exclude_len: i32,
+    out_indices: &![i64; 520],
+) -> i32 with Mut {
+    var out_count: i32 = 0
+    var i: i64 = 0
+    while i < pool_len {
+        var already_used: bool = false
+        var e: i32 = 0
+        while e < exclude_len {
+            if exclude_index[e as usize] == i { already_used = true }
+            e = e + 1
+        }
+        if !already_used {
+            let candidate = pool_certs[i as usize]
+            var matches: bool = false
+            if cert.authority_key_id_len > 0 && candidate.subject_key_id_len > 0 {
+                if cert.authority_key_id_len == candidate.subject_key_id_len {
+                    var same: bool = true
+                    var b: i32 = 0
+                    while b < cert.authority_key_id_len {
+                        if cert.authority_key_id[b as usize] != candidate.subject_key_id[b as usize] { same = false }
+                        b = b + 1
+                    }
+                    matches = same
+                }
+            } else {
+                matches = x509_name_eq(&cert.issuer, &candidate.subject)
+            }
+            if matches {
+                out_indices[out_count as usize] = i
+                out_count = out_count + 1
+            }
+        }
+        i = i + 1
+    }
+    out_count
+}
+
+fn chain_is_trusted_root(cert: &Certificate, trust_store: &TrustStore) -> bool {
+    if trust_store_find_by_subject(trust_store, &cert.subject) >= 0 {
+        return x509_name_eq(&cert.subject, &cert.issuer)
+    }
+    false
+}
+
+pub fn chain_build_candidates(
+    leaf: &Certificate,
+    leaf_buf: &RawBuf,
+    intermediates: &[Certificate; 8],
+    intermediate_bufs: &[RawBuf; 8],
+    intermediate_count: i32,
+    trust_store: &TrustStore,
+) -> ([ChainCandidate; 16], i32) with IO, Mut {
+    var results: [ChainCandidate; 16] = [
+        ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: 0 };
+        16
+    ]
+    var result_count: i32 = 0
+
+    var pool_certs: [Certificate; 520] = [certificate_zero(); 520]
+    var pool_bufs: [RawBuf; 520] = [rawbuf_new(1); 520]
+    var pool_len: i64 = 0
+    var pi: i64 = 0
+    while pi < (intermediate_count as i64) {
+        pool_certs[pool_len as usize] = intermediates[pi as usize]
+        pool_bufs[pool_len as usize] = intermediate_bufs[pi as usize]
+        pool_len = pool_len + 1
+        pi = pi + 1
+    }
+    var ti: i64 = 0
+    while ti < (trust_store.count as i64) {
+        pool_certs[pool_len as usize] = trust_store.certs[ti as usize]
+        pool_bufs[pool_len as usize] = trust_store.bufs[ti as usize]
+        pool_len = pool_len + 1
+        ti = ti + 1
+    }
+
+    // Explicit-stack DFS (no recursion needed): each stack frame is a path
+    // prefix plus the list of pool indices already tried as its next
+    // issuer. `path_pool_index[d]` (d >= 1) records which pool index is
+    // currently occupying depth d, so it doubles as both the "already used
+    // in this path" exclusion set AND the backtracking undo record.
+    var path_certs: [Certificate; 11] = [certificate_zero(); 11]
+    var path_bufs: [RawBuf; 11] = [rawbuf_new(1); 11]
+    var path_pool_index: [i64; 11] = [0 - 1; 11]
+    var depth: i64 = 0
+    path_certs[0] = *leaf
+    path_bufs[0] = *leaf_buf
+    depth = 1
+
+    // `tried[d]` = how many of chain_find_issuer_candidates' results at
+    // depth d have already been attempted (drives backtracking: when a
+    // depth's candidates are exhausted, pop back to depth-1 and advance
+    // ITS tried-count instead).
+    var tried: [i32; 11] = [0; 11]
+
+    while depth >= 1 && depth <= CHAIN_MAX_DEPTH && (result_count as i64) < MAX_CHAIN_CANDIDATES {
+        let current = path_certs[(depth - 1) as usize]
+        if chain_is_trusted_root(&current, trust_store) && depth > 1 {
+            var rc = ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: depth as i32 }
+            var ci: i64 = 0
+            while ci < depth {
+                rc.certs[ci as usize] = path_certs[ci as usize]
+                rc.bufs[ci as usize] = path_bufs[ci as usize]
+                ci = ci + 1
+            }
+            results[result_count as usize] = rc
+            result_count = result_count + 1
+            // Backtrack after recording: a trusted root is a leaf of the
+            // search tree, never itself an issuer we recurse through.
+            depth = depth - 1
+        } else {
+            var candidate_indices: [i64; 520] = [0; 520]
+            let n = chain_find_issuer_candidates(&current, &pool_certs, &pool_bufs, pool_len, &path_pool_index, (depth - 1) as i32, &!candidate_indices)
+            if (tried[depth as usize] as i64) < (n as i64) {
+                let chosen = candidate_indices[tried[depth as usize] as usize]
+                tried[depth as usize] = tried[depth as usize] + 1
+                path_pool_index[depth as usize] = chosen
+                path_certs[depth as usize] = pool_certs[chosen as usize]
+                path_bufs[depth as usize] = pool_bufs[chosen as usize]
+                depth = depth + 1
+                tried[depth as usize] = 0
+            } else {
+                // Exhausted this depth's candidates -- backtrack. Also
+                // clear this depth's pool-index slot so it no longer
+                // shows up in the exclusion set once depth-1 advances.
+                tried[depth as usize] = 0
+                path_pool_index[depth as usize] = 0 - 1
+                depth = depth - 1
+            }
+        }
+    }
+
+    (results, result_count)
+}
