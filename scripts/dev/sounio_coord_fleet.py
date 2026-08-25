@@ -22,7 +22,7 @@ from typing import Any
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.25.7"
+RUNTIME_VERSION = "2026.08.25.8"
 UUID_RE = re.compile(
     r"(?P<uuid>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"
@@ -599,7 +599,8 @@ def explicit_plan(args: argparse.Namespace) -> LaunchPlan:
         if args.identity in {"exact", "bootstrap"}
         else f"fleet-{slug(args.slot)}"
     )
-    return LaunchPlan(args.agent, lane, args.session_id, args.identity, command)
+    home = Path(args.home).expanduser().resolve() if args.home else None
+    return LaunchPlan(args.agent, lane, args.session_id, args.identity, command, home)
 
 
 def status_command(args: argparse.Namespace) -> int:
@@ -709,6 +710,7 @@ def parser() -> argparse.ArgumentParser:
         "--identity", choices=("exact", "bootstrap", "standalone"), default="exact"
     )
     launch_parser.add_argument("--cwd", required=True)
+    launch_parser.add_argument("--home")
     launch_parser.add_argument("--no-attach", action="store_true")
     launch_parser.add_argument("--start-capability-id")
     launch_parser.add_argument("command", nargs=argparse.REMAINDER)
