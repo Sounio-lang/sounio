@@ -1,7 +1,13 @@
 import collections, sys
 
-# prime modulus for rank computations: entries are 0,+-1, so the rank over
-# F_P coincides with the rank over Q.
+# prime modulus for rank computations. NOTE (2026-08-23 correction,
+# see docs/audit/KERNEL_SPECTRUM_ORACLE_DOMAIN_2026-08-23.md): entries being
+# 0,+-1 does NOT imply rank over F_P equals rank over Q — a minor can be
+# nonzero over Q and divisible by P (16x16 Hadamard bound 2^32 = 2.00x P).
+# rank_{F_P} <= rank_Q holds for every prime, so this modular path yields a
+# genuine UPPER bound on the rank, i.e. a lower bound on dim ker. The exact
+# authority is cd_zd_kernel_spectrum_exact_certificate.py (integer-only,
+# Bareiss independence + M.v = 0 verification, valid for every prime).
 P = (1 << 31) - 1
 def build_fast(K):
     """basis table for dim 2^K via CD recursion on tables. tab[i][j]=(sign,k)."""
