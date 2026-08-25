@@ -135,15 +135,21 @@ so attached worktrees see the same active claims.
 Before the first write in an implementation lane:
 
 1. Run `bin/sounio-coord brief` (also shown by `./sounio-whereami --quick`).
-2. Claim the exact write set:
-   `bin/sounio-coord claim --agent <id> --lane <id> --intent "<goal>" --files <paths...>`.
+2. Claim the exact write set and any semantic resources whose meaning must stay
+   single-writer:
+   `bin/sounio-coord claim --agent <id> --lane <id> --intent "<goal>" --resources concept:<id> diagnostic:<id> --files <paths...>`.
 3. Keep long-running work alive with
    `bin/sounio-coord heartbeat --agent <id> --lane <id>`.
-4. Release on completion, abort, or handoff with
+4. Release on completion or abort with
    `bin/sounio-coord release --agent <id> --lane <id> --reason "<result>"`.
 
-Put `--files` last and quote glob scopes such as
-`'self-hosted/compiler/**'`. The command refuses overlapping active claims.
+Typed resources use `concept:`, `diagnostic:`, `gate:`, or `api:`. Exact names
+conflict exactly; a trailing `/**` claims a semantic subtree. Resource ownership
+is independent of file ownership, so two lanes touching different files still
+conflict when they claim the same diagnostic or semantic boundary. Put
+`--resources` before `--files`, put `--files` last, and quote glob scopes such as
+`'concept:epistemic/**'` or `'self-hosted/compiler/**'`. The command refuses
+overlapping active claims.
 Claims expire after four hours by default; expiry makes abandoned work visible,
 but does not authorize overwriting dirty files. Git status and executable repo
 truth still outrank coordination metadata. Treat this as runtime presence, not a
@@ -153,9 +159,12 @@ repository contracts named below.
 Project hooks in `.codex/hooks.json` and `.claude/settings.json` automate the
 common path. They register session presence, refresh a 30-minute lease during
 active turns, and reserve files before structured `Write`, `Edit`, or
-`apply_patch` calls. Claude releases its session lease on `SessionEnd`; Codex
-currently has no session-end event, so its inactive hook lease expires. Codex
-users must review and trust the project hook with `/hooks` once per hook hash.
+`apply_patch` calls. When a hook can verify that its tmux pane, harness process,
+and current path all belong to the session worktree, it also registers an
+expiring immediate-delivery endpoint. Claude releases its session lease and
+endpoint on `SessionEnd`; Codex currently has no session-end event, so its
+inactive hook lease and endpoint expire. Codex users must review and trust the
+project hook with `/hooks` once per hook hash.
 Shell commands can write arbitrary files and cannot be scoped reliably, so a
 manual exact scope remains mandatory before write-bearing Bash commands. The
 startup hook prints the session's agent/lane identity; reuse it with
@@ -170,13 +179,57 @@ Agents can exchange live messages across worktrees:
   `bin/sounio-coord inbox --agent <id> --lane <id>`.
 - After acting on a message, acknowledge it with
   `bin/sounio-coord ack --agent <id> --lane <id> --message <message-id>`.
+- For an accepted transfer, use the transactional proof-carrying handoff:
+  `bin/sounio-coord handoff --agent <id> --lane <id> --to-agent <id> --to-lane <id> --message "<result>" --commit HEAD --gate <gate>=PASS --evidence <path>`.
 
-Prompt and post-tool hooks inject unread messages into the agent's active turn.
-A rejected structured write also sends a request to the current owner
-automatically. Use
+The handoff command requires the current `HEAD`, at least one passing gate, at
+least one existing evidence path, and clean claimed files. It publishes the
+commit, gates, evidence, file snapshot, and semantic-resource snapshot before
+removing the claim. Any refused precondition leaves the claim active and
+publishes no handoff. Use `--reply-to <request-id>` to close a directed request.
+The compatibility form `send --kind handoff` is only an unstructured message;
+it does not release ownership or establish an evidence-bearing transfer.
+
+An exact directed message attempts immediate delivery when the recipient has a
+verified endpoint. The wake contains only message metadata and an inbox command,
+never the raw message body. Before sending any input, delivery revalidates the
+tmux socket, pane id, process id, harness command, and worktree; drift or expiry
+fails closed and leaves the durable bus message untouched. Wake receipts are
+deduplicated and visible through `message-status`, but prove only transport
+delivery: they are not hook injection receipts, acknowledgements, or responses.
+Use `endpoint-status` to inspect a lane and `wake --message <id>` to retry.
+
+Prompt and post-tool hooks remain the source-of-truth fallback and inject unread
+messages into the agent's active turn. A rejected structured write also sends a
+request to the current owner automatically. Do not start a second
+`claude --resume` process to force delivery into a running local session. A
+Claude background agent whose own worktree endpoint cannot be verified receives
+the durable message at a hook boundary or through the existing `claude agents`
+manager. Use
 `info`, `request`, `reply`, `blocker`, or `handoff` as message kinds. Messages
 coordinate work in progress; durable blockers still require the blocker
 contract.
+
+### Shared coordination runtime
+
+`bin/sounio-coord` and `scripts/dev/sounio_coord_agent_hook.py` are stable
+launchers. After the one-time launcher migration reaches a worktree, both select
+the versioned runtime installed under the repository's shared Git directory:
+
+- `<git-common-dir>/sounio-coord-runtime/current`
+
+Install or upgrade it atomically from a source worktree with
+`bin/sounio-coord install-runtime`. Inspect the selected implementation with
+`bin/sounio-coord runtime-info`, list installed versions with
+`bin/sounio-coord install-runtime --list`, and roll back with
+`bin/sounio-coord install-runtime --activate <runtime-id>`. Launchers require an
+exact protocol-major match and refuse a broken or incomplete shared runtime;
+they do not silently fall back after a shared runtime has been activated.
+
+Before the first shared install, launchers use their worktree-local bundled
+runtime. `SOUNIO_COORD_RUNTIME_MODE=local` forces that fallback for diagnosis and
+selftests. Do not edit the shared runtime directory by hand. Runtime installs use
+immutable content-addressed version directories and an atomic `current` symlink.
 
 If an agent leaves a blocker for another agent, it must use that contract's
 Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,

@@ -1,0 +1,639 @@
+//! Native policy adapter for OCaml Loom continuity facts.
+//!
+//! The build composes this entrypoint with `loom_continuity.sio`, keeping the
+//! host seal and admission constructor private inside one native program. The
+//! The OCaml host sends thirteen legacy fields, fifteen signer-authenticated
+//! fields, or eighteen independently observed fields over stdin. Pre-spawn
+//! measurement frames additionally carry decision and independently measured
+//! fact vectors. Sounio owns parsing, nominal proof separation, fact agreement,
+//! and the transition-policy decision.
+
+fn decimal_field(raw: string, start: i64) -> (i64, i64, i64) with Mut, Div, Panic {
+    var offset = start
+    var value: i64 = 0
+    var seen: bool = false
+    while offset < 4096 {
+        let code = str_char_at(raw, offset)
+        if code <= 0 { return (if seen { 1 } else { 0 }, value, offset) }
+        if code == 32 {
+            if !seen { return (0, 0, offset) }
+            return (1, value, offset + 1)
+        }
+        if code < 48 || code > 57 { return (0, 0, offset) }
+        value = value * 10 + (code - 48)
+        seen = true
+        offset = offset + 1
+    }
+    (0, 0, offset)
+}
+
+fn digest256_field(
+    raw: string,
+    start: i64,
+) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) with Mut, Div, Panic {
+    let (ok0, limb0, p0) = decimal_field(raw, start)
+    let (ok1, limb1, p1) = decimal_field(raw, p0)
+    let (ok2, limb2, p2) = decimal_field(raw, p1)
+    let (ok3, limb3, p3) = decimal_field(raw, p2)
+    let (ok4, limb4, p4) = decimal_field(raw, p3)
+    let (ok5, limb5, p5) = decimal_field(raw, p4)
+    let (ok6, limb6, p6) = decimal_field(raw, p5)
+    let (ok7, limb7, p7) = decimal_field(raw, p6)
+    let canonical = ok0 == 1 && ok1 == 1 && ok2 == 1 && ok3 == 1 &&
+        ok4 == 1 && ok5 == 1 && ok6 == 1 && ok7 == 1 &&
+        limb0 <= 4294967295 && limb1 <= 4294967295 &&
+        limb2 <= 4294967295 && limb3 <= 4294967295 &&
+        limb4 <= 4294967295 && limb5 <= 4294967295 &&
+        limb6 <= 4294967295 && limb7 <= 4294967295
+    if !canonical {
+        return (0, 0, 0, 0, 0, 0, 0, 0, 0, p7)
+    }
+    (1, limb0, limb1, limb2, limb3, limb4, limb5, limb6, limb7, p7)
+}
+
+fn pre_spawn_policy_accepts(
+    predecessor_receipt_token: i64,
+    signer_authority_token: i64,
+    observer_authority_token: i64,
+    independent_observation_token: i64,
+) -> bool with LoomHostTrust, Panic {
+    let observed = admit_pre_spawn_principal_evidence(
+        predecessor_receipt_token,
+        signer_authority_token,
+        observer_authority_token,
+        independent_observation_token,
+    )
+    match verify_independent_pre_spawn_admission(observed) {
+        Some(receipt) => promote_independent_pre_spawn_admission(receipt) > 0,
+        None => false,
+    }
+}
+
+fn pre_spawn_measurement_policy_accepts(
+    predecessor_receipt_token: i64,
+    signer_authority_token: i64,
+    observer_authority_token: i64,
+    independent_observation_token: i64,
+    decision_generation_token: i64,
+    decision_fingerprint_token: i64,
+    decision_semantic_head_token: i64,
+    decision_guardian_head_token: i64,
+    measured_generation_token: i64,
+    measured_fingerprint_token: i64,
+    measured_semantic_head_token: i64,
+    measured_guardian_head_token: i64,
+) -> bool with LoomHostTrust, Panic {
+    let observed = admit_pre_spawn_measurement_evidence(
+        predecessor_receipt_token,
+        signer_authority_token,
+        observer_authority_token,
+        independent_observation_token,
+        decision_generation_token,
+        decision_fingerprint_token,
+        decision_semantic_head_token,
+        decision_guardian_head_token,
+        measured_generation_token,
+        measured_fingerprint_token,
+        measured_semantic_head_token,
+        measured_guardian_head_token,
+    )
+    match verify_independent_pre_spawn_measurement_admission(observed) {
+        Some(receipt) => promote_independent_pre_spawn_measurement_admission(receipt) > 0,
+        None => false,
+    }
+}
+
+fn observation_authority_policy_accepts(
+    predecessor_receipt_token: i64,
+    signer_authority_token: i64,
+    observer_authority_token: i64,
+    journal_authority_token: i64,
+    independent_observation_token: i64,
+    journal_checkpoint_token: i64,
+    journal_epoch: i64,
+    decision_generation_token: i64,
+    decision_fingerprint_token: i64,
+    decision_semantic_head_token: i64,
+    decision_guardian_head_token: i64,
+    measured_generation_token: i64,
+    measured_fingerprint_token: i64,
+    measured_semantic_head_token: i64,
+    measured_guardian_head_token: i64,
+    decision_generation_digest: Digest256,
+    decision_fingerprint_digest: Digest256,
+    decision_semantic_head_digest: Digest256,
+    decision_guardian_head_digest: Digest256,
+    measured_generation_digest: Digest256,
+    measured_fingerprint_digest: Digest256,
+    measured_semantic_head_digest: Digest256,
+    measured_guardian_head_digest: Digest256,
+) -> bool with LoomHostTrust, Panic {
+    let observed = admit_pre_spawn_observation_authority_evidence(
+        predecessor_receipt_token,
+        signer_authority_token,
+        observer_authority_token,
+        journal_authority_token,
+        independent_observation_token,
+        journal_checkpoint_token,
+        journal_epoch,
+        decision_generation_token,
+        decision_fingerprint_token,
+        decision_semantic_head_token,
+        decision_guardian_head_token,
+        measured_generation_token,
+        measured_fingerprint_token,
+        measured_semantic_head_token,
+        measured_guardian_head_token,
+        decision_generation_digest,
+        decision_fingerprint_digest,
+        decision_semantic_head_digest,
+        decision_guardian_head_digest,
+        measured_generation_digest,
+        measured_fingerprint_digest,
+        measured_semantic_head_digest,
+        measured_guardian_head_digest,
+    )
+    match verify_observation_authority_admission(observed) {
+        Some(receipt) => promote_observation_authority_admission(receipt) > 0,
+        None => false,
+    }
+}
+
+fn journal_quorum_policy_accepts(
+    predecessor_receipt_token: i64,
+    signer_authority_token: i64,
+    observer_authority_token: i64,
+    journal_authority_token_a: i64,
+    journal_authority_token_b: i64,
+    journal_authority_token_c: i64,
+    journal_required_quorum: i64,
+    journal_min_valid_signatures: i64,
+    independent_observation_token: i64,
+    journal_checkpoint_token: i64,
+    journal_epoch: i64,
+    decision_generation_token: i64,
+    decision_fingerprint_token: i64,
+    decision_semantic_head_token: i64,
+    decision_guardian_head_token: i64,
+    measured_generation_token: i64,
+    measured_fingerprint_token: i64,
+    measured_semantic_head_token: i64,
+    measured_guardian_head_token: i64,
+    decision_generation_digest: Digest256,
+    decision_fingerprint_digest: Digest256,
+    decision_semantic_head_digest: Digest256,
+    decision_guardian_head_digest: Digest256,
+    measured_generation_digest: Digest256,
+    measured_fingerprint_digest: Digest256,
+    measured_semantic_head_digest: Digest256,
+    measured_guardian_head_digest: Digest256,
+) -> bool with LoomHostTrust, Panic {
+    let observed = admit_pre_spawn_journal_quorum_evidence(
+        predecessor_receipt_token,
+        signer_authority_token,
+        observer_authority_token,
+        journal_authority_token_a,
+        journal_authority_token_b,
+        journal_authority_token_c,
+        journal_required_quorum,
+        journal_min_valid_signatures,
+        independent_observation_token,
+        journal_checkpoint_token,
+        journal_epoch,
+        decision_generation_token,
+        decision_fingerprint_token,
+        decision_semantic_head_token,
+        decision_guardian_head_token,
+        measured_generation_token,
+        measured_fingerprint_token,
+        measured_semantic_head_token,
+        measured_guardian_head_token,
+        decision_generation_digest,
+        decision_fingerprint_digest,
+        decision_semantic_head_digest,
+        decision_guardian_head_digest,
+        measured_generation_digest,
+        measured_fingerprint_digest,
+        measured_semantic_head_digest,
+        measured_guardian_head_digest,
+    )
+    match verify_observation_authority_quorum_admission(observed) {
+        Some(receipt) => promote_observation_authority_quorum_admission(receipt) > 0,
+        None => false,
+    }
+}
+
+fn policy_accepts(
+    observed: ObservedContinuity,
+    transition_kind: i64,
+    authenticity_mode: i64,
+) -> bool {
+    if transition_kind == 1 {
+        if authenticity_mode == 1 {
+            return match verify_signed_initial_generation(observed) {
+                Some(receipt) => promote_signed_initial_generation(receipt) > 0,
+                None => false,
+            }
+        }
+        return match verify_initial_generation(observed) {
+            Some(receipt) => promote_initial_generation(receipt) > 0,
+            None => false,
+        }
+    }
+    if transition_kind == 2 {
+        if authenticity_mode == 2 {
+            return match verify_independently_signed_clean_respawn(observed) {
+                Some(receipt) => promote_independently_signed_clean_respawn(receipt) > 0,
+                None => false,
+            }
+        }
+        if authenticity_mode == 1 {
+            return match verify_signed_clean_respawn(observed) {
+                Some(receipt) => promote_signed_clean_respawn(receipt) > 0,
+                None => false,
+            }
+        }
+        return match verify_clean_respawn(observed) {
+            Some(receipt) => promote_clean_respawn(receipt) > 0,
+            None => false,
+        }
+    }
+    if transition_kind == 3 {
+        if authenticity_mode == 2 {
+            return match verify_independently_signed_pod_resurrection(observed) {
+                Some(receipt) => {
+                    let (generation, evidence, lineage, predecessor, transitions, pods) =
+                        promote_independently_signed_pod_resurrection(receipt)
+                    generation > 0 && evidence > 0 && lineage > 0 &&
+                        predecessor > 0 && transitions > 0 && pods > 0
+                },
+                None => false,
+            }
+        }
+        if authenticity_mode == 1 {
+            return match verify_signed_pod_resurrection(observed) {
+                Some(receipt) => {
+                    let (generation, evidence, lineage, predecessor, transitions, pods) =
+                        promote_signed_pod_resurrection(receipt)
+                    generation > 0 && evidence > 0 && lineage > 0 &&
+                        predecessor > 0 && transitions > 0 && pods > 0
+                },
+                None => false,
+            }
+        }
+        return match verify_pod_resurrection(observed) {
+            Some(receipt) => {
+                let (generation, evidence, lineage, predecessor, transitions, pods) =
+                    promote_pod_resurrection(receipt)
+                generation > 0 && evidence > 0 && lineage > 0 &&
+                    predecessor > 0 && transitions > 0 && pods > 0
+            },
+            None => false,
+        }
+    }
+    false
+}
+
+fn main() -> i64 with IO, LoomHostTrust, Mut, Div, Panic {
+    let input = read_line()
+    let (ok1, evidence_set_token, p1) = decimal_field(input, 0)
+    let (ok2, receipt_chain_token, p2) = decimal_field(input, p1)
+    let (ok3, current_generation_token, p3) = decimal_field(input, p2)
+    let (ok4, generation_fingerprint_token, p4) = decimal_field(input, p3)
+    let (ok5, semantic_journal_head_token, p5) = decimal_field(input, p4)
+    if evidence_set_token == 9006 {
+        let (q_ok6, journal_authority_token_b, q_p6) = decimal_field(input, p5)
+        let (q_ok7, journal_authority_token_c, q_p7) = decimal_field(input, q_p6)
+        let (q_ok8, journal_required_quorum, q_p8) = decimal_field(input, q_p7)
+        let (q_ok9, journal_min_valid_signatures, q_p9) = decimal_field(input, q_p8)
+        let (q_ok10, independent_observation_token, q_p10) = decimal_field(input, q_p9)
+        let (q_ok11, journal_checkpoint_token, q_p11) = decimal_field(input, q_p10)
+        let (q_ok12, journal_epoch, q_p12) = decimal_field(input, q_p11)
+        let (q_ok13, decision_generation_token, q_p13) = decimal_field(input, q_p12)
+        let (q_ok14, decision_fingerprint_token, q_p14) = decimal_field(input, q_p13)
+        let (q_ok15, decision_semantic_head_token, q_p15) = decimal_field(input, q_p14)
+        let (q_ok16, decision_guardian_head_token, q_p16) = decimal_field(input, q_p15)
+        let (q_ok17, measured_generation_token, q_p17) = decimal_field(input, q_p16)
+        let (q_ok18, measured_fingerprint_token, q_p18) = decimal_field(input, q_p17)
+        let (q_ok19, measured_semantic_head_token, q_p19) = decimal_field(input, q_p18)
+        let (q_ok20, measured_guardian_head_token, q_p20) = decimal_field(input, q_p19)
+        let (d_ok1, d10, d11, d12, d13, d14, d15, d16, d17, d_p1) =
+            digest256_field(input, q_p20)
+        let (d_ok2, d20, d21, d22, d23, d24, d25, d26, d27, d_p2) =
+            digest256_field(input, d_p1)
+        let (d_ok3, d30, d31, d32, d33, d34, d35, d36, d37, d_p3) =
+            digest256_field(input, d_p2)
+        let (d_ok4, d40, d41, d42, d43, d44, d45, d46, d47, d_p4) =
+            digest256_field(input, d_p3)
+        let (d_ok5, d50, d51, d52, d53, d54, d55, d56, d57, d_p5) =
+            digest256_field(input, d_p4)
+        let (d_ok6, d60, d61, d62, d63, d64, d65, d66, d67, d_p6) =
+            digest256_field(input, d_p5)
+        let (d_ok7, d70, d71, d72, d73, d74, d75, d76, d77, d_p7) =
+            digest256_field(input, d_p6)
+        let (d_ok8, d80, d81, d82, d83, d84, d85, d86, d87, d_p8) =
+            digest256_field(input, d_p7)
+        let canonical_quorum = ok1 == 1 && ok2 == 1 && ok3 == 1 &&
+            ok4 == 1 && ok5 == 1 && q_ok6 == 1 && q_ok7 == 1 &&
+            q_ok8 == 1 && q_ok9 == 1 && q_ok10 == 1 && q_ok11 == 1 &&
+            q_ok12 == 1 && q_ok13 == 1 && q_ok14 == 1 && q_ok15 == 1 &&
+            q_ok16 == 1 && q_ok17 == 1 && q_ok18 == 1 && q_ok19 == 1 &&
+            q_ok20 == 1 && d_ok1 == 1 && d_ok2 == 1 && d_ok3 == 1 &&
+            d_ok4 == 1 && d_ok5 == 1 && d_ok6 == 1 && d_ok7 == 1 &&
+            d_ok8 == 1 && str_char_at(input, d_p8) <= 0 &&
+            !(d_p8 > 0 && str_char_at(input, d_p8 - 1) == 32)
+        if !canonical_quorum {
+            println("SOUNIO_CONTINUITY_REFUSE reason=canonical-journal-quorum-input")
+            return 64
+        }
+        let decision_generation_digest =
+            admit_digest256(d10, d11, d12, d13, d14, d15, d16, d17)
+        let decision_fingerprint_digest =
+            admit_digest256(d20, d21, d22, d23, d24, d25, d26, d27)
+        let decision_semantic_head_digest =
+            admit_digest256(d30, d31, d32, d33, d34, d35, d36, d37)
+        let decision_guardian_head_digest =
+            admit_digest256(d40, d41, d42, d43, d44, d45, d46, d47)
+        let measured_generation_digest =
+            admit_digest256(d50, d51, d52, d53, d54, d55, d56, d57)
+        let measured_fingerprint_digest =
+            admit_digest256(d60, d61, d62, d63, d64, d65, d66, d67)
+        let measured_semantic_head_digest =
+            admit_digest256(d70, d71, d72, d73, d74, d75, d76, d77)
+        let measured_guardian_head_digest =
+            admit_digest256(d80, d81, d82, d83, d84, d85, d86, d87)
+        if !journal_quorum_policy_accepts(
+            receipt_chain_token,
+            current_generation_token,
+            generation_fingerprint_token,
+            semantic_journal_head_token,
+            journal_authority_token_b,
+            journal_authority_token_c,
+            journal_required_quorum,
+            journal_min_valid_signatures,
+            independent_observation_token,
+            journal_checkpoint_token,
+            journal_epoch,
+            decision_generation_token,
+            decision_fingerprint_token,
+            decision_semantic_head_token,
+            decision_guardian_head_token,
+            measured_generation_token,
+            measured_fingerprint_token,
+            measured_semantic_head_token,
+            measured_guardian_head_token,
+            decision_generation_digest,
+            decision_fingerprint_digest,
+            decision_semantic_head_digest,
+            decision_guardian_head_digest,
+            measured_generation_digest,
+            measured_fingerprint_digest,
+            measured_semantic_head_digest,
+            measured_guardian_head_digest,
+        ) {
+            println("SOUNIO_CONTINUITY_REFUSE reason=journal-quorum-admission")
+            return 42
+        }
+        println("SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v4 authority=five-principals+2-of-3-journal-quorum+full-sha256-agreement")
+        return 0
+    }
+    if evidence_set_token == 9005 {
+        let (a_ok6, independent_observation_token, a_p6) = decimal_field(input, p5)
+        let (a_ok7, journal_checkpoint_token, a_p7) = decimal_field(input, a_p6)
+        let (a_ok8, journal_epoch, a_p8) = decimal_field(input, a_p7)
+        let (a_ok9, decision_generation_token, a_p9) = decimal_field(input, a_p8)
+        let (a_ok10, decision_fingerprint_token, a_p10) = decimal_field(input, a_p9)
+        let (a_ok11, decision_semantic_head_token, a_p11) = decimal_field(input, a_p10)
+        let (a_ok12, decision_guardian_head_token, a_p12) = decimal_field(input, a_p11)
+        let (a_ok13, measured_generation_token, a_p13) = decimal_field(input, a_p12)
+        let (a_ok14, measured_fingerprint_token, a_p14) = decimal_field(input, a_p13)
+        let (a_ok15, measured_semantic_head_token, a_p15) = decimal_field(input, a_p14)
+        let (a_ok16, measured_guardian_head_token, a_p16) = decimal_field(input, a_p15)
+        let (d_ok1, d10, d11, d12, d13, d14, d15, d16, d17, d_p1) =
+            digest256_field(input, a_p16)
+        let (d_ok2, d20, d21, d22, d23, d24, d25, d26, d27, d_p2) =
+            digest256_field(input, d_p1)
+        let (d_ok3, d30, d31, d32, d33, d34, d35, d36, d37, d_p3) =
+            digest256_field(input, d_p2)
+        let (d_ok4, d40, d41, d42, d43, d44, d45, d46, d47, d_p4) =
+            digest256_field(input, d_p3)
+        let (d_ok5, d50, d51, d52, d53, d54, d55, d56, d57, d_p5) =
+            digest256_field(input, d_p4)
+        let (d_ok6, d60, d61, d62, d63, d64, d65, d66, d67, d_p6) =
+            digest256_field(input, d_p5)
+        let (d_ok7, d70, d71, d72, d73, d74, d75, d76, d77, d_p7) =
+            digest256_field(input, d_p6)
+        let (d_ok8, d80, d81, d82, d83, d84, d85, d86, d87, d_p8) =
+            digest256_field(input, d_p7)
+        let canonical_authority = ok1 == 1 && ok2 == 1 && ok3 == 1 &&
+            ok4 == 1 && ok5 == 1 && a_ok6 == 1 && a_ok7 == 1 &&
+            a_ok8 == 1 && a_ok9 == 1 && a_ok10 == 1 && a_ok11 == 1 &&
+            a_ok12 == 1 && a_ok13 == 1 && a_ok14 == 1 && a_ok15 == 1 &&
+            a_ok16 == 1 && d_ok1 == 1 && d_ok2 == 1 && d_ok3 == 1 &&
+            d_ok4 == 1 && d_ok5 == 1 && d_ok6 == 1 && d_ok7 == 1 &&
+            d_ok8 == 1 && str_char_at(input, d_p8) <= 0 &&
+            !(d_p8 > 0 && str_char_at(input, d_p8 - 1) == 32)
+        if !canonical_authority {
+            println("SOUNIO_CONTINUITY_REFUSE reason=canonical-observation-authority-input")
+            return 64
+        }
+        let decision_generation_digest =
+            admit_digest256(d10, d11, d12, d13, d14, d15, d16, d17)
+        let decision_fingerprint_digest =
+            admit_digest256(d20, d21, d22, d23, d24, d25, d26, d27)
+        let decision_semantic_head_digest =
+            admit_digest256(d30, d31, d32, d33, d34, d35, d36, d37)
+        let decision_guardian_head_digest =
+            admit_digest256(d40, d41, d42, d43, d44, d45, d46, d47)
+        let measured_generation_digest =
+            admit_digest256(d50, d51, d52, d53, d54, d55, d56, d57)
+        let measured_fingerprint_digest =
+            admit_digest256(d60, d61, d62, d63, d64, d65, d66, d67)
+        let measured_semantic_head_digest =
+            admit_digest256(d70, d71, d72, d73, d74, d75, d76, d77)
+        let measured_guardian_head_digest =
+            admit_digest256(d80, d81, d82, d83, d84, d85, d86, d87)
+        if !observation_authority_policy_accepts(
+            receipt_chain_token,
+            current_generation_token,
+            generation_fingerprint_token,
+            semantic_journal_head_token,
+            independent_observation_token,
+            journal_checkpoint_token,
+            journal_epoch,
+            decision_generation_token,
+            decision_fingerprint_token,
+            decision_semantic_head_token,
+            decision_guardian_head_token,
+            measured_generation_token,
+            measured_fingerprint_token,
+            measured_semantic_head_token,
+            measured_guardian_head_token,
+            decision_generation_digest,
+            decision_fingerprint_digest,
+            decision_semantic_head_digest,
+            decision_guardian_head_digest,
+            measured_generation_digest,
+            measured_fingerprint_digest,
+            measured_semantic_head_digest,
+            measured_guardian_head_digest,
+        ) {
+            println("SOUNIO_CONTINUITY_REFUSE reason=observation-authority-admission")
+            return 42
+        }
+        println("SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v3 authority=three-principals+full-sha256-agreement")
+        return 0
+    }
+    if evidence_set_token == 9004 {
+        let (m_ok6, decision_generation_token, m_p6) = decimal_field(input, p5)
+        let (m_ok7, decision_fingerprint_token, m_p7) = decimal_field(input, m_p6)
+        let (m_ok8, decision_semantic_head_token, m_p8) = decimal_field(input, m_p7)
+        let (m_ok9, decision_guardian_head_token, m_p9) = decimal_field(input, m_p8)
+        let (m_ok10, measured_generation_token, m_p10) = decimal_field(input, m_p9)
+        let (m_ok11, measured_fingerprint_token, m_p11) = decimal_field(input, m_p10)
+        let (m_ok12, measured_semantic_head_token, m_p12) = decimal_field(input, m_p11)
+        let (m_ok13, measured_guardian_head_token, m_p13) = decimal_field(input, m_p12)
+        let canonical_measurement = ok1 == 1 && ok2 == 1 && ok3 == 1 &&
+            ok4 == 1 && ok5 == 1 && m_ok6 == 1 && m_ok7 == 1 &&
+            m_ok8 == 1 && m_ok9 == 1 && m_ok10 == 1 && m_ok11 == 1 &&
+            m_ok12 == 1 && m_ok13 == 1 && str_char_at(input, m_p13) <= 0 &&
+            !(m_p13 > 0 && str_char_at(input, m_p13 - 1) == 32)
+        if !canonical_measurement {
+            println("SOUNIO_CONTINUITY_REFUSE reason=canonical-pre-spawn-measurement-input")
+            return 64
+        }
+        if !pre_spawn_measurement_policy_accepts(
+            receipt_chain_token,
+            current_generation_token,
+            generation_fingerprint_token,
+            semantic_journal_head_token,
+            decision_generation_token,
+            decision_fingerprint_token,
+            decision_semantic_head_token,
+            decision_guardian_head_token,
+            measured_generation_token,
+            measured_fingerprint_token,
+            measured_semantic_head_token,
+            measured_guardian_head_token,
+        ) {
+            println("SOUNIO_CONTINUITY_REFUSE reason=independent-measurement-disagreement")
+            return 42
+        }
+        println("SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v2 authority=disjoint-principals+measured-fact-agreement")
+        return 0
+    }
+    if evidence_set_token == 9003 {
+        let canonical_pre_spawn = ok1 == 1 && ok2 == 1 && ok3 == 1 &&
+            ok4 == 1 && ok5 == 1 && str_char_at(input, p5) <= 0 &&
+            !(p5 > 0 && str_char_at(input, p5 - 1) == 32)
+        if !canonical_pre_spawn {
+            println("SOUNIO_CONTINUITY_REFUSE reason=canonical-pre-spawn-input")
+            return 64
+        }
+        if !pre_spawn_policy_accepts(
+            receipt_chain_token,
+            current_generation_token,
+            generation_fingerprint_token,
+            semantic_journal_head_token,
+        ) {
+            println("SOUNIO_CONTINUITY_REFUSE reason=principal-independence")
+            return 42
+        }
+        println("SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v1 authority=disjoint-principals")
+        return 0
+    }
+    let (ok6, guardian_journal_head_token, p6) = decimal_field(input, p5)
+    let (ok7, lineage_head_token, p7) = decimal_field(input, p6)
+    let (ok8, predecessor_generation_token, p8) = decimal_field(input, p7)
+    let (ok9, predecessor_semantic_head_token, p9) = decimal_field(input, p8)
+    let (ok10, predecessor_guardian_head_token, p10) = decimal_field(input, p9)
+    let (ok11, transition_kind, p11) = decimal_field(input, p10)
+    let (ok12, transition_count, p12) = decimal_field(input, p11)
+    let (ok13, pod_resurrection_count, p13) = decimal_field(input, p12)
+    let (ok14, predecessor_receipt_token, p14) = decimal_field(input, p13)
+    let (ok15, authenticity_mode, p15) = decimal_field(input, p14)
+    let (ok16, signer_authority_token, p16) = decimal_field(input, p15)
+    let (ok17, observer_authority_token, p17) = decimal_field(input, p16)
+    let (ok18, independent_observation_token, p18) = decimal_field(input, p17)
+    let legacy_input = ok14 == 0 && str_char_at(input, p13) <= 0 &&
+        !(p13 > 0 && str_char_at(input, p13 - 1) == 32)
+    let signed_input = ok14 == 1 && ok15 == 1 && authenticity_mode == 1 &&
+        str_char_at(input, p15) <= 0 &&
+        !(p15 > 0 && str_char_at(input, p15 - 1) == 32)
+    let independently_observed_input =
+        ok14 == 1 && ok15 == 1 && authenticity_mode == 2 &&
+        ok16 == 1 && ok17 == 1 && ok18 == 1 &&
+        str_char_at(input, p18) <= 0 &&
+        !(p18 > 0 && str_char_at(input, p18 - 1) == 32)
+    if ok1 != 1 || ok2 != 1 || ok3 != 1 || ok4 != 1 || ok5 != 1 ||
+        ok6 != 1 || ok7 != 1 || ok8 != 1 || ok9 != 1 || ok10 != 1 ||
+        ok11 != 1 || ok12 != 1 || ok13 != 1 ||
+        (!legacy_input && !signed_input && !independently_observed_input) {
+        println("SOUNIO_CONTINUITY_REFUSE reason=canonical-input")
+        return 64
+    }
+    let admitted_predecessor_receipt = if signed_input || independently_observed_input {
+        predecessor_receipt_token
+    } else {
+        0
+    }
+    let admitted_authenticity_mode = if independently_observed_input {
+        2
+    } else if signed_input {
+        1
+    } else {
+        0
+    }
+    let admitted_signer_authority = if independently_observed_input {
+        signer_authority_token
+    } else { 0 }
+    let admitted_observer_authority = if independently_observed_input {
+        observer_authority_token
+    } else { 0 }
+    let admitted_independent_observation = if independently_observed_input {
+        independent_observation_token
+    } else { 0 }
+
+    let bridge0 = open_host_trust_bridge(evidence_set_token, receipt_chain_token)
+    let (bridge1, host_receipt) = admit_runtime_continuity(
+        bridge0,
+        1,
+        evidence_set_token,
+        receipt_chain_token,
+        current_generation_token,
+        generation_fingerprint_token,
+        semantic_journal_head_token,
+        guardian_journal_head_token,
+        lineage_head_token,
+        predecessor_generation_token,
+        predecessor_semantic_head_token,
+        predecessor_guardian_head_token,
+        admitted_predecessor_receipt,
+        admitted_authenticity_mode,
+        admitted_signer_authority,
+        admitted_observer_authority,
+        admitted_independent_observation,
+        transition_kind,
+        transition_count,
+        pod_resurrection_count,
+        true,
+        true,
+        true,
+    )
+    close_host_trust_bridge(bridge1)
+    let observed = import_host_continuity(host_receipt)
+
+    if !policy_accepts(observed, transition_kind, admitted_authenticity_mode) {
+        println("SOUNIO_CONTINUITY_REFUSE reason=typestate")
+        return 42
+    }
+
+    if admitted_authenticity_mode == 2 {
+        println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v3 authenticity=ed25519+independent-observer")
+    } else if admitted_authenticity_mode == 1 {
+        println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v2 authenticity=ed25519")
+    } else {
+        println("SOUNIO_CONTINUITY_ACCEPT schema=loom-native-continuity-v1")
+    }
+    0
+}
