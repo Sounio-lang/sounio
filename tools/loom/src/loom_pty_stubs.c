@@ -3,20 +3,46 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <caml/version.h>
+
+#if OCAML_VERSION >= 50000
+#define CAML_INTERNALS
+#endif
+
 #include <caml/alloc.h>
 #include <caml/fail.h>
 #include <caml/memory.h>
 #include <caml/mlvalues.h>
 
+#if OCAML_VERSION >= 50000
+#include <caml/domain.h>
+#include <caml/runtime_events.h>
+#endif
+
 CAMLprim value sounio_loom_forkpty(value unit) {
   CAMLparam1(unit);
   CAMLlocal1(result);
   int master_fd = -1;
+
+#if OCAML_VERSION >= 50000
+  if (caml_domain_is_multicore()) {
+    caml_failwith("forkpty may not be called after any domain has been spawned");
+  }
+#endif
+
   pid_t pid = forkpty(&master_fd, NULL, NULL, NULL);
 
   if (pid < 0) {
     caml_failwith("forkpty failed");
   }
+
+#if OCAML_VERSION >= 50000
+  if (pid == 0) {
+    /* Match Unix.fork before returning from C into the OCaml 5 runtime. */
+    caml_runtime_events_post_fork();
+    caml_atfork_hook();
+  }
+#endif
 
   result = caml_alloc_tuple(2);
   Store_field(result, 0, Val_int(pid));
