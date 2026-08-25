@@ -15,6 +15,9 @@ export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/
 export SOUNIO_LOOM_OBLIGATION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 
 cleanup() {
+  [[ -z "${supervisor_pid:-}" ]] || kill "$supervisor_pid" 2>/dev/null || true
+  [[ -z "${failing_supervisor_pid:-}" ]] || \
+    kill "$failing_supervisor_pid" 2>/dev/null || true
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
   rm -rf "$TEST_ROOT"
 }
@@ -90,6 +93,13 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the model-derived sabotage generator'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-trace-verify" ]] || \
   fail 'installed runtime omitted the independent trace verifier'
+activation_file="$REPO/.git/sounio-coord-state/loom-obligation-activation.v1"
+[[ -f "$activation_file" ]] || fail 'installer omitted the durable obligation activation watermark'
+grep -q '^schema=loom-obligation-activation-v1$' "$activation_file" || \
+  fail 'installer wrote the wrong durable obligation activation schema'
+grep -Eq '^activated_epoch=[1-9][0-9]*$' "$activation_file" || \
+  fail 'installer wrote an invalid durable obligation activation epoch'
+activation_sha="$(sha256sum "$activation_file" | awk '{print $1}')"
 [[ -f "$RUNTIME_ROOT/versions/$first_id/formal/SounioFleet.tla" ]] || \
   fail 'installed runtime omitted the TLA+ fleet model'
 grep -q '^capability=crash-recovery-v1$' "$RUNTIME_ROOT/versions/$first_id/manifest" || \
@@ -107,6 +117,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
   loom-native-sounio-continuity-v1 \
   loom-durable-obligation-v1 \
+  loom-post-activation-request-bridge-v1 \
   loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
   loom-signed-continuity-receipt-v2 loom-principal-independence-v1 \
   loom-independent-measurement-v1 \
@@ -155,9 +166,155 @@ grep -q '^LOOM_OBLIGATION_OPEN idempotent=no ' <<< "$output" || \
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
 grep -q '"count":1,"unclosed":1' <<< "$output" || \
   fail 'shared runtime did not expose its durable obligation projection'
+
+output="$(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    bin/sounio-coord send --agent runtime-sender --lane source \
+    --to-agent runtime-worker --to-lane target --kind request \
+    --message 'explicit durable obligation opt-out control'
+)"
+opt_out_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+grep -q '^obligation_opt_out=1$' "$STATE/messages/$opt_out_message.message" || \
+  fail 'new client did not distinguish explicit obligation opt-out'
+
+output="$(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    bin/sounio-coord send --agent stale-runtime-sender --lane source \
+    --to-agent runtime-worker --to-lane target --kind request \
+    --message 'post-activation stale-client request'
+)"
+stale_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+sed -i '/^obligation_opt_out=1$/d' "$STATE/messages/$stale_message.message"
+
+output="$(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    bin/sounio-coord send --agent historical-runtime-sender --lane source \
+    --to-agent runtime-worker --to-lane target --kind request \
+    --message 'pre-activation historical request control'
+)"
+historical_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+activation_epoch="$(sed -n 's/^activated_epoch=//p' "$activation_file")"
+historical_epoch=$((activation_epoch - 1))
+sed -i '/^obligation_opt_out=1$/d' "$STATE/messages/$historical_message.message"
+sed -i "s/^created_epoch=.*/created_epoch=$historical_epoch/" \
+  "$STATE/messages/$historical_message.message"
+
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-reconcile)"
-grep -q '^LOOM_OBLIGATION_RECONCILE requests=1 state=PASS$' <<< "$output" || \
+grep -q '^LOOM_OBLIGATION_RECONCILE requests=2 marked=1 legacy=1 ignored=2 state=PASS$' \
+  <<< "$output" || \
   fail 'shared runtime obligation reconciliation failed'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
+grep -q '"count":2,"unclosed":2' <<< "$output" || \
+  fail 'post-activation stale request was not imported or historical control leaked in'
+
+(
+  cd "$SECOND"
+  exec env SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-supervise \
+    --interval-seconds 1
+) > "$TEST_ROOT/obligation-supervisor.log" 2>&1 &
+supervisor_pid=$!
+supervisor_live=0
+for _ in 1 2 3 4 5; do
+  output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+    bin/sounio-coord obligation-supervisor-status 2>/dev/null || true)"
+  if grep -q 'state=live' <<< "$output"; then
+    supervisor_live=1
+    break
+  fi
+  sleep 1
+done
+((supervisor_live == 1)) || fail 'continuous obligation supervisor did not become live'
+output="$(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    bin/sounio-coord send --agent supervised-stale-sender --lane source \
+    --to-agent runtime-worker --to-lane target --kind request \
+    --message 'stale request created after supervisor start'
+)"
+supervised_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+sed -i '/^obligation_opt_out=1$/d' "$STATE/messages/$supervised_message.message"
+supervised_imported=0
+for _ in 1 2 3 4 5; do
+  output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
+  if grep -q '"count":3,"unclosed":3' <<< "$output"; then
+    supervised_imported=1
+    break
+  fi
+  sleep 1
+done
+kill "$supervisor_pid" 2>/dev/null || true
+wait "$supervisor_pid" 2>/dev/null || true
+((supervised_imported == 1)) || fail 'running supervisor did not import a new stale request'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-status 2>/dev/null || true)"
+grep -q 'state=stopped' <<< "$output" || \
+  fail "terminated obligation supervisor left its OCaml child live: $output"
+
+FAIL_STATE="$TEST_ROOT/failing-supervisor-state"
+(
+  cd "$SECOND"
+  exec env SOUNIO_COORD_DIR="$FAIL_STATE" bin/sounio-coord obligation-supervise \
+    --interval-seconds 1
+) > "$TEST_ROOT/failing-obligation-supervisor.log" 2>&1 &
+failing_supervisor_pid=$!
+failing_supervisor_live=0
+for _ in 1 2 3 4 5; do
+  output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$FAIL_STATE" \
+    bin/sounio-coord obligation-supervisor-status 2>/dev/null || true)"
+  if grep -q 'state=live' <<< "$output"; then
+    failing_supervisor_live=1
+    break
+  fi
+  sleep 1
+done
+((failing_supervisor_live == 1)) || fail 'negative-control supervisor did not become live'
+output="$(
+  cd "$SECOND"
+  SOUNIO_COORD_DIR="$FAIL_STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    bin/sounio-coord send --agent malformed-sender --lane source \
+    --to-agent runtime-worker --to-lane target --kind request \
+    --message 'malformed contract must stop supervisor'
+)"
+malformed_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$output")"
+printf 'obligation_schema=loom-durable-obligation-v1\n' >> \
+  "$FAIL_STATE/messages/$malformed_message.message"
+failing_supervisor_stopped=0
+for _ in 1 2 3 4 5; do
+  if ! kill -0 "$failing_supervisor_pid" 2>/dev/null; then
+    failing_supervisor_stopped=1
+    break
+  fi
+  sleep 1
+done
+if ((failing_supervisor_stopped == 0)); then
+  kill "$failing_supervisor_pid" 2>/dev/null || true
+  wait "$failing_supervisor_pid" 2>/dev/null || true
+  fail 'periodic reconciliation failure did not stop the supervisor'
+fi
+set +e
+wait "$failing_supervisor_pid" 2>/dev/null
+failing_supervisor_status=$?
+set -e
+((failing_supervisor_status != 0)) || \
+  fail 'periodic reconciliation failure produced a successful supervisor exit'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$FAIL_STATE" \
+  bin/sounio-coord obligation-supervisor-status 2>/dev/null || true)"
+grep -q 'state=stopped' <<< "$output" || \
+  fail 'failed supervisor left its OCaml child live'
+
+# Sabotage only the activation boundary. The formerly historical request must
+# become eligible, proving that this boundary caused the earlier refusal.
+cp "$activation_file" "$TEST_ROOT/activation-watermark.saved"
+sed -i "s/^activated_epoch=.*/activated_epoch=$historical_epoch/" "$activation_file"
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-reconcile)"
+grep -q '^LOOM_OBLIGATION_RECONCILE requests=4 marked=1 legacy=3 ignored=1 state=PASS$' \
+  <<< "$output" || fail 'activation-boundary sabotage did not admit the historical request'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
+grep -q '"count":4,"unclosed":4' <<< "$output" || \
+  fail 'activation-boundary sabotage did not isolate the governing rule'
 printf 'runtime outcome\n' > "$TEST_ROOT/runtime-outcome.txt"
 printf 'runtime evidence\n' > "$TEST_ROOT/runtime-evidence.txt"
 output="$(
@@ -184,11 +341,25 @@ output="$(
     --agent runtime-worker --lane target --message "$runtime_message" \
     --claim runtime-claim --outcome "$TEST_ROOT/runtime-outcome.txt" \
     --evidence "$TEST_ROOT/runtime-evidence.txt"
+  for message in "$stale_message" "$supervised_message" "$historical_message"; do
+    SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-consume \
+      --agent runtime-worker --lane target --message "$message"
+    SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-claim \
+      --agent runtime-worker --lane target --message "$message" \
+      --claim "runtime-claim-$message" --ttl-seconds 120
+    SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-complete \
+      --agent runtime-worker --lane target --message "$message" \
+      --claim "runtime-claim-$message" --outcome "$TEST_ROOT/runtime-outcome.txt" \
+      --evidence "$TEST_ROOT/runtime-evidence.txt"
+  done
 )"
+cp "$TEST_ROOT/activation-watermark.saved" "$activation_file"
+[[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
+  fail 'sabotage control did not restore the activation watermark exactly'
 grep -q '^LOOM_OBLIGATION_COMPLETED .*state=completed .*unclosed=no ' <<< "$output" || \
   fail 'presence-derived shared-runtime obligation did not complete'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
-grep -q '"count":1,"unclosed":0' <<< "$output" || \
+grep -q '"count":4,"unclosed":0' <<< "$output" || \
   fail 'completed shared-runtime obligation remained unclosed'
 
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/scripts/dev/sounio_coord_runtime.sh"
@@ -252,11 +423,15 @@ second_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$second_id$" <<< "$output" || fail 'worktree did not observe atomic runtime upgrade'
 grep -q '^runtime_version=2026.08.23.8-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
+[[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
+  fail 'runtime upgrade rewrote the activation watermark'
 
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --activate "$first_id")"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'runtime rollback failed'
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'worktree did not observe runtime rollback'
+[[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
+  fail 'runtime rollback rewrote the activation watermark'
 
 mkdir -p "$BAD/scripts/dev" "$BAD/formal/tla" "$BAD/tools"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$BAD/scripts/dev/"

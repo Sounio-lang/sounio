@@ -31,6 +31,53 @@ manifest_value() {
   sed -n "s/^${key}=//p" "$manifest" | head -1
 }
 
+ensure_obligation_activation() {
+  local activation_dir activation_file lock_file manifest installed_utc epoch
+  local earliest_epoch='' earliest_utc='' earliest_runtime='' candidate_runtime tmp_file
+  activation_dir="$GIT_COMMON_DIR/sounio-coord-state"
+  activation_file="$activation_dir/loom-obligation-activation.v1"
+  lock_file="$GIT_COMMON_DIR/.sounio-coord-obligation-activation.lock"
+  mkdir -p "$activation_dir"
+  exec 8>"$lock_file"
+  flock 8
+  if [[ -f "$activation_file" ]]; then
+    grep -q '^schema=loom-obligation-activation-v1$' "$activation_file" &&
+      grep -Eq '^activated_epoch=[1-9][0-9]*$' "$activation_file" &&
+      grep -Eq '^runtime_id=.+$' "$activation_file" ||
+      die "invalid durable obligation activation watermark: $activation_file"
+    flock -u 8
+    return 0
+  fi
+  for manifest in "$RUNTIME_ROOT"/versions/*/manifest; do
+    [[ -f "$manifest" ]] || continue
+    grep -q '^capability=loom-durable-obligation-v1$' "$manifest" || continue
+    installed_utc="$(manifest_value "$manifest" installed_utc)"
+    candidate_runtime="$(manifest_value "$manifest" runtime_id)"
+    [[ -n "$installed_utc" && -n "$candidate_runtime" ]] ||
+      die "durable obligation runtime has incomplete activation metadata: $manifest"
+    epoch="$(date -u -d "$installed_utc" +%s 2>/dev/null || true)"
+    [[ "$epoch" =~ ^[1-9][0-9]*$ ]] ||
+      die "durable obligation runtime has invalid installed_utc: $manifest"
+    if [[ -z "$earliest_epoch" ]] || ((epoch < earliest_epoch)); then
+      earliest_epoch="$epoch"
+      earliest_utc="$installed_utc"
+      earliest_runtime="$candidate_runtime"
+    fi
+  done
+  [[ -n "$earliest_epoch" ]] ||
+    die "cannot establish durable obligation activation watermark"
+  tmp_file="$(mktemp "$activation_dir/.loom-obligation-activation.XXXXXX")"
+  {
+    printf 'schema=loom-obligation-activation-v1\n'
+    printf 'activated_utc=%s\n' "$earliest_utc"
+    printf 'activated_epoch=%s\n' "$earliest_epoch"
+    printf 'runtime_id=%s\n' "$earliest_runtime"
+    printf 'policy=post-activation-directed-request\n'
+  } > "$tmp_file"
+  mv "$tmp_file" "$activation_file"
+  flock -u 8
+}
+
 activate_runtime() {
   local runtime_id="$1" version_dir manifest protocol link_tmp
   version_dir="$RUNTIME_ROOT/versions/$runtime_id"
@@ -57,6 +104,7 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-obligation-runtime" ]] || \
       die "installed runtime declares durable obligations but omits Loom or native Sounio frame 9007: $runtime_id"
+    ensure_obligation_activation
   fi
   if grep -q '^capability=loom-signed-continuity-receipt-v2$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
@@ -376,6 +424,7 @@ else
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-durable-obligation-v1\n'
+    printf 'capability=loom-post-activation-request-bridge-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'
     printf 'capability=loom-separate-pod-inbox-replay-v1\n'
     printf 'capability=loom-signed-continuity-receipt-v2\n'
