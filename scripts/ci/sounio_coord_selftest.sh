@@ -98,4 +98,60 @@ output="$(
 )"
 grep -qE '^summary=active_claims:0 stale_claims:0 conflicts:0$' <<< "$output" || fail 'claims remained active'
 
+# A lease taken from a worktree that is later removed must stay reachable to its
+# owner. Before the orphan handling existed, both release and scope died with
+# "claim belongs to worktree <gone>" and only TTL expiry could clear the lease.
+git -C "$REPO" worktree add -q --detach "$TEST_ROOT/throwaway" HEAD
+(
+  cd "$TEST_ROOT/throwaway"
+  run_coord scope --agent agent-c --lane orphan --intent 'orphan probe'
+) >/dev/null
+git -C "$REPO" worktree remove --force "$TEST_ROOT/throwaway"
+
+output="$(
+  cd "$REPO"
+  run_coord release --agent agent-c --lane orphan --reason 'worktree removed'
+)"
+grep -qE '^RELEASED claim_id=agent-c--orphan' <<< "$output" || fail 'orphaned claim could not be released'
+
+git -C "$REPO" worktree add -q --detach "$TEST_ROOT/throwaway" HEAD
+(
+  cd "$TEST_ROOT/throwaway"
+  run_coord scope --agent agent-c --lane orphan2 --intent 'orphan probe'
+) >/dev/null
+git -C "$REPO" worktree remove --force "$TEST_ROOT/throwaway"
+
+(
+  cd "$REPO"
+  run_coord scope --agent agent-c --lane orphan2 --intent 'retaken here'
+) >/dev/null || fail 'orphaned claim could not be re-scoped'
+grep -q 'event=ORPHANED' "$STATE/events.log" || fail 'orphan adoption was not recorded'
+
+# The guard itself must survive: a claim whose worktree still exists stays
+# protected, and another agent still cannot take over an orphan.
+git -C "$REPO" worktree add -q --detach "$TEST_ROOT/throwaway" HEAD
+(
+  cd "$TEST_ROOT/throwaway"
+  run_coord scope --agent agent-c --lane live --intent 'still alive'
+) >/dev/null
+if (
+  cd "$REPO"
+  run_coord release --agent agent-c --lane live --reason 'should be refused'
+) >/dev/null 2>&1; then
+  fail 'claim was released while its worktree still existed'
+fi
+git -C "$REPO" worktree remove --force "$TEST_ROOT/throwaway"
+if (
+  cd "$REPO"
+  run_coord release --agent agent-d --lane live --reason 'hijack attempt'
+) >/dev/null 2>&1; then
+  fail 'a different agent released an orphaned claim'
+fi
+
+(
+  cd "$REPO"
+  run_coord release --agent agent-c --lane orphan2 --reason 'selftest complete'
+  run_coord release --agent agent-c --lane live --reason 'selftest complete'
+) >/dev/null
+
 echo 'sounio-coord-selftest: PASS'
