@@ -1,0 +1,181 @@
+// Noise-symbol sets — the NS abstract domain (sibling to R-ORIGIN provenance).
+//
+// A Knowledge value's uncertainty carries the identity-set of the independent
+// measurement sources it derives from. This module is the interning table for
+// those sets. N1 was REPRESENTATION-ONLY. N2 (this phase) wires seed/union/
+// call-substitution into the checker (self-hosted/check/check.sio,
+// epistemic.sio) as METADATA ONLY: TypeEntry.noise_set_id is now populated
+// end-to-end, but no diagnostic (E230) reads it yet -- that gate is N3.
+// SOUNIO_NS_TRACE=1 is the only way to observe the metadata in N2; behaviour
+// (accept/reject) is unchanged either way. SOUNIO_NS_SABOTAGE=1 disables only
+// the N2 propagation writes, as a control (see checker_ns_sabotage in
+// check.sio).
+//
+// Handle encoding (3 states — see docs/internal/concepts/ns-antigarbling-lane-20260823.md):
+//   -1  = unknown / top   (ignorance; NEVER treated as disjoint)
+//    0  = empty / deterministic  (no uncertainty sources)
+//   >0  = interned set handle  (index+1 into the table's mask array)
+//
+// The HANDLE is opaque; set operations (union, disjoint) dereference to the
+// canonical inline mask and re-intern. Bitwise ops act only on the inline mask,
+// never on the handle (per the codex representation contract). Source cap = 64
+// (one i64 mask); overflow saturates to unknown (conservative).
+
+// ============================================================
+// Constants
+// ============================================================
+
+// -1: unknown / top. No unary minus in Sounio, so subtract.
+// pub since N2 (check.sio consumes this directly at the seed/union/ctor
+// sites rather than re-deriving the literal).
+pub fn ns_unknown() -> i64 { 0 - 1 }
+
+// 0: empty / deterministic.
+pub fn ns_empty() -> i64 { 0 }
+
+// Table capacity (distinct interned non-empty sets).
+fn ns_cap() -> i64 { 4096 }
+
+// ============================================================
+// Interning table
+// ============================================================
+
+// masks[i] holds the canonical inline bitmask of interned set with handle i+1.
+// count is the number of interned non-empty sets.
+pub struct NoiseSetTable {
+    masks: [i64; 4096],
+    count: i64,
+}
+
+pub fn ns_table_new() -> NoiseSetTable {
+    NoiseSetTable { masks: [0; 4096], count: 0 }
+}
+
+// Heap-allocated table, mirroring struct_table_alloc()/fn_sig_table_alloc()
+// (self-hosted/check/defs.sio) — a *mut field on Checker rather than an
+// inline value, so the noise-symbol table does not grow the by-value Checker
+// struct (already ~164KB and SRET-fragile; see the comment on
+// checker_check_measure_expr_inplace in check.sio). heap_alloc zeroes the
+// block, which is exactly ns_table_new()'s value (masks all 0, count 0) --
+// see fn_sig_table_alloc's "calloc zeroes" comment for the same contract.
+pub fn ns_table_alloc() -> *mut NoiseSetTable with Alloc {
+    heap_alloc(32776) as *mut NoiseSetTable
+}
+
+// Sentinel for Checker.last_call_arg_ns (check.sio, N2 phase): "no
+// Knowledge-typed call argument observed yet this call". Deliberately
+// outside the three valid handle states (-1 unknown / 0 empty / >0 interned)
+// so a call with zero Knowledge arguments can be told apart from one whose
+// argument's own noise_set_id happens to be unknown (-1).
+pub fn ns_arg_sentinel() -> i64 { 0 - 2 }
+
+// ============================================================
+// Mask helpers (inline, source cap 64)
+// ============================================================
+
+// Single-source mask: bit `src`. src outside [0,63] saturates to 0 here; the
+// caller maps that to unknown via ns_singleton.
+fn ns_bit(src: i64) -> i64 {
+    if src < 0 { 0 }
+    else if src > 63 { 0 }
+    else {
+        let shift = src as u8
+        ((1 as i64) << shift) as i64
+    }
+}
+
+// ============================================================
+// Handle <-> mask
+// ============================================================
+
+// Dereference a handle to its inline mask. unknown/top -> a full mask is not
+// representable; callers must special-case unknown BEFORE calling ns_deref.
+// empty -> 0. interned -> masks[handle-1].
+fn ns_deref(table: &NoiseSetTable, handle: i64) -> i64 {
+    if handle <= 0 { 0 }
+    else {
+        let idx = handle - 1
+        if idx < table.count { table.masks[idx as usize] } else { 0 }
+    }
+}
+
+// Intern an inline mask, returning its canonical handle.
+// mask 0 -> empty handle 0. Existing mask -> its handle. New -> append.
+// Table full -> unknown (conservative: we lose the identity, so must not claim
+// disjointness later).
+pub fn ns_intern(table: &!NoiseSetTable, mask: i64) -> i64 with Mut, Panic, Div {
+    if mask == 0 { return 0 }
+    var i: i64 = 0
+    while i < table.count {
+        if table.masks[i as usize] == mask { return i + 1 }
+        i = i + 1
+    }
+    if table.count >= ns_cap() { return ns_unknown() }
+    let idx = table.count
+    table.masks[idx as usize] = mask
+    table.count = idx + 1
+    idx + 1
+}
+
+// A freshly measured source becomes a singleton set. Out-of-range source ->
+// unknown (we cannot represent it in the 64-bit mask, so stay conservative).
+pub fn ns_singleton(table: &!NoiseSetTable, src: i64) -> i64 with Mut, Panic, Div {
+    if src < 0 { return ns_unknown() }
+    if src > 63 { return ns_unknown() }
+    let m = ns_bit(src)
+    // Fail-closed (grok-4.6 N1 review): a real source must NEVER intern to the
+    // empty mask. If the bit for src is 0 (e.g. any shift-UB at the sign bit 63),
+    // saturate to unknown rather than hand back handle 0 (which would certify the
+    // source independent of itself and drop it from unions).
+    if m == 0 { return ns_unknown() }
+    ns_intern(table, m)
+}
+
+// ============================================================
+// Handle validity — fail-closed guard (codex N1 review)
+// ============================================================
+
+// A handle is a VALID interned reference iff it is empty (0) or a live index in
+// [1, count]. Negative (unknown/top) is NOT "valid interned" — callers handle it
+// explicitly (top) before this check. An out-of-range positive handle is invalid
+// and must NEVER be treated as a real (deref-able) set: fail closed.
+fn ns_handle_valid(table: &NoiseSetTable, h: i64) -> bool {
+    (h == 0) || (h > 0 && h <= table.count)
+}
+
+// ============================================================
+// Domain operations (transfer + query)
+// ============================================================
+
+// Union of two source-sets (the add/mul transfer). Unknown absorbs (top).
+// An INVALID positive handle saturates to unknown (we lost the identity, so we
+// must not silently drop it through the empty identity). empty is the identity.
+// Validity is checked BEFORE the empty shortcuts and before any deref.
+pub fn ns_union(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    if a > table.count { return ns_unknown() }   // invalid positive -> top
+    if b > table.count { return ns_unknown() }
+    if a == 0 { return b }
+    if b == 0 { return a }
+    let ma = ns_deref(table, a)
+    let mb = ns_deref(table, b)
+    ns_intern(table, ma | mb)
+}
+
+// Disjointness certificate. TRUE only when both sets are KNOWN, VALID, and share
+// no source. Unknown (-1) is NEVER disjoint. An INVALID positive handle is NEVER
+// disjoint (fail closed — an unrepresentable set cannot be certified independent).
+// empty is disjoint from anything (deterministic values carry no shared
+// uncertainty). Validity is checked BEFORE the empty shortcuts and before deref.
+pub fn ns_disjoint(table: &NoiseSetTable, a: i64, b: i64) -> bool {
+    if a < 0 { return false }
+    if b < 0 { return false }
+    if !ns_handle_valid(table, a) { return false }   // invalid positive -> not disjoint
+    if !ns_handle_valid(table, b) { return false }
+    if a == 0 { return true }
+    if b == 0 { return true }
+    let ma = ns_deref(table, a)
+    let mb = ns_deref(table, b)
+    (ma & mb) == 0
+}

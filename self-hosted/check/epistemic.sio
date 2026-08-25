@@ -779,7 +779,12 @@ pub fn epsilon_combine_weighted(eps_a: f64, eps_b: f64, weight_a: f64, weight_b:
 
 // Compute result type for binary operations on Knowledge types
 // Handles epsilon propagation according to operation semantics
-pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+//
+// ns_table: the calling Checker's noise-symbol interning table (see
+// check::noise_sets, check.sio's Checker.ns_table). N2 dataflow (REQ-3):
+// the result's noise_set_id is the UNION of the two operands' sets, computed
+// here right beside the epsilon propagation it mirrors.
+pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, ns_table: *mut NoiseSetTable) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // If neither operand is Knowledge, return error
     let left_is_knowledge = is_knowledge_type(left_ty)
     let right_is_knowledge = is_knowledge_type(right_ty)
@@ -841,7 +846,21 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
             _ => {
                 // For arithmetic operations, result is Knowledge with combined epsilon
                 // Inner type is the same as input inner types (assuming they match)
-                ty_knowledge(left_inner, result_epsilon)
+                var result = ty_knowledge(left_inner, result_epsilon)
+                // N2 (REQ-3): union the two operands' noise-symbol sets. A
+                // non-Knowledge operand (e.g. a plain literal added to a
+                // measured value) contributes the empty set -- it carries no
+                // uncertainty sources of its own, so ns_union's empty-is-
+                // identity handling folds it away rather than corrupting the
+                // union with an unrelated value. Sabotage leaves noise_set_id
+                // at ty_knowledge's -1 default.
+                if !checker_ns_sabotage() {
+                    let left_ns = if left_is_knowledge { left_ty.noise_set_id } else { ns_empty() }
+                    let right_ns = if right_is_knowledge { right_ty.noise_set_id } else { ns_empty() }
+                    result.noise_set_id = ns_union(&!(*ns_table), left_ns, right_ns)
+                }
+                checker_ns_trace_emit("union", result.noise_set_id)
+                result
             }
         }
     }
