@@ -1,0 +1,170 @@
+// stdlib/x509/trust_store.sio — system CA bundle loader
+//
+// Loads /etc/ssl/certs/ca-certificates.crt (the Debian/Ubuntu system CA
+// bundle: a concatenation of PEM-encoded root certificates) into an
+// in-memory TrustStore by walking it block-by-block with
+// x509::pem::pem_decode_next and parsing each decoded DER block with
+// x509::cert::x509_parse_certificate.
+//
+// read_file signature (Step 1 spike, confirmed on this compiler --
+// Madaros v0.80.0): `read_file(path: string) -> string with IO` is a
+// compiler builtin, NOT the 3-arg `(path, buf, max_len) -> i64` form the
+// task-2 brief's Step 1/Step 4 sketch guessed at (that form matches
+// Madaros's own bootstrap-era codegen source, self-hosted/native/
+// codegen.sio, describing an IR-level stub shape -- not the front-end
+// callable contract). Confirmed empirically:
+//   $ ./bin/souc run /tmp/read_file_spike.sio   // 1-arg let n = read_file(path); print_int(n)
+//   check: OK, runs, but prints a huge number -- because `n` there was
+//   silently typed as the string's underlying pointer value, not a
+//   length. The real accessors are the compiler builtins `str_len(s:
+//   string) -> i64` and `str_char_at(s: string, i: i64) -> i64`, exactly
+//   as already documented (and independently verified against real
+//   `/etc/hosts` content) in stdlib/net/dns.sio's header comment from a
+//   sibling task in this same plan. No `extern "C" fn heap_alloc` /
+//   raw-pointer plumbing is needed or accepted for file reads at all --
+//   the brief's `extern "C" { fn heap_alloc(...) }` block for read_file
+//   purposes is dropped entirely here (rawbuf_new already wraps
+//   heap_alloc internally for RawBuf allocation, which is all this file
+//   still needs it for).
+//
+// Malformed-PEM-block handling (a real gap between the brief's original
+// sketch and pem_decode_next's actual returned contract, resolved here
+// as a task-level judgment call): pem_decode_next returns a non-zero
+// error code (PEM_ERR_NO_END_MARKER / PEM_ERR_BASE64_DECODE) with
+// next_search_offset == 0 for a malformed block -- 0 is a real buffer
+// offset, not a sentinel meaning "no more blocks" (-1 means that), and
+// it is not "the position just past the bad block" either, since
+// pem.sio has no such "skip past this block" primitive. Resuming the
+// scan loop from offset 0 on a malformed-block error would therefore
+// re-find the SAME bad block on every iteration and infinite-loop
+// (offset never advances past it). The brief's Step 4 sketch treated a
+// non-zero perr as "skip it, continue scanning" via `offset = next`,
+// which -- given pem_decode_next's real contract -- is exactly that
+// infinite loop, not best-effort skipping. Since there is no safe way to
+// re-derive a resume position from here, this loader treats ANY non-zero
+// perr as fatal for the whole load, returning TRUST_STORE_ERR_READ_FAILED
+// (reusing that existing error code rather than adding a new public one,
+// since Tasks 3/4 only need to distinguish "got a usable TrustStore" from
+// "did not" -- see task-2 brief's own interface list, which enumerates
+// TRUST_STORE_ERR_READ_FAILED and TRUST_STORE_ERR_TOO_MANY_CERTS as the
+// only two error consts Tasks 3/4 import verbatim). This is a deliberate
+// change from the brief: no looping, no silent truncation.
+
+use net::socket::*
+use x509::pem::*
+use x509::cert::*
+
+pub const TRUST_STORE_MAX_CERTS: i64 = 512
+pub const TRUST_STORE_ERR_READ_FAILED: i64 = 0 - 1
+pub const TRUST_STORE_ERR_TOO_MANY_CERTS: i64 = 0 - 2
+
+pub struct TrustStore {
+    certs: [Certificate; 512],
+    bufs: [RawBuf; 512],
+    count: i32,
+}
+
+pub fn x509_name_eq(a: &X509Name, b: &X509Name) -> bool {
+    if a.count != b.count { return false }
+    var i: i32 = 0
+    while i < a.count {
+        let ea = a.entries[i as usize]
+        let eb = b.entries[i as usize]
+        if ea.oid_len != eb.oid_len { return false }
+        if ea.value_len != eb.value_len { return false }
+        var j: i32 = 0
+        while j < ea.oid_len {
+            if ea.oid[j as usize] != eb.oid[j as usize] { return false }
+            j = j + 1
+        }
+        var k: i32 = 0
+        while k < ea.value_len {
+            if ea.value[k as usize] != eb.value[k as usize] { return false }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn trust_store_find_by_subject(store: &TrustStore, subject: &X509Name) -> i64 {
+    var i: i64 = 0
+    while i < (store.count as i64) {
+        if x509_name_eq(&store.certs[i as usize].subject, subject) {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+pub fn trust_store_find_by_ski(store: &TrustStore, ski: &[u8; 32], ski_len: i32) -> i64 {
+    var i: i64 = 0
+    while i < (store.count as i64) {
+        let c = store.certs[i as usize]
+        if c.subject_key_id_len == ski_len {
+            var matched: bool = true
+            var j: i32 = 0
+            while j < ski_len {
+                if c.subject_key_id[j as usize] != ski[j as usize] { matched = false }
+                j = j + 1
+            }
+            if matched { return i }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// The real Debian/Ubuntu bundle is well under 1 MB as of 2026; read_file's
+// own mmap sizing (1 MiB minimum, page-aligned up from file size) comfortably
+// covers it with no size argument needed on this call at all.
+const CA_BUNDLE_PATH: string = "/etc/ssl/certs/ca-certificates.crt"
+
+pub fn trust_store_load() -> (TrustStore, i64) with IO, Mut, Div, Panic {
+    var store = TrustStore {
+        certs: [certificate_zero(); 512],
+        bufs: [rawbuf_new(1); 512],
+        count: 0,
+    }
+
+    let content: string = read_file(CA_BUNDLE_PATH)
+    let n: i64 = str_len(content)
+    if n <= 0 {
+        return (store, TRUST_STORE_ERR_READ_FAILED)
+    }
+
+    let bundle = rawbuf_new(n + 8)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(&bundle, i, str_char_at(content, i))
+        i = i + 1
+    }
+
+    var offset: i64 = 0
+    while offset >= 0 {
+        let (der, der_len, next, perr) = pem_decode_next(&bundle, n, offset)
+        if perr != 0 {
+            // See header comment: a malformed block cannot be safely
+            // skipped with pem_decode_next's actual contract (next == 0
+            // is not a resumable position), so this fails the whole load
+            // rather than looping forever or silently truncating it.
+            return (store, TRUST_STORE_ERR_READ_FAILED)
+        } else if der_len > 0 {
+            if (store.count as i64) >= TRUST_STORE_MAX_CERTS {
+                return (store, TRUST_STORE_ERR_TOO_MANY_CERTS)
+            }
+            let (cert, cerr) = x509_parse_certificate(&der, der_len)
+            if cerr == 0 {
+                store.certs[store.count as usize] = cert
+                store.bufs[store.count as usize] = der
+                store.count = store.count + 1
+            }
+            offset = next
+        } else {
+            offset = next  // -1: no more blocks, loop condition ends it
+        }
+    }
+
+    (store, 0)
+}
