@@ -46,6 +46,9 @@ expect_accept consume \
 expect_accept interrupt-consumed \
   "9007 5 2 4 101 201 301 0 400 $message $zeros $zeros" \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=interrupt state=4'
+expect_refusal interrupt-consumed-wrong-next \
+  "9007 5 2 6 101 201 301 0 400 $message $zeros $zeros" 42 \
+  'SOUNIO_OBLIGATION_REFUSE reason=transition-policy'
 expect_accept claim \
   "9007 3 2 3 101 201 301 401 500 $message $zeros $zeros" \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=claim state=3'
@@ -55,6 +58,9 @@ expect_accept renew \
 expect_accept interrupt \
   "9007 5 3 4 101 201 301 401 600 $message $zeros $zeros" \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=interrupt state=4'
+expect_refusal interrupt-claimed-wrong-next \
+  "9007 5 3 6 101 201 301 401 600 $message $zeros $zeros" 42 \
+  'SOUNIO_OBLIGATION_REFUSE reason=transition-policy'
 expect_accept recover \
   "9007 6 4 5 101 202 302 401 0 $message $zeros $zeros" \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=recover state=5'
