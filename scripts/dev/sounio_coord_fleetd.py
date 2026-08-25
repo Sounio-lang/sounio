@@ -27,7 +27,7 @@ from typing import Any, Iterator
 
 
 PROTOCOL_VERSION = 1
-RUNTIME_VERSION = "2026.08.25.4"
+RUNTIME_VERSION = "2026.08.25.5"
 SCHEMA_VERSION = "1"
 ZERO_HASH = "0" * 64
 SAFE_TOKEN = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
@@ -907,6 +907,21 @@ def parse_fleet_status(output: str, slot: str) -> dict[str, str]:
     return {}
 
 
+def logical_command_name(command: list[str]) -> str:
+    if not command:
+        return ""
+    wrapper_index = 0
+    if Path(command[0]).name in {"python", "python3"}:
+        wrapper_index += 1
+    if (
+        wrapper_index + 2 < len(command)
+        and Path(command[wrapper_index]).name == "sounio-fleet-agent-runtime"
+        and command[wrapper_index + 1] == "_continue-fallback"
+    ):
+        return Path(command[wrapper_index + 2]).name
+    return Path(command[0]).name
+
+
 def desired_mapping_mismatch(spec: LaneSpec, mapping: dict[str, Any]) -> str | None:
     expected: dict[str, str] = {"worktree": str(spec.cwd)}
     if spec.kind:
@@ -921,6 +936,7 @@ def desired_mapping_mismatch(spec: LaneSpec, mapping: dict[str, Any]) -> str | N
         expected["identity"] = spec.identity
     if spec.command:
         original_command = list(spec.command)
+        expected["command"] = logical_command_name(original_command)
         original_digest = hashlib.sha256(
             canonical_json(original_command).encode("utf-8")
         ).hexdigest()
@@ -941,14 +957,12 @@ def desired_mapping_mismatch(spec: LaneSpec, mapping: dict[str, Any]) -> str | N
                 *assignments,
                 *original_command,
             ]
-            expected["command"] = Path(spec.command[0]).name
             expected["argv_digest"] = hashlib.sha256(
                 canonical_json(wrapped).encode("utf-8")
             ).hexdigest()
             if isinstance(start_capability_id, str) and start_capability_id:
                 expected["original_argv_digest"] = original_digest
         else:
-            expected["command"] = Path(spec.command[0]).name
             expected["argv_digest"] = original_digest
     for key, value in expected.items():
         observed = mapping.get(key)

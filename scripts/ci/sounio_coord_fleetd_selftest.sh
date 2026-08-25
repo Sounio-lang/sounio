@@ -207,6 +207,20 @@ with module.connect_db(Path(sys.argv[2])) as connection:
     )
 assert initial[0] == "start", initial
 assert unreachable == ("blocked", "probe-unreachable-start-not-authorized"), unreachable
+assert module.logical_command_name(
+    [
+        "/usr/bin/python3",
+        "/runtime/bin/sounio-fleet-agent-runtime",
+        "_continue-fallback",
+        "/opt/cursor-agent",
+    ]
+) == "cursor-agent"
+assert module.logical_command_name(
+    ["/usr/bin/python3", "-c", "print('cursor-agent')"]
+) == "python3"
+assert module.logical_command_name(
+    ["/tmp/not-sounio-fleet-agent-runtime", "_continue-fallback", "cursor-agent"]
+) == "not-sounio-fleet-agent-runtime"
 PY
 
 output="$(fleetd init --config "$CONFIG")"
