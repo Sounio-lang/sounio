@@ -10040,7 +10040,61 @@ impl Lowerer {
                 _ => { return (lo, 0 - 1) }
             }
         }
-        if n <= 0 || (*cur).kind != ExprKind::ExprCall {
+        if n <= 0 {
+            return (lo, 0 - 1)
+        }
+        // Peel identity wrappers: `id_d(make_d(x, v0)).c.b.a.x` has the same field
+        // provenance as `make_d(x, v0).c.b.a.x`, so walk through the identity to
+        // the call that actually built the struct. Bounded, so a mutually
+        // identity-wrapping pair cannot spin.
+        var peel: i64 = 0
+        while peel < 8 {
+            if (*cur).kind == ExprKind::ExprMethodCall {
+                break
+            }
+            if (*cur).kind != ExprKind::ExprCall {
+                return (lo, 0 - 1)
+            }
+            var is_id = false
+            var want: i64 = 0
+            match (*cur).left {
+                Some(ce) => {
+                    let nm = lo.expr_to_callee_name_ref(&(*ce))
+                    let xi = lo.fo_xfer_lookup(nm)
+                    if xi >= 0 && FO_XFER_KIND[xi as usize] == 1 {
+                        is_id = true
+                        let li = FO_XFER_LIT[xi as usize]
+                        if li >= 0.5 && li < 1.5 { want = 1 }
+                    }
+                }
+                _ => {}
+            }
+            if !is_id {
+                break
+            }
+            var acur = &(*cur).args
+            var ai: i64 = 0
+            var moved = false
+            while true {
+                match *acur {
+                    Some(al) => {
+                        if ai == want {
+                            cur = &(*al).head
+                            moved = true
+                            break
+                        }
+                        ai = ai + 1
+                        acur = &(*al).tail
+                    }
+                    _ => break
+                }
+            }
+            if !moved {
+                return (lo, 0 - 1)
+            }
+            peel = peel + 1
+        }
+        if (*cur).kind != ExprKind::ExprCall && (*cur).kind != ExprKind::ExprMethodCall {
             return (lo, 0 - 1)
         }
         // Registration walks root-to-leaf; this walk collected leaf-to-root, so
@@ -10050,6 +10104,43 @@ impl Lowerer {
         while i >= 0 {
             h = fo_ctor_path_fold(h, hashes[i as usize])
             i = i - 1
+        }
+        // A method call reaches the same ctor entries through a different name and
+        // a shifted argument list. Registration mangles `Type_method` and its
+        // params include `self` as p0; the AST arg list excludes the receiver. So
+        // a field initialised from the method's first real argument registers as
+        // p1 and must be applied against AST arg 0.
+        //
+        // Only kind 1 with a param index of at least 1 is accepted. Every other
+        // kind is defined over p0/p1, and for a method p0 is the RECEIVER, not a
+        // scalar -- applying those would silently attribute the receiver's
+        // uncertainty to an argument. Refusing keeps the pre-existing 0.0.
+        if (*cur).kind == ExprKind::ExprMethodCall {
+            match (*cur).left {
+                Some(recv) => {
+                    if (*recv).kind != ExprKind::ExprIdent {
+                        return (lo, 0 - 1)
+                    }
+                    let tname = lo.lookup_local_struct_type((*recv).name)
+                    if tname.len <= 0 {
+                        return (lo, 0 - 1)
+                    }
+                    let mangled = ir_mangle_method_name(tname, (*cur).name)
+                    let midx = fo_ctor_global_lookup(fo_name_hash(mangled), h)
+                    if midx < 0 {
+                        return (lo, 0 - 1)
+                    }
+                    if FO_CTOR_KIND[midx as usize] != 1 {
+                        return (lo, 0 - 1)
+                    }
+                    let mlit = FO_CTOR_LIT[midx as usize]
+                    if mlit < 0.5 {
+                        return (lo, 0 - 1)
+                    }
+                    return lo.fo_apply_transfer_kind(1, mlit - 1.0, 0 - 1, &(*cur).args, 0)
+                }
+                _ => { return (lo, 0 - 1) }
+            }
         }
         match (*cur).left {
             Some(callee_expr) => {
