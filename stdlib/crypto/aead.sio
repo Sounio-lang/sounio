@@ -32,6 +32,25 @@
 //! 46 47). The correct 12-byte nonce is therefore
 //! [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47], used in
 //! this task's own test file.
+//!
+//! CONSTANT-TIME SCOPE (final whole-plan review, Finding 8): tag
+//! comparison in `chacha20poly1305_open` (below) and in `gcm.sio`'s
+//! `gcm_open` is constant-time (accumulate an OR of byte differences,
+//! branch once), as required. That is the ONLY constant-time guarantee
+//! this module makes. Two data-dependent-timing surfaces remain
+//! elsewhere in the dependency chain, inherent to non-bitsliced software
+//! crypto rather than a defect, and a future TLS consumer should not
+//! assume full constant-time behaviour beyond tag comparison:
+//!   - `crypto::aes`'s S-box substitution step is a plain table lookup
+//!     (`sbox[byte]`), whose memory-access pattern depends on the
+//!     secret byte value (classic AES cache-timing surface).
+//!   - `crypto::poly1305`'s final reduction takes a data-dependent
+//!     `overflow` branch (`if overflow == 1 { ... }`, selecting between
+//!     the reduced and unreduced limb set) -- see that file's own
+//!     header, which already documents this as an explicit, accepted
+//!     non-goal.
+//! Making either of these constant-time (bitslicing AES, or a
+//! branchless mask-select in Poly1305) is out of scope for this plan.
 
 use net::socket::*
 use crypto::aes::*
@@ -88,7 +107,7 @@ fn chacha20poly1305_seal(key: &[u8;32], nonce: &[u8;12], plaintext: &RawBuf, pla
 
 fn chacha20poly1305_open(key: &[u8;32], nonce: &[u8;12], ciphertext_with_tag: &RawBuf, ciphertext_with_tag_len: i64, aad: &RawBuf, aad_len: i64) -> (RawBuf, bool) with IO {
     if ciphertext_with_tag_len < 16 {
-        return (rawbuf_new(1), false)
+        return (rawbuf_new(8), false)
     }
     let plaintext_len = ciphertext_with_tag_len - 16
 
@@ -166,7 +185,22 @@ pub fn aead_seal(
     } else if algo == AEAD_AES_256_GCM {
         let round_keys = aes256_key_schedule(key)
         gcm_seal(&round_keys, nonce, plaintext, plaintext_len, aad, aad_len)
+    } else if algo == AEAD_CHACHA20_POLY1305 {
+        chacha20poly1305_seal(key, nonce, plaintext, plaintext_len, aad, aad_len)
     } else {
+        // Final whole-plan review, Finding 2: an unrecognized `algo`
+        // value reaches here (not just AEAD_CHACHA20_POLY1305 -- the
+        // previous unconditional `else` treated ANY unknown value as
+        // ChaCha20-Poly1305, silently). `aead_seal`'s signature
+        // (`-> (RawBuf, i64)`) has no failure channel to report an
+        // invalid algorithm through, unlike `aead_open`'s `(RawBuf,
+        // bool)`, so this branch cannot fail closed the way
+        // `aead_open`'s final `else` below does. Passing an
+        // unrecognized `algo` to `aead_seal` is therefore a caller
+        // programming error with undefined behaviour in this function
+        // -- do not change the signature to "fix" this; callers must
+        // validate `algo` against the three `AEAD_*` constants before
+        // calling.
         chacha20poly1305_seal(key, nonce, plaintext, plaintext_len, aad, aad_len)
     }
 }
@@ -189,7 +223,12 @@ pub fn aead_open(
     } else if algo == AEAD_AES_256_GCM {
         let round_keys = aes256_key_schedule(key)
         gcm_open(&round_keys, nonce, ciphertext_with_tag, ciphertext_with_tag_len, aad, aad_len)
-    } else {
+    } else if algo == AEAD_CHACHA20_POLY1305 {
         chacha20poly1305_open(key, nonce, ciphertext_with_tag, ciphertext_with_tag_len, aad, aad_len)
+    } else {
+        // Final whole-plan review, Finding 2: fail closed on a truly
+        // unrecognized `algo` rather than silently treating it as
+        // ChaCha20-Poly1305 (the previous unconditional `else` bug).
+        (rawbuf_new(8), false)
     }
 }

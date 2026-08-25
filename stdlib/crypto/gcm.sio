@@ -56,7 +56,22 @@ pub const GCM_NONCE_LEN: i64 = 12
 
 fn ghash_multiply(x: &[u8;16], h: &[u8;16]) -> [u8;16] {
     var z: [u8;16] = [(0 as u8);16]
-    var v: [u8;16] = *x
+    // Element-by-element copy, NOT `var v: [u8;16] = *x` (final
+    // whole-plan review, Finding 3): a bare dereference of a
+    // `&[u8;16]` reference aliases the caller's array on this compiler
+    // rather than copying it (same defect documented at
+    // `gcm_increment_counter` below, and in docs/handoff/
+    // souc_v0800_defects.md). `v` is only ever read below, never
+    // written, so every existing call site happens to be safe today --
+    // but a future caller that reads `*x` again after this call would
+    // see silently corrupted data if `v` aliased it. Copy explicitly so
+    // this function stays safe regardless of future call sites.
+    var v: [u8;16] = [(0 as u8);16]
+    var vi: i64 = 0
+    while vi < 16 {
+        v[vi as usize] = x[vi as usize]
+        vi = vi + 1
+    }
 
     var byte_idx: i64 = 0
     while byte_idx < 16 {
@@ -182,6 +197,13 @@ fn ghash(h: &[u8;16], aad: &RawBuf, aad_len: i64, ciphertext: &RawBuf, ciphertex
 // bits, which hold the nonce in GCM's 12-byte-nonce construction, never
 // change during a single seal/open call) -- uses word32.sio's add32, never
 // native u32, per this plan's Global Constraints.
+//
+// Counter-wrap note: `add32` wraps this 32-bit counter mod 2^32 after
+// 2^32 16-byte blocks (~64GB per invocation) -- unreachable for
+// realistic TLS record sizes, but a wrap would collide the counter back
+// onto J0 (counter value 0, reserved for the tag-encryption block in
+// gcm_seal/gcm_open below), which would be catastrophic if it were ever
+// reached.
 fn gcm_increment_counter(block: &[u8;16]) -> [u8;16] {
     let low32 = ((block[12] as i64) << 24) | ((block[13] as i64) << 16) | ((block[14] as i64) << 8) | (block[15] as i64)
     let incremented = add32(low32, 1)
