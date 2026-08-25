@@ -134,7 +134,8 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   fleet-proven-exit-v1 fleet-ed25519-anchor-v1 \
   fleet-checkpoint-handoff-v1 fleet-tla-model-v1 \
   fleet-trace-refinement-v1 fleet-temporal-authority-v1 \
-  fleet-recovery-start-only-v1; do
+  fleet-recovery-start-only-v1 fleet-recovery-directory-v1 \
+  fleet-recovery-latch-trace-v1; do
   grep -q "^capability=$capability$" "$RUNTIME_ROOT/versions/$first_id/manifest" || \
     fail "installed runtime omitted capability=$capability"
 done
