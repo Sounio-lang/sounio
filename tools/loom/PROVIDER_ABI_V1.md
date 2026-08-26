@@ -5,9 +5,9 @@ Schema: `loom-provider-abi-v1`
 ## Purpose
 
 The Loom CLI is the stable user and automation interface. Codex CLI, Claude
-Code, Grok CLI, and OpenCode are provider adapters. Each adapter retains its own
-release cadence, credential store, session representation, event stream, and
-permission model.
+Code, Kimi Code CLI, Grok CLI, and OpenCode are provider adapters. Each adapter
+retains its own release cadence, credential store, session representation,
+event stream, and permission model.
 
 The ABI normalizes capabilities and custody. It does not claim that provider
 semantics are identical.
@@ -73,11 +73,17 @@ and gives input authority only to Loom's exclusive interactive lease and
 authenticated wake path. Kernel recovery preserves the Guardian PID, provider
 PID, instance identity, output cursor, and provider conversation.
 
-The first vertical supports Codex with inline TUI mode. Persistent Claude,
-Grok, and OpenCode adapters are refused until each has a tested native input and
-session-resume contract. `provider-open` also refuses `--isolate-context`:
-Codex TUI does not currently expose isolation equivalent to the headless
-`--ephemeral --ignore-rules` contract.
+Persistent mode supports Codex and Kimi. Codex receives its initial prompt in
+the native TUI argv. Kimi's TUI has no positional bootstrap-prompt contract, so
+Loom starts the native process first and sends the initial prompt through the
+same authenticated input lease used for later wakes. The plan and receipt expose
+this distinction as `prompt_transport=argv|loom-wake`; Kimi's bootstrap prompt
+does not appear in the process argv.
+
+Persistent Claude, Grok, OpenCode, and Cursor adapters are refused until each
+has a tested native input and session-resume contract. `provider-open` also
+refuses `--isolate-context`: neither supported TUI currently exposes isolation
+equivalent to its headless contract.
 
 ### `provider-auth-login`
 
@@ -91,12 +97,14 @@ material.
 | --- | --- | --- | --- |
 | Codex | JSONL | stream-observed | `codex login status` |
 | Claude Code | stream-json | caller UUID | `claude auth status --json` |
+| Kimi Code | stream-json | native store | unknown; no offline status contract |
 | Grok | streaming-json | caller UUID | unknown; no offline status contract |
 | OpenCode | JSON events | stream-observed | delegated multiprovider store |
 
 `caller` means Loom supplies the UUID when the provider supports it.
 `stream-observed` means the provider assigns its session identity and emits it in
-the event stream.
+the event stream. `native store` means the provider assigns and persists the
+identity, but its current headless stream does not expose that identity to Loom.
 
 ## Context Isolation
 
@@ -106,6 +114,7 @@ the event stream.
 | --- | --- |
 | Codex | `--ephemeral --ignore-rules` |
 | Claude Code | `--safe-mode` |
+| Kimi Code | unavailable; request fails closed |
 | Grok | `--no-memory --no-subagents --disable-web-search --max-turns 2` |
 | OpenCode | `--pure` |
 
@@ -125,6 +134,7 @@ the provider's native dangerous or auto-approval flag:
 | --- | --- |
 | Codex | `--dangerously-bypass-approvals-and-sandbox` |
 | Claude Code | `--dangerously-skip-permissions` |
+| Kimi Code | `--auto` |
 | Grok | `--always-approve` |
 | OpenCode | `--auto` |
 
@@ -139,12 +149,13 @@ missing, non-regular, or non-executable overrides are refused.
 
 ## Evidence
 
-`scripts/ci/sounio_loom_provider_abi_selftest.sh` uses four deterministic fake
+`scripts/ci/sounio_loom_provider_abi_selftest.sh` uses five deterministic fake
 CLIs to test catalog normalization, native credential authority, nonzero auth
 status parsing, prompt redaction, unsafe opt-in, UUID enforcement, override
 validation, context-isolation mappings, inherited-harness removal, native login
 delegation, headless stdin closure, persistent input leasing, kernel replacement
-with stable Guardian/provider identities, and verified terminal replay.
+with stable Guardian/provider identities, Kimi bootstrap through authenticated
+`loom-wake`, and verified terminal replay.
 
 On 2026-08-25, the retained three-agent canary launched real Codex, Grok, and
 MiniMax-via-OpenCode processes exclusively through `bin/loom provider-start`.
@@ -159,9 +170,11 @@ and hashes are in `tools/loom/evidence/three-agent-recovery-20260825/`.
 
 Provider ABI v1 does not yet:
 
-- project stream-observed provider session IDs into a durable provider catalog;
+- project stream-observed or native-store provider session IDs into a durable
+  provider catalog;
 - normalize provider event payloads into a shared typed event algebra;
-- expose persistent interactive adapters beyond Codex;
+- expose persistent interactive adapters beyond Codex and Kimi;
+- resume a native-store Kimi session after its provider process dies;
 - resume a persistent provider after Guardian or host loss;
 - broker or replicate credentials;
 - prove provider readiness by making a paid model request during status;

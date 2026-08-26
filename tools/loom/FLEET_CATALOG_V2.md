@@ -82,12 +82,14 @@ hide with process discovery.
 
 ## Current boundary
 
-Persistent catalog custody is initially available for Codex because Codex is
-the first provider with a verified `provider-open` adapter. Other provider kinds
-fail closed. Provider or Guardian loss permits a new physical generation from
-the sealed bootstrap intent; it cannot preserve the dead provider process or
-claim that the new conversation is the old one. Kernel-only loss preserves the
-Guardian, provider PID, instance, PTY, output cursor, and conversation.
+Persistent catalog custody is available for Codex and Kimi because both have a
+verified `provider-open` adapter. Kimi's initial prompt crosses the authenticated
+Loom input lease after the TUI is under Guardian custody; it is not placed in an
+unsupported positional argv. Other provider kinds fail closed. Provider or
+Guardian loss permits a new physical generation from the sealed bootstrap
+intent; it cannot preserve the dead provider process or claim that the new
+conversation is the old one. Kernel-only loss preserves the Guardian, provider
+PID, instance, PTY, output cursor, and conversation.
 
 The executable sabotage gate is:
 
@@ -96,5 +98,6 @@ scripts/ci/sounio_loom_fleet_custody_selftest.sh
 ```
 
 It proves prompt tamper refusal, forged-custody refusal, dual-authority refusal,
-explicit active adoption, idempotent reconciliation, and stable-provider kernel
-recovery.
+exact refusal of a provider without a persistent adapter, explicit active
+adoption, idempotent Codex and Kimi reconciliation, Kimi lease bootstrap, and
+stable-provider kernel recovery.

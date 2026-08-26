@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.26"
+let runtime_version = "2026.08.26.27"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -6814,6 +6814,7 @@ type fleet_spec = {
 }
 
 let fleet_kinds = [ "claude"; "codex"; "kimi"; "grok"; "cursor"; "empryo" ]
+let persistent_fleet_kinds = [ "codex"; "kimi" ]
 
 let fleet_directory root = Filename.concat root "fleet"
 
@@ -6865,7 +6866,7 @@ let fleet_spec_of_values path values =
     failf "unsupported fleet kind %s in %s" kind path;
   if custody <> "agentd" && custody <> "loom" then
     failf "unsupported fleet custody %s in %s" custody path;
-  if custody = "loom" && kind <> "codex" then
+  if custody = "loom" && not (List.mem kind persistent_fleet_kinds) then
     failf "persistent fleet provider unavailable for kind %s in %s" kind path;
   if not ((not (Filename.is_relative home)) && Sys.file_exists home && Sys.is_directory home) then
     failf "fleet home is unavailable for slot %s: %s" slot home;
@@ -6980,6 +6981,7 @@ let run_captured ?environment executable arguments =
 type provider_auth_probe =
   | Codex_auth
   | Claude_auth
+  | Kimi_auth
   | Grok_auth
   | Opencode_auth
 
@@ -7015,6 +7017,7 @@ type provider_plan = {
   plan_model : string;
   plan_unsafe_auto : bool;
   plan_context_isolation : bool;
+  plan_prompt_transport : string;
   plan_prompt : string;
   plan_argv : string list;
 }
@@ -7040,6 +7043,13 @@ let provider_specs =
           "context-isolation" ];
       provider_auth_probe = Claude_auth;
       provider_login_args = [ "auth"; "login" ] };
+    { provider_id = "kimi"; provider_name = "Moonshot Kimi Code CLI";
+      provider_executable = "kimi"; provider_version_args = [ "--version" ];
+      provider_stream = "stream-json"; provider_session_binding = "native-store";
+      provider_capabilities =
+        [ "interactive"; "headless"; "event-stream"; "resume"; "model-select";
+          "auth-login"; "doctor"; "persistent-input" ];
+      provider_auth_probe = Kimi_auth; provider_login_args = [ "login" ] };
     { provider_id = "grok"; provider_name = "xAI Grok CLI";
       provider_executable = "grok"; provider_version_args = [ "--version" ];
       provider_stream = "streaming-json"; provider_session_binding = "caller";
@@ -7133,6 +7143,7 @@ let provider_auth_status spec executable =
          if result.captured_code = 0 then
            ("unknown", "native-auth-status-invalid-json")
          else ("unknown", "native-auth-status-failed"))
+  | Kimi_auth -> ("unknown", "native-cli-has-no-offline-auth-status")
   | Grok_auth -> ("unknown", "native-cli-has-no-offline-auth-status")
   | Opencode_auth ->
       let result = run_captured executable [ "providers"; "list" ] in
@@ -7212,6 +7223,7 @@ let provider_model_args spec model =
   else
     match spec.provider_id with
     | "codex" -> [ "-m"; model ]
+    | "kimi" -> [ "-m"; model ]
     | "claude" | "grok" | "opencode" -> [ "--model"; model ]
     | _ -> failf "unsupported-provider:%s" spec.provider_id
 
@@ -7221,6 +7233,7 @@ let provider_unsafe_args spec enabled =
     match spec.provider_id with
     | "codex" -> [ "--dangerously-bypass-approvals-and-sandbox" ]
     | "claude" -> [ "--dangerously-skip-permissions" ]
+    | "kimi" -> [ "--auto" ]
     | "grok" -> [ "--always-approve" ]
     | "opencode" -> [ "--auto" ]
     | _ -> failf "unsupported-provider:%s" spec.provider_id
@@ -7231,6 +7244,7 @@ let provider_context_isolation_args spec enabled =
     match spec.provider_id with
     | "codex" -> [ "--ephemeral"; "--ignore-rules" ]
     | "claude" -> [ "--safe-mode" ]
+    | "kimi" -> failf "provider-context-isolation-unavailable:kimi"
     | "grok" ->
         [ "--no-memory"; "--no-subagents"; "--disable-web-search";
           "--max-turns"; "2" ]
@@ -7264,6 +7278,13 @@ let provider_argv spec lifecycle executable mode cwd session_id provider_session
       [ executable; "--print"; "--output-format"; "stream-json"; "--verbose";
         "--resume"; provider_session ]
       @ context_args @ model_args @ unsafe_args @ [ prompt ]
+  | "kimi", "turn", "new" ->
+      [ executable; "--output-format"; "stream-json" ]
+      @ model_args @ unsafe_args @ [ "--prompt"; prompt ]
+  | "kimi", "turn", "resume" ->
+      [ executable; "--session"; provider_session; "--output-format";
+        "stream-json" ]
+      @ model_args @ unsafe_args @ [ "--prompt"; prompt ]
   | "grok", "turn", "new" ->
       [ executable; "--no-leader"; "--cwd"; cwd; "--output-format";
         "streaming-json"; "--session-id"; session_id ]
@@ -7282,6 +7303,8 @@ let provider_argv spec lifecycle executable mode cwd session_id provider_session
   | "codex", "persistent", "new" ->
       [ executable; "--no-alt-screen"; "-C"; cwd ]
       @ model_args @ unsafe_args @ [ prompt ]
+  | "kimi", "persistent", "new" ->
+      [ executable ] @ model_args @ unsafe_args
   | _, "persistent", _ ->
       failf "persistent-provider-unavailable:%s:%s" spec.provider_id mode
   | _, _, _ ->
@@ -7322,6 +7345,10 @@ let provider_plan cli default_lifecycle =
     provider_argv spec lifecycle executable mode cwd session_id provider_session
       model unsafe_auto context_isolation prompt
   in
+  let prompt_transport =
+    if lifecycle = "persistent" && spec.provider_id = "kimi" then "loom-wake"
+    else "argv"
+  in
   { plan_spec = spec; plan_lifecycle = lifecycle;
     plan_stdin_authority =
       (if lifecycle = "persistent" then "loom-lease" else "closed");
@@ -7329,23 +7356,27 @@ let provider_plan cli default_lifecycle =
     plan_cwd = cwd; plan_session_id = session_id;
     plan_provider_session = provider_session; plan_model = model;
     plan_unsafe_auto = unsafe_auto; plan_context_isolation = context_isolation;
+    plan_prompt_transport = prompt_transport;
     plan_prompt = prompt; plan_argv = argv }
 
 let redacted_provider_argv plan =
-  let rec redact = function
-    | [] -> []
-    | [ _prompt ] ->
-        [ Printf.sprintf "<PROMPT sha256=%s bytes=%d>" (sha256 plan.plan_prompt)
-            (String.length plan.plan_prompt) ]
-    | head :: tail -> head :: redact tail
-  in
-  redact plan.plan_argv
+  if plan.plan_prompt_transport = "loom-wake" then plan.plan_argv
+  else
+    let rec redact = function
+      | [] -> []
+      | [ _prompt ] ->
+          [ Printf.sprintf "<PROMPT sha256=%s bytes=%d>" (sha256 plan.plan_prompt)
+              (String.length plan.plan_prompt) ]
+      | head :: tail -> head :: redact tail
+    in
+    redact plan.plan_argv
 
 let provider_plan_json plan =
   Printf.sprintf
-    "{\"schema\":%s,\"provider\":%s,\"lifecycle\":%s,\"stdin_authority\":%s,\"mode\":%s,\"executable\":%s,\"stream\":%s,\"credential_authority\":\"native\",\"session_binding\":%s,\"loom_session\":%s,\"provider_session\":%s,\"cwd\":%s,\"model\":%s,\"unsafe_auto\":%s,\"context_isolation\":%s,\"prompt_bytes\":%d,\"prompt_sha256\":%s,\"argv_sha256\":%s,\"argv\":%s}"
+    "{\"schema\":%s,\"provider\":%s,\"lifecycle\":%s,\"stdin_authority\":%s,\"prompt_transport\":%s,\"mode\":%s,\"executable\":%s,\"stream\":%s,\"credential_authority\":\"native\",\"session_binding\":%s,\"loom_session\":%s,\"provider_session\":%s,\"cwd\":%s,\"model\":%s,\"unsafe_auto\":%s,\"context_isolation\":%s,\"prompt_bytes\":%d,\"prompt_sha256\":%s,\"argv_sha256\":%s,\"argv\":%s}"
     (json_quote provider_abi_schema) (json_quote plan.plan_spec.provider_id)
     (json_quote plan.plan_lifecycle) (json_quote plan.plan_stdin_authority)
+    (json_quote plan.plan_prompt_transport)
     (json_quote plan.plan_mode) (json_quote plan.plan_executable)
     (json_quote plan.plan_spec.provider_stream)
     (json_quote plan.plan_spec.provider_session_binding)
@@ -7362,9 +7393,9 @@ let provider_plan_command cli =
   if flag cli "--json" then Printf.printf "%s\n%!" (provider_plan_json plan)
   else
     Printf.printf
-      "LOOM_PROVIDER_PLAN schema=%s provider=%s lifecycle=%s stdin_authority=%s mode=%s stream=%s credential_authority=native session_binding=%s prompt_bytes=%d prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
+      "LOOM_PROVIDER_PLAN schema=%s provider=%s lifecycle=%s stdin_authority=%s prompt_transport=%s mode=%s stream=%s credential_authority=native session_binding=%s prompt_bytes=%d prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
       provider_abi_schema plan.plan_spec.provider_id plan.plan_lifecycle
-      plan.plan_stdin_authority plan.plan_mode
+      plan.plan_stdin_authority plan.plan_prompt_transport plan.plan_mode
       plan.plan_spec.provider_stream plan.plan_spec.provider_session_binding
       (String.length plan.plan_prompt) (sha256 plan.plan_prompt)
       (command_argv_digest (Array.of_list plan.plan_argv))
@@ -7399,9 +7430,21 @@ let provider_open_command cli =
       rest = runtime :: "_provider-tui" :: plan.plan_argv }
   in
   start_command start_cli;
+  if plan.plan_prompt_transport = "loom-wake" then (
+    let wake_cli =
+      { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2; rest = [] }
+    in
+    Hashtbl.replace wake_cli.options "--message-id"
+      ("provider-bootstrap-" ^ String.sub (sha256 plan.plan_prompt) 0 16);
+    Hashtbl.replace wake_cli.options "--prompt" plan.plan_prompt;
+    (try wake_command wake_cli
+     with error ->
+       (try stop_command wake_cli with _ -> ());
+       raise error));
   Printf.printf
-    "LOOM_PROVIDER_OPENED schema=%s provider=%s lifecycle=persistent stdin_authority=loom-lease session_binding=%s prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=false\n%!"
+    "LOOM_PROVIDER_OPENED schema=%s provider=%s lifecycle=persistent stdin_authority=loom-lease prompt_transport=%s session_binding=%s prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=false\n%!"
     provider_abi_schema plan.plan_spec.provider_id
+    plan.plan_prompt_transport
     plan.plan_spec.provider_session_binding (sha256 plan.plan_prompt)
     (command_argv_digest (Array.of_list plan.plan_argv))
     (if plan.plan_unsafe_auto then "true" else "false")
@@ -8582,7 +8625,7 @@ let fleet_enroll_command cli =
          || optional cli "--coord-dir" <> None || flag cli "--unsafe-auto"
          || flag cli "--adopt-active")
   then failf "agentd fleet enrollment contains Loom-only authority options";
-  if custody = "loom" && kind <> "codex" then
+  if custody = "loom" && not (List.mem kind persistent_fleet_kinds) then
     failf "persistent fleet provider unavailable for kind %s" kind;
   let prompt, prompt_file, prompt_sha256, session_id, coord_dir, model, unsafe_auto =
     if custody = "loom" then (
@@ -8742,6 +8785,7 @@ let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
+  Printf.eprintf "  provider-open persistent providers: codex, kimi\n";
   Printf.eprintf
     "\nSpectral data plane:\n  export-events-arrow --out PATH [--state-dir DIR]\n  verify-events-arrow --file PATH\n";
   Printf.eprintf

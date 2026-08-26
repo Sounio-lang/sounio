@@ -666,6 +666,8 @@ bin/loom provider-start --provider codex --agent codex --lane work \
   --session-id UUID --cwd DIR --prompt-file PROMPT --isolate-context
 bin/loom provider-open --provider codex --agent codex --lane persistent-work \
   --session-id UUID --cwd DIR --prompt-file PROMPT
+bin/loom provider-open --provider kimi --agent kimi --lane persistent-work \
+  --session-id UUID --cwd DIR --prompt-file PROMPT
 bin/loom provider-auth-login --provider codex
 ```
 
@@ -680,19 +682,22 @@ OCaml trampoline that closes stdin and removes inherited Codex, Claude, and tmux
 harness identity variables. `--isolate-context` maps provider-specific
 reductions in memory, rules, and subagent context; it is deliberately not
 described as a sandbox. The provider remains the Guardian-owned child, so kernel
-recovery does not replace its process identity. Codex, Claude Code, Grok, and
-OpenCode are supported. Their stream, authentication, and session-binding
-differences remain typed rather than being flattened into a false common
-denominator. The complete contract and current boundaries are in
+recovery does not replace its process identity. Codex, Claude Code, Kimi Code,
+Grok, and OpenCode are supported. Their stream, authentication, and
+session-binding differences remain typed rather than being flattened into a
+false common denominator. The complete contract and current boundaries are in
 `tools/loom/PROVIDER_ABI_V1.md`.
 
 `provider-open` is the persistent counterpart. Its provider stdin remains
 attached to the Guardian-owned PTY and is reachable only through Loom's
-exclusive input lease or authenticated wake transport. The initial vertical is
-Codex-only and fails closed for persistent resume or context-isolation requests
-that the native TUI cannot honor. Killing and recovering the disposable Loom
-kernel preserves the Guardian, Codex process, instance identity, conversation,
-and durable output cursor. A woken lane can answer with
+exclusive input lease or authenticated wake transport. Codex takes its initial
+prompt in the native TUI argv; Kimi starts with a prompt-free argv and receives
+its bootstrap through the authenticated lease because its TUI exposes no
+positional prompt contract. Persistent adapters for other providers and
+context-isolation requests that the native TUIs cannot honor fail closed.
+Killing and recovering the disposable Loom kernel preserves the Guardian,
+provider process, instance identity, conversation, and durable output cursor.
+A woken lane can answer with
 `bin/sounio-coord reply --agent A --lane L --reply-to MESSAGE_ID --message TEXT`;
 the command derives the original sender and thread instead of requiring the
 provider to reconstruct routing metadata.
@@ -775,6 +780,11 @@ The default remains `agentd` for compatibility. A `loom` slot records a stable
 agent, session UUID, native provider kind, credential home, shared coordination
 authority, and SHA-256-bound bootstrap prompt. The raw prompt is copied into
 private catalog storage rather than embedded in the descriptor.
+
+Verified persistent catalog kinds are currently `codex` and `kimi`. The Kimi
+bootstrap is delivered only after the native TUI is under Loom custody, and the
+catalog sabotage gate proves that changing the stored kind to an unverified
+provider such as Cursor is refused by the persistent-adapter allowlist.
 
 `fleet-reconcile` is a no-mutation plan by default. It observes both the legacy
 fleet adapter and Loom before taking action. A slot whose non-selected authority
