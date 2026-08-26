@@ -902,7 +902,43 @@ without a dedicated fresh GitHub issue.
 
 ---
 
-## D11 — whole-program-scale corruption of a struct's scalar fields, deterministic and reproducible only above some module/function-count threshold
+## D11 — a tuple-destructured local loses its struct type, so a field read resolves by NAME across every struct in the linked program
+
+> **UPDATE 2026-08-26 — ROOT-CAUSED, minimal repro found. Full dispatch:
+> [`docs/audit/D11_ARENA_SCRATCH_RESET_CROSS_MODULE_CORRUPTION_DISPATCH_2026-08-26.md`](../audit/D11_ARENA_SCRATCH_RESET_CROSS_MODULE_CORRUPTION_DISPATCH_2026-08-26.md).**
+> The entry below is preserved as the original investigation trail; two of its
+> conclusions are now known to be wrong.
+>
+> - **It is not a scale/threshold defect and the arena is not involved.** The
+>   `arena_reset_skipped (call-arg scratch overflow)` path is *fail-safe* (it
+>   declines to reset, so nothing can dangle); the corruption reproduces with
+>   `arena_reset_totals ok=35 skip=0`, and in a **6-function, single-file,
+>   import-free program** where the arena machinery never runs.
+> - **Root cause:** the parser desugars `let (cert_inner, e0) = der_enter(...)`
+>   to `let __tup0 = der_enter(...)` + `let cert_inner = __tup0.0`, and
+>   `lower_let_stmt_ref` (`self-hosted/ir/lower.sio`) has no rule that records a
+>   struct type for a tuple-index field-access initialiser. `cert_inner.pos`
+>   then falls through `field_idx_for_base_ref` to `field_idx_from_name_simple`
+>   — a global, name-only, **first-registered-match** scan over every struct
+>   layout — and picks `HsBuf.pos` (index 3, declared in `stdlib/tls/client.sio`)
+>   instead of `DerReader.pos` (index 1). Reading index 3 of a 24-byte
+>   `DerReader` lands 8 bytes past its end: deterministically 255, whence
+>   `tbs_len = 527 - 255 = 272`. This is exactly **Finding 25**, the gap
+>   `docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md`
+>   deliberately left open.
+> - **Minimal repro:** `tests/known_failures/madaros_tuple_destructure_field_name_collision_probe.sio`
+>   (30 lines, no imports). Swapping the two struct declarations makes it pass —
+>   the proof that resolution is declaration-order first-match.
+> - **Proof the memory is intact:** an instrumented `der_pos_of(&cert_inner)`
+>   (reading `r.pos` through a typed `&DerReader` parameter) returns **4** in the
+>   same run where the inline `cert_inner.pos` returns **255**. Only the caller's
+>   field-load instruction is wrong.
+> - **Status:** fix proposed in the dispatch (§"Proposed fix"), **not
+>   implemented**. Verified stdlib-level mitigation, not applied: renaming
+>   `HsBuf.pos` → `hs_pos` in `stdlib/tls/client.sio` makes the full 36-module
+>   program return the correct `tbs_start=4, tbs_len=523`.
+
+### Original entry (2026-08-25), preserved
 
 ### Symptom
 Discovered 2026-08-25 during the Madaros TLS 1.3 handshake plan, Task 7
