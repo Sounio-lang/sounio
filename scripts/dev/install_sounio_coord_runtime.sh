@@ -111,6 +111,12 @@ activate_runtime() {
       -x "$version_dir/bin/sounio-loom-epistemic-runtime" ]] || \
       die "installed runtime declares the epistemic machine but omits Loom or native Sounio frame 9008: $runtime_id"
   fi
+  if grep -q '^capability=loom-attention-compiler-v0$' "$manifest"; then
+    grep -q '^capability=loom-epistemic-machine-v0$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-attention-runtime" ]] || \
+      die "installed runtime declares the attention compiler without the epistemic machine, Loom, or native Sounio frame 9009: $runtime_id"
+  fi
   if grep -q '^capability=loom-recoverable-control-service-v1$' "$manifest"; then
     grep -q '^capability=loom-durable-obligation-v1$' "$manifest" &&
       grep -q '^capability=loom-post-activation-request-bridge-v1$' "$manifest" &&
@@ -282,6 +288,7 @@ loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
 loom_continuity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_continuity_adapter.sh"
 loom_obligation_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_obligation_adapter.sh"
 loom_epistemic_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_epistemic_adapter.sh"
+loom_attention_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_attention_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
@@ -289,6 +296,8 @@ loom_obligation_entrypoint="$SOURCE_ROOT/tools/loom/obligation_adapter_main.sio"
 loom_obligation_module="$SOURCE_ROOT/stdlib/coordination/loom_obligation.sio"
 loom_epistemic_entrypoint="$SOURCE_ROOT/tools/loom/epistemic_adapter_main.sio"
 loom_epistemic_module="$SOURCE_ROOT/stdlib/coordination/loom_epistemic_machine.sio"
+loom_attention_entrypoint="$SOURCE_ROOT/tools/loom/attention_adapter_main.sio"
+loom_attention_module="$SOURCE_ROOT/stdlib/coordination/loom_attention_compiler.sio"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -308,12 +317,16 @@ loom_epistemic_module="$SOURCE_ROOT/stdlib/coordination/loom_epistemic_machine.s
   die "Loom obligation build entrypoint missing or not executable: $loom_obligation_build_source"
 [[ -x "$loom_epistemic_build_source" ]] || \
   die "Loom epistemic build entrypoint missing or not executable: $loom_epistemic_build_source"
+[[ -x "$loom_attention_build_source" ]] || \
+  die "Loom attention build entrypoint missing or not executable: $loom_attention_build_source"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
   die "Loom native Sounio obligation source bundle is incomplete"
 [[ -f "$loom_epistemic_entrypoint" && -f "$loom_epistemic_module" ]] || \
   die "Loom native Sounio epistemic source bundle is incomplete"
+[[ -f "$loom_attention_entrypoint" && -f "$loom_attention_module" ]] || \
+  die "Loom native Sounio attention source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && -f "$loom_project/src/loom_ui.ml" && \
   -f "$loom_project/src/loom_pty_stubs.c" && \
@@ -344,6 +357,7 @@ loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_continuity_binary="$loom_project/_build/default/src/sounio-loom-continuity-runtime"
 loom_obligation_binary="$loom_project/_build/default/src/sounio-loom-obligation-runtime"
 loom_epistemic_binary="$loom_project/_build/default/src/sounio-loom-epistemic-runtime"
+loom_attention_binary="$loom_project/_build/default/src/sounio-loom-attention-runtime"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
@@ -351,6 +365,8 @@ loom_epistemic_binary="$loom_project/_build/default/src/sounio-loom-epistemic-ru
   die "Loom build omitted its native Sounio obligation adapter"
 [[ -x "$loom_epistemic_binary" ]] || \
   die "Loom build omitted its native Sounio epistemic adapter"
+[[ -x "$loom_attention_binary" ]] || \
+  die "Loom build omitted its native Sounio attention adapter"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
@@ -377,6 +393,16 @@ loom_epistemic_probe="$(
 [[ "$loom_epistemic_probe" == \
   'SOUNIO_EPISTEMIC_ACCEPT schema=loom-native-epistemic-v0 transition=create state=active' ]] || \
   die "Loom native Sounio epistemic adapter failed its install probe"
+ones='1 1 1 1 1 1 1 1'
+twos='2 2 2 2 2 2 2 2'
+threes='3 3 3 3 3 3 3 3'
+loom_attention_probe="$(
+  printf '9009 1 1 100 101 201 202 301 401 900 800 700 50 100 800 900 900 50 100 %s %s %s %s\n' \
+    "$ones" "$twos" "$threes" "$zeros" | "$loom_attention_binary"
+)"
+[[ "$loom_attention_probe" == \
+  'SOUNIO_ATTENTION_ACCEPT schema=loom-native-attention-v0 transition=compile policy=information-first' ]] || \
+  die "Loom native Sounio attention adapter failed its install probe"
 loom_measurement_probe="$(
   printf '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401\n' | \
     "$loom_continuity_binary"
@@ -423,7 +449,8 @@ bundle_sha="$({
     "$loom_continuity_module" "$loom_obligation_build_source" \
     "$loom_obligation_entrypoint" "$loom_obligation_module" \
     "$loom_epistemic_build_source" "$loom_epistemic_entrypoint" \
-    "$loom_epistemic_module"
+    "$loom_epistemic_module" "$loom_attention_build_source" \
+    "$loom_attention_entrypoint" "$loom_attention_module"
   find "$loom_project/src/vendor" -type f -print0 | sort -z | xargs -0 sha256sum
 } | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
@@ -458,6 +485,8 @@ else
     "$stage/bin/sounio-loom-obligation-runtime"
   install -m 0755 "$loom_epistemic_binary" \
     "$stage/bin/sounio-loom-epistemic-runtime"
+  install -m 0755 "$loom_attention_binary" \
+    "$stage/bin/sounio-loom-attention-runtime"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -474,6 +503,8 @@ else
     printf 'loom_obligation_frame=9007\n'
     printf 'loom_epistemic_language=Sounio\n'
     printf 'loom_epistemic_frame=9008\n'
+    printf 'loom_attention_language=Sounio\n'
+    printf 'loom_attention_frame=9009\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
@@ -489,6 +520,8 @@ else
     printf 'capability=loom-durable-obligation-v1\n'
     printf 'capability=loom-epistemic-machine-v0\n'
     printf 'capability=loom-epistemic-arrow-projection-v0\n'
+    printf 'capability=loom-attention-compiler-v0\n'
+    printf 'capability=loom-attention-linear-resource-v0\n'
     printf 'capability=loom-post-activation-request-bridge-v1\n'
     printf 'capability=loom-recoverable-control-service-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'

@@ -154,6 +154,47 @@ damaged history into a visually plausible table. The v0 boundary is one local
 filesystem authority. It does not claim distributed consensus, deterministic
 LLM reruns, physical causality, or exactly-once external effects.
 
+## Counterfactual Attention Compiler v0
+
+The first attention compiler chooses one next experiment from a canonical TSV
+candidate set and persists both the complete set and the decision in the
+epistemic worldline. It keeps information gain, falsification power,
+counterfactual divergence, risk, and cost separate instead of hiding them in a
+weighted score.
+
+```text
+candidate_id target_world claim provider resource information falsification divergence cost risk evidence_sha256 falsifier_sha256
+```
+
+The actual file is tab-separated and begins with that exact header. It accepts
+at most 64 unique candidates. The three explicit policies are
+`information-first`, `falsification-first`, and `counterfactual-first`; lower
+risk and then lower cost break axis ties, followed by stable candidate ID.
+Candidates whose integer cost exceeds the budget are infeasible.
+
+```sh
+bin/loom attention-compile --state-dir STATE --world scheduler \
+  --plan plan-1 --candidates candidates.tsv --budget 100 \
+  --policy falsification-first --owner claude --generation generation-1
+bin/loom attention-complete --state-dir STATE --world scheduler \
+  --plan plan-1 --owner claude --generation generation-1 \
+  --outcome SHA256
+```
+
+Native Sounio frame `9009` checks the selected candidate against every feasible
+rival with `attention_selected_not_dominated`. The compile event atomically
+reserves the selected exact resource; completion with the same owner and
+generation releases it. This makes ordinary capabilities and attention plans
+mutually exclusive across all local worldlines without a scheduling-receipt to
+capability-acquire crash window. Replay recompiles the stored candidate set,
+repeats all native pair checks, validates every target world and claim, and
+refuses the entire Arrow projection on divergence or journal damage.
+
+These axes are bounded author estimates and the policy order is governance, not
+an objective law of scientific value. V0 proves deterministic local replay and
+resource exclusion, not optimal research strategy, fairness, starvation
+freedom, distributed scheduling, or model reliability.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every

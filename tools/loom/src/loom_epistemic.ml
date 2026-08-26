@@ -369,6 +369,303 @@ let transition_of_event event =
         evidence_digest = field fields "hypothesis_digest" }
   | kind -> failf "epistemic-event-kind-unknown:%s" kind
 
+type attention_policy =
+  | Information_first
+  | Falsification_first
+  | Counterfactual_first
+
+let attention_policy_name = function
+  | Information_first -> "information-first"
+  | Falsification_first -> "falsification-first"
+  | Counterfactual_first -> "counterfactual-first"
+
+let attention_policy_code = function
+  | Information_first -> 1
+  | Falsification_first -> 2
+  | Counterfactual_first -> 3
+
+let attention_policy_of_string = function
+  | "information-first" -> Information_first
+  | "falsification-first" -> Falsification_first
+  | "counterfactual-first" -> Counterfactual_first
+  | value -> failf "epistemic-attention-policy-invalid:%s" value
+
+type attention_candidate = {
+  candidate_id : string;
+  target_world : string;
+  target_claim : string;
+  provider : string;
+  resource : string;
+  information_gain : int;
+  falsification_power : int;
+  counterfactual_divergence : int;
+  cost : int;
+  risk : int;
+  candidate_evidence_digest : string;
+  candidate_falsifier_digest : string;
+}
+
+let attention_candidate_header =
+  String.concat "\t"
+    [ "candidate_id"; "target_world"; "claim"; "provider"; "resource";
+      "information"; "falsification"; "divergence"; "cost"; "risk";
+      "evidence_sha256"; "falsifier_sha256" ]
+
+let attention_int label ~minimum ~maximum value =
+  let parsed =
+    try int_of_string value
+    with _ -> failf "epistemic-attention-%s-invalid" label
+  in
+  if parsed < minimum || parsed > maximum then
+    failf "epistemic-attention-%s-invalid" label;
+  parsed
+
+let canonical_attention_candidate candidate =
+  String.concat "\t"
+    [ candidate.candidate_id; candidate.target_world; candidate.target_claim;
+      candidate.provider; candidate.resource;
+      string_of_int candidate.information_gain;
+      string_of_int candidate.falsification_power;
+      string_of_int candidate.counterfactual_divergence;
+      string_of_int candidate.cost; string_of_int candidate.risk;
+      candidate.candidate_evidence_digest;
+      candidate.candidate_falsifier_digest ]
+
+let attention_candidate_of_line line =
+  match String.split_on_char '\t' line with
+  | [ candidate_id; target_world; target_claim; provider; resource;
+      information; falsification; divergence; cost; risk; evidence;
+      falsifier ] ->
+      validate_atom "attention-candidate" candidate_id;
+      validate_atom "attention-target-world" target_world;
+      validate_atom "attention-target-claim" target_claim;
+      validate_atom "attention-provider" provider;
+      validate_text "attention-resource" resource;
+      if String.contains resource '\t' || String.contains resource '\n'
+         || String.contains resource '\r'
+      then failf "epistemic-attention-resource-invalid";
+      { candidate_id; target_world; target_claim; provider; resource;
+        information_gain =
+          attention_int "information" ~minimum:1 ~maximum:1000 information;
+        falsification_power =
+          attention_int "falsification" ~minimum:1 ~maximum:1000 falsification;
+        counterfactual_divergence =
+          attention_int "divergence" ~minimum:1 ~maximum:1000 divergence;
+        cost = attention_int "cost" ~minimum:1 ~maximum:1_000_000 cost;
+        risk = attention_int "risk" ~minimum:0 ~maximum:1000 risk;
+        candidate_evidence_digest = require_digest "attention-evidence" evidence;
+        candidate_falsifier_digest =
+          require_digest "attention-falsifier" falsifier }
+  | _ -> failf "epistemic-attention-candidate-row-malformed"
+
+let canonical_attention_candidates candidates =
+  String.concat "\n"
+    (attention_candidate_header
+     :: List.map canonical_attention_candidate candidates)
+  ^ "\n"
+
+let parse_attention_candidate_lines lines =
+  match lines with
+  | header :: rows when header = attention_candidate_header ->
+      if rows = [] || List.length rows > 64 then
+        failf "epistemic-attention-candidate-count-invalid";
+      if List.exists (fun row -> row = "") rows then
+        failf "epistemic-attention-candidate-row-malformed";
+      let candidates = List.map attention_candidate_of_line rows in
+      let seen = Hashtbl.create (List.length candidates) in
+      List.iter
+        (fun candidate ->
+          if Hashtbl.mem seen candidate.candidate_id then
+            failf "epistemic-attention-candidate-duplicate:%s"
+              candidate.candidate_id;
+          Hashtbl.add seen candidate.candidate_id ())
+        candidates;
+      let canonical = canonical_attention_candidates candidates in
+      if String.length canonical > 65_536 then
+        failf "epistemic-attention-candidate-set-too-large";
+      (candidates, canonical)
+  | _ -> failf "epistemic-attention-candidate-header-invalid"
+
+let parse_attention_candidate_text value =
+  let lines = String.split_on_char '\n' value in
+  let lines =
+    match List.rev lines with
+    | "" :: rest -> List.rev rest
+    | _ -> lines
+  in
+  parse_attention_candidate_lines lines
+
+let compare_high left right = Int.compare right left
+let compare_low left right = Int.compare left right
+
+let first_comparison comparisons =
+  let rec loop = function
+    | [] -> 0
+    | value :: rest -> if value = 0 then loop rest else value
+  in
+  loop comparisons
+
+let compare_attention_candidates policy left right =
+  let information = compare_high left.information_gain right.information_gain in
+  let falsification =
+    compare_high left.falsification_power right.falsification_power
+  in
+  let divergence =
+    compare_high left.counterfactual_divergence
+      right.counterfactual_divergence
+  in
+  let risk = compare_low left.risk right.risk in
+  let cost = compare_low left.cost right.cost in
+  let policy_axes =
+    match policy with
+    | Information_first -> [ information; falsification; divergence ]
+    | Falsification_first -> [ falsification; information; divergence ]
+    | Counterfactual_first -> [ divergence; falsification; information ]
+  in
+  first_comparison
+    (policy_axes @ [ risk; cost; String.compare left.candidate_id right.candidate_id ])
+
+let select_attention_candidate policy budget candidates =
+  if budget <= 0 || budget > 1_000_000 then
+    failf "epistemic-attention-budget-invalid";
+  match
+    candidates
+    |> List.filter (fun candidate -> candidate.cost <= budget)
+    |> List.sort (compare_attention_candidates policy)
+  with
+  | selected :: _ -> selected
+  | [] -> failf "epistemic-attention-no-feasible-candidate"
+
+let attention_candidate_set_digest canonical =
+  sha256 ("loom-attention-candidates-v0\000" ^ canonical)
+
+let attention_adapter_path () =
+  match Sys.getenv_opt "SOUNIO_LOOM_ATTENTION_ADAPTER" with
+  | Some path when path <> "" -> path
+  | _ ->
+      Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+        "sounio-loom-attention-runtime"
+
+let verify_attention_frame frame expected =
+  let adapter = attention_adapter_path () in
+  if not (Sys.file_exists adapter) then
+    failf "epistemic-attention-native-adapter-missing:%s" adapter;
+  let code, output =
+    process_exchange (Unix.realpath adapter) (String.concat " " frame ^ "\n")
+  in
+  if code <> 0 || output <> expected then
+    failf "epistemic-attention-native-refused:rc=%d:output=%s" code output
+
+let verify_attention_pair ~plan ~policy ~budget ~owner ~generation
+    ~candidate_set_digest ~selected ~rival =
+  let zeros = List.init 8 (fun _ -> "0") in
+  let frame =
+    [ "9009"; "1"; string_of_int (attention_policy_code policy);
+      string_of_int budget; token "loom-attention-plan" plan;
+      token "loom-attention-candidate" selected.candidate_id;
+      token "loom-attention-candidate" rival.candidate_id;
+      token "loom-attention-owner" owner;
+      token "loom-attention-generation" generation;
+      string_of_int selected.information_gain;
+      string_of_int selected.falsification_power;
+      string_of_int selected.counterfactual_divergence;
+      string_of_int selected.cost; string_of_int selected.risk;
+      string_of_int rival.information_gain;
+      string_of_int rival.falsification_power;
+      string_of_int rival.counterfactual_divergence;
+      string_of_int rival.cost; string_of_int rival.risk ]
+    @ digest_limbs selected.candidate_evidence_digest
+    @ digest_limbs selected.candidate_falsifier_digest
+    @ digest_limbs candidate_set_digest @ zeros
+  in
+  verify_attention_frame frame
+    (Printf.sprintf
+       "SOUNIO_ATTENTION_ACCEPT schema=loom-native-attention-v0 transition=compile policy=%s"
+       (attention_policy_name policy))
+
+let verify_attention_completion ~plan ~candidate ~owner ~generation ~outcome =
+  let zeros = List.init 8 (fun _ -> "0") in
+  let frame =
+    [ "9009"; "2"; "0"; "0"; token "loom-attention-plan" plan;
+      token "loom-attention-candidate" candidate; "0";
+      token "loom-attention-owner" owner;
+      token "loom-attention-generation" generation ]
+    @ List.init 10 (fun _ -> "0")
+    @ zeros @ zeros @ zeros @ digest_limbs outcome
+  in
+  verify_attention_frame frame
+    "SOUNIO_ATTENTION_ACCEPT schema=loom-native-attention-v0 transition=complete state=completed"
+
+type attention_decision = {
+  plan_id : string;
+  policy : attention_policy;
+  budget : int;
+  candidates : attention_candidate list;
+  canonical_candidates : string;
+  candidate_set_digest : string;
+  selected : attention_candidate;
+  attention_owner : string;
+  attention_generation : string;
+  mutable completed : bool;
+  mutable outcome_digest : string;
+}
+
+let attention_decision_of_event event =
+  let fields = decode_fields event.payload in
+  let plan_id = field fields "plan" in
+  let policy = attention_policy_of_string (field fields "policy") in
+  let budget =
+    attention_int "budget" ~minimum:1 ~maximum:1_000_000
+      (field fields "budget")
+  in
+  let stored_candidates = field fields "candidate_set" in
+  let candidates, canonical_candidates =
+    parse_attention_candidate_text stored_candidates
+  in
+  if stored_candidates <> canonical_candidates then
+    failf "epistemic-attention-candidate-set-noncanonical:%s" plan_id;
+  let candidate_set_digest =
+    require_digest "attention-candidate-set"
+      (field fields "candidate_set_digest")
+  in
+  if attention_candidate_set_digest canonical_candidates <> candidate_set_digest
+  then failf "epistemic-attention-candidate-set-digest-mismatch:%s" plan_id;
+  let selected = select_attention_candidate policy budget candidates in
+  let selected_id = field fields "selected" in
+  if selected.candidate_id <> selected_id then
+    failf "epistemic-attention-selection-mismatch:expected=%s:actual=%s"
+      selected.candidate_id selected_id;
+  let attention_owner = field fields "owner" in
+  let attention_generation = field fields "generation" in
+  validate_atom "attention-plan" plan_id;
+  validate_atom "attention-owner" attention_owner;
+  validate_atom "attention-generation" attention_generation;
+  let require_selected key actual =
+    if field fields key <> actual then
+      failf "epistemic-attention-selected-field-mismatch:%s" key
+  in
+  require_selected "target_world" selected.target_world;
+  require_selected "claim" selected.target_claim;
+  require_selected "provider" selected.provider;
+  require_selected "resource" selected.resource;
+  require_selected "information" (string_of_int selected.information_gain);
+  require_selected "falsification" (string_of_int selected.falsification_power);
+  require_selected "divergence"
+    (string_of_int selected.counterfactual_divergence);
+  require_selected "cost" (string_of_int selected.cost);
+  require_selected "risk" (string_of_int selected.risk);
+  require_selected "evidence_digest" selected.candidate_evidence_digest;
+  require_selected "falsifier_digest" selected.candidate_falsifier_digest;
+  List.iter
+    (fun rival ->
+      verify_attention_pair ~plan:plan_id ~policy ~budget
+        ~owner:attention_owner ~generation:attention_generation
+        ~candidate_set_digest ~selected ~rival)
+    candidates;
+  { plan_id; policy; budget; candidates; canonical_candidates;
+    candidate_set_digest; selected; attention_owner; attention_generation;
+    completed = false; outcome_digest = "" }
+
 type knowledge = {
   knowledge_id : string;
   value : string;
@@ -406,6 +703,7 @@ type state = {
   knowledges : (string, knowledge) Hashtbl.t;
   claims : (string, claim) Hashtbl.t;
   capabilities : (string, capability) Hashtbl.t;
+  attentions : (string, attention_decision) Hashtbl.t;
 }
 
 let confidence_value value =
@@ -447,14 +745,17 @@ let reduce world events head =
   let state =
     { world_id = world; agent; lane; parent_world; parent_head; hypothesis;
       events; journal_head = head; knowledges = Hashtbl.create 32;
-      claims = Hashtbl.create 32; capabilities = Hashtbl.create 16 }
+      claims = Hashtbl.create 32; capabilities = Hashtbl.create 16;
+      attentions = Hashtbl.create 16 }
   in
   List.iteri
     (fun index event ->
-      let transition = transition_of_event event in
-      if transition.world <> world then failf "epistemic-event-world-drift:%d" event.sequence;
-      verify_native transition;
       let fields = decode_fields event.payload in
+      if field fields "world" <> world then
+        failf "epistemic-event-world-drift:%d" event.sequence;
+      (match event.kind with
+      | "ATTENTION_COMPILED" | "ATTENTION_COMPLETED" -> ()
+      | _ -> verify_native (transition_of_event event));
       match event.kind with
       | "WORLD_CREATED" | "WORLD_FORKED" ->
           if index <> 0 then failf "epistemic-world-origin-duplicate:%d" event.sequence
@@ -516,6 +817,11 @@ let reduce world events head =
               if not existing.released && existing.resource = resource then
                 failf "epistemic-resource-already-owned:%s" resource)
             state.capabilities;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.completed && decision.selected.resource = resource
+              then failf "epistemic-resource-already-owned:%s" resource)
+            state.attentions;
           Hashtbl.add state.capabilities id
             { capability_id = id; resource; owner; generation; released = false }
       | "CAPABILITY_RELEASED" ->
@@ -531,6 +837,51 @@ let reduce world events head =
              || item.generation <> field fields "generation"
           then failf "epistemic-capability-release-identity-drift:%s" id;
           item.released <- true
+      | "ATTENTION_COMPILED" ->
+          let decision = attention_decision_of_event event in
+          if Hashtbl.mem state.attentions decision.plan_id then
+            failf "epistemic-attention-plan-duplicate:%s" decision.plan_id;
+          Hashtbl.iter
+            (fun _ capability ->
+              if not capability.released
+                 && capability.resource = decision.selected.resource
+              then
+                failf "epistemic-resource-already-owned:%s"
+                  decision.selected.resource)
+            state.capabilities;
+          Hashtbl.iter
+            (fun _ existing ->
+              if not existing.completed
+                 && existing.selected.resource = decision.selected.resource
+              then
+                failf "epistemic-resource-already-owned:%s"
+                  decision.selected.resource)
+            state.attentions;
+          Hashtbl.add state.attentions decision.plan_id decision
+      | "ATTENTION_COMPLETED" ->
+          let plan_id = field fields "plan" in
+          let decision =
+            match Hashtbl.find_opt state.attentions plan_id with
+            | Some value -> value
+            | None -> failf "epistemic-attention-plan-missing:%s" plan_id
+          in
+          if decision.completed then
+            failf "epistemic-attention-plan-already-completed:%s" plan_id;
+          let selected = field fields "selected" in
+          let owner = field fields "owner" in
+          let generation = field fields "generation" in
+          if selected <> decision.selected.candidate_id
+             || owner <> decision.attention_owner
+             || generation <> decision.attention_generation
+          then
+            failf "epistemic-attention-completion-identity-drift:%s" plan_id;
+          let outcome =
+            require_digest "attention-outcome" (field fields "outcome_digest")
+          in
+          verify_attention_completion ~plan:plan_id ~candidate:selected ~owner
+            ~generation ~outcome;
+          decision.completed <- true;
+          decision.outcome_digest <- outcome
       | kind -> failf "epistemic-event-kind-unknown:%s" kind)
     events;
   state
@@ -561,22 +912,56 @@ let validate_parent_binding root states =
 
 let validate_global_capabilities states =
   let resources = Hashtbl.create 32 in
+  let reserve resource world id =
+    match Hashtbl.find_opt resources resource with
+    | None -> Hashtbl.add resources resource (world, id)
+    | Some (first_world, first_id) ->
+        failf "epistemic-global-resource-conflict:%s:first=%s/%s:second=%s/%s"
+          resource first_world first_id world id
+  in
   List.iter
     (fun state ->
       Hashtbl.iter
         (fun _ capability ->
           if not capability.released then
-            match Hashtbl.find_opt resources capability.resource with
-            | None -> Hashtbl.add resources capability.resource (state.world_id, capability.capability_id)
-            | Some (world, id) ->
-                failf "epistemic-global-resource-conflict:%s:first=%s/%s:second=%s/%s"
-                  capability.resource world id state.world_id capability.capability_id)
-        state.capabilities)
+            reserve capability.resource state.world_id capability.capability_id)
+        state.capabilities;
+      Hashtbl.iter
+        (fun _ decision ->
+          if not decision.completed then
+            reserve decision.selected.resource state.world_id decision.plan_id)
+        state.attentions)
+    states
+
+let validate_attention_references states =
+  List.iter
+    (fun scheduling_world ->
+      Hashtbl.iter
+        (fun _ decision ->
+          List.iter
+            (fun candidate ->
+              let target =
+                match
+                  List.find_opt
+                    (fun state -> state.world_id = candidate.target_world)
+                    states
+                with
+                | Some value -> value
+                | None ->
+                    failf "epistemic-attention-target-world-missing:%s"
+                      candidate.target_world
+              in
+              if not (Hashtbl.mem target.claims candidate.target_claim) then
+                failf "epistemic-attention-target-claim-missing:%s/%s"
+                  candidate.target_world candidate.target_claim)
+            decision.candidates)
+        scheduling_world.attentions)
     states
 
 let load_all root =
   let states = List.map (load_world_local root) (world_ids root) in
   validate_parent_binding root states;
+  validate_attention_references states;
   validate_global_capabilities states;
   states
 
@@ -585,7 +970,8 @@ let find_world states world =
   | Some state -> state
   | None -> failf "epistemic-world-missing:%s" world
 
-let append root world kind fields =
+let append ?(verify = fun event -> verify_native (transition_of_event event))
+    root world kind fields =
   let path = journal_path root world in
   mkdir_p (Filename.dirname path);
   let journal_exists = Sys.file_exists path in
@@ -602,7 +988,7 @@ let append root world kind fields =
     { sequence; observed_at_utc; previous_sha256 = previous; kind; payload;
       event_sha256 = event_digest body }
   in
-  verify_native (transition_of_event event);
+  verify event;
   let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
   Unix.set_close_on_exec descriptor;
   Fun.protect
@@ -712,7 +1098,12 @@ let acquire_capability ~root ~world ~capability ~resource ~owner ~generation =
             (fun _ existing ->
               if not existing.released && existing.resource = resource then
                 failf "epistemic-global-resource-conflict:%s" resource)
-            state.capabilities)
+            state.capabilities;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.completed && decision.selected.resource = resource
+              then failf "epistemic-global-resource-conflict:%s" resource)
+            state.attentions)
         states;
       let event =
         append root world "CAPABILITY_ACQUIRED"
@@ -748,6 +1139,124 @@ let release_capability ~root ~world ~capability ~owner ~generation =
       ignore (load_all root);
       Printf.sprintf "LOOM_CAPABILITY_RELEASED world=%s capability=%s head=%s"
         world capability event.event_sha256)
+
+let compile_attention ~root ~world ~plan ~candidate_file ~budget ~policy
+    ~owner ~generation =
+  validate_atom "world" world;
+  validate_atom "attention-plan" plan;
+  validate_atom "attention-owner" owner;
+  validate_atom "attention-generation" generation;
+  if not (Sys.file_exists candidate_file) then
+    failf "epistemic-attention-candidate-file-missing:%s" candidate_file;
+  let candidates, canonical_candidates =
+    parse_attention_candidate_lines (read_lines candidate_file)
+  in
+  let selected = select_attention_candidate policy budget candidates in
+  let candidate_set_digest =
+    attention_candidate_set_digest canonical_candidates
+  in
+  with_machine_lock root (fun () ->
+      let states = load_all root in
+      let scheduling_world = find_world states world in
+      if Hashtbl.mem scheduling_world.attentions plan then
+        failf "epistemic-attention-plan-duplicate:%s" plan;
+      List.iter
+        (fun candidate ->
+          let target = find_world states candidate.target_world in
+          if not (Hashtbl.mem target.claims candidate.target_claim) then
+            failf "epistemic-attention-target-claim-missing:%s/%s"
+              candidate.target_world candidate.target_claim)
+        candidates;
+      List.iter
+        (fun state ->
+          Hashtbl.iter
+            (fun _ capability ->
+              if not capability.released
+                 && capability.resource = selected.resource
+              then
+                failf "epistemic-global-resource-conflict:%s"
+                  selected.resource)
+            state.capabilities;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.completed
+                 && decision.selected.resource = selected.resource
+              then
+                failf "epistemic-global-resource-conflict:%s"
+                  selected.resource)
+            state.attentions)
+        states;
+      let fields =
+        [ ("world", world); ("plan", plan);
+          ("policy", attention_policy_name policy);
+          ("budget", string_of_int budget);
+          ("candidate_set", canonical_candidates);
+          ("candidate_set_digest", candidate_set_digest);
+          ("selected", selected.candidate_id);
+          ("target_world", selected.target_world);
+          ("claim", selected.target_claim); ("provider", selected.provider);
+          ("resource", selected.resource);
+          ("information", string_of_int selected.information_gain);
+          ("falsification", string_of_int selected.falsification_power);
+          ("divergence", string_of_int selected.counterfactual_divergence);
+          ("cost", string_of_int selected.cost);
+          ("risk", string_of_int selected.risk);
+          ("evidence_digest", selected.candidate_evidence_digest);
+          ("falsifier_digest", selected.candidate_falsifier_digest);
+          ("owner", owner); ("generation", generation) ]
+      in
+      let event =
+        append
+          ~verify:(fun candidate_event ->
+            ignore (attention_decision_of_event candidate_event))
+          root world "ATTENTION_COMPILED" fields
+      in
+      ignore (load_all root);
+      Printf.sprintf
+        "LOOM_ATTENTION_COMPILED schema=loom-attention-compiler-v0 world=%s plan=%s policy=%s selected=%s target=%s/%s provider=%s cost=%d budget=%d resource_sha256=%s candidates=%d head=%s"
+        world plan (attention_policy_name policy) selected.candidate_id
+        selected.target_world selected.target_claim selected.provider selected.cost
+        budget (sha256 selected.resource) (List.length candidates)
+        event.event_sha256)
+
+let complete_attention ~root ~world ~plan ~owner ~generation ~outcome =
+  validate_atom "world" world;
+  validate_atom "attention-plan" plan;
+  validate_atom "attention-owner" owner;
+  validate_atom "attention-generation" generation;
+  let outcome = require_digest "attention-outcome" outcome in
+  with_machine_lock root (fun () ->
+      let state = find_world (load_all root) world in
+      let decision =
+        match Hashtbl.find_opt state.attentions plan with
+        | Some value -> value
+        | None -> failf "epistemic-attention-plan-missing:%s" plan
+      in
+      if decision.completed then
+        failf "epistemic-attention-plan-already-completed:%s" plan;
+      if owner <> decision.attention_owner
+         || generation <> decision.attention_generation
+      then failf "epistemic-attention-completion-identity-drift:%s" plan;
+      let selected = decision.selected.candidate_id in
+      let verify_completion event =
+        let fields = decode_fields event.payload in
+        verify_attention_completion ~plan:(field fields "plan")
+          ~candidate:(field fields "selected")
+          ~owner:(field fields "owner")
+          ~generation:(field fields "generation")
+          ~outcome:
+            (require_digest "attention-outcome" (field fields "outcome_digest"))
+      in
+      let event =
+        append ~verify:verify_completion root world "ATTENTION_COMPLETED"
+          [ ("world", world); ("plan", plan); ("selected", selected);
+            ("owner", owner); ("generation", generation);
+            ("outcome_digest", outcome) ]
+      in
+      ignore (load_all root);
+      Printf.sprintf
+        "LOOM_ATTENTION_COMPLETED schema=loom-attention-compiler-v0 world=%s plan=%s selected=%s outcome=%s head=%s"
+        world plan selected outcome event.event_sha256)
 
 let fork ~root ~parent ~child ~agent ~lane ~hypothesis ~expected_parent_head =
   validate_atom "parent" parent;
@@ -790,10 +1299,16 @@ let status ~root ~world =
           (fun _ capability count -> if capability.released then count else count + 1)
           state.capabilities 0
       in
+      let live_attention =
+        Hashtbl.fold
+          (fun _ decision count -> if decision.completed then count else count + 1)
+          state.attentions 0
+      in
       Printf.sprintf
-        "LOOM_WORLD_OK schema=%s world=%s events=%d knowledge=%d claims=%d challenged=%d live_capabilities=%d parent=%s head=%s"
+        "LOOM_WORLD_OK schema=%s world=%s events=%d knowledge=%d claims=%d challenged=%d live_capabilities=%d attention_plans=%d live_attention=%d parent=%s head=%s"
         schema world (List.length state.events) (Hashtbl.length state.knowledges)
         (Hashtbl.length state.claims) challenged live_capabilities
+        (Hashtbl.length state.attentions) live_attention
         (if state.parent_world = "" then "-" else state.parent_world)
         state.journal_head)
 

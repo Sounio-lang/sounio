@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.18"
+let runtime_version = "2026.08.26.19"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -3619,6 +3619,31 @@ let world_verify_command cli =
 let world_list_command cli =
   let root = epistemic_root cli in
   epistemic_print (fun () -> Loom_epistemic.list ~root)
+
+let attention_budget cli =
+  let raw = required cli "--budget" in
+  try int_of_string raw
+  with _ -> failf "attention budget must be an integer: %s" raw
+
+let attention_compile_command cli =
+  let root = epistemic_root cli in
+  let policy =
+    Loom_epistemic.attention_policy_of_string (required cli "--policy")
+  in
+  epistemic_print (fun () ->
+      Loom_epistemic.compile_attention ~root ~world:(required cli "--world")
+        ~plan:(required cli "--plan")
+        ~candidate_file:(required cli "--candidates")
+        ~budget:(attention_budget cli) ~policy ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation"))
+
+let attention_complete_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.complete_attention ~root ~world:(required cli "--world")
+        ~plan:(required cli "--plan") ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation")
+        ~outcome:(required cli "--outcome"))
 
 let session_events_json (_, values) =
   let agent = table_value values "agent" in
@@ -8443,6 +8468,8 @@ let usage () =
   Printf.eprintf
     "\nEpistemic machine v0:\n  world-create --world W --agent A --lane L\n  knowledge-observe --world W --knowledge K --value V --error E --uncertainty U --confidence P --provenance SHA\n  epistemic-claim-open --world W --claim C --knowledge K --evidence SHA\n  epistemic-claim-challenge --world W --claim C --challenge X --falsifier SHA\n  epistemic-capability-acquire --world W --capability C --resource R --owner A --generation G\n  epistemic-capability-release --world W --capability C --owner A --generation G\n  world-fork --parent W --child W --agent A --lane L --hypothesis H [--parent-head SHA]\n  world-status|world-verify --world W\n  world-list\n";
   Printf.eprintf
+    "\nCounterfactual Attention Compiler v0:\n  attention-compile --world W --plan P --candidates FILE --budget N --policy information-first|falsification-first|counterfactual-first --owner A --generation G\n  attention-complete --world W --plan P --owner A --generation G --outcome SHA\n";
+  Printf.eprintf
     "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
 let arguments_after_command () =
@@ -8515,6 +8542,8 @@ let main () =
     | "world-status" -> world_status_command cli; 0
     | "world-verify" -> world_verify_command cli; 0
     | "world-list" -> world_list_command cli; 0
+    | "attention-compile" -> attention_compile_command cli; 0
+    | "attention-complete" -> attention_complete_command cli; 0
     | "export-events-arrow" -> export_events_arrow_command cli; 0
     | "verify-events-arrow" -> verify_events_arrow_command cli; 0
     | "beagle-serve" -> serve_beagle_bridge cli; 0

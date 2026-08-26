@@ -25,6 +25,7 @@ dune build --root "$ROOT_DIR/tools/loom" src/loom.exe
 "$SCRIPT_DIR/build_sounio_loom_continuity_adapter.sh"
 "$SCRIPT_DIR/build_sounio_loom_obligation_adapter.sh"
 "$SCRIPT_DIR/build_sounio_loom_epistemic_adapter.sh"
+"$SCRIPT_DIR/build_sounio_loom_attention_adapter.sh"
 printf 'BUILT path=%s ocaml=%s dune=%s\n' \
   "$ROOT_DIR/tools/loom/_build/default/src/loom.exe" \
   "$(ocamlopt -version)" "$(dune --version)"

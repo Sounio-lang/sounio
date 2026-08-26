@@ -117,7 +117,7 @@ export SOUNIO_LOOM_PROVIDER_OPENCODE="$TEST_ROOT/fake-opencode"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 version="$($LOOM runtime-version)"
-grep -q '^runtime_version=2026.08.26.18$' <<< "$version" || \
+grep -q '^runtime_version=2026.08.26.19$' <<< "$version" || \
   fail 'public loom launcher selected the wrong runtime'
 
 providers="$($LOOM provider-list --json)"
