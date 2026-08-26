@@ -456,4 +456,4 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E228 | import | error | import copy truncated | [E228.md](explanations/E228.md) |
 | E232 | type-checker/struct | error | the same array local initialises two fields | — |
 | E245 | type-checker/epistemic | error | arithmetic between two Knowledge<T> values is not supported | — |
-| E246 | type-checker/effects | error | effect name is unknown, or dropped as a ninth slot | — |
+| E246 | type-checker/effects | error | unknown effect, or effect dropped as a ninth slot | — |
