@@ -380,7 +380,31 @@ Cluster paths and the pre-GPU reading list live in the `cluster-gpu-jobs` skill
 
 Ten agent slots share this pod (`claude-1..3`, `codex-1..3`, `grok-cli1..2`,
 `kimi-cli1..2`) and one filesystem. Coordination used to be a document that
-nobody wrote to. It is now a channel:
+nobody wrote to. It is now a channel.
+
+> **`agent-bus.sh` is not on `main`. Check before you reach for it.**
+> `scripts/dev/agent-bus.sh`, `scripts/mcp/agent_bus_mcp.py` and
+> `scripts/mcp/agent-bus.mcp.json` are tracked only on the long-running
+> integration lineage that `/workspace/sounio` is checked out on (added in
+> `925d8fa33d`; a later commit message claims it landed "on main where every
+> agent can reach it" — it did not). From any worktree cut off `main` all three
+> are absent, so the commands below fail with *no such file*. That is a missing
+> tool, **not** an empty bus — do not conclude nobody is coordinating.
+>
+> On a `main`-based checkout use `bin/sounio-coord`, which *is* on `main` and is
+> what the session hooks already call on your behalf:
+> ```bash
+> bin/sounio-coord brief                                  # FIRST THING
+> bin/sounio-coord status                                 # claims, conflicts, worktrees
+> bin/sounio-coord scope --agent ID --lane ID --intent T  # take/extend a lease
+> bin/sounio-coord inbox  --agent ID --lane ID            # messages waiting for you
+> bin/sounio-coord send   --agent ID --lane ID --kind info --message '...'
+> ```
+> `send` with no `--to-agent`/`--to-lane` broadcasts to every lane. Its store is
+> `${TMPDIR:-/tmp}/sounio-coord/<repo-key>` — a *different* store from the
+> `agent-bus` one below, so a post to one is not visible from the other.
+
+Where `agent-bus.sh` is present:
 
 ```bash
 scripts/dev/agent-bus.sh brief          # FIRST THING. hazards, leases, recent events
