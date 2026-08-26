@@ -1189,3 +1189,53 @@ Distinct from D12 (arena exhaustion): this is a missing timeout primitive,
 not an allocation-budget defect. Not fixed here: out of scope for a
 consumer repo, and no CLI flag or stdlib option currently exists to opt in
 to a bounded wait.
+
+## D15 (fixed) — `x509_verify_hostname` never matched `iPAddress` SubjectAltName entries
+
+**Symptom chain, and two wrong diagnoses corrected along the way**: while
+testing `Sounio-lang/conclave-search`'s Task 9 (a DNS-over-HTTPS resolver)
+against Cloudflare's real, publicly-trusted `1.1.1.1:443` endpoint,
+`tls_connect` returned `TLS_CONNECT_ERR_CERT_CHAIN` (-8). This symptom was
+independently misdiagnosed twice before the real cause was found by direct
+instrumentation:
+
+1. The `conclave-search` task implementer attributed it to D11 (this
+   file's tuple-destructure field-resolution bug) via a function-count
+   correlation. **Refuted**: D11's own fix (`3ec2d971d`) is present in the
+   binary that produced this failure, and a direct re-parse of the exact
+   certificate in question (`tbs_start=4, tbs_len=1292`, cross-checked
+   against `openssl asn1parse`) showed no TBS corruption at all.
+2. A second review attributed it to `x509_verify_hostname`
+   (`stdlib/x509/chain.sio`) only ever checking `GENERAL_NAME_DNS_NAME` SAN
+   entries and never `GENERAL_NAME_IP_ADDRESS` — measured directly:
+   `verify_hostname("1.1.1.1")` returned `false` in isolation. **This gap
+   is real and has been fixed** (commit `7b819069e`: `x509_verify_hostname`
+   now parses the connect hostname as dotted-decimal IPv4 and compares it
+   octet-for-octet against any `iPAddress`-tagged SAN). But fixing it did
+   **not** change the `1.1.1.1` symptom — instrumenting the real
+   `chain_result` (not just the collapsed `TLS_CONNECT_ERR_CERT_CHAIN`)
+   showed `CHAIN_ERR_BAD_SIGNATURE` (-6), returned well before
+   `x509_verify_hostname` is ever reached for this chain.
+3. **Actual root cause**: Cloudflare's certificate chain for `1.1.1.1` is
+   signed `ecdsa-with-SHA384` (an SSL.com ECC intermediate). This is a
+   pre-existing, already self-documented scope limitation from the
+   original TLS handshake plan: `x509_verify_signature`
+   (`stdlib/x509/cert.sio` ~line 1566) explicitly fails closed on
+   `ecdsa-with-SHA384` with an inline comment stating the SHA-384 hashing
+   path for `ecdsa_p256_verify` was never built (only SHA-256 was, per
+   that plan's Task 2). This is **not new** and **not fixed here** — it is
+   a known, deliberate gap, now confirmed to be reachable against a
+   real-world, commonly-deployed CA configuration (SSL.com's ECC
+   intermediates routinely sign with SHA-384), not just a theoretical one.
+
+**Net effect**: the `iPAddress`-SAN fix (item 2) is real and kept — it
+unblocks any future target whose leaf/intermediate chain signs with
+`ecdsa-with-SHA256` or RSA. But `1.1.1.1` specifically, and any other
+target with an SHA-384-signed link in its chain, remains blocked on the
+pre-existing ECDSA-SHA384 gap, not on anything newly found here.
+
+**Filed**: fix at `7b819069e`. The SHA-384 gap itself is not re-filed as a
+new entry — it was already self-documented at its own definition site in
+`stdlib/x509/cert.sio` when the original TLS plan scoped ECDSA to SHA-256
+only; this entry exists to record that it is now confirmed load-bearing
+against real-world traffic, not just theoretical.
