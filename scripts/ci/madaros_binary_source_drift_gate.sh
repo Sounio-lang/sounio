@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # The committed Madaros binary must exercise what its source implements.
 #
 # lean_single has canonical_compiler_gate.sh: the shipped ELF must be the
@@ -36,7 +37,7 @@ SOUC="${SOUNIO_DRIFT_SOUC:-$ROOT/bin/souc}"
 
 fail_json() {
   printf '{"status":"fail","reason":"%s","metrics":{"total":%s,"passed":%s,"failed":%s,"not_run":0}}\n' \
-    "$1" "${2:-0}" "${3:-0}" "${4:-1}" > "$ART"
+    "$1" "${2:-0}" "${3:-0}" "${4:-1}" | gate_write_artifact "$ART"
 }
 
 [[ -x "$SOUC" ]] || { echo "MADAROS_DRIFT_FAIL reason=no_compiler at $SOUC" >&2; fail_json no_compiler; exit 1; }
@@ -139,5 +140,5 @@ MSG
 fi
 
 printf '{"status":"pass","metrics":{"total":%s,"passed":%s,"failed":0,"not_run":%s}}\n' \
-  "$total" "$((total - skipped))" "$skipped" > "$ART"
+  "$total" "$((total - skipped))" "$skipped" | gate_write_artifact "$ART"
 echo "MADAROS_BINARY_SOURCE_DRIFT_OK"

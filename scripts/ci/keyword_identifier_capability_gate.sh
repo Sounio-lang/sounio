@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # Every word classified IDENTIFIER_OK must actually BE usable as an identifier.
 #
 # parser_keyword_classification_gate.sh checks that each identifier-shaped
@@ -46,7 +47,7 @@ for w in match struct while return let; do
   [[ "$(probe "$w")" != "0" ]] || {
     echo "CONTROL_FAIL: reserved word '$w' was accepted as an identifier." >&2
     echo "  The probe cannot distinguish anything. Refusing to report." >&2
-    printf '{"status":"fail","reason":"control did not fire","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' > "$ART"
+    printf '{"status":"fail","reason":"control did not fire","metrics":{"total":0,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
     exit 1
   }
 done
@@ -119,8 +120,8 @@ echo "  probed $total keyword-shaped words, $failed unusable, $pending pending r
 
 if [[ "$failed" -gt 0 ]]; then
   echo "KEYWORD_CAPABILITY_FAIL: the classification claims something the parser does not honour." >&2
-  printf '{"status":"fail","metrics":{"total":%s,"passed":%s,"failed":%s,"not_run":0}}\n' "$total" "$((total-failed))" "$failed" > "$ART"
+  printf '{"status":"fail","metrics":{"total":%s,"passed":%s,"failed":%s,"not_run":0}}\n' "$total" "$((total-failed))" "$failed" | gate_write_artifact "$ART"
   exit 1
 fi
-printf '{"status":"pass","metrics":{"total":%s,"passed":%s,"failed":0,"not_run":%s}}\n' "$total" "$((total-pending))" "$pending" > "$ART"
+printf '{"status":"pass","metrics":{"total":%s,"passed":%s,"failed":0,"not_run":%s}}\n' "$total" "$((total-pending))" "$pending" | gate_write_artifact "$ART"
 echo "KEYWORD_IDENTIFIER_CAPABILITY_OK"

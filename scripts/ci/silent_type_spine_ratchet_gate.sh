@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # Parameter-position uses of type kinds the *mut lowering spine does not handle.
 #
 # GATE_CONTRACT: v0
@@ -87,7 +88,7 @@ else
   echo "OK: crossings hold at ${frozen} (each named above)."
 fi
 
-cat > "$OUT" <<JSON
+cat <<JSON | gate_write_artifact "$OUT"
 {
   "gate": "silent_type_spine_ratchet",
   "status": "${status}",

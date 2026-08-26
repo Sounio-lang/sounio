@@ -235,40 +235,6 @@ gate_measured_yes() {
   echo "measured=yes"
 }
 
-# gate_write_artifact <path>
-#
-# Write stdin to <path>, but ONLY if the bytes differ from what is already
-# there. A ratchet artefact should dirty the working tree exactly when the
-# number it records has moved, and never when it has not.
-#
-# Why this exists
-# ---------------
-# Fourteen gates write into artifacts/gates/, twelve of those files are tracked,
-# and every one of them rewrote its artefact unconditionally. So merely RUNNING
-# a gate left the tree dirty, and `git checkout` then refuses to move:
-#
-#   error: Your local changes to the following files would be overwritten
-#          by checkout: artifacts/gates/diagnostic_identity.json
-#
-# Measured cost of that, on 2026-08-26: a verification worktree silently stayed
-# pinned at an older commit because the checkout was refused, and the gate run
-# afterwards reported confidently about a tree three merges out of date. The
-# refusal was printed; the number that followed it was read instead.
-#
-# It is also the governance rule this repository already has -- a gate must not
-# dirty the tree the next gate inspects -- broken by the gates themselves.
-#
-# Idempotent writing keeps the artefact tracked (so a moved number still shows
-# up in a diff, which is the whole point of a checked-in ratchet) while making a
-# no-change run leave no trace.
-gate_write_artifact() {
-  local dest="$1" tmp
-  mkdir -p "$(dirname "$dest")"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/gate-artifact.XXXXXX")"
-  cat > "$tmp"
-  if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
-    rm -f "$tmp"
-    return 0
-  fi
-  mv -f "$tmp" "$dest"
-}
+# The idempotent artefact writer lives in its own side-effect-free file so
+# gates that do not source this library can use it too.
+. "$(dirname "${BASH_SOURCE[0]}")/gate_artifact.sh"
