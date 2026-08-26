@@ -1158,3 +1158,34 @@ Not a GitHub issue. Recorded here and in the dispatch per this file's
 convention. **Next highest-value work: `x509_parse_certificate`'s ~11.5 MB
 per call**, which is now the single largest lever and is mostly parser
 scratch rather than the returned value.
+
+## D13 — `env_get` discards its output buffer and reports success unconditionally on hit
+
+`stdlib/os/env.sio::env_get` (line 24) takes `out: &![u8; 256]` but never
+writes to it — the parameter is discarded with `let _ = out` on line 26. The
+function still returns `0` (success) whenever the underlying `getenv(key)`
+succeeds, so every caller sees "found" with a permanently-empty/garbage
+`out` buffer. This is a fail-open no-op, not a fail-closed error: callers
+cannot detect it from the return code alone.
+
+Found while reviewing `Sounio-lang/conclave-search`'s Task 7 (CLI
+orchestrator) — it could not use `env_get` for host/port configuration and
+fell back to argv-only configuration as a workaround. Not fixed here: out
+of scope for that repo, and this file is shared stdlib.
+
+## D14 — no connect or receive timeout anywhere in `stdlib/net`/`stdlib/tls`
+
+`stdlib/net/socket.sio::tcp_connect` (line 124) calls the raw `connect`
+syscall with no `SO_RCVTIMEO`/`SO_SNDTIMEO` socket option set anywhere in
+this file, and `stdlib/tls/client.sio`'s `tls_connect`/`tls_recv` inherit
+that: a black-holed (silently dropped, as opposed to actively refused) host
+or a peer that accepts but never sends hangs the calling process
+indefinitely, with no way for the caller to bound the wait.
+
+Found and independently confirmed while reviewing `Sounio-lang/conclave-search`'s
+Task 7 — a CLI that fetches attacker- or network-controlled URLs (e.g. from
+search results) has no way to bound a single fetch's wall-clock cost.
+Distinct from D12 (arena exhaustion): this is a missing timeout primitive,
+not an allocation-budget defect. Not fixed here: out of scope for a
+consumer repo, and no CLI flag or stdlib option currently exists to opt in
+to a bounded wait.
