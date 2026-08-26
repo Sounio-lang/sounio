@@ -477,6 +477,7 @@ else
     printf 'capability=loom-persistent-fleet-catalog-v1\n'
     printf 'capability=loom-fleet-custody-catalog-v2\n'
     printf 'capability=loom-conflict-free-active-adoption-v1\n'
+    printf 'capability=loom-coordination-authority-binding-v1\n'
     printf 'capability=loom-post-pod-reconcile-v1\n'
     printf 'capability=coord-reply-correlation-v1\n'
     printf 'capability=fleet-launcher-v1\n'

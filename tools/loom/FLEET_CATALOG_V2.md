@@ -18,7 +18,7 @@ reconciler observes both authorities before it mutates either surface.
 Every v2 record stores:
 
 - enabled state, slot, provider kind, agent identity, credential home, and cwd;
-- the selected custody implementation;
+- the selected custody implementation and shared coordination authority;
 - for Loom custody, a stable session UUID, optional model, and explicit unsafe
   policy;
 - a private bootstrap prompt path and its SHA-256 digest.
@@ -26,6 +26,14 @@ Every v2 record stores:
 The bootstrap prompt is copied to `<state>/fleet/prompts/<slot>.txt` with mode
 `0600`. The descriptor contains only its path and digest. A missing, relocated,
 or modified prompt refuses catalog loading before provider launch.
+
+`coord_dir` is the absolute durable state directory for the coordination bus.
+Enrollment derives it from the controlling Git worktree or accepts an explicit
+`--coord-dir`. Reconciliation injects it as `SOUNIO_COORD_DIR` into both new and
+recovered kernels. Therefore a lane whose provider cwd is another repository
+still refreshes presence and endpoint records in the selected Sounio bus. A
+legacy v2 entry without this field can be re-enrolled with `--replace`; until
+then, mutation refuses rather than registering into an implicit local bus.
 
 Version 1 records remain readable and mean `custody=agentd`. The next successful
 enrollment rewrites them as version 2 without changing that authority.

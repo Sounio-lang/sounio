@@ -208,9 +208,9 @@ boundary and preregistered sabotage control.
 `fleet-enroll` stores desired lane intent under the repository's persistent Git
 common directory. Catalog v2 makes `custody=agentd|loom` part of desired state.
 The default remains `agentd` for compatibility. A `loom` slot records a stable
-agent, session UUID, native provider kind, credential home, and SHA-256-bound
-bootstrap prompt. The raw prompt is copied into private catalog storage rather
-than embedded in the descriptor.
+agent, session UUID, native provider kind, credential home, shared coordination
+authority, and SHA-256-bound bootstrap prompt. The raw prompt is copied into
+private catalog storage rather than embedded in the descriptor.
 
 `fleet-reconcile` is a no-mutation plan by default. It observes both the legacy
 fleet adapter and Loom before taking action. A slot whose non-selected authority
@@ -219,6 +219,13 @@ starting a second CLI. An absent Loom slot is opened with `provider-open`, while
 a surviving Guardian with a dead kernel is recovered without replacing the
 provider. Repeated application is idempotent, and `fleet-disable` prevents an
 intentional stop from being relaunched.
+
+The coordination authority defaults to the `sounio-coord-state` directory of
+the worktree from which enrollment runs and can be pinned with `--coord-dir`.
+It is injected into every open or recovered kernel as `SOUNIO_COORD_DIR`. This
+keeps a provider working in another Git repository on the Sounio fleet bus
+instead of silently registering its endpoint in that repository's private Git
+state.
 
 An existing active Loom lane can enter the catalog only with `--adopt-active`.
 Enrollment verifies agent, lane, worktree, session UUID, and provider command

@@ -134,6 +134,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-recoverable-guardian-v1 loom-kernel-recovery-v1 loom-dual-journal-v1 \
   loom-persistent-fleet-catalog-v1 loom-post-pod-reconcile-v1 \
   loom-fleet-custody-catalog-v2 loom-conflict-free-active-adoption-v1 \
+  loom-coordination-authority-binding-v1 \
   fleet-linear-capability-v1 \
   fleet-home-isolation-v1 \
   fleet-presentation-follow-v1 \

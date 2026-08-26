@@ -9,6 +9,8 @@ ADOPT_STATE_DIR="$TEST_ROOT/adopt-state"
 WORKTREE="$TEST_ROOT/worktree"
 HOME_DIR="$TEST_ROOT/home"
 LEGACY_STATE="$TEST_ROOT/legacy"
+COORD_DIR="$TEST_ROOT/coord"
+ADOPT_COORD_DIR="$TEST_ROOT/adopt-coord"
 FAKE_CODEX="$TEST_ROOT/fake-codex"
 FAKE_FLEET_AGENT="$TEST_ROOT/fake-fleet-agent"
 LOOM="${SOUNIO_LOOM_BIN:-$ROOT_DIR/tools/loom/_build/default/src/loom.exe}"
@@ -57,7 +59,8 @@ case "${1:-}:${2:-}" in
     ;;
   --no-alt-screen:*)
     prompt="${!#}"
-    printf 'FLEET_CODEX_READY:%s:HOME=%s:PID=%s\n' "$prompt" "$HOME" "$$"
+    printf 'FLEET_CODEX_READY:%s:HOME=%s:COORD=%s:PID=%s\n' \
+      "$prompt" "$HOME" "${SOUNIO_COORD_DIR:-missing}" "$$"
     while IFS= read -r wake; do
       printf 'FLEET_CODEX_WAKE:%s\n' "$wake"
       [[ "$wake" == /exit ]] && break
@@ -111,7 +114,8 @@ loom() {
 bootstrap_prompt='CATALOG_BOOTSTRAP_PROMPT'
 enrolled="$(loom fleet-enroll --state-dir "$STATE_DIR" --slot "$LANE" \
   --kind codex --custody loom --agent "$AGENT" --home "$HOME_DIR" \
-  --session-id "$SESSION_ID" --prompt "$bootstrap_prompt" --cwd "$WORKTREE")"
+  --session-id "$SESSION_ID" --coord-dir "$COORD_DIR" \
+  --prompt "$bootstrap_prompt" --cwd "$WORKTREE")"
 [[ "$enrolled" == *'custody=loom'* && "$enrolled" == *'adopted=no'* ]] || \
   fail 'catalog did not persist explicit Loom custody'
 
@@ -120,6 +124,8 @@ prompt_file="$STATE_DIR/fleet/prompts/$LANE.txt"
 grep -q '^version=2$' "$descriptor" || fail 'catalog did not write schema v2'
 grep -q '^custody=loom$' "$descriptor" || fail 'catalog omitted Loom custody'
 grep -q "^session_id=$SESSION_ID$" "$descriptor" || fail 'catalog omitted stable session identity'
+grep -q "^coord_dir=$COORD_DIR$" "$descriptor" || \
+  fail 'catalog omitted the shared coordination authority'
 [[ "$(stat -c '%a' "$prompt_file")" == 600 ]] || fail 'sealed prompt permissions are not private'
 grep -Fq "$bootstrap_prompt" "$prompt_file" || fail 'sealed prompt content changed'
 if grep -Fq "$bootstrap_prompt" "$descriptor"; then
@@ -212,8 +218,9 @@ for _ in $(seq 1 100); do
   grep -q "FLEET_CODEX_WAKE:$post_recovery" <<< "$replay" && break
   sleep 0.05
 done
-grep -q "FLEET_CODEX_READY:$bootstrap_prompt:HOME=$HOME_DIR" <<< "$replay" || \
-  fail 'provider did not inherit the enrolled credential home'
+grep -q "FLEET_CODEX_READY:$bootstrap_prompt:HOME=$HOME_DIR:COORD=$COORD_DIR" \
+  <<< "$replay" || \
+  fail 'provider did not inherit enrolled credential and coordination authorities'
 grep -q "FLEET_CODEX_WAKE:$post_recovery" <<< "$replay" || \
   fail 'recovered catalog lane did not accept a second input'
 
@@ -231,7 +238,8 @@ grep -q 'fleet-authority-conflict.*desired=agentd.*loom:active' \
   fail 'reverse dual authority sabotage was refused by the wrong rule'
 if loom fleet-enroll --state-dir "$ADOPT_STATE_DIR" --slot "$ADOPT_LANE" \
   --kind codex --custody loom --agent "$AGENT" --home "$HOME_DIR" \
-  --session-id "$ADOPT_SESSION" --prompt "$manual_prompt" --cwd "$WORKTREE" \
+  --session-id "$ADOPT_SESSION" --coord-dir "$ADOPT_COORD_DIR" \
+  --prompt "$manual_prompt" --cwd "$WORKTREE" \
   > "$TEST_ROOT/unapproved-adoption.out" 2>&1; then
   fail 'catalog silently adopted an already-active Loom lane'
 fi
@@ -241,7 +249,8 @@ grep -q 'active Loom lane requires --adopt-active' \
 if loom fleet-enroll --state-dir "$ADOPT_STATE_DIR" --slot "$ADOPT_LANE" \
   --kind codex --custody loom --agent "$AGENT" --home "$HOME_DIR" \
   --session-id 66666666-6666-4666-8666-666666666666 \
-  --prompt "$manual_prompt" --cwd "$WORKTREE" --adopt-active \
+  --coord-dir "$ADOPT_COORD_DIR" --prompt "$manual_prompt" \
+  --cwd "$WORKTREE" --adopt-active \
   > "$TEST_ROOT/identity-drift.out" 2>&1; then
   fail 'active adoption accepted a forged session identity'
 fi
@@ -250,7 +259,8 @@ grep -q 'fleet Loom identity drift.*field=session_id' \
   fail 'forged adoption identity was refused by the wrong rule'
 adopted="$(loom fleet-enroll --state-dir "$ADOPT_STATE_DIR" --slot "$ADOPT_LANE" \
   --kind codex --custody loom --agent "$AGENT" --home "$HOME_DIR" \
-  --session-id "$ADOPT_SESSION" --prompt "$manual_prompt" --cwd "$WORKTREE" \
+  --session-id "$ADOPT_SESSION" --coord-dir "$ADOPT_COORD_DIR" \
+  --prompt "$manual_prompt" --cwd "$WORKTREE" \
   --adopt-active)"
 [[ "$adopted" == *'adopted=active'* ]] || \
   fail 'explicit active adoption did not publish its receipt'
