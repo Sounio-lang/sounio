@@ -89,7 +89,7 @@ done
 status=$([[ $unverified -le $UNVERIFIED_CEILING && $noroute -eq 0 ]] && echo pass || echo fail)
 printf '{"status":"%s","metrics":{"total":%d,"passed":%d,"failed":%d,"not_run":%d},"verdicts":{"confirmed":%d,"refuted":%d,"unmeasured":%d,"unverified":%d,"no_route":%d},"files":%d}\n' \
   "$status" "$total" "$((confirmed + refuted + unmeasured))" "$unverified" "$unmeasured" \
-  "$confirmed" "$refuted" "$unmeasured" "$unverified" "$noroute" "${#FILES[@]}" > "$ART"
+  "$confirmed" "$refuted" "$unmeasured" "$unverified" "$noroute" "${#FILES[@]}" | gate_write_artifact "$ART"
 
 echo "pair_verification_ratchet: status=$status files=${#FILES[@]} claims=$total"
 echo "  confirmed=$confirmed refuted=$refuted unmeasured=$unmeasured unverified=$unverified (ceiling $UNVERIFIED_CEILING) no_route=$noroute"
