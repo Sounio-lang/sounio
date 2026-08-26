@@ -93,6 +93,11 @@ pub const TLS_CONNECT_ERR_FINISHED: i64 = 0 - 10
 pub const TLS_CONNECT_ERR_HRR: i64 = 0 - 11
 pub const TLS_CONNECT_ERR_BAD_HOST: i64 = 0 - 12
 pub const TLS_CONNECT_ERR_D9_CORRUPTION: i64 = 0 - 13
+// RFC 8446 SS4.1.4: on a HelloRetryRequest, the server's second ServerHello
+// MUST negotiate the same cipher_suite as the (implicit) first one signalled
+// in the HelloRetryRequest itself -- see the D9-check-2b/cipher-suite-check
+// note at the HelloRetryRequest branch in tls_connect below.
+pub const TLS_CONNECT_ERR_CIPHER_SUITE_MISMATCH: i64 = 0 - 14
 
 fn tls_connection_zero() -> TlsConnection with IO {
     TlsConnection {
@@ -830,11 +835,35 @@ pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustS
                 (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_RECV)
             } else {
                 let (sh2_info, sh2_ok) = decode_server_hello(&sh2_bytes, sh2_len)
+                // --- D9 CHECK 2b: the HelloRetryRequest path's own second
+                // ServerHello. D9 check 2 above only ever re-scanned sh1 --
+                // on the HRR path, sh2 is what actually supplies the
+                // x25519_public consumed downstream (see the ECDHE
+                // derivation after this whole if/else), and it was never
+                // independently re-verified against its own raw wire bytes,
+                // leaving exactly the kind of caller-destructure corruption
+                // D9 exists to catch unchecked on the path most likely to
+                // exercise different code shapes. Same independent-re-scan
+                // discipline as D9 check 2 (see this file's header comment)
+                // -- fails closed with TLS_CONNECT_ERR_D9_CORRUPTION on any
+                // mismatch, computed unconditionally alongside decode's own
+                // ok/status so it can't be skipped by an early return
+                // built into decode_server_hello. ---
+                let (sh2_scanned_random, sh2_scanned_key, sh2_scan_found) = sh_scan_random_and_key(&sh2_bytes, sh2_len)
                 if !sh2_ok {
                     (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_DECODE)
                 } else if sh2_info.is_hello_retry_request {
                     // Only one retry permitted (this task's own scope).
                     (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_HRR)
+                } else if !arrays32_eq(&sh2_scanned_random, &sh2_info.random) {
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_D9_CORRUPTION)
+                } else if sh2_info.has_key_share && (!sh2_scan_found || !arrays32_eq(&sh2_scanned_key, &sh2_info.x25519_public)) {
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_D9_CORRUPTION)
+                } else if sh2_info.cipher_suite != sh1_info.cipher_suite {
+                    // RFC 8446 SS4.1.4: the server MUST NOT change the
+                    // negotiated cipher_suite across a HelloRetryRequest
+                    // retry.
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_CIPHER_SUITE_MISMATCH)
                 } else {
                     transcript_append(&!hs_transcript, &sh2_bytes, sh2_len)
                     (sock4, sh2_info, sh2_bytes, sh2_len, TLS_CONNECT_OK)
