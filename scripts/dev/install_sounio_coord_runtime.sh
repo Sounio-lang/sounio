@@ -147,6 +147,18 @@ activate_runtime() {
     grep -q '^capability=loom-signed-outcome-authority-v0$' "$manifest" || \
       die "installed runtime declares derived outcome-evidence capabilities without signed outcome authority: $runtime_id"
   fi
+  if grep -q '^capability=loom-external-witness-mesh-v0$' "$manifest"; then
+    grep -q '^capability=loom-epistemic-machine-v0$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-witness-mesh-runtime" && \
+        -x /usr/bin/openssl ]] || \
+      die "installed runtime declares the external witness mesh without the epistemic machine, Loom, OpenSSL, or native Sounio frame 9013: $runtime_id"
+  fi
+  if grep -Eq '^capability=loom-(quorum-intersection-checkpoint|rollback-detection-through-checkpoint)-v0$' \
+      "$manifest"; then
+    grep -q '^capability=loom-external-witness-mesh-v0$' "$manifest" || \
+      die "installed runtime declares derived witness-mesh capabilities without the external witness mesh: $runtime_id"
+  fi
   if grep -q '^capability=loom-recoverable-control-service-v1$' "$manifest"; then
     grep -q '^capability=loom-durable-obligation-v1$' "$manifest" &&
       grep -q '^capability=loom-post-activation-request-bridge-v1$' "$manifest" &&
@@ -322,6 +334,7 @@ loom_attention_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_attentio
 loom_portfolio_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_portfolio_attention_adapter.sh"
 loom_contingent_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_contingent_policy_adapter.sh"
 loom_outcome_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_outcome_authority_adapter.sh"
+loom_witness_mesh_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_mesh_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
@@ -337,6 +350,8 @@ loom_contingent_entrypoint="$SOURCE_ROOT/tools/loom/contingent_policy_adapter_ma
 loom_contingent_module="$SOURCE_ROOT/stdlib/coordination/loom_contingent_policy.sio"
 loom_outcome_authority_entrypoint="$SOURCE_ROOT/tools/loom/outcome_authority_adapter_main.sio"
 loom_outcome_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_outcome_authority.sio"
+loom_witness_mesh_entrypoint="$SOURCE_ROOT/tools/loom/witness_mesh_adapter_main.sio"
+loom_witness_mesh_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_mesh.sio"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -364,6 +379,8 @@ loom_outcome_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_outcome_aut
   die "Loom contingent-policy build entrypoint missing or not executable: $loom_contingent_build_source"
 [[ -x "$loom_outcome_authority_build_source" ]] || \
   die "Loom outcome-authority build entrypoint missing or not executable: $loom_outcome_authority_build_source"
+[[ -x "$loom_witness_mesh_build_source" ]] || \
+  die "Loom witness-mesh build entrypoint missing or not executable: $loom_witness_mesh_build_source"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
@@ -379,8 +396,12 @@ loom_outcome_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_outcome_aut
 [[ -f "$loom_outcome_authority_entrypoint" && \
   -f "$loom_outcome_authority_module" ]] || \
   die "Loom native Sounio outcome-authority source bundle is incomplete"
+[[ -f "$loom_witness_mesh_entrypoint" && \
+  -f "$loom_witness_mesh_module" ]] || \
+  die "Loom native Sounio witness-mesh source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
-  -f "$loom_project/src/loom_epistemic.ml" && -f "$loom_project/src/loom_ui.ml" && \
+  -f "$loom_project/src/loom_epistemic.ml" && \
+  -f "$loom_project/src/loom_witness.ml" && -f "$loom_project/src/loom_ui.ml" && \
   -f "$loom_project/src/loom_pty_stubs.c" && \
   -f "$loom_project/src/dune" && -f "$loom_project/dune-project" ]] || \
   die "Loom OCaml source bundle is incomplete: $loom_project"
@@ -413,6 +434,7 @@ loom_attention_binary="$loom_project/_build/default/src/sounio-loom-attention-ru
 loom_portfolio_binary="$loom_project/_build/default/src/sounio-loom-portfolio-runtime"
 loom_contingent_binary="$loom_project/_build/default/src/sounio-loom-contingent-runtime"
 loom_outcome_authority_binary="$loom_project/_build/default/src/sounio-loom-outcome-authority-runtime"
+loom_witness_mesh_binary="$loom_project/_build/default/src/sounio-loom-witness-mesh-runtime"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
@@ -428,6 +450,8 @@ loom_outcome_authority_binary="$loom_project/_build/default/src/sounio-loom-outc
   die "Loom build omitted its native Sounio contingent-policy adapter"
 [[ -x "$loom_outcome_authority_binary" ]] || \
   die "Loom build omitted its native Sounio outcome-authority adapter"
+[[ -x "$loom_witness_mesh_binary" ]] || \
+  die "Loom build omitted its native Sounio witness-mesh adapter"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_runtime_version="$(sed -n 's/^runtime_version=//p' <<< "$loom_version_output" | head -1)"
@@ -495,6 +519,14 @@ loom_outcome_authority_probe="$(
 [[ "$loom_outcome_authority_probe" == \
   'SOUNIO_OUTCOME_AUTHORITY_ACCEPT schema=loom-native-outcome-authority-v0 transition=consume state=verified' ]] || \
   die "Loom native Sounio outcome-authority adapter failed its install probe"
+loom_witness_mesh_probe="$(
+  printf '9013 2 1 1 0 101 201 301 101 201 0 401 401 401 0 0 1 1 1 0 0 3 3 3 0 %s %s %s %s %s %s %s %s\n' \
+    "$ones" "$ones" "$ones" "$zeros" "$twos" "$twos" "$twos" \
+    "$zeros" | "$loom_witness_mesh_binary"
+)"
+[[ "$loom_witness_mesh_probe" == \
+  'SOUNIO_WITNESS_MESH_ACCEPT schema=loom-native-witness-mesh-v0 transition=anchor state=quorum-verified' ]] || \
+  die "Loom native Sounio witness-mesh adapter failed its install probe"
 loom_measurement_probe="$(
   printf '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401\n' | \
     "$loom_continuity_binary"
@@ -533,7 +565,8 @@ bundle_sha="$({
     "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier" \
     "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune" \
     "$loom_project/src/loom.ml" "$loom_project/src/loom_arrow.ml" \
-    "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_ui.ml" \
+    "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_witness.ml" \
+    "$loom_project/src/loom_ui.ml" \
     "$loom_project/src/loom_pty_stubs.c" "$loom_project/src/loom_arrow_stubs.c" \
     "$loom_project/src/loom_nanoarrow.c" "$loom_project/src/loom_nanoarrow_ipc.c" \
     "$loom_project/src/loom_flatcc.c" \
@@ -547,7 +580,9 @@ bundle_sha="$({
     "$loom_portfolio_module" "$loom_contingent_build_source" \
     "$loom_contingent_entrypoint" "$loom_contingent_module" \
     "$loom_outcome_authority_build_source" \
-    "$loom_outcome_authority_entrypoint" "$loom_outcome_authority_module"
+    "$loom_outcome_authority_entrypoint" "$loom_outcome_authority_module" \
+    "$loom_witness_mesh_build_source" "$loom_witness_mesh_entrypoint" \
+    "$loom_witness_mesh_module"
   find "$loom_project/src/vendor" -type f -print0 | sort -z | xargs -0 sha256sum
 } | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
@@ -590,6 +625,8 @@ else
     "$stage/bin/sounio-loom-contingent-runtime"
   install -m 0755 "$loom_outcome_authority_binary" \
     "$stage/bin/sounio-loom-outcome-authority-runtime"
+  install -m 0755 "$loom_witness_mesh_binary" \
+    "$stage/bin/sounio-loom-witness-mesh-runtime"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -614,6 +651,8 @@ else
     printf 'loom_contingent_frame=9011\n'
     printf 'loom_outcome_authority_language=Sounio\n'
     printf 'loom_outcome_authority_frame=9012\n'
+    printf 'loom_witness_mesh_language=Sounio\n'
+    printf 'loom_witness_mesh_frame=9013\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
@@ -638,6 +677,9 @@ else
     printf 'capability=loom-signed-outcome-authority-v0\n'
     printf 'capability=loom-linear-outcome-evidence-v0\n'
     printf 'capability=loom-journal-head-bound-consume-v0\n'
+    printf 'capability=loom-external-witness-mesh-v0\n'
+    printf 'capability=loom-quorum-intersection-checkpoint-v0\n'
+    printf 'capability=loom-rollback-detection-through-checkpoint-v0\n'
     printf 'capability=loom-post-activation-request-bridge-v1\n'
     printf 'capability=loom-recoverable-control-service-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'

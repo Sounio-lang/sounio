@@ -363,10 +363,94 @@ supported in their separate mode.
 
 This path proves authorization and state binding within one filesystem
 authority. It does not prove physical measurement truth, classifier accuracy,
-private-key custody, process isolation, or organizational independence. It also
-does not resist rollback of an entire internally consistent state directory;
-that requires a future external monotonic anchor such as a transparency witness
-or hardware counter.
+private-key custody, process isolation, or organizational independence. By
+itself it also does not resist rollback of an entire internally consistent
+state directory. The optional Witness Mesh below adds a bounded external
+monotonic checkpoint; the signed outcome path alone retains no rollback claim.
+
+## Witness Mesh v0
+
+Witness Mesh moves the epistemic journal's monotonic high-water mark outside
+the protected local state directory. Configure one Ed25519 anchor authority,
+exactly three distinct Ed25519 witness members, and their current network
+endpoints. All four keys must be distinct:
+
+```text
+anchor_public_key<TAB>/anchor/authority-public.pem
+witness_id<TAB>public_key
+w1<TAB>/authority-a/witness-public.pem
+w2<TAB>/authority-b/witness-public.pem
+w3<TAB>/authority-c/witness-public.pem
+```
+
+```text
+witness_id<TAB>host<TAB>port
+w1<TAB>witness-a.internal<TAB>9441
+w2<TAB>witness-b.internal<TAB>9441
+w3<TAB>witness-c.internal<TAB>9441
+```
+
+Each authority runs a separately stateful service:
+
+```sh
+bin/loom witness-serve --witness-state-dir AUTHORITY_STATE \
+  --membership membership.tsv --witness w1 \
+  --private-key witness-private.pem --bind 127.0.0.1 --port 9441
+```
+
+The client anchors and strictly verifies one epistemic world:
+
+```sh
+bin/loom witness-mesh-anchor --state-dir STATE --world scheduler \
+  --membership membership.tsv --endpoints endpoints.tsv \
+  --anchor-private-key /anchor/authority-private.pem
+bin/loom witness-mesh-verify --state-dir STATE --world scheduler \
+  --membership membership.tsv --endpoints endpoints.tsv
+# Availability-oriented verification for non-equivocating witnesses:
+bin/loom witness-mesh-verify --state-dir STATE --world scheduler \
+  --membership membership.tsv --endpoints endpoints.tsv --policy crash-quorum
+```
+
+An anchor signs and sends each service the literal journal suffix from that
+service's last signed `(event_count, head)` to the proposed checkpoint. The
+service authenticates the anchor request, reparses every event, requires a
+contiguous predecessor, persists its canonical Ed25519 receipt before replying,
+and makes an exact retry of its latest request idempotent. Each witness-signed
+receipt carries the independently verifiable anchor authorization. Native
+Sounio frame `9013` admits only two matching shares from a fixed three-member
+set. The local certificate chain binds each preceding certificate, but local
+self-consistency is never sufficient authority.
+
+Anchoring and `crash-quorum` verification require 2/3, so one unavailable
+non-equivocating service does not stop that mode. The default
+`byzantine-strict` verification requires all 3/3 current receipts. It therefore
+fails closed when any witness is unavailable, but detects a stale/equivocating
+answer from one dishonest witness because the other two current states are also
+required. A restarted lagging witness replays its entire missed raw suffix from
+its own retained head. If the client dies after external quorum persistence but
+before the local certificate write, the next client completes or reuses the
+signed next-sequence receipts and reconstructs the missing certificate without
+rolling a witness backward.
+
+The guarantee is deliberately policy-bounded. `crash-quorum` detects rollback
+or a fork through the latest checkpoint only under non-equivocation/state
+retention; it does not tolerate a Byzantine witness as the sole intersection of
+two 2/3 quorums. `byzantine-strict` detects the concrete one-dishonest-witness
+rollback attack while all three services are reachable, but it is still not a
+consensus protocol and makes no progress claim for a silent or refusing
+dishonest witness. An unanchored suffix is refused by either verifier but is not
+rollback-protected. V0 is not Byzantine consensus, general f=1 Byzantine fault
+tolerance, threshold signatures, TLS, confidentiality, trusted time, membership
+rotation, hardware key custody, or organizational independence. A membership
+change invalidates the existing chain and requires a new world/epoch with
+isolated witness state. Frames are bounded to 4 MiB and raw segments to 1 MiB;
+authenticated plaintext still exposes traffic and permits delay, loss, replay,
+and denial of service, but an unauthenticated peer cannot advance witness state
+without the anchor key. Witness signatures establish journal continuity and
+keyholder authorship, not physical or scientific truth, and MUST NOT by
+themselves authorize clinical, dosing, or classifier decisions. The exact
+semantic and falsification boundary is in
+`docs/internal/concepts/loom-witness-mesh.contract`.
 
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their

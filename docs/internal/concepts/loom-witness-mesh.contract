@@ -1,0 +1,152 @@
+# Loom Witness Mesh
+
+Concept-ID: `SOUNIO-LOOM-WITNESS-MESH`
+
+Status: executable bounded external monotonic authority. Promotion evidence is
+retained in `tools/loom/evidence/loom-witness-mesh-v0-20260826.txt`.
+
+## Semantic Lane
+
+```text
+Semantic-Lane-ID: codex-loom-witness-mesh-20260826
+Owner: codex/session-01a02a17-f139-7613-98a1-
+Concept-IDs: SOUNIO-LOOM-WITNESS-MESH; SOUNIO-LOOM-EPISTEMIC-MACHINE; SOUNIO-LOOM-OUTCOME-EVIDENCE-AUTHORITY; SOUNIO-FALSIFICATION-CARRYING-DEVELOPMENT
+Intent-Preserved: local journal consistency, external monotonic history, anchor authority, witness identity, membership identity, checkpoint sequence, event count, journal head, raw event segment, request authorization, signed share, quorum certificate, verification policy, and physical truth remain distinct facts
+Transformation: authorize each unanchored epistemic-journal segment with a distinct anchor key; replay it at three separately stateful Ed25519 witness services; persist each witness share before reply; admit two matching shares through native Sounio frame 9013; chain a local quorum certificate; and require either a 2-of-3 crash-fault quorum or all 3-of-3 current receipts to verify the latest checkpoint
+Types-Changed: WitnessMeshDigest256, VerifiedWitnessShare, VerifiedWitnessMeshCheckpoint, HostWitnessMeshReceipt
+Effects-Changed: LoomWitnessMeshHostTrust admits only native frame-9013 fixed-membership, quorum, checkpoint-agreement, and monotonic-advance transitions
+IR-Changed: none in v0; witness shares and certificates are runtime semantic objects, not compiler IR or a consensus log
+Claims-Introduced: 2-of-3 anchoring and crash-quorum verification remain available with one unavailable non-equivocating witness; crash-quorum detects rollback or a fork at or before the latest checkpoint under state retention and non-equivocation; byzantine-strict verification requires 3-of-3 current receipts and detects the concrete rollback attack with one dishonest witness while all three respond; a lagging witness can replay the missed raw journal suffix; an unauthorized anchor request cannot advance witness state; and a client crash after external persistence but before local certificate persistence is recoverable from signed witness state
+Claims-Forbidden: rollback protection for an unanchored suffix, Byzantine safety for 2-of-3 verification, availability of byzantine-strict verification with any unavailable or refusing witness, physical or semantic truth of journal events, authorization of clinical, dosing, classifier, or other consequential decisions from continuity alone, Byzantine consensus, general f=1 Byzantine fault tolerance, threshold-signature cryptography, confidentiality, TLS authentication, availability under network partition, trusted time, membership rotation inside an existing chain, key recovery, hardware custody, organizational independence, protection when two witnesses collude or lose monotonic state, exactly-once external effects, or PL/CS priority
+Assumptions: Ed25519 and SHA-256 retain their standard security properties; the anchor public key and exactly three witness public keys are all distinct; the anchor private key is not available to an unauthenticated transport peer; witness private keys and state are outside the rollback authority of the protected local state directory; crash-quorum witnesses do not equivocate and retain state; byzantine-strict has at most one dishonest witness and all three witnesses return a verifiable current status; the native adapter and local verifier are in the trusted computing base
+Write-Set: native witness-mesh Sounio module and frame-9013 adapter; OCaml witness service, client, certificate chain, and CLI; focused build, runtime packaging, tests, contract, README, and evidence
+Read-Set: replay-verified epistemic journal events, exact local journal head, fixed membership, signed remote status receipts, local certificate chain, native frame-9013 result, and endpoint availability
+Positive-Witness: three services reject a tampered anchor authorization before persistence; two witnesses replay and sign checkpoint one; the client crashes after quorum but before its local certificate, reconstructs that certificate from signed remote state, advances and crash-verifies with one member down, then brings the lagging member directly to checkpoint three by replaying its missing raw suffix and passes 3-of-3 byzantine-strict verification
+Negative-Witness: wrong anchor key, tampered anchor signature, one share, collapsed membership, membership digest drift, checkpoint drift, non-advance, internally consistent local rollback, internally consistent local fork, unanchored suffix, two unavailable services, and byzantine-strict verification with one unavailable service all refuse; removing only each named native rule admits its paired otherwise-refused same-frame control
+Acceptance-Gate: scripts/ci/sounio_loom_witness_mesh_selftest.sh; scripts/ci/sounio_loom_witness_mesh_adapter_selftest.sh; scripts/ci/loom_witness_mesh_typestate_gate.sh; scripts/ci/sounio_coord_runtime_selftest.sh
+Integration-Target: native OCaml Loom kernel, native Sounio frame 9013, epistemic worldline journal, signed outcome state, and shared coordination runtime
+Authoritative-Only-If: each service verifies the distinct anchor authorization and raw contiguous journal segment from its own persisted predecessor; persists a canonical signed receipt before reply; the client verifies every anchor and witness signature and exact fixed membership; at least two receipts agree on sequence, count, head, domain, and membership; native frame 9013 accepts; the local certificate chain verifies; crash-quorum obtains at least two current equal receipts under non-equivocation; and byzantine-strict obtains all three current equal receipts under at most one dishonest witness
+```
+
+## Protocol Boundary
+
+Membership contains one anchor authority and exactly three witness identities,
+all with distinct Ed25519 public keys. Endpoints are separate, replaceable
+routing data and are not member identity. Each service stores one canonical
+signed high-water receipt per world. An anchor request contains the literal
+contiguous epistemic-journal segment, its start and end coordinates, and
+domain-separated SHA-256 digests, then binds that payload with the configured
+anchor signature. The service verifies this authorization before state access,
+reparses every event with the same journal verifier used locally, requires its
+own persisted `(count, head)` predecessor, and atomically persists the new
+receipt before replying. The witness-signed receipt carries the anchor key ID,
+request payload digest, and anchor signature for independent re-verification.
+
+The client accepts two or three shares over one fixed membership, world,
+anchor sequence, event count, and journal head. Its local certificate also
+binds the preceding certificate digest and preceding checkpoint coordinates.
+Local certificate self-consistency is insufficient. `crash-quorum` asks the
+external services for current signed status and requires 2-of-3 receipts equal
+to the latest local checkpoint under a non-equivocation assumption.
+`byzantine-strict` requires all 3-of-3 current receipts and is the default CLI
+policy.
+
+Any two subsets of size two in a fixed set of three intersect, but their only
+common member may be dishonest: `{B,H1}` and `{B,H2}` intersect only at `B`.
+Signatures cannot prove that member honest, so 2-of-3 verification has only the
+crash/non-equivocating result. Requiring all three current receipts makes either
+honest witness that participated in any 2-of-3 anchor visible during
+`byzantine-strict` verification. A stale or equivocating dishonest response then
+causes disagreement and refusal. This is still not consensus: if the dishonest
+witness is silent, byzantine-strict loses availability; if two witnesses
+collude, restore old state, or lose state and keys together, v0 has no safety
+claim.
+
+## Crash And Catch-Up Semantics
+
+The request digest makes an exact retry of the latest service request
+idempotent. Retrying an older sequence is refused as non-monotonic. A harder crash can
+occur after one or more services persist the next checkpoint but before the
+client writes its certificate. On restart, the client treats a signed next
+sequence as a recoverable candidate, verifies that its head is a prefix of the
+local journal, completes the same checkpoint at another witness when needed,
+and reconstructs the missing local certificate. It never asks an external
+witness to move backward.
+
+A lagging service may skip certificate sequence numbers because it validates
+the full missing raw suffix from its own last head to the common new head. This
+is state catch-up under fixed membership, not membership reconfiguration or
+state transfer by assertion.
+
+## Transport And Custody
+
+V0 uses framed TCP bounded to 4 MiB, with raw journal segments bounded to 1 MiB.
+Every state-advancing request is anchor-authorized and every receipt and
+membership identity is signed and verified, so an active transport intermediary
+cannot advance witness state or forge an accepted checkpoint without a
+configured private key. It can still observe traffic, replay a request, delay
+it, drop it, or cause denial of service. Exact latest-request replay is
+idempotent; old replay is non-monotonic and refused. TLS, peer-channel
+authentication, encryption, remote attestation, certificate rotation, and
+hardware-backed keys are deliberately future interfaces.
+
+The three witness state directories and private keys must not share the
+rollback authority of the protected Loom state. Running all three under one
+operator, filesystem snapshot, host, or credential vault may be useful for
+testing but does not establish failure-domain or organizational independence.
+
+## Native Rules And Linear Proof
+
+Frame `9013` has five independent sabotage controls:
+
+- `witness_mesh_members_are_separated` rejects repeated member identities;
+- `witness_mesh_quorum_is_satisfied` requires canonical flags and two shares;
+- `witness_mesh_receipts_match_membership` binds each share to its fixed slot
+  and exact membership digest;
+- `witness_mesh_checkpoint_agrees` binds domain, sequence, count, and head;
+- `witness_mesh_checkpoint_advances` requires both coordinates to increase
+  strictly: `anchor_sequence' > anchor_sequence` and
+  `event_count' > event_count`.
+
+Two private `VerifiedWitnessShare` values from distinct members are consumed to
+construct one `VerifiedWitnessMeshCheckpoint`, which is consumed once to obtain
+a private `HostWitnessMeshReceipt`. External construction refuses with `E176`;
+share reuse refuses with `E039`.
+
+## Evidence Boundary
+
+The strongest v0 statement is conditional and exact: `byzantine-strict`
+detects rollback or forking at or before the latest witnessed checkpoint with
+at most one dishonest witness when all three services return current verifiable
+status. `crash-quorum` provides the analogous 2-of-3 result only under
+non-equivocation and state retention. An appended but unanchored suffix is
+refused by either verifier, but it is not rollback-protected until an anchor
+quorum signs it. Witnesses attest authorization, journal continuity, and
+authorship of receipts, not the scientific truth, causal validity, safety, or
+morality of journal content. Continuity evidence alone MUST NOT authorize a
+clinical, dosing, classifier, or other consequential decision.
+
+## Falsification Conditions
+
+- a service accepts a segment whose first event does not extend its persisted
+  predecessor or whose event hashes do not reach the claimed head;
+- an unauthenticated or incorrectly signed anchor request advances state;
+- an exact retry of the latest request changes state or returns a different
+  signed receipt;
+- a crash after external quorum persistence requires resetting a witness or
+  loses the accepted checkpoint;
+- one share can mint a local certificate or pass either verification policy;
+- 2-of-3 crash-quorum passes after one member equivocates;
+- 3-of-3 byzantine-strict passes a rollback view produced by one dishonest
+  witness and one lagging honest witness;
+- a locally hash-consistent rollback or fork passes strict verification against
+  the advanced external witnesses;
+- a lagging witness rejoins by trusting a claimed head without replaying its
+  missing raw journal suffix;
+- a certificate remains valid after anchor authority, membership, domain,
+  count, sequence, head, request authorization, or a witness signature changes;
+- removing one named frame-9013 rule does not admit its paired same-frame
+  sabotage control;
+- a report promotes the bounded result into Byzantine consensus, physical
+  truth, organizational independence, or protection beyond the latest
+  externally witnessed checkpoint.
