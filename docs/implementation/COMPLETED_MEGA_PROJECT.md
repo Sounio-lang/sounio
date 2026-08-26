@@ -99,7 +99,7 @@ All major features have been successfully implemented! This document summarizes 
 
 ```bash
 # Analyze single file
-python3 tools/analyze/dead_code.py self-hosted/lexer.sio
+python3 tools/analyze/dead_code.py self-hosted/compiler/lexer.sio
 ```
 
 **Features:**
@@ -283,7 +283,7 @@ Documentation:
 ./tools/lsp/test_smoke.sh
 
 # 2. Run dead code analysis on file
-python3 tools/analyze/dead_code.py self-hosted/lexer.sio
+python3 tools/analyze/dead_code.py self-hosted/compiler/lexer.sio
 
 # 3. Run workspace analysis
 python3 tools/analyze/workspace_analysis.py self-hosted/

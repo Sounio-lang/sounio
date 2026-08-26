@@ -14,7 +14,11 @@ self-hosted compiler without runtime Rust compilation of the root suite.
 
 ## R2 Cutover Update (No-Rust Contracts)
 
-Sounio now supports signed bundle/state bootstrap commands:
+The signed bundle/state bootstrap commands below were provided by the Rust
+`souc` crate, which was removed in `79acc192e1` ("[cutover] Remove Rust crates").
+The shipped compiler does not implement them — `souc --help` lists the
+subcommands it accepts and `bootstrap` is not among them — so these forms are
+recorded here only as the contract they enforced:
 
 - `souc bootstrap verify --bundle <dir>`
 - `souc bootstrap init --bundle <dir> --state <dir>`
@@ -28,12 +32,22 @@ The signed bundle contract is defined by `bootstrap/artifacts/manifest.v2.json`
 
 Optimization policy contract is defined by
 `bootstrap/policies/policy.v1.json`
-(`schema = "sounio.optimization.policy.v1"`). Policy promotion/evaluation uses:
+(`schema = "sounio.optimization.policy.v1"`). The policy commands that drove it
+went with the same Rust removal and are likewise not implemented by the shipped
+compiler:
 
 - `souc opt policy train --corpus <path> --output <file>`
 - `souc opt policy eval --policy <file>`
 - `souc opt policy promote --policy <file> --output <file>`
 - `souc opt policy status --policy <file>`
+
+The wrapper scripts that still shell out to these forms —
+`scripts/bootstrap/bootstrap_verify_artifacts.sh`,
+`scripts/omega/omega_prepare_policy_smoke.sh`,
+`scripts/omega/omega_policy_status.sh` and
+`scripts/selfhost/selfhost_independence_gate.sh` — are inoperative for the same
+reason. The contract artifacts themselves (`bootstrap/artifacts/manifest.v2.json`,
+`bootstrap/policies/policy.v1.json`) are still present in the tree.
 
 Performance release gating contract is defined by
 `benchmarks/independence/contract.v1.json`
@@ -126,7 +140,7 @@ In seed-enforced wrapper mode:
 Generate/update seed artifact with:
 
 ```bash
-bash scripts/build_bootstrap_seed.sh
+bash scripts/bootstrap/build_bootstrap_seed.sh
 ```
 
 This script:
@@ -172,7 +186,7 @@ Diverse Double-Compilation*. PhD dissertation, George Mason University.
 Before any tagged release of Sounio, the following command **must exit 0**:
 
 ```bash
-bash scripts/diverse_double_compile_check.sh
+bash scripts/dev/diverse_double_compile_check.sh
 ```
 
 This builds `souc` under two independent host toolchains:
@@ -208,13 +222,13 @@ compiler could have silently modified the Sounio code.
 
 ```bash
 # Full check (two cargo builds, ~5–10 min):
-bash scripts/diverse_double_compile_check.sh
+bash scripts/dev/diverse_double_compile_check.sh
 
 # Skip rebuild if binaries already exist:
-bash scripts/diverse_double_compile_check.sh --skip-build
+bash scripts/dev/diverse_double_compile_check.sh --skip-build
 
 # Use a custom reference program:
-bash scripts/diverse_double_compile_check.sh --ref-program path/to/program.sio
+bash scripts/dev/diverse_double_compile_check.sh --ref-program path/to/program.sio
 
 # Rust integration test (requires pre-built DDC binaries):
 cargo test -p souc --test ddc_check -- --include-ignored

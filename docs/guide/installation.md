@@ -376,7 +376,7 @@ brew install cmake
 **Solution**:
 ```bash
 export SOUNIO_STDLIB_PATH=/path/to/sounio/stdlib
-souc sysroot stdlib-paths  # Verify configuration
+souc info                  # Verify configuration: the `stdlib:` line echoes the resolved path
 ```
 
 ### Build Fails with `feature X requires feature Y`

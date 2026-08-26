@@ -46,8 +46,12 @@ The fastest way to orient yourself is:
 - `self-hosted/compiler/module_loader.sio`
 - `self-hosted/compiler/lexer.sio`
 - `self-hosted/compiler/parser.sio`
-- `self-hosted/compiler/typecheck.sio`
-- `self-hosted/compiler/gen.sio`
+
+The monolithic `self-hosted/compiler/typecheck.sio` and `self-hosted/compiler/gen.sio`
+stages that this list used to name were superseded and moved to
+`archive/dead-code-2026/compiler/` in `2661416ce2`; checking now enters through
+`self-hosted/check/` and code generation through `self-hosted/ir/` and
+`self-hosted/native/`, as in the subsystem map above.
 
 Those files are useful entry points, but they are not the full implementation. In most cases they fan out into the subsystem directories listed above.
 

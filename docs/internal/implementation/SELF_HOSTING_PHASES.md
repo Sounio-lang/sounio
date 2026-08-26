@@ -11,7 +11,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.imple
 
 ## Cutover Status (No-Rust Build+Run)
 
-Current cutover contract is bundle/state driven:
+The bundle/state cutover contract below was driven by the Rust `souc` crate,
+which was removed in `79acc192e1` ("[cutover] Remove Rust crates"). The shipped
+compiler implements none of these subcommands — `souc --help` lists what it does
+accept, and neither `bootstrap` nor `opt` appears there — so the list records the
+contract, not a runnable command surface:
 
 - `souc bootstrap verify --bundle <dir>`
 - `souc bootstrap init --bundle <dir> --state <dir>`
@@ -21,7 +25,8 @@ Current cutover contract is bundle/state driven:
 - `souc opt policy promote --policy <file> --output <file>`
 - `souc opt policy status --policy <file>`
 
-Artifacts are validated from `manifest.v2.json` with Ed25519 signatures.
+Artifacts are still declared in `bootstrap/artifacts/manifest.v2.json` with
+Ed25519 signatures, but no compiler subcommand validates them today.
 Legacy Rust-bridge transition env knobs are removed and treated as hard errors.
 Optimization policy decisions are tracked by `bootstrap/policies/policy.v1.json`
 (`schema = "sounio.optimization.policy.v1"`).

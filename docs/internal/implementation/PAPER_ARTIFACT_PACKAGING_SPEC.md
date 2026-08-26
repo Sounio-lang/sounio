@@ -32,12 +32,12 @@ It converts existing CI and self-host gate outputs into a claim-backed evidence 
 ### Lane A: Public Core Reproducibility
 
 - Command surface:
-  - `scripts/fast_gate.sh`
+  - `scripts/dev/fast_gate.sh`
   - `scripts/dev/e2e_gate.sh` (called by `fast_gate.sh`)
-  - `scripts/check_feature_matrix.sh`
+  - `scripts/ci/check_feature_matrix.sh`
   - `scripts/selfhost/selfhost_zero_fallback_gate.sh`
-  - `scripts/selfhost_driver_output_gate.sh`
-  - `scripts/poseidon_gate.sh`
+  - `scripts/ci/selfhost_driver_output_gate.sh`
+  - `scripts/ci/poseidon_gate.sh`
 - Primary CI mapping:
   - `.github/workflows/ci.yml` jobs: `fast-gate`, `selfhost-zero-fallback`, `joss-smoke`.
 
@@ -54,7 +54,7 @@ Workload classes (anonymized):
 
 Execution mechanism (already implemented):
 
-- Use `scripts/poseidon_gate.sh` with `MATRIX_FILE=<private_matrix>`.
+- Use `scripts/ci/poseidon_gate.sh` with `MATRIX_FILE=<private_matrix>`.
 - Matrix schema is defined in `scripts/poseidon_compat_matrix.txt`:
   - `case_id|mode|command|compare`
   - modes: `run_selfhost` and `direct`
@@ -73,15 +73,15 @@ Required acceptance criteria:
 
 | Metric | Command | Expected marker(s) | Acceptance gate |
 |---|---|---|---|
-| Fast regression gate completion | `bash scripts/fast_gate.sh` | `[fast-gate] ok` | Marker present |
+| Fast regression gate completion | `bash scripts/dev/fast_gate.sh` | `[fast-gate] ok` | Marker present |
 | End-to-end backend checks | `bash scripts/dev/e2e_gate.sh` | `[e2e] ok` | Marker present |
-| Feature matrix checks | `bash scripts/check_feature_matrix.sh` | `[feature-matrix] ok` | Marker present |
+| Feature matrix checks | `bash scripts/ci/check_feature_matrix.sh` | `[feature-matrix] ok` | Marker present |
 | Self-host strict zero fallback summary | `bash scripts/selfhost/selfhost_zero_fallback_gate.sh` | `SELFHOST_ZERO_GATE_SUMMARY pass=<n> fail=<m>` | `fail=0` |
-| Self-host driver output smoke | `bash scripts/selfhost_driver_output_gate.sh` | `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY pass=<n> fail=<m>` | `fail=0` |
+| Self-host driver output smoke | `bash scripts/ci/selfhost_driver_output_gate.sh` | `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY pass=<n> fail=<m>` | `fail=0` |
 | Parse-all report completeness | same as above | `PASS [parse-all-report] ...` | Pass marker present |
 | Parse-all shard completeness | same as above | `PASS [parse-all-shards] ...` | Pass marker present |
 | Full self-host strict pass | same as above | `PASS [full-selfhost] strict no-fallback gate passed` | Pass marker present |
-| Compatibility parity matrix | `bash scripts/poseidon_gate.sh` | `PASS [<case_id>] baseline and candidate match (...)` | All matrix cases pass |
+| Compatibility parity matrix | `bash scripts/ci/poseidon_gate.sh` | `PASS [<case_id>] baseline and candidate match (...)` | All matrix cases pass |
 | Poseidon full-suite summary | same as above | `Summary: PASS=<n> FAIL=<m>` | `FAIL=0` |
 | JOSS smoke examples | CI `joss-smoke` in `.github/workflows/ci.yml` | step success (`Run required JOSS examples`) | Job green |
 | Compile-fail diagnostic behavior | CI `joss-smoke` in `.github/workflows/ci.yml` | step success (`Compile-fail smoke ...`) | Job green |
@@ -90,13 +90,13 @@ Required acceptance criteria:
 
 | Claim ID | Paper-facing claim | Evidence source(s) | Marker(s) / artifact(s) |
 |---|---|---|---|
-| `C1` | Sounio build/test path is reproducible on public runners | `.github/workflows/ci.yml` `fast-gate`; `scripts/fast_gate.sh` | `[fast-gate] ok` |
+| `C1` | Sounio build/test path is reproducible on public runners | `.github/workflows/ci.yml` `fast-gate`; `scripts/dev/fast_gate.sh` | `[fast-gate] ok` |
 | `C2` | Multi-backend pipeline is exercised (native, LLVM when available, GPU compile smoke + runtime attestation gate) | `scripts/dev/e2e_gate.sh`, CI `fast-gate` | `[e2e] native build + run`, `[e2e] llvm ...` or skip marker, `[e2e] gpu backend compile smoke`, `[e2e] gpu runtime attestation gate`, `[e2e] ok` |
 | `C3` | Self-host path passes strict no-fallback corpus gate | `scripts/selfhost/selfhost_zero_fallback_gate.sh`, CI `selfhost-zero-fallback` | `PASS [full-selfhost] ...`, `PASS [parse-all-report] ...`, `PASS [parse-all-shards] ...`, `SELFHOST_ZERO_GATE_SUMMARY ... fail=0` |
-| `C3b` | Self-host driver can emit decodable bytecode artifacts (bootstrap subset) | `scripts/selfhost_driver_output_gate.sh` | `PASS [ret_42] ...`, `PASS [print_boot] ...`, `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY ... fail=0` |
+| `C3b` | Self-host driver can emit decodable bytecode artifacts (bootstrap subset) | `scripts/ci/selfhost_driver_output_gate.sh` | `PASS [ret_42] ...`, `PASS [print_boot] ...`, `SELFHOST_DRIVER_OUTPUT_GATE_SUMMARY ... fail=0` |
 | `C4` | Ontology mismatch diagnostics are enforced in end-to-end checks | `scripts/dev/e2e_gate.sh` ontology cross-check | presence of `semantic distance` diagnostic in failure path check |
-| `C5` | Self-host/non-self-host parity is regression-tested | `scripts/poseidon_gate.sh`, `scripts/poseidon_compat_matrix.txt` | `PASS [<case_id>] baseline and candidate match (...)`, `Summary: PASS=<n> FAIL=0` |
-| `C6` | Enterprise backend workload compatibility can be validated without disclosing proprietary implementation details | `scripts/poseidon_gate.sh` with private `MATRIX_FILE` | anonymized `PASS [<enterprise_case>] ...` lines + `FAIL=0` summary + no fallback markers in strict mode |
+| `C5` | Self-host/non-self-host parity is regression-tested | `scripts/ci/poseidon_gate.sh`, `scripts/poseidon_compat_matrix.txt` | `PASS [<case_id>] baseline and candidate match (...)`, `Summary: PASS=<n> FAIL=0` |
+| `C6` | Enterprise backend workload compatibility can be validated without disclosing proprietary implementation details | `scripts/ci/poseidon_gate.sh` with private `MATRIX_FILE` | anonymized `PASS [<enterprise_case>] ...` lines + `FAIL=0` summary + no fallback markers in strict mode |
 
 ## Reproducibility Protocol
 
@@ -110,14 +110,14 @@ mkdir -p "$ARTIFACT_ROOT"
 ### 2) Run public lanes and collect logs
 
 ```bash
-bash scripts/fast_gate.sh | tee "$ARTIFACT_ROOT/fast_gate.log"
-bash scripts/check_feature_matrix.sh | tee "$ARTIFACT_ROOT/feature_matrix.log"
+bash scripts/dev/fast_gate.sh | tee "$ARTIFACT_ROOT/fast_gate.log"
+bash scripts/ci/check_feature_matrix.sh | tee "$ARTIFACT_ROOT/feature_matrix.log"
 WORK_DIR="$ARTIFACT_ROOT/selfhost-zero" \
   bash scripts/selfhost/selfhost_zero_fallback_gate.sh | tee "$ARTIFACT_ROOT/selfhost_zero_gate.log"
 WORK_DIR="$ARTIFACT_ROOT/selfhost-driver-output" \
-  bash scripts/selfhost_driver_output_gate.sh | tee "$ARTIFACT_ROOT/selfhost_driver_output_gate.log"
+  bash scripts/ci/selfhost_driver_output_gate.sh | tee "$ARTIFACT_ROOT/selfhost_driver_output_gate.log"
 WORK_DIR="$ARTIFACT_ROOT/poseidon-public" \
-  bash scripts/poseidon_gate.sh | tee "$ARTIFACT_ROOT/poseidon_public.log"
+  bash scripts/ci/poseidon_gate.sh | tee "$ARTIFACT_ROOT/poseidon_public.log"
 ```
 
 Expected log markers:
@@ -134,7 +134,7 @@ Expected log markers:
 WORK_DIR="$ARTIFACT_ROOT/poseidon-enterprise" \
 MATRIX_FILE="/secure/path/enterprise_compat_matrix.txt" \
 SOUNIO_SELFHOST_NO_RUST_FALLBACK=1 \
-bash scripts/poseidon_gate.sh | tee "$ARTIFACT_ROOT/poseidon_enterprise.log"
+bash scripts/ci/poseidon_gate.sh | tee "$ARTIFACT_ROOT/poseidon_enterprise.log"
 ```
 
 Expected markers:
@@ -169,7 +169,7 @@ rg -n "Summary: PASS=.* FAIL=0" "$ARTIFACT_ROOT/poseidon_public.log" "$ARTIFACT_
 
 ## Paper Packaging Checklist
 
-- Include this spec: `docs/PAPER_ARTIFACT_PACKAGING_SPEC.md`.
+- Include this spec: `docs/internal/implementation/PAPER_ARTIFACT_PACKAGING_SPEC.md`.
 - Include logs from the reproducibility protocol under a timestamped artifact directory.
 - Include a short appendix table with `Claim ID -> log file -> marker`.
 - For enterprise lane publication, share only:
