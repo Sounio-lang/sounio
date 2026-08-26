@@ -613,9 +613,32 @@ fn lower_type_list_named_name_at(opt: &Option<Box<TypeExprList>>, k: i64) -> Nam
     }
 }
 
+// Poison sentinel for LOWER_RTT_NAMEID: two functions that share an
+// interned NAME (this table's key -- see the note above LOWER_RTT_ARITY;
+// this codebase alone has 39 distinct `fn add(...) -> (XTable, i64)`
+// functions and 5 `parse_* -> (Parser, ...)` functions, per the review that
+// asked for this hardening) can disagree on which struct type occupies a
+// given tuple-return slot. Recording the SECOND function's answer over the
+// first's would be silent last-write-wins: whichever of the two colliding
+// functions happens to be registered last would win the slot for BOTH,
+// even though real element-struct types differ, risking a future
+// mis-resolution. Only a genuine slot flip (both a prior real registration
+// and a new one, disagreeing) poisons -- registering the SAME answer twice
+// (the ordinary case: every call site above re-derives the same function's
+// own tuple-name row) is not a conflict and never poisons.
+const LOWER_RTT_POISON: i64 = 0 - 1
+
 // Record, for a function whose DECLARED return type is a tuple, the struct
 // type name of each of its first LOWER_RTT_ARITY elements. Called from every
 // site that already fills in return_struct_name from the same TypeExpr.
+//
+// Collision handling (hardening, see LOWER_RTT_POISON above): a slot already
+// holding a non-zero, non-poison id that DISAGREES with this call's id is
+// poisoned (set to LOWER_RTT_POISON) rather than overwritten -- two
+// same-named functions in the linked program disagree on this element's
+// struct type, so neither answer can be trusted. A slot already poisoned
+// stays poisoned. An id of 0 (element absent, or not a plain named type)
+// carries no information and never overwrites or poisons an existing entry.
 fn lower_record_ret_tuple_names(fn_name: Name, return_type: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
     match *return_type {
         Some(te) => {
@@ -630,7 +653,15 @@ fn lower_record_ret_tuple_names(fn_name: Name, return_type: &Option<Box<TypeExpr
                 if elem.len > 0 {
                     id = ir_intern_name(elem)
                 }
-                LOWER_RTT_NAMEID[(base + k) as usize] = id
+                if id != 0 {
+                    let slot = base + k
+                    let existing = LOWER_RTT_NAMEID[slot as usize]
+                    if existing == 0 {
+                        LOWER_RTT_NAMEID[slot as usize] = id
+                    } else if existing != id && existing != LOWER_RTT_POISON {
+                        LOWER_RTT_NAMEID[slot as usize] = LOWER_RTT_POISON
+                    }
+                }
                 k = k + 1
             }
         }
@@ -643,7 +674,9 @@ fn lower_ret_tuple_elem_name(fn_name: Name, k: i64) -> Name with Mut, Panic, Div
     if fn_name.len <= 0 { return ir_empty_name() }
     let key = ir_intern_name(fn_name)
     if key <= 0 || key > LOWER_RTT_MAX_KEY { return ir_empty_name() }
-    ir_name_at(LOWER_RTT_NAMEID[((key - 1) * LOWER_RTT_ARITY + k) as usize])
+    let id = LOWER_RTT_NAMEID[((key - 1) * LOWER_RTT_ARITY + k) as usize]
+    if id == LOWER_RTT_POISON { return ir_empty_name() }
+    ir_name_at(id)
 }
 
 // The desugared `let __tupN = f()` and its `let x = __tupN.k` element bindings
