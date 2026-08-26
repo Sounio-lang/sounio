@@ -14,11 +14,10 @@ self-hosted compiler without runtime Rust compilation of the root suite.
 
 ## R2 Cutover Update (No-Rust Contracts)
 
-The signed bundle/state bootstrap commands below were provided by the Rust
-`souc` crate, which was removed in `79acc192e1` ("[cutover] Remove Rust crates").
-The shipped compiler does not implement them — `souc --help` lists the
-subcommands it accepts and `bootstrap` is not among them — so these forms are
-recorded here only as the contract they enforced:
+Sounio supports signed bundle/state bootstrap commands on the checked artifact
+`artifacts/omega/souc-bin/souc-linux-x86_64-gpu`. They are not available on the
+default `./bin/souc` (Madaros), which has no `bootstrap` subcommand, so point
+`SOUC_BIN` at the checked artifact before running them:
 
 - `souc bootstrap verify --bundle <dir>`
 - `souc bootstrap init --bundle <dir> --state <dir>`
@@ -32,22 +31,26 @@ The signed bundle contract is defined by `bootstrap/artifacts/manifest.v2.json`
 
 Optimization policy contract is defined by
 `bootstrap/policies/policy.v1.json`
-(`schema = "sounio.optimization.policy.v1"`). The policy commands that drove it
-went with the same Rust removal and are likewise not implemented by the shipped
-compiler:
+(`schema = "sounio.optimization.policy.v1"`). Policy promotion/evaluation uses the
+same checked artifact — the default `./bin/souc` has no `opt` subcommand either:
 
 - `souc opt policy train --corpus <path> --output <file>`
 - `souc opt policy eval --policy <file>`
 - `souc opt policy promote --policy <file> --output <file>`
 - `souc opt policy status --policy <file>`
 
-The wrapper scripts that still shell out to these forms —
+The wrapper scripts that shell out to these forms —
 `scripts/bootstrap/bootstrap_verify_artifacts.sh`,
 `scripts/omega/omega_prepare_policy_smoke.sh`,
-`scripts/omega/omega_policy_status.sh` and
-`scripts/selfhost/selfhost_independence_gate.sh` — are inoperative for the same
-reason. The contract artifacts themselves (`bootstrap/artifacts/manifest.v2.json`,
-`bootstrap/policies/policy.v1.json`) are still present in the tree.
+`scripts/omega/omega_policy_status.sh`, and
+`scripts/selfhost/selfhost_independence_gate.sh` — do not resolve the checked
+artifact by default (they look for `target/release/souc`, a bare `souc` on
+`PATH`, or `./souc`), so pass it explicitly with `--souc <path>` or
+`SOUC_BIN=<path>`. `scripts/bootstrap/bootstrap_verify_artifacts.sh` also
+computes `ROOT_DIR` one directory too high for its current location under
+`scripts/bootstrap/` (`dirname/..`, where its sibling `build_bootstrap_seed.sh`
+uses `dirname/../..`), so give it an absolute `--bundle` path until that is
+corrected.
 
 Performance release gating contract is defined by
 `benchmarks/independence/contract.v1.json`

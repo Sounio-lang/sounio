@@ -594,11 +594,9 @@ The following env vars now hard-error with migration guidance:
 - `SOUNIO_SELFHOST_NO_RUST_HARNESS`
 - `SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT`
 
-The signed bundle/state commands that replaced them were part of the Rust `souc`
-crate, removed in `79acc192e1` ("[cutover] Remove Rust crates"). The shipped
-compiler does not implement them — `souc --help` lists the subcommands it
-accepts, and neither `bootstrap` nor `opt` is among them. They are kept here as a
-record of the contract:
+Use signed bundle/state commands instead. They run on the checked artifact
+`artifacts/omega/souc-bin/souc-linux-x86_64-gpu`, not on the default `./bin/souc`
+(Madaros), which has no `bootstrap` or `opt` subcommand:
 
 ```bash
 souc bootstrap verify --bundle bootstrap

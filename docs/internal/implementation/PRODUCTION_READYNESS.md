@@ -70,8 +70,10 @@ canonical setup story for this repo snapshot.
 ## 4) Troubleshooting
 
 ### `ImportError` / `Import not found`
-- Check `SOUNIO_STDLIB_PATH` against the `stdlib:` line printed by `souc info`
-  (there is no `souc sysroot` subcommand; `souc --help` lists the real surface).
+- Check `SOUNIO_STDLIB_PATH` and `souc sysroot stdlib-paths` on the checked
+  artifact `artifacts/omega/souc-bin/souc-linux-x86_64-gpu`. The default
+  `./bin/souc` (Madaros) has no `sysroot` subcommand; there, use the `stdlib:`
+  line printed by `souc info`.
 - Ensure imports are module-rooted correctly (`import stdlib.foo::bar;`).
 - Confirm workspace run path: relative imports are resolved from the source directory.
 
