@@ -404,6 +404,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.seq-kaxi-order-independence-2026-08-18 | repo_only | docs/audit/SEQ_KAXI_ORDER_INDEPENDENCE_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.seven-fibers-of-twelve-2026-08-19 | repo_only | docs/audit/SEVEN_FIBERS_OF_TWELVE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sigsegv-pbpk28-private-struct-2026-06-02 | repo_only | docs/audit/SIGSEGV_PBPK28_PRIVATE_STRUCT_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.soir-blocked-drafts-triage-2026-08-17 | repo_only | docs/audit/SOIR_BLOCKED_DRAFTS_TRIAGE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.soir-capacity-lockstep-census-2026-08-19 | repo_only | docs/audit/SOIR_CAPACITY_LOCKSTEP_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.souc-wrapper-bare-dash-o-swallow-dispatch-2026-08-18 | repo_only | docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.sounio-release-production-readiness-2026-06-22 | repo_only | docs/audit/SOUNIO_RELEASE_PRODUCTION_READINESS_2026-06-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -425,6 +426,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.unlearning-quadrant-2026-08-19 | repo_only | docs/audit/UNLEARNING_QUADRANT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.vec-new-path-call-fabrication-census-2026-08-17 | repo_only | docs/audit/VEC_NEW_PATH_CALL_FABRICATION_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.wave14d-thinlink-921-residual-2026-07-21 | repo_only | docs/audit/WAVE14D_THINLINK_921_RESIDUAL_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.wave3-conflicted-pr-triage-2026-08-16 | repo_only | docs/audit/WAVE3_CONFLICTED_PR_TRIAGE_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-diagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_DIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-hessian-offdiagonal | repo_only | docs/audit/windows_assert_a64_parity/AD_HESSIAN_OFFDIAGONAL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.windows-assert-a64-parity.ad-shadows-first-order | repo_only | docs/audit/windows_assert_a64_parity/AD_SHADOWS_FIRST_ORDER.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -564,6 +566,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.governance.ci-trust-contract | repo_only | docs/governance/CI_TRUST_CONTRACT.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.data-access-credentials | repo_only | docs/governance/data_access_credentials.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.governance.docs-conventions | repo_only | docs/governance/DOCS_CONVENTIONS.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.governance.squash-then-continue-trap-2026-08-17 | repo_only | docs/governance/SQUASH_THEN_CONTINUE_TRAP_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.abide-associator-null | repo_only | docs/gpu/ABIDE_ASSOCIATOR_NULL.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.assoc-e2e-training | repo_only | docs/gpu/ASSOC_E2E_TRAINING.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.gpu.assoc-vjp-complete | repo_only | docs/gpu/ASSOC_VJP_COMPLETE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -609,6 +612,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.handoff.compiler-knowledge-units-dataframe-dispatch-2026-07-17 | repo_only | docs/handoff/compiler_knowledge_units_dataframe_dispatch_2026-07-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-struct-array-mul-loop-fix-prompt | repo_only | docs/handoff/compiler_struct_array_mul_loop_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.compiler-trait-bounded-dispatch-fix-prompt | repo_only | docs/handoff/compiler_trait_bounded_dispatch_fix_prompt.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.handoff.compiler-units-bigframe-binding-dispatch-2026-07-23 | repo_only | docs/handoff/compiler_units_bigframe_binding_dispatch_2026-07-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.a8-crossmod-forwarding-miscompile | repo_only | docs/handoff/continuity/A8_CROSSMOD_FORWARDING_MISCOMPILE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.bootstrap | repo_only | docs/handoff/continuity/BOOTSTRAP.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.handoff.continuity.scoreboard | repo_only | docs/handoff/continuity/SCOREBOARD.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
