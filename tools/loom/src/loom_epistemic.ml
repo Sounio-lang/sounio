@@ -666,6 +666,561 @@ let attention_decision_of_event event =
     candidate_set_digest; selected; attention_owner; attention_generation;
     completed = false; outcome_digest = "" }
 
+type portfolio_budget = {
+  portfolio_token_budget : int;
+  portfolio_wall_budget : int;
+  portfolio_gpu_budget : int;
+  portfolio_quota_budget : int;
+}
+
+type portfolio_candidate = {
+  portfolio_candidate_id : string;
+  portfolio_target_world : string;
+  portfolio_target_claim : string;
+  portfolio_provider : string;
+  portfolio_resources : string list;
+  portfolio_information : int;
+  portfolio_falsification : int;
+  portfolio_divergence : int;
+  portfolio_token_cost : int;
+  portfolio_wall_cost : int;
+  portfolio_gpu_cost : int;
+  portfolio_quota_cost : int;
+  portfolio_risk : int;
+  portfolio_evidence_digest : string;
+  portfolio_falsifier_digest : string;
+}
+
+type portfolio_aggregate = {
+  portfolio_candidates : portfolio_candidate list;
+  portfolio_selected_resources : string list;
+  aggregate_information : int;
+  aggregate_falsification : int;
+  aggregate_divergence : int;
+  aggregate_token_cost : int;
+  aggregate_wall_cost : int;
+  aggregate_gpu_cost : int;
+  aggregate_quota_cost : int;
+  aggregate_risk : int;
+}
+
+let portfolio_candidate_header =
+  String.concat "\t"
+    [ "candidate_id"; "target_world"; "claim"; "provider"; "resources";
+      "information"; "falsification"; "divergence"; "token_cost";
+      "wall_cost"; "gpu_cost"; "quota_cost"; "risk";
+      "evidence_sha256"; "falsifier_sha256" ]
+
+let portfolio_int label ~minimum ~maximum value =
+  let parsed =
+    try int_of_string value
+    with _ -> failf "epistemic-portfolio-%s-invalid" label
+  in
+  if parsed < minimum || parsed > maximum then
+    failf "epistemic-portfolio-%s-invalid" label;
+  parsed
+
+let portfolio_resources_of_string value =
+  validate_text "portfolio-resources" value;
+  if String.contains value '\t' || String.contains value '\n'
+     || String.contains value '\r'
+  then failf "epistemic-portfolio-resources-invalid";
+  let resources = String.split_on_char ',' value in
+  List.iter
+    (fun resource ->
+      validate_text "portfolio-resource" resource;
+      if String.contains resource ',' then
+        failf "epistemic-portfolio-resource-invalid")
+    resources;
+  let canonical = List.sort_uniq String.compare resources in
+  if resources <> canonical then
+    failf "epistemic-portfolio-resources-noncanonical";
+  resources
+
+let canonical_portfolio_candidate candidate =
+  String.concat "\t"
+    [ candidate.portfolio_candidate_id; candidate.portfolio_target_world;
+      candidate.portfolio_target_claim; candidate.portfolio_provider;
+      String.concat "," candidate.portfolio_resources;
+      string_of_int candidate.portfolio_information;
+      string_of_int candidate.portfolio_falsification;
+      string_of_int candidate.portfolio_divergence;
+      string_of_int candidate.portfolio_token_cost;
+      string_of_int candidate.portfolio_wall_cost;
+      string_of_int candidate.portfolio_gpu_cost;
+      string_of_int candidate.portfolio_quota_cost;
+      string_of_int candidate.portfolio_risk;
+      candidate.portfolio_evidence_digest;
+      candidate.portfolio_falsifier_digest ]
+
+let portfolio_candidate_of_line line =
+  match String.split_on_char '\t' line with
+  | [ candidate_id; target_world; target_claim; provider; resources;
+      information; falsification; divergence; token_cost; wall_cost;
+      gpu_cost; quota_cost; risk; evidence; falsifier ] ->
+      validate_atom "portfolio-candidate" candidate_id;
+      validate_atom "portfolio-target-world" target_world;
+      validate_atom "portfolio-target-claim" target_claim;
+      validate_atom "portfolio-provider" provider;
+      { portfolio_candidate_id = candidate_id;
+        portfolio_target_world = target_world;
+        portfolio_target_claim = target_claim;
+        portfolio_provider = provider;
+        portfolio_resources = portfolio_resources_of_string resources;
+        portfolio_information =
+          portfolio_int "information" ~minimum:1 ~maximum:1000 information;
+        portfolio_falsification =
+          portfolio_int "falsification" ~minimum:1 ~maximum:1000 falsification;
+        portfolio_divergence =
+          portfolio_int "divergence" ~minimum:1 ~maximum:1000 divergence;
+        portfolio_token_cost =
+          portfolio_int "token-cost" ~minimum:1 ~maximum:1_000_000 token_cost;
+        portfolio_wall_cost =
+          portfolio_int "wall-cost" ~minimum:1 ~maximum:1_000_000 wall_cost;
+        portfolio_gpu_cost =
+          portfolio_int "gpu-cost" ~minimum:0 ~maximum:1_000_000 gpu_cost;
+        portfolio_quota_cost =
+          portfolio_int "quota-cost" ~minimum:0 ~maximum:1_000_000 quota_cost;
+        portfolio_risk =
+          portfolio_int "risk" ~minimum:0 ~maximum:1000 risk;
+        portfolio_evidence_digest =
+          require_digest "portfolio-evidence" evidence;
+        portfolio_falsifier_digest =
+          require_digest "portfolio-falsifier" falsifier }
+  | _ -> failf "epistemic-portfolio-candidate-row-malformed"
+
+let canonical_portfolio_candidates candidates =
+  String.concat "\n"
+    (portfolio_candidate_header
+     :: List.map canonical_portfolio_candidate candidates)
+  ^ "\n"
+
+let parse_portfolio_candidate_lines lines =
+  match lines with
+  | header :: rows when header = portfolio_candidate_header ->
+      if rows = [] || List.length rows > 18 then
+        failf "epistemic-portfolio-candidate-count-invalid";
+      if List.exists (fun row -> row = "") rows then
+        failf "epistemic-portfolio-candidate-row-malformed";
+      let candidates =
+        List.map portfolio_candidate_of_line rows
+        |> List.sort (fun left right ->
+               String.compare left.portfolio_candidate_id
+                 right.portfolio_candidate_id)
+      in
+      let rec reject_duplicate_ids = function
+        | left :: (right :: _ as rest) ->
+            if left.portfolio_candidate_id = right.portfolio_candidate_id then
+              failf "epistemic-portfolio-candidate-duplicate:%s"
+                left.portfolio_candidate_id;
+            reject_duplicate_ids rest
+        | _ -> ()
+      in
+      reject_duplicate_ids candidates;
+      let canonical = canonical_portfolio_candidates candidates in
+      if String.length canonical > 65_536 then
+        failf "epistemic-portfolio-candidate-set-too-large";
+      (candidates, canonical)
+  | _ -> failf "epistemic-portfolio-candidate-header-invalid"
+
+let parse_portfolio_candidate_text value =
+  let lines = String.split_on_char '\n' value in
+  let lines =
+    match List.rev lines with
+    | "" :: rest -> List.rev rest
+    | _ -> lines
+  in
+  parse_portfolio_candidate_lines lines
+
+let portfolio_budget_of_strings token_budget wall_budget gpu_budget quota_budget =
+  { portfolio_token_budget =
+      portfolio_int "token-budget" ~minimum:1 ~maximum:18_000_000 token_budget;
+    portfolio_wall_budget =
+      portfolio_int "wall-budget" ~minimum:1 ~maximum:18_000_000 wall_budget;
+    portfolio_gpu_budget =
+      portfolio_int "gpu-budget" ~minimum:0 ~maximum:18_000_000 gpu_budget;
+    portfolio_quota_budget =
+      portfolio_int "quota-budget" ~minimum:0 ~maximum:18_000_000 quota_budget }
+
+let portfolio_budget ~token_budget ~wall_budget ~gpu_budget ~quota_budget =
+  portfolio_budget_of_strings (string_of_int token_budget)
+    (string_of_int wall_budget) (string_of_int gpu_budget)
+    (string_of_int quota_budget)
+
+let enumerate_feasible_portfolios budget candidates =
+  let items = Array.of_list candidates in
+  let count = Array.length items in
+  if count = 0 || count > 18 then
+    failf "epistemic-portfolio-candidate-count-invalid";
+  let portfolios = ref [] in
+  for mask = 1 to (1 lsl count) - 1 do
+    let selected = ref [] in
+    let resources = Hashtbl.create 16 in
+    let feasible = ref true in
+    let information = ref 0 in
+    let falsification = ref 0 in
+    let divergence = ref 0 in
+    let token_cost = ref 0 in
+    let wall_cost = ref 0 in
+    let gpu_cost = ref 0 in
+    let quota_cost = ref 0 in
+    let risk = ref 0 in
+    for index = 0 to count - 1 do
+      if mask land (1 lsl index) <> 0 then (
+        let candidate = items.(index) in
+        List.iter
+          (fun resource ->
+            if Hashtbl.mem resources resource then feasible := false
+            else Hashtbl.add resources resource ())
+          candidate.portfolio_resources;
+        selected := candidate :: !selected;
+        information := !information + candidate.portfolio_information;
+        falsification := !falsification + candidate.portfolio_falsification;
+        divergence := !divergence + candidate.portfolio_divergence;
+        token_cost := !token_cost + candidate.portfolio_token_cost;
+        wall_cost := !wall_cost + candidate.portfolio_wall_cost;
+        gpu_cost := !gpu_cost + candidate.portfolio_gpu_cost;
+        quota_cost := !quota_cost + candidate.portfolio_quota_cost;
+        risk := !risk + candidate.portfolio_risk)
+    done;
+    if !token_cost > budget.portfolio_token_budget
+       || !wall_cost > budget.portfolio_wall_budget
+       || !gpu_cost > budget.portfolio_gpu_budget
+       || !quota_cost > budget.portfolio_quota_budget
+    then feasible := false;
+    if !feasible then
+      let selected_resources =
+        Hashtbl.fold (fun resource () values -> resource :: values)
+          resources []
+        |> List.sort String.compare
+      in
+      portfolios :=
+        { portfolio_candidates = List.rev !selected;
+          portfolio_selected_resources = selected_resources;
+          aggregate_information = !information;
+          aggregate_falsification = !falsification;
+          aggregate_divergence = !divergence;
+          aggregate_token_cost = !token_cost;
+          aggregate_wall_cost = !wall_cost;
+          aggregate_gpu_cost = !gpu_cost;
+          aggregate_quota_cost = !quota_cost;
+          aggregate_risk = !risk }
+        :: !portfolios
+  done;
+  match List.rev !portfolios with
+  | [] -> failf "epistemic-portfolio-no-feasible-subset"
+  | values -> values
+
+let portfolio_selected_set portfolio =
+  portfolio.portfolio_candidates
+  |> List.map (fun candidate -> candidate.portfolio_candidate_id)
+  |> String.concat ","
+
+let portfolio_candidate_set_digest canonical =
+  sha256 ("loom-portfolio-candidates-v0\000" ^ canonical)
+
+let portfolio_selected_set_digest selected_set =
+  sha256 ("loom-portfolio-selected-set-v0\000" ^ selected_set)
+
+let portfolio_evidence_digest portfolio =
+  portfolio.portfolio_candidates
+  |> List.map (fun candidate ->
+         candidate.portfolio_candidate_id ^ "="
+         ^ candidate.portfolio_evidence_digest)
+  |> String.concat "\n"
+  |> fun value -> sha256 ("loom-portfolio-evidence-v0\000" ^ value)
+
+let portfolio_falsifier_digest portfolio =
+  portfolio.portfolio_candidates
+  |> List.map (fun candidate ->
+         candidate.portfolio_candidate_id ^ "="
+         ^ candidate.portfolio_falsifier_digest)
+  |> String.concat "\n"
+  |> fun value -> sha256 ("loom-portfolio-falsifier-v0\000" ^ value)
+
+let portfolio_dominates left right =
+  let no_worse =
+    left.aggregate_information >= right.aggregate_information
+    && left.aggregate_falsification >= right.aggregate_falsification
+    && left.aggregate_divergence >= right.aggregate_divergence
+    && left.aggregate_risk <= right.aggregate_risk
+    && left.aggregate_token_cost <= right.aggregate_token_cost
+    && left.aggregate_wall_cost <= right.aggregate_wall_cost
+    && left.aggregate_gpu_cost <= right.aggregate_gpu_cost
+    && left.aggregate_quota_cost <= right.aggregate_quota_cost
+  in
+  let strictly_better =
+    left.aggregate_information > right.aggregate_information
+    || left.aggregate_falsification > right.aggregate_falsification
+    || left.aggregate_divergence > right.aggregate_divergence
+    || left.aggregate_risk < right.aggregate_risk
+    || left.aggregate_token_cost < right.aggregate_token_cost
+    || left.aggregate_wall_cost < right.aggregate_wall_cost
+    || left.aggregate_gpu_cost < right.aggregate_gpu_cost
+    || left.aggregate_quota_cost < right.aggregate_quota_cost
+  in
+  no_worse && strictly_better
+
+let portfolio_frontier_limit = 256
+let portfolio_frontier_bytes_limit = 1_048_576
+
+let pareto_frontier portfolios =
+  let add frontier candidate =
+    if List.exists (fun incumbent -> portfolio_dominates incumbent candidate)
+         frontier
+    then frontier
+    else (
+      let updated =
+        candidate
+        :: List.filter
+             (fun incumbent -> not (portfolio_dominates candidate incumbent))
+             frontier
+      in
+      let size = List.length updated in
+      if size > portfolio_frontier_limit then
+        failf "epistemic-portfolio-frontier-limit-exceeded:%d" size;
+      updated)
+  in
+  List.fold_left add [] portfolios
+  |> List.sort (fun left right ->
+         String.compare (portfolio_selected_set left)
+           (portfolio_selected_set right))
+
+let compare_portfolios policy left right =
+  let information =
+    compare_high left.aggregate_information right.aggregate_information
+  in
+  let falsification =
+    compare_high left.aggregate_falsification right.aggregate_falsification
+  in
+  let divergence =
+    compare_high left.aggregate_divergence right.aggregate_divergence
+  in
+  let policy_axes =
+    match policy with
+    | Information_first -> [ information; falsification; divergence ]
+    | Falsification_first -> [ falsification; information; divergence ]
+    | Counterfactual_first -> [ divergence; falsification; information ]
+  in
+  first_comparison
+    (policy_axes
+     @ [ compare_low left.aggregate_risk right.aggregate_risk;
+         compare_low left.aggregate_token_cost right.aggregate_token_cost;
+         compare_low left.aggregate_wall_cost right.aggregate_wall_cost;
+         compare_low left.aggregate_gpu_cost right.aggregate_gpu_cost;
+         compare_low left.aggregate_quota_cost right.aggregate_quota_cost;
+         String.compare (portfolio_selected_set left)
+           (portfolio_selected_set right) ])
+
+let select_portfolio policy frontier =
+  match List.sort (compare_portfolios policy) frontier with
+  | selected :: _ -> selected
+  | [] -> failf "epistemic-portfolio-frontier-empty"
+
+let portfolio_frontier_header =
+  String.concat "\t"
+    [ "selected_ids"; "resources"; "information"; "falsification";
+      "divergence"; "risk"; "token_cost"; "wall_cost"; "gpu_cost";
+      "quota_cost"; "evidence_sha256"; "falsifier_sha256" ]
+
+let canonical_portfolio_frontier frontier =
+  let row portfolio =
+    String.concat "\t"
+      [ portfolio_selected_set portfolio;
+        String.concat "," portfolio.portfolio_selected_resources;
+        string_of_int portfolio.aggregate_information;
+        string_of_int portfolio.aggregate_falsification;
+        string_of_int portfolio.aggregate_divergence;
+        string_of_int portfolio.aggregate_risk;
+        string_of_int portfolio.aggregate_token_cost;
+        string_of_int portfolio.aggregate_wall_cost;
+        string_of_int portfolio.aggregate_gpu_cost;
+        string_of_int portfolio.aggregate_quota_cost;
+        portfolio_evidence_digest portfolio;
+        portfolio_falsifier_digest portfolio ]
+  in
+  let canonical =
+    String.concat "\n" (portfolio_frontier_header :: List.map row frontier) ^ "\n"
+  in
+  if String.length canonical > portfolio_frontier_bytes_limit then
+    failf "epistemic-portfolio-frontier-bytes-exceeded:%d"
+      (String.length canonical);
+  canonical
+
+let portfolio_frontier_digest canonical =
+  sha256 ("loom-portfolio-frontier-v0\000" ^ canonical)
+
+let portfolio_adapter_path () =
+  match Sys.getenv_opt "SOUNIO_LOOM_PORTFOLIO_ADAPTER" with
+  | Some path when path <> "" -> path
+  | _ ->
+      Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+        "sounio-loom-portfolio-runtime"
+
+let verify_portfolio_frame frame expected =
+  let adapter = portfolio_adapter_path () in
+  if not (Sys.file_exists adapter) then
+    failf "epistemic-portfolio-native-adapter-missing:%s" adapter;
+  let code, output =
+    process_exchange (Unix.realpath adapter) (String.concat " " frame ^ "\n")
+  in
+  if code <> 0 || output <> expected then
+    failf "epistemic-portfolio-native-refused:rc=%d:output=%s" code output
+
+let verify_portfolio_pair ~portfolio_id ~policy ~budget ~owner ~generation
+    ~candidate_set_digest ~frontier_digest ~selected ~rival =
+  let selected_set = portfolio_selected_set selected in
+  let rival_set = portfolio_selected_set rival in
+  let zeros = List.init 8 (fun _ -> "0") in
+  let frame =
+    [ "9010"; "1"; string_of_int (attention_policy_code policy);
+      string_of_int budget.portfolio_token_budget;
+      string_of_int budget.portfolio_wall_budget;
+      string_of_int budget.portfolio_gpu_budget;
+      string_of_int budget.portfolio_quota_budget;
+      token "loom-attention-portfolio" portfolio_id;
+      token "loom-portfolio-selected-set" selected_set;
+      token "loom-portfolio-rival-set" rival_set;
+      token "loom-portfolio-owner" owner;
+      token "loom-portfolio-generation" generation;
+      string_of_int selected.aggregate_information;
+      string_of_int selected.aggregate_falsification;
+      string_of_int selected.aggregate_divergence;
+      string_of_int selected.aggregate_risk;
+      string_of_int selected.aggregate_token_cost;
+      string_of_int selected.aggregate_wall_cost;
+      string_of_int selected.aggregate_gpu_cost;
+      string_of_int selected.aggregate_quota_cost;
+      string_of_int rival.aggregate_information;
+      string_of_int rival.aggregate_falsification;
+      string_of_int rival.aggregate_divergence;
+      string_of_int rival.aggregate_risk;
+      string_of_int rival.aggregate_token_cost;
+      string_of_int rival.aggregate_wall_cost;
+      string_of_int rival.aggregate_gpu_cost;
+      string_of_int rival.aggregate_quota_cost ]
+    @ digest_limbs candidate_set_digest @ digest_limbs frontier_digest
+    @ digest_limbs (portfolio_selected_set_digest selected_set)
+    @ digest_limbs (portfolio_evidence_digest selected)
+    @ digest_limbs (portfolio_falsifier_digest selected) @ zeros
+  in
+  verify_portfolio_frame frame
+    (Printf.sprintf
+       "SOUNIO_PORTFOLIO_ACCEPT schema=loom-native-portfolio-v0 transition=compile policy=%s"
+       (attention_policy_name policy))
+
+let verify_portfolio_completion ~portfolio_id ~selected_set ~owner ~generation
+    ~outcome =
+  let zeros = List.init 8 (fun _ -> "0") in
+  let frame =
+    [ "9010"; "2"; "0"; "0"; "0"; "0"; "0";
+      token "loom-attention-portfolio" portfolio_id;
+      token "loom-portfolio-selected-set" selected_set; "0";
+      token "loom-portfolio-owner" owner;
+      token "loom-portfolio-generation" generation ]
+    @ List.init 16 (fun _ -> "0")
+    @ zeros @ zeros @ zeros @ zeros @ zeros @ digest_limbs outcome
+  in
+  verify_portfolio_frame frame
+    "SOUNIO_PORTFOLIO_ACCEPT schema=loom-native-portfolio-v0 transition=complete state=completed"
+
+type portfolio_attention_decision = {
+  portfolio_id : string;
+  portfolio_policy : attention_policy;
+  portfolio_budget : portfolio_budget;
+  all_portfolio_candidates : portfolio_candidate list;
+  canonical_portfolio_candidate_set : string;
+  portfolio_candidate_set_digest : string;
+  portfolio_frontier : portfolio_aggregate list;
+  canonical_frontier : string;
+  portfolio_frontier_digest : string;
+  selected_portfolio : portfolio_aggregate;
+  portfolio_owner : string;
+  portfolio_generation : string;
+  mutable portfolio_completed : bool;
+  mutable portfolio_outcome_digest : string;
+}
+
+let portfolio_attention_decision_of_event event =
+  let fields = decode_fields event.payload in
+  let portfolio_id = field fields "portfolio" in
+  let policy = attention_policy_of_string (field fields "policy") in
+  let budget =
+    portfolio_budget_of_strings (field fields "token_budget")
+      (field fields "wall_budget") (field fields "gpu_budget")
+      (field fields "quota_budget")
+  in
+  let stored_candidates = field fields "candidate_set" in
+  let candidates, canonical_candidates =
+    parse_portfolio_candidate_text stored_candidates
+  in
+  if stored_candidates <> canonical_candidates then
+    failf "epistemic-portfolio-candidate-set-noncanonical:%s" portfolio_id;
+  let candidate_set_digest =
+    require_digest "portfolio-candidate-set"
+      (field fields "candidate_set_digest")
+  in
+  if portfolio_candidate_set_digest canonical_candidates
+     <> candidate_set_digest
+  then failf "epistemic-portfolio-candidate-set-digest-mismatch:%s" portfolio_id;
+  let feasible = enumerate_feasible_portfolios budget candidates in
+  let frontier = pareto_frontier feasible in
+  let canonical_frontier = canonical_portfolio_frontier frontier in
+  if field fields "frontier" <> canonical_frontier then
+    failf "epistemic-portfolio-frontier-mismatch:%s" portfolio_id;
+  let frontier_digest =
+    require_digest "portfolio-frontier" (field fields "frontier_digest")
+  in
+  if portfolio_frontier_digest canonical_frontier <> frontier_digest then
+    failf "epistemic-portfolio-frontier-digest-mismatch:%s" portfolio_id;
+  let selected = select_portfolio policy frontier in
+  let selected_set = portfolio_selected_set selected in
+  if field fields "selected_set" <> selected_set then
+    failf "epistemic-portfolio-selection-mismatch:expected=%s:actual=%s"
+      selected_set (field fields "selected_set");
+  let selected_set_digest =
+    require_digest "portfolio-selected-set"
+      (field fields "selected_set_digest")
+  in
+  if portfolio_selected_set_digest selected_set <> selected_set_digest then
+    failf "epistemic-portfolio-selected-set-digest-mismatch:%s" portfolio_id;
+  let owner = field fields "owner" in
+  let generation = field fields "generation" in
+  validate_atom "attention-portfolio" portfolio_id;
+  validate_atom "portfolio-owner" owner;
+  validate_atom "portfolio-generation" generation;
+  let require_selected key actual =
+    if field fields key <> actual then
+      failf "epistemic-portfolio-selected-field-mismatch:%s" key
+  in
+  require_selected "resources"
+    (String.concat "," selected.portfolio_selected_resources);
+  require_selected "information" (string_of_int selected.aggregate_information);
+  require_selected "falsification"
+    (string_of_int selected.aggregate_falsification);
+  require_selected "divergence" (string_of_int selected.aggregate_divergence);
+  require_selected "risk" (string_of_int selected.aggregate_risk);
+  require_selected "token_cost" (string_of_int selected.aggregate_token_cost);
+  require_selected "wall_cost" (string_of_int selected.aggregate_wall_cost);
+  require_selected "gpu_cost" (string_of_int selected.aggregate_gpu_cost);
+  require_selected "quota_cost" (string_of_int selected.aggregate_quota_cost);
+  require_selected "evidence_digest" (portfolio_evidence_digest selected);
+  require_selected "falsifier_digest" (portfolio_falsifier_digest selected);
+  List.iter
+    (fun rival ->
+      verify_portfolio_pair ~portfolio_id ~policy ~budget ~owner ~generation
+        ~candidate_set_digest ~frontier_digest ~selected ~rival)
+    frontier;
+  { portfolio_id; portfolio_policy = policy; portfolio_budget = budget;
+    all_portfolio_candidates = candidates;
+    canonical_portfolio_candidate_set = canonical_candidates;
+    portfolio_candidate_set_digest = candidate_set_digest;
+    portfolio_frontier = frontier; canonical_frontier;
+    portfolio_frontier_digest = frontier_digest;
+    selected_portfolio = selected; portfolio_owner = owner;
+    portfolio_generation = generation; portfolio_completed = false;
+    portfolio_outcome_digest = "" }
+
 type knowledge = {
   knowledge_id : string;
   value : string;
@@ -704,6 +1259,7 @@ type state = {
   claims : (string, claim) Hashtbl.t;
   capabilities : (string, capability) Hashtbl.t;
   attentions : (string, attention_decision) Hashtbl.t;
+  attention_portfolios : (string, portfolio_attention_decision) Hashtbl.t;
 }
 
 let confidence_value value =
@@ -746,7 +1302,7 @@ let reduce world events head =
     { world_id = world; agent; lane; parent_world; parent_head; hypothesis;
       events; journal_head = head; knowledges = Hashtbl.create 32;
       claims = Hashtbl.create 32; capabilities = Hashtbl.create 16;
-      attentions = Hashtbl.create 16 }
+      attentions = Hashtbl.create 16; attention_portfolios = Hashtbl.create 16 }
   in
   List.iteri
     (fun index event ->
@@ -754,7 +1310,8 @@ let reduce world events head =
       if field fields "world" <> world then
         failf "epistemic-event-world-drift:%d" event.sequence;
       (match event.kind with
-      | "ATTENTION_COMPILED" | "ATTENTION_COMPLETED" -> ()
+      | "ATTENTION_COMPILED" | "ATTENTION_COMPLETED"
+      | "ATTENTION_PORTFOLIO_COMPILED" | "ATTENTION_PORTFOLIO_COMPLETED" -> ()
       | _ -> verify_native (transition_of_event event));
       match event.kind with
       | "WORLD_CREATED" | "WORLD_FORKED" ->
@@ -822,6 +1379,13 @@ let reduce world events head =
               if not decision.completed && decision.selected.resource = resource
               then failf "epistemic-resource-already-owned:%s" resource)
             state.attentions;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.portfolio_completed
+                 && List.mem resource
+                      decision.selected_portfolio.portfolio_selected_resources
+              then failf "epistemic-resource-already-owned:%s" resource)
+            state.attention_portfolios;
           Hashtbl.add state.capabilities id
             { capability_id = id; resource; owner; generation; released = false }
       | "CAPABILITY_RELEASED" ->
@@ -857,6 +1421,15 @@ let reduce world events head =
                 failf "epistemic-resource-already-owned:%s"
                   decision.selected.resource)
             state.attentions;
+          Hashtbl.iter
+            (fun _ existing ->
+              if not existing.portfolio_completed
+                 && List.mem decision.selected.resource
+                      existing.selected_portfolio.portfolio_selected_resources
+              then
+                failf "epistemic-resource-already-owned:%s"
+                  decision.selected.resource)
+            state.attention_portfolios;
           Hashtbl.add state.attentions decision.plan_id decision
       | "ATTENTION_COMPLETED" ->
           let plan_id = field fields "plan" in
@@ -882,6 +1455,61 @@ let reduce world events head =
             ~generation ~outcome;
           decision.completed <- true;
           decision.outcome_digest <- outcome
+      | "ATTENTION_PORTFOLIO_COMPILED" ->
+          let decision = portfolio_attention_decision_of_event event in
+          if Hashtbl.mem state.attention_portfolios decision.portfolio_id then
+            failf "epistemic-attention-portfolio-duplicate:%s"
+              decision.portfolio_id;
+          List.iter
+            (fun resource ->
+              Hashtbl.iter
+                (fun _ capability ->
+                  if not capability.released
+                     && capability.resource = resource
+                  then failf "epistemic-resource-already-owned:%s" resource)
+                state.capabilities;
+              Hashtbl.iter
+                (fun _ attention ->
+                  if not attention.completed
+                     && attention.selected.resource = resource
+                  then failf "epistemic-resource-already-owned:%s" resource)
+                state.attentions;
+              Hashtbl.iter
+                (fun _ existing ->
+                  if not existing.portfolio_completed
+                     && List.mem resource
+                          existing.selected_portfolio.portfolio_selected_resources
+                  then failf "epistemic-resource-already-owned:%s" resource)
+                state.attention_portfolios)
+            decision.selected_portfolio.portfolio_selected_resources;
+          Hashtbl.add state.attention_portfolios decision.portfolio_id decision
+      | "ATTENTION_PORTFOLIO_COMPLETED" ->
+          let portfolio_id = field fields "portfolio" in
+          let decision =
+            match Hashtbl.find_opt state.attention_portfolios portfolio_id with
+            | Some value -> value
+            | None ->
+                failf "epistemic-attention-portfolio-missing:%s" portfolio_id
+          in
+          if decision.portfolio_completed then
+            failf "epistemic-attention-portfolio-already-completed:%s"
+              portfolio_id;
+          let selected_set = field fields "selected_set" in
+          let owner = field fields "owner" in
+          let generation = field fields "generation" in
+          if selected_set <> portfolio_selected_set decision.selected_portfolio
+             || owner <> decision.portfolio_owner
+             || generation <> decision.portfolio_generation
+          then
+            failf "epistemic-portfolio-completion-identity-drift:%s"
+              portfolio_id;
+          let outcome =
+            require_digest "portfolio-outcome" (field fields "outcome_digest")
+          in
+          verify_portfolio_completion ~portfolio_id ~selected_set ~owner
+            ~generation ~outcome;
+          decision.portfolio_completed <- true;
+          decision.portfolio_outcome_digest <- outcome
       | kind -> failf "epistemic-event-kind-unknown:%s" kind)
     events;
   state
@@ -930,32 +1558,48 @@ let validate_global_capabilities states =
         (fun _ decision ->
           if not decision.completed then
             reserve decision.selected.resource state.world_id decision.plan_id)
-        state.attentions)
+        state.attentions;
+      Hashtbl.iter
+        (fun _ decision ->
+          if not decision.portfolio_completed then
+            List.iter
+              (fun resource ->
+                reserve resource state.world_id decision.portfolio_id)
+              decision.selected_portfolio.portfolio_selected_resources)
+        state.attention_portfolios)
     states
 
 let validate_attention_references states =
+  let require_target target_world target_claim =
+    let target =
+      match
+        List.find_opt (fun state -> state.world_id = target_world) states
+      with
+      | Some value -> value
+      | None ->
+          failf "epistemic-attention-target-world-missing:%s" target_world
+    in
+    if not (Hashtbl.mem target.claims target_claim) then
+      failf "epistemic-attention-target-claim-missing:%s/%s"
+        target_world target_claim
+  in
   List.iter
     (fun scheduling_world ->
       Hashtbl.iter
         (fun _ decision ->
           List.iter
             (fun candidate ->
-              let target =
-                match
-                  List.find_opt
-                    (fun state -> state.world_id = candidate.target_world)
-                    states
-                with
-                | Some value -> value
-                | None ->
-                    failf "epistemic-attention-target-world-missing:%s"
-                      candidate.target_world
-              in
-              if not (Hashtbl.mem target.claims candidate.target_claim) then
-                failf "epistemic-attention-target-claim-missing:%s/%s"
-                  candidate.target_world candidate.target_claim)
+              require_target candidate.target_world candidate.target_claim)
             decision.candidates)
-        scheduling_world.attentions)
+        scheduling_world.attentions;
+      Hashtbl.iter
+        (fun _ decision ->
+          List.iter
+            (fun candidate ->
+              require_target candidate.portfolio_target_world
+                candidate.portfolio_target_claim)
+            decision.all_portfolio_candidates)
+        scheduling_world.attention_portfolios)
     states
 
 let load_all root =
@@ -1103,7 +1747,14 @@ let acquire_capability ~root ~world ~capability ~resource ~owner ~generation =
             (fun _ decision ->
               if not decision.completed && decision.selected.resource = resource
               then failf "epistemic-global-resource-conflict:%s" resource)
-            state.attentions)
+            state.attentions;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.portfolio_completed
+                 && List.mem resource
+                      decision.selected_portfolio.portfolio_selected_resources
+              then failf "epistemic-global-resource-conflict:%s" resource)
+            state.attention_portfolios)
         states;
       let event =
         append root world "CAPABILITY_ACQUIRED"
@@ -1184,7 +1835,16 @@ let compile_attention ~root ~world ~plan ~candidate_file ~budget ~policy
               then
                 failf "epistemic-global-resource-conflict:%s"
                   selected.resource)
-            state.attentions)
+            state.attentions;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.portfolio_completed
+                 && List.mem selected.resource
+                      decision.selected_portfolio.portfolio_selected_resources
+              then
+                failf "epistemic-global-resource-conflict:%s"
+                  selected.resource)
+            state.attention_portfolios)
         states;
       let fields =
         [ ("world", world); ("plan", plan);
@@ -1258,6 +1918,158 @@ let complete_attention ~root ~world ~plan ~owner ~generation ~outcome =
         "LOOM_ATTENTION_COMPLETED schema=loom-attention-compiler-v0 world=%s plan=%s selected=%s outcome=%s head=%s"
         world plan selected outcome event.event_sha256)
 
+let compile_attention_portfolio ~root ~world ~portfolio ~candidate_file
+    ~token_budget ~wall_budget ~gpu_budget ~quota_budget ~policy ~owner
+    ~generation =
+  validate_atom "world" world;
+  validate_atom "attention-portfolio" portfolio;
+  validate_atom "portfolio-owner" owner;
+  validate_atom "portfolio-generation" generation;
+  if not (Sys.file_exists candidate_file) then
+    failf "epistemic-portfolio-candidate-file-missing:%s" candidate_file;
+  let budget =
+    portfolio_budget ~token_budget ~wall_budget ~gpu_budget ~quota_budget
+  in
+  let candidates, canonical_candidates =
+    parse_portfolio_candidate_lines (read_lines candidate_file)
+  in
+  let feasible = enumerate_feasible_portfolios budget candidates in
+  let frontier = pareto_frontier feasible in
+  let canonical_frontier = canonical_portfolio_frontier frontier in
+  let selected = select_portfolio policy frontier in
+  let candidate_set_digest =
+    portfolio_candidate_set_digest canonical_candidates
+  in
+  let frontier_digest = portfolio_frontier_digest canonical_frontier in
+  let selected_set = portfolio_selected_set selected in
+  let selected_set_digest = portfolio_selected_set_digest selected_set in
+  with_machine_lock root (fun () ->
+      let states = load_all root in
+      let scheduling_world = find_world states world in
+      if Hashtbl.mem scheduling_world.attention_portfolios portfolio then
+        failf "epistemic-attention-portfolio-duplicate:%s" portfolio;
+      List.iter
+        (fun candidate ->
+          let target = find_world states candidate.portfolio_target_world in
+          if not (Hashtbl.mem target.claims candidate.portfolio_target_claim)
+          then
+            failf "epistemic-attention-target-claim-missing:%s/%s"
+              candidate.portfolio_target_world candidate.portfolio_target_claim)
+        candidates;
+      List.iter
+        (fun resource ->
+          List.iter
+            (fun state ->
+              Hashtbl.iter
+                (fun _ capability ->
+                  if not capability.released
+                     && capability.resource = resource
+                  then failf "epistemic-global-resource-conflict:%s" resource)
+                state.capabilities;
+              Hashtbl.iter
+                (fun _ attention ->
+                  if not attention.completed
+                     && attention.selected.resource = resource
+                  then failf "epistemic-global-resource-conflict:%s" resource)
+                state.attentions;
+              Hashtbl.iter
+                (fun _ existing ->
+                  if not existing.portfolio_completed
+                     && List.mem resource
+                          existing.selected_portfolio.portfolio_selected_resources
+                  then failf "epistemic-global-resource-conflict:%s" resource)
+                state.attention_portfolios)
+            states)
+        selected.portfolio_selected_resources;
+      let fields =
+        [ ("world", world); ("portfolio", portfolio);
+          ("policy", attention_policy_name policy);
+          ("token_budget", string_of_int budget.portfolio_token_budget);
+          ("wall_budget", string_of_int budget.portfolio_wall_budget);
+          ("gpu_budget", string_of_int budget.portfolio_gpu_budget);
+          ("quota_budget", string_of_int budget.portfolio_quota_budget);
+          ("candidate_set", canonical_candidates);
+          ("candidate_set_digest", candidate_set_digest);
+          ("frontier", canonical_frontier);
+          ("frontier_digest", frontier_digest);
+          ("selected_set", selected_set);
+          ("selected_set_digest", selected_set_digest);
+          ("resources", String.concat "," selected.portfolio_selected_resources);
+          ("information", string_of_int selected.aggregate_information);
+          ("falsification", string_of_int selected.aggregate_falsification);
+          ("divergence", string_of_int selected.aggregate_divergence);
+          ("risk", string_of_int selected.aggregate_risk);
+          ("token_cost", string_of_int selected.aggregate_token_cost);
+          ("wall_cost", string_of_int selected.aggregate_wall_cost);
+          ("gpu_cost", string_of_int selected.aggregate_gpu_cost);
+          ("quota_cost", string_of_int selected.aggregate_quota_cost);
+          ("evidence_digest", portfolio_evidence_digest selected);
+          ("falsifier_digest", portfolio_falsifier_digest selected);
+          ("owner", owner); ("generation", generation) ]
+      in
+      let event =
+        append
+          ~verify:(fun candidate_event ->
+            ignore (portfolio_attention_decision_of_event candidate_event))
+          root world "ATTENTION_PORTFOLIO_COMPILED" fields
+      in
+      ignore (load_all root);
+      Printf.sprintf
+        "LOOM_PORTFOLIO_COMPILED schema=loom-pareto-portfolio-v0 world=%s portfolio=%s policy=%s selected=%s selected_count=%d resources=%d candidates=%d enumerated=%d feasible=%d frontier=%d token=%d/%d wall=%d/%d gpu=%d/%d quota=%d/%d selected_set_sha256=%s frontier_sha256=%s head=%s"
+        world portfolio (attention_policy_name policy) selected_set
+        (List.length selected.portfolio_candidates)
+        (List.length selected.portfolio_selected_resources)
+        (List.length candidates) ((1 lsl List.length candidates) - 1)
+        (List.length feasible) (List.length frontier)
+        selected.aggregate_token_cost budget.portfolio_token_budget
+        selected.aggregate_wall_cost budget.portfolio_wall_budget
+        selected.aggregate_gpu_cost budget.portfolio_gpu_budget
+        selected.aggregate_quota_cost budget.portfolio_quota_budget
+        selected_set_digest frontier_digest event.event_sha256)
+
+let complete_attention_portfolio ~root ~world ~portfolio ~owner ~generation
+    ~outcome =
+  validate_atom "world" world;
+  validate_atom "attention-portfolio" portfolio;
+  validate_atom "portfolio-owner" owner;
+  validate_atom "portfolio-generation" generation;
+  let outcome = require_digest "portfolio-outcome" outcome in
+  with_machine_lock root (fun () ->
+      let state = find_world (load_all root) world in
+      let decision =
+        match Hashtbl.find_opt state.attention_portfolios portfolio with
+        | Some value -> value
+        | None -> failf "epistemic-attention-portfolio-missing:%s" portfolio
+      in
+      if decision.portfolio_completed then
+        failf "epistemic-attention-portfolio-already-completed:%s" portfolio;
+      if owner <> decision.portfolio_owner
+         || generation <> decision.portfolio_generation
+      then failf "epistemic-portfolio-completion-identity-drift:%s" portfolio;
+      let selected_set = portfolio_selected_set decision.selected_portfolio in
+      let verify_completion event =
+        let fields = decode_fields event.payload in
+        verify_portfolio_completion ~portfolio_id:(field fields "portfolio")
+          ~selected_set:(field fields "selected_set")
+          ~owner:(field fields "owner")
+          ~generation:(field fields "generation")
+          ~outcome:
+            (require_digest "portfolio-outcome" (field fields "outcome_digest"))
+      in
+      let event =
+        append ~verify:verify_completion root world
+          "ATTENTION_PORTFOLIO_COMPLETED"
+          [ ("world", world); ("portfolio", portfolio);
+            ("selected_set", selected_set); ("owner", owner);
+            ("generation", generation); ("outcome_digest", outcome) ]
+      in
+      ignore (load_all root);
+      Printf.sprintf
+        "LOOM_PORTFOLIO_COMPLETED schema=loom-pareto-portfolio-v0 world=%s portfolio=%s selected=%s released_resources=%d outcome=%s head=%s"
+        world portfolio selected_set
+        (List.length decision.selected_portfolio.portfolio_selected_resources)
+        outcome event.event_sha256)
+
 let fork ~root ~parent ~child ~agent ~lane ~hypothesis ~expected_parent_head =
   validate_atom "parent" parent;
   validate_atom "child" child;
@@ -1304,11 +2116,18 @@ let status ~root ~world =
           (fun _ decision count -> if decision.completed then count else count + 1)
           state.attentions 0
       in
+      let live_portfolios =
+        Hashtbl.fold
+          (fun _ decision count ->
+            if decision.portfolio_completed then count else count + 1)
+          state.attention_portfolios 0
+      in
       Printf.sprintf
-        "LOOM_WORLD_OK schema=%s world=%s events=%d knowledge=%d claims=%d challenged=%d live_capabilities=%d attention_plans=%d live_attention=%d parent=%s head=%s"
+        "LOOM_WORLD_OK schema=%s world=%s events=%d knowledge=%d claims=%d challenged=%d live_capabilities=%d attention_plans=%d live_attention=%d attention_portfolios=%d live_portfolios=%d parent=%s head=%s"
         schema world (List.length state.events) (Hashtbl.length state.knowledges)
         (Hashtbl.length state.claims) challenged live_capabilities
         (Hashtbl.length state.attentions) live_attention
+        (Hashtbl.length state.attention_portfolios) live_portfolios
         (if state.parent_world = "" then "-" else state.parent_world)
         state.journal_head)
 

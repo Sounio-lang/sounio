@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.19"
+let runtime_version = "2026.08.26.20"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -3642,6 +3642,38 @@ let attention_complete_command cli =
   epistemic_print (fun () ->
       Loom_epistemic.complete_attention ~root ~world:(required cli "--world")
         ~plan:(required cli "--plan") ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation")
+        ~outcome:(required cli "--outcome"))
+
+let portfolio_integer cli option =
+  let raw = required cli option in
+  try int_of_string raw
+  with _ -> failf "portfolio %s must be an integer: %s" option raw
+
+let attention_portfolio_compile_command cli =
+  let root = epistemic_root cli in
+  let policy =
+    Loom_epistemic.attention_policy_of_string (required cli "--policy")
+  in
+  epistemic_print (fun () ->
+      Loom_epistemic.compile_attention_portfolio ~root
+        ~world:(required cli "--world")
+        ~portfolio:(required cli "--portfolio")
+        ~candidate_file:(required cli "--candidates")
+        ~token_budget:(portfolio_integer cli "--token-budget")
+        ~wall_budget:(portfolio_integer cli "--wall-budget")
+        ~gpu_budget:(portfolio_integer cli "--gpu-budget")
+        ~quota_budget:(portfolio_integer cli "--quota-budget")
+        ~policy ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation"))
+
+let attention_portfolio_complete_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.complete_attention_portfolio ~root
+        ~world:(required cli "--world")
+        ~portfolio:(required cli "--portfolio")
+        ~owner:(required cli "--owner")
         ~generation:(required cli "--generation")
         ~outcome:(required cli "--outcome"))
 
@@ -8470,6 +8502,8 @@ let usage () =
   Printf.eprintf
     "\nCounterfactual Attention Compiler v0:\n  attention-compile --world W --plan P --candidates FILE --budget N --policy information-first|falsification-first|counterfactual-first --owner A --generation G\n  attention-complete --world W --plan P --owner A --generation G --outcome SHA\n";
   Printf.eprintf
+    "\nPareto Portfolio Attention Compiler v0:\n  attention-portfolio-compile --world W --portfolio P --candidates FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --policy information-first|falsification-first|counterfactual-first --owner A --generation G\n  attention-portfolio-complete --world W --portfolio P --owner A --generation G --outcome SHA\n";
+  Printf.eprintf
     "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
 let arguments_after_command () =
@@ -8544,6 +8578,10 @@ let main () =
     | "world-list" -> world_list_command cli; 0
     | "attention-compile" -> attention_compile_command cli; 0
     | "attention-complete" -> attention_complete_command cli; 0
+    | "attention-portfolio-compile" ->
+        attention_portfolio_compile_command cli; 0
+    | "attention-portfolio-complete" ->
+        attention_portfolio_complete_command cli; 0
     | "export-events-arrow" -> export_events_arrow_command cli; 0
     | "verify-events-arrow" -> verify_events_arrow_command cli; 0
     | "beagle-serve" -> serve_beagle_bridge cli; 0

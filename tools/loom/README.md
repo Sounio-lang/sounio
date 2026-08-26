@@ -195,6 +195,55 @@ an objective law of scientific value. V0 proves deterministic local replay and
 resource exclusion, not optimal research strategy, fairness, starvation
 freedom, distributed scheduling, or model reliability.
 
+## Pareto Portfolio Attention Compiler v0
+
+The portfolio compiler chooses a compatible set of experiments rather than a
+single winner. For 1 through 18 candidates it enumerates every nonempty subset,
+rejects subsets that repeat an exact resource or exceed token, wall, GPU, or
+quota budgets, retains the complete eight-axis Pareto frontier, and selects one
+frontier portfolio under the same explicit policy family.
+
+```text
+candidate_id target_world claim provider resources information falsification divergence token_cost wall_cost gpu_cost quota_cost risk evidence_sha256 falsifier_sha256
+```
+
+The file is tab-separated. `resources` is a comma-separated, sorted, unique set
+of exact identities. Token and wall costs are positive; GPU and quota costs may
+be zero. Risk and all four costs are minimized while information,
+falsification, and divergence are maximized. Sorted candidate IDs are the final
+tie-break, never an implicit weighted score.
+
+```sh
+bin/loom attention-portfolio-compile --state-dir STATE --world scheduler \
+  --portfolio wave-1 --candidates portfolio.tsv \
+  --token-budget 8000 --wall-budget 600 --gpu-budget 2 --quota-budget 4 \
+  --policy information-first --owner codex --generation generation-1
+bin/loom attention-portfolio-complete --state-dir STATE --world scheduler \
+  --portfolio wave-1 --owner codex --generation generation-1 \
+  --outcome SHA256
+```
+
+One compile event atomically reserves the selected resource union; a refusal
+reserves none of it. Completion releases the same union. The reducer recomputes
+the feasible subsets, frontier, selected set, and domain-separated digests from
+the canonical candidate set on every replay. It then asks native Sounio frame
+`9010` to compare the selected aggregate with every frontier rival. The named
+`portfolio_selected_not_dominated` sabotage control admits the exact dominated
+frame that the production rule refuses, identifying that comparator as
+load-bearing.
+
+V0 materializes at most 256 skyline members and 1 MiB of canonical frontier.
+It refuses a larger working skyline before journaling rather than silently
+truncating or approximating it, so accepted decisions retain exact semantics.
+
+The verified event and canonical frontier flow into the existing Arrow spectral
+plane for UI, WebGPU, and analysis without making Arrow scheduling authority.
+This is a bounded exact local compiler over declared integer estimates. It does
+not establish that epistemic value is additive: correlations, redundancy, and
+submodular effects between experiments are outside v0. It also does not
+establish objective novelty, calibrated utility, distributed resource truth,
+consensus, fairness, or globally optimal science.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every
