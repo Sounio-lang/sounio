@@ -733,3 +733,169 @@ expression form specifically rather than plain identifier-to-identifier assignme
 ### Filed
 Not yet filed as a GitHub issue as of this entry (2026-08-25) — track alongside Sounio-lang/sounio#643
 (D6) as a related but distinct value-semantics defect.
+
+---
+
+## D9 — cross-struct field-name collision corrupts a returned struct's fixed-array field at a tuple-return boundary
+
+### Symptom
+Discovered 2026-08-25 during the Madaros TLS 1.3 handshake plan
+(`docs/superpowers/sdd/2026-08-25-madaros-tls13-handshake-plan/`), Task 6
+(`stdlib/tls/handshake.sio` + `client_hello.sio` + `server_hello.sio`).
+`ServerHelloInfo` and `ClientHelloParams` both declare fields named
+`random: [u8;32]` and `x25519_public: [u8;32]` (mandated by the task brief —
+the shared field names are intentional, not an accident). When both structs
+were compiled into the same final linked program, `decode_server_hello`'s
+`x25519_public` field came back corrupted at the caller's tuple-destructure
+point immediately after the function returned — even though every field of
+the struct read correctly right up to `decode_server_hello`'s own `return`
+statement, confirmed via `print_int` probes at every stage inside the
+function.
+
+### Minimal repro
+No fully principled minimal repro was found despite roughly 2 hours of
+bisection work, including building several minimal standalone repro
+modules with two structs sharing field names. Per this file's own
+precedent (D1, D8), the absence of a clean isolated repro does not exempt
+a real, measured defect from being recorded here — it is stated honestly
+below rather than omitted.
+
+### Boundary (honest, from direct investigation)
+The corruption is **data- and module-composition-dependent, not simply
+"two structs with the same field name"**:
+- A third struct declared with the same field names sometimes made the
+  corruption disappear again — the trigger is not purely "N structs share
+  a field name."
+- The bug was insensitive to **which file physically declared which
+  struct** — moving `ServerHelloInfo` or `ClientHelloParams` to a
+  different file did not by itself change the outcome.
+- The one variable that did correlate with the corruption: **whether both
+  structs ended up compiled into the same final linked program.**
+
+### Exact stdout
+Not captured as a standalone transcript (no isolated repro exists to run);
+the corruption was observed and confirmed via `print_int` probes bracketing
+`decode_server_hello`'s internal field reads (all correct) versus the
+caller's tuple-destructured `x25519_public` immediately after the call
+returned (wrong), inside the real `tls_handshake_codec_rfc8448.sio` test
+during Task 6 development, before the workaround below was applied.
+
+### Impact
+Forced `stdlib/tls/handshake.sio` to split into three files instead of one
+(`client_hello.sio`, `server_hello.sio`, `handshake.sio`) for Task 6. The
+verified, stable workaround is **physical file separation**:
+`ServerHelloInfo`/`decode_server_hello` and
+`ClientHelloParams`/`encode_client_hello` are declared in different files
+that are never both `use`d directly by the same caller — callers instead go
+through `handshake.sio`'s `pub use tls::server_hello::*` /
+`pub use tls::client_hello::*` re-exports. This specific configuration was
+exercised across dozens of runs of the real RFC 8448 handshake-codec test
+and held stable.
+
+**Open question this workaround does not close, recorded here for whoever
+picks up Task 7**: file separation only avoids putting both struct
+*declarations* in one file's own compilation unit — it does not obviously
+avoid "both structs compiled into the same final linked program," which is
+the condition this investigation actually correlated the corruption with.
+Task 7 (not yet built as of this entry) is a future orchestration function
+that will necessarily `use` both `ServerHelloInfo` and `ClientHelloParams`
+together in the same function, at which point both structs are compiled
+into the same linked program regardless of which files declared them. That
+is exactly the condition under which this defect was observed. Task 7 must
+explicitly re-verify `x25519_public`/`random` integrity once that linkage
+exists — the file-separation workaround verified here should not be assumed
+to transfer to that shape without a fresh check.
+
+### Suspected area
+Field/offset resolution for struct-typed values crossing a function-return
+(tuple-destructure) boundary when two or more struct types with identical
+field names are live in the same compilation — plausibly struct layout or
+field-access lowering in `self-hosted/ir/lower.sio`, or symbol/offset table
+construction in the checker (`self-hosted/check/check.sio`), given the
+symptom is keyed to whole-program composition rather than to any single
+function's local IR. Not investigated further inside compiler internals as
+part of Task 6 — this is a workaround-and-record entry, not a root-caused
+one.
+
+### Filed
+NOT filed as a GitHub issue as of this entry (2026-08-25) — matching D1's
+and D8's own honest-negative-result convention for defects without a clean
+isolated repro.
+
+---
+
+## D10 — `rawbuf_set` write-clobber applies to out-of-order length-field backpatching, not just limb-to-byte conversion
+
+### Symptom
+Discovered 2026-08-25 during the same Madaros TLS 1.3 handshake plan, Task 6.
+`encode_client_hello`'s first implementation attempt wrote the message body
+first (positions 4 and up), then went back to patch the 4-byte handshake
+header at position 0 and the extensions-length field mid-buffer — a classic
+out-of-order write pattern with no subsequent write to correct the forward
+clobber it causes. This silently corrupted `ClientHelloParams.random` in
+the function's own returned buffer: confirmed via `print_int` probes that
+`random` was correct immediately after being written, then wrong by the
+time the later header-patch write executed.
+
+### Root cause — same mechanism as the existing Finding 20
+This is the same `rawbuf_set` write-side defect already documented in this
+codebase at `stdlib/x509/cert.sio` (comments around lines 947 and
+1218–1236, referred to there as "Finding 20"): each `rawbuf_set` call also
+clobbers the 7 bytes *following* the byte it targets, so a buffer written
+in a single ascending, uninterrupted pass is self-correcting (each write's
+forward clobber is overwritten by the next write in sequence) except for
+the buffer's own trailing bytes, which have nothing after them to correct
+the clobber. Finding 20 documents this for **out-of-order limb-to-byte
+conversion**; this entry (D10) is the same root mechanism surfacing in a
+**different failure-mode shape: header/length backpatching** — writing a
+message body before going back to patch an earlier length or header field,
+rather than converting numeric limbs out of ascending order. This file has
+no separate numbered `D`-entry for Finding 20 itself (it exists only as
+inline comments in `stdlib/x509/cert.sio`); this entry cross-references it
+directly rather than duplicating its explanation.
+
+### Minimal repro
+Not isolated as a standalone repro file; reproduced directly in
+`encode_client_hello` (`stdlib/tls/client_hello.sio`) during Task 6
+development, before the fix described below was applied.
+
+### Exact stdout
+Not captured as a standalone transcript. Observed via `print_int` probes
+inside `encode_client_hello`: `ClientHelloParams.random` bytes printed
+correctly immediately after the body-write loop that wrote them, and
+printed incorrectly after the subsequent header-patch (`rawbuf_set` at
+buffer position 0) and extensions-length-patch writes executed.
+
+### Impact
+Fixed by computing every length value `encode_client_hello` needs
+(extensions-total-length, body-length) **analytically, before writing any
+byte**, as a pure function of `server_name_len`/`cookie_len` — so the
+entire message (header through the last extension) is written in one
+single ascending, uninterrupted pass with no backpatching at all. The only
+remaining uncorrected clobber lands in the function's own 8 bytes of
+trailing allocation slack, which is this codebase's existing standard
+mitigation for the Finding-20 write-clobber (the same pattern already used
+elsewhere, e.g. `stdlib/x509/cert.sio` lines ~1553–1558). `encode_finished`
+(`stdlib/tls/handshake.sio`) already wrote header-then-body in the correct
+ascending order but lacked the 8-byte trailing slack; that slack was added
+while fixing this defect.
+
+An unrelated, self-inflicted arithmetic bug was found and fixed during the
+same debugging pass: the analytical `body_len` formula initially used a
+fixed offset of 45 bytes for the pre-extensions part of ClientHello; the
+real byte count is 47 (an off-by-2 that produced a correct-looking but
+wrong header length field, caught by the test's own length-consistency
+assertion). This arithmetic bug is not itself a compiler defect and is
+recorded here only for completeness of the investigation trail.
+
+### Suspected area
+Same as Finding 20: `rawbuf_set`'s write implementation — see
+`stdlib/x509/cert.sio` lines 947 and 1218–1236 for the existing
+documentation of the underlying 7-byte-forward-clobber mechanism.
+
+### Filed
+NOT filed as a GitHub issue as of this entry (2026-08-25) — the underlying
+mechanism (Finding 20) is an existing, already-documented, already-worked-
+around behavior; this entry records a new failure-mode shape it produces,
+consistent with D1's/D8's honest-negative-result convention for entries
+without a dedicated fresh GitHub issue.
