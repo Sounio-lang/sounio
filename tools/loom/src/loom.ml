@@ -4,10 +4,12 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.21"
+let runtime_version = "2026.08.26.22"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
+let max_outcome_measurement_bytes = 16 * 1024 * 1024
+let max_outcome_receipt_bytes = 16 * 1024
 
 external forkpty : unit -> int * file_descr = "sounio_loom_forkpty"
 external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsize"
@@ -108,6 +110,22 @@ let read_file path =
         if count > 0 then (Buffer.add_subbytes output bytes 0 count; loop ())
       in
       loop ();
+      Buffer.contents output)
+
+let read_file_bounded label limit path =
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      let output = Buffer.create (min limit 4096) in
+      let bytes = Bytes.create 65536 in
+      let rec loop length =
+        let count = input channel bytes 0 (Bytes.length bytes) in
+        if count > 0 then (
+          let length = length + count in
+          if length > limit then failf "%s exceeds %d bytes" label limit;
+          Buffer.add_subbytes output bytes 0 count;
+          loop length)
+      in
+      loop 0;
       Buffer.contents output)
 
 let file_size path =
@@ -3699,7 +3717,67 @@ let contingent_policy_compile_command cli =
         ~gpu_budget:(contingent_integer cli "--gpu-budget")
         ~quota_budget:(contingent_integer cli "--quota-budget")
         ~order ~owner:(required cli "--owner")
-        ~generation:(required cli "--generation"))
+        ~generation:(required cli "--generation")
+        ~measurement_principal:(optional cli "--measurement-principal")
+        ~measurement_public_key_file:
+          (optional cli "--measurement-public-key")
+        ~classifier_principal:(optional cli "--classifier-principal")
+        ~classifier_public_key_file:(optional cli "--classifier-public-key")
+        ~classifier_spec_digest:(optional cli "--classifier-spec-digest"))
+
+let contingent_measurement_attest_command cli =
+  let root = epistemic_root cli in
+  let receipt_path = required cli "--receipt" in
+  let canonical, receipt_digest, measurement_digest =
+    Loom_epistemic.attest_contingent_measurement ~root
+      ~world:(required cli "--world")
+      ~policy_id:(required cli "--contingent-policy")
+      ~principal:(required cli "--measurement-principal")
+      ~nonce:(required cli "--measurement-nonce")
+      ~private_key:(required cli "--measurement-private-key")
+      ~measurement_bytes:
+        (read_file_bounded "measurement" max_outcome_measurement_bytes
+           (required cli "--measurement"))
+  in
+  atomic_write receipt_path canonical;
+  Printf.printf
+    "LOOM_MEASUREMENT_ATTESTED schema=loom-outcome-evidence-authority-v0 measurement_sha256=%s receipt_sha256=%s receipt=%s\n%!"
+    measurement_digest receipt_digest receipt_path
+
+let contingent_classification_attest_command cli =
+  let root = epistemic_root cli in
+  let receipt_path = required cli "--receipt" in
+  let canonical, receipt_digest =
+    Loom_epistemic.attest_contingent_classification ~root
+      ~world:(required cli "--world")
+      ~policy_id:(required cli "--contingent-policy")
+      ~outcome_id:(required cli "--outcome")
+      ~principal:(required cli "--classifier-principal")
+      ~private_key:(required cli "--classifier-private-key")
+      ~measurement_canonical:
+        (read_file_bounded "measurement receipt" max_outcome_receipt_bytes
+           (required cli "--measurement-receipt"))
+  in
+  atomic_write receipt_path canonical;
+  Printf.printf
+    "LOOM_CLASSIFICATION_ATTESTED schema=loom-outcome-evidence-authority-v0 receipt_sha256=%s receipt=%s\n%!"
+    receipt_digest receipt_path
+
+let contingent_policy_observe_attested_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.observe_contingent_policy_attested ~root
+        ~world:(required cli "--world")
+        ~policy_id:(required cli "--contingent-policy")
+        ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation")
+        ~measurement_canonical:
+          (read_file_bounded "measurement receipt" max_outcome_receipt_bytes
+             (required cli "--measurement-receipt"))
+        ~classification_canonical:
+          (read_file_bounded "classification receipt"
+             max_outcome_receipt_bytes
+             (required cli "--classification-receipt")))
 
 let contingent_policy_observe_command cli =
   let root = epistemic_root cli in
@@ -8539,7 +8617,7 @@ let usage () =
   Printf.eprintf
     "\nPareto Portfolio Attention Compiler v0:\n  attention-portfolio-compile --world W --portfolio P --candidates FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --policy information-first|falsification-first|counterfactual-first --owner A --generation G\n  attention-portfolio-complete --world W --portfolio P --owner A --generation G --outcome SHA\n";
   Printf.eprintf
-    "\nRobust Contingent Policy Compiler v0:\n  contingent-policy-compile --world W --contingent-policy P --root-state S --actions FILE --outcomes FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --order information-first|falsification-first|counterfactual-first --owner A --generation G\n  contingent-policy-observe --world W --contingent-policy P --outcome O --owner A --generation G --outcome-digest SHA\n";
+    "\nRobust Contingent Policy Compiler v0:\n  contingent-policy-compile --world W --contingent-policy P --root-state S --actions FILE --outcomes FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --order information-first|falsification-first|counterfactual-first --owner A --generation G [--measurement-principal M --measurement-public-key PEM --classifier-principal C --classifier-public-key PEM --classifier-spec-digest SHA]\n  contingent-measurement-attest --world W --contingent-policy P --measurement FILE --measurement-principal M --measurement-private-key PEM --measurement-nonce N --receipt FILE\n  contingent-classification-attest --world W --contingent-policy P --measurement-receipt FILE --outcome O --classifier-principal C --classifier-private-key PEM --receipt FILE\n  contingent-policy-observe-attested --world W --contingent-policy P --measurement-receipt FILE --classification-receipt FILE --owner A --generation G\n  contingent-policy-observe --world W --contingent-policy P --outcome O --owner A --generation G --outcome-digest SHA (legacy opaque policies only)\n";
   Printf.eprintf
     "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
@@ -8621,6 +8699,12 @@ let main () =
         attention_portfolio_complete_command cli; 0
     | "contingent-policy-compile" ->
         contingent_policy_compile_command cli; 0
+    | "contingent-measurement-attest" ->
+        contingent_measurement_attest_command cli; 0
+    | "contingent-classification-attest" ->
+        contingent_classification_attest_command cli; 0
+    | "contingent-policy-observe-attested" ->
+        contingent_policy_observe_attested_command cli; 0
     | "contingent-policy-observe" ->
         contingent_policy_observe_command cli; 0
     | "export-events-arrow" -> export_events_arrow_command cli; 0

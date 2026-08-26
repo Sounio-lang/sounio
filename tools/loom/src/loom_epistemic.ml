@@ -7,6 +7,9 @@ let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 let schema = "loom-epistemic-machine-v0"
 let journal_domain = "loom-epistemic-journal-v0"
 let zero_digest = String.make 64 '0'
+let max_outcome_measurement_bytes = 16 * 1024 * 1024
+let max_outcome_receipt_bytes = 16 * 1024
+let max_outcome_public_key_bytes = 8 * 1024
 
 let sha256 value =
   Cryptokit.hash_string (Cryptokit.Hash.sha256 ()) value
@@ -225,6 +228,115 @@ let token domain value =
     let digest = sha256 (domain ^ "\000" ^ value) in
     let bounded = Int64.of_string ("0x" ^ String.sub digest 0 15) in
     Int64.to_string (Int64.add bounded 1L)
+
+let base64_encode value =
+  Cryptokit.transform_string (Cryptokit.Base64.encode_compact_pad ()) value
+
+let base64_decode value =
+  try
+    let decoded =
+      Cryptokit.transform_string (Cryptokit.Base64.decode ()) value
+    in
+    if base64_encode decoded <> value then
+      failf "epistemic-outcome-authority-signature-noncanonical-base64";
+    decoded
+  with
+  | Error _ as error -> raise error
+  | _ -> failf "epistemic-outcome-authority-signature-invalid-base64"
+
+let write_file path value =
+  let channel = open_out_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_out_noerr channel)
+    (fun () -> output_string channel value; flush channel)
+
+let read_file_bounded label limit path =
+  let channel = open_in_bin path in
+  Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+      let length = in_channel_length channel in
+      if length > limit then failf "epistemic-%s-too-large:%d" label length;
+      really_input_string channel length)
+
+let outcome_openssl_command () =
+  match Sys.getenv_opt "SOUNIO_LOOM_OPENSSL" with
+  | Some path when path <> "" -> path
+  | _ -> "/usr/bin/openssl"
+
+let process_quiet executable arguments =
+  let null = Unix.openfile "/dev/null" [ O_RDWR ] 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close null)
+    (fun () ->
+      let pid = Unix.create_process executable arguments null null null in
+      match snd (Unix.waitpid [] pid) with WEXITED 0 -> true | _ -> false)
+
+let with_outcome_crypto_files operation =
+  let public_key_path = Filename.temp_file "loom-outcome-public-" ".pem" in
+  let payload_path = Filename.temp_file "loom-outcome-payload-" ".bin" in
+  let signature_path = Filename.temp_file "loom-outcome-signature-" ".bin" in
+  let derived_path = Filename.temp_file "loom-outcome-derived-" ".bin" in
+  Fun.protect
+    ~finally:(fun () ->
+      List.iter
+        (fun path -> try Sys.remove path with _ -> ())
+        [ public_key_path; payload_path; signature_path; derived_path ])
+    (fun () ->
+      operation public_key_path payload_path signature_path derived_path)
+
+let outcome_public_key_id public_key =
+  with_outcome_crypto_files
+    (fun public_key_path _ _ derived_path ->
+      write_file public_key_path public_key;
+      let openssl = outcome_openssl_command () in
+      let arguments =
+        [| openssl; "pkey"; "-pubin"; "-in"; public_key_path;
+           "-outform"; "DER"; "-out"; derived_path |]
+      in
+      if not (Sys.file_exists openssl && process_quiet openssl arguments) then
+        failf "epistemic-outcome-authority-public-key-invalid";
+      let channel = open_in_bin derived_path in
+      let value =
+        Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+            really_input_string channel (in_channel_length channel))
+      in
+      sha256 value)
+
+let outcome_ed25519_verify public_key payload signature_base64 =
+  with_outcome_crypto_files
+    (fun public_key_path payload_path signature_path _ ->
+      write_file public_key_path public_key;
+      write_file payload_path payload;
+      write_file signature_path (base64_decode signature_base64);
+      let openssl = outcome_openssl_command () in
+      let arguments =
+        [| openssl; "pkeyutl"; "-verify"; "-pubin"; "-rawin";
+           "-inkey"; public_key_path; "-in"; payload_path; "-sigfile";
+           signature_path |]
+      in
+      Sys.file_exists openssl && process_quiet openssl arguments)
+
+let outcome_ed25519_sign private_key payload =
+  if not (Sys.file_exists private_key) then
+    failf "epistemic-outcome-authority-private-key-missing:%s" private_key;
+  with_outcome_crypto_files
+    (fun _ payload_path signature_path _ ->
+      write_file payload_path payload;
+      let openssl = outcome_openssl_command () in
+      let arguments =
+        [| openssl; "pkeyutl"; "-sign"; "-rawin"; "-inkey";
+           private_key; "-in"; payload_path; "-out"; signature_path |]
+      in
+      if not (Sys.file_exists openssl && process_quiet openssl arguments) then
+        failf "epistemic-outcome-authority-signature-failed";
+      let channel = open_in_bin signature_path in
+      let signature =
+        Fun.protect ~finally:(fun () -> close_in_noerr channel) (fun () ->
+            really_input_string channel (in_channel_length channel))
+      in
+      if String.length signature <> 64 then
+        failf "epistemic-outcome-authority-signature-size:%d"
+          (String.length signature);
+      base64_encode signature)
 
 let adapter_path () =
   match Sys.getenv_opt "SOUNIO_LOOM_EPISTEMIC_ADAPTER" with
@@ -1286,6 +1398,259 @@ type contingent_graph = {
   canonical_contingent_outcomes : string;
 }
 
+type signed_contingent_outcome_authority = {
+  measurement_principal : string;
+  measurement_public_key : string;
+  measurement_key_id : string;
+  classifier_principal : string;
+  classifier_public_key : string;
+  classifier_key_id : string;
+  classifier_spec_digest : string;
+}
+
+type contingent_outcome_authority =
+  | Opaque_outcome_digest
+  | Signed_outcome_authority of signed_contingent_outcome_authority
+
+type contingent_measurement_receipt = {
+  measurement_world : string;
+  measurement_policy : string;
+  measurement_selected_policy_digest : string;
+  measurement_current_path : string;
+  measurement_current_action : string;
+  measurement_owner : string;
+  measurement_generation : string;
+  measurement_journal_head : string;
+  measurement_principal : string;
+  measurement_key_id : string;
+  measurement_nonce : string;
+  measurement_digest : string;
+  measurement_payload_digest : string;
+  measurement_signature : string;
+}
+
+type contingent_classification_receipt = {
+  classification_world : string;
+  classification_policy : string;
+  classification_selected_policy_digest : string;
+  classification_current_path : string;
+  classification_current_action : string;
+  classification_owner : string;
+  classification_generation : string;
+  classification_journal_head : string;
+  classification_measurement_receipt_digest : string;
+  classification_measurement_digest : string;
+  classification_nonce : string;
+  classifier_principal : string;
+  classifier_key_id : string;
+  classification_spec_digest : string;
+  classification_partition_digest : string;
+  classification_outcome : string;
+  classification_payload_digest : string;
+  classification_signature : string;
+}
+
+let receipt_fields text =
+  let table = Hashtbl.create 24 in
+  let lines = String.split_on_char '\n' text in
+  let lines =
+    match List.rev lines with "" :: rest -> List.rev rest | _ -> lines
+  in
+  List.iter
+    (fun line ->
+      match String.index_opt line '=' with
+      | None -> failf "epistemic-outcome-authority-receipt-malformed"
+      | Some index ->
+          let key = String.sub line 0 index in
+          let value =
+            String.sub line (index + 1) (String.length line - index - 1)
+          in
+          if key = "" || Hashtbl.mem table key then
+            failf "epistemic-outcome-authority-receipt-malformed";
+          Hashtbl.add table key value)
+    lines;
+  table
+
+let receipt_field fields key =
+  match Hashtbl.find_opt fields key with
+  | Some value -> value
+  | None -> failf "epistemic-outcome-authority-receipt-field-missing:%s" key
+
+let contingent_measurement_payload receipt =
+  Printf.sprintf
+    "schema=loom-contingent-measurement-payload-v0\nalgorithm=ed25519\nworld=%s\ncontingent_policy=%s\nselected_policy_sha256=%s\ncurrent_path=%s\ncurrent_action=%s\nowner=%s\ngeneration=%s\njournal_head_sha256=%s\nmeasurement_principal=%s\nmeasurement_key_id=%s\nmeasurement_nonce=%s\nmeasurement_sha256=%s\n"
+    receipt.measurement_world receipt.measurement_policy
+    receipt.measurement_selected_policy_digest receipt.measurement_current_path
+    receipt.measurement_current_action receipt.measurement_owner
+    receipt.measurement_generation receipt.measurement_journal_head
+    receipt.measurement_principal
+    receipt.measurement_key_id receipt.measurement_nonce
+    receipt.measurement_digest
+
+let canonical_contingent_measurement_receipt receipt =
+  Printf.sprintf
+    "schema=loom-contingent-measurement-receipt-v0\nalgorithm=ed25519\nworld=%s\ncontingent_policy=%s\nselected_policy_sha256=%s\ncurrent_path=%s\ncurrent_action=%s\nowner=%s\ngeneration=%s\njournal_head_sha256=%s\nmeasurement_principal=%s\nmeasurement_key_id=%s\nmeasurement_nonce=%s\nmeasurement_sha256=%s\nsigned_payload_sha256=%s\nsignature_base64=%s\n"
+    receipt.measurement_world receipt.measurement_policy
+    receipt.measurement_selected_policy_digest receipt.measurement_current_path
+    receipt.measurement_current_action receipt.measurement_owner
+    receipt.measurement_generation receipt.measurement_journal_head
+    receipt.measurement_principal
+    receipt.measurement_key_id receipt.measurement_nonce
+    receipt.measurement_digest receipt.measurement_payload_digest
+    receipt.measurement_signature
+
+let contingent_measurement_receipt_digest canonical =
+  sha256 ("loom-contingent-measurement-receipt-v0\000" ^ canonical)
+
+let parse_contingent_measurement_receipt canonical =
+  if String.length canonical > max_outcome_receipt_bytes then
+    failf "epistemic-outcome-authority-measurement-receipt-too-large:%d"
+      (String.length canonical);
+  let fields = receipt_fields canonical in
+  if receipt_field fields "schema" <> "loom-contingent-measurement-receipt-v0"
+     || receipt_field fields "algorithm" <> "ed25519"
+  then failf "epistemic-outcome-authority-measurement-schema-invalid";
+  let receipt =
+    { measurement_world = receipt_field fields "world";
+      measurement_policy = receipt_field fields "contingent_policy";
+      measurement_selected_policy_digest =
+        require_digest "outcome-authority-selected-policy"
+          (receipt_field fields "selected_policy_sha256");
+      measurement_current_path = receipt_field fields "current_path";
+      measurement_current_action = receipt_field fields "current_action";
+      measurement_owner = receipt_field fields "owner";
+      measurement_generation = receipt_field fields "generation";
+      measurement_journal_head =
+        require_digest "outcome-authority-journal-head"
+          (receipt_field fields "journal_head_sha256");
+      measurement_principal = receipt_field fields "measurement_principal";
+      measurement_key_id =
+        require_digest "outcome-authority-measurement-key"
+          (receipt_field fields "measurement_key_id");
+      measurement_nonce = receipt_field fields "measurement_nonce";
+      measurement_digest =
+        require_digest "outcome-authority-measurement"
+          (receipt_field fields "measurement_sha256");
+      measurement_payload_digest =
+        require_digest "outcome-authority-measurement-payload"
+          (receipt_field fields "signed_payload_sha256");
+      measurement_signature = receipt_field fields "signature_base64" }
+  in
+  List.iter
+    (fun (label, value) -> validate_atom label value)
+    [ ("outcome-authority-world", receipt.measurement_world);
+      ("outcome-authority-policy", receipt.measurement_policy);
+      ("outcome-authority-path", receipt.measurement_current_path);
+      ("outcome-authority-action", receipt.measurement_current_action);
+      ("outcome-authority-owner", receipt.measurement_owner);
+      ("outcome-authority-generation", receipt.measurement_generation);
+      ("outcome-authority-measurement-principal",
+       receipt.measurement_principal);
+      ("outcome-authority-nonce", receipt.measurement_nonce) ];
+  let payload = contingent_measurement_payload receipt in
+  if receipt.measurement_payload_digest <> sha256 payload
+     || canonical_contingent_measurement_receipt receipt <> canonical
+     || receipt.measurement_signature = ""
+  then failf "epistemic-outcome-authority-measurement-noncanonical";
+  receipt
+
+let contingent_classification_payload receipt =
+  Printf.sprintf
+    "schema=loom-contingent-classification-payload-v0\nalgorithm=ed25519\nworld=%s\ncontingent_policy=%s\nselected_policy_sha256=%s\ncurrent_path=%s\ncurrent_action=%s\nowner=%s\ngeneration=%s\njournal_head_sha256=%s\nmeasurement_receipt_sha256=%s\nmeasurement_sha256=%s\nmeasurement_nonce=%s\nclassifier_principal=%s\nclassifier_key_id=%s\nclassifier_spec_sha256=%s\noutcome_partition_sha256=%s\noutcome=%s\n"
+    receipt.classification_world receipt.classification_policy
+    receipt.classification_selected_policy_digest
+    receipt.classification_current_path receipt.classification_current_action
+    receipt.classification_owner receipt.classification_generation
+    receipt.classification_journal_head
+    receipt.classification_measurement_receipt_digest
+    receipt.classification_measurement_digest receipt.classification_nonce
+    receipt.classifier_principal receipt.classifier_key_id
+    receipt.classification_spec_digest receipt.classification_partition_digest
+    receipt.classification_outcome
+
+let canonical_contingent_classification_receipt receipt =
+  Printf.sprintf
+    "schema=loom-contingent-classification-receipt-v0\nalgorithm=ed25519\nworld=%s\ncontingent_policy=%s\nselected_policy_sha256=%s\ncurrent_path=%s\ncurrent_action=%s\nowner=%s\ngeneration=%s\njournal_head_sha256=%s\nmeasurement_receipt_sha256=%s\nmeasurement_sha256=%s\nmeasurement_nonce=%s\nclassifier_principal=%s\nclassifier_key_id=%s\nclassifier_spec_sha256=%s\noutcome_partition_sha256=%s\noutcome=%s\nsigned_payload_sha256=%s\nsignature_base64=%s\n"
+    receipt.classification_world receipt.classification_policy
+    receipt.classification_selected_policy_digest
+    receipt.classification_current_path receipt.classification_current_action
+    receipt.classification_owner receipt.classification_generation
+    receipt.classification_journal_head
+    receipt.classification_measurement_receipt_digest
+    receipt.classification_measurement_digest receipt.classification_nonce
+    receipt.classifier_principal receipt.classifier_key_id
+    receipt.classification_spec_digest receipt.classification_partition_digest
+    receipt.classification_outcome receipt.classification_payload_digest
+    receipt.classification_signature
+
+let contingent_classification_receipt_digest canonical =
+  sha256 ("loom-contingent-classification-receipt-v0\000" ^ canonical)
+
+let parse_contingent_classification_receipt canonical =
+  if String.length canonical > max_outcome_receipt_bytes then
+    failf "epistemic-outcome-authority-classification-receipt-too-large:%d"
+      (String.length canonical);
+  let fields = receipt_fields canonical in
+  if
+    receipt_field fields "schema"
+    <> "loom-contingent-classification-receipt-v0"
+    || receipt_field fields "algorithm" <> "ed25519"
+  then failf "epistemic-outcome-authority-classification-schema-invalid";
+  let receipt =
+    { classification_world = receipt_field fields "world";
+      classification_policy = receipt_field fields "contingent_policy";
+      classification_selected_policy_digest =
+        require_digest "outcome-authority-selected-policy"
+          (receipt_field fields "selected_policy_sha256");
+      classification_current_path = receipt_field fields "current_path";
+      classification_current_action = receipt_field fields "current_action";
+      classification_owner = receipt_field fields "owner";
+      classification_generation = receipt_field fields "generation";
+      classification_journal_head =
+        require_digest "outcome-authority-journal-head"
+          (receipt_field fields "journal_head_sha256");
+      classification_measurement_receipt_digest =
+        require_digest "outcome-authority-measurement-receipt"
+          (receipt_field fields "measurement_receipt_sha256");
+      classification_measurement_digest =
+        require_digest "outcome-authority-measurement"
+          (receipt_field fields "measurement_sha256");
+      classification_nonce = receipt_field fields "measurement_nonce";
+      classifier_principal = receipt_field fields "classifier_principal";
+      classifier_key_id =
+        require_digest "outcome-authority-classifier-key"
+          (receipt_field fields "classifier_key_id");
+      classification_spec_digest =
+        require_digest "outcome-authority-classifier-spec"
+          (receipt_field fields "classifier_spec_sha256");
+      classification_partition_digest =
+        require_digest "outcome-authority-partition"
+          (receipt_field fields "outcome_partition_sha256");
+      classification_outcome = receipt_field fields "outcome";
+      classification_payload_digest =
+        require_digest "outcome-authority-classification-payload"
+          (receipt_field fields "signed_payload_sha256");
+      classification_signature = receipt_field fields "signature_base64" }
+  in
+  List.iter
+    (fun (label, value) -> validate_atom label value)
+    [ ("outcome-authority-world", receipt.classification_world);
+      ("outcome-authority-policy", receipt.classification_policy);
+      ("outcome-authority-path", receipt.classification_current_path);
+      ("outcome-authority-action", receipt.classification_current_action);
+      ("outcome-authority-owner", receipt.classification_owner);
+      ("outcome-authority-generation", receipt.classification_generation);
+      ("outcome-authority-classifier-principal",
+       receipt.classifier_principal);
+      ("outcome-authority-nonce", receipt.classification_nonce);
+      ("outcome-authority-outcome", receipt.classification_outcome) ];
+  let payload = contingent_classification_payload receipt in
+  if receipt.classification_payload_digest <> sha256 payload
+     || canonical_contingent_classification_receipt receipt <> canonical
+     || receipt.classification_signature = ""
+  then failf "epistemic-outcome-authority-classification-noncanonical";
+  receipt
+
 let contingent_action_header =
   String.concat "\t"
     [ "state"; "action_id"; "target_world"; "claim"; "provider";
@@ -2054,6 +2419,27 @@ let verify_contingent_frame frame expected =
   if code <> 0 || output <> expected then
     failf "epistemic-contingent-native-refused:rc=%d:output=%s" code output
 
+let outcome_authority_adapter_path () =
+  match Sys.getenv_opt "SOUNIO_LOOM_OUTCOME_AUTHORITY_ADAPTER" with
+  | Some path when path <> "" -> path
+  | _ ->
+      Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+        "sounio-loom-outcome-authority-runtime"
+
+let verify_outcome_authority_frame frame =
+  let adapter = outcome_authority_adapter_path () in
+  if not (Sys.file_exists adapter) then
+    failf "epistemic-outcome-authority-native-adapter-missing:%s" adapter;
+  let code, output =
+    process_exchange (Unix.realpath adapter) (String.concat " " frame ^ "\n")
+  in
+  let expected =
+    "SOUNIO_OUTCOME_AUTHORITY_ACCEPT schema=loom-native-outcome-authority-v0 transition=consume state=verified"
+  in
+  if code <> 0 || output <> expected then
+    failf "epistemic-outcome-authority-native-refused:rc=%d:output=%s" code
+      output
+
 let contingent_zero_limbs = List.init 8 (fun _ -> "0")
 
 let verify_contingent_partition ~policy_id ~owner ~generation
@@ -2181,6 +2567,74 @@ let contingent_observed_branch_digest path node branch =
   in
   sha256 ("loom-contingent-observed-branch-v0\000" ^ value)
 
+let contingent_current_partition_digest node =
+  contingent_partition_digest node.contingent_root_action
+    (List.map
+       (fun branch -> branch.contingent_branch_outcome)
+       node.contingent_policy_branches)
+
+let verify_outcome_authority_transition ~policy_id ~selected_policy_digest
+    ~path ~node ~outcome_id ~owner ~generation ~journal_head
+    ~measurement_authority
+    ~measurement ~measurement_receipt_digest ~classification
+    ~classification_receipt_digest =
+  let measurement_principal, measurement_key_id, classifier_principal,
+      classifier_key_id, classifier_spec_digest =
+    match measurement_authority with
+    | Opaque_outcome_digest ->
+        failf "epistemic-outcome-authority-not-configured:%s" policy_id
+    | Signed_outcome_authority authority ->
+        ( authority.measurement_principal, authority.measurement_key_id,
+          authority.classifier_principal, authority.classifier_key_id,
+          authority.classifier_spec_digest )
+  in
+  let partition_digest = contingent_current_partition_digest node in
+  let frame =
+    [ "9012"; "1"; "1";
+      token "loom-outcome-policy" policy_id;
+      token "loom-outcome-selected-policy" selected_policy_digest;
+      token "loom-outcome-action"
+        node.contingent_root_action.contingent_action_id;
+      token "loom-outcome-path" path;
+      token "loom-outcome-variant" outcome_id;
+      token "loom-outcome-owner" owner;
+      token "loom-outcome-generation" generation;
+      token "loom-outcome-journal-head" journal_head;
+      token "loom-outcome-measurement-principal" measurement_principal;
+      token "loom-outcome-classifier-principal" classifier_principal;
+      token "loom-outcome-measurement-key" measurement_key_id;
+      token "loom-outcome-classifier-key" classifier_key_id;
+      token "loom-outcome-policy" measurement.measurement_policy;
+      token "loom-outcome-selected-policy"
+        measurement.measurement_selected_policy_digest;
+      token "loom-outcome-action" measurement.measurement_current_action;
+      token "loom-outcome-path" measurement.measurement_current_path;
+      token "loom-outcome-generation" measurement.measurement_generation;
+      token "loom-outcome-journal-head" measurement.measurement_journal_head;
+      token "loom-outcome-nonce" measurement.measurement_nonce;
+      token "loom-outcome-policy" classification.classification_policy;
+      token "loom-outcome-selected-policy"
+        classification.classification_selected_policy_digest;
+      token "loom-outcome-action"
+        classification.classification_current_action;
+      token "loom-outcome-path" classification.classification_current_path;
+      token "loom-outcome-variant" classification.classification_outcome;
+      token "loom-outcome-generation"
+        classification.classification_generation;
+      token "loom-outcome-journal-head"
+        classification.classification_journal_head;
+      token "loom-outcome-nonce" classification.classification_nonce ]
+    @ digest_limbs measurement.measurement_digest
+    @ digest_limbs measurement_receipt_digest
+    @ digest_limbs classification.classification_measurement_receipt_digest
+    @ digest_limbs classifier_spec_digest
+    @ digest_limbs classification.classification_spec_digest
+    @ digest_limbs partition_digest
+    @ digest_limbs classification.classification_partition_digest
+    @ digest_limbs classification_receipt_digest
+  in
+  verify_outcome_authority_frame frame
+
 let verify_contingent_transition ~policy_id ~selected_policy_digest ~path
     ~node ~branch ~claimed_next_action ~owner ~generation ~outcome_digest =
   let outcome = branch.contingent_branch_outcome in
@@ -2226,6 +2680,50 @@ let contingent_policy_node_count policy =
   in
   count policy
 
+let contingent_outcome_authority_of_fields policy_id owner fields =
+  match optional_field fields "outcome_authority_mode" with
+  | "" | "opaque-digest-v0" -> Opaque_outcome_digest
+  | "ed25519-two-stage-v0" ->
+      let measurement_principal = field fields "measurement_principal" in
+      let measurement_public_key = field fields "measurement_public_key" in
+      let measurement_key_id =
+        require_digest "outcome-authority-measurement-key"
+          (field fields "measurement_key_id")
+      in
+      let classifier_principal = field fields "classifier_principal" in
+      let classifier_public_key = field fields "classifier_public_key" in
+      let classifier_key_id =
+        require_digest "outcome-authority-classifier-key"
+          (field fields "classifier_key_id")
+      in
+      let classifier_spec_digest =
+        require_digest "outcome-authority-classifier-spec"
+          (field fields "classifier_spec_digest")
+      in
+      validate_atom "outcome-authority-measurement-principal"
+        measurement_principal;
+      validate_atom "outcome-authority-classifier-principal"
+        classifier_principal;
+      if owner = measurement_principal || owner = classifier_principal
+         || measurement_principal = classifier_principal
+      then
+        failf "epistemic-outcome-authority-principal-collapse:%s" policy_id;
+      if String.length measurement_public_key > 4096
+         || String.length classifier_public_key > 4096
+         || String.contains measurement_public_key '\000'
+         || String.contains classifier_public_key '\000'
+      then failf "epistemic-outcome-authority-public-key-invalid:%s" policy_id;
+      if outcome_public_key_id measurement_public_key <> measurement_key_id
+         || outcome_public_key_id classifier_public_key <> classifier_key_id
+      then failf "epistemic-outcome-authority-key-id-mismatch:%s" policy_id;
+      if measurement_key_id = classifier_key_id then
+        failf "epistemic-outcome-authority-key-collapse:%s" policy_id;
+      Signed_outcome_authority
+        { measurement_principal; measurement_public_key; measurement_key_id;
+          classifier_principal; classifier_public_key; classifier_key_id;
+          classifier_spec_digest }
+  | mode -> failf "epistemic-outcome-authority-mode-invalid:%s" mode
+
 type contingent_policy_decision = {
   contingent_policy_id : string;
   contingent_root_state : string;
@@ -2242,6 +2740,7 @@ type contingent_policy_decision = {
   selected_contingent_policy_digest : string;
   contingent_owner : string;
   contingent_generation : string;
+  contingent_outcome_authority : contingent_outcome_authority;
   contingent_examined : int;
   mutable contingent_current_path : string;
   mutable contingent_completed : bool;
@@ -2315,6 +2814,9 @@ let contingent_policy_decision_of_event event =
   validate_atom "contingent-root-state" root_state;
   validate_atom "contingent-owner" owner;
   validate_atom "contingent-generation" generation;
+  let outcome_authority =
+    contingent_outcome_authority_of_fields policy_id owner fields
+  in
   let require_selected key actual =
     if field fields key <> actual then
       failf "epistemic-contingent-selected-field-mismatch:%s" key
@@ -2369,8 +2871,104 @@ let contingent_policy_decision_of_event event =
     canonical_selected_contingent_policy = canonical_selected;
     selected_contingent_policy_digest = selected_digest;
     contingent_owner = owner; contingent_generation = generation;
+    contingent_outcome_authority = outcome_authority;
     contingent_examined = synthesis.contingent_examined;
     contingent_current_path = "root"; contingent_completed = false }
+
+let signed_contingent_authority policy_id decision =
+  match decision.contingent_outcome_authority with
+  | Opaque_outcome_digest ->
+      failf "epistemic-outcome-authority-not-configured:%s" policy_id
+  | Signed_outcome_authority authority -> authority
+
+let verify_contingent_outcome_receipts ~world ~decision ~path ~node
+    ~outcome_id ~journal_head ~measurement_canonical
+    ~classification_canonical =
+  let policy_id = decision.contingent_policy_id in
+  let authority = signed_contingent_authority policy_id decision in
+  let measurement =
+    parse_contingent_measurement_receipt measurement_canonical
+  in
+  let measurement_receipt_digest =
+    contingent_measurement_receipt_digest measurement_canonical
+  in
+  let classification =
+    parse_contingent_classification_receipt classification_canonical
+  in
+  let classification_receipt_digest =
+    contingent_classification_receipt_digest classification_canonical
+  in
+  let expected_action = node.contingent_root_action.contingent_action_id in
+  let identity_matches =
+    measurement.measurement_world = world
+    && measurement.measurement_policy = policy_id
+    && measurement.measurement_selected_policy_digest
+       = decision.selected_contingent_policy_digest
+    && measurement.measurement_current_path = path
+    && measurement.measurement_current_action = expected_action
+    && measurement.measurement_owner = decision.contingent_owner
+    && measurement.measurement_generation = decision.contingent_generation
+    && measurement.measurement_journal_head = journal_head
+    && measurement.measurement_principal = authority.measurement_principal
+    && measurement.measurement_key_id = authority.measurement_key_id
+    && classification.classification_world = world
+    && classification.classification_policy = policy_id
+    && classification.classification_selected_policy_digest
+       = decision.selected_contingent_policy_digest
+    && classification.classification_current_path = path
+    && classification.classification_current_action = expected_action
+    && classification.classification_owner = decision.contingent_owner
+    && classification.classification_generation
+       = decision.contingent_generation
+    && classification.classification_journal_head = journal_head
+    && classification.classifier_principal = authority.classifier_principal
+    && classification.classifier_key_id = authority.classifier_key_id
+  in
+  if not identity_matches then
+    failf "epistemic-outcome-authority-cursor-binding-mismatch:%s"
+      policy_id;
+  if
+    classification.classification_measurement_receipt_digest
+    <> measurement_receipt_digest
+    || classification.classification_measurement_digest
+       <> measurement.measurement_digest
+    || classification.classification_nonce <> measurement.measurement_nonce
+  then
+    failf "epistemic-outcome-authority-measurement-binding-mismatch:%s"
+      policy_id;
+  let partition_digest = contingent_current_partition_digest node in
+  if classification.classification_spec_digest
+     <> authority.classifier_spec_digest
+     || classification.classification_partition_digest <> partition_digest
+     || classification.classification_outcome <> outcome_id
+  then
+    failf "epistemic-outcome-authority-classification-binding-mismatch:%s"
+      policy_id;
+  if
+    not
+      (outcome_ed25519_verify authority.measurement_public_key
+         (contingent_measurement_payload measurement)
+         measurement.measurement_signature)
+  then failf "epistemic-outcome-authority-measurement-signature-invalid:%s"
+      policy_id;
+  if
+    not
+      (outcome_ed25519_verify authority.classifier_public_key
+         (contingent_classification_payload classification)
+         classification.classification_signature)
+  then
+    failf "epistemic-outcome-authority-classification-signature-invalid:%s"
+      policy_id;
+  verify_outcome_authority_transition ~policy_id
+    ~selected_policy_digest:decision.selected_contingent_policy_digest ~path
+    ~node ~outcome_id ~owner:decision.contingent_owner
+    ~generation:decision.contingent_generation
+    ~journal_head
+    ~measurement_authority:decision.contingent_outcome_authority ~measurement
+    ~measurement_receipt_digest ~classification
+    ~classification_receipt_digest;
+  ( measurement, measurement_receipt_digest, classification,
+    classification_receipt_digest )
 
 type knowledge = {
   knowledge_id : string;
@@ -2807,6 +3405,38 @@ let reduce world events head =
           then
             failf "epistemic-contingent-observed-branch-digest-mismatch:%s"
               policy_id;
+          (match decision.contingent_outcome_authority with
+          | Opaque_outcome_digest ->
+              if optional_field fields "outcome_authority_mode" <> "" then
+                failf "epistemic-outcome-authority-mode-drift:%s" policy_id
+          | Signed_outcome_authority _ ->
+              if
+                field fields "outcome_authority_mode"
+                <> "ed25519-two-stage-v0"
+              then
+                failf "epistemic-outcome-authority-mode-drift:%s" policy_id;
+              let measurement, measurement_receipt_digest, _,
+                  classification_receipt_digest =
+                verify_contingent_outcome_receipts ~world:state.world_id
+                  ~decision ~path ~node ~outcome_id
+                  ~journal_head:event.previous_sha256
+                  ~measurement_canonical:(field fields "measurement_receipt")
+                  ~classification_canonical:
+                    (field fields "classification_receipt")
+              in
+              if
+                require_digest "outcome-authority-measurement-receipt"
+                  (field fields "measurement_receipt_digest")
+                <> measurement_receipt_digest
+                ||
+                require_digest "outcome-authority-classification-receipt"
+                  (field fields "classification_receipt_digest")
+                <> classification_receipt_digest
+                || field fields "outcome_digest"
+                   <> measurement.measurement_digest
+              then
+                failf "epistemic-outcome-authority-receipt-digest-drift:%s"
+                  policy_id);
           let outcome_digest =
             require_digest "contingent-outcome"
               (field fields "outcome_digest")
@@ -3522,12 +4152,62 @@ let ensure_contingent_resource_available states ~world ~policy_id resource =
 
 let compile_contingent_policy ~root ~world ~policy_id ~root_state
     ~action_file ~outcome_file ~token_budget ~wall_budget ~gpu_budget
-    ~quota_budget ~order ~owner ~generation =
+    ~quota_budget ~order ~owner ~generation ~measurement_principal
+    ~measurement_public_key_file ~classifier_principal
+    ~classifier_public_key_file ~classifier_spec_digest =
   validate_atom "world" world;
   validate_atom "contingent-policy" policy_id;
   validate_atom "contingent-root-state" root_state;
   validate_atom "contingent-owner" owner;
   validate_atom "contingent-generation" generation;
+  let authority_fields, authority_name =
+    match
+      ( measurement_principal, measurement_public_key_file,
+        classifier_principal, classifier_public_key_file,
+        classifier_spec_digest )
+    with
+    | None, None, None, None, None ->
+        ([ ("outcome_authority_mode", "opaque-digest-v0") ], "opaque")
+    | Some measurement_principal, Some measurement_key_file,
+      Some classifier_principal, Some classifier_key_file,
+      Some classifier_spec_digest ->
+        validate_atom "outcome-authority-measurement-principal"
+          measurement_principal;
+        validate_atom "outcome-authority-classifier-principal"
+          classifier_principal;
+        if not (Sys.file_exists measurement_key_file) then
+          failf "epistemic-outcome-authority-measurement-key-missing:%s"
+            measurement_key_file;
+        if not (Sys.file_exists classifier_key_file) then
+          failf "epistemic-outcome-authority-classifier-key-missing:%s"
+            classifier_key_file;
+        let measurement_public_key =
+          read_file_bounded "outcome-authority-measurement-public-key"
+            max_outcome_public_key_bytes measurement_key_file
+        in
+        let classifier_public_key =
+          read_file_bounded "outcome-authority-classifier-public-key"
+            max_outcome_public_key_bytes classifier_key_file
+        in
+        let measurement_key_id =
+          outcome_public_key_id measurement_public_key
+        in
+        let classifier_key_id = outcome_public_key_id classifier_public_key in
+        let classifier_spec_digest =
+          require_digest "outcome-authority-classifier-spec"
+            classifier_spec_digest
+        in
+        ( [ ("outcome_authority_mode", "ed25519-two-stage-v0");
+            ("measurement_principal", measurement_principal);
+            ("measurement_public_key", measurement_public_key);
+            ("measurement_key_id", measurement_key_id);
+            ("classifier_principal", classifier_principal);
+            ("classifier_public_key", classifier_public_key);
+            ("classifier_key_id", classifier_key_id);
+            ("classifier_spec_digest", classifier_spec_digest) ],
+          "signed-two-stage" )
+    | _ -> failf "epistemic-outcome-authority-configuration-incomplete"
+  in
   if not (Sys.file_exists action_file) then
     failf "epistemic-contingent-action-file-missing:%s" action_file;
   if not (Sys.file_exists outcome_file) then
@@ -3608,6 +4288,7 @@ let compile_contingent_policy ~root ~world ~policy_id ~root_state
           ("falsifier_digest", contingent_policy_falsifier_digest selected);
           ("branch_digest", contingent_policy_branch_digest selected);
           ("owner", owner); ("generation", generation) ]
+        @ authority_fields
       in
       let event =
         append
@@ -3617,8 +4298,9 @@ let compile_contingent_policy ~root ~world ~policy_id ~root_state
       in
       ignore (load_all root);
       Printf.sprintf
-        "LOOM_CONTINGENT_COMPILED schema=loom-robust-contingent-policy-v0 world=%s policy=%s order=%s root_state=%s root_action=%s current_resource=%s states=%d actions=%d outcomes=%d examined=%d frontier=%d nodes=%d guaranteed_information=%d guaranteed_falsification=%d guaranteed_divergence=%d worst_risk=%d token=%d/%d wall=%d/%d gpu=%d/%d quota=%d/%d selected_policy_sha256=%s frontier_sha256=%s head=%s"
-        world policy_id (attention_policy_name order) root_state
+        "LOOM_CONTINGENT_COMPILED schema=loom-robust-contingent-policy-v0 world=%s policy=%s order=%s authority=%s root_state=%s root_action=%s current_resource=%s states=%d actions=%d outcomes=%d examined=%d frontier=%d nodes=%d guaranteed_information=%d guaranteed_falsification=%d guaranteed_divergence=%d worst_risk=%d token=%d/%d wall=%d/%d gpu=%d/%d quota=%d/%d selected_policy_sha256=%s frontier_sha256=%s head=%s"
+        world policy_id (attention_policy_name order) authority_name
+        root_state
         selected.contingent_root_action.contingent_action_id current_resource
         (List.length graph.contingent_states)
         (List.length graph.contingent_actions)
@@ -3635,6 +4317,253 @@ let compile_contingent_policy ~root ~world ~policy_id ~root_state
         budget.contingent_gpu_budget selected.contingent_aggregate_quota_cost
         budget.contingent_quota_budget selected_digest frontier_digest
         event.event_sha256)
+
+let attest_contingent_measurement ~root ~world ~policy_id ~principal ~nonce
+    ~private_key ~measurement_bytes =
+  validate_atom "world" world;
+  validate_atom "contingent-policy" policy_id;
+  validate_atom "outcome-authority-measurement-principal" principal;
+  validate_atom "outcome-authority-nonce" nonce;
+  if String.length measurement_bytes > max_outcome_measurement_bytes then
+    failf "epistemic-outcome-authority-measurement-too-large:%d"
+      (String.length measurement_bytes);
+  let measurement_digest = sha256 measurement_bytes in
+  with_machine_lock root (fun () ->
+      let state = find_world (load_all root) world in
+      let decision =
+        match Hashtbl.find_opt state.contingent_policies policy_id with
+        | Some value -> value
+        | None -> failf "epistemic-contingent-policy-missing:%s" policy_id
+      in
+      if decision.contingent_completed then
+        failf "epistemic-contingent-policy-already-completed:%s" policy_id;
+      let authority = signed_contingent_authority policy_id decision in
+      if principal <> authority.measurement_principal then
+        failf "epistemic-outcome-authority-measurement-principal-drift:%s"
+          policy_id;
+      let path = decision.contingent_current_path in
+      let node =
+        contingent_policy_node_at_path decision.selected_contingent_policy path
+      in
+      let provisional =
+        { measurement_world = world; measurement_policy = policy_id;
+          measurement_selected_policy_digest =
+            decision.selected_contingent_policy_digest;
+          measurement_current_path = path;
+          measurement_current_action =
+            node.contingent_root_action.contingent_action_id;
+          measurement_owner = decision.contingent_owner;
+          measurement_generation = decision.contingent_generation;
+          measurement_journal_head = state.journal_head;
+          measurement_principal = principal;
+          measurement_key_id = authority.measurement_key_id;
+          measurement_nonce = nonce; measurement_digest;
+          measurement_payload_digest = zero_digest;
+          measurement_signature = "" }
+      in
+      let payload = contingent_measurement_payload provisional in
+      let signature = outcome_ed25519_sign private_key payload in
+      if
+        not
+          (outcome_ed25519_verify authority.measurement_public_key payload
+             signature)
+      then
+        failf "epistemic-outcome-authority-measurement-private-key-mismatch:%s"
+          policy_id;
+      let receipt =
+        { provisional with measurement_payload_digest = sha256 payload;
+          measurement_signature = signature }
+      in
+      let canonical = canonical_contingent_measurement_receipt receipt in
+      ( canonical, contingent_measurement_receipt_digest canonical,
+        measurement_digest ))
+
+let verify_measurement_for_classification ~world ~decision ~path ~node
+    ~journal_head canonical =
+  let policy_id = decision.contingent_policy_id in
+  let authority = signed_contingent_authority policy_id decision in
+  let measurement = parse_contingent_measurement_receipt canonical in
+  if
+    measurement.measurement_world <> world
+    || measurement.measurement_policy <> policy_id
+    || measurement.measurement_selected_policy_digest
+       <> decision.selected_contingent_policy_digest
+    || measurement.measurement_current_path <> path
+    || measurement.measurement_current_action
+       <> node.contingent_root_action.contingent_action_id
+    || measurement.measurement_owner <> decision.contingent_owner
+    || measurement.measurement_generation <> decision.contingent_generation
+    || measurement.measurement_journal_head <> journal_head
+    || measurement.measurement_principal <> authority.measurement_principal
+    || measurement.measurement_key_id <> authority.measurement_key_id
+  then
+    failf "epistemic-outcome-authority-cursor-binding-mismatch:%s" policy_id;
+  if
+    not
+      (outcome_ed25519_verify authority.measurement_public_key
+         (contingent_measurement_payload measurement)
+         measurement.measurement_signature)
+  then failf "epistemic-outcome-authority-measurement-signature-invalid:%s"
+      policy_id;
+  (measurement, contingent_measurement_receipt_digest canonical)
+
+let attest_contingent_classification ~root ~world ~policy_id ~outcome_id
+    ~principal ~private_key ~measurement_canonical =
+  validate_atom "world" world;
+  validate_atom "contingent-policy" policy_id;
+  validate_atom "contingent-outcome" outcome_id;
+  validate_atom "outcome-authority-classifier-principal" principal;
+  with_machine_lock root (fun () ->
+      let state = find_world (load_all root) world in
+      let decision =
+        match Hashtbl.find_opt state.contingent_policies policy_id with
+        | Some value -> value
+        | None -> failf "epistemic-contingent-policy-missing:%s" policy_id
+      in
+      if decision.contingent_completed then
+        failf "epistemic-contingent-policy-already-completed:%s" policy_id;
+      let authority = signed_contingent_authority policy_id decision in
+      if principal <> authority.classifier_principal then
+        failf "epistemic-outcome-authority-classifier-principal-drift:%s"
+          policy_id;
+      let path = decision.contingent_current_path in
+      let node =
+        contingent_policy_node_at_path decision.selected_contingent_policy path
+      in
+      ignore (contingent_branch_for_outcome node outcome_id);
+      let measurement, measurement_receipt_digest =
+        verify_measurement_for_classification ~world ~decision ~path ~node
+          ~journal_head:state.journal_head measurement_canonical
+      in
+      let provisional =
+        { classification_world = world; classification_policy = policy_id;
+          classification_selected_policy_digest =
+            decision.selected_contingent_policy_digest;
+          classification_current_path = path;
+          classification_current_action =
+            node.contingent_root_action.contingent_action_id;
+          classification_owner = decision.contingent_owner;
+          classification_generation = decision.contingent_generation;
+          classification_journal_head = state.journal_head;
+          classification_measurement_receipt_digest =
+            measurement_receipt_digest;
+          classification_measurement_digest = measurement.measurement_digest;
+          classification_nonce = measurement.measurement_nonce;
+          classifier_principal = principal;
+          classifier_key_id = authority.classifier_key_id;
+          classification_spec_digest = authority.classifier_spec_digest;
+          classification_partition_digest =
+            contingent_current_partition_digest node;
+          classification_outcome = outcome_id;
+          classification_payload_digest = zero_digest;
+          classification_signature = "" }
+      in
+      let payload = contingent_classification_payload provisional in
+      let signature = outcome_ed25519_sign private_key payload in
+      if
+        not
+          (outcome_ed25519_verify authority.classifier_public_key payload
+             signature)
+      then
+        failf "epistemic-outcome-authority-classifier-private-key-mismatch:%s"
+          policy_id;
+      let receipt =
+        { provisional with classification_payload_digest = sha256 payload;
+          classification_signature = signature }
+      in
+      let canonical = canonical_contingent_classification_receipt receipt in
+      (canonical, contingent_classification_receipt_digest canonical))
+
+let observe_contingent_policy_attested ~root ~world ~policy_id ~owner
+    ~generation ~measurement_canonical ~classification_canonical =
+  validate_atom "world" world;
+  validate_atom "contingent-policy" policy_id;
+  validate_atom "contingent-owner" owner;
+  validate_atom "contingent-generation" generation;
+  with_machine_lock root (fun () ->
+      let states = load_all root in
+      let scheduling_world = find_world states world in
+      let decision =
+        match Hashtbl.find_opt scheduling_world.contingent_policies policy_id with
+        | Some value -> value
+        | None -> failf "epistemic-contingent-policy-missing:%s" policy_id
+      in
+      if decision.contingent_completed then
+        failf "epistemic-contingent-policy-already-completed:%s" policy_id;
+      if owner <> decision.contingent_owner
+         || generation <> decision.contingent_generation
+      then
+        failf "epistemic-contingent-observation-identity-drift:%s" policy_id;
+      let path = decision.contingent_current_path in
+      let node =
+        contingent_policy_node_at_path decision.selected_contingent_policy path
+      in
+      let classification =
+        parse_contingent_classification_receipt classification_canonical
+      in
+      let outcome_id = classification.classification_outcome in
+      let measurement, measurement_receipt_digest, _,
+          classification_receipt_digest =
+        verify_contingent_outcome_receipts ~world ~decision ~path ~node
+          ~outcome_id ~journal_head:scheduling_world.journal_head
+          ~measurement_canonical ~classification_canonical
+      in
+      let branch = contingent_branch_for_outcome node outcome_id in
+      let next_path, next_action, next_resource, state_name =
+        match branch.contingent_continuation with
+        | None -> ("-", "-", "-", "completed")
+        | Some child ->
+            let next_path =
+              path ^ "."
+              ^ string_of_int
+                  branch.contingent_branch_outcome.contingent_variant_index
+            in
+            ensure_contingent_resource_available states ~world ~policy_id
+              child.contingent_root_action.contingent_resource;
+            ( next_path, child.contingent_root_action.contingent_action_id,
+              child.contingent_root_action.contingent_resource, "advanced" )
+      in
+      let branch_digest = contingent_observed_branch_digest path node branch in
+      let current_action = node.contingent_root_action.contingent_action_id in
+      let fields =
+        [ ("world", world); ("contingent_policy", policy_id);
+          ("selected_policy_digest",
+           decision.selected_contingent_policy_digest);
+          ("current_path", path); ("current_action", current_action);
+          ("outcome", outcome_id); ("next_path", next_path);
+          ("next_action", next_action); ("next_resource", next_resource);
+          ("branch_digest", branch_digest);
+          ("outcome_digest", measurement.measurement_digest);
+          ("owner", owner); ("generation", generation);
+          ("outcome_authority_mode", "ed25519-two-stage-v0");
+          ("measurement_receipt", measurement_canonical);
+          ("measurement_receipt_digest", measurement_receipt_digest);
+          ("classification_receipt", classification_canonical);
+          ("classification_receipt_digest",
+           classification_receipt_digest) ]
+      in
+      let event =
+        append
+          ~verify:(fun _ ->
+            ignore
+              (verify_contingent_outcome_receipts ~world ~decision ~path ~node
+                 ~outcome_id ~journal_head:scheduling_world.journal_head
+                 ~measurement_canonical ~classification_canonical);
+            verify_contingent_transition ~policy_id
+              ~selected_policy_digest:
+                decision.selected_contingent_policy_digest
+              ~path ~node ~branch
+              ~claimed_next_action:
+                (if next_action = "-" then "" else next_action)
+              ~owner ~generation ~outcome_digest:measurement.measurement_digest)
+          root world "CONTINGENT_POLICY_OBSERVED" fields
+      in
+      ignore (load_all root);
+      Printf.sprintf
+        "LOOM_CONTINGENT_ATTESTED schema=loom-outcome-evidence-authority-v0 world=%s policy=%s state=%s path=%s current_action=%s outcome=%s next_path=%s next_action=%s measurement_sha256=%s measurement_receipt_sha256=%s classification_receipt_sha256=%s head=%s"
+        world policy_id state_name path current_action outcome_id next_path
+        next_action measurement.measurement_digest measurement_receipt_digest
+        classification_receipt_digest event.event_sha256)
 
 let observe_contingent_policy ~root ~world ~policy_id ~outcome_id ~owner
     ~generation ~outcome_digest =
@@ -3656,6 +4585,11 @@ let observe_contingent_policy ~root ~world ~policy_id ~outcome_id ~owner
       in
       if decision.contingent_completed then
         failf "epistemic-contingent-policy-already-completed:%s" policy_id;
+      (match decision.contingent_outcome_authority with
+      | Opaque_outcome_digest -> ()
+      | Signed_outcome_authority _ ->
+          failf "epistemic-outcome-authority-attestation-required:%s"
+            policy_id);
       if owner <> decision.contingent_owner
          || generation <> decision.contingent_generation
       then

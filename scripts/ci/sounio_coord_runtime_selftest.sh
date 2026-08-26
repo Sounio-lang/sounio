@@ -17,6 +17,7 @@ export SOUNIO_LOOM_EPISTEMIC_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/s
 export SOUNIO_LOOM_ATTENTION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-attention-runtime"
 export SOUNIO_LOOM_PORTFOLIO_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-portfolio-runtime"
 export SOUNIO_LOOM_CONTINGENT_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-contingent-runtime"
+export SOUNIO_LOOM_OUTCOME_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-outcome-authority-runtime"
 
 cleanup() {
   [[ -z "${supervisor_pid:-}" ]] || kill "$supervisor_pid" 2>/dev/null || true
@@ -54,6 +55,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_attention_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_portfolio_attention_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_contingent_policy_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_outcome_authority_adapter.sh" \
   "$REPO/scripts/dev/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
@@ -63,6 +65,7 @@ cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/attention_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/portfolio_attention_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/contingent_policy_adapter_main.sio" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/outcome_authority_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
@@ -85,6 +88,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_attention_compiler.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_portfolio_attention.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_contingent_policy.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_outcome_authority.sio" \
   "$REPO/stdlib/coordination/"
 chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
@@ -121,6 +126,8 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the native Sounio portfolio adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-contingent-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio contingent-policy adapter'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-outcome-authority-runtime" ]] || \
+  fail 'installed runtime omitted the native Sounio outcome-authority adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-agent-runtime" ]] || \
   fail 'installed runtime omitted the fleet launcher'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-runtime" ]] || \
@@ -157,6 +164,8 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-attention-compiler-v0 loom-attention-linear-resource-v0 \
   loom-pareto-portfolio-attention-v0 loom-atomic-multi-resource-attention-v0 \
   loom-robust-contingent-policy-v0 loom-atomic-outcome-resource-handoff-v0 \
+  loom-signed-outcome-authority-v0 loom-linear-outcome-evidence-v0 \
+  loom-journal-head-bound-consume-v0 \
   loom-post-activation-request-bridge-v1 \
   loom-recoverable-control-service-v1 \
   loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
@@ -198,7 +207,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.26.21$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.26.22$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
@@ -548,6 +557,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_attention_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_portfolio_attention_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_contingent_policy_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_outcome_authority_adapter.sh" \
   "$ALT/scripts/dev/"
 mkdir -p "$ALT/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
@@ -557,6 +567,7 @@ cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/attention_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/portfolio_attention_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/contingent_policy_adapter_main.sio" "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/outcome_authority_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
@@ -579,6 +590,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_attention_compiler.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_portfolio_attention.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_contingent_policy.sio" \
+  "$ALT/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_outcome_authority.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$ALT/formal/tla/"
@@ -640,6 +653,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_attention_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_portfolio_attention_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_contingent_policy_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_outcome_authority_adapter.sh" \
   "$BAD/scripts/dev/"
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
@@ -649,6 +663,7 @@ cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/attention_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/portfolio_attention_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/contingent_policy_adapter_main.sio" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/outcome_authority_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
@@ -671,6 +686,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_attention_compiler.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_portfolio_attention.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_contingent_policy.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_outcome_authority.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"
@@ -708,6 +725,33 @@ fi
 output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'failed contingent activation changed the current runtime'
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/outcome-authority-adapter-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=outcome-authority-adapter-omitted/' \
+  "$RUNTIME_ROOT/versions/outcome-authority-adapter-omitted/manifest"
+rm -f "$RUNTIME_ROOT/versions/outcome-authority-adapter-omitted/bin/sounio-loom-outcome-authority-runtime"
+if (cd "$REPO" && bin/sounio-coord install-runtime \
+    --activate outcome-authority-adapter-omitted) >/dev/null 2>&1; then
+  fail 'installer activated a declared frame-9012 runtime without its adapter'
+fi
+output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'failed outcome-authority activation changed the current runtime'
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/outcome-authority-root-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=outcome-authority-root-omitted/' \
+  "$RUNTIME_ROOT/versions/outcome-authority-root-omitted/manifest"
+sed -i '/^capability=loom-signed-outcome-authority-v0$/d' \
+  "$RUNTIME_ROOT/versions/outcome-authority-root-omitted/manifest"
+if (cd "$REPO" && bin/sounio-coord install-runtime \
+    --activate outcome-authority-root-omitted) >/dev/null 2>&1; then
+  fail 'installer activated derived outcome-evidence capabilities without their root capability'
+fi
+output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'failed outcome-authority dependency activation changed the current runtime'
 
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --list)"
 grep -q "runtime_id=$first_id current=yes" <<< "$output" || fail 'runtime list lost the current marker'

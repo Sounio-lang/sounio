@@ -308,6 +308,66 @@ those variants, calibrating the declared estimates, causal validity,
 distributed resource truth, fairness, and global scientific optimality remain
 outside the compiler's evidence authority.
 
+## Signed outcome evidence authority v0
+
+A contingent policy can commit separate measurement and classification
+authorities at compile time:
+
+```sh
+bin/loom contingent-policy-compile --state-dir STATE --world scheduler \
+  --contingent-policy policy-1 --root-state root \
+  --actions ACTIONS.tsv --outcomes OUTCOMES.tsv \
+  --token-budget 8000 --wall-budget 600 --gpu-budget 2 --quota-budget 4 \
+  --order information-first --owner codex --generation generation-1 \
+  --measurement-principal instrument-a \
+  --measurement-public-key measurement-public.pem \
+  --classifier-principal classifier-a \
+  --classifier-public-key classifier-public.pem \
+  --classifier-spec-digest SHA256
+
+bin/loom contingent-measurement-attest --state-dir STATE --world scheduler \
+  --contingent-policy policy-1 --measurement measurement.bin \
+  --measurement-principal instrument-a \
+  --measurement-private-key measurement-private.pem \
+  --measurement-nonce measurement-1 --receipt measurement.receipt
+
+bin/loom contingent-classification-attest --state-dir STATE --world scheduler \
+  --contingent-policy policy-1 --measurement-receipt measurement.receipt \
+  --outcome observed-variant --classifier-principal classifier-a \
+  --classifier-private-key classifier-private.pem \
+  --receipt classification.receipt
+
+bin/loom contingent-policy-observe-attested --state-dir STATE \
+  --world scheduler --contingent-policy policy-1 \
+  --measurement-receipt measurement.receipt \
+  --classification-receipt classification.receipt \
+  --owner codex --generation generation-1
+```
+
+The three committed principals, policy owner, measurer, and classifier, must be
+pairwise distinct, and the two Ed25519 keys must differ. The measurement signs
+the exact bytes plus the replay-derived policy, cursor, action, path,
+generation, and current journal head. The classifier signs the complete
+measurement receipt digest, the precommitted classifier specification, the
+recomputed current nominal partition, and one outcome at that same machine
+coordinate. Loom reloads and recomputes those bindings under `machine.lock`,
+checks native frame `9012`, independently checks route frame `9011`, then stores
+both receipts and the transition in one hash-chained event.
+
+The exact journal head acts as a local compare-and-swap coordinate, so an
+unrelated intervening append stales both receipts even if the policy cursor did
+not move. The carried measurement nonce provides correlation and receipt-digest
+uniqueness; it is not a global replay ledger. A strict signed policy cannot fall
+back to the legacy opaque outcome-digest command, while legacy policies remain
+supported in their separate mode.
+
+This path proves authorization and state binding within one filesystem
+authority. It does not prove physical measurement truth, classifier accuracy,
+private-key custody, process isolation, or organizational independence. It also
+does not resist rollback of an entire internally consistent state directory;
+that requires a future external monotonic anchor such as a transparency witness
+or hardware counter.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every
