@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.26.13
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.26.15
 
 usage() {
   cat <<'USAGE'
@@ -91,6 +91,8 @@ Commands:
   send    --agent ID --lane ID [--to-agent ID] [--to-lane ID]
           [--thread ID] [--reply-to MESSAGE_ID] --kind KIND --message TEXT
                                  send a message to another lane or broadcast
+  reply  --agent ID --lane ID --reply-to MESSAGE_ID --message TEXT
+                                 reply to the original sender and preserve its thread
   inbox   --agent ID --lane ID [--all] [--directed-only] [--newest-first]
           [--limit N] [--from-agent ID] [--from-lane ID] [--kind KIND]
           [--thread ID] [--since-epoch N]
@@ -1361,7 +1363,7 @@ attempt_message_wake() {
       return 0
     fi
     launcher="$(coord_inbox_launcher)"
-    prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $D_AGENT --lane $D_LANE --directed-only --newest-first, then reply or ack $M_ID."
+    prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $D_AGENT --lane $D_LANE --directed-only --newest-first, then run $launcher reply --agent $D_AGENT --lane $D_LANE --reply-to $M_ID --message \"<response>\" or $launcher ack --agent $D_AGENT --lane $D_LANE --message $M_ID."
     if ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" -l "$prompt" 2>/dev/null || \
       ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" Enter 2>/dev/null; then
       WAKE_STATUS='failed'
@@ -1393,7 +1395,7 @@ attempt_message_wake() {
   fi
 
   launcher="$(coord_inbox_launcher)"
-  prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then reply or ack $M_ID."
+  prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then run $launcher reply --agent $E_AGENT --lane $E_LANE --reply-to $M_ID --message \"<response>\" or $launcher ack --agent $E_AGENT --lane $E_LANE --message $M_ID."
   if ! deliver_registered_endpoint "$prompt" "$M_ID"; then
     WAKE_STATUS='failed'
     printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=%s\n' \
@@ -3807,6 +3809,7 @@ case "$command" in
   experiment-status) causal_runtime_command status "$@" ;;
   handoff) handoff_command "$@" ;;
   send) send_command "$@" ;;
+  reply) send_command "$@" --kind reply ;;
   inbox) inbox_command "$@" ;;
   injected) injected_command "$@" ;;
   ack) ack_command "$@" ;;
@@ -3817,5 +3820,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, experiment-open, experiment-close, experiment-status, handoff, send, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac

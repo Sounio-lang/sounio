@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.12"
+let runtime_version = "2026.08.26.14"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -704,7 +704,10 @@ let command_argv_digest command =
 
 let logical_command_name command =
   if Array.length command = 0 then ""
-  else if Array.length command >= 3 && command.(1) = "_provider-exec" then
+  else if
+    Array.length command >= 3
+    && List.mem command.(1) [ "_provider-exec"; "_provider-tui" ]
+  then
     Filename.basename command.(2)
   else
     let first = Filename.basename command.(0) in
@@ -2137,7 +2140,10 @@ let handle_request kernel client line =
                || String.contains prompt '\000'
             then failf "invalid-prompt";
             write_all kernel.guardian_fd prompt;
-            Unix.sleepf 0.025;
+            let submit_delay =
+              min 0.35 (0.075 +. (float_of_int (String.length prompt) /. 4000.0))
+            in
+            Unix.sleepf submit_delay;
             write_all kernel.guardian_fd "\r";
             ignore
               (append_event kernel.journal "WAKE"
@@ -6449,6 +6455,8 @@ type provider_status = {
 
 type provider_plan = {
   plan_spec : provider_spec;
+  plan_lifecycle : string;
+  plan_stdin_authority : string;
   plan_mode : string;
   plan_executable : string;
   plan_cwd : string;
@@ -6691,47 +6699,57 @@ let provider_context_isolation_args spec enabled =
     | "opencode" -> [ "--pure" ]
     | _ -> failf "unsupported-provider:%s" spec.provider_id
 
-let provider_argv spec executable mode cwd session_id provider_session model
-    unsafe_auto context_isolation prompt =
+let provider_argv spec lifecycle executable mode cwd session_id provider_session
+    model unsafe_auto context_isolation prompt =
   let model_args = provider_model_args spec model in
   let unsafe_args = provider_unsafe_args spec unsafe_auto in
-  let context_args = provider_context_isolation_args spec context_isolation in
-  match (spec.provider_id, mode) with
-  | "codex", "new" ->
+  let context_args =
+    if lifecycle = "persistent" && context_isolation then
+      failf "persistent-context-isolation-unavailable:%s" spec.provider_id
+    else provider_context_isolation_args spec context_isolation
+  in
+  match (spec.provider_id, lifecycle, mode) with
+  | "codex", "turn", "new" ->
       [ executable; "exec"; "--json"; "--color"; "never";
         "--skip-git-repo-check"; "-C"; cwd ]
       @ context_args @ model_args @ unsafe_args @ [ prompt ]
-  | "codex", "resume" ->
+  | "codex", "turn", "resume" ->
       [ executable; "exec"; "--json"; "--color"; "never";
         "--skip-git-repo-check"; "-C"; cwd ]
       @ context_args @ model_args @ unsafe_args
       @ [ "resume"; provider_session; prompt ]
-  | "claude", "new" ->
+  | "claude", "turn", "new" ->
       [ executable; "--print"; "--output-format"; "stream-json"; "--verbose";
         "--session-id"; session_id ]
       @ context_args @ model_args @ unsafe_args @ [ prompt ]
-  | "claude", "resume" ->
+  | "claude", "turn", "resume" ->
       [ executable; "--print"; "--output-format"; "stream-json"; "--verbose";
         "--resume"; provider_session ]
       @ context_args @ model_args @ unsafe_args @ [ prompt ]
-  | "grok", "new" ->
+  | "grok", "turn", "new" ->
       [ executable; "--no-leader"; "--cwd"; cwd; "--output-format";
         "streaming-json"; "--session-id"; session_id ]
       @ context_args @ model_args @ unsafe_args @ [ "-p"; prompt ]
-  | "grok", "resume" ->
+  | "grok", "turn", "resume" ->
       [ executable; "--no-leader"; "--cwd"; cwd; "--output-format";
         "streaming-json"; "--resume"; provider_session ]
       @ context_args @ model_args @ unsafe_args @ [ "-p"; prompt ]
-  | "opencode", "new" ->
+  | "opencode", "turn", "new" ->
       [ executable; "run"; "--format"; "json"; "--dir"; cwd ]
       @ context_args @ model_args @ unsafe_args @ [ prompt ]
-  | "opencode", "resume" ->
+  | "opencode", "turn", "resume" ->
       [ executable; "run"; "--format"; "json"; "--dir"; cwd; "--session";
         provider_session ]
       @ context_args @ model_args @ unsafe_args @ [ prompt ]
-  | _, _ -> failf "unsupported-provider-mode:%s:%s" spec.provider_id mode
+  | "codex", "persistent", "new" ->
+      [ executable; "--no-alt-screen"; "-C"; cwd ]
+      @ model_args @ unsafe_args @ [ prompt ]
+  | _, "persistent", _ ->
+      failf "persistent-provider-unavailable:%s:%s" spec.provider_id mode
+  | _, _, _ ->
+      failf "unsupported-provider-mode:%s:%s:%s" spec.provider_id lifecycle mode
 
-let provider_plan cli =
+let provider_plan cli default_lifecycle =
   let spec = required cli "--provider" |> provider_spec in
   let executable =
     match provider_executable spec with
@@ -6740,6 +6758,13 @@ let provider_plan cli =
   in
   let mode = Option.value ~default:"new" (optional cli "--mode") in
   if mode <> "new" && mode <> "resume" then failf "invalid-provider-mode:%s" mode;
+  let lifecycle =
+    Option.value ~default:default_lifecycle (optional cli "--lifecycle")
+  in
+  if lifecycle <> "turn" && lifecycle <> "persistent" then
+    failf "invalid-provider-lifecycle:%s" lifecycle;
+  if lifecycle = "persistent" && mode <> "new" then
+    failf "persistent-provider-resume-unavailable:%s" spec.provider_id;
   let cwd = cwd_option cli in
   let session_id = required cli "--session-id" in
   let provider_session = Option.value ~default:"" (optional cli "--provider-session") in
@@ -6756,10 +6781,13 @@ let provider_plan cli =
   let context_isolation = flag cli "--isolate-context" in
   let prompt = provider_prompt cli in
   let argv =
-    provider_argv spec executable mode cwd session_id provider_session model
-      unsafe_auto context_isolation prompt
+    provider_argv spec lifecycle executable mode cwd session_id provider_session
+      model unsafe_auto context_isolation prompt
   in
-  { plan_spec = spec; plan_mode = mode; plan_executable = executable;
+  { plan_spec = spec; plan_lifecycle = lifecycle;
+    plan_stdin_authority =
+      (if lifecycle = "persistent" then "loom-lease" else "closed");
+    plan_mode = mode; plan_executable = executable;
     plan_cwd = cwd; plan_session_id = session_id;
     plan_provider_session = provider_session; plan_model = model;
     plan_unsafe_auto = unsafe_auto; plan_context_isolation = context_isolation;
@@ -6777,8 +6805,9 @@ let redacted_provider_argv plan =
 
 let provider_plan_json plan =
   Printf.sprintf
-    "{\"schema\":%s,\"provider\":%s,\"mode\":%s,\"executable\":%s,\"stream\":%s,\"credential_authority\":\"native\",\"session_binding\":%s,\"loom_session\":%s,\"provider_session\":%s,\"cwd\":%s,\"model\":%s,\"unsafe_auto\":%s,\"context_isolation\":%s,\"prompt_bytes\":%d,\"prompt_sha256\":%s,\"argv_sha256\":%s,\"argv\":%s}"
+    "{\"schema\":%s,\"provider\":%s,\"lifecycle\":%s,\"stdin_authority\":%s,\"mode\":%s,\"executable\":%s,\"stream\":%s,\"credential_authority\":\"native\",\"session_binding\":%s,\"loom_session\":%s,\"provider_session\":%s,\"cwd\":%s,\"model\":%s,\"unsafe_auto\":%s,\"context_isolation\":%s,\"prompt_bytes\":%d,\"prompt_sha256\":%s,\"argv_sha256\":%s,\"argv\":%s}"
     (json_quote provider_abi_schema) (json_quote plan.plan_spec.provider_id)
+    (json_quote plan.plan_lifecycle) (json_quote plan.plan_stdin_authority)
     (json_quote plan.plan_mode) (json_quote plan.plan_executable)
     (json_quote plan.plan_spec.provider_stream)
     (json_quote plan.plan_spec.provider_session_binding)
@@ -6791,12 +6820,13 @@ let provider_plan_json plan =
     (json_string_list (redacted_provider_argv plan))
 
 let provider_plan_command cli =
-  let plan = provider_plan cli in
+  let plan = provider_plan cli "turn" in
   if flag cli "--json" then Printf.printf "%s\n%!" (provider_plan_json plan)
   else
     Printf.printf
-      "LOOM_PROVIDER_PLAN schema=%s provider=%s mode=%s stream=%s credential_authority=native session_binding=%s prompt_bytes=%d prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
-      provider_abi_schema plan.plan_spec.provider_id plan.plan_mode
+      "LOOM_PROVIDER_PLAN schema=%s provider=%s lifecycle=%s stdin_authority=%s mode=%s stream=%s credential_authority=native session_binding=%s prompt_bytes=%d prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
+      provider_abi_schema plan.plan_spec.provider_id plan.plan_lifecycle
+      plan.plan_stdin_authority plan.plan_mode
       plan.plan_spec.provider_stream plan.plan_spec.provider_session_binding
       (String.length plan.plan_prompt) (sha256 plan.plan_prompt)
       (command_argv_digest (Array.of_list plan.plan_argv))
@@ -6804,7 +6834,9 @@ let provider_plan_command cli =
       (if plan.plan_context_isolation then "true" else "false")
 
 let provider_start_command cli =
-  let plan = provider_plan cli in
+  let plan = provider_plan cli "turn" in
+  if plan.plan_lifecycle <> "turn" then
+    failf "provider-start-requires-turn-lifecycle";
   let runtime = Unix.realpath Sys.executable_name in
   let start_cli =
     { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2;
@@ -6819,6 +6851,23 @@ let provider_start_command cli =
     (if plan.plan_unsafe_auto then "true" else "false")
     (if plan.plan_context_isolation then "true" else "false")
 
+let provider_open_command cli =
+  let plan = provider_plan cli "persistent" in
+  if plan.plan_lifecycle <> "persistent" then
+    failf "provider-open-requires-persistent-lifecycle";
+  let runtime = Unix.realpath Sys.executable_name in
+  let start_cli =
+    { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2;
+      rest = runtime :: "_provider-tui" :: plan.plan_argv }
+  in
+  start_command start_cli;
+  Printf.printf
+    "LOOM_PROVIDER_OPENED schema=%s provider=%s lifecycle=persistent stdin_authority=loom-lease session_binding=%s prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=false\n%!"
+    provider_abi_schema plan.plan_spec.provider_id
+    plan.plan_spec.provider_session_binding (sha256 plan.plan_prompt)
+    (command_argv_digest (Array.of_list plan.plan_argv))
+    (if plan.plan_unsafe_auto then "true" else "false")
+
 let provider_auth_login_command cli =
   let spec = required cli "--provider" |> provider_spec in
   let executable =
@@ -6831,28 +6880,36 @@ let provider_auth_login_command cli =
     provider_abi_schema spec.provider_id;
   Unix.execv executable (Array.of_list (executable :: spec.provider_login_args))
 
+let provider_clean_environment () =
+  let harness_keys =
+    [ "CODEX_SESSION_ID"; "CODEX_THREAD_ID"; "CODEX_CI"; "CLAUDECODE";
+      "CLAUDE_CODE_ENTRYPOINT"; "CLAUDE_CODE_SESSION_ID"; "TMUX";
+      "TMUX_PANE"; "TMUX_TMPDIR" ]
+  in
+  Unix.environment () |> Array.to_list
+  |> List.filter (fun entry ->
+         not
+           (List.exists
+              (fun key -> starts_with entry (key ^ "="))
+              harness_keys))
+  |> Array.of_list
+
 let provider_exec_command arguments =
   match arguments with
   | executable :: tail ->
       let null = Unix.openfile "/dev/null" [ O_RDONLY ] 0 in
       Unix.dup2 null Unix.stdin;
       if null <> Unix.stdin then Unix.close null;
-      let harness_keys =
-        [ "CODEX_SESSION_ID"; "CODEX_THREAD_ID"; "CODEX_CI"; "CLAUDECODE";
-          "CLAUDE_CODE_ENTRYPOINT"; "CLAUDE_CODE_SESSION_ID"; "TMUX";
-          "TMUX_PANE"; "TMUX_TMPDIR" ]
-      in
-      let environment =
-        Unix.environment () |> Array.to_list
-        |> List.filter (fun entry ->
-               not
-                 (List.exists
-                    (fun key -> starts_with entry (key ^ "="))
-                    harness_keys))
-        |> Array.of_list
-      in
-      Unix.execve executable (Array.of_list (executable :: tail)) environment
+      Unix.execve executable (Array.of_list (executable :: tail))
+        (provider_clean_environment ())
   | [] -> failf "provider-exec-requires-an-executable"
+
+let provider_tui_command arguments =
+  match arguments with
+  | executable :: tail ->
+      Unix.execve executable (Array.of_list (executable :: tail))
+        (provider_clean_environment ())
+  | [] -> failf "provider-tui-requires-an-executable"
 
 type obligation_paths = {
   obligation_dir : string;
@@ -7926,7 +7983,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version
 
 let arguments_after_command () =
@@ -7939,6 +7996,8 @@ let main () =
     let command = Sys.argv.(1) in
     if command = "_provider-exec" then
       provider_exec_command (arguments_after_command ())
+    else if command = "_provider-tui" then
+      provider_tui_command (arguments_after_command ())
     else
       let booleans =
         [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
@@ -7960,6 +8019,7 @@ let main () =
     | "provider-status" -> provider_status_command cli; 0
     | "provider-plan" -> provider_plan_command cli; 0
     | "provider-start" -> provider_start_command cli; 0
+    | "provider-open" -> provider_open_command cli; 0
     | "provider-auth-login" -> provider_auth_login_command cli
     | "obligation-open" -> obligation_open_command cli; 0
     | "obligation-consume" -> obligation_consume_command cli; 0

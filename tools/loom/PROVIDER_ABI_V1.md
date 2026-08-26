@@ -36,7 +36,9 @@ claim.
 
 ### `provider-plan`
 
-Constructs a provider-native headless argv without executing it. The JSON plan
+Constructs a provider-native argv without executing it. The default
+`--lifecycle turn` is headless. `--lifecycle persistent` plans a long-lived
+interactive provider whose stdin authority is held by a Loom input lease. The JSON plan
 contains:
 
 - provider and ABI identity;
@@ -49,6 +51,7 @@ contains:
 - redacted argv;
 - explicit unsafe-auto state;
 - explicit context-isolation state.
+- lifecycle and stdin-authority contracts.
 
 The raw prompt is never rendered. Prompt files must be regular files, are capped
 at 1 MiB, and cannot contain NUL.
@@ -61,6 +64,20 @@ identity variables, and calls `execve` directly; no shell parses the provider
 argv. Provider credential variables remain under the native CLI's authority.
 The existing Loom journal, PTY, replay, crash, recover, and snapshot contracts
 then apply unchanged.
+
+### `provider-open`
+
+Starts a persistent interactive provider under the same Guardian custody.
+Unlike `provider-start`, the internal OCaml trampoline keeps the PTY connected
+and gives input authority only to Loom's exclusive interactive lease and
+authenticated wake path. Kernel recovery preserves the Guardian PID, provider
+PID, instance identity, output cursor, and provider conversation.
+
+The first vertical supports Codex with inline TUI mode. Persistent Claude,
+Grok, and OpenCode adapters are refused until each has a tested native input and
+session-resume contract. `provider-open` also refuses `--isolate-context`:
+Codex TUI does not currently expose isolation equivalent to the headless
+`--ephemeral --ignore-rules` contract.
 
 ### `provider-auth-login`
 
@@ -95,7 +112,9 @@ the event stream.
 The internal trampoline always removes Codex session IDs, `CLAUDECODE` and
 related Claude harness IDs, and tmux identity variables so a nested provider
 cannot mistake the parent harness for its own session. `--isolate-context` is
-not a network, filesystem, process, or provider-account sandbox.
+not a network, filesystem, process, or provider-account sandbox. These mappings
+apply to `lifecycle=turn`; persistent mode fails closed when isolation is
+requested.
 
 ## Permission Boundary
 
@@ -124,7 +143,8 @@ missing, non-regular, or non-executable overrides are refused.
 CLIs to test catalog normalization, native credential authority, nonzero auth
 status parsing, prompt redaction, unsafe opt-in, UUID enforcement, override
 validation, context-isolation mappings, inherited-harness removal, native login
-delegation, stdin closure, Guardian execution, and verified terminal replay.
+delegation, headless stdin closure, persistent input leasing, kernel replacement
+with stable Guardian/provider identities, and verified terminal replay.
 
 On 2026-08-25, the retained three-agent canary launched real Codex, Grok, and
 MiniMax-via-OpenCode processes exclusively through `bin/loom provider-start`.
@@ -141,7 +161,8 @@ Provider ABI v1 does not yet:
 
 - project stream-observed provider session IDs into a durable provider catalog;
 - normalize provider event payloads into a shared typed event algebra;
-- expose a unified interactive multi-turn input protocol;
+- expose persistent interactive adapters beyond Codex;
+- resume a persistent provider after Guardian or host loss;
 - broker or replicate credentials;
 - prove provider readiness by making a paid model request during status;
 - admit provider launch capabilities through a native Sounio policy proof.

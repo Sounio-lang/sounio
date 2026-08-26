@@ -128,7 +128,8 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-cross-node-replay-v1 \
   loom-exclusive-input-lease-v1 loom-read-only-gui-v1 \
   loom-fusion-cockpit-v1 loom-authority-overlay-v1 \
-  coord-cockpit-snapshot-v1 loom-coord-transport-v1 \
+  coord-cockpit-snapshot-v1 loom-persistent-provider-custody-v1 \
+  coord-reply-command-v1 loom-coord-transport-v1 \
   coord-generation-scoped-wake-v1 \
   loom-recoverable-guardian-v1 loom-kernel-recovery-v1 loom-dual-journal-v1 \
   loom-persistent-fleet-catalog-v1 loom-post-pod-reconcile-v1 \

@@ -30,7 +30,7 @@ git -C "$REPO" commit -qm 'seed'
 git -C "$REPO" worktree add -q -b second-lane "$TEST_ROOT/second-worktree"
 
 run_coord() {
-  SOUNIO_COORD_DIR="$STATE" "$TOOL" "$@"
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 "$TOOL" "$@"
 }
 
 output="$(
@@ -185,14 +185,14 @@ grep -q "^WAIT_TIMEOUT message_id=$first_id timeout_seconds=0$" <<< "$output" ||
 
 reply_output="$(
   cd "$TEST_ROOT/second-worktree"
-  run_coord send --agent agent-b --lane codegen --kind reply \
+  run_coord reply --agent agent-b --lane codegen \
     --reply-to "$second_id" --message 'threaded reply'
 )"
 reply_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
 thread_id="$(sed -n 's/.* thread_id=\([^ ]*\).*/\1/p' <<< "$reply_output")"
 [[ "$thread_id" == "$second_id" ]] || fail 'reply did not inherit the request thread'
 grep -q 'to_agent=agent-a to_lane=parser' <<< "$reply_output" || \
-  fail 'reply did not inherit the request sender as its destination'
+  fail 'reply command did not infer the request sender as its destination'
 output="$(
   cd "$REPO"
   run_coord inbox --agent agent-a --lane parser --thread "$thread_id"

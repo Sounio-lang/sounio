@@ -467,6 +467,8 @@ else
     printf 'capability=loom-fusion-cockpit-v1\n'
     printf 'capability=loom-authority-overlay-v1\n'
     printf 'capability=coord-cockpit-snapshot-v1\n'
+    printf 'capability=loom-persistent-provider-custody-v1\n'
+    printf 'capability=coord-reply-command-v1\n'
     printf 'capability=loom-coord-transport-v1\n'
     printf 'capability=coord-generation-scoped-wake-v1\n'
     printf 'capability=loom-recoverable-guardian-v1\n'

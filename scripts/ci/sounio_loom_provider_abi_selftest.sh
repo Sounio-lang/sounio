@@ -11,6 +11,7 @@ STATE_DIR="$TEST_ROOT/state"
 SESSION_ID='11111111-1111-4111-8111-111111111111'
 AGENT='provider-abi-test'
 LANE='codex-headless'
+PERSISTENT_LANE='codex-persistent'
 
 fail() {
   printf 'sounio-loom-provider-abi-selftest: FAIL: %s test_root=%s\n' "$*" "$TEST_ROOT" >&2
@@ -20,6 +21,8 @@ fail() {
 cleanup() {
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 || true
+  "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+    --agent "$AGENT" --lane "$PERSISTENT_LANE" >/dev/null 2>&1 || true
   if [[ "${SOUNIO_LOOM_KEEP_TEST_ROOT:-0}" != 1 ]]; then
     rm -rf "$TEST_ROOT"
   fi
@@ -58,6 +61,18 @@ case "$name:${1:-}:${2:-}" in
     printf '{"type":"thread.started","thread_id":"provider-abi-thread"}\n'
     printf 'FAKE_CODEX_OUTPUT:%s\n' "$prompt"
     sleep 1
+    ;;
+  fake-codex:--no-alt-screen:*)
+    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
+      printf 'parent harness identity leaked into persistent provider process\n' >&2
+      exit 43
+    fi
+    prompt="${!#}"
+    printf 'FAKE_CODEX_TUI_READY:%s\n' "$prompt"
+    while IFS= read -r wake; do
+      printf 'FAKE_CODEX_TUI_WAKE:%s\n' "$wake"
+      [[ "$wake" == /exit ]] && break
+    done
     ;;
   fake-claude:--version:)
     printf 'Claude Code provider-abi-test\n'
@@ -102,7 +117,7 @@ export SOUNIO_LOOM_PROVIDER_OPENCODE="$TEST_ROOT/fake-opencode"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 version="$($LOOM runtime-version)"
-grep -q '^runtime_version=2026.08.25.11$' <<< "$version" || \
+grep -q '^runtime_version=2026.08.26.14$' <<< "$version" || \
   fail 'public loom launcher selected the wrong runtime'
 
 providers="$($LOOM provider-list --json)"
@@ -132,11 +147,58 @@ if grep -Fq "$secret" <<< "$plan"; then
 fi
 jq -e --arg digest "$secret_sha" '
   .schema == "loom-provider-abi-v1" and .provider == "codex" and
+  .lifecycle == "turn" and .stdin_authority == "closed" and
   .prompt_sha256 == $digest and .prompt_bytes == 26 and
   .unsafe_auto == false and .context_isolation == false and
   (.argv | index("--dangerously-bypass-approvals-and-sandbox") == null) and
   (.argv | index("--ephemeral") == null)' \
   <<< "$plan" >/dev/null || fail 'safe Codex plan has the wrong custody fields'
+
+persistent_plan="$($LOOM provider-plan --provider codex --lifecycle persistent \
+  --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt "$secret" --json)"
+if grep -Fq "$secret" <<< "$persistent_plan"; then
+  fail 'persistent provider plan disclosed the raw prompt'
+fi
+jq -e '.lifecycle == "persistent" and .stdin_authority == "loom-lease" and
+  .context_isolation == false and (.argv | index("--no-alt-screen") != null) and
+  (.argv | index("exec") == null)' <<< "$persistent_plan" >/dev/null || \
+  fail 'persistent Codex plan has the wrong input authority'
+
+if "$LOOM" provider-plan --provider codex --lifecycle persistent \
+  --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt test --isolate-context \
+  > "$TEST_ROOT/persistent-isolation.out" 2> "$TEST_ROOT/persistent-isolation.err"; then
+  fail 'persistent provider silently accepted headless context isolation'
+fi
+grep -q 'persistent-context-isolation-unavailable:codex' \
+  "$TEST_ROOT/persistent-isolation.err" || \
+  fail 'persistent context isolation was refused by the wrong rule'
+
+if "$LOOM" provider-plan --provider claude --lifecycle persistent \
+  --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt test \
+  > "$TEST_ROOT/persistent-claude.out" 2> "$TEST_ROOT/persistent-claude.err"; then
+  fail 'persistent provider accepted an unimplemented Claude adapter'
+fi
+grep -q 'persistent-provider-unavailable:claude:new' \
+  "$TEST_ROOT/persistent-claude.err" || \
+  fail 'unimplemented persistent provider was refused by the wrong rule'
+
+if "$LOOM" provider-start --provider codex --lifecycle persistent \
+  --state-dir "$STATE_DIR" --agent "$AGENT" --lane refused-start \
+  --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt test \
+  > "$TEST_ROOT/persistent-start.out" 2> "$TEST_ROOT/persistent-start.err"; then
+  fail 'provider-start crossed into persistent lifecycle'
+fi
+grep -q 'provider-start-requires-turn-lifecycle' "$TEST_ROOT/persistent-start.err" || \
+  fail 'provider-start lifecycle sabotage was refused by the wrong rule'
+
+if "$LOOM" provider-open --provider codex --lifecycle turn \
+  --state-dir "$STATE_DIR" --agent "$AGENT" --lane refused-open \
+  --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt test \
+  > "$TEST_ROOT/turn-open.out" 2> "$TEST_ROOT/turn-open.err"; then
+  fail 'provider-open crossed into turn lifecycle'
+fi
+grep -q 'provider-open-requires-persistent-lifecycle' "$TEST_ROOT/turn-open.err" || \
+  fail 'provider-open lifecycle sabotage was refused by the wrong rule'
 
 unsafe_plan="$($LOOM provider-plan --provider codex --session-id "$SESSION_ID" \
   --cwd "$TEST_ROOT" --prompt "$secret" --unsafe-auto --json)"
@@ -257,4 +319,96 @@ grep -q "FAKE_CODEX_OUTPUT:$run_prompt" <<< "$replay" || \
 grep -q 'source=offline' "$TEST_ROOT/snapshot.meta" || \
   fail 'terminal provider replay did not use verified offline custody'
 
-printf 'sounio-loom-provider-abi-selftest: PASS providers=4 credentials=native prompt=redacted unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed session_binding=typed replay=verified\n'
+persistent_prompt='PERSISTENT_INITIAL_WITNESS'
+CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
+CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=parent CLAUDE_CODE_SESSION_ID=parent-claude \
+TMUX=parent-tmux TMUX_PANE=parent-pane TMUX_TMPDIR=parent-tmp \
+"$LOOM" provider-open --provider codex --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$PERSISTENT_LANE" --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$persistent_prompt" \
+  > "$TEST_ROOT/open.out"
+grep -q 'LOOM_PROVIDER_OPENED schema=loom-provider-abi-v1 provider=codex lifecycle=persistent stdin_authority=loom-lease' \
+  "$TEST_ROOT/open.out" || fail 'provider-open omitted its persistent custody receipt'
+
+persistent_descriptor="$STATE_DIR/sessions/$AGENT--$PERSISTENT_LANE/session.state"
+before_status="$($LOOM status --machine --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT")"
+before_instance="$(sed -n 's/^instance_id=//p' <<< "$before_status")"
+before_kernel="$(sed -n 's/^daemon_pid=//p' <<< "$before_status")"
+before_guardian="$(sed -n 's/^guardian_pid=//p' <<< "$before_status")"
+before_harness="$(sed -n 's/^harness_pid=//p' <<< "$before_status")"
+[[ -n "$before_instance" && -n "$before_kernel" && -n "$before_guardian" && \
+  -n "$before_harness" ]] || fail 'provider-open omitted its process authority lattice'
+
+persistent_replay=''
+for _ in $(seq 1 100); do
+  persistent_replay="$($LOOM snapshot --state-dir "$STATE_DIR" \
+    --agent "$AGENT" --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT" --cursor 0 \
+    2>/dev/null || true)"
+  grep -q "FAKE_CODEX_TUI_READY:$persistent_prompt" <<< "$persistent_replay" && break
+  sleep 0.05
+done
+grep -q "FAKE_CODEX_TUI_READY:$persistent_prompt" <<< "$persistent_replay" || \
+  fail 'persistent provider initial output was not durably visible'
+
+"$LOOM" crash-kernel --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT" --at now >/dev/null
+for _ in $(seq 1 100); do
+  if ! "$LOOM" status --state-dir "$STATE_DIR" --agent "$AGENT" \
+    --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+guardian_during="$($LOOM guardian-status --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT")"
+grep -q "instance_id=$before_instance" <<< "$guardian_during" || \
+  fail 'Guardian lost the persistent provider generation after kernel death'
+grep -q "guardian_pid=$before_guardian" <<< "$guardian_during" || \
+  fail 'Guardian PID changed after kernel death'
+grep -q "harness_pid=$before_harness" <<< "$guardian_during" || \
+  fail 'provider PID changed after kernel death'
+
+"$LOOM" recover --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT" > "$TEST_ROOT/recover.out"
+after_status="$($LOOM status --machine --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT")"
+after_instance="$(sed -n 's/^instance_id=//p' <<< "$after_status")"
+after_kernel="$(sed -n 's/^daemon_pid=//p' <<< "$after_status")"
+after_guardian="$(sed -n 's/^guardian_pid=//p' <<< "$after_status")"
+after_harness="$(sed -n 's/^harness_pid=//p' <<< "$after_status")"
+[[ "$after_instance" == "$before_instance" ]] || fail 'recovery changed provider generation'
+[[ "$after_guardian" == "$before_guardian" ]] || fail 'recovery replaced the Guardian'
+[[ "$after_harness" == "$before_harness" ]] || fail 'recovery replaced the provider process'
+[[ "$after_kernel" != "$before_kernel" ]] || fail 'kernel sabotage did not replace the kernel'
+
+post_recovery_prompt='PERSISTENT_AFTER_RECOVERY_WITNESS'
+"$LOOM" wake --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$PERSISTENT_LANE" --session-id "$SESSION_ID" \
+  --message-id provider-open-recovery --prompt "$post_recovery_prompt" \
+  --cwd "$TEST_ROOT" >/dev/null
+for _ in $(seq 1 100); do
+  persistent_replay="$($LOOM snapshot --state-dir "$STATE_DIR" \
+    --agent "$AGENT" --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT" --cursor 0 \
+    2>/dev/null || true)"
+  grep -q "FAKE_CODEX_TUI_WAKE:$post_recovery_prompt" <<< "$persistent_replay" && break
+  sleep 0.05
+done
+grep -q "FAKE_CODEX_TUI_WAKE:$post_recovery_prompt" <<< "$persistent_replay" || \
+  fail 'recovered kernel could not deliver a second provider input'
+
+"$LOOM" stop --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null
+for _ in $(seq 1 100); do
+  [[ "$(sed -n 's/^state=//p' "$persistent_descriptor" 2>/dev/null || true)" == exited ]] && break
+  sleep 0.05
+done
+journal="$(sed -n 's/^journal_file=//p' "$persistent_descriptor")"
+guardian_journal="$(sed -n 's/^guardian_journal_file=//p' "$persistent_descriptor")"
+"$LOOM" verify-journal --journal "$journal" | grep -q '^JOURNAL_OK ' || \
+  fail 'persistent provider semantic journal did not verify'
+"$LOOM" verify-guardian-journal --journal "$guardian_journal" | \
+  grep -q '^GUARDIAN_JOURNAL_OK ' || \
+  fail 'persistent provider Guardian journal did not verify'
+
+printf 'sounio-loom-provider-abi-selftest: PASS providers=4 credentials=native prompt=redacted unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed persistent_stdin=loom-lease kernel_recovery=stable-provider session_binding=typed replay=verified\n'

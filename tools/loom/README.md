@@ -98,6 +98,8 @@ bin/loom provider-plan --provider codex --session-id UUID --cwd DIR \
   --prompt-file PROMPT --isolate-context --json
 bin/loom provider-start --provider codex --agent codex --lane work \
   --session-id UUID --cwd DIR --prompt-file PROMPT --isolate-context
+bin/loom provider-open --provider codex --agent codex --lane persistent-work \
+  --session-id UUID --cwd DIR --prompt-file PROMPT
 bin/loom provider-auth-login --provider codex
 ```
 
@@ -117,6 +119,17 @@ OpenCode are supported. Their stream, authentication, and session-binding
 differences remain typed rather than being flattened into a false common
 denominator. The complete contract and current boundaries are in
 `tools/loom/PROVIDER_ABI_V1.md`.
+
+`provider-open` is the persistent counterpart. Its provider stdin remains
+attached to the Guardian-owned PTY and is reachable only through Loom's
+exclusive input lease or authenticated wake transport. The initial vertical is
+Codex-only and fails closed for persistent resume or context-isolation requests
+that the native TUI cannot honor. Killing and recovering the disposable Loom
+kernel preserves the Guardian, Codex process, instance identity, conversation,
+and durable output cursor. A woken lane can answer with
+`bin/sounio-coord reply --agent A --lane L --reply-to MESSAGE_ID --message TEXT`;
+the command derives the original sender and thread instead of requiring the
+provider to reconstruct routing metadata.
 
 ## Durable Obligations
 
