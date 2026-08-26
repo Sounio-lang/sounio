@@ -10901,6 +10901,108 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
         } else {
             compile_or()
             emit_store_var(start_slot)
+            // ISSUE1678_SINGLE_ELEMENT_BORROW_X86
+            if TK[EP as usize] == 42 {
+                // A closed bracket is a single-element borrow, not a malformed
+                // slice. Keep the index in a spill slot while resolving the
+                // base representation: aggregate arrays are pointer-per-slot;
+                // scalar arrays expose the address of the inline cell.
+                EP = EP + 1
+                let lvi = var_find_idx(rns, rne)
+                var base_ptr_slot: i64 = 0
+                var base_len_slot: i64 = 0
+                var base_len_const: i64 = 0
+                var has_const_len: i64 = 0
+                var elem_ty: i64 = 1
+                var elem_hash: i64 = 0
+                var esiz: i64 = 8
+                var ok_base: i64 = 0
+                var allow_mut: i64 = 0
+                if lvi >= 0 {
+                    let lty = VAR_TY[lvi as usize]
+                    let lhash = VAR_TY_HASH[lvi as usize]
+                    base_ptr_slot = VAR_SLOT[lvi as usize]
+                    if lty == 8 {
+                        base_len_const = VAR_ALEN[lvi as usize]
+                        has_const_len = 1
+                        esiz = VAR_ESIZ[lvi as usize]
+                        if arr_hash_elem_ty(lhash) != 0 { elem_ty = arr_hash_elem_ty(lhash) }
+                        elem_hash = arr_hash_elem_hash(lhash)
+                        ok_base = 1
+                        if want_mut == 0 || VAR_MUT[lvi as usize] != 0 { allow_mut = 1 }
+                    } else if type_is_slice_ref(lty, lhash) {
+                        let inner_hash = ref_hash_inner_hash(lhash)
+                        base_len_slot = VAR_LEN_SLOT[lvi as usize]
+                        esiz = arr_hash_esiz(inner_hash)
+                        if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                        elem_hash = arr_hash_elem_hash(inner_hash)
+                        ok_base = 1
+                        if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+                    } else if type_is_array_ref(lty, lhash) {
+                        let inner_hash = ref_hash_inner_hash(lhash)
+                        base_len_const = arr_hash_alen(inner_hash)
+                        has_const_len = 1
+                        esiz = arr_hash_esiz(inner_hash)
+                        if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                        elem_hash = arr_hash_elem_hash(inner_hash)
+                        ok_base = 1
+                        if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+                    }
+                } else {
+                    let gi = gl_find(rns, rne)
+                    if gi >= 0 && GL_TY[gi as usize] == 8 {
+                        base_len_const = GL[(gi * 4 + 3) as usize]
+                        has_const_len = 1
+                        esiz = GL[(gi * 4 + 2) as usize]
+                        if arr_hash_elem_ty(GL_TY_HASH[gi as usize]) != 0 { elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize]) }
+                        elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
+                        ok_base = 1
+                        allow_mut = 1
+                    }
+                }
+                if ok_base == 0 {
+                    tc_error(borrow_tok, "element borrow requires array or slice base")
+                    em(0x31); em(0xc0)
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 10
+                    EXPR_TY_HASH = ref_hash_make(0, 0, want_mut)
+                    return
+                }
+                if want_mut != 0 && allow_mut == 0 {
+                    tc_error_hard(borrow_tok, "Mut borrow requires mutable array or slice source")
+                }
+                emit_load_var(start_slot)
+                em(0x48); em(0x89); em(0xc2)  // mov rdx, rax (index)
+                if has_const_len != 0 { emit_imm64(base_len_const) }
+                else { emit_load_var(base_len_slot) }
+                em(0x48); em(0x39); em(0xc2)  // cmp rdx, rax (index < len)
+                em(0x0f); em(0x82); let elem_index_ok = CL; em32(0)
+                emit_assert_fail()
+                patch32(elem_index_ok, CL)
+                if lvi >= 0 {
+                    emit_load_var(base_ptr_slot)
+                } else {
+                    let gi = gl_find(rns, rne)
+                    if gi >= 0 { emit_imm64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+                    else { em(0x31); em(0xc0) }
+                }
+                em(0x48); em(0x89); em(0xc1)  // mov rcx, rax (base)
+                emit_load_var(start_slot)
+                if esiz == 8 && (elem_ty == 6 || elem_ty == 7 || elem_ty == 8) && elem_hash != 0 {
+                    em(0x48); em(0x8b); em(0x04); em(0xc1)  // mov rax, [rcx + rax*8]
+                } else if esiz == 8 {
+                    em(0x48); em(0x8d); em(0x04); em(0xc1)  // lea rax, [rcx + rax*8]
+                } else if esiz == 1 {
+                    em(0x48); em(0x8d); em(0x04); em(0x01)  // lea rax, [rcx + rax]
+                } else {
+                    em(0x48); em(0x69); em(0xc0); em32(esiz)  // imul rax, rax, esiz
+                    em(0x48); em(0x01); em(0xc8)               // add rax, rcx
+                }
+                EXPR_IS_F64 = 0
+                EXPR_TY = 10
+                EXPR_TY_HASH = ref_hash_make(elem_ty, elem_hash, want_mut)
+                return
+            }
             if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
             if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
                 EP = EP + 1
@@ -32709,6 +32811,108 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
             } else {
                 compile_or_a64()
                 emit_store_var_a64(start_slot)
+                // ISSUE1678_SINGLE_ELEMENT_BORROW_A64
+                if TK[EP as usize] == 42 {
+                    // ARM64 parity for the x86 single-element borrow above.
+                    // Aggregate slots contain pointers; scalar slots are inline.
+                    EP = EP + 1
+                    let lvi = var_find_idx(rns, rne)
+                    var base_ptr_slot: i64 = 0
+                    var base_len_slot: i64 = 0
+                    var base_len_const: i64 = 0
+                    var has_const_len: i64 = 0
+                    var elem_ty: i64 = 1
+                    var elem_hash: i64 = 0
+                    var esiz: i64 = 8
+                    var ok_base: i64 = 0
+                    var allow_mut: i64 = 0
+                    if lvi >= 0 {
+                        let lty = VAR_TY[lvi as usize]
+                        let lhash = VAR_TY_HASH[lvi as usize]
+                        base_ptr_slot = VAR_SLOT[lvi as usize]
+                        if lty == 8 {
+                            base_len_const = VAR_ALEN[lvi as usize]
+                            has_const_len = 1
+                            esiz = VAR_ESIZ[lvi as usize]
+                            if arr_hash_elem_ty(lhash) != 0 { elem_ty = arr_hash_elem_ty(lhash) }
+                            elem_hash = arr_hash_elem_hash(lhash)
+                            ok_base = 1
+                            if want_mut == 0 || VAR_MUT[lvi as usize] != 0 { allow_mut = 1 }
+                        } else if type_is_slice_ref(lty, lhash) {
+                            let inner_hash = ref_hash_inner_hash(lhash)
+                            base_len_slot = VAR_LEN_SLOT[lvi as usize]
+                            esiz = arr_hash_esiz(inner_hash)
+                            if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                            elem_hash = arr_hash_elem_hash(inner_hash)
+                            ok_base = 1
+                            if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+                        } else if type_is_array_ref(lty, lhash) {
+                            let inner_hash = ref_hash_inner_hash(lhash)
+                            base_len_const = arr_hash_alen(inner_hash)
+                            has_const_len = 1
+                            esiz = arr_hash_esiz(inner_hash)
+                            if arr_hash_elem_ty(inner_hash) != 0 { elem_ty = arr_hash_elem_ty(inner_hash) }
+                            elem_hash = arr_hash_elem_hash(inner_hash)
+                            ok_base = 1
+                            if want_mut == 0 || ref_hash_mut(lhash) != 0 { allow_mut = 1 }
+                        }
+                    } else {
+                        let gi = gl_find(rns, rne)
+                        if gi >= 0 && GL_TY[gi as usize] == 8 {
+                            base_len_const = GL[(gi * 4 + 3) as usize]
+                            has_const_len = 1
+                            esiz = GL[(gi * 4 + 2) as usize]
+                            if arr_hash_elem_ty(GL_TY_HASH[gi as usize]) != 0 { elem_ty = arr_hash_elem_ty(GL_TY_HASH[gi as usize]) }
+                            elem_hash = arr_hash_elem_hash(GL_TY_HASH[gi as usize])
+                            ok_base = 1
+                            allow_mut = 1
+                        }
+                    }
+                    if ok_base == 0 {
+                        tc_error(borrow_tok, "element borrow requires array or slice base")
+                        em32(0xD2800000)
+                        EXPR_IS_F64 = 0
+                        EXPR_TY = 10
+                        EXPR_TY_HASH = ref_hash_make(0, 0, want_mut)
+                        return
+                    }
+                    if want_mut != 0 && allow_mut == 0 {
+                        tc_error_hard(borrow_tok, "Mut borrow requires mutable array or slice source")
+                    }
+                    emit_load_var_a64(start_slot)
+                    em32(0xAA0003E9)  // mov x9, x0 (index)
+                    if has_const_len != 0 { emit_imm64_reg_a64(10, base_len_const) }
+                    else { emit_load_var_a64(base_len_slot); em32(0xAA0003EA) }
+                    em32(0xEB00001F | (10 << 16) | (9 << 5))  // cmp x9, x10
+                    let elem_index_ok = CL
+                    em32(0x54000003)  // b.lo ok
+                    emit_assert_fail_a64()
+                    patch_branch_a64(elem_index_ok, CL)
+                    emit_load_var_a64(start_slot)
+                    em32(0xAA0003E9)  // mov x9, x0 (index)
+                    if lvi >= 0 {
+                        emit_load_var_a64(base_ptr_slot)
+                    } else {
+                        let gi = gl_find(rns, rne)
+                        if gi >= 0 { emit_image_addr_a64(GL_BSS_BASE + GL[(gi * 4 + 1) as usize]) }
+                        else { em32(0xD2800000) }
+                    }
+                    if esiz == 8 && (elem_ty == 6 || elem_ty == 7 || elem_ty == 8) && elem_hash != 0 {
+                        em32(0xF8697800)  // ldr x0, [x0, x9, lsl #3]
+                    } else if esiz == 8 {
+                        em32(0x8B090C00)  // add x0, x0, x9, lsl #3
+                    } else if esiz == 1 {
+                        em32(0x8B090000)  // add x0, x0, x9
+                    } else {
+                        emit_imm64_reg_a64(10, esiz)
+                        em32(0x9B0A7D29)  // mul x9, x9, x10
+                        em32(0x8B090000)  // add x0, x0, x9
+                    }
+                    EXPR_IS_F64 = 0
+                    EXPR_TY = 10
+                    EXPR_TY_HASH = ref_hash_make(elem_ty, elem_hash, want_mut)
+                    return
+                }
                 if TK[EP as usize] == 64 { tc_error(borrow_tok, "slice borrows require half-open ranges") }
                 if TK[EP as usize] == 63 || TK[EP as usize] == 64 {
                     EP = EP + 1

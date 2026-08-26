@@ -1,0 +1,44 @@
+//@ run-pass
+// #1678: `&array[index]` is a single-element borrow. It must not be parsed as
+// a malformed slice, and aggregate pointer slots must not be exposed as cells.
+
+struct Cell { value: i64, pad: [i64; 8] }
+
+fn read_cell(p: &Cell) -> i64 with Mut, Panic { (*p).value }
+
+fn bump_cell(p: &!Cell) with Mut, Panic {
+    (*p).value = (*p).value + 1
+}
+
+fn read_i64(p: &i64) -> i64 with Mut, Panic { (*p) }
+
+fn read_array_ref(values: &[i64; 4], index: usize) -> i64 with Mut, Panic {
+    read_i64(&values[index])
+}
+
+fn main() -> i32 with Mut, Panic {
+    // Assign each aggregate slot explicitly: aggregate repeat initialization is
+    // a separate known compiler surface and is not the property under test.
+    var cells = [Cell { value: 0, pad: [0; 8] }; 4]
+    cells[0 as usize] = Cell { value: 11, pad: [0; 8] }
+    cells[1 as usize] = Cell { value: 22, pad: [0; 8] }
+    cells[2 as usize] = Cell { value: 33, pad: [0; 8] }
+    cells[3 as usize] = Cell { value: 44, pad: [0; 8] }
+
+    if read_cell(&cells[2 as usize]) != 33 { return 1 }
+    bump_cell(&!cells[2 as usize])
+    if cells[2 as usize].value != 34 { return 2 }
+    if cells[1 as usize].value != 22 || cells[3 as usize].value != 44 { return 3 }
+
+    var values = [10, 20, 30, 40]
+    if read_i64(&values[2 as usize]) != 30 { return 4 }
+    if read_array_ref(&values, 1 as usize) != 20 { return 5 }
+
+    // Sabotage control for the parser boundary: range syntax must remain a
+    // slice and retain its fat-pointer length.
+    let middle = &values[1..3]
+    if slice_len(middle) != 2 { return 6 }
+    if middle[0 as usize] != 20 || middle[1 as usize] != 30 { return 7 }
+    if read_i64(&middle[1 as usize]) != 30 { return 8 }
+    return 0
+}
