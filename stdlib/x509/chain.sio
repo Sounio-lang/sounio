@@ -436,6 +436,59 @@ pub fn x509_verify_hostname(leaf: &Certificate, hostname: &RawBuf, hostname_len:
                     }
                 }
             }
+        } else if san.tag == GENERAL_NAME_IP_ADDRESS {
+            // A `GeneralName` of type iPAddress (RFC 5280 SubjectAltName)
+            // stores the raw address octets, not ASCII text -- an IPv4 SAN
+            // is exactly 4 bytes. This stack's `tls_connect` only ever
+            // verifies against a dotted-decimal IPv4 hostname string (it
+            // has no DNS resolver and no IPv6 support anywhere), so parse
+            // `hostname` the same way and compare octet-for-octet. Before
+            // this branch existed, NO iPAddress SAN was ever matched --
+            // every `tls_connect` to an IP-literal host against a
+            // correctly-formed certificate (RFC 5280 requires an IP
+            // identity to be encoded as iPAddress, not dNSName) failed
+            // hostname verification unconditionally. Found while
+            // integrating `Sounio-lang/conclave-search`'s DNS-over-HTTPS
+            // resolver against Cloudflare's real, publicly-trusted
+            // `1.1.1.1` certificate.
+            if san.value_len == 4 {
+                var octet_idx: i64 = 0
+                var value: i64 = 0
+                var have_digit: bool = false
+                var ok: bool = true
+                var octets: [i64; 4] = [0; 4]
+                var p: i64 = 0
+                while p < hostname_len && ok {
+                    let c = rawbuf_get(hostname, p)
+                    if c == (46 as i64) {
+                        if !have_digit || octet_idx > 2 || value > 255 {
+                            ok = false
+                        } else {
+                            octets[octet_idx as usize] = value
+                            octet_idx = octet_idx + 1
+                            value = 0
+                            have_digit = false
+                        }
+                    } else if c >= (48 as i64) && c <= (57 as i64) {
+                        value = value * 10 + (c - (48 as i64))
+                        if value > 255 { ok = false }
+                        have_digit = true
+                    } else {
+                        ok = false
+                    }
+                    p = p + 1
+                }
+                if ok && have_digit && octet_idx == 3 {
+                    octets[3] = value
+                    var same3: bool = true
+                    var q: i64 = 0
+                    while q < 4 {
+                        if (san.value[q as usize] as i64) != octets[q as usize] { same3 = false }
+                        q = q + 1
+                    }
+                    if same3 { return true }
+                }
+            }
         }
         i = i + 1
     }
