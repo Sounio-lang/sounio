@@ -131,13 +131,22 @@ for line in open(cat, errors='replace'):
     if m:
         documented.setdefault(int(m.group(1)), set()).add(m.group(2).strip())
 
-# Positive control: the gate must see the two collisions found by hand. If the
-# extraction misses them it is reporting zero for the same reason a grep that
-# matches nothing reports zero.
-control = [n for n in (220, 210) if n in emitted]
-if len(control) != 2:
-    print(f"  CONTROL-FAIL  the message-row extraction did not find E220/E210 (found {control})")
-    print("                the identities are known to exist; a zero here is the extraction, not the tree")
+# Positive control: the extraction must demonstrably see BOTH emission
+# mechanisms, or a zero means the pattern and not the tree.
+#
+# The first version pinned E220 and E210 -- the two collisions found by hand --
+# and broke the moment they were repaired. A control that names the specific
+# defect it watches stops working exactly when the work succeeds, which is the
+# opposite of what a control is for. It now asserts the mechanisms instead: at
+# least one code from the message-row table, at least one from a bespoke
+# error[E<N>] emitter, and a floor on the total.
+mech1 = len(_first)
+mech2 = len(emitted) - len(set(_first) - set())
+tagged = len(re.findall(r'print\("error\[E\d+\]', src))
+if mech1 < 50 or tagged < 20 or len(emitted) < 100:
+    print(f"  CONTROL-FAIL  extraction saw message_rows={mech1} tagged_prints={tagged} total={len(emitted)}")
+    print("                the compiler is known to emit well over 100 codes by two mechanisms;")
+    print("                a low count here is the pattern, not the tree")
     sys.exit(3)
 
 def norm(s):
