@@ -407,9 +407,12 @@ loom_contingent_binary="$loom_project/_build/default/src/sounio-loom-contingent-
   die "Loom build omitted its native Sounio contingent-policy adapter"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
+loom_runtime_version="$(sed -n 's/^runtime_version=//p' <<< "$loom_version_output" | head -1)"
 loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
 [[ "$loom_protocol" == 1 && "$loom_language" == OCaml ]] || \
   die "Loom kernel must report protocol 1 and language OCaml"
+[[ "$loom_runtime_version" == "$runtime_version" ]] || \
+  die "Loom kernel version $loom_runtime_version does not match coordination runtime $runtime_version"
 loom_continuity_probe="$(
   printf '101 111 201 301 401 501 0 0 0 0 1 0 0\n' | "$loom_continuity_binary"
 )"
