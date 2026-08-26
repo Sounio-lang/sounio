@@ -569,6 +569,91 @@ pub fn lower_hard_error_reset() with Mut {
 // IrLowerResult/IrLowerBoxResult construction site.
 pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
+// ============================================================
+// D11: tuple-return element struct types.
+//
+// `let (r, status) = f()` is desugared BY THE PARSER
+// (self-hosted/parser/stmts.sio) into `let __tupN = f()` + `let r = __tupN.0`
+// + `let status = __tupN.1`. lower_let_stmt_ref had no binding rule for a
+// tuple-index field-access initialiser, so `r`'s struct-type slot stayed
+// empty and a later `r.field` fell through field_idx_for_base_ref to
+// field_idx_from_name_simple -- the GLOBAL, name-only, FIRST-REGISTERED-match
+// scan over every struct layout in the linked program. Any other struct
+// anywhere in the closure declaring the same field name at a different index
+// silently won. Measured: x509_parse_certificate's `cert_inner.pos` resolved
+// to tls::client's HsBuf.pos (index 3) instead of asn1::der's DerReader.pos
+// (index 1), reading 8 bytes past the end of a 24-byte DerReader and turning
+// a valid certificate into CHAIN_ERR_BAD_SIGNATURE.
+// See docs/audit/D11_ARENA_SCRATCH_RESET_CROSS_MODULE_CORRUPTION_DISPATCH_2026-08-26.md.
+//
+// Keyed by the callee's INTERNED NAME, not by fn_id: fn_ids are remapped by
+// the cross-module merge (ir_merge_place_and_remap_function), names are not --
+// name identity is exactly what the merge dedups on. A miss (unknown callee,
+// non-tuple return, non-struct element, unregistered layout, pool overflow)
+// leaves the previous behaviour untouched, so this table can only ever add
+// resolution, never mis-resolve.
+let LOWER_RTT_ARITY: i64 = 4
+let LOWER_RTT_MAX_KEY: i64 = 65536
+var LOWER_RTT_NAMEID: [i64; 262144]
+
+// Named-struct type name of tuple element k of a declared tuple type, or the
+// empty name (element k absent, or not a plain named type).
+fn lower_type_list_named_name_at(opt: &Option<Box<TypeExprList>>, k: i64) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if k <= 0 {
+                if (*list).head.kind == TypeExprKind::TypeNamed {
+                    return ir_path_first_name((*list).head.path)
+                }
+                return ir_empty_name()
+            }
+            lower_type_list_named_name_at(&(*list).tail, k - 1)
+        }
+        None => ir_empty_name(),
+    }
+}
+
+// Record, for a function whose DECLARED return type is a tuple, the struct
+// type name of each of its first LOWER_RTT_ARITY elements. Called from every
+// site that already fills in return_struct_name from the same TypeExpr.
+fn lower_record_ret_tuple_names(fn_name: Name, return_type: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    match *return_type {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return }
+            let key = ir_intern_name(fn_name)
+            if key <= 0 || key > LOWER_RTT_MAX_KEY { return }
+            let base = (key - 1) * LOWER_RTT_ARITY
+            var k: i64 = 0
+            while k < LOWER_RTT_ARITY {
+                let elem = lower_type_list_named_name_at(&(*te).type_args, k)
+                var id: i64 = 0
+                if elem.len > 0 {
+                    id = ir_intern_name(elem)
+                }
+                LOWER_RTT_NAMEID[(base + k) as usize] = id
+                k = k + 1
+            }
+        }
+        None => {}
+    }
+}
+
+fn lower_ret_tuple_elem_name(fn_name: Name, k: i64) -> Name with Mut, Panic, Div {
+    if k < 0 || k >= LOWER_RTT_ARITY { return ir_empty_name() }
+    if fn_name.len <= 0 { return ir_empty_name() }
+    let key = ir_intern_name(fn_name)
+    if key <= 0 || key > LOWER_RTT_MAX_KEY { return ir_empty_name() }
+    ir_name_at(LOWER_RTT_NAMEID[((key - 1) * LOWER_RTT_ARITY + k) as usize])
+}
+
+// The desugared `let __tupN = f()` and its `let x = __tupN.k` element bindings
+// are emitted contiguously and in source order by parse_block, so remembering
+// only the most recent tuple-producing temp is enough to link them. Both are
+// interned ids (0 = none) rather than Names: a module-level `var` of struct
+// type is not a shape this compiler's own codegen is proven on.
+var LOWER_TUPLET_TMP_ID: i64 = 0
+var LOWER_TUPLET_CALLEE_ID: i64 = 0
+
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
@@ -1775,6 +1860,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                        lower_record_ret_tuple_names(fn_slot_sig.name, &(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -2254,6 +2340,7 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
     fn_slot.return_struct_name = lower_opt_type_named_name(return_type)
+    lower_record_ret_tuple_names(name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3113,6 +3200,7 @@ fn lowerer_preseed_program_items_mut(
                                     fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                     fn_slot_sig.return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                     fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                    lower_record_ret_tuple_names(fn_slot_sig.name, &(*fd).return_type)
                                     fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                     fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                     if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -3247,6 +3335,7 @@ fn ir_fast_summary_preseed_fn_signature(
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
+    lower_record_ret_tuple_names(name, return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3375,6 +3464,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
+    lower_record_ret_tuple_names(name, return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3693,6 +3783,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                 module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                 module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                lower_record_ret_tuple_names(module.functions[fn_id as usize].name, &(*fd).return_type)
                                 module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                 module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3787,6 +3878,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                                         module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                                         module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                                        lower_record_ret_tuple_names(module.functions[fn_id as usize].name, &(*fd).return_type)
                                                         module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                                         module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -4282,6 +4374,7 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).returns_float = lower_opt_return_float_code(&fd.return_type)
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+    lower_record_ret_tuple_names((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*lo).current_func = strategy_func_box
 
@@ -11774,6 +11867,7 @@ impl Lowerer {
         func.returns_float = lower_opt_return_float_code(return_type)
         func.return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
         func.return_struct_name = lower_opt_type_named_name(return_type)
+        lower_record_ret_tuple_names(func.name, return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
@@ -12462,6 +12556,7 @@ impl Lowerer {
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        lower_record_ret_tuple_names((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         // Sprint 44: allocate profiling counter for instrumented functions
@@ -12648,6 +12743,7 @@ impl Lowerer {
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        lower_record_ret_tuple_names((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -13452,6 +13548,16 @@ impl Lowerer {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
                             lo = lo.bind_local_struct_type(s.name, ret_name)
+                        } else {
+                            // D11: an empty return_struct_name means the callee does
+                            // not return a single named struct -- which is also the
+                            // case for a TUPLE return. Remember this temp and its
+                            // callee so the desugared `let x = __tupN.k` bindings that
+                            // parse_block emits immediately after can recover element
+                            // k's struct type. Harmless when the return really is a
+                            // scalar: the lookup then finds no recorded element name.
+                            LOWER_TUPLET_TMP_ID = ir_intern_name(s.name)
+                            LOWER_TUPLET_CALLEE_ID = ir_intern_name(callee_struct_name)
                         }
                     } else {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
@@ -13462,6 +13568,34 @@ impl Lowerer {
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprFieldAccess {
+                    // D11: `let r = __tupN.k`, the parser's desugaring of
+                    // `let (r, ...) = f()`. Recover element k's struct type from the
+                    // callee remembered at the immediately-preceding
+                    // `let __tupN = f()` and bind it, so a later `r.field` resolves
+                    // through field_idx_from_name (struct-scoped) instead of falling
+                    // to field_idx_from_name_simple's first-registered-match scan.
+                    // Guarded on the temp's own name matching, on the element being a
+                    // registered struct layout, and on a tuple return actually having
+                    // been recorded -- any miss leaves the previous behaviour intact.
+                    let d11_tuple_idx = lower_name_tuple_index((*expr_box).name)
+                    if d11_tuple_idx >= 0 && LOWER_TUPLET_TMP_ID != 0 {
+                        match (*expr_box).left {
+                            Some(d11_base) => {
+                                if (*d11_base).kind == ExprKind::ExprIdent
+                                    && ir_intern_name((*d11_base).name) == LOWER_TUPLET_TMP_ID {
+                                    let d11_elem = lower_ret_tuple_elem_name(
+                                        ir_name_at(LOWER_TUPLET_CALLEE_ID),
+                                        d11_tuple_idx
+                                    )
+                                    if d11_elem.len > 0
+                                        && lower_struct_layout_index_of(&(*lo.struct_layouts), d11_elem) >= 0 {
+                                        lo = lo.bind_local_struct_type(s.name, d11_elem)
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     // `let p = h.inner` where the FIELD is a Box: propagate "Box" into the
                     // local's struct-type slot, exactly as the Box::new branch above does, so
                     // that `*p` lowers to the field-0 read (box deref through the handle)
