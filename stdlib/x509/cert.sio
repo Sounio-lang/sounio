@@ -8,6 +8,7 @@
 
 use asn1::der::*
 use bignum::bigint::*
+use crypto::ecdsa_p256::*
 use crypto::pkcs1::*
 use hash::sha1::*
 use hash::sha256::*
@@ -33,6 +34,16 @@ pub const X509_ERR_TOO_MANY_ENTRIES: i64 = 0 - 2
 pub const X509_ERR_VALUE_TOO_LONG: i64 = 0 - 3
 pub const X509_ERR_SIG_ALG_MISMATCH: i64 = 0 - 4
 pub const X509_ERR_MALFORMED: i64 = 0 - 5
+
+// SubjectPublicKeyInfo algorithm as recognized by this parser -- Task 3
+// (docs of the same task's brief): RSA was the only algorithm this parser
+// could ever produce before this task; EC (P-256/prime256v1) is new.
+// UNKNOWN covers every other algorithm (Ed25519, other named curves, etc.)
+// this task is not chartered to support -- `modulus`/`public_exponent`
+// and `ec_public_key` are both left at their zero values in that case.
+pub const PUBKEY_ALG_RSA: i32 = 0
+pub const PUBKEY_ALG_EC_P256: i32 = 1
+pub const PUBKEY_ALG_UNKNOWN: i32 = 2
 
 pub struct RdnEntry {
     oid: [u8; 20],
@@ -107,6 +118,8 @@ pub struct Certificate {
     subject: X509Name,
     modulus: BigInt,
     public_exponent: BigInt,
+    public_key_algorithm: i32,
+    ec_public_key: EcPoint,
 
     extensions: [ExtensionEntry; 32],
     extension_count: i32,
@@ -230,6 +243,8 @@ pub fn certificate_zero() -> Certificate {
         subject: x509_name_zero(),
         modulus: bigint_zero(),
         public_exponent: bigint_zero(),
+        public_key_algorithm: PUBKEY_ALG_UNKNOWN,
+        ec_public_key: EcPoint { x: bigint_zero(), y: bigint_zero() },
         extensions: extensions_zero,
         extension_count: 0,
         is_ca: false,
@@ -411,6 +426,34 @@ fn bigint_to_small_i32(v: &BigInt) -> i32 {
 // the reorder. Threading it as its own scalar parameter/return value
 // avoids relying on the reorder alone to survive this function's own
 // internal call chain.
+// Converts a 32-byte big-endian integer (an uncompressed EC point's X or Y
+// coordinate) into a BigInt. BigInt.limbs is little-endian 16-bit limbs
+// (stdlib/bignum/bigint.sio) -- each limb here is built from one big-endian
+// byte pair, working from the LEAST significant end of the 32-byte input
+// (bytes[30..31]) towards the MOST significant end (bytes[0..1]), so
+// limbs[0] ends up holding the value's least-significant 16 bits, matching
+// bigint_from_u32's own convention. Reads `bytes` element-by-element (never
+// `var x = *ref` on the fixed-array parameter) per the compiler's SSD8
+// aliasing defect (docs/handoff/souc_v0800_defects.md).
+fn bigint_from_be_bytes32(bytes: &[u8; 32]) -> BigInt {
+    var result = bigint_zero()
+    var limb_idx: i64 = 0
+    var byte_pos: i64 = 30
+    while byte_pos >= 0 {
+        let hi = bytes[byte_pos as usize] as u16
+        let lo = bytes[(byte_pos + 1) as usize] as u16
+        result.limbs[limb_idx as usize] = (hi << 8) | lo
+        limb_idx = limb_idx + 1
+        byte_pos = byte_pos - 2
+    }
+    var len: i32 = 16
+    while len > 0 && result.limbs[(len - 1) as usize] == 0 {
+        len = len - 1
+    }
+    result.len = len
+    result
+}
+
 fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate, version: i32) -> (Certificate, DerReader, i64) with IO {
     var cert = cert_in
     // Never copy a struct via `*r` (this branch's established discipline) --
@@ -484,38 +527,115 @@ fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate
     if e3 != DER_OK { return (cert, after_subject, e3) }
     let (spki_inner2, spki_alg_tag, s16) = der_read_tlv(&spki_inner)
     if s16 != DER_OK { return (cert, after_subject, s16) }
+
+    // AlgorithmIdentifier ::= SEQUENCE { algorithm OBJECT IDENTIFIER,
+    // parameters ANY DEFINED BY algorithm OPTIONAL }. Before this task, this
+    // function never looked inside this SEQUENCE at all -- it skipped
+    // straight past it (`der_next`) and unconditionally assumed the BIT
+    // STRING held an RSAPublicKey. Task 3 (docs of this task's own brief):
+    // read `algorithm`'s OID here and branch RSA vs EC (P-256) vs unknown.
+    let (alg_id_inner, e_alg) = der_enter(&spki_inner, &spki_alg_tag)
+    if e_alg != DER_OK { return (cert, after_subject, e_alg) }
+    let (alg_id_inner2, alg_oid_tag, s_alg_oid) = der_read_tlv(&alg_id_inner)
+    if s_alg_oid != DER_OK { return (cert, after_subject, s_alg_oid) }
+    if alg_oid_tag.tag_number != DER_TAG_OBJECT_IDENTIFIER { return (cert, after_subject, X509_ERR_MALFORMED) }
+    var alg_oid_buf: [u8; 20] = [0; 20]
+    var alg_oi: i64 = 0
+    // Capped at 20 (X509_MAX_OID_BYTES) -- same discipline as every other
+    // OID-reading loop in this file (a malformed/adversarial certificate's
+    // OID content_len is attacker-controlled and not otherwise bounded).
+    while alg_oi < alg_oid_tag.content_len && alg_oi < 20 {
+        alg_oid_buf[alg_oi as usize] = (rawbuf_get(buf, alg_oid_tag.content_start + alg_oi) & 255) as u8
+        alg_oi = alg_oi + 1
+    }
+    let alg_oid_len = alg_oid_tag.content_len as i32
+    let rsa_oid = oid_rsa_encryption()
+    let ec_oid = oid_ec_public_key()
+    let is_rsa_alg = oid_eq9(&alg_oid_buf, alg_oid_len, &rsa_oid)
+    let is_ec_alg = oid_eq7(&alg_oid_buf, alg_oid_len, &ec_oid)
+
+    // For id-ecPublicKey, `parameters` is REQUIRED and is itself an OID
+    // naming the curve (RFC 5480 SS2.1.1) -- for P-256 that is prime256v1.
+    // This task only recognizes that one curve; any other named curve (or
+    // no parameters at all) leaves public_key_algorithm at UNKNOWN.
+    var is_p256_curve = false
+    if is_ec_alg {
+        let (after_alg_oid, s_after_alg_oid) = der_next(&alg_id_inner, &alg_oid_tag)
+        if s_after_alg_oid != DER_OK { return (cert, after_subject, s_after_alg_oid) }
+        let (curve_r, curve_oid_tag, s_curve) = der_read_tlv(&after_alg_oid)
+        if s_curve != DER_OK { return (cert, after_subject, s_curve) }
+        if curve_oid_tag.tag_number == DER_TAG_OBJECT_IDENTIFIER {
+            var curve_oid_buf: [u8; 20] = [0; 20]
+            var curve_oi: i64 = 0
+            while curve_oi < curve_oid_tag.content_len && curve_oi < 20 {
+                curve_oid_buf[curve_oi as usize] = (rawbuf_get(buf, curve_oid_tag.content_start + curve_oi) & 255) as u8
+                curve_oi = curve_oi + 1
+            }
+            let curve_oid_len = curve_oid_tag.content_len as i32
+            let p256_oid = oid_prime256v1()
+            is_p256_curve = oid_eq8(&curve_oid_buf, curve_oid_len, &p256_oid)
+        }
+    }
+
     let (after_spki_alg, s17) = der_next(&spki_inner, &spki_alg_tag)
     if s17 != DER_OK { return (cert, after_subject, s17) }
     let (spki_inner3, bitstr_tag, s18) = der_read_tlv(&after_spki_alg)
     if s18 != DER_OK { return (cert, after_subject, s18) }
     if bitstr_tag.tag_number != DER_TAG_BIT_STRING { return (cert, after_subject, X509_ERR_MALFORMED) }
     // BIT STRING's first content byte is the "unused bits" count (always 0
-    // for a byte-aligned RSAPublicKey); the RSAPublicKey DER starts at the
-    // next byte.
-    let rsa_key_start = bitstr_tag.content_start + 1
-    let rsa_key_len = bitstr_tag.content_len - 1
-    let rsa_key_reader = DerReader { buf_ptr: after_spki_alg.buf_ptr, pos: rsa_key_start, end: rsa_key_start + rsa_key_len }
-    let (r6, rsa_seq_tag, s19) = der_read_tlv(&rsa_key_reader)
-    if s19 != DER_OK { return (cert, after_subject, s19) }
-    let (rsa_inner, e4) = der_enter(&rsa_key_reader, &rsa_seq_tag)
-    if e4 != DER_OK { return (cert, after_subject, e4) }
-    let (rsa_inner2, mod_tag, s20) = der_read_tlv(&rsa_inner)
-    if s20 != DER_OK { return (cert, after_subject, s20) }
-    let (modulus, s21) = der_read_integer(&rsa_inner, &mod_tag)
-    if s21 != DER_OK { return (cert, after_subject, s21) }
-    cert.modulus = modulus
-    let (after_mod, s22) = der_next(&rsa_inner, &mod_tag)
-    if s22 != DER_OK { return (cert, after_subject, s22) }
-    let (rsa_inner3, exp_tag, s23) = der_read_tlv(&after_mod)
-    if s23 != DER_OK { return (cert, after_subject, s23) }
-    let (exponent, s24) = der_read_integer(&after_mod, &exp_tag)
-    if s24 != DER_OK { return (cert, after_subject, s24) }
-    cert.public_exponent = exponent
-    // The BIT STRING (containing the RSAPublicKey) was read via a SEPARATE
-    // child reader (rsa_key_reader) scoped inside the BIT STRING's own
-    // content -- advancing past the whole subjectPublicKeyInfo field in the
-    // OUTER cursor uses der_skip on after_subject/t5 (the SPKI SEQUENCE's
-    // own tag), not anything derived from rsa_key_reader.
+    // for both a byte-aligned RSAPublicKey and an uncompressed EC point).
+    let key_start = bitstr_tag.content_start + 1
+    let key_len = bitstr_tag.content_len - 1
+
+    if is_rsa_alg {
+        let rsa_key_reader = DerReader { buf_ptr: after_spki_alg.buf_ptr, pos: key_start, end: key_start + key_len }
+        let (r6, rsa_seq_tag, s19) = der_read_tlv(&rsa_key_reader)
+        if s19 != DER_OK { return (cert, after_subject, s19) }
+        let (rsa_inner, e4) = der_enter(&rsa_key_reader, &rsa_seq_tag)
+        if e4 != DER_OK { return (cert, after_subject, e4) }
+        let (rsa_inner2, mod_tag, s20) = der_read_tlv(&rsa_inner)
+        if s20 != DER_OK { return (cert, after_subject, s20) }
+        let (modulus, s21) = der_read_integer(&rsa_inner, &mod_tag)
+        if s21 != DER_OK { return (cert, after_subject, s21) }
+        cert.modulus = modulus
+        let (after_mod, s22) = der_next(&rsa_inner, &mod_tag)
+        if s22 != DER_OK { return (cert, after_subject, s22) }
+        let (rsa_inner3, exp_tag, s23) = der_read_tlv(&after_mod)
+        if s23 != DER_OK { return (cert, after_subject, s23) }
+        let (exponent, s24) = der_read_integer(&after_mod, &exp_tag)
+        if s24 != DER_OK { return (cert, after_subject, s24) }
+        cert.public_exponent = exponent
+        cert.public_key_algorithm = PUBKEY_ALG_RSA
+    } else if is_ec_alg && is_p256_curve {
+        // Uncompressed point per SEC1 SS2.3.3: 0x04 || X (32 bytes) || Y (32
+        // bytes) -- a compressed point (0x02/0x03 prefix) is a valid DER
+        // encoding this task does not support (per the task brief: not what
+        // OpenSSL or any modern CA/server emits by default). Leave
+        // public_key_algorithm at UNKNOWN rather than guess at decoding it.
+        let point_prefix = rawbuf_get(buf, key_start) & 255
+        if point_prefix == 4 && key_len == 65 {
+            var x_bytes: [u8; 32] = [0; 32]
+            var y_bytes: [u8; 32] = [0; 32]
+            var bi: i64 = 0
+            while bi < 32 {
+                x_bytes[bi as usize] = (rawbuf_get(buf, key_start + 1 + bi) & 255) as u8
+                y_bytes[bi as usize] = (rawbuf_get(buf, key_start + 1 + 32 + bi) & 255) as u8
+                bi = bi + 1
+            }
+            cert.ec_public_key = EcPoint { x: bigint_from_be_bytes32(&x_bytes), y: bigint_from_be_bytes32(&y_bytes) }
+            cert.public_key_algorithm = PUBKEY_ALG_EC_P256
+        }
+    }
+    // else: unrecognized algorithm (or EC with an unsupported curve, or an
+    // unsupported EC point encoding) -- cert.public_key_algorithm stays at
+    // its certificate_zero() default (PUBKEY_ALG_UNKNOWN) and
+    // modulus/public_exponent/ec_public_key all stay at their zero values.
+
+    // The BIT STRING (containing the RSAPublicKey or EC point) was read via
+    // a SEPARATE child reader/direct offsets scoped inside the BIT STRING's
+    // own content -- advancing past the whole subjectPublicKeyInfo field in
+    // the OUTER cursor uses der_skip on after_subject/t5 (the SPKI
+    // SEQUENCE's own tag), not anything derived from that inner reading.
     let (after_spki, s25) = der_skip(&after_subject, &t5)
     if s25 != DER_OK { return (cert, after_subject, s25) }
     cert.version = version
