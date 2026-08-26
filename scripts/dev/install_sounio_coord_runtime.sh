@@ -106,6 +106,11 @@ activate_runtime() {
       die "installed runtime declares durable obligations but omits Loom or native Sounio frame 9007: $runtime_id"
     ensure_obligation_activation
   fi
+  if grep -q '^capability=loom-epistemic-machine-v0$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-epistemic-runtime" ]] || \
+      die "installed runtime declares the epistemic machine but omits Loom or native Sounio frame 9008: $runtime_id"
+  fi
   if grep -q '^capability=loom-recoverable-control-service-v1$' "$manifest"; then
     grep -q '^capability=loom-durable-obligation-v1$' "$manifest" &&
       grep -q '^capability=loom-post-activation-request-bridge-v1$' "$manifest" &&
@@ -276,11 +281,14 @@ fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
 loom_continuity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_continuity_adapter.sh"
 loom_obligation_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_obligation_adapter.sh"
+loom_epistemic_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_epistemic_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
 loom_obligation_entrypoint="$SOURCE_ROOT/tools/loom/obligation_adapter_main.sio"
 loom_obligation_module="$SOURCE_ROOT/stdlib/coordination/loom_obligation.sio"
+loom_epistemic_entrypoint="$SOURCE_ROOT/tools/loom/epistemic_adapter_main.sio"
+loom_epistemic_module="$SOURCE_ROOT/stdlib/coordination/loom_epistemic_machine.sio"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -298,11 +306,16 @@ loom_obligation_module="$SOURCE_ROOT/stdlib/coordination/loom_obligation.sio"
   die "Loom continuity build entrypoint missing or not executable: $loom_continuity_build_source"
 [[ -x "$loom_obligation_build_source" ]] || \
   die "Loom obligation build entrypoint missing or not executable: $loom_obligation_build_source"
+[[ -x "$loom_epistemic_build_source" ]] || \
+  die "Loom epistemic build entrypoint missing or not executable: $loom_epistemic_build_source"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
   die "Loom native Sounio obligation source bundle is incomplete"
-[[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_ui.ml" && \
+[[ -f "$loom_epistemic_entrypoint" && -f "$loom_epistemic_module" ]] || \
+  die "Loom native Sounio epistemic source bundle is incomplete"
+[[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
+  -f "$loom_project/src/loom_epistemic.ml" && -f "$loom_project/src/loom_ui.ml" && \
   -f "$loom_project/src/loom_pty_stubs.c" && \
   -f "$loom_project/src/dune" && -f "$loom_project/dune-project" ]] || \
   die "Loom OCaml source bundle is incomplete: $loom_project"
@@ -330,11 +343,14 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_continuity_binary="$loom_project/_build/default/src/sounio-loom-continuity-runtime"
 loom_obligation_binary="$loom_project/_build/default/src/sounio-loom-obligation-runtime"
+loom_epistemic_binary="$loom_project/_build/default/src/sounio-loom-epistemic-runtime"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
 [[ -x "$loom_obligation_binary" ]] || \
   die "Loom build omitted its native Sounio obligation adapter"
+[[ -x "$loom_epistemic_binary" ]] || \
+  die "Loom build omitted its native Sounio epistemic adapter"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
@@ -352,6 +368,15 @@ loom_obligation_probe="$(
 [[ "$loom_obligation_probe" == \
   'SOUNIO_OBLIGATION_ACCEPT schema=loom-native-obligation-v1 transition=open state=1' ]] || \
   die "Loom native Sounio obligation adapter failed its install probe"
+zeros='0 0 0 0 0 0 0 0'
+loom_epistemic_probe="$(
+  printf '9008 1 0 1 101 0 0 0 0 0 %s %s %s %s %s %s %s\n' \
+    "$zeros" "$zeros" "$zeros" "$zeros" "$zeros" "$zeros" "$zeros" | \
+    "$loom_epistemic_binary"
+)"
+[[ "$loom_epistemic_probe" == \
+  'SOUNIO_EPISTEMIC_ACCEPT schema=loom-native-epistemic-v0 transition=create state=active' ]] || \
+  die "Loom native Sounio epistemic adapter failed its install probe"
 loom_measurement_probe="$(
   printf '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401\n' | \
     "$loom_continuity_binary"
@@ -384,16 +409,23 @@ loom_quorum_probe="$({
   'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v4 authority=five-principals+2-of-3-journal-quorum+full-sha256-agreement' ]] || \
   die "Loom native Sounio journal-quorum adapter failed its install probe"
 
-bundle_sha="$(
+bundle_sha="$({
   sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
     "$fleet_source" "$fleetd_source" "$fleet_model_source" \
     "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier" \
     "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune" \
-    "$loom_project/src/loom.ml" "$loom_project/src/loom_ui.ml" \
-    "$loom_project/src/loom_pty_stubs.c" \
+    "$loom_project/src/loom.ml" "$loom_project/src/loom_arrow.ml" \
+    "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_ui.ml" \
+    "$loom_project/src/loom_pty_stubs.c" "$loom_project/src/loom_arrow_stubs.c" \
+    "$loom_project/src/loom_nanoarrow.c" "$loom_project/src/loom_nanoarrow_ipc.c" \
+    "$loom_project/src/loom_flatcc.c" \
     "$loom_continuity_build_source" "$loom_continuity_entrypoint" \
     "$loom_continuity_module" "$loom_obligation_build_source" \
-    "$loom_obligation_entrypoint" "$loom_obligation_module" | \
+    "$loom_obligation_entrypoint" "$loom_obligation_module" \
+    "$loom_epistemic_build_source" "$loom_epistemic_entrypoint" \
+    "$loom_epistemic_module"
+  find "$loom_project/src/vendor" -type f -print0 | sort -z | xargs -0 sha256sum
+} | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
 )"
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
@@ -424,6 +456,8 @@ else
     "$stage/bin/sounio-loom-continuity-runtime"
   install -m 0755 "$loom_obligation_binary" \
     "$stage/bin/sounio-loom-obligation-runtime"
+  install -m 0755 "$loom_epistemic_binary" \
+    "$stage/bin/sounio-loom-epistemic-runtime"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -438,6 +472,8 @@ else
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'
     printf 'loom_obligation_frame=9007\n'
+    printf 'loom_epistemic_language=Sounio\n'
+    printf 'loom_epistemic_frame=9008\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
@@ -451,6 +487,8 @@ else
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-durable-obligation-v1\n'
+    printf 'capability=loom-epistemic-machine-v0\n'
+    printf 'capability=loom-epistemic-arrow-projection-v0\n'
     printf 'capability=loom-post-activation-request-bridge-v1\n'
     printf 'capability=loom-recoverable-control-service-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'

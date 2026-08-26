@@ -13,6 +13,7 @@ BAD="$TEST_ROOT/bad-source"
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime"
 export SOUNIO_LOOM_OBLIGATION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
+export SOUNIO_LOOM_EPISTEMIC_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-epistemic-runtime"
 
 cleanup() {
   [[ -z "${supervisor_pid:-}" ]] || kill "$supervisor_pid" 2>/dev/null || true
@@ -46,13 +47,16 @@ cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
   "$REPO/scripts/dev/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
@@ -64,6 +68,8 @@ mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_epistemic_machine.sio" \
   "$REPO/stdlib/coordination/"
 chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
@@ -92,6 +98,8 @@ grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime 
   fail 'installed runtime omitted the native Sounio continuity adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-obligation-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio obligation adapter'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-epistemic-runtime" ]] || \
+  fail 'installed runtime omitted the native Sounio epistemic adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-agent-runtime" ]] || \
   fail 'installed runtime omitted the fleet launcher'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-runtime" ]] || \
@@ -124,6 +132,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
   loom-native-sounio-continuity-v1 \
   loom-durable-obligation-v1 \
+  loom-epistemic-machine-v0 loom-epistemic-arrow-projection-v0 \
   loom-post-activation-request-bridge-v1 \
   loom-recoverable-control-service-v1 \
   loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
@@ -509,13 +518,16 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
   "$ALT/scripts/dev/"
 mkdir -p "$ALT/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
@@ -527,6 +539,8 @@ mkdir -p "$ALT/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
+  "$ALT/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_epistemic_machine.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$ALT/formal/tla/"
@@ -582,13 +596,16 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
   "$BAD/scripts/dev/"
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
@@ -600,6 +617,8 @@ mkdir -p "$BAD/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_epistemic_machine.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"

@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.17"
+let runtime_version = "2026.08.26.18"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -3473,12 +3473,33 @@ let session_spectral_events (_, values) =
   List.map (spectral_event values "semantic" semantic_head) semantic_events
   @ List.map (spectral_event values "guardian" guardian_head) guardian_events
 
+let epistemic_spectral_events root =
+  Loom_epistemic.spectral_events root
+  |> List.map (fun event ->
+         Loom_arrow.
+           { agent = event.Loom_epistemic.spectral_agent;
+             lane = event.spectral_lane;
+             instance_id = event.spectral_world;
+             session_state = event.spectral_state;
+             journal = "epistemic-worldline";
+             sequence = event.spectral_sequence;
+             observed_at_utc = event.spectral_observed_at_utc;
+             kind = event.spectral_kind;
+             payload = event.spectral_payload;
+             previous_sha256 = event.spectral_previous_sha256;
+             event_sha256 = event.spectral_event_sha256;
+             journal_head_sha256 = event.spectral_head_sha256;
+             verified = true })
+
 let spectral_events root =
-  session_descriptors root
-  |> List.fold_left
-       (fun events descriptor ->
-         List.rev_append (session_spectral_events descriptor) events)
-       []
+  let session_events =
+    session_descriptors root
+    |> List.fold_left
+         (fun events descriptor ->
+           List.rev_append (session_spectral_events descriptor) events)
+         []
+  in
+  session_events @ epistemic_spectral_events root
   |> List.sort (fun left right ->
          compare
            ( left.Loom_arrow.observed_at_utc,
@@ -3519,6 +3540,85 @@ let verify_events_arrow_command cli =
   in
   Printf.printf "LOOM_ARROW_OK %s bytes=%d file=%s\n%!" summary
     (String.length bytes) path
+
+let epistemic_root cli =
+  let cwd = cwd_option cli in
+  root_option cli cwd
+
+let epistemic_print action =
+  try Printf.printf "%s\n%!" (action ())
+  with Loom_epistemic.Error message -> failf "%s" message
+
+let world_create_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.create ~root ~world:(required cli "--world")
+        ~agent:(required cli "--agent") ~lane:(required cli "--lane"))
+
+let knowledge_observe_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.observe ~root ~world:(required cli "--world")
+        ~knowledge:(required cli "--knowledge") ~value:(required cli "--value")
+        ~arithmetic_error:(required cli "--error")
+        ~uncertainty:(required cli "--uncertainty")
+        ~confidence:(required cli "--confidence")
+        ~provenance:(required cli "--provenance"))
+
+let epistemic_claim_open_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.open_claim ~root ~world:(required cli "--world")
+        ~claim:(required cli "--claim") ~knowledge:(required cli "--knowledge")
+        ~evidence:(required cli "--evidence"))
+
+let epistemic_claim_challenge_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.challenge ~root ~world:(required cli "--world")
+        ~claim:(required cli "--claim")
+        ~challenge:(required cli "--challenge")
+        ~falsifier:(required cli "--falsifier"))
+
+let epistemic_capability_acquire_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.acquire_capability ~root ~world:(required cli "--world")
+        ~capability:(required cli "--capability")
+        ~resource:(required cli "--resource") ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation"))
+
+let epistemic_capability_release_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.release_capability ~root ~world:(required cli "--world")
+        ~capability:(required cli "--capability")
+        ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation"))
+
+let world_fork_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.fork ~root ~parent:(required cli "--parent")
+        ~child:(required cli "--child") ~agent:(required cli "--agent")
+        ~lane:(required cli "--lane")
+        ~hypothesis:(required cli "--hypothesis")
+        ~expected_parent_head:
+          (Option.value ~default:"" (optional cli "--parent-head")))
+
+let world_status_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.status ~root ~world:(required cli "--world"))
+
+let world_verify_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.verify ~root ~world:(required cli "--world"))
+
+let world_list_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () -> Loom_epistemic.list ~root)
 
 let session_events_json (_, values) =
   let agent = table_value values "agent" in
@@ -8341,6 +8441,8 @@ let usage () =
   Printf.eprintf
     "\nSpectral data plane:\n  export-events-arrow --out PATH [--state-dir DIR]\n  verify-events-arrow --file PATH\n";
   Printf.eprintf
+    "\nEpistemic machine v0:\n  world-create --world W --agent A --lane L\n  knowledge-observe --world W --knowledge K --value V --error E --uncertainty U --confidence P --provenance SHA\n  epistemic-claim-open --world W --claim C --knowledge K --evidence SHA\n  epistemic-claim-challenge --world W --claim C --challenge X --falsifier SHA\n  epistemic-capability-acquire --world W --capability C --resource R --owner A --generation G\n  epistemic-capability-release --world W --capability C --owner A --generation G\n  world-fork --parent W --child W --agent A --lane L --hypothesis H [--parent-head SHA]\n  world-status|world-verify --world W\n  world-list\n";
+  Printf.eprintf
     "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
 let arguments_after_command () =
@@ -8401,6 +8503,18 @@ let main () =
     | "list" -> list_command cli; 0
     | "tui" -> tui_command cli; 0
     | "serve" -> serve_http cli; 0
+    | "world-create" -> world_create_command cli; 0
+    | "knowledge-observe" -> knowledge_observe_command cli; 0
+    | "epistemic-claim-open" -> epistemic_claim_open_command cli; 0
+    | "epistemic-claim-challenge" -> epistemic_claim_challenge_command cli; 0
+    | "epistemic-capability-acquire" ->
+        epistemic_capability_acquire_command cli; 0
+    | "epistemic-capability-release" ->
+        epistemic_capability_release_command cli; 0
+    | "world-fork" -> world_fork_command cli; 0
+    | "world-status" -> world_status_command cli; 0
+    | "world-verify" -> world_verify_command cli; 0
+    | "world-list" -> world_list_command cli; 0
     | "export-events-arrow" -> export_events_arrow_command cli; 0
     | "verify-events-arrow" -> verify_events_arrow_command cli; 0
     | "beagle-serve" -> serve_beagle_bridge cli; 0
@@ -8420,6 +8534,7 @@ let () =
   try exit (main ())
   with
   | Loom_error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_epistemic.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Sys_error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Unix_error (error, function_name, argument) ->
       Printf.eprintf "error: %s: %s(%s)\n%!" (Unix.error_message error) function_name argument;

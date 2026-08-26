@@ -113,6 +113,47 @@ spectral plane  = Arrow IPC batches for scan, visualization, ML, and WebGPU
 The Arrow plane is not a transaction log, recovery source, or authority store.
 Its schema is an interoperability contract for disposable projections.
 
+## Epistemic Machine v0
+
+Loom can now persist a bounded epistemic worldline independently of any one
+provider CLI or UI process. A worldline records observations with five separate
+`Knowledge` axes, evidence-bearing claims, explicit falsifier challenges,
+exclusive write capabilities, and counterfactual forks bound to a verified
+parent head.
+
+```sh
+bin/loom world-create --state-dir STATE --world alpha \
+  --agent codex --lane experiment
+bin/loom knowledge-observe --state-dir STATE --world alpha \
+  --knowledge k1 --value 42.0 --error 0.01 \
+  --uncertainty interval-0.2 --confidence 0.91 --provenance SHA256
+bin/loom epistemic-claim-open --state-dir STATE --world alpha \
+  --claim c1 --knowledge k1 --evidence SHA256
+bin/loom epistemic-claim-challenge --state-dir STATE --world alpha \
+  --claim c1 --challenge x1 --falsifier SHA256
+bin/loom epistemic-capability-acquire --state-dir STATE --world alpha \
+  --capability cap1 --resource PATH --owner codex --generation generation-1
+bin/loom world-fork --state-dir STATE --parent alpha --child beta \
+  --agent grok --lane hostile-review --hypothesis 'the mechanism is false'
+bin/loom world-verify --state-dir STATE --world alpha
+bin/loom world-list --state-dir STATE
+```
+
+The OCaml reducer replays the SHA-256 journal, resolves object references,
+enforces one live capability per exact resource across all local worldlines,
+and binds every fork to an observed parent head. Before appending an event it
+asks native Sounio frame `9008` to admit the nominal transition. A named
+sabotage test removes only `knowledge_axes_are_bound` and proves that this rule,
+rather than an incidental parser failure, is what rejects an incomplete
+observation.
+
+Epistemic worldline events also appear in `loom-spectral-events-v1` with
+`journal=epistemic-worldline`. That Arrow stream remains a verified-derived
+projection: journal corruption refuses export and cannot be used to launder a
+damaged history into a visually plausible table. The v0 boundary is one local
+filesystem authority. It does not claim distributed consensus, deterministic
+LLM reruns, physical causality, or exactly-once external effects.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every
