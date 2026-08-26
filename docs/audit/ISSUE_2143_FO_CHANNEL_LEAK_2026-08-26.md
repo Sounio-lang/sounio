@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.issue-2143-fo-channel-leak-2026-08-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.issue-2143-fo-channel-leak-2026-08-26
+-->
+
 # Issue #2143 — FO channel-table per-function reset (measurement + fix + evidence)
 
 **One line:** the FO channel table (`fo_nchan`, `fo_sigma2`, `fo_bind_count`; and the
