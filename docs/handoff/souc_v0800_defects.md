@@ -899,3 +899,149 @@ mechanism (Finding 20) is an existing, already-documented, already-worked-
 around behavior; this entry records a new failure-mode shape it produces,
 consistent with D1's/D8's honest-negative-result convention for entries
 without a dedicated fresh GitHub issue.
+
+---
+
+## D11 — whole-program-scale corruption of a struct's scalar fields, deterministic and reproducible only above some module/function-count threshold
+
+### Symptom
+Discovered 2026-08-25 during the Madaros TLS 1.3 handshake plan, Task 7
+(`stdlib/tls/client.sio`, `tls_connect`), while driving a real handshake
+against a live local `openssl s_server -tls1_3`. `x509_parse_certificate(buf,
+len)` (`stdlib/x509/cert.sio`) returns a `Certificate` whose `tbs_start`/
+`tbs_len` fields are WRONG (255/272) instead of the correct values (4/523)
+for a real, independently-generated, byte-verified-identical 803-byte RSA
+certificate DER buffer — while other fields of the SAME returned struct
+(`modulus` — correct 256-byte RSA-2048 modulus, `public_key_algorithm` —
+correct `PUBKEY_ALG_RSA`, `outer_signature_len` — correct 256) come back
+right. The wrong `tbs_start`/`tbs_len` values make `x509_verify_chain`
+(`stdlib/x509/chain.sio`) hash the wrong byte range for the certificate's own
+self-signature check, so a certificate that is genuinely self-signed and
+genuinely present (byte-for-byte) in its own trust store is rejected with
+`CHAIN_ERR_BAD_SIGNATURE` — a real, exploitable-looking failure with no
+actual security cause; the certificate and signature are both entirely
+valid, and the compiler is just computing the wrong hash input.
+
+### A distinct, more severe symptom found and worked around during the same
+### investigation: a real SEGFAULT via a D9-class field-name collision
+Before finding the above, the same test SEGFAULTED (rc=139) deeper in the
+handshake, inside `bytes_be_to_bigint` while converting `CertificateVerify`'s
+signature bytes to a `BigInt` — traced to `cv_info.signature_len` (a `tls::
+handshake::CertificateVerifyInfo` field, `i64`) printing a huge garbage value
+(54287, not the real 256) immediately after `decode_certificate_verify`
+returned, while the SAME tuple's `signature_scheme` field printed correctly
+(2052 = `0x0804` = `rsa_pss_rsae_sha256`). This is D9
+(`docs/handoff/souc_v0800_defects.md`, above) recurring via a DIFFERENT,
+accidental field-name collision than the one D9 itself was filed for:
+`x509::cert::Certificate` and `x509::sct::SctEntry`/`x509::cert::SctEntry`
+both already declare a `signature_len: i32` field, and `x509::cert::
+Certificate` also has a fixed-array `signature: [u8;128]` field — both names
+collide with `tls::handshake::CertificateVerifyInfo`'s own (pre-existing,
+Task-6-authored) `signature: RawBuf` / `signature_len: i64` fields, and all
+of these types are compiled into the same final linked program by
+`client.sio` (which needs `x509::cert::Certificate` for chain verification
+AND `tls::handshake::CertificateVerifyInfo` for the TLS layer). Renaming
+`CertificateVerifyInfo`'s two colliding fields to `cv_signature`/
+`cv_signature_len` (`stdlib/tls/handshake.sio`) made the segfault disappear
+completely and the crypto-critical CertificateVerify signature check start
+succeeding correctly against the real server (confirmed: RSA-PSS-SHA256
+verification against the live openssl-signed transcript hash returned
+`true`). This is the SAME general defect class as D9 (cross-struct
+field-name collision corrupting a struct at a tuple-return/cross-module
+boundary), just a fresh, previously-unknown pair of colliding names —
+recorded here rather than reopening D9, since D9 is specific to the
+`ServerHelloInfo`/`ClientHelloParams` pair and this is a different pair with
+a different, additionally worse symptom (SIGSEGV, not just wrong data).
+**The rename fix for the segfault is real, verified, and kept in `stdlib/
+tls/handshake.sio` and its own RFC 8448 test — it is not a workaround this
+entry recommends undoing.**
+
+### The `tbs_start`/`tbs_len` corruption (this entry's primary finding) is NOT explained by D9's field-name-collision mechanism
+Exhaustively checked: no other struct compiled into this program declares a
+field named `tbs_start` or `tbs_len`. This corruption survives the D9-style
+rename fix intact (confirmed: still 255/272 after the `signature`/
+`signature_len` rename above). It is a DIFFERENT mechanism from D9.
+
+### Minimal repro / isolation (the load-bearing finding of this entry)
+1. A small, standalone test (`x509::chain`/`x509::cert`/`net::socket` only,
+   ~20 modules merged, "`Merged IR: 238 functions`" per the build log)
+   calling `x509_parse_certificate` ONCE on this exact 803-byte DER buffer
+   (embedded as a byte-array literal) returns the CORRECT
+   `tbs_start=4, tbs_len=523, outer_signature_len=256`, and a full
+   `x509_verify_chain` call against a trust store containing this same
+   certificate as its own trust anchor returns `CHAIN_OK` (0).
+2. The SAME exact byte content (verified byte-for-byte identical via an
+   independent Python diff of all 803 bytes — zero differences), parsed by
+   the SAME `x509_parse_certificate` function, but as part of the full
+   `tls_client_handshake_loopback.sio` program (36 modules merged,
+   `Merged IR: 455 functions`), returns the WRONG `tbs_start=255,
+   tbs_len=272` — deterministically and repeatably (confirmed: two
+   consecutive calls on the identical buffer within the same run both
+   return 255/272, not two different garbage values — this is not random
+   heap garbage, it's a wrong-but-consistent computation for this program).
+3. This reproduces at the VERY FIRST call the test program makes to
+   `x509_parse_certificate` — before `tls_connect` is even called, before
+   any networking/crypto has executed — ruling out "prior heavy computation
+   corrupts shared state" as the mechanism. The only variable that changed
+   between the passing (238-function) and failing (455-function) case is
+   the TOTAL SIZE of the merged/linked program.
+4. Every build of the failing program's own compiler diagnostics show:
+   `lower_array: arena_reset_totals ok=0 skip=35 sites_reclaimed=0` — EVERY
+   SINGLE arena reset across all 35 non-test modules was skipped
+   (`arena_reset_skipped (call-arg scratch overflow)`, printed once per
+   module with an escalating `sites` count, e.g. `module 35 sites 1513`).
+   The smaller, passing isolated test's build log shows the same kind of
+   message but far fewer sites-per-module and, critically, still succeeds —
+   consistent with this being a real, size/allocation-pressure-dependent
+   arena/scratch-memory-reuse defect, not a one-off fluke.
+
+### Impact
+This blocks `tls_connect` (`stdlib/tls/client.sio`, Task 7 of this plan)
+from ever reaching `CHAIN_OK` against a real server at this program's scale
+(36 modules / 455 functions merged) — confirmed identically for BOTH an RSA
+test certificate (`tests/run-pass/tls_client_handshake_loopback.sio`) and an
+independently-generated ECDSA P-256 test certificate (`tests/run-pass/
+tls_client_handshake_ecdsa_loopback.sio`), both failing with
+`CHAIN_ERR_BAD_SIGNATURE` at the identical point for the identical reason.
+The adversarial case (`tests/run-pass/tls_client_adversarial_untrusted_loopback.sio`,
+an EMPTY trust store) is NOT affected — it fails closed correctly
+(`chain_build_candidates` finds no path to a trusted root before ever
+reaching the corrupted-signature-check code, so `x509_verify_chain` returns
+`CHAIN_ERR_NO_PATH_TO_ROOT` well before the D11 corruption would matter) —
+this is a genuine, unaffected-by-D11 positive security result.
+
+Every other real, live-network-verified piece of the handshake up to this
+point works correctly against the actual openssl server: ClientHello
+encode/send, ServerHello receive/decode (with the D9 x25519_public/random
+verification below passing), the full TLS 1.3 key schedule (HKDF Early/
+Handshake Secret, traffic secrets, traffic key/IV derivation), AES-128-GCM
+record encryption/decryption of the real EncryptedExtensions message, TLS
+Certificate message decode, and CertificateVerify's own RSA-PSS-SHA256
+signature verification against the live transcript hash (a real
+cryptographic check, genuinely passing). Only the X.509 chain's own
+self-signature check — a different code path, using `Certificate.tbs_start/
+tbs_len` rather than the TLS transcript — is affected.
+
+### Suspected area
+`self-hosted/compiler/module_frontend.sio` / `self-hosted/ir/lower.sio`'s
+arena/scratch allocation-and-reset machinery for imported/cross-module
+calls (the `lower_array: arena_reset_skipped (call-arg scratch overflow)`
+diagnostic family) — the same general subsystem already implicated in
+`stdlib/x509/chain.sio`'s own in-code comment about needing to inline
+`chain_build_candidates` to avoid a related (but distinct-symptom) defect,
+and in this repo's CLAUDE.md SS13 "residual D3 family: multi-module
+memory-wall / exclusive-ref fragile chains" note. Not investigated further
+inside compiler internals as part of Task 7 — this is a workaround-and-record
+entry per this file's own established convention (D1, D8, D9), not a
+root-caused one.
+
+### Filed
+NOT filed as a GitHub issue as of this entry (2026-08-25) — no isolated
+minimal repro below the size of this actual 36-module program was found in
+the time available (attempts to reproduce with smaller synthetic multi-
+module programs of increasing size were not completed); recorded here per
+this file's own honest-negative-result convention (D1, D8, D9) so the next
+agent has the full forensic trail rather than rediscovering it. **This
+defect BLOCKS Task 7 of the Madaros TLS 1.3 handshake plan from reaching a
+fully working real-server handshake and is reported as such in that task's
+own completion report.**
