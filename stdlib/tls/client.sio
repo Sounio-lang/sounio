@@ -136,6 +136,22 @@ pub const TLS_CONNECT_ERR_D9_CORRUPTION: i64 = 0 - 13
 // in the HelloRetryRequest itself -- see the D9-check-2b/cipher-suite-check
 // note at the HelloRetryRequest branch in tls_connect below.
 pub const TLS_CONNECT_ERR_CIPHER_SUITE_MISMATCH: i64 = 0 - 14
+// Final-review Fix 3: the design spec's own Scope Decision promises "if the
+// server's HRR instead demands a key-exchange group other than X25519, fail
+// closed with a clear error -- no other curve is implemented." Distinct
+// from TLS_CONNECT_ERR_HRR (a second, disallowed retry) and from
+// TLS_CONNECT_ERR_KEY_EXCHANGE (no key_share extension present at all, or
+// ECDHE computation failure) -- this is specifically "the HRR named a real
+// group, and it wasn't X25519".
+pub const TLS_CONNECT_ERR_UNSUPPORTED_GROUP: i64 = 0 - 15
+
+// RFC 8446 SS4.2.7 NamedGroup -- X25519 only (see plan's Out of Scope).
+// Duplicated from `stdlib/tls/server_hello.sio`'s own private constant of
+// the same name/value -- see Finding 4 of the final whole-plan review
+// (parked): a direct, harmless artifact of the D9-forced file split that
+// keeps `ServerHelloInfo`/`ClientHelloParams` physically apart (see this
+// file's own header comment on the D9 defect).
+const NAMED_GROUP_X25519: i64 = 0x001d
 
 fn tls_connection_zero() -> TlsConnection with IO {
     TlsConnection {
@@ -844,10 +860,25 @@ pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustS
         transcript_append(&!hs_transcript, &synthetic, 4 + hash_len)
         transcript_append(&!hs_transcript, &sh1_bytes, sh1_len)
 
+        // Final-review Fix 3: RFC 8446 SS4.1.4's HelloRetryRequest carries
+        // its selected group as a bare NamedGroup in its own key_share
+        // extension (`sh1_info.selected_group`, recorded unconditionally by
+        // `decode_server_hello` -- see `ServerHelloInfo`'s own doc comment).
+        // Checked explicitly and BEFORE any re-send: this plan implements
+        // X25519 only (per the plan's own Out of Scope / Scope Decision),
+        // so an HRR demanding a different group must fail closed with a
+        // clear, distinct error here -- previously this fell through
+        // indistinguishably from "no key_share in the HRR at all" (a
+        // cookie-only HRR) and the client would blindly retry with its
+        // original X25519 share, only for the server to abort the mismatched
+        // retry downstream.
+        if sh1_info.selected_group != (NAMED_GROUP_X25519 as u16) {
+            (sock2, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_UNSUPPORTED_GROUP)
+        } else {
+
         // Re-send ClientHello with the HRR's cookie echoed back (if any).
-        // Same random/key_share: this plan supports only X25519, so it has
-        // nothing else to offer even if the server's HRR requested a
-        // different group -- that case is a known limitation (see report).
+        // Same random/key_share: this plan supports only X25519, confirmed
+        // above to be what the HRR actually asked for.
         let ch2_params = ClientHelloParams {
             random: client_random,
             x25519_public: x25519_pub,
@@ -911,6 +942,7 @@ pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustS
                     (sock4, sh2_info, sh2_bytes, sh2_len, TLS_CONNECT_OK)
                 }
             }
+        }
         }
     } else {
         transcript_append(&!hs_transcript, &ch_bytes, ch_len)

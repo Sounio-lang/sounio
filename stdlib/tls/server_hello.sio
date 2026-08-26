@@ -32,6 +32,18 @@ pub struct ServerHelloInfo {
     has_key_share: bool,
     cookie: RawBuf,
     cookie_len: i64,
+    // Final-review Fix 3: the raw NamedGroup value carried by the
+    // key_share extension, recorded UNCONDITIONALLY -- regardless of
+    // whether it equals NAMED_GROUP_X25519 -- so a caller can tell "server
+    // asked for a different group" apart from "no key_share extension at
+    // all" (previously indistinguishable: `has_key_share` stayed false in
+    // both cases). On a HelloRetryRequest (RFC 8446 SS4.1.4), the
+    // key_share extension_data IS the selected NamedGroup, a bare 2-byte
+    // value, not a full KeyShareEntry -- this field is what the design
+    // spec's own Scope Decision means by "the server's HRR ... demands a
+    // key-exchange group other than X25519". Zero when no key_share
+    // extension was present at all.
+    selected_group: u16,
 }
 
 fn buf_get_u8(buf: &RawBuf, pos: i64) -> i64 with IO {
@@ -55,6 +67,7 @@ fn server_hello_info_zero() -> ServerHelloInfo with IO {
         has_key_share: false,
         cookie: rawbuf_new(1),
         cookie_len: 0,
+        selected_group: 0 as u16,
     }
 }
 
@@ -113,6 +126,12 @@ pub fn decode_server_hello(msg_bytes: &RawBuf, msg_len: i64) -> (ServerHelloInfo
             // KeyShareEntry (group + key_exchange), NOT a list, unlike
             // ClientHello's.
             let group = buf_get_u16(msg_bytes, pos)
+            // Recorded unconditionally -- see `selected_group`'s own doc
+            // comment on `ServerHelloInfo` above -- so a non-X25519 group
+            // (most importantly on a HelloRetryRequest) is distinguishable
+            // from "no key_share extension present" rather than silently
+            // falling through as the same "no key share" case.
+            info.selected_group = group as u16
             if group == NAMED_GROUP_X25519 {
                 let key_len = buf_get_u16(msg_bytes, pos + 2)
                 if key_len == 32 {
