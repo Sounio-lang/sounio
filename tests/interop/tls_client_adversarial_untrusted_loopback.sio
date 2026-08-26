@@ -1,0 +1,67 @@
+// MANUAL SETUP REQUIRED -- not part of the default run-pass suite.
+//
+// Adversarial case (task-7 brief Step 5): tls_connect against the RSA
+// loopback server from tests/interop/tls_client_handshake_loopback.sio,
+// but with a TrustStore that does NOT contain the server's certificate
+// (empty trust store). Must fail closed at CERTIFICATE CHAIN VALIDATION
+// specifically -- never at an earlier stage, and never succeed.
+//
+// This test previously asserted only `result_code >= 0` is a failure --
+// but with NO server listening at all (the original version had no way to
+// start one, and implicitly assumed some OTHER test file had already
+// started a server on this port), `tcp_connect` itself fails first, before
+// chain validation ever runs, with `TLS_CONNECT_ERR_CONNECT` (-1) -- a
+// DIFFERENT sentinel that also happens to satisfy "not >= 0", making the
+// test pass for the wrong reason regardless of whether the actual security
+// property (fail closed on an untrusted certificate) was ever exercised.
+// Fixed by asserting the EXACT sentinel `TLS_CONNECT_ERR_CERT_CHAIN` (-8),
+// so a missing/unreachable server is now a hard, distinguishable test
+// FAILURE rather than an accidental pass.
+//
+// To run (needs the SAME live server as
+// tests/interop/tls_client_handshake_loopback.sio -- see that file's
+// header for the full rationale on why this lives under tests/interop/
+// rather than tests/run-pass/, and why the fixture is committed rather
+// than regenerated per-run):
+//   1. openssl s_server \
+//        -key tests/interop/fixtures/tls/rsa_key.pem \
+//        -cert tests/interop/fixtures/tls/rsa_cert.pem \
+//        -accept 44330 -tls1_3 -www
+//   2. SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run tests/interop/tls_client_adversarial_untrusted_loopback.sio
+
+use tls::client::*
+use x509::trust_store::*
+use x509::cert::*
+use net::socket::*
+
+fn now_unix() -> i64 with IO {
+    syscall6(201, 0, 0, 0, 0, 0, 0)
+}
+
+fn main() -> i64 with IO, Mut {
+    var store = TrustStore { certs: [certificate_zero(); 512], bufs: [rawbuf_new(1); 512], count: 0 }
+
+    let host_text = "127.0.0.1"
+    let host_len = str_len(host_text)
+    let host = rawbuf_new(host_len + 8)
+    var hi: i64 = 0
+    while hi < host_len {
+        rawbuf_set(&host, hi, str_char_at(host_text, hi))
+        hi = hi + 1
+    }
+
+    let (conn, result_code) = tls_connect(&host, host_len, 44330 as u16, &store, now_unix())
+    if result_code != TLS_CONNECT_ERR_CERT_CHAIN {
+        println("adversarial: expected TLS_CONNECT_ERR_CERT_CHAIN (-8), got:")
+        print_int(result_code)
+        if result_code >= 0 {
+            println("SECURITY FAILURE -- handshake succeeded, untrusted cert")
+        } else {
+            println("failed closed, but NOT at chain validation -- is the")
+            println("server at 127.0.0.1:44330 running? (see file header)")
+        }
+        return 1
+    }
+    println("adversarial: correctly failed closed at chain validation")
+    return 0
+}
