@@ -14,7 +14,7 @@ set -euo pipefail
 #   - matplotlib + numpy (optional, for roofline PNG plot)
 #   - CUDA toolkit 12.x + NVIDIA GPU (only when --gpu is passed)
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 GPU_MODE=false
