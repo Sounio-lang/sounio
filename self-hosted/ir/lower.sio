@@ -9704,103 +9704,148 @@ impl Lowerer {
     // f'(x) and f''(x) for the kind-8 set, from x plus sqrt/sin/cos/exp only --
     // all backend builtins, so this reintroduces no E221 hole. Signs are baked
     // into the formulas; the caller applies no FO_XFER_LIT correction.
+    // f'(x) and f''(x) for the kind-8 set, from x plus sqrt/sin/cos/exp only --
+    // all backend builtins, so this reintroduces no E221 hole.
+    //
+    // EVERY tuple result has its .1 extracted on the line after the call, and
+    // nothing reads `<tuple>.1` later. That is not style. Reading an earlier
+    // tuple's .1 after a later tuple has been bound returns the LATER one's
+    // value: the IR dump caught `d2 = nx / u2` emitted as
+    // `binop dst=23 src1=22 src2=22` -- nx in both operand slots, u2's register
+    // (21) never referenced. It is why the first derivative was always right
+    // (used immediately) and every longer chain was wrong.
     fn fo_emit_analytic_deriv(self, which: i64, argv: i64, want_second: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
-        let one_p = lo.emit_f64_const(1.0)
-        lo = one_p.0
-        let one = one_p.1
-        let two_p = lo.emit_f64_const(2.0)
-        lo = two_p.0
-        let two = two_p.1
-        let negtwo_p = lo.emit_f64_const(0.0 - 2.0)
-        lo = negtwo_p.0
-        let negtwo = negtwo_p.1
-        let zero_p = lo.emit_f64_const(0.0)
-        lo = zero_p.0
-        let zero = zero_p.1
+        let onep = lo.emit_f64_const(1.0)
+        lo = onep.0
+        let one = onep.1
+        let twop = lo.emit_f64_const(2.0)
+        lo = twop.0
+        let two = twop.1
+        let ntp = lo.emit_f64_const(0.0 - 2.0)
+        lo = ntp.0
+        let negtwo = ntp.1
+        let zp = lo.emit_f64_const(0.0)
+        lo = zp.0
+        let zero = zp.1
 
         if which == 1 {
             // atan: u = 1 + x^2 ; f' = 1/u ; f'' = -2x/u^2
-            let xx = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
-            lo = xx.0
-            let u = lo.fo_emit_f64_binop(one, BinaryOp::OpAdd, xx.1)
-            lo = u.0
+            let xxp = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
+            lo = xxp.0
+            let xx = xxp.1
+            let up = lo.fo_emit_f64_binop(one, BinaryOp::OpAdd, xx)
+            lo = up.0
+            let u = up.1
             if !want_second {
-                let d1 = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, u.1)
-                lo = d1.0
-                return (lo, d1.1)
+                let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, u)
+                lo = d1p.0
+                return (lo, d1p.1)
             }
-            let u2 = lo.fo_emit_f64_binop(u.1, BinaryOp::OpMul, u.1)
-            lo = u2.0
-            let nx = lo.fo_emit_f64_binop(negtwo, BinaryOp::OpMul, argv)
-            lo = nx.0
-            let d2 = lo.fo_emit_f64_binop(nx.1, BinaryOp::OpDiv, u2.1)
-            lo = d2.0
-            return (lo, d2.1)
+            let u2p = lo.fo_emit_f64_binop(u, BinaryOp::OpMul, u)
+            lo = u2p.0
+            let u2 = u2p.1
+            let nxp = lo.fo_emit_f64_binop(negtwo, BinaryOp::OpMul, argv)
+            lo = nxp.0
+            let nx = nxp.1
+            let d2p = lo.fo_emit_f64_binop(nx, BinaryOp::OpDiv, u2)
+            lo = d2p.0
+            return (lo, d2p.1)
         }
         if which == 2 || which == 3 {
-            let xx = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
-            lo = xx.0
-            let u = lo.fo_emit_f64_binop(one, BinaryOp::OpSub, xx.1)
-            lo = u.0
-            let sp = lo.fo_emit_math_call(make_name("sqrt"), u.1)
+            // asin: u = 1 - x^2 ; s = sqrt(u) ; f' = 1/s ; f'' = x/(u*s)
+            // acos negates both.
+            let xxp = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
+            lo = xxp.0
+            let xx = xxp.1
+            let up = lo.fo_emit_f64_binop(one, BinaryOp::OpSub, xx)
+            lo = up.0
+            let u = up.1
+            let sp = lo.fo_emit_math_call(make_name("sqrt"), u)
             lo = sp.0
-            let d1r = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, sp.1)
-            lo = d1r.0
-            let us = lo.fo_emit_f64_binop(u.1, BinaryOp::OpMul, sp.1)
-            lo = us.0
-            let d2r = lo.fo_emit_f64_binop(argv, BinaryOp::OpDiv, us.1)
-            lo = d2r.0
-            if which == 2 {
-                if want_second { return (lo, d2r.1) }
-            return (lo, d1r.1)
+            let sroot = sp.1
+            if !want_second {
+                let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, sroot)
+                lo = d1p.0
+                let d1 = d1p.1
+                if which == 2 {
+                    return (lo, d1)
+                }
+                let ngp = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, d1)
+                lo = ngp.0
+                return (lo, ngp.1)
             }
-            let d1n = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, d1r.1)
-            lo = d1n.0
-            let d2n = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, d2r.1)
-            lo = d2n.0
-            if want_second { return (lo, d2n.1) }
-            return (lo, d1n.1)
+            let usp = lo.fo_emit_f64_binop(u, BinaryOp::OpMul, sroot)
+            lo = usp.0
+            let us = usp.1
+            let d2p = lo.fo_emit_f64_binop(argv, BinaryOp::OpDiv, us)
+            lo = d2p.0
+            let d2 = d2p.1
+            if which == 2 {
+                return (lo, d2)
+            }
+            let ng2p = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, d2)
+            lo = ng2p.0
+            return (lo, ng2p.1)
         }
         if which == 4 {
-            let c = lo.fo_emit_math_call(make_name("cos"), argv)
-            lo = c.0
-            let c2 = lo.fo_emit_f64_binop(c.1, BinaryOp::OpMul, c.1)
-            lo = c2.0
-            let d1 = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, c2.1)
-            lo = d1.0
-            let sn = lo.fo_emit_math_call(make_name("sin"), argv)
-            lo = sn.0
-            let c3 = lo.fo_emit_f64_binop(c2.1, BinaryOp::OpMul, c.1)
-            lo = c3.0
-            let twosin = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, sn.1)
-            lo = twosin.0
-            let d2 = lo.fo_emit_f64_binop(twosin.1, BinaryOp::OpDiv, c3.1)
-            lo = d2.0
-            if want_second { return (lo, d2.1) }
-            return (lo, d1.1)
+            // tan: c = cos x ; f' = 1/c^2 ; f'' = 2 sin x / c^3
+            let cp = lo.fo_emit_math_call(make_name("cos"), argv)
+            lo = cp.0
+            let c = cp.1
+            let c2p = lo.fo_emit_f64_binop(c, BinaryOp::OpMul, c)
+            lo = c2p.0
+            let c2 = c2p.1
+            if !want_second {
+                let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, c2)
+                lo = d1p.0
+                return (lo, d1p.1)
+            }
+            let snp = lo.fo_emit_math_call(make_name("sin"), argv)
+            lo = snp.0
+            let sn = snp.1
+            let c3p = lo.fo_emit_f64_binop(c2, BinaryOp::OpMul, c)
+            lo = c3p.0
+            let c3 = c3p.1
+            let tsp = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, sn)
+            lo = tsp.0
+            let twosin = tsp.1
+            let d2p = lo.fo_emit_f64_binop(twosin, BinaryOp::OpDiv, c3)
+            lo = d2p.0
+            return (lo, d2p.1)
         }
         if which == 5 {
-            let x2 = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, argv)
-            lo = x2.0
-            let e = lo.fo_emit_math_call(make_name("exp"), x2.1)
-            lo = e.0
-            let em = lo.fo_emit_f64_binop(e.1, BinaryOp::OpSub, one)
-            lo = em.0
-            let ep = lo.fo_emit_f64_binop(e.1, BinaryOp::OpAdd, one)
+            // tanh: e = exp(2x) ; t = (e-1)/(e+1) ; f' = 1 - t^2 ; f'' = -2 t f'
+            let x2p = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, argv)
+            lo = x2p.0
+            let x2 = x2p.1
+            let ep = lo.fo_emit_math_call(make_name("exp"), x2)
             lo = ep.0
-            let t = lo.fo_emit_f64_binop(em.1, BinaryOp::OpDiv, ep.1)
-            lo = t.0
-            let tt = lo.fo_emit_f64_binop(t.1, BinaryOp::OpMul, t.1)
-            lo = tt.0
-            let d1 = lo.fo_emit_f64_binop(one, BinaryOp::OpSub, tt.1)
-            lo = d1.0
-            let nt = lo.fo_emit_f64_binop(negtwo, BinaryOp::OpMul, t.1)
-            lo = nt.0
-            let d2 = lo.fo_emit_f64_binop(nt.1, BinaryOp::OpMul, d1.1)
-            lo = d2.0
-            if want_second { return (lo, d2.1) }
-            return (lo, d1.1)
+            let e = ep.1
+            let emp = lo.fo_emit_f64_binop(e, BinaryOp::OpSub, one)
+            lo = emp.0
+            let em = emp.1
+            let epp = lo.fo_emit_f64_binop(e, BinaryOp::OpAdd, one)
+            lo = epp.0
+            let epl = epp.1
+            let tp = lo.fo_emit_f64_binop(em, BinaryOp::OpDiv, epl)
+            lo = tp.0
+            let t = tp.1
+            let ttp = lo.fo_emit_f64_binop(t, BinaryOp::OpMul, t)
+            lo = ttp.0
+            let tt = ttp.1
+            let d1p = lo.fo_emit_f64_binop(one, BinaryOp::OpSub, tt)
+            lo = d1p.0
+            let d1 = d1p.1
+            if !want_second {
+                return (lo, d1)
+            }
+            let ntxp = lo.fo_emit_f64_binop(negtwo, BinaryOp::OpMul, t)
+            lo = ntxp.0
+            let ntx = ntxp.1
+            let d2p = lo.fo_emit_f64_binop(ntx, BinaryOp::OpMul, d1)
+            lo = d2p.0
+            return (lo, d2p.1)
         }
         (lo, 0 - 1)
     }
@@ -9980,14 +10025,43 @@ impl Lowerer {
             if d1r < 0 {
                 return (lo.fo_clear_expr_sens(), -1)
             }
-            // Second order is NOT wired here, deliberately. The analytic f'' is
-            // computed and available, but writing it into so_expr_hess produced
-            // 1.000000 where -0.640000 is the truth -- traced by storing d2r raw
-            // into the slot, which read back as 1.0 rather than the -0.64 the
-            // register should hold. Until that is understood, hessian_of keeps
-            // returning the honest 0.0 it returns today: this change must not
-            // trade a silent zero for a confident wrong number, which is the
-            // whole complaint in #2164.
+            // Second order, in kind 6's order: written BEFORE the sens combine,
+            // which overwrites fo_expr_sens. Restricted the same way kind 6
+            // documents -- only when the argument carries no Hessian of its own,
+            // because with a compound inner the chain rule reads s_g^2 where H_g
+            // belongs, and a confident wrong number is harder to catch than a zero.
+            if lo.so_enabled && !sab_hessian_chain() && d2r >= 0 {
+                let hNow8 = lo.so_snapshot_expr_hess()
+                var arg_has_hess8 = false
+                var hq8: i64 = 0
+                while hq8 < 36 {
+                    if hNow8[hq8 as usize] >= 0 { arg_has_hess8 = true }
+                    hq8 = hq8 + 1
+                }
+                if arg_has_hess8 {
+                    lo = lo.so_clear_expr_hess()
+                } else {
+                    var hj8: i64 = 0
+                    while hj8 < 8 {
+                        var hk8: i64 = hj8
+                        while hk8 < 8 {
+                            let sj8 = s0[hj8 as usize]
+                            let sk8 = s0[hk8 as usize]
+                            if sj8 >= 0 && sk8 >= 0 {
+                                let pjp = lo.fo_emit_f64_binop(sj8, BinaryOp::OpMul, sk8)
+                                lo = pjp.0
+                                let pj = pjp.1
+                                let pvp = lo.fo_emit_f64_binop(d2r, BinaryOp::OpMul, pj)
+                                lo = pvp.0
+                                let hid8 = lo.so_hess_idx(hj8, hk8)
+                                lo.so_expr_hess[hid8 as usize] = pvp.1
+                            }
+                            hk8 = hk8 + 1
+                        }
+                        hj8 = hj8 + 1
+                    }
+                }
+            }
             var sL8: [i64; 32] = [-1; 32]
             lo = lo.fo_combine_sens_mul(sL8, s0, d1r, argv8)
             lo.fo_trace_sens(make_name("k8_after_combine"))
