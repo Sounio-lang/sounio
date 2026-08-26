@@ -51,9 +51,22 @@ gate_name "diagnostic_identity"
 # only evidence of where the boundary of "one identity" is unclear. Whoever
 # reconciles them should record which route was right per code, and lower these
 # lines accordingly.
-COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-26}"
+COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-25}"
 UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-140}"
-ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-20}"
+# 20 -> 21, and this one RISES on purpose.
+#
+# Repairing a collision necessarily orphans the vacated catalogue row: E220 and
+# E210 kept their published identities and their emitters moved to E245/E246, so
+# both rows now describe a diagnostic check.sio no longer prints. They are not
+# dead -- lean_single still emits their message text, untagged, which is the
+# systemic cause of the whole collision family (#2170). They are "documented,
+# emitted without the tag", and this gate cannot yet tell that from truly dead.
+#
+# Raising the ceiling to absorb a repair is exactly what a ratchet must not do
+# silently, so it is written here rather than adjusted quietly: every collision
+# fixed by moving an emitter will push this number up by one until the untagged
+# lean_single prints are tagged, at which point it falls by all of them at once.
+ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-21}"
 
 ART_DIR="$ROOT_DIR/artifacts/gates"; mkdir -p "$ART_DIR"
 ART="$ART_DIR/diagnostic_identity.json"
