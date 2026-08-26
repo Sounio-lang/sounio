@@ -1094,11 +1094,24 @@ pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustS
 // if/else EXPRESSION consuming the same linear bindings symmetrically
 // across every branch.
 
+// `TLS_IO_ERR_SEND`/`RECV`/`DECRYPT`/`ALERT`/`MALFORMED` are five distinct
+// names deliberately bound to the same negative value. That's intentional,
+// not an oversight: the design spec only promises callers "negative return
+// == error", mirroring `tcp_recv`'s own simple "any negative == error"
+// contract -- nothing in this file (or any caller) currently branches on
+// *which* of these five values came back. The separate names exist purely
+// so a future caller could start distinguishing them without an API-
+// breaking change (the constant, not its numeric value, is the stable
+// surface). `TLS_IO_ERR_RECORD_OVERFLOW` below is the one deliberate
+// exception -- final-review Fix 1 gives it a genuinely distinct value
+// because RFC 8446 SS5.4 treats an oversized record as its own alert
+// (`record_overflow`), not a generic decrypt/malformed failure.
 pub const TLS_IO_ERR_SEND: i64 = 0 - 1
 pub const TLS_IO_ERR_RECV: i64 = 0 - 1
 pub const TLS_IO_ERR_DECRYPT: i64 = 0 - 1
 pub const TLS_IO_ERR_ALERT: i64 = 0 - 1
 pub const TLS_IO_ERR_MALFORMED: i64 = 0 - 1
+pub const TLS_IO_ERR_RECORD_OVERFLOW: i64 = 0 - 2
 
 // Sends `buf[0..len)` as one or more `application_data` records
 // (RFC 8446 SS5.1 caps a single TLSPlaintext at 2^14 bytes -- this loop
@@ -1211,6 +1224,38 @@ pub fn split_into_buf_and_pending(content_len: i64, cap: i64) -> (i64, i64) {
     (out_len, overflow_len)
 }
 
+// Final-review Fix 1: RFC 8446 SS5.4 requires rejecting an oversized
+// TLSCiphertext/TLSInnerPlaintext with a `record_overflow`-class error
+// rather than trusting either length to bound `TlsConnection.pending`
+// (16392 bytes, TLS_MAX_FRAGMENT + 8). Neither the wire `frag_len` (up to
+// 65535, straight off the 2-byte header) nor `record_decrypt`'s returned
+// `content_len` (up to ~65518) was checked against TLS_MAX_FRAGMENT before
+// reaching `split_into_buf_and_pending`'s unchecked `rawbuf_set` loop into
+// `pending` -- a non-compliant/hostile but authenticated server could
+// overflow that fixed allocation. Both checks below are pure (no RawBuf/
+// network/effects) so they're exhaustively unit-testable without a live
+// peer, the same way `split_into_buf_and_pending` above is.
+//
+// `is_oversized_ciphertext_fragment` bounds the WIRE length, checked in
+// `tls_recv_loop` before the fragment is even read off the socket. The
+// limit is TLS_MAX_FRAGMENT + 256: RFC 8446 SS5.2's own stated ciphertext
+// expansion (the AEAD tag plus up to 255 bytes of padding this client
+// never emits but a peer's encoder might) on top of the SS5.1 plaintext
+// cap. This is the generous, early, cheap check -- not the decisive one.
+pub fn is_oversized_ciphertext_fragment(frag_len: i64) -> bool {
+    frag_len > TLS_MAX_FRAGMENT + 256
+}
+
+// `is_oversized_decrypted_content` bounds the DECRYPTED plaintext length
+// returned by `record_decrypt`, checked in `tls_recv_loop` immediately
+// after decryption succeeds and before `split_into_buf_and_pending` is
+// ever called. This is the decisive check: it directly bounds what could
+// reach the `pending` write, independent of whatever the wire header
+// claimed.
+pub fn is_oversized_decrypted_content(content_len: i64) -> bool {
+    content_len > TLS_MAX_FRAGMENT
+}
+
 fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, i64) with IO, Mut {
     let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
     var records2 = records
@@ -1226,6 +1271,18 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
     } else {
         let outer_type = rawbuf_get(&header, 0)
         let frag_len = (rawbuf_get(&header, 3) << 8) | rawbuf_get(&header, 4)
+        if is_oversized_ciphertext_fragment(frag_len) {
+            // Final-review Fix 1: fail closed on the wire length BEFORE
+            // ever allocating a buffer for or reading the fragment itself
+            // -- RFC 8446 SS5.4's `record_overflow` case. See
+            // `is_oversized_ciphertext_fragment`'s own doc comment above.
+            let conn_err = TlsConnection {
+                sock: sock2, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+            }
+            (conn_err, TLS_IO_ERR_RECORD_OVERFLOW)
+        } else {
         let payload = rawbuf_new(frag_len + 8)
         let (sock3, n2) = tcp_recv_exact(sock2, &payload, 0, frag_len)
         if n2 < frag_len {
@@ -1254,6 +1311,21 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                     tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                 }
                 (conn_err, TLS_IO_ERR_DECRYPT)
+            } else if is_oversized_decrypted_content(content_len) {
+                // Final-review Fix 1 -- the decisive check: whatever the
+                // wire header claimed, `record_decrypt`'s own returned
+                // `content_len` is what could actually reach
+                // `split_into_buf_and_pending`'s unchecked write into
+                // `pending`. Fail closed here, before that call, for every
+                // content type -- not just `application_data` -- since RFC
+                // 8446 SS5.1's 2^14 plaintext cap applies regardless of
+                // what the decrypted record turns out to contain.
+                let conn_err = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                }
+                (conn_err, TLS_IO_ERR_RECORD_OVERFLOW)
             } else if content_type == TLS_CONTENT_TYPE_APPLICATION_DATA {
                 // Task 8 fix-round-1: `content_len` (this one record's
                 // decrypted plaintext length, up to TLS_MAX_FRAGMENT) can
@@ -1372,6 +1444,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                 }
                 (conn_err, TLS_IO_ERR_MALFORMED)
             }
+        }
         }
     }
 }
