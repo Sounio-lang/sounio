@@ -3014,6 +3014,16 @@ fn nc_emit_idiv_rcx(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0xf9)
 }
 
+// div rcx — UNSIGNED divide rcx into rdx:rax. Quotient in rax, remainder in rdx.
+// CALLER must zero rdx first (xor rdx, rdx) or rdx's high bits fault with #DE.
+// ModRM 0xF1 differs from idiv's 0xF9 only in the /reg field (6 vs 7).
+// Findings 11 (#2084): pairing with `div` to make u64 / and % honest above bit 63.
+fn nc_emit_div_rcx(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xf7)
+    nc_emit_byte(nc, 0xf1)
+}
+
 fn nc_emit_ud2(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f)
     nc_emit_byte(nc, 0x0b)
@@ -7892,6 +7902,15 @@ fn nc_emit_sar_rax_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xd3); nc_emit_byte(nc, 0xf8)
 }
 
+// shr rax, cl — logical (unsigned) shift right. Counterpart to nc_emit_sar_rax_cl.
+// 48 D3 E8. Used for BinaryOp::OpUShr and as the bare helper for the unsigned
+// divmod case where shr is also part of the lowering pipeline. Distinct from sar
+// only when rax has the sign bit set; bit-63-set is the boundary the Finding 11
+// witness exercises.
+fn nc_emit_shr_rax_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0xd3); nc_emit_byte(nc, 0xe8)
+}
+
 fn nc_emit_and_bool_rax_rbx(nc: &! NativeCompiler) with Mut, Panic, Div {
     // test rbx, rbx; setne cl; test rax, rax; setne al; and al, cl; movzx rax, al
     nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x85); nc_emit_byte(nc, 0xdb)
@@ -8345,12 +8364,40 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_mark_int_reg(nc, dst)
         return true
     }
+    if op == BinaryOp::OpUDiv {
+        // UNSIGNED divide: rax = lhs / rhs. Mirrors OpDiv's sequence but with
+        // div (unsigned) instead of idiv (signed), and zeroes rdx first so the
+        // quotient = rdx:rax / rhs has rdx == 0. Findings 11 (#2084).
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_mov_reg_reg(nc, 1, 0)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_xor_rdx_rdx(nc)   // rdx = 0
+        nc_emit_div_rcx(nc)                 // div rcx: rax = quotient, rdx = remainder
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
     if op == BinaryOp::OpRem {
         nc_core_load_temp_to_rax(nc, rhs)
         nc_emit_mov_reg_reg(nc, 1, 0)
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_cqo(nc)
         nc_emit_idiv_rcx(nc)
+        nc_emit_mov_rax_rdx(nc)
+        nc_core_store_rax_to_temp(nc, dst)
+        nc_core_mark_int_reg(nc, dst)
+        return true
+    }
+    if op == BinaryOp::OpURem {
+        // UNSIGNED remainder: rax = lhs % rhs. div's remainder lives in rdx.
+        // Findings 11 (#2084): paired with OpUDiv so u64 % above bit 63 returns
+        // the unsigned magnitude remainder instead of the signed truncate-toward-zero
+        // version of the same bits.
+        nc_core_load_temp_to_rax(nc, rhs)
+        nc_emit_mov_reg_reg(nc, 1, 0)
+        nc_core_load_temp_to_rax(nc, lhs)
+        nc_emit_xor_rdx_rdx(nc)   // rdx = 0
+        nc_emit_div_rcx(nc)                 // rdx = lhs % rhs (unsigned)
         nc_emit_mov_rax_rdx(nc)
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
@@ -8376,7 +8423,7 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_core_mark_int_reg(nc, dst)
         return true
     }
-    if op == BinaryOp::OpShl || op == BinaryOp::OpShr {
+    if op == BinaryOp::OpShl || op == BinaryOp::OpShr || op == BinaryOp::OpUShr {
         nc_core_load_temp_to_rax(nc, lhs)
         nc_emit_push_rax(nc)
         nc_core_load_temp_to_rax(nc, rhs)
@@ -8385,8 +8432,13 @@ fn nc_emit_core_binop(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64
         nc_emit_mov_rax_rbx(nc)
         if op == BinaryOp::OpShl {
             nc_emit_shl_rax_cl(nc)
-        } else {
+        } else if op == BinaryOp::OpShr {
             nc_emit_sar_rax_cl(nc)
+        } else {
+            // OpUShr: logical (unsigned) right shift. Distinct from sar only
+            // when lhs has the sign bit set; bit-63-set is the boundary the
+            // Finding 11 witness exercises.
+            nc_emit_shr_rax_cl(nc)
         }
         nc_core_store_rax_to_temp(nc, dst)
         nc_core_mark_int_reg(nc, dst)
@@ -11687,8 +11739,13 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpDiv {
             out.code = a64_emit_sdiv(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUDiv {
+            out.code = a64_emit_udiv(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpRem {
             out.code = a64_emit_sdiv(out.code, A64_X11, A64_X9, A64_X10)
+            out.code = a64_emit_msub(out.code, A64_X9, A64_X11, A64_X10, A64_X9)
+        } else if instr.bin_op == BinaryOp::OpURem {
+            out.code = a64_emit_udiv(out.code, A64_X11, A64_X9, A64_X10)
             out.code = a64_emit_msub(out.code, A64_X9, A64_X11, A64_X10, A64_X9)
         } else if instr.bin_op == BinaryOp::OpBitAnd {
             out.code = a64_emit_and(out.code, A64_X9, A64_X9, A64_X10)
@@ -11700,6 +11757,8 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
             out.code = a64_emit_lsl(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpShr {
             out.code = a64_emit_asr(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUShr {
+            out.code = a64_emit_lsr(out.code, A64_X9, A64_X9, A64_X10)
         } else {
             return (out, "aarch64_binop_pending:" + native_v2_ir_opcode_name(IrOpcode::IrBinOp))
         }
