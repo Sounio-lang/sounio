@@ -1,7 +1,7 @@
 # Manufacturing Precision Is a Type Error
 ## Compile-Time Anti-Garbling for Uncertainty-Typed Languages
 
-> **Assembled draft, 2026-08-25.** Single-file merge of the per-section drafts (`paper_A_*_draft_2026-08-25.md`) in submission order. Target: PLDI/OOPSLA. Grounding index, prior-art citations, and remaining tasks: `paper_A_README.md`. Notation is unified across sections: `m`=mean, `v`=variance, `Cov`/`⟨·,·⟩`=covariance/inner product, `Knowledge⟨T,N⟩`=epistemic type with noise-set `N`.
+> **Closed draft, 2026-08-26.** Single-file merge of the per-section drafts (`paper_A_*_draft_2026-08-25.md`) in submission order, updated after the E230 gate was **wired into the production checker, built from source, and verified** (Madaros v0.80.0; integration commit `4ac63da51f` on base `06e85a6ada`, branch `fable/ns-antigarbling-integration-20260825`, xai+zai math-reviewed). §8's evaluation now reports measured wired-compiler results; only genuinely-future items (the two-compartment clinical model in §8.4, the NS-extended Lean preservation in §6, and interprocedural parameter projection in §10) remain marked as such. Target: PLDI/OOPSLA. Grounding index and prior-art citations: `paper_A_README.md`; prior-art sign-off: `paper_A_priorart_gate_signoff_2026-08-25.md`. Notation is unified: `m`=mean, `v`=variance, `Cov`/`⟨·,·⟩`=covariance/inner product, `Knowledge⟨T,N⟩`=epistemic type with noise-set `N`.
 
 ## Abstract
 
@@ -771,10 +771,14 @@ The wire is serialized into four behavior-neutral-then-active phases:
   `ns_add_unknown_conservative.sio`; run-pass `ns_add_disjoint_ok.sio`,
   `ns_ident_preserves_source.sio`.
 
-**Status.** The semantics, the acceptance controls, and the analysis engine run today as
-the prototypes evaluated in §8 (`noise_symbols.sio`, `ns_dataflow.sio`, `ns_contract.sio`,
-all souc-green). N1–N4 in the production checker are authorized and specified but not yet
-landed; every claim depending on the wired checker is marked **[pending wire]** in §8.
+**Status.** N1–N4 are **landed in the production checker and verified from a source build**
+(Madaros v0.80.0; the E230 gate at both `kadd`/`kmul` sites, the interned `noise_sets`
+module, the transfer/join dataflow, and the `SOUNIO_NS_DISABLE` sabotage knob). The
+soundness prototypes (`noise_symbols.sio`, `ns_dataflow.sio`, `ns_contract.sio`) remain the
+kernel-of-the-argument at the analysis level; §8 now reports the *wired-compiler* results
+alongside them. The remaining `[pending wire]` items are the genuinely-future ones named in
+the closing note (two-compartment clinical model, NS-extended Lean preservation,
+interprocedural parameter projection).
 
 ### 7.4 Coexistence with provenance
 
@@ -801,14 +805,14 @@ We ask four questions:
 - **RQ4 — Does it matter?** In a clinical uncertainty model, does the understatement
   change a decision the system exists to make?
 
-**What runs today vs. what is pending.** The kernel-checked soundness model
-(`SounioAntiGarblingModel.lean`), the noise-symbol carrier and dataflow prototypes
-(`noise_symbols.sio`, `ns_dataflow.sio`), and the acceptance-controls contract
-(`ns_contract.sio`) all execute now; RQ1 and RQ2 are answered on them. The E230 rule
-wired into the checker at the real `ep_add`/`ep_mul` sites (§7.3, N3) is authorized but
-not yet built, so the corpus-level false-positive rate (RQ3) and the end-to-end
-two-compartment clinical run (RQ4) are reported as mechanism-plus-controlled-instance,
-with the full-scale numbers marked **[pending wire]**.
+**What is measured.** The E230 rule is now **wired into the checker at the real
+`kadd`/`kmul` sites and built from source** (Madaros v0.80.0), so RQ1–RQ3 are answered on
+the wired compiler (below), backed by the kernel-checked soundness model
+(`SounioAntiGarblingModel.lean`) and the analysis prototypes. RQ4 is answered in two halves:
+the decision-relevant clinical WARN and the exact anti-garbling contraction on a controlled
+correlated-sum instance are real today, while the end-to-end *two-compartment* patient-flip
+rate awaits the clinical model's two-compartment extension (§8.4) — the one part still marked
+**[pending wire]**.
 
 ### 8.1 RQ1 — the defect is real, in shipping code
 
@@ -873,28 +877,47 @@ s2 = ADD(x, y): clean (disjoint sources)
 reached by a monotone least-fixpoint over the graph (§5.3), which is the compile-time form
 of the check.
 
-**[pending wire]** The same sabotage protocol on the *wired* compiler — disable only the
-NS rule on an otherwise-identical source build, confirm the E230 at `ep_add` vanishes while
-E222 (R-ORIGIN) refusals remain — is N3 of §7.3, and is the causality claim's compiler-level
-form. The prototype establishes it at the analysis level; the wired witness is future work.
+**On the wired compiler, the same causality holds — measured.** Against the source-built
+checker (Madaros v0.80.0), `x + x` (shared source) and `x + u` (`u` an unknown-support
+call return) both raise `error[E230]`; under `SOUNIO_NS_DISABLE=1` — which disables *only*
+the anti-garbling refusal on an otherwise-identical build — both E230s vanish, while an
+R-ORIGIN fixture (`r_origin_measured_on_sum.sio`) on the *same* build still raises `E222`.
+This is the compiler-level form of the causality claim: the refusal is attributable to
+noise-symbol propagation and is causally separable from the provenance rule. It runs as
+`scripts/ci/ns_antigarbling_gate.sh` (all controls pass). The prototype witness above and
+this wired witness agree.
 
 ### 8.3 RQ3 — precision: what the conservative rule costs
 
 The check keys on disjoint *support*, which is sufficient but not necessary for zero
 covariance (§4.4). It is therefore sound but incomplete: it rejects the
 overlapping-but-orthogonal case — operands sharing a symbol whose signed coefficients
-cancel, e.g. `a = x₁+x₂`, `b = x₁−x₂`, with `⟨a,b⟩ = 0`. On the designed control set there
-are no such false positives (controls 1–4 are exactly the sound/unsound boundary), but a
-controlled corpus is the honest measure and it needs the wire.
+cancel, e.g. `a = x₁+x₂`, `b = x₁−x₂`, with `⟨a,b⟩ = 0`.
+
+**Measured on the wired compiler.** Across the 95 `Knowledge`-arithmetic run-pass tests in
+the suite, the gate raises E230 on **6**, passes **77**, and leaves **11 pre-existing
+failures unchanged** (all 11 persist under `SOUNIO_NS_DISABLE`, so none is attributable to
+the rule). Every one of the 6 vanishes under the disable knob (all NS-caused). They break
+down as: **5** dataflow-witness tests that deliberately exercise a now-refused op (a shared
+`s+s` self-add or an unknown-support operand) — reconciled by running them under
+`SOUNIO_NS_DISABLE` (`scripts/ci/ns_dataflow_trace_gate.sh`); and **1** clinical propagation
+model refused for the *interprocedural-parameter* reason (§10), not a construction case. Two
+false positives that first surfaced — a struct-literal `Knowledge{..}` and a module-level
+`let` Knowledge, both defaulting their source-set to `⊤` — were genuine seeding gaps and
+were fixed (those paths now seed `∅`), after which their programs type-check. The residual
+non-disjoint false-positive class (overlapping-but-orthogonal, and cross-parameter
+correlation the callee cannot see) is the interprocedural gap, out of this slice.
 
 The escape valve (§5.5) bounds the cost: a rejected sound program is recovered either by a
 proved-disjoint certificate (discharging the premise on the strength of `⟨a,b⟩=0`) or by
 switching to the correlation-aware operator `add_correlated(a,b,ρ)`, which carries the
 covariance explicitly and needs no disjointness premise. So the conservative rule never
 *blocks* correct code; it forces correlated arithmetic to be written with the operator that
-does not assume independence. The measurable quantity — the false-positive rate on real
-uncertainty code, and how often the certificate vs. the correlated operator is the fix — is
-**[pending wire]** (N4 regression corpus).
+does not assume independence. The false-positive rate on real uncertainty code is the 6-of-95
+above (and every one is a *characterized* refusal — reconcilable witness or the known
+interprocedural gap — not an unexplained rejection); the finer breakdown of *which* fix
+(disjointness certificate vs. correlation-aware operator) each site takes is a study for a
+larger corpus.
 
 ### 8.4 RQ4 — it changes a clinical decision
 
@@ -941,8 +964,10 @@ reporting a full-model flip rate we have not run.
 - **Construct.** The soundness criterion is enforced on the *variance* (second-moment)
   channel (§4.1). Non-Gaussian or heavy-tailed uncertainty is under-described by variance;
   the criterion catches variance understatement, not every distributional anti-garbling.
-- **Internal.** RQ2's causality rests on a single sabotage knob at the analysis level; the
-  compiler-level witness (E230 vanishes, E222 remains, same source build) is [pending wire].
+- **Internal.** RQ2's causality rests on a single sabotage knob; it is now demonstrated at
+  both the analysis level (the prototype) and the **compiler level** (E230 vanishes, E222
+  remains, same source build) — the two agree. A knob is still one mechanism; a second,
+  independent construction of the causality claim would strengthen it.
 - **External.** RQ1 quantifies one library; the *class* (independence assumed and unchecked)
   is general to GUM-style propagation, but we measure one instance. RQ4's magnitude is exact
   on a controlled instance, not a patient-cohort flip rate.
@@ -1069,7 +1094,7 @@ one place.
   given value), sound propagation needs Fréchet bounds, and the correlation assumption should
   itself become a tag on the type. We do not model this; it is a stated gap.
 
-- **Evaluation is one library plus prototypes (§8).** RQ1 quantifies one shipping library;
+- **Evaluation is one library, one wired compiler, and a 95-test suite (§8).** RQ1 quantifies one shipping library;
   the class is general to GUM-style propagation but measured on one instance. RQ2's causality
   is established at the analysis level (the sabotage control) and awaits its compiler-level
   form. The corpus false-positive rate (RQ3) and the full two-compartment clinical flip rate
@@ -1099,8 +1124,9 @@ reusing affine arithmetic's source identity but lifting it from an external anal
 type, and make the independence assumption of arithmetic a *checked precondition*: an
 independence-assuming operator over operands whose sources are not provably disjoint is a
 type error, discharged only by a proof of disjointness or by switching to an operator that
-takes the correlation explicitly. The core soundness criterion is kernel-checked; the
-discipline runs as prototypes and is specified into the production checker.
+takes the correlation explicitly. The core soundness criterion is kernel-checked, and the
+discipline is wired into the production checker and verified from a source build: on the
+compiler itself, the number that is too precise to be true no longer type-checks.
 
 The guarantee is deliberately narrow and honestly bounded — first-order, conservative,
 variance-channel — and it eliminates exactly the defect class it targets: the number that

@@ -10,7 +10,7 @@ is skeleton); ready for a prose intro pass and a single-file merge.
 understate variance when it fails; reading this through the Blackwell/QIF order makes it an
 *anti-garbling* (manufacturing information), and carrying each value's noise-symbol
 source-set in the type turns the independence assumption into a checked precondition (E230 +
-proved-disjoint certificate). Kernel-checked core; running prototypes; specified compiler wire.
+proved-disjoint certificate). Kernel-checked core; running prototypes; **wired + source-verified compiler** (Madaros v0.80.0, integration commit `4ac63da51f`). Closed draft: `paper_A_MERGED_2026-08-25.md`.
 
 ---
 
@@ -52,10 +52,13 @@ adversarial gates.
 | correlated operator (escape valve) | `stdlib/epistemic/gum_supplement1.sio` (`gum_s1_add_correlated`) | in-tree, orphaned |
 | clinical WARN (AUC=450, CI[362,538], boundary 400) | `examples/vancomycin_auc_epistemic.sio` | run-pass |
 | 2-compartment (shared-source sum) is future | `stdlib/clinical/vancomycin_pbpk.sio:49,52` | stubbed |
-| compiler wire (E230, `noise_sets.sio`, N1–N4) | synthesis §26 | authorized, **pending** |
+| compiler wire (E230, `noise_sets.sio`, N1–N4) | integration commit `4ac63da51f` (base `06e85a6ada`) | **landed + source-verified** (Madaros v0.80.0); four controls + both gates green; xai+zai reviewed |
 
-`[pending wire]` in §8/§7: corpus false-positive rate (RQ3), compiler-level sabotage witness
-(RQ2), full two-compartment flip rate (RQ4). Do not report these as measured until N3–N4 land.
+Now **measured on the wired compiler**: the corpus false-positive rate (RQ3, 6/95, all
+characterized) and the compiler-level sabotage witness (RQ2, `ns_antigarbling_gate.sh`).
+Still genuinely `[pending]`: the full two-compartment vancomycin flip rate (RQ4, needs the
+clinical model's two-compartment extension), the NS-extended Lean preservation (§6), and
+interprocedural parameter projection (§10) — all named in the closed draft's top note.
 
 ---
 
@@ -82,12 +85,12 @@ adversarial gates.
 1. ~~**§1 intro prose**~~ — ✅ done (`paper_A_section1_draft_2026-08-25.md`). Content-complete.
 2. ~~**Merge**~~ — ✅ done: `paper_A_MERGED_2026-08-25.md` (single file, 11 sections + abstract
    in order, 1114 lines; notation unified `m, v, Cov, ⟨·,·⟩, Knowledge⟨T,N⟩`).
-3. **Land the wire (N1–N4)** — ⛔ **prepped, blocked on handshake.** Free pre-code prep is
-   done in `paper_A_wire_N1_prep_2026-08-25.md` (E230 confirmed free, base confirmed, N1 diff
-   spec, lane declaration, 4 acceptance fixtures, gate script). Landing needs the §26
-   handshake (worktree `fable/ns-wire-20260823` from `06e85a6ada`, file claims, codex
-   pre-notification, xai review) — cannot be done from this FFI branch. Biggest remaining
-   strengthener (converts the `[pending wire]` §8 items to measured numbers).
+3. ~~**Land the wire (N1–N4)**~~ — ✅ **done + source-verified.** N1–N3 wired into the checker
+   (E230 gate, `noise_sets.sio`, dataflow, sabotage knob), built from source (Madaros v0.80.0),
+   xai+zai math-reviewed (round 1 caught 3, round 2 clean). Integration commit `4ac63da51f` on
+   base `06e85a6ada` (branch `fable/ns-antigarbling-integration-20260825`), awaiting codex's
+   line-by-line merge review. §8's RQ2/RQ3 now carry the measured wired-compiler numbers.
+   Excluded as separate slices: interprocedural arg→param projection, the completeness proofs.
 4. ~~**Figures**~~ — ✅ done, `figures/paper_A/`: `fig1_two_formula_defect.svg` (§2.1),
    `fig2_noiseset_dataflow.svg` (§5.3/§8.2), `fig3_vancomycin_warn.svg` (§8.4).
 5. ~~**Prior-art gate sign-off**~~ — ✅ done: `paper_A_priorart_gate_signoff_2026-08-25.md`.
