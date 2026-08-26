@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.25"
+let runtime_version = "2026.08.26.26"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -3862,6 +3862,67 @@ let witness_epoch_verify_command cli =
         ~active_root:(required cli "--active-state-dir")
         ~membership_file:(required cli "--membership")
         ~endpoints_file:(required cli "--endpoints"))
+
+let witness_epoch_transparency_port cli =
+  match optional cli "--log-port" with
+  | None -> 0
+  | Some raw ->
+      let value =
+        try int_of_string raw
+        with _ -> failf "witness epoch transparency --log-port must be an integer: %s" raw
+      in
+      if value < 0 || value > 65535 then
+        failf "witness epoch transparency --log-port must be between 0 and 65535: %d"
+          value;
+      value
+
+let witness_epoch_log_serve_command cli =
+  Loom_witness_transparency.serve
+    ~state_dir:(required cli "--log-state-dir")
+    ~operator:(required cli "--operator")
+    ~operator_public_key_file:(required cli "--operator-public-key")
+    ~operator_private_key:(required cli "--operator-private-key")
+    ~publisher_public_key_file:(required cli "--publisher-public-key")
+    ~bind:(optional cli "--bind" |> Option.value ~default:"127.0.0.1")
+    ~port:(witness_epoch_transparency_port cli)
+
+let witness_epoch_log_status_command cli =
+  epistemic_print (fun () ->
+      Loom_witness_transparency.status
+        ~host:(required cli "--log-host")
+        ~port:(witness_epoch_transparency_port cli)
+        ~operator:(required cli "--operator")
+        ~operator_public_key_file:(required cli "--operator-public-key")
+        ~world:(required cli "--world"))
+
+let witness_epoch_transparency_publish_command cli =
+  epistemic_print (fun () ->
+      Loom_witness_transparency.publish
+        ~epoch_state_dir:(required cli "--epoch-state-dir")
+        ~transparency_state_dir:(required cli "--transparency-state-dir")
+        ~world:(required cli "--world")
+        ~log_host:(required cli "--log-host")
+        ~log_port:(witness_epoch_transparency_port cli)
+        ~operator:(required cli "--operator")
+        ~operator_public_key_file:(required cli "--operator-public-key")
+        ~publisher_public_key_file:(required cli "--publisher-public-key")
+        ~publisher_private_key:(required cli "--publisher-private-key")
+        ~membership_file:(required cli "--transparency-membership")
+        ~endpoints_file:(required cli "--transparency-endpoints")
+        ~anchor_private_key:(required cli "--transparency-anchor-private-key"))
+
+let witness_epoch_transparency_verify_command cli =
+  epistemic_print (fun () ->
+      Loom_witness_transparency.verify
+        ~epoch_state_dir:(required cli "--epoch-state-dir")
+        ~transparency_state_dir:(required cli "--transparency-state-dir")
+        ~world:(required cli "--world")
+        ~log_host:(required cli "--log-host")
+        ~log_port:(witness_epoch_transparency_port cli)
+        ~operator:(required cli "--operator")
+        ~operator_public_key_file:(required cli "--operator-public-key")
+        ~membership_file:(required cli "--transparency-membership")
+        ~endpoints_file:(required cli "--transparency-endpoints"))
 
 let session_events_json (_, values) =
   let agent = table_value values "agent" in
@@ -8692,7 +8753,7 @@ let usage () =
   Printf.eprintf
     "\nRobust Contingent Policy Compiler v0:\n  contingent-policy-compile --world W --contingent-policy P --root-state S --actions FILE --outcomes FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --order information-first|falsification-first|counterfactual-first --owner A --generation G [--measurement-principal M --measurement-public-key PEM --classifier-principal C --classifier-public-key PEM --classifier-spec-digest SHA]\n  contingent-measurement-attest --world W --contingent-policy P --measurement FILE --measurement-principal M --measurement-private-key PEM --measurement-nonce N --receipt FILE\n  contingent-classification-attest --world W --contingent-policy P --measurement-receipt FILE --outcome O --classifier-principal C --classifier-private-key PEM --receipt FILE\n  contingent-policy-observe-attested --world W --contingent-policy P --measurement-receipt FILE --classification-receipt FILE --owner A --generation G\n  contingent-policy-observe --world W --contingent-policy P --outcome O --owner A --generation G --outcome-digest SHA (legacy opaque policies only)\n";
   Printf.eprintf
-    "\nWitness Mesh v0/v1:\n  witness-serve --witness-state-dir DIR --membership FILE --witness ID --private-key PEM [--bind IP] [--port N]\n  witness-mesh-anchor --state-dir DIR --world W --membership FILE --endpoints FILE --anchor-private-key PEM\n  witness-mesh-verify --state-dir DIR --world W --membership FILE --endpoints FILE [--policy byzantine-strict|crash-quorum]\n  witness-epoch-handoff --epoch-state-dir DIR --world W --from-epoch N --to-epoch N --old-state-dir DIR --old-membership FILE --old-endpoints FILE --new-state-dir DIR --new-membership FILE --new-endpoints FILE\n  witness-epoch-verify --epoch-state-dir DIR --world W --active-state-dir DIR --membership FILE --endpoints FILE\n";
+    "\nWitness Mesh v0/v1:\n  witness-serve --witness-state-dir DIR --membership FILE --witness ID --private-key PEM [--bind IP] [--port N]\n  witness-mesh-anchor --state-dir DIR --world W --membership FILE --endpoints FILE --anchor-private-key PEM\n  witness-mesh-verify --state-dir DIR --world W --membership FILE --endpoints FILE [--policy byzantine-strict|crash-quorum]\n  witness-epoch-handoff --epoch-state-dir DIR --world W --from-epoch N --to-epoch N --old-state-dir DIR --old-membership FILE --old-endpoints FILE --new-state-dir DIR --new-membership FILE --new-endpoints FILE\n  witness-epoch-verify --epoch-state-dir DIR --world W --active-state-dir DIR --membership FILE --endpoints FILE\n  witness-epoch-log-serve --log-state-dir DIR --operator ID --operator-public-key PEM --operator-private-key PEM --publisher-public-key PEM [--bind IP] [--log-port N]\n  witness-epoch-log-status --log-host HOST --log-port N --operator ID --operator-public-key PEM --world W\n  witness-epoch-transparency-publish --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --publisher-public-key PEM --publisher-private-key PEM --transparency-membership FILE --transparency-endpoints FILE --transparency-anchor-private-key PEM\n  witness-epoch-transparency-verify --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --transparency-membership FILE --transparency-endpoints FILE\n";
   Printf.eprintf
     "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
@@ -8787,6 +8848,12 @@ let main () =
     | "witness-mesh-verify" -> witness_mesh_verify_command cli; 0
     | "witness-epoch-handoff" -> witness_epoch_handoff_command cli; 0
     | "witness-epoch-verify" -> witness_epoch_verify_command cli; 0
+    | "witness-epoch-log-serve" -> witness_epoch_log_serve_command cli; 0
+    | "witness-epoch-log-status" -> witness_epoch_log_status_command cli; 0
+    | "witness-epoch-transparency-publish" ->
+        witness_epoch_transparency_publish_command cli; 0
+    | "witness-epoch-transparency-verify" ->
+        witness_epoch_transparency_verify_command cli; 0
     | "export-events-arrow" -> export_events_arrow_command cli; 0
     | "verify-events-arrow" -> verify_events_arrow_command cli; 0
     | "beagle-serve" -> serve_beagle_bridge cli; 0
@@ -8809,6 +8876,8 @@ let () =
   | Loom_epistemic.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness_epoch.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_witness_transparency.Error error ->
+      Printf.eprintf "error: %s\n%!" error; exit 1
   | Sys_error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Unix_error (error, function_name, argument) ->
       Printf.eprintf "error: %s: %s(%s)\n%!" (Unix.error_message error) function_name argument;

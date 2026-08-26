@@ -567,6 +567,81 @@ under a monotonic authority outside the protected roots' rollback domain before
 claiming rollback resistance. The bounded semantic and falsification contract
 is `docs/internal/concepts/loom-witness-epoch-handoff.contract`.
 
+## Witness Epoch Transparency v0
+
+Epoch transparency moves the handoff history outside the epoch-control
+directory's rollback domain. A signed append-only operator stores the canonical
+handoff journal, while a fixed Witness Mesh v1 council independently anchors
+the exact tree size and RFC6962-style Merkle root. The operator is storage, not
+truth: verification replays the complete bounded journal, recomputes every leaf
+and internal-node hash, checks the operator signature, and queries a fresh
+3-of-4 witness quorum before accepting the active epoch.
+
+```sh
+bin/loom witness-epoch-log-serve \
+  --log-state-dir LOG_STATE --operator log-operator \
+  --operator-public-key operator-public.pem \
+  --operator-private-key operator-private.pem \
+  --publisher-public-key publisher-public.pem \
+  --bind LOG_ADDRESS --log-port 9442
+
+bin/loom witness-epoch-transparency-publish \
+  --epoch-state-dir EPOCH_STATE --transparency-state-dir TRANSPARENCY_STATE \
+  --world scheduler --log-host LOG_HOST --log-port 9442 \
+  --operator log-operator --operator-public-key operator-public.pem \
+  --publisher-public-key publisher-public.pem \
+  --publisher-private-key publisher-private.pem \
+  --transparency-membership transparency-membership.tsv \
+  --transparency-endpoints transparency-endpoints.tsv \
+  --transparency-anchor-private-key transparency-anchor-private.pem
+
+bin/loom witness-epoch-transparency-verify \
+  --epoch-state-dir EPOCH_STATE --transparency-state-dir TRANSPARENCY_STATE \
+  --world scheduler --log-host LOG_HOST --log-port 9442 \
+  --operator log-operator --operator-public-key operator-public.pem \
+  --transparency-membership transparency-membership.tsv \
+  --transparency-endpoints transparency-endpoints.tsv
+```
+
+Native Sounio frame `9016` consumes separate linear proofs for the verified
+frame `9015` handoff, signed reachable log, current witness quorum, independent
+operator principal, monotonic append, materialized-prefix inclusion, exact leaf
+binding, and latest-epoch agreement. Its eight named rules are each covered by
+a same-frame necessity control: the unmodified rule refuses the attack and
+replacing only that rule with `true` admits the identical frame under the test
+harness. The private
+host receipt cannot be constructed by callers, and the quorum proof cannot be
+reused.
+
+Publishing requires the active handoff to be the newest leaf: for tree size
+`n`, the appended transition must have index `n` and `to_epoch = n + 2` after
+the explicit epoch-one bootstrap. A crash after operator append but before
+witness anchoring is recovered by retrying the exact persisted leaf; a
+conflicting retry refuses. The bounded v0 journal supports at most 64
+transitions and deliberately uses a full materialized prefix instead of a
+compact consistency proof.
+
+Production verification refuses an operator that resolves to the local host.
+The environment variable
+`SOUNIO_LOOM_WITNESS_EPOCH_TRANSPARENCY_TEST_ALLOW_SAME_HOST=1` exists only for
+deterministic local gates and labels its output
+`custody=SIMULATED_NOT_CLAIMED`; it is not evidence of external custody.
+
+The proven claim is narrow: a verifier connected to the signed operator and a
+fresh 3-of-4 council refuses rollback below the latest quorum-witnessed epoch,
+signed split views, forged inclusion, reordered or dropped handoffs,
+host-principal collapse, stale signed tree heads, and an unreachable log. The
+cross-node gate runs the client, node-local operator storage, and four witness
+services on five distinct Slurm hosts, stages checksum-verified artifacts, and
+accepts only `custody=EXTERNAL_HOST`; see
+`scripts/ci/sounio_loom_witness_epoch_transparency_cross_node_selftest.sh`.
+
+This is not a freeze detector, availability protocol, consensus service,
+trusted-time system, compact transparency log, or backup of the log bytes. It
+makes no safety claim with two dishonest witnesses, under a full partition, or
+when the operator and at least two witnesses collude. The bounded contract is
+`docs/internal/concepts/loom-witness-epoch-transparency.contract`.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every

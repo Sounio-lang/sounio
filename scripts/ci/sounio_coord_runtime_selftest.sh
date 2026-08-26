@@ -21,6 +21,7 @@ export SOUNIO_LOOM_OUTCOME_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/_build/defau
 export SOUNIO_LOOM_WITNESS_MESH_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-witness-mesh-runtime"
 export SOUNIO_LOOM_WITNESS_MESH_V1_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-witness-mesh-v1-runtime"
 export SOUNIO_LOOM_WITNESS_EPOCH_HANDOFF_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-witness-epoch-handoff-runtime"
+export SOUNIO_LOOM_WITNESS_EPOCH_TRANSPARENCY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
 
 cleanup() {
   [[ -z "${supervisor_pid:-}" ]] || kill "$supervisor_pid" 2>/dev/null || true
@@ -62,6 +63,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
   "$REPO/scripts/dev/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
@@ -76,11 +78,14 @@ cp "$ROOT_DIR/tools/loom/witness_mesh_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/witness_mesh_v1_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/witness_epoch_handoff_adapter_main.sio" \
   "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
+  "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
@@ -109,6 +114,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh_v1.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
   "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
+  "$REPO/stdlib/coordination/"
 chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Runtime Selftest'
@@ -135,6 +142,9 @@ grep -q '^source_state=clean$' "$first_manifest" || \
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
   grep -qx 'stdlib/coordination/loom_witness_epoch_handoff.sio' || \
   fail 'runtime source SHA omits the frame-9015 source'
+git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
+  grep -qx 'stdlib/coordination/loom_witness_epoch_transparency.sio' || \
+  fail 'runtime source SHA omits the frame-9016 source'
 
 printf '\n# dirty runtime source control\n' >> \
   "$REPO/stdlib/coordination/loom_witness_epoch_handoff.sio"
@@ -173,6 +183,8 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
   fail 'installed runtime omitted the native Sounio witness-mesh-v1 adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-witness-epoch-handoff-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio witness-epoch-handoff adapter'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-witness-epoch-transparency-runtime" ]] || \
+  fail 'installed runtime omitted the native Sounio witness-epoch-transparency adapter'
 grep -q '^loom_witness_mesh_language=Sounio$' \
   "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the witness-mesh language declaration'
@@ -191,6 +203,12 @@ grep -q '^loom_witness_epoch_handoff_language=Sounio$' \
 grep -q '^loom_witness_epoch_handoff_frame=9015$' \
   "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the witness-epoch-handoff frame declaration'
+grep -q '^loom_witness_epoch_transparency_language=Sounio$' \
+  "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed runtime omitted the witness-epoch-transparency language declaration'
+grep -q '^loom_witness_epoch_transparency_frame=9016$' \
+  "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed runtime omitted the witness-epoch-transparency frame declaration'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-agent-runtime" ]] || \
   fail 'installed runtime omitted the fleet launcher'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-fleet-runtime" ]] || \
@@ -238,6 +256,11 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-joint-old-new-witness-quorum-v0 \
   loom-atomic-witness-epoch-activation-v0 \
   loom-witness-epoch-crash-recovery-v0 \
+  loom-external-epoch-transparency-v0 \
+  loom-materialized-merkle-prefix-verification-v0 \
+  loom-witnessed-split-view-refusal-v0 \
+  loom-latest-quorum-witnessed-epoch-rollback-refusal-v0 \
+  loom-transparency-unreachable-fail-closed-v0 \
   loom-post-activation-request-bridge-v1 \
   loom-recoverable-control-service-v1 \
   loom-beagle-coordination-endpoint-v1 loom-separate-pod-inbox-replay-v1 \
@@ -279,7 +302,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.26.25$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.26.26$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
@@ -634,6 +657,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
   "$ALT/scripts/dev/"
 mkdir -p "$ALT/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
@@ -648,11 +672,14 @@ cp "$ROOT_DIR/tools/loom/witness_mesh_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/witness_mesh_v1_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/witness_epoch_handoff_adapter_main.sio" \
   "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
+  "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
@@ -680,6 +707,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh_v1.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
+  "$ALT/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$ALT/formal/tla/"
@@ -746,6 +775,7 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
   "$BAD/scripts/dev/"
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
@@ -760,11 +790,14 @@ cp "$ROOT_DIR/tools/loom/witness_mesh_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/witness_mesh_v1_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/witness_epoch_handoff_adapter_main.sio" \
   "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
+  "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
@@ -792,6 +825,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh_v1.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"
@@ -937,6 +972,33 @@ fi
 output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'failed witness-epoch dependency activation changed the current runtime'
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/witness-epoch-transparency-adapter-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=witness-epoch-transparency-adapter-omitted/' \
+  "$RUNTIME_ROOT/versions/witness-epoch-transparency-adapter-omitted/manifest"
+rm -f "$RUNTIME_ROOT/versions/witness-epoch-transparency-adapter-omitted/bin/sounio-loom-witness-epoch-transparency-runtime"
+if (cd "$REPO" && bin/sounio-coord install-runtime \
+    --activate witness-epoch-transparency-adapter-omitted) >/dev/null 2>&1; then
+  fail 'installer activated a declared frame-9016 runtime without its adapter'
+fi
+output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'failed witness-epoch-transparency activation changed the current runtime'
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/witness-epoch-transparency-root-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=witness-epoch-transparency-root-omitted/' \
+  "$RUNTIME_ROOT/versions/witness-epoch-transparency-root-omitted/manifest"
+sed -i '/^capability=loom-external-epoch-transparency-v0$/d' \
+  "$RUNTIME_ROOT/versions/witness-epoch-transparency-root-omitted/manifest"
+if (cd "$REPO" && bin/sounio-coord install-runtime \
+    --activate witness-epoch-transparency-root-omitted) >/dev/null 2>&1; then
+  fail 'installer activated derived transparency capabilities without their root capability'
+fi
+output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'failed transparency dependency activation changed the current runtime'
 
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --list)"
 grep -q "runtime_id=$first_id current=yes" <<< "$output" || fail 'runtime list lost the current marker'
