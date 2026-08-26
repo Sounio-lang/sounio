@@ -8,7 +8,7 @@ validated_by: controller (tls-on-madaros branch, TLS 1.3 handshake sub-project)
 
 # Forensic dispatch — D11: a tuple-destructured local loses its struct type, so a field read resolves by NAME across every struct in the linked program (filed as "arena/scratch reset cross-module corruption"; the arena is not involved)
 
-**Filed:** 2026-08-26 · **Status:** ROOT-CAUSED, minimal repro found, fix proposed but NOT implemented · **Protocol:** CLAUDE.md §8 · **Supersedes the suspected area recorded in** `docs/handoff/souc_v0800_defects.md` §D11.
+**Filed:** 2026-08-26 · **Status:** RESOLVED (fixed in `self-hosted/ir/lower.sio`, commit `3ec2d971d`; dispatch filed as `f83b20ce3`) · **Protocol:** CLAUDE.md §8 · **Supersedes the suspected area recorded in** `docs/handoff/souc_v0800_defects.md` §D11.
 
 **The name of this file is kept as originally dispatched. It is wrong about the
 mechanism and is retained only so the handoff entry's cross-reference resolves.
@@ -284,6 +284,76 @@ re-arms it, with no warning.
   wrong. Same *ingredient* (a colliding field name), different stage.
 - **Prior heavy computation / heap state.** The corruption is present at the
   very first call, in a program that does nothing else.
+
+## Resolution (2026-08-26, commit `3ec2d971d`)
+
+Implemented as proposed above, with one simplification: no per-`__tupN` table
+is needed. `parse_block` drains the desugared element bindings immediately
+after the `let __tupN = f()` they belong to and in source order, so remembering
+only the **most recent** tuple-producing temp (`LOWER_TUPLET_TMP_ID`) and its
+callee (`LOWER_TUPLET_CALLEE_ID`, both interned ids) is sufficient to link
+them, and a name mismatch simply declines.
+
+Landed in `self-hosted/ir/lower.sio`:
+
+- `LOWER_RTT_NAMEID: [i64; 262144]` — element struct name-ids for up to 4
+  tuple-return elements, keyed by the callee's **interned name**, not by
+  `fn_id`. `fn_id`s are remapped by `ir_merge_place_and_remap_function`; names
+  are not — name identity is exactly what the cross-module merge dedups on.
+- `lower_type_list_named_name_at`, `lower_record_ret_tuple_names`,
+  `lower_ret_tuple_elem_name` — record/read helpers.
+- One `lower_record_ret_tuple_names(...)` call added beside each of the eleven
+  existing `return_struct_name = lower_opt_type_named_name(...)` assignments.
+- `lower_let_stmt_ref`'s `ExprCall` branch remembers the temp + callee when the
+  return is not a single named struct; its `ExprFieldAccess` branch binds
+  element `k`'s struct type when the field name is a tuple index and the base
+  is that remembered temp.
+
+Every step is guarded — non-tuple return, non-struct element, unregistered
+layout, name-pool overflow, or a temp-name mismatch all fall through to the
+previous behaviour. The table can only ever *add* resolution, never
+mis-resolve.
+
+### Verification
+
+| Check | Before | After |
+|---|---|---|
+| `tests/run-pass/tuple_destructure_field_name_collision_regression.sio` | exit 1, `r.pos=0` | **exit 0, `r.pos=222`** |
+| 36-module TLS parse-only repro, unmodified stdlib | `tbs_start=255 tbs_len=272` | **`tbs_start=4 tbs_len=523`** |
+| `souc check self-hosted/compiler/main.sio` (120-module compiler closure) with the fixed compiler | — | `run_check_mode: verdict=0`, `check: OK` |
+| `scripts/run_sio_test_suite.sh --filter-prefix {a..i} --jobs 3` (886 tests) | 391 pass / 129 fail | **byte-identical** pass/fail counts and failing-test identities |
+| `--filter-prefix {x509_,tls_,asn1_,der_,struct_,knowledge_,tuple_,cert_}` | 61 pass / 13 fail | **byte-identical** |
+
+`tests/run-pass/knowledge_array.sio` SIGSEGVs (`run exited 139`) on **both**
+the pre-fix and post-fix compilers — pre-existing, unchanged, and unrelated;
+noted here because commit `88f91fae6` records that test as the canary for
+changes in this neighbourhood.
+
+The compiler ELF itself (`artifacts/self-hosted/madaros`) is gitignored, so the
+fix ships as source: re-run
+`bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros`
+(directly — never wrapped in the build lock, which self-deadlocks) to pick it
+up. Build wall time measured here: ~4 minutes on the 64-core pod.
+
+### Still open after this fix
+
+- **The fallback itself.** `field_idx_from_name_simple` remains a global,
+  name-only, first-registered-match scan for every base whose struct type still
+  cannot be resolved. This fix removes the tuple-destructure route into it; it
+  does not remove the fallback. The defensive diagnostic proposed above
+  (warn when two layouts declare the same field name at different indices) is
+  **not** implemented and remains the cheapest way to make the remaining
+  instances of this class observable rather than silent.
+- **Tuple arity > 4** and tuple elements that are not plain named types are not
+  recorded — they fall back to the old behaviour, silently.
+- **Finding 26** (a struct containing an array-of-structs field, written into a
+  doubly array-indexed target) from the 2026-08-24 dispatch is untouched.
+- `tests/run-pass/tls_client_handshake_loopback.sio` reaching `CHAIN_OK`
+  against a live `openssl s_server -tls1_3` has **not** been re-run: it needs
+  the server up and the embedded test certificate regenerated (it expires
+  2026-08-27). The parse-only reduction proves the corrupted input to
+  `x509_verify_chain` is gone; the end-to-end handshake verdict is not yet
+  re-measured.
 
 ## Trail
 

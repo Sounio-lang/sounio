@@ -904,7 +904,19 @@ without a dedicated fresh GitHub issue.
 
 ## D11 — a tuple-destructured local loses its struct type, so a field read resolves by NAME across every struct in the linked program
 
-> **UPDATE 2026-08-26 — ROOT-CAUSED, minimal repro found. Full dispatch:
+> **UPDATE 2026-08-26 — RESOLVED.** Fixed in `self-hosted/ir/lower.sio`,
+> commit `3ec2d971d` (dispatch `f83b20ce3`). Regression guard:
+> `tests/run-pass/tuple_destructure_field_name_collision_regression.sio`.
+> The 36-module TLS program now returns `tbs_start=4, tbs_len=523` with an
+> unmodified stdlib; the fixed compiler type-checks the whole 120-module
+> compiler closure; 886 suite tests across prefixes a-i show byte-identical
+> pass/fail to the pre-fix baseline. The end-to-end handshake against a live
+> `openssl s_server` has NOT been re-run (needs the server up and the embedded
+> test certificate regenerated — it expires 2026-08-27). Rebuild the compiler
+> ELF (gitignored) with
+> `bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros`.
+>
+> **Root cause and full trail:
 > [`docs/audit/D11_ARENA_SCRATCH_RESET_CROSS_MODULE_CORRUPTION_DISPATCH_2026-08-26.md`](../audit/D11_ARENA_SCRATCH_RESET_CROSS_MODULE_CORRUPTION_DISPATCH_2026-08-26.md).**
 > The entry below is preserved as the original investigation trail; two of its
 > conclusions are now known to be wrong.
@@ -933,10 +945,15 @@ without a dedicated fresh GitHub issue.
 >   (reading `r.pos` through a typed `&DerReader` parameter) returns **4** in the
 >   same run where the inline `cert_inner.pos` returns **255**. Only the caller's
 >   field-load instruction is wrong.
-> - **Status:** fix proposed in the dispatch (§"Proposed fix"), **not
->   implemented**. Verified stdlib-level mitigation, not applied: renaming
->   `HsBuf.pos` → `hs_pos` in `stdlib/tls/client.sio` makes the full 36-module
->   program return the correct `tbs_start=4, tbs_len=523`.
+> - **Fix:** `lower_let_stmt_ref` now recovers element `k`'s struct type at the
+>   desugared `let x = __tupN.k`, from a per-callee (interned-**name**-keyed,
+>   because fn_ids are remapped by the merge and names are not) table of
+>   declared tuple-return element types. Every step is guarded; a miss falls
+>   back to the previous behaviour, so it can only add resolution.
+> - **Still open:** `field_idx_from_name_simple`'s global first-match fallback
+>   itself is unchanged — this fix removes the tuple-destructure route into it,
+>   not the fallback. The proposed ambiguity diagnostic is not implemented.
+>   Tuple arity > 4 is not covered. See the dispatch's "Still open" section.
 
 ### Original entry (2026-08-25), preserved
 
