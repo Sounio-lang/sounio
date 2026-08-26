@@ -197,14 +197,19 @@ if len(orphaned) > o_ceil:
     fails.append(f"orphaned catalogue rows rose {o_ceil} -> {len(orphaned)}")
 if fails: status = "fail"
 
-json.dump({"status": status,
+_payload = {"status": status,
            "metrics": {"total": len(set(emitted) | set(documented)),
                        "passed": len(set(emitted) | set(documented)) - len(collisions),
                        "failed": len(collisions), "not_run": 0},
            "collisions": {str(k): v for k, v in collisions.items()},
            "undocumented": undocumented, "orphaned": orphaned,
-           "ceilings": {"collisions": c_ceil, "undocumented": u_ceil, "orphaned": o_ceil}},
-          open(art, 'w'))
+           "ceilings": {"collisions": c_ceil, "undocumented": u_ceil, "orphaned": o_ceil}}
+# Write only when the bytes differ: a ratchet artefact should dirty the tree
+# exactly when its number moves. Running a gate must not block `git checkout`
+# (scripts/lib/gate_assert.sh: gate_write_artifact, same rule in bash).
+_new = json.dumps(_payload)
+if not os.path.exists(art) or open(art, errors='replace').read() != _new:
+    open(art, 'w').write(_new)
 
 print(f"diagnostic_identity: status={status} collisions={len(collisions)} (ceiling {c_ceil}) undocumented={len(undocumented)} (ceiling {u_ceil}) orphaned={len(orphaned)} (ceiling {o_ceil})")
 sys.exit(1 if fails else 0)

@@ -84,7 +84,7 @@ if [[ "${SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY:-0}" == "1" ]]; then
   # reports passes it did not observe is the exact defect this gate exists to
   # find -- it was written that way first, and caught in review of its own JSON.
   printf '{"status":"pass","mode":"census","metrics":{"total":%d,"declared":%d,"unverified":%d,"passed":0,"failed":0,"not_run":%d}}\n' \
-    "$total_w" "$n_decl" "$n_undecl" "$total_w" > "$ART"
+    "$total_w" "$n_decl" "$n_undecl" "$total_w" | gate_write_artifact "$ART"
   echo "witness_declares_its_sabotage: census only -- $n_decl declared, $n_undecl unverified, of $total_w"
   gate_pass "census written to $ART"
   exit 0
@@ -267,7 +267,7 @@ if [[ $((failed - broken)) -ne 0 ]] || [[ $broken -gt ${SOUNIO_WITNESS_UNJUDGEAB
 fi
 printf '{"status":"%s","mode":"full","metrics":{"total":%d,"declared":%d,"unverified":%d,"unjudgeable":%d,"passed":%d,"failed":%d,"not_run":%d},"deaths":{"run":%d,"compile_refused":%d,"crash":%d,"timeout":%d,"misattributed":%d}}\n' \
   "$status" "$total_w" "$n_decl" "$n_undecl" "$broken" "$passed" "$((failed - broken))" "$n_undecl" \
-  "$d_run" "$d_compile" "$d_crash" "$d_timeout" "$d_misattributed" > "$ART"
+  "$d_run" "$d_compile" "$d_crash" "$d_timeout" "$d_misattributed" | gate_write_artifact "$ART"
 
 echo "witness_declares_its_sabotage: status=$status declared=$n_decl passed=$passed failed=$failed unverified=$n_undecl of=$total_w"
 echo "  deaths: run=$d_run compile-refused=$d_compile crash=$d_crash timeout=$d_timeout misattributed=$d_misattributed | unjudgeable=$broken (ceiling $UNJUDGEABLE_CEILING)"
