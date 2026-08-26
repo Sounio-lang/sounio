@@ -1,0 +1,113 @@
+// stdlib/tls/transcript.sio — TLS 1.3 running transcript-hash accumulator
+// (RFC 8446 SS4.4.1).
+//
+// The TLS 1.3 transcript hash is a running hash over the concatenation of
+// every handshake-message-layer byte sequence sent or received so far
+// (the 4-byte handshake header `msg_type || uint24 length` plus body of
+// each ClientHello, ServerHello, EncryptedExtensions, Certificate,
+// CertificateVerify, Finished, ... message, in wire order) -- NOT the
+// record-layer's own 5-byte `TLSCiphertext`/`TLSPlaintext` header, and
+// NOT the AEAD tag. `derive_secret` (stdlib/crypto/hkdf.sio) takes this
+// running hash as its `transcript_hash` input at several points in the
+// handshake (e.g. "hash through ServerHello" for the handshake traffic
+// secrets, "hash through server Finished" for the application traffic
+// secrets).
+//
+// This module keeps the FULL accumulated message-byte buffer (`buf`,
+// growable) rather than incremental hash state, since `sha256`/`sha384`
+// (stdlib/hash/{sha256,sha384}.sio) only expose a whole-buffer interface
+// (`sha256(buf: &RawBuf, len: i64) -> [u8;32] with IO`) and not a
+// streaming/incremental one. `transcript_current_hash` re-hashes the
+// whole accumulated buffer each time it's called -- this is what RFC
+// 8446's own reference pseudocode describes ("Transcript-Hash(M1, M2,
+// ... Mn) = Hash(M1 || M2 || ... || Mn)"), not an optimization target
+// for this plan.
+//
+// `hash_algo` reuses `stdlib/crypto/hkdf.sio`'s own
+// `HKDF_HASH_SHA256`/`HKDF_HASH_SHA384` constants -- this file defines no
+// new hash-algorithm enum.
+
+use net::socket::*
+use hash::sha256::*
+use hash::sha384::*
+use crypto::hkdf::*
+
+pub struct TranscriptHash {
+    hash_algo: i32,
+    buf: RawBuf,
+    len: i64,
+    cap: i64,
+}
+
+// Initial capacity is arbitrary (grown on demand by transcript_append) --
+// large enough that a typical handshake's first few messages
+// (ClientHello, ServerHello) don't immediately trigger a reallocation.
+const TRANSCRIPT_INITIAL_CAP: i64 = 1024
+
+pub fn transcript_new(hash_algo: i32) -> TranscriptHash with IO {
+    TranscriptHash {
+        hash_algo: hash_algo,
+        buf: rawbuf_new(TRANSCRIPT_INITIAL_CAP),
+        len: 0,
+        cap: TRANSCRIPT_INITIAL_CAP,
+    }
+}
+
+// Appends `msg_bytes[0..msg_len]` (a full handshake-message-layer byte
+// sequence: 4-byte header + body) to the running transcript buffer,
+// growing it first if needed. Growth target is `2*(len+msg_len)` per the
+// task brief, copying the old contents element-by-element into the new
+// buffer -- this module deals only in `RawBuf` (a `{ptr, cap}` struct
+// with no fixed-array fields), so compiler defect SS D8 (`var x = *ref`
+// aliasing a `&[T;N]` reference) does not directly apply here, but the
+// copy loop below is still written explicitly byte-by-byte rather than
+// via any bulk/aliasing shortcut, for the same auditability reason.
+pub fn transcript_append(t: &!TranscriptHash, msg_bytes: &RawBuf, msg_len: i64) with Mut, IO {
+    let needed = t.len + msg_len
+    if needed > t.cap {
+        let new_cap = 2 * needed
+        let new_buf = rawbuf_new(new_cap)
+        var i: i64 = 0
+        while i < t.len {
+            rawbuf_set(&new_buf, i, rawbuf_get(&t.buf, i))
+            i = i + 1
+        }
+        t.buf = new_buf
+        t.cap = new_cap
+    }
+
+    var j: i64 = 0
+    while j < msg_len {
+        rawbuf_set(&t.buf, t.len + j, rawbuf_get(msg_bytes, j))
+        j = j + 1
+    }
+    t.len = t.len + msg_len
+}
+
+// Hashes the accumulated `buf[0..len]` with `sha256`/`sha384` per
+// `hash_algo`, returning the digest as a freshly-allocated `RawBuf` (32
+// bytes for SHA-256, 48 bytes for SHA-384) -- matching
+// `stdlib/crypto/hkdf.sio`'s own `RawBuf`-based digest convention (e.g.
+// `derive_secret`'s `transcript_hash: &RawBuf` parameter) so callers can
+// pass this straight through without any fixed-array conversion.
+pub fn transcript_current_hash(t: &TranscriptHash) -> RawBuf with IO {
+    if t.hash_algo == HKDF_HASH_SHA256 {
+        let digest = sha256(&t.buf, t.len)
+        let out = rawbuf_new(32)
+        var i: i64 = 0
+        while i < 32 {
+            rawbuf_set(&out, i, digest[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    } else {
+        let digest = sha384(&t.buf, t.len)
+        let out = rawbuf_new(48)
+        var i: i64 = 0
+        while i < 48 {
+            rawbuf_set(&out, i, digest[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    }
+}
