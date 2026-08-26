@@ -510,6 +510,63 @@ A dishonest witness may also force a fail-closed denial of service with a stale,
 future, malformed, or otherwise nonmatching signed status; no Byzantine
 liveness claim is made.
 
+## Proof-Carrying Witness Epoch Handoff v0
+
+Epoch handoff rotates a fixed Witness Mesh v1 membership without mutating the
+old configuration in place. Both old and new roots must independently verify a
+current 3-of-4 checkpoint over the same world, event count, and journal head.
+The memberships, root identities, and boundary certificate digests must differ,
+and the epoch number must increase by exactly one.
+
+```sh
+bin/loom witness-epoch-handoff \
+  --epoch-state-dir EPOCH_STATE --world scheduler \
+  --from-epoch 1 --to-epoch 2 \
+  --old-state-dir OLD_STATE --old-membership OLD_MEMBERSHIP \
+  --old-endpoints OLD_ENDPOINTS \
+  --new-state-dir NEW_STATE --new-membership NEW_MEMBERSHIP \
+  --new-endpoints NEW_ENDPOINTS
+bin/loom witness-epoch-verify \
+  --epoch-state-dir EPOCH_STATE --world scheduler \
+  --active-state-dir NEW_STATE --membership NEW_MEMBERSHIP \
+  --endpoints NEW_ENDPOINTS
+```
+
+Native Sounio frame `9015` consumes a linear verified-old-quorum token and a
+separate verified-new-quorum token. Both tokens carry their epoch number, and
+admission requires an exact `verified=1`, `required=3`, `members=4` summary
+under the explicit host-trust effect. The resulting private linear receipt
+carries both membership/root/certificate
+summaries through consumption. Its seven named rules bind both exact
+`3/4` configurations, adjacent epochs, distinct memberships and roots, one
+shared checkpoint, distinct boundary certificates, and a well-formed
+predecessor digest. The OCaml verifier retains and replays both complete frame
+`9014` certificate chains plus the frame `9015` handoff chain; embedded receipt
+bytes never substitute for missing retained state.
+
+Preparation durably writes one deterministic canonical handoff receipt before
+activation. The active epoch is a separate fsync-and-rename pointer. A crash in
+the first window reuses the prepared receipt without publishing an epoch; a
+crash after pointer replacement returns the already active transition as an
+idempotent retry. Existing conflicting prepared or active state refuses rather
+than being overwritten.
+
+This is a proof-carrying joint-authority transition, not dynamic Byzantine
+consensus. It has no leader election, view change, asynchronous liveness,
+automatic state transfer, threshold signature, or progress claim below three
+valid old and three valid new statuses. Epoch one is an explicit bootstrap
+boundary. This v0 supports `from_epoch` 1 through 64, giving at most 64
+handoffs and active epochs through 65; a longer history requires a future
+compaction or roll-forward authority. The old/new roots, memberships,
+certificates, and status receipts must remain available.
+
+Process-crash recovery is executable; adversarial filesystem freshness remains
+a custody assumption. If the epoch-control directory can be rolled back with
+all of its receipts, a self-consistent old active pointer can replay. Deploy it
+under a monotonic authority outside the protected roots' rollback domain before
+claiming rollback resistance. The bounded semantic and falsification contract
+is `docs/internal/concepts/loom-witness-epoch-handoff.contract`.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every

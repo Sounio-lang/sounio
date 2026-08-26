@@ -1,0 +1,122 @@
+# Loom Witness Epoch Handoff
+
+Concept-ID: `SOUNIO-LOOM-WITNESS-EPOCH-HANDOFF`
+
+Status: executable bounded proof-carrying reconfiguration protocol.
+
+## Semantic Lane
+
+```text
+Semantic-Lane-ID: codex-loom-witness-epoch-handoff-20260826
+Owner: codex/session-01a02a17-f139-7613-98a1-
+Concept-IDs: SOUNIO-LOOM-WITNESS-EPOCH-HANDOFF; SOUNIO-LOOM-WITNESS-MESH; SOUNIO-LOOM-EPISTEMIC-MACHINE; SOUNIO-FALSIFICATION-CARRYING-DEVELOPMENT
+Intent-Preserved: old membership, new membership, old state root, new state root, old current quorum, new current quorum, shared journal checkpoint, boundary certificates, predecessor handoff, prepared receipt, active epoch pointer, endpoint routing, and physical truth remain distinct facts
+Transformation: verify one current 3-of-4 Witness Mesh v1 quorum under the old membership and a separate current 3-of-4 quorum under the new membership; require adjacent epoch numbers, distinct membership and root identities, identical world/event-count/journal-head coordinates, distinct bound certificates, and a valid predecessor digest; consume both linear quorum proofs through native Sounio frame 9015; durably prepare one canonical handoff receipt; then atomically replace the active epoch pointer
+Types-Changed: WitnessEpochDigest256, VerifiedOldEpochQuorum, VerifiedNewEpochQuorum, VerifiedWitnessEpochHandoff, HostWitnessEpochHandoffReceipt
+Effects-Changed: LoomWitnessEpochHandoffHostTrust admits only native frame-9015 joint-quorum transitions whose seven named boundary rules all hold
+IR-Changed: none; epoch handoffs are runtime proof objects and do not alter compiler IR
+Claims-Introduced: membership rotation cannot be authorized by only the old or only the new current quorum; accepted epoch numbers are adjacent and v0 supports at most 64 transitions; the old and new roots and memberships are distinct; both sides bind the same replay-verified journal coordinate; every accepted handoff has two independently verifiable boundary certificates and current status sets; a prepared receipt survives a client crash before activation; the active pointer replacement survives a client crash before return; exact retries are idempotent; and a post-activation verifier replays the complete retained predecessor chain, native frames 9014 and 9015, and the active membership/root binding
+Claims-Forbidden: dynamic Byzantine consensus, state-machine replication, leader election, view change, asynchronous or partition liveness, automatic member discovery, threshold signatures, state transfer by assertion, progress with fewer than three valid old and three valid new statuses, safety with two dishonest witnesses in either membership, protection after honest witness state loss, rollback resistance when the epoch-control directory shares the attacker's rollback authority, trusted time, TLS, confidentiality, HSM custody, organizational independence, physical or semantic event truth, exactly-once external effects, or PL/CS novelty priority
+Assumptions: both configurations independently satisfy the Witness Mesh v1 contract; Ed25519 and SHA-256 retain their standard properties; at most one witness per configuration is dishonest; honest witness state is retained outside the protected root's rollback authority; the epoch-control directory is retained outside the rollback authority against which active-epoch freshness is claimed; old and new roots, memberships, certificates, and status receipts remain available for verification; filesystem fsync and rename provide their documented durability and atomicity; the OCaml verifier and native Sounio adapters are in the trusted computing base
+Write-Set: native frame-9015 Sounio module and adapter; OCaml handoff, retained-chain verifier, crash recovery, and CLI; focused build, packaging, tests, contract, README, registry, and evidence
+Read-Set: two replay-verified world journals, two fixed v1 memberships, two endpoint sets, two complete certificate chains, eight signed current statuses, an optional predecessor handoff, the deterministic prepared receipt, and the active epoch pointer
+Positive-Witness: eight services establish independent old and new 4-of-4 current checkpoints at one journal coordinate; a crash after prepared-receipt fsync recovers and activates the same receipt; a crash after active-pointer rename returns idempotently on restart; and cold verification replays both boundary configurations plus frames 9014 and 9015
+Negative-Witness: only two valid new statuses, only two valid old statuses, epoch skip, reused root, reused membership, checkpoint drift, rolled-back old root, changed retained membership file, changed handoff content, and changed active pointer all refuse; removing only each named frame-9015 rule admits its paired otherwise-refused same-frame control
+Acceptance-Gate: scripts/ci/sounio_loom_witness_epoch_handoff_selftest.sh; scripts/ci/sounio_loom_witness_epoch_handoff_adapter_selftest.sh; scripts/ci/loom_witness_epoch_handoff_typestate_gate.sh; scripts/ci/sounio_coord_runtime_selftest.sh; scripts/ci/sounio_loom_witness_mesh_v1_selftest.sh
+Integration-Target: native OCaml Loom kernel, native Sounio frames 9014 and 9015, Witness Mesh v1 services, epistemic worldline journal, and shared coordination runtime
+Authoritative-Only-If: both memberships and roots are distinct and retained; both sides independently verify a current 3-of-4 checkpoint; their world, event count, and journal head agree exactly; the epoch increases by one; the boundary certificates differ and remain bound to their memberships; the predecessor digest is zero only at epoch one and otherwise resolves recursively to the old epoch/root/membership; native frame 9015 accepts; the prepared receipt is canonical and content-digested; activation uses the verified receipt; and every report preserves the control-directory custody assumption
+```
+
+## Protocol Boundary
+
+The protocol rotates authority without mutating either membership or root in
+place. It retains the old and new Witness Mesh v1 proof objects and joins their
+compact native summaries. The private linear Sounio receipt carries both epoch
+numbers, membership and root digests, the shared domain/checkpoint, both anchor
+sequences, both certificate digests, and the predecessor digest. The separate
+persisted OCaml receipt additionally contains the canonical old and new
+certificate bytes, signed current status receipts, membership-file and root
+identities, shared checkpoint, and predecessor path. Verification reloads the
+retained files and certificate chains; neither receipt is accepted as an
+assertion about missing state.
+
+Epoch one is the explicit bootstrap boundary: it may prepare `1 -> 2` without a
+prior active pointer, and records the all-zero predecessor digest. Every later
+handoff must resolve the active pointer, recursively verify the preceding
+handoff chain, and show that its new membership/root are the next handoff's old
+membership/root. This v0 admits `from_epoch` values 1 through 64, hence at most
+64 transitions and active epochs through 65. Longer histories require a future
+compaction or roll-forward authority. The verifier refuses an absent,
+malformed, substituted, inconsistent, or out-of-range predecessor chain.
+
+## Crash Semantics
+
+Preparation writes a deterministic per-epoch receipt with file fsync, rename,
+and directory fsync. Activation writes a separate canonical pointer with the
+same sequence. A crash after preparation leaves no active epoch and retry
+reuses the already verified receipt. A crash after activation leaves the new
+pointer visible and retry returns the same transition as idempotent. A conflicting
+prepared receipt or active transition refuses; it is never overwritten.
+
+This proves process-crash recovery, not adversarial freshness of a filesystem
+snapshot. If an attacker can roll the epoch-control directory back together
+with every referenced receipt, a self-consistent older pointer may replay. A
+meaningful rollback-resistance deployment must put that directory under a
+monotonic authority outside the attacker's rollback domain.
+
+## Native And Linear Boundary
+
+Frame `9015` has seven independently sabotaged rules:
+
+- `witness_epoch_quorums_are_verified` requires both verified flags and exact
+  `3/4 + 3/4` configuration summaries;
+- `witness_epoch_epochs_are_adjacent` requires `1 <= from_epoch <= 64` and
+  `to_epoch = from_epoch + 1`;
+- `witness_epoch_memberships_change` rejects a reused membership digest;
+- `witness_epoch_roots_are_separated` rejects a reused root identity;
+- `witness_epoch_checkpoint_agrees` requires both anchor sequences to be
+  positive (they may differ) and binds domain, event count, and journal head
+  across both sides;
+- `witness_epoch_certificates_are_bound` requires nonzero distinct boundary
+  certificate digests;
+- `witness_epoch_chain_is_well_formed` checks the native digest shape: it
+  permits a zero predecessor only from epoch one and requires a nonzero
+  predecessor thereafter. The OCaml verifier must resolve that digest and bind
+  the full predecessor chain, so frame 9015 is necessary but not sufficient.
+
+One epoch-bound `VerifiedOldEpochQuorum` and one epoch-bound
+`VerifiedNewEpochQuorum`, each admitted only from an exact `verified=1`,
+`required=3`, `members=4` summary under the host-trust effect, are consumed to construct one
+`VerifiedWitnessEpochHandoff`. Rebinding those tokens to caller-supplied epoch
+numbers refuses. The proof is consumed once to obtain the private host receipt.
+External host-receipt construction refuses with `E176`; reusing either quorum
+proof refuses with `E039`.
+
+## Evidence Boundary
+
+The PL/CS contribution implemented here is a small proof-carrying
+reconfiguration kernel: linear old/new authority tokens, an independently
+sabotage-tested refinement frame, retained certificate-chain replay, and a
+crash-recoverable activation commit. It is an executable research mechanism,
+not a literature-priority claim. Any novelty comparison with Vertical Paxos,
+joint consensus, reconfiguration logics, or proof-carrying distributed systems
+requires a separate sourced related-work review.
+
+## Falsification Conditions
+
+- one current quorum can authorize rotation without the other;
+- a skipped, repeated, or descending epoch activates;
+- a 65th transition activates under this bounded v0;
+- an epoch-bound quorum token can be rebound to different caller inputs;
+- old and new membership or root identity can be reused;
+- different event counts or journal heads activate;
+- a boundary certificate, current status receipt, retained membership file, or
+  retained root can change without invalidating the handoff;
+- a non-genesis handoff verifies without its predecessor;
+- a crash after preparation loses the receipt or publishes the new active epoch;
+- a crash after activation makes exact retry create a second transition;
+- a conflicting prepared receipt is overwritten;
+- removing one named frame-9015 rule fails to admit its exact sabotage control;
+- a report calls the result dynamic consensus, asynchronous liveness, automatic
+  state transfer, physical truth, or rollback-safe while the control directory
+  remains under the attacked rollback authority.

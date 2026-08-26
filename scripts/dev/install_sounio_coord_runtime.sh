@@ -173,6 +173,22 @@ activate_runtime() {
     grep -q '^capability=loom-external-witness-mesh-v1$' "$manifest" || \
       die "installed runtime declares derived witness-mesh-v1 capabilities without the v1 mesh: $runtime_id"
   fi
+  if grep -q '^capability=loom-proof-carrying-witness-epoch-handoff-v0$' \
+      "$manifest"; then
+    grep -q '^capability=loom-external-witness-mesh-v1$' "$manifest" && \
+      grep -q '^capability=loom-epistemic-machine-v0$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-witness-mesh-v1-runtime" && \
+        -x "$version_dir/bin/sounio-loom-witness-epoch-handoff-runtime" && \
+        -x /usr/bin/openssl ]] || \
+      die "installed runtime declares proof-carrying witness epoch handoff without witness mesh v1, the epistemic machine, Loom, OpenSSL, or native Sounio frame 9015: $runtime_id"
+  fi
+  if grep -Eq '^capability=loom-(joint-old-new-witness-quorum|atomic-witness-epoch-activation|witness-epoch-crash-recovery)-v0$' \
+      "$manifest"; then
+    grep -q '^capability=loom-proof-carrying-witness-epoch-handoff-v0$' \
+      "$manifest" || \
+      die "installed runtime declares derived witness-epoch capabilities without the proof-carrying handoff: $runtime_id"
+  fi
   if grep -q '^capability=loom-recoverable-control-service-v1$' "$manifest"; then
     grep -q '^capability=loom-durable-obligation-v1$' "$manifest" &&
       grep -q '^capability=loom-post-activation-request-bridge-v1$' "$manifest" &&
@@ -330,6 +346,7 @@ if [[ "$action" == activate ]]; then
   exit 0
 fi
 
+installer_source="$SOURCE_ROOT/scripts/dev/install_sounio_coord_runtime.sh"
 runtime_source="$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
 hook_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agent_hook_runtime.py"
 causal_source="$SOURCE_ROOT/scripts/dev/sounio_coord_causal_runtime.py"
@@ -350,6 +367,7 @@ loom_contingent_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_conting
 loom_outcome_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_outcome_authority_adapter.sh"
 loom_witness_mesh_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_mesh_adapter.sh"
 loom_witness_mesh_v1_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh"
+loom_witness_epoch_handoff_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
@@ -369,6 +387,9 @@ loom_witness_mesh_entrypoint="$SOURCE_ROOT/tools/loom/witness_mesh_adapter_main.
 loom_witness_mesh_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_mesh.sio"
 loom_witness_mesh_v1_entrypoint="$SOURCE_ROOT/tools/loom/witness_mesh_v1_adapter_main.sio"
 loom_witness_mesh_v1_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_mesh_v1.sio"
+loom_witness_epoch_handoff_entrypoint="$SOURCE_ROOT/tools/loom/witness_epoch_handoff_adapter_main.sio"
+loom_witness_epoch_handoff_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_epoch_handoff.sio"
+[[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -400,6 +421,8 @@ loom_witness_mesh_v1_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_mesh_
   die "Loom witness-mesh build entrypoint missing or not executable: $loom_witness_mesh_build_source"
 [[ -x "$loom_witness_mesh_v1_build_source" ]] || \
   die "Loom witness-mesh-v1 build entrypoint missing or not executable: $loom_witness_mesh_v1_build_source"
+[[ -x "$loom_witness_epoch_handoff_build_source" ]] || \
+  die "Loom witness-epoch-handoff build entrypoint missing or not executable: $loom_witness_epoch_handoff_build_source"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
@@ -421,9 +444,14 @@ loom_witness_mesh_v1_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_mesh_
 [[ -f "$loom_witness_mesh_v1_entrypoint" && \
   -f "$loom_witness_mesh_v1_module" ]] || \
   die "Loom native Sounio witness-mesh-v1 source bundle is incomplete"
+[[ -f "$loom_witness_epoch_handoff_entrypoint" && \
+  -f "$loom_witness_epoch_handoff_module" ]] || \
+  die "Loom native Sounio witness-epoch-handoff source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && \
-  -f "$loom_project/src/loom_witness.ml" && -f "$loom_project/src/loom_ui.ml" && \
+  -f "$loom_project/src/loom_witness.ml" && \
+  -f "$loom_project/src/loom_witness_epoch.ml" && \
+  -f "$loom_project/src/loom_ui.ml" && \
   -f "$loom_project/src/loom_pty_stubs.c" && \
   -f "$loom_project/src/dune" && -f "$loom_project/dune-project" ]] || \
   die "Loom OCaml source bundle is incomplete: $loom_project"
@@ -458,6 +486,7 @@ loom_contingent_binary="$loom_project/_build/default/src/sounio-loom-contingent-
 loom_outcome_authority_binary="$loom_project/_build/default/src/sounio-loom-outcome-authority-runtime"
 loom_witness_mesh_binary="$loom_project/_build/default/src/sounio-loom-witness-mesh-runtime"
 loom_witness_mesh_v1_binary="$loom_project/_build/default/src/sounio-loom-witness-mesh-v1-runtime"
+loom_witness_epoch_handoff_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-handoff-runtime"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
@@ -477,6 +506,8 @@ loom_witness_mesh_v1_binary="$loom_project/_build/default/src/sounio-loom-witnes
   die "Loom build omitted its native Sounio witness-mesh adapter"
 [[ -x "$loom_witness_mesh_v1_binary" ]] || \
   die "Loom build omitted its native Sounio witness-mesh-v1 adapter"
+[[ -x "$loom_witness_epoch_handoff_binary" ]] || \
+  die "Loom build omitted its native Sounio witness-epoch-handoff adapter"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_runtime_version="$(sed -n 's/^runtime_version=//p' <<< "$loom_version_output" | head -1)"
@@ -561,6 +592,15 @@ loom_witness_mesh_v1_probe="$(
 [[ "$loom_witness_mesh_v1_probe" == \
   'SOUNIO_WITNESS_MESH_V1_ACCEPT schema=loom-native-witness-mesh-v1 transition=anchor state=quorum-verified' ]] || \
   die "Loom native Sounio witness-mesh-v1 adapter failed its install probe"
+loom_witness_epoch_handoff_probe="$(
+  printf '9015 1 1 1 2 3 3 4 4 501 501 7 1 12 12 %s %s %s %s %s %s %s %s %s\n' \
+    "$ones" "$twos" "$threes" "$fours" "$fives" "$fives" \
+    "$sixes" "$sevens" "$zeros" | \
+    "$loom_witness_epoch_handoff_binary"
+)"
+[[ "$loom_witness_epoch_handoff_probe" == \
+  'SOUNIO_WITNESS_EPOCH_HANDOFF_ACCEPT schema=loom-native-witness-epoch-handoff-v0 transition=joint-quorum state=prepared' ]] || \
+  die "Loom native Sounio witness-epoch-handoff adapter failed its install probe"
 loom_measurement_probe="$(
   printf '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401\n' | \
     "$loom_continuity_binary"
@@ -593,31 +633,59 @@ loom_quorum_probe="$({
   'SOUNIO_CONTINUITY_PRESPAWN_ACCEPT schema=loom-native-pre-spawn-v4 authority=five-principals+2-of-3-journal-quorum+full-sha256-agreement' ]] || \
   die "Loom native Sounio journal-quorum adapter failed its install probe"
 
+bundle_sources=(
+  "$installer_source" "$runtime_source" "$hook_source" "$causal_source"
+  "$agentd_source"
+  "$fleet_source" "$fleetd_source" "$fleet_model_source"
+  "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier"
+  "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune"
+  "$loom_project/src/loom.ml" "$loom_project/src/loom_arrow.ml"
+  "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_witness.ml"
+  "$loom_project/src/loom_witness_epoch.ml" "$loom_project/src/loom_ui.ml"
+  "$loom_project/src/loom_pty_stubs.c" "$loom_project/src/loom_arrow_stubs.c"
+  "$loom_project/src/loom_nanoarrow.c" "$loom_project/src/loom_nanoarrow_ipc.c"
+  "$loom_project/src/loom_flatcc.c"
+  "$loom_continuity_build_source" "$loom_continuity_entrypoint"
+  "$loom_continuity_module" "$loom_obligation_build_source"
+  "$loom_obligation_entrypoint" "$loom_obligation_module"
+  "$loom_epistemic_build_source" "$loom_epistemic_entrypoint"
+  "$loom_epistemic_module" "$loom_attention_build_source"
+  "$loom_attention_entrypoint" "$loom_attention_module"
+  "$loom_portfolio_build_source" "$loom_portfolio_entrypoint"
+  "$loom_portfolio_module" "$loom_contingent_build_source"
+  "$loom_contingent_entrypoint" "$loom_contingent_module"
+  "$loom_outcome_authority_build_source"
+  "$loom_outcome_authority_entrypoint" "$loom_outcome_authority_module"
+  "$loom_witness_mesh_build_source" "$loom_witness_mesh_entrypoint"
+  "$loom_witness_mesh_module" "$loom_witness_mesh_v1_build_source"
+  "$loom_witness_mesh_v1_entrypoint" "$loom_witness_mesh_v1_module"
+  "$loom_witness_epoch_handoff_build_source"
+  "$loom_witness_epoch_handoff_entrypoint"
+  "$loom_witness_epoch_handoff_module"
+)
+
+source_sha=unknown
+source_state=unversioned
+if git -C "$SOURCE_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  source_sha="$(git -C "$SOURCE_ROOT" rev-parse --short=12 HEAD)"
+  source_paths=()
+  for source in "${bundle_sources[@]}"; do
+    source_paths+=("${source#"$SOURCE_ROOT"/}")
+  done
+  source_paths+=("tools/loom/src/vendor")
+  source_dirty="$(
+    git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all -- \
+      "${source_paths[@]}"
+  )"
+  if [[ -n "$source_dirty" ]]; then
+    printf '%s\n' "$source_dirty" >&2
+    die "runtime source bundle has uncommitted changes; commit the source before installation"
+  fi
+  source_state=clean
+fi
+
 bundle_sha="$({
-  sha256sum "$runtime_source" "$hook_source" "$causal_source" "$agentd_source" \
-    "$fleet_source" "$fleetd_source" "$fleet_model_source" \
-    "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier" \
-    "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune" \
-    "$loom_project/src/loom.ml" "$loom_project/src/loom_arrow.ml" \
-    "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_witness.ml" \
-    "$loom_project/src/loom_ui.ml" \
-    "$loom_project/src/loom_pty_stubs.c" "$loom_project/src/loom_arrow_stubs.c" \
-    "$loom_project/src/loom_nanoarrow.c" "$loom_project/src/loom_nanoarrow_ipc.c" \
-    "$loom_project/src/loom_flatcc.c" \
-    "$loom_continuity_build_source" "$loom_continuity_entrypoint" \
-    "$loom_continuity_module" "$loom_obligation_build_source" \
-    "$loom_obligation_entrypoint" "$loom_obligation_module" \
-    "$loom_epistemic_build_source" "$loom_epistemic_entrypoint" \
-    "$loom_epistemic_module" "$loom_attention_build_source" \
-    "$loom_attention_entrypoint" "$loom_attention_module" \
-    "$loom_portfolio_build_source" "$loom_portfolio_entrypoint" \
-    "$loom_portfolio_module" "$loom_contingent_build_source" \
-    "$loom_contingent_entrypoint" "$loom_contingent_module" \
-    "$loom_outcome_authority_build_source" \
-    "$loom_outcome_authority_entrypoint" "$loom_outcome_authority_module" \
-    "$loom_witness_mesh_build_source" "$loom_witness_mesh_entrypoint" \
-    "$loom_witness_mesh_module" "$loom_witness_mesh_v1_build_source" \
-    "$loom_witness_mesh_v1_entrypoint" "$loom_witness_mesh_v1_module"
+  sha256sum "${bundle_sources[@]}"
   find "$loom_project/src/vendor" -type f -print0 | sort -z | xargs -0 sha256sum
 } | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
@@ -625,7 +693,6 @@ bundle_sha="$({
 safe_version="$(printf '%s' "$runtime_version" | tr -c 'A-Za-z0-9._-' '_')"
 runtime_id="p${protocol}-${safe_version}-${bundle_sha:0:12}"
 version_dir="$RUNTIME_ROOT/versions/$runtime_id"
-source_sha="$(git -C "$SOURCE_ROOT" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)"
 
 if [[ -d "$version_dir" ]]; then
   installed_sha="$(manifest_value "$version_dir/manifest" bundle_sha256)"
@@ -664,6 +731,8 @@ else
     "$stage/bin/sounio-loom-witness-mesh-runtime"
   install -m 0755 "$loom_witness_mesh_v1_binary" \
     "$stage/bin/sounio-loom-witness-mesh-v1-runtime"
+  install -m 0755 "$loom_witness_epoch_handoff_binary" \
+    "$stage/bin/sounio-loom-witness-epoch-handoff-runtime"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -692,9 +761,12 @@ else
     printf 'loom_witness_mesh_frame=9013\n'
     printf 'loom_witness_mesh_v1_language=Sounio\n'
     printf 'loom_witness_mesh_v1_frame=9014\n'
+    printf 'loom_witness_epoch_handoff_language=Sounio\n'
+    printf 'loom_witness_epoch_handoff_frame=9015\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
+    printf 'source_state=%s\n' "$source_state"
     printf 'capability=causal-experiment-receipts-v1\n'
     printf 'capability=crash-recovery-v1\n'
     printf 'capability=agentd-transport-v1\n'
@@ -723,6 +795,10 @@ else
     printf 'capability=loom-three-of-four-witness-quorum-v1\n'
     printf 'capability=loom-one-dishonest-honest-intersection-v1\n'
     printf 'capability=loom-one-fault-anchor-and-verify-availability-v1\n'
+    printf 'capability=loom-proof-carrying-witness-epoch-handoff-v0\n'
+    printf 'capability=loom-joint-old-new-witness-quorum-v0\n'
+    printf 'capability=loom-atomic-witness-epoch-activation-v0\n'
+    printf 'capability=loom-witness-epoch-crash-recovery-v0\n'
     printf 'capability=loom-post-activation-request-bridge-v1\n'
     printf 'capability=loom-recoverable-control-service-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'
