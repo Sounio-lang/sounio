@@ -68,17 +68,36 @@ pub const GENERAL_NAME_URI: i32 = 6
 pub const GENERAL_NAME_IP_ADDRESS: i32 = 7
 pub const GENERAL_NAME_REGISTERED_ID: i32 = 8
 
-// NOTE: this struct's shape depends on Task 1's array-of-nested-struct audit
-// outcome. Task 1's audit fully PASSED (all four checks, including nested
-// struct-in-array), so this uses the rich design with a dedicated
-// `directory_name` field.
+// ARENA FOOTPRINT (2026-08-26, see
+// docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md):
+// this struct used to carry a `directory_name: X509Name` field for the
+// RFC 5280 directoryName GeneralName choice ([4]). That field was NEVER
+// populated and NEVER read: `x509_parse_general_names` deliberately skips
+// copying it (a Madaros defect corrupts a doubly-indexed struct-in-array
+// write -- see the long comment at that copy loop), and no consumer in
+// stdlib/ or tests/ ever reads it back. It was, however, 2,564 of this
+// struct's ~2,849 bytes, and `Certificate` holds SIXTY-FOUR GeneralNames
+// (`san_entries` + `issuer_alt_names`, 32 each) -- so this one dead field
+// accounted for roughly 87% of every `Certificate` value, and
+// `x509_verify_chain` copies `Certificate` VALUES by the hundred. Removing
+// it shrinks `GeneralName` from ~2,849 B to ~285 B and `Certificate` from
+// ~210 KB to ~46 KB, with no behavioural change whatsoever.
+//
+// If directoryName support is ever genuinely needed, do NOT re-add an
+// inline `X509Name` here: park the decoded name in a side table indexed by
+// GeneralName position, so the cost is paid only by certificates that
+// actually use the [4] choice.
+//
+// Field INDICES 0..4 (tag, value, value_len, oid, oid_len) are unchanged by
+// this removal -- see tests/run-pass/x509_generalname_field_index_ambiguity.sio,
+// which locks exactly those indices against the compiler's name-only
+// field-resolution fallback.
 pub struct GeneralName {
     tag: i32,
     value: [u8; 253],
     value_len: i32,
     oid: [u8; 20],
     oid_len: i32,
-    directory_name: X509Name,
 }
 
 pub struct ExtensionEntry {
@@ -173,7 +192,6 @@ pub fn general_name_zero() -> GeneralName {
         value_len: 0,
         oid: [0; 20],
         oid_len: 0,
-        directory_name: x509_name_zero(),
     }
 }
 
