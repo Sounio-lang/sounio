@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.14"
+let runtime_version = "2026.08.26.15"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -6293,12 +6293,31 @@ let tui_command cli =
               | _ -> ()
         done)
 
+let provider_uuid value =
+  let rec valid index =
+    if index = String.length value then true
+    else if List.mem index [ 8; 13; 18; 23 ] then
+      value.[index] = '-' && valid (index + 1)
+    else
+      match value.[index] with
+      | '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' -> valid (index + 1)
+      | _ -> false
+  in
+  String.length value = 36 && valid 0
+
 type fleet_spec = {
   fleet_slot : string;
   fleet_kind : string;
+  fleet_custody : string;
+  fleet_agent : string;
   fleet_home : string;
   fleet_cwd : string;
   fleet_enabled : bool;
+  fleet_session_id : string;
+  fleet_prompt_file : string;
+  fleet_prompt_sha256 : string;
+  fleet_model : string;
+  fleet_unsafe_auto : bool;
 }
 
 let fleet_kinds = [ "claude"; "codex"; "kimi"; "grok"; "cursor"; "empryo" ]
@@ -6308,14 +6327,26 @@ let fleet_directory root = Filename.concat root "fleet"
 let fleet_spec_path root slot =
   Filename.concat (fleet_directory root) (slug slot ^ ".state")
 
+let fleet_prompt_directory root = Filename.concat (fleet_directory root) "prompts"
+
+let fleet_prompt_path root slot =
+  Filename.concat (fleet_prompt_directory root) (slug slot ^ ".txt")
+
 let fleet_spec_fields spec =
   [
-    ("version", "1");
+    ("version", "2");
     ("enabled", if spec.fleet_enabled then "true" else "false");
     ("slot", spec.fleet_slot);
     ("kind", spec.fleet_kind);
+    ("custody", spec.fleet_custody);
+    ("agent", spec.fleet_agent);
     ("home", spec.fleet_home);
     ("cwd", spec.fleet_cwd);
+    ("session_id", spec.fleet_session_id);
+    ("prompt_file", spec.fleet_prompt_file);
+    ("prompt_sha256", spec.fleet_prompt_sha256);
+    ("model", spec.fleet_model);
+    ("unsafe_auto", if spec.fleet_unsafe_auto then "true" else "false");
   ]
 
 let validate_fleet_atom name value =
@@ -6323,16 +6354,24 @@ let validate_fleet_atom name value =
   then failf "invalid fleet %s" name
 
 let fleet_spec_of_values path values =
-  if table_value values "version" <> "1" then
+  let version = table_value values "version" in
+  if version <> "1" && version <> "2" then
     failf "fleet catalog version is not supported: %s" path;
   let slot = table_value values "slot" in
   let kind = table_value values "kind" in
+  let custody = if version = "1" then "agentd" else table_value values "custody" in
+  let agent = if version = "1" then kind else table_value values "agent" in
   let home = table_value values "home" in
   let cwd = table_value values "cwd" in
   List.iter (fun (name, value) -> validate_fleet_atom name value)
-    [ ("slot", slot); ("kind", kind); ("home", home); ("cwd", cwd) ];
+    [ ("slot", slot); ("kind", kind); ("custody", custody); ("agent", agent);
+      ("home", home); ("cwd", cwd) ];
   if not (List.mem kind fleet_kinds) then
     failf "unsupported fleet kind %s in %s" kind path;
+  if custody <> "agentd" && custody <> "loom" then
+    failf "unsupported fleet custody %s in %s" custody path;
+  if custody = "loom" && kind <> "codex" then
+    failf "persistent fleet provider unavailable for kind %s in %s" kind path;
   if not ((not (Filename.is_relative home)) && Sys.file_exists home && Sys.is_directory home) then
     failf "fleet home is unavailable for slot %s: %s" slot home;
   if not ((not (Filename.is_relative cwd)) && Sys.file_exists cwd && Sys.is_directory cwd) then
@@ -6343,8 +6382,42 @@ let fleet_spec_of_values path values =
     | "false" -> false
     | _ -> failf "invalid enabled state in %s" path
   in
-  { fleet_slot = slot; fleet_kind = kind; fleet_home = home; fleet_cwd = cwd;
-    fleet_enabled = enabled }
+  let session_id = if version = "1" then "" else table_value values "session_id" in
+  let prompt_file = if version = "1" then "" else table_value values "prompt_file" in
+  let prompt_sha256 = if version = "1" then "" else table_value values "prompt_sha256" in
+  let model = if version = "1" then "" else table_value values "model" in
+  let unsafe_auto =
+    if version = "1" then false
+    else
+      match table_value values "unsafe_auto" with
+      | "true" -> true
+      | "false" -> false
+      | _ -> failf "invalid unsafe_auto state in %s" path
+  in
+  if String.exists (fun character -> character = '\n' || character = '\r') model then
+    failf "invalid fleet model in %s" path;
+  if custody = "loom" then (
+    if not (provider_uuid session_id) then
+      failf "invalid fleet session id for slot %s" slot;
+    if Filename.is_relative prompt_file then
+      failf "fleet prompt file must be absolute for slot %s" slot;
+    let expected_directory = Filename.concat (Filename.dirname path) "prompts" in
+    if Filename.dirname prompt_file <> expected_directory then
+      failf "fleet prompt escaped sealed catalog storage for slot %s" slot;
+    if not (Sys.file_exists prompt_file && (Unix.stat prompt_file).st_kind = S_REG) then
+      failf "fleet prompt is unavailable for slot %s: %s" slot prompt_file;
+    let actual_prompt_sha256 = sha256 (read_file prompt_file) in
+    if prompt_sha256 = "" || actual_prompt_sha256 <> prompt_sha256 then
+      failf "fleet prompt digest mismatch for slot %s" slot)
+  else if
+    session_id <> "" || prompt_file <> "" || prompt_sha256 <> ""
+    || model <> "" || unsafe_auto
+  then failf "agentd fleet slot %s contains Loom-only authority fields" slot;
+  { fleet_slot = slot; fleet_kind = kind; fleet_custody = custody;
+    fleet_agent = agent; fleet_home = home; fleet_cwd = cwd;
+    fleet_enabled = enabled; fleet_session_id = session_id;
+    fleet_prompt_file = prompt_file; fleet_prompt_sha256 = prompt_sha256;
+    fleet_model = model; fleet_unsafe_auto = unsafe_auto }
 
 let load_fleet_specs root =
   let directory = fleet_directory root in
@@ -6363,31 +6436,6 @@ let load_fleet_specs root =
            Hashtbl.add seen spec.fleet_slot path;
            spec)
 
-let fleet_enroll_command cli =
-  let cwd = cwd_option cli in
-  let root = root_option cli cwd in
-  let slot = required cli "--slot" in
-  let kind = required cli "--kind" in
-  let home = Unix.realpath (required cli "--home") in
-  validate_fleet_atom "slot" slot;
-  if not (List.mem kind fleet_kinds) then failf "unsupported fleet kind: %s" kind;
-  let spec =
-    { fleet_slot = slot; fleet_kind = kind; fleet_home = home; fleet_cwd = cwd;
-      fleet_enabled = true }
-  in
-  let directory = fleet_directory root in
-  mkdir_p directory;
-  let path = fleet_spec_path root slot in
-  let desired = descriptor_text (fleet_spec_fields spec) in
-  if Sys.file_exists path then (
-    let existing = parse_key_values path in
-    let existing_spec = fleet_spec_of_values path existing in
-    if existing_spec <> spec && not (flag cli "--replace") then
-      failf "fleet slot %s already has different desired state" slot);
-  atomic_write path desired;
-  Printf.printf "LOOM_FLEET_ENROLLED slot=%s kind=%s cwd=%s state=enabled\n%!"
-    slot kind cwd
-
 let fleet_disable_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
@@ -6402,7 +6450,8 @@ let fleet_disable_command cli =
 
 type captured_process = { captured_code : int; captured_output : string }
 
-let run_captured executable arguments =
+let run_captured ?environment executable arguments =
+  let environment = Option.value ~default:(Unix.environment ()) environment in
   let reader, writer = Unix.pipe () in
   Unix.set_close_on_exec reader;
   match Unix.fork () with
@@ -6411,7 +6460,7 @@ let run_captured executable arguments =
       Unix.dup2 writer Unix.stdout;
       Unix.dup2 writer Unix.stderr;
       if writer <> Unix.stdout && writer <> Unix.stderr then Unix.close writer;
-      (try Unix.execv executable (Array.of_list (executable :: arguments))
+      (try Unix.execve executable (Array.of_list (executable :: arguments)) environment
        with _ -> Unix._exit 127)
   | pid ->
       Unix.close writer;
@@ -6656,18 +6705,6 @@ let provider_prompt cli =
       let prompt = read_file resolved in
       if String.contains prompt '\000' then failf "provider-prompt-contains-nul";
       prompt
-
-let provider_uuid value =
-  let rec valid index =
-    if index = String.length value then true
-    else if List.mem index [ 8; 13; 18; 23 ] then
-      value.[index] = '-' && valid (index + 1)
-    else
-      match value.[index] with
-      | '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' -> valid (index + 1)
-      | _ -> false
-  in
-  String.length value = 36 && valid 0
 
 let provider_model_args spec model =
   if model = "" then []
@@ -7945,46 +7982,239 @@ let fleet_probe helper spec =
     failf "fleet slot %s has identity drift" spec.fleet_slot;
   (state, result)
 
+let random_provider_uuid () =
+  let value = Bytes.of_string (random_hex 16) in
+  Bytes.set value 12 '4';
+  Bytes.set value 16 '8';
+  let hex = Bytes.unsafe_to_string value in
+  Printf.sprintf "%s-%s-%s-%s-%s" (String.sub hex 0 8) (String.sub hex 8 4)
+    (String.sub hex 12 4) (String.sub hex 16 4) (String.sub hex 20 12)
+
+let fleet_provider_environment spec =
+  let inherited =
+    Unix.environment () |> Array.to_list
+    |> List.filter (fun entry ->
+           not (starts_with entry "HOME=" || starts_with entry "CODEX_HOME="))
+  in
+  Array.of_list (("HOME=" ^ spec.fleet_home) :: inherited)
+
+let fleet_assert_loom_identity spec values =
+  let assert_field name expected =
+    let observed = table_value values name in
+    if observed <> expected then
+      failf "fleet Loom identity drift slot=%s field=%s expected=%s observed=%s"
+        spec.fleet_slot name expected observed
+  in
+  assert_field "agent" spec.fleet_agent;
+  assert_field "lane" spec.fleet_slot;
+  assert_field "worktree" spec.fleet_cwd;
+  if spec.fleet_session_id <> "" then
+    assert_field "session_id" spec.fleet_session_id;
+  if spec.fleet_custody = "loom" then (
+    let provider = provider_spec spec.fleet_kind in
+    let executable =
+      match provider_executable provider with
+      | Some path -> path
+      | None -> failf "provider-executable-not-found:%s" spec.fleet_kind
+    in
+    assert_field "command" (Filename.basename executable))
+
+let fleet_loom_state root spec =
+  let paths = session_paths root spec.fleet_agent spec.fleet_slot in
+  let active = try Some (status_request paths |> protocol_fields) with _ -> None in
+  match active with
+  | Some values ->
+      fleet_assert_loom_identity spec values;
+      "active"
+  | None ->
+      if not (Sys.file_exists paths.token_path) then "absent"
+      else
+        let guardian =
+          try
+            let token = trim (read_file paths.token_path) in
+            Some (guardian_status_request paths token)
+          with _ -> None
+        in
+        (match guardian with
+        | Some values ->
+            fleet_assert_loom_identity spec values;
+            if table_value values "state" = "active" then "recoverable"
+            else "absent"
+        | None -> "absent")
+
+let fleet_enroll_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let slot = required cli "--slot" in
+  let kind = required cli "--kind" in
+  let custody = Option.value ~default:"agentd" (optional cli "--custody") in
+  let agent = Option.value ~default:kind (optional cli "--agent") in
+  let home = Unix.realpath (required cli "--home") in
+  validate_fleet_atom "slot" slot;
+  validate_fleet_atom "agent" agent;
+  if not (List.mem kind fleet_kinds) then failf "unsupported fleet kind: %s" kind;
+  if custody <> "agentd" && custody <> "loom" then
+    failf "unsupported fleet custody: %s" custody;
+  if custody = "agentd"
+     && (optional cli "--prompt" <> None || optional cli "--prompt-file" <> None
+         || optional cli "--session-id" <> None || optional cli "--model" <> None
+         || flag cli "--unsafe-auto" || flag cli "--adopt-active")
+  then failf "agentd fleet enrollment contains Loom-only authority options";
+  if custody = "loom" && kind <> "codex" then
+    failf "persistent fleet provider unavailable for kind %s" kind;
+  let prompt, prompt_file, prompt_sha256, session_id, model, unsafe_auto =
+    if custody = "loom" then (
+      ignore
+        (match provider_executable (provider_spec kind) with
+        | Some path -> path
+        | None -> failf "provider-executable-not-found:%s" kind);
+      let prompt = provider_prompt cli in
+      let session_id =
+        Option.value ~default:(random_provider_uuid ()) (optional cli "--session-id")
+      in
+      if not (provider_uuid session_id) then
+        failf "provider-session-id-must-be-uuid:%s" kind;
+      (prompt, fleet_prompt_path root slot, sha256 prompt, session_id,
+       Option.value ~default:"" (optional cli "--model"), flag cli "--unsafe-auto"))
+    else ("", "", "", "", "", false)
+  in
+  let spec =
+    { fleet_slot = slot; fleet_kind = kind; fleet_custody = custody;
+      fleet_agent = agent; fleet_home = home; fleet_cwd = cwd;
+      fleet_enabled = true; fleet_session_id = session_id;
+      fleet_prompt_file = prompt_file; fleet_prompt_sha256 = prompt_sha256;
+      fleet_model = model; fleet_unsafe_auto = unsafe_auto }
+  in
+  let directory = fleet_directory root in
+  mkdir_p directory;
+  let path = fleet_spec_path root slot in
+  let existing =
+    if Sys.file_exists path then Some (fleet_spec_of_values path (parse_key_values path))
+    else None
+  in
+  if existing <> None && existing <> Some spec && not (flag cli "--replace") then
+    failf "fleet slot %s already has different desired state" slot;
+  let agentd_state =
+    if custody = "loom" then
+      let state, _ = fleet_probe (fleet_agent_command ()) spec in
+      state
+    else "unobserved"
+  in
+  let loom_state = fleet_loom_state root spec in
+  if custody = "loom" && agentd_state = "active" then
+    failf "fleet-authority-conflict slot=%s desired=loom observed=agentd:active" slot;
+  if custody = "agentd" && loom_state <> "absent" then
+    failf "fleet-authority-conflict slot=%s desired=agentd observed=loom:%s" slot loom_state;
+  let same = existing = Some spec in
+  if custody = "loom" && loom_state = "active" && not same
+     && not (flag cli "--adopt-active")
+  then failf "active Loom lane requires --adopt-active for slot %s" slot;
+  if flag cli "--adopt-active" && (custody <> "loom" || loom_state <> "active") then
+    failf "--adopt-active requires a matching active Loom lane for slot %s" slot;
+  if custody = "loom" then atomic_write prompt_file prompt;
+  atomic_write path (descriptor_text (fleet_spec_fields spec));
+  Printf.printf
+    "LOOM_FLEET_ENROLLED slot=%s kind=%s custody=%s agent=%s session_id=%s cwd=%s state=enabled adopted=%s\n%!"
+    slot kind custody agent (if session_id = "" then "-" else session_id) cwd
+    (if flag cli "--adopt-active" then "active" else "no")
+
+let fleet_run_loom root spec action =
+  let runtime = Unix.realpath Sys.executable_name in
+  let arguments =
+    if action = "recover" then
+      [ "recover"; "--agent"; spec.fleet_agent; "--lane"; spec.fleet_slot;
+        "--session-id"; spec.fleet_session_id; "--cwd"; spec.fleet_cwd;
+        "--state-dir"; root ]
+    else
+      [ "provider-open"; "--provider"; spec.fleet_kind;
+        "--agent"; spec.fleet_agent; "--lane"; spec.fleet_slot;
+        "--session-id"; spec.fleet_session_id; "--cwd"; spec.fleet_cwd;
+        "--state-dir"; root; "--prompt-file"; spec.fleet_prompt_file ]
+      @ (if spec.fleet_model = "" then [] else [ "--model"; spec.fleet_model ])
+      @ (if spec.fleet_unsafe_auto then [ "--unsafe-auto" ] else [])
+  in
+  run_captured ~environment:(fleet_provider_environment spec) runtime arguments
+
 let fleet_reconcile_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
   let apply = flag cli "--apply" in
   let helper = fleet_agent_command () in
   let specs = load_fleet_specs root |> List.filter (fun spec -> spec.fleet_enabled) in
-  let started = ref 0 and healthy = ref 0 in
+  let started = ref 0 and recovered = ref 0 and healthy = ref 0 in
   List.iter
     (fun spec ->
-      let state, _ = fleet_probe helper spec in
-      if state = "active" then (
-        incr healthy;
-        Printf.printf "LOOM_FLEET slot=%s state=active action=noop\n%!" spec.fleet_slot)
-      else if not apply then
-        Printf.printf "LOOM_FLEET slot=%s state=%s action=start mode=plan\n%!"
-          spec.fleet_slot state
+      let agentd_state, _ = fleet_probe helper spec in
+      let loom_state = fleet_loom_state root spec in
+      if spec.fleet_custody = "agentd" then (
+        if loom_state <> "absent" then
+          failf "fleet-authority-conflict slot=%s desired=agentd observed=loom:%s"
+            spec.fleet_slot loom_state;
+        if agentd_state = "active" then (
+          incr healthy;
+          Printf.printf
+            "LOOM_FLEET slot=%s state=active action=noop custody=agentd\n%!"
+            spec.fleet_slot)
+        else if not apply then
+          Printf.printf
+            "LOOM_FLEET slot=%s state=%s action=start mode=plan custody=agentd\n%!"
+            spec.fleet_slot agentd_state
+        else (
+          let result =
+            run_captured helper
+              [ "launch-kind"; "--slot"; spec.fleet_slot; "--kind";
+                spec.fleet_kind; "--home"; spec.fleet_home; "--cwd";
+                spec.fleet_cwd; "--no-attach" ]
+          in
+          if result.captured_code <> 0 then
+            failf "fleet launch failed for %s: %s" spec.fleet_slot
+              (trim result.captured_output);
+          let after, _ = fleet_probe helper spec in
+          if after <> "active" then
+            failf "fleet slot %s did not become active after launch" spec.fleet_slot;
+          incr started;
+          Printf.printf
+            "LOOM_FLEET slot=%s state=active action=started custody=agentd\n%!"
+            spec.fleet_slot))
       else (
-        let result =
-          run_captured helper
-            [ "launch-kind"; "--slot"; spec.fleet_slot; "--kind";
-              spec.fleet_kind; "--home"; spec.fleet_home; "--cwd";
-              spec.fleet_cwd; "--no-attach" ]
-        in
-        if result.captured_code <> 0 then
-          failf "fleet launch failed for %s: %s" spec.fleet_slot
-            (trim result.captured_output);
-        let after, _ = fleet_probe helper spec in
-        if after <> "active" then
-          failf "fleet slot %s did not become active after launch" spec.fleet_slot;
-        incr started;
-        Printf.printf "LOOM_FLEET slot=%s state=active action=started\n%!"
-          spec.fleet_slot))
+        if agentd_state = "active" then
+          failf "fleet-authority-conflict slot=%s desired=loom observed=agentd:active"
+            spec.fleet_slot;
+        if loom_state = "active" then (
+          incr healthy;
+          Printf.printf
+            "LOOM_FLEET slot=%s custody=loom state=active action=noop\n%!"
+            spec.fleet_slot)
+        else if not apply then
+          Printf.printf
+            "LOOM_FLEET slot=%s custody=loom state=%s action=%s mode=plan\n%!"
+            spec.fleet_slot loom_state
+            (if loom_state = "recoverable" then "recover" else "provider-open")
+        else (
+          let action = if loom_state = "recoverable" then "recover" else "provider-open" in
+          let result = fleet_run_loom root spec action in
+          if result.captured_code <> 0 then
+            failf "fleet Loom %s failed for %s: %s" action spec.fleet_slot
+              (trim result.captured_output);
+          let after = fleet_loom_state root spec in
+          if after <> "active" then
+            failf "fleet slot %s did not enter active Loom custody after %s"
+              spec.fleet_slot action;
+          if action = "recover" then incr recovered else incr started;
+          Printf.printf
+            "LOOM_FLEET slot=%s custody=loom state=active action=%s\n%!"
+            spec.fleet_slot (if action = "recover" then "recovered" else "opened"))))
     specs;
-  Printf.printf "loom_fleet_slots=%d healthy=%d started=%d mode=%s\n%!"
-    (List.length specs) !healthy !started (if apply then "apply" else "plan")
+  Printf.printf "loom_fleet_slots=%d healthy=%d started=%d recovered=%d mode=%s\n%!"
+    (List.length specs) !healthy !started !recovered
+    (if apply then "apply" else "plan")
 
 let usage () =
   Printf.eprintf
     "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
-    runtime_version
+    runtime_version;
+  Printf.eprintf
+    "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
 let arguments_after_command () =
   let values = Array.to_list Sys.argv in
@@ -8001,7 +8231,7 @@ let main () =
     else
       let booleans =
         [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
-          "--replace"; "--json"; "--once"; "--unsafe-auto";
+          "--replace"; "--adopt-active"; "--json"; "--once"; "--unsafe-auto";
           "--isolate-context" ]
       in
       let cli = parse_cli booleans (arguments_after_command ()) in

@@ -33,6 +33,8 @@ bin/sounio-loom recover --agent codex --lane experiment
 bin/sounio-loom guardian-status --agent codex --lane experiment
 bin/sounio-loom snapshot --agent codex --lane experiment --cursor 0 --meta
 bin/sounio-loom fleet-enroll --slot codex-1 --kind codex --home "$HOME" --cwd "$PWD"
+bin/sounio-loom fleet-enroll --slot codex-persistent --kind codex \
+  --custody loom --home "$HOME" --cwd "$PWD" --prompt-file BOOTSTRAP.md
 bin/sounio-loom fleet-reconcile
 bin/sounio-loom fleet-reconcile --apply
 bin/sounio-loom list
@@ -204,12 +206,26 @@ See `docs/internal/concepts/loom-obligation.contract` for the exact semantic
 boundary and preregistered sabotage control.
 
 `fleet-enroll` stores desired lane intent under the repository's persistent Git
-common directory. `fleet-reconcile` is a no-mutation plan by default; `--apply`
-starts only enabled absent slots and verifies that each becomes active. Repeated
-application is idempotent, and `fleet-disable` prevents an intentional stop from
-being relaunched. The current launcher boundary delegates process creation to
-the compatibility `agentd` adapter while desired-state parsing and reconciliation
-policy live in the OCaml runtime.
+common directory. Catalog v2 makes `custody=agentd|loom` part of desired state.
+The default remains `agentd` for compatibility. A `loom` slot records a stable
+agent, session UUID, native provider kind, credential home, and SHA-256-bound
+bootstrap prompt. The raw prompt is copied into private catalog storage rather
+than embedded in the descriptor.
+
+`fleet-reconcile` is a no-mutation plan by default. It observes both the legacy
+fleet adapter and Loom before taking action. A slot whose non-selected authority
+is active is refused with `fleet-authority-conflict`; it is never "repaired" by
+starting a second CLI. An absent Loom slot is opened with `provider-open`, while
+a surviving Guardian with a dead kernel is recovered without replacing the
+provider. Repeated application is idempotent, and `fleet-disable` prevents an
+intentional stop from being relaunched.
+
+An existing active Loom lane can enter the catalog only with `--adopt-active`.
+Enrollment verifies agent, lane, worktree, session UUID, and provider command
+before atomically publishing desired state. This adopts already-existing Loom
+custody; it does not seize or convert a live agentd/tmux PTY. Stop the old
+authority first when migrating a legacy lane. The complete state machine and
+sabotage boundaries are in `tools/loom/FLEET_CATALOG_V2.md`.
 
 `scripts/dev/install_sounio_loom_kubernetes_hook.sh` installs the one-shot
 reconciler in the workspace StatefulSet. It refuses any update strategy other
