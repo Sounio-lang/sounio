@@ -8562,6 +8562,21 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
         None => {}
     }
+    // #2164: a bare call to a math name the native backend cannot emit. Guarded
+    // on direct_sig_id < 0 so it fires only where the name resolves to nothing
+    // real -- the phantom-builtin case that produces a runtime SIGILL.
+    if direct_sig_id < 0 {
+        match e.left {
+            Some(callee_expr) => {
+                if (*callee_expr).kind == ExprKind::ExprIdent {
+                    if name_is_unimplemented_native_math((*callee_expr).name) {
+                        checker_report_error_at_inplace(c, e.span, 221, 0, 0, 0)
+                    }
+                }
+            }
+            None => {}
+        }
+    }
     if direct_sig_id >= 0 {
         if (*c).enforce_visibility && !checker_fn_sig_visible_inplace(c, direct_sig_id) {
             checker_report_private_fn_inplace(c, e.span, direct_sig_id)
@@ -14062,6 +14077,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 175 { print("function is private in its defining module") }
     else if code == 176 { print("struct constructor is private in its defining module") }
     else if code == 177 { print("enum constructor is private in its defining module") }
+    else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
     else if code == 220 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
@@ -14358,6 +14374,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 171 {
         print("   |\n   = help: use `.value` within a `with Epistemic` function to extract the inner value with explicit acknowledgment\n")
+    }
+    else if code == 221 {
+        print("   |\n   = help: `use math::pure::{atan}` -- pure Sounio implementations of all five live there -- or use sin, cos, exp, log, sqrt, which the backend emits directly\n")
     }
     else if code == 220 {
         print("   |\n   = help: peel first -- `let a = kA.value` and `let b = kB.value`, then combine `a` and `b`; `variance_of(a op b)` propagates the uncertainty and is the supported path on this engine\n")
@@ -14694,6 +14713,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 219 {
         print("   = note: there is no dynamic linker in this backend; an unimplemented extern compiles to an empty stub whose calls read 0\n")
+    }
+    else if code == 221 {
+        print("   = note: checker_bind_import_unknown_inplace binds tan/atan/tanh/asin/acos, but native_v2_builtin_id_for_func_ref has no id for them; sin, cos and exp do\n")
     }
     else if code == 220 {
         print("   = note: the checker types this as Knowledge<T>, but lower_binary_expr_ref has no Knowledge arm, so both operands would lower as scalars and the result handle would be arithmetic on two pointers\n")
@@ -15184,6 +15206,39 @@ fn call_expr_is_syscall6(opt: Option<Box<Expr> >) -> bool with Mut, Panic, Div, 
 // extern names probed under Madaros (fabs, pow, floor, ceil, malloc, getpid,
 // tgamma, ...) all 19 returned 0, and heap_alloc — listed but dispatched
 // elsewhere — returned a real pointer.
+// #2164: bound for checking, absent from the backend.
+//
+// checker_bind_import_unknown_inplace binds these five so a multi-module program
+// does not trip E137 on them, exactly as it does for sin/cos/exp. The difference
+// is that sin/cos/exp have builtin ids and these do not: native_v2_builtin_id_
+// for_func_ref -- which the comment above calls the authority -- maps neither
+// tan, atan, tanh, asin nor acos. A call therefore typechecks, compiles to an
+// ELF, and dies on an illegal instruction at run time. `print_f64(atan(0.5))`
+// alone is enough; measured rc=132 on all five.
+//
+// Refusing is the honest answer until the backend emits them. Each needs a
+// hand-written x86-64 kernel with its own range reduction, the way
+// emit_builtin_sin already is -- and a subtly wrong one would be worse than the
+// crash, which at least announces itself.
+//
+// This refuses ONLY the unresolved bare name: a program that DEFINES the
+// function resolves through direct_sig_id and never reaches the check, which is
+// why the whole stdlib is unaffected -- measured, 2 files refused across
+// stdlib+tests+examples, and both are the known-broken ones.
+//
+// The help line points at stdlib/math/pure.sio, whose implementations are
+// correct (verified: copied verbatim under another name, atan(0.5) = 0.463648).
+// They were not `pub` until this change, so importing them failed with E175 and
+// the refusal would have been a dead end -- measured, not assumed.
+fn name_is_unimplemented_native_math(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if name_eq(n, make_name("tan")) { return true }
+    if name_eq(n, make_name("atan")) { return true }
+    if name_eq(n, make_name("tanh")) { return true }
+    if name_eq(n, make_name("asin")) { return true }
+    if name_eq(n, make_name("acos")) { return true }
+    false
+}
+
 fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, IO {
     if name_eq(n, make_name("print_int")) { return true }        // id 1
     if name_eq(n, make_name("print_char")) { return true }       // id 2
