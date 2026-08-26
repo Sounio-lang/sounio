@@ -4353,14 +4353,33 @@ fn lowerer_lower_fn_item_mut(
     // line asked for. Measured: a function that never mentions correlation read
     // Var(c+d) = 0.16 instead of 0.10, the previous function's number entire.
     //
-    // This reset does NOT go in begin_function_body_lowering, which announces
-    // itself as "per-function reset of vreg-keyed float/variance tables" and
-    // has zero callers in the whole tree. Everything it resets -- fo_nchan,
-    // fo_sigma2, FO_SIGMA_REG, fo_expr_sens -- is therefore never reset by it.
+    // Both this reset and the FO channel-table reset below originally lived in a
+    // by-value `begin_function_body_lowering` that the *mut port left with zero
+    // callers, so none of it ran. #2145 moved the correlation reset onto this live
+    // path (the miscompile it measured is above); #2143 moved the channel table
+    // (fo_nchan / fo_sigma2 / fo_bind_count) here too and removed the dead function.
     var fo_cri: i64 = 0
     while fo_cri < 64 {
         FO_COV_RHO[fo_cri as usize] = 0.0
         fo_cri = fo_cri + 1
+    }
+    // #2143 (sibling of #2145): the FO channel table is keyed by vreg, which restarts
+    // per function. The *mut port left its reset only in the (now-removed) dead
+    // by-value original, so fo_nchan / fo_sigma2 (the live channel map read by
+    // fo_seed_from_variance's reuse check at `fo_sigma2[k] == variance_reg`) / fo_bind_count
+    // accumulate across a module's functions. Currently masked -- fo_expr_sens and
+    // FO_HOFF are cleared per seed and FO_COV_RHO is reset just above, so stale
+    // channels stay inert -- but the reuse check `fo_sigma2[k] == variance_reg` reads
+    // stale entries, and the reset belongs on the confirmed live path beside the
+    // correlation reset, not in dead code. (FO_SIGMA_REG is a write-only mirror; reset
+    // for parity.)
+    (*lo).fo_nchan = 0
+    (*lo).fo_bind_count = 0
+    var fo_sri: i64 = 0
+    while fo_sri < 32 {
+        (*lo).fo_sigma2[fo_sri as usize] = -1
+        FO_SIGMA_REG[fo_sri as usize] = -1
+        fo_sri = fo_sri + 1
     }
     // Seed the transcendental chain-rule entries here, on the confirmed live path.
     //
@@ -6217,51 +6236,6 @@ impl Lowerer {
             lo.module = module_box
         }
         lo.current_func_loaded = false
-        lo
-    }
-
-    fn begin_function_body_lowering(self, fn_id: i64, name: Name) -> Lowerer with Mut, Panic, Div {
-        var lo = self.flush_current_func()
-        lo.current_fn = fn_id
-        // Reuse the Box the Lowerer already holds instead of bump-allocating a
-        // fresh ~504 KB IrFunction per function; and read the preserved fields
-        // in place instead of `let preserved = …`, which copied the whole
-        // function to look at seven scalars.
-        var reused = lo.current_func
-        ir_reset_function_in_place(&! (*reused), name)
-        if fn_id >= 0 && fn_id < lo.module.fn_count {
-            (*reused).name = lo.module.functions[fn_id as usize].name
-            (*reused).compile_strategy = lo.module.functions[fn_id as usize].compile_strategy
-            (*reused).returns_float = lo.module.functions[fn_id as usize].returns_float
-            (*reused).return_fixed_array_len = lo.module.functions[fn_id as usize].return_fixed_array_len
-            (*reused).return_struct_name = lo.module.functions[fn_id as usize].return_struct_name
-            (*reused).first_param_is_ref = lo.module.functions[fn_id as usize].first_param_is_ref
-            (*reused).prof_counter_id = lo.module.functions[fn_id as usize].prof_counter_id
-        }
-        lo.current_func = reused
-        lo.current_func_loaded = true
-        lo.env = None
-        var rst_locals = lo.locals
-        (*rst_locals).count = 0
-        lo.locals = rst_locals
-        lo.scope_depth = 0
-        lo.loop_depth = 0
-        // D5 (#986): per-function reset of vreg-keyed float/variance tables.
-        lo.array_elem_float_reg_count = 0
-        lo.variance_base_reg_count = 0
-        lo.pending_variance_reg = -1
-        lo.pending_closure_fn_id = -1
-        // Multi-channel FO seeds are per-function.
-        lo.fo_nchan = 0
-        lo.fo_bind_count = 0
-        var fci: i64 = 0
-        while fci < 32 {
-            lo.fo_sigma2[fci as usize] = -1
-            FO_SIGMA_REG[fci as usize] = -1
-            lo.fo_expr_sens[fci as usize] = -1
-            lo.fo_pending_sens[fci as usize] = -1
-            fci = fci + 1
-        }
         lo
     }
 
