@@ -69,6 +69,17 @@ use hash::sha384::*
 
 // --- public result type and error sentinels -------------------------------
 
+// RFC 8446 SS5.1: TLSPlaintext.length MUST NOT exceed 2^14 bytes. This file
+// adds no TLSInnerPlaintext padding, so a single `record_encrypt` call's
+// input is capped at this size; `tls_send` splits any longer caller buffer
+// into multiple records via the loop further below. Also sizes
+// `TlsConnection.pending` (see its own doc comment): moved up here, ahead of
+// `tls_connection_zero`'s first use of it, since this compiler enforces
+// "no forward references" for helpers/constants (`CLAUDE.md` SS7) -- this
+// constant used to live next to `tls_send` further down, after every one of
+// its uses.
+const TLS_MAX_FRAGMENT: i64 = 16384
+
 pub struct TlsConnection {
     sock: TcpSocket,
     records: RecordLayerState,
@@ -87,6 +98,23 @@ pub struct TlsConnection {
     // seen and skipped, not merely "never returned as application data by
     // accident of timing".
     tickets_discarded: i64,
+    // Task 8 fix-round-1: a single decrypted `application_data` record's
+    // plaintext (up to TLS_MAX_FRAGMENT = 16384 bytes) can be, and in
+    // realistic HTTP-response-sized traffic often is, larger than the
+    // caller's own `cap`-sized `tls_recv` buffer -- the interop test's own
+    // 4096-byte scratch buffer included. Before this fix, `tls_recv_loop`
+    // copied only the first `cap` bytes of the decrypted content into the
+    // caller's buffer and silently dropped the rest when the local
+    // decrypted-content `RawBuf` went out of scope -- genuine, silent data
+    // loss. `pending`/`pending_offset`/`pending_len` hold whatever excess a
+    // record produced so the NEXT `tls_recv` call drains it before reading
+    // (or decrypting) anything else from the socket. `pending` is sized
+    // once, at TLS_MAX_FRAGMENT bytes, in `tls_connection_zero`/
+    // `tls_connect` -- large enough for the worst case (all but 1 byte of
+    // one maximal record held back) -- and never reallocated.
+    pending: RawBuf,
+    pending_offset: i64,
+    pending_len: i64,
 }
 
 pub const TLS_CONNECT_OK: i64 = 0
@@ -119,6 +147,9 @@ fn tls_connection_zero() -> TlsConnection with IO {
         client_ap_secret: rawbuf_new(1),
         server_ap_secret: rawbuf_new(1),
         tickets_discarded: 0,
+        pending: rawbuf_new(TLS_MAX_FRAGMENT + 8),
+        pending_offset: 0,
+        pending_len: 0,
     }
 }
 
@@ -1021,6 +1052,9 @@ pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustS
         client_ap_secret: client_ap_secret,
         server_ap_secret: server_ap_secret,
         tickets_discarded: 0,
+        pending: rawbuf_new(TLS_MAX_FRAGMENT + 8),
+        pending_offset: 0,
+        pending_len: 0,
     }
     (conn, TLS_CONNECT_OK)
 }
@@ -1060,12 +1094,6 @@ pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustS
 // if/else EXPRESSION consuming the same linear bindings symmetrically
 // across every branch.
 
-// RFC 8446 SS5.1: TLSPlaintext.length MUST NOT exceed 2^14 bytes. This file
-// adds no TLSInnerPlaintext padding, so a single `record_encrypt` call's
-// input is capped at this size; `tls_send` splits any longer caller buffer
-// into multiple records via the loop below.
-const TLS_MAX_FRAGMENT: i64 = 16384
-
 pub const TLS_IO_ERR_SEND: i64 = 0 - 1
 pub const TLS_IO_ERR_RECV: i64 = 0 - 1
 pub const TLS_IO_ERR_DECRYPT: i64 = 0 - 1
@@ -1087,7 +1115,7 @@ pub fn tls_send(conn: TlsConnection, buf: &RawBuf, len: i64) -> (TlsConnection, 
     if len <= 0 {
         (conn, 0)
     } else {
-        let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded } = conn
+        let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
         var records2 = records
         let chunk_len = if len > TLS_MAX_FRAGMENT { TLS_MAX_FRAGMENT } else { len }
         let view = rawbuf_view(buf, 0, chunk_len)
@@ -1101,6 +1129,9 @@ pub fn tls_send(conn: TlsConnection, buf: &RawBuf, len: i64) -> (TlsConnection, 
             client_ap_secret: client_ap_secret,
             server_ap_secret: server_ap_secret,
             tickets_discarded: tickets_discarded,
+            pending: pending,
+            pending_offset: pending_offset,
+            pending_len: pending_len,
         }
         if send_err != 0 {
             (conn2, TLS_IO_ERR_SEND)
@@ -1162,8 +1193,26 @@ fn rekey_read_direction(records: RecordLayerState, new_read_key: &RawBuf, new_re
 // `tcp_recv`'s own contract distinguishes a `recv() == 0` peer-closed-
 // gracefully from a `recv() < 0` error -- this file's own `close_notify`
 // path is the ONLY way a positive-length TLS session produces a clean 0).
+// Pure arithmetic split of one decrypted `application_data` record's
+// `content_len` bytes between what a `tls_recv` caller gets back THIS call
+// (`out_len`, capped at `cap`) and how many trailing bytes of that same
+// record must be held in `TlsConnection.pending` for the NEXT call
+// (`overflow_len`) instead of being dropped -- Task 8 fix-round-1. No
+// RawBuf/network/effects involved, deliberately, so this one arithmetic
+// decision can be unit-tested directly and exhaustively (see
+// tests/run-pass/tls_client_recv_pending_split.sio, which imports and calls
+// this exact function rather than re-deriving its logic) independently of
+// the live-server-only interop tests the rest of this file's
+// `application_data` path otherwise requires. `pub` purely for that
+// testability -- no other module calls it.
+pub fn split_into_buf_and_pending(content_len: i64, cap: i64) -> (i64, i64) {
+    let out_len = if content_len < cap { content_len } else { cap }
+    let overflow_len = content_len - out_len
+    (out_len, overflow_len)
+}
+
 fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, i64) with IO, Mut {
-    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded } = conn
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
     var records2 = records
     let header = rawbuf_new(5 + 8)
     let (sock2, n1) = tcp_recv_exact(sock, &header, 0, 5)
@@ -1171,7 +1220,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
         let conn_err = TlsConnection {
             sock: sock2, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
             master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-            tickets_discarded: tickets_discarded,
+            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
         }
         (conn_err, TLS_IO_ERR_RECV)
     } else {
@@ -1183,7 +1232,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
             let conn_err = TlsConnection {
                 sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                 master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                tickets_discarded: tickets_discarded,
+                tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
             }
             (conn_err, TLS_IO_ERR_RECV)
         } else if outer_type == (TLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC as i64) {
@@ -1193,7 +1242,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
             let conn_next = TlsConnection {
                 sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                 master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                tickets_discarded: tickets_discarded,
+                tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
             }
             tls_recv_loop(conn_next, buf, cap)
         } else {
@@ -1202,20 +1251,33 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                 let conn_err = TlsConnection {
                     sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                     master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                    tickets_discarded: tickets_discarded,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                 }
                 (conn_err, TLS_IO_ERR_DECRYPT)
             } else if content_type == TLS_CONTENT_TYPE_APPLICATION_DATA {
-                let out_len = if content_len < cap { content_len } else { cap }
+                // Task 8 fix-round-1: `content_len` (this one record's
+                // decrypted plaintext length, up to TLS_MAX_FRAGMENT) can
+                // exceed the caller's `cap`. `split_into_buf_and_pending`
+                // (pure, unit-tested independently in
+                // tests/run-pass/tls_client_recv_pending_split.sio) decides
+                // exactly how many bytes go to the caller now (`out_len`)
+                // versus how many must be held in `conn.pending` for the
+                // NEXT `tls_recv` call (`overflow_len`) -- never dropped.
+                let (out_len, overflow_len) = split_into_buf_and_pending(content_len, cap)
                 var ci: i64 = 0
                 while ci < out_len {
                     rawbuf_set(buf, ci, rawbuf_get(&content, ci))
                     ci = ci + 1
                 }
+                var oi: i64 = 0
+                while oi < overflow_len {
+                    rawbuf_set(&pending, oi, rawbuf_get(&content, out_len + oi))
+                    oi = oi + 1
+                }
                 let conn_ok = TlsConnection {
                     sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                     master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                    tickets_discarded: tickets_discarded,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: 0, pending_len: overflow_len,
                 }
                 (conn_ok, out_len)
             } else if content_type == TLS_CONTENT_TYPE_ALERT {
@@ -1229,7 +1291,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                 let conn_after = TlsConnection {
                     sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                     master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                    tickets_discarded: tickets_discarded,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                 }
                 if is_close_notify {
                     (conn_after, 0)
@@ -1241,7 +1303,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                     let conn_err = TlsConnection {
                         sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                         master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                        tickets_discarded: tickets_discarded,
+                        tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                     }
                     (conn_err, TLS_IO_ERR_MALFORMED)
                 } else {
@@ -1256,7 +1318,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                         let conn_next = TlsConnection {
                             sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                             master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                            tickets_discarded: tickets_discarded + 1,
+                            tickets_discarded: tickets_discarded + 1, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                         }
                         tls_recv_loop(conn_next, buf, cap)
                     } else if is_key_update(msg_type) {
@@ -1286,7 +1348,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                         let conn_rekeyed = TlsConnection {
                             sock: sock3, records: records3, hash_algo: hash_algo, hs_transcript: hs_transcript,
                             master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: new_server_ap_secret,
-                            tickets_discarded: tickets_discarded,
+                            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                         }
                         tls_recv_loop(conn_rekeyed, buf, cap)
                     } else {
@@ -1297,7 +1359,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                         let conn_err = TlsConnection {
                             sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                             master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                            tickets_discarded: tickets_discarded,
+                            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                         }
                         (conn_err, TLS_IO_ERR_MALFORMED)
                     }
@@ -1306,7 +1368,7 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
                 let conn_err = TlsConnection {
                     sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
                     master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
-                    tickets_discarded: tickets_discarded,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
                 }
                 (conn_err, TLS_IO_ERR_MALFORMED)
             }
@@ -1320,8 +1382,40 @@ fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection,
 // own EOF convention). Negative return: error (decrypt failure, fatal
 // alert, malformed/unexpected message, or a short/failed underlying
 // `tcp_recv`).
+//
+// Task 8 fix-round-1: checks `conn.pending_len` FIRST, before touching the
+// socket at all. A previous call's decrypted record may have been larger
+// than that call's own `cap`, in which case the excess is sitting in
+// `conn.pending` (see `TlsConnection`'s own doc comment) -- this drains it
+// first, exactly like `tcp_recv`'s own contract of returning whatever is
+// already available rather than blocking for more. Only once `pending_len`
+// reaches 0 does this fall through to `tls_recv_loop`, which reads and
+// decrypts the next record from the wire.
 pub fn tls_recv(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, i64) with IO, Mut {
-    tls_recv_loop(conn, buf, cap)
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
+    if pending_len > 0 {
+        let take = if pending_len < cap { pending_len } else { cap }
+        var i: i64 = 0
+        while i < take {
+            rawbuf_set(buf, i, rawbuf_get(&pending, pending_offset + i))
+            i = i + 1
+        }
+        let remaining = pending_len - take
+        let new_offset = if remaining > 0 { pending_offset + take } else { 0 }
+        let conn2 = TlsConnection {
+            sock: sock, records: records, hash_algo: hash_algo, hs_transcript: hs_transcript,
+            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded, pending: pending, pending_offset: new_offset, pending_len: remaining,
+        }
+        (conn2, take)
+    } else {
+        let conn2 = TlsConnection {
+            sock: sock, records: records, hash_algo: hash_algo, hs_transcript: hs_transcript,
+            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+        }
+        tls_recv_loop(conn2, buf, cap)
+    }
 }
 
 // Sends a best-effort `close_notify` alert (RFC 8446 SS6.1: "Unless some
@@ -1330,15 +1424,16 @@ pub fn tls_recv(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, 
 // closes the underlying socket regardless of whether the send succeeded --
 // a peer that has already disappeared must never hang this call.
 pub fn tls_close(conn: TlsConnection) with IO, Mut {
-    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded } = conn
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
     var records2 = records
     let alert = rawbuf_new(2 + 8)
     rawbuf_set(&alert, 0, 1) // AlertLevel: warning
     rawbuf_set(&alert, 1, 0) // AlertDescription: close_notify
     let (sock2, send_err) = send_encrypted_record(sock, &!records2, TLS_CONTENT_TYPE_ALERT, &alert, 2)
     // hash_algo/hs_transcript/master_secret/client_ap_secret/
-    // server_ap_secret/tickets_discarded/send_err are intentionally unused
-    // past this point -- tls_close is a pure sink, nothing downstream
+    // server_ap_secret/tickets_discarded/pending/pending_offset/
+    // pending_len/send_err are intentionally unused past this point --
+    // tls_close is a pure sink, nothing downstream
     // consumes them.
     tcp_close(sock2)
 }
