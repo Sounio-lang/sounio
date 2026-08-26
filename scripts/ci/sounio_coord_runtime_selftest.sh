@@ -52,8 +52,14 @@ cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$REPO/tools/loom/src/"
+  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_nanoarrow.c" \
+  "$ROOT_DIR/tools/loom/src/loom_nanoarrow_ipc.c" \
+  "$ROOT_DIR/tools/loom/src/loom_flatcc.c" "$REPO/tools/loom/src/"
+cp -R "$ROOT_DIR/tools/loom/src/vendor" "$REPO/tools/loom/src/"
 mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$REPO/stdlib/coordination/"
@@ -509,8 +515,14 @@ cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$ALT/tools/loom/src/"
+  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_nanoarrow.c" \
+  "$ROOT_DIR/tools/loom/src/loom_nanoarrow_ipc.c" \
+  "$ROOT_DIR/tools/loom/src/loom_flatcc.c" "$ALT/tools/loom/src/"
+cp -R "$ROOT_DIR/tools/loom/src/vendor" "$ALT/tools/loom/src/"
 mkdir -p "$ALT/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$ALT/stdlib/coordination/"
@@ -576,8 +588,14 @@ cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$BAD/tools/loom/src/"
+  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_nanoarrow.c" \
+  "$ROOT_DIR/tools/loom/src/loom_nanoarrow_ipc.c" \
+  "$ROOT_DIR/tools/loom/src/loom_flatcc.c" "$BAD/tools/loom/src/"
+cp -R "$ROOT_DIR/tools/loom/src/vendor" "$BAD/tools/loom/src/"
 mkdir -p "$BAD/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$BAD/stdlib/coordination/"
