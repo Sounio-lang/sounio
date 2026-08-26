@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.25.11"
+let runtime_version = "2026.08.26.12"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -194,6 +194,38 @@ let process_output command arguments =
   match Unix.close_process_in input with
   | WEXITED 0 -> trim output
   | _ -> failf "command failed: %s" command
+
+let process_output_all cwd command arguments =
+  let reader, writer = Unix.pipe () in
+  Unix.set_close_on_exec reader;
+  match Unix.fork () with
+  | 0 ->
+      Unix.close reader;
+      Unix.dup2 writer Unix.stdout;
+      Unix.dup2 writer Unix.stderr;
+      if writer <> Unix.stdout && writer <> Unix.stderr then Unix.close writer;
+      (try
+         Unix.chdir cwd;
+         Unix.execve command arguments (Unix.environment ())
+       with _ -> Unix._exit 127)
+  | pid ->
+      Unix.close writer;
+      let output = Buffer.create 4096 in
+      let bytes = Bytes.create 16384 in
+      let rec read () =
+        match Unix.read reader bytes 0 (Bytes.length bytes) with
+        | 0 -> ()
+        | count -> Buffer.add_subbytes output bytes 0 count; read ()
+        | exception Unix_error (EINTR, _, _) -> read ()
+      in
+      Fun.protect ~finally:(fun () -> Unix.close reader) read;
+      let _, status = Unix.waitpid [] pid in
+      let code =
+        match status with
+        | WEXITED value -> value
+        | WSIGNALED signal | WSTOPPED signal -> 128 + signal
+      in
+      (code, Buffer.contents output)
 
 let process_exchange command arguments input =
   let stdin_read, stdin_write = Unix.pipe () in
@@ -2376,7 +2408,11 @@ let unregister_coordination kernel =
            [ "endpoint-unregister"; "--agent"; kernel.agent; "--lane"; kernel.lane ]);
       ignore
         (coord_call kernel
-           [ "presence-unregister"; "--agent"; kernel.agent; "--lane"; kernel.lane ])
+           [ "presence-unregister"; "--agent"; kernel.agent; "--lane"; kernel.lane ]);
+      ignore
+        (coord_call kernel
+           [ "release"; "--agent"; kernel.agent; "--lane"; kernel.lane;
+             "--reason"; "Loom session exited" ])
 
 let run_kernel kernel =
   write_descriptor kernel "active";
@@ -3445,6 +3481,224 @@ let session_events_json (_, values) =
 let events_json root =
   session_descriptors root |> List.map session_events_json |> String.concat ","
   |> Printf.sprintf "[%s]"
+
+type authority_lane = {
+  authority_agent : string;
+  authority_lane : string;
+  mutable authority_claim : string;
+  mutable authority_presence : string;
+  mutable authority_presence_reason : string;
+  mutable authority_endpoint : string;
+  mutable authority_transport : string;
+  mutable authority_harness : string;
+  mutable authority_session_id : string;
+  mutable authority_generation : string;
+  mutable authority_pid : string;
+  mutable authority_last_seen : string;
+  mutable authority_worktree : string;
+  mutable authority_loom_state : string;
+  mutable authority_loom_instance : string;
+  mutable authority_guardian_pid : string;
+  mutable authority_harness_pid : string;
+  mutable authority_started_utc : string;
+  mutable authority_command : string;
+  mutable authority_cursor : int;
+}
+
+let empty_authority_lane agent lane =
+  { authority_agent = agent; authority_lane = lane; authority_claim = "missing";
+    authority_presence = "missing"; authority_presence_reason = "no-record";
+    authority_endpoint = "missing"; authority_transport = "none";
+    authority_harness = "unknown"; authority_session_id = "";
+    authority_generation = ""; authority_pid = ""; authority_last_seen = "";
+    authority_worktree = ""; authority_loom_state = "none";
+    authority_loom_instance = ""; authority_guardian_pid = "";
+    authority_harness_pid = ""; authority_started_utc = "";
+    authority_command = ""; authority_cursor = 0 }
+
+let authority_key agent lane = agent ^ "\000" ^ lane
+
+let authority_entry lanes agent lane =
+  let key = authority_key agent lane in
+  match Hashtbl.find_opt lanes key with
+  | Some value -> value
+  | None ->
+      let value = empty_authority_lane agent lane in
+      Hashtbl.add lanes key value;
+      value
+
+let coordination_snapshot_command cwd =
+  match Sys.getenv_opt "SOUNIO_COORD_COMMAND" with
+  | Some path when Sys.file_exists path -> Some path
+  | _ ->
+      let sibling =
+        Filename.concat (Filename.dirname Sys.executable_name)
+          "sounio-coord-runtime"
+      in
+      if Sys.file_exists sibling then Some sibling
+      else
+        let launcher = Filename.concat (Filename.concat cwd "bin") "sounio-coord" in
+        if Sys.file_exists launcher then Some launcher else None
+
+let snapshot_fields values =
+  let fields = Hashtbl.create 16 in
+  List.iter
+    (fun field ->
+      match String.index_opt field '=' with
+      | None -> ()
+      | Some index ->
+          Hashtbl.replace fields (String.sub field 0 index)
+            (String.sub field (index + 1) (String.length field - index - 1)))
+    values;
+  fields
+
+let load_authority_snapshot cwd lanes =
+  match coordination_snapshot_command cwd with
+  | None -> (false, "")
+  | Some command ->
+      let code, output =
+        process_output_all cwd command [| command; "cockpit-snapshot" |]
+      in
+      if code <> 0 then (false, "")
+      else
+        let valid = ref false and snapshot_utc = ref "" in
+        output |> split_on '\n'
+        |> List.iter (fun line ->
+               match split_on '\t' line with
+               | "COCKPIT" :: values ->
+                   let fields = snapshot_fields values in
+                   if table_value fields "protocol" = "1" then valid := true;
+                   snapshot_utc := table_value fields "snapshot_utc"
+               | ("CLAIM" as kind) :: values
+               | ("ENDPOINT" as kind) :: values
+               | ("PRESENCE" as kind) :: values ->
+                   let fields = snapshot_fields values in
+                   let agent = table_value fields "agent" in
+                   let lane = table_value fields "lane" in
+                   if agent <> "" && lane <> "" then (
+                     let entry = authority_entry lanes agent lane in
+                     let prefer key current =
+                       let value = table_value fields key in
+                       if value <> "" then value else current
+                     in
+                     entry.authority_last_seen <-
+                       prefer "last_seen" entry.authority_last_seen;
+                     entry.authority_worktree <-
+                       prefer "worktree" entry.authority_worktree;
+                     if kind = "CLAIM" then
+                       entry.authority_claim <- table_value fields "state"
+                     else if kind = "ENDPOINT" then (
+                       entry.authority_endpoint <- table_value fields "state";
+                       entry.authority_transport <-
+                         prefer "transport" entry.authority_transport;
+                       entry.authority_harness <-
+                         prefer "harness" entry.authority_harness)
+                     else (
+                       entry.authority_presence <- table_value fields "state";
+                       entry.authority_presence_reason <-
+                         prefer "reason" entry.authority_presence_reason;
+                       entry.authority_harness <-
+                         prefer "harness" entry.authority_harness;
+                       entry.authority_session_id <-
+                         prefer "session_id" entry.authority_session_id;
+                       entry.authority_generation <-
+                         prefer "generation" entry.authority_generation;
+                       entry.authority_pid <- prefer "pid" entry.authority_pid))
+               | _ -> ());
+        (!valid, !snapshot_utc)
+
+let operational_state lane =
+  if lane.authority_loom_state = "active" then "active"
+  else if lane.authority_presence = "live" then "live"
+  else if lane.authority_presence = "unresponsive" then "unresponsive"
+  else if lane.authority_presence = "orphaned" then "orphaned"
+  else if lane.authority_claim = "active" then "claimed"
+  else if lane.authority_loom_state <> "none" then lane.authority_loom_state
+  else "offline"
+
+let authority_rank lane =
+  if lane.authority_loom_state = "active"
+     && lane.authority_presence = "live"
+     && lane.authority_endpoint = "active"
+  then 0
+  else if lane.authority_presence = "live" && lane.authority_endpoint = "active" then 1
+  else
+    match operational_state lane with
+    | "active" -> 2
+    | "live" -> 3
+    | "claimed" -> 4
+    | "unresponsive" -> 5
+    | "recoverable" -> 6
+    | "orphaned" -> 7
+    | _ -> 8
+
+let authority_lane_json lane =
+  Printf.sprintf
+    "{\"agent\":\"%s\",\"lane\":\"%s\",\"state\":\"%s\",\"claim_state\":\"%s\",\"presence_state\":\"%s\",\"presence_reason\":\"%s\",\"endpoint_state\":\"%s\",\"transport\":\"%s\",\"harness\":\"%s\",\"session_id\":\"%s\",\"generation\":\"%s\",\"pid\":\"%s\",\"last_seen_utc\":\"%s\",\"worktree\":\"%s\",\"loom_state\":\"%s\",\"loom_instance\":\"%s\",\"guardian_pid\":\"%s\",\"harness_pid\":\"%s\",\"started_utc\":\"%s\",\"command\":\"%s\",\"cursor\":%d}"
+    (json_escape lane.authority_agent) (json_escape lane.authority_lane)
+    (operational_state lane) (json_escape lane.authority_claim)
+    (json_escape lane.authority_presence)
+    (json_escape lane.authority_presence_reason)
+    (json_escape lane.authority_endpoint)
+    (json_escape lane.authority_transport) (json_escape lane.authority_harness)
+    (json_escape lane.authority_session_id)
+    (json_escape lane.authority_generation) (json_escape lane.authority_pid)
+    (json_escape lane.authority_last_seen)
+    (json_escape lane.authority_worktree)
+    (json_escape lane.authority_loom_state)
+    (json_escape lane.authority_loom_instance)
+    (json_escape lane.authority_guardian_pid)
+    (json_escape lane.authority_harness_pid)
+    (json_escape lane.authority_started_utc)
+    (json_escape lane.authority_command) lane.authority_cursor
+
+let fleet_json root cwd =
+  let lanes = Hashtbl.create 64 in
+  let coordination_available, snapshot_utc = load_authority_snapshot cwd lanes in
+  session_descriptors root
+  |> List.iter (fun (_, values) ->
+         let agent = table_value values "agent" in
+         let lane = table_value values "lane" in
+         if agent <> "" && lane <> "" then (
+           let entry = authority_entry lanes agent lane in
+           let output = table_value values "output_file" in
+           entry.authority_loom_state <- table_value values "state";
+           entry.authority_loom_instance <- table_value values "instance_id";
+           entry.authority_guardian_pid <- table_value values "guardian_pid";
+           entry.authority_harness_pid <- table_value values "harness_pid";
+           entry.authority_started_utc <- table_value values "started_utc";
+           entry.authority_command <- table_value values "command";
+           entry.authority_cursor <- file_size output;
+           if entry.authority_session_id = "" then
+             entry.authority_session_id <- table_value values "session_id";
+           if entry.authority_worktree = "" then
+             entry.authority_worktree <- table_value values "worktree"));
+  let values = Hashtbl.fold (fun _ value found -> value :: found) lanes [] in
+  let values =
+    List.sort
+      (fun left right ->
+        let rank = compare (authority_rank left) (authority_rank right) in
+        if rank <> 0 then rank
+        else
+          compare
+            (left.authority_agent, left.authority_lane)
+            (right.authority_agent, right.authority_lane))
+      values
+  in
+  let count predicate =
+    List.fold_left (fun total value -> if predicate value then total + 1 else total) 0 values
+  in
+  Printf.sprintf
+    "{\"schema\":\"loom-authority-overlay-v1\",\"snapshot_utc\":\"%s\",\"coordination_available\":%s,\"summary\":{\"lanes\":%d,\"live\":%d,\"unresponsive\":%d,\"orphaned\":%d,\"loom_custody\":%d,\"active_endpoints\":%d},\"lanes\":[%s]}"
+    (json_escape snapshot_utc)
+    (if coordination_available then "true" else "false")
+    (List.length values)
+    (count (fun lane -> lane.authority_presence = "live"))
+    (count (fun lane -> lane.authority_presence = "unresponsive"))
+    (count (fun lane -> lane.authority_presence = "orphaned"))
+    (count (fun lane -> lane.authority_loom_state = "active" || lane.authority_loom_state = "recoverable"))
+    (count (fun lane -> lane.authority_endpoint = "active"))
+    (values |> List.map authority_lane_json |> String.concat ",")
 
 let legacy_html =
   {|
@@ -5964,6 +6218,8 @@ let serve_http cli =
                if path = "/" then http_response "200 OK" "text/html; charset=utf-8" html
                else if path = "/api/sessions" then
                  http_response "200 OK" "application/json" (sessions_json root)
+               else if path = "/api/fleet" then
+                 http_response "200 OK" "application/json" (fleet_json root cwd)
                else if path = "/api/events" then
                  http_response "200 OK" "application/json" (events_json root)
                else if path = "/api/snapshot" then

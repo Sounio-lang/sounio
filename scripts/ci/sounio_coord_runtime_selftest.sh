@@ -52,6 +52,7 @@ cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$REPO/tools/loom/src/"
 mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
@@ -125,7 +126,9 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-observation-authority-v1 \
   loom-journal-authority-quorum-v1 \
   loom-cross-node-replay-v1 \
-  loom-exclusive-input-lease-v1 loom-read-only-gui-v1 loom-coord-transport-v1 \
+  loom-exclusive-input-lease-v1 loom-read-only-gui-v1 \
+  loom-fusion-cockpit-v1 loom-authority-overlay-v1 \
+  coord-cockpit-snapshot-v1 loom-coord-transport-v1 \
   coord-generation-scoped-wake-v1 \
   loom-recoverable-guardian-v1 loom-kernel-recovery-v1 loom-dual-journal-v1 \
   loom-persistent-fleet-catalog-v1 loom-post-pod-reconcile-v1 \
@@ -414,6 +417,7 @@ output="$(
     --session-id runtime-obligation-session --pid "$runtime_pid" \
     --pid-start "$runtime_start" --boot-id "$boot_id" \
     --pid-namespace "$pid_namespace" --host runtime-selftest --ttl-seconds 120
+  SOUNIO_COORD_DIR="$STATE" bin/sounio-coord cockpit-snapshot
   SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-consume \
     --agent runtime-worker --lane target --message "$runtime_message"
   SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-claim \
@@ -440,6 +444,15 @@ cp "$TEST_ROOT/activation-watermark.saved" "$activation_file"
   fail 'sabotage control did not restore the activation watermark exactly'
 grep -q '^LOOM_OBLIGATION_COMPLETED .*state=completed .*unclosed=no ' <<< "$output" || \
   fail 'presence-derived shared-runtime obligation did not complete'
+grep -Fq $'COCKPIT\tprotocol=1\t' <<< "$output" || \
+  fail 'installed runtime omitted the cockpit machine protocol'
+grep -Fq $'CLAIM\tstate=active\tagent=runtime-worker\tlane=target\t' <<< "$output" || \
+  fail 'cockpit snapshot omitted its active claim'
+grep -Fq $'PRESENCE\tstate=live\treason=process-verified\tagent=runtime-worker\tlane=target\t' \
+  <<< "$output" || fail 'cockpit snapshot omitted verified process presence'
+if grep -Eq 'token_file=|socket=|address=' <<< "$output"; then
+  fail 'cockpit snapshot disclosed a delivery capability'
+fi
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-list --json)"
 grep -q '"count":4,"unclosed":0' <<< "$output" || \
   fail 'completed shared-runtime obligation remained unclosed'
@@ -493,6 +506,7 @@ cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$ALT/tools/loom/src/"
 mkdir -p "$ALT/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
@@ -559,6 +573,7 @@ cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" "$BAD/tools/loom/src/"
 mkdir -p "$BAD/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \

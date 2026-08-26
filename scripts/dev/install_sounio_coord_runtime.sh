@@ -302,7 +302,8 @@ loom_obligation_module="$SOURCE_ROOT/stdlib/coordination/loom_obligation.sio"
   die "Loom native Sounio continuity source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
   die "Loom native Sounio obligation source bundle is incomplete"
-[[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_pty_stubs.c" && \
+[[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_ui.ml" && \
+  -f "$loom_project/src/loom_pty_stubs.c" && \
   -f "$loom_project/src/dune" && -f "$loom_project/dune-project" ]] || \
   die "Loom OCaml source bundle is incomplete: $loom_project"
 
@@ -388,7 +389,8 @@ bundle_sha="$(
     "$fleet_source" "$fleetd_source" "$fleet_model_source" \
     "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier" \
     "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune" \
-    "$loom_project/src/loom.ml" "$loom_project/src/loom_pty_stubs.c" \
+    "$loom_project/src/loom.ml" "$loom_project/src/loom_ui.ml" \
+    "$loom_project/src/loom_pty_stubs.c" \
     "$loom_continuity_build_source" "$loom_continuity_entrypoint" \
     "$loom_continuity_module" "$loom_obligation_build_source" \
     "$loom_obligation_entrypoint" "$loom_obligation_module" | \
@@ -462,6 +464,9 @@ else
     printf 'capability=loom-cursor-replay-v1\n'
     printf 'capability=loom-exclusive-input-lease-v1\n'
     printf 'capability=loom-read-only-gui-v1\n'
+    printf 'capability=loom-fusion-cockpit-v1\n'
+    printf 'capability=loom-authority-overlay-v1\n'
+    printf 'capability=coord-cockpit-snapshot-v1\n'
     printf 'capability=loom-coord-transport-v1\n'
     printf 'capability=coord-generation-scoped-wake-v1\n'
     printf 'capability=loom-recoverable-guardian-v1\n'

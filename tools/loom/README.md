@@ -67,6 +67,15 @@ bin/sounio-loom obligation-supervise --state-dir PATH
 refused unless `--allow-remote` is explicit. The session directory and token are
 local capabilities and must remain private to the owning user.
 
+The Fusion cockpit keeps three authorities separate. `/api/fleet` overlays the
+coordination runtime's lightweight `cockpit-snapshot` with Loom session
+descriptors, so a lane can be live on the bus, reachable through an agentd or
+tmux endpoint, and still have no Loom PTY custody. Only `loom_state=active` or
+`loom_state=recoverable` means Loom owns durable terminal continuity. The
+machine snapshot never exports endpoint addresses, sockets, token paths,
+message bodies, or provider prompts. `/api/events` likewise emits only verified
+journal metadata and refuses unverified histories.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every

@@ -267,7 +267,7 @@ gui_html="$(curl -fsS "$gui_url/")"
 grep -qi 'Sounio Loom' <<< "$gui_html" || fail 'GUI did not serve its operational view'
 grep -Fq 'data-loom-ui="fusion-v1"' <<< "$gui_html" || fail 'GUI did not serve the Fusion cockpit'
 grep -Fq 'navigator.gpu' <<< "$gui_html" || fail 'GUI omitted its WebGPU spectral path'
-grep -Fq "list.find(s=>s.state==='active')" <<< "$gui_html" || \
+grep -Fq "list.find(s=>s.loom_state==='active')" <<< "$gui_html" || \
   fail 'GUI does not explicitly select live work'
 sessions_json="$(curl -fsS "$gui_url/api/sessions")"
 [[ "$sessions_json" == *"\"instance_id\":\"$instance_id\""* ]] || fail 'GUI observed the wrong generation'
@@ -275,6 +275,14 @@ sessions_json="$(curl -fsS "$gui_url/api/sessions")"
   fail 'operator session list did not rank active work before archived work'
 [[ "$sessions_json" == *'"agent":"lost","lane":"pod-loss"'*'"state":"lost"'* ]] || \
   fail 'operator session list laundered a dead generation as active'
+fleet_json="$(curl -fsS "$gui_url/api/fleet")"
+[[ "$fleet_json" == *'"schema":"loom-authority-overlay-v1"'* ]] || \
+  fail 'GUI omitted the authority overlay schema'
+[[ "$fleet_json" == *"\"instance_id\":\"$instance_id\""* || \
+  "$fleet_json" == *"\"loom_instance\":\"$instance_id\""* ]] || \
+  fail 'authority overlay observed the wrong Loom generation'
+[[ "$fleet_json" == *'"loom_state":"active"'* ]] || \
+  fail 'authority overlay omitted active Loom custody'
 events_json="$(curl -fsS "$gui_url/api/events")"
 [[ "$events_json" == *"\"instance_id\":\"$instance_id\""* ]] || \
   fail 'event chronograph observed the wrong generation'
@@ -678,6 +686,17 @@ message_status="$(coord_retry message-status --agent loom-sender --lane transpor
 SOUNIO_COORD_RUNTIME_MODE=local "$LOOM" stop --state-dir "$TEST_ROOT/coord-loom" \
   --cwd "$ROOT_DIR" --agent "$COORD_AGENT" --lane "$COORD_LANE" >/dev/null
 COORD_LOOM_ACTIVE=0
+coord_snapshot=''
+for _ in $(seq 1 100); do
+  coord_snapshot="$(coord cockpit-snapshot)"
+  if ! grep -Fq $'agent=codex\tlane=loom-transport' <<< "$coord_snapshot"; then
+    break
+  fi
+  sleep 0.05
+done
+if grep -Fq $'agent=codex\tlane=loom-transport' <<< "$coord_snapshot"; then
+  fail 'clean Loom exit retained coordination authority'
+fi
 
 FAKE_FLEET_STATE="$TEST_ROOT/fake-fleet-state"
 FAKE_FLEET_AGENT="$TEST_ROOT/fake-fleet-agent"

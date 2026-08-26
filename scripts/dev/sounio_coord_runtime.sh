@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.25.12
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.26.13
 
 usage() {
   cat <<'USAGE'
@@ -16,6 +16,7 @@ so every worktree attached to the same repository can see the same leases.
 Commands:
   runtime-version                 show the runtime protocol and implementation version
   brief                          show the startup-sized coordination summary
+  cockpit-snapshot               emit the lightweight machine fleet snapshot
   status                         show claims, conflicts, and relevant worktrees
   status --all-worktrees         include a full (slower) worktree scan
   check                          status, then fail when active ownership conflicts exist
@@ -3682,6 +3683,71 @@ status_command() {
   STATUS_CONFLICTS="$conflicts"
 }
 
+cockpit_snapshot_command() {
+  local claim_file endpoint_file presence_file state
+  local active_claims=0 stale_claims=0
+  local active_endpoints=0 stale_endpoints=0 drifted_endpoints=0 unavailable_endpoints=0
+  local live_presences=0 unresponsive_presences=0 orphaned_presences=0
+  local -a endpoint_paths=() presence_paths=()
+
+  (($# == 0)) || die "cockpit-snapshot does not accept arguments"
+  printf 'COCKPIT\tprotocol=1\tsnapshot_utc=%s\n' "$NOW_UTC"
+
+  refresh_claim_paths
+  for claim_file in "${claim_paths[@]}"; do
+    [[ -f "$claim_file" ]] || continue
+    load_claim "$claim_file"
+    [[ -n "$C_ID" ]] || continue
+    if claim_expired; then
+      state=stale
+      stale_claims=$((stale_claims + 1))
+    else
+      state=active
+      active_claims=$((active_claims + 1))
+    fi
+    printf 'CLAIM\tstate=%s\tagent=%s\tlane=%s\tlast_seen=%s\tworktree=%s\tbranch=%s\tsha=%s\n' \
+      "$state" "$C_AGENT" "$C_LANE" "$C_LAST_UTC" "$C_WORKTREE" "$C_BRANCH" "$C_SHA"
+  done
+
+  endpoint_paths=("$ENDPOINTS_DIR"/*.endpoint)
+  for endpoint_file in "${endpoint_paths[@]}"; do
+    [[ -f "$endpoint_file" ]] || continue
+    load_endpoint "$endpoint_file"
+    [[ -n "$E_ID" ]] || continue
+    endpoint_state || true
+    case "$ENDPOINT_STATE" in
+      active) active_endpoints=$((active_endpoints + 1)) ;;
+      stale) stale_endpoints=$((stale_endpoints + 1)) ;;
+      drifted) drifted_endpoints=$((drifted_endpoints + 1)) ;;
+      *) unavailable_endpoints=$((unavailable_endpoints + 1)) ;;
+    esac
+    printf 'ENDPOINT\tstate=%s\tagent=%s\tlane=%s\tharness=%s\ttransport=%s\tinstance_id=%s\tlast_seen=%s\tworktree=%s\n' \
+      "$ENDPOINT_STATE" "$E_AGENT" "$E_LANE" "$E_HARNESS" "$E_TRANSPORT" \
+      "$E_INSTANCE_ID" "$E_LAST_UTC" "$E_WORKTREE"
+  done
+
+  presence_paths=("$PRESENCES_DIR"/*.presence)
+  for presence_file in "${presence_paths[@]}"; do
+    [[ -f "$presence_file" ]] || continue
+    load_presence "$presence_file"
+    [[ -n "$P_ID" ]] || continue
+    presence_state || true
+    case "$PRESENCE_STATE" in
+      live) live_presences=$((live_presences + 1)) ;;
+      unresponsive) unresponsive_presences=$((unresponsive_presences + 1)) ;;
+      orphaned) orphaned_presences=$((orphaned_presences + 1)) ;;
+    esac
+    printf 'PRESENCE\tstate=%s\treason=%s\tagent=%s\tlane=%s\tharness=%s\tsession_id=%s\tgeneration=%s\tpid=%s\tlast_seen=%s\tworktree=%s\n' \
+      "$PRESENCE_STATE" "$PRESENCE_REASON" "$P_AGENT" "$P_LANE" "$P_HARNESS" \
+      "$P_SESSION_ID" "$P_GENERATION" "$P_PID" "$P_LAST_UTC" "$P_WORKTREE"
+  done
+
+  printf 'SUMMARY\tactive_claims=%s\tstale_claims=%s\tactive_endpoints=%s\tstale_endpoints=%s\tdrifted_endpoints=%s\tunavailable_endpoints=%s\tlive_presences=%s\tunresponsive_presences=%s\torphaned_presences=%s\n' \
+    "$active_claims" "$stale_claims" "$active_endpoints" "$stale_endpoints" \
+    "$drifted_endpoints" "$unavailable_endpoints" "$live_presences" \
+    "$unresponsive_presences" "$orphaned_presences"
+}
+
 STATUS_CONFLICTS=0
 command="${1:-status}"
 if (($#)); then shift; fi
@@ -3696,6 +3762,7 @@ case "$command" in
   brief)
     status_command --brief "$@"
     ;;
+  cockpit-snapshot) cockpit_snapshot_command "$@" ;;
   status|list)
     status_command "$@"
     ;;
