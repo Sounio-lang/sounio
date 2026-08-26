@@ -264,7 +264,9 @@ for _ in $(seq 1 100); do
 done
 [[ -n "$gui_url" ]] || fail 'read-only GUI did not start'
 gui_html="$(curl -fsS "$gui_url/")"
-grep -q 'SOUNIO LOOM' <<< "$gui_html" || fail 'GUI did not serve its operational view'
+grep -qi 'Sounio Loom' <<< "$gui_html" || fail 'GUI did not serve its operational view'
+grep -Fq 'data-loom-ui="fusion-v1"' <<< "$gui_html" || fail 'GUI did not serve the Fusion cockpit'
+grep -Fq 'navigator.gpu' <<< "$gui_html" || fail 'GUI omitted its WebGPU spectral path'
 grep -Fq "list.find(s=>s.state==='active')" <<< "$gui_html" || \
   fail 'GUI does not explicitly select live work'
 sessions_json="$(curl -fsS "$gui_url/api/sessions")"
@@ -273,6 +275,13 @@ sessions_json="$(curl -fsS "$gui_url/api/sessions")"
   fail 'operator session list did not rank active work before archived work'
 [[ "$sessions_json" == *'"agent":"lost","lane":"pod-loss"'*'"state":"lost"'* ]] || \
   fail 'operator session list laundered a dead generation as active'
+events_json="$(curl -fsS "$gui_url/api/events")"
+[[ "$events_json" == *"\"instance_id\":\"$instance_id\""* ]] || \
+  fail 'event chronograph observed the wrong generation'
+[[ "$events_json" == *'"verified":true'* ]] || \
+  fail 'event chronograph accepted no verified journal'
+[[ "$events_json" == *'"kind":"SESSION_STARTED"'* ]] || \
+  fail 'event chronograph omitted the durable session start'
 curl -fsS "$gui_url/api/snapshot?agent=$AGENT&lane=$LANE&cursor=0" | grep -q 'BOOT_READY' || \
   fail 'GUI read path could not observe durable output'
 kill "$GUI_PID"

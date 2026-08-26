@@ -3377,14 +3377,76 @@ let sessions_json root =
   |> List.map (fun (_, values) ->
          let output = table_value values "output_file" in
          Printf.sprintf
-           "{\"agent\":\"%s\",\"lane\":\"%s\",\"session_id\":\"%s\",\"instance_id\":\"%s\",\"state\":\"%s\",\"daemon_pid\":\"%s\",\"harness_pid\":\"%s\",\"cursor\":%d}"
+           "{\"agent\":\"%s\",\"lane\":\"%s\",\"session_id\":\"%s\",\"instance_id\":\"%s\",\"state\":\"%s\",\"daemon_pid\":\"%s\",\"guardian_pid\":\"%s\",\"harness_pid\":\"%s\",\"cursor\":%d,\"started_utc\":\"%s\",\"worktree\":\"%s\",\"command\":\"%s\"}"
            (json_escape (table_value values "agent")) (json_escape (table_value values "lane"))
            (json_escape (table_value values "session_id")) (json_escape (table_value values "instance_id"))
            (json_escape (table_value values "state")) (json_escape (table_value values "daemon_pid"))
-           (json_escape (table_value values "harness_pid")) (file_size output))
+           (json_escape (table_value values "guardian_pid"))
+           (json_escape (table_value values "harness_pid")) (file_size output)
+           (json_escape (table_value values "started_utc"))
+           (json_escape (table_value values "worktree"))
+           (json_escape (table_value values "command")))
   |> String.concat "," |> Printf.sprintf "[%s]"
 
-let html =
+let take_last limit values =
+  let length = List.length values in
+  if length <= limit then values
+  else
+    let rec drop count remaining =
+      if count <= 0 then remaining
+      else match remaining with [] -> [] | _ :: tail -> drop (count - 1) tail
+    in
+    drop (length - limit) values
+
+let journal_event_json source (event : journal_event) =
+  Printf.sprintf
+    "{\"source\":\"%s\",\"seq\":%d,\"utc\":\"%s\",\"kind\":\"%s\",\"hash\":\"%s\"}"
+    source event.seq (json_escape event.utc) (json_escape event.kind)
+    (json_escape event.hash)
+
+let session_events_json (_, values) =
+  let agent = table_value values "agent" in
+  let lane = table_value values "lane" in
+  let instance = table_value values "instance_id" in
+  let state = table_value values "state" in
+  try
+    let semantic_events, _, semantic_head =
+      load_and_verify_journal (table_value values "journal_file")
+    in
+    let guardian_events, _, _, guardian_head =
+      load_and_verify_guardian_journal
+        (table_value values "guardian_journal_file")
+    in
+    let recoveries =
+      List.fold_left
+        (fun count (event : journal_event) ->
+          if event.kind = "KERNEL_RECOVERED" then count + 1 else count)
+        0 semantic_events
+    in
+    let events =
+      (List.map (fun event -> (event.utc, journal_event_json "semantic" event))
+         (take_last 128 semantic_events))
+      @ (List.map (fun event -> (event.utc, journal_event_json "guardian" event))
+           (take_last 128 guardian_events))
+      |> List.sort (fun (left, _) (right, _) -> compare left right)
+      |> List.map snd |> String.concat ","
+    in
+    Printf.sprintf
+      "{\"agent\":\"%s\",\"lane\":\"%s\",\"instance_id\":\"%s\",\"state\":\"%s\",\"verified\":true,\"recoveries\":%d,\"semantic_head\":\"%s\",\"guardian_head\":\"%s\",\"events\":[%s]}"
+      (json_escape agent) (json_escape lane) (json_escape instance)
+      (json_escape state) recoveries (json_escape semantic_head)
+      (json_escape guardian_head) events
+  with error ->
+    Printf.sprintf
+      "{\"agent\":\"%s\",\"lane\":\"%s\",\"instance_id\":\"%s\",\"state\":\"%s\",\"verified\":false,\"recoveries\":0,\"error\":\"%s\",\"events\":[]}"
+      (json_escape agent) (json_escape lane) (json_escape instance)
+      (json_escape state) (json_escape (Printexc.to_string error))
+
+let events_json root =
+  session_descriptors root |> List.map session_events_json |> String.concat ","
+  |> Printf.sprintf "[%s]"
+
+let legacy_html =
   {|
 <!doctype html>
 <html lang="en">
@@ -3416,6 +3478,8 @@ refresh();
 </body>
 </html>
 |}
+
+let html = if Loom_ui.html = "" then legacy_html else Loom_ui.html
 
 let http_response ?(headers = []) status content_type body =
   let header_lines =
@@ -5900,6 +5964,8 @@ let serve_http cli =
                if path = "/" then http_response "200 OK" "text/html; charset=utf-8" html
                else if path = "/api/sessions" then
                  http_response "200 OK" "application/json" (sessions_json root)
+               else if path = "/api/events" then
+                 http_response "200 OK" "application/json" (events_json root)
                else if path = "/api/snapshot" then
                  let status, headers, body = snapshot_from_files root query in
                  http_response ~headers status "application/octet-stream" body
