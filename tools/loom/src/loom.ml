@@ -3677,6 +3677,41 @@ let attention_portfolio_complete_command cli =
         ~generation:(required cli "--generation")
         ~outcome:(required cli "--outcome"))
 
+let contingent_integer cli option =
+  let raw = required cli option in
+  try int_of_string raw
+  with _ -> failf "contingent policy %s must be an integer: %s" option raw
+
+let contingent_policy_compile_command cli =
+  let root = epistemic_root cli in
+  let order =
+    Loom_epistemic.attention_policy_of_string (required cli "--order")
+  in
+  epistemic_print (fun () ->
+      Loom_epistemic.compile_contingent_policy ~root
+        ~world:(required cli "--world")
+        ~policy_id:(required cli "--contingent-policy")
+        ~root_state:(required cli "--root-state")
+        ~action_file:(required cli "--actions")
+        ~outcome_file:(required cli "--outcomes")
+        ~token_budget:(contingent_integer cli "--token-budget")
+        ~wall_budget:(contingent_integer cli "--wall-budget")
+        ~gpu_budget:(contingent_integer cli "--gpu-budget")
+        ~quota_budget:(contingent_integer cli "--quota-budget")
+        ~order ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation"))
+
+let contingent_policy_observe_command cli =
+  let root = epistemic_root cli in
+  epistemic_print (fun () ->
+      Loom_epistemic.observe_contingent_policy ~root
+        ~world:(required cli "--world")
+        ~policy_id:(required cli "--contingent-policy")
+        ~outcome_id:(required cli "--outcome")
+        ~owner:(required cli "--owner")
+        ~generation:(required cli "--generation")
+        ~outcome_digest:(required cli "--outcome-digest"))
+
 let session_events_json (_, values) =
   let agent = table_value values "agent" in
   let lane = table_value values "lane" in
@@ -8504,6 +8539,8 @@ let usage () =
   Printf.eprintf
     "\nPareto Portfolio Attention Compiler v0:\n  attention-portfolio-compile --world W --portfolio P --candidates FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --policy information-first|falsification-first|counterfactual-first --owner A --generation G\n  attention-portfolio-complete --world W --portfolio P --owner A --generation G --outcome SHA\n";
   Printf.eprintf
+    "\nRobust Contingent Policy Compiler v0:\n  contingent-policy-compile --world W --contingent-policy P --root-state S --actions FILE --outcomes FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --order information-first|falsification-first|counterfactual-first --owner A --generation G\n  contingent-policy-observe --world W --contingent-policy P --outcome O --owner A --generation G --outcome-digest SHA\n";
+  Printf.eprintf
     "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
 let arguments_after_command () =
@@ -8582,6 +8619,10 @@ let main () =
         attention_portfolio_compile_command cli; 0
     | "attention-portfolio-complete" ->
         attention_portfolio_complete_command cli; 0
+    | "contingent-policy-compile" ->
+        contingent_policy_compile_command cli; 0
+    | "contingent-policy-observe" ->
+        contingent_policy_observe_command cli; 0
     | "export-events-arrow" -> export_events_arrow_command cli; 0
     | "verify-events-arrow" -> verify_events_arrow_command cli; 0
     | "beagle-serve" -> serve_beagle_bridge cli; 0

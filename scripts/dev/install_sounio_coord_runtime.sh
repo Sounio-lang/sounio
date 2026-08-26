@@ -124,6 +124,17 @@ activate_runtime() {
         -x "$version_dir/bin/sounio-loom-portfolio-runtime" ]] || \
       die "installed runtime declares Pareto portfolio attention without the attention compiler, epistemic machine, Loom, or native Sounio frame 9010: $runtime_id"
   fi
+  if grep -q '^capability=loom-robust-contingent-policy-v0$' "$manifest"; then
+    grep -q '^capability=loom-pareto-portfolio-attention-v0$' "$manifest" && \
+      grep -q '^capability=loom-epistemic-machine-v0$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-contingent-runtime" ]] || \
+      die "installed runtime declares robust contingent policies without portfolio attention, the epistemic machine, Loom, or native Sounio frame 9011: $runtime_id"
+  fi
+  if grep -q '^capability=loom-atomic-outcome-resource-handoff-v0$' "$manifest"; then
+    grep -q '^capability=loom-robust-contingent-policy-v0$' "$manifest" || \
+      die "installed runtime declares atomic outcome handoff without robust contingent policies: $runtime_id"
+  fi
   if grep -q '^capability=loom-recoverable-control-service-v1$' "$manifest"; then
     grep -q '^capability=loom-durable-obligation-v1$' "$manifest" &&
       grep -q '^capability=loom-post-activation-request-bridge-v1$' "$manifest" &&
@@ -297,6 +308,7 @@ loom_obligation_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_obligat
 loom_epistemic_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_epistemic_adapter.sh"
 loom_attention_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_attention_adapter.sh"
 loom_portfolio_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_portfolio_attention_adapter.sh"
+loom_contingent_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_contingent_policy_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
@@ -308,6 +320,8 @@ loom_attention_entrypoint="$SOURCE_ROOT/tools/loom/attention_adapter_main.sio"
 loom_attention_module="$SOURCE_ROOT/stdlib/coordination/loom_attention_compiler.sio"
 loom_portfolio_entrypoint="$SOURCE_ROOT/tools/loom/portfolio_attention_adapter_main.sio"
 loom_portfolio_module="$SOURCE_ROOT/stdlib/coordination/loom_portfolio_attention.sio"
+loom_contingent_entrypoint="$SOURCE_ROOT/tools/loom/contingent_policy_adapter_main.sio"
+loom_contingent_module="$SOURCE_ROOT/stdlib/coordination/loom_contingent_policy.sio"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
@@ -331,6 +345,8 @@ loom_portfolio_module="$SOURCE_ROOT/stdlib/coordination/loom_portfolio_attention
   die "Loom attention build entrypoint missing or not executable: $loom_attention_build_source"
 [[ -x "$loom_portfolio_build_source" ]] || \
   die "Loom portfolio build entrypoint missing or not executable: $loom_portfolio_build_source"
+[[ -x "$loom_contingent_build_source" ]] || \
+  die "Loom contingent-policy build entrypoint missing or not executable: $loom_contingent_build_source"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
@@ -341,6 +357,8 @@ loom_portfolio_module="$SOURCE_ROOT/stdlib/coordination/loom_portfolio_attention
   die "Loom native Sounio attention source bundle is incomplete"
 [[ -f "$loom_portfolio_entrypoint" && -f "$loom_portfolio_module" ]] || \
   die "Loom native Sounio portfolio source bundle is incomplete"
+[[ -f "$loom_contingent_entrypoint" && -f "$loom_contingent_module" ]] || \
+  die "Loom native Sounio contingent-policy source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && -f "$loom_project/src/loom_ui.ml" && \
   -f "$loom_project/src/loom_pty_stubs.c" && \
@@ -373,6 +391,7 @@ loom_obligation_binary="$loom_project/_build/default/src/sounio-loom-obligation-
 loom_epistemic_binary="$loom_project/_build/default/src/sounio-loom-epistemic-runtime"
 loom_attention_binary="$loom_project/_build/default/src/sounio-loom-attention-runtime"
 loom_portfolio_binary="$loom_project/_build/default/src/sounio-loom-portfolio-runtime"
+loom_contingent_binary="$loom_project/_build/default/src/sounio-loom-contingent-runtime"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
@@ -384,6 +403,8 @@ loom_portfolio_binary="$loom_project/_build/default/src/sounio-loom-portfolio-ru
   die "Loom build omitted its native Sounio attention adapter"
 [[ -x "$loom_portfolio_binary" ]] || \
   die "Loom build omitted its native Sounio portfolio adapter"
+[[ -x "$loom_contingent_binary" ]] || \
+  die "Loom build omitted its native Sounio contingent-policy adapter"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
@@ -422,6 +443,8 @@ loom_attention_probe="$(
   die "Loom native Sounio attention adapter failed its install probe"
 fours='4 4 4 4 4 4 4 4'
 fives='5 5 5 5 5 5 5 5'
+sixes='6 6 6 6 6 6 6 6'
+sevens='7 7 7 7 7 7 7 7'
 loom_portfolio_probe="$(
   printf '9010 1 1 100 100 10 10 101 201 202 301 401 900 800 700 40 50 50 5 5 800 900 900 50 50 50 5 5 %s %s %s %s %s %s\n' \
     "$ones" "$twos" "$threes" "$fours" "$fives" "$zeros" | \
@@ -430,6 +453,14 @@ loom_portfolio_probe="$(
 [[ "$loom_portfolio_probe" == \
   'SOUNIO_PORTFOLIO_ACCEPT schema=loom-native-portfolio-v0 transition=compile policy=information-first' ]] || \
   die "Loom native Sounio portfolio adapter failed its install probe"
+loom_contingent_probe="$(
+  printf '9011 1 1 0 100 100 10 10 101 201 202 301 0 0 0 401 501 900 500 400 40 50 50 5 5 800 900 900 50 50 50 5 5 %s %s %s %s %s %s %s %s\n' \
+    "$ones" "$twos" "$threes" "$fours" "$fives" "$sixes" "$sevens" \
+    "$zeros" | "$loom_contingent_binary"
+)"
+[[ "$loom_contingent_probe" == \
+  'SOUNIO_CONTINGENT_ACCEPT schema=loom-native-contingent-policy-v0 transition=compile policy=information-first' ]] || \
+  die "Loom native Sounio contingent-policy adapter failed its install probe"
 loom_measurement_probe="$(
   printf '9004 1002 1101 1201 1301 2101 2201 2301 2401 2101 2201 2301 2401\n' | \
     "$loom_continuity_binary"
@@ -479,7 +510,8 @@ bundle_sha="$({
     "$loom_epistemic_module" "$loom_attention_build_source" \
     "$loom_attention_entrypoint" "$loom_attention_module" \
     "$loom_portfolio_build_source" "$loom_portfolio_entrypoint" \
-    "$loom_portfolio_module"
+    "$loom_portfolio_module" "$loom_contingent_build_source" \
+    "$loom_contingent_entrypoint" "$loom_contingent_module"
   find "$loom_project/src/vendor" -type f -print0 | sort -z | xargs -0 sha256sum
 } | \
     awk '{print $1}' | sha256sum | awk '{print $1}'
@@ -518,6 +550,8 @@ else
     "$stage/bin/sounio-loom-attention-runtime"
   install -m 0755 "$loom_portfolio_binary" \
     "$stage/bin/sounio-loom-portfolio-runtime"
+  install -m 0755 "$loom_contingent_binary" \
+    "$stage/bin/sounio-loom-contingent-runtime"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -538,6 +572,8 @@ else
     printf 'loom_attention_frame=9009\n'
     printf 'loom_portfolio_language=Sounio\n'
     printf 'loom_portfolio_frame=9010\n'
+    printf 'loom_contingent_language=Sounio\n'
+    printf 'loom_contingent_frame=9011\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'source_sha=%s\n' "$source_sha"
@@ -557,6 +593,8 @@ else
     printf 'capability=loom-attention-linear-resource-v0\n'
     printf 'capability=loom-pareto-portfolio-attention-v0\n'
     printf 'capability=loom-atomic-multi-resource-attention-v0\n'
+    printf 'capability=loom-robust-contingent-policy-v0\n'
+    printf 'capability=loom-atomic-outcome-resource-handoff-v0\n'
     printf 'capability=loom-post-activation-request-bridge-v1\n'
     printf 'capability=loom-recoverable-control-service-v1\n'
     printf 'capability=loom-beagle-coordination-endpoint-v1\n'

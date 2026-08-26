@@ -244,6 +244,70 @@ submodular effects between experiments are outside v0. It also does not
 establish objective novelty, calibrated utility, distributed resource truth,
 consensus, fairness, or globally optimal science.
 
+## Robust Contingent Policy Compiler v0
+
+The contingent compiler selects an action now and a different continuation for
+each declared nominal outcome. It compiles a bounded acyclic action/outcome DAG
+into an exact history-conditioned policy tree using backward induction. This is
+the adaptive object that the open-loop portfolio compiler deliberately does not
+claim to produce.
+
+```text
+state action_id target_world claim provider resource information falsification divergence token_cost wall_cost gpu_cost quota_cost risk evidence_sha256 falsifier_sha256
+action_id variant_index variant_count outcome_id successor_state branch_evidence_sha256
+```
+
+Both files are tab-separated and begin with those exact headers. For every
+action, outcome variants must be indexed exactly `0..variant_count-1`; gaps,
+duplicates, and count drift refuse the entire graph. `successor_state=-` is a
+terminal branch. All declared states must be reachable from the root and the
+graph must be acyclic.
+
+```sh
+bin/loom contingent-policy-compile --state-dir STATE --world scheduler \
+  --contingent-policy policy-1 --root-state start \
+  --actions actions.tsv --outcomes outcomes.tsv \
+  --token-budget 8000 --wall-budget 600 --gpu-budget 2 --quota-budget 4 \
+  --order information-first --owner codex --generation generation-1
+bin/loom contingent-policy-observe --state-dir STATE --world scheduler \
+  --contingent-policy policy-1 --outcome observed-variant \
+  --owner codex --generation generation-1 --outcome-digest SHA256
+```
+
+At each action, information, falsification, and divergence are the immediate
+value plus the minimum continuation value across its mutually exclusive
+branches. Risk and the four costs are the immediate burden plus the maximum
+continuation burden. Local Pareto pruning preserves the complete achievable
+non-dominated value frontier; the chosen retained witness uses the explicit
+information, falsification, or counterfactual order. It may retain multiple
+equal-value trees, but does not claim to enumerate every structurally distinct
+tree that a parent min/max bottleneck maps to an already represented vector.
+No probabilities, expectation, weighted score, submodularity, or approximation
+theorem are implied.
+
+Compile atomically reserves only the root action's exact resource. An observed
+outcome atomically releases that resource and either reserves the exact next
+action resource or completes the policy. A failed handoff appends nothing and
+keeps the current resource live; future-branch resources are never reserved in
+advance. Replay rebuilds the graph, frontier, selected tree, and observed route,
+then rechecks native Sounio frame `9011`. Its named rules separately establish
+non-domination, total nominal partitions, and exact branch routing.
+
+This handoff is serialized by the state directory's exclusive `machine.lock`,
+which remains held across replay, next-resource validation, verified append,
+fsync, and post-append replay. Concurrent contenders therefore act as a
+compare-and-swap on the derived live-resource set; the precheck is not trusted
+outside that critical section.
+
+V0 accepts at most 8 reachable states, 18 actions, and 3 outcomes per action. It
+refuses after 65,536 constructed policies, after a working frontier reaches 257
+members, or when canonical policy/frontier text exceeds 1 MiB. These are
+fail-closed exact bounds, not silent truncation. Completeness is only over the
+declared nominal outcome variants. Mapping a physical observation to one of
+those variants, calibrating the declared estimates, causal validity,
+distributed resource truth, fairness, and global scientific optimality remain
+outside the compiler's evidence authority.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every

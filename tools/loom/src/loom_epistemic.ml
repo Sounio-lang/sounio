@@ -1221,6 +1221,1157 @@ let portfolio_attention_decision_of_event event =
     portfolio_generation = generation; portfolio_completed = false;
     portfolio_outcome_digest = "" }
 
+type contingent_budget = {
+  contingent_token_budget : int;
+  contingent_wall_budget : int;
+  contingent_gpu_budget : int;
+  contingent_quota_budget : int;
+}
+
+type contingent_action = {
+  contingent_state : string;
+  contingent_action_id : string;
+  contingent_target_world : string;
+  contingent_target_claim : string;
+  contingent_provider : string;
+  contingent_resource : string;
+  contingent_information : int;
+  contingent_falsification : int;
+  contingent_divergence : int;
+  contingent_token_cost : int;
+  contingent_wall_cost : int;
+  contingent_gpu_cost : int;
+  contingent_quota_cost : int;
+  contingent_risk : int;
+  contingent_evidence_digest : string;
+  contingent_falsifier_digest : string;
+}
+
+type contingent_outcome = {
+  contingent_outcome_action : string;
+  contingent_variant_index : int;
+  contingent_variant_count : int;
+  contingent_outcome_id : string;
+  contingent_successor_state : string;
+  contingent_branch_evidence_digest : string;
+}
+
+type contingent_policy_branch = {
+  contingent_branch_outcome : contingent_outcome;
+  contingent_continuation : contingent_policy option;
+}
+
+and contingent_policy = {
+  contingent_root_action : contingent_action;
+  contingent_policy_branches : contingent_policy_branch list;
+  contingent_aggregate_information : int;
+  contingent_aggregate_falsification : int;
+  contingent_aggregate_divergence : int;
+  contingent_aggregate_token_cost : int;
+  contingent_aggregate_wall_cost : int;
+  contingent_aggregate_gpu_cost : int;
+  contingent_aggregate_quota_cost : int;
+  contingent_aggregate_risk : int;
+}
+
+type contingent_graph = {
+  contingent_actions : contingent_action list;
+  contingent_outcomes : contingent_outcome list;
+  contingent_states : string list;
+  contingent_actions_by_state :
+    (string, contingent_action list) Hashtbl.t;
+  contingent_outcomes_by_action :
+    (string, contingent_outcome list) Hashtbl.t;
+  canonical_contingent_actions : string;
+  canonical_contingent_outcomes : string;
+}
+
+let contingent_action_header =
+  String.concat "\t"
+    [ "state"; "action_id"; "target_world"; "claim"; "provider";
+      "resource"; "information"; "falsification"; "divergence";
+      "token_cost"; "wall_cost"; "gpu_cost"; "quota_cost"; "risk";
+      "evidence_sha256"; "falsifier_sha256" ]
+
+let contingent_outcome_header =
+  String.concat "\t"
+    [ "action_id"; "variant_index"; "variant_count"; "outcome_id";
+      "successor_state"; "branch_evidence_sha256" ]
+
+let contingent_int label ~minimum ~maximum value =
+  let parsed =
+    try int_of_string value
+    with _ -> failf "epistemic-contingent-%s-invalid" label
+  in
+  if parsed < minimum || parsed > maximum then
+    failf "epistemic-contingent-%s-invalid" label;
+  parsed
+
+let contingent_budget_of_strings token_budget wall_budget gpu_budget
+    quota_budget =
+  { contingent_token_budget =
+      contingent_int "token-budget" ~minimum:1 ~maximum:18_000_000
+        token_budget;
+    contingent_wall_budget =
+      contingent_int "wall-budget" ~minimum:1 ~maximum:18_000_000
+        wall_budget;
+    contingent_gpu_budget =
+      contingent_int "gpu-budget" ~minimum:0 ~maximum:18_000_000
+        gpu_budget;
+    contingent_quota_budget =
+      contingent_int "quota-budget" ~minimum:0 ~maximum:18_000_000
+        quota_budget }
+
+let contingent_budget ~token_budget ~wall_budget ~gpu_budget ~quota_budget =
+  contingent_budget_of_strings (string_of_int token_budget)
+    (string_of_int wall_budget) (string_of_int gpu_budget)
+    (string_of_int quota_budget)
+
+let canonical_contingent_action action =
+  String.concat "\t"
+    [ action.contingent_state; action.contingent_action_id;
+      action.contingent_target_world; action.contingent_target_claim;
+      action.contingent_provider; action.contingent_resource;
+      string_of_int action.contingent_information;
+      string_of_int action.contingent_falsification;
+      string_of_int action.contingent_divergence;
+      string_of_int action.contingent_token_cost;
+      string_of_int action.contingent_wall_cost;
+      string_of_int action.contingent_gpu_cost;
+      string_of_int action.contingent_quota_cost;
+      string_of_int action.contingent_risk;
+      action.contingent_evidence_digest;
+      action.contingent_falsifier_digest ]
+
+let contingent_action_of_line line =
+  match String.split_on_char '\t' line with
+  | [ state; action_id; target_world; target_claim; provider; resource;
+      information; falsification; divergence; token_cost; wall_cost;
+      gpu_cost; quota_cost; risk; evidence; falsifier ] ->
+      validate_atom "contingent-state" state;
+      validate_atom "contingent-action" action_id;
+      validate_atom "contingent-target-world" target_world;
+      validate_atom "contingent-target-claim" target_claim;
+      validate_atom "contingent-provider" provider;
+      validate_text "contingent-resource" resource;
+      if String.contains resource '\t' || String.contains resource '\n'
+         || String.contains resource '\r'
+      then failf "epistemic-contingent-resource-invalid";
+      { contingent_state = state; contingent_action_id = action_id;
+        contingent_target_world = target_world;
+        contingent_target_claim = target_claim;
+        contingent_provider = provider; contingent_resource = resource;
+        contingent_information =
+          contingent_int "information" ~minimum:1 ~maximum:1000 information;
+        contingent_falsification =
+          contingent_int "falsification" ~minimum:1 ~maximum:1000
+            falsification;
+        contingent_divergence =
+          contingent_int "divergence" ~minimum:1 ~maximum:1000 divergence;
+        contingent_token_cost =
+          contingent_int "token-cost" ~minimum:1 ~maximum:1_000_000
+            token_cost;
+        contingent_wall_cost =
+          contingent_int "wall-cost" ~minimum:1 ~maximum:1_000_000
+            wall_cost;
+        contingent_gpu_cost =
+          contingent_int "gpu-cost" ~minimum:0 ~maximum:1_000_000 gpu_cost;
+        contingent_quota_cost =
+          contingent_int "quota-cost" ~minimum:0 ~maximum:1_000_000
+            quota_cost;
+        contingent_risk =
+          contingent_int "risk" ~minimum:0 ~maximum:1000 risk;
+        contingent_evidence_digest =
+          require_digest "contingent-evidence" evidence;
+        contingent_falsifier_digest =
+          require_digest "contingent-falsifier" falsifier }
+  | _ -> failf "epistemic-contingent-action-row-malformed"
+
+let canonical_contingent_action_set actions =
+  String.concat "\n"
+    (contingent_action_header
+     :: List.map canonical_contingent_action actions)
+  ^ "\n"
+
+let parse_contingent_action_lines lines =
+  match lines with
+  | header :: rows when header = contingent_action_header ->
+      if rows = [] || List.length rows > 18 then
+        failf "epistemic-contingent-action-count-invalid";
+      if List.exists (fun row -> row = "") rows then
+        failf "epistemic-contingent-action-row-malformed";
+      let actions =
+        List.map contingent_action_of_line rows
+        |> List.sort (fun left right ->
+               let state_order =
+                 String.compare left.contingent_state right.contingent_state
+               in
+               if state_order <> 0 then state_order
+               else
+                 String.compare left.contingent_action_id
+                   right.contingent_action_id)
+      in
+      let ids = Hashtbl.create 24 in
+      List.iter
+        (fun action ->
+          if Hashtbl.mem ids action.contingent_action_id then
+            failf "epistemic-contingent-action-duplicate:%s"
+              action.contingent_action_id;
+          Hashtbl.add ids action.contingent_action_id ())
+        actions;
+      let canonical = canonical_contingent_action_set actions in
+      if String.length canonical > 65_536 then
+        failf "epistemic-contingent-action-set-too-large";
+      (actions, canonical)
+  | _ -> failf "epistemic-contingent-action-header-invalid"
+
+let parse_contingent_action_text value =
+  let lines = String.split_on_char '\n' value in
+  let lines =
+    match List.rev lines with
+    | "" :: rest -> List.rev rest
+    | _ -> lines
+  in
+  parse_contingent_action_lines lines
+
+let canonical_contingent_outcome outcome =
+  String.concat "\t"
+    [ outcome.contingent_outcome_action;
+      string_of_int outcome.contingent_variant_index;
+      string_of_int outcome.contingent_variant_count;
+      outcome.contingent_outcome_id; outcome.contingent_successor_state;
+      outcome.contingent_branch_evidence_digest ]
+
+let contingent_outcome_of_line line =
+  match String.split_on_char '\t' line with
+  | [ action_id; variant_index; variant_count; outcome_id; successor_state;
+      branch_evidence ] ->
+      validate_atom "contingent-outcome-action" action_id;
+      validate_atom "contingent-outcome" outcome_id;
+      if successor_state <> "-" then
+        validate_atom "contingent-successor-state" successor_state;
+      { contingent_outcome_action = action_id;
+        contingent_variant_index =
+          contingent_int "variant-index" ~minimum:0 ~maximum:2
+            variant_index;
+        contingent_variant_count =
+          contingent_int "variant-count" ~minimum:1 ~maximum:3
+            variant_count;
+        contingent_outcome_id = outcome_id;
+        contingent_successor_state = successor_state;
+        contingent_branch_evidence_digest =
+          require_digest "contingent-branch-evidence" branch_evidence }
+  | _ -> failf "epistemic-contingent-outcome-row-malformed"
+
+let canonical_contingent_outcome_set outcomes =
+  String.concat "\n"
+    (contingent_outcome_header
+     :: List.map canonical_contingent_outcome outcomes)
+  ^ "\n"
+
+let parse_contingent_outcome_lines lines =
+  match lines with
+  | header :: rows when header = contingent_outcome_header ->
+      if rows = [] || List.length rows > 54 then
+        failf "epistemic-contingent-outcome-count-invalid";
+      if List.exists (fun row -> row = "") rows then
+        failf "epistemic-contingent-outcome-row-malformed";
+      let outcomes =
+        List.map contingent_outcome_of_line rows
+        |> List.sort (fun left right ->
+               let action_order =
+                 String.compare left.contingent_outcome_action
+                   right.contingent_outcome_action
+               in
+               if action_order <> 0 then action_order
+               else
+                 compare left.contingent_variant_index
+                   right.contingent_variant_index)
+      in
+      let canonical = canonical_contingent_outcome_set outcomes in
+      if String.length canonical > 65_536 then
+        failf "epistemic-contingent-outcome-set-too-large";
+      (outcomes, canonical)
+  | _ -> failf "epistemic-contingent-outcome-header-invalid"
+
+let parse_contingent_outcome_text value =
+  let lines = String.split_on_char '\n' value in
+  let lines =
+    match List.rev lines with
+    | "" :: rest -> List.rev rest
+    | _ -> lines
+  in
+  parse_contingent_outcome_lines lines
+
+let contingent_action_set_digest canonical =
+  sha256 ("loom-contingent-actions-v0\000" ^ canonical)
+
+let contingent_outcome_set_digest canonical =
+  sha256 ("loom-contingent-outcomes-v0\000" ^ canonical)
+
+let build_contingent_graph ~root actions outcomes canonical_actions
+    canonical_outcomes =
+  validate_atom "contingent-root-state" root;
+  let actions_by_id = Hashtbl.create 24 in
+  let actions_by_state = Hashtbl.create 12 in
+  List.iter
+    (fun action ->
+      Hashtbl.add actions_by_id action.contingent_action_id action;
+      let existing =
+        Option.value ~default:[]
+          (Hashtbl.find_opt actions_by_state action.contingent_state)
+      in
+      Hashtbl.replace actions_by_state action.contingent_state
+        (action :: existing))
+    actions;
+  Hashtbl.iter
+    (fun state values ->
+      Hashtbl.replace actions_by_state state
+        (List.sort
+           (fun left right ->
+             String.compare left.contingent_action_id
+               right.contingent_action_id)
+           values))
+    actions_by_state;
+  let states =
+    Hashtbl.fold (fun state _ values -> state :: values) actions_by_state []
+    |> List.sort String.compare
+  in
+  if List.length states > 8 then
+    failf "epistemic-contingent-state-count-invalid";
+  if not (Hashtbl.mem actions_by_state root) then
+    failf "epistemic-contingent-root-state-missing:%s" root;
+  let outcomes_by_action = Hashtbl.create 24 in
+  List.iter
+    (fun outcome ->
+      if not (Hashtbl.mem actions_by_id outcome.contingent_outcome_action)
+      then
+        failf "epistemic-contingent-outcome-action-missing:%s"
+          outcome.contingent_outcome_action;
+      if outcome.contingent_variant_index >= outcome.contingent_variant_count
+      then
+        failf "epistemic-contingent-partition-index-invalid:%s"
+          outcome.contingent_outcome_action;
+      let existing =
+        Option.value ~default:[]
+          (Hashtbl.find_opt outcomes_by_action
+             outcome.contingent_outcome_action)
+      in
+      Hashtbl.replace outcomes_by_action outcome.contingent_outcome_action
+        (outcome :: existing))
+    outcomes;
+  List.iter
+    (fun action ->
+      let action_outcomes =
+        match Hashtbl.find_opt outcomes_by_action action.contingent_action_id with
+        | Some values ->
+            List.sort
+              (fun left right ->
+                compare left.contingent_variant_index
+                  right.contingent_variant_index)
+              values
+        | None ->
+            failf "epistemic-contingent-partition-missing:%s"
+              action.contingent_action_id
+      in
+      let declared =
+        (List.hd action_outcomes).contingent_variant_count
+      in
+      if List.length action_outcomes <> declared
+         || List.exists
+              (fun outcome -> outcome.contingent_variant_count <> declared)
+              action_outcomes
+      then
+        failf "epistemic-contingent-partition-incomplete:%s"
+          action.contingent_action_id;
+      List.iteri
+        (fun expected outcome ->
+          if outcome.contingent_variant_index <> expected then
+            failf "epistemic-contingent-partition-noncanonical:%s"
+              action.contingent_action_id)
+        action_outcomes;
+      let outcome_ids = Hashtbl.create 4 in
+      List.iter
+        (fun outcome ->
+          if Hashtbl.mem outcome_ids outcome.contingent_outcome_id then
+            failf "epistemic-contingent-outcome-duplicate:%s/%s"
+              action.contingent_action_id outcome.contingent_outcome_id;
+          Hashtbl.add outcome_ids outcome.contingent_outcome_id ();
+          if outcome.contingent_successor_state <> "-"
+             && not
+                  (Hashtbl.mem actions_by_state
+                     outcome.contingent_successor_state)
+          then
+            failf "epistemic-contingent-successor-state-missing:%s"
+              outcome.contingent_successor_state)
+        action_outcomes;
+      Hashtbl.replace outcomes_by_action action.contingent_action_id
+        action_outcomes)
+    actions;
+  let colors = Hashtbl.create 12 in
+  let reachable = Hashtbl.create 12 in
+  let rec visit state =
+    match Hashtbl.find_opt colors state with
+    | Some 1 -> failf "epistemic-contingent-graph-cycle:%s" state
+    | Some 2 -> Hashtbl.replace reachable state ()
+    | _ ->
+        Hashtbl.replace colors state 1;
+        Hashtbl.replace reachable state ();
+        let state_actions = Hashtbl.find actions_by_state state in
+        List.iter
+          (fun action ->
+            Hashtbl.find outcomes_by_action action.contingent_action_id
+            |> List.iter (fun outcome ->
+                   if outcome.contingent_successor_state <> "-" then
+                     visit outcome.contingent_successor_state))
+          state_actions;
+        Hashtbl.replace colors state 2
+  in
+  visit root;
+  List.iter
+    (fun state ->
+      if not (Hashtbl.mem reachable state) then
+        failf "epistemic-contingent-state-unreachable:%s" state)
+    states;
+  { contingent_actions = actions; contingent_outcomes = outcomes;
+    contingent_states = states; contingent_actions_by_state = actions_by_state;
+    contingent_outcomes_by_action = outcomes_by_action;
+    canonical_contingent_actions = canonical_actions;
+    canonical_contingent_outcomes = canonical_outcomes }
+
+let contingent_policy_tree_header =
+  String.concat "\t"
+    [ "path"; "state"; "action_id"; "variant_index"; "variant_count";
+      "outcome_id"; "successor_state"; "branch_evidence_sha256";
+      "child_path" ]
+
+let canonical_contingent_policy_tree policy =
+  let rec rows path node =
+    node.contingent_policy_branches
+    |> List.fold_left
+         (fun values branch ->
+           let outcome = branch.contingent_branch_outcome in
+           let child_path =
+             match branch.contingent_continuation with
+             | None -> "-"
+             | Some _ ->
+                 path ^ "." ^ string_of_int outcome.contingent_variant_index
+           in
+           let row =
+             String.concat "\t"
+               [ path; node.contingent_root_action.contingent_state;
+                 node.contingent_root_action.contingent_action_id;
+                 string_of_int outcome.contingent_variant_index;
+                 string_of_int outcome.contingent_variant_count;
+                 outcome.contingent_outcome_id;
+                 outcome.contingent_successor_state;
+                 outcome.contingent_branch_evidence_digest; child_path ]
+           in
+           match branch.contingent_continuation with
+           | None -> row :: values
+           | Some child ->
+               List.rev_append (rows child_path child) (row :: values))
+         []
+    |> List.rev
+  in
+  let canonical =
+    String.concat "\n"
+      (contingent_policy_tree_header :: rows "root" policy)
+    ^ "\n"
+  in
+  if String.length canonical > 1_048_576 then
+    failf "epistemic-contingent-policy-bytes-exceeded:%d"
+      (String.length canonical);
+  canonical
+
+let contingent_policy_digest policy =
+  sha256
+    ("loom-contingent-policy-tree-v0\000"
+     ^ canonical_contingent_policy_tree policy)
+
+let contingent_policy_evidence_digest policy =
+  let rec rows path node =
+    let current =
+      path ^ "=" ^ node.contingent_root_action.contingent_action_id ^ "="
+      ^ node.contingent_root_action.contingent_evidence_digest
+    in
+    current
+    :: List.concat_map
+         (fun branch ->
+           match branch.contingent_continuation with
+           | None -> []
+           | Some child ->
+               let outcome = branch.contingent_branch_outcome in
+               rows
+                 (path ^ "."
+                  ^ string_of_int outcome.contingent_variant_index)
+                 child)
+         node.contingent_policy_branches
+  in
+  rows "root" policy |> String.concat "\n"
+  |> fun value -> sha256 ("loom-contingent-policy-evidence-v0\000" ^ value)
+
+let contingent_policy_falsifier_digest policy =
+  let rec rows path node =
+    let current =
+      path ^ "=" ^ node.contingent_root_action.contingent_action_id ^ "="
+      ^ node.contingent_root_action.contingent_falsifier_digest
+    in
+    current
+    :: List.concat_map
+         (fun branch ->
+           match branch.contingent_continuation with
+           | None -> []
+           | Some child ->
+               let outcome = branch.contingent_branch_outcome in
+               rows
+                 (path ^ "."
+                  ^ string_of_int outcome.contingent_variant_index)
+                 child)
+         node.contingent_policy_branches
+  in
+  rows "root" policy |> String.concat "\n"
+  |> fun value -> sha256 ("loom-contingent-policy-falsifier-v0\000" ^ value)
+
+let contingent_policy_branch_digest policy =
+  let rec rows path node =
+    List.concat_map
+      (fun branch ->
+        let outcome = branch.contingent_branch_outcome in
+        let current =
+          String.concat "="
+            [ path; node.contingent_root_action.contingent_action_id;
+              outcome.contingent_outcome_id;
+              outcome.contingent_successor_state;
+              outcome.contingent_branch_evidence_digest ]
+        in
+        match branch.contingent_continuation with
+        | None -> [ current ]
+        | Some child ->
+            current
+            :: rows
+                 (path ^ "."
+                  ^ string_of_int outcome.contingent_variant_index)
+                 child)
+      node.contingent_policy_branches
+  in
+  rows "root" policy |> String.concat "\n"
+  |> fun value -> sha256 ("loom-contingent-policy-branches-v0\000" ^ value)
+
+let contingent_partition_digest action outcomes =
+  let value =
+    canonical_contingent_action action ^ "\n"
+    ^ String.concat "\n" (List.map canonical_contingent_outcome outcomes)
+    ^ "\n"
+  in
+  sha256 ("loom-contingent-outcome-partition-v0\000" ^ value)
+
+let contingent_policy_dominates left right =
+  let no_worse =
+    left.contingent_aggregate_information
+      >= right.contingent_aggregate_information
+    && left.contingent_aggregate_falsification
+       >= right.contingent_aggregate_falsification
+    && left.contingent_aggregate_divergence
+       >= right.contingent_aggregate_divergence
+    && left.contingent_aggregate_risk <= right.contingent_aggregate_risk
+    && left.contingent_aggregate_token_cost
+       <= right.contingent_aggregate_token_cost
+    && left.contingent_aggregate_wall_cost
+       <= right.contingent_aggregate_wall_cost
+    && left.contingent_aggregate_gpu_cost
+       <= right.contingent_aggregate_gpu_cost
+    && left.contingent_aggregate_quota_cost
+       <= right.contingent_aggregate_quota_cost
+  in
+  let strictly_better =
+    left.contingent_aggregate_information
+      > right.contingent_aggregate_information
+    || left.contingent_aggregate_falsification
+       > right.contingent_aggregate_falsification
+    || left.contingent_aggregate_divergence
+       > right.contingent_aggregate_divergence
+    || left.contingent_aggregate_risk < right.contingent_aggregate_risk
+    || left.contingent_aggregate_token_cost
+       < right.contingent_aggregate_token_cost
+    || left.contingent_aggregate_wall_cost
+       < right.contingent_aggregate_wall_cost
+    || left.contingent_aggregate_gpu_cost
+       < right.contingent_aggregate_gpu_cost
+    || left.contingent_aggregate_quota_cost
+       < right.contingent_aggregate_quota_cost
+  in
+  no_worse && strictly_better
+
+let contingent_frontier_limit = 256
+let contingent_examined_limit = 65_536
+
+let add_contingent_frontier ~state frontier candidate =
+  if
+    List.exists
+      (fun incumbent -> contingent_policy_dominates incumbent candidate)
+      frontier
+  then frontier
+  else
+    let updated =
+      candidate
+      :: List.filter
+           (fun incumbent ->
+             not (contingent_policy_dominates candidate incumbent))
+           frontier
+    in
+    let size = List.length updated in
+    if size > contingent_frontier_limit then
+      failf "epistemic-contingent-frontier-limit-exceeded:%s:%d" state size;
+    updated
+
+let compare_contingent_policies policy left right =
+  let information =
+    compare_high left.contingent_aggregate_information
+      right.contingent_aggregate_information
+  in
+  let falsification =
+    compare_high left.contingent_aggregate_falsification
+      right.contingent_aggregate_falsification
+  in
+  let divergence =
+    compare_high left.contingent_aggregate_divergence
+      right.contingent_aggregate_divergence
+  in
+  let policy_axes =
+    match policy with
+    | Information_first -> [ information; falsification; divergence ]
+    | Falsification_first -> [ falsification; information; divergence ]
+    | Counterfactual_first -> [ divergence; falsification; information ]
+  in
+  first_comparison
+    (policy_axes
+     @ [ compare_low left.contingent_aggregate_risk
+           right.contingent_aggregate_risk;
+         compare_low left.contingent_aggregate_token_cost
+           right.contingent_aggregate_token_cost;
+         compare_low left.contingent_aggregate_wall_cost
+           right.contingent_aggregate_wall_cost;
+         compare_low left.contingent_aggregate_gpu_cost
+           right.contingent_aggregate_gpu_cost;
+         compare_low left.contingent_aggregate_quota_cost
+           right.contingent_aggregate_quota_cost;
+         String.compare (contingent_policy_digest left)
+           (contingent_policy_digest right) ])
+
+let select_contingent_policy policy frontier =
+  match List.sort (compare_contingent_policies policy) frontier with
+  | selected :: _ -> selected
+  | [] -> failf "epistemic-contingent-frontier-empty"
+
+let contingent_policy_fits budget policy =
+  policy.contingent_aggregate_token_cost
+    <= budget.contingent_token_budget
+  && policy.contingent_aggregate_wall_cost
+     <= budget.contingent_wall_budget
+  && policy.contingent_aggregate_gpu_cost
+     <= budget.contingent_gpu_budget
+  && policy.contingent_aggregate_quota_cost
+     <= budget.contingent_quota_budget
+
+let min_ints values =
+  match values with
+  | first :: rest -> List.fold_left min first rest
+  | [] -> failf "epistemic-contingent-outcome-partition-empty"
+
+let max_ints values =
+  match values with
+  | first :: rest -> List.fold_left max first rest
+  | [] -> failf "epistemic-contingent-outcome-partition-empty"
+
+let make_contingent_policy action branches =
+  let continuation_benefit field =
+    branches
+    |> List.map (fun branch ->
+           match branch.contingent_continuation with
+           | None -> 0
+           | Some policy -> field policy)
+    |> min_ints
+  in
+  let continuation_burden field =
+    branches
+    |> List.map (fun branch ->
+           match branch.contingent_continuation with
+           | None -> 0
+           | Some policy -> field policy)
+    |> max_ints
+  in
+  { contingent_root_action = action; contingent_policy_branches = branches;
+    contingent_aggregate_information =
+      action.contingent_information
+      + continuation_benefit
+          (fun policy -> policy.contingent_aggregate_information);
+    contingent_aggregate_falsification =
+      action.contingent_falsification
+      + continuation_benefit
+          (fun policy -> policy.contingent_aggregate_falsification);
+    contingent_aggregate_divergence =
+      action.contingent_divergence
+      + continuation_benefit
+          (fun policy -> policy.contingent_aggregate_divergence);
+    contingent_aggregate_token_cost =
+      action.contingent_token_cost
+      + continuation_burden
+          (fun policy -> policy.contingent_aggregate_token_cost);
+    contingent_aggregate_wall_cost =
+      action.contingent_wall_cost
+      + continuation_burden
+          (fun policy -> policy.contingent_aggregate_wall_cost);
+    contingent_aggregate_gpu_cost =
+      action.contingent_gpu_cost
+      + continuation_burden
+          (fun policy -> policy.contingent_aggregate_gpu_cost);
+    contingent_aggregate_quota_cost =
+      action.contingent_quota_cost
+      + continuation_burden
+          (fun policy -> policy.contingent_aggregate_quota_cost);
+    contingent_aggregate_risk =
+      action.contingent_risk
+      + continuation_burden
+          (fun policy -> policy.contingent_aggregate_risk) }
+
+type contingent_synthesis = {
+  contingent_root_frontier : contingent_policy list;
+  contingent_examined : int;
+}
+
+let synthesize_contingent_policies graph ~root ~budget =
+  let memo = Hashtbl.create 12 in
+  let examined = ref 0 in
+  let rec synthesize state =
+    match Hashtbl.find_opt memo state with
+    | Some value -> value
+    | None ->
+        let frontier = ref [] in
+        let actions = Hashtbl.find graph.contingent_actions_by_state state in
+        List.iter
+          (fun action ->
+            let outcomes =
+              Hashtbl.find graph.contingent_outcomes_by_action
+                action.contingent_action_id
+            in
+            let rec enumerate remaining reversed_branches =
+              match remaining with
+              | [] ->
+                  incr examined;
+                  if !examined > contingent_examined_limit then
+                    failf "epistemic-contingent-examined-limit-exceeded:%d"
+                      !examined;
+                  let candidate =
+                    make_contingent_policy action
+                      (List.rev reversed_branches)
+                  in
+                  if contingent_policy_fits budget candidate then
+                    frontier :=
+                      add_contingent_frontier ~state !frontier candidate
+              | outcome :: rest ->
+                  if outcome.contingent_successor_state = "-" then
+                    enumerate rest
+                      ({ contingent_branch_outcome = outcome;
+                         contingent_continuation = None }
+                       :: reversed_branches)
+                  else
+                    synthesize outcome.contingent_successor_state
+                    |> List.iter (fun continuation ->
+                           enumerate rest
+                             ({ contingent_branch_outcome = outcome;
+                                contingent_continuation = Some continuation }
+                              :: reversed_branches))
+            in
+            enumerate outcomes [])
+          actions;
+        let canonical =
+          List.sort
+            (fun left right ->
+              String.compare (contingent_policy_digest left)
+                (contingent_policy_digest right))
+            !frontier
+        in
+        Hashtbl.add memo state canonical;
+        canonical
+  in
+  let root_frontier = synthesize root in
+  if root_frontier = [] then
+    failf "epistemic-contingent-no-feasible-policy";
+  { contingent_root_frontier = root_frontier;
+    contingent_examined = !examined }
+
+let contingent_frontier_header =
+  String.concat "\t"
+    [ "policy_sha256"; "root_action"; "information"; "falsification";
+      "divergence"; "risk"; "token_cost"; "wall_cost"; "gpu_cost";
+      "quota_cost"; "evidence_sha256"; "falsifier_sha256";
+      "branches_sha256" ]
+
+let canonical_contingent_frontier frontier =
+  let row policy =
+    String.concat "\t"
+      [ contingent_policy_digest policy;
+        policy.contingent_root_action.contingent_action_id;
+        string_of_int policy.contingent_aggregate_information;
+        string_of_int policy.contingent_aggregate_falsification;
+        string_of_int policy.contingent_aggregate_divergence;
+        string_of_int policy.contingent_aggregate_risk;
+        string_of_int policy.contingent_aggregate_token_cost;
+        string_of_int policy.contingent_aggregate_wall_cost;
+        string_of_int policy.contingent_aggregate_gpu_cost;
+        string_of_int policy.contingent_aggregate_quota_cost;
+        contingent_policy_evidence_digest policy;
+        contingent_policy_falsifier_digest policy;
+        contingent_policy_branch_digest policy ]
+  in
+  let canonical =
+    String.concat "\n" (contingent_frontier_header :: List.map row frontier)
+    ^ "\n"
+  in
+  if String.length canonical > 1_048_576 then
+    failf "epistemic-contingent-frontier-bytes-exceeded:%d"
+      (String.length canonical);
+  canonical
+
+let contingent_frontier_digest canonical =
+  sha256 ("loom-contingent-frontier-v0\000" ^ canonical)
+
+let contingent_adapter_path () =
+  match Sys.getenv_opt "SOUNIO_LOOM_CONTINGENT_ADAPTER" with
+  | Some path when path <> "" -> path
+  | _ ->
+      Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+        "sounio-loom-contingent-runtime"
+
+let verify_contingent_frame frame expected =
+  let adapter = contingent_adapter_path () in
+  if not (Sys.file_exists adapter) then
+    failf "epistemic-contingent-native-adapter-missing:%s" adapter;
+  let code, output =
+    process_exchange (Unix.realpath adapter) (String.concat " " frame ^ "\n")
+  in
+  if code <> 0 || output <> expected then
+    failf "epistemic-contingent-native-refused:rc=%d:output=%s" code output
+
+let contingent_zero_limbs = List.init 8 (fun _ -> "0")
+
+let verify_contingent_partition ~policy_id ~owner ~generation
+    ~outcome_set_digest action outcomes =
+  let slots =
+    List.map
+      (fun outcome -> string_of_int (outcome.contingent_variant_index + 1))
+      outcomes
+    @ List.init (3 - List.length outcomes) (fun _ -> "0")
+  in
+  let variant_count = (List.hd outcomes).contingent_variant_count in
+  let selected_axes =
+    [ string_of_int variant_count; string_of_int (List.length outcomes) ]
+    @ slots @ [ "0"; "0"; "0" ]
+  in
+  let frame =
+    [ "9011"; "3"; "0"; "0"; "0"; "0"; "0"; "0";
+      token "loom-contingent-policy" policy_id; "0"; "0";
+      token "loom-contingent-action" action.contingent_action_id;
+      "0"; "0"; "0"; token "loom-contingent-owner" owner;
+      token "loom-contingent-generation" generation ]
+    @ selected_axes @ List.init 8 (fun _ -> "0")
+    @ contingent_zero_limbs @ digest_limbs outcome_set_digest
+    @ contingent_zero_limbs @ contingent_zero_limbs
+    @ contingent_zero_limbs @ contingent_zero_limbs
+    @ digest_limbs (contingent_partition_digest action outcomes)
+    @ contingent_zero_limbs
+  in
+  verify_contingent_frame frame
+    "SOUNIO_CONTINGENT_ACCEPT schema=loom-native-contingent-policy-v0 transition=partition state=total"
+
+let verify_contingent_pair ~policy_id ~order ~budget ~owner ~generation
+    ~action_set_digest ~outcome_set_digest ~frontier_digest ~selected ~rival =
+  let selected_digest = contingent_policy_digest selected in
+  let rival_digest = contingent_policy_digest rival in
+  let selected_axes =
+    [ string_of_int selected.contingent_aggregate_information;
+      string_of_int selected.contingent_aggregate_falsification;
+      string_of_int selected.contingent_aggregate_divergence;
+      string_of_int selected.contingent_aggregate_risk;
+      string_of_int selected.contingent_aggregate_token_cost;
+      string_of_int selected.contingent_aggregate_wall_cost;
+      string_of_int selected.contingent_aggregate_gpu_cost;
+      string_of_int selected.contingent_aggregate_quota_cost ]
+  in
+  let rival_axes =
+    [ string_of_int rival.contingent_aggregate_information;
+      string_of_int rival.contingent_aggregate_falsification;
+      string_of_int rival.contingent_aggregate_divergence;
+      string_of_int rival.contingent_aggregate_risk;
+      string_of_int rival.contingent_aggregate_token_cost;
+      string_of_int rival.contingent_aggregate_wall_cost;
+      string_of_int rival.contingent_aggregate_gpu_cost;
+      string_of_int rival.contingent_aggregate_quota_cost ]
+  in
+  let frame =
+    [ "9011"; "1"; string_of_int (attention_policy_code order); "0";
+      string_of_int budget.contingent_token_budget;
+      string_of_int budget.contingent_wall_budget;
+      string_of_int budget.contingent_gpu_budget;
+      string_of_int budget.contingent_quota_budget;
+      token "loom-contingent-policy" policy_id;
+      token "loom-contingent-policy-tree" selected_digest;
+      token "loom-contingent-policy-tree" rival_digest;
+      token "loom-contingent-action"
+        selected.contingent_root_action.contingent_action_id;
+      "0"; "0"; "0"; token "loom-contingent-owner" owner;
+      token "loom-contingent-generation" generation ]
+    @ selected_axes @ rival_axes @ digest_limbs action_set_digest
+    @ digest_limbs outcome_set_digest @ digest_limbs frontier_digest
+    @ digest_limbs selected_digest
+    @ digest_limbs (contingent_policy_evidence_digest selected)
+    @ digest_limbs (contingent_policy_falsifier_digest selected)
+    @ digest_limbs (contingent_policy_branch_digest selected)
+    @ contingent_zero_limbs
+  in
+  verify_contingent_frame frame
+    (Printf.sprintf
+       "SOUNIO_CONTINGENT_ACCEPT schema=loom-native-contingent-policy-v0 transition=compile policy=%s"
+       (attention_policy_name order))
+
+let contingent_policy_node_at_path policy path =
+  let pieces = String.split_on_char '.' path in
+  match pieces with
+  | "root" :: indices ->
+      List.fold_left
+        (fun node index_text ->
+          let index =
+            try int_of_string index_text
+            with _ -> failf "epistemic-contingent-cursor-invalid:%s" path
+          in
+          match
+            List.find_opt
+              (fun branch ->
+                branch.contingent_branch_outcome.contingent_variant_index
+                = index)
+              node.contingent_policy_branches
+          with
+          | Some { contingent_continuation = Some child; _ } -> child
+          | _ -> failf "epistemic-contingent-cursor-invalid:%s" path)
+        policy indices
+  | _ -> failf "epistemic-contingent-cursor-invalid:%s" path
+
+let contingent_branch_for_outcome node outcome_id =
+  match
+    List.find_opt
+      (fun branch ->
+        branch.contingent_branch_outcome.contingent_outcome_id = outcome_id)
+      node.contingent_policy_branches
+  with
+  | Some branch -> branch
+  | None ->
+      failf "epistemic-contingent-outcome-not-in-partition:%s/%s"
+        node.contingent_root_action.contingent_action_id outcome_id
+
+let contingent_observed_branch_digest path node branch =
+  let outcome = branch.contingent_branch_outcome in
+  let value =
+    String.concat "\t"
+      [ path; node.contingent_root_action.contingent_action_id;
+        outcome.contingent_outcome_id;
+        string_of_int outcome.contingent_variant_index;
+        outcome.contingent_successor_state;
+        outcome.contingent_branch_evidence_digest ]
+  in
+  sha256 ("loom-contingent-observed-branch-v0\000" ^ value)
+
+let verify_contingent_transition ~policy_id ~selected_policy_digest ~path
+    ~node ~branch ~claimed_next_action ~owner ~generation ~outcome_digest =
+  let outcome = branch.contingent_branch_outcome in
+  let terminal, expected_next_action =
+    match branch.contingent_continuation with
+    | None -> (1, "")
+    | Some child ->
+        (0, child.contingent_root_action.contingent_action_id)
+  in
+  let frame =
+    [ "9011"; "2"; "0"; string_of_int terminal;
+      "0"; "0"; "0"; "0";
+      token "loom-contingent-policy" policy_id;
+      token "loom-contingent-policy-tree" selected_policy_digest; "0";
+      token "loom-contingent-action"
+        node.contingent_root_action.contingent_action_id;
+      token "loom-contingent-outcome" outcome.contingent_outcome_id;
+      token "loom-contingent-action" expected_next_action;
+      token "loom-contingent-action" claimed_next_action;
+      token "loom-contingent-owner" owner;
+      token "loom-contingent-generation" generation ]
+    @ List.init 16 (fun _ -> "0")
+    @ contingent_zero_limbs @ contingent_zero_limbs
+    @ contingent_zero_limbs @ digest_limbs selected_policy_digest
+    @ contingent_zero_limbs @ contingent_zero_limbs
+    @ digest_limbs (contingent_observed_branch_digest path node branch)
+    @ digest_limbs outcome_digest
+  in
+  verify_contingent_frame frame
+    (Printf.sprintf
+       "SOUNIO_CONTINGENT_ACCEPT schema=loom-native-contingent-policy-v0 transition=observe state=%s"
+       (if terminal = 1 then "completed" else "advanced"))
+
+let contingent_policy_node_count policy =
+  let rec count node =
+    1
+    + List.fold_left
+        (fun total branch ->
+          match branch.contingent_continuation with
+          | None -> total
+          | Some child -> total + count child)
+        0 node.contingent_policy_branches
+  in
+  count policy
+
+type contingent_policy_decision = {
+  contingent_policy_id : string;
+  contingent_root_state : string;
+  contingent_order : attention_policy;
+  contingent_budget : contingent_budget;
+  contingent_graph : contingent_graph;
+  contingent_action_set_digest : string;
+  contingent_outcome_set_digest : string;
+  contingent_frontier : contingent_policy list;
+  canonical_contingent_frontier : string;
+  contingent_frontier_digest : string;
+  selected_contingent_policy : contingent_policy;
+  canonical_selected_contingent_policy : string;
+  selected_contingent_policy_digest : string;
+  contingent_owner : string;
+  contingent_generation : string;
+  contingent_examined : int;
+  mutable contingent_current_path : string;
+  mutable contingent_completed : bool;
+}
+
+let contingent_policy_decision_of_event event =
+  let fields = decode_fields event.payload in
+  let policy_id = field fields "contingent_policy" in
+  let root_state = field fields "root_state" in
+  let order = attention_policy_of_string (field fields "order") in
+  let budget =
+    contingent_budget_of_strings (field fields "token_budget")
+      (field fields "wall_budget") (field fields "gpu_budget")
+      (field fields "quota_budget")
+  in
+  let stored_actions = field fields "action_set" in
+  let actions, canonical_actions =
+    parse_contingent_action_text stored_actions
+  in
+  if stored_actions <> canonical_actions then
+    failf "epistemic-contingent-action-set-noncanonical:%s" policy_id;
+  let stored_outcomes = field fields "outcome_set" in
+  let outcomes, canonical_outcomes =
+    parse_contingent_outcome_text stored_outcomes
+  in
+  if stored_outcomes <> canonical_outcomes then
+    failf "epistemic-contingent-outcome-set-noncanonical:%s" policy_id;
+  let graph =
+    build_contingent_graph ~root:root_state actions outcomes
+      canonical_actions canonical_outcomes
+  in
+  let action_set_digest =
+    require_digest "contingent-action-set"
+      (field fields "action_set_digest")
+  in
+  if contingent_action_set_digest canonical_actions <> action_set_digest then
+    failf "epistemic-contingent-action-set-digest-mismatch:%s" policy_id;
+  let outcome_set_digest =
+    require_digest "contingent-outcome-set"
+      (field fields "outcome_set_digest")
+  in
+  if contingent_outcome_set_digest canonical_outcomes <> outcome_set_digest
+  then
+    failf "epistemic-contingent-outcome-set-digest-mismatch:%s" policy_id;
+  let synthesis =
+    synthesize_contingent_policies graph ~root:root_state ~budget
+  in
+  let frontier = synthesis.contingent_root_frontier in
+  let canonical_frontier = canonical_contingent_frontier frontier in
+  if field fields "frontier" <> canonical_frontier then
+    failf "epistemic-contingent-frontier-mismatch:%s" policy_id;
+  let frontier_digest =
+    require_digest "contingent-frontier" (field fields "frontier_digest")
+  in
+  if contingent_frontier_digest canonical_frontier <> frontier_digest then
+    failf "epistemic-contingent-frontier-digest-mismatch:%s" policy_id;
+  let selected = select_contingent_policy order frontier in
+  let canonical_selected = canonical_contingent_policy_tree selected in
+  if field fields "selected_policy" <> canonical_selected then
+    failf "epistemic-contingent-selection-mismatch:%s" policy_id;
+  let selected_digest =
+    require_digest "contingent-selected-policy"
+      (field fields "selected_policy_digest")
+  in
+  if contingent_policy_digest selected <> selected_digest then
+    failf "epistemic-contingent-selected-policy-digest-mismatch:%s"
+      policy_id;
+  let owner = field fields "owner" in
+  let generation = field fields "generation" in
+  validate_atom "contingent-policy" policy_id;
+  validate_atom "contingent-root-state" root_state;
+  validate_atom "contingent-owner" owner;
+  validate_atom "contingent-generation" generation;
+  let require_selected key actual =
+    if field fields key <> actual then
+      failf "epistemic-contingent-selected-field-mismatch:%s" key
+  in
+  require_selected "root_action"
+    selected.contingent_root_action.contingent_action_id;
+  require_selected "current_resource"
+    selected.contingent_root_action.contingent_resource;
+  require_selected "information"
+    (string_of_int selected.contingent_aggregate_information);
+  require_selected "falsification"
+    (string_of_int selected.contingent_aggregate_falsification);
+  require_selected "divergence"
+    (string_of_int selected.contingent_aggregate_divergence);
+  require_selected "risk"
+    (string_of_int selected.contingent_aggregate_risk);
+  require_selected "token_cost"
+    (string_of_int selected.contingent_aggregate_token_cost);
+  require_selected "wall_cost"
+    (string_of_int selected.contingent_aggregate_wall_cost);
+  require_selected "gpu_cost"
+    (string_of_int selected.contingent_aggregate_gpu_cost);
+  require_selected "quota_cost"
+    (string_of_int selected.contingent_aggregate_quota_cost);
+  require_selected "evidence_digest"
+    (contingent_policy_evidence_digest selected);
+  require_selected "falsifier_digest"
+    (contingent_policy_falsifier_digest selected);
+  require_selected "branch_digest"
+    (contingent_policy_branch_digest selected);
+  List.iter
+    (fun action ->
+      verify_contingent_partition ~policy_id ~owner ~generation
+        ~outcome_set_digest action
+        (Hashtbl.find graph.contingent_outcomes_by_action
+           action.contingent_action_id))
+    graph.contingent_actions;
+  List.iter
+    (fun rival ->
+      verify_contingent_pair ~policy_id ~order ~budget ~owner ~generation
+        ~action_set_digest ~outcome_set_digest ~frontier_digest ~selected
+        ~rival)
+    frontier;
+  { contingent_policy_id = policy_id; contingent_root_state = root_state;
+    contingent_order = order; contingent_budget = budget;
+    contingent_graph = graph; contingent_action_set_digest = action_set_digest;
+    contingent_outcome_set_digest = outcome_set_digest;
+    contingent_frontier = frontier;
+    canonical_contingent_frontier = canonical_frontier;
+    contingent_frontier_digest = frontier_digest;
+    selected_contingent_policy = selected;
+    canonical_selected_contingent_policy = canonical_selected;
+    selected_contingent_policy_digest = selected_digest;
+    contingent_owner = owner; contingent_generation = generation;
+    contingent_examined = synthesis.contingent_examined;
+    contingent_current_path = "root"; contingent_completed = false }
+
 type knowledge = {
   knowledge_id : string;
   value : string;
@@ -1260,6 +2411,7 @@ type state = {
   capabilities : (string, capability) Hashtbl.t;
   attentions : (string, attention_decision) Hashtbl.t;
   attention_portfolios : (string, portfolio_attention_decision) Hashtbl.t;
+  contingent_policies : (string, contingent_policy_decision) Hashtbl.t;
 }
 
 let confidence_value value =
@@ -1302,7 +2454,8 @@ let reduce world events head =
     { world_id = world; agent; lane; parent_world; parent_head; hypothesis;
       events; journal_head = head; knowledges = Hashtbl.create 32;
       claims = Hashtbl.create 32; capabilities = Hashtbl.create 16;
-      attentions = Hashtbl.create 16; attention_portfolios = Hashtbl.create 16 }
+      attentions = Hashtbl.create 16; attention_portfolios = Hashtbl.create 16;
+      contingent_policies = Hashtbl.create 16 }
   in
   List.iteri
     (fun index event ->
@@ -1311,7 +2464,8 @@ let reduce world events head =
         failf "epistemic-event-world-drift:%d" event.sequence;
       (match event.kind with
       | "ATTENTION_COMPILED" | "ATTENTION_COMPLETED"
-      | "ATTENTION_PORTFOLIO_COMPILED" | "ATTENTION_PORTFOLIO_COMPLETED" -> ()
+      | "ATTENTION_PORTFOLIO_COMPILED" | "ATTENTION_PORTFOLIO_COMPLETED"
+      | "CONTINGENT_POLICY_COMPILED" | "CONTINGENT_POLICY_OBSERVED" -> ()
       | _ -> verify_native (transition_of_event event));
       match event.kind with
       | "WORLD_CREATED" | "WORLD_FORKED" ->
@@ -1386,6 +2540,17 @@ let reduce world events head =
                       decision.selected_portfolio.portfolio_selected_resources
               then failf "epistemic-resource-already-owned:%s" resource)
             state.attention_portfolios;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.contingent_completed then
+                let node =
+                  contingent_policy_node_at_path
+                    decision.selected_contingent_policy
+                    decision.contingent_current_path
+                in
+                if node.contingent_root_action.contingent_resource = resource
+                then failf "epistemic-resource-already-owned:%s" resource)
+            state.contingent_policies;
           Hashtbl.add state.capabilities id
             { capability_id = id; resource; owner; generation; released = false }
       | "CAPABILITY_RELEASED" ->
@@ -1430,6 +2595,21 @@ let reduce world events head =
                 failf "epistemic-resource-already-owned:%s"
                   decision.selected.resource)
             state.attention_portfolios;
+          Hashtbl.iter
+            (fun _ existing ->
+              if not existing.contingent_completed then
+                let node =
+                  contingent_policy_node_at_path
+                    existing.selected_contingent_policy
+                    existing.contingent_current_path
+                in
+                if
+                  node.contingent_root_action.contingent_resource
+                  = decision.selected.resource
+                then
+                  failf "epistemic-resource-already-owned:%s"
+                    decision.selected.resource)
+            state.contingent_policies;
           Hashtbl.add state.attentions decision.plan_id decision
       | "ATTENTION_COMPLETED" ->
           let plan_id = field fields "plan" in
@@ -1480,7 +2660,18 @@ let reduce world events head =
                      && List.mem resource
                           existing.selected_portfolio.portfolio_selected_resources
                   then failf "epistemic-resource-already-owned:%s" resource)
-                state.attention_portfolios)
+                state.attention_portfolios;
+              Hashtbl.iter
+                (fun _ existing ->
+                  if not existing.contingent_completed then
+                    let node =
+                      contingent_policy_node_at_path
+                        existing.selected_contingent_policy
+                        existing.contingent_current_path
+                    in
+                    if node.contingent_root_action.contingent_resource = resource
+                    then failf "epistemic-resource-already-owned:%s" resource)
+                state.contingent_policies)
             decision.selected_portfolio.portfolio_selected_resources;
           Hashtbl.add state.attention_portfolios decision.portfolio_id decision
       | "ATTENTION_PORTFOLIO_COMPLETED" ->
@@ -1510,6 +2701,169 @@ let reduce world events head =
             ~generation ~outcome;
           decision.portfolio_completed <- true;
           decision.portfolio_outcome_digest <- outcome
+      | "CONTINGENT_POLICY_COMPILED" ->
+          let decision = contingent_policy_decision_of_event event in
+          if
+            Hashtbl.mem state.contingent_policies
+              decision.contingent_policy_id
+          then
+            failf "epistemic-contingent-policy-duplicate:%s"
+              decision.contingent_policy_id;
+          let resource =
+            decision.selected_contingent_policy.contingent_root_action
+              .contingent_resource
+          in
+          Hashtbl.iter
+            (fun _ capability ->
+              if not capability.released && capability.resource = resource
+              then failf "epistemic-resource-already-owned:%s" resource)
+            state.capabilities;
+          Hashtbl.iter
+            (fun _ attention ->
+              if not attention.completed
+                 && attention.selected.resource = resource
+              then failf "epistemic-resource-already-owned:%s" resource)
+            state.attentions;
+          Hashtbl.iter
+            (fun _ portfolio ->
+              if not portfolio.portfolio_completed
+                 && List.mem resource
+                      portfolio.selected_portfolio
+                        .portfolio_selected_resources
+              then failf "epistemic-resource-already-owned:%s" resource)
+            state.attention_portfolios;
+          Hashtbl.iter
+            (fun _ existing ->
+              if not existing.contingent_completed then
+                let node =
+                  contingent_policy_node_at_path
+                    existing.selected_contingent_policy
+                    existing.contingent_current_path
+                in
+                if node.contingent_root_action.contingent_resource = resource
+                then failf "epistemic-resource-already-owned:%s" resource)
+            state.contingent_policies;
+          Hashtbl.add state.contingent_policies
+            decision.contingent_policy_id decision
+      | "CONTINGENT_POLICY_OBSERVED" ->
+          let policy_id = field fields "contingent_policy" in
+          let decision =
+            match Hashtbl.find_opt state.contingent_policies policy_id with
+            | Some value -> value
+            | None ->
+                failf "epistemic-contingent-policy-missing:%s" policy_id
+          in
+          if decision.contingent_completed then
+            failf "epistemic-contingent-policy-already-completed:%s"
+              policy_id;
+          let path = field fields "current_path" in
+          let current_action = field fields "current_action" in
+          let outcome_id = field fields "outcome" in
+          let next_path = field fields "next_path" in
+          let next_action = field fields "next_action" in
+          let next_resource = field fields "next_resource" in
+          let owner = field fields "owner" in
+          let generation = field fields "generation" in
+          if path <> decision.contingent_current_path
+             || owner <> decision.contingent_owner
+             || generation <> decision.contingent_generation
+             || field fields "selected_policy_digest"
+                <> decision.selected_contingent_policy_digest
+          then
+            failf "epistemic-contingent-observation-identity-drift:%s"
+              policy_id;
+          let node =
+            contingent_policy_node_at_path
+              decision.selected_contingent_policy path
+          in
+          if current_action
+             <> node.contingent_root_action.contingent_action_id
+          then
+            failf "epistemic-contingent-current-action-drift:%s" policy_id;
+          let branch = contingent_branch_for_outcome node outcome_id in
+          let expected_path, expected_action, expected_resource =
+            match branch.contingent_continuation with
+            | None -> ("-", "-", "-")
+            | Some child ->
+                ( path ^ "."
+                  ^ string_of_int
+                      branch.contingent_branch_outcome
+                        .contingent_variant_index,
+                  child.contingent_root_action.contingent_action_id,
+                  child.contingent_root_action.contingent_resource )
+          in
+          if next_path <> expected_path || next_action <> expected_action
+             || next_resource <> expected_resource
+          then
+            failf "epistemic-contingent-branch-routing-mismatch:%s/%s"
+              policy_id outcome_id;
+          let expected_branch_digest =
+            contingent_observed_branch_digest path node branch
+          in
+          if
+            require_digest "contingent-observed-branch"
+              (field fields "branch_digest")
+            <> expected_branch_digest
+          then
+            failf "epistemic-contingent-observed-branch-digest-mismatch:%s"
+              policy_id;
+          let outcome_digest =
+            require_digest "contingent-outcome"
+              (field fields "outcome_digest")
+          in
+          verify_contingent_transition ~policy_id
+            ~selected_policy_digest:decision.selected_contingent_policy_digest
+            ~path ~node ~branch
+            ~claimed_next_action:(if next_action = "-" then "" else next_action)
+            ~owner ~generation ~outcome_digest;
+          (match branch.contingent_continuation with
+          | None -> decision.contingent_completed <- true
+          | Some _ ->
+              Hashtbl.iter
+                (fun _ capability ->
+                  if not capability.released
+                     && capability.resource = next_resource
+                  then
+                    failf "epistemic-resource-already-owned:%s"
+                      next_resource)
+                state.capabilities;
+              Hashtbl.iter
+                (fun _ attention ->
+                  if not attention.completed
+                     && attention.selected.resource = next_resource
+                  then
+                    failf "epistemic-resource-already-owned:%s"
+                      next_resource)
+                state.attentions;
+              Hashtbl.iter
+                (fun _ portfolio ->
+                  if not portfolio.portfolio_completed
+                     && List.mem next_resource
+                          portfolio.selected_portfolio
+                            .portfolio_selected_resources
+                  then
+                    failf "epistemic-resource-already-owned:%s"
+                      next_resource)
+                state.attention_portfolios;
+              Hashtbl.iter
+                (fun existing_id existing ->
+                  if existing_id <> policy_id
+                     && not existing.contingent_completed
+                  then
+                    let existing_node =
+                      contingent_policy_node_at_path
+                        existing.selected_contingent_policy
+                        existing.contingent_current_path
+                    in
+                    if
+                      existing_node.contingent_root_action
+                        .contingent_resource
+                      = next_resource
+                    then
+                      failf "epistemic-resource-already-owned:%s"
+                        next_resource)
+                state.contingent_policies;
+              decision.contingent_current_path <- next_path)
       | kind -> failf "epistemic-event-kind-unknown:%s" kind)
     events;
   state
@@ -1566,7 +2920,18 @@ let validate_global_capabilities states =
               (fun resource ->
                 reserve resource state.world_id decision.portfolio_id)
               decision.selected_portfolio.portfolio_selected_resources)
-        state.attention_portfolios)
+        state.attention_portfolios;
+      Hashtbl.iter
+        (fun _ decision ->
+          if not decision.contingent_completed then
+            let node =
+              contingent_policy_node_at_path
+                decision.selected_contingent_policy
+                decision.contingent_current_path
+            in
+            reserve node.contingent_root_action.contingent_resource
+              state.world_id decision.contingent_policy_id)
+        state.contingent_policies)
     states
 
 let validate_attention_references states =
@@ -1599,7 +2964,15 @@ let validate_attention_references states =
               require_target candidate.portfolio_target_world
                 candidate.portfolio_target_claim)
             decision.all_portfolio_candidates)
-        scheduling_world.attention_portfolios)
+        scheduling_world.attention_portfolios;
+      Hashtbl.iter
+        (fun _ decision ->
+          List.iter
+            (fun action ->
+              require_target action.contingent_target_world
+                action.contingent_target_claim)
+            decision.contingent_graph.contingent_actions)
+        scheduling_world.contingent_policies)
     states
 
 let load_all root =
@@ -1754,7 +3127,18 @@ let acquire_capability ~root ~world ~capability ~resource ~owner ~generation =
                  && List.mem resource
                       decision.selected_portfolio.portfolio_selected_resources
               then failf "epistemic-global-resource-conflict:%s" resource)
-            state.attention_portfolios)
+            state.attention_portfolios;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.contingent_completed then
+                let node =
+                  contingent_policy_node_at_path
+                    decision.selected_contingent_policy
+                    decision.contingent_current_path
+                in
+                if node.contingent_root_action.contingent_resource = resource
+                then failf "epistemic-global-resource-conflict:%s" resource)
+            state.contingent_policies)
         states;
       let event =
         append root world "CAPABILITY_ACQUIRED"
@@ -1844,7 +3228,22 @@ let compile_attention ~root ~world ~plan ~candidate_file ~budget ~policy
               then
                 failf "epistemic-global-resource-conflict:%s"
                   selected.resource)
-            state.attention_portfolios)
+            state.attention_portfolios;
+          Hashtbl.iter
+            (fun _ decision ->
+              if not decision.contingent_completed then
+                let node =
+                  contingent_policy_node_at_path
+                    decision.selected_contingent_policy
+                    decision.contingent_current_path
+                in
+                if
+                  node.contingent_root_action.contingent_resource
+                  = selected.resource
+                then
+                  failf "epistemic-global-resource-conflict:%s"
+                    selected.resource)
+            state.contingent_policies)
         states;
       let fields =
         [ ("world", world); ("plan", plan);
@@ -1978,7 +3377,20 @@ let compile_attention_portfolio ~root ~world ~portfolio ~candidate_file
                      && List.mem resource
                           existing.selected_portfolio.portfolio_selected_resources
                   then failf "epistemic-global-resource-conflict:%s" resource)
-                state.attention_portfolios)
+                state.attention_portfolios;
+              Hashtbl.iter
+                (fun _ decision ->
+                  if not decision.contingent_completed then
+                    let node =
+                      contingent_policy_node_at_path
+                        decision.selected_contingent_policy
+                        decision.contingent_current_path
+                    in
+                    if
+                      node.contingent_root_action.contingent_resource = resource
+                    then
+                      failf "epistemic-global-resource-conflict:%s" resource)
+                state.contingent_policies)
             states)
         selected.portfolio_selected_resources;
       let fields =
@@ -2070,6 +3482,240 @@ let complete_attention_portfolio ~root ~world ~portfolio ~owner ~generation
         (List.length decision.selected_portfolio.portfolio_selected_resources)
         outcome event.event_sha256)
 
+let ensure_contingent_resource_available states ~world ~policy_id resource =
+  List.iter
+    (fun state ->
+      Hashtbl.iter
+        (fun _ capability ->
+          if not capability.released && capability.resource = resource then
+            failf "epistemic-global-resource-conflict:%s" resource)
+        state.capabilities;
+      Hashtbl.iter
+        (fun _ attention ->
+          if not attention.completed
+             && attention.selected.resource = resource
+          then failf "epistemic-global-resource-conflict:%s" resource)
+        state.attentions;
+      Hashtbl.iter
+        (fun _ portfolio ->
+          if not portfolio.portfolio_completed
+             && List.mem resource
+                  portfolio.selected_portfolio.portfolio_selected_resources
+          then failf "epistemic-global-resource-conflict:%s" resource)
+        state.attention_portfolios;
+      Hashtbl.iter
+        (fun existing_id decision ->
+          if
+            not
+              (state.world_id = world && existing_id = policy_id)
+            && not decision.contingent_completed
+          then
+            let node =
+              contingent_policy_node_at_path
+                decision.selected_contingent_policy
+                decision.contingent_current_path
+            in
+            if node.contingent_root_action.contingent_resource = resource then
+              failf "epistemic-global-resource-conflict:%s" resource)
+        state.contingent_policies)
+    states
+
+let compile_contingent_policy ~root ~world ~policy_id ~root_state
+    ~action_file ~outcome_file ~token_budget ~wall_budget ~gpu_budget
+    ~quota_budget ~order ~owner ~generation =
+  validate_atom "world" world;
+  validate_atom "contingent-policy" policy_id;
+  validate_atom "contingent-root-state" root_state;
+  validate_atom "contingent-owner" owner;
+  validate_atom "contingent-generation" generation;
+  if not (Sys.file_exists action_file) then
+    failf "epistemic-contingent-action-file-missing:%s" action_file;
+  if not (Sys.file_exists outcome_file) then
+    failf "epistemic-contingent-outcome-file-missing:%s" outcome_file;
+  let budget =
+    contingent_budget ~token_budget ~wall_budget ~gpu_budget ~quota_budget
+  in
+  let actions, canonical_actions =
+    parse_contingent_action_lines (read_lines action_file)
+  in
+  let outcomes, canonical_outcomes =
+    parse_contingent_outcome_lines (read_lines outcome_file)
+  in
+  let graph =
+    build_contingent_graph ~root:root_state actions outcomes
+      canonical_actions canonical_outcomes
+  in
+  let synthesis =
+    synthesize_contingent_policies graph ~root:root_state ~budget
+  in
+  let frontier = synthesis.contingent_root_frontier in
+  let canonical_frontier = canonical_contingent_frontier frontier in
+  let selected = select_contingent_policy order frontier in
+  let canonical_selected = canonical_contingent_policy_tree selected in
+  let action_set_digest = contingent_action_set_digest canonical_actions in
+  let outcome_set_digest = contingent_outcome_set_digest canonical_outcomes in
+  let frontier_digest = contingent_frontier_digest canonical_frontier in
+  let selected_digest = contingent_policy_digest selected in
+  with_machine_lock root (fun () ->
+      let states = load_all root in
+      let scheduling_world = find_world states world in
+      if Hashtbl.mem scheduling_world.contingent_policies policy_id then
+        failf "epistemic-contingent-policy-duplicate:%s" policy_id;
+      List.iter
+        (fun action ->
+          let target = find_world states action.contingent_target_world in
+          if not (Hashtbl.mem target.claims action.contingent_target_claim)
+          then
+            failf "epistemic-attention-target-claim-missing:%s/%s"
+              action.contingent_target_world action.contingent_target_claim)
+        actions;
+      let current_resource =
+        selected.contingent_root_action.contingent_resource
+      in
+      ensure_contingent_resource_available states ~world ~policy_id
+        current_resource;
+      let fields =
+        [ ("world", world); ("contingent_policy", policy_id);
+          ("root_state", root_state); ("order", attention_policy_name order);
+          ("token_budget", string_of_int budget.contingent_token_budget);
+          ("wall_budget", string_of_int budget.contingent_wall_budget);
+          ("gpu_budget", string_of_int budget.contingent_gpu_budget);
+          ("quota_budget", string_of_int budget.contingent_quota_budget);
+          ("action_set", canonical_actions);
+          ("action_set_digest", action_set_digest);
+          ("outcome_set", canonical_outcomes);
+          ("outcome_set_digest", outcome_set_digest);
+          ("frontier", canonical_frontier);
+          ("frontier_digest", frontier_digest);
+          ("selected_policy", canonical_selected);
+          ("selected_policy_digest", selected_digest);
+          ("root_action", selected.contingent_root_action.contingent_action_id);
+          ("current_resource", current_resource);
+          ("information",
+           string_of_int selected.contingent_aggregate_information);
+          ("falsification",
+           string_of_int selected.contingent_aggregate_falsification);
+          ("divergence",
+           string_of_int selected.contingent_aggregate_divergence);
+          ("risk", string_of_int selected.contingent_aggregate_risk);
+          ("token_cost",
+           string_of_int selected.contingent_aggregate_token_cost);
+          ("wall_cost", string_of_int selected.contingent_aggregate_wall_cost);
+          ("gpu_cost", string_of_int selected.contingent_aggregate_gpu_cost);
+          ("quota_cost",
+           string_of_int selected.contingent_aggregate_quota_cost);
+          ("evidence_digest", contingent_policy_evidence_digest selected);
+          ("falsifier_digest", contingent_policy_falsifier_digest selected);
+          ("branch_digest", contingent_policy_branch_digest selected);
+          ("owner", owner); ("generation", generation) ]
+      in
+      let event =
+        append
+          ~verify:(fun candidate_event ->
+            ignore (contingent_policy_decision_of_event candidate_event))
+          root world "CONTINGENT_POLICY_COMPILED" fields
+      in
+      ignore (load_all root);
+      Printf.sprintf
+        "LOOM_CONTINGENT_COMPILED schema=loom-robust-contingent-policy-v0 world=%s policy=%s order=%s root_state=%s root_action=%s current_resource=%s states=%d actions=%d outcomes=%d examined=%d frontier=%d nodes=%d guaranteed_information=%d guaranteed_falsification=%d guaranteed_divergence=%d worst_risk=%d token=%d/%d wall=%d/%d gpu=%d/%d quota=%d/%d selected_policy_sha256=%s frontier_sha256=%s head=%s"
+        world policy_id (attention_policy_name order) root_state
+        selected.contingent_root_action.contingent_action_id current_resource
+        (List.length graph.contingent_states)
+        (List.length graph.contingent_actions)
+        (List.length graph.contingent_outcomes)
+        synthesis.contingent_examined (List.length frontier)
+        (contingent_policy_node_count selected)
+        selected.contingent_aggregate_information
+        selected.contingent_aggregate_falsification
+        selected.contingent_aggregate_divergence
+        selected.contingent_aggregate_risk
+        selected.contingent_aggregate_token_cost
+        budget.contingent_token_budget selected.contingent_aggregate_wall_cost
+        budget.contingent_wall_budget selected.contingent_aggregate_gpu_cost
+        budget.contingent_gpu_budget selected.contingent_aggregate_quota_cost
+        budget.contingent_quota_budget selected_digest frontier_digest
+        event.event_sha256)
+
+let observe_contingent_policy ~root ~world ~policy_id ~outcome_id ~owner
+    ~generation ~outcome_digest =
+  validate_atom "world" world;
+  validate_atom "contingent-policy" policy_id;
+  validate_atom "contingent-outcome" outcome_id;
+  validate_atom "contingent-owner" owner;
+  validate_atom "contingent-generation" generation;
+  let outcome_digest =
+    require_digest "contingent-outcome" outcome_digest
+  in
+  with_machine_lock root (fun () ->
+      let states = load_all root in
+      let scheduling_world = find_world states world in
+      let decision =
+        match Hashtbl.find_opt scheduling_world.contingent_policies policy_id with
+        | Some value -> value
+        | None -> failf "epistemic-contingent-policy-missing:%s" policy_id
+      in
+      if decision.contingent_completed then
+        failf "epistemic-contingent-policy-already-completed:%s" policy_id;
+      if owner <> decision.contingent_owner
+         || generation <> decision.contingent_generation
+      then
+        failf "epistemic-contingent-observation-identity-drift:%s" policy_id;
+      let path = decision.contingent_current_path in
+      let node =
+        contingent_policy_node_at_path
+          decision.selected_contingent_policy path
+      in
+      let branch = contingent_branch_for_outcome node outcome_id in
+      let next_path, next_action, next_resource, state_name =
+        match branch.contingent_continuation with
+        | None -> ("-", "-", "-", "completed")
+        | Some child ->
+            let next_path =
+              path ^ "."
+              ^ string_of_int
+                  branch.contingent_branch_outcome.contingent_variant_index
+            in
+            ensure_contingent_resource_available states ~world ~policy_id
+              child.contingent_root_action.contingent_resource;
+            ( next_path, child.contingent_root_action.contingent_action_id,
+              child.contingent_root_action.contingent_resource, "advanced" )
+      in
+      let branch_digest =
+        contingent_observed_branch_digest path node branch
+      in
+      let current_action =
+        node.contingent_root_action.contingent_action_id
+      in
+      let fields =
+        [ ("world", world); ("contingent_policy", policy_id);
+          ("selected_policy_digest",
+           decision.selected_contingent_policy_digest);
+          ("current_path", path); ("current_action", current_action);
+          ("outcome", outcome_id); ("next_path", next_path);
+          ("next_action", next_action); ("next_resource", next_resource);
+          ("branch_digest", branch_digest);
+          ("outcome_digest", outcome_digest); ("owner", owner);
+          ("generation", generation) ]
+      in
+      let event =
+        append
+          ~verify:(fun _ ->
+            verify_contingent_transition ~policy_id
+              ~selected_policy_digest:
+                decision.selected_contingent_policy_digest
+              ~path ~node ~branch
+              ~claimed_next_action:
+                (if next_action = "-" then "" else next_action)
+              ~owner ~generation ~outcome_digest)
+          root world "CONTINGENT_POLICY_OBSERVED" fields
+      in
+      ignore (load_all root);
+      Printf.sprintf
+        "LOOM_CONTINGENT_OBSERVED schema=loom-robust-contingent-policy-v0 world=%s policy=%s state=%s path=%s current_action=%s outcome=%s next_path=%s next_action=%s released_resource=%s next_resource=%s outcome_sha256=%s head=%s"
+        world policy_id state_name path current_action outcome_id next_path
+        next_action node.contingent_root_action.contingent_resource
+        next_resource outcome_digest event.event_sha256)
+
 let fork ~root ~parent ~child ~agent ~lane ~hypothesis ~expected_parent_head =
   validate_atom "parent" parent;
   validate_atom "child" child;
@@ -2122,12 +3768,19 @@ let status ~root ~world =
             if decision.portfolio_completed then count else count + 1)
           state.attention_portfolios 0
       in
+      let live_contingent =
+        Hashtbl.fold
+          (fun _ decision count ->
+            if decision.contingent_completed then count else count + 1)
+          state.contingent_policies 0
+      in
       Printf.sprintf
-        "LOOM_WORLD_OK schema=%s world=%s events=%d knowledge=%d claims=%d challenged=%d live_capabilities=%d attention_plans=%d live_attention=%d attention_portfolios=%d live_portfolios=%d parent=%s head=%s"
+        "LOOM_WORLD_OK schema=%s world=%s events=%d knowledge=%d claims=%d challenged=%d live_capabilities=%d attention_plans=%d live_attention=%d attention_portfolios=%d live_portfolios=%d contingent_policies=%d live_contingent=%d parent=%s head=%s"
         schema world (List.length state.events) (Hashtbl.length state.knowledges)
         (Hashtbl.length state.claims) challenged live_capabilities
         (Hashtbl.length state.attentions) live_attention
         (Hashtbl.length state.attention_portfolios) live_portfolios
+        (Hashtbl.length state.contingent_policies) live_contingent
         (if state.parent_world = "" then "-" else state.parent_world)
         state.journal_head)
 
