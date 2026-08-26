@@ -184,10 +184,13 @@ fn main() -> i64 with IO, Mut {
 
     // ------------------------------------------------------------------
     // Round-trip test independent of RFC 8448: encrypt then decrypt an
-    // arbitrary plaintext at sequence numbers 0, 1, and the 254->255
-    // rollover, confirming the 8-byte sequence-number-to-nonce encoding
-    // handles a multi-byte sequence number correctly (RFC 8448's own
-    // trace only ever exercises sequence number 0).
+    // arbitrary plaintext at sequence numbers 0, 1, 254 (0xfe), 255
+    // (0xff, the low-byte saturation point), and 256 (the genuine
+    // 255->256 multi-byte carry, where the second-to-last byte of the
+    // 8-byte big-endian sequence number increments for the first time),
+    // confirming the 8-byte sequence-number-to-nonce encoding handles a
+    // multi-byte sequence number correctly (RFC 8448's own trace only
+    // ever exercises sequence number 0).
     // ------------------------------------------------------------------
     var rt_state = record_layer_new(AEAD_AES_128_GCM, 16, 12)
     record_layer_rekey(&!rt_state, &derived_key, &derived_iv, &derived_key, &derived_iv)
@@ -200,14 +203,18 @@ fn main() -> i64 with IO, Mut {
     rawbuf_set(&msg, 4, 0x6f) // 'o'
 
     var seq_target: i64 = 0
-    while seq_target < 255 {
+    while seq_target <= 256 {
         // Drive write_seq/read_seq up to `seq_target` by round-tripping
         // dummy records, then do the real assertion at that sequence
-        // number. seq_target takes the values 0, 1, ..., 254 so both the
-        // single-digit case and the 254->255 rollover-adjacent boundary
-        // (writing byte 0xfe then 0xff of the 8-byte big-endian sequence
-        // number into the nonce) are exercised, per this task's brief.
-        if seq_target == 0 || seq_target == 1 || seq_target == 254 {
+        // number. seq_target takes the values 0, 1, ..., 256 so the
+        // single-digit case, the low-byte saturation point (seq == 255,
+        // i.e. 0xff, the last value the low byte of the 8-byte
+        // big-endian sequence number can hold), and the genuine
+        // multi-byte carry (seq == 256, where the second-to-last byte of
+        // that 8-byte encoding increments for the first time) are all
+        // actually exercised at those exact sequence numbers -- not just
+        // approached by a loop bound that stopped one short.
+        if seq_target == 0 || seq_target == 1 || seq_target == 254 || seq_target == 255 || seq_target == 256 {
             let ct = record_encrypt(&!rt_state, TLS_CONTENT_TYPE_APPLICATION_DATA, &msg, 5)
             let (rt_content_type, rt_plain, rt_plain_len, rt_ok) = record_decrypt(&!rt_state, &ct, 22)
             assert(rt_ok)
@@ -222,6 +229,6 @@ fn main() -> i64 with IO, Mut {
         seq_target = seq_target + 1
     }
 
-    println("tls_record_rfc8448: round-trip OK at seq 0, 1, and the 254->255 rollover")
+    println("tls_record_rfc8448: round-trip OK at seq 0, 1, 254 (0xfe), 255 (0xff low-byte saturation), and 256 (genuine multi-byte carry)")
     return 0
 }
