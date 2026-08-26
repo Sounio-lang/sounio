@@ -15,7 +15,7 @@ PRUNE_BACKUPS="${PLAN_BIG_OVERNIGHT_PRUNE_BACKUPS:-1}"
 
 usage() {
   cat <<USAGE
-Usage: scripts/rotate_overnight_plan_big_artifacts.sh [options]
+Usage: scripts/ops/rotate_overnight_plan_big_artifacts.sh [options]
 
 Options:
   --keep-run-logs N      Keep newest N run_*.log files (default: 120)

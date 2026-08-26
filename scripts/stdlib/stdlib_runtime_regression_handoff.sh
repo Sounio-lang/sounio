@@ -145,7 +145,7 @@ status_summary = "ready" if (strict_science_rc != 0 and science_status == "fail"
 obj = {
     "schema": "sounio.stdlib.runtime_regression_upstream_handoff.v1",
     "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    "command": "bash scripts/stdlib_runtime_regression_handoff.sh",
+    "command": "bash scripts/stdlib/stdlib_runtime_regression_handoff.sh",
     "status_summary": status_summary,
     "runtime_provenance": {
         "souc_bin": souc_bin,

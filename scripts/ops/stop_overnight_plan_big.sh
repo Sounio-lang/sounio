@@ -12,7 +12,7 @@ WAIT_SEC="${PLAN_BIG_OVERNIGHT_STOP_WAIT_SEC:-15}"
 
 usage() {
   cat <<USAGE
-Usage: scripts/stop_overnight_plan_big.sh [--force] [--wait-sec N]
+Usage: scripts/ops/stop_overnight_plan_big.sh [--force] [--wait-sec N]
 
 Options:
   --force       Send SIGKILL if process does not stop after wait window

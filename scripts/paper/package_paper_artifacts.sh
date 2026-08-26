@@ -9,7 +9,7 @@
 #   - Self-hosting stage parity evidence
 #
 # Usage:
-#   bash scripts/package_paper_artifacts.sh
+#   bash scripts/paper/package_paper_artifacts.sh
 #
 # Output:
 #   artifacts/omega/paper_artifacts.tar.gz

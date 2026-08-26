@@ -209,7 +209,7 @@ show_help() {
   cat <<'EOF_HELP'
 GLM-4.7 Performance Benchmark Suite (No-Rust)
 
-Usage: scripts/run_glm_benchmarks.sh [COMMAND]
+Usage: scripts/research/run_glm_benchmarks.sh [COMMAND]
 
 Commands:
   check           Check prerequisites
