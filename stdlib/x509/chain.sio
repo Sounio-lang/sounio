@@ -29,21 +29,77 @@ struct ChainCandidate {
     len: i32,
 }
 
+// ARENA DISCIPLINE FOR THIS WHOLE MODULE (2026-08-26, see
+// docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md):
+// the Madaros runtime arena is NEVER reclaimed -- every allocation is a
+// permanent per-process budget spend against a fixed ~1.85 GiB heap, and
+// running out is an uncatchable `madaros: arena full` / exit 181 abort
+// (Finding 12, docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md).
+// A `Certificate` is ~46 KB. Binding one by value -- `let c = certs[i]` --
+// therefore burns 46 KB of a non-refundable budget, and this module's DFS
+// used to do exactly that once per POOL ENTRY per DFS STEP (150+ trust-store
+// roots x several steps = tens of MB per single chain verification).
+//
+// RULE: never bind a `Certificate` (or a `ChainCandidate`, which holds 11 of
+// them) to a `let`/`var` when a `&` reference taken directly on the array
+// element will do. `&some_array[i as usize]` and `&some.field[i as usize]`
+// are both well-supported and are what the code below uses throughout.
+//
+// The one deliberate exception is the `rc` temporary in the "record a
+// completed path" branch: writing straight into `candidates[n].certs[ci]`
+// would be a doubly-indexed struct-in-array write, which is a KNOWN-
+// CORRUPTING shape on this compiler (see the long comment in
+// stdlib/x509/cert.sio's x509_parse_general_names). That temp costs ~506 KB
+// but is paid at most MAX_CHAIN_CANDIDATES times, not per pool entry.
+
+// True when `candidate` is a plausible issuer of `cert`: AKI/SKI match when
+// `cert` carries an authorityKeyIdentifier AND `candidate` carries a
+// subjectKeyIdentifier, else issuer-DN == candidate-subject equality.
+//
+// Exists so the search below can compare through `&Certificate` references
+// taken on the array element rather than copying each candidate by value.
+fn cert_is_plausible_issuer(cert: &Certificate, candidate: &Certificate) -> bool {
+    if cert.authority_key_id_len > 0 && candidate.subject_key_id_len > 0 {
+        // Note the asymmetry with the DN fallback, preserved exactly from
+        // the original inline form: when both key identifiers are present
+        // but their LENGTHS differ, the result is `false` -- it does NOT
+        // fall through to a DN comparison.
+        if cert.authority_key_id_len != candidate.subject_key_id_len {
+            return false
+        }
+        var same: bool = true
+        var b: i32 = 0
+        while b < cert.authority_key_id_len {
+            if cert.authority_key_id[b as usize] != candidate.subject_key_id[b as usize] { same = false }
+            b = b + 1
+        }
+        return same
+    }
+    x509_name_eq(&cert.issuer, &candidate.subject)
+}
+
 // Returns the count of pool indices (written into `out_indices`) that are
-// plausible issuers of `cert`: identified by AKI/SKI match when `cert`
-// carries an authorityKeyIdentifier, else by issuer-DN == candidate-subject
-// equality. `pool_certs`/`pool_bufs` is intermediates ++ trust_store.certs,
-// built once by the caller (not reconstructed per DFS step).
+// plausible issuers of `cert`.
+//
+// The "pool" is VIRTUAL: index `i` denotes `intermediates[i]` while
+// `i < intermediate_count`, and `trust_store.certs[i - intermediate_count]`
+// beyond that. The previous version materialised this as a real
+// `[Certificate; 520]` array that the caller rebuilt on every verification
+// -- ~24 MB of permanent arena for the array plus one 46 KB copy per
+// trust-store root to fill it, all to hold certificates that already exist
+// in memory. Nothing is copied now; only i64 indices are.
 fn chain_find_issuer_candidates(
     cert: &Certificate,
-    pool_certs: &[Certificate; 520],
-    pool_bufs: &[RawBuf; 520],
-    pool_len: i64,
+    intermediates: &[Certificate; 8],
+    intermediate_count: i32,
+    trust_store: &TrustStore,
     exclude_index: &[i64; 11],
     exclude_len: i32,
     out_indices: &![i64; 520],
 ) -> i32 with Mut {
     var out_count: i32 = 0
+    let split: i64 = intermediate_count as i64
+    let pool_len: i64 = split + (trust_store.count as i64)
     var i: i64 = 0
     while i < pool_len {
         var already_used: bool = false
@@ -53,20 +109,11 @@ fn chain_find_issuer_candidates(
             e = e + 1
         }
         if !already_used {
-            let candidate = pool_certs[i as usize]
             var matches: bool = false
-            if cert.authority_key_id_len > 0 && candidate.subject_key_id_len > 0 {
-                if cert.authority_key_id_len == candidate.subject_key_id_len {
-                    var same: bool = true
-                    var b: i32 = 0
-                    while b < cert.authority_key_id_len {
-                        if cert.authority_key_id[b as usize] != candidate.subject_key_id[b as usize] { same = false }
-                        b = b + 1
-                    }
-                    matches = same
-                }
+            if i < split {
+                matches = cert_is_plausible_issuer(cert, &intermediates[i as usize])
             } else {
-                matches = x509_name_eq(&cert.issuer, &candidate.subject)
+                matches = cert_is_plausible_issuer(cert, &trust_store.certs[(i - split) as usize])
             }
             if matches {
                 out_indices[out_count as usize] = i
@@ -112,23 +159,10 @@ pub fn chain_build_candidates(
     ]
     var result_count: i32 = 0
 
-    var pool_certs: [Certificate; 520] = [certificate_zero(); 520]
-    var pool_bufs: [RawBuf; 520] = [rawbuf_new(1); 520]
-    var pool_len: i64 = 0
-    var pi: i64 = 0
-    while pi < (intermediate_count as i64) {
-        pool_certs[pool_len as usize] = intermediates[pi as usize]
-        pool_bufs[pool_len as usize] = intermediate_bufs[pi as usize]
-        pool_len = pool_len + 1
-        pi = pi + 1
-    }
-    var ti: i64 = 0
-    while ti < (trust_store.count as i64) {
-        pool_certs[pool_len as usize] = trust_store.certs[ti as usize]
-        pool_bufs[pool_len as usize] = trust_store.bufs[ti as usize]
-        pool_len = pool_len + 1
-        ti = ti + 1
-    }
+    // Virtual pool (see chain_find_issuer_candidates): pool index `i` is
+    // `intermediates[i]` while `i < split`, else `trust_store.certs[i -
+    // split]`. No `[Certificate; 520]` pool array is materialised.
+    let split: i64 = intermediate_count as i64
 
     // Explicit-stack DFS (no recursion needed): each stack frame is a path
     // prefix plus the list of pool indices already tried as its next
@@ -149,6 +183,12 @@ pub fn chain_build_candidates(
     // ITS tried-count instead).
     var tried: [i32; 11] = [0; 11]
 
+    // Hoisted out of the DFS loop: this is 4 KB, and the arena never gives
+    // it back, so re-declaring it per iteration leaked 4 KB per DFS step.
+    // It is fully overwritten by chain_find_issuer_candidates' out_count
+    // prefix on every use, so hoisting carries no stale-data risk.
+    var candidate_indices: [i64; 520] = [0; 520]
+
     // NOTE (fix round, Findings 1+2 from adversarial review): the loop's
     // exit condition must fire ONLY on `depth == 0` (search space fully
     // explored) or `result_count >= MAX_CHAIN_CANDIDATES` (enough
@@ -159,8 +199,10 @@ pub fn chain_build_candidates(
     // candidate at shallower depths (Finding 1). The depth cap is now
     // enforced inside the loop body instead, as an explicit backtrack.
     while depth >= 1 && (result_count as i64) < MAX_CHAIN_CANDIDATES {
-        let current = path_certs[(depth - 1) as usize]
-        if chain_is_trusted_root(&current, trust_store) && depth > 1 {
+        // `&path_certs[(depth - 1) as usize]`, not `let current =
+        // path_certs[...]`: the by-value bind allocated a fresh ~46 KB
+        // Certificate copy on EVERY iteration of this loop.
+        if chain_is_trusted_root(&path_certs[(depth - 1) as usize], trust_store) && depth > 1 {
             var rc = ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: depth as i32 }
             var ci: i64 = 0
             while ci < depth {
@@ -191,7 +233,6 @@ pub fn chain_build_candidates(
             // index in the first place.
             depth = depth - 1
         } else {
-            var candidate_indices: [i64; 520] = [0; 520]
             // Finding 2's fix: exclude_len must be `depth`, not `depth -
             // 1`. `path_pool_index[i]` records the pool index of the cert
             // occupying path position `i`, and `current` (the cert whose
@@ -206,13 +247,21 @@ pub fn chain_build_candidates(
             // with Finding 1's bug, could exhaust the whole search on a
             // dead-end branch before ever trying the real sibling
             // candidate sitting right next to it in `tried[]`.
-            let n = chain_find_issuer_candidates(&current, &pool_certs, &pool_bufs, pool_len, &path_pool_index, depth as i32, &!candidate_indices)
+            let n = chain_find_issuer_candidates(&path_certs[(depth - 1) as usize], intermediates, intermediate_count, trust_store, &path_pool_index, depth as i32, &!candidate_indices)
             if (tried[depth as usize] as i64) < (n as i64) {
                 let chosen = candidate_indices[tried[depth as usize] as usize]
                 tried[depth as usize] = tried[depth as usize] + 1
                 path_pool_index[depth as usize] = chosen
-                path_certs[depth as usize] = pool_certs[chosen as usize]
-                path_bufs[depth as usize] = pool_bufs[chosen as usize]
+                // Virtual-pool resolution, replacing the materialised
+                // pool_certs/pool_bufs arrays. Same index ordering as
+                // before: intermediates first, then trust-store roots.
+                if chosen < split {
+                    path_certs[depth as usize] = intermediates[chosen as usize]
+                    path_bufs[depth as usize] = intermediate_bufs[chosen as usize]
+                } else {
+                    path_certs[depth as usize] = trust_store.certs[(chosen - split) as usize]
+                    path_bufs[depth as usize] = trust_store.bufs[(chosen - split) as usize]
+                }
                 depth = depth + 1
                 // Only reset the new depth's tried-counter when that depth
                 // is still within the searchable range (<= CHAIN_MAX_DEPTH
@@ -280,13 +329,17 @@ fn key_usage_allows_cert_sign(key_usage_bits: i32) -> bool {
 // x509_verify_chain to pick the "most progress" candidate to report when
 // every candidate fails for a different reason.
 fn chain_verify_path(path_certs: &[Certificate; 11], path_bufs: &[RawBuf; 11], path_len: i32, now_unix: i64) -> (i64, i32) with IO {
+    // Every certificate here is read through a direct array-element field
+    // access or a `&` reference -- never bound by value. See this module's
+    // "ARENA DISCIPLINE" note: `let cert = path_certs[i]` allocated a
+    // permanent ~46 KB copy per loop iteration, and this function runs once
+    // per candidate path.
     var i: i32 = 0
     while i < path_len {
-        let cert = path_certs[i as usize]
-        if now_unix < cert.not_before_unix {
+        if now_unix < path_certs[i as usize].not_before_unix {
             return (CHAIN_ERR_NOT_YET_VALID, i)
         }
-        if now_unix > cert.not_after_unix {
+        if now_unix > path_certs[i as usize].not_after_unix {
             return (CHAIN_ERR_EXPIRED, i)
         }
         i = i + 1
@@ -294,25 +347,21 @@ fn chain_verify_path(path_certs: &[Certificate; 11], path_bufs: &[RawBuf; 11], p
 
     var d: i32 = 0
     while d < path_len - 1 {
-        let cert = path_certs[d as usize]
-        let cert_buf = path_bufs[d as usize]
-        let issuer = path_certs[(d + 1) as usize]
-
-        if !x509_verify_signature(&cert_buf, &cert, &issuer) {
+        if !x509_verify_signature(&path_bufs[d as usize], &path_certs[d as usize], &path_certs[(d + 1) as usize]) {
             return (CHAIN_ERR_BAD_SIGNATURE, d)
         }
 
-        if !issuer.is_ca {
+        if !path_certs[(d + 1) as usize].is_ca {
             return (CHAIN_ERR_NOT_CA, d + 1)
         }
-        if issuer.key_usage_bits != 0 && !key_usage_allows_cert_sign(issuer.key_usage_bits) {
+        if path_certs[(d + 1) as usize].key_usage_bits != 0 && !key_usage_allows_cert_sign(path_certs[(d + 1) as usize].key_usage_bits) {
             return (CHAIN_ERR_NOT_CA, d + 1)
         }
-        if issuer.path_len_constraint >= 0 {
+        if path_certs[(d + 1) as usize].path_len_constraint >= 0 {
             // Number of CA certs strictly between `issuer` and the leaf:
             // path_certs[0..d] excludes the leaf itself (index 0) when d>0,
             // so the count of intermediates below `issuer` is exactly `d`.
-            if (d as i64) > (issuer.path_len_constraint as i64) {
+            if (d as i64) > (path_certs[(d + 1) as usize].path_len_constraint as i64) {
                 return (CHAIN_ERR_PATH_LEN_EXCEEDED, d + 1)
             }
         }
@@ -482,23 +531,9 @@ pub fn x509_verify_chain(
     ]
     var candidate_count: i32 = 0
 
-    var pool_certs: [Certificate; 520] = [certificate_zero(); 520]
-    var pool_bufs: [RawBuf; 520] = [rawbuf_new(1); 520]
-    var pool_len: i64 = 0
-    var pi: i64 = 0
-    while pi < (intermediate_count as i64) {
-        pool_certs[pool_len as usize] = intermediates[pi as usize]
-        pool_bufs[pool_len as usize] = intermediate_bufs[pi as usize]
-        pool_len = pool_len + 1
-        pi = pi + 1
-    }
-    var ti: i64 = 0
-    while ti < (trust_store.count as i64) {
-        pool_certs[pool_len as usize] = trust_store.certs[ti as usize]
-        pool_bufs[pool_len as usize] = trust_store.bufs[ti as usize]
-        pool_len = pool_len + 1
-        ti = ti + 1
-    }
+    // Virtual pool -- see chain_find_issuer_candidates and the matching
+    // comment in chain_build_candidates.
+    let split: i64 = intermediate_count as i64
 
     var path_certs: [Certificate; 11] = [certificate_zero(); 11]
     var path_bufs: [RawBuf; 11] = [rawbuf_new(1); 11]
@@ -510,9 +545,12 @@ pub fn x509_verify_chain(
 
     var tried: [i32; 11] = [0; 11]
 
+    // Hoisted out of the loop -- see the matching comment in
+    // chain_build_candidates.
+    var candidate_indices: [i64; 520] = [0; 520]
+
     while depth >= 1 && (candidate_count as i64) < MAX_CHAIN_CANDIDATES {
-        let current = path_certs[(depth - 1) as usize]
-        if chain_is_trusted_root(&current, trust_store) && depth > 1 {
+        if chain_is_trusted_root(&path_certs[(depth - 1) as usize], trust_store) && depth > 1 {
             var rc = ChainCandidate { certs: [certificate_zero(); 11], bufs: [rawbuf_new(1); 11], len: depth as i32 }
             var ci: i64 = 0
             while ci < depth {
@@ -526,14 +564,21 @@ pub fn x509_verify_chain(
         } else if depth > CHAIN_MAX_DEPTH {
             depth = depth - 1
         } else {
-            var candidate_indices: [i64; 520] = [0; 520]
-            let n = chain_find_issuer_candidates(&current, &pool_certs, &pool_bufs, pool_len, &path_pool_index, depth as i32, &!candidate_indices)
+            let n = chain_find_issuer_candidates(&path_certs[(depth - 1) as usize], intermediates, intermediate_count, trust_store, &path_pool_index, depth as i32, &!candidate_indices)
             if (tried[depth as usize] as i64) < (n as i64) {
                 let chosen = candidate_indices[tried[depth as usize] as usize]
                 tried[depth as usize] = tried[depth as usize] + 1
                 path_pool_index[depth as usize] = chosen
-                path_certs[depth as usize] = pool_certs[chosen as usize]
-                path_bufs[depth as usize] = pool_bufs[chosen as usize]
+                // Virtual-pool resolution, replacing the materialised
+                // pool_certs/pool_bufs arrays. Same index ordering as
+                // before: intermediates first, then trust-store roots.
+                if chosen < split {
+                    path_certs[depth as usize] = intermediates[chosen as usize]
+                    path_bufs[depth as usize] = intermediate_bufs[chosen as usize]
+                } else {
+                    path_certs[depth as usize] = trust_store.certs[(chosen - split) as usize]
+                    path_bufs[depth as usize] = trust_store.bufs[(chosen - split) as usize]
+                }
                 depth = depth + 1
                 if depth <= CHAIN_MAX_DEPTH {
                     tried[depth as usize] = 0
@@ -555,15 +600,16 @@ pub fn x509_verify_chain(
     var best_error: i64 = CHAIN_ERR_NO_PATH_TO_ROOT
     var c: i32 = 0
     while c < candidate_count {
-        let cand = candidates[c as usize]
-        let (result, depth_reached) = chain_verify_path(&cand.certs, &cand.bufs, cand.len, now_unix)
+        // `&candidates[c].certs`, not `let cand = candidates[c]`: a
+        // ChainCandidate holds 11 Certificates, so the by-value bind burned
+        // ~506 KB of permanent arena per candidate examined.
+        let (result, depth_reached) = chain_verify_path(&candidates[c as usize].certs, &candidates[c as usize].bufs, candidates[c as usize].len, now_unix)
         if result == CHAIN_OK {
             if !x509_verify_hostname(leaf, hostname, hostname_len) {
                 return CHAIN_ERR_HOSTNAME_MISMATCH
             }
             if ocsp_response_len > 0 {
-                let issuer_in_path = cand.certs[1]
-                let (ocsp_status, ocsp_err) = ocsp_verify_response(ocsp_response, ocsp_response_len, leaf, &issuer_in_path, now_unix)
+                let (ocsp_status, ocsp_err) = ocsp_verify_response(ocsp_response, ocsp_response_len, leaf, &candidates[c as usize].certs[1], now_unix)
                 if ocsp_err != OCSP_OK {
                     return CHAIN_ERR_OCSP_INVALID
                 }
