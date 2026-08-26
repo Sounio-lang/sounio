@@ -85,3 +85,27 @@ not re-added here.
 Fix applied on branch `fable/issue2143-fo-leak` from `origin/main` 25a6cf9c8b, with codex's
 confirmation of base and approach. Buggy/fixed codegen receipt preserved above. Framed
 honestly as defensive + dead-code removal (no reproduced miscompile), 0 regressions.
+
+## Regression differential (deterministic build-level, 296 tests)
+
+Execution differentials were abandoned as unreliable: the suite is flaky — the *same*
+buggy binary run 3× on `linear_match_binding_consumed`, `gpu_hlir_vec4_lane_plan_leaf`,
+`knowledge_array` gives self-inconsistent output (intermittent timeout/no-output under
+parallel load), so a single-run buggy-vs-fixed comparison measures flakiness, not codegen.
+
+Compilation, by contrast, is deterministic (verified: same binary builds byte-identical
+ELF twice). So the authoritative differential compares the **emitted ELF** buggy vs fixed
+over 296 tests — 169 FO-seeding (the complete set the fix can touch) + 127 non-FO control:
+
+| result | count |
+|---|---|
+| **ELF byte-identical** (no codegen change) | **251** |
+| **ELF differs** (AFF 0 / CTL 0) | **0** |
+| NOBUILD on BOTH binaries (pre-existing) | 45 |
+| NOBUILD asymmetric (fix-caused) | **0** |
+
+**DIFF count = 0.** The fix produces byte-identical emitted code for every one of the 251
+buildable tests — including all FO-affected ones — and introduces zero new build failures
+(the 45 NOBUILDs fail identically on origin/main's buggy binary too). This is the strongest
+no-regression proof and independently reconfirms the MASKED finding: the reset changes only
+internal Lowerer state that no current input lowers into different machine code.
