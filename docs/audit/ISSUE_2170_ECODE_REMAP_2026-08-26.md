@@ -53,11 +53,18 @@ collisions. Other collision classes retain separate ownership.
   `b9a4dd9ec5a0a46fa4e0613df3e1a20f3f871ea5552f159af5794cd76eec0099`,
   101388577 bytes. The build used the independently fixed-pointed #1678 seed
   `455365f19b6c96506991cfac5fed3d86ca655a324567d71bc9309ae5cd2aa759`.
+- Shipped Madaros: `bin/madaros-linux-x86_64` is that exact source-fresh ELF.
+  Its gate receipt names source commit `aac119fb941906c65764167fc82dae3a510c5475`
+  and records `madaros_full_gate.sh=pass`.
 - Live remap witnesses: malformed ZD locus refused with E247; reserved
   wide-float source refused with E249; unsupported extern call refused with
-  E250. Each returned `rc=1` and none printed `check: OK`.
+  E250. Each returned `rc=1` and none printed `check: OK`. These witnesses also
+  passed through the public default `bin/souc` path after artifact promotion.
 - Extern live gate: implemented control checked clean; unsupported call refused
   with E250 and produced no ELF.
+- CI wiring: Contracts runs the structural mapping and all four sabotage
+  controls; Madaros Witness Gate reruns the live source-reachable witnesses
+  against `/tmp/madaros-ci.elf` built from the commit under test.
 - Website diagnostic modules: targeted TypeScript check passed. Full Astro
   check could not allocate its WebAssembly instance in the pod; whole-project
   `tsc` also retains the unrelated baseline implicit-any in `feed.xml.ts`.

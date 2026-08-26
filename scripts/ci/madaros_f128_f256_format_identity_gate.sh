@@ -292,6 +292,6 @@ echo "claim=internal_format_identity_plus_fresh_source_canonical_cli_containment
 echo "source_values=parser_E249_with_checker_defense_on_canonical_cli_paths"
 echo "ir_schema=unchanged"
 echo "value_transport=not_implemented"
-echo "ci_enforcement=not_wired_manual_gate"
+echo "ci_enforcement=madaros_witness_gate"
 echo "future_preparsed_cache=out_of_scope_must_version_or_revalidate"
 echo "internal_direct_load_lower=not_claimed_must_check_parser_errors"
