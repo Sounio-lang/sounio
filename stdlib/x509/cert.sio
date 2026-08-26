@@ -1520,7 +1520,14 @@ pub fn x509_parse_certificate(buf: &RawBuf, len: i64) -> (Certificate, i64) with
     (cert, X509_OK)
 }
 
-pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer_modulus: &BigInt, issuer_exponent: &BigInt) -> bool with IO {
+// Verifies cert's outer signature against issuer's public key. `issuer` is
+// the ISSUING certificate's own full, already-parsed Certificate -- not
+// pre-extracted RSA fields -- so this function can branch on
+// `issuer.public_key_algorithm` to dispatch RSA vs ECDSA verification, and
+// enforce the algorithm-confusion cross-check below. The original RSA-only
+// signature (`issuer_modulus: &BigInt, issuer_exponent: &BigInt`) is gone;
+// every call site now passes `&issuer`.
+pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer: &Certificate) -> bool with IO {
     var hash_algorithm: i32 = 0
     // Per Finding 18: call each OID accessor once into a local `let`
     // before taking a reference to it.
@@ -1528,6 +1535,69 @@ pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer_modulus: &
     let oid_s256 = oid_sha256_with_rsa()
     let oid_s384 = oid_sha384_with_rsa()
     let oid_s512 = oid_sha512_with_rsa()
+    let oid_ecdsa_256 = oid_ecdsa_with_sha256()
+    let oid_ecdsa_384 = oid_ecdsa_with_sha384()
+
+    let is_rsa_sig_alg = oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s1)
+        || oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s256)
+        || oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s384)
+        || oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s512)
+    let is_ecdsa_sha256_sig_alg = oid_eq8(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_ecdsa_256)
+    let is_ecdsa_sha384_sig_alg = oid_eq8(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_ecdsa_384)
+
+    if is_ecdsa_sha384_sig_alg {
+        // ecdsa-with-SHA384 is a REAL gap, not simply "unsupported": Task 2
+        // of this plan only built ecdsa_p256_verify's SHA-256 hashing path
+        // (it hashes internally with sha256(), unconditionally). Calling it
+        // on SHA-384-intended signature data would either always fail (safe
+        // but misleading -- looks like a bad signature, not an unsupported
+        // algorithm) or, worse, coincidentally validate something it never
+        // should. Fail closed and explicitly, rather than silently
+        // mis-dispatching to the wrong hash. Extending ecdsa_p256_verify
+        // itself for SHA-384 is out of scope for this task.
+        return false
+    }
+
+    // Algorithm-confusion cross-check (a real security property, not just
+    // type-safety): the certificate's OWN signature-algorithm OID must
+    // agree with the ISSUER's key algorithm. A cert signed with
+    // ecdsa-with-SHA256 whose alleged issuer's key is RSA (or vice versa)
+    // must never reach either verification path below.
+    if is_rsa_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_RSA {
+        return false
+    }
+    if is_ecdsa_sha256_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256 {
+        return false
+    }
+
+    if is_ecdsa_sha256_sig_alg {
+        // Same tbs_copy pattern as the RSA path below: the TBSCertificate
+        // bytes to hash live at cert.tbs_start > 0 inside a larger buffer,
+        // so copy exactly that byte range into a fresh RawBuf (offset 0)
+        // before hashing/verifying.
+        let tbs_copy = rawbuf_new(cert.tbs_len + 8)
+        var eci: i64 = 0
+        while eci < cert.tbs_len {
+            rawbuf_set(&tbs_copy, eci, rawbuf_get(buf, cert.tbs_start + eci))
+            eci = eci + 1
+        }
+
+        // cert.outer_signature is already the DER-encoded ECDSA-Sig-Value
+        // SEQUENCE { r INTEGER, s INTEGER } (RFC 3279 SS2.2.3) -- X.509's own
+        // SignatureValue BIT STRING encoding of an ECDSA signature and
+        // ecdsa_p256_verify's expected `der_signature` wire format are the
+        // same structure, so it is passed through directly with no
+        // re-encoding.
+        let esig_buf = rawbuf_new((cert.outer_signature_len as i64) + 8)
+        var esi: i64 = 0
+        while esi < (cert.outer_signature_len as i64) {
+            rawbuf_set(&esig_buf, esi, (cert.outer_signature[esi as usize] as i64) & 255)
+            esi = esi + 1
+        }
+
+        return ecdsa_p256_verify(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
+    }
+
     if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s1) {
         hash_algorithm = PKCS1_HASH_SHA1
     } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s256) {
@@ -1537,8 +1607,11 @@ pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer_modulus: &
     } else if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_s512) {
         hash_algorithm = PKCS1_HASH_SHA512
     } else {
-        return false   // unsupported algorithm -- see spec Non-Goals (no ECDSA/Ed25519)
+        return false   // unsupported algorithm
     }
+
+    let issuer_modulus = &issuer.modulus
+    let issuer_exponent = &issuer.public_exponent
 
     var message_hash: [u8; 64] = [0; 64]
     var message_hash_len: i64 = 0

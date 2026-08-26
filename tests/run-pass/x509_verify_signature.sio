@@ -197,9 +197,23 @@ fn main() -> i64 with IO {
     let issuer_modulus = build_bigint_128(issuer_modulus_limbs())
     let issuer_exponent = bigint_from_u32(65537)
 
+    // x509_verify_signature now takes the issuer's full Certificate (so it
+    // can branch on issuer.public_key_algorithm), not pre-extracted RSA
+    // fields directly. Build a minimal synthetic issuer Certificate --
+    // certificate_zero() plus exactly the fields the RSA path reads
+    // (modulus/public_exponent/public_key_algorithm) -- rather than parsing
+    // a real issuer cert, since this test's whole point is exercising
+    // x509_verify_signature against a known real key pair's raw
+    // modulus/exponent, independent of any issuer certificate's own wire
+    // encoding.
+    var issuer_cert = certificate_zero()
+    issuer_cert.modulus = issuer_modulus
+    issuer_cert.public_exponent = issuer_exponent
+    issuer_cert.public_key_algorithm = PUBKEY_ALG_RSA
+
     // ---- True case: the real, openssl-verified signature against the
     // real key pair's own modulus/exponent must verify. ----
-    let ok = x509_verify_signature(&buf, &cert, &issuer_modulus, &issuer_exponent)
+    let ok = x509_verify_signature(&buf, &cert, &issuer_cert)
     if ok == false {
         print_int(5)
         return 1
@@ -222,7 +236,7 @@ fn main() -> i64 with IO {
     }
     let original_byte = rawbuf_get(&corrupted_buf, 24) & 255
     rawbuf_set(&corrupted_buf, 24, original_byte ^ 1)
-    let bad1 = x509_verify_signature(&corrupted_buf, &cert, &issuer_modulus, &issuer_exponent)
+    let bad1 = x509_verify_signature(&corrupted_buf, &cert, &issuer_cert)
     if bad1 == true {
         print_int(6)
         return 1
@@ -232,7 +246,11 @@ fn main() -> i64 with IO {
     // ---- False case 2: the correct (uncorrupted) TBSCertificate bytes,
     // but verified against the WRONG issuer's public key, must NOT verify. --
     let wrong_modulus = build_bigint_128(wrong_modulus_limbs())
-    let bad2 = x509_verify_signature(&buf, &cert, &wrong_modulus, &issuer_exponent)
+    var wrong_issuer_cert = certificate_zero()
+    wrong_issuer_cert.modulus = wrong_modulus
+    wrong_issuer_cert.public_exponent = issuer_exponent
+    wrong_issuer_cert.public_key_algorithm = PUBKEY_ALG_RSA
+    let bad2 = x509_verify_signature(&buf, &cert, &wrong_issuer_cert)
     if bad2 == true {
         print_int(7)
         return 1
