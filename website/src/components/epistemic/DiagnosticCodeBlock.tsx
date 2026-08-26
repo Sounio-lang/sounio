@@ -1,7 +1,7 @@
 import {
-  E219_HELP,
-  E219_MESSAGE,
-  E219_NOTE,
+  E250_HELP,
+  E250_MESSAGE,
+  E250_NOTE,
   PRE_FIX_PRINT_CAP,
   splitAtPrintCap,
 } from '../../lib/diagnosticHonesty';
@@ -64,7 +64,7 @@ export function DiagnosticCodeBlock({
   effects = [],
   lines,
   span,
-  code = 'E219',
+  code = 'E250',
   message,
   help,
   note,
@@ -171,7 +171,7 @@ export function DiagnosticCodeBlock({
   );
 }
 
-export const E219_WITNESS_LINES: DiagnosticLine[] = [
+export const E250_WITNESS_LINES: DiagnosticLine[] = [
   { number: 19, text: 'extern "C" {' },
   { number: 20, text: '    fn malloc(size: i64) -> i64;' },
   { number: 21, text: '    fn abs(x: i64) -> i64;' },
@@ -185,28 +185,28 @@ export const E219_WITNESS_LINES: DiagnosticLine[] = [
   { number: 29, text: '}' },
 ];
 
-// P0-F allow-listed malloc. The live E219 in this fixture is abs — the
+// P0-F allow-listed malloc. The live E250 in this fixture is abs — the
 // call that used to compile to a fabricated 0 (#1622) and that #1801
 // now infects as ty_error() rather than the declared i64.
-export const E219_WITNESS_SPAN: DiagnosticSpan = {
+export const E250_WITNESS_SPAN: DiagnosticSpan = {
   file: 'tests/compile-fail/extern_c_unimplemented_builtin.sio',
   line: 27,
   column: 15,
   endColumn: 18,
 };
 
-export function E219DiagnosticCodeBlock(props: { className?: string }) {
+export function E250DiagnosticCodeBlock(props: { className?: string }) {
   return (
     <DiagnosticCodeBlock
       filename="tests/compile-fail/extern_c_unimplemented_builtin.sio"
       engine="Madaros"
       effects={['IO']}
-      lines={E219_WITNESS_LINES}
-      span={E219_WITNESS_SPAN}
-      code="E219"
-      message={E219_MESSAGE}
-      help={E219_HELP}
-      note={E219_NOTE}
+      lines={E250_WITNESS_LINES}
+      span={E250_WITNESS_SPAN}
+      code="E250"
+      message={E250_MESSAGE}
+      help={E250_HELP}
+      note={E250_NOTE}
       markPrintCap
       className={props.className}
     />

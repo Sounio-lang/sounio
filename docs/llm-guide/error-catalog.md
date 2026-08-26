@@ -457,3 +457,7 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E232 | type-checker/struct | error | the same array local initialises two fields | — |
 | E245 | type-checker/epistemic | error | arithmetic between two Knowledge<T> values is not supported | — |
 | E246 | type-checker/effects | error | unknown effect, or effect dropped as a ninth slot | — |
+| E247 | type-checker/zero-divisor | error | ZD locus is not a well-formed sedenion pair | [E247.md](explanations/E247.md) |
+| E248 | type-checker/numeric | error | f128/f256 value conversion is not implemented | [E248.md](explanations/E248.md) |
+| E249 | parser/type-checker | error | f128/f256 is reserved for compiler-owned format identity | [E249.md](explanations/E249.md) |
+| E250 | type-checker/extern | error | call to an extern C function the native backend does not implement | [E250.md](explanations/E250.md) |

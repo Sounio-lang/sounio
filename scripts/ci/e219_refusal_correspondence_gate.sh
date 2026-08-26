@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Guard the correspondence between SounioRefusalHonesty and the Madaros
-# E219 / empty-stub path. A well-typed unimplemented call must refuse
+# E250 / empty-stub path. A well-typed unimplemented call must refuse
 # (not return the declared type) and must not compile to a stub that
 # reads 0.
 
@@ -87,12 +87,12 @@ if [[ ! -f "$MODEL_SOURCE" ]]; then
 fi
 
 if [[ "$NOT_RUN" -eq 0 ]]; then
-  # Checker: E219 still exists, and refuse infects the expression type.
-  check_count_ge "e219_sites" \
+  # Checker: E250 still exists, and refuse infects the expression type.
+  check_count_ge "e250_sites" \
     'name_is_native_backend_builtin.*\{|!name_is_native_backend_builtin' \
     "$CHECKER_SOURCE" 3
-  check_count_ge "e219_reports" \
-    ', 219, 0, 0, 0\)' "$CHECKER_SOURCE" 3
+  check_count_ge "e250_reports" \
+    ', 250, 0, 0, 0\)' "$CHECKER_SOURCE" 3
   check_count_ge "refuse_infects_ty_error" \
     'refused_unimplemented' "$CHECKER_SOURCE" 6
   check_grep "decl_is_not_call" \

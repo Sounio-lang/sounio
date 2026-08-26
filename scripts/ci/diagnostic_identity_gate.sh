@@ -51,7 +51,12 @@ gate_name "diagnostic_identity"
 # only evidence of where the boundary of "one identity" is unclear. Whoever
 # reconciles them should record which route was right per code, and lower these
 # lines accordingly.
-COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-34}"
+# 34 -> 30. #2170 keeps the published lean_single identities E208/E217/E218/E219
+# and moves the unrelated Madaros diagnostics that had been re-issued on those
+# same numbers to E247/E248/E249/E250. Four codes, each of which named two
+# things, now name one. Measured against origin/main on the same command, and
+# the delta is exactly those four with nothing else moving.
+COLLISION_CEILING="${SOUNIO_DIAG_COLLISION_CEILING:-30}"
 UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-141}"
 # 20 -> 21, and this one RISES on purpose.
 #
@@ -66,7 +71,15 @@ UNDOCUMENTED_CEILING="${SOUNIO_DIAG_UNDOCUMENTED_CEILING:-141}"
 # silently, so it is written here rather than adjusted quietly: every collision
 # fixed by moving an emitter will push this number up by one until the untagged
 # lean_single prints are tagged, at which point it falls by all of them at once.
-ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-14}"
+# 14 -> 18, and this one RISES for the reason written above it: repairing a
+# collision by moving an emitter orphans the catalogue row it vacated. The four
+# new orphans are E208/E217/E218/E219 -- exactly the four collisions repaired,
+# one for one. They are not dead: lean_single still emits their message text
+# untagged, which is the systemic cause of the whole family (#2170/#2171), and
+# this gate cannot yet tell "documented, emitted without the tag" from truly
+# dead. Tagging lean_single (#2212) is what collapses this population; it takes
+# 14 to 1 on its own and would absorb these four with it.
+ORPHANED_CEILING="${SOUNIO_DIAG_ORPHANED_CEILING:-18}"
 
 ART_DIR="$ROOT_DIR/artifacts/gates"; mkdir -p "$ART_DIR"
 ART="$ART_DIR/diagnostic_identity.json"

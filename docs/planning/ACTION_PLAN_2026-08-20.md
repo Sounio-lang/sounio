@@ -320,7 +320,7 @@ its slot is now reserved before the work starts.
 | 3 | **Is the integer tower closed or open?** | `i7`, `i999999`, `u4096` all typecheck; `i0` does not. |
 | ~~4~~ | ~~canonical epistemic shape~~ | **RULED — R3, Beta `(α, β)`.** |
 | 5 | **`int`/`uint`, `own`/`handle`, `u16`** | documented and dead — decision table in #2049. |
-| 6 | **Does `Reserved` belong on both engines?** | `E218` is Madaros-only; lean_single accepts `f128`. |
+| 6 | **Does `Reserved` belong on both engines?** | `E249` is Madaros-only; lean_single accepts `f128`. |
 | ~~7~~ | ~~abstract over effects?~~ | **RULED — R4, a real row with effect variables.** §6's subtyping direction follows from it and is still owed. |
 | 8 | **Does `Epistemic(950)` satisfy `Epistemic(400)`?** | §8, not §6 — belief is the value layer. |
 
