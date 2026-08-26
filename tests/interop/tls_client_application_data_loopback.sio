@@ -1,0 +1,196 @@
+// MANUAL SETUP REQUIRED -- not part of the default run-pass suite.
+//
+// Drives a real TLS 1.3 handshake against a local openssl s_server on
+// loopback (same fixture/approach as tests/interop/tls_client_handshake_
+// loopback.sio -- see that file's own header comment for why this lives
+// under tests/interop/ rather than tests/run-pass/: Madaros has no
+// fork/execve primitive to start the external openssl process itself), then
+// exercises the FULL application-data lifecycle this task (Task 8) adds:
+// sends a real minimal HTTP/1.0 request, reads back a real HTTP response
+// over the encrypted connection, confirms at least one NewSessionTicket
+// (which openssl s_server sends by default right after the handshake) was
+// silently discarded rather than handed back as application data, and
+// confirms the server's close_notify surfaces as a clean `tls_recv == 0`
+// EOF rather than a negative error or a hang.
+//
+// To run:
+//   1. Start the server against the COMMITTED fixture key+cert, with -www
+//      so it actually serves an HTTP status page for any request (Task 8's
+//      own Step 1 -- Task 7's test only needed the handshake to complete,
+//      never sent a real request):
+//        openssl s_server \
+//          -key tests/interop/fixtures/tls/rsa_key.pem \
+//          -cert tests/interop/fixtures/tls/rsa_cert.pem \
+//          -accept 44332 -tls1_3 -www
+//   2. SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run tests/interop/tls_client_application_data_loopback.sio
+//
+// Uses a different port (44332) from tls_client_handshake_loopback.sio's
+// 44330 so both interop tests can have their own openssl s_server instance
+// running side by side without a port clash, though only one needs to be
+// up at a time to run its own test.
+//
+// The fixture cert (tests/interop/fixtures/tls/rsa_cert.pem) is loaded at
+// runtime via the compiler's builtin `read_file(path: string) -> string
+// with IO` plus `x509::pem::pem_decode_next` -- the same PEM-loading chain
+// `stdlib/x509/trust_store.sio` already uses for the real system CA bundle
+// -- rather than embedding the DER bytes inline the way
+// tls_client_handshake_loopback.sio does; both approaches decode to the
+// exact same trust anchor, this one just avoids re-transcribing an 803-byte
+// array a second time in a second file.
+//
+// `now_unix` mirrors tls_client_handshake_loopback.sio's own approach:
+// `syscall6` (allowlisted on Madaros's native backend) with x86-64 syscall
+// number 201 (`time(2)`, NULL `tloc`) rather than `clock_gettime`, which the
+// native backend's extern-function allowlist does not include (verified
+// 2026-08-26 while building the sibling test).
+
+use tls::client::*
+use x509::trust_store::*
+use x509::cert::*
+use x509::pem::*
+use net::socket::*
+
+fn now_unix() -> i64 with IO {
+    syscall6(201, 0, 0, 0, 0, 0, 0)
+}
+
+// Copies a compiler string literal into a fresh RawBuf byte-for-byte.
+fn string_to_rawbuf(s: string) -> (RawBuf, i64) with IO {
+    let n = str_len(s)
+    let out = rawbuf_new(n + 8)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(&out, i, str_char_at(s, i))
+        i = i + 1
+    }
+    (out, n)
+}
+
+// Recursive accumulate-until-EOF loop -- see this file's header comment and
+// stdlib/tls/client.sio's own "control-flow-shape" note above
+// `tcp_recv_exact`: a `while` loop re-threading a `TlsConnection` (which
+// embeds a linear `TcpSocket`) trips this compiler's linear checker, so
+// this accumulation loop is recursion, exactly like every re-threading loop
+// inside client.sio itself. Returns (conn, total_bytes_accumulated,
+// status): status 0 means clean EOF (`close_notify` observed), negative
+// means `tls_recv` reported an error, and accumulation stops either way.
+fn recv_all(conn: TlsConnection, acc: &RawBuf, acc_len: i64, acc_cap: i64) -> (TlsConnection, i64, i64) with IO, Mut {
+    let tmp = rawbuf_new(4096 + 8)
+    let (conn2, n) = tls_recv(conn, &tmp, 4096)
+    if n < 0 {
+        (conn2, acc_len, n)
+    } else if n == 0 {
+        (conn2, acc_len, 0)
+    } else {
+        let room = acc_cap - acc_len
+        let copy_len = if n > room { room } else { n }
+        var i: i64 = 0
+        while i < copy_len {
+            rawbuf_set(acc, acc_len + i, rawbuf_get(&tmp, i))
+            i = i + 1
+        }
+        recv_all(conn2, acc, acc_len + copy_len, acc_cap)
+    }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let cert_pem = read_file("tests/interop/fixtures/tls/rsa_cert.pem")
+    let cert_pem_len = str_len(cert_pem)
+    let cert_pem_buf = rawbuf_new(cert_pem_len + 8)
+    var pi: i64 = 0
+    while pi < cert_pem_len {
+        rawbuf_set(&cert_pem_buf, pi, str_char_at(cert_pem, pi))
+        pi = pi + 1
+    }
+
+    let (der_buf, der_len, _next_offset, pem_err) = pem_decode_next(&cert_pem_buf, cert_pem_len, 0)
+    if pem_err != 0 || der_len == 0 {
+        println("tls_client_application_data_loopback: failed to PEM-decode the fixture certificate")
+        return 1
+    }
+
+    let (cert, perr) = x509_parse_certificate(&der_buf, der_len)
+    if perr != 0 {
+        println("tls_client_application_data_loopback: failed to parse the fixture certificate")
+        return 1
+    }
+
+    var store = TrustStore { certs: [certificate_zero(); 512], bufs: [rawbuf_new(1); 512], count: 1 }
+    store.certs[0] = cert
+    store.bufs[0] = der_buf
+
+    let (host, host_len) = string_to_rawbuf("127.0.0.1")
+
+    let (conn0, connect_result) = tls_connect(&host, host_len, 44332 as u16, &store, now_unix())
+    if connect_result != 0 {
+        println("tls_client_application_data_loopback: handshake failed")
+        print_int(connect_result)
+        return 1
+    }
+
+    let (request, request_len) = string_to_rawbuf("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+    let (conn1, sent) = tls_send(conn0, &request, request_len)
+    if sent != request_len {
+        println("tls_client_application_data_loopback: tls_send did not send the whole request")
+        return 1
+    }
+
+    let acc_cap: i64 = 65536
+    let acc = rawbuf_new(acc_cap + 8)
+    let (conn2, total_len, recv_status) = recv_all(conn1, &acc, 0, acc_cap)
+
+    if recv_status < 0 {
+        println("tls_client_application_data_loopback: tls_recv reported an error before EOF")
+        print_int(recv_status)
+        return 1
+    }
+    // recv_status == 0 here means recv_all's own terminal tls_recv call
+    // observed close_notify cleanly (0 = EOF, per tls_recv's tcp_recv-
+    // mirroring contract) -- not a hang, not a negative error. This is
+    // Step 5's close_notify-as-EOF assertion.
+
+    if total_len < 12 {
+        println("tls_client_application_data_loopback: response too short to contain an HTTP status line")
+        return 1
+    }
+
+    // Step 4 (NewSessionTicket-discard, made explicit): openssl s_server
+    // sends at least one NewSessionTicket immediately after the handshake
+    // by default. If tls_recv's internal discard path never ran, either
+    // this test would have received raw NewSessionTicket handshake bytes
+    // as if they were application data (and the "HTTP/1." check below
+    // would fail, since a NewSessionTicket's first bytes are the
+    // handshake-layer msg_type 0x04, not 'H'=0x48), or -- if some other
+    // code path accidentally swallowed it silently -- this counter would
+    // stay at 0. Asserting it directly makes the discard observable rather
+    // than inferred.
+    if conn2.tickets_discarded < 1 {
+        println("tls_client_application_data_loopback: expected at least one NewSessionTicket to be discarded, counter is")
+        print_int(conn2.tickets_discarded)
+        return 1
+    }
+
+    // Real HTTP status line check ("HTTP/1.x ...") -- confirms the
+    // accumulated bytes are a genuine decrypted HTTP response from
+    // openssl s_server -www, not garbage, not a still-encrypted fragment,
+    // and not the discarded ticket's own bytes leaking through.
+    let h = rawbuf_get(&acc, 0)
+    let t1 = rawbuf_get(&acc, 1)
+    let t2 = rawbuf_get(&acc, 2)
+    let t3 = rawbuf_get(&acc, 3)
+    let p = rawbuf_get(&acc, 4)
+    let slash = rawbuf_get(&acc, 5)
+    let one = rawbuf_get(&acc, 6)
+    let dot = rawbuf_get(&acc, 7)
+    let looks_like_http_status_line = h == 72 && t1 == 84 && t2 == 84 && t3 == 80 && p == 47 && slash == 49 && one == 46 && dot != 0
+    // "HTTP/1." == bytes 72 84 84 80 47 49 46 (H T T P / 1 .)
+    if !looks_like_http_status_line {
+        println("tls_client_application_data_loopback: accumulated response does not start with an HTTP/1.x status line")
+        return 1
+    }
+
+    tls_close(conn2)
+
+    println("tls_client_application_data_loopback: sent request, received real HTTP response, discarded ticket(s), clean EOF")
+    return 0
+}

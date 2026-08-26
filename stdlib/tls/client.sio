@@ -77,6 +77,16 @@ pub struct TlsConnection {
     master_secret: RawBuf,
     client_ap_secret: RawBuf,
     server_ap_secret: RawBuf,
+    // Test-observability counter (Task 8): incremented by tls_recv every
+    // time it silently discards a post-handshake NewSessionTicket message,
+    // per the plan brief's own suggestion ("a permanent return-value/
+    // counter Task 8 finds a clean way to expose for testing"). Not used
+    // by tls_send/tls_recv/tls_close's own logic -- purely observational,
+    // so tests/interop/tls_client_application_data_loopback.sio can assert
+    // openssl s_server's default post-handshake ticket(s) were actually
+    // seen and skipped, not merely "never returned as application data by
+    // accident of timing".
+    tickets_discarded: i64,
 }
 
 pub const TLS_CONNECT_OK: i64 = 0
@@ -108,6 +118,7 @@ fn tls_connection_zero() -> TlsConnection with IO {
         master_secret: rawbuf_new(1),
         client_ap_secret: rawbuf_new(1),
         server_ap_secret: rawbuf_new(1),
+        tickets_discarded: 0,
     }
 }
 
@@ -1009,6 +1020,325 @@ pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustS
         master_secret: master_secret,
         client_ap_secret: client_ap_secret,
         server_ap_secret: server_ap_secret,
+        tickets_discarded: 0,
     }
     (conn, TLS_CONNECT_OK)
+}
+
+// ============================================================================
+// Task 8: application-data lifecycle -- tls_send / tls_recv / tls_close
+// ============================================================================
+//
+// Appends the final public interface of the whole TLS-on-Madaros effort to
+// this same file. Consumes the exact `TlsConnection` state `tls_connect`
+// (above) leaves behind: `sock` positioned right after the client's own
+// Finished was sent, `records` already rekeyed for application traffic
+// (client_ap_secret/server_ap_secret installed as write/read respectively),
+// `hash_algo` fixing which HKDF hash the post-handshake KeyUpdate
+// re-derivation (RFC 8446 SS7.2) must use.
+//
+// RFC 8446 SS7.2 label independently re-verified fresh
+// (https://www.rfc-editor.org/rfc/rfc8446.txt) for this task: the KeyUpdate
+// traffic-secret re-derivation label is the literal ASCII string
+// "traffic upd" (11 bytes) -- `application_traffic_secret_N+1 =
+// HKDF-Expand-Label(application_traffic_secret_N, "traffic upd", "",
+// Hash.length)`.
+//
+// close_notify's exact 2-byte Alert encoding independently re-verified fresh
+// against the same RFC (SS6, SS6.1): AlertLevel=warning(1),
+// AlertDescription=close_notify(0) -- wire bytes `0x01 0x00`. RFC 8446 SS6
+// itself notes the `level` field is vestigial in TLS 1.3 ("the severity is
+// implicit in the type of alert being sent, and the 'level' field can
+// safely be ignored") -- this file still emits/checks the conventional
+// warning-level encoding, since that's what real peers (openssl s_server
+// included) actually send and expect.
+//
+// Same control-flow-shape discipline as `tls_connect` above (see the note
+// above `tcp_recv_exact`): every function below either recurses instead of
+// looping over a re-threaded linear value (`TcpSocket`, transitively
+// `TlsConnection` since it embeds one), or is written as one exhaustive
+// if/else EXPRESSION consuming the same linear bindings symmetrically
+// across every branch.
+
+// RFC 8446 SS5.1: TLSPlaintext.length MUST NOT exceed 2^14 bytes. This file
+// adds no TLSInnerPlaintext padding, so a single `record_encrypt` call's
+// input is capped at this size; `tls_send` splits any longer caller buffer
+// into multiple records via the loop below.
+const TLS_MAX_FRAGMENT: i64 = 16384
+
+pub const TLS_IO_ERR_SEND: i64 = 0 - 1
+pub const TLS_IO_ERR_RECV: i64 = 0 - 1
+pub const TLS_IO_ERR_DECRYPT: i64 = 0 - 1
+pub const TLS_IO_ERR_ALERT: i64 = 0 - 1
+pub const TLS_IO_ERR_MALFORMED: i64 = 0 - 1
+
+// Sends `buf[0..len)` as one or more `application_data` records
+// (RFC 8446 SS5.1 caps a single TLSPlaintext at 2^14 bytes -- this loop
+// splits correctly rather than assuming one request always fits, per the
+// task brief, even though every realistic payload in this plan's own
+// scope -- an HTTP/1.0 GET line -- is far under that cap).
+//
+// Recursive rather than a `while` loop re-threading `conn` (which embeds
+// the linear `TcpSocket`) -- see the control-flow-shape note above
+// `tcp_recv_exact` in tls_connect's own section of this file: a `while`
+// loop reassigning an already-used linear-typed var trips
+// `error[E039]: linear value has already been used` on this compiler.
+pub fn tls_send(conn: TlsConnection, buf: &RawBuf, len: i64) -> (TlsConnection, i64) with IO, Mut {
+    if len <= 0 {
+        (conn, 0)
+    } else {
+        let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded } = conn
+        var records2 = records
+        let chunk_len = if len > TLS_MAX_FRAGMENT { TLS_MAX_FRAGMENT } else { len }
+        let view = rawbuf_view(buf, 0, chunk_len)
+        let (sock2, send_err) = send_encrypted_record(sock, &!records2, TLS_CONTENT_TYPE_APPLICATION_DATA, &view, chunk_len)
+        let conn2 = TlsConnection {
+            sock: sock2,
+            records: records2,
+            hash_algo: hash_algo,
+            hs_transcript: hs_transcript,
+            master_secret: master_secret,
+            client_ap_secret: client_ap_secret,
+            server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded,
+        }
+        if send_err != 0 {
+            (conn2, TLS_IO_ERR_SEND)
+        } else if chunk_len >= len {
+            (conn2, chunk_len)
+        } else {
+            let rest_view = rawbuf_view(buf, chunk_len, len - chunk_len)
+            let (conn3, rest_sent) = tls_send(conn2, &rest_view, len - chunk_len)
+            if rest_sent < 0 {
+                (conn3, TLS_IO_ERR_SEND)
+            } else {
+                (conn3, chunk_len + rest_sent)
+            }
+        }
+    }
+}
+
+// RFC 8446 SS7.2 KeyUpdate re-derivation: the receiving side's OWN read-
+// direction traffic secret is advanced one step, independently of the
+// write direction (RFC 8446 SS4.6.3: "each side updates its own sending
+// key independently ... a KeyUpdate does not cause an update of the peer's
+// sending key"). Builds a fresh `RecordLayerState` directly (struct-literal
+// construction, matching this codebase's established cross-file field-
+// access convention -- e.g. `stdlib/x509/cert.sio`'s `Certificate` fields
+// are read directly from this same file with no per-field `pub` -- struct-
+// level `pub` is what gates visibility here, not per-field) rather than
+// calling `record_layer_rekey`: that function (Task 4, `stdlib/tls/
+// record.sio`) unconditionally resets BOTH read and write sequence numbers
+// to 0 on every call (correct for its own designed use -- a real key
+// change on both directions at once, e.g. the handshake-to-application-
+// keys transition), which would be WRONG here -- resetting `write_seq` to
+// 0 without also rotating the write key would risk nonce reuse on this
+// connection's OWN next `tls_send`. Constructing the new state directly
+// keeps `write_key`/`write_iv`/`write_seq` completely untouched, only
+// replacing `read_key`/`read_iv` and resetting `read_seq` (RFC 8446 SS5.3:
+// a sequence number resets "whenever the key is changed", scoped to the
+// direction whose key actually changed).
+fn rekey_read_direction(records: RecordLayerState, new_read_key: &RawBuf, new_read_iv: &RawBuf) -> RecordLayerState with IO {
+    RecordLayerState {
+        read_key: *new_read_key,
+        read_iv: *new_read_iv,
+        read_seq: 0,
+        write_key: records.write_key,
+        write_iv: records.write_iv,
+        write_seq: records.write_seq,
+        key_len: records.key_len,
+        iv_len: records.iv_len,
+        aead_algo: records.aead_algo,
+    }
+}
+
+// Core `tls_recv` loop: reads and decrypts one TLS record at a time,
+// transparently discarding NewSessionTicket, transparently re-keying on
+// KeyUpdate, and recursing to read the next record in either case, until
+// either real `application_data` arrives, `close_notify` is observed (EOF,
+// returns 0), a fatal condition is hit (negative sentinel), or the
+// underlying `tcp_recv_exact` calls short-read/EOF/error (also a negative
+// sentinel, distinguished from `close_notify`'s clean EOF exactly the way
+// `tcp_recv`'s own contract distinguishes a `recv() == 0` peer-closed-
+// gracefully from a `recv() < 0` error -- this file's own `close_notify`
+// path is the ONLY way a positive-length TLS session produces a clean 0).
+fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, i64) with IO, Mut {
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded } = conn
+    var records2 = records
+    let header = rawbuf_new(5 + 8)
+    let (sock2, n1) = tcp_recv_exact(sock, &header, 0, 5)
+    if n1 < 5 {
+        let conn_err = TlsConnection {
+            sock: sock2, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded,
+        }
+        (conn_err, TLS_IO_ERR_RECV)
+    } else {
+        let outer_type = rawbuf_get(&header, 0)
+        let frag_len = (rawbuf_get(&header, 3) << 8) | rawbuf_get(&header, 4)
+        let payload = rawbuf_new(frag_len + 8)
+        let (sock3, n2) = tcp_recv_exact(sock2, &payload, 0, frag_len)
+        if n2 < frag_len {
+            let conn_err = TlsConnection {
+                sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                tickets_discarded: tickets_discarded,
+            }
+            (conn_err, TLS_IO_ERR_RECV)
+        } else if outer_type == (TLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC as i64) {
+            // RFC 8446 Appendix D.4: stray middlebox-compatibility CCS
+            // records MUST be ignored wherever they appear, not just
+            // immediately post-ClientHello.
+            let conn_next = TlsConnection {
+                sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                tickets_discarded: tickets_discarded,
+            }
+            tls_recv_loop(conn_next, buf, cap)
+        } else {
+            let (content_type, content, content_len, ok) = record_decrypt(&!records2, &payload, frag_len)
+            if !ok {
+                let conn_err = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded,
+                }
+                (conn_err, TLS_IO_ERR_DECRYPT)
+            } else if content_type == TLS_CONTENT_TYPE_APPLICATION_DATA {
+                let out_len = if content_len < cap { content_len } else { cap }
+                var ci: i64 = 0
+                while ci < out_len {
+                    rawbuf_set(buf, ci, rawbuf_get(&content, ci))
+                    ci = ci + 1
+                }
+                let conn_ok = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded,
+                }
+                (conn_ok, out_len)
+            } else if content_type == TLS_CONTENT_TYPE_ALERT {
+                // RFC 8446 SS6/SS6.1: close_notify = AlertLevel(warning=1)
+                // || AlertDescription(close_notify=0) -- verified fresh
+                // against the RFC for this task (see file section header
+                // above). Any other alert (or a malformed 2-byte alert
+                // body) is a fatal condition -- return the negative
+                // sentinel, never a partial/forged read.
+                let is_close_notify = content_len == 2 && rawbuf_get(&content, 0) == 1 && rawbuf_get(&content, 1) == 0
+                let conn_after = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded,
+                }
+                if is_close_notify {
+                    (conn_after, 0)
+                } else {
+                    (conn_after, TLS_IO_ERR_ALERT)
+                }
+            } else if content_type == TLS_CONTENT_TYPE_HANDSHAKE {
+                if content_len < 1 {
+                    let conn_err = TlsConnection {
+                        sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                        master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                        tickets_discarded: tickets_discarded,
+                    }
+                    (conn_err, TLS_IO_ERR_MALFORMED)
+                } else {
+                    let msg_type = (rawbuf_get(&content, 0) as u8)
+                    if is_new_session_ticket(msg_type) {
+                        // Silently discard (resumption is out of this
+                        // plan's scope, per the spec's own Scope
+                        // Decisions) and read the next record instead of
+                        // returning -- but bump the test-observability
+                        // counter first (see TlsConnection's own doc
+                        // comment on `tickets_discarded`).
+                        let conn_next = TlsConnection {
+                            sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                            tickets_discarded: tickets_discarded + 1,
+                        }
+                        tls_recv_loop(conn_next, buf, cap)
+                    } else if is_key_update(msg_type) {
+                        // RFC 8446 SS7.2 / SS4.6.3: re-derive this
+                        // connection's read-direction (server) application
+                        // traffic secret and rekey the read side only (see
+                        // `rekey_read_direction`'s own doc comment above
+                        // for why `record_layer_rekey` itself is NOT used
+                        // here). This plan's own scope (per the design
+                        // spec's Scope Decisions) is limited to
+                        // "transparently handles KeyUpdate ... no new key-
+                        // schedule construction" -- it does NOT echo a
+                        // KeyUpdate of its own back to the peer even when
+                        // the received KeyUpdate's request_update field
+                        // asks for one (RFC 8446 SS4.6.3's SHOULD), since
+                        // this plan never needs to actively rotate its own
+                        // write-direction key and doing so with no
+                        // consumer would be scope creep -- documented here
+                        // as a known limitation rather than silently
+                        // dropped.
+                        let hash_len = hash_len_for(hash_algo)
+                        let (upd_label, upd_label_len) = label_buf("traffic upd")
+                        let empty_ctx = rawbuf_new(0)
+                        let new_server_ap_secret = derive_secret(hash_algo, &server_ap_secret, hash_len, &upd_label, upd_label_len, &empty_ctx, 0)
+                        let (new_read_key, new_read_iv) = tls13_traffic_key_and_iv(hash_algo, &new_server_ap_secret, hash_len, records2.key_len, records2.iv_len)
+                        let records3 = rekey_read_direction(records2, &new_read_key, &new_read_iv)
+                        let conn_rekeyed = TlsConnection {
+                            sock: sock3, records: records3, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: new_server_ap_secret,
+                            tickets_discarded: tickets_discarded,
+                        }
+                        tls_recv_loop(conn_rekeyed, buf, cap)
+                    } else {
+                        // Any other post-handshake handshake-layer message
+                        // (e.g. a second CertificateRequest, or a stray
+                        // ClientHello/ServerHello) is unexpected in this
+                        // state -- fail closed.
+                        let conn_err = TlsConnection {
+                            sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                            tickets_discarded: tickets_discarded,
+                        }
+                        (conn_err, TLS_IO_ERR_MALFORMED)
+                    }
+                }
+            } else {
+                let conn_err = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded,
+                }
+                (conn_err, TLS_IO_ERR_MALFORMED)
+            }
+        }
+    }
+}
+
+// Reads up to `cap` bytes of real `application_data` into `buf`, silently
+// skipping NewSessionTicket/KeyUpdate post-handshake messages and
+// transparently handling `close_notify` (returns 0, matching `tcp_recv`'s
+// own EOF convention). Negative return: error (decrypt failure, fatal
+// alert, malformed/unexpected message, or a short/failed underlying
+// `tcp_recv`).
+pub fn tls_recv(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, i64) with IO, Mut {
+    tls_recv_loop(conn, buf, cap)
+}
+
+// Sends a best-effort `close_notify` alert (RFC 8446 SS6.1: "Unless some
+// other fatal alert has been transmitted, each party MUST send a
+// close_notify alert before closing" its side of the connection) then
+// closes the underlying socket regardless of whether the send succeeded --
+// a peer that has already disappeared must never hang this call.
+pub fn tls_close(conn: TlsConnection) with IO, Mut {
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded } = conn
+    var records2 = records
+    let alert = rawbuf_new(2 + 8)
+    rawbuf_set(&alert, 0, 1) // AlertLevel: warning
+    rawbuf_set(&alert, 1, 0) // AlertDescription: close_notify
+    let (sock2, send_err) = send_encrypted_record(sock, &!records2, TLS_CONTENT_TYPE_ALERT, &alert, 2)
+    // hash_algo/hs_transcript/master_secret/client_ap_secret/
+    // server_ap_secret/tickets_discarded/send_err are intentionally unused
+    // past this point -- tls_close is a pure sink, nothing downstream
+    // consumes them.
+    tcp_close(sock2)
 }
