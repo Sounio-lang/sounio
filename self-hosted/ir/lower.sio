@@ -732,10 +732,25 @@ pub fn fo_xfer_global_reset() with Mut {
 // log is deliberately absent: its derivative is 1/x, not a call, so it needs a
 // reciprocal kind rather than this one. Leaving it out keeps it honestly
 // unsupported instead of silently wrong.
+fn kind_lit_to_analytic_id(lit: f64) -> i64 with Mut, Panic, Div {
+    if lit >= 0.5 && lit < 1.5 { return 1 }
+    if lit >= 1.5 && lit < 2.5 { return 2 }
+    if lit >= 2.5 && lit < 3.5 { return 3 }
+    if lit >= 3.5 && lit < 4.5 { return 4 }
+    if lit >= 4.5 && lit < 5.5 { return 5 }
+    0
+}
+
 fn fo_xfer_seed_transcendentals() with Mut, Panic, Div, IO {
     fo_xfer_global_set(make_name("sin"), 6, 1.0, make_name("cos"))
     fo_xfer_global_set(make_name("cos"), 6, 0.0 - 1.0, make_name("sin"))
     fo_xfer_global_set(make_name("exp"), 6, 1.0, make_name("exp"))
+    // Kind 8: derivative EMITTED, not named. atan' = 1/(1+x^2) has no name.
+    fo_xfer_global_set(make_name("atan"), 8, 1.0, ir_empty_name())
+    fo_xfer_global_set(make_name("asin"), 8, 2.0, ir_empty_name())
+    fo_xfer_global_set(make_name("acos"), 8, 3.0, ir_empty_name())
+    fo_xfer_global_set(make_name("tan"), 8, 4.0, ir_empty_name())
+    fo_xfer_global_set(make_name("tanh"), 8, 5.0, ir_empty_name())
 }
 
 // Derivative function for a kind-6 entry, resolved from FO_XFER_FWD_HASH. The
@@ -9638,6 +9653,158 @@ impl Lowerer {
     }
 
     // Apply registered pure-fn FO transfer at a call site. depth limits FWD recursion.
+    // Dump the live sensitivity channels. This is the instrument the first
+    // attempt at kind 8 lacked: a wrong final variance cannot tell "derivative
+    // not applied" from "channel lost", and both look like sigma^2.
+    fn fo_trace_sens(self, tag: Name) with Mut, Panic, Div, IO {
+        if !lower_live_diag_enabled() {
+            return
+        }
+        print("lower_live: sens ")
+        print(str_from_bytes(tag.buf, tag.len))
+        print(" nchan=")
+        print_int(self.fo_nchan)
+        var k: i64 = 0
+        while k < 32 {
+            if self.fo_expr_sens[k as usize] >= 0 {
+                print(" s[")
+                print_int(k)
+                print("]=r")
+                print_int(self.fo_expr_sens[k as usize])
+            }
+            k = k + 1
+        }
+        print("\n")
+    }
+
+    fn fo_emit_math_call(self, nm: Name, argv: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let fid = lowerer_find_or_add_fn_id_mut(&! lo, nm)
+        let cargs: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(argv)))
+        let dp = lo.fresh_reg()
+        lo = dp.0
+        let dreg = dp.1
+        var ci = ir_call(dreg, fid, nm, cargs, 1)
+        ci.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(ci)
+        lo = lo.emit(ir_mark_float_reg(dreg))
+        (lo, dreg)
+    }
+
+    fn fo_emit_f64_binop(self, a: i64, op: BinaryOp, b: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let rp = lo.fresh_reg()
+        lo = rp.0
+        let r = rp.1
+        lo = lo.emit(ir_binop_typed(r, a, op, b, true, true))
+        lo = lo.emit(ir_mark_float_reg(r))
+        (lo, r)
+    }
+
+    // f'(x) and f''(x) for the kind-8 set, from x plus sqrt/sin/cos/exp only --
+    // all backend builtins, so this reintroduces no E221 hole. Signs are baked
+    // into the formulas; the caller applies no FO_XFER_LIT correction.
+    fn fo_emit_analytic_deriv(self, which: i64, argv: i64, want_second: bool) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let one_p = lo.emit_f64_const(1.0)
+        lo = one_p.0
+        let one = one_p.1
+        let two_p = lo.emit_f64_const(2.0)
+        lo = two_p.0
+        let two = two_p.1
+        let negtwo_p = lo.emit_f64_const(0.0 - 2.0)
+        lo = negtwo_p.0
+        let negtwo = negtwo_p.1
+        let zero_p = lo.emit_f64_const(0.0)
+        lo = zero_p.0
+        let zero = zero_p.1
+
+        if which == 1 {
+            // atan: u = 1 + x^2 ; f' = 1/u ; f'' = -2x/u^2
+            let xx = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
+            lo = xx.0
+            let u = lo.fo_emit_f64_binop(one, BinaryOp::OpAdd, xx.1)
+            lo = u.0
+            if !want_second {
+                let d1 = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, u.1)
+                lo = d1.0
+                return (lo, d1.1)
+            }
+            let u2 = lo.fo_emit_f64_binop(u.1, BinaryOp::OpMul, u.1)
+            lo = u2.0
+            let nx = lo.fo_emit_f64_binop(negtwo, BinaryOp::OpMul, argv)
+            lo = nx.0
+            let d2 = lo.fo_emit_f64_binop(nx.1, BinaryOp::OpDiv, u2.1)
+            lo = d2.0
+            return (lo, d2.1)
+        }
+        if which == 2 || which == 3 {
+            let xx = lo.fo_emit_f64_binop(argv, BinaryOp::OpMul, argv)
+            lo = xx.0
+            let u = lo.fo_emit_f64_binop(one, BinaryOp::OpSub, xx.1)
+            lo = u.0
+            let sp = lo.fo_emit_math_call(make_name("sqrt"), u.1)
+            lo = sp.0
+            let d1r = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, sp.1)
+            lo = d1r.0
+            let us = lo.fo_emit_f64_binop(u.1, BinaryOp::OpMul, sp.1)
+            lo = us.0
+            let d2r = lo.fo_emit_f64_binop(argv, BinaryOp::OpDiv, us.1)
+            lo = d2r.0
+            if which == 2 {
+                if want_second { return (lo, d2r.1) }
+            return (lo, d1r.1)
+            }
+            let d1n = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, d1r.1)
+            lo = d1n.0
+            let d2n = lo.fo_emit_f64_binop(zero, BinaryOp::OpSub, d2r.1)
+            lo = d2n.0
+            if want_second { return (lo, d2n.1) }
+            return (lo, d1n.1)
+        }
+        if which == 4 {
+            let c = lo.fo_emit_math_call(make_name("cos"), argv)
+            lo = c.0
+            let c2 = lo.fo_emit_f64_binop(c.1, BinaryOp::OpMul, c.1)
+            lo = c2.0
+            let d1 = lo.fo_emit_f64_binop(one, BinaryOp::OpDiv, c2.1)
+            lo = d1.0
+            let sn = lo.fo_emit_math_call(make_name("sin"), argv)
+            lo = sn.0
+            let c3 = lo.fo_emit_f64_binop(c2.1, BinaryOp::OpMul, c.1)
+            lo = c3.0
+            let twosin = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, sn.1)
+            lo = twosin.0
+            let d2 = lo.fo_emit_f64_binop(twosin.1, BinaryOp::OpDiv, c3.1)
+            lo = d2.0
+            if want_second { return (lo, d2.1) }
+            return (lo, d1.1)
+        }
+        if which == 5 {
+            let x2 = lo.fo_emit_f64_binop(two, BinaryOp::OpMul, argv)
+            lo = x2.0
+            let e = lo.fo_emit_math_call(make_name("exp"), x2.1)
+            lo = e.0
+            let em = lo.fo_emit_f64_binop(e.1, BinaryOp::OpSub, one)
+            lo = em.0
+            let ep = lo.fo_emit_f64_binop(e.1, BinaryOp::OpAdd, one)
+            lo = ep.0
+            let t = lo.fo_emit_f64_binop(em.1, BinaryOp::OpDiv, ep.1)
+            lo = t.0
+            let tt = lo.fo_emit_f64_binop(t.1, BinaryOp::OpMul, t.1)
+            lo = tt.0
+            let d1 = lo.fo_emit_f64_binop(one, BinaryOp::OpSub, tt.1)
+            lo = d1.0
+            let nt = lo.fo_emit_f64_binop(negtwo, BinaryOp::OpMul, t.1)
+            lo = nt.0
+            let d2 = lo.fo_emit_f64_binop(nt.1, BinaryOp::OpMul, d1.1)
+            lo = d2.0
+            if want_second { return (lo, d2.1) }
+            return (lo, d1.1)
+        }
+        (lo, 0 - 1)
+    }
+
     fn fo_apply_call_transfer(
         self,
         callee: Name,
@@ -9758,6 +9925,74 @@ impl Lowerer {
         // right for `2.0 * x` and wrong for `sin(x)`, whose factor cos(x) depends
         // on the argument. Precedent for emitting a call from lowering:
         // uncertainty_of already emits sqrt this way.
+        if kind == 8 {
+            let which = kind_lit_to_analytic_id(kind_lit)
+            if which <= 0 {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+            lo.fo_trace_sens(make_name("k8_entry"))
+            let aval8 = lo.fo_lower_nth_arg_value(args, 0)
+            lo = aval8.0
+            let argv8 = aval8.1
+            // The argument register has to be MARKED float before it is read by
+            // f64 arithmetic. Kind 6 never needed this because it only ever hands
+            // argv to a call, whose own IR_FLOAT_REG_MARKER_FLAG covers it; this
+            // arm reads it directly, and unmarked it came back as 0 at run time --
+            // which made 1/(1+x^2) evaluate to 1 and the variance to sigma^2.
+            if argv8 >= 0 {
+                lo = lo.emit(ir_mark_float_reg(argv8))
+            }
+            lo.fo_trace_sens(make_name("k8_after_argval"))
+            if lower_live_diag_enabled() {
+                print("lower_live: k8 which=")
+                print_int(which)
+                print(" argv=r")
+                print_int(argv8)
+                var q: i64 = 0
+                var n0: i64 = 0
+                while q < 32 {
+                    if s0[q as usize] >= 0 { n0 = n0 + 1 }
+                    q = q + 1
+                }
+                print(" s0_live=")
+                print_int(n0)
+                print("\n")
+            }
+            if argv8 < 0 {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+            // Two calls, not one 3-tuple: `(Lowerer, i64, i64)` returned garbage
+            // in its third slot -- traced as d2=r140737316931064, a pointer-shaped
+            // value, which is what crashed the second-order block.
+            let dd1 = lo.fo_emit_analytic_deriv(which, argv8, false)
+            lo = dd1.0
+            let d1r = dd1.1
+            let dd2 = lo.fo_emit_analytic_deriv(which, argv8, true)
+            lo = dd2.0
+            let d2r = dd2.1
+            if lower_live_diag_enabled() {
+                print("lower_live: k8 d1=r")
+                print_int(d1r)
+                print(" d2=r")
+                print_int(d2r)
+                print("\n")
+            }
+            if d1r < 0 {
+                return (lo.fo_clear_expr_sens(), -1)
+            }
+            // Second order is NOT wired here, deliberately. The analytic f'' is
+            // computed and available, but writing it into so_expr_hess produced
+            // 1.000000 where -0.640000 is the truth -- traced by storing d2r raw
+            // into the slot, which read back as 1.0 rather than the -0.64 the
+            // register should hold. Until that is understood, hessian_of keeps
+            // returning the honest 0.0 it returns today: this change must not
+            // trade a silent zero for a confident wrong number, which is the
+            // whole complaint in #2164.
+            var sL8: [i64; 32] = [-1; 32]
+            lo = lo.fo_combine_sens_mul(sL8, s0, d1r, argv8)
+            lo.fo_trace_sens(make_name("k8_after_combine"))
+            return lo.fo_emit_var_from_sens()
+        }
         if kind == 6 {
             let dname = fo_xfer_derivative_name(idx)
             if dname.len == 0 {
