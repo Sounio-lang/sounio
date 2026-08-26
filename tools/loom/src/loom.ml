@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.16"
+let runtime_version = "2026.08.26.17"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -3446,6 +3446,80 @@ let journal_event_json source (event : journal_event) =
     source event.seq (json_escape event.utc) (json_escape event.kind)
     (json_escape event.hash)
 
+let spectral_event values source head (event : journal_event) =
+  Loom_arrow.
+    { agent = table_value values "agent";
+      lane = table_value values "lane";
+      instance_id = table_value values "instance_id";
+      session_state = table_value values "state";
+      journal = source;
+      sequence = Int64.of_int event.seq;
+      observed_at_utc = event.utc;
+      kind = event.kind;
+      payload = string_of_hex event.payload_hex;
+      previous_sha256 = event.previous;
+      event_sha256 = event.hash;
+      journal_head_sha256 = head;
+      verified = true }
+
+let session_spectral_events (_, values) =
+  let semantic_events, _, semantic_head =
+    load_and_verify_journal (table_value values "journal_file")
+  in
+  let guardian_events, _, _, guardian_head =
+    load_and_verify_guardian_journal
+      (table_value values "guardian_journal_file")
+  in
+  List.map (spectral_event values "semantic" semantic_head) semantic_events
+  @ List.map (spectral_event values "guardian" guardian_head) guardian_events
+
+let spectral_events root =
+  session_descriptors root
+  |> List.fold_left
+       (fun events descriptor ->
+         List.rev_append (session_spectral_events descriptor) events)
+       []
+  |> List.sort (fun left right ->
+         compare
+           ( left.Loom_arrow.observed_at_utc,
+             left.agent,
+             left.lane,
+             left.journal,
+             left.sequence )
+           ( right.Loom_arrow.observed_at_utc,
+             right.agent,
+             right.lane,
+             right.journal,
+             right.sequence ))
+
+let events_arrow root =
+  let events = spectral_events root in
+  let bytes =
+    try Loom_arrow.encode events
+    with Failure message -> failf "arrow-ipc-encode:%s" message
+  in
+  (bytes, List.length events)
+
+let export_events_arrow_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let output = required cli "--out" in
+  let bytes, rows = events_arrow root in
+  atomic_write output bytes;
+  Printf.printf
+    "LOOM_ARROW_EXPORTED schema=loom-spectral-events-v1 authority=verified-derived rows=%d bytes=%d output=%s\n%!"
+    rows (String.length bytes) output
+
+let verify_events_arrow_command cli =
+  let path = required cli "--file" in
+  let bytes = read_file path in
+  let summary =
+    try Loom_arrow.inspect bytes
+    with Failure message -> failf "arrow-ipc-verify:%s" message
+  in
+  Printf.printf "LOOM_ARROW_OK %s bytes=%d file=%s\n%!" summary
+    (String.length bytes) path
+
 let session_events_json (_, values) =
   let agent = table_value values "agent" in
   let lane = table_value values "lane" in
@@ -6228,6 +6302,20 @@ let serve_http cli =
                  http_response "200 OK" "application/json" (fleet_json root cwd)
                else if path = "/api/events" then
                  http_response "200 OK" "application/json" (events_json root)
+               else if path = "/api/events.arrow" then
+                 (try
+                    let body, rows = events_arrow root in
+                    http_response
+                      ~headers:
+                        [ ("X-Loom-Schema", "loom-spectral-events-v1");
+                          ("X-Loom-Authority", "verified-derived");
+                          ("X-Loom-Rows", string_of_int rows) ]
+                      "200 OK" "application/vnd.apache.arrow.stream" body
+                  with error ->
+                    http_response "409 Conflict" "application/json"
+                      (Printf.sprintf
+                         "{\"error\":\"spectral_projection_refused\",\"reason\":\"%s\"}"
+                         (json_escape (Printexc.to_string error))))
                else if path = "/api/snapshot" then
                  let status, headers, body = snapshot_from_files root query in
                  http_response ~headers status "application/octet-stream" body
@@ -8251,6 +8339,8 @@ let usage () =
     "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf
+    "\nSpectral data plane:\n  export-events-arrow --out PATH [--state-dir DIR]\n  verify-events-arrow --file PATH\n";
+  Printf.eprintf
     "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
 let arguments_after_command () =
@@ -8311,6 +8401,8 @@ let main () =
     | "list" -> list_command cli; 0
     | "tui" -> tui_command cli; 0
     | "serve" -> serve_http cli; 0
+    | "export-events-arrow" -> export_events_arrow_command cli; 0
+    | "verify-events-arrow" -> verify_events_arrow_command cli; 0
     | "beagle-serve" -> serve_beagle_bridge cli; 0
     | "fleet-enroll" -> fleet_enroll_command cli; 0
     | "fleet-disable" -> fleet_disable_command cli; 0

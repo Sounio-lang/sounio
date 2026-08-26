@@ -40,6 +40,8 @@ bin/sounio-loom fleet-reconcile --apply
 bin/sounio-loom list
 bin/sounio-loom tui
 bin/sounio-loom serve --bind 127.0.0.1 --port 8787
+bin/sounio-loom export-events-arrow --out loom-events.arrow
+bin/sounio-loom verify-events-arrow --file loom-events.arrow
 bin/sounio-loom beagle-serve --bind 127.0.0.1 --port 4372
 bin/sounio-loom verify-continuity-receipt \
   --receipt PATH --public-key PUBLIC.pem --adapter PATH
@@ -77,6 +79,39 @@ tmux endpoint, and still have no Loom PTY custody. Only `loom_state=active` or
 machine snapshot never exports endpoint addresses, sockets, token paths,
 message bodies, or provider prompts. `/api/events` likewise emits only verified
 journal metadata and refuses unverified histories.
+
+## Spectral Data Plane
+
+`/api/events.arrow` and `export-events-arrow` expose the verified semantic and
+Guardian event histories as an Apache Arrow IPC stream. The stream is a derived,
+read-only projection: the append-only journals remain the authority, and one
+invalid journal refuses the complete projection instead of yielding a partial
+or apparently verified table.
+
+The `loom-spectral-events-v1` schema keeps proof material columnar alongside the
+event data. Its 13 non-null columns include the lane and generation identity,
+journal domain, sequence, UTC observation string, event kind, binary payload,
+the previous and current event digests, the verified journal head, and the
+explicit `verified` bit. SHA-256 values use Arrow `fixed_size_binary[32]`, not
+hex strings, so analytical and WebGPU consumers receive a compact physical
+representation without losing the hash-chain boundary.
+
+The OCaml runtime constructs the projection through a small C FFI over the
+vendored Apache nanoarrow 0.9.0 IPC writer. Python and Rust are not runtime or
+build dependencies. The HTTP response uses
+`application/vnd.apache.arrow.stream` and declares
+`X-Loom-Authority: verified-derived`; corruption or journal verification failure
+returns a refusal rather than a fallback JSON dataset.
+
+This split is intentional:
+
+```text
+control plane   = journals, leases, ACKs, recovery, authority
+spectral plane  = Arrow IPC batches for scan, visualization, ML, and WebGPU
+```
+
+The Arrow plane is not a transaction log, recovery source, or authority store.
+Its schema is an interoperability contract for disposable projections.
 
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
