@@ -385,6 +385,33 @@ same way, which is equivalent to using 16-bit limbs in the first place.
 
 ## Finding 12 — the Madaros runtime arena is never reclaimed: every value-returning function that allocates is a permanent, per-process budget spend
 
+> **UPDATE 2026-08-26 — measured on real TLS, and partly mitigated.** The
+> closing paragraph below predicted this ceiling "will return for any
+> long-running process (e.g. a TLS server handling many handshakes)". It
+> did, far sooner than the ~460,000-call figure suggests: a process could
+> complete **two** real, CA-verified TLS handshakes before exit 181, and
+> some chains died on the first. Certificate-chain verification is
+> unusually expensive against this budget because `Certificate` values are
+> enormous and were copied by value in the hot path.
+>
+> That specific measurement, its cost attribution
+> (`certificate_zero()` ~352 KB, `x509_parse_certificate()` ~11.5 MB,
+> `x509_verify_chain()` ~30 MB per call), and its resolution — ceiling
+> raised **2 → 95 handshakes/process** via commits `c9bd996b2`,
+> `976e3e399` and `eea3a449f` — are dispatched separately in
+> [`ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md`](ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md).
+>
+> Two corrections that finding's own numbers depend on:
+>
+> - **A `[u8; N]` field occupies one 8-byte slot per element, not N bytes.**
+>   Every size estimate made against the logical struct size is 8× low.
+> - **The arena is now 8 GiB, not 2 GiB, on Linux** (`native_v2_arena_bytes()`
+>   in `self-hosted/native/gc.sio`), with the handle table at 2^24.
+>
+> **The defect itself is UNCHANGED and still open.** Nothing is reclaimed;
+> the wall moved ~47×, it did not disappear. The guidance below stands
+> exactly as written.
+
 A Sounio function that returns a struct containing an array field (e.g.
 `fn f() -> BigInt` where `BigInt` holds `[u16; 512]`) allocates a fresh block
 in the Madaros runtime arena on every call, and that block is **never freed or

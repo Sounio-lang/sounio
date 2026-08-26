@@ -1098,3 +1098,63 @@ agent has the full forensic trail rather than rediscovering it. **This
 defect BLOCKS Task 7 of the Madaros TLS 1.3 handshake plan from reaching a
 fully working real-server handshake and is reported as such in that task's
 own completion report.**
+
+---
+
+## D12 — real-CA TLS handshakes exhaust the never-reclaimed process arena after 2 connections (exit 181)
+
+**Status:** RESOLVED for the reported workload (ceiling **2 → 95**
+handshakes/process). The underlying lifetime defect is UNCHANGED and still
+open — the wall moved ~47×, it did not disappear.
+
+**Full forensic dispatch:**
+[`docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md`](../audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md)
+
+This is **Finding 12** of
+[`docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md`](../audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md)
+("the Madaros runtime arena is never reclaimed") realised on the TLS path,
+with a real measurement in place of that finding's projection. Finding 12
+predicted the ceiling "will return for any long-running process (e.g. a TLS
+server handling many handshakes)"; it returned at **two** handshakes, not at
+the ~460,000 `bigint_add` calls its own headline figure suggests.
+
+### Symptom
+```
+arena_probe: handshake attempt 3
+madaros: arena full          (exit 181, uncatchable)
+```
+Repro: `tests/interop/tls_arena_multi_handshake_probe.sio`.
+
+### Why chain verification is so expensive
+- `GeneralName` carried `directory_name: X509Name` — **never populated,
+  never read** (the parser deliberately skips copying it because a
+  doubly-indexed struct-in-array write corrupts on this compiler). It was
+  ~87% of every `Certificate`, since `Certificate` holds 64 `GeneralName`s.
+- `stdlib/x509/chain.sio` copied `Certificate` **values** in the hot path,
+  including once per trust-store root (150) per DFS step.
+- **A `[u8; N]` field costs 8N bytes** — one 8-byte slot per element. Every
+  size estimate in this file made against logical struct size is 8× low.
+
+### Cost attribution (measured, `tests/interop/x509_arena_cost_probe.sio`)
+| Operation | Iterations/process | Implied cost |
+|---|---:|---:|
+| `certificate_zero()` | 5,254 | ~352 KB |
+| `x509_parse_certificate()` | 161 | ~11.5 MB |
+| `x509_verify_chain()` | 44 | ~30 MB |
+
+### Fix
+| Commit | Change | Ceiling |
+|---|---|---:|
+| `c9bd996b2` | drop `GeneralName.directory_name` | 2 → 11 |
+| `976e3e399` | `&Certificate` refs + virtual issuer pool in `chain.sio` | 11 → 11 |
+| `eea3a449f` | arena 2 GiB → 8 GiB, handle table 2^22 → 2^24 (Linux) | 11 → **95** |
+
+`976e3e399` showing no end-to-end movement is reported as measured, not
+hidden: the attribution table above shows parsing and crypto dominate path
+building. It was kept because it removes a real ~50 MB/verification cost.
+
+### Filed
+Not a GitHub issue. Recorded here and in the dispatch per this file's
+convention. **Next highest-value work: `x509_parse_certificate`'s ~11.5 MB
+per call**, which is now the single largest lever and is mostly parser
+scratch rather than the returned value.
