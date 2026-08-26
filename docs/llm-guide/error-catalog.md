@@ -418,7 +418,7 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 >
 > This happened mechanically, not carelessly: until #2180 `lean_single` printed 42
 > of its diagnostics as a bare `error: <text>` with no number, so a survey taken
-> from inside `check.sio` saw those numbers as free. It now prints all of them,
+> from inside `check.sio` saw those numbers as free. It now prints 41 of them,
 > and `scripts/ci/diagnostic_identity_gate.sh` surveys both engines, so the next
 > re-allocation collides visibly instead of silently. Which identity keeps each
 > number is a separate decision, per code, and is not yet made.
@@ -439,6 +439,16 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E217 | invalid function body span | f128/f256 value conversion is not implemented; wide-float casts fail closed |
 | E218 | tail type mismatch | f128/f256 is reserved for compiler-owned format identity |
 | E219 | function pass mismatch | call to an `extern "C"` function |
+
+> **E219 is the one exception, and it is instructive.** `lean_single` does NOT
+> print its tag for `function pass mismatch`, because
+> `scripts/ci/e219_engine_oracle_gate.sh` asserts the seed must not spell E219 at
+> all: that oracle scores an engine SPLIT in which E219 is a Madaros judgment
+> about an unimplemented `extern "C"` builtin, and it says outright that a
+> cosmetic E219 on the seed "is a fail, not a close. A real seed refuse is also a
+> fail — update the theorem, do not silence the gate." So the catalogue and that
+> gate disagree about who owns E219. Tagging the seat forced the disagreement
+> into the open; resolving it is a decision about the theorem, not an edit.
 | E221 | no main | this math function is bound for typechecking but the native backend cannot emit it |
 
 | Code | Component | Severity | Gloss | Explanation |
