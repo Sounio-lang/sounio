@@ -2,7 +2,7 @@
 topic_id: repo.docs.llm-guide.error-catalog
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-08-26
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-guide.error-catalog
 -->
@@ -407,6 +407,39 @@ Got an error?
 Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `souc check --json` flag and **no** `souc explain <CODE>` subcommand in Madaros v0.80.0 (both were removed / never shipped — verify with `souc --help`). Read the per-code files under `explanations/` directly.
 
 > **⚠️ Enforcement reality — verified 2026-07-11 against the default `bin/souc` (Madaros).** The default compiler is **more permissive** than this table implies; several listed codes do **not** currently fire under `souc check` (the "wrong" example compiles clean). Verified non-firing: **E035** (missing IO/Div/Observe effect — effects are not enforced under `check`), **E040/E041/E042/E043** (Rust `let mut` / `&mut` / `#[...]` / `ident!()` — these surface as a bare `parse error` or `check: OK`, not a coded compat error), **E201–E207** (the `ZD` capability family — unenforced), **E208/E209** (refinement predicates — `Pos`/`Prob` treated nominally; the predicate is not evaluated), **E213** (tuple-destructure arity), **E216** (recursive struct type), **E224** (unreadable/dead import — silently ignored). Wrong code numbers: an arity mismatch surfaces as **E010** (not E006); a tail/return-type mismatch as **E008** (not E218). Confirmed firing: E001, E010, E170, E171. `check` stops before codegen, so codegen/linker codes (E007, E217–E223) are not reachable via `check`. Treat this table as the code *namespace*, not a guarantee that every guard is wired. (Note: the `lean_single` seed engine is stricter and rejects some of the above — but agents use the default Madaros.)
+
+> **⚠️ One number, two meanings — measured 2026-08-26 (#2180).** This namespace has
+> **two owners**. `lean_single` (the CI oracle and the seed) and `check.sio` (the
+> Madaros checker) both emit `error[E<N>]`, and for the fifteen codes below they
+> emit it for **different diagnostics**. The table above documents the
+> `lean_single` identity in every case; `explanations/E<N>.md` explains that one.
+> If you saw the code come out of the default `bin/souc`, the right-hand column is
+> what you actually hit, and the explanation file will not describe it.
+>
+> This happened mechanically, not carelessly: until #2180 `lean_single` printed 42
+> of its diagnostics as a bare `error: <text>` with no number, so a survey taken
+> from inside `check.sio` saw those numbers as free. It now prints all of them,
+> and `scripts/ci/diagnostic_identity_gate.sh` surveys both engines, so the next
+> re-allocation collides visibly instead of silently. Which identity keeps each
+> number is a separate decision, per code, and is not yet made.
+>
+| Code | `lean_single` emits (documented above) | `check.sio` / Madaros emits |
+|------|----------------------------------------|------------------------------|
+| E006 | arity mismatch | conditions must be of type `bool` |
+| E007 | too many local variables in function | branches have incompatible types |
+| E008 | too many globals | return value does not match the declared return type |
+| E036 | `Unobserved<T>` crosses the observation boundary without `with Observe` | confidence bound is not tight enough |
+| E040 | Rust `let mut` — use `var` | linear value must be used |
+| E041 | Rust `&mut` — use `&!` | ontology subsumption could not be verified |
+| E042 | Rust attribute `#[...]` not valid in Sounio | value does not satisfy the refinement predicate |
+| E043 | Rust macro `ident!(...)` not valid in Sounio | incompatible unit dimensions in conversion |
+| E067 | potential confounding | causal query is non-identifiable (no valid adjustment set) |
+| E080 | `Deterministic` function declares an IO effect | contest metadata is incomplete for witness projection |
+| E208 | refinement type violation (integer) | ZD locus is not a well-formed sedenion pair `eIeJ` |
+| E217 | invalid function body span | f128/f256 value conversion is not implemented; wide-float casts fail closed |
+| E218 | tail type mismatch | f128/f256 is reserved for compiler-owned format identity |
+| E219 | function pass mismatch | call to an `extern "C"` function |
+| E221 | no main | this math function is bound for typechecking but the native backend cannot emit it |
 
 | Code | Component | Severity | Gloss | Explanation |
 |------|-----------|----------|-------|-------------|
