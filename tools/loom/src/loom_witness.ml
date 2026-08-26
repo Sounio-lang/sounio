@@ -119,7 +119,18 @@ type endpoint = {
   endpoint_port : int;
 }
 
+type topology = Mesh_v0 | Mesh_v1
+
+let topology_member_count = function Mesh_v0 -> 3 | Mesh_v1 -> 4
+let topology_quorum = function Mesh_v0 -> 2 | Mesh_v1 -> 3
+let topology_frame = function Mesh_v0 -> 9013 | Mesh_v1 -> 9014
+let topology_suffix = function Mesh_v0 -> "v0" | Mesh_v1 -> "v1"
+let topology_schema = function
+  | Mesh_v0 -> "loom-witness-mesh-v0"
+  | Mesh_v1 -> "loom-witness-mesh-v1"
+
 type membership = {
+  topology : topology;
   members : member array;
   anchor_public_key_path : string;
   anchor_public_key_pem : string;
@@ -135,12 +146,18 @@ let resolve_relative base path =
 let load_membership path =
   let directory = Filename.dirname (Unix.realpath path) in
   let lines = read_lines path in
-  let anchor_public_key_path, rows =
+  let topology, anchor_public_key_path, rows =
     match lines with
     | anchor_row :: "witness_id\tpublic_key" :: rest ->
         (match String.split_on_char '\t' anchor_row with
         | [ "anchor_public_key"; anchor_public_key_path ] ->
-            (resolve_relative directory anchor_public_key_path, rest)
+            (Mesh_v0, resolve_relative directory anchor_public_key_path, rest)
+        | _ -> failf "witness-anchor-key-row-invalid")
+    | "schema\tloom-witness-membership-v1" :: anchor_row
+      :: "witness_id\tpublic_key" :: rest ->
+        (match String.split_on_char '\t' anchor_row with
+        | [ "anchor_public_key"; anchor_public_key_path ] ->
+            (Mesh_v1, resolve_relative directory anchor_public_key_path, rest)
         | _ -> failf "witness-anchor-key-row-invalid")
     | _ -> failf "witness-membership-header-invalid"
   in
@@ -151,9 +168,10 @@ let load_membership path =
   let anchor_key_id =
     Loom_epistemic.outcome_public_key_id anchor_public_key_pem
   in
-  if List.length rows <> 3 then
-    failf "witness-membership-requires-three-members:actual=%d"
-      (List.length rows);
+  let member_count = topology_member_count topology in
+  if List.length rows <> member_count then
+    failf "witness-membership-cardinality-mismatch:topology=%s:expected=%d:actual=%d"
+      (topology_suffix topology) member_count (List.length rows);
   let members =
     List.map
       (fun row ->
@@ -171,27 +189,35 @@ let load_membership path =
     |> List.sort (fun left right -> String.compare left.member_id right.member_id)
     |> Array.of_list
   in
-  if members.(0).member_id = members.(1).member_id
-     || members.(0).member_id = members.(2).member_id
-     || members.(1).member_id = members.(2).member_id
-  then failf "witness-membership-id-collapse";
-  if members.(0).key_id = members.(1).key_id
-     || members.(0).key_id = members.(2).key_id
-     || members.(1).key_id = members.(2).key_id
-  then failf "witness-membership-key-collapse";
+  let ensure_distinct label projection =
+    let seen = Hashtbl.create member_count in
+    Array.iter
+      (fun member ->
+        let value = projection member in
+        if Hashtbl.mem seen value then failf "%s" label;
+        Hashtbl.add seen value ())
+      members
+  in
+  ensure_distinct "witness-membership-id-collapse" (fun member -> member.member_id);
+  ensure_distinct "witness-membership-key-collapse" (fun member -> member.key_id);
   if Array.exists (fun member -> member.key_id = anchor_key_id) members then
     failf "witness-anchor-key-collapses-with-member";
   let canonical_membership =
-    "anchor\t" ^ anchor_key_id ^ "\n"
+    (match topology with
+    | Mesh_v0 -> ""
+    | Mesh_v1 -> "schema\tloom-witness-membership-v1\n")
+    ^ "anchor\t" ^ anchor_key_id ^ "\n"
     ^ (Array.to_list members
       |> List.map (fun member -> member.member_id ^ "\t" ^ member.key_id)
       |> String.concat "\n")
     ^ "\n"
   in
   let membership_digest =
-    sha256 ("loom-witness-membership-v0\000" ^ canonical_membership)
+    sha256
+      ("loom-witness-membership-" ^ topology_suffix topology ^ "\000"
+       ^ canonical_membership)
   in
-  { members; anchor_public_key_path; anchor_public_key_pem; anchor_key_id;
+  { topology; members; anchor_public_key_path; anchor_public_key_pem; anchor_key_id;
     canonical_membership; membership_digest }
 
 let member_by_id membership member_id =
@@ -207,9 +233,10 @@ let load_endpoints membership path =
     | "witness_id\thost\tport" :: rest -> rest
     | _ -> failf "witness-endpoints-header-invalid"
   in
-  if List.length rows <> 3 then
-    failf "witness-endpoints-requires-three-members:actual=%d"
-      (List.length rows);
+  let member_count = topology_member_count membership.topology in
+  if List.length rows <> member_count then
+    failf "witness-endpoints-cardinality-mismatch:topology=%s:expected=%d:actual=%d"
+      (topology_suffix membership.topology) member_count (List.length rows);
   let endpoints =
     List.map
       (fun row ->
@@ -236,6 +263,7 @@ let load_endpoints membership path =
   endpoints
 
 type request = {
+  request_schema : string;
   request_witness : string;
   request_membership_digest : string;
   request_domain : string;
@@ -253,15 +281,17 @@ type request = {
 
 let request_payload request =
   Printf.sprintf
-    "schema=loom-witness-segment-request-v0\nop=anchor\nwitness=%s\nmembership_sha256=%s\ndomain=%s\nanchor_sequence=%d\nstart_event_count=%d\nstart_head_sha256=%s\nend_event_count=%d\nend_head_sha256=%s\nsegment_sha256=%s\nsegment_hex=%s\n"
-    request.request_witness request.request_membership_digest
+    "schema=%s\nop=anchor\nwitness=%s\nmembership_sha256=%s\ndomain=%s\nanchor_sequence=%d\nstart_event_count=%d\nstart_head_sha256=%s\nend_event_count=%d\nend_head_sha256=%s\nsegment_sha256=%s\nsegment_hex=%s\n"
+    request.request_schema request.request_witness request.request_membership_digest
     request.request_domain request.request_anchor_sequence
     request.request_start_count request.request_start_head
     request.request_end_count request.request_end_head
     request.request_segment_digest (hex_of_string request.request_segment)
 
-let anchor_authorization_message payload_digest =
-  "loom-witness-anchor-authorization-v0\000" ^ payload_digest
+let anchor_authorization_message schema payload_digest =
+  "loom-witness-anchor-authorization-"
+  ^ (if Filename.check_suffix schema "-v1" then "v1" else "v0")
+  ^ "\000" ^ payload_digest
 
 let canonical_request request =
   request_payload request
@@ -270,14 +300,14 @@ let canonical_request request =
       request.request_anchor_key_id request.request_payload_digest
       request.request_anchor_signature
 
-let request_digest canonical =
-  sha256 ("loom-witness-segment-request-v0\000" ^ canonical)
+let request_digest request canonical =
+  sha256 (request.request_schema ^ "\000" ^ canonical)
 
 let authorize_request membership private_key request =
   let payload_digest = sha256 (request_payload request) in
   let signed =
     Loom_epistemic.outcome_ed25519_sign private_key
-      (anchor_authorization_message payload_digest)
+      (anchor_authorization_message request.request_schema payload_digest)
   in
   let signature =
     match Sys.getenv_opt "SOUNIO_LOOM_WITNESS_TAMPER_ANCHOR_SIGNATURE" with
@@ -294,8 +324,10 @@ let authorize_request membership private_key request =
 let parse_request membership canonical =
   if String.length canonical > max_wire_bytes then failf "witness-request-too-large";
   let fields = fields_of_text "witness-request" canonical in
-  if field "witness-request" fields "schema"
-       <> "loom-witness-segment-request-v0"
+  let expected_schema =
+    "loom-witness-segment-request-" ^ topology_suffix membership.topology
+  in
+  if field "witness-request" fields "schema" <> expected_schema
      || field "witness-request" fields "op" <> "anchor"
   then failf "witness-request-schema-invalid";
   let segment =
@@ -305,7 +337,8 @@ let parse_request membership canonical =
   if String.length segment > max_segment_bytes then
     failf "witness-request-segment-too-large:%d" (String.length segment);
   let request =
-    { request_witness = field "witness-request" fields "witness";
+    { request_schema = expected_schema;
+      request_witness = field "witness-request" fields "witness";
       request_membership_digest =
         nonzero_digest "witness-request-membership"
           (field "witness-request" fields "membership_sha256");
@@ -350,12 +383,14 @@ let parse_request membership canonical =
   then failf "witness-request-anchor-authorization-mismatch";
   if not
        (Loom_epistemic.outcome_ed25519_verify membership.anchor_public_key_pem
-          (anchor_authorization_message request.request_payload_digest)
+          (anchor_authorization_message request.request_schema
+             request.request_payload_digest)
           request.request_anchor_signature)
   then failf "witness-request-anchor-signature-invalid";
   request
 
 type receipt = {
+  receipt_schema : string;
   receipt_witness : string;
   receipt_key_id : string;
   receipt_membership_digest : string;
@@ -376,8 +411,8 @@ type receipt = {
 
 let receipt_payload receipt =
   Printf.sprintf
-    "schema=loom-witness-share-payload-v0\nalgorithm=ed25519\nwitness=%s\nkey_id=%s\nmembership_sha256=%s\ndomain=%s\nanchor_sequence=%d\nstart_event_count=%d\nstart_head_sha256=%s\nend_event_count=%d\nend_head_sha256=%s\nsegment_sha256=%s\nrequest_sha256=%s\nanchor_key_id=%s\nrequest_payload_sha256=%s\nanchor_signature_base64=%s\n"
-    receipt.receipt_witness receipt.receipt_key_id
+    "schema=%s\nalgorithm=ed25519\nwitness=%s\nkey_id=%s\nmembership_sha256=%s\ndomain=%s\nanchor_sequence=%d\nstart_event_count=%d\nstart_head_sha256=%s\nend_event_count=%d\nend_head_sha256=%s\nsegment_sha256=%s\nrequest_sha256=%s\nanchor_key_id=%s\nrequest_payload_sha256=%s\nanchor_signature_base64=%s\n"
+    receipt.receipt_schema receipt.receipt_witness receipt.receipt_key_id
     receipt.receipt_membership_digest receipt.receipt_domain
     receipt.receipt_anchor_sequence receipt.receipt_start_count
     receipt.receipt_start_head receipt.receipt_end_count
@@ -390,18 +425,21 @@ let canonical_receipt receipt =
   ^ Printf.sprintf "signed_payload_sha256=%s\nsignature_base64=%s\n"
       receipt.receipt_payload_digest receipt.receipt_signature
 
-let receipt_digest canonical =
-  sha256 ("loom-witness-share-receipt-v0\000" ^ canonical)
+let receipt_digest receipt canonical =
+  sha256 (receipt.receipt_schema ^ "\000" ^ canonical)
 
-let parse_receipt canonical =
+let parse_receipt membership canonical =
   if String.length canonical > 16 * 1024 then failf "witness-receipt-too-large";
   let fields = fields_of_text "witness-receipt" canonical in
-  if field "witness-receipt" fields "schema"
-       <> "loom-witness-share-payload-v0"
+  let expected_schema =
+    "loom-witness-share-payload-" ^ topology_suffix membership.topology
+  in
+  if field "witness-receipt" fields "schema" <> expected_schema
      || field "witness-receipt" fields "algorithm" <> "ed25519"
   then failf "witness-receipt-schema-invalid";
   let receipt =
-    { receipt_witness = field "witness-receipt" fields "witness";
+    { receipt_schema = expected_schema;
+      receipt_witness = field "witness-receipt" fields "witness";
       receipt_key_id =
         nonzero_digest "witness-receipt-key"
           (field "witness-receipt" fields "key_id");
@@ -454,7 +492,7 @@ let parse_receipt canonical =
   receipt
 
 let verify_receipt membership member canonical =
-  let receipt = parse_receipt canonical in
+  let receipt = parse_receipt membership canonical in
   if receipt.receipt_witness <> member.member_id
      || receipt.receipt_key_id <> member.key_id
      || receipt.receipt_membership_digest <> membership.membership_digest
@@ -462,7 +500,10 @@ let verify_receipt membership member canonical =
   then failf "witness-receipt-authority-mismatch:%s" member.member_id;
   if not
        (Loom_epistemic.outcome_ed25519_verify membership.anchor_public_key_pem
-          (anchor_authorization_message receipt.receipt_request_payload_digest)
+          (anchor_authorization_message
+             ("loom-witness-segment-request-"
+              ^ topology_suffix membership.topology)
+             receipt.receipt_request_payload_digest)
           receipt.receipt_anchor_signature)
   then failf "witness-receipt-anchor-signature-invalid:%s" member.member_id;
   if not
@@ -494,13 +535,15 @@ let verify_segment request =
 
 let status_request membership member domain =
   Printf.sprintf
-    "schema=loom-witness-status-request-v0\nop=status\nwitness=%s\nmembership_sha256=%s\ndomain=%s\n"
-    member.member_id membership.membership_digest domain
+    "schema=loom-witness-status-request-%s\nop=status\nwitness=%s\nmembership_sha256=%s\ndomain=%s\n"
+    (topology_suffix membership.topology) member.member_id
+    membership.membership_digest domain
 
 let genesis_status membership member domain =
   Printf.sprintf
-    "schema=loom-witness-status-v0\nstatus=genesis\nwitness=%s\nkey_id=%s\nmembership_sha256=%s\ndomain=%s\n"
-    member.member_id member.key_id membership.membership_digest domain
+    "schema=loom-witness-status-%s\nstatus=genesis\nwitness=%s\nkey_id=%s\nmembership_sha256=%s\ndomain=%s\n"
+    (topology_suffix membership.topology) member.member_id member.key_id
+    membership.membership_digest domain
 
 let parse_status_request membership member canonical =
   let expected = status_request membership member
@@ -509,7 +552,7 @@ let parse_status_request membership member canonical =
   in
   let fields = fields_of_text "witness-status-request" canonical in
   if field "witness-status-request" fields "schema"
-       <> "loom-witness-status-request-v0"
+       <> "loom-witness-status-request-" ^ topology_suffix membership.topology
      || field "witness-status-request" fields "op" <> "status"
      || field "witness-status-request" fields "witness" <> member.member_id
      || field "witness-status-request" fields "membership_sha256"
@@ -544,7 +587,7 @@ let handle_anchor membership member private_key state_dir canonical =
      || request.request_membership_digest <> membership.membership_digest
   then failf "witness-request-authority-mismatch";
   let state = load_state membership member state_dir request.request_domain in
-  let canonical_request_digest = request_digest canonical in
+  let canonical_request_digest = request_digest request canonical in
   (match state with
   | Some (previous_canonical, previous)
     when previous.receipt_request_digest = canonical_request_digest ->
@@ -565,7 +608,9 @@ let handle_anchor membership member private_key state_dir canonical =
       then failf "witness-anchor-predecessor-mismatch";
       verify_segment request;
       let provisional =
-        { receipt_witness = member.member_id; receipt_key_id = member.key_id;
+        { receipt_schema =
+            "loom-witness-share-payload-" ^ topology_suffix membership.topology;
+          receipt_witness = member.member_id; receipt_key_id = member.key_id;
           receipt_membership_digest = membership.membership_digest;
           receipt_domain = request.request_domain;
           receipt_anchor_sequence = request.request_anchor_sequence;
@@ -687,7 +732,10 @@ let query_status membership endpoint domain =
     let canonical =
       exchange endpoint (status_request membership endpoint.endpoint_member domain)
     in
-    if starts_with canonical "schema=loom-witness-status-v0\n" then (
+    if starts_with canonical
+         ("schema=loom-witness-status-" ^ topology_suffix membership.topology
+          ^ "\n")
+    then (
       parse_genesis_status membership endpoint.endpoint_member domain canonical;
       Genesis)
     else
@@ -715,7 +763,7 @@ let send_anchor membership endpoint request =
      || receipt.receipt_end_count <> request.request_end_count
      || receipt.receipt_end_head <> request.request_end_head
      || receipt.receipt_segment_digest <> request.request_segment_digest
-     || receipt.receipt_request_digest <> request_digest canonical_request
+     || receipt.receipt_request_digest <> request_digest request canonical_request
      || receipt.receipt_anchor_key_id <> request.request_anchor_key_id
      || receipt.receipt_request_payload_digest <> request.request_payload_digest
      || receipt.receipt_anchor_signature <> request.request_anchor_signature
@@ -745,8 +793,10 @@ let serve ~state_dir ~membership_file ~witness_id ~private_key ~bind ~port =
     match Unix.getsockname server with ADDR_INET (_, value) -> value | _ -> port
   in
   Printf.printf
-    "LOOM_WITNESS_READY schema=loom-witness-service-v0 witness=%s key_id=%s membership_sha256=%s bind=%s port=%d authority=external-monotonic-state\n%!"
-    witness_id member.key_id membership.membership_digest bind actual_port;
+    "LOOM_WITNESS_READY schema=loom-witness-service-%s witness=%s key_id=%s membership_sha256=%s members=%d quorum=%d bind=%s port=%d authority=external-monotonic-state\n%!"
+    (topology_suffix membership.topology) witness_id member.key_id
+    membership.membership_digest (topology_member_count membership.topology)
+    (topology_quorum membership.topology) bind actual_port;
   while true do
     let client, _ = Unix.accept server in
     Fun.protect ~finally:(fun () -> Unix.close client) (fun () ->
@@ -773,6 +823,7 @@ let serve ~state_dir ~membership_file ~witness_id ~private_key ~bind ~port =
   done
 
 type certificate = {
+  certificate_topology : topology;
   certificate_world : string;
   certificate_membership_digest : string;
   certificate_previous_digest : string;
@@ -787,19 +838,31 @@ type certificate = {
 let share_field = function None -> "-" | Some canonical -> hex_of_string canonical
 
 let canonical_certificate certificate =
-  Printf.sprintf
-    "schema=loom-witness-mesh-certificate-v0\nworld=%s\nmembership_sha256=%s\nquorum=2\nprevious_certificate_sha256=%s\nprevious_anchor_sequence=%d\nanchor_sequence=%d\nprevious_event_count=%d\nevent_count=%d\njournal_head_sha256=%s\nshare1=%s\nshare2=%s\nshare3=%s\nnative_frame=9013\n"
-    certificate.certificate_world certificate.certificate_membership_digest
-    certificate.certificate_previous_digest
-    certificate.certificate_previous_sequence certificate.certificate_sequence
-    certificate.certificate_previous_event_count certificate.certificate_event_count
-    certificate.certificate_journal_head
-    (share_field certificate.certificate_shares.(0))
-    (share_field certificate.certificate_shares.(1))
-    (share_field certificate.certificate_shares.(2))
+  let prefix =
+    Printf.sprintf
+      "schema=loom-witness-mesh-certificate-%s\nworld=%s\nmembership_sha256=%s\nquorum=%d\nprevious_certificate_sha256=%s\nprevious_anchor_sequence=%d\nanchor_sequence=%d\nprevious_event_count=%d\nevent_count=%d\njournal_head_sha256=%s\n"
+      (topology_suffix certificate.certificate_topology)
+      certificate.certificate_world certificate.certificate_membership_digest
+      (topology_quorum certificate.certificate_topology)
+      certificate.certificate_previous_digest
+      certificate.certificate_previous_sequence certificate.certificate_sequence
+      certificate.certificate_previous_event_count certificate.certificate_event_count
+      certificate.certificate_journal_head
+  in
+  let shares =
+    Array.to_list certificate.certificate_shares
+    |> List.mapi (fun index share ->
+           Printf.sprintf "share%d=%s\n" (index + 1) (share_field share))
+    |> String.concat ""
+  in
+  prefix ^ shares
+  ^ Printf.sprintf "native_frame=%d\n"
+      (topology_frame certificate.certificate_topology)
 
-let certificate_digest canonical =
-  sha256 ("loom-witness-mesh-certificate-v0\000" ^ canonical)
+let certificate_digest topology canonical =
+  sha256
+    ("loom-witness-mesh-certificate-" ^ topology_suffix topology ^ "\000"
+     ^ canonical)
 
 let parse_share label value =
   if value = "-" then None
@@ -807,16 +870,20 @@ let parse_share label value =
     try Some (string_of_hex value)
     with _ -> failf "%s-invalid-hex" label
 
-let parse_certificate canonical =
+let parse_certificate membership canonical =
   if String.length canonical > 64 * 1024 then failf "witness-certificate-too-large";
   let fields = fields_of_text "witness-certificate" canonical in
+  let topology = membership.topology in
   if field "witness-certificate" fields "schema"
-       <> "loom-witness-mesh-certificate-v0"
-     || field "witness-certificate" fields "quorum" <> "2"
-     || field "witness-certificate" fields "native_frame" <> "9013"
+       <> "loom-witness-mesh-certificate-" ^ topology_suffix topology
+     || field "witness-certificate" fields "quorum"
+        <> string_of_int (topology_quorum topology)
+     || field "witness-certificate" fields "native_frame"
+        <> string_of_int (topology_frame topology)
   then failf "witness-certificate-schema-invalid";
   let certificate =
-    { certificate_world = field "witness-certificate" fields "world";
+    { certificate_topology = topology;
+      certificate_world = field "witness-certificate" fields "world";
       certificate_membership_digest =
         nonzero_digest "witness-certificate-membership"
           (field "witness-certificate" fields "membership_sha256");
@@ -839,29 +906,35 @@ let parse_certificate canonical =
         nonzero_digest "witness-certificate-head"
           (field "witness-certificate" fields "journal_head_sha256");
       certificate_shares =
-        [| parse_share "witness-certificate-share1"
-             (field "witness-certificate" fields "share1");
-           parse_share "witness-certificate-share2"
-             (field "witness-certificate" fields "share2");
-           parse_share "witness-certificate-share3"
-             (field "witness-certificate" fields "share3") |] }
+        Array.init (topology_member_count topology) (fun index ->
+            let key = Printf.sprintf "share%d" (index + 1) in
+            parse_share ("witness-certificate-" ^ key)
+              (field "witness-certificate" fields key)) }
   in
   validate_atom "witness-certificate-world" certificate.certificate_world;
   if canonical_certificate certificate <> canonical then
     failf "witness-certificate-noncanonical";
   certificate
 
-let adapter_path () =
-  match Sys.getenv_opt "SOUNIO_LOOM_WITNESS_MESH_ADAPTER" with
+let adapter_path topology =
+  let variable, binary =
+    match topology with
+    | Mesh_v0 ->
+        ("SOUNIO_LOOM_WITNESS_MESH_ADAPTER",
+         "sounio-loom-witness-mesh-runtime")
+    | Mesh_v1 ->
+        ("SOUNIO_LOOM_WITNESS_MESH_V1_ADAPTER",
+         "sounio-loom-witness-mesh-v1-runtime")
+  in
+  match Sys.getenv_opt variable with
   | Some path when path <> "" -> path
   | _ ->
       Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
-        "sounio-loom-witness-mesh-runtime"
+        binary
 
 let zero_limbs = List.init 8 (fun _ -> "0")
 
 let verify_native_frame membership certificate receipts =
-  let receipt_at index = receipts.(index) in
   let signature_flags =
     Array.to_list receipts
     |> List.map (function None -> "0" | Some _ -> "1")
@@ -903,7 +976,9 @@ let verify_native_frame membership certificate receipts =
          | Some receipt -> Loom_epistemic.digest_limbs (projection receipt))
   in
   let frame =
-    [ "9013"; "2" ] @ signature_flags @ members @ receipt_members
+    [ string_of_int (topology_frame membership.topology);
+      string_of_int (topology_quorum membership.topology) ]
+    @ signature_flags @ members @ receipt_members
     @ [ expected_domain ] @ receipt_domains
     @ [ string_of_int certificate.certificate_previous_sequence;
         string_of_int certificate.certificate_sequence ]
@@ -916,15 +991,18 @@ let verify_native_frame membership certificate receipts =
     @ Loom_epistemic.digest_limbs certificate.certificate_journal_head
     @ digest_slots (fun receipt -> receipt.receipt_end_head)
   in
-  ignore receipt_at;
-  let adapter = adapter_path () in
+  let adapter = adapter_path membership.topology in
   if not (Sys.file_exists adapter) then failf "witness-native-adapter-missing:%s" adapter;
   let code, output =
     Loom_epistemic.process_exchange (Unix.realpath adapter)
       (String.concat " " frame ^ "\n")
   in
   let expected =
-    "SOUNIO_WITNESS_MESH_ACCEPT schema=loom-native-witness-mesh-v0 transition=anchor state=quorum-verified"
+    match membership.topology with
+    | Mesh_v0 ->
+        "SOUNIO_WITNESS_MESH_ACCEPT schema=loom-native-witness-mesh-v0 transition=anchor state=quorum-verified"
+    | Mesh_v1 ->
+        "SOUNIO_WITNESS_MESH_V1_ACCEPT schema=loom-native-witness-mesh-v1 transition=anchor state=quorum-verified"
   in
   if code <> 0 || output <> expected then
     failf "witness-native-refused:rc=%d:output=%s" code output
@@ -989,7 +1067,7 @@ let load_certificate_chain root world membership events head_at =
   List.iter
     (fun path ->
       let canonical = read_file_bounded "witness-certificate" (64 * 1024) path in
-      let certificate = parse_certificate canonical in
+      let certificate = parse_certificate membership canonical in
       if certificate.certificate_world <> world
          || certificate.certificate_membership_digest <> membership.membership_digest
          || certificate.certificate_previous_digest <> !previous_digest
@@ -1002,10 +1080,11 @@ let load_certificate_chain root world membership events head_at =
             <> certificate.certificate_journal_head
       then failf "witness-certificate-chain-mismatch:%s" path;
       let receipts = receipts_for_certificate membership certificate in
-      if Array.fold_left (fun count -> function None -> count | Some _ -> count + 1) 0 receipts < 2
+      if Array.fold_left (fun count -> function None -> count | Some _ -> count + 1) 0 receipts
+         < topology_quorum membership.topology
       then failf "witness-certificate-quorum-missing:%s" path;
       verify_native_frame membership certificate receipts;
-      previous_digest := certificate_digest canonical;
+      previous_digest := certificate_digest membership.topology canonical;
       previous_sequence := certificate.certificate_sequence;
       previous_count := certificate.certificate_event_count;
       latest := Some (canonical, certificate))
@@ -1097,7 +1176,8 @@ let anchor ~root ~world ~membership_file ~endpoints_file ~anchor_private_key =
           match latest with
           | None -> (zero_digest, 0, 0)
           | Some (canonical, certificate) ->
-              ( certificate_digest canonical, certificate.certificate_sequence,
+              ( certificate_digest membership.topology canonical,
+                certificate.certificate_sequence,
                 certificate.certificate_event_count )
         in
         if Array.length events <= previous_count then
@@ -1115,7 +1195,9 @@ let anchor ~root ~world ~membership_file ~endpoints_file ~anchor_private_key =
             current_head statuses
         in
         let anchor_sequence = previous_sequence + 1 in
-        let receipts = Array.make 3 None in
+        let member_count = topology_member_count membership.topology in
+        let required_quorum = topology_quorum membership.topology in
+        let receipts = Array.make member_count None in
         let failures = ref [] in
         Array.iteri
           (fun index endpoint ->
@@ -1142,7 +1224,10 @@ let anchor ~root ~world ~membership_file ~endpoints_file ~anchor_private_key =
                 else
                   let segment = segment_between events start_count target_count in
                   let unsigned_request =
-                    { request_witness = endpoint.endpoint_member.member_id;
+                    { request_schema =
+                        "loom-witness-segment-request-"
+                        ^ topology_suffix membership.topology;
+                      request_witness = endpoint.endpoint_member.member_id;
                       request_membership_digest = membership.membership_digest;
                       request_domain = world;
                       request_anchor_sequence = anchor_sequence;
@@ -1179,7 +1264,7 @@ let anchor ~root ~world ~membership_file ~endpoints_file ~anchor_private_key =
             (fun count -> function None -> count | Some _ -> count + 1)
             0 receipts
         in
-        if receipt_count < 2 then (
+        if receipt_count < required_quorum then (
           let detail =
             List.rev !failures
             |> List.map (fun (member, error) -> member ^ "=" ^ error)
@@ -1198,7 +1283,8 @@ let anchor ~root ~world ~membership_file ~endpoints_file ~anchor_private_key =
             receipts
         in
         let certificate =
-          { certificate_world = world;
+          { certificate_topology = membership.topology;
+            certificate_world = world;
             certificate_membership_digest = membership.membership_digest;
             certificate_previous_digest = previous_digest;
             certificate_previous_sequence = previous_sequence;
@@ -1221,10 +1307,11 @@ let anchor ~root ~world ~membership_file ~endpoints_file ~anchor_private_key =
         if target_count < Array.length events then advance ()
         else
           Printf.sprintf
-            "LOOM_WITNESS_MESH_ANCHORED schema=loom-witness-mesh-v0 world=%s sequence=%d event_count=%d journal_head=%s quorum=%d/3 recovered_checkpoints=%d membership_sha256=%s certificate_sha256=%s certificate=%s"
-            world anchor_sequence target_count target_head receipt_count
+            "LOOM_WITNESS_MESH_ANCHORED schema=%s world=%s sequence=%d event_count=%d journal_head=%s quorum=%d/%d recovered_checkpoints=%d membership_sha256=%s certificate_sha256=%s certificate=%s"
+            (topology_schema membership.topology) world anchor_sequence
+            target_count target_head receipt_count member_count
             !recovered_checkpoints membership.membership_digest
-            (certificate_digest canonical) output
+            (certificate_digest membership.topology canonical) output
       in
       advance ())
 
@@ -1275,16 +1362,26 @@ let verify ~root ~world ~membership_file ~endpoints_file ~policy =
           0 statuses
       in
       let required, rollback_resistance =
-        match policy with
-        | Crash_quorum -> (2, "CONDITIONAL_ON_NON_EQUIVOCATION")
-        | Byzantine_strict -> (3, "ONE_DISHONEST_WITNESS")
+        match (membership.topology, policy) with
+        | _, Crash_quorum ->
+            (topology_quorum membership.topology,
+             "CONDITIONAL_ON_NON_EQUIVOCATION")
+        | Mesh_v0, Byzantine_strict ->
+            (topology_member_count membership.topology,
+             "ONE_DISHONEST_WITNESS_ALL_MEMBERS")
+        | Mesh_v1, Byzantine_strict ->
+            (topology_quorum membership.topology,
+             "ONE_DISHONEST_WITNESS_HONEST_INTERSECTION")
       in
       if current < required then
         failf "witness-current-quorum-unavailable:policy=%s:valid=%d:required=%d"
           (verification_policy_name policy) current required;
       Printf.sprintf
-        "LOOM_WITNESS_MESH_OK schema=loom-witness-mesh-v0 world=%s sequence=%d event_count=%d journal_head=%s verification_policy=%s remote_quorum=%d/3 required=%d/3 membership_sha256=%s certificate_sha256=%s rollback_resistance=%s scope=THROUGH_LATEST_CHECKPOINT"
-        world certificate.certificate_sequence certificate.certificate_event_count
+        "LOOM_WITNESS_MESH_OK schema=%s world=%s sequence=%d event_count=%d journal_head=%s verification_policy=%s remote_quorum=%d/%d required=%d/%d membership_sha256=%s certificate_sha256=%s rollback_resistance=%s scope=THROUGH_LATEST_CHECKPOINT"
+        (topology_schema membership.topology) world
+        certificate.certificate_sequence certificate.certificate_event_count
         certificate.certificate_journal_head (verification_policy_name policy)
-        current required membership.membership_digest (certificate_digest canonical)
+        current (topology_member_count membership.topology) required
+        (topology_member_count membership.topology) membership.membership_digest
+        (certificate_digest membership.topology canonical)
         rollback_resistance)

@@ -452,6 +452,64 @@ themselves authorize clinical, dosing, or classifier decisions. The exact
 semantic and falsification boundary is in
 `docs/internal/concepts/loom-witness-mesh.contract`.
 
+## Witness Mesh v1
+
+V1 makes the availability/safety trade explicit in the membership schema and
+uses four fixed witnesses with a 3-of-4 quorum. The first line selects v1; a v0
+membership file remains byte-for-byte compatible with the previous parser:
+
+```text
+schema<TAB>loom-witness-membership-v1
+anchor_public_key<TAB>/anchor/authority-public.pem
+witness_id<TAB>public_key
+w1<TAB>/authority-a/witness-public.pem
+w2<TAB>/authority-b/witness-public.pem
+w3<TAB>/authority-c/witness-public.pem
+w4<TAB>/authority-d/witness-public.pem
+```
+
+The endpoint file has the same header as v0 and one row for each of `w1` through
+`w4`. The existing `witness-serve`, `witness-mesh-anchor`, and
+`witness-mesh-verify` commands select v1 from the membership schema. Native
+Sounio frame `9014` consumes three distinct matching linear shares. Its five
+rules independently check member separation, canonical 3-of-4 quorum flags,
+membership binding, checkpoint agreement, and strict monotonic advance.
+Both v1 verification policies therefore require 3-of-4. `crash-quorum` retains
+the non-equivocation/state-retention claim, while default `byzantine-strict`
+uses the `f <= 1` honest-intersection argument below.
+
+For any two quorums `Q1` and `Q2` of size three in a fixed four-member universe,
+`|Q1 intersection Q2| >= 3 + 3 - 4 = 2`. If at most one member is dishonest,
+that intersection contains at least one honest member. Distinct 3-subsets
+intersect in exactly two members; identical quorums intersect in all three.
+Consequently, under
+fixed membership, retained honest state, verified signatures, and `f <= 1`, a
+3-of-4 current-status verification cannot accept a rollback view whose only
+bridge to the anchoring quorum is dishonest. Unlike v0 strict mode, v1 can both
+anchor and strictly verify with one unavailable member when the other three
+return valid matching receipts.
+
+The executable attack control advances `w1,w2,w3`, leaves `w4` behind, makes
+`w1` unavailable, rolls the dishonest `w2` back to a valid older signed state,
+and keeps honest `w3` current. Verification refuses the rolled local view
+because the required 3-of-4 response contains that current honest intersection.
+The recovery control then catches `w2` and `w4` up from their own retained
+predecessors and verifies with `w1` still unavailable.
+
+This is a bounded honest-intersection checkpoint protocol, not a general BFT
+consensus protocol. There is one configured anchor authority, no leader
+election, view change, asynchronous liveness proof, dynamic reconfiguration, or
+state transfer by assertion. Progress requires three protocol-valid matching
+responses; network reachability alone is insufficient. A dishonest refusal or
+invalid response plus another unavailable service halts it. V1 also does not
+provide TLS, confidentiality, trusted time, threshold signatures, HSM custody,
+organizational independence, protection after two dishonest/rolled-back
+witnesses, or truth of the journal payload. Membership rotation starts a new
+world or epoch. The same 4 MiB frame and 1 MiB raw-segment bounds apply.
+A dishonest witness may also force a fail-closed denial of service with a stale,
+future, malformed, or otherwise nonmatching signed status; no Byzantine
+liveness claim is made.
+
 When a session has exited, `snapshot` falls back to terminal offline replay. It
 accepts that path only after both the semantic and Guardian journals reach their
 terminal states, the Guardian cursor equals the durable output length, and every
