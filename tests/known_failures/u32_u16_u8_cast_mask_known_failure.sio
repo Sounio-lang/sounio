@@ -1,0 +1,52 @@
+//@ known-failure: `as u8` / `as u16` / `as u32` do not mask at conversion -- tracked as Finding 14 of the unsigned-ops scope extension.
+
+// Findings 11 / 13 / 14 are ONE defect (see finding11_scope_extension dispatch):
+// there is no width information on integer locals in the modular compiler, so
+// `300 as u8` is a no-op -- the i64 value 300 is held in the same slot a u8
+// value would use, and the runtime never masks to 8 bits. Reading it back as
+// u8 returns 300, not 44. Finding 11 added unsigned /, %, >>. Casts to a
+// narrower unsigned type need the same width-aware lowering -- which the
+// signedness-only fix does not provide.
+//
+// Expected behaviour (NOT what the compiler does today):
+//   300   as u8   == 44       // 300 mod 256
+//   70000 as u16  == 4464     // 70000 mod 65536
+//   (-1)  as u8   == 255      // two's-complement reinterpret of -1
+//   257   as u16  == 257      // identity case, no mask
+//
+// What the compiler does today: the cast emits nothing. The value flows
+// through as i64 and is held in the slot the destination type would occupy,
+// without ever being masked. So:
+//   300 as u8 returns 300 (not 44)
+//   70000 as u16 returns 70000 (not 4464)
+//
+// This is a follow-up change. A width-aware lowering that masks to the
+// destination bit-width at every store-into-narrower-slot boundary would fix
+// it. Tracking that width -- on locals, on expression results, on cast targets
+// -- is the missing primitive.
+
+fn main() -> i64 with IO, Div {
+    // 300 mod 256 = 44.  Current: returns 300.
+    let narrow: u8 = 300 as u8
+    if narrow == 44 { return 0 }    // would prove cast masks to 8 bits
+    if narrow == 300 { return 1 }   // current broken behaviour: no mask
+
+    // 70000 mod 65536 = 4464.  Current: returns 70000.
+    let mid: u16 = 70000 as u16
+    if mid == 4464 { return 0 }     // would prove cast masks to 16 bits
+    if mid == 70000 { return 2 }    // current broken behaviour: no mask
+
+    // (-1) reinterpret as u8 = 255.  Current: returns -1 (i64 bit pattern
+    // 0xFFFF_FFFF_FFFF_FFFF held in u8 slot, never masked).
+    let neg_one_in: i64 = 0 - 1
+    let neg8: u8 = neg_one_in as u8
+    if neg8 == 255 { return 0 }     // would prove cast masks to 8 bits
+    if neg8 == 18446744073709551615 { return 3 }   // current broken behaviour
+
+    // Identity case (within width) should still be correct.
+    let ok: u16 = 257 as u16
+    if ok == 257 { return 0 }
+    if ok == 0 { return 4 }
+
+    return 7
+}

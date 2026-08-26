@@ -1,0 +1,59 @@
+//@ run-pass
+// Finding 11 (issue #2084): u64 >>, /, % must use unsigned semantics.
+//
+// At the dispatch point these three operations had a single BinaryOp variant
+// each (OpShr, OpDiv, OpRem) that the lowering always emitted as the signed
+// x86 instruction (sar rax,cl / idiv rcx). For a u64 value with bit 63 set
+// that gives mathematically wrong answers with no error:
+//   - 0xFFFF_FFFF_FFFF_FFFF_u64 >> 1 expected 0x7FFF_FFFF_FFFF_FFFF (unsigned)
+//     sar gives                    0xFFFF_FFFF_FFFF_FFFF (sign-extends)
+//   - 0xFFFF_FFFF_FFFF_FFFF_u64 /  2 expected 0x7FFF_FFFF_FFFF_FFFF (unsigned)
+//     idiv gives                            0 (treats as -1, truncate-toward-zero)
+//   - 0xFFFF_FFFF_FFFF_FFFF_u64 %  2 expected                    1 (unsigned)
+//     idiv gives                           -1 (i.e. the input unchanged)
+//
+// Bit-63-set is the boundary: a value with bit 62 set already shifts correctly
+// because the sign bit stays 0 under sar. + - * & | ^ << == != are unaffected.
+//
+// This fixture MUST fail on unfixed main (where the lowering always emits the
+// signed instruction) and PASS once BinaryOp carries OpUDiv/OpURem/OpUShr and
+// the lowering routes them to div r/m64 / shr rax,cl.
+
+fn main() -> i64 with IO, Div {
+    // Values chosen to surface all three signed/unsigned disagreements at once.
+    // (1 << 63) + 1 has bit 63 set; bit 62 is clear so a value just below it
+    // would still sar correctly. Used for the unsigned-divmod correctness.
+    let n: u64 = 9223372036854775809   // 0x8000_0000_0000_0001
+    let q: u64 = n / 2
+    let r: u64 = n % 2
+    if q != 4611686018427387904 { return 11 }   // 0x4000_0000_0000_0000
+    if r != 1 { return 12 }
+
+    // (1 << 63) - 1 has all lower 63 bits set, so bit 63 is clear; this
+    // case is correct under both signed and unsigned, and is included as a
+    // sanity bound (any accidental regression that flips the divmod polarity
+    // would also fail here).
+    let m: u64 = 9223372036854775807   // 0x7FFF_FFFF_FFFF_FFFF
+    let q2: u64 = m / 3
+    if q2 != 3074457345618258602 { return 13 }
+
+    // Shift: 0xFFFF_FFFF_FFFF_FFFF_u64 >> 1 expected 0x7FFF_FFFF_FFFF_FFFF.
+    // sar on -1 gives -1 unchanged; the bug returns -1 (=0xFFFF_FFFF_FFFF_FFFF_u64
+    // when reinterpreted as u64), not the halve we expect.
+    let big: u64 = 18446744073709551615   // 0xFFFF_FFFF_FFFF_FFFF
+    let half: u64 = big >> 1
+    if half != 9223372036854775807 { return 14 }   // 0x7FFF_FFFF_FFFF_FFFF
+
+    // Shift by 63: keeps only bit 63, expected 1; sar would keep sign -> 0xFFFF...FFFF.
+    let top: u64 = big >> 63
+    if top != 1 { return 15 }
+
+    // Bit-62-set sanity: 0x4000...0000_u64 >> 1 expected 0x2000...0000. This
+    // one already passes under sar (sign bit stays 0) and is here to prove the
+    // unsigned path did not break the already-correct signed path.
+    let b62: u64 = 4611686018427387904   // 0x4000_0000_0000_0000
+    if (b62 >> 1) != 2305843009213693952 { return 16 }
+
+    println("u64 >>, /, % use unsigned semantics")
+    0
+}
