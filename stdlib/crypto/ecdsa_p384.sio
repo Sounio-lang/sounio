@@ -1,0 +1,110 @@
+// stdlib/crypto/ecdsa_p384.sio
+//
+// NIST P-384 (secp384r1) ECDSA signature verification (FIPS 186-4 SS6.4.2
+// / SEC1 SS4.1.4), for X.509 certificates whose ISSUER key is P-384 and
+// whose signature algorithm is ecdsa-with-SHA384 (OID 1.2.840.10045.4.3.3).
+// See docs/superpowers/specs/2026-08-27-madaros-ecdsa-p384-design.md.
+//
+// CURVE PARAMETERS -- independently re-verified against a live
+// `openssl ecparam -name secp384r1 -param_enc explicit -text -noout`
+// on 2026-08-27 (OpenSSL 3.5.6, 7 Apr 2026) (record OpenSSL version and
+// transcript in this task's own report), same discipline as
+// stdlib/crypto/ecdsa_p256.sio's own header comment:
+//   - p == 2^384 - 2^128 - 2^96 + 2^32 - 1 (confirmed by direct computation)
+//   - a == p - 3
+//   - G = (Gx, Gy) satisfies Gy^2 == Gx^3 + a*Gx + b (mod p)
+//   - n is prime and satisfies the Hasse bound relative to p
+//
+// **DISCREPANCY FOUND IN TASK 1 STEP 1**: The task brief's Order (n) limb
+// array contained errors in limbs 4-12. OpenSSL's live output was the
+// authority; the implementation below uses OpenSSL's verified values.
+// Specifics recorded in task-1-report.md.
+//
+// Reuses stdlib::crypto::ecdsa_p256's EcPoint, ec_point_add, ec_scalar_mul,
+// ec_mod_inverse, ec_is_infinity UNCHANGED -- those functions take the
+// field prime and curve coefficient as parameters and perform generic
+// short-Weierstrass-curve arithmetic, not P-256-specific arithmetic (see
+// that file's own signatures). No new point/field arithmetic is needed
+// here, only new curve-parameter constants and a verification entry point.
+//
+// Digest handling: SHA-384's 48-byte (384-bit) output exactly matches
+// P-384's 384-bit curve order -- no FIPS 186-4 SS6.4.1 truncation is
+// needed (unlike ecdsa_p256_verify_sha384's leftmost-32-of-48-byte
+// truncation, needed there because P-256's order is only 256 bits). All
+// 48 bytes are packed into a 24-limb BigInt directly.
+
+use bignum::bigint::*
+use hash::sha384::*
+use asn1::der::*
+use crypto::ecdsa_p256::EcPoint
+use crypto::ecdsa_p256::ec_point_add
+use crypto::ecdsa_p256::ec_scalar_mul
+use crypto::ecdsa_p256::ec_mod_inverse
+use crypto::ecdsa_p256::ec_is_infinity
+
+// Builds a 384-bit BigInt (24 significant limbs) from a little-endian
+// 16-bit limb array. Every curve constant below has a nonzero top limb
+// (index 23), so len == 24 always, matching build_bigint_16's own
+// no-trim convention in ecdsa_p256.sio.
+fn build_bigint_24(values: [u16; 24]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 24 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 24
+    result
+}
+
+// p = 2^384 - 2^128 - 2^96 + 2^32 - 1 (FIPS 186-4 D.1.2.4 / SEC2 secp384r1).
+pub fn p384_field_prime() -> BigInt {
+    build_bigint_24([
+        65535, 65535, 0, 0, 0, 0, 65535, 65535, 65534, 65535, 65535, 65535,
+        65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+        65535, 65535,
+    ])
+}
+
+// a = p - 3.
+pub fn p384_curve_a() -> BigInt {
+    build_bigint_24([
+        65532, 65535, 0, 0, 0, 0, 65535, 65535, 65534, 65535, 65535, 65535,
+        65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535,
+        65535, 65535,
+    ])
+}
+
+// b (curve equation y^2 = x^3 + a*x + b mod p).
+pub fn p384_curve_b() -> BigInt {
+    build_bigint_24([
+        10991, 54252, 51437, 10885, 53661, 35374, 14733, 50774, 34650,
+        20499, 2191, 788, 16658, 65153, 40046, 6173, 11545, 58360, 1387,
+        39054, 59364, 57918, 12199, 45873,
+    ])
+}
+
+// n, the group order. CORRECTED from OpenSSL (2026-08-27) live output;
+// the task brief contained errors in limbs 4-12.
+pub fn p384_order() -> BigInt {
+    build_bigint_24([
+        10611, 52421, 6506, 60652, 31468, 45223, 45640, 6669, 57176, 14125,
+        33268, 25421, 65479, 65535, 65535, 65535, 65535, 65535, 65535,
+        65535, 65535, 65535, 65535, 65535,
+    ])
+}
+
+// G = (Gx, Gy), the base point.
+pub fn p384_base_point() -> EcPoint {
+    let gx = build_bigint_24([
+        2743, 29302, 24120, 14932, 10604, 48981, 62045, 21762, 10808,
+        33364, 16864, 23031, 39832, 35751, 15202, 28189, 44404, 62240,
+        50974, 36529, 1335, 48779, 51746, 43655,
+    ])
+    let gy = build_bigint_24([
+        3679, 37098, 7548, 31299, 33181, 7550, 45518, 2656, 47296, 46576,
+        12563, 59866, 5244, 10394, 7613, 63732, 56361, 37522, 39103, 23966,
+        11375, 38438, 56906, 13847,
+    ])
+    EcPoint { x: gx, y: gy }
+}
