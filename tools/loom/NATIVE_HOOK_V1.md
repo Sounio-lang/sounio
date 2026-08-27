@@ -111,6 +111,15 @@ worktree whose SessionStart loads `bin/sounio-loom agent-hook`. A positive live
 canary must therefore use a freshly started real session; a file-on-disk check,
 inbox read, or Python shim is not evidence of native-hook activation.
 
+Runtime `2026.08.27.33` also supports an independent primary checkout using the
+same installed coordination kernel and durable bus. Set both
+`SOUNIO_COORD_RUNTIME_DIR` and `SOUNIO_COORD_DIR` to the shared runtime and state
+roots before starting the harness. This is required when a CLI intentionally
+inherits hook declarations from a linked worktree's control checkout. The
+override changes hook discovery isolation, but not authority: registration and
+every later wake revalidation still require the exact active bundle path,
+manifest, source hash, and binary hashes.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic

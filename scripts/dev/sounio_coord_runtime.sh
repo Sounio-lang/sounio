@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.32
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.33
 
 usage() {
   cat <<'USAGE'
@@ -1489,9 +1489,17 @@ manifest_field() {
   sed -n "s/^${key}=//p" "$manifest" | head -n 1
 }
 
+active_coord_runtime_root() {
+  local runtime_root
+  runtime_root="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
+  runtime_root="$(readlink -f "$runtime_root" 2>/dev/null || true)"
+  [[ -n "$runtime_root" ]] || return 1
+  printf '%s\n' "$runtime_root"
+}
+
 native_hook_parent_identity() {
   local parent_pid="$PPID" runtime_self local_runtime local_loom parent_tail caller_tail
-  local parent_bundle runtime_bundle current_bundle manifest runtime_version expected_parent_sha expected_coord_sha
+  local runtime_root parent_bundle runtime_bundle current_bundle manifest runtime_version expected_parent_sha expected_coord_sha
   NATIVE_HOOK_PARENT_EXECUTABLE="$(readlink -f "/proc/$parent_pid/exe" 2>/dev/null || true)"
   [[ -n "$NATIVE_HOOK_PARENT_EXECUTABLE" ]] || return 1
   runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
@@ -1531,14 +1539,15 @@ native_hook_parent_identity() {
     NATIVE_HOOK_SOURCE_SHA="$(current_sha)"
     NATIVE_HOOK_WAKE_ELIGIBLE=0
   else
+    runtime_root="$(active_coord_runtime_root)" || return 1
     parent_bundle="$(readlink -f "$(dirname "$NATIVE_HOOK_PARENT_EXECUTABLE")/.." 2>/dev/null || true)"
     runtime_bundle="$(readlink -f "$(dirname "$runtime_self")/.." 2>/dev/null || true)"
     [[ -n "$parent_bundle" && "$parent_bundle" == "$runtime_bundle" ]] || return 1
     case "$parent_bundle" in
-      "$GIT_COMMON_DIR"/sounio-coord-runtime/versions/*) ;;
+      "$runtime_root"/versions/*) ;;
       *) return 1 ;;
     esac
-    current_bundle="$(readlink -f "$GIT_COMMON_DIR/sounio-coord-runtime/current" 2>/dev/null || true)"
+    current_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
     [[ -n "$current_bundle" && "$parent_bundle" == "$current_bundle" ]] || return 1
     [[ "$NATIVE_HOOK_PARENT_EXECUTABLE" == "$parent_bundle/bin/sounio-loom-runtime" ]] || return 1
     manifest="$parent_bundle/manifest"
@@ -1594,7 +1603,7 @@ HOOK_CAPABILITY_REASON='absent'
 hook_capability_binding_is_current() {
   local agent="$1" lane="$2" generation="$3" capability_file presence_file
   local current_generation current_sha256 current_coord_sha256 current_caller_sha256
-  local manifest bundle runtime_self active_bundle
+  local manifest runtime_root bundle runtime_self active_bundle
   HOOK_CAPABILITY_REASON='absent'
   capability_file="$(hook_capability_path "$agent" "$lane")"
   [[ -f "$capability_file" ]] || return 1
@@ -1646,9 +1655,11 @@ hook_capability_binding_is_current() {
       "$HC_CALLER_EXECUTABLE" ]] || \
     { HOOK_CAPABILITY_REASON='caller-executable-drift'; return 1; }
   if ((HC_WAKE_ELIGIBLE)); then
+    runtime_root="$(active_coord_runtime_root)" || \
+      { HOOK_CAPABILITY_REASON='runtime-root-absent'; return 1; }
     runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
     bundle="$(readlink -f "$(dirname "$HC_PRODUCER_EXECUTABLE")/.." 2>/dev/null || true)"
-    active_bundle="$(readlink -f "$GIT_COMMON_DIR/sounio-coord-runtime/current" 2>/dev/null || true)"
+    active_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
     manifest="$bundle/manifest"
     [[ "$runtime_self" == "$HC_COORD_EXECUTABLE" && \
       "$bundle" == "$active_bundle" && -r "$manifest" && \
