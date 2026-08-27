@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.internal.garden.seeds.2026-08-27-pireus-aarchmrs-open-corpus
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-27-pireus-aarchmrs-open-corpus
+-->
+
 # Pireus: The Open Arm Chart
 
 > **Status**: Garden | **Date**: 2026-08-27 | **Authority**: founder direction

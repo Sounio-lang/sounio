@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.internal.concepts.pireus-aarchmrs-tbl-import
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-aarchmrs-tbl-import
+-->
+
 # Pireus AARCHMRS TBL/TBX Import
 
 Proposed Concept-ID: `SOUNIO-PIREUS-AARCHMRS-IMPORT`
