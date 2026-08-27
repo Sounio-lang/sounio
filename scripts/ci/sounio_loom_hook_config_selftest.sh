@@ -6,7 +6,7 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 CODEX_HOOKS="$ROOT_DIR/.codex/hooks.json"
 CLAUDE_HOOKS="$ROOT_DIR/.claude/settings.json"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-hook-config.XXXXXX")"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook.config.XXXXXX")"
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -33,6 +33,8 @@ run_native_roundtrip() {
   local session_id="hook-config-$agent-$$"
   local receipt="$TEST_ROOT/$agent-receipt.tsv"
   export SOUNIO_COORD_DIR="$TEST_ROOT/coord"
+  export SOUNIO_COORD_RUNTIME_MODE=local
+  export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
   export SOUNIO_LOOM_HOOK_TEST_MODE=1
   export SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$receipt"
   unset SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME
@@ -50,6 +52,9 @@ run_native_roundtrip() {
     fail "$agent native round trip omitted its operational language"
   grep -Fq 'semantic_authority_language=Sounio' "$receipt" ||
     fail "$agent native round trip omitted Sounio authority"
+  capability="$TEST_ROOT/coord/hook-capabilities/${agent}--session-${session_id:0:24}.capability"
+  [[ ! -e "$capability" ]] ||
+    fail "$agent SessionEnd left its local native capability active"
 }
 
 [[ "$(native_count "$CODEX_HOOKS" codex)" -eq 5 ]] ||
@@ -87,4 +92,4 @@ if validate_no_legacy_bridge "$TEST_ROOT/codex-sabotaged.json"; then
 fi
 
 printf '%s\n' \
-  'sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 roundtrip=codex+claude bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused runtime=2026.08.27.35'
+  'sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 shared_runtime=2026.08.27.35 local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused'
