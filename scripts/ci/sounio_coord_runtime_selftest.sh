@@ -13,6 +13,8 @@ BAD="$TEST_ROOT/bad-source"
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
 export SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
+export SOUNIO_LOOM_LANE_HEALTH_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-runtime"
+export SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-parity-runtime"
 export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime"
 export SOUNIO_LOOM_OBLIGATION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 export SOUNIO_LOOM_EPISTEMIC_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-epistemic-runtime"
@@ -66,6 +68,8 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -82,6 +86,10 @@ mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
+  "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$REPO/tools/loom/"
@@ -100,6 +108,7 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -114,6 +123,8 @@ mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$REPO/stdlib/coordination/"
@@ -135,6 +146,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$REPO/stdlib/coordination/"
+mkdir -p "$REPO/stdlib/crypto"
+cp "$ROOT_DIR/stdlib/crypto/sha256.sio" "$REPO/stdlib/crypto/"
 chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Runtime Selftest'
@@ -250,6 +263,11 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
   fail 'installed runtime omitted the OCaml Loom kernel'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-language-authority-runtime" ]] || \
   fail 'installed runtime omitted the frozen Sounio language authority'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-runtime" && \
+  -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-parity-runtime" ]] || \
+  fail 'installed runtime omitted the frozen Sounio lane-health executables'
+grep -q '^loom_lane_health_semantics_sha256=5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f$' \
+  "$first_manifest" || fail 'installed runtime omitted frozen lane-health semantics'
 grep -q '^capability=loom-native-agent-hook-v1$' "$first_manifest" || \
   fail 'installed runtime omitted the native-agent-hook capability'
 grep -q '^loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff$' \
@@ -331,6 +349,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
   loom-native-hook-binary-attestation-v1 \
+  loom-truthful-lane-health-v1 loom-nondestructive-health-reconcile-v1 \
   loom-native-sounio-continuity-v1 \
   loom-durable-obligation-v1 \
   loom-epistemic-machine-v0 loom-epistemic-arrow-projection-v0 \
@@ -362,7 +381,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-journal-authority-quorum-v1 \
   loom-cross-node-replay-v1 \
   loom-exclusive-input-lease-v1 loom-read-only-gui-v1 \
-  loom-fusion-cockpit-v1 loom-authority-overlay-v1 \
+  loom-fusion-cockpit-v1 loom-authority-overlay-v1 loom-authority-overlay-v2 \
   coord-cockpit-snapshot-v1 loom-persistent-provider-custody-v1 \
   coord-reply-command-v1 loom-coord-transport-v1 \
   coord-generation-scoped-wake-v1 \
@@ -740,6 +759,8 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -756,6 +777,10 @@ mkdir -p "$ALT/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
+  "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$ALT/tools/loom/"
@@ -774,6 +799,7 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -788,6 +814,8 @@ mkdir -p "$ALT/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
+  "$ALT/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$ALT/stdlib/coordination/"
@@ -809,6 +837,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$ALT/stdlib/coordination/"
+mkdir -p "$ALT/stdlib/crypto"
+cp "$ROOT_DIR/stdlib/crypto/sha256.sio" "$ALT/stdlib/crypto/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$ALT/formal/tla/"
 sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
@@ -865,6 +895,8 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -881,6 +913,10 @@ mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
+  "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$BAD/tools/loom/"
@@ -898,6 +934,7 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -912,6 +949,8 @@ mkdir -p "$BAD/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$BAD/stdlib/coordination/"
@@ -933,6 +972,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$BAD/stdlib/coordination/"
+mkdir -p "$BAD/stdlib/crypto"
+cp "$ROOT_DIR/stdlib/crypto/sha256.sio" "$BAD/stdlib/crypto/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \
@@ -945,6 +986,19 @@ mkdir -p "$RUNTIME_ROOT/versions/incomplete"
 if (cd "$REPO" && bin/sounio-coord install-runtime --activate incomplete) >/dev/null 2>&1; then
   fail 'installer activated an incomplete runtime'
 fi
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/lane-health-authority-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=lane-health-authority-omitted/' \
+  "$RUNTIME_ROOT/versions/lane-health-authority-omitted/manifest"
+rm -f \
+  "$RUNTIME_ROOT/versions/lane-health-authority-omitted/bin/sounio-loom-lane-health-runtime"
+if (cd "$REPO" && bin/sounio-coord install-runtime \
+    --activate lane-health-authority-omitted) >/dev/null 2>&1; then
+  fail 'installer activated truthful lane health without its Sounio authority executable'
+fi
+output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'failed lane-health activation changed the current runtime'
 cp -a "$RUNTIME_ROOT/versions/$first_id" \
   "$RUNTIME_ROOT/versions/portfolio-adapter-omitted"
 sed -i 's/^runtime_id=.*/runtime_id=portfolio-adapter-omitted/' \
