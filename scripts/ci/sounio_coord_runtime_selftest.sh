@@ -10,6 +10,7 @@ STATE="$TEST_ROOT/state"
 ALT="$TEST_ROOT/upgrade-source"
 BAD="$TEST_ROOT/bad-source"
 POLICYLESS="$TEST_ROOT/policyless-worktree"
+CAPSULE_STATE="$TEST_ROOT/policyless-state"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
@@ -451,7 +452,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.36$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.27.37$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 
 mkdir -p "$POLICYLESS/bin"
@@ -463,22 +464,39 @@ capsule_runtime="$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime"
 capsule_harness="$TEST_ROOT/codex"
 cp "$(command -v bash)" "$capsule_harness"
 chmod 0755 "$capsule_harness"
-capsule_event="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$capsule_session\",\"cwd\":\"$POLICYLESS\"}"
+capsule_start_event="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$capsule_session\",\"cwd\":\"$POLICYLESS\"}"
+capsule_end_event="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$capsule_session\",\"cwd\":\"$POLICYLESS\"}"
 capsule_hook_command='runtime_dir="$(readlink -f "${SOUNIO_COORD_RUNTIME_DIR:-$(git rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime}/current")" && test -n "$runtime_dir" && exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$runtime_dir/policy/language-authority" "$runtime_dir/bin/sounio-loom-runtime" agent-hook --agent codex'
 output="$(
   cd "$POLICYLESS"
-  printf '%s\n' "$capsule_event" | \
-    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE" \
+  printf '%s\n%s\n' "$capsule_start_event" "$capsule_end_event" | \
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
     SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 SOUNIO_LOOM_HOOK_TEST_MODE=1 \
     SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$capsule_receipt" \
     "$capsule_harness" -c \
-      '/bin/bash -c "$1"; hook_status=$?; exit "$hook_status"' \
+      'while IFS= read -r event; do printf "%s\n" "$event" | /bin/bash -c "$1" || exit $?; done' \
       _ "$capsule_hook_command"
 )"
+grep -Fq 'Sounio coordination joined:' <<< "$output" || \
+  fail 'policyless SessionStart did not join through the exact hook command'
 grep -Fq 'decision=ALLOW' "$capsule_receipt" || \
   fail 'policyless worktree did not reach an ALLOW receipt'
 grep -Fq 'semantic_authority_origin=runtime-capsule' "$capsule_receipt" || \
   fail 'policyless worktree did not use the installed authority capsule'
+capsule_supervisor_status="$(
+  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
+    "$POLICYLESS/bin/sounio-coord" obligation-supervisor-status
+)"
+grep -Fq 'state=live' <<< "$capsule_supervisor_status" || \
+  fail 'policyless SessionStart did not leave the native obligation supervisor live'
+capsule_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$capsule_supervisor_status")"
+capsule_supervisor_wrapper="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$capsule_supervisor_pid/status")"
+tr '\0' '\n' < "/proc/$capsule_supervisor_wrapper/environ" | \
+  grep -Fxq "SOUNIO_COORD_DIR=$CAPSULE_STATE" || \
+  fail 'detached supervisor wrapper omitted its explicit state-root identity'
+SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
+  "$POLICYLESS/bin/sounio-coord" obligation-supervisor-stop \
+  --timeout-seconds 5 >/dev/null
 
 capsule_source="$authority_capsule/stdlib/coordination/loom_language_authority.sio"
 cp "$capsule_source" "$TEST_ROOT/authority-source.saved"
@@ -486,8 +504,8 @@ printf 'sabotaged\n' > "$capsule_source"
 set +e
 capsule_sabotage_output="$(
   cd "$POLICYLESS"
-  printf '%s\n' "$capsule_event" | \
-    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE" \
+  printf '%s\n' "$capsule_end_event" | \
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
     SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 SOUNIO_LOOM_HOOK_TEST_MODE=1 \
     SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$capsule_receipt" \
     "$capsule_runtime" agent-hook --agent codex 2>&1

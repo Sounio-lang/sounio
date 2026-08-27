@@ -786,6 +786,9 @@ Pod-external guardian such as Beagle should call `ensure` after a Pod restart
 rather than manufacturing a tmux session. The production and sabotage receipts
 are recorded in
 `tools/loom/evidence/loom-autonomous-coordination-v1-20260827.txt`.
+The detached wrapper also exports its exact coordination state root so an
+independent primary checkout can rediscover the same leader without confusing
+its own Git common directory for the supervisor's custody boundary.
 
 The authoritative state lives under the shared coordination directory in
 `loom-obligations/*/journal.tsv`. The TUI, GUI, JSON endpoint, and supervisor are

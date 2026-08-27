@@ -152,6 +152,15 @@ from another. Decision receipts record `semantic_authority_origin=worktree` or
 and requires `Sounio-authority-source-hash-mismatch`, proving that the capsule
 binding itself causes the refusal.
 
+Runtime `2026.08.27.37` binds the detached obligation-supervisor wrapper to its
+effective `SOUNIO_COORD_DIR`. An independent control checkout can therefore
+rediscover the same PID-1-parented leader even when its own Git common directory
+is different. The policyless hook fixture crosses `SessionStart` and
+`SessionEnd` under one exact `codex` process, requires the supervisor to remain
+live, checks the wrapper environment for the exact state root, and then stops it
+from that independent checkout. Omitting the binding reproduces the
+cross-checkout refusal and makes this gate fail.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic

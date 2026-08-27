@@ -93,7 +93,7 @@ case "$runtime_selection" in
   shared|local) ;;
   *) fail "hook launcher selected an unknown runtime source: ${runtime_selection:-missing}" ;;
 esac
-grep -Fq 'runtime_version=2026.08.27.36' <<< "$runtime_info" ||
+grep -Fq 'runtime_version=2026.08.27.37' <<< "$runtime_info" ||
   fail "hook launcher selected the wrong runtime version"
 grep -Fq 'language=OCaml' <<< "$runtime_info" ||
   fail "hook launcher did not select the native OCaml runtime"
@@ -109,4 +109,4 @@ if validate_no_legacy_bridge "$TEST_ROOT/codex-sabotaged.json"; then
 fi
 
 printf '%s\n' \
-  "sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 launcher_runtime=$runtime_selection:2026.08.27.36 hook_runtime=git-common-dir/current authority=runtime-capsule local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused"
+  "sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 launcher_runtime=$runtime_selection:2026.08.27.37 hook_runtime=git-common-dir/current authority=runtime-capsule local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused"
