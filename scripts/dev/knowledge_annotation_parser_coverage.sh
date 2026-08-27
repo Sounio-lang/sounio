@@ -168,7 +168,16 @@ else
       fi
     done
 
-    fail_probes=(derived_eps source literature input int_skip typo_ident)
+    # `input` is deliberately in NEITHER list from 2026-08-27: its expectation
+    # is now clock-dependent and no single entry can be right for both.
+    # Measured on this tree:
+    #   shipped bin/souc (Madaros v0.80.0, predates the keyword)  rc=1  refuses
+    #   source-built Madaros from this checkout                   rc=0  parses
+    # Asserting either one here would make the gate lie the moment bin/souc is
+    # rebuilt. The source-built clock for Input is the three run-pass tests
+    # (knowledge_provenance_input.sio and siblings); the STATIC pins above are
+    # what guard the keyword itself.
+    fail_probes=(derived_eps source literature int_skip typo_ident)
     for name in "${fail_probes[@]}"; do
       f="$PROBE_DIR/${name}.sio"
       if [[ ! -f "$f" ]]; then

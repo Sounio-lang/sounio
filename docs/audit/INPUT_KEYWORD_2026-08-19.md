@@ -156,3 +156,17 @@ pin was therefore narrowed from `{Source, Literature, Input}` to
 must-be-present keyword list so it cannot silently regress.
 `docs/audit/KNOWLEDGE_ANNOTATION_PARSER_COVERAGE_2026-08-19.md` carries the
 matching addendum.
+
+### One more thing the shipped ELF no longer does
+
+`docs/audit/KNOWLEDGE_ANNOTATION_PARSER_COVERAGE_2026-08-19.md` says of its
+DYNAMIC clock that "the committed ELF is expected to still swallow these until
+it is rebuilt". Measured 2026-08-27 against `./bin/souc` (Madaros v0.80.0) on
+this tree, it does not: `source`, `literature`, `typo_ident`, `int_skip` and
+`input` all return rc=1. The shipped ELF has been rebuilt since that sentence
+was written.
+
+That is why `input` was removed from the coverage gate's DYNAMIC `fail_probes`
+and put in neither list: it refuses under the shipped ELF (which predates this
+keyword) and parses under a source-built compiler from this checkout, so any
+single expectation there would be false against one of the two clocks.
