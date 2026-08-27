@@ -494,6 +494,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.nonassociative-order | repo_only | docs/internal/concepts/nonassociative-order.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.ordered-path-provenance | repo_only | docs/internal/concepts/ordered-path-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.pireus-apple-metal-family-import | repo_only | docs/internal/concepts/pireus-apple-metal-family-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-execution-engine-ontology | repo_only | docs/internal/concepts/pireus-execution-engine-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-material-ontology | repo_only | docs/internal/concepts/pireus-material-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-ptx-prmt-import | repo_only | docs/internal/concepts/pireus-ptx-prmt-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -515,6 +516,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.garden.seeds.2026-05-10-epistemic-fermentation | repo_only | docs/internal/garden/seeds/2026-05-10-epistemic-fermentation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-07-11-the-zero-of-encounter | repo_only | docs/internal/garden/seeds/2026-07-11-the-zero-of-encounter.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-07-26-fpga-acceleration-opportunity | repo_only | docs/internal/garden/seeds/2026-07-26-fpga-acceleration-opportunity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-08-27-pireus-apple-metal-family-corpus | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-apple-metal-family-corpus.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-pireus-canonical-corpora | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-canonical-corpora.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-pireus-darwin-multi-engine | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-darwin-multi-engine.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-pireus-harbor-of-targets | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-harbor-of-targets.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -922,6 +924,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.particle-physics-epistemic-audit | historical | docs/research/particle_physics_epistemic_audit.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.petitot-semantic-potential | historical | docs/research/petitot-semantic-potential.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.pireus-apple-metal-family-import-semantics | historical | docs/research/pireus_apple_metal_family_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-execution-engine-semantics | historical | docs/research/pireus_execution_engine_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-ptx-prmt-import-semantics | historical | docs/research/pireus_ptx_prmt_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-v0-semantics | historical | docs/research/pireus_v0_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -945,6 +948,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.quaternion-neural-networks | historical | docs/research/QUATERNION_NEURAL_NETWORKS.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.r2-continuous-law-theorem-falsifiers-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.r2-continuous-law-theorem-spec-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-apple-metal-family-import-20260827 | historical | docs/research/receipts/pireus_apple_metal_family_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-execution-engine-20260827 | historical | docs/research/receipts/pireus_execution_engine_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-ptx-prmt-import-20260827 | historical | docs/research/receipts/pireus_ptx_prmt_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-v0-20260827 | historical | docs/research/receipts/pireus_v0_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

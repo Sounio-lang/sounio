@@ -1,9 +1,24 @@
+<!-- docs:meta
+topic_id: repo.docs.research.receipts.pireus-apple-metal-family-import-20260827
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.receipts.pireus-apple-metal-family-import-20260827
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Pireus Apple Metal Family Import Receipt
 
-**Date:** 2026-08-27  
-**Concept-ID:** `SOUNIO-PIREUS-APPLE-METAL-FAMILY-IMPORT`  
-**Language:** Sounio  
-**Role:** `SEMANTIC_AUTHORITY`  
+**Date:** 2026-08-27
+**Concept-ID:** `SOUNIO-PIREUS-APPLE-METAL-FAMILY-IMPORT`
+**Language:** Sounio
+**Role:** `SEMANTIC_AUTHORITY`
 **Requested stage:** `SEMANTICS_FROZEN`
 
 ## Mandatory Order
