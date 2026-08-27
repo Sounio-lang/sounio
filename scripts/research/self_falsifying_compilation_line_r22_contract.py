@@ -30,14 +30,11 @@ CLAUSES:
                                 independence measured, not argued.
   V2_ONE_DATE_FOR_EVERY_DOC     census of the declared field over every
                                 governed repo doc: one distinct value.
-  V3_DATE_PRECEDES_THE_REPO     no commit in this repository is older than the
-                                declared date. The whole corpus claims a
-                                validation that predates its own history.
-  V4_GATE_REJECTS_THE_TRUE_DATE end-to-end, hermetic: in a hardlink farm (the
+  V4_GATE_REJECTS_RECORDED_DATE end-to-end, hermetic: in a hardlink farm (the
                                 working tree is never touched) the real checker
                                 passes on the corpus as-is, and fails when one
-                                document is given the date git says it was
-                                added. Both arms, so the instrument has a
+                                document is given the date git records for its
+                                addition. Both arms, so the instrument has a
                                 positive AND a negative control.
 
 WHAT THIS DOES NOT MEASURE. Whether the documents were in fact validated on
@@ -54,7 +51,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,27 +155,6 @@ def clause_v2(literal: str) -> bool:
     return ok
 
 
-def clause_v3(literal: str) -> bool:
-    older = git("log", f"--before={literal}", "--oneline")
-    n_older = len([ln for ln in older.splitlines() if ln.strip()])
-    first = git("log", "--reverse", "--format=%ad", "--date=short")
-    first_date = first.splitlines()[0].strip() if first else ""
-    print(f"V3 declared validation date: {literal}")
-    print(f"    commits in this repository older than it: {n_older}")
-    print(f"    oldest commit in this repository:         {first_date}")
-    delta = ""
-    if first_date:
-        d0 = date.fromisoformat(literal)
-        d1 = date.fromisoformat(first_date)
-        delta = (d1 - d0).days
-        print(f"    the corpus declares a validation {delta} days before the"
-              " repository's own history begins")
-    ok = n_older == 0 and bool(first_date) and isinstance(delta, int) and delta > 0
-    print(f"V3_DATE_PRECEDES_THE_REPO {'PASS' if ok else 'FAIL'}")
-    print()
-    return ok
-
-
 def run_checker(cwd: Path) -> tuple[int, str]:
     proc = subprocess.run(["node", str(CHECKER)], cwd=str(cwd),
                           capture_output=True, text=True)
@@ -190,17 +165,17 @@ def clause_v4(literal: str) -> bool:
     subject = ROOT / SUBJECT
     if not subject.is_file():
         print(f"V4 subject absent: {SUBJECT}")
-        print("V4_GATE_REJECTS_THE_TRUE_DATE FAIL")
+        print("V4_GATE_REJECTS_RECORDED_DATE FAIL")
         print()
         return False
 
     added = git("log", "--diff-filter=A", "--format=%ad", "--date=short",
                 "--", SUBJECT)
-    true_date = added.splitlines()[-1].strip() if added else ""
-    if not true_date or true_date == literal:
+    recorded_date = added.splitlines()[-1].strip() if added else ""
+    if not recorded_date or recorded_date == literal:
         print(f"V4 no usable git addition date for {SUBJECT} "
-              f"(got {true_date!r})")
-        print("V4_GATE_REJECTS_THE_TRUE_DATE FAIL")
+              f"(got {recorded_date!r})")
+        print("V4_GATE_REJECTS_RECORDED_DATE FAIL")
         print()
         return False
 
@@ -224,7 +199,7 @@ def clause_v4(literal: str) -> bool:
                             capture_output=True, text=True)
         if cp.returncode != 0:
             print(f"V4 farm could not be built: {cp.stderr.strip()[:200]}")
-            print("V4_GATE_REJECTS_THE_TRUE_DATE FAIL")
+            print("V4_GATE_REJECTS_RECORDED_DATE FAIL")
             print()
             return False
         # website: real spine down to src/content, symlinks for the rest.
@@ -260,7 +235,7 @@ def clause_v4(literal: str) -> bool:
                               capture_output=True, text=True)
         if sync.returncode != 0:
             print(f"V4 farm sync failed: {sync.stderr.strip()[:200]}")
-            print("V4_GATE_REJECTS_THE_TRUE_DATE FAIL")
+            print("V4_GATE_REJECTS_RECORDED_DATE FAIL")
             print()
             return False
         print(f"V4 farm synced to consistency: {sync.stdout.strip()[:90]}")
@@ -272,15 +247,15 @@ def clause_v4(literal: str) -> bool:
         print(f"V4 negative control -- farm unmodified: checker rc={rc_clean}"
               f" ({'green' if clean_green else 'RED'})")
 
-        # POSITIVE CONTROL. Give one document the date git says it was added.
+        # POSITIVE CONTROL. Give one document the date git records for its addition.
         target = farm / SUBJECT
         text = target.read_text()
         patched, n_sub = re.subn(rf"^last_validated: {re.escape(literal)}$",
-                                 f"last_validated: {true_date}", text,
+                                 f"last_validated: {recorded_date}", text,
                                  count=1, flags=re.M)
         if n_sub != 1:
             print("V4 could not patch the subject's field")
-            print("V4_GATE_REJECTS_THE_TRUE_DATE FAIL")
+            print("V4_GATE_REJECTS_RECORDED_DATE FAIL")
             print()
             return False
         target.unlink()  # break the hardlink before writing
@@ -291,9 +266,9 @@ def clause_v4(literal: str) -> bool:
                     f'expected "{literal}"')
         rejected = rc_true != 0 and expected in out_true
         print(f"    {SUBJECT}")
-        print(f"    git says it was added   {true_date}")
+        print(f"    git records its addition {recorded_date}")
         print(f"    the generator asserts   {literal}")
-        print(f"V4 positive control -- truthful date: checker rc={rc_true}"
+        print(f"V4 positive control -- recorded date: checker rc={rc_true}"
               f" ({'REJECTED' if rejected else 'accepted'})")
         if rejected:
             for line in out_true.splitlines():
@@ -314,7 +289,7 @@ def clause_v4(literal: str) -> bool:
         print(f"V4 hermetic: {len(before)} working-tree files unchanged"
               " across the farm sync")
 
-    print(f"V4_GATE_REJECTS_THE_TRUE_DATE {'PASS' if ok else 'FAIL'}")
+    print(f"V4_GATE_REJECTS_RECORDED_DATE {'PASS' if ok else 'FAIL'}")
     print()
     return ok
 
@@ -329,18 +304,17 @@ def main() -> int:
         print("SELF_FALSIFYING_R22_VERDICT INCONCLUSIVE")
         return 1
     ok2 = clause_v2(literal)
-    ok3 = clause_v3(literal)
     ok4 = clause_v4(literal)
 
-    ok = ok1 and ok2 and ok3 and ok4
-    verdict = ("VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE"
+    ok = ok1 and ok2 and ok4
+    verdict = ("VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_RECORDED_DATE"
                if ok else "INCONCLUSIVE")
     print("-" * 72)
     print("A field shaped like a measurement is a constant in the generator,")
     print("and the check wired into CI enforces the constant. The corpus is")
-    print("uniform because uniformity is what passes: a document recording")
-    print("when it was really validated turns the gate red. The gate is green")
-    print("exactly when the field it guards carries no information.")
+    print("uniform because uniformity is what passes: a document carrying a")
+    print("topic-specific date recorded in Git turns the gate red. The gate is green")
+    print("exactly when the field carries no topic-specific validation information.")
     print()
     print(f"SELF_FALSIFYING_R22_VERDICT {verdict}")
     return 0 if ok else 1

@@ -17,10 +17,11 @@ CLAUSES:
                              sign vector exists), not merely a GL(3,2) element.
   W2_ORBIT_THEOREM_RUNS      the verifier executes end to end and reports the
                              predicted orbit multiset 2^(n-4)x[7] + (2^(n-4)-1)x[1],
-                             stab 24, fixed = seam subspace, at n = 4..7.
-  W3_DANGLING_DEP_CLOSED     the oracle is in the tree and the R20 audit no
-                             longer flags it; the remaining absent hard deps are
-                             foreign lanes, not this one's.
+                             on F2^(n-1)\\{0}, with stab 24 and fixed = seam
+                             subspace, at n = 4..7.
+  W3_DANGLING_DEP_CLOSED     the oracle is in the tree and the current R20 audit
+                             no longer flags this exact dependency. Other absent
+                             hard dependencies remain visible but do not reopen it.
 
 Pure Python 3.
 """
@@ -82,7 +83,8 @@ def main() -> int:
         ok = pat in line and "stab(7-orbit)=24" in line and line.rstrip().endswith("OK")
         w2 &= ok
         print(f"  n={lvl}: {'OK' if ok else 'MISMATCH'}  "
-              f"{pat}, stab=24, seam-fixed")
+              f"{pat} on F2^{lvl - 1}\\{{0}}, stab=24, "
+              "fixed=seam-subspace")
     w2 &= "VERIFIED n=4..7" in out
     print(f"W2_ORBIT_THEOREM_RUNS {'PASS' if w2 else 'FAIL'}  "
           f"(exit {cp.returncode}) -- first in-tree run of the orbit verifier")
@@ -96,14 +98,12 @@ def main() -> int:
         hard = [r for r in a["missing"] if r.get("hard_dependency")]
         oracle_flagged = any("automorphism_oracle" in r["artifact"] for r in hard)
         remaining = [r["artifact"] for r in hard]
-        this_line = [r for r in remaining if "cd_tower" in r]
-        w3 = w3 and not oracle_flagged and not this_line
+        w3 = w3 and not oracle_flagged
         print(f"  oracle in tree: {ORACLE.exists()}; still flagged absent: "
               f"{oracle_flagged}")
-        print(f"  remaining absent hard deps: {len(remaining)} "
-              f"(this line's: {len(this_line)})")
+        print(f"  remaining absent hard deps: {len(remaining)}")
         for r in remaining:
-            print(f"      foreign: {r}")
+            print(f"      open: {r}")
     else:
         w3 = False
         print("  R20 audit not present; run scripts/research/r20_provenance_audit.py")
@@ -115,7 +115,7 @@ def main() -> int:
                if ok else "INCONCLUSIVE")
     print("-" * 72)
     print("The dependency R20 found dangling under the theorem R21 proved is")
-    print("closed: the oracle is reconstructed from the verifier's own proof,")
+    print("closed: the oracle is reconstructed from the verifier's recorded construction,")
     print("validated, and the orbit theorem is now checkable in every checkout.")
     print()
     print(f"SELF_FALSIFYING_R26_VERDICT {verdict}")

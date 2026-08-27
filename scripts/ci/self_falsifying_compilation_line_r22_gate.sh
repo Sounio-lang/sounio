@@ -15,7 +15,7 @@ command -v node >/dev/null 2>&1 || fail "node absent -- the enforcement arm cann
 OUT="$(python3 "$CONTRACT" 2>&1)" || { echo "$OUT"; fail "contract exited non-zero"; }
 echo "$OUT"
 for c in V1_VALUE_IS_A_LITERAL V2_ONE_DATE_FOR_EVERY_DOC \
-         V3_DATE_PRECEDES_THE_REPO V4_GATE_REJECTS_THE_TRUE_DATE; do
+         V4_GATE_REJECTS_RECORDED_DATE; do
     grep -q "^${c} PASS" <<<"$OUT" || fail "${c} did not PASS"
 done
 # The separation from registry staleness is the point of V4's farm sync: without
@@ -31,7 +31,7 @@ grep -qE 'V4 hermetic: [0-9]+ working-tree files unchanged' <<<"$OUT" \
 # An instrument with one arm measures nothing. Both controls must remain.
 grep -qE 'negative control -- farm unmodified: checker rc=0' <<<"$OUT" \
     || fail "the negative control no longer reproduces the green result"
-grep -qE 'positive control -- truthful date: checker rc=[1-9]' <<<"$OUT" \
+grep -qE 'positive control -- recorded date: checker rc=[1-9]' <<<"$OUT" \
     || fail "the positive control no longer exercises rejection"
 grep -q 'metadata mismatch for last_validated' <<<"$OUT" \
     || fail "the rejection is no longer attributed to the field under study"

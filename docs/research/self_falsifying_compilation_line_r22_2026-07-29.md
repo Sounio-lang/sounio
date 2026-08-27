@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.self-
 
 **Date:** 2026-07-29
 **Orthography:** EN-UK
-**Status:** `EXECUTABLE` — `VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE`
+**Status:** `EXECUTABLE` — `VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_RECORDED_DATE`
 **Parents:** `self_falsifying_compilation_line_r1_2026-07-26.md` (claims bound to no gate; the hermeticity rule this rung obeys), `self_falsifying_compilation_line_r20_2026-07-28.md` (an oracle never committed), `self_falsifying_compilation_line_r21_2026-07-28.md` (the preceding rung)
 **Harness:** `scripts/research/self_falsifying_compilation_line_r22_contract.py`
 **Gate:** `scripts/ci/self_falsifying_compilation_line_r22_gate.sh`
@@ -36,21 +36,17 @@ Every governed repository document carries a `docs:meta` block with a field
 named `last_validated`. It has the form of a measurement. It is a constant.
 
 > **`last_validated` is a quoted literal at two sites in the generator, the same
-> value for every topic, declared by every governed repository document, and
-> older than the repository's first commit. The check wired into CI enforces the
-> literal: a document that records the date it was really validated is a gate
-> failure. The gate is green exactly when the field it guards carries no
-> information.**
+> value for every topic, and declared by every governed repository document.
+> The check wired into CI enforces the literal: a document given a topic-specific
+> date recorded in Git is a gate failure. The gate is green exactly when the
+> field it guards carries no topic-specific validation information.**
 
-Verdict: `SELF_FALSIFYING_R22_VERDICT VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE`.
+Verdict: `SELF_FALSIFYING_R22_VERDICT VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_RECORDED_DATE`.
 
 **No counts in the headline, and R1 is the reason.** R1's headline carried a
 measured count and went stale the moment a claim was added to the manifest it
-counted. The counts here — 1063 documents, 1213 topics, 85 days — are corpus
-figures that move whenever a document is added, so they live in §3 with the
-date they were measured, and the claim above is stated in the form that does not
-drift. This rung moved its own denominator while being written: registering this
-spec took the corpus from 1062 documents to 1063.
+counted. The corpus counts live in §3 because they move whenever a document is
+added; the claim above is stated without a moving denominator.
 
 ## 2. Where it comes from
 
@@ -74,29 +70,28 @@ corpus is uniform because uniformity is what passes.
 
 ## 3. Verified, and how
 
-Corpus figures measured 2026-07-29 at `7d376f4b8` plus this rung's own commit;
-they move with the corpus, and the contract re-measures them on every run.
+Corpus figures re-measured 2026-08-27; they move with the corpus, and the
+contract re-measures them on every run.
 
 | clause | | |
 |---|---|---|
-| `V1_VALUE_IS_A_LITERAL` | two sites, both quoted literals; one distinct value over 1213 topics | the field has no input |
-| `V2_ONE_DATE_FOR_EVERY_DOC` | census of the declared field over 1063 governed repo docs: `'2026-03-07': 1063` | one date, no exceptions |
-| `V3_DATE_PRECEDES_THE_REPO` | 0 commits older than the declared date; oldest commit 2026-05-31, i.e. **85 days** later | the corpus claims a validation older than its own history |
-| `V4_GATE_REJECTS_THE_TRUE_DATE` | hermetic farm, **synced to consistency first**; then unmodified → `rc=0`, one truthful date → `rc=1` with `metadata mismatch for last_validated: expected "2026-03-07"` | the check rejects the truth |
+| `V1_VALUE_IS_A_LITERAL` | two sites, both quoted literals; one distinct value over 1269 topics | the field has no topic input |
+| `V2_ONE_DATE_FOR_EVERY_DOC` | census of the declared field over 1119 governed repo docs: `'2026-03-07': 1119` | one date, no exceptions |
+| `V4_GATE_REJECTS_RECORDED_DATE` | hermetic farm, **synced to consistency first**; then unmodified → `rc=0`, one Git-recorded addition date → `rc=1` with `metadata mismatch for last_validated: expected "2026-03-07"` | the check rejects topic-specific repository evidence |
 
-**V3 replaces a measurement that was tried and discarded.** The first attempt
-asked, per document, whether the declared date preceded the document's own
-creation. It cannot: this repository's history begins 2026-05-31, so git
-addition dates are not creation dates for anything older, and an early draft of
-this rung produced per-document figures that its own spot-check contradicted.
-The surviving question needs no per-document dating and cannot be got wrong:
-**no commit in this repository is older than the date every document claims.**
+**The former V3 was removed on 2026-08-27 because its historical premise became
+false.** It claimed that no repository commit predated `2026-03-07`. The live
+history now begins at `2025-12-25`, so the clause correctly went red when first
+wired into CI. Repository age was not needed to establish the literal or the
+checker behaviour, and retaining it would have promoted a stale supporting
+claim into a required result.
 
 **V4 has two arms on purpose.** An instrument that fails on everything measures
 nothing. The synced farm is checked *unmodified* first and must come back green
-(`rc=0`); only then is one document given the date git records for its addition
-(2026-07-28 for R21's spec), and the same checker must reject it. Both arms are
-pinned by the gate, so this rung cannot decay into a one-armed instrument.
+(`rc=0`); only then is one document given the date Git records for its addition
+(2026-07-28 for R21's spec), and the same checker must reject it. This is a
+repository-recorded date, not proof of when human validation occurred. Both arms
+are pinned by the gate, so this rung cannot decay into a one-armed instrument.
 
 **The farm is synced before it is measured, and that is a correction.** As first
 written, V4 measured the farm as-copied — so it inherited the repository's

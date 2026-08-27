@@ -32,8 +32,8 @@ verifier via `exec_module` with no fallback. R21 then proved a theorem that
 **rests on** that orbit theorem — whose own verification script could not execute
 in any checkout, because its oracle had never existed anywhere.
 
-> **The oracle is reconstructed from the verifier's own proof, validated rather
-> than assumed, and the orbit theorem's verifier now runs end to end for the
+> **The oracle is reconstructed from the verifier's recorded block-form
+> construction, validated rather than assumed, and the orbit theorem's verifier now runs end to end for the
 > first time in any checkout of this repository — reproducing the predicted
 > orbit structure at n = 4, 5, 6, 7.**
 
@@ -56,8 +56,8 @@ The oracle exposes two functions the verifier consumes:
 - `orbits_on(M, elems)` — the partition of `elems` under the group given
   explicitly by the image arrays M.
 
-Built from the verifier's own PROOF (block-form freezing + GL(3,2)-transitivity),
-then **validated, because a reconstruction assumed is worth nothing**:
+Built from the block-form construction recorded in the verifier, then
+**validated, because a reconstruction assumed is worth nothing**:
 
 > The verifier's docstring says "168 valid maps = GL(3,2) = Aut(octonions)". That
 > is imprecise for the **signed** table: only **21** of the 168 GL(3,2) linear
@@ -77,21 +77,22 @@ they generate precisely the orbit multiset the theorem predicts.
 
 ## 3. What this closes, and what it does not
 
-- **Closes the deepest dangling dependency of the arc.** R20's audit went from 6
-  absent hard-dependencies to 2, and **neither of the remaining two is this
-  line's** — both are the foreign fMRI lane (`extract_fmriprep_roi_timeseries.py`,
-  `extract_trained_roi_associator.sio`). The orbit theorem R21 rests on is now
-  verifiable in every checkout.
-- **Not a new proof of the orbit theorem.** The theorem was already proven ∀n in
-  the verifier's docstring (block-form freezing, unconditional per Kirshtein 2012
-  Thm 41, + GL(3,2) transitivity). This makes its *machine verification* runnable;
-  it does not re-derive the mathematics.
+- **Closes the exact dangling dependency of the arc.** The current R20 audit
+  reports other absent hard dependencies, including fMRI, suffering-aware, and
+  CD-tower campaign artifacts, but no longer reports
+  `cd_tower_automorphism_oracle.py`. Those open dependencies remain visible and
+  are not claimed closed here. The orbit theorem R21 rests on is now verifiable
+  in every checkout.
+- **Not a new proof of the orbit theorem.** The verifier's docstring records an
+  all-n argument using block-form freezing and GL(3,2) transitivity. This rung
+  does not independently re-check the citation or re-prove that all-n argument;
+  it validates the reconstructed oracle and runs the bounded verifier at n=4..7.
 - **Not recovery.** The file never existed in git; this is reconstruction from
-  the proof, not `git show` from a branch. Independence is deliberate: the oracle
+  the recorded construction, not `git show` from a branch. Independence is deliberate: the oracle
   writes `cds` from the recursion rather than importing it, because an imported
   dependency is the failure that made the reconstruction necessary.
-- **Not a claim about the foreign lanes.** Their two absent artifacts are
-  recorded, not fixed here.
+- **Not a claim that every research dependency is present.** The remaining
+  absent artifacts are recorded by the refreshed R20 audit, not fixed here.
 
 ## 4. Reproduce
 
