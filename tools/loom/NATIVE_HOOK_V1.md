@@ -120,6 +120,14 @@ override changes hook discovery isolation, but not authority: registration and
 every later wake revalidation still require the exact active bundle path,
 manifest, source hash, and binary hashes.
 
+Runtime `2026.08.27.34` completes the native endpoint migration for tmux. The
+OCaml hook derives the socket and pane from its inherited tmux environment,
+asks tmux for the pane id and current path, and requires that path to resolve to
+the exact session repository before registration. The coordination runtime then
+revalidates the socket, pane, process, harness, worktree, and generation before
+any wake. Missing or inconsistent tmux identity creates no endpoint and cannot
+be promoted by the native-hook capability alone.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic

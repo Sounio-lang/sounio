@@ -863,6 +863,33 @@ let refresh_hook_capability tool_root process_root agent lane raw_session_id =
        [ "hook-capability-register"; "--agent"; agent; "--lane"; lane;
          "--session-id"; raw_session_id ])
 
+let tmux_endpoint root =
+  match Sys.getenv_opt "TMUX", Sys.getenv_opt "TMUX_PANE" with
+  | Some tmux, Some pane when tmux <> "" && pane <> "" ->
+      let socket =
+        match String.split_on_char ',' tmux with
+        | value :: _ -> value
+        | [] -> ""
+      in
+      if socket = "" then None
+      else
+        let result =
+          run_process ~cwd:root "tmux"
+            [ "-S"; socket; "display-message"; "-p"; "-t"; pane;
+              "#{pane_id}|#{pane_current_path}" ]
+        in
+        if result.code <> 0 then None
+        else
+          (match String.split_on_char '|' (trim result.output) with
+          | [ pane_id; pane_cwd ] when pane_id <> "" && pane_cwd <> "" ->
+              (try
+                 let pane_root = git_root pane_cwd |> Unix.realpath in
+                 if pane_root = Unix.realpath root then Some (socket, pane_id)
+                 else None
+               with _ -> None)
+          | _ -> None)
+  | _ -> None
+
 let refresh_endpoint tool_root root agent lane raw_session_id =
   let harness = harness_of_agent agent in
   let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
@@ -887,7 +914,16 @@ let refresh_endpoint tool_root root agent lane raw_session_id =
                  "--harness"; harness; "--transport"; "loom";
                  "--address"; socket; "--socket"; socket; "--token-file";
                  token; "--ttl-seconds"; ttl ])
-      | _ -> ())
+      | _ ->
+          (match tmux_endpoint root with
+          | Some (socket, pane) ->
+              ignore
+                (coord_ok tool_root root
+                   [ "endpoint-register"; "--agent"; agent; "--lane"; lane;
+                     "--harness"; harness; "--transport"; "tmux";
+                     "--address"; pane; "--socket"; socket; "--ttl-seconds";
+                     ttl ])
+          | None -> ()))
 
 let message_lines output =
   String.split_on_char '\n' output |> List.filter (fun line -> starts_with line "MESSAGE ")
