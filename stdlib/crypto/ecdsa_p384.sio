@@ -103,3 +103,128 @@ pub fn p384_base_point() -> EcPoint {
     ])
     EcPoint { x: gx, y: gy }
 }
+
+// Modular inverse mod a PRIME modulus via Fermat's little theorem:
+// a^-1 mod m == a^(m-2) mod m. Used locally for P-384 verification
+// (ec_mod_inverse from ecdsa_p256.sio is private and not importable;
+// both use the same formula).
+fn ec_mod_inverse(a: &BigInt, m: &BigInt) -> BigInt {
+    let two = bigint_from_u32(2)
+    let m_minus_2 = bigint_sub(m, &two)
+    bigint_modpow(a, &m_minus_2, m)
+}
+
+// Converts the 48 big-endian bytes of a SHA-384 digest into the digest
+// integer `e`, in BigInt's little-endian 16-bit limb order (limb 0 =
+// least significant = the LAST two bytes). No truncation -- see Task 2
+// Step 1: SHA-384's 384-bit output exactly matches p384_order()'s 384-bit
+// length, unlike P-256/SHA-384 which truncates 48 bytes down to 32.
+fn p384_e_from_be48(digest48: &[u8; 48]) -> BigInt {
+    var e = bigint_zero()
+    var ei: i64 = 0
+    while ei < 24 {
+        let hi_idx = 46 - 2 * ei
+        let lo_idx = 47 - 2 * ei
+        let hi: i64 = digest48[hi_idx as usize] as i64
+        let lo: i64 = digest48[lo_idx as usize] as i64
+        e.limbs[ei as usize] = ((hi << 8) | lo) as u16
+        ei = ei + 1
+    }
+    e.len = 24
+    while e.len > 0 && e.limbs[(e.len - 1) as usize] == 0 {
+        e.len = e.len - 1
+    }
+    e
+}
+
+// The ECDSA verification core, shared by (currently the only) public entry
+// point below -- mirrors ecdsa_p256_verify_with_e's structure exactly
+// (stdlib/crypto/ecdsa_p256.sio), parameterized by P-384's own curve
+// constants instead of P-256's.
+fn ecdsa_p384_verify_with_e(
+    pubkey: &EcPoint,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+    e: &BigInt,
+) -> bool with IO {
+    let top = der_reader_new(der_signature, 0, der_signature_len)
+    let (seq_tag, seq_status) = der_peek_tag(&top)
+    if seq_status != DER_OK {
+        return false
+    }
+    if seq_tag.tag_number != DER_TAG_SEQUENCE || seq_tag.constructed == false {
+        return false
+    }
+    let (body, enter_status) = der_enter(&top, &seq_tag)
+    if enter_status != DER_OK {
+        return false
+    }
+
+    let (r_tag, r_tag_status) = der_peek_tag(&body)
+    if r_tag_status != DER_OK {
+        return false
+    }
+    let (r, r_status) = der_read_integer(&body, &r_tag)
+    if r_status != DER_OK {
+        return false
+    }
+    let (body_after_r, next_status) = der_next(&body, &r_tag)
+    if next_status != DER_OK {
+        return false
+    }
+
+    let (s_tag, s_tag_status) = der_peek_tag(&body_after_r)
+    if s_tag_status != DER_OK {
+        return false
+    }
+    let (s, s_status) = der_read_integer(&body_after_r, &s_tag)
+    if s_status != DER_OK {
+        return false
+    }
+
+    let n = p384_order()
+    let p = p384_field_prime()
+    let curve_a = p384_curve_a()
+    let g = p384_base_point()
+
+    let one = bigint_from_u32(1)
+    if bigint_cmp(&r, &one) < 0 || bigint_cmp(&r, &n) >= 0 {
+        return false
+    }
+    if bigint_cmp(&s, &one) < 0 || bigint_cmp(&s, &n) >= 0 {
+        return false
+    }
+
+    let w = ec_mod_inverse(&s, &n)
+    let u1 = bigint_mod(&bigint_mul(e, &w), &n)
+    let u2 = bigint_mod(&bigint_mul(&r, &w), &n)
+
+    let p1 = ec_scalar_mul(&u1, &g, &curve_a, &p)
+    let p2 = ec_scalar_mul(&u2, pubkey, &curve_a, &p)
+    let sum_point = ec_point_add(&p1, &p2, &p)
+    if ec_is_infinity(&sum_point) {
+        return false
+    }
+
+    let v = bigint_mod(&sum_point.x, &n)
+    bigint_cmp(&v, &r) == 0
+}
+
+// ECDSA-with-SHA-384 signature verification over P-384 (FIPS 186-4
+// SS6.4.2 / SEC1 SS4.1.4). `der_signature` must be a DER
+// SEQUENCE { r INTEGER, s INTEGER } (RFC 3279 SS2.2.3).
+//
+// Wire use: X.509 certificates signed ecdsa-with-SHA384 (OID
+// 1.2.840.10045.4.3.3) whose ISSUER key is P-384 -- e.g. SSL.com's ECC
+// intermediates (Cloudflare's 1.1.1.1 chain among them).
+pub fn ecdsa_p384_verify_sha384(
+    pubkey: &EcPoint,
+    message: &RawBuf,
+    message_len: i64,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+) -> bool with IO {
+    let digest = sha384(message, message_len)
+    let e = p384_e_from_be48(&digest)
+    ecdsa_p384_verify_with_e(pubkey, der_signature, der_signature_len, &e)
+}
