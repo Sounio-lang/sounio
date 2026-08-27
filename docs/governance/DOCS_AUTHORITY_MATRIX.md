@@ -498,6 +498,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.pireus-apple-metal-family-import | repo_only | docs/internal/concepts/pireus-apple-metal-family-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-execution-engine-ontology | repo_only | docs/internal/concepts/pireus-execution-engine-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-graph-identity-composition | repo_only | docs/internal/concepts/pireus-graph-identity-composition.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.pireus-intel-vpermpd-selector-semantics | repo_only | docs/internal/concepts/pireus-intel-vpermpd-selector-semantics.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-material-ontology | repo_only | docs/internal/concepts/pireus-material-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-ptx-prmt-import | repo_only | docs/internal/concepts/pireus-ptx-prmt-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-target-profile-ontology | repo_only | docs/internal/concepts/pireus-target-profile-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -948,6 +949,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.pireus-apple-metal-family-import-semantics | historical | docs/research/pireus_apple_metal_family_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-execution-engine-semantics | historical | docs/research/pireus_execution_engine_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-graph-identity-composition-semantics | historical | docs/research/pireus_graph_identity_composition_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.pireus-intel-vpermpd-selector-semantics | historical | docs/research/pireus_intel_vpermpd_selector_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-ptx-prmt-import-semantics | historical | docs/research/pireus_ptx_prmt_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-v0-semantics | historical | docs/research/pireus_v0_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-v01-target-profile-semantics | historical | docs/research/pireus_v01_target_profile_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -978,6 +980,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.receipts.pireus-apple-metal-table-cells-20260827 | historical | docs/research/receipts/pireus_apple_metal_table_cells_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-execution-engine-20260827 | historical | docs/research/receipts/pireus_execution_engine_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-graph-identity-composition-20260827 | historical | docs/research/receipts/pireus_graph_identity_composition_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-intel-vpermpd-selector-semantics-20260827 | historical | docs/research/receipts/pireus_intel_vpermpd_selector_semantics_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-ptx-prmt-import-20260827 | historical | docs/research/receipts/pireus_ptx_prmt_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-v0-20260827 | historical | docs/research/receipts/pireus_v0_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-v01-target-profile-20260827 | historical | docs/research/receipts/pireus_v01_target_profile_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
