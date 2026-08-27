@@ -27,6 +27,13 @@ The bootstrap prompt is copied to `<state>/fleet/prompts/<slot>.txt` with mode
 `0600`. The descriptor contains only its path and digest. A missing, relocated,
 or modified prompt refuses catalog loading before provider launch.
 
+Providers whose ABI declares `session_binding=native-store` also make HOME a
+conversation authority. Two enabled Loom slots of the same native-store
+provider therefore cannot share one credential HOME in a catalog. Enrollment
+refuses `fleet-native-store-home-conflict` before writing the second intent;
+operators retain the native CLI login flow by assigning a distinct HOME to
+each concurrent slot.
+
 `coord_dir` is the absolute durable state directory for the coordination bus.
 Enrollment derives it from the controlling Git worktree or accepts an explicit
 `--coord-dir`. Reconciliation injects it as `SOUNIO_COORD_DIR` into both new and
@@ -100,4 +107,5 @@ scripts/ci/sounio_loom_fleet_custody_selftest.sh
 It proves prompt tamper refusal, forged-custody refusal, dual-authority refusal,
 exact refusal of a provider without a persistent adapter, explicit active
 adoption, idempotent Codex and Kimi reconciliation, Kimi lease bootstrap, and
-stable-provider kernel recovery.
+stable-provider kernel recovery. It also sabotages same-HOME native-store
+aliasing and requires refusal by the exact catalog isolation rule.

@@ -78,7 +78,11 @@ the native TUI argv. Kimi's TUI has no positional bootstrap-prompt contract, so
 Loom starts the native process first and sends the initial prompt through the
 same authenticated input lease used for later wakes. The plan and receipt expose
 this distinction as `prompt_transport=argv|loom-wake`; Kimi's bootstrap prompt
-does not appear in the process argv.
+does not appear in the process argv. `loom-wake` is executable-only by
+construction: any future adapter that adds even one provider argument under
+that transport is refused before the process starts. The bootstrap message ID
+is derived from provider kind, Loom session UUID, and prompt digest, preventing
+same-prompt sessions from aliasing one durable wake identity.
 
 Persistent Claude, Grok, OpenCode, and Cursor adapters are refused until each
 has a tested native input and session-resume contract. `provider-open` also
@@ -155,7 +159,10 @@ status parsing, prompt redaction, unsafe opt-in, UUID enforcement, override
 validation, context-isolation mappings, inherited-harness removal, native login
 delegation, headless stdin closure, persistent input leasing, kernel replacement
 with stable Guardian/provider identities, Kimi bootstrap through authenticated
-`loom-wake`, and verified terminal replay.
+`loom-wake`, provider/session-bound bootstrap identity, and verified terminal
+replay. Harness removal covers Codex, Claude, Kimi, Cursor, Grok, tmux, and
+inherited Sounio agentd/session identities without removing provider credential
+variables.
 
 On 2026-08-25, the retained three-agent canary launched real Codex, Grok, and
 MiniMax-via-OpenCode processes exclusively through `bin/loom provider-start`.

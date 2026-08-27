@@ -97,7 +97,7 @@ case "$name:${1:-}:${2:-}" in
     printf 'FAKE_LOGIN provider=kimi\n'
     ;;
   fake-kimi:--output-format:stream-json)
-    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
+    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${KIMI_SESSION_ID+x}${KIMI_CLI_SESSION_ID+x}${CURSOR_SESSION_ID+x}${CURSOR_AGENT_SESSION_ID+x}${GROK_SESSION_ID+x}${SOUNIO_AGENT_ID+x}${SOUNIO_LANE_ID+x}${SOUNIO_AGENTD_SOCKET+x}${SOUNIO_AGENTD_TOKEN_FILE+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
       printf 'parent harness identity leaked into Kimi provider process\n' >&2
       exit 44
     fi
@@ -110,7 +110,7 @@ case "$name:${1:-}:${2:-}" in
     sleep 1
     ;;
   fake-kimi::)
-    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
+    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${KIMI_SESSION_ID+x}${KIMI_CLI_SESSION_ID+x}${CURSOR_SESSION_ID+x}${CURSOR_AGENT_SESSION_ID+x}${GROK_SESSION_ID+x}${SOUNIO_AGENT_ID+x}${SOUNIO_LANE_ID+x}${SOUNIO_AGENTD_SOCKET+x}${SOUNIO_AGENTD_TOKEN_FILE+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
       printf 'parent harness identity leaked into persistent Kimi process\n' >&2
       exit 46
     fi
@@ -154,7 +154,7 @@ export SOUNIO_LOOM_PROVIDER_OPENCODE="$TEST_ROOT/fake-opencode"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 version="$($LOOM runtime-version)"
-grep -q '^runtime_version=2026.08.26.28$' <<< "$version" || \
+grep -q '^runtime_version=2026.08.27.29$' <<< "$version" || \
   fail 'public loom launcher selected the wrong runtime'
 
 providers="$($LOOM provider-list --json)"
@@ -532,6 +532,11 @@ guardian_journal="$(sed -n 's/^guardian_journal_file=//p' "$persistent_descripto
 kimi_persistent_prompt='KIMI_PERSISTENT_INITIAL_WITNESS'
 CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
 CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=parent CLAUDE_CODE_SESSION_ID=parent-claude \
+KIMI_SESSION_ID=parent-kimi KIMI_CLI_SESSION_ID=parent-kimi-cli \
+CURSOR_SESSION_ID=parent-cursor CURSOR_AGENT_SESSION_ID=parent-cursor-agent \
+GROK_SESSION_ID=parent-grok SOUNIO_AGENT_ID=parent-agent \
+SOUNIO_LANE_ID=parent-lane SOUNIO_AGENTD_SOCKET=parent-agentd-socket \
+SOUNIO_AGENTD_TOKEN_FILE=parent-agentd-token \
 TMUX=parent-tmux TMUX_PANE=parent-pane TMUX_TMPDIR=parent-tmp \
 "$LOOM" provider-open --provider kimi --state-dir "$STATE_DIR" \
   --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" --session-id "$SESSION_ID" \
@@ -540,6 +545,13 @@ TMUX=parent-tmux TMUX_PANE=parent-pane TMUX_TMPDIR=parent-tmp \
 grep -q 'LOOM_WAKE state=delivered .*message_id=provider-bootstrap-' \
   "$TEST_ROOT/kimi-open.out" || \
   fail 'persistent Kimi bootstrap did not traverse the authenticated Loom wake path'
+bootstrap_id="$(sed -n 's/.*message_id=\(provider-bootstrap-[^ ]*\).*/\1/p' \
+  "$TEST_ROOT/kimi-open.out" | head -n 1)"
+bootstrap_digest="$(printf '%s\0%s\0%s' kimi "$SESSION_ID" \
+  "$kimi_persistent_prompt" | sha256sum | cut -d' ' -f1)"
+expected_bootstrap_id="provider-bootstrap-${bootstrap_digest:0:16}"
+[[ "$bootstrap_id" == "$expected_bootstrap_id" ]] || \
+  fail 'persistent bootstrap identity was not bound to provider, session, and prompt'
 grep -q 'LOOM_PROVIDER_OPENED schema=loom-provider-abi-v1 provider=kimi lifecycle=persistent stdin_authority=loom-lease prompt_transport=loom-wake' \
   "$TEST_ROOT/kimi-open.out" || \
   fail 'persistent Kimi receipt omitted its prompt transport'
@@ -616,4 +628,4 @@ grep -q "FAKE_KIMI_TUI_WAKE:$kimi_post_recovery" \
 "$LOOM" stop --state-dir "$STATE_DIR" --agent "$AGENT" \
   --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null
 
-printf 'sounio-loom-provider-abi-selftest: PASS providers=5 credentials=native prompt=redacted prompt_transport=typed unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed persistent_stdin=loom-lease kernel_recovery=stable-provider session_binding=typed replay=verified\n'
+printf 'sounio-loom-provider-abi-selftest: PASS providers=5 credentials=native prompt=redacted prompt_transport=typed wake_argv=executable-only bootstrap_identity=provider+session+prompt unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed persistent_stdin=loom-lease kernel_recovery=stable-provider session_binding=typed replay=verified\n'
