@@ -124,7 +124,7 @@ case "$command_name" in
     [[ "${SOUNIO_FAKE_STOP_SILENT:-0}" == 1 ]] || \
       printf 'FLEET_SLOT_STOPPED slot=%s state=%s\n' "$slot" "$previous"
     ;;
-  launch-kind)
+  launch|launch-kind)
     [[ "${SOUNIO_FAKE_ROLLBACK_FAIL:-0}" == 1 ]] && exit 57
     : > "$SOUNIO_FAKE_LEGACY_STATE/$slot.active"
     printf 'FLEET_SLOT action=started slot=%s agent=claude lane=%s session_id=%s identity=exact\n' \

@@ -9862,35 +9862,20 @@ let fleet_transfer_catalog_target root transfer =
     fleet_prompt_file =
       fleet_prompt_path root transfer.custody_target.fleet_slot }
 
-let output_key_values output =
-  let fields = Hashtbl.create 16 in
-  split_on '\n' output
-  |> List.iter (fun line ->
-         match String.index_opt line '=' with
-         | None -> ()
-         | Some index ->
-             Hashtbl.replace fields (String.sub line 0 index)
-               (String.sub line (index + 1) (String.length line - index - 1)));
-  fields
-
-let fleet_transfer_source_plan helper transfer =
+let fleet_transfer_source_argv transfer =
   let source = transfer.custody_source in
-  let result =
-    run_captured helper
-      [ "plan-kind"; "--slot"; source.fleet_slot; "--kind";
-        source.fleet_kind; "--home"; source.fleet_home; "--cwd";
-        source.fleet_cwd ]
+  let provider = provider_spec source.fleet_kind in
+  let executable =
+    match provider_executable provider with
+    | Some path -> path
+    | None -> failf "provider-executable-not-found:%s" source.fleet_kind
   in
-  if result.captured_code <> 0 then
-    failf "fleet-custody-transfer-rollback-plan-failed:%s"
-      (trim result.captured_output);
-  let fields = output_key_values result.captured_output in
-  if table_value fields "agent" <> transfer.custody_source_agent
-     || table_value fields "lane" <> transfer.custody_source_lane
-     || table_value fields "session_id" <> transfer.custody_source_session
-     || table_value fields "identity" <> "exact"
-  then failf "fleet-custody-transfer-rollback-identity-unavailable";
-  sha256 result.captured_output
+  provider_argv provider "persistent" executable "resume" source.fleet_cwd
+    transfer.custody_source_session transfer.custody_source_session "" false
+    false ""
+
+let fleet_transfer_source_plan transfer =
+  fleet_transfer_source_argv transfer |> Array.of_list |> command_argv_digest
 
 let fleet_transfer_source_observation helper transfer =
   let source = transfer.custody_source in
@@ -9949,11 +9934,15 @@ let fleet_transfer_quiesce_source helper transfer =
 
 let fleet_transfer_restore_source helper transfer =
   let source = transfer.custody_source in
+  let command = fleet_transfer_source_argv transfer in
   let result =
     run_captured helper
-      [ "launch-kind"; "--slot"; source.fleet_slot; "--kind";
-        source.fleet_kind; "--home"; source.fleet_home; "--cwd";
-        source.fleet_cwd; "--no-attach" ]
+      ([ "launch"; "--slot"; source.fleet_slot; "--agent";
+         transfer.custody_source_agent; "--lane";
+         transfer.custody_source_lane; "--session-id";
+         transfer.custody_source_session; "--identity"; "exact"; "--home";
+         source.fleet_home; "--cwd"; source.fleet_cwd; "--no-attach"; "--" ]
+       @ command)
   in
   if result.captured_code <> 0 then
     failf "fleet-custody-transfer-source-rollback-failed:%s"
@@ -10382,7 +10371,7 @@ let fleet_transfer_stage root _cwd cli =
       custody_quiescence_receipt_sha256 = "";
       custody_policy_receipt_sha256 = ""; custody_created_utc = utc_now () }
   in
-  ignore (fleet_transfer_source_plan (fleet_agent_command ()) transfer);
+  ignore (fleet_transfer_source_plan transfer);
   let state, identity, _ =
     fleet_transfer_source_observation (fleet_agent_command ()) transfer
   in
