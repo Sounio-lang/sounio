@@ -1435,10 +1435,15 @@ parser hypothesis.
 
 ## D18 — the live-handshake `CHAIN_ERR_EXPIRED` is a scalar-field offset defect on `ChainCandidate`, not a handshake-framing defect
 
-**Status:** reported symptom **ROOT-CAUSED and FIXED**. The handshake is
-**still blocked**, on a second, distinct instance of the same defect class,
-which is characterised here and deliberately **NOT fixed** (it is a compiler
-defect; CLAUDE.md §8 forbids patching `self-hosted/` ad hoc).
+**Status:** reported symptom **ROOT-CAUSED and FIXED** (Parts 1 and 2 stand).
+**Part 3 is WITHDRAWN — see D19.** Its claimed second defect
+(`x509_parse_certificate` returning `tbs_start`/`tbs_len` = 255/44) does not
+reproduce on any surface, including the very endpoint it was measured on, and
+its conclusion that "a real TLS handshake against these endpoints cannot
+complete until this compiler defect is fixed" is false: the handshake returns
+`rc 0` / `CHAIN_OK`. Do not open work against Part 3. Read
+[D19](#d19--d18-part-3-refuted-and-the-arena-full-traced-to-a-stale-2-gib-binary)
+first.
 
 **Full forensic dispatch:**
 [`docs/audit/D18_CHAIN_CANDIDATE_SCALAR_FIELD_OFFSET_DISPATCH_2026-08-27.md`](../audit/D18_CHAIN_CANDIDATE_SCALAR_FIELD_OFFSET_DISPATCH_2026-08-27.md)
@@ -1582,6 +1587,108 @@ at `-7` rather than in path verification.
 
 ### Filed
 Not a GitHub issue. Recorded here and in the dispatch per this file's
-convention. **Next highest-value work: the Part 3 compiler defect** —
-`x509_parse_certificate`'s returned `Certificate` carrying wrong
-`tbs_start`/`tbs_len` across a module boundary.
+convention. ~~**Next highest-value work: the Part 3 compiler defect**~~ —
+**withdrawn, see D19.** Part 3 does not reproduce; the handshake it declared
+impossible now completes.
+
+---
+
+## D19 — D18 Part 3 refuted, and the `arena full` traced to a stale 2 GiB binary
+
+**Status:** **NOT A DEFECT.** The dispatched compiler defect does not exist on
+this branch; the live TLS handshake it declared impossible **succeeds**; and
+the `madaros: arena full` regression is a **stale deployed artefact**. No
+`self-hosted/` change was made, and none is warranted.
+
+**Full forensic dispatch:**
+[`docs/audit/D19_AGGREGATE_RETURN_REFUTATION_AND_STALE_ARENA_DISPATCH_2026-08-27.md`](../audit/D19_AGGREGATE_RETURN_REFUTATION_AND_STALE_ARENA_DISPATCH_2026-08-27.md)
+
+### The dispatched claim
+D18 Part 3: `x509_parse_certificate` returns a `Certificate` whose
+`tbs_start`/`tbs_len` are `255`/`44` against a true `4`/`295` when called from
+`stdlib/tls/handshake.sio`, blocking every real handshake — an untested
+variant of D2's large-aggregate cross-module family, this time for aggregate
+*return* values.
+
+### Exact stdout — the same endpoint, this branch, instrumented
+
+Probe built from this worktree, run inside the `epistemic-search` pod (whose
+CA bundle carries `conclave-search-internal-ca`, 152 entries):
+
+```
+P2 trust_store err 0 count 152
+D19 inline_pos 4 typedref_pos 4 tbs_start_pos 4 top_pos 0 cs 8 cl 291
+D19 stored tbs_start 4 tbs_len 295
+D19 cvp path_len 2 c0.tbs 4/295 c0.pka 1
+D19 chain_result 0 intermediate_count 0 leaf.tbs_start 4 leaf.tbs_len 295
+P4 tls_connect rc 0
+```
+
+and with the instrumentation removed and `stdlib/` pristine:
+
+```
+trust_store err 0 count 152
+tls_connect rc 0
+```
+
+`255` → **4**, `44` → **295**, `-6` → **`CHAIN_OK`**. `10.96.250.20:443`
+behaves the same. Offline, the same 385-byte leaf (byte-sum 30515) driven
+through `decode_certificate_message` gives `4`/`295` too.
+
+### Why the original reading could not have meant what it was taken to mean
+`tbs_len` is computed as `(content_start + content_len) - tbs_start_pos`, and
+for this certificate `content_start + content_len = 299`. `299 - 255 = 44`.
+D18's two "independently corrupt" fields were **one** wrong scalar plus its own
+subtraction — so the "2nd and 3rd members corrupt, later members fine" shape,
+the whole basis for calling it a new non-monotonic aggregate-return defect,
+never existed.
+
+Both standing compiler hypotheses are eliminated by measurement, not by
+argument: `tbs_start`/`tbs_len` are declared by exactly one struct in the
+tree, so `field_idx_from_name_simple`'s global first-match scan has nothing to
+collide with; and D11's tuple-destructure struct-type recovery
+(`LOWER_TUPLET_TMP_ID`) is present and demonstrably works, confirmed by two
+purpose-built repros — single-module and cross-module — that plant a decoy
+struct declaring `pos` at a different index and still read the right value.
+
+### The `arena full` (exit 181, empty stdout)
+Three hypotheses, all settled by measurement:
+
+- **Buffering hides the status lines** — refuted. A program that prints three
+  lines then exhausts the arena, with stdout redirected to a *file*, still
+  shows all three. `print` is unbuffered; empty stdout means nothing printed,
+  so the abort is *earlier* than it looks.
+- **A regression from D18's restructuring** — refuted. Rebuilt against
+  pre-D18 `chain.sio` (`ece1420be`), the binary behaves identically and does
+  **not** abort.
+- **Downstream of the `tbs_start` corruption** — moot; there is none.
+
+The cause, measured in one pod on one query with only the binary differing:
+
+| Binary | Arena reserved | Peak RSS | Result |
+|---|---:|---:|---|
+| deployed image `v4` | **2.0 GiB** | — | exit 181, empty stdout |
+| built from this worktree | **8.0 GiB** | **3.2 GiB** | full pipeline, exit 1, honest report |
+
+The deployed binary predates `eea3a449f` (arena 2 GiB → 8 GiB). The workload
+needs 3.2 GiB. **Rebuild the image and the abort is gone.**
+
+### What still stops a useful answer (neither is a compiler defect)
+- beagle-core's `POST /api/exocortex/v1/graphrag/query` returns **HTTP 401** —
+  it wants a Bearer token, and `conclave-search` sends only
+  `X-Beagle-Consumer`, exactly as `search/memory_context.sio`'s own comment
+  predicted. TLS to that host verifies `CHAIN_OK`, so this is not transport.
+- `1.1.1.1`'s DoH leaf is **ecdsa-with-SHA384 over P-256** — D15's known hole —
+  so `tls_connect` returns `-8`, DNS resolution fails, and every domain-name
+  search result is dropped. SearXNG discovery itself works (five candidates
+  over a verified connection).
+
+### Test evidence
+No `self-hosted/` or `stdlib/` file was modified; the only source change is one
+added test, `tests/run-pass/tls_decode_certificate_message_p256_leaf.sio`,
+which pins the offline half of the refutation. Suite results are in the
+dispatch.
+
+### Filed
+Not a GitHub issue. Recorded here and in the dispatch per this file's
+convention.
