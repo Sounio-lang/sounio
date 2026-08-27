@@ -44,6 +44,7 @@ pub const X509_ERR_MALFORMED: i64 = 0 - 5
 pub const PUBKEY_ALG_RSA: i32 = 0
 pub const PUBKEY_ALG_EC_P256: i32 = 1
 pub const PUBKEY_ALG_UNKNOWN: i32 = 2
+pub const PUBKEY_ALG_EC_P384: i32 = 3
 
 pub struct RdnEntry {
     oid: [u8; 20],
@@ -472,6 +473,27 @@ fn bigint_from_be_bytes32(bytes: &[u8; 32]) -> BigInt {
     result
 }
 
+// Same convention as bigint_from_be_bytes32 above, sized for P-384's 48-byte
+// coordinates (24 little-endian 16-bit limbs instead of 16).
+fn bigint_from_be_bytes48(bytes: &[u8; 48]) -> BigInt {
+    var result = bigint_zero()
+    var limb_idx: i64 = 0
+    var byte_pos: i64 = 46
+    while byte_pos >= 0 {
+        let hi = bytes[byte_pos as usize] as u16
+        let lo = bytes[(byte_pos + 1) as usize] as u16
+        result.limbs[limb_idx as usize] = (hi << 8) | lo
+        limb_idx = limb_idx + 1
+        byte_pos = byte_pos - 2
+    }
+    var len: i32 = 24
+    while len > 0 && result.limbs[(len - 1) as usize] == 0 {
+        len = len - 1
+    }
+    result.len = len
+    result
+}
+
 fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate, version: i32) -> (Certificate, DerReader, i64) with IO {
     var cert = cert_in
     // Never copy a struct via `*r` (this branch's established discipline) --
@@ -573,10 +595,11 @@ fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate
     let is_ec_alg = oid_eq7(&alg_oid_buf, alg_oid_len, &ec_oid)
 
     // For id-ecPublicKey, `parameters` is REQUIRED and is itself an OID
-    // naming the curve (RFC 5480 SS2.1.1) -- for P-256 that is prime256v1.
-    // This task only recognizes that one curve; any other named curve (or
-    // no parameters at all) leaves public_key_algorithm at UNKNOWN.
+    // naming the curve (RFC 5480 SS2.1.1) -- P-256 is prime256v1, P-384 is
+    // secp384r1. Any other named curve (or no parameters at all) leaves
+    // public_key_algorithm at UNKNOWN.
     var is_p256_curve = false
+    var is_p384_curve = false
     if is_ec_alg {
         let (after_alg_oid, s_after_alg_oid) = der_next(&alg_id_inner, &alg_oid_tag)
         if s_after_alg_oid != DER_OK { return (cert, after_subject, s_after_alg_oid) }
@@ -591,7 +614,9 @@ fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate
             }
             let curve_oid_len = curve_oid_tag.content_len as i32
             let p256_oid = oid_prime256v1()
+            let p384_oid = oid_secp384r1()
             is_p256_curve = oid_eq8(&curve_oid_buf, curve_oid_len, &p256_oid)
+            is_p384_curve = oid_eq5(&curve_oid_buf, curve_oid_len, &p384_oid)
         }
     }
 
@@ -642,6 +667,23 @@ fn x509_parse_tbs_after_serial(buf: &RawBuf, r: &DerReader, cert_in: Certificate
             }
             cert.ec_public_key = EcPoint { x: bigint_from_be_bytes32(&x_bytes), y: bigint_from_be_bytes32(&y_bytes) }
             cert.public_key_algorithm = PUBKEY_ALG_EC_P256
+        }
+    } else if is_ec_alg && is_p384_curve {
+        // Same uncompressed-point shape as the P-256 arm above, sized for
+        // P-384's 48-byte coordinates: 0x04 || X (48 bytes) || Y (48
+        // bytes) = 97 bytes total.
+        let point_prefix2 = rawbuf_get(buf, key_start) & 255
+        if point_prefix2 == 4 && key_len == 97 {
+            var x_bytes2: [u8; 48] = [0; 48]
+            var y_bytes2: [u8; 48] = [0; 48]
+            var bi2: i64 = 0
+            while bi2 < 48 {
+                x_bytes2[bi2 as usize] = (rawbuf_get(buf, key_start + 1 + bi2) & 255) as u8
+                y_bytes2[bi2 as usize] = (rawbuf_get(buf, key_start + 1 + 48 + bi2) & 255) as u8
+                bi2 = bi2 + 1
+            }
+            cert.ec_public_key = EcPoint { x: bigint_from_be_bytes48(&x_bytes2), y: bigint_from_be_bytes48(&y_bytes2) }
+            cert.public_key_algorithm = PUBKEY_ALG_EC_P384
         }
     }
     // else: unrecognized algorithm (or EC with an unsupported curve, or an
