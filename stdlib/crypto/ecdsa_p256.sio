@@ -56,6 +56,7 @@
 use bignum::bigint::*
 use net::socket::*
 use hash::sha256::*
+use hash::sha384::*
 use asn1::der::*
 
 pub struct EcPoint {
@@ -468,22 +469,44 @@ pub fn p256_base_point() -> EcPoint {
     EcPoint { x: gx, y: gy }
 }
 
-// ECDSA signature verification (FIPS 186-4 SS6.4.2 / SEC1 SS4.1.4).
-// `der_signature` must be a DER SEQUENCE { r INTEGER, s INTEGER }
-// (RFC 3279 SS2.2.3), the universal ECDSA-in-X.509/TLS wire encoding.
-//
-// Hash truncation: e = SHA-256(message), interpreted as a big-endian
-// integer, truncated to the leftmost min(hash_bit_length,
-// curve_order_bit_length) bits per FIPS 186-4 SS6.4.1. For P-256 with
-// SHA-256, hash_bit_length == curve_order_bit_length == 256, so no
-// truncation is actually performed -- the full 32-byte digest is used
-// as-is, converted directly to a 256-bit integer below.
-pub fn ecdsa_p256_verify(
+// Converts the 32 big-endian bytes that FIPS 186-4 SS6.4.1's truncation rule
+// has already selected into the digest integer `e`, in BigInt's own
+// little-endian 16-bit limb order (limb 0 = least significant = the LAST
+// two bytes). Both public entry points below funnel through this one
+// function, so the byte-to-integer convention can never diverge between
+// the SHA-256 and SHA-384 paths -- only WHICH 32 bytes reach it does.
+fn p256_e_from_be32(digest32: &[u8; 32]) -> BigInt {
+    var e = bigint_zero()
+    var ei: i64 = 0
+    while ei < 16 {
+        let hi_idx = 30 - 2 * ei
+        let lo_idx = 31 - 2 * ei
+        let hi: i64 = digest32[hi_idx as usize] as i64
+        let lo: i64 = digest32[lo_idx as usize] as i64
+        e.limbs[ei as usize] = ((hi << 8) | lo) as u16
+        ei = ei + 1
+    }
+    e.len = 16
+    while e.len > 0 && e.limbs[(e.len - 1) as usize] == 0 {
+        e.len = e.len - 1
+    }
+    e
+}
+
+// The ECDSA verification core (FIPS 186-4 SS6.4.2 / SEC1 SS4.1.4), shared
+// verbatim by every public entry point below: DER signature parsing, the
+// r/s range checks, and the curve arithmetic. It takes the digest integer
+// `e` ALREADY COMPUTED AND ALREADY TRUNCATED, because the hash function and
+// its FIPS 186-4 SS6.4.1 truncation are the ONLY things that differ between
+// the supported signature algorithms. Deliberately private and deliberately
+// not duplicated per hash: these steps carry the reviewed security
+// properties (DER strictness, 1 <= r,s < n, point-at-infinity rejection),
+// and a second copy could silently drift from this one.
+fn ecdsa_p256_verify_with_e(
     pubkey: &EcPoint,
-    message: &RawBuf,
-    message_len: i64,
     der_signature: &RawBuf,
     der_signature_len: i64,
+    e: &BigInt,
 ) -> bool with IO {
     let top = der_reader_new(der_signature, 0, der_signature_len)
     let (seq_tag, seq_status) = der_peek_tag(&top)
@@ -534,29 +557,14 @@ pub fn ecdsa_p256_verify(
         return false
     }
 
-    // e = SHA-256(message), as a big-endian 256-bit integer -- no
-    // truncation needed (see doc comment above).
-    let digest = sha256(message, message_len)
-    var e = bigint_zero()
-    var ei: i64 = 0
-    while ei < 16 {
-        let hi_idx = 30 - 2 * ei
-        let lo_idx = 31 - 2 * ei
-        let hi: i64 = digest[hi_idx as usize] as i64
-        let lo: i64 = digest[lo_idx as usize] as i64
-        e.limbs[ei as usize] = ((hi << 8) | lo) as u16
-        ei = ei + 1
-    }
-    e.len = 16
-    while e.len > 0 && e.limbs[(e.len - 1) as usize] == 0 {
-        e.len = e.len - 1
-    }
+    // `e` arrives already hashed and already truncated -- see each public
+    // entry point below.
 
     // Step 2: w = s^-1 mod n.
     let w = ec_mod_inverse(&s, &n)
 
     // Step 3: u1 = (e * w) mod n, u2 = (r * w) mod n.
-    let u1 = bigint_mod(&bigint_mul(&e, &w), &n)
+    let u1 = bigint_mod(&bigint_mul(e, &w), &n)
     let u2 = bigint_mod(&bigint_mul(&r, &w), &n)
 
     // Step 4: point = u1*G + u2*Q. Point at infinity is a hard failure.
@@ -570,4 +578,78 @@ pub fn ecdsa_p256_verify(
     // Step 5: v = point.x mod n; valid iff v == r.
     let v = bigint_mod(&sum_point.x, &n)
     bigint_cmp(&v, &r) == 0
+}
+
+// ECDSA-with-SHA-256 signature verification over P-256 (FIPS 186-4
+// SS6.4.2 / SEC1 SS4.1.4). `der_signature` must be a DER
+// SEQUENCE { r INTEGER, s INTEGER } (RFC 3279 SS2.2.3), the universal
+// ECDSA-in-X.509/TLS wire encoding.
+//
+// Hash truncation: e = SHA-256(message), interpreted as a big-endian
+// integer, truncated to the leftmost min(hash_bit_length,
+// curve_order_bit_length) bits per FIPS 186-4 SS6.4.1. For P-256 with
+// SHA-256, hash_bit_length == curve_order_bit_length == 256, so no
+// truncation is actually performed -- the full 32-byte digest is used
+// as-is.
+//
+// Wire uses: TLS 1.3's ecdsa_secp256r1_sha256 CertificateVerify scheme
+// (RFC 8446 SS4.2.3), and X.509 certificates signed ecdsa-with-SHA256.
+pub fn ecdsa_p256_verify(
+    pubkey: &EcPoint,
+    message: &RawBuf,
+    message_len: i64,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+) -> bool with IO {
+    let digest = sha256(message, message_len)
+    let e = p256_e_from_be32(&digest)
+    ecdsa_p256_verify_with_e(pubkey, der_signature, der_signature_len, &e)
+}
+
+// ECDSA-with-SHA-384 signature verification over P-256. Identical to
+// ecdsa_p256_verify in every respect except the digest: the DER parsing,
+// the r/s range checks and the curve arithmetic are the SAME CODE (see
+// ecdsa_p256_verify_with_e above), not a second copy.
+//
+// HASH TRUNCATION -- the whole substance of this function, and the one
+// place a plausible-looking mistake would produce a verifier that is
+// wrong rather than merely broken. FIPS 186-4 SS6.4.1 (identically, SEC1
+// v2 SS4.1.3 step 3, via the bit-string-to-integer conversion of SS2.3.2):
+// when the hash output is LONGER than the bit length of the curve order
+// n, e is taken from the LEFTMOST (most significant) bitlen(n) bits of
+// the digest. For P-256, bitlen(n) = 256 = 32 bytes; SHA-384 emits 48
+// bytes. So e = digest[0 .. 32), and digest[32 .. 48) -- the trailing 16
+// bytes -- are DISCARDED. Not the rightmost 32 bytes, not a reduction of
+// the full 384-bit value mod n, not a right-shift: the leftmost 32 bytes,
+// taken as a big-endian integer, exactly as if SHA-384 had emitted only
+// them. (bitlen(n) is not a multiple of 8 for some curves, which is why
+// the standard states the rule in bits; for P-256 it is exactly 256 bits,
+// so the byte-aligned slice below is the complete rule, with no leftover
+// bit-shift.) Note that e may exceed n -- that is expected and correct;
+// no reduction mod n is applied here, matching the SHA-256 path.
+//
+// Wire use: X.509 certificates signed ecdsa-with-SHA384 (OID
+// 1.2.840.10045.4.3.3) whose ISSUER key is P-256. RFC 5480 SS2 makes the
+// signature hash independent of the subject key's curve, so a P-256
+// issuer signing with SHA-384 is valid and common -- SSL.com's ECC
+// intermediates (Cloudflare's 1.1.1.1 chain among them) do exactly this.
+// This is NOT TLS 1.3's ecdsa_secp384r1_sha384 scheme (0x0503), which
+// couples SHA-384 to a P-384 KEY and is a different, unimplemented curve.
+pub fn ecdsa_p256_verify_sha384(
+    pubkey: &EcPoint,
+    message: &RawBuf,
+    message_len: i64,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+) -> bool with IO {
+    let digest = sha384(message, message_len)
+    // Leftmost 32 of 48 bytes -- see the truncation note above.
+    var digest32: [u8; 32] = [0; 32]
+    var ti: i64 = 0
+    while ti < 32 {
+        digest32[ti as usize] = digest[ti as usize]
+        ti = ti + 1
+    }
+    let e = p256_e_from_be32(&digest32)
+    ecdsa_p256_verify_with_e(pubkey, der_signature, der_signature_len, &e)
 }
