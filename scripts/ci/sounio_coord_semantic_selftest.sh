@@ -23,7 +23,10 @@ fail() {
 run_coord() {
   local cwd="$1"
   shift
-  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local "$TOOL" "$@")
+  # Durable obligation custody has dedicated Loom selftests; keep this gate
+  # focused on semantic ownership and proof-carrying legacy handoff behavior.
+  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+    SOUNIO_COORD_DURABLE_OBLIGATIONS=0 "$TOOL" "$@")
 }
 
 mkdir -p "$REPO/semantic"
