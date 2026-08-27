@@ -22,6 +22,10 @@ INSERT_CRASH_LOG="$TEST_ROOT/insert-crash-receiver.log"
 RETRY_LOG="$TEST_ROOT/retry-receiver.log"
 RUNTIME="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh"
 
+# Propagate the explicit local-only fixture into synthetic tmux receivers.
+export SOUNIO_COORD_RUNTIME_MODE=local
+export SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST=1
+
 cleanup() {
   tmux -S "$SOCKET" kill-server >/dev/null 2>&1 || true
   git -C "$REPO" worktree remove --force "$GROK_HOME" >/dev/null 2>&1 || true
@@ -99,7 +103,17 @@ coord() {
   local worktree="$1"
   shift
   (cd "$worktree" && SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST=1 \
     SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    "$RUNTIME" "$@")
+}
+
+coord_strict() {
+  local worktree="$1"
+  shift
+  (cd "$worktree" && SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_HISTORY_HOME="$HISTORY_HOME" \
+    SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST=0 SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
     "$RUNTIME" "$@")
 }
 
@@ -137,6 +151,37 @@ output="$(coord "$SECOND" endpoint-register --agent codex --lane recipient \
   --harness codex --transport tmux --address "$pane" --socket "$SOCKET" \
   --ttl-seconds 300)"
 grep -q '^ENDPOINT_REGISTERED ' <<< "$output" || fail 'endpoint was not registered'
+
+# A durable message to a legacy pane is retained without terminal insertion.
+legacy_bytes_before=0
+[[ ! -f "$RECEIVER_LOG" ]] || legacy_bytes_before="$(wc -c < "$RECEIVER_LOG" | tr -d ' ')"
+legacy_output="$(coord_strict "$REPO" send --agent sender --lane origin \
+  --to-agent codex --to-lane recipient --kind blocker \
+  --message 'legacy pane must restart with native hook' 2>&1)"
+legacy_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$legacy_output")"
+[[ -n "$legacy_message" ]] || fail 'legacy hook control did not persist its message'
+grep -q "^WAKE_PENDING message_id=$legacy_message .*state=awaiting-native-hook reason=absent " \
+  <<< "$legacy_output" || fail "legacy pane was not held before insertion: $legacy_output"
+legacy_submission="$(find "$STATE/message-wake-submissions" -type f \
+  -name "$legacy_message--*.submitted" -print -quit)"
+[[ -n "$legacy_submission" ]] || fail 'legacy hook control omitted its prepared record'
+grep -qx 'state=prepared' "$legacy_submission" || \
+  fail 'legacy hook control advanced its transport state'
+grep -qx 'insertion_state=not-attempted' "$legacy_submission" || \
+  fail 'legacy hook control fabricated insertion uncertainty'
+grep -qx 'attempts=0' "$legacy_submission" || \
+  fail 'legacy hook control counted an attempt before eligibility'
+sleep 0.2
+legacy_bytes_after=0
+[[ ! -f "$RECEIVER_LOG" ]] || legacy_bytes_after="$(wc -c < "$RECEIVER_LOG" | tr -d ' ')"
+[[ "$legacy_bytes_before" == "$legacy_bytes_after" ]] || \
+  fail 'legacy hook control wrote to the pane before attestation'
+legacy_ack="$(coord "$SECOND" ack --agent codex --lane recipient \
+  --message "$legacy_message")"
+grep -q "^ACKED message_id=$legacy_message .*wake_cancelled=1$" <<< "$legacy_ack" ||
+  fail "legacy acknowledgement did not cancel its pending wake: $legacy_ack"
+[[ ! -e "$legacy_submission" ]] || \
+  fail 'legacy acknowledgement retained its prepared wake submission'
 
 coord "$SECOND" claim --agent codex --lane duplicate --intent 'duplicate endpoint sabotage' \
   --files duplicate.test >/dev/null

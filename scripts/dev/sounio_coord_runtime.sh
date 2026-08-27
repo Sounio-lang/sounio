@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.31
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.32
 
 usage() {
   cat <<'USAGE'
@@ -46,6 +46,12 @@ Commands:
                                  bind a lane to a tmux-independent process identity
   presence-unregister --agent ID --lane ID
                                  remove the lane's process identity on a clean exit
+  hook-capability-register --agent ID --lane ID --session-id ID
+                                 attest a native OCaml hook generation
+  hook-capability-unregister --agent ID --lane ID
+                                 retire a native hook attestation
+  hook-capability-status --agent ID --lane ID
+                                 inspect native hook eligibility
   recover [--agent ID --lane ID] [--all]
                                  reconstruct one lane or audit the fleet after a crash
   obligation-open --agent ID --lane ID --message ID
@@ -211,11 +217,13 @@ ACKS_DIR="$STATE_DIR/message-acks"
 INJECTIONS_DIR="$STATE_DIR/message-injections"
 ENDPOINTS_DIR="$STATE_DIR/delivery-endpoints"
 PRESENCES_DIR="$STATE_DIR/process-presences"
+HOOK_CAPABILITIES_DIR="$STATE_DIR/hook-capabilities"
 WAKES_DIR="$STATE_DIR/message-wakes"
 WAKE_SUBMISSIONS_DIR="$STATE_DIR/message-wake-submissions"
 EVENT_LOG="$STATE_DIR/events.log"
 mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR" "$INJECTIONS_DIR" \
-  "$ENDPOINTS_DIR" "$PRESENCES_DIR" "$WAKES_DIR" "$WAKE_SUBMISSIONS_DIR"
+  "$ENDPOINTS_DIR" "$PRESENCES_DIR" "$HOOK_CAPABILITIES_DIR" "$WAKES_DIR" \
+  "$WAKE_SUBMISSIONS_DIR"
 
 NOW_EPOCH="$(date +%s)"
 NOW_TICK="$(date +%s%N)"
@@ -1396,13 +1404,403 @@ append_presence_event() {
 }
 
 remove_presence_for_lane() {
-  local agent="$1" lane="$2" worktree="$3" reason="$4" presence_file
+  local agent="$1" lane="$2" worktree="$3" reason="$4" presence_file capability_file
   presence_file="$(presence_path "$agent" "$lane")"
   [[ -f "$presence_file" ]] || return 0
   load_presence "$presence_file"
   [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" ]] || die "presence owner mismatch"
   unlink "$presence_file"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ ! -f "$capability_file" ]] || unlink "$capability_file"
   append_presence_event PRESENCE_UNREGISTERED "$reason"
+}
+
+hook_capability_path() {
+  printf '%s/%s.capability' "$HOOK_CAPABILITIES_DIR" "$(claim_id_for "$1" "$2")"
+}
+
+load_hook_capability() {
+  local capability_file="$1" line
+  HC_SCHEMA=''
+  HC_STATE=''
+  HC_AGENT=''
+  HC_LANE=''
+  HC_SESSION_ID=''
+  HC_GENERATION=''
+  HC_WORKTREE=''
+  HC_HARNESS=''
+  HC_PRESENCE_PID=0
+  HC_PRESENCE_PID_START=0
+  HC_PRESENCE_BOOT_ID=''
+  HC_PRESENCE_PID_NAMESPACE=''
+  HC_PRODUCER_EXECUTABLE=''
+  HC_PRODUCER_SHA256=''
+  HC_COORD_EXECUTABLE=''
+  HC_COORD_SHA256=''
+  HC_CALLER_PID=0
+  HC_CALLER_PID_START=0
+  HC_CALLER_BOOT_ID=''
+  HC_CALLER_PID_NAMESPACE=''
+  HC_CALLER_EXECUTABLE=''
+  HC_CALLER_SHA256=''
+  HC_WAKE_ELIGIBLE=0
+  HC_RUNTIME_ID=''
+  HC_SOURCE_SHA=''
+  HC_CREATED_UTC=''
+  HC_CREATED_EPOCH=0
+  HC_EXPIRES_EPOCH=0
+  [[ -r "$capability_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      schema=*) HC_SCHEMA="${line#schema=}" ;;
+      state=*) HC_STATE="${line#state=}" ;;
+      agent=*) HC_AGENT="${line#agent=}" ;;
+      lane=*) HC_LANE="${line#lane=}" ;;
+      session_id=*) HC_SESSION_ID="${line#session_id=}" ;;
+      generation=*) HC_GENERATION="${line#generation=}" ;;
+      worktree=*) HC_WORKTREE="${line#worktree=}" ;;
+      harness=*) HC_HARNESS="${line#harness=}" ;;
+      presence_pid=*) HC_PRESENCE_PID="${line#presence_pid=}" ;;
+      presence_pid_start=*) HC_PRESENCE_PID_START="${line#presence_pid_start=}" ;;
+      presence_boot_id=*) HC_PRESENCE_BOOT_ID="${line#presence_boot_id=}" ;;
+      presence_pid_namespace=*) HC_PRESENCE_PID_NAMESPACE="${line#presence_pid_namespace=}" ;;
+      producer_executable=*) HC_PRODUCER_EXECUTABLE="${line#producer_executable=}" ;;
+      producer_sha256=*) HC_PRODUCER_SHA256="${line#producer_sha256=}" ;;
+      coord_executable=*) HC_COORD_EXECUTABLE="${line#coord_executable=}" ;;
+      coord_sha256=*) HC_COORD_SHA256="${line#coord_sha256=}" ;;
+      caller_pid=*) HC_CALLER_PID="${line#caller_pid=}" ;;
+      caller_pid_start=*) HC_CALLER_PID_START="${line#caller_pid_start=}" ;;
+      caller_boot_id=*) HC_CALLER_BOOT_ID="${line#caller_boot_id=}" ;;
+      caller_pid_namespace=*) HC_CALLER_PID_NAMESPACE="${line#caller_pid_namespace=}" ;;
+      caller_executable=*) HC_CALLER_EXECUTABLE="${line#caller_executable=}" ;;
+      caller_sha256=*) HC_CALLER_SHA256="${line#caller_sha256=}" ;;
+      wake_eligible=*) HC_WAKE_ELIGIBLE="${line#wake_eligible=}" ;;
+      runtime_id=*) HC_RUNTIME_ID="${line#runtime_id=}" ;;
+      source_sha=*) HC_SOURCE_SHA="${line#source_sha=}" ;;
+      created_utc=*) HC_CREATED_UTC="${line#created_utc=}" ;;
+      created_epoch=*) HC_CREATED_EPOCH="${line#created_epoch=}" ;;
+      expires_epoch=*) HC_EXPIRES_EPOCH="${line#expires_epoch=}" ;;
+    esac
+  done < "$capability_file"
+}
+
+manifest_field() {
+  local manifest="$1" key="$2"
+  sed -n "s/^${key}=//p" "$manifest" | head -n 1
+}
+
+native_hook_parent_identity() {
+  local parent_pid="$PPID" runtime_self local_runtime local_loom parent_tail caller_tail
+  local parent_bundle runtime_bundle current_bundle manifest runtime_version expected_parent_sha expected_coord_sha
+  NATIVE_HOOK_PARENT_EXECUTABLE="$(readlink -f "/proc/$parent_pid/exe" 2>/dev/null || true)"
+  [[ -n "$NATIVE_HOOK_PARENT_EXECUTABLE" ]] || return 1
+  runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  [[ -n "$runtime_self" ]] || return 1
+  NATIVE_HOOK_COORD_EXECUTABLE="$runtime_self"
+  NATIVE_HOOK_PARENT_SHA256="$(sha256sum "$NATIVE_HOOK_PARENT_EXECUTABLE" | awk '{print $1}')"
+  NATIVE_HOOK_COORD_SHA256="$(sha256sum "$runtime_self" | awk '{print $1}')"
+  [[ "$NATIVE_HOOK_PARENT_SHA256" =~ ^[0-9a-f]{64}$ && \
+    "$NATIVE_HOOK_COORD_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  parent_tail="$(sed 's/^[^)]*) //' "/proc/$parent_pid/stat" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID="$(awk '{print $2}' <<< "$parent_tail")"
+  [[ "$NATIVE_HOOK_CALLER_PID" =~ ^[1-9][0-9]*$ ]] || return 1
+  caller_tail="$(sed 's/^[^)]*) //' "/proc/$NATIVE_HOOK_CALLER_PID/stat" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID_START="$(awk '{print $20}' <<< "$caller_tail")"
+  NATIVE_HOOK_CALLER_EXECUTABLE="$(readlink -f "/proc/$NATIVE_HOOK_CALLER_PID/exe" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_COMMAND="$(basename "$NATIVE_HOOK_CALLER_EXECUTABLE")"
+  NATIVE_HOOK_CALLER_SHA256="$(sha256sum "$NATIVE_HOOK_CALLER_EXECUTABLE" 2>/dev/null | awk '{print $1}')"
+  NATIVE_HOOK_CALLER_CMDLINE="$(tr '\0' ' ' < "/proc/$NATIVE_HOOK_CALLER_PID/cmdline" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID_NAMESPACE="$(readlink "/proc/$NATIVE_HOOK_CALLER_PID/ns/pid" 2>/dev/null || true)"
+  [[ "$NATIVE_HOOK_CALLER_PID_START" =~ ^[1-9][0-9]*$ && \
+    -n "$NATIVE_HOOK_CALLER_EXECUTABLE" && \
+    "$NATIVE_HOOK_CALLER_SHA256" =~ ^[0-9a-f]{64}$ && \
+    -n "$NATIVE_HOOK_CALLER_BOOT_ID" && \
+    -n "$NATIVE_HOOK_CALLER_PID_NAMESPACE" ]] || return 1
+
+  local_runtime="$(readlink -f "$WORKTREE/scripts/dev/sounio_coord_runtime.sh" 2>/dev/null || true)"
+  local_loom="$(readlink -f "$WORKTREE/tools/loom/_build/default/src/loom.exe" 2>/dev/null || true)"
+  if [[ -n "$local_runtime" && -n "$local_loom" && \
+    "$runtime_self" == "$local_runtime" && \
+    "$NATIVE_HOOK_PARENT_EXECUTABLE" == "$local_loom" ]]; then
+    [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == local && \
+      "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 && \
+      "$STATE_DIR" == "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord ]] || return 1
+    NATIVE_HOOK_RUNTIME_ID="local-${SOUNIO_COORD_RUNTIME_VERSION}"
+    NATIVE_HOOK_SOURCE_SHA="$(current_sha)"
+    NATIVE_HOOK_WAKE_ELIGIBLE=0
+  else
+    parent_bundle="$(readlink -f "$(dirname "$NATIVE_HOOK_PARENT_EXECUTABLE")/.." 2>/dev/null || true)"
+    runtime_bundle="$(readlink -f "$(dirname "$runtime_self")/.." 2>/dev/null || true)"
+    [[ -n "$parent_bundle" && "$parent_bundle" == "$runtime_bundle" ]] || return 1
+    case "$parent_bundle" in
+      "$GIT_COMMON_DIR"/sounio-coord-runtime/versions/*) ;;
+      *) return 1 ;;
+    esac
+    current_bundle="$(readlink -f "$GIT_COMMON_DIR/sounio-coord-runtime/current" 2>/dev/null || true)"
+    [[ -n "$current_bundle" && "$parent_bundle" == "$current_bundle" ]] || return 1
+    [[ "$NATIVE_HOOK_PARENT_EXECUTABLE" == "$parent_bundle/bin/sounio-loom-runtime" ]] || return 1
+    manifest="$parent_bundle/manifest"
+    [[ -r "$manifest" ]] || return 1
+    runtime_version="$(manifest_field "$manifest" runtime_version)"
+    [[ "$runtime_version" == "$SOUNIO_COORD_RUNTIME_VERSION" ]] || return 1
+    expected_parent_sha="$(manifest_field "$manifest" loom_runtime_sha256)"
+    expected_coord_sha="$(manifest_field "$manifest" coord_runtime_sha256)"
+    [[ "$expected_parent_sha" =~ ^[0-9a-f]{64}$ && \
+      "$expected_coord_sha" =~ ^[0-9a-f]{64}$ && \
+      "$NATIVE_HOOK_PARENT_SHA256" == "$expected_parent_sha" && \
+      "$NATIVE_HOOK_COORD_SHA256" == "$expected_coord_sha" ]] || return 1
+    NATIVE_HOOK_RUNTIME_ID="$(manifest_field "$manifest" runtime_id)"
+    NATIVE_HOOK_SOURCE_SHA="$(manifest_field "$manifest" source_sha)"
+    [[ -n "$NATIVE_HOOK_RUNTIME_ID" && -n "$NATIVE_HOOK_SOURCE_SHA" ]] || return 1
+    NATIVE_HOOK_WAKE_ELIGIBLE=1
+  fi
+}
+
+native_hook_caller_is_exact_harness() {
+  local harness="$1"
+  case "$harness" in
+    codex) [[ "$NATIVE_HOOK_CALLER_COMMAND" == codex ]] ;;
+    claude)
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == claude ]] ||
+        [[ "$NATIVE_HOOK_CALLER_COMMAND" == node &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'/@anthropic-ai/claude-code/'* &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'cli.js'* ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+native_hook_caller_matches_presence() {
+  [[ "$NATIVE_HOOK_CALLER_PID" == "$P_PID" && \
+    "$NATIVE_HOOK_CALLER_PID_START" == "$P_PID_START" && \
+    "$NATIVE_HOOK_CALLER_BOOT_ID" == "$P_BOOT_ID" && \
+    "$NATIVE_HOOK_CALLER_PID_NAMESPACE" == "$P_PID_NAMESPACE" ]] || return 1
+  if ((NATIVE_HOOK_WAKE_ELIGIBLE)); then
+    native_hook_caller_is_exact_harness "$P_HARNESS"
+  else
+    [[ "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]]
+  fi
+}
+
+native_hook_wake_selftest_fixture() {
+  [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == local && \
+    "${SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST:-0}" == 1 && \
+    "$STATE_DIR" == "${TMPDIR:-/tmp}"/sounio-coord-wake-selftest.*/state ]]
+}
+
+HOOK_CAPABILITY_REASON='absent'
+hook_capability_binding_is_current() {
+  local agent="$1" lane="$2" generation="$3" capability_file presence_file
+  local current_generation current_sha256 current_coord_sha256 current_caller_sha256
+  local manifest bundle runtime_self active_bundle
+  HOOK_CAPABILITY_REASON='absent'
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ -f "$capability_file" ]] || return 1
+  load_hook_capability "$capability_file"
+  [[ "$HC_SCHEMA" == loom-native-hook-capability-v1 && \
+    "$HC_STATE" == NATIVE_HOOK_ATTESTED && "$HC_AGENT" == "$agent" && \
+    "$HC_LANE" == "$lane" && "$HC_GENERATION" == "$generation" && \
+    "$HC_WAKE_ELIGIBLE" =~ ^[01]$ && \
+    "$HC_CREATED_EPOCH" =~ ^[0-9]+$ && "$HC_EXPIRES_EPOCH" =~ ^[0-9]+$ ]] || \
+    { HOOK_CAPABILITY_REASON='invalid-record'; return 1; }
+  ((NOW_EPOCH <= HC_EXPIRES_EPOCH)) || \
+    { HOOK_CAPABILITY_REASON='expired'; return 1; }
+  if ((! HC_WAKE_ELIGIBLE)); then
+    [[ "$HC_SOURCE_SHA" == "$(current_sha)" ]] || \
+      { HOOK_CAPABILITY_REASON='source-binding-drift'; return 1; }
+  fi
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || { HOOK_CAPABILITY_REASON='presence-absent'; return 1; }
+  load_presence "$presence_file"
+  presence_state || { HOOK_CAPABILITY_REASON="presence-${PRESENCE_REASON}"; return 1; }
+  current_generation="$(process_presence_delivery_generation \
+    "$agent" "$lane" "$HC_WORKTREE" "$HC_HARNESS" 2>/dev/null || true)"
+  [[ -n "$current_generation" && "$current_generation" == "$generation" && \
+    "$P_SESSION_ID" == "$HC_SESSION_ID" && "$P_PID" == "$HC_PRESENCE_PID" && \
+    "$P_PID_START" == "$HC_PRESENCE_PID_START" && \
+    "$P_BOOT_ID" == "$HC_PRESENCE_BOOT_ID" && \
+    "$P_PID_NAMESPACE" == "$HC_PRESENCE_PID_NAMESPACE" ]] || \
+    { HOOK_CAPABILITY_REASON='presence-generation-drift'; return 1; }
+  [[ "$HC_CALLER_PID" == "$P_PID" && \
+    "$HC_CALLER_PID_START" == "$P_PID_START" && \
+    "$HC_CALLER_BOOT_ID" == "$P_BOOT_ID" && \
+    "$HC_CALLER_PID_NAMESPACE" == "$P_PID_NAMESPACE" ]] || \
+    { HOOK_CAPABILITY_REASON='caller-presence-drift'; return 1; }
+  [[ -x "$HC_CALLER_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='caller-executable-absent'; return 1; }
+  [[ -x "$HC_PRODUCER_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='producer-absent'; return 1; }
+  [[ -x "$HC_COORD_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='coord-runtime-absent'; return 1; }
+  current_sha256="$(sha256sum "$HC_PRODUCER_EXECUTABLE" | awk '{print $1}')"
+  current_coord_sha256="$(sha256sum "$HC_COORD_EXECUTABLE" | awk '{print $1}')"
+  current_caller_sha256="$(sha256sum "$HC_CALLER_EXECUTABLE" | awk '{print $1}')"
+  [[ "$current_sha256" == "$HC_PRODUCER_SHA256" ]] || \
+    { HOOK_CAPABILITY_REASON='producer-drift'; return 1; }
+  [[ "$current_coord_sha256" == "$HC_COORD_SHA256" ]] || \
+    { HOOK_CAPABILITY_REASON='coord-runtime-drift'; return 1; }
+  [[ "$current_caller_sha256" == "$HC_CALLER_SHA256" && \
+    "$(readlink -f "/proc/$HC_CALLER_PID/exe" 2>/dev/null || true)" == \
+      "$HC_CALLER_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='caller-executable-drift'; return 1; }
+  if ((HC_WAKE_ELIGIBLE)); then
+    runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    bundle="$(readlink -f "$(dirname "$HC_PRODUCER_EXECUTABLE")/.." 2>/dev/null || true)"
+    active_bundle="$(readlink -f "$GIT_COMMON_DIR/sounio-coord-runtime/current" 2>/dev/null || true)"
+    manifest="$bundle/manifest"
+    [[ "$runtime_self" == "$HC_COORD_EXECUTABLE" && \
+      "$bundle" == "$active_bundle" && -r "$manifest" && \
+      "$(manifest_field "$manifest" runtime_id)" == "$HC_RUNTIME_ID" && \
+      "$(manifest_field "$manifest" source_sha)" == "$HC_SOURCE_SHA" && \
+      "$(manifest_field "$manifest" loom_runtime_sha256)" == "$HC_PRODUCER_SHA256" && \
+      "$(manifest_field "$manifest" coord_runtime_sha256)" == "$HC_COORD_SHA256" ]] || \
+      { HOOK_CAPABILITY_REASON='manifest-binding-drift'; return 1; }
+  fi
+  HOOK_CAPABILITY_REASON='native-generation-attested'
+  return 0
+}
+
+hook_capability_is_current() {
+  local agent="$1" lane="$2" generation="$3"
+  if native_hook_wake_selftest_fixture; then
+    HOOK_CAPABILITY_REASON='explicit-selftest-fixture'
+    return 0
+  fi
+  hook_capability_binding_is_current "$agent" "$lane" "$generation" || return 1
+  [[ "$HC_WAKE_ELIGIBLE" == 1 ]] || \
+    { HOOK_CAPABILITY_REASON='selftest-only'; return 1; }
+  return 0
+}
+
+hook_capability_register_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' session_id='' ttl capability_file
+  local presence_file generation tmp_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --session-id) require_arg "$1" "$2"; session_id="$2"; shift 2 ;;
+      *) die "unknown hook-capability-register option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$session_id" ]] || \
+    die "hook-capability-register requires --agent, --lane, and --session-id"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value session-id "$session_id"
+  native_hook_parent_identity || \
+    die "native hook capability requires the matching OCaml runtime parent"
+  ttl="${SOUNIO_COORD_HOOK_TTL_SECONDS:-1800}"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "hook capability ttl must be positive"
+  acquire_state_lock "the native hook capability registration"
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || die "native hook capability requires process presence"
+  load_presence "$presence_file"
+  presence_state || die "native hook capability presence is not live: $PRESENCE_REASON"
+  [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" && \
+    "$P_SESSION_ID" == "$session_id" && "$P_WORKTREE" == "$WORKTREE" ]] || \
+    die "native hook capability does not match process presence"
+  native_hook_caller_matches_presence || \
+    die "native hook caller does not match the existing process presence"
+  generation="$(process_presence_delivery_generation \
+    "$agent" "$lane" "$P_WORKTREE" "$P_HARNESS")" || \
+    die "native hook capability has no process generation"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  tmp_file="$(mktemp "$HOOK_CAPABILITIES_DIR/.hook-capability-write.XXXXXX")"
+  {
+    printf 'schema=loom-native-hook-capability-v1\n'
+    printf 'state=NATIVE_HOOK_ATTESTED\n'
+    printf 'agent=%s\n' "$agent"
+    printf 'lane=%s\n' "$lane"
+    printf 'session_id=%s\n' "$session_id"
+    printf 'generation=%s\n' "$generation"
+    printf 'worktree=%s\n' "$P_WORKTREE"
+    printf 'harness=%s\n' "$P_HARNESS"
+    printf 'presence_pid=%s\n' "$P_PID"
+    printf 'presence_pid_start=%s\n' "$P_PID_START"
+    printf 'presence_boot_id=%s\n' "$P_BOOT_ID"
+    printf 'presence_pid_namespace=%s\n' "$P_PID_NAMESPACE"
+    printf 'producer_executable=%s\n' "$NATIVE_HOOK_PARENT_EXECUTABLE"
+    printf 'producer_sha256=%s\n' "$NATIVE_HOOK_PARENT_SHA256"
+    printf 'coord_executable=%s\n' "$NATIVE_HOOK_COORD_EXECUTABLE"
+    printf 'coord_sha256=%s\n' "$NATIVE_HOOK_COORD_SHA256"
+    printf 'caller_pid=%s\n' "$NATIVE_HOOK_CALLER_PID"
+    printf 'caller_pid_start=%s\n' "$NATIVE_HOOK_CALLER_PID_START"
+    printf 'caller_boot_id=%s\n' "$NATIVE_HOOK_CALLER_BOOT_ID"
+    printf 'caller_pid_namespace=%s\n' "$NATIVE_HOOK_CALLER_PID_NAMESPACE"
+    printf 'caller_executable=%s\n' "$NATIVE_HOOK_CALLER_EXECUTABLE"
+    printf 'caller_sha256=%s\n' "$NATIVE_HOOK_CALLER_SHA256"
+    printf 'wake_eligible=%s\n' "$NATIVE_HOOK_WAKE_ELIGIBLE"
+    printf 'runtime_id=%s\n' "$NATIVE_HOOK_RUNTIME_ID"
+    printf 'source_sha=%s\n' "$NATIVE_HOOK_SOURCE_SHA"
+    printf 'created_utc=%s\n' "$NOW_UTC"
+    printf 'created_epoch=%s\n' "$NOW_EPOCH"
+    printf 'expires_epoch=%s\n' "$((NOW_EPOCH + ttl))"
+  } > "$tmp_file"
+  mv "$tmp_file" "$capability_file"
+  printf 'utc=%s event=HOOK_CAPABILITY_REGISTERED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=NATIVE_HOOK_ATTESTED wake_eligible=%s\n' \
+    "$NOW_UTC" "$agent" "$lane" "$session_id" "$generation" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$NATIVE_HOOK_SOURCE_SHA" \
+    "$NATIVE_HOOK_WAKE_ELIGIBLE" >> "$EVENT_LOG"
+  printf 'HOOK_CAPABILITY_REGISTERED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=NATIVE_HOOK_ATTESTED wake_eligible=%s\n' \
+    "$agent" "$lane" "$session_id" "$generation" "$NATIVE_HOOK_RUNTIME_ID" \
+    "$NATIVE_HOOK_SOURCE_SHA" "$NATIVE_HOOK_WAKE_ELIGIBLE"
+}
+
+hook_capability_unregister_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' session_id='' capability_file presence_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --session-id) require_arg "$1" "$2"; session_id="$2"; shift 2 ;;
+      *) die "unknown hook-capability-unregister option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$session_id" ]] || \
+    die "hook-capability-unregister requires --agent, --lane, and --session-id"
+  native_hook_parent_identity || \
+    die "native hook capability removal requires the matching OCaml runtime parent"
+  acquire_state_lock "the native hook capability removal"
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || die "native hook capability removal requires process presence"
+  load_presence "$presence_file"
+  [[ "$P_SESSION_ID" == "$session_id" ]] || die "native hook capability session mismatch"
+  native_hook_caller_matches_presence || \
+    die "native hook removal caller does not match process presence"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ -f "$capability_file" ]] && unlink "$capability_file"
+  printf 'utc=%s event=HOOK_CAPABILITY_UNREGISTERED agent=%s lane=%s\n' \
+    "$NOW_UTC" "$agent" "$lane" >> "$EVENT_LOG"
+  printf 'HOOK_CAPABILITY_UNREGISTERED agent=%s lane=%s\n' "$agent" "$lane"
+}
+
+hook_capability_status_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' capability_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      *) die "unknown hook-capability-status option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" ]] || \
+    die "hook-capability-status requires --agent and --lane"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ -f "$capability_file" ]] || die "native hook capability not found: $agent/$lane"
+  load_hook_capability "$capability_file"
+  if hook_capability_binding_is_current "$agent" "$lane" "$HC_GENERATION"; then
+    printf 'HOOK_CAPABILITY_STATUS agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=NATIVE_HOOK_ATTESTED wake_eligible=%s reason=%s\n' \
+      "$agent" "$lane" "$HC_SESSION_ID" "$HC_GENERATION" "$HC_RUNTIME_ID" \
+      "$HC_SOURCE_SHA" "$HC_WAKE_ELIGIBLE" "$HOOK_CAPABILITY_REASON"
+  else
+    printf 'HOOK_CAPABILITY_STATUS agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=INELIGIBLE reason=%s\n' \
+      "$agent" "$lane" "$HC_SESSION_ID" "$HC_GENERATION" "$HC_RUNTIME_ID" \
+      "$HC_SOURCE_SHA" "$HOOK_CAPABILITY_REASON"
+    return 1
+  fi
 }
 
 wake_submission_generation_is_current() {
@@ -1525,11 +1923,28 @@ attempt_tmux_wake_submission() {
     S_LAST_ATTEMPT_EPOCH=0
     S_ATTEMPTS=0
   fi
+  if ! hook_capability_is_current "$target_agent" "$target_lane" "$generation"; then
+    # A legacy lane may retain a durable obligation, but it must not look like
+    # an attempted terminal write. A later native generation can start here.
+    write_wake_submission "$submission_file"
+    cleanup_lock
+    WAKE_STATUS='pending-native-hook'
+    printf 'utc=%s event=WAKE_DEFERRED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s reason=hook-capability-%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$endpoint_id" \
+      "$target_agent" "$target_lane" "$address" "$generation" \
+      "$HOOK_CAPABILITY_REASON" >> "$EVENT_LOG"
+    printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=awaiting-native-hook reason=%s discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" \
+      "$HOOK_CAPABILITY_REASON" "$discovery"
+    return 1
+  fi
+
   S_LAST_ATTEMPT_EPOCH="$current_epoch"
   S_ATTEMPTS=$((S_ATTEMPTS + 1))
   if ((needs_insert)); then
-    # Persist uncertainty before the external write. A crash after send-keys
-    # can recover by observing this exact message id, but may never reinsert.
+    # Persist uncertainty immediately before the external write. A crash after
+    # send-keys can recover by observing this exact message id, but may never
+    # blindly reinsert.
     S_INSERTION_STATE='uncertain'
   fi
   write_wake_submission "$submission_file"
@@ -3495,6 +3910,12 @@ promote_wake_submissions_for_injection() {
       submitted) [[ -n "$S_SUBMITTED_UTC" ]] || continue ;;
       *) continue ;;
     esac
+    if ! hook_capability_is_current "$agent" "$lane" "$S_GENERATION"; then
+      printf 'utc=%s event=WAKE_START_REFUSED message_id=%s endpoint_id=%s agent=%s lane=%s generation=%s reason=hook-capability-%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$agent" "$lane" "$S_GENERATION" "$HOOK_CAPABILITY_REASON" >> "$EVENT_LOG"
+      continue
+    fi
     if ! wake_submission_generation_is_current; then
       printf 'utc=%s event=WAKE_START_REFUSED message_id=%s endpoint_id=%s agent=%s lane=%s generation=%s reason=generation-drift\n' \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
@@ -3791,7 +4212,9 @@ wait_command() {
 }
 
 ack_command() {
-  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file ack_file
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file ack_file submission_file
+  local cancelled=0
+  local -a submission_paths=()
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
@@ -3812,7 +4235,18 @@ ack_command() {
   acquire_state_lock "the acknowledgement"
   ack_file="$(message_ack_path "$M_ID" "$agent" "$lane")"
   printf 'utc=%s agent=%s lane=%s\n' "$NOW_UTC" "$agent" "$lane" > "$ack_file"
-  printf 'ACKED message_id=%s agent=%s lane=%s\n' "$M_ID" "$agent" "$lane"
+  submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$M_ID")"--*.submitted)
+  for submission_file in "${submission_paths[@]}"; do
+    [[ -f "$submission_file" ]] || continue
+    load_wake_submission "$submission_file"
+    unlink "$submission_file"
+    cancelled=$((cancelled + 1))
+    printf 'utc=%s event=WAKE_CANCELLED message_id=%s endpoint_id=%s agent=%s lane=%s generation=%s reason=acknowledged\n' \
+      "$NOW_UTC" "$M_ID" "$S_ENDPOINT_ID" "$agent" "$lane" \
+      "$S_GENERATION" >> "$EVENT_LOG"
+  done
+  printf 'ACKED message_id=%s agent=%s lane=%s wake_cancelled=%s\n' \
+    "$M_ID" "$agent" "$lane" "$cancelled"
 }
 
 prune_command() {
@@ -4199,6 +4633,9 @@ case "$command" in
   endpoint-status) endpoint_status_command "$@" ;;
   presence-register) presence_register_command "$@" ;;
   presence-unregister) presence_unregister_command "$@" ;;
+  hook-capability-register) hook_capability_register_command "$@" ;;
+  hook-capability-unregister) hook_capability_unregister_command "$@" ;;
+  hook-capability-status) hook_capability_status_command "$@" ;;
   recover) recover_command "$@" ;;
   obligation-open) coord_obligation_open_command "$@" ;;
   obligation-consume) coord_obligation_recipient_command consume "$@" ;;
@@ -4234,5 +4671,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-capability-status, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac

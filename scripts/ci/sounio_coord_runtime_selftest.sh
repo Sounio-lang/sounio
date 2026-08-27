@@ -198,6 +198,32 @@ grep -q "^source_sha=$first_source_sha$" "$first_manifest" || \
   fail 'runtime manifest source SHA does not identify the committed source'
 grep -q '^source_state=clean$' "$first_manifest" || \
   fail 'runtime manifest omitted clean source provenance'
+coord_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" | awk '{print $1}')"
+loom_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime" | awk '{print $1}')"
+grep -qx "coord_runtime_sha256=$coord_runtime_sha" "$first_manifest" || \
+  fail 'runtime manifest did not pin the coordination runtime executable'
+grep -qx "loom_runtime_sha256=$loom_runtime_sha" "$first_manifest" || \
+  fail 'runtime manifest did not pin the compiled OCaml Loom executable'
+grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$first_manifest" || \
+  fail 'runtime manifest omitted native hook binary attestation'
+
+active_before_tamper="$(readlink -f "$RUNTIME_ROOT/current")"
+for tamper_binary in sounio-coord-runtime sounio-loom-runtime; do
+  binary="$RUNTIME_ROOT/versions/$first_id/bin/$tamper_binary"
+  saved_binary="$TEST_ROOT/$tamper_binary.saved"
+  cp -p "$binary" "$saved_binary"
+  printf x >> "$binary"
+  set +e
+  tamper_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$RUNTIME_ROOT" --activate "$first_id" 2>&1)"
+  tamper_rc=$?
+  set -e
+  [[ "$tamper_rc" -ne 0 && "$tamper_output" == *'binary hash mismatch'* ]] || \
+    fail "activation accepted tampered $tamper_binary: rc=$tamper_rc output=$tamper_output"
+  [[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] || \
+    fail 'failed binary activation changed the current runtime link'
+  cp -p "$saved_binary" "$binary"
+done
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
   grep -qx 'stdlib/coordination/loom_witness_epoch_handoff.sio' || \
   fail 'runtime source SHA omits the frame-9015 source'
@@ -304,6 +330,7 @@ grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/man
 for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
+  loom-native-hook-binary-attestation-v1 \
   loom-native-sounio-continuity-v1 \
   loom-durable-obligation-v1 \
   loom-epistemic-machine-v0 loom-epistemic-arrow-projection-v0 \
@@ -367,7 +394,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.31$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.27.32$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'

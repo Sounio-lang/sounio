@@ -857,6 +857,12 @@ let refresh_presence tool_root process_root claim_root agent lane raw_session_id
   if result.code <> 0 then
     failf "process-presence-refused:%s" (trim result.output)
 
+let refresh_hook_capability tool_root process_root agent lane raw_session_id =
+  ignore
+    (coord_ok tool_root process_root
+       [ "hook-capability-register"; "--agent"; agent; "--lane"; lane;
+         "--session-id"; raw_session_id ])
+
 let refresh_endpoint tool_root root agent lane raw_session_id =
   let harness = harness_of_agent agent in
   let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
@@ -942,6 +948,10 @@ let execute_event tool_root root event agent lane raw_session_id file_capability
   if event_name = "SessionEnd" then (
     refresh_presence tool_root presence_root root agent lane raw_session_id;
     ignore
+      (coord_ok tool_root presence_root
+         [ "hook-capability-unregister"; "--agent"; agent; "--lane"; lane;
+           "--session-id"; raw_session_id ]);
+    ignore
       (run_coord tool_root presence_root
          [ "endpoint-unregister"; "--agent"; agent; "--lane"; lane ]);
     ignore
@@ -963,6 +973,7 @@ let execute_event tool_root root event agent lane raw_session_id file_capability
         target_scope (string_field ~default:root event "cwd") root paths
       in
       refresh_presence tool_root presence_root root agent lane raw_session_id;
+      refresh_hook_capability tool_root presence_root agent lane raw_session_id;
       let authorization =
         run_coord tool_root target_root
           ([ "authorize"; "--agent"; agent; "--files" ] @ target_paths)
@@ -987,6 +998,7 @@ let execute_event tool_root root event agent lane raw_session_id file_capability
       let field, command = execution_command input in
       let cwd = execution_cwd event input root in
       refresh_presence tool_root presence_root root agent lane raw_session_id;
+      refresh_hook_capability tool_root presence_root agent lane raw_session_id;
       refresh_endpoint tool_root presence_root agent lane raw_session_id;
       let replacement =
         Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
@@ -1006,6 +1018,7 @@ let execute_event tool_root root event agent lane raw_session_id file_capability
     if claim.code <> 0 && not (contains claim.output "claim belongs to worktree ")
     then failf "coordination-claim-refused:%s" (trim claim.output);
     refresh_presence tool_root presence_root root agent lane raw_session_id;
+    refresh_hook_capability tool_root presence_root agent lane raw_session_id;
     refresh_endpoint tool_root presence_root agent lane raw_session_id;
     if event_name = "SessionStart" then (
       ignore

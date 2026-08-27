@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.27.31"
+let runtime_version = "2026.08.27.32"
 let max_control_bytes = 16 * 1024
 let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024

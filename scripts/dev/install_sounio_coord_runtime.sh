@@ -31,6 +31,17 @@ manifest_value() {
   sed -n "s/^${key}=//p" "$manifest" | head -1
 }
 
+verify_manifest_binary_sha256() {
+  local manifest="$1" key="$2" binary="$3" expected actual
+  expected="$(manifest_value "$manifest" "$key")"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || \
+    die "installed runtime has invalid $key: $manifest"
+  [[ -f "$binary" ]] || die "installed runtime hash target is absent: $binary"
+  actual="$(sha256sum "$binary" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] || \
+    die "installed runtime binary hash mismatch: $key expected=$expected actual=$actual"
+}
+
 ensure_obligation_activation() {
   local activation_dir activation_file lock_file manifest installed_utc epoch
   local earliest_epoch='' earliest_utc='' earliest_runtime='' candidate_runtime tmp_file
@@ -103,6 +114,14 @@ activate_runtime() {
     [[ "$(manifest_value "$manifest" loom_language_authority_semantics_sha256)" == \
       16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff ]] || \
       die "installed native hook is not bound to the frozen Sounio authority: $runtime_id"
+  fi
+  if grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest"; then
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" || \
+      die "installed runtime declares native hook attestation without the native hook: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" coord_runtime_sha256 \
+      "$version_dir/bin/sounio-coord-runtime"
+    verify_manifest_binary_sha256 "$manifest" loom_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-runtime"
   fi
   if grep -q '^capability=loom-native-sounio-continuity-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
@@ -821,6 +840,8 @@ else
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
+  coord_runtime_sha256="$(sha256sum "$stage/bin/sounio-coord-runtime" | awk '{print $1}')"
+  loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
   {
     printf 'runtime_id=%s\n' "$runtime_id"
     printf 'protocol_version=%s\n' "$protocol"
@@ -858,6 +879,8 @@ else
     printf 'loom_witness_epoch_transparency_frame=9016\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
+    printf 'coord_runtime_sha256=%s\n' "$coord_runtime_sha256"
+    printf 'loom_runtime_sha256=%s\n' "$loom_runtime_sha256"
     printf 'source_sha=%s\n' "$source_sha"
     printf 'source_state=%s\n' "$source_state"
     printf 'capability=causal-experiment-receipts-v1\n'
@@ -869,6 +892,7 @@ else
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
+    printf 'capability=loom-native-hook-binary-attestation-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-durable-obligation-v1\n'
     printf 'capability=loom-epistemic-machine-v0\n'

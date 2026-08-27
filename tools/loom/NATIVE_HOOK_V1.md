@@ -36,6 +36,9 @@ requested write is performed.
   toolchain, hardware, command descriptor and event hash, exact Sounio result,
   final `ALLOW`/`DENY`, and reason.
 - Atomic runtime packaging of the OCaml hook and its frozen Sounio authority.
+- A durable `NATIVE_HOOK_ATTESTED` capability that proves the currently loaded
+  session actually crossed the native OCaml hook boundary. This is operational
+  evidence only: it is never `PARITY_OPEN` or `CLAIM_READY`.
 
 `scripts/ci/sounio_loom_native_hook_selftest.sh` exercises lifecycle and write
 round trips, policy/runtime sabotage, strict and duplicate-key JSON refusal,
@@ -73,6 +76,40 @@ generation-bound hook receipt, not evidence that bytes reached a terminal.
 This stronger handshake currently applies to tmux delivery. `agentd` and
 `loom` transports retain their separate adapter-confirmed transport receipts;
 they must not be reported as generation-bound prompt starts.
+
+### Loaded-Hook Attestation
+
+Runtime `2026.08.27.32` additionally gates terminal insertion and start
+promotion on a current native-hook capability. A session without that
+capability remains `prepared`, with `insertion_state=not-attempted` and zero
+attempts. The durable message remains pending, but the runtime writes no bytes
+to the terminal. If the message is acknowledged before a native session takes
+ownership, acknowledgement atomically cancels the pending wake submission.
+
+Capability registration is accepted only when all of these identities agree:
+
+- the immediate parent is the manifest-pinned OCaml Loom executable;
+- Loom's caller is the exact live session process recorded by presence,
+  including PID, process start time, boot id, PID namespace, executable path,
+  and executable hash;
+- the OCaml producer and coordination runtime hashes match the active immutable
+  bundle manifest;
+- the running coordination executable is the active shared runtime, with the
+  same runtime id and source hash recorded by the capability;
+- the endpoint generation, worktree, harness, and session id still match.
+
+The production Codex predicate accepts the exact `codex` executable name.
+Claude accepts the exact native `claude` executable, or its pinned Node CLI
+shape. Broad names such as a code-mode host cannot mint capability. Local-mode
+selftests may emit `NATIVE_HOOK_ATTESTED`, but always with `wake_eligible=0`;
+they cannot create production wake authority.
+
+Installing a new runtime does not upgrade an already loaded session. Old
+capabilities become invalid when the active bundle changes, and sessions that
+started on the Python bridge or an older hook must drain and restart from a
+worktree whose SessionStart loads `bin/sounio-loom agent-hook`. A positive live
+canary must therefore use a freshly started real session; a file-on-disk check,
+inbox read, or Python shim is not evidence of native-hook activation.
 
 ## Deliberate Boundary
 

@@ -59,12 +59,60 @@ export SOUNIO_COORD_RUNTIME_MODE=local
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$AUTHORITY_RUNTIME"
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$DECISION_LOG"
 export SOUNIO_LOOM_HOOK_TEST_MODE=1
+export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
 unset TMUX TMUX_PANE SOUNIO_AGENTD_SOCKET SOUNIO_AGENTD_TOKEN_FILE SOUNIO_AGENTD_WORKTREE
 
 session_start="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\"}"
 run_hook "$session_start"
 [[ "$HOOK_RC" -eq 0 && "$HOOK_OUTPUT" == *'Sounio coordination joined:'* ]] ||
   fail "native SessionStart failed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+capability_file="$COORD_DIR/hook-capabilities/codex--$SESSION_LANE.capability"
+[[ -f "$capability_file" ]] || fail 'local hook omitted its native attestation'
+grep -qx 'state=NATIVE_HOOK_ATTESTED' "$capability_file" ||
+  fail 'local hook wrote the wrong attestation state'
+grep -qx 'wake_eligible=0' "$capability_file" ||
+  fail 'local hook selftest minted production wake eligibility'
+grep -Eq '^producer_sha256=[0-9a-f]{64}$' "$capability_file" ||
+  fail 'local hook omitted the OCaml producer hash'
+grep -Eq '^coord_sha256=[0-9a-f]{64}$' "$capability_file" ||
+  fail 'local hook omitted the coordination runtime hash'
+
+capability_backup="$TEST_ROOT/native-hook-capability.backup"
+cp "$capability_file" "$capability_backup"
+sed -i 's/^source_sha=.*/source_sha=0000000000000000000000000000000000000000000000000000000000000000/' \
+  "$capability_file"
+set +e
+source_tamper_output="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
+  --agent codex --lane "$SESSION_LANE" 2>&1)"
+source_tamper_rc=$?
+set -e
+[[ "$source_tamper_rc" -ne 0 && \
+  "$source_tamper_output" == *'reason=source-binding-drift'* ]] ||
+  fail "tampered capability source binding remained current: rc=$source_tamper_rc output=$source_tamper_output"
+mv "$capability_backup" "$capability_file"
+
+set +e
+direct_output="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" hook-capability-register --agent codex \
+  --lane "$SESSION_LANE" --session-id "$SESSION_ID" 2>&1)"
+direct_rc=$?
+set -e
+[[ "$direct_rc" -ne 0 && \
+  "$direct_output" == *'requires the matching OCaml runtime parent'* ]] ||
+  fail "direct shell registration was not refused: rc=$direct_rc output=$direct_output"
+
+exec_session="exec-shell-selftest-$$"
+set +e
+exec_output="$(printf '%s\n' \
+  "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$exec_session\",\"cwd\":\"$ROOT_DIR\"}" | \
+  env -u SOUNIO_COORD_NATIVE_HOOK_SELFTEST bash -c \
+    'exec "$1" agent-hook --agent codex' _ "$LOOM" 2>&1)"
+exec_rc=$?
+set -e
+[[ "$exec_rc" -eq 2 && \
+  "$exec_output" == *'matching OCaml runtime parent'* ]] ||
+  fail "exec-from-shell native mint was not refused: rc=$exec_rc output=$exec_output"
 supervisor_status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   "$ROOT_DIR/bin/sounio-coord" obligation-supervisor-status)"
 [[ "$supervisor_status" == *'state=live'* ]] || \
@@ -174,6 +222,11 @@ run_hook "$post_event"
 session_end="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\"}"
 run_hook "$session_end"
 [[ "$HOOK_RC" -eq 0 ]] || fail "native SessionEnd failed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
+  --agent codex --lane "$SESSION_LANE" >/dev/null 2>&1; then
+  fail 'SessionEnd left a native hook capability behind'
+fi
 
 [[ -f "$DECISION_LOG" ]] || fail "native hook omitted its decision log"
 grep -Fq $'decision=ALLOW\treason=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SEMANTICS_FROZEN' \
@@ -208,4 +261,4 @@ status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
 [[ "$status" != *"session-$SESSION_ID"* ]] || fail "SessionEnd left an active native-hook claim"
 
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio session=roundtrip prompt_boundary=injected retry_supervisor=live writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused log_redirect=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio session=roundtrip hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused log_redirect=refused decision_receipt=complete python=not-executed rust=not-executed'
