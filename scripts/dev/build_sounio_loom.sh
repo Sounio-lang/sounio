@@ -22,6 +22,19 @@ command -v openssl >/dev/null 2>&1 || {
 }
 
 dune build --root "$ROOT_DIR/tools/loom" src/loom.exe
+language_authority_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
+if [[ -n "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT is not executable' >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$language_authority_output")"
+  install -m 0755 "$SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT" \
+    "$language_authority_output"
+else
+  SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$language_authority_output" \
+    "$SCRIPT_DIR/build_sounio_loom_language_authority.sh"
+fi
 "$SCRIPT_DIR/build_sounio_loom_continuity_adapter.sh"
 "$SCRIPT_DIR/build_sounio_loom_obligation_adapter.sh"
 "$SCRIPT_DIR/build_sounio_loom_epistemic_adapter.sh"

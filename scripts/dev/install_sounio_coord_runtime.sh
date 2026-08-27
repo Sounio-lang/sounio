@@ -96,6 +96,14 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-runtime" ]] || \
       die "installed runtime declares Loom but omits its OCaml kernel: $runtime_id"
   fi
+  if grep -q '^capability=loom-native-agent-hook-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-language-authority-runtime" ]] || \
+      die "installed runtime declares the native agent hook but omits its OCaml kernel or frozen Sounio authority: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_language_authority_semantics_sha256)" == \
+      16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff ]] || \
+      die "installed native hook is not bound to the frozen Sounio authority: $runtime_id"
+  fi
   if grep -q '^capability=loom-native-sounio-continuity-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
       die "installed runtime declares native Sounio continuity but omits its adapter: $runtime_id"
@@ -376,6 +384,7 @@ fleet_model_config="$SOURCE_ROOT/formal/tla/SounioFleet.cfg"
 fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
+loom_language_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_language_authority.sh"
 loom_continuity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_continuity_adapter.sh"
 loom_obligation_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_obligation_adapter.sh"
 loom_epistemic_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_epistemic_adapter.sh"
@@ -388,6 +397,9 @@ loom_witness_mesh_v1_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_wi
 loom_witness_epoch_handoff_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh"
 loom_witness_epoch_transparency_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
+loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
+loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
+loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v1"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
 loom_obligation_entrypoint="$SOURCE_ROOT/tools/loom/obligation_adapter_main.sio"
@@ -424,6 +436,8 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
 [[ -x "$fleet_trace_verifier" ]] || \
   die "fleet trace verifier missing or not executable: $fleet_trace_verifier"
 [[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
+[[ -x "$loom_language_authority_build_source" ]] || \
+  die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
 [[ -x "$loom_continuity_build_source" ]] || \
   die "Loom continuity build entrypoint missing or not executable: $loom_continuity_build_source"
 [[ -x "$loom_obligation_build_source" ]] || \
@@ -448,6 +462,10 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
   die "Loom witness-epoch-transparency build entrypoint missing or not executable: $loom_witness_epoch_transparency_build_source"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
+[[ -f "$loom_language_authority_entrypoint" && \
+  -f "$loom_language_authority_module" && \
+  -f "$loom_language_authority_freeze" ]] || \
+  die "Loom frozen Sounio language-authority source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
   die "Loom native Sounio obligation source bundle is incomplete"
 [[ -f "$loom_epistemic_entrypoint" && -f "$loom_epistemic_module" ]] || \
@@ -475,6 +493,7 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
   die "Loom native Sounio witness-epoch-transparency source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && \
+  -f "$loom_project/src/loom_hook.ml" && \
   -f "$loom_project/src/loom_witness.ml" && \
   -f "$loom_project/src/loom_witness_epoch.ml" && \
   -f "$loom_project/src/loom_witness_transparency.ml" && \
@@ -504,6 +523,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
+loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
 loom_continuity_binary="$loom_project/_build/default/src/sounio-loom-continuity-runtime"
 loom_obligation_binary="$loom_project/_build/default/src/sounio-loom-obligation-runtime"
 loom_epistemic_binary="$loom_project/_build/default/src/sounio-loom-epistemic-runtime"
@@ -516,6 +536,8 @@ loom_witness_mesh_v1_binary="$loom_project/_build/default/src/sounio-loom-witnes
 loom_witness_epoch_handoff_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-handoff-runtime"
 loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+[[ -x "$loom_language_authority_binary" ]] || \
+  die "Loom build omitted its frozen Sounio language-authority runtime"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
 [[ -x "$loom_obligation_binary" ]] || \
@@ -546,6 +568,18 @@ loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
   die "Loom kernel must report protocol 1 and language OCaml"
 [[ "$loom_runtime_version" == "$runtime_version" ]] || \
   die "Loom kernel version $loom_runtime_version does not match coordination runtime $runtime_version"
+loom_language_authority_probe="$(printf '0\n' | "$loom_language_authority_binary")"
+[[ "$loom_language_authority_probe" == \
+  'SOUNIO_LANGUAGE_AUTHORITY_SELFTEST PASS cases=33' ]] || \
+  die "Loom frozen Sounio language-authority runtime failed its install probe"
+loom_language_authority_expected_sha="$(
+  manifest_value "$loom_language_authority_freeze" executable_sha256
+)"
+read -r loom_language_authority_actual_sha _ < <(
+  sha256sum "$loom_language_authority_binary"
+)
+[[ "$loom_language_authority_actual_sha" == "$loom_language_authority_expected_sha" ]] || \
+  die "Loom language-authority runtime does not match its freeze manifest"
 loom_continuity_probe="$(
   printf '101 111 201 301 401 501 0 0 0 0 1 0 0\n' | "$loom_continuity_binary"
 )"
@@ -677,9 +711,13 @@ bundle_sources=(
   "$agentd_source"
   "$fleet_source" "$fleetd_source" "$fleet_model_source"
   "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier"
-  "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune"
+  "$loom_build_source" "$loom_language_authority_build_source"
+  "$loom_language_authority_entrypoint" "$loom_language_authority_module"
+  "$loom_language_authority_freeze"
+  "$loom_project/dune-project" "$loom_project/src/dune"
   "$loom_project/src/loom.ml" "$loom_project/src/loom_arrow.ml"
-  "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_witness.ml"
+  "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_hook.ml"
+  "$loom_project/src/loom_witness.ml"
   "$loom_project/src/loom_witness_epoch.ml"
   "$loom_project/src/loom_witness_transparency.ml" "$loom_project/src/loom_ui.ml"
   "$loom_project/src/loom_pty_stubs.c" "$loom_project/src/loom_arrow_stubs.c"
@@ -756,6 +794,8 @@ else
   install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
   install -m 0755 "$fleet_trace_verifier" "$stage/bin/sounio-fleet-trace-verify"
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
+  install -m 0755 "$loom_language_authority_binary" \
+    "$stage/bin/sounio-loom-language-authority-runtime"
   install -m 0755 "$loom_continuity_binary" \
     "$stage/bin/sounio-loom-continuity-runtime"
   install -m 0755 "$loom_obligation_binary" \
@@ -788,6 +828,12 @@ else
     printf 'fleet_protocol_version=%s\n' "$fleet_protocol"
     printf 'fleetd_protocol_version=%s\n' "$fleetd_protocol"
     printf 'loom_protocol_version=%s\n' "$loom_protocol"
+    printf 'loom_language_authority_language=Sounio\n'
+    printf 'loom_language_authority_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_language_authority_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_language_authority_frame=9020\n'
+    printf 'loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\n'
+    printf 'loom_language_authority_manifest_sha256=5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e\n'
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'
@@ -822,6 +868,7 @@ else
     printf 'capability=agentd-logical-command-v1\n'
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
+    printf 'capability=loom-native-agent-hook-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-durable-obligation-v1\n'
     printf 'capability=loom-epistemic-machine-v0\n'

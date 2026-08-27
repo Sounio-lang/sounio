@@ -1,0 +1,971 @@
+open Unix
+
+exception Error of string
+
+let pinned_manifest_sha256 =
+  "5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e"
+
+let max_event_bytes = 8 * 1024 * 1024
+let process_timeout_seconds = 5.0
+
+let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
+
+let starts_with value prefix =
+  String.length value >= String.length prefix
+  && String.sub value 0 (String.length prefix) = prefix
+
+let ends_with value suffix =
+  String.length value >= String.length suffix
+  && String.sub value (String.length value - String.length suffix)
+       (String.length suffix) = suffix
+
+let contains value needle =
+  let value_length = String.length value and needle_length = String.length needle in
+  let rec search index =
+    if needle_length = 0 then true
+    else if index + needle_length > value_length then false
+    else if String.sub value index needle_length = needle then true
+    else search (index + 1)
+  in
+  search 0
+
+let test_mode () = Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" = Some "1"
+
+let trim = String.trim
+
+let sha256 value =
+  Cryptokit.hash_string (Cryptokit.Hash.sha256 ()) value
+  |> Cryptokit.transform_string (Cryptokit.Hexa.encode ())
+
+let read_file ?(limit = max_event_bytes) path =
+  let channel = open_in_bin path in
+  Fun.protect
+    ~finally:(fun () -> close_in_noerr channel)
+    (fun () ->
+      let output = Buffer.create 4096 in
+      let bytes = Bytes.create 16384 in
+      let rec loop total =
+        let count = input channel bytes 0 (Bytes.length bytes) in
+        if count = 0 then Buffer.contents output
+        else if total + count > limit then failf "file-too-large:%s" path
+        else (Buffer.add_subbytes output bytes 0 count; loop (total + count))
+      in
+      loop 0)
+
+let read_stdin () =
+  let buffer = Buffer.create 4096 in
+  let bytes = Bytes.create 16384 in
+  let rec loop total =
+    let count = input Stdlib.stdin bytes 0 (Bytes.length bytes) in
+    if count = 0 then Buffer.contents buffer
+    else if total + count > max_event_bytes then failf "hook-event-too-large"
+    else (Buffer.add_subbytes buffer bytes 0 count; loop (total + count))
+  in
+  loop 0
+
+let sha256_file path = sha256 (read_file path)
+
+let rec mkdir_p path =
+  if path = "" || path = "." || path = "/" || Sys.file_exists path then ()
+  else (mkdir_p (Filename.dirname path); Unix.mkdir path 0o700)
+
+let write_all descriptor value =
+  let rec loop offset =
+    if offset < String.length value then
+      match Unix.write_substring descriptor value offset (String.length value - offset) with
+      | 0 -> failf "short-process-input-write"
+      | count -> loop (offset + count)
+      | exception Unix_error (EINTR, _, _) -> loop offset
+  in
+  loop 0
+
+type process_result = { code : int; output : string }
+
+let exit_code = function
+  | WEXITED code -> code
+  | WSIGNALED signal | WSTOPPED signal -> 128 + signal
+
+let replace_environment name value environment =
+  let prefix = name ^ "=" in
+  let retained =
+    Array.to_list environment
+    |> List.filter (fun item -> not (starts_with item prefix))
+  in
+  Array.of_list ((prefix ^ value) :: retained)
+
+let run_process ?(input = "") ?(environment = Unix.environment ()) ~cwd command arguments =
+  let stdin_read, stdin_write = Unix.pipe () in
+  let output_read, output_write = Unix.pipe () in
+  Unix.set_close_on_exec stdin_write;
+  Unix.set_close_on_exec output_read;
+  let argv = Array.of_list (command :: arguments) in
+  let pid =
+    match Unix.fork () with
+    | 0 ->
+        Unix.close stdin_write;
+        Unix.close output_read;
+        Unix.dup2 stdin_read Unix.stdin;
+        Unix.dup2 output_write Unix.stdout;
+        Unix.dup2 output_write Unix.stderr;
+        if stdin_read <> Unix.stdin then Unix.close stdin_read;
+        if output_write <> Unix.stdout && output_write <> Unix.stderr then
+          Unix.close output_write;
+        (try
+           Unix.chdir cwd;
+           Unix.execvpe command argv environment
+         with _ -> Unix._exit 127)
+    | pid -> pid
+  in
+  Unix.close stdin_read;
+  Unix.close output_write;
+  let close_noerr descriptor = try Unix.close descriptor with _ -> () in
+  let kill_noerr () =
+    (try Unix.kill pid Sys.sigkill with _ -> ());
+    (try ignore (Unix.waitpid [] pid) with _ -> ())
+  in
+  Fun.protect
+    ~finally:(fun () -> close_noerr stdin_write; close_noerr output_read)
+    (fun () ->
+      (try write_all stdin_write input
+       with error -> kill_noerr (); raise error);
+      Unix.close stdin_write;
+      let deadline = Unix.gettimeofday () +. process_timeout_seconds in
+      let output = Buffer.create 4096 in
+      let bytes = Bytes.create 16384 in
+      let rec drain () =
+        let remaining = deadline -. Unix.gettimeofday () in
+        if remaining <= 0.0 then (kill_noerr (); failf "process-timeout:%s" command);
+        let ready, _, _ = Unix.select [ output_read ] [] [] remaining in
+        if ready = [] then (kill_noerr (); failf "process-timeout:%s" command)
+        else
+          match Unix.read output_read bytes 0 (Bytes.length bytes) with
+          | 0 -> ()
+          | count ->
+              if Buffer.length output + count > max_event_bytes then (
+                kill_noerr ();
+                failf "process-output-too-large:%s" command);
+              Buffer.add_subbytes output bytes 0 count;
+              drain ()
+          | exception Unix_error (EINTR, _, _) -> drain ()
+      in
+      drain ();
+      let _, status = Unix.waitpid [] pid in
+      { code = exit_code status; output = Buffer.contents output })
+
+let process_ok ?input ?environment ~cwd command arguments =
+  let result = run_process ?input ?environment ~cwd command arguments in
+  if result.code <> 0 then
+    failf "process-failed:%s:rc=%d:%s" command result.code (trim result.output);
+  trim result.output
+
+type json_value =
+  | Json_object of (string * json_value) list
+  | Json_array of json_value list
+  | Json_string of string
+  | Json_number of string
+  | Json_bool of bool
+  | Json_null
+
+let hex_value character =
+  match character with
+  | '0' .. '9' -> Char.code character - Char.code '0'
+  | 'a' .. 'f' -> 10 + Char.code character - Char.code 'a'
+  | 'A' .. 'F' -> 10 + Char.code character - Char.code 'A'
+  | _ -> failf "invalid-json:bad-hex"
+
+let parse_json value =
+  let length = String.length value in
+  let index = ref 0 in
+  let invalid message = failf "invalid-json:%s:at=%d" message !index in
+  let rec whitespace () =
+    if !index < length then
+      match value.[!index] with
+      | ' ' | '\t' | '\n' | '\r' -> incr index; whitespace ()
+      | _ -> ()
+  and string_literal () =
+    if !index >= length || value.[!index] <> '"' then invalid "expected-string";
+    incr index;
+    let output = Buffer.create 32 in
+    let rec loop () =
+      if !index >= length then invalid "unterminated-string";
+      match value.[!index] with
+      | '"' -> incr index; Buffer.contents output
+      | '\\' ->
+          incr index;
+          if !index >= length then invalid "unterminated-escape";
+          let escaped = value.[!index] in
+          incr index;
+          (match escaped with
+          | '"' | '\\' | '/' -> Buffer.add_char output escaped
+          | 'b' -> Buffer.add_char output '\b'
+          | 'f' -> Buffer.add_char output '\012'
+          | 'n' -> Buffer.add_char output '\n'
+          | 'r' -> Buffer.add_char output '\r'
+          | 't' -> Buffer.add_char output '\t'
+          | 'u' ->
+              if !index + 4 > length then invalid "short-unicode-escape";
+              let code =
+                (hex_value value.[!index] lsl 12)
+                lor (hex_value value.[!index + 1] lsl 8)
+                lor (hex_value value.[!index + 2] lsl 4)
+                lor hex_value value.[!index + 3]
+              in
+              index := !index + 4;
+              if code <= 0x7f then Buffer.add_char output (Char.chr code)
+              else if code <= 0x7ff then (
+                Buffer.add_char output (Char.chr (0xc0 lor (code lsr 6)));
+                Buffer.add_char output (Char.chr (0x80 lor (code land 0x3f))))
+              else (
+                Buffer.add_char output (Char.chr (0xe0 lor (code lsr 12)));
+                Buffer.add_char output
+                  (Char.chr (0x80 lor ((code lsr 6) land 0x3f)));
+                Buffer.add_char output (Char.chr (0x80 lor (code land 0x3f))))
+          | _ -> invalid "unknown-escape");
+          loop ()
+      | character when Char.code character < 32 -> invalid "control-in-string"
+      | character -> Buffer.add_char output character; incr index; loop ()
+    in
+    loop ()
+  and number_literal () =
+    let start = !index in
+    if !index < length && value.[!index] = '-' then incr index;
+    let digits () =
+      let before = !index in
+      while !index < length && value.[!index] >= '0' && value.[!index] <= '9' do
+        incr index
+      done;
+      if before = !index then invalid "expected-number"
+    in
+    digits ();
+    if !index < length && value.[!index] = '.' then (incr index; digits ());
+    if !index < length && (value.[!index] = 'e' || value.[!index] = 'E') then (
+      incr index;
+      if !index < length && (value.[!index] = '+' || value.[!index] = '-') then
+        incr index;
+      digits ());
+    String.sub value start (!index - start)
+  and keyword literal parsed =
+    let ending = !index + String.length literal in
+    if ending > length || String.sub value !index (String.length literal) <> literal
+    then invalid ("expected-" ^ literal);
+    index := ending;
+    parsed
+  and item () =
+    whitespace ();
+    if !index >= length then invalid "expected-value";
+    match value.[!index] with
+    | '{' -> object_literal ()
+    | '[' -> array_literal ()
+    | '"' -> Json_string (string_literal ())
+    | 't' -> keyword "true" (Json_bool true)
+    | 'f' -> keyword "false" (Json_bool false)
+    | 'n' -> keyword "null" Json_null
+    | '-' | '0' .. '9' -> Json_number (number_literal ())
+    | _ -> invalid "unexpected-token"
+  and object_literal () =
+    incr index;
+    whitespace ();
+    let rec members values =
+      whitespace ();
+      if !index < length && value.[!index] = '}' then (
+        incr index;
+        Json_object (List.rev values))
+      else
+        let key = string_literal () in
+        if List.mem_assoc key values then invalid ("duplicate-key-" ^ key);
+        whitespace ();
+        if !index >= length || value.[!index] <> ':' then invalid "expected-colon";
+        incr index;
+        let member = item () in
+        whitespace ();
+        if !index < length && value.[!index] = ',' then (
+          incr index;
+          whitespace ();
+          if !index < length && value.[!index] = '}' then
+            invalid "trailing-object-comma";
+          members ((key, member) :: values))
+        else if !index < length && value.[!index] = '}' then (
+          incr index;
+          Json_object (List.rev ((key, member) :: values)))
+        else invalid "expected-object-separator"
+    in
+    members []
+  and array_literal () =
+    incr index;
+    whitespace ();
+    let rec elements values =
+      whitespace ();
+      if !index < length && value.[!index] = ']' then (
+        incr index;
+        Json_array (List.rev values))
+      else
+        let element = item () in
+        whitespace ();
+        if !index < length && value.[!index] = ',' then (
+          incr index;
+          whitespace ();
+          if !index < length && value.[!index] = ']' then
+            invalid "trailing-array-comma";
+          elements (element :: values))
+        else if !index < length && value.[!index] = ']' then (
+          incr index;
+          Json_array (List.rev (element :: values)))
+        else invalid "expected-array-separator"
+    in
+    elements []
+  in
+  let parsed = item () in
+  whitespace ();
+  if !index <> length then invalid "trailing-data";
+  parsed
+
+let object_field value name =
+  match value with
+  | Json_object fields -> List.assoc_opt name fields
+  | _ -> failf "invalid-json:expected-object"
+
+let string_field ?(default = "") value name =
+  match object_field value name with
+  | Some (Json_string found) -> found
+  | Some Json_null | None -> default
+  | Some _ -> failf "invalid-json:%s-must-be-string" name
+
+let rec collect_named_strings names value =
+  match value with
+  | Json_object fields ->
+      List.fold_left
+        (fun collected (name, member) ->
+          let direct =
+            if List.mem name names then
+              match member with Json_string text when text <> "" -> [ text ] | _ -> []
+            else []
+          in
+          direct @ collect_named_strings names member @ collected)
+        [] fields
+  | Json_array values ->
+      List.fold_left
+        (fun collected member -> collect_named_strings names member @ collected)
+        [] values
+  | Json_string _ | Json_number _ | Json_bool _ | Json_null -> []
+
+let unique values = List.sort_uniq String.compare values
+
+let patch_paths patch =
+  String.split_on_char '\n' patch
+  |> List.filter_map (fun line ->
+         let prefixes = [ "*** Add File: "; "*** Update File: "; "*** Delete File: " ] in
+         List.find_map
+           (fun prefix ->
+             if starts_with line prefix then
+               Some (String.sub line (String.length prefix)
+                       (String.length line - String.length prefix))
+             else None)
+           prefixes)
+
+let extract_paths event =
+  let tool_name = string_field event "tool_name" in
+  match object_field event "tool_input" with
+  | None | Some Json_null -> []
+  | Some input ->
+      let direct = collect_named_strings [ "file_path"; "notebook_path" ] input in
+      let patches =
+        if List.mem tool_name [ "apply_patch"; "Edit"; "Write"; "MultiEdit" ] then
+          match input with
+          | Json_string patch -> patch_paths patch
+          | _ ->
+              collect_named_strings [ "patch"; "input" ] input
+              |> List.concat_map patch_paths
+        else []
+      in
+      unique (direct @ patches)
+
+let safe_token ?(limit = 24) value =
+  let output = Buffer.create (min limit (String.length value)) in
+  String.iter
+    (fun character ->
+      if Buffer.length output < limit then
+        match character with
+        | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '.' | '_' | '-' ->
+            Buffer.add_char output character
+        | _ -> Buffer.add_char output '_')
+    value;
+  let token = Buffer.contents output in
+  if token = "" then "unknown" else token
+
+let git_output cwd arguments = process_ok ~cwd "git" ("-C" :: cwd :: arguments)
+
+let git_root cwd = git_output cwd [ "rev-parse"; "--show-toplevel" ]
+
+let git_common_dir root =
+  let value = git_output root [ "rev-parse"; "--path-format=absolute"; "--git-common-dir" ] in
+  Unix.realpath value
+
+let normalize_absolute cwd value =
+  let raw = if Filename.is_relative value then Filename.concat cwd value else value in
+  let parts = String.split_on_char '/' raw in
+  let reduced =
+    List.fold_left
+      (fun stack part ->
+        match part, stack with
+        | ("" | "."), _ -> stack
+        | "..", _ :: tail -> tail
+        | "..", [] -> []
+        | _, _ -> part :: stack)
+      [] parts
+    |> List.rev
+  in
+  "/" ^ String.concat "/" reduced
+
+let rec canonical_missing path suffix =
+  if Sys.file_exists path then
+    List.fold_left Filename.concat (Unix.realpath path) suffix
+  else
+    let parent = Filename.dirname path in
+    if parent = path then failf "path-has-no-existing-ancestor:%s" path;
+    canonical_missing parent (Filename.basename path :: suffix)
+
+let existing_directory path =
+  let rec loop candidate =
+    if Sys.file_exists candidate then
+      if Sys.is_directory candidate then candidate else Filename.dirname candidate
+    else
+      let parent = Filename.dirname candidate in
+      if parent = candidate then failf "path-has-no-existing-directory:%s" path;
+      loop parent
+  in
+  loop path
+
+let relative_to root path =
+  let prefix = if root = "/" then "/" else root ^ "/" in
+  if path = root then "."
+  else if starts_with path prefix then
+    String.sub path (String.length prefix) (String.length path - String.length prefix)
+  else failf "path-outside-worktree:%s" path
+
+let target_scope cwd session_root paths =
+  let session_common = git_common_dir session_root in
+  let grouped = Hashtbl.create 2 in
+  List.iter
+    (fun value ->
+      let absolute = canonical_missing (normalize_absolute cwd value) [] in
+      let target_root =
+        try git_root (existing_directory absolute) |> Unix.realpath
+        with Error _ | Unix_error _ ->
+          failf "write-path-outside-current-repository:%s" value
+      in
+      if git_common_dir target_root <> session_common then
+        failf "write-path-outside-current-repository:%s" value;
+      if target_root <> Unix.realpath session_root then
+        failf "write-path-outside-session-worktree:%s" value;
+      let relative = relative_to target_root absolute in
+      let previous = Option.value ~default:[] (Hashtbl.find_opt grouped target_root) in
+      Hashtbl.replace grouped target_root (relative :: previous))
+    paths;
+  let roots = Hashtbl.to_seq_keys grouped |> List.of_seq in
+  match roots with
+  | [ root ] -> (root, unique (Hashtbl.find grouped root))
+  | _ -> failf "write-paths-span-multiple-worktrees"
+
+let parse_manifest path =
+  let table = Hashtbl.create 48 in
+  read_file path |> String.split_on_char '\n'
+  |> List.iter (fun line ->
+         match String.index_opt line '=' with
+         | None when line = "" -> ()
+         | None -> failf "malformed-freeze-manifest-line"
+         | Some index ->
+             let key = String.sub line 0 index in
+             if Hashtbl.mem table key then failf "duplicate-freeze-field:%s" key;
+             Hashtbl.add table key
+               (String.sub line (index + 1) (String.length line - index - 1)));
+  table
+
+let required table key =
+  match Hashtbl.find_opt table key with
+  | Some value when value <> "" -> value
+  | _ -> failf "missing-freeze-field:%s" key
+
+let digest_u32_of_hex digest =
+  if String.length digest <> 64 then failf "invalid-sha256:%s" digest;
+  List.init 8 (fun index ->
+      let chunk = String.sub digest (index * 8) 8 in
+      try Int64.to_string (Int64.of_string ("0x" ^ chunk))
+      with _ -> failf "invalid-sha256:%s" digest)
+  |> String.concat " "
+
+let digest_u32_field table key =
+  let value = required table key in
+  let parts = String.split_on_char ',' value in
+  if List.length parts <> 8 then failf "invalid-freeze-digest-field:%s" key;
+  List.iter
+    (fun part ->
+      try
+        let value = Int64.of_string part in
+        if value < 0L || value > 4294967295L then raise Exit
+      with _ -> failf "invalid-freeze-digest-field:%s" key)
+    parts;
+  String.concat " " parts
+
+let authority_runtime root manifest =
+  let explicit = Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME" in
+  let sibling =
+    Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+      "sounio-loom-language-authority-runtime"
+  in
+  let local =
+    Filename.concat root
+      "tools/loom/.runtime/sounio-loom-language-authority-runtime"
+  in
+  let selected =
+    match explicit with
+    | Some path when path <> "" -> path
+    | _ when Sys.file_exists sibling -> sibling
+    | _ -> local
+  in
+  if not (Sys.file_exists selected) then failf "Sounio-authority-runtime-missing:%s" selected;
+  if sha256_file selected <> required manifest "executable_sha256" then
+    failf "Sounio-authority-runtime-hash-mismatch";
+  selected
+
+type authority_receipt = {
+  sounio_source_sha256 : string;
+  semantics_sha256 : string;
+  producing_language : string;
+  language_role : string;
+  semantic_authority_language : string;
+  semantic_authority_role : string;
+  toolchain : string;
+  toolchain_sha256 : string;
+  hardware : string;
+  hardware_sha256 : string;
+  command : string;
+  command_sha256 : string;
+  result : string;
+}
+
+let operational_receipt raw_event command =
+  let executable = Unix.realpath Sys.executable_name in
+  let toolchain =
+    Printf.sprintf "OCaml %s executable=%s" Sys.ocaml_version executable
+  in
+  let hardware =
+    String.concat ";"
+      [ "os_type=" ^ Sys.os_type; "word_size=" ^ string_of_int Sys.word_size;
+        "hostname=" ^ Unix.gethostname ();
+        "cpuinfo_sha256=" ^
+          (if Sys.file_exists "/proc/cpuinfo" then sha256_file "/proc/cpuinfo"
+           else sha256 "unavailable") ]
+  in
+  { sounio_source_sha256 = "unavailable";
+    semantics_sha256 = "unavailable";
+    producing_language = "OCaml";
+    language_role = "OPERATIONAL_REALIZATION";
+    semantic_authority_language = "unverified";
+    semantic_authority_role = "unverified";
+    toolchain;
+    toolchain_sha256 = sha256_file executable;
+    hardware;
+    hardware_sha256 = sha256 hardware;
+    command;
+    command_sha256 = sha256 raw_event;
+    result = "unavailable" }
+
+let authorize_guard root _raw_event base_receipt =
+  let manifest_path =
+    match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_MANIFEST" with
+    | Some path when path <> "" -> path
+    | _ -> Filename.concat root "tools/loom/language_authority.freeze.v1"
+  in
+  if not (Sys.file_exists manifest_path) then failf "Sounio-authority-policy-missing";
+  if sha256_file manifest_path <> pinned_manifest_sha256 then
+    failf "Sounio-authority-policy-hash-mismatch";
+  let manifest = parse_manifest manifest_path in
+  if required manifest "stage" <> "SEMANTICS_FROZEN"
+     || required manifest "producing_language" <> "Sounio"
+     || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
+     || required manifest "parity_open" <> "false"
+     || required manifest "claim_ready" <> "false"
+  then failf "Sounio-authority-policy-state-invalid";
+  let source_path = Filename.concat root (required manifest "source_path") in
+  let entrypoint_path = Filename.concat root (required manifest "entrypoint_path") in
+  if sha256_file source_path <> required manifest "source_sha256" then
+    failf "Sounio-authority-source-hash-mismatch";
+  if sha256_file entrypoint_path <> required manifest "entrypoint_sha256" then
+    failf "Sounio-authority-entrypoint-hash-mismatch";
+  if sha256 (read_file source_path ^ read_file entrypoint_path)
+     <> required manifest "semantics_sha256"
+  then failf "Sounio-authority-semantics-hash-mismatch";
+  let runtime = authority_runtime root manifest in
+  let source = digest_u32_field manifest "source_sha256_u32" in
+  let semantics = digest_u32_field manifest "semantics_sha256_u32" in
+  let toolchain = digest_u32_of_hex base_receipt.toolchain_sha256 in
+  let hardware = digest_u32_of_hex base_receipt.hardware_sha256 in
+  let command = digest_u32_of_hex base_receipt.command_sha256 in
+  let zero = "0 0 0 0 0 0 0 0" in
+  let frame =
+    String.concat " "
+      [ "9020 3 6 9 8 1 0 0 0 0 0 0 0 0 0 1 1 1";
+        source; semantics; semantics; toolchain; hardware; command; zero; zero ]
+    ^ "\n"
+  in
+  let result = run_process ~input:frame ~cwd:root runtime [] in
+  let decision = trim result.output in
+  if result.code <> 0
+     || not (starts_with decision "SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 ")
+     || not (ends_with decision "next_stage=SEMANTICS_FROZEN")
+  then failf "Sounio-authority-denied:rc=%d:%s" result.code decision;
+  { base_receipt with
+    sounio_source_sha256 = required manifest "source_sha256";
+    semantics_sha256 = required manifest "semantics_sha256";
+    semantic_authority_language = required manifest "producing_language";
+    semantic_authority_role = required manifest "language_role";
+    result = decision }
+
+let utc_now () =
+  let tm = Unix.gmtime (Unix.gettimeofday ()) in
+  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02dZ"
+    (tm.tm_year + 1900) (tm.tm_mon + 1) tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec
+
+let log_escape value =
+  String.map (function '\t' | '\n' | '\r' -> ' ' | character -> character) value
+
+let append_decision_log root decision reason agent lane event receipt =
+  let path =
+    match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG" with
+    | Some value when value <> "" && test_mode () -> value
+    | Some value when value <> "" -> failf "decision-log-override-requires-test-mode"
+    | _ ->
+        Filename.concat
+          (Filename.concat (git_common_dir root) "sounio-loom-language-authority")
+          "agent-hook.tsv"
+  in
+  mkdir_p (Filename.dirname path);
+  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let line =
+        String.concat "\t"
+          [ "schema=loom-agent-hook-receipt-v1";
+            "utc=" ^ utc_now ();
+            "decision=" ^ decision;
+            "reason=" ^ log_escape reason;
+            "agent=" ^ log_escape agent;
+            "lane=" ^ log_escape lane;
+            "event=" ^ log_escape event;
+            "sounio_source_sha256=" ^ receipt.sounio_source_sha256;
+            "semantics_sha256=" ^ receipt.semantics_sha256;
+            "producing_language=" ^ receipt.producing_language;
+            "language_role=" ^ receipt.language_role;
+            "semantic_authority_language=" ^ receipt.semantic_authority_language;
+            "semantic_authority_role=" ^ receipt.semantic_authority_role;
+            "toolchain=" ^ log_escape receipt.toolchain;
+            "toolchain_sha256=" ^ receipt.toolchain_sha256;
+            "hardware=" ^ log_escape receipt.hardware;
+            "hardware_sha256=" ^ receipt.hardware_sha256;
+            "command=" ^ log_escape receipt.command;
+            "command_sha256=" ^ receipt.command_sha256;
+            "result=" ^ log_escape receipt.result ] ^ "\n"
+      in
+      write_all descriptor line;
+      Unix.fsync descriptor;
+      Unix.lockf descriptor F_ULOCK 0)
+
+let coordination_environment () =
+  let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
+  replace_environment "SOUNIO_COORD_TTL_SECONDS" ttl (Unix.environment ())
+
+let run_coord root worktree arguments =
+  run_process ~environment:(coordination_environment ()) ~cwd:worktree
+    (Filename.concat root "bin/sounio-coord") arguments
+
+let coord_ok root worktree arguments =
+  let result = run_coord root worktree arguments in
+  if result.code <> 0 then
+    failf "coordination-failed:rc=%d:%s" result.code (trim result.output);
+  trim result.output
+
+let scope_arguments agent lane intent =
+  [ "--agent"; agent; "--lane"; lane; "--intent"; intent ]
+
+let harness_of_agent agent =
+  if starts_with agent "claude" then "claude"
+  else if starts_with agent "codex" then "codex"
+  else failf "unsupported-hook-agent:%s" agent
+
+let process_identity () =
+  let pid = Unix.getppid () in
+  let stat = read_file (Printf.sprintf "/proc/%d/stat" pid) in
+  let closing =
+    match String.rindex_opt stat ')' with
+    | Some index -> index
+    | None -> failf "invalid-parent-process-stat"
+  in
+  let tail =
+    String.sub stat (closing + 2) (String.length stat - closing - 2)
+    |> String.split_on_char ' ' |> List.filter (( <> ) "")
+  in
+  let pid_start =
+    match List.nth_opt tail 19 with Some value -> value | None -> failf "parent-start-missing"
+  in
+  (pid, pid_start, trim (read_file "/proc/sys/kernel/random/boot_id"),
+   Unix.readlink "/proc/self/ns/pid", Unix.gethostname ())
+
+let process_worktree root =
+  match Sys.getenv_opt "SOUNIO_AGENTD_WORKTREE" with
+  | Some path when path <> "" ->
+      (try
+         let physical = git_root path |> Unix.realpath in
+         if git_common_dir physical = git_common_dir root then physical else root
+       with _ -> root)
+  | _ -> root
+
+let refresh_presence tool_root process_root claim_root agent lane raw_session_id =
+  let harness = harness_of_agent agent in
+  let pid, pid_start, boot_id, pid_namespace, host = process_identity () in
+  let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
+  let arguments =
+    [ "presence-register"; "--agent"; agent; "--lane"; lane; "--harness"; harness;
+      "--session-id"; raw_session_id; "--pid"; string_of_int pid; "--pid-start";
+      pid_start; "--boot-id"; boot_id; "--pid-namespace"; pid_namespace;
+      "--host"; host; "--ttl-seconds"; ttl ]
+  in
+  let result = run_coord tool_root process_root arguments in
+  let result =
+    if result.code <> 0 && String.contains result.output ':'
+       && String.split_on_char '\n' result.output
+          |> List.exists (fun line -> starts_with (trim line) "error: claim not found:")
+    then (
+      ignore
+        (coord_ok tool_root claim_root
+           ("scope" :: scope_arguments agent lane ("active " ^ agent ^ " session")));
+      run_coord tool_root process_root arguments)
+    else result
+  in
+  if result.code <> 0 then
+    failf "process-presence-refused:%s" (trim result.output)
+
+let tmux_endpoint root =
+  match Sys.getenv_opt "TMUX", Sys.getenv_opt "TMUX_PANE" with
+  | Some tmux, Some pane when tmux <> "" && pane <> "" ->
+      let socket = List.hd (String.split_on_char ',' tmux) in
+      let result =
+        run_process ~cwd:root "tmux"
+          [ "-S"; socket; "display-message"; "-p"; "-t"; pane;
+            "#{pane_id}|#{pane_current_path}" ]
+      in
+      if result.code <> 0 then None
+      else (
+        match String.split_on_char '|' (trim result.output) with
+        | [ pane_id; pane_cwd ] ->
+            (try
+               if Unix.realpath (git_root pane_cwd) = Unix.realpath root then
+                 Some (socket, pane_id)
+               else None
+             with _ -> None)
+        | _ -> None)
+  | _ -> None
+
+let refresh_endpoint tool_root root agent lane =
+  let harness = harness_of_agent agent in
+  let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
+  match Sys.getenv_opt "SOUNIO_AGENTD_SOCKET", Sys.getenv_opt "SOUNIO_AGENTD_TOKEN_FILE" with
+  | Some socket, Some token when socket <> "" && token <> ""
+                                  && Sys.file_exists socket && Sys.file_exists token ->
+      ignore
+        (coord_ok tool_root root
+           [ "endpoint-register"; "--agent"; agent; "--lane"; lane;
+             "--harness"; harness; "--transport"; "agentd"; "--address"; socket;
+             "--socket"; socket; "--token-file"; token; "--ttl-seconds"; ttl ])
+  | _ ->
+      (match tmux_endpoint root with
+      | None -> ()
+      | Some (socket, pane) ->
+          ignore
+            (coord_ok tool_root root
+               [ "endpoint-register"; "--agent"; agent; "--lane"; lane;
+                 "--harness"; harness; "--transport"; "tmux"; "--address"; pane;
+                 "--socket"; socket; "--ttl-seconds"; ttl ]))
+
+let message_lines output =
+  String.split_on_char '\n' output |> List.filter (fun line -> starts_with line "MESSAGE ")
+
+let message_id line =
+  match String.split_on_char ' ' line with
+  | "MESSAGE" :: id :: _ when starts_with id "id=" ->
+      Some (String.sub id 3 (String.length id - 3))
+  | _ -> None
+
+let inject_messages tool_root root agent lane =
+  let inbox =
+    run_coord tool_root root
+      [ "inbox"; "--agent"; agent; "--lane"; lane; "--directed-only";
+        "--newest-first"; "--limit"; "12" ]
+  in
+  if inbox.code <> 0 then failf "coordination-inbox-failed:%s" (trim inbox.output);
+  let lines = message_lines inbox.output in
+  if lines <> [] then (
+    print_endline "Recent directed Sounio lane messages waiting for this agent:";
+    List.iter print_endline lines;
+    let ids = List.filter_map message_id lines in
+    if ids <> [] then
+      ignore
+        (coord_ok tool_root root
+           ([ "injected"; "--agent"; agent; "--lane"; lane; "--messages" ] @ ids));
+    Printf.printf
+      "After handling one, acknowledge it with bin/sounio-coord ack --agent %s --lane %s --message <id>.\n%!"
+      agent lane)
+
+let notify_conflict tool_root root agent lane paths output =
+  let tokens = String.split_on_char ' ' output in
+  let value prefix =
+    List.find_map
+      (fun token ->
+        if starts_with token prefix then
+          Some (String.sub token (String.length prefix)
+                  (String.length token - String.length prefix))
+        else None)
+      tokens
+  in
+  match value "agent=", value "lane=" with
+  | Some owner_agent, Some owner_lane ->
+      ignore
+        (run_coord tool_root root
+           [ "send"; "--agent"; agent; "--lane"; lane; "--to-agent"; owner_agent;
+             "--to-lane"; owner_lane; "--kind"; "request"; "--message";
+             "Write conflict requested by " ^ agent ^ "/" ^ lane ^ ": " ^
+             String.concat ", " paths ])
+  | _ -> ()
+
+let execute_event tool_root root event agent lane raw_session_id =
+  let event_name = string_field event "hook_event_name" in
+  if event_name = "" then failf "hook-event-name-missing";
+  let intent = "active " ^ agent ^ " session" in
+  let common = scope_arguments agent lane intent in
+  let presence_root = process_worktree root in
+  if event_name = "SessionEnd" then (
+    refresh_presence tool_root presence_root root agent lane raw_session_id;
+    ignore
+      (run_coord tool_root presence_root
+         [ "endpoint-unregister"; "--agent"; agent; "--lane"; lane ]);
+    ignore
+      (run_coord tool_root presence_root
+         [ "presence-unregister"; "--agent"; agent; "--lane"; lane ]);
+    ignore
+      (coord_ok tool_root root
+         [ "release"; "--agent"; agent; "--lane"; lane; "--reason";
+           "agent session ended" ]))
+  else if event_name = "PreToolUse" then (
+    let paths = extract_paths event in
+    let tool_name = string_field event "tool_name" in
+    if List.mem tool_name [ "apply_patch"; "Edit"; "Write"; "MultiEdit";
+                            "NotebookEdit" ] && paths = []
+    then failf "write-path-missing";
+    if paths <> [] then (
+      let target_root, target_paths =
+        target_scope (string_field ~default:root event "cwd") root paths
+      in
+      refresh_presence tool_root presence_root root agent lane raw_session_id;
+      let authorization =
+        run_coord tool_root target_root
+          ([ "authorize"; "--agent"; agent; "--files" ] @ target_paths)
+      in
+      if authorization.code <> 0 then (
+        let scoped =
+          if target_root = root then
+            run_coord tool_root root
+              ([ "scope" ] @ common @ [ "--files" ] @ target_paths)
+          else authorization
+        in
+        if scoped.code <> 0 then (
+          notify_conflict tool_root root agent lane target_paths scoped.output;
+          failf "coordination-write-refused:%s" (trim scoped.output)));
+      refresh_endpoint tool_root presence_root agent lane))
+  else (
+    let claim =
+      if event_name = "SessionStart" then run_coord tool_root root ([ "scope" ] @ common)
+      else
+        let heartbeat =
+          run_coord tool_root root [ "heartbeat"; "--agent"; agent; "--lane"; lane ]
+        in
+        if heartbeat.code = 0 then heartbeat
+        else run_coord tool_root root ([ "scope" ] @ common)
+    in
+    if claim.code <> 0 && not (contains claim.output "claim belongs to worktree ")
+    then failf "coordination-claim-refused:%s" (trim claim.output);
+    refresh_presence tool_root presence_root root agent lane raw_session_id;
+    refresh_endpoint tool_root presence_root agent lane;
+    if event_name = "SessionStart" then
+      Printf.printf
+        "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
+        agent lane;
+    if event_name = "UserPromptSubmit" || event_name = "PostToolUse" then
+      inject_messages tool_root root agent lane)
+
+let parse_agent arguments =
+  let loop = function
+    | [ "--agent"; value ] when value <> "" -> safe_token value
+    | "--agent" :: value :: tail when value <> "" ->
+        if tail = [] then safe_token value else failf "unexpected-agent-hook-arguments"
+    | _ -> failf "usage: agent-hook --agent codex|claude"
+  in
+  loop arguments
+
+let run arguments =
+  let root = ref None in
+  let agent = ref "unknown" in
+  let lane = ref "session-unknown" in
+  let event_name = ref "unknown" in
+  let receipt = ref None in
+  try
+    agent := parse_agent arguments;
+    let raw_event = read_stdin () in
+    if raw_event = "" then failf "hook-event-empty";
+    (try root := Some (git_root (Unix.getcwd ()) |> Unix.realpath) with _ -> ());
+    receipt := Some (operational_receipt raw_event "sounio-loom agent-hook event=unparsed");
+    let event = parse_json raw_event in
+    let cwd = string_field ~default:(Unix.getcwd ()) event "cwd" in
+    let current_root = git_root cwd |> Unix.realpath in
+    root := Some current_root;
+    let raw_session_id = string_field ~default:"unknown" event "session_id" in
+    lane := "session-" ^ safe_token raw_session_id;
+    event_name := string_field ~default:"unknown" event "hook_event_name";
+    let tool_name = string_field ~default:"none" event "tool_name" in
+    let command =
+      Printf.sprintf "sounio-loom agent-hook --agent %s event=%s tool=%s"
+        !agent !event_name tool_name
+    in
+    let base_receipt = operational_receipt raw_event command in
+    receipt := Some base_receipt;
+    let authorized_receipt = authorize_guard current_root raw_event base_receipt in
+    receipt := Some authorized_receipt;
+    append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
+      !event_name authorized_receipt;
+    execute_event current_root current_root event !agent !lane raw_session_id;
+    0
+  with
+  | Error message
+  | Sys_error message ->
+      (match !root, !receipt with
+      | Some current_root, Some current_receipt ->
+          (try
+             append_decision_log current_root "DENY" message !agent !lane !event_name
+               current_receipt
+           with _ -> ())
+      | _ -> ());
+      Printf.eprintf "sounio native hook refused: %s\n%!" message;
+      2
+  | Unix_error (error, function_name, argument) ->
+      let message =
+        Printf.sprintf "%s:%s(%s)" (Unix.error_message error) function_name argument
+      in
+      (match !root, !receipt with
+      | Some current_root, Some current_receipt ->
+          (try
+             append_decision_log current_root "DENY" message !agent !lane !event_name
+               current_receipt
+           with _ -> ())
+      | _ -> ());
+      Printf.eprintf "sounio native hook refused: %s\n%!" message;
+      2

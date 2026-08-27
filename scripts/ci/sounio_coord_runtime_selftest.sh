@@ -11,6 +11,7 @@ ALT="$TEST_ROOT/upgrade-source"
 BAD="$TEST_ROOT/bad-source"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
 export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime"
 export SOUNIO_LOOM_OBLIGATION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 export SOUNIO_LOOM_EPISTEMIC_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-epistemic-runtime"
@@ -53,6 +54,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -67,6 +69,8 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$REPO/scripts/dev/"
 mkdir -p "$REPO/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$REPO/tools/loom/"
@@ -83,6 +87,7 @@ cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -95,6 +100,8 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
 cp -R "$ROOT_DIR/tools/loom/src/vendor" "$REPO/tools/loom/src/"
 mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$REPO/stdlib/coordination/"
@@ -163,6 +170,12 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
   fail 'installed runtime omitted the detached agent supervisor'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime" ]] || \
   fail 'installed runtime omitted the OCaml Loom kernel'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-language-authority-runtime" ]] || \
+  fail 'installed runtime omitted the frozen Sounio language authority'
+grep -q '^capability=loom-native-agent-hook-v1$' "$first_manifest" || \
+  fail 'installed runtime omitted the native-agent-hook capability'
+grep -q '^loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff$' \
+  "$first_manifest" || fail 'installed native hook is not bound to frozen Sounio semantics'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-continuity-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio continuity adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-obligation-runtime" ]] || \
@@ -302,7 +315,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.29$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.27.30$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
@@ -647,6 +660,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -661,6 +675,8 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ALT/scripts/dev/"
 mkdir -p "$ALT/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$ALT/tools/loom/"
@@ -677,6 +693,7 @@ cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -689,6 +706,8 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
 cp -R "$ROOT_DIR/tools/loom/src/vendor" "$ALT/tools/loom/src/"
 mkdir -p "$ALT/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$ALT/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$ALT/stdlib/coordination/"
@@ -765,6 +784,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -779,6 +799,8 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$BAD/scripts/dev/"
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$BAD/tools/loom/"
@@ -795,6 +817,7 @@ cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -807,6 +830,8 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
 cp -R "$ROOT_DIR/tools/loom/src/vendor" "$BAD/tools/loom/src/"
 mkdir -p "$BAD/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$BAD/stdlib/coordination/"

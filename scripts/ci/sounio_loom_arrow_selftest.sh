@@ -142,7 +142,7 @@ curl -sS -D "$TEST_ROOT/current-missing.headers" \
   -o "$TEST_ROOT/current-missing.json"
 grep -q '^HTTP/1.1 409 Conflict' "$TEST_ROOT/current-missing.headers" || \
   fail 'current runtime without Guardian journal did not fail closed'
-grep -q 'guardianless-generation-runtime-mismatch:descriptor=2026.08.24.0:generation=2026.08.27.29' \
+grep -q 'guardianless-generation-runtime-mismatch:descriptor=2026.08.24.0:generation=2026.08.27.30' \
   "$TEST_ROOT/current-missing.json" || \
   fail 'descriptor-downgrade sabotage was refused by an unrelated rule'
 
@@ -154,7 +154,7 @@ curl -sS -D "$TEST_ROOT/current-required.headers" \
   -o "$TEST_ROOT/current-required.json"
 grep -q '^HTTP/1.1 409 Conflict' "$TEST_ROOT/current-required.headers" || \
   fail 'current runtime without Guardian journal did not fail closed'
-grep -q 'guardian-journal-required:runtime-version=2026.08.27.29' \
+grep -q 'guardian-journal-required:runtime-version=2026.08.27.30' \
   "$TEST_ROOT/current-required.json" || \
   fail 'current-runtime omission was refused by an unrelated rule'
 
