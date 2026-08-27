@@ -32,7 +32,8 @@ fail() {
 run_hook() {
   local event="$1" agent="${2:-codex}"
   set +e
-  HOOK_OUTPUT="$(printf '%s\n' "$event" | "$LOOM" agent-hook --agent "$agent" 2>&1)"
+  HOOK_OUTPUT="$(printf '%s\n' "$event" | "$LOOM" agent-hook --agent "$agent" \
+    --test-file-capability-fixture 2>&1)"
   HOOK_RC=$?
   set -e
 }
@@ -78,7 +79,7 @@ issue() {
     fail "hook output omitted the replacement command"
   [[ "$HOOK_OUTPUT" != *"$command"* ]] ||
     fail "hook output leaked the original command"
-  [[ "$REPLACEMENT" == *' exec-capability --token '* ]] ||
+  [[ "$REPLACEMENT" == *' exec-capability --test-file-capability-fixture --token '* ]] ||
     fail "replacement command has an unexpected shape: $REPLACEMENT"
   TOKEN="${REPLACEMENT##*--token }"
   [[ "$TOKEN" =~ ^[0-9a-f]{64}$ ]] || fail "replacement token is not 256-bit hex"
@@ -301,7 +302,8 @@ chmod 0700 "$TEST_ROOT/loom-tampered"
 printf x >>"$TEST_ROOT/loom-tampered" || fail "could not tamper broker fixture"
 chmod 0755 "$TEST_ROOT/loom-tampered"
 set +e
-EXEC_OUTPUT="$("$TEST_ROOT/loom-tampered" exec-capability --token "$TOKEN" 2>&1)"
+EXEC_OUTPUT="$("$TEST_ROOT/loom-tampered" exec-capability \
+  --test-file-capability-fixture --token "$TOKEN" 2>&1)"
 EXEC_RC=$?
 set -e
 [[ "$EXEC_RC" -eq 126 && "$EXEC_OUTPUT" == *'capability-broker-hash-mismatch'* ]] ||

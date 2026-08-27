@@ -4,15 +4,19 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.27.30"
+let runtime_version = "2026.08.27.31"
 let max_control_bytes = 16 * 1024
+let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
 let max_outcome_measurement_bytes = 16 * 1024 * 1024
 let max_outcome_receipt_bytes = 16 * 1024
+let max_exec_capability_payload_bytes = 512 * 1024
 
 external forkpty : unit -> int * file_descr = "sounio_loom_forkpty"
 external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsize"
+external peer_credentials : file_descr -> int * int * int = "sounio_loom_peer_credentials"
+external pidfd_open : int -> file_descr option = "sounio_loom_pidfd_open"
 
 let failf format = Printf.ksprintf (fun value -> raise (Loom_error value)) format
 
@@ -514,6 +518,50 @@ let process_start pid =
   match List.nth_opt (split_on ' ' tail) 19 with
   | Some start -> start
   | None -> failf "process stat omitted start time for pid %d" pid
+
+let process_parent pid =
+  let value = read_file_bounded "process stat" 65536 (Printf.sprintf "/proc/%d/stat" pid) in
+  let closing =
+    try String.rindex value ')' with Not_found -> failf "invalid process stat for pid %d" pid
+  in
+  let tail = String.sub value (closing + 2) (String.length value - closing - 2) in
+  match List.nth_opt (split_on ' ' tail) 1 with
+  | Some parent ->
+      (try int_of_string parent with _ -> failf "invalid parent pid for pid %d" pid)
+  | None -> failf "process stat omitted parent pid for pid %d" pid
+
+let process_pid_namespace pid =
+  Unix.readlink (Printf.sprintf "/proc/%d/ns/pid" pid)
+
+let process_cwd pid = Unix.realpath (Printf.sprintf "/proc/%d/cwd" pid)
+
+let process_executable pid = Unix.realpath (Printf.sprintf "/proc/%d/exe" pid)
+
+let process_executable_sha256 pid =
+  read_file_bounded "peer executable" (128 * 1024 * 1024)
+    (Printf.sprintf "/proc/%d/exe" pid)
+  |> sha256
+
+let process_arguments pid =
+  read_file_bounded "process command line" (256 * 1024)
+    (Printf.sprintf "/proc/%d/cmdline" pid)
+  |> split_on '\000' |> List.filter (( <> ) "")
+
+let path_within root path =
+  path = root
+  || starts_with path (if root = "/" then "/" else root ^ "/")
+
+let process_descends_from ~pid ~ancestor ~ancestor_start =
+  let rec walk current depth =
+    if depth > 64 || current <= 1 then false
+    else if current = ancestor then process_start current = ancestor_start
+    else
+      let parent = process_parent current in
+      parent <> current && walk parent (depth + 1)
+  in
+  walk pid 0
+
+let current_time_us () = Int64.of_float (Unix.gettimeofday () *. 1_000_000.0)
 
 let json_quote value =
   let buffer = Buffer.create (String.length value + 8) in
@@ -1165,7 +1213,10 @@ let verify_events path events =
           output_cursor := ending
       | "KERNEL_RECOVERED", Active -> lease := None
       | ( "INPUT" | "WAKE" | "RESIZE" | "SIGNAL" | "OBSERVER_ATTACHED"
-        | "OBSERVER_DETACHED" ), Active -> ()
+        | "OBSERVER_DETACHED" | "KERNEL_GENERATION" | "PEER_REFUSED"
+        | "EXEC_GRANT_ISSUED" | "EXEC_GRANT_EXPIRED"
+        | "EXEC_GRANT_REFUSED" | "EXEC_GRANT_CONSUMED"
+        | "EXEC_CONSUME_REFUSED" ), Active -> ()
       | _, Initial -> failf "semantic:event-before-session-start seq=%d" event.seq
       | _, Exited -> failf "semantic:event-after-session-exit seq=%d" event.seq
       | _ -> failf "semantic:unknown-event kind=%s seq=%d" event.kind event.seq);
@@ -1598,10 +1649,12 @@ let run_guardian paths agent lane session_id cwd command instance_id output_path
       Array.append (Unix.environment ())
         [| Printf.sprintf "SOUNIO_LOOM_GUARDIAN_SOCKET=%s"
              paths.guardian_socket_path;
+           Printf.sprintf "SOUNIO_LOOM_SOCKET=%s" paths.socket_path;
            Printf.sprintf "SOUNIO_LOOM_TOKEN_FILE=%s" paths.token_path;
            Printf.sprintf "SOUNIO_LOOM_AGENT=%s" agent;
            Printf.sprintf "SOUNIO_LOOM_LANE=%s" lane;
-           Printf.sprintf "SOUNIO_LOOM_SESSION_ID=%s" session_id |]
+           Printf.sprintf "SOUNIO_LOOM_SESSION_ID=%s" session_id;
+           Printf.sprintf "SOUNIO_LOOM_INSTANCE_ID=%s" instance_id |]
     in
     Unix.execvpe command.(0) command environment);
   Unix.set_close_on_exec master_fd;
@@ -1946,10 +1999,24 @@ type stream_mode = Awaiting | Observer | Interactive of string
 type client = {
   fd : file_descr;
   id : string;
+  peer_pid : int;
+  peer_uid : int;
+  peer_gid : int;
+  peer_start : string;
+  peer_pid_namespace : string;
+  peer_pidfd : file_descr;
   input : Buffer.t;
   mutable mode : stream_mode;
   mutable pending : string;
   mutable pending_offset : int;
+}
+
+type exec_grant = {
+  exec_payload : string;
+  exec_payload_sha256 : string;
+  exec_cwd : string;
+  exec_expires_us : int64;
+  exec_generation : string;
 }
 
 type kernel = {
@@ -1961,6 +2028,11 @@ type kernel = {
   command_name : string;
   command_digest : string;
   instance_id : string;
+  kernel_generation : string;
+  boot_id : string;
+  pid_namespace : string;
+  executable_path : string;
+  executable_sha256 : string;
   output_path : string;
   journal_path : string;
   token : string;
@@ -1975,6 +2047,7 @@ type kernel = {
   started_utc : string;
   journal : journal;
   clients : (file_descr, client) Hashtbl.t;
+  exec_grants : (string, exec_grant) Hashtbl.t;
   mutable next_client : int;
   mutable input_holder : file_descr option;
   mutable output_cursor : int;
@@ -2016,6 +2089,9 @@ let descriptor_fields kernel state =
     ("session_id", kernel.session_id);
     ("worktree", kernel.cwd);
     ("instance_id", kernel.instance_id);
+    ("kernel_generation", kernel.kernel_generation);
+    ("boot_id", kernel.boot_id);
+    ("pid_namespace", kernel.pid_namespace);
     ("daemon_pid", string_of_int (Unix.getpid ()));
     ("daemon_pid_start", kernel.daemon_pid_start);
     ("harness_pid", string_of_int kernel.harness_pid);
@@ -2051,6 +2127,8 @@ let status_fields kernel =
     ("lane", kernel.lane);
     ("session_id", kernel.session_id);
     ("instance_id", kernel.instance_id);
+    ("kernel_generation", kernel.kernel_generation);
+    ("pending_exec_grants", string_of_int (Hashtbl.length kernel.exec_grants));
     ("daemon_pid", string_of_int (Unix.getpid ()));
     ("daemon_pid_start", kernel.daemon_pid_start);
     ("harness_pid", string_of_int kernel.harness_pid);
@@ -2078,6 +2156,7 @@ let close_client kernel descriptor =
       | Observer -> ignore (append_event kernel.journal "OBSERVER_DETACHED" client.id)
       | Awaiting -> ());
       Hashtbl.remove kernel.clients descriptor;
+      (try Unix.close client.peer_pidfd with _ -> ());
       (try Unix.close descriptor with _ -> ())
 
 let read_output_range kernel cursor limit =
@@ -2098,6 +2177,74 @@ let read_output_range kernel cursor limit =
       fill 0;
       Bytes.unsafe_to_string bytes)
 
+let pidfd_alive descriptor =
+  let readable, _, _ = Unix.select [ descriptor ] [] [] 0.0 in
+  readable = []
+
+let arguments_contain_pair arguments first second =
+  let rec loop = function
+    | left :: right :: _ when left = first && right = second -> true
+    | _ :: tail -> loop tail
+    | [] -> false
+  in
+  loop arguments
+
+let authenticate_exec_peer kernel client operation handle =
+  if client.peer_uid <> Unix.geteuid () || client.peer_gid <> Unix.getegid () then
+    failf "exec-peer-credential-mismatch";
+  if not (pidfd_alive client.peer_pidfd) then failf "exec-peer-exited";
+  if process_start client.peer_pid <> client.peer_start then
+    failf "exec-peer-start-changed";
+  let namespace = process_pid_namespace client.peer_pid in
+  if namespace <> client.peer_pid_namespace || namespace <> kernel.pid_namespace then
+    failf "exec-peer-pid-namespace-mismatch";
+  if trim (read_file "/proc/sys/kernel/random/boot_id") <> kernel.boot_id then
+    failf "exec-peer-boot-identity-mismatch";
+  if process_executable client.peer_pid <> kernel.executable_path
+     || process_executable_sha256 client.peer_pid <> kernel.executable_sha256
+  then failf "exec-peer-executable-mismatch";
+  if
+    not
+      (process_descends_from ~pid:client.peer_pid ~ancestor:kernel.harness_pid
+         ~ancestor_start:kernel.harness_pid_start)
+  then failf "exec-peer-outside-harness-ancestry";
+  let peer_cwd = process_cwd client.peer_pid in
+  if not (path_within kernel.cwd peer_cwd) then failf "exec-peer-cwd-outside-worktree";
+  let arguments = process_arguments client.peer_pid in
+  if operation = "issue" then (
+    if not (List.mem "agent-hook" arguments) then
+      failf "exec-issuer-command-mismatch")
+  else if operation = "consume" then (
+    if not (List.mem "exec-capability" arguments) then
+      failf "exec-consumer-command-mismatch";
+    match handle with
+    | Some expected when arguments_contain_pair arguments "--handle" expected -> ()
+    | _ -> failf "exec-consumer-handle-mismatch")
+  else failf "exec-peer-operation-invalid";
+  peer_cwd
+
+let valid_exec_handle value =
+  String.length value = 64
+  && String.for_all
+       (function '0' .. '9' | 'a' .. 'f' -> true | _ -> false)
+       value
+
+let expire_exec_grants kernel =
+  let now = current_time_us () in
+  let expired =
+    Hashtbl.fold
+      (fun handle grant values ->
+        if now > grant.exec_expires_us then handle :: values else values)
+      kernel.exec_grants []
+  in
+  List.iter
+    (fun handle ->
+      Hashtbl.remove kernel.exec_grants handle;
+      ignore
+        (append_event kernel.journal "EXEC_GRANT_EXPIRED"
+           (sha256 handle)))
+    expired
+
 let handle_request kernel client line =
   let refuse code =
     queue client (control_line [ "ERR"; code ]);
@@ -2113,6 +2260,102 @@ let handle_request kernel client line =
             |> List.map (fun (key, value) -> key ^ "=" ^ field_escape value)
           in
           queue client (control_line ("OK" :: "STATUS" :: fields))
+      | "EXEC_ISSUE", [ instance; cwd_hex; ttl_raw; payload_sha256; payload_hex ] -> (
+          try
+            if instance <> kernel.instance_id then failf "exec-instance-mismatch";
+            ignore (authenticate_exec_peer kernel client "issue" None);
+            let ttl = parse_nonnegative "exec-ttl" ttl_raw in
+            if ttl < 1 || ttl > 120 then failf "exec-ttl-out-of-range";
+            let requested_cwd = string_of_hex cwd_hex |> Unix.realpath in
+            if not (path_within kernel.cwd requested_cwd) then
+              failf "exec-cwd-outside-worktree";
+            let payload = string_of_hex payload_hex in
+            if payload = "" || String.length payload > max_exec_capability_payload_bytes then
+              failf "exec-capability-payload-size-refused";
+            if sha256 payload <> payload_sha256 then
+              failf "exec-capability-payload-digest-mismatch";
+            let handle = random_hex 32 in
+            let expires_us =
+              Int64.add (current_time_us ())
+                (Int64.mul (Int64.of_int ttl) 1_000_000L)
+            in
+            Hashtbl.add kernel.exec_grants handle
+              { exec_payload = payload;
+                exec_payload_sha256 = payload_sha256;
+                exec_cwd = requested_cwd;
+                exec_expires_us = expires_us;
+                exec_generation = kernel.kernel_generation };
+            ignore
+              (append_event kernel.journal "EXEC_GRANT_ISSUED"
+                 (String.concat ":"
+                    [ sha256 handle; payload_sha256; Int64.to_string expires_us;
+                      string_of_int client.peer_pid ]));
+            queue client
+              (control_line
+                 [ "OK"; "EXEC_ISSUED"; kernel.instance_id;
+                   kernel.kernel_generation; handle; Int64.to_string expires_us;
+                   payload_sha256 ])
+          with
+          | Loom_error error ->
+              ignore
+                (append_event kernel.journal "EXEC_GRANT_REFUSED"
+                   (sha256 error));
+              refuse error
+          | Unix_error (error, function_name, argument) ->
+              let reason =
+                Printf.sprintf "%s:%s(%s)" (Unix.error_message error)
+                  function_name argument
+              in
+              ignore
+                (append_event kernel.journal "EXEC_GRANT_REFUSED"
+                   (sha256 reason));
+              refuse reason)
+      | "EXEC_CONSUME", [ instance; generation; handle ] -> (
+          try
+            if instance <> kernel.instance_id then failf "exec-instance-mismatch";
+            if generation <> kernel.kernel_generation then
+              failf "exec-kernel-generation-mismatch";
+            if not (valid_exec_handle handle) then failf "exec-handle-invalid";
+            let peer_cwd =
+              authenticate_exec_peer kernel client "consume" (Some handle)
+            in
+            let grant =
+              match Hashtbl.find_opt kernel.exec_grants handle with
+              | Some grant -> grant
+              | None -> failf "exec-handle-missing-or-replayed"
+            in
+            if grant.exec_generation <> kernel.kernel_generation then
+              failf "exec-grant-generation-mismatch";
+            if current_time_us () > grant.exec_expires_us then (
+              Hashtbl.remove kernel.exec_grants handle;
+              failf "exec-grant-expired");
+            if peer_cwd <> grant.exec_cwd then failf "exec-grant-cwd-mismatch";
+            Hashtbl.remove kernel.exec_grants handle;
+            ignore
+              (append_event kernel.journal "EXEC_GRANT_CONSUMED"
+                 (String.concat ":"
+                    [ sha256 handle; grant.exec_payload_sha256;
+                      string_of_int client.peer_pid ]));
+            queue client
+              (control_line
+                 [ "OK"; "EXEC_CONSUMED"; kernel.instance_id;
+                   kernel.kernel_generation; grant.exec_payload_sha256;
+                   hex_of_string grant.exec_payload ])
+          with
+          | Loom_error error ->
+              ignore
+                (append_event kernel.journal "EXEC_CONSUME_REFUSED"
+                   (sha256 error));
+              refuse error
+          | Unix_error (error, function_name, argument) ->
+              let reason =
+                Printf.sprintf "%s:%s(%s)" (Unix.error_message error)
+                  function_name argument
+              in
+              ignore
+                (append_event kernel.journal "EXEC_CONSUME_REFUSED"
+                   (sha256 reason));
+              refuse reason)
       | "SNAPSHOT", [ cursor; limit ] -> (
           try
             let cursor = parse_nonnegative "cursor" cursor in
@@ -2230,7 +2473,8 @@ let read_client kernel descriptor =
            | Observer -> close_client kernel descriptor
            | Awaiting ->
                Buffer.add_subbytes client.input bytes 0 count;
-               if Buffer.length client.input > max_control_bytes then close_client kernel descriptor
+               if Buffer.length client.input > max_kernel_control_bytes then
+                 close_client kernel descriptor
                else
                  let value = Buffer.contents client.input in
                  (match String.index_opt value '\n' with
@@ -2245,20 +2489,43 @@ let read_client kernel descriptor =
 let accept_client kernel =
   try
     let descriptor, _ = Unix.accept kernel.listener in
-    Unix.set_close_on_exec descriptor;
-    Unix.set_nonblock descriptor;
-    kernel.next_client <- kernel.next_client + 1;
-    let client =
-      {
-        fd = descriptor;
-        id = Printf.sprintf "client-%d-%d" (Unix.getpid ()) kernel.next_client;
-        input = Buffer.create 256;
-        mode = Awaiting;
-        pending = "";
-        pending_offset = 0;
-      }
-    in
-    Hashtbl.add kernel.clients descriptor client
+    let pidfd = ref None in
+    (try
+       Unix.set_close_on_exec descriptor;
+       let peer_pid, peer_uid, peer_gid = peer_credentials descriptor in
+       let peer_pidfd =
+         match pidfd_open peer_pid with
+         | Some descriptor -> descriptor
+         | None -> failf "pidfd-open-refused"
+       in
+       pidfd := Some peer_pidfd;
+       let peer_start = process_start peer_pid in
+       let peer_pid_namespace = process_pid_namespace peer_pid in
+       Unix.set_nonblock descriptor;
+       kernel.next_client <- kernel.next_client + 1;
+       let client =
+         {
+           fd = descriptor;
+           id = Printf.sprintf "client-%d-%d" (Unix.getpid ()) kernel.next_client;
+           peer_pid;
+           peer_uid;
+           peer_gid;
+           peer_start;
+           peer_pid_namespace;
+           peer_pidfd;
+           input = Buffer.create 256;
+           mode = Awaiting;
+           pending = "";
+           pending_offset = 0;
+         }
+       in
+       Hashtbl.add kernel.clients descriptor client
+     with error ->
+       Option.iter (fun fd -> try Unix.close fd with _ -> ()) !pidfd;
+       (try Unix.close descriptor with _ -> ());
+       ignore
+         (append_event kernel.journal "PEER_REFUSED"
+            (sha256 (Printexc.to_string error))))
   with Unix_error ((EAGAIN | EWOULDBLOCK), _, _) -> ()
 
 let crash_if_armed kernel point =
@@ -2439,12 +2706,17 @@ let unregister_coordination kernel =
              "--reason"; "Loom session exited" ])
 
 let run_kernel kernel =
+  ignore
+    (append_event kernel.journal "KERNEL_GENERATION"
+       (String.concat ":"
+          [ kernel.kernel_generation; kernel.boot_id; kernel.pid_namespace ]));
   write_descriptor kernel "active";
   if Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0" then spawn_coordination_refresh kernel;
   let signal_stop _ = kernel.stopping <- true in
   Sys.set_signal Sys.sigterm (Sys.Signal_handle signal_stop);
   Sys.set_signal Sys.sigint (Sys.Signal_handle signal_stop);
   while not kernel.stopping && kernel.harness_exit = None do
+    expire_exec_grants kernel;
     reap_coordination kernel;
     if Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0"
        && Unix.gettimeofday () >= kernel.next_coord_refresh
@@ -2575,6 +2847,7 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     with _ -> failf "guardian status omitted %s" name
   in
   let listener = create_listener paths.socket_path in
+  let self_pid = Unix.getpid () in
   {
     paths;
     agent;
@@ -2584,6 +2857,12 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     command_name = table_value guardian_values "command";
     command_digest = table_value guardian_values "argv_digest";
     instance_id;
+    kernel_generation = random_hex 32;
+    boot_id = trim (read_file "/proc/sys/kernel/random/boot_id");
+    pid_namespace =
+      process_pid_namespace (int_field "harness_pid");
+    executable_path = process_executable self_pid;
+    executable_sha256 = process_executable_sha256 self_pid;
     output_path;
     journal_path;
     token;
@@ -2598,6 +2877,7 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     started_utc = utc_now ();
     journal;
     clients = Hashtbl.create 16;
+    exec_grants = Hashtbl.create 16;
     next_client = 0;
     input_holder = None;
     output_cursor = ending;
@@ -8910,7 +9190,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --token TOKEN\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf "  provider-open persistent providers: codex, kimi\n";
   Printf.eprintf

@@ -1,6 +1,13 @@
+#define _GNU_SOURCE
+
 #include <errno.h>
+#include <fcntl.h>
 #include <pty.h>
+#include <sys/socket.h>
 #include <sys/ioctl.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
 #include <caml/alloc.h>
@@ -37,4 +44,46 @@ CAMLprim value sounio_loom_set_winsize(value fd_value, value rows_value,
     caml_failwith("TIOCSWINSZ failed");
   }
   CAMLreturn(Val_unit);
+}
+
+CAMLprim value sounio_loom_peer_credentials(value fd_value) {
+  CAMLparam1(fd_value);
+  CAMLlocal1(result);
+#ifdef __linux__
+  struct ucred credentials;
+  socklen_t length = sizeof(credentials);
+
+  if (getsockopt(Int_val(fd_value), SOL_SOCKET, SO_PEERCRED, &credentials,
+                 &length) < 0 || length != sizeof(credentials)) {
+    caml_failwith("SO_PEERCRED failed");
+  }
+
+  result = caml_alloc_tuple(3);
+  Store_field(result, 0, Val_int(credentials.pid));
+  Store_field(result, 1, Val_int(credentials.uid));
+  Store_field(result, 2, Val_int(credentials.gid));
+  CAMLreturn(result);
+#else
+  caml_failwith("SO_PEERCRED unavailable on this platform");
+#endif
+}
+
+CAMLprim value sounio_loom_pidfd_open(value pid_value) {
+  CAMLparam1(pid_value);
+  CAMLlocal1(result);
+#if defined(__linux__) && defined(SYS_pidfd_open)
+  int descriptor = (int)syscall(SYS_pidfd_open, Int_val(pid_value), 0);
+  if (descriptor < 0) {
+    CAMLreturn(Val_int(0));
+  }
+  if (fcntl(descriptor, F_SETFD, FD_CLOEXEC) < 0) {
+    close(descriptor);
+    CAMLreturn(Val_int(0));
+  }
+  result = caml_alloc(1, 0);
+  Store_field(result, 0, Val_int(descriptor));
+  CAMLreturn(result);
+#else
+  CAMLreturn(Val_int(0));
+#endif
 }

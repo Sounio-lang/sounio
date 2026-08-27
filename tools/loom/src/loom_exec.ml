@@ -12,6 +12,8 @@ let max_command_bytes = 64 * 1024
 let max_arguments = 256
 let authority_timeout_seconds = 5.0
 let default_capability_ttl_seconds = 30
+let max_kernel_control_bytes = 2 * 1024 * 1024
+let kernel_connect_timeout_seconds = 3.0
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
@@ -64,6 +66,61 @@ let write_all descriptor value =
       | exception Unix_error (EINTR, _, _) -> loop offset
   in
   loop 0
+
+let read_control_line descriptor =
+  let output = Buffer.create 512 in
+  let byte = Bytes.create 1 in
+  let rec read () =
+    match Unix.read descriptor byte 0 1 with
+    | 0 -> failf "execution-kernel-closed-before-response"
+    | _ ->
+        let character = Bytes.get byte 0 in
+        if character = '\n' then Buffer.contents output
+        else if Buffer.length output >= max_kernel_control_bytes then
+          failf "execution-kernel-response-too-large"
+        else (Buffer.add_char output character; read ())
+    | exception Unix_error (EINTR, _, _) -> read ()
+  in
+  read ()
+
+let required_environment name =
+  match Sys.getenv_opt name with
+  | Some value when value <> "" -> value
+  | _ -> failf "execution-kernel-environment-missing:%s" name
+
+let kernel_request operation arguments =
+  let socket = required_environment "SOUNIO_LOOM_SOCKET" in
+  let token_file = required_environment "SOUNIO_LOOM_TOKEN_FILE" in
+  let token = trim (read_file ~limit:65536 token_file) in
+  let request =
+    String.concat "\t" ("LOOM/1" :: token :: operation :: arguments) ^ "\n"
+  in
+  if String.length request > max_kernel_control_bytes then
+    failf "execution-kernel-request-too-large";
+  let deadline = Unix.gettimeofday () +. kernel_connect_timeout_seconds in
+  let rec connect () =
+    let descriptor = Unix.socket PF_UNIX SOCK_STREAM 0 in
+    Unix.set_close_on_exec descriptor;
+    try
+      Unix.connect descriptor (ADDR_UNIX socket);
+      descriptor
+    with
+    | Unix_error ((ENOENT | ECONNREFUSED), _, _) when Unix.gettimeofday () < deadline ->
+        Unix.close descriptor;
+        Unix.sleepf 0.025;
+        connect ()
+    | error ->
+        Unix.close descriptor;
+        raise error
+  in
+  let descriptor = connect () in
+  Fun.protect
+    ~finally:(fun () -> try Unix.close descriptor with _ -> ())
+    (fun () ->
+      write_all descriptor request;
+      match String.split_on_char '\t' (read_control_line descriptor) with
+      | "ERR" :: reason :: _ -> failf "execution-kernel-refused:%s" reason
+      | fields -> fields)
 
 let test_mode () = Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" = Some "1"
 
@@ -931,9 +988,43 @@ let shell_quote value =
 
 let broker_command token =
   shell_quote (Unix.realpath Sys.executable_name)
-  ^ " exec-capability --token " ^ token
+  ^ " exec-capability --test-file-capability-fixture --token " ^ token
 
-let authorize_and_issue ~root ~cwd ~command =
+let file_capability_fixture_requested requested =
+  if not requested then false
+  else if not (test_mode ()) then
+    failf "file-capability-fixture-requires-test-mode"
+  else
+    match Sys.getenv_opt "SOUNIO_LOOM_EXECUTION_CAPABILITY_DIR" with
+    | Some value when value <> "" -> true
+    | _ -> failf "file-capability-fixture-directory-missing"
+
+let kernel_issue_capability ~cwd ~payload =
+  let instance = required_environment "SOUNIO_LOOM_INSTANCE_ID" in
+  let payload_sha256 = sha256 payload in
+  let ttl = capability_ttl_seconds () in
+  match
+    kernel_request "EXEC_ISSUE"
+      [ instance; hex_encode cwd; string_of_int ttl; payload_sha256;
+        hex_encode payload ]
+  with
+  | [ "OK"; "EXEC_ISSUED"; actual_instance; generation; handle;
+      expires_us; actual_payload_sha256 ]
+    when actual_instance = instance && actual_payload_sha256 = payload_sha256 ->
+      ignore
+        (try Int64.of_string expires_us
+         with _ -> failf "execution-kernel-invalid-expiry");
+      if String.length generation <> 64 || String.length handle <> 64 then
+        failf "execution-kernel-invalid-grant-identity";
+      (instance, generation, handle)
+  | _ -> failf "execution-kernel-invalid-issue-response"
+
+let broker_command_kernel instance generation handle =
+  String.concat " "
+    [ shell_quote (Unix.realpath Sys.executable_name); "exec-capability";
+      "--instance"; instance; "--generation"; generation; "--handle"; handle ]
+
+let authorize_and_issue ~file_capability_fixture ~root ~cwd ~command =
   let root = Unix.realpath root in
   let cwd = canonical_directory cwd in
   if not (within root cwd) then failf "execution-cwd-outside-worktree:%s" cwd;
@@ -996,7 +1087,6 @@ let authorize_and_issue ~root ~cwd ~command =
       failf "execution-authority-allowed-empty-measurement";
     let token = random_token () in
     token_sha256 := sha256 token;
-    let directory = capability_directory root in
     let body =
       capability_body ~root ~cwd ~token ~policy ~measurement
         ~hardware_record:hardware_record_value
@@ -1004,10 +1094,20 @@ let authorize_and_issue ~root ~cwd ~command =
         ~environment_record:environment_record_value
         ~environment_sha256:!environment_sha256_value ~frame ~decision
     in
-    ignore (write_capability directory token body);
+    let replacement =
+      if file_capability_fixture_requested file_capability_fixture then (
+        let directory = capability_directory root in
+        ignore (write_capability directory token body);
+        broker_command token)
+      else
+        let instance, generation, handle =
+          kernel_issue_capability ~cwd ~payload:body
+        in
+        broker_command_kernel instance generation handle
+    in
     append ~phase:"ISSUE" ~decision:"ALLOW"
       ~reason:measurement.classification_reason;
-    broker_command token
+    replacement
   with
   | Error reason as error ->
       (try append ~phase:"ISSUE" ~decision:"DENY" ~reason with _ -> ());
@@ -1067,15 +1167,9 @@ let validate_token token =
     (function '0' .. '9' | 'a' .. 'f' -> () | _ -> failf "invalid-capability-token")
     token
 
-let consume_capability root token =
+let execute_capability_content ~root ~token ~content ~burn ~cleanup =
   validate_token token;
   let root = Unix.realpath root in
-  let directory = capability_directory root in
-  let source = Filename.concat directory (token ^ ".cap") in
-  let consuming =
-    Filename.concat directory
-      (Printf.sprintf "%s.consuming.%d" token (Unix.getpid ()))
-  in
   let command_hex = ref "" in
   let command_sha256 = ref "-" in
   let manifest_sha256 = ref "-" in
@@ -1094,7 +1188,6 @@ let consume_capability root token =
   let frame_sha256 = ref "-" in
   let authority_result = ref "unavailable" in
   let token_sha256 = sha256 token in
-  let cleanup () = if Sys.file_exists consuming then (try Unix.unlink consuming with _ -> ()) in
   let append ~decision ~reason =
     append_decision_log ~root ~phase:"CONSUME" ~decision ~reason
       ~token_sha256 ~manifest_sha256:!manifest_sha256
@@ -1108,19 +1201,12 @@ let consume_capability root token =
       ~authority_result:!authority_result
   in
   try
-    (try Unix.rename source consuming
-     with Unix_error (ENOENT, _, _) -> failf "capability-missing-or-replayed");
-    fsync_directory directory;
     let environment_bindings_value = environment_bindings () in
     ensure_safe_shell_bridge_environment environment_bindings_value;
     environment_record_value := environment_record_from environment_bindings_value;
     let execution_environment = environment_array_from environment_bindings_value in
     environment_sha256_value := environment_hash !environment_record_value;
-    let info = Unix.lstat consuming in
-    if info.st_kind <> S_REG then failf "capability-record-not-regular";
-    if info.st_uid <> Unix.geteuid () then failf "capability-record-owner-mismatch";
-    if info.st_perm land 0o077 <> 0 then failf "capability-record-mode-insecure";
-    let table = parse_capability (read_file ~limit:(1024 * 1024) consuming) in
+    let table = parse_capability content in
     if capability_required table "schema" <> "loom-execution-capability-v1" then
       failf "capability-schema-mismatch";
     if capability_required table "token" <> token then failf "capability-token-mismatch";
@@ -1204,8 +1290,7 @@ let consume_capability root token =
     authority_result := decision;
     if decision <> hex_decode "decision" (capability_required table "decision_hex") then
       failf "capability-decision-drift";
-    Unix.unlink consuming;
-    fsync_directory directory;
+    burn ();
     append ~decision:"ALLOW" ~reason:"single-use-capability";
     (try Unix.execve measurement.executable (Array.of_list measurement.argv)
            execution_environment
@@ -1233,15 +1318,92 @@ let consume_capability root token =
       (try append ~decision:"DENY" ~reason with _ -> ());
       raise unix_error
 
-let parse_token_arguments = function
-  | [ "--token"; token ] -> token
-  | _ -> failf "usage: exec-capability --token TOKEN"
+let consume_capability_file root token =
+  ignore (file_capability_fixture_requested true);
+  validate_token token;
+  let root = Unix.realpath root in
+  let directory = capability_directory root in
+  let source = Filename.concat directory (token ^ ".cap") in
+  let consuming =
+    Filename.concat directory
+      (Printf.sprintf "%s.consuming.%d" token (Unix.getpid ()))
+  in
+  let cleanup () =
+    if Sys.file_exists consuming then (try Unix.unlink consuming with _ -> ())
+  in
+  let entered_core = ref false in
+  let append_route_refusal reason =
+    let hardware = hardware_record () in
+    append_decision_log ~root ~phase:"CONSUME" ~decision:"DENY" ~reason
+      ~token_sha256:(sha256 token) ~manifest_sha256:"-" ~source_sha256:"-"
+      ~semantics_sha256:"-" ~command_hex:"-" ~command_sha256:"-"
+      ~executable_hex:"-" ~executable_sha256:"-"
+      ~hardware_record_hex:(hex_encode hardware)
+      ~hardware_sha256:(hardware_hash hardware) ~environment_sha256:"-"
+      ~language:13 ~execution_class:5 ~closure_attested:0 ~frame_sha256:"-"
+      ~authority_result:"unavailable"
+  in
+  try
+    (try Unix.rename source consuming
+     with Unix_error (ENOENT, _, _) -> failf "capability-missing-or-replayed");
+    fsync_directory directory;
+    let info = Unix.lstat consuming in
+    if info.st_kind <> S_REG then failf "capability-record-not-regular";
+    if info.st_uid <> Unix.geteuid () then failf "capability-record-owner-mismatch";
+    if info.st_perm land 0o077 <> 0 then failf "capability-record-mode-insecure";
+    let content = read_file ~limit:(1024 * 1024) consuming in
+    let burn () =
+      Unix.unlink consuming;
+      fsync_directory directory
+    in
+    entered_core := true;
+    execute_capability_content ~root ~token ~content ~burn ~cleanup
+  with error ->
+    cleanup ();
+    if not !entered_core then (
+      let reason =
+        match error with
+        | Error message | Sys_error message -> message
+        | Unix_error (unix_error, function_name, argument) ->
+            Printf.sprintf "%s:%s(%s)" (Unix.error_message unix_error)
+              function_name argument
+        | _ -> Printexc.to_string error
+      in
+      try append_route_refusal reason with _ -> ());
+    raise error
+
+let consume_capability_kernel root instance generation handle =
+  validate_token generation;
+  validate_token handle;
+  let expected_instance = required_environment "SOUNIO_LOOM_INSTANCE_ID" in
+  if instance <> expected_instance then failf "execution-kernel-instance-drift";
+  let content =
+    match kernel_request "EXEC_CONSUME" [ instance; generation; handle ] with
+    | [ "OK"; "EXEC_CONSUMED"; actual_instance; actual_generation;
+        payload_sha256; payload_hex ]
+      when actual_instance = instance && actual_generation = generation ->
+        let payload = hex_decode "kernel_payload" payload_hex in
+        if sha256 payload <> payload_sha256 then
+          failf "execution-kernel-payload-digest-mismatch";
+        payload
+    | _ -> failf "execution-kernel-invalid-consume-response"
+  in
+  let table = parse_capability content in
+  let token = capability_required table "token" in
+  execute_capability_content ~root ~token ~content ~burn:(fun () -> ())
+    ~cleanup:(fun () -> ())
 
 let run arguments =
   try
-    let token = parse_token_arguments arguments in
     let root = find_repo_root (Unix.getcwd ()) in
-    consume_capability root token
+    (match arguments with
+    | [ "--test-file-capability-fixture"; "--token"; token ] ->
+        consume_capability_file root token
+    | [ "--instance"; instance; "--generation"; generation; "--handle"; handle ] ->
+        consume_capability_kernel root instance generation handle
+    | _ ->
+        failf
+          "usage: exec-capability --instance INSTANCE --generation GENERATION --handle HANDLE")
   with
   | Error message
   | Sys_error message ->

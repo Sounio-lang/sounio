@@ -93,6 +93,11 @@ let replace_environment name value environment =
   in
   Array.of_list ((prefix ^ value) :: retained)
 
+let drop_environment_prefix prefix environment =
+  Array.to_list environment
+  |> List.filter (fun item -> not (starts_with item prefix))
+  |> Array.of_list
+
 let run_process ?(input = "") ?(environment = Unix.environment ()) ~cwd command arguments =
   let stdin_read, stdin_write = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
@@ -769,7 +774,9 @@ let append_decision_log root decision reason agent lane event receipt =
 
 let coordination_environment () =
   let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
-  replace_environment "SOUNIO_COORD_TTL_SECONDS" ttl (Unix.environment ())
+  Unix.environment ()
+  |> drop_environment_prefix "SOUNIO_AGENTD_"
+  |> replace_environment "SOUNIO_COORD_TTL_SECONDS" ttl
 
 let run_coord root worktree arguments =
   run_process ~environment:(coordination_environment ()) ~cwd:worktree
@@ -807,14 +814,23 @@ let process_identity () =
   (pid, pid_start, trim (read_file "/proc/sys/kernel/random/boot_id"),
    Unix.readlink "/proc/self/ns/pid", Unix.gethostname ())
 
-let process_worktree root =
+let exact_environment name expected =
+  Sys.getenv_opt name = Some expected
+
+let agentd_identity_matches root agent lane raw_session_id =
+  exact_environment "SOUNIO_AGENTD_AGENT" agent
+  && exact_environment "SOUNIO_AGENTD_LANE" lane
+  && exact_environment "SOUNIO_AGENTD_SESSION_ID" raw_session_id
+  &&
   match Sys.getenv_opt "SOUNIO_AGENTD_WORKTREE" with
   | Some path when path <> "" ->
-      (try
-         let physical = git_root path |> Unix.realpath in
-         if git_common_dir physical = git_common_dir root then physical else root
-       with _ -> root)
-  | _ -> root
+      (try Unix.realpath path = Unix.realpath root with _ -> false)
+  | _ -> false
+
+let process_worktree root agent lane raw_session_id =
+  if agentd_identity_matches root agent lane raw_session_id then
+    Unix.realpath root
+  else root
 
 let refresh_presence tool_root process_root claim_root agent lane raw_session_id =
   let harness = harness_of_agent agent in
@@ -841,32 +857,12 @@ let refresh_presence tool_root process_root claim_root agent lane raw_session_id
   if result.code <> 0 then
     failf "process-presence-refused:%s" (trim result.output)
 
-let tmux_endpoint root =
-  match Sys.getenv_opt "TMUX", Sys.getenv_opt "TMUX_PANE" with
-  | Some tmux, Some pane when tmux <> "" && pane <> "" ->
-      let socket = List.hd (String.split_on_char ',' tmux) in
-      let result =
-        run_process ~cwd:root "tmux"
-          [ "-S"; socket; "display-message"; "-p"; "-t"; pane;
-            "#{pane_id}|#{pane_current_path}" ]
-      in
-      if result.code <> 0 then None
-      else (
-        match String.split_on_char '|' (trim result.output) with
-        | [ pane_id; pane_cwd ] ->
-            (try
-               if Unix.realpath (git_root pane_cwd) = Unix.realpath root then
-                 Some (socket, pane_id)
-               else None
-             with _ -> None)
-        | _ -> None)
-  | _ -> None
-
-let refresh_endpoint tool_root root agent lane =
+let refresh_endpoint tool_root root agent lane raw_session_id =
   let harness = harness_of_agent agent in
   let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_COORD_HOOK_TTL_SECONDS") in
   match Sys.getenv_opt "SOUNIO_AGENTD_SOCKET", Sys.getenv_opt "SOUNIO_AGENTD_TOKEN_FILE" with
   | Some socket, Some token when socket <> "" && token <> ""
+                                  && agentd_identity_matches root agent lane raw_session_id
                                   && Sys.file_exists socket && Sys.file_exists token ->
       ignore
         (coord_ok tool_root root
@@ -874,14 +870,18 @@ let refresh_endpoint tool_root root agent lane =
              "--harness"; harness; "--transport"; "agentd"; "--address"; socket;
              "--socket"; socket; "--token-file"; token; "--ttl-seconds"; ttl ])
   | _ ->
-      (match tmux_endpoint root with
-      | None -> ()
-      | Some (socket, pane) ->
+      (match Sys.getenv_opt "SOUNIO_LOOM_SOCKET",
+             Sys.getenv_opt "SOUNIO_LOOM_TOKEN_FILE" with
+      | Some socket, Some token when socket <> "" && token <> ""
+                                     && Sys.file_exists socket
+                                     && Sys.file_exists token ->
           ignore
-            (coord_ok tool_root root
+            (run_coord tool_root root
                [ "endpoint-register"; "--agent"; agent; "--lane"; lane;
-                 "--harness"; harness; "--transport"; "tmux"; "--address"; pane;
-                 "--socket"; socket; "--ttl-seconds"; ttl ]))
+                 "--harness"; harness; "--transport"; "loom";
+                 "--address"; socket; "--socket"; socket; "--token-file";
+                 token; "--ttl-seconds"; ttl ])
+      | _ -> ())
 
 let message_lines output =
   String.split_on_char '\n' output |> List.filter (fun line -> starts_with line "MESSAGE ")
@@ -933,12 +933,12 @@ let notify_conflict tool_root root agent lane paths output =
              String.concat ", " paths ])
   | _ -> ()
 
-let execute_event tool_root root event agent lane raw_session_id =
+let execute_event tool_root root event agent lane raw_session_id file_capability_fixture =
   let event_name = string_field event "hook_event_name" in
   if event_name = "" then failf "hook-event-name-missing";
   let intent = "active " ^ agent ^ " session" in
   let common = scope_arguments agent lane intent in
-  let presence_root = process_worktree root in
+  let presence_root = process_worktree root agent lane raw_session_id in
   if event_name = "SessionEnd" then (
     refresh_presence tool_root presence_root root agent lane raw_session_id;
     ignore
@@ -977,7 +977,7 @@ let execute_event tool_root root event agent lane raw_session_id =
         if scoped.code <> 0 then (
           notify_conflict tool_root root agent lane target_paths scoped.output;
           failf "coordination-write-refused:%s" (trim scoped.output)));
-      refresh_endpoint tool_root presence_root agent lane);
+      refresh_endpoint tool_root presence_root agent lane raw_session_id);
     if execution_tool tool_name then (
       let input =
         match object_field event "tool_input" with
@@ -987,8 +987,10 @@ let execute_event tool_root root event agent lane raw_session_id =
       let field, command = execution_command input in
       let cwd = execution_cwd event input root in
       refresh_presence tool_root presence_root root agent lane raw_session_id;
-      refresh_endpoint tool_root presence_root agent lane;
-      let replacement = Loom_exec.authorize_and_issue ~root ~cwd ~command in
+      refresh_endpoint tool_root presence_root agent lane raw_session_id;
+      let replacement =
+        Loom_exec.authorize_and_issue ~file_capability_fixture ~root ~cwd ~command
+      in
       Some (execution_hook_output input field replacement))
     else None)
   else (
@@ -1004,7 +1006,7 @@ let execute_event tool_root root event agent lane raw_session_id =
     if claim.code <> 0 && not (contains claim.output "claim belongs to worktree ")
     then failf "coordination-claim-refused:%s" (trim claim.output);
     refresh_presence tool_root presence_root root agent lane raw_session_id;
-    refresh_endpoint tool_root presence_root agent lane;
+    refresh_endpoint tool_root presence_root agent lane raw_session_id;
     if event_name = "SessionStart" then
       Printf.printf
         "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
@@ -1015,10 +1017,13 @@ let execute_event tool_root root event agent lane raw_session_id =
 
 let parse_agent arguments =
   let loop = function
-    | [ "--agent"; value ] when value <> "" -> safe_token value
-    | "--agent" :: value :: tail when value <> "" ->
-        if tail = [] then safe_token value else failf "unexpected-agent-hook-arguments"
-    | _ -> failf "usage: agent-hook --agent codex|claude"
+    | [ "--agent"; value ] when value <> "" -> (safe_token value, false)
+    | [ "--agent"; value; "--test-file-capability-fixture" ] when value <> "" ->
+        if not (test_mode ()) then failf "file-capability-fixture-requires-test-mode";
+        (safe_token value, true)
+    | _ ->
+        failf
+          "usage: agent-hook --agent codex|claude [--test-file-capability-fixture]"
   in
   loop arguments
 
@@ -1029,7 +1034,8 @@ let run arguments =
   let event_name = ref "unknown" in
   let receipt = ref None in
   try
-    agent := parse_agent arguments;
+    let parsed_agent, file_capability_fixture = parse_agent arguments in
+    agent := parsed_agent;
     let raw_event = read_stdin () in
     if raw_event = "" then failf "hook-event-empty";
     (try root := Some (git_root (Unix.getcwd ()) |> Unix.realpath) with _ -> ());
@@ -1052,6 +1058,7 @@ let run arguments =
     receipt := Some authorized_receipt;
     let hook_output =
       execute_event current_root current_root event !agent !lane raw_session_id
+        file_capability_fixture
     in
     append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
       !event_name authorized_receipt;
