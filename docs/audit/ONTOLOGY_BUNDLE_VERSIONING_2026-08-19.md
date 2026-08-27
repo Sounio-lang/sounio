@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.ontology-bundle-versioning-2026-08-19
 authority: repo_only
 audience: users
-last_validated: 2026-08-19
-validated_by: lane/minimax-cli2/ontology-versioning-2026-08-19
+last_validated: 2026-08-27
+validated_by: lane/minimax-cli2/ontology-versioning-2026-08-19 (re-measured on rebase by claude-2)
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ontology-bundle-versioning-2026-08-19
 -->
 
@@ -15,7 +15,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ontology
 
 The 6-dimension declaration this work rests on:
 
-- **Concept-IDs.** SOUNIO-ONTOLOGICAL-VALIDATION (#1967, in-flight) argues that
+- **Concept-IDs.** SOUNIO-ONTOLOGICAL-VALIDATION (#1967, **merged
+  2026-08-19**; `docs/internal/concepts/ontological-validation.md`) argues that
   types are ontological terms - `CHEBI:9168` references the entity "rapamycin",
   a subclass of macrolide, and `disjoint` refuses invalid sums. If that is so,
   the version of the bundle is part of the meaning of any program that names
@@ -182,11 +183,36 @@ exit=0
 ## ci.yml re-link - PROPOSAL ONLY, NOT EDITED
 
 The dispatch identifies this gate as one of fourteen that no workflow
-names. PR #1967 documents the catalog: 17 ontology-related gates, 3 named
-by any workflow, 14 never run including
-`generated_ontology_manifest_gate.sh`. The dispatch instructs that this
-PR coordinate with the lane measuring the 14 (currently grok-cli3) and
-that no other gate be linked in this PR.
+names. PR #1967, as filed on 2026-08-19, documented the catalog as
+17 ontology-related gates, 3 named by any workflow, 14 never run
+including `generated_ontology_manifest_gate.sh`. The dispatch instructs
+that this PR coordinate with the lane measuring the 14 (currently
+grok-cli3) and that no other gate be linked in this PR.
+
+**Re-measured 2026-08-27 on `origin/main` @ `055825a3f9`** (rebase of this
+PR). Two corrections to the sentence above, neither of which changes what
+this PR does:
+
+1. **The totals moved.** There are now **19** `scripts/ci/*ontolog*.sh`
+   gate scripts, of which **5** are named by a file under
+   `.github/workflows/` (`madaros_ontology_enforcement_gate.sh`,
+   `ontology_cli_smoke_gate.sh`, `ontology_frontiers_gate.sh`,
+   `ontology_multi_ontology_gate.sh`, `run_ontology_validation.sh`). The
+   17/3 pair is stale; the **14 unnamed is unchanged**, and
+   `generated_ontology_manifest_gate.sh` is still one of them —
+   `git grep -c generated_ontology_manifest_gate -- .github/workflows/`
+   returns nothing. The proposal-only framing of this section therefore
+   still holds.
+
+2. **"Never run" is withdrawn upstream and is withdrawn here.** The merged
+   #1967 concept document
+   (`docs/internal/concepts/ontological-validation.md`) states that the
+   count measures **direct invocation** — whether a workflow names the
+   script — not **coverage**, and that the wording "fourteen never run"
+   "claimed more than the instrument supported and is withdrawn". The
+   correct statement is that fourteen gates, this one among them, are
+   **named by no workflow**; whether a running parent covers any of them
+   is **unmeasured**.
 
 Per the same pattern as lane/minimax-cli1 (#1961, exactly analogous),
 this PR proposes the ci.yml diff but does not edit `ci.yml`. The
