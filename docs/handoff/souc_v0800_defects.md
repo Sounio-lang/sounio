@@ -1209,6 +1209,41 @@ to a bounded wait.
 
 ## D15 (fixed) — `x509_verify_hostname` never matched `iPAddress` SubjectAltName entries
 
+> **UPDATE 2026-08-27 — the ECDSA-SHA384 gap (item 3 below) is RESOLVED, and
+> item 3's root cause for `1.1.1.1` is CORRECTED.** Full dispatch:
+> [`docs/audit/D20_ECDSA_SHA384_X509_SIGNATURE_VERIFICATION_DISPATCH_2026-08-27.md`](../audit/D20_ECDSA_SHA384_X509_SIGNATURE_VERIFICATION_DISPATCH_2026-08-27.md).
+>
+> **Fixed:** `x509_verify_signature`'s unconditional `return false` for
+> `ecdsa-with-SHA384` is gone. `stdlib/crypto/ecdsa_p256.sio` gained
+> `ecdsa_p256_verify_sha384`, applying FIPS 186-4 §6.4.1's leftmost-256-bits
+> truncation to SHA-384's 48-byte digest; both ECDSA entry points now share
+> one private verification core (DER parsing, `1 ≤ r,s < n`, curve math), so
+> the reviewed security steps exist in exactly one copy. Proven against a
+> real chain generated **and independently validated** by OpenSSL 3.5.6
+> (`openssl verify … OK`), pinned as
+> `tests/run-pass/x509_chain_ecdsa_sha384_signature.sio`. Two deliberate
+> mis-truncations (rightmost-32, off-by-one) both make that test fail, so it
+> genuinely pins the rule. Suite: `x509` 24 → 26 pass, 0 fail, 3 skip against
+> a clean-tree baseline on the identical invocation; `tls`/`crypto`/`pem`
+> unchanged.
+>
+> **Corrected — and this matters more than the fix:** item 3 below names the
+> SHA-384 hash as the reason `1.1.1.1` failed. That is the smaller half.
+> Fetching the real chain shows the leaf is signed by **SSL.com SSL
+> Intermediate CA ECC R2, whose key is P-384** — verifying that link needs a
+> different *curve*, not a different *hash*, and only P-256 is implemented.
+> Measured on the real bytes: both certificates parse `X509_OK`, the leaf's
+> key is `EC_P256`, the intermediate's is `PUBKEY_ALG_UNKNOWN`, and
+> `x509_verify_signature` returns `false` — the new algorithm-confusion guard
+> correctly refusing to run a P-384 key through P-256 arithmetic. Pinned as
+> `tests/run-pass/x509_ecdsa_sha384_p384_issuer_rejected.sio`.
+>
+> **So `1.1.1.1` is still blocked (`tls_connect` → `-8`), and DoH with it.**
+> The remaining work is **P-384 curve support**, not a hash path. Live
+> measurement: `tests/interop/tls_connect_1111_sha384_probe.sio`. Anything in
+> this file that cites "D15's ECDSA-SHA384 gap" as the `1.1.1.1` blocker
+> (lines below, and D19's entry) should be read as "D15's P-384 gap".
+
 **Symptom chain, and two wrong diagnoses corrected along the way**: while
 testing `Sounio-lang/conclave-search`'s Task 9 (a DNS-over-HTTPS resolver)
 against Cloudflare's real, publicly-trusted `1.1.1.1:443` endpoint,
