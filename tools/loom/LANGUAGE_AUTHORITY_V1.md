@@ -91,6 +91,15 @@ The executable prints exactly one `SOUNIO_LANGUAGE_AUTHORITY_ALLOW` or
 `SOUNIO_LANGUAGE_AUTHORITY_DENY` line and exits with the decision code.
 Input `0` runs the Sounio-owned 33-case expected-result suite.
 
+## Frozen V1 Root
+
+The first frozen semantic bundle is
+`16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff`.
+Its machine-readable receipt is `language_authority.freeze.v1`; the durable
+verifier is `scripts/ci/sounio_loom_language_authority_freeze_selftest.sh`.
+This opens OCaml operational realization against that exact parent hash. It
+does not yet open parity or authorize a claim-ready promotion.
+
 ## Migration Boundary
 
 V1 is not a claim that current hooks comply. The current Codex and Claude hooks
