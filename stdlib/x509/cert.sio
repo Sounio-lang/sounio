@@ -1563,19 +1563,6 @@ pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer: &Certific
     let is_ecdsa_sha256_sig_alg = oid_eq8(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_ecdsa_256)
     let is_ecdsa_sha384_sig_alg = oid_eq8(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &oid_ecdsa_384)
 
-    if is_ecdsa_sha384_sig_alg {
-        // ecdsa-with-SHA384 is a REAL gap, not simply "unsupported": Task 2
-        // of this plan only built ecdsa_p256_verify's SHA-256 hashing path
-        // (it hashes internally with sha256(), unconditionally). Calling it
-        // on SHA-384-intended signature data would either always fail (safe
-        // but misleading -- looks like a bad signature, not an unsupported
-        // algorithm) or, worse, coincidentally validate something it never
-        // should. Fail closed and explicitly, rather than silently
-        // mis-dispatching to the wrong hash. Extending ecdsa_p256_verify
-        // itself for SHA-384 is out of scope for this task.
-        return false
-    }
-
     // Algorithm-confusion cross-check (a real security property, not just
     // type-safety): the certificate's OWN signature-algorithm OID must
     // agree with the ISSUER's key algorithm. A cert signed with
@@ -1587,8 +1574,18 @@ pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer: &Certific
     if is_ecdsa_sha256_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256 {
         return false
     }
+    // Same guard for ecdsa-with-SHA384. P-256 is the only EC curve this
+    // implementation supports, so an ecdsa-with-SHA384 certificate whose
+    // issuer key is anything else (RSA, or an EC curve we did not parse as
+    // P-256) must be rejected here rather than reaching the P-256
+    // verifier. Note this constrains the ISSUER'S KEY, not the hash: per
+    // RFC 5480 SS2 the signature hash and the key's curve are independent
+    // in X.509, so P-256 + SHA-384 is a valid, deployed combination (D15).
+    if is_ecdsa_sha384_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256 {
+        return false
+    }
 
-    if is_ecdsa_sha256_sig_alg {
+    if is_ecdsa_sha256_sig_alg || is_ecdsa_sha384_sig_alg {
         // Same tbs_copy pattern as the RSA path below: the TBSCertificate
         // bytes to hash live at cert.tbs_start > 0 inside a larger buffer,
         // so copy exactly that byte range into a fresh RawBuf (offset 0)
@@ -1613,6 +1610,18 @@ pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer: &Certific
             esi = esi + 1
         }
 
+        // The ONLY difference between the two ECDSA paths is which hash
+        // the signature was made over -- the TBS-copy and signature-buffer
+        // handling above is deliberately shared, so the two can never
+        // diverge in how they present the signed bytes. Both verifiers are
+        // the same DER parsing and the same curve arithmetic underneath
+        // (stdlib/crypto/ecdsa_p256.sio's ecdsa_p256_verify_with_e);
+        // ecdsa_p256_verify_sha384 additionally applies FIPS 186-4
+        // SS6.4.1's leftmost-256-bits truncation to SHA-384's 48-byte
+        // digest.
+        if is_ecdsa_sha384_sig_alg {
+            return ecdsa_p256_verify_sha384(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
+        }
         return ecdsa_p256_verify(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
     }
 
