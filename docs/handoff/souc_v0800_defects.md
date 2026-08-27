@@ -1243,6 +1243,38 @@ to a bounded wait.
 > measurement: `tests/interop/tls_connect_1111_sha384_probe.sio`. Anything in
 > this file that cites "D15's ECDSA-SHA384 gap" as the `1.1.1.1` blocker
 > (lines below, and D19's entry) should be read as "D15's P-384 gap".
+>
+> **CLOSED 2026-08-27 — the residual P-384 gap D20 found is now resolved.**
+> Full spec:
+> [`docs/superpowers/specs/2026-08-27-madaros-ecdsa-p384-design.md`](../superpowers/specs/2026-08-27-madaros-ecdsa-p384-design.md).
+> NIST P-384 (secp384r1) curve constants and a shared-core verifier landed
+> in `stdlib/crypto/ecdsa_p384.sio` (`ecdsa_p384_verify_sha384`), the
+> secp384r1 OID in `stdlib/x509/oid.sio` (`oid_secp384r1`), 97-byte
+> uncompressed-point public-key parsing and `PUBKEY_ALG_EC_P384`
+> recognition in `stdlib/x509/cert.sio`, and dispatch by issuer key
+> algorithm (P-256 vs P-384, fail-closed for anything else) in
+> `x509_verify_signature` plus the matching trust-anchor guard in
+> `stdlib/x509/trust_store.sio`. Proven three ways: (1) a real,
+> openssl-generated, `openssl verify`-confirmed P-384 root signing a P-256
+> leaf (the same shape as SSL.com's real intermediate) verifies end to end
+> — `tests/run-pass/x509_chain_ecdsa_p384_signature.sio`; (2) the same
+> P-384-signed leaf is correctly *rejected* against an unrelated, real
+> P-256 root, proving the dispatch is a genuine per-curve check and not
+> "any EC key accepted" — `tests/run-pass/x509_chain_ecdsa_p384_cross_curve_rejected.sio`;
+> (3) the original motivating live case now succeeds for real:
+> `tls_connect` against Cloudflare's `1.1.1.1:443` (SSL.com SSL
+> Intermediate CA ECC R2, a genuine P-384 issuer) returned **rc 0**,
+> "1.1.1.1 chain VERIFIED", re-measured live on 2026-08-27 — see the
+> updated `tests/interop/tls_connect_1111_sha384_probe.sio`.
+>
+> **Residual, out of this closeout's scope:**
+> `tests/run-pass/x509_ecdsa_sha384_p384_issuer_rejected.sio` (committed
+> before P-384 recognition existed) now fails the suite, because it
+> asserts `inter.public_key_algorithm == PUBKEY_ALG_UNKNOWN` for a P-384
+> intermediate — an assumption this very fix invalidates by design. It was
+> not modified as part of this closeout (out of file scope for the task
+> that closed D20); it needs to be updated or retired to assert the new,
+> correct behaviour instead of the old fail-closed one.
 
 **Symptom chain, and two wrong diagnoses corrected along the way**: while
 testing `Sounio-lang/conclave-search`'s Task 9 (a DNS-over-HTTPS resolver)
