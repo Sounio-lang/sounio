@@ -1,8 +1,17 @@
+<!-- docs:meta
+topic_id: repo.docs.internal.concepts.pireus-ptx-prmt-import
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-ptx-prmt-import
+-->
+
 # Pireus PTX `prmt` Import
 
-**Concept-ID:** `SOUNIO-PIREUS-PTX-PRMT-IMPORT`  
-**Status:** executable candidate; Loom acceptance required  
-**Owner:** Pireus hardware ontology  
+**Concept-ID:** `SOUNIO-PIREUS-PTX-PRMT-IMPORT`
+**Status:** executable candidate; Loom acceptance required
+**Owner:** Pireus hardware ontology
 **Semantic authority:** Sounio
 
 ## Boundary

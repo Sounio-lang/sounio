@@ -1,9 +1,24 @@
+<!-- docs:meta
+topic_id: repo.docs.research.receipts.pireus-ptx-prmt-import-20260827
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.receipts.pireus-ptx-prmt-import-20260827
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Pireus PTX `prmt` Import Receipt
 
-**Date:** 2026-08-27  
-**Concept-ID:** `SOUNIO-PIREUS-PTX-PRMT-IMPORT`  
-**Language:** Sounio  
-**Role:** `SEMANTIC_AUTHORITY`  
+**Date:** 2026-08-27
+**Concept-ID:** `SOUNIO-PIREUS-PTX-PRMT-IMPORT`
+**Language:** Sounio
+**Role:** `SEMANTIC_AUTHORITY`
 **Requested stage:** `SEMANTICS_FROZEN`
 
 ## Mandatory Order
@@ -28,8 +43,8 @@ The Sounio authority surfaces are:
 | --- | --- |
 | `stdlib/hardware/pireus/ptx_import.sio` | `ca2760d539c4602c85841ac8475a9ffd8a2f760313a8169faf99a32956063bba` |
 | `examples/pireus_ptx_prmt_import.sio` | `a21248170c321b55423db8cc4afbe0965dc1ddb180fc5afa2a8b339bacbf29fa` |
-| `docs/internal/concepts/pireus-ptx-prmt-import.md` | `37c74ae8a7c929089e623dac524be418dc3db8ca2b0dee694316c7ead7921ed8` |
-| `docs/research/pireus_ptx_prmt_import_semantics.md` | `cc6a8484ee6bc9b6e90e55b2e25cf54f5ca4172575c2728b2ab00cc21372e34c` |
+| `docs/internal/concepts/pireus-ptx-prmt-import.md` | `cf84fb2dd5d168d09fdfc8472928a27b7cf4528b2b6fb544c6f96b07b6950579` |
+| `docs/research/pireus_ptx_prmt_import_semantics.md` | `1454e6a212f320fbf4194b3cbb220a30abed56fbf5e8041ce076b7dee5cae697` |
 
 The executable source hash, not this prose receipt, is the source field bound
 to Loom frame `9020`. The paired semantics document is the frozen-semantics
@@ -174,6 +189,17 @@ Lean, Koka, C++, Haskell, and external LLM parity/review were not invoked.
 External LLM offload reviews invoked: none; this internal ontology importer adds
 no mathematical, clinical, or external-facing claim.
 
+## Canonical Acceptance Normalization
+
+The source-lane handoff declared `diff-check=PASS`, but an independent
+`git diff --check` found Markdown hard-break whitespace in this receipt, the
+concept contract, and the semantics document. Canonical Loom acceptance removed
+only that trailing whitespace. The Sounio sources and produced result did not
+change. Consequently, the accepted contract and semantics hashes above replace
+the source-lane hashes `37c74ae8...7921ed8` and `cc6a8484...1372e34c`.
+The canonical acceptance receipt records both histories and binds the normalized
+semantics hash to a fresh Loom frame.
+
 ## Loom Admission
 
 The frozen semantics were submitted to Loom frame `9020` with:
@@ -199,7 +225,7 @@ The complete frame bound these receipt fields:
 | Field | SHA-256 |
 | --- | --- |
 | Sounio executable source | `a21248170c321b55423db8cc4afbe0965dc1ddb180fc5afa2a8b339bacbf29fa` |
-| Frozen semantics | `cc6a8484ee6bc9b6e90e55b2e25cf54f5ca4172575c2728b2ab00cc21372e34c` |
+| Frozen semantics | `1454e6a212f320fbf4194b3cbb220a30abed56fbf5e8041ce076b7dee5cae697` |
 | Toolchain record | `2ce5194cdc517de8d7a0063e09d4f4e7b6b5701a23fa1031a3ec9e8f56486b6e` |
 | Hardware record | `fd73771f3ac0ac200b6d93641b95744ea673c80a83f6d588adb8a19c5e1cf8f0` |
 | Command record | `49aa26a27c7b3defd96d517c77c45978d46590a6a32b923c070a97cabf4cfba1` |

@@ -1,8 +1,23 @@
+<!-- docs:meta
+topic_id: repo.docs.research.pireus-ptx-prmt-import-semantics
+authority: historical
+audience: researchers
+last_validated: 2026-03-07
+validated_by: A6
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.pireus-ptx-prmt-import-semantics
+-->
+
+
+<!-- docs:status-note:start -->
+> Docs status: `historical`
+> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
+<!-- docs:status-note:end -->
+
 # Pireus PTX `prmt` Import Semantics
 
-**Semantic bundle:** `pireus-ptx-prmt.v0`  
-**Date:** 2026-08-27  
-**Producing language:** Sounio  
+**Semantic bundle:** `pireus-ptx-prmt.v0`
+**Date:** 2026-08-27
+**Producing language:** Sounio
 **Role:** `SEMANTIC_AUTHORITY`
 
 ## Authority Input

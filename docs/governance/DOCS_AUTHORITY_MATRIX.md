@@ -496,6 +496,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-execution-engine-ontology | repo_only | docs/internal/concepts/pireus-execution-engine-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-material-ontology | repo_only | docs/internal/concepts/pireus-material-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.pireus-ptx-prmt-import | repo_only | docs/internal/concepts/pireus-ptx-prmt-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-target-profile-ontology | repo_only | docs/internal/concepts/pireus-target-profile-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -518,6 +519,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.garden.seeds.2026-08-27-pireus-darwin-multi-engine | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-darwin-multi-engine.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-pireus-harbor-of-targets | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-harbor-of-targets.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-pireus-material-ontology | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-material-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-08-27-pireus-ptx-prmt-corpus | repo_only | docs/internal/garden/seeds/2026-08-27-pireus-ptx-prmt-corpus.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-sounio-before-parity | repo_only | docs/internal/garden/seeds/2026-08-27-sounio-before-parity.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-sounio-execution-capability-broker | repo_only | docs/internal/garden/seeds/2026-08-27-sounio-execution-capability-broker.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.templates.seed | repo_only | docs/internal/garden/templates/seed.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -921,6 +923,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.petitot-semantic-potential | historical | docs/research/petitot-semantic-potential.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-execution-engine-semantics | historical | docs/research/pireus_execution_engine_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.pireus-ptx-prmt-import-semantics | historical | docs/research/pireus_ptx_prmt_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-v0-semantics | historical | docs/research/pireus_v0_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-v01-target-profile-semantics | historical | docs/research/pireus_v01_target_profile_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.prereg-piloto1-addendum1 | historical | docs/research/PREREG-piloto1-addendum1.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -943,6 +946,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.r2-continuous-law-theorem-falsifiers-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.r2-continuous-law-theorem-spec-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-execution-engine-20260827 | historical | docs/research/receipts/pireus_execution_engine_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-ptx-prmt-import-20260827 | historical | docs/research/receipts/pireus_ptx_prmt_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-v0-20260827 | historical | docs/research/receipts/pireus_v0_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-v01-target-profile-20260827 | historical | docs/research/receipts/pireus_v01_target_profile_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.relational-annihilation-geometry | historical | docs/research/relational-annihilation-geometry.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
