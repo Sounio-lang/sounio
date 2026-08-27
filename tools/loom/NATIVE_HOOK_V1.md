@@ -43,6 +43,37 @@ pathless, outside-repository, and sibling-worktree writes, receipt completeness,
 log-redirection refusal, and executable sentinels that prove the hook invoked
 neither Python nor Rust.
 
+## Generation-Bound Wake Start
+
+Runtime `2026.08.27.31` separates terminal transport from agent execution for
+tmux endpoints. A durable wake advances through:
+
+1. `prepared`: the generation-bound submission exists, but Enter has not
+   succeeded;
+2. `submit-uncertain`: persisted before Enter, so a crash cannot fabricate a
+   submission receipt;
+3. `submitted`: Enter succeeded and `submitted_utc` is not earlier than the
+   confirmed `inserted_utc`;
+4. `started`: the native prompt hook injected that message into the same live
+   endpoint generation.
+
+Insertion is also fail-closed. The runtime persists `insertion_state=uncertain`
+before `send-keys -l`. A retry may recognize the exact message id in the tmux
+pane and continue with Enter, but it never writes the full prompt again after
+an uncertain external effect. A successor endpoint cannot confirm a predecessor
+submission. After a successor registers its own generation, the retry supervisor
+creates a fresh submission and removes the obsolete pending marker only after
+the successor hook starts it.
+
+Session start ensures the native retry supervisor. Short lock contention waits
+for a bounded interval; timeout still refuses explicitly and performs no state
+mutation. `WAKE_STARTED` is therefore stronger than `WAKE_DELIVERED`: it is a
+generation-bound hook receipt, not evidence that bytes reached a terminal.
+
+This stronger handshake currently applies to tmux delivery. `agentd` and
+`loom` transports retain their separate adapter-confirmed transport receipts;
+they must not be reported as generation-bound prompt starts.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic

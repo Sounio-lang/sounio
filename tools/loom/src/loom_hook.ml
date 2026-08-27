@@ -1007,10 +1007,13 @@ let execute_event tool_root root event agent lane raw_session_id file_capability
     then failf "coordination-claim-refused:%s" (trim claim.output);
     refresh_presence tool_root presence_root root agent lane raw_session_id;
     refresh_endpoint tool_root presence_root agent lane raw_session_id;
-    if event_name = "SessionStart" then
+    if event_name = "SessionStart" then (
+      ignore
+        (coord_ok tool_root root
+           [ "obligation-supervisor-ensure"; "--interval-seconds"; "1" ]);
       Printf.printf
         "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
-        agent lane;
+        agent lane);
     if event_name = "UserPromptSubmit" || event_name = "PostToolUse" then
       inject_messages tool_root root agent lane;
     None)

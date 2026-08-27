@@ -12,6 +12,7 @@ BAD="$TEST_ROOT/bad-source"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
+export SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
 export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime"
 export SOUNIO_LOOM_OBLIGATION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 export SOUNIO_LOOM_EPISTEMIC_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-epistemic-runtime"
@@ -25,6 +26,7 @@ export SOUNIO_LOOM_WITNESS_EPOCH_HANDOFF_PREBUILT="$ROOT_DIR/tools/loom/_build/d
 export SOUNIO_LOOM_WITNESS_EPOCH_TRANSPARENCY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
 
 cleanup() {
+  [[ -z "${lock_holder_pid:-}" ]] || kill "$lock_holder_pid" 2>/dev/null || true
   [[ -z "${supervisor_pid:-}" ]] || kill "$supervisor_pid" 2>/dev/null || true
   [[ -z "${failing_supervisor_pid:-}" ]] || \
     kill "$failing_supervisor_pid" 2>/dev/null || true
@@ -36,6 +38,15 @@ trap cleanup EXIT
 fail() {
   echo "sounio-coord-runtime-selftest: FAIL: $*" >&2
   exit 1
+}
+
+snapshot_coord_state() {
+  (
+    cd "$STATE"
+    find . -mindepth 1 ! -name '.claims.lock' -printf '%P|%y|%s\n' | sort
+    find . -type f ! -name '.claims.lock' -print0 | sort -z | \
+      xargs -0 -r sha256sum
+  )
 }
 
 mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/formal/tla" "$REPO/tools"
@@ -87,6 +98,7 @@ cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
@@ -135,6 +147,46 @@ RUNTIME_ROOT="$REPO/.git/sounio-coord-runtime"
 output="$(cd "$REPO" && SOUNIO_COORD_RUNTIME_MODE=local bin/sounio-coord runtime-info)"
 grep -q '^selection=local$' <<< "$output" || fail 'launcher did not report its local fallback'
 grep -q '^protocol_version=3$' <<< "$output" || fail 'local runtime protocol is wrong'
+
+# Lock contention waits for a bounded interval, then fails closed without
+# changing coordination state.
+SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$REPO/bin/sounio-coord" brief >/dev/null
+: > "$STATE/.claims.lock"
+lock_snapshot_before="$(snapshot_coord_state)"
+lock_ready="$TEST_ROOT/lock-ready"
+(
+  exec 9>"$STATE/.claims.lock"
+  flock 9
+  : > "$lock_ready"
+  sleep 5
+) &
+lock_holder_pid=$!
+for _ in $(seq 1 50); do
+  [[ -f "$lock_ready" ]] && break
+  sleep 0.02
+done
+[[ -f "$lock_ready" ]] || fail 'lock sabotage holder did not become ready'
+lock_started_ns="$(date +%s%N)"
+set +e
+lock_output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+  SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_LOCK_WAIT_SECONDS=0.2 \
+  bin/sounio-coord claim --agent lock-test --lane held \
+  --intent 'held lock must fail closed' --files lock-sabotage.test 2>&1)"
+lock_rc=$?
+set -e
+lock_elapsed_ms=$((($(date +%s%N) - lock_started_ns) / 1000000))
+kill "$lock_holder_pid" 2>/dev/null || true
+wait "$lock_holder_pid" 2>/dev/null || true
+lock_holder_pid=''
+[[ "$lock_rc" -ne 0 ]] || fail 'held lock sabotage was allowed'
+grep -q 'coordination state is being changed; retry the claim' <<< "$lock_output" || \
+  fail "held lock refusal omitted its retry reason: $lock_output"
+((lock_elapsed_ms >= 100 && lock_elapsed_ms < 1500)) || \
+  fail "held lock timeout was not bounded: ${lock_elapsed_ms}ms"
+lock_snapshot_after="$(snapshot_coord_state)"
+[[ "$lock_snapshot_after" == "$lock_snapshot_before" ]] || \
+  fail 'held lock refusal mutated coordination state'
 
 output="$(cd "$REPO" && bin/sounio-coord install-runtime)"
 first_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
@@ -315,7 +367,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.30$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.27.31$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
@@ -693,6 +745,7 @@ cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \

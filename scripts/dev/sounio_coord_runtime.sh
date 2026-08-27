@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.30
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.31
 
 usage() {
   cat <<'USAGE'
@@ -72,6 +72,7 @@ Commands:
                                  idempotently start or stop the detached control service
   wake    --agent ID --lane ID --message MESSAGE_ID
                                  retry immediate delivery for a visible directed message
+  wake-reconcile                 retry pending submissions without reinserting prompts
   experiment-open --agent ID --lane ID --receipt PATH --statement TEXT
           --falsifier TEXT --intervention TEXT --treatment-predicate TEXT
           --control-predicate TEXT --resource RESOURCE [--resource RESOURCE ...]
@@ -211,9 +212,10 @@ INJECTIONS_DIR="$STATE_DIR/message-injections"
 ENDPOINTS_DIR="$STATE_DIR/delivery-endpoints"
 PRESENCES_DIR="$STATE_DIR/process-presences"
 WAKES_DIR="$STATE_DIR/message-wakes"
+WAKE_SUBMISSIONS_DIR="$STATE_DIR/message-wake-submissions"
 EVENT_LOG="$STATE_DIR/events.log"
 mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR" "$INJECTIONS_DIR" \
-  "$ENDPOINTS_DIR" "$PRESENCES_DIR" "$WAKES_DIR"
+  "$ENDPOINTS_DIR" "$PRESENCES_DIR" "$WAKES_DIR" "$WAKE_SUBMISSIONS_DIR"
 
 NOW_EPOCH="$(date +%s)"
 NOW_TICK="$(date +%s%N)"
@@ -225,6 +227,8 @@ LOCK_FD=''
 cleanup_lock() {
   if [[ -n "$LOCK_FD" ]]; then
     flock -u "$LOCK_FD" 2>/dev/null || true
+    eval "exec ${LOCK_FD}>&-" 2>/dev/null || true
+    LOCK_FD=''
   fi
   if [[ -n "$LOCK_TO_CLEAN" ]]; then
     rmdir "$LOCK_TO_CLEAN" 2>/dev/null || true
@@ -235,10 +239,14 @@ cleanup_lock() {
 trap cleanup_lock EXIT
 
 acquire_state_lock() {
-  local action="$1" lock_dir lock_epoch
+  local action="$1" lock_dir lock_epoch lock_wait
   if command -v flock >/dev/null 2>&1; then
+    lock_wait="${SOUNIO_COORD_LOCK_WAIT_SECONDS:-2}"
+    [[ "$lock_wait" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+      die "SOUNIO_COORD_LOCK_WAIT_SECONDS must be a non-negative number"
     exec {LOCK_FD}>"$STATE_DIR/.claims.lock"
-    flock -n "$LOCK_FD" || die "coordination state is being changed; retry $action"
+    flock -w "$lock_wait" "$LOCK_FD" || \
+      die "coordination state is being changed; retry $action"
     return 0
   fi
 
@@ -664,6 +672,85 @@ wake_receipt_path() {
   else
     printf '%s/%s--%s.wake' "$WAKES_DIR" "$(slug "$1")" "$(slug "$2")"
   fi
+}
+
+wake_submission_path() {
+  printf '%s/%s--%s--%s.submitted' "$WAKE_SUBMISSIONS_DIR" "$(slug "$1")" \
+    "$(slug "$2")" "$(slug "$3")"
+}
+
+load_wake_submission() {
+  local submission_file="$1" line
+  S_SCHEMA=''
+  S_STATE=''
+  S_MESSAGE_ID=''
+  S_ENDPOINT_ID=''
+  S_AGENT=''
+  S_LANE=''
+  S_HARNESS=''
+  S_WORKTREE=''
+  S_TRANSPORT=''
+  S_ADDRESS=''
+  S_SOCKET=''
+  S_GENERATION=''
+  S_DISCOVERY=''
+  S_CREATED_UTC=''
+  S_INSERTION_STATE=''
+  S_INSERTED_UTC=''
+  S_SUBMITTED_UTC=''
+  S_LAST_ATTEMPT_EPOCH=0
+  S_ATTEMPTS=0
+  [[ -r "$submission_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      schema=*) S_SCHEMA="${line#schema=}" ;;
+      state=*) S_STATE="${line#state=}" ;;
+      message_id=*) S_MESSAGE_ID="${line#message_id=}" ;;
+      endpoint_id=*) S_ENDPOINT_ID="${line#endpoint_id=}" ;;
+      agent=*) S_AGENT="${line#agent=}" ;;
+      lane=*) S_LANE="${line#lane=}" ;;
+      harness=*) S_HARNESS="${line#harness=}" ;;
+      worktree=*) S_WORKTREE="${line#worktree=}" ;;
+      transport=*) S_TRANSPORT="${line#transport=}" ;;
+      address=*) S_ADDRESS="${line#address=}" ;;
+      socket=*) S_SOCKET="${line#socket=}" ;;
+      generation=*) S_GENERATION="${line#generation=}" ;;
+      discovery=*) S_DISCOVERY="${line#discovery=}" ;;
+      created_utc=*) S_CREATED_UTC="${line#created_utc=}" ;;
+      insertion_state=*) S_INSERTION_STATE="${line#insertion_state=}" ;;
+      inserted_utc=*) S_INSERTED_UTC="${line#inserted_utc=}" ;;
+      submitted_utc=*) S_SUBMITTED_UTC="${line#submitted_utc=}" ;;
+      last_attempt_epoch=*) S_LAST_ATTEMPT_EPOCH="${line#last_attempt_epoch=}" ;;
+      attempts=*) S_ATTEMPTS="${line#attempts=}" ;;
+    esac
+  done < "$submission_file"
+}
+
+write_wake_submission() {
+  local submission_file="$1" tmp_file
+  tmp_file="$(mktemp "$WAKE_SUBMISSIONS_DIR/.submission-write.XXXXXX")"
+  {
+    printf 'schema=loom-wake-submission-v1\n'
+    printf 'state=%s\n' "$S_STATE"
+    printf 'message_id=%s\n' "$S_MESSAGE_ID"
+    printf 'endpoint_id=%s\n' "$S_ENDPOINT_ID"
+    printf 'agent=%s\n' "$S_AGENT"
+    printf 'lane=%s\n' "$S_LANE"
+    printf 'harness=%s\n' "$S_HARNESS"
+    printf 'worktree=%s\n' "$S_WORKTREE"
+    printf 'transport=%s\n' "$S_TRANSPORT"
+    printf 'address=%s\n' "$S_ADDRESS"
+    printf 'socket=%s\n' "$S_SOCKET"
+    printf 'generation=%s\n' "$S_GENERATION"
+    printf 'discovery=%s\n' "$S_DISCOVERY"
+    printf 'created_utc=%s\n' "$S_CREATED_UTC"
+    printf 'insertion_state=%s\n' "$S_INSERTION_STATE"
+    printf 'inserted_utc=%s\n' "$S_INSERTED_UTC"
+    printf 'submitted_utc=%s\n' "$S_SUBMITTED_UTC"
+    printf 'last_attempt_epoch=%s\n' "$S_LAST_ATTEMPT_EPOCH"
+    printf 'attempts=%s\n' "$S_ATTEMPTS"
+  } > "$tmp_file"
+  mv "$tmp_file" "$submission_file"
 }
 
 process_presence_delivery_generation() {
@@ -1318,6 +1405,220 @@ remove_presence_for_lane() {
   append_presence_event PRESENCE_UNREGISTERED "$reason"
 }
 
+wake_submission_generation_is_current() {
+  local current_pane current_pid current_command current_path current_root current_generation
+  case "$S_TRANSPORT" in
+    tmux)
+      [[ -S "$S_SOCKET" ]] || return 1
+      current_pane="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_id}' 2>/dev/null || true)"
+      current_pid="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_pid}' 2>/dev/null || true)"
+      current_command="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_current_command}' 2>/dev/null || true)"
+      current_path="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_current_path}' 2>/dev/null || true)"
+      [[ "$current_pane" == "$S_ADDRESS" && "$current_pid" =~ ^[1-9][0-9]*$ && \
+        -n "$current_path" ]] || return 1
+      harness_command_matches "$S_HARNESS" "$current_command" || return 1
+      current_root="$(git -C "$current_path" rev-parse --show-toplevel 2>/dev/null || true)"
+      [[ -n "$current_root" ]] || return 1
+      current_root="$(cd "$current_root" && pwd -P)"
+      [[ "$current_root" == "$S_WORKTREE" ]] || return 1
+      if [[ "$S_GENERATION" == process-* ]]; then
+        current_generation="$(process_presence_delivery_generation \
+          "$S_AGENT" "$S_LANE" "$S_WORKTREE" "$S_HARNESS" 2>/dev/null || true)"
+      else
+        current_generation="tmux-$S_ADDRESS-$current_pid"
+      fi
+      [[ -n "$current_generation" && "$current_generation" == "$S_GENERATION" ]]
+      ;;
+    agentd|loom)
+      local endpoint_file
+      endpoint_file="$(endpoint_path "$S_AGENT" "$S_LANE")"
+      [[ -f "$endpoint_file" ]] || return 1
+      load_endpoint "$endpoint_file"
+      endpoint_state || return 1
+      [[ "$E_ID" == "$S_ENDPOINT_ID" ]] || return 1
+      current_generation="$(registered_delivery_generation 2>/dev/null || true)"
+      [[ -n "$current_generation" && "$current_generation" == "$S_GENERATION" ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_wake_start() {
+  local receipt_file="$1" timeout_millis checks attempt
+  timeout_millis="${SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS:-1500}"
+  [[ "$timeout_millis" =~ ^[0-9]+$ ]] || \
+    die "SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS must be a non-negative integer"
+  checks=$((timeout_millis / 50))
+  for ((attempt = 0; attempt <= checks; attempt++)); do
+    [[ -f "$receipt_file" ]] && return 0
+    ((attempt == checks)) || sleep 0.05
+  done
+  return 1
+}
+
+tmux_wake_prompt_is_visible() {
+  local socket="$1" address="$2" message_id="$3"
+  tmux -S "$socket" capture-pane -p -J -t "$address" 2>/dev/null | \
+    grep -Fq -- "$message_id"
+}
+
+attempt_tmux_wake_submission() {
+  local message_id="$1" endpoint_id="$2" target_agent="$3" target_lane="$4"
+  local harness="$5" target_worktree="$6" socket="$7" address="$8"
+  local generation="$9" discovery="${10}" prompt="${11}"
+  local receipt_file submission_file current_utc current_epoch needs_insert=1
+  local insertion_uncertain=0
+
+  receipt_file="$(wake_receipt_path "$message_id" "$endpoint_id" "$generation")"
+  submission_file="$(wake_submission_path "$message_id" "$endpoint_id" "$generation")"
+  if [[ -f "$receipt_file" ]]; then
+    WAKE_STATUS='deduplicated'
+    printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-started discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$generation" "$discovery"
+    return 0
+  fi
+
+  current_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  current_epoch="$(date +%s)"
+  if [[ -f "$submission_file" ]]; then
+    load_wake_submission "$submission_file"
+    [[ "$S_SCHEMA" == loom-wake-submission-v1 && "$S_MESSAGE_ID" == "$message_id" && \
+      "$S_ENDPOINT_ID" == "$endpoint_id" && "$S_AGENT" == "$target_agent" && \
+      "$S_LANE" == "$target_lane" && "$S_GENERATION" == "$generation" ]] || \
+      die "wake submission identity mismatch: $submission_file"
+    case "$S_STATE" in
+      prepared|submit-uncertain|submitted) ;;
+      *) die "wake submission has invalid transport state: $submission_file" ;;
+    esac
+    case "$S_INSERTION_STATE" in
+      not-attempted) needs_insert=1 ;;
+      confirmed) needs_insert=0 ;;
+      uncertain)
+        needs_insert=0
+        if tmux_wake_prompt_is_visible "$socket" "$address" "$message_id"; then
+          S_INSERTION_STATE='confirmed'
+          [[ -n "$S_INSERTED_UTC" ]] || S_INSERTED_UTC="$current_utc"
+        else
+          insertion_uncertain=1
+        fi
+        ;;
+      *) die "wake submission has invalid insertion state: $submission_file" ;;
+    esac
+  else
+    S_SCHEMA='loom-wake-submission-v1'
+    S_STATE='prepared'
+    S_MESSAGE_ID="$message_id"
+    S_ENDPOINT_ID="$endpoint_id"
+    S_AGENT="$target_agent"
+    S_LANE="$target_lane"
+    S_HARNESS="$harness"
+    S_WORKTREE="$target_worktree"
+    S_TRANSPORT='tmux'
+    S_ADDRESS="$address"
+    S_SOCKET="$socket"
+    S_GENERATION="$generation"
+    S_DISCOVERY="$discovery"
+    S_CREATED_UTC="$current_utc"
+    S_INSERTION_STATE='not-attempted'
+    S_INSERTED_UTC=''
+    S_SUBMITTED_UTC=''
+    S_LAST_ATTEMPT_EPOCH=0
+    S_ATTEMPTS=0
+  fi
+  S_LAST_ATTEMPT_EPOCH="$current_epoch"
+  S_ATTEMPTS=$((S_ATTEMPTS + 1))
+  if ((needs_insert)); then
+    # Persist uncertainty before the external write. A crash after send-keys
+    # can recover by observing this exact message id, but may never reinsert.
+    S_INSERTION_STATE='uncertain'
+  fi
+  write_wake_submission "$submission_file"
+  cleanup_lock
+
+  if ((insertion_uncertain)); then
+    WAKE_STATUS='pending-insertion-uncertain'
+    printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=insertion-uncertain discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 1
+  fi
+
+  if [[ -f "$receipt_file" ]]; then
+    WAKE_STATUS='started'
+    printf 'WAKE_STARTED message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 0
+  fi
+
+  if ((needs_insert)); then
+    if ! tmux -S "$socket" send-keys -t "$address" -l "$prompt" 2>/dev/null; then
+      WAKE_STATUS='pending-insertion-uncertain'
+      printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=insertion-uncertain discovery=%s\n' \
+        "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+      return 1
+    fi
+    if [[ "${SOUNIO_COORD_TEST_FAIL_AFTER_WAKE_INSERT:-0}" == 1 ]]; then
+      WAKE_STATUS='pending-insertion-uncertain'
+      printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=insertion-uncertain discovery=%s sabotage=after-external-insert\n' \
+        "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+      return 1
+    fi
+    acquire_state_lock "the wake insertion receipt"
+    if [[ -f "$submission_file" && ! -f "$receipt_file" ]]; then
+      load_wake_submission "$submission_file"
+      S_INSERTION_STATE='confirmed'
+      S_INSERTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_wake_submission "$submission_file"
+    fi
+    cleanup_lock
+    printf 'utc=%s event=WAKE_INSERTED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$endpoint_id" \
+      "$target_agent" "$target_lane" "$address" "$generation" "$discovery" >> "$EVENT_LOG"
+  fi
+
+  acquire_state_lock "the wake submit preparation"
+  if [[ -f "$submission_file" && ! -f "$receipt_file" ]]; then
+    load_wake_submission "$submission_file"
+    case "$S_STATE" in
+      prepared) S_STATE='submit-uncertain' ;;
+      submit-uncertain|submitted) ;;
+      *) die "wake submission has invalid pre-submit state: $submission_file" ;;
+    esac
+    write_wake_submission "$submission_file"
+  fi
+  cleanup_lock
+
+  if [[ ! -f "$receipt_file" ]] && \
+    ! tmux -S "$socket" send-keys -t "$address" Enter 2>/dev/null; then
+    WAKE_STATUS='pending-submit'
+    printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=submit-pending discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 1
+  fi
+  acquire_state_lock "the wake submit receipt"
+  if [[ -f "$submission_file" && ! -f "$receipt_file" ]]; then
+    load_wake_submission "$submission_file"
+    S_STATE='submitted'
+    [[ -n "$S_SUBMITTED_UTC" ]] || \
+      S_SUBMITTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_wake_submission "$submission_file"
+  fi
+  cleanup_lock
+  printf 'utc=%s event=WAKE_SUBMITTED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$endpoint_id" \
+    "$target_agent" "$target_lane" "$address" "$generation" "$discovery" >> "$EVENT_LOG"
+
+  if wait_for_wake_start "$receipt_file"; then
+    WAKE_STATUS='started'
+    printf 'WAKE_STARTED message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 0
+  fi
+  WAKE_STATUS='pending-start'
+  printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=awaiting-start discovery=%s\n' \
+    "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+  return 1
+}
+
 WAKE_STATUS='unavailable'
 attempt_message_wake() {
   local message_id="$1" message_file endpoint_file receipt_file prompt tmp_file ack_file
@@ -1358,44 +1659,39 @@ attempt_message_wake() {
     receipt_file="$(wake_receipt_path "$M_ID" "$D_ENDPOINT_ID" "$delivery_generation")"
     if [[ -f "$receipt_file" ]]; then
       WAKE_STATUS='deduplicated'
-      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered discovery=%s\n' \
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-started discovery=%s\n' \
         "$M_ID" "$D_ENDPOINT_ID" "$delivery_generation" "$D_DISCOVERY"
       return 0
     fi
     launcher="$(coord_inbox_launcher)"
     prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $D_AGENT --lane $D_LANE --directed-only --newest-first, then run $launcher reply --agent $D_AGENT --lane $D_LANE --reply-to $M_ID --message \"<response>\" or $launcher ack --agent $D_AGENT --lane $D_LANE --message $M_ID."
-    if ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" -l "$prompt" 2>/dev/null || \
-      ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" Enter 2>/dev/null; then
-      WAKE_STATUS='failed'
-      printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=tmux discovery=%s\n' \
-        "$M_ID" "$D_ENDPOINT_ID" "$D_DISCOVERY" >&2
-      return 1
-    fi
-    tmp_file="$(mktemp "$WAKES_DIR/.wake-write.XXXXXX")"
-    printf 'utc=%s message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
-      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$delivery_generation" \
-      "$D_DISCOVERY" > "$tmp_file"
-    mv "$tmp_file" "$receipt_file"
-    printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s discovery=%s\n' \
-      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" "$D_ADDRESS" \
-      "$delivery_generation" "$D_DISCOVERY" >> "$EVENT_LOG"
-    WAKE_STATUS='delivered'
-    printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
-      "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$delivery_generation" "$D_DISCOVERY"
-    return 0
+    attempt_tmux_wake_submission "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" \
+      "$D_HARNESS" "$D_WORKTREE" "$D_SOCKET" "$D_ADDRESS" "$delivery_generation" \
+      "$D_DISCOVERY" "$prompt"
+    return $?
   fi
   load_endpoint "$endpoint_file"
   delivery_generation="$(registered_delivery_generation)" || return 1
   receipt_file="$(wake_receipt_path "$M_ID" "$E_ID" "$delivery_generation")"
   if [[ -f "$receipt_file" ]]; then
     WAKE_STATUS='deduplicated'
-    printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered\n' \
-      "$M_ID" "$E_ID" "$delivery_generation"
+    if [[ "$E_TRANSPORT" == tmux ]]; then
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-started\n' \
+        "$M_ID" "$E_ID" "$delivery_generation"
+    else
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered\n' \
+        "$M_ID" "$E_ID" "$delivery_generation"
+    fi
     return 0
   fi
 
   launcher="$(coord_inbox_launcher)"
   prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then run $launcher reply --agent $E_AGENT --lane $E_LANE --reply-to $M_ID --message \"<response>\" or $launcher ack --agent $E_AGENT --lane $E_LANE --message $M_ID."
+  if [[ "$E_TRANSPORT" == tmux ]]; then
+    attempt_tmux_wake_submission "$M_ID" "$E_ID" "$E_AGENT" "$E_LANE" "$E_HARNESS" \
+      "$E_WORKTREE" "$E_SOCKET" "$E_ADDRESS" "$delivery_generation" registered "$prompt"
+    return $?
+  fi
   if ! deliver_registered_endpoint "$prompt" "$M_ID"; then
     WAKE_STATUS='failed'
     printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=%s\n' \
@@ -2622,6 +2918,48 @@ coord_obligation_reconcile_command() {
     "$opened" "$marked" "$legacy" "$ignored"
 }
 
+coord_wake_reconcile_command() {
+  (($# == 0)) || die "wake-reconcile does not accept arguments"
+  local submission_file message_file runtime_self now_epoch retry_interval
+  local attempted=0 started=0 pending=0 skipped=0 sender_agent sender_lane output
+  local -a submission_paths=()
+  retry_interval="${SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS:-1}"
+  [[ "$retry_interval" =~ ^[1-9][0-9]*$ ]] || \
+    die "SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS must be a positive integer"
+  now_epoch="$(date +%s)"
+  runtime_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  submission_paths=("$WAKE_SUBMISSIONS_DIR"/*.submitted)
+  for submission_file in "${submission_paths[@]}"; do
+    [[ -f "$submission_file" ]] || continue
+    load_wake_submission "$submission_file"
+    [[ "$S_SCHEMA" == loom-wake-submission-v1 && \
+      "$S_LAST_ATTEMPT_EPOCH" =~ ^[0-9]+$ ]] || \
+      { skipped=$((skipped + 1)); continue; }
+    case "$S_STATE" in
+      prepared|submit-uncertain|submitted) ;;
+      *) skipped=$((skipped + 1)); continue ;;
+    esac
+    ((now_epoch >= S_LAST_ATTEMPT_EPOCH + retry_interval)) || { skipped=$((skipped + 1)); continue; }
+    message_file="$MESSAGES_DIR/$(slug "$S_MESSAGE_ID").message"
+    [[ -f "$message_file" ]] || { skipped=$((skipped + 1)); continue; }
+    load_message "$message_file"
+    sender_agent="$M_FROM_AGENT"
+    sender_lane="$M_FROM_LANE"
+    attempted=$((attempted + 1))
+    if output="$(env SOUNIO_COORD_DIR="$STATE_DIR" \
+      SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS="${SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS:-250}" \
+      "$runtime_self" wake --agent "$sender_agent" --lane "$sender_lane" \
+      --message "$S_MESSAGE_ID" 2>&1)"; then
+      started=$((started + 1))
+    else
+      pending=$((pending + 1))
+    fi
+    printf '%s\n' "$output"
+  done
+  printf 'WAKE_RECONCILE attempted=%s started=%s pending=%s skipped=%s\n' \
+    "$attempted" "$started" "$pending" "$skipped"
+}
+
 coord_obligation_supervisor_stop_children() {
   local child
   for child in $(jobs -pr); do
@@ -2777,6 +3115,7 @@ coord_obligation_supervisor_command() {
   [[ "$interval" =~ ^[1-9][0-9]*$ ]] && ((interval <= 60)) ||
     die "obligation supervisor interval must be between 1 and 60 seconds"
   coord_obligation_reconcile_command >/dev/null
+  coord_wake_reconcile_command >/dev/null
   if ((once)); then
     coord_obligation_invoke "${args[@]}"
     return 0
@@ -2786,7 +3125,8 @@ coord_obligation_supervisor_command() {
   trap 'coord_obligation_supervisor_stop_children; exit 143' TERM
   (
     while sleep "$interval"; do
-      if ! (coord_obligation_reconcile_command >/dev/null); then
+      if ! (coord_obligation_reconcile_command >/dev/null && \
+        coord_wake_reconcile_command >/dev/null); then
         kill -TERM "$$" 2>/dev/null || true
         exit 1
       fi
@@ -3138,6 +3478,69 @@ inbox_command() {
   printf 'inbox_omitted=%s\n' "$omitted"
 }
 
+promote_wake_submissions_for_injection() {
+  local message_id="$1" agent="$2" lane="$3" submission_file receipt_file tmp_file
+  local promoted=0
+  local -a submission_paths=()
+  submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$message_id")"--*.submitted)
+  for submission_file in "${submission_paths[@]}"; do
+    [[ -f "$submission_file" ]] || continue
+    load_wake_submission "$submission_file"
+    [[ "$S_SCHEMA" == loom-wake-submission-v1 && \
+      "$S_MESSAGE_ID" == "$message_id" && "$S_AGENT" == "$agent" && \
+      "$S_LANE" == "$lane" && "$S_INSERTION_STATE" == confirmed && \
+      -n "$S_INSERTED_UTC" ]] || continue
+    case "$S_STATE" in
+      submit-uncertain) ;;
+      submitted) [[ -n "$S_SUBMITTED_UTC" ]] || continue ;;
+      *) continue ;;
+    esac
+    if ! wake_submission_generation_is_current; then
+      printf 'utc=%s event=WAKE_START_REFUSED message_id=%s endpoint_id=%s agent=%s lane=%s generation=%s reason=generation-drift\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$agent" "$lane" "$S_GENERATION" >> "$EVENT_LOG"
+      continue
+    fi
+    if [[ "$S_STATE" == submit-uncertain ]]; then
+      S_STATE='submitted'
+      S_SUBMITTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_wake_submission "$submission_file"
+    fi
+    receipt_file="$(wake_receipt_path "$message_id" "$S_ENDPOINT_ID" "$S_GENERATION")"
+    if [[ ! -f "$receipt_file" ]]; then
+      tmp_file="$(mktemp "$WAKES_DIR/.wake-start-write.XXXXXX")"
+      printf 'utc=%s message_id=%s endpoint_id=%s transport=%s address=%s generation=%s discovery=%s state=started insertion_state=%s inserted_utc=%s submitted_utc=%s attempts=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$S_TRANSPORT" "$S_ADDRESS" "$S_GENERATION" "$S_DISCOVERY" \
+        "$S_INSERTION_STATE" "${S_INSERTED_UTC:--}" "$S_SUBMITTED_UTC" \
+        "$S_ATTEMPTS" > "$tmp_file"
+      mv "$tmp_file" "$receipt_file"
+      printf 'utc=%s event=WAKE_STARTED message_id=%s endpoint_id=%s agent=%s lane=%s transport=%s address=%s generation=%s discovery=%s attempts=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$agent" "$lane" "$S_TRANSPORT" "$S_ADDRESS" "$S_GENERATION" \
+        "$S_DISCOVERY" "$S_ATTEMPTS" >> "$EVENT_LOG"
+    fi
+    unlink "$submission_file"
+    promoted=$((promoted + 1))
+    printf 'WAKE_STARTED message_id=%s endpoint_id=%s transport=%s address=%s generation=%s discovery=%s\n' \
+      "$message_id" "$S_ENDPOINT_ID" "$S_TRANSPORT" "$S_ADDRESS" \
+      "$S_GENERATION" "$S_DISCOVERY"
+  done
+  if ((promoted)); then
+    submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$message_id")"--*.submitted)
+    for submission_file in "${submission_paths[@]}"; do
+      [[ -f "$submission_file" ]] || continue
+      load_wake_submission "$submission_file"
+      if [[ "$S_SCHEMA" == loom-wake-submission-v1 && \
+        "$S_MESSAGE_ID" == "$message_id" && "$S_AGENT" == "$agent" && \
+        "$S_LANE" == "$lane" ]]; then
+        unlink "$submission_file"
+      fi
+    done
+  fi
+  return 0
+}
+
 injected_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id message_file injection_file index
   local -a message_ids=() injection_files=()
@@ -3182,6 +3585,7 @@ injected_command() {
       printf 'utc=%s agent=%s lane=%s\n' "$NOW_UTC" "$agent" "$lane" > "$injection_file"
     fi
     printf 'INJECTED message_id=%s agent=%s lane=%s\n' "$message_id" "$agent" "$lane"
+    promote_wake_submissions_for_injection "$message_id" "$agent" "$lane"
   done
 }
 
@@ -3189,11 +3593,11 @@ message_status_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file receipt_file
   local original_from_agent original_from_lane original_to_agent original_to_lane
   local original_kind original_thread original_epoch request_state latest_response='-'
-  local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0 wakes=0
+  local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0 wakes=0 wake_pending=0
   local receipt_utc receipt_agent receipt_lane token_utc token_agent token_lane
-  local token token_message token_endpoint token_transport token_address token_generation
+  local token token_message token_endpoint token_transport token_address token_generation token_state
   local receipt_generation
-  local -a message_paths=() injection_paths=() ack_paths=() wake_paths=() receipt_tokens=()
+  local -a message_paths=() injection_paths=() ack_paths=() wake_paths=() submission_paths=() receipt_tokens=()
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
@@ -3260,12 +3664,14 @@ message_status_command() {
   injection_paths=("$INJECTIONS_DIR/$(slug "$message_id")"--*.injected)
   ack_paths=("$ACKS_DIR/$(slug "$message_id")"--*.ack)
   wake_paths=("$WAKES_DIR/$(slug "$message_id")"--*.wake)
+  submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$message_id")"--*.submitted)
   injected="${#injection_paths[@]}"
   acknowledged="${#ack_paths[@]}"
   wakes="${#wake_paths[@]}"
-  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s wakes=%s\n' \
+  wake_pending="${#submission_paths[@]}"
+  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s wakes=%s wake_pending=%s\n' \
     "$message_id" "$original_kind" "$original_thread" "$request_state" "$injected" \
-    "$acknowledged" "$responses" "$latest_response" "$wakes"
+    "$acknowledged" "$responses" "$latest_response" "$wakes" "$wake_pending"
   for receipt_file in "${injection_paths[@]}"; do
     [[ -f "$receipt_file" ]] || continue
     read -r token_utc token_agent token_lane < "$receipt_file" || true
@@ -3292,6 +3698,7 @@ message_status_command() {
     token_transport=''
     token_address=''
     token_generation=''
+    token_state=''
     receipt_tokens=()
     read -r -a receipt_tokens < "$receipt_file" || true
     for token in "${receipt_tokens[@]}"; do
@@ -3302,13 +3709,15 @@ message_status_command() {
         transport=*) token_transport="$token" ;;
         address=*) token_address="$token" ;;
         generation=*) token_generation="$token" ;;
+        state=*) token_state="$token" ;;
       esac
     done
     receipt_generation="${token_generation#generation=}"
-    printf 'WAKE_RECEIPT message_id=%s utc=%s endpoint_id=%s transport=%s address=%s generation=%s\n' \
+    printf 'WAKE_RECEIPT message_id=%s utc=%s endpoint_id=%s transport=%s address=%s' \
       "$message_id" "${token_utc#utc=}" "${token_endpoint#endpoint_id=}" \
-      "${token_transport#transport=}" "${token_address#address=}" \
-      "${receipt_generation:--}"
+      "${token_transport#transport=}" "${token_address#address=}"
+    [[ -z "$token_state" ]] || printf ' state=%s' "${token_state#state=}"
+    printf ' generation=%s\n' "${receipt_generation:--}"
   done
 }
 
@@ -3409,8 +3818,8 @@ ack_command() {
 prune_command() {
   local removed=0 messages_removed=0 endpoints_removed=0 presences_removed=0
   local recovery_retention="${SOUNIO_COORD_RECOVERY_RETENTION_SECONDS:-604800}"
-  local claim_file message_file ack_file injection_file endpoint_file presence_file wake_file
-  local -a message_paths=() ack_paths=() injection_paths=() endpoint_paths=() presence_paths=() wake_paths=()
+  local claim_file message_file ack_file injection_file endpoint_file presence_file wake_file submission_file
+  local -a message_paths=() ack_paths=() injection_paths=() endpoint_paths=() presence_paths=() wake_paths=() submission_paths=()
   [[ "$recovery_retention" =~ ^[1-9][0-9]*$ ]] || \
     die "SOUNIO_COORD_RECOVERY_RETENTION_SECONDS must be a positive integer"
   acquire_state_lock "prune"
@@ -3443,6 +3852,10 @@ prune_command() {
       wake_paths=("$WAKES_DIR/$(slug "$M_ID")"--*.wake)
       for wake_file in "${wake_paths[@]}"; do
         [[ -f "$wake_file" ]] && unlink "$wake_file"
+      done
+      submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$M_ID")"--*.submitted)
+      for submission_file in "${submission_paths[@]}"; do
+        [[ -f "$submission_file" ]] && unlink "$submission_file"
       done
       messages_removed=$((messages_removed + 1))
       printf 'PRUNED_MESSAGE message_id=%s\n' "$M_ID"
@@ -3804,6 +4217,7 @@ case "$command" in
   obligation-supervisor-ensure) coord_obligation_supervisor_service_command ensure "$@" ;;
   obligation-supervisor-stop) coord_obligation_supervisor_service_command stop "$@" ;;
   wake) wake_command "$@" ;;
+  wake-reconcile) coord_wake_reconcile_command "$@" ;;
   experiment-open) causal_runtime_command open "$@" ;;
   experiment-close) causal_runtime_command close "$@" ;;
   experiment-status) causal_runtime_command status "$@" ;;
@@ -3820,5 +4234,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
 esac

@@ -14,8 +14,12 @@ SIBLING_ROOT="$TEST_ROOT/sibling-worktree"
 SIBLING_ADDED=0
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 SESSION_ID="native-hook-selftest-$$"
+SESSION_LANE="session-${SESSION_ID:0:24}"
 
 cleanup() {
+  SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+    "$ROOT_DIR/bin/sounio-coord" obligation-supervisor-stop \
+    --timeout-seconds 5 >/dev/null 2>&1 || true
   if [[ "$SIBLING_ADDED" -eq 1 ]]; then
     git -C "$ROOT_DIR" worktree remove --force "$SIBLING_ROOT" >/dev/null 2>&1 || true
   fi
@@ -61,6 +65,23 @@ session_start="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$SESSION_I
 run_hook "$session_start"
 [[ "$HOOK_RC" -eq 0 && "$HOOK_OUTPUT" == *'Sounio coordination joined:'* ]] ||
   fail "native SessionStart failed: rc=$HOOK_RC output=$HOOK_OUTPUT"
+supervisor_status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" obligation-supervisor-status)"
+[[ "$supervisor_status" == *'state=live'* ]] || \
+  fail "SessionStart did not ensure the native retry supervisor: $supervisor_status"
+
+message_output="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  SOUNIO_COORD_DURABLE_OBLIGATIONS=0 "$ROOT_DIR/bin/sounio-coord" send \
+  --agent sender --lane native-hook-test --to-agent codex --to-lane "$SESSION_LANE" \
+  --kind info --message 'native prompt boundary start witness')"
+message_id="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<< "$message_output")"
+[[ -n "$message_id" ]] || fail 'native hook witness message was not persisted'
+prompt_event="{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\",\"prompt\":\"native hook witness\"}"
+run_hook "$prompt_event"
+[[ "$HOOK_RC" -eq 0 && "$HOOK_OUTPUT" == *"MESSAGE id=$message_id "* ]] ||
+  fail "UserPromptSubmit did not consume the durable inbox: rc=$HOOK_RC output=$HOOK_OUTPUT"
+injection_receipt="$COORD_DIR/message-injections/$message_id--codex--$SESSION_LANE.injected"
+[[ -f "$injection_receipt" ]] || fail 'UserPromptSubmit omitted its injection receipt'
 
 write_event="{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"tools/loom/native-hook-probe.txt\"}}"
 run_hook "$write_event"
@@ -187,4 +208,4 @@ status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
 [[ "$status" != *"session-$SESSION_ID"* ]] || fail "SessionEnd left an active native-hook claim"
 
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio session=roundtrip writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused log_redirect=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio session=roundtrip prompt_boundary=injected retry_supervisor=live writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused log_redirect=refused decision_receipt=complete python=not-executed rust=not-executed'
