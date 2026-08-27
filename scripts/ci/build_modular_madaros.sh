@@ -70,6 +70,7 @@ fi
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 
+BUILD_LOG="$(mktemp "${TMPDIR:-/tmp}/madaros-build.XXXXXX.log")"
 # Derive a source-tracking seed. If SOUC_BIN/SOUNIO_SOUC_BIN was explicitly set we
 # trust it as an already-fresh seed (e.g. a gen3.elf) and use it directly. Otherwise
 # the bootstrap ELF is a committed binary that may lag the source, so we first
@@ -77,6 +78,7 @@ rm -f "$OUT"
 # current source's features (arena/vmem #719 etc.), then compile main.sio with that.
 TMP_SEED_DIR=""
 cleanup() {
+    rm -f "$BUILD_LOG"
     if [[ -n "$TMP_SEED_DIR" && -d "$TMP_SEED_DIR" ]]; then
         rm -rf "$TMP_SEED_DIR"
     fi
@@ -130,8 +132,30 @@ echo "  seed:  $SEED"
 echo "  src:   $SRC"
 echo "  out:   $OUT"
 
-# Serialize heavy build via the global workspace lock.
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+run_seed_build() {
+    local seed="$1"
+    rm -f "$BUILD_LOG"
+    set +e
+    scripts/dev/souc-build-lock.sh "$seed" "$SRC" "$OUT" >"$BUILD_LOG" 2>&1
+    local rc=$?
+    set -e
+    cat "$BUILD_LOG"
+    if grep -Eq '^(error(\[[^]]+\])?:|Error:)' "$BUILD_LOG"; then
+        echo "error: modular compiler emitted an error diagnostic despite exit $rc" >&2
+        return 86
+    fi
+    return "$rc"
+}
+
+# Serialize heavy build via the global workspace lock, through the fail-closed
+# wrapper: a compiler that prints `error:` and still exits 0 must not hand the
+# caller a "successful" binary.
+#
+# Rebase note (2026-08-27): this PR's original branch wrapped a `run_seed_build`
+# + pinned-seed-retry machinery that main has since deleted (no PINNED_SEED /
+# SOUNIO_MADAROS_SEED path survives on main; seed derivation is now unconditional
+# above). Only the fail-closed half is carried over, wired to main's single call.
+run_seed_build "$SEED"
 
 if [[ ! -s "$OUT" ]]; then
     echo "error: modular compiler build produced no output: $OUT" >&2

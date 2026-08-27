@@ -12,7 +12,7 @@
 #   madaros --version
 #   madaros info
 #   madaros check input.sio
-#   madaros build input.sio [-o OUT] [--backend native|gpu]
+#   madaros build input.sio [-o OUT] [--backend native|gpu|wasm]
 #   madaros run input.sio
 #   madaros pkg ...
 #
@@ -85,8 +85,8 @@ Usage:
   madaros info                          print resolution path
   madaros check <source.sio|project-dir>
                                       parse, resolve and typecheck
-  madaros build <source.sio|project-dir> [-o OUT] [--backend native|gpu]
-                                      compile source to native ELF or GPU artifact
+  madaros build <source.sio|project-dir> [-o OUT] [--backend native|gpu|wasm]
+                                      compile source to native ELF, GPU, or WebAssembly
   madaros compile <source.sio|project-dir> [-o OUT]
                                       alias for build
   madaros run <source.sio|project-dir>
@@ -101,6 +101,9 @@ Common modular-compiler modes:
   madaros --native-v2-emit-scalar N     emit a scalar witness
   madaros --version-json                emit version metadata
   madaros pkg ...                       package manager commands
+
+WebAssembly build options:
+  --backend wasm                        emit a WebAssembly module
 
 GPU build options:
   --backend gpu                         emit PTX via the public GPU build path
@@ -489,7 +492,7 @@ _parse_build_options() {
         ;;
       --backend)
         if [[ $# -lt 2 ]]; then
-          echo "error: madaros build: --backend requires native or gpu" >&2
+          echo "error: madaros build: --backend requires native, gpu, or wasm" >&2
           return 2
         fi
         BUILD_BACKEND="$2"
@@ -534,7 +537,7 @@ _parse_build_options() {
   done
   case "$BUILD_BACKEND" in
     native|"") BUILD_BACKEND="native" ;;
-    gpu) ;;
+    gpu|wasm) ;;
     *)
       echo "error: madaros build: unsupported backend: $BUILD_BACKEND" >&2
       return 2
@@ -548,6 +551,38 @@ _compile_source_to_artifact() {
   local src="$1"
   local out="$2"
   local rc=0
+  if [[ "$BUILD_BACKEND" == "wasm" ]]; then
+    # Guard: bounded vmem + 300 s timeout. The modular compiler owns lowering;
+    # the launcher verifies that the claimed artifact is actually WebAssembly.
+    #
+    # Rebase note (2026-08-27): the original PR branch predates main's Lane A1
+    # invariant above ("never file-non-empty alone"), so its wasm branch dropped
+    # the compiler's exit status. Both intents are kept here: rc is captured and
+    # a partial artifact is discarded (main), then the WASM magic is checked (PR).
+    set +e
+    ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$src" -t wasm -o "$out" )
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+      echo "error: madaros build: compiler exited with status $rc" >&2
+      if [[ -s "$out" ]]; then
+        echo "error: madaros build: discarding partial WASM artifact at $out" >&2
+        rm -f "$out"
+      fi
+      return "$rc"
+    fi
+    if [[ ! -s "$out" ]]; then
+      echo "error: madaros build: compiler produced no WASM artifact at $out" >&2
+      return 1
+    fi
+    local wasm_magic
+    wasm_magic="$(od -An -tx1 -N4 "$out" 2>/dev/null | tr -d '[:space:]')"
+    if [[ "$wasm_magic" != "0061736d" ]]; then
+      echo "error: madaros build: invalid WASM magic at $out" >&2
+      return 1
+    fi
+    return 0
+  fi
   if [[ "$BUILD_BACKEND" == "gpu" ]]; then
     local gpu_args=("$src" -o "$out" --gpu-target "$BUILD_GPU_TARGET")
     if [[ -n "$BUILD_GPU_BINARY_FORMAT" ]]; then
