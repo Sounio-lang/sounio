@@ -287,6 +287,13 @@ fleet_json="$(curl -fsS "$gui_url/api/fleet")"
   fail 'authority overlay observed the wrong Loom generation'
 [[ "$fleet_json" == *'"loom_state":"active"'* ]] || \
   fail 'authority overlay omitted active Loom custody'
+tui_machine="$("$LOOM" tui --machine --state-dir "$STATE_DIR" --cwd "$TEST_ROOT")"
+grep -q '^LOOM_TUI schema=loom-truthful-fleet-tui-v1 authority=Sounio realization=OCaml ' \
+  <<< "$tui_machine" || fail 'TUI omitted the truthful-health authority header'
+grep -q 'semantics_sha256=5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f' \
+  <<< "$tui_machine" || fail 'TUI omitted the frozen Sounio semantics hash'
+grep -Eq "^LOOM_TUI_LANE health=[A-Z]+ agent=$AGENT lane=$LANE .*custody=active " \
+  <<< "$tui_machine" || fail 'TUI omitted the live Loom-owned lane'
 events_json="$(curl -fsS "$gui_url/api/events")"
 [[ "$events_json" == *"\"instance_id\":\"$instance_id\""* ]] || \
   fail 'event chronograph observed the wrong generation'

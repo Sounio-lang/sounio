@@ -4669,6 +4669,21 @@ let authority_rank lane =
   | Loom_lane_health.Conflicted -> 7
   | Loom_lane_health.Unknown -> 8
 
+let sorted_authority_values lanes =
+  Hashtbl.fold (fun _ value found -> value :: found) lanes []
+  |> List.sort (fun left right ->
+         let rank = compare (authority_rank left) (authority_rank right) in
+         if rank <> 0 then rank
+         else
+           compare
+             (left.authority_agent, left.authority_lane)
+             (right.authority_agent, right.authority_lane))
+
+let count_authority_health values state =
+  List.fold_left
+    (fun total lane -> if truthful_state lane = state then total + 1 else total)
+    0 values
+
 let authority_lane_json lane =
   let health = truthful_state lane in
   let boolean value = if value then "true" else "false" in
@@ -4742,22 +4757,11 @@ let fleet_json root cwd =
   let coordination_available, snapshot_utc, snapshot_authorized, lanes =
     load_authority_lanes root cwd
   in
-  let values = Hashtbl.fold (fun _ value found -> value :: found) lanes [] in
-  let values =
-    List.sort
-      (fun left right ->
-        let rank = compare (authority_rank left) (authority_rank right) in
-        if rank <> 0 then rank
-        else
-          compare
-            (left.authority_agent, left.authority_lane)
-            (right.authority_agent, right.authority_lane))
-      values
-  in
+  let values = sorted_authority_values lanes in
   let count predicate =
     List.fold_left (fun total value -> if predicate value then total + 1 else total) 0 values
   in
-  let count_health state = count (fun lane -> truthful_state lane = state) in
+  let count_health = count_authority_health values in
   Printf.sprintf
     "{\"schema\":\"loom-authority-overlay-v2\",\"compatibility_schema\":\"loom-authority-overlay-v1\",\"snapshot_utc\":\"%s\",\"coordination_available\":%s,\"observation_authorized\":%s,\"health_authority\":\"Sounio\",\"health_realization\":\"OCaml\",\"health_semantics_sha256\":\"%s\",\"summary\":{\"lanes\":%d,\"live\":%d,\"raw_unresponsive\":%d,\"raw_orphaned\":%d,\"loom_custody\":%d,\"active_endpoints\":%d,\"working\":%d,\"idle\":%d,\"blocked\":%d,\"disconnected\":%d,\"unresponsive\":%d,\"orphaned\":%d,\"dead\":%d,\"conflicted\":%d,\"unknown\":%d},\"lanes\":[%s]}"
     (json_escape snapshot_utc)
@@ -7336,31 +7340,149 @@ let serve_http cli =
   done;
   Unix.close server
 
+let tui_health_color = function
+  | Loom_lane_health.Working -> "\027[38;5;48m"
+  | Loom_lane_health.Idle -> "\027[38;5;51m"
+  | Loom_lane_health.Blocked -> "\027[38;5;220m"
+  | Loom_lane_health.Disconnected -> "\027[38;5;208m"
+  | Loom_lane_health.Unresponsive -> "\027[38;5;203m"
+  | Loom_lane_health.Orphaned -> "\027[38;5;171m"
+  | Loom_lane_health.Dead -> "\027[38;5;244m"
+  | Loom_lane_health.Conflicted -> "\027[1;38;5;197m"
+  | Loom_lane_health.Unknown -> "\027[38;5;250m"
+
+let tui_clip width value =
+  if String.length value <= width then value
+  else if width <= 1 then String.sub value 0 width
+  else String.sub value 0 (width - 1) ^ "~"
+
+let tui_window_size () =
+  match Sys.getenv_opt "LINES" with
+  | Some value ->
+      (try max 6 (min 30 (int_of_string value - 10)) with _ -> 14)
+  | None -> 14
+
+let rec tui_drop count values =
+  if count <= 0 then values
+  else match values with [] -> [] | _ :: tail -> tui_drop (count - 1) tail
+
+let rec tui_take count values =
+  if count <= 0 then []
+  else match values with [] -> [] | head :: tail -> head :: tui_take (count - 1) tail
+
+let tui_machine_snapshot root cwd =
+  let coordination_available, snapshot_utc, snapshot_authorized, lanes =
+    load_authority_lanes root cwd
+  in
+  let values = sorted_authority_values lanes in
+  Printf.printf
+    "LOOM_TUI schema=loom-truthful-fleet-tui-v1 authority=Sounio realization=OCaml semantics_sha256=%s snapshot_utc=%s coordination_available=%s observation_authorized=%s lanes=%d\n%!"
+    Loom_lane_health.parent_semantics_sha256 snapshot_utc
+    (if coordination_available then "true" else "false")
+    (if snapshot_authorized then "true" else "false")
+    (List.length values);
+  List.iter
+    (fun lane ->
+      let health = truthful_state lane in
+      Printf.printf
+        "LOOM_TUI_LANE health=%s agent=%s lane=%s pid=%s claim=%s presence=%s reason=%s endpoint=%s custody=%s active_obligations=%d pending_obligations=%d progress=%s ready=%s\n%!"
+        (Loom_lane_health.name health) lane.authority_agent lane.authority_lane
+        (if lane.authority_harness_pid <> "" then lane.authority_harness_pid
+         else lane.authority_pid)
+        lane.authority_claim lane.authority_presence lane.authority_presence_reason
+        lane.authority_endpoint lane.authority_loom_state
+        lane.authority_active_obligations lane.authority_pending_obligations
+        (if lane.authority_progress_observed then "yes" else "no")
+        (if lane.authority_ready_observed then "yes" else "no"))
+    values
+
 let tui_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
-  if not (Unix.isatty Unix.stdin) then list_command cli
+  if flag cli "--machine" then tui_machine_snapshot root cwd
+  else if not (Unix.isatty Unix.stdin) then list_command cli
   else
     let original = set_terminal_raw Unix.stdin in
-    let selected = ref 0 and running = ref true in
+    let selected = ref 0 and running = ref true and notice = ref "" in
     Fun.protect
       ~finally:(fun () -> Unix.tcsetattr Unix.stdin TCSANOW original; print_string "\027[?25h\027[0m\n"; flush Stdlib.stdout)
       (fun () ->
         print_string "\027[?25l";
         while !running do
-          let sessions = session_descriptors root in
-          if !selected >= List.length sessions then selected := max 0 (List.length sessions - 1);
-          Printf.printf "\027[2J\027[H\027[1;37mSOUNIO LOOM\027[0m  durable fleet multiplexer\n";
-          Printf.printf "\027[90m%-4s %-14s %-32s %-9s %-8s %s\027[0m\n" "" "AGENT" "LANE" "STATE" "PID" "CURSOR";
+          let coordination_available, _, snapshot_authorized, lanes =
+            load_authority_lanes root cwd
+          in
+          let values = sorted_authority_values lanes in
+          let length = List.length values in
+          if !selected >= length then selected := max 0 (length - 1);
+          let window = tui_window_size () in
+          let first =
+            max 0 (min (max 0 (length - window)) (!selected - (window / 2)))
+          in
+          let visible = tui_take window (tui_drop first values) in
+          let count state = count_authority_health values state in
+          Printf.printf
+            "\027[2J\027[H\027[1;37mSOUNIO LOOM\027[0m  Sounio-authoritative fleet health\n";
+          Printf.printf
+            "\027[90mauthority=Sounio  realization=OCaml  semantics=%s  observation=%s  lanes=%d\027[0m\n"
+            (String.sub Loom_lane_health.parent_semantics_sha256 0 12)
+            (if coordination_available && snapshot_authorized then
+               "VERIFIED" else "UNKNOWN")
+            length;
+          Printf.printf
+            "\027[38;5;48mWORK %d\027[0m  \027[38;5;51mIDLE %d\027[0m  \027[38;5;220mBLOCK %d\027[0m  \027[38;5;208mDISC %d\027[0m  \027[38;5;203mUNRESP %d\027[0m\n"
+            (count Loom_lane_health.Working) (count Loom_lane_health.Idle)
+            (count Loom_lane_health.Blocked)
+            (count Loom_lane_health.Disconnected)
+            (count Loom_lane_health.Unresponsive);
+          Printf.printf
+            "\027[38;5;171mORPH %d\027[0m  \027[38;5;244mDEAD %d\027[0m  \027[1;38;5;197mCONFLICT %d\027[0m  \027[38;5;250mUNKNOWN %d\027[0m\n"
+            (count Loom_lane_health.Orphaned)
+            (count Loom_lane_health.Dead)
+            (count Loom_lane_health.Conflicted)
+            (count Loom_lane_health.Unknown);
+          Printf.printf
+            "\027[90m   %-12s %-10s %-26s %-7s %-3s %-8s\027[0m\n"
+            "HEALTH" "AGENT" "LANE" "PID" "OBL" "ENDPOINT";
           List.iteri
-            (fun index (_, values) ->
-              let marker = if index = !selected then "\027[36m > " else "   " in
-              Printf.printf "%s%-14s %-32s %-9s %-8s %s\027[0m\n" marker
-                (table_value values "agent") (table_value values "lane")
-                (table_value values "state") (table_value values "harness_pid")
-                (string_of_int (file_size (table_value values "output_file"))))
-            sessions;
-          print_string "\n\027[90mj/k select   enter attach   o observe   r refresh   q quit   detach: Ctrl-]\027[0m\n";
+            (fun visible_index lane ->
+              let index = first + visible_index in
+              let health = truthful_state lane in
+              let marker = if index = !selected then " > " else "   " in
+              let pid =
+                if lane.authority_harness_pid <> "" then
+                  lane.authority_harness_pid else lane.authority_pid
+              in
+              Printf.printf "%s%s%s%-12s %-10s %-26s %-7s %-3d %-8s\027[0m\n"
+                (if index = !selected then "\027[1m" else "")
+                (tui_health_color health) marker (Loom_lane_health.name health)
+                (tui_clip 10 lane.authority_agent)
+                (tui_clip 26 lane.authority_lane) (tui_clip 7 pid)
+                (lane.authority_active_obligations
+                 + lane.authority_pending_obligations)
+                (tui_clip 8 lane.authority_endpoint))
+            visible;
+          Printf.printf "\027[90mshowing %d-%d/%d\027[0m\n"
+            (if length = 0 then 0 else first + 1)
+            (min length (first + List.length visible)) length;
+          (match List.nth_opt values !selected with
+          | None -> print_string "\nno observed lanes\n"
+          | Some lane ->
+              Printf.printf
+                "selected %s/%s  claim=%s presence=%s(%s) custody=%s\n"
+                (tui_clip 14 lane.authority_agent)
+                (tui_clip 42 lane.authority_lane) lane.authority_claim
+                lane.authority_presence lane.authority_presence_reason
+                lane.authority_loom_state;
+              Printf.printf
+                "endpoint=%s progress=%s ready=%s obligations=%d/%d%s\n"
+                lane.authority_endpoint
+                (if lane.authority_progress_observed then "yes" else "no")
+                (if lane.authority_ready_observed then "yes" else "no")
+                lane.authority_active_obligations
+                lane.authority_pending_obligations
+                (if !notice = "" then "" else "  " ^ !notice));
+          print_string "\027[90mj/k select   enter attach   o observe   r refresh   q quit   detach: Ctrl-]\027[0m\n";
           flush Stdlib.stdout;
           let readable, _, _ = Unix.select [ Unix.stdin ] [] [] 1.0 in
           if readable <> [] then
@@ -7368,24 +7490,31 @@ let tui_command cli =
             if Unix.read Unix.stdin byte 0 1 = 1 then
               match Bytes.get byte 0 with
               | 'q' -> running := false
-              | 'j' -> if !selected + 1 < List.length sessions then incr selected
+              | 'j' -> if !selected + 1 < length then incr selected
               | 'k' -> if !selected > 0 then decr selected
+              | 'r' -> notice := "snapshot refreshed"
               | '\r' | '\n' | 'o' as key -> (
-                  match List.nth_opt sessions !selected with
+                  match List.nth_opt values !selected with
                   | None -> ()
-                  | Some (_, values) ->
+                  | Some lane when lane.authority_loom_state <> "active" ->
+                      notice :=
+                        (if lane.authority_loom_state = "recoverable" then
+                           "attach refused: recover custody first"
+                         else "attach refused: no Loom custody")
+                  | Some lane ->
                       Unix.tcsetattr Unix.stdin TCSANOW original;
                       print_string "\027[2J\027[H\027[?25h";
                       flush Stdlib.stdout;
                       let attach_cli =
                         { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2; rest = [] }
                       in
-                      Hashtbl.replace attach_cli.options "--agent" (table_value values "agent");
-                      Hashtbl.replace attach_cli.options "--lane" (table_value values "lane");
+                      Hashtbl.replace attach_cli.options "--agent" lane.authority_agent;
+                      Hashtbl.replace attach_cli.options "--lane" lane.authority_lane;
                       Hashtbl.replace attach_cli.options "--cursor" "auto";
                       (try stream_command attach_cli (key <> 'o') with Loom_error error -> Printf.eprintf "\nLoom: %s\n%!" error);
                       ignore (set_terminal_raw Unix.stdin);
-                      print_string "\027[?25l")
+                      print_string "\027[?25l";
+                      notice := "")
               | _ -> ()
         done)
 
