@@ -789,6 +789,10 @@ are recorded in
 The detached wrapper also exports its exact coordination state root so an
 independent primary checkout can rediscover the same leader without confusing
 its own Git common directory for the supervisor's custody boundary.
+When a live leader exists, runtime activation itself now performs this handoff:
+the installer returns `ACTIVATED` only after the selected immutable bundle owns
+a new verified generation. If that assumption fails, activation restores the
+previous bundle and its leader before refusing.
 
 The authoritative state lives under the shared coordination directory in
 `loom-obligations/*/journal.tsv`. The TUI, GUI, JSON endpoint, and supervisor are

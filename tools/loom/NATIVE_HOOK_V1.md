@@ -161,6 +161,14 @@ live, checks the wrapper environment for the exact state root, and then stops it
 from that independent checkout. Omitting the binding reproduces the
 cross-checkout refusal and makes this gate fail.
 
+Runtime `2026.08.27.38` moves control-service handoff into the atomic runtime
+activation transaction. When a live supervisor exists, the installer does not
+return `ACTIVATED` until the newly selected immutable bundle has retired the
+old generation and established its own leader. A failed handoff restores the
+previous `current` symlink and re-ensures the previous generation before the
+installer refuses. This removes first-lane warm-up from the hook path and makes
+upgrade and rollback causally visible to the runtime selftest.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic

@@ -91,6 +91,9 @@ ensure_obligation_activation() {
 
 activate_runtime() {
   local runtime_id="$1" version_dir manifest protocol link_tmp
+  local previous_target='' previous_bundle='' previous_runtime=''
+  local control_state control_status='' control_service_was_live=0
+  local ensure_output='' ensure_rc=0
   version_dir="$RUNTIME_ROOT/versions/$runtime_id"
   manifest="$version_dir/manifest"
   [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" && \
@@ -361,11 +364,49 @@ activate_runtime() {
       [[ -x "$version_dir/bin/sounio-fleet-trace-verify" ]] || \
       die "installed runtime declares recovery-latch refinement without its directory authority and verifier: $runtime_id"
   fi
+  control_state="${SOUNIO_COORD_DIR:-$GIT_COMMON_DIR/sounio-coord-state}"
+  if [[ -L "$RUNTIME_ROOT/current" ]]; then
+    previous_target="$(readlink "$RUNTIME_ROOT/current" 2>/dev/null || true)"
+    previous_bundle="$(readlink -f "$RUNTIME_ROOT/current" 2>/dev/null || true)"
+    previous_runtime="$previous_bundle/bin/sounio-coord-runtime"
+    if [[ -x "$previous_runtime" ]]; then
+      control_status="$(
+        SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
+          "$previous_runtime" obligation-supervisor-status 2>/dev/null || true
+      )"
+      if grep -q '^LOOM_OBLIGATION_SUPERVISOR_STATUS state=live ' \
+        <<< "$control_status"; then
+        control_service_was_live=1
+      fi
+    fi
+  fi
   [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
     die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
   link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
   ln -s "versions/$runtime_id" "$link_tmp"
   mv -Tf "$link_tmp" "$RUNTIME_ROOT/current"
+  if ((control_service_was_live)); then
+    set +e
+    ensure_output="$(
+      SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
+        "$version_dir/bin/sounio-coord-runtime" obligation-supervisor-ensure \
+        --interval-seconds 2 9>&- 2>&1
+    )"
+    ensure_rc=$?
+    set -e
+    if ((ensure_rc != 0)); then
+      link_tmp="$RUNTIME_ROOT/.current-rollback.$$.$RANDOM"
+      ln -s "$previous_target" "$link_tmp"
+      mv -Tf "$link_tmp" "$RUNTIME_ROOT/current"
+      if [[ -x "$previous_runtime" ]]; then
+        SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
+          "$previous_runtime" obligation-supervisor-ensure --interval-seconds 2 \
+          9>&- >/dev/null 2>&1 || true
+      fi
+      die "runtime activation could not assume the control service and was rolled back: $ensure_output"
+    fi
+    printf '%s\n' "$ensure_output"
+  fi
   printf 'ACTIVATED runtime_id=%s protocol=%s path=%s\n' \
     "$runtime_id" "$protocol" "$version_dir"
 }

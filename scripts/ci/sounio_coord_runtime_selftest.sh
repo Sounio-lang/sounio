@@ -45,6 +45,19 @@ fail() {
   exit 1
 }
 
+assert_processes_do_not_hold() {
+  local path="$1" label="$2" process_pid fd
+  shift 2
+  for process_pid in "$@"; do
+    [[ -d "/proc/$process_pid/fd" ]] ||
+      fail "$label process disappeared before descriptor inspection: $process_pid"
+    for fd in "/proc/$process_pid/fd/"*; do
+      [[ "$(readlink -f "$fd" 2>/dev/null || true)" != "$(readlink -f "$path")" ]] ||
+        fail "$label inherited forbidden descriptor: $path"
+    done
+  done
+}
+
 snapshot_coord_state() {
   (
     cd "$STATE"
@@ -452,7 +465,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.37$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.27.38$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 
 mkdir -p "$POLICYLESS/bin"
@@ -965,9 +978,21 @@ sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.
 sed -i 's/^let runtime_version = .*/let runtime_version = "2026.08.23.8-test"/' \
   "$ALT/tools/loom/src/loom.ml"
 chmod +x "$ALT/scripts/dev/"*
-output="$(cd "$REPO" && bin/sounio-coord install-runtime --source-root "$ALT")"
+output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord install-runtime --source-root "$ALT")"
+upgrade_output="$output"
 second_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$second_id" && "$second_id" != "$first_id" ]] || fail 'upgrade did not create a new runtime id'
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$upgrade_output" || \
+  fail 'runtime upgrade did not assume the live control service before activation returned'
+upgraded_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$upgrade_output")"
+[[ -n "$upgraded_supervisor_pid" && "$upgraded_supervisor_pid" != "$supervisor_pid" ]] || \
+  fail 'runtime upgrade retained the old control-service generation'
+upgraded_supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' \
+  "/proc/$upgraded_supervisor_pid/status")"
+assert_processes_do_not_hold "$RUNTIME_ROOT/.install.lock" \
+  'upgraded control service' "$upgraded_supervisor_wrapper_pid" \
+  "$upgraded_supervisor_pid"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$second_id$" <<< "$output" || fail 'worktree did not observe atomic runtime upgrade'
 grep -q '^runtime_version=2026.08.23.8-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
@@ -975,27 +1000,70 @@ grep -q '^runtime_version=2026.08.23.8-test$' <<< "$output" || fail 'upgraded ru
   fail 'runtime upgrade rewrote the activation watermark'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
-grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$output" || \
-  fail 'runtime upgrade did not restart the control service onto the selected bundle'
-upgraded_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
-[[ -n "$upgraded_supervisor_pid" && "$upgraded_supervisor_pid" != "$supervisor_pid" ]] || \
-  fail 'runtime upgrade retained the old control-service generation'
+grep -q "^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=$upgraded_supervisor_pid " <<< "$output" || \
+  fail 'post-upgrade ensure did not observe the installer-owned control-service generation'
 supervisor_pid="$upgraded_supervisor_pid"
 
-output="$(cd "$REPO" && bin/sounio-coord install-runtime --activate "$first_id")"
+output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord install-runtime --activate "$first_id")"
+rollback_output="$output"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'runtime rollback failed'
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$rollback_output" || \
+  fail 'runtime rollback did not assume the live control service before activation returned'
+rolled_back_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$rollback_output")"
+[[ -n "$rolled_back_supervisor_pid" && "$rolled_back_supervisor_pid" != "$supervisor_pid" ]] || \
+  fail 'runtime rollback retained the upgraded control-service generation'
+rolled_back_supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' \
+  "/proc/$rolled_back_supervisor_pid/status")"
+assert_processes_do_not_hold "$RUNTIME_ROOT/.install.lock" \
+  'rolled-back control service' "$rolled_back_supervisor_wrapper_pid" \
+  "$rolled_back_supervisor_pid"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'worktree did not observe runtime rollback'
 [[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
   fail 'runtime rollback rewrote the activation watermark'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
-grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$output" || \
-  fail 'runtime rollback did not restart the control service onto the selected bundle'
-rolled_back_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
-[[ -n "$rolled_back_supervisor_pid" && "$rolled_back_supervisor_pid" != "$supervisor_pid" ]] || \
-  fail 'runtime rollback retained the upgraded control-service generation'
+grep -q "^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=$rolled_back_supervisor_pid " <<< "$output" || \
+  fail 'post-rollback ensure did not observe the installer-owned control-service generation'
 supervisor_pid="$rolled_back_supervisor_pid"
+
+handoff_refusal_id='control-service-handoff-refuses'
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/$handoff_refusal_id"
+sed -i "s/^runtime_id=.*/runtime_id=$handoff_refusal_id/" \
+  "$RUNTIME_ROOT/versions/$handoff_refusal_id/manifest"
+handoff_runtime="$RUNTIME_ROOT/versions/$handoff_refusal_id/bin/sounio-coord-runtime"
+handoff_runtime_tmp="$handoff_runtime.sabotage"
+{
+  head -1 "$handoff_runtime"
+  printf '%s\n' \
+    'if [[ "${1:-}" == obligation-supervisor-ensure ]]; then' \
+    '  printf "sabotage-control-service-handoff-refused\\n" >&2' \
+    '  exit 70' \
+    'fi'
+  tail -n +2 "$handoff_runtime"
+} > "$handoff_runtime_tmp"
+mv "$handoff_runtime_tmp" "$handoff_runtime"
+chmod +x "$handoff_runtime"
+handoff_runtime_sha="$(sha256sum "$handoff_runtime" | awk '{print $1}')"
+sed -i "s/^coord_runtime_sha256=.*/coord_runtime_sha256=$handoff_runtime_sha/" \
+  "$RUNTIME_ROOT/versions/$handoff_refusal_id/manifest"
+if handoff_refusal_output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+    bin/sounio-coord install-runtime --activate "$handoff_refusal_id" 2>&1)"; then
+  fail 'runtime activation survived a refused control-service handoff'
+fi
+grep -q 'runtime activation could not assume the control service and was rolled back: sabotage-control-service-handoff-refused' \
+  <<< "$handoff_refusal_output" || \
+  fail 'refused control-service handoff did not identify transactional rollback'
+output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'refused control-service handoff did not restore the previous runtime'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-status)"
+grep -q "^LOOM_OBLIGATION_SUPERVISOR_STATUS state=live pid=$supervisor_pid " <<< "$output" || \
+  fail 'refused control-service handoff did not preserve the previous live generation'
+
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-stop --timeout-seconds 5)"
 grep -q "state=stopped pid=$supervisor_pid " <<< "$output" || \
