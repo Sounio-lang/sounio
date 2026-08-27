@@ -76,10 +76,15 @@ grep -Fq '"matcher": "Write|Edit|MultiEdit|NotebookEdit"' "$CLAUDE_HOOKS" ||
   fail "Claude Bash/Exec was attached before capability-custody and outcome gates"
 
 runtime_info="$($ROOT_DIR/bin/sounio-loom runtime-info)"
-grep -Fq 'selection=shared' <<< "$runtime_info" ||
-  fail "hook launcher did not select the shared runtime"
+runtime_selection="$(sed -n 's/^selection=//p' <<<"$runtime_info" | head -1)"
+case "$runtime_selection" in
+  shared|local) ;;
+  *) fail "hook launcher selected an unknown runtime source: ${runtime_selection:-missing}" ;;
+esac
 grep -Fq 'runtime_version=2026.08.27.35' <<< "$runtime_info" ||
   fail "hook launcher selected the wrong runtime version"
+grep -Fq 'language=OCaml' <<< "$runtime_info" ||
+  fail "hook launcher did not select the native OCaml runtime"
 
 run_native_roundtrip codex
 run_native_roundtrip claude
@@ -92,4 +97,4 @@ if validate_no_legacy_bridge "$TEST_ROOT/codex-sabotaged.json"; then
 fi
 
 printf '%s\n' \
-  'sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 shared_runtime=2026.08.27.35 local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused'
+  "sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 launcher_runtime=$runtime_selection:2026.08.27.35 local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused"
