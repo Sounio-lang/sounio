@@ -1,0 +1,380 @@
+//@ run-pass
+//!
+//! First Sounio semantic-authority witness for bounded RFC 1950/RFC 1951
+//! decompression. The dynamic-Huffman fixture is emitted here in Sounio.
+
+use compress::inflate::{
+    SounioInflateInput,
+    SounioInflateResult,
+    SOUNIO_INFLATE_OK,
+    SOUNIO_INFLATE_ERR_INPUT_BOUNDS,
+    SOUNIO_INFLATE_ERR_OUTPUT_CAPACITY,
+    SOUNIO_INFLATE_ERR_TRUNCATED,
+    SOUNIO_INFLATE_ERR_RESERVED_BLOCK,
+    SOUNIO_INFLATE_ERR_STORED_LENGTH,
+    SOUNIO_INFLATE_ERR_DISTANCE,
+    SOUNIO_INFLATE_ERR_ZLIB_HEADER,
+    SOUNIO_INFLATE_ERR_DICTIONARY,
+    SOUNIO_INFLATE_ERR_ADLER32,
+    sounio_inflate_raw,
+    sounio_inflate_raw_limit,
+    sounio_inflate_zlib,
+    sounio_inflate_zlib_limit,
+    sounio_inflate_negative_oversubscribed_tree,
+    sounio_inflate_negative_incomplete_tree,
+}
+
+struct FixtureWriter {
+    byte_pos: i64,
+    bit_buffer: i64,
+    bit_count: i64,
+}
+
+fn fixture_input() -> SounioInflateInput {
+    SounioInflateInput { bytes: [0; 65536] }
+}
+
+fn fixture_result() -> SounioInflateResult {
+    SounioInflateResult {
+        bytes: [0; 262144],
+        error: 0,
+        input_bytes: 0,
+        output_bytes: 0,
+        blocks: 0,
+        stored_blocks: 0,
+        fixed_blocks: 0,
+        dynamic_blocks: 0,
+        literals: 0,
+        copies: 0,
+        max_distance: 0,
+        checksum_match: false,
+    }
+}
+
+fn fixture_write_byte(
+    input: &!SounioInflateInput,
+    writer: &!FixtureWriter,
+    value: i64,
+) with Mut, Panic {
+    input.bytes[writer.byte_pos as usize] = value & 255
+    writer.byte_pos = writer.byte_pos + 1
+}
+
+fn fixture_write_bits(
+    input: &!SounioInflateInput,
+    writer: &!FixtureWriter,
+    value: i64,
+    count: i64,
+) with Mut, Panic {
+    writer.bit_buffer = writer.bit_buffer | (value << writer.bit_count)
+    writer.bit_count = writer.bit_count + count
+    while writer.bit_count >= 8 {
+        fixture_write_byte(input, writer, writer.bit_buffer & 255)
+        writer.bit_buffer = writer.bit_buffer >> 8
+        writer.bit_count = writer.bit_count - 8
+    }
+}
+
+fn fixture_flush_bits(
+    input: &!SounioInflateInput,
+    writer: &!FixtureWriter,
+) with Mut, Panic {
+    if writer.bit_count > 0 {
+        fixture_write_byte(input, writer, writer.bit_buffer & 255)
+        writer.bit_buffer = 0
+        writer.bit_count = 0
+    }
+}
+
+fn fixture_stored_abcd(input: &!SounioInflateInput) -> i64
+with Mut, Panic {
+    let bytes: [i64; 9] = [1, 4, 0, 251, 255, 65, 66, 67, 68]
+    var i: i64 = 0
+    while i < 9 {
+        input.bytes[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    9
+}
+
+fn fixture_fixed_hello(input: &!SounioInflateInput) -> i64
+with Mut, Panic {
+    let bytes: [i64; 13] = [
+        120, 156, 203, 72, 205, 201, 201, 7, 0, 6, 44, 2, 21
+    ]
+    var i: i64 = 0
+    while i < 13 {
+        input.bytes[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    13
+}
+
+fn fixture_dynamic_aaaa(input: &!SounioInflateInput) -> i64
+with Mut, Panic {
+    input.bytes[0] = 120
+    input.bytes[1] = 1
+    var writer = FixtureWriter { byte_pos: 2, bit_buffer: 0, bit_count: 0 }
+
+    // BFINAL=1, BTYPE=dynamic, HLIT=258, HDIST=1, HCLEN=18.
+    fixture_write_bits(input, &!writer, 5, 3)
+    fixture_write_bits(input, &!writer, 1, 5)
+    fixture_write_bits(input, &!writer, 0, 5)
+    fixture_write_bits(input, &!writer, 14, 4)
+
+    // Code-length alphabet in RFC order: 18->1, 2->2, 1->2.
+    let code_lengths: [i64; 18] = [
+        0, 0, 1, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 2, 0, 2
+    ]
+    var i: i64 = 0
+    while i < 18 {
+        fixture_write_bits(input, &!writer, code_lengths[i as usize], 3)
+        i = i + 1
+    }
+
+    // Literal/distance lengths: 65*0, L65=2, 190*0, EOB=2,
+    // L257=1, D0=1. Codes are written bit-reversed for DEFLATE.
+    fixture_write_bits(input, &!writer, 0, 1) // symbol 18
+    fixture_write_bits(input, &!writer, 54, 7)
+    fixture_write_bits(input, &!writer, 3, 2) // symbol 2
+    fixture_write_bits(input, &!writer, 0, 1) // 138 zeros
+    fixture_write_bits(input, &!writer, 127, 7)
+    fixture_write_bits(input, &!writer, 0, 1) // 52 zeros
+    fixture_write_bits(input, &!writer, 41, 7)
+    fixture_write_bits(input, &!writer, 3, 2) // EOB length 2
+    fixture_write_bits(input, &!writer, 1, 2) // symbol 1
+    fixture_write_bits(input, &!writer, 1, 2) // distance symbol 0 length 1
+
+    // Payload: literal A, length 3, distance 1, end of block.
+    fixture_write_bits(input, &!writer, 1, 2) // literal 65
+    fixture_write_bits(input, &!writer, 0, 1) // length symbol 257
+    fixture_write_bits(input, &!writer, 0, 1) // distance symbol 0
+    fixture_write_bits(input, &!writer, 3, 2) // end of block 256
+    fixture_flush_bits(input, &!writer)
+
+    // Adler-32("AAAA") = 0x028e0105.
+    fixture_write_byte(input, &!writer, 2)
+    fixture_write_byte(input, &!writer, 142)
+    fixture_write_byte(input, &!writer, 1)
+    fixture_write_byte(input, &!writer, 5)
+    writer.byte_pos
+}
+
+fn fixture_dynamic_literal_only(input: &!SounioInflateInput) -> i64
+with Mut, Panic {
+    var writer = FixtureWriter { byte_pos: 0, bit_buffer: 0, bit_count: 0 }
+
+    // BFINAL=1, BTYPE=dynamic, HLIT=257, HDIST=1, HCLEN=18.
+    fixture_write_bits(input, &!writer, 5, 3)
+    fixture_write_bits(input, &!writer, 0, 5)
+    fixture_write_bits(input, &!writer, 0, 5)
+    fixture_write_bits(input, &!writer, 14, 4)
+
+    // Code-length alphabet: 18->1, 0->2, 1->2.
+    let code_lengths: [i64; 18] = [
+        0, 0, 1, 2, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 2
+    ]
+    var i: i64 = 0
+    while i < 18 {
+        fixture_write_bits(input, &!writer, code_lengths[i as usize], 3)
+        i = i + 1
+    }
+
+    // Literal Z and EOB have one-bit codes; the sole distance length is zero.
+    fixture_write_bits(input, &!writer, 0, 1) // 90 zeros via symbol 18
+    fixture_write_bits(input, &!writer, 79, 7)
+    fixture_write_bits(input, &!writer, 3, 2) // literal 90 length 1
+    fixture_write_bits(input, &!writer, 0, 1) // 138 zeros
+    fixture_write_bits(input, &!writer, 127, 7)
+    fixture_write_bits(input, &!writer, 0, 1) // 27 zeros
+    fixture_write_bits(input, &!writer, 16, 7)
+    fixture_write_bits(input, &!writer, 3, 2) // EOB length 1
+    fixture_write_bits(input, &!writer, 1, 2) // distance length 0
+
+    fixture_write_bits(input, &!writer, 0, 1) // literal Z
+    fixture_write_bits(input, &!writer, 1, 1) // end of block
+    fixture_flush_bits(input, &!writer)
+    writer.byte_pos
+}
+
+fn fixture_impossible_distance(input: &!SounioInflateInput) -> i64
+with Mut, Panic {
+    var writer = FixtureWriter { byte_pos: 0, bit_buffer: 0, bit_count: 0 }
+    fixture_write_bits(input, &!writer, 3, 3) // final fixed block
+    fixture_write_bits(input, &!writer, 64, 7) // symbol 257, length 3
+    fixture_write_bits(input, &!writer, 0, 5) // distance 1 before output
+    fixture_flush_bits(input, &!writer)
+    writer.byte_pos
+}
+
+fn fixture_truncated_stored(input: &!SounioInflateInput) -> i64
+with Mut, Panic {
+    let bytes: [i64; 7] = [1, 4, 0, 251, 255, 65, 66]
+    var i: i64 = 0
+    while i < 7 {
+        input.bytes[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+    7
+}
+
+fn byte_sequence_is(
+    result: &SounioInflateResult,
+    a: i64,
+    b: i64,
+    c: i64,
+    d: i64,
+) -> bool with Panic {
+    result.output_bytes == 4 && result.bytes[0] == a &&
+        result.bytes[1] == b && result.bytes[2] == c &&
+        result.bytes[3] == d
+}
+
+fn yes(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var failures: i64 = 0
+
+    var stored_input = fixture_input()
+    let stored_len = fixture_stored_abcd(&!stored_input)
+    var stored = fixture_result()
+    sounio_inflate_raw(&stored_input, stored_len, &!stored)
+    let stored_ok = stored.error == SOUNIO_INFLATE_OK &&
+        stored.stored_blocks == 1 && stored.blocks == 1 &&
+        byte_sequence_is(&stored, 65, 66, 67, 68)
+    if !stored_ok { failures = failures + 1 }
+
+    var fixed_input = fixture_input()
+    let fixed_len = fixture_fixed_hello(&!fixed_input)
+    var fixed = fixture_result()
+    sounio_inflate_zlib(&fixed_input, fixed_len, &!fixed)
+    let fixed_ok = fixed.error == SOUNIO_INFLATE_OK &&
+        fixed.fixed_blocks == 1 && fixed.output_bytes == 5 &&
+        fixed.bytes[0] == 104 && fixed.bytes[1] == 101 &&
+        fixed.bytes[2] == 108 && fixed.bytes[3] == 108 &&
+        fixed.bytes[4] == 111 && fixed.checksum_match
+    if !fixed_ok { failures = failures + 1 }
+
+    var dynamic_input = fixture_input()
+    let dynamic_len = fixture_dynamic_aaaa(&!dynamic_input)
+    var dynamic = fixture_result()
+    sounio_inflate_zlib(&dynamic_input, dynamic_len, &!dynamic)
+    let dynamic_ok = dynamic.error == SOUNIO_INFLATE_OK &&
+        dynamic.dynamic_blocks == 1 && dynamic.literals == 1 &&
+        dynamic.copies == 1 && dynamic.max_distance == 1 &&
+        dynamic.checksum_match && byte_sequence_is(&dynamic, 65, 65, 65, 65)
+    if !dynamic_ok { failures = failures + 1 }
+
+    var literal_input = fixture_input()
+    let literal_len = fixture_dynamic_literal_only(&!literal_input)
+    var literal = fixture_result()
+    sounio_inflate_raw(&literal_input, literal_len, &!literal)
+    let literal_ok = literal.error == SOUNIO_INFLATE_OK &&
+        literal.dynamic_blocks == 1 && literal.literals == 1 &&
+        literal.copies == 0 && literal.output_bytes == 1 &&
+        literal.bytes[0] == 90
+    if !literal_ok { failures = failures + 1 }
+
+    var reserved_input = fixture_input()
+    reserved_input.bytes[0] = 7
+    var reserved = fixture_result()
+    sounio_inflate_raw(&reserved_input, 1, &!reserved)
+    let reserved_ok = reserved.error == SOUNIO_INFLATE_ERR_RESERVED_BLOCK
+
+    var length_input = fixture_input()
+    let length_len = fixture_stored_abcd(&!length_input)
+    length_input.bytes[3] = 250
+    var length_error = fixture_result()
+    sounio_inflate_raw(&length_input, length_len, &!length_error)
+    let length_ok = length_error.error == SOUNIO_INFLATE_ERR_STORED_LENGTH
+
+    var distance_input = fixture_input()
+    let distance_len = fixture_impossible_distance(&!distance_input)
+    var distance_error = fixture_result()
+    sounio_inflate_raw(&distance_input, distance_len, &!distance_error)
+    let distance_ok = distance_error.error == SOUNIO_INFLATE_ERR_DISTANCE
+
+    var truncated_input = fixture_input()
+    let truncated_len = fixture_truncated_stored(&!truncated_input)
+    var truncated = fixture_result()
+    sounio_inflate_raw(&truncated_input, truncated_len, &!truncated)
+    let truncated_ok = truncated.error == SOUNIO_INFLATE_ERR_TRUNCATED
+
+    var header_input = fixture_input()
+    let header_len = fixture_fixed_hello(&!header_input)
+    header_input.bytes[0] = 119
+    var header = fixture_result()
+    sounio_inflate_zlib(&header_input, header_len, &!header)
+    let header_ok = header.error == SOUNIO_INFLATE_ERR_ZLIB_HEADER
+
+    var dictionary_input = fixture_input()
+    dictionary_input.bytes[0] = 120
+    dictionary_input.bytes[1] = 32
+    var dictionary = fixture_result()
+    sounio_inflate_zlib(&dictionary_input, 6, &!dictionary)
+    let dictionary_ok = dictionary.error == SOUNIO_INFLATE_ERR_DICTIONARY
+
+    var checksum_input = fixture_input()
+    let checksum_len = fixture_fixed_hello(&!checksum_input)
+    checksum_input.bytes[12] = checksum_input.bytes[12] ^ 1
+    var checksum = fixture_result()
+    sounio_inflate_zlib(&checksum_input, checksum_len, &!checksum)
+    let checksum_ok = checksum.error == SOUNIO_INFLATE_ERR_ADLER32
+
+    var capacity = fixture_result()
+    sounio_inflate_zlib_limit(&dynamic_input, dynamic_len, 3, &!capacity)
+    let capacity_ok = capacity.error == SOUNIO_INFLATE_ERR_OUTPUT_CAPACITY
+
+    var byte_domain_input = fixture_input()
+    let byte_domain_len = fixture_stored_abcd(&!byte_domain_input)
+    byte_domain_input.bytes[8] = 256
+    var byte_domain = fixture_result()
+    sounio_inflate_raw(&byte_domain_input, byte_domain_len, &!byte_domain)
+    let byte_domain_ok =
+        byte_domain.error == SOUNIO_INFLATE_ERR_INPUT_BOUNDS
+
+    let oversubscribed_ok = sounio_inflate_negative_oversubscribed_tree()
+    let incomplete_ok = sounio_inflate_negative_incomplete_tree()
+    if !reserved_ok || !length_ok || !distance_ok || !truncated_ok ||
+        !header_ok || !dictionary_ok || !checksum_ok || !capacity_ok ||
+        !byte_domain_ok || !oversubscribed_ok || !incomplete_ok {
+        failures = failures + 1
+    }
+
+    print("SOUNIO_AUTHORITY schema=sounio-rfc1950-rfc1951-inflate.v0 role=SEMANTIC_AUTHORITY\n")
+    print("INFLATE_STORED output=ABCD bytes="); print_int(stored.output_bytes)
+    print(" blocks="); print_int(stored.stored_blocks)
+    print(" ok="); print_int(yes(stored_ok)); print("\n")
+    print("INFLATE_FIXED output=hello bytes="); print_int(fixed.output_bytes)
+    print(" blocks="); print_int(fixed.fixed_blocks)
+    print(" checksum="); print_int(yes(fixed.checksum_match))
+    print(" ok="); print_int(yes(fixed_ok)); print("\n")
+    print("INFLATE_DYNAMIC output=AAAA bytes="); print_int(dynamic.output_bytes)
+    print(" blocks="); print_int(dynamic.dynamic_blocks)
+    print(" literals="); print_int(dynamic.literals)
+    print(" copies="); print_int(dynamic.copies)
+    print(" max_distance="); print_int(dynamic.max_distance)
+    print(" checksum="); print_int(yes(dynamic.checksum_match))
+    print(" ok="); print_int(yes(dynamic_ok)); print("\n")
+    print("INFLATE_DYNAMIC_LITERAL output=Z bytes=")
+    print_int(literal.output_bytes)
+    print(" blocks="); print_int(literal.dynamic_blocks)
+    print(" copies="); print_int(literal.copies)
+    print(" empty_distance_tree=1 ok="); print_int(yes(literal_ok)); print("\n")
+    print("INFLATE_NEGATIVE reserved="); print_int(yes(reserved_ok))
+    print(" stored_length="); print_int(yes(length_ok))
+    print(" distance="); print_int(yes(distance_ok))
+    print(" truncated="); print_int(yes(truncated_ok))
+    print(" zlib_header="); print_int(yes(header_ok))
+    print(" dictionary="); print_int(yes(dictionary_ok))
+    print(" adler32="); print_int(yes(checksum_ok))
+    print(" output_capacity="); print_int(yes(capacity_ok))
+    print(" byte_domain="); print_int(yes(byte_domain_ok))
+    print(" oversubscribed_tree="); print_int(yes(oversubscribed_ok))
+    print(" incomplete_tree="); print_int(yes(incomplete_ok)); print("\n")
+    print("INFLATE_BOUNDARY byte_stream_only=1 pdf_semantics=0 apple_semantics=0 ffi_zlib=0\n")
+    print("INFLATE_SUMMARY failures="); print_int(failures); print("\n")
+    if failures == 0 { 0 } else { 1 }
+}
