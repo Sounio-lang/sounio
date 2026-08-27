@@ -3446,11 +3446,75 @@ coord_obligation_supervisor_owned_executable() {
   [[ -n "$local_loom" && "$executable" == "$local_loom" ]]
 }
 
+coord_obligation_supervisor_owned_pids() {
+  local proc pid owner ppid value index observed_state_dir script_path runtime_root local_runtime
+  local expected_state_dir env_value
+  local -a argv=()
+  expected_state_dir="$(readlink -f "$STATE_DIR" 2>/dev/null || true)"
+  [[ -n "$expected_state_dir" ]] || return 0
+  runtime_root="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
+  runtime_root="$(readlink -f "$runtime_root" 2>/dev/null || true)"
+  local_runtime="$(readlink -f "$WORKTREE/scripts/dev/sounio_coord_runtime.sh" 2>/dev/null || true)"
+  for proc in /proc/[1-9]*; do
+    [[ -d "$proc" ]] || continue
+    pid="${proc##*/}"
+    owner="$(stat -c %u "$proc" 2>/dev/null || true)"
+    [[ "$owner" == "$(id -u)" ]] || continue
+    ppid="$(sed -n 's/^PPid:[[:space:]]*//p' "$proc/status" 2>/dev/null || true)"
+    [[ "$ppid" == 1 ]] || continue
+    argv=()
+    while IFS= read -r -d '' value; do
+      argv+=("$value")
+    done < "$proc/cmdline"
+    [[ "${argv[2]:-}" == obligation-supervise ]] || continue
+    script_path="$(readlink -f "${argv[1]:-}" 2>/dev/null || true)"
+    [[ -n "$script_path" ]] || continue
+    if [[ -n "$runtime_root" ]]; then
+      case "$script_path" in
+        "$runtime_root"/versions/*/bin/sounio-coord-runtime) ;;
+        *) [[ -n "$local_runtime" && "$script_path" == "$local_runtime" ]] || continue ;;
+      esac
+    elif [[ -z "$local_runtime" || "$script_path" != "$local_runtime" ]]; then
+      continue
+    fi
+    observed_state_dir=''
+    for ((index = 3; index + 1 < ${#argv[@]}; index++)); do
+      if [[ "${argv[$index]}" == --state-dir ]]; then
+        observed_state_dir="$(readlink -f "${argv[$((index + 1))]}" 2>/dev/null || true)"
+        break
+      fi
+    done
+    if [[ -z "$observed_state_dir" && -r "$proc/environ" ]]; then
+      while IFS= read -r -d '' env_value; do
+        case "$env_value" in
+          SOUNIO_COORD_DIR=*)
+            observed_state_dir="$(readlink -f "${env_value#SOUNIO_COORD_DIR=}" 2>/dev/null || true)"
+            break
+            ;;
+        esac
+      done < "$proc/environ"
+    fi
+    if [[ -z "$observed_state_dir" && -n "$runtime_root" ]]; then
+      case "$script_path" in
+        "$runtime_root"/versions/*/bin/sounio-coord-runtime)
+          observed_state_dir="$(readlink -f "$GIT_COMMON_DIR/sounio-coord-state" 2>/dev/null || true)"
+          ;;
+      esac
+    fi
+    [[ "$observed_state_dir" == "$expected_state_dir" ]] || continue
+    printf '%s\n' "$pid"
+  done
+  return 0
+}
+
 coord_obligation_supervisor_service_command() {
   local action="$1"; shift
   local interval=2 timeout=10 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
+  local leader_lock="$STATE_DIR/.obligation-supervisor-leader.lock"
   local runtime_self log_file attempt previous_pid='' previous_start=''
-  local expected_loom='' actual_loom='' ensured_state=started
+  local expected_loom='' actual_loom='' ensured_state=started state_live=0 pid
+  local supervisor_wrapper_pid=''
+  local -a owned_pids=() remaining_pids=()
   while (($#)); do
     case "$1" in
       --interval-seconds)
@@ -3473,14 +3537,21 @@ coord_obligation_supervisor_service_command() {
   exec 6>"$lock_file"
   flock 6
   if coord_obligation_supervisor_state; then
+    state_live=1
     previous_pid="$COORD_OBLIGATION_SUPERVISOR_PID"
     previous_start="$COORD_OBLIGATION_SUPERVISOR_PID_START"
     actual_loom="$(readlink -f "/proc/$previous_pid/exe" 2>/dev/null || true)"
     coord_obligation_supervisor_owned_executable "$actual_loom" ||
       die "refusing to signal unowned obligation supervisor pid=$previous_pid executable=${actual_loom:-unknown}"
+  fi
+  mapfile -t owned_pids < <(coord_obligation_supervisor_owned_pids)
+  if ((state_live)); then
+    supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$previous_pid/status" 2>/dev/null || true)"
+    array_contains "$supervisor_wrapper_pid" "${owned_pids[@]}" ||
+      die "refusing to signal obligation supervisor outside the selected state directory: pid=$previous_pid wrapper=${supervisor_wrapper_pid:-unknown}"
     if [[ "$action" == ensure ]]; then
       expected_loom="$(readlink -f "$(coord_loom_obligation_runtime)")"
-      if [[ "$actual_loom" == "$expected_loom" ]]; then
+      if [[ "$actual_loom" == "$expected_loom" && ${#owned_pids[@]} == 1 ]]; then
         printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=%s pid_start=%s replayed_utc=%s\n' \
           "$previous_pid" "$previous_start" "$COORD_OBLIGATION_SUPERVISOR_REPLAYED_UTC"
         flock -u 6
@@ -3488,17 +3559,28 @@ coord_obligation_supervisor_service_command() {
       fi
       ensured_state=restarted
     fi
-    kill -TERM "$previous_pid" 2>/dev/null || true
+  elif ((${#owned_pids[@]})) && [[ "$action" == ensure ]]; then
+    ensured_state=restarted
+  fi
+  if ((${#owned_pids[@]})); then
+    for pid in "${owned_pids[@]}"; do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
     for ((attempt = 0; attempt < timeout * 10; attempt++)); do
-      coord_obligation_supervisor_state || break
+      remaining_pids=()
+      for pid in "${owned_pids[@]}"; do
+        kill -0 "$pid" 2>/dev/null && remaining_pids+=("$pid")
+      done
+      ((${#remaining_pids[@]} == 0)) && break
       sleep 0.1
     done
-    if coord_obligation_supervisor_state; then
-      die "obligation supervisor did not stop within ${timeout}s: pid=$previous_pid"
-    fi
+    ((${#remaining_pids[@]} == 0)) ||
+      die "obligation supervisors did not stop within ${timeout}s: pids=$(IFS=,; printf '%s' "${remaining_pids[*]}")"
+    flock -w "$timeout" "$leader_lock" -c true ||
+      die "obligation supervisor leader lock did not release within ${timeout}s: lock=$leader_lock"
     if [[ "$action" == stop ]]; then
-      printf 'LOOM_OBLIGATION_SUPERVISOR_STOPPED state=stopped pid=%s pid_start=%s\n' \
-        "$previous_pid" "$previous_start"
+      printf 'LOOM_OBLIGATION_SUPERVISOR_STOPPED state=stopped pid=%s pid_start=%s retired=%s\n' \
+        "${previous_pid:--}" "${previous_start:--}" "${#owned_pids[@]}"
       flock -u 6
       return 0
     fi
@@ -3531,6 +3613,7 @@ coord_obligation_supervisor_service_command() {
 coord_obligation_supervisor_command() {
   local action="$1"; shift
   local once=0 interval=2 bridge_pid='' loom_pid='' supervisor_status
+  local leader_lock="$STATE_DIR/.obligation-supervisor-leader.lock"
   local -a args=("obligation-$action")
   while (($#)); do
     case "$1" in
@@ -3551,6 +3634,15 @@ coord_obligation_supervisor_command() {
   fi
   [[ "$interval" =~ ^[1-9][0-9]*$ ]] && ((interval <= 60)) ||
     die "obligation supervisor interval must be between 1 and 60 seconds"
+  if ((!once)); then
+    mkdir -p "$STATE_DIR"
+    exec 7>"$leader_lock"
+    if ! flock -n 7; then
+      printf 'LOOM_OBLIGATION_SUPERVISOR_REFUSED state=duplicate-leader lock=%s\n' \
+        "$leader_lock" >&2
+      return 73
+    fi
+  fi
   coord_obligation_reconcile_command >/dev/null
   coord_wake_reconcile_command >/dev/null
   if ((once)); then

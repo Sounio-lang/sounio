@@ -519,6 +519,14 @@ output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
 grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
   fail 'control-service ensure was not idempotent'
+set +e
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" timeout 3 \
+  bin/sounio-coord obligation-supervise --interval-seconds 1 2>&1)"
+duplicate_supervisor_status=$?
+set -e
+((duplicate_supervisor_status == 73)) && \
+  grep -q 'state=duplicate-leader' <<< "$output" || \
+  fail 'raw supervisor start was not fenced by the lifetime leader lock'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-status)"
 grep -q "state=live pid=$supervisor_pid " <<< "$output" || \
