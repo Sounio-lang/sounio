@@ -26,7 +26,10 @@ export SOUC_BIN="$(pwd)/bin/souc"
 What this default artifact proves today:
 
 - version `1.0.0-beta.4`
-- Cranelift JIT enabled
+- **Cranelift JIT NOT compiled** — `souc info` prints `[-] Cranelift JIT - rebuild
+  with --features jit`. Measured 2026-08-27: no artifact enables it, no build path
+  passes the feature, and the binary exports no Cranelift symbol. This bullet
+  previously read "Cranelift JIT enabled" — not compiled
 - LLVM and GPU codegen disabled in this artifact
 - SMT, LSP, distributed, and package-manager features disabled in this artifact
 - ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
