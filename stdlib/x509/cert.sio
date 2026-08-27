@@ -9,6 +9,7 @@
 use asn1::der::*
 use bignum::bigint::*
 use crypto::ecdsa_p256::*
+use crypto::ecdsa_p384::ecdsa_p384_verify_sha384
 use crypto::pkcs1::*
 use hash::sha1::*
 use hash::sha256::*
@@ -1616,14 +1617,17 @@ pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer: &Certific
     if is_ecdsa_sha256_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256 {
         return false
     }
-    // Same guard for ecdsa-with-SHA384. P-256 is the only EC curve this
-    // implementation supports, so an ecdsa-with-SHA384 certificate whose
-    // issuer key is anything else (RSA, or an EC curve we did not parse as
-    // P-256) must be rejected here rather than reaching the P-256
-    // verifier. Note this constrains the ISSUER'S KEY, not the hash: per
-    // RFC 5480 SS2 the signature hash and the key's curve are independent
-    // in X.509, so P-256 + SHA-384 is a valid, deployed combination (D15).
-    if is_ecdsa_sha384_sig_alg && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256 {
+    // Same guard for ecdsa-with-SHA384, extended (2026-08-27) to accept
+    // BOTH curves this implementation verifies: P-256 (D20) and P-384
+    // (this task). An issuer key that is neither is still rejected here,
+    // before reaching either curve's arithmetic. Note this constrains the
+    // ISSUER'S KEY, not the hash: per RFC 5480 SS2 the signature hash and
+    // the key's curve are independent in X.509, so P-256+SHA-384 AND
+    // P-384+SHA-384 are both valid, deployed combinations (D15, and
+    // Cloudflare's own 1.1.1.1 intermediate for the P-384 case).
+    if is_ecdsa_sha384_sig_alg
+        && issuer.public_key_algorithm != PUBKEY_ALG_EC_P256
+        && issuer.public_key_algorithm != PUBKEY_ALG_EC_P384 {
         return false
     }
 
@@ -1662,6 +1666,9 @@ pub fn x509_verify_signature(buf: &RawBuf, cert: &Certificate, issuer: &Certific
         // SS6.4.1's leftmost-256-bits truncation to SHA-384's 48-byte
         // digest.
         if is_ecdsa_sha384_sig_alg {
+            if issuer.public_key_algorithm == PUBKEY_ALG_EC_P384 {
+                return ecdsa_p384_verify_sha384(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
+            }
             return ecdsa_p256_verify_sha384(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
         }
         return ecdsa_p256_verify(&issuer.ec_public_key, &tbs_copy, cert.tbs_len, &esig_buf, cert.outer_signature_len as i64)
