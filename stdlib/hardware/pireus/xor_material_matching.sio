@@ -897,3 +897,151 @@ pub fn pireus_xor_material_evaluate(xed_path: string)
         failures: failures,
     }
 }
+
+fn pxm_material_digest_matches(digest: &PireusXorMaterialDigest,
+    expected: [i64; 8]) -> bool {
+    pxm_hash_equal(&digest.words, &expected)
+}
+
+/// Exact predicate admitted only after the first Sounio authority stream.
+pub fn pireus_xor_material_matches_frozen_semantics(
+    result: &PireusXorMaterialResult,
+) -> bool with Div {
+    if !result.valid || result.error != PIREUS_XOR_MATERIAL_OK ||
+        result.bits != 4 || result.dimension != 16 ||
+        result.element_bits != 64 || result.chunk_lanes != 8 ||
+        result.chunk_count != 2 || !result.operation_parent_live_match ||
+        !result.operation_result_digest_match ||
+        !result.operation_parent_binding_valid {
+        return false
+    }
+
+    let expected_operation =
+        pireus_xor_material_operation_semantics_hash()
+    let expected_receipt = pireus_xor_material_operation_receipt_hash()
+    let expected_result = pireus_xor_material_operation_result_digest()
+    if !pxm_hash_equal(
+        &result.operation_semantics_sha256, &expected_operation) ||
+        !pxm_hash_equal(&result.operation_receipt_sha256, &expected_receipt) ||
+        !pxm_hash_equal(&result.operation_result_digest, &expected_result) {
+        return false
+    }
+
+    if result.selector.count != 256 || result.reconstructed_cells != 256 ||
+        result.one_source_groups != 32 ||
+        !result.layout_one_source_per_group {
+        return false
+    }
+    var index: i64 = 0
+    while index < 256 {
+        let d = index / 16
+        let within_d = index - d * 16
+        let chunk = within_d / 8
+        let lane = within_d - chunk * 8
+        let global_i = chunk * 8 + lane
+        let partner_j = global_i ^ d
+        let source_chunk = chunk ^ (d >> 3)
+        let source_lane = lane ^ (d & 7)
+        if result.selector.displacements[index] != d ||
+            result.selector.output_chunks[index] != chunk ||
+            result.selector.output_lanes[index] != lane ||
+            result.selector.global_indices[index] != global_i ||
+            result.selector.partner_indices[index] != partner_j ||
+            result.selector.source_chunks[index] != source_chunk ||
+            result.selector.source_lanes[index] != source_lane ||
+            !result.selector.reconstructed[index] {
+            return false
+        }
+        index = index + 1
+    }
+
+    let expected_xed_content =
+        pireus_xor_material_xed_frozen_content_hash()
+    let expected_xed_envelope =
+        pireus_xor_material_xed_current_envelope_hash()
+    let expected_xed_receipt =
+        pireus_xor_material_xed_current_receipt_hash()
+    let xed = &result.xed
+    if !xed.valid ||
+        !pxm_hash_equal(&xed.frozen_content_sha256, &expected_xed_content) ||
+        !pxm_hash_equal(
+            &xed.current_envelope_sha256, &expected_xed_envelope) ||
+        !pxm_hash_equal(&xed.current_receipt_sha256, &expected_xed_receipt) ||
+        xed.total_forms != 8 || xed.vpermpd_forms != 4 ||
+        xed.vpermi2pd_forms != 2 || xed.vpermt2pd_forms != 2 ||
+        !xed.frozen_receipt_reference_present ||
+        !xed.vendor_corpus_digest_match ||
+        !xed.counts_from_digest_matched_vendor_bytes ||
+        !xed.counts_match_receipt_record ||
+        !xed.candidate_family_present ||
+        xed.selector_behavior_derived_from_form_presence ||
+        xed.selector_semantics_receipt_present ||
+        xed.instruction_match_authorized ||
+        xed.immediate_sufficiency_authorized ||
+        xed.two_source_necessity_authorized {
+        return false
+    }
+
+    if result.targets.count != 3 ||
+        result.targets.target_ids[0] != PIREUS_XOR_TARGET_DARWIN_XEON ||
+        result.targets.target_ids[1] != PIREUS_XOR_TARGET_APPLE_SILICON ||
+        result.targets.target_ids[2] != PIREUS_XOR_TARGET_DGX ||
+        !result.targets.canonical[0] || !result.targets.canonical[1] ||
+        !result.targets.canonical[2] || result.targets.observed[0] ||
+        result.targets.observed[1] || result.targets.observed[2] ||
+        result.targets.candidate_plans[0] !=
+            PIREUS_XOR_PLAN_TWO_F64X8_CHUNKS ||
+        result.targets.candidate_plans[1] != PIREUS_XOR_PLAN_UNRESOLVED ||
+        result.targets.candidate_plans[2] != PIREUS_XOR_PLAN_UNRESOLVED ||
+        result.targets.unresolved[0] || !result.targets.unresolved[1] ||
+        !result.targets.unresolved[2] ||
+        result.targets.material_receipts[0] ||
+        result.targets.material_receipts[1] ||
+        result.targets.material_receipts[2] {
+        return false
+    }
+
+    let neg = &result.negatives
+    if !neg.missing_operation_parent_hash ||
+        !neg.mismatched_operation_parent_hash ||
+        !neg.missing_operation_receipt ||
+        !neg.mismatched_operation_receipt ||
+        !neg.wrong_logical_bit_width || !neg.wrong_dimension ||
+        !neg.wrong_element_width || !neg.wrong_chunk_width ||
+        !neg.displacement_out_of_range ||
+        !neg.output_chunk_out_of_range ||
+        !neg.output_lane_out_of_range || !neg.corrupted_source_chunk ||
+        !neg.corrupted_source_lane ||
+        !neg.layout_to_two_source_necessity ||
+        !neg.imm8_without_vendor_semantics ||
+        !neg.form_presence_to_behavior ||
+        !neg.capability_to_emitted_use ||
+        !neg.target_observation_without_receipt ||
+        !neg.cost_without_material_receipt ||
+        !neg.parity_or_claim_before_transition ||
+        !neg.prohibited_oracle_language || neg.passed != 21 ||
+        neg.total != 21 {
+        return false
+    }
+
+    if result.material_observation_count != 0 ||
+        result.instruction_match_count != 0 || result.lowering_count != 0 ||
+        result.cost_record_count != 0 ||
+        !result.loom_guardian_external_required || result.parity_open ||
+        result.claim_ready || result.failures != 0 {
+        return false
+    }
+
+    pxm_material_digest_matches(&result.selector_digest,
+        [0xfd515df6, 0xbe12f316, 0xcc771cf0, 0x43aa0220,
+         0xbae75563, 0x62074a12, 0xeefe7f5a, 0x8f718928]) &&
+    pxm_material_digest_matches(&result.evidence_digest,
+        [0x824e0d32, 0x4a62a817, 0xf2d116f5, 0x1e6b9095,
+         0x34add1a3, 0xbae46a09, 0x3dc09139, 0xd1230774]) &&
+    pxm_material_digest_matches(&result.target_digest,
+        [0x3e2e2f88, 0x1cc866c4, 0xa99b6b95, 0xea933153,
+         0xdf35e047, 0x2b42f51f, 0x9a0c5a2f, 0x0cb975b5]) &&
+    pxm_material_digest_matches(&result.witness_digest,
+        [0x95f189ec, 0x40d69f9b, 0x2dcc3263, 0x557e6076,
+         0xe9232420, 0x0e5cc7cc, 0xb7c525fc, 0xa19e82bb])
+}
