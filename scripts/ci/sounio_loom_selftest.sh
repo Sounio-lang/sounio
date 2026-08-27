@@ -19,6 +19,7 @@ GUARD_AGENT=loom-guardian-test
 GUARD_LANE=kernel-recovery
 GUARD_ACTIVE=0
 COORD_LOOM_ACTIVE=0
+COORD_LOCK_HOLDER=''
 COORD_AGENT=codex
 COORD_LANE=loom-transport
 
@@ -94,6 +95,7 @@ cleanup() {
   [[ -z "$OBSERVER_ONE" ]] || kill "$OBSERVER_ONE" 2>/dev/null || true
   [[ -z "$OBSERVER_TWO" ]] || kill "$OBSERVER_TWO" 2>/dev/null || true
   [[ -z "$GUI_PID" ]] || kill "$GUI_PID" 2>/dev/null || true
+  [[ -z "$COORD_LOCK_HOLDER" ]] || kill "$COORD_LOCK_HOLDER" 2>/dev/null || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 || true
   if [[ "$GUARD_ACTIVE" == 1 ]]; then
@@ -509,6 +511,15 @@ done
   grep -q 'phase=exited' || fail 'guardian journal did not reach a valid terminal state'
 
 cp "$TEST_ROOT/harness.sh" "$TEST_ROOT/codex-test"
+cat > "$TEST_ROOT/flaky-coord.sh" <<'COORD'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == endpoint-register ]] && mkdir "$SOUNIO_LOOM_TEST_ENDPOINT_FAIL_ONCE" 2>/dev/null; then
+  exit 75
+fi
+exec "$SOUNIO_LOOM_TEST_COORD_RUNTIME" "$@"
+COORD
+chmod +x "$TEST_ROOT/flaky-coord.sh"
 coord() {
   SOUNIO_COORD_WORKTREE="$ROOT_DIR" SOUNIO_COORD_DIR="$TEST_ROOT/coord-bus" \
     SOUNIO_COORD_RUNTIME_MODE=local "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$@"
@@ -529,8 +540,11 @@ coord_retry() {
   fail "coordination operation did not clear lock contention: $output"
 }
 start_coord_generation() {
-  SOUNIO_COORD_COMMAND="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" \
+  SOUNIO_COORD_COMMAND="$TEST_ROOT/flaky-coord.sh" \
   SOUNIO_COORD_DIR="$TEST_ROOT/coord-bus" SOUNIO_COORD_RUNTIME_MODE=local \
+  SOUNIO_COORD_LOCK_WAIT_SECONDS=1 \
+  SOUNIO_LOOM_TEST_COORD_RUNTIME="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" \
+  SOUNIO_LOOM_TEST_ENDPOINT_FAIL_ONCE="$TEST_ROOT/coord-endpoint-failed-once" \
     "$LOOM" start --state-dir "$TEST_ROOT/coord-loom" --agent "$COORD_AGENT" \
     --lane "$COORD_LANE" --session-id loom-coord-selftest --cwd "$ROOT_DIR" -- \
     "$TEST_ROOT/codex-test" >/dev/null
@@ -542,7 +556,7 @@ coord_loom_status() {
 }
 wait_coord_endpoint() {
   local output='' attempt
-  for attempt in $(seq 1 100); do
+  for attempt in $(seq 1 300); do
     output="$(coord endpoint-status --agent "$COORD_AGENT" --lane "$COORD_LANE" 2>/dev/null || true)"
     [[ "$output" == *'state=active'* && "$output" == *'transport=loom'* ]] && {
       printf '%s\n' "$output"
@@ -567,9 +581,32 @@ kill_coord_generation() {
   fail "dead coordination generation retained an active endpoint: $output"
 }
 
+mkdir -p "$TEST_ROOT/coord-bus"
+(
+  exec 8> "$TEST_ROOT/coord-bus/.claims.lock"
+  flock 8
+  touch "$TEST_ROOT/coord-lock-ready"
+  sleep 3
+) &
+COORD_LOCK_HOLDER=$!
+for _ in $(seq 1 100); do
+  [[ -f "$TEST_ROOT/coord-lock-ready" ]] && break
+  sleep 0.01
+done
+[[ -f "$TEST_ROOT/coord-lock-ready" ]] || fail 'coordination contention fixture did not acquire its lock'
 start_coord_generation
 COORD_LOOM_ACTIVE=1
 endpoint="$(wait_coord_endpoint)"
+wait "$COORD_LOCK_HOLDER"
+COORD_LOCK_HOLDER=''
+coord_daemon_log="$(find "$TEST_ROOT/coord-loom" -name daemon.log -type f -print -quit)"
+[[ -n "$coord_daemon_log" ]] || fail 'coordination generation omitted its daemon log'
+grep -q 'LOOM_COORDINATION_RETRY failures=1 ' "$coord_daemon_log" || \
+  fail 'Loom did not retry endpoint registration after transient lock contention'
+grep -q 'LOOM_COORDINATION_WARNING operation=endpoint-register' "$coord_daemon_log" || \
+  fail 'Loom endpoint sabotage did not reach the endpoint registration boundary'
+grep -q 'LOOM_COORDINATION_RETRY failures=2 ' "$coord_daemon_log" || \
+  fail 'Loom did not retry after the endpoint registration sabotage'
 coord_before="$(coord_loom_status)"
 coord_guardian="$(field guardian_pid "$coord_before")"
 coord_harness="$(field harness_pid "$coord_before")"

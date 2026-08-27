@@ -2055,6 +2055,7 @@ type kernel = {
   mutable harness_exit : int option;
   mutable next_coord_refresh : float;
   mutable coord_pid : int option;
+  mutable coord_failures : int;
   mutable crash_at : string option;
 }
 
@@ -2638,35 +2639,70 @@ let coord_call kernel arguments =
 
 let refresh_coordination kernel =
   match harness_for_agent kernel.agent with
-  | None -> ()
+  | None -> true
   | Some harness ->
       let ttl = Option.value ~default:"1800" (Sys.getenv_opt "SOUNIO_LOOM_COORD_TTL_SECONDS") in
       let identity = [ "--agent"; kernel.agent; "--lane"; kernel.lane ] in
-      if coord_call kernel ("heartbeat" :: identity) <> 0 then
-        ignore
-          (coord_call kernel
-             ([ "scope"; "--agent"; kernel.agent; "--lane"; kernel.lane; "--intent";
-                Printf.sprintf "loom-supervised %s session" harness ]));
-      let presence =
-        [ "presence-register"; "--agent"; kernel.agent; "--lane"; kernel.lane;
-          "--harness"; harness; "--session-id"; kernel.session_id; "--pid";
-          string_of_int kernel.harness_pid; "--pid-start"; process_start kernel.harness_pid;
-          "--boot-id"; trim (read_file "/proc/sys/kernel/random/boot_id");
-          "--pid-namespace"; Unix.readlink (Printf.sprintf "/proc/%d/ns/pid" kernel.harness_pid);
-          "--host"; Unix.gethostname (); "--ttl-seconds"; ttl ]
+      let claim_ready =
+        coord_call kernel ("heartbeat" :: identity) = 0
+        || coord_call kernel
+             [ "scope"; "--agent"; kernel.agent; "--lane"; kernel.lane;
+               "--intent"; Printf.sprintf "loom-supervised %s session" harness ]
+           = 0
       in
-      if coord_call kernel presence <> 0 then
-        Printf.eprintf "LOOM_COORDINATION_WARNING operation=presence-register\n%!"
+      if not claim_ready then (
+        Printf.eprintf "LOOM_COORDINATION_WARNING operation=heartbeat-or-scope\n%!";
+        false)
       else
-        let endpoint =
-          [ "endpoint-register"; "--agent"; kernel.agent; "--lane"; kernel.lane;
-            "--harness"; harness; "--transport"; "loom"; "--address";
-            kernel.paths.socket_path; "--socket"; kernel.paths.socket_path;
-            "--token-file"; kernel.paths.token_path; "--ttl-seconds"; ttl ]
+        let presence =
+          [ "presence-register"; "--agent"; kernel.agent; "--lane"; kernel.lane;
+            "--harness"; harness; "--session-id"; kernel.session_id; "--pid";
+            string_of_int kernel.harness_pid; "--pid-start"; process_start kernel.harness_pid;
+            "--boot-id"; trim (read_file "/proc/sys/kernel/random/boot_id");
+            "--pid-namespace"; Unix.readlink (Printf.sprintf "/proc/%d/ns/pid" kernel.harness_pid);
+            "--host"; Unix.gethostname (); "--ttl-seconds"; ttl ]
         in
-        if coord_call kernel endpoint <> 0 then
-          Printf.eprintf "LOOM_COORDINATION_WARNING operation=endpoint-register\n%!";
-      ()
+        if coord_call kernel presence <> 0 then (
+          Printf.eprintf "LOOM_COORDINATION_WARNING operation=presence-register\n%!";
+          false)
+        else
+          let endpoint =
+            [ "endpoint-register"; "--agent"; kernel.agent; "--lane"; kernel.lane;
+              "--harness"; harness; "--transport"; "loom"; "--address";
+              kernel.paths.socket_path; "--socket"; kernel.paths.socket_path;
+              "--token-file"; kernel.paths.token_path; "--ttl-seconds"; ttl ]
+          in
+          if coord_call kernel endpoint <> 0 then (
+            Printf.eprintf "LOOM_COORDINATION_WARNING operation=endpoint-register\n%!";
+            false)
+          else true
+
+let coordination_retry_delay kernel =
+  let base =
+    match min kernel.coord_failures 6 with
+    | 0 | 1 -> 1.0
+    | 2 -> 2.0
+    | 3 -> 4.0
+    | 4 -> 8.0
+    | 5 -> 16.0
+    | _ -> 30.0
+  in
+  let lane_hash = Hashtbl.hash (kernel.agent ^ "/" ^ kernel.lane) land max_int in
+  let spread = float_of_int (lane_hash mod 1000) /. 2000.0 in
+  min 30.0 (base +. spread)
+
+let finish_coordination_refresh kernel code =
+  kernel.coord_pid <- None;
+  if code = 0 then (
+    kernel.coord_failures <- 0;
+    kernel.next_coord_refresh <- Unix.gettimeofday () +. 300.0)
+  else (
+    kernel.coord_failures <- kernel.coord_failures + 1;
+    let delay = coordination_retry_delay kernel in
+    kernel.next_coord_refresh <- Unix.gettimeofday () +. delay;
+    Printf.eprintf
+      "LOOM_COORDINATION_RETRY failures=%d delay_seconds=%.3f exit_code=%d\n%!"
+      kernel.coord_failures delay code)
 
 let reap_coordination kernel =
   match kernel.coord_pid with
@@ -2674,8 +2710,8 @@ let reap_coordination kernel =
   | Some pid -> (
       match Unix.waitpid [ WNOHANG ] pid with
       | 0, _ -> ()
-      | _ -> kernel.coord_pid <- None
-      | exception Unix_error (ECHILD, _, _) -> kernel.coord_pid <- None)
+      | _, status -> finish_coordination_refresh kernel (process_exit_code status)
+      | exception Unix_error (ECHILD, _, _) -> finish_coordination_refresh kernel 255)
 
 let spawn_coordination_refresh kernel =
   reap_coordination kernel;
@@ -2684,8 +2720,11 @@ let spawn_coordination_refresh kernel =
     | 0 ->
         Sys.set_signal Sys.sigterm Sys.Signal_default;
         Sys.set_signal Sys.sigint Sys.Signal_default;
-        (try refresh_coordination kernel; exit 0
-         with _ -> exit 1)
+        (try exit (if refresh_coordination kernel then 0 else 75)
+         with exn ->
+           Printf.eprintf "LOOM_COORDINATION_WARNING operation=refresh error=%s\n%!"
+             (Printexc.to_string exn);
+           exit 1)
     | pid ->
         kernel.coord_pid <- Some pid;
         kernel.next_coord_refresh <- Unix.gettimeofday () +. 300.0)
@@ -2885,6 +2924,7 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     harness_exit = None;
     next_coord_refresh = 0.0;
     coord_pid = None;
+    coord_failures = 0;
     crash_at = None;
   }
 
