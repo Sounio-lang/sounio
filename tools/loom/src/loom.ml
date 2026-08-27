@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.26.27"
+let runtime_version = "2026.08.26.28"
 let max_control_bytes = 16 * 1024
 let max_snapshot_bytes = 1024 * 1024
 let max_pending_bytes = 8 * 1024 * 1024
@@ -3480,16 +3480,96 @@ let spectral_event values source head (event : journal_event) =
       journal_head_sha256 = head;
       verified = true }
 
+type verified_session_journals = {
+  semantic_events : journal_event list;
+  semantic_head : string;
+  guardian_journal : (journal_event list * string) option;
+}
+
+let guardianless_runtime_versions = [ "2026.08.24.0" ]
+let guardian_release_utc = "2026-08-24T08:58:13Z"
+
+let verify_guardianless_generation values semantic_path runtime semantic_events
+    semantic_phase =
+  let generation_dir = Filename.dirname semantic_path in
+  let snapshot_path = Filename.concat generation_dir "session.state" in
+  if Sys.file_exists snapshot_path then (
+    let snapshot = parse_key_values snapshot_path in
+    let snapshot_runtime = table_value snapshot "runtime_version" in
+    if snapshot_runtime <> runtime then
+      failf
+        "guardianless-generation-runtime-mismatch:descriptor=%s:generation=%s"
+        runtime (if snapshot_runtime = "" then "unknown" else snapshot_runtime);
+    let descriptor_instance = table_value values "instance_id" in
+    let snapshot_instance = table_value snapshot "instance_id" in
+    if descriptor_instance = "" || snapshot_instance <> descriptor_instance then
+      failf
+        "guardianless-generation-instance-mismatch:descriptor=%s:generation=%s"
+        (if descriptor_instance = "" then "unknown" else descriptor_instance)
+        (if snapshot_instance = "" then "unknown" else snapshot_instance);
+    let snapshot_journal = table_value snapshot "journal_file" in
+    if snapshot_journal <> semantic_path then
+      failf "guardianless-generation-journal-mismatch";
+    let snapshot_guardian = table_value snapshot "guardian_journal_file" in
+    if snapshot_guardian <> "" then
+      failf "guardianless-generation-declares-guardian:path=%s"
+        snapshot_guardian);
+  let hidden_guardian = Filename.concat generation_dir "guardian.tsv" in
+  if Sys.file_exists hidden_guardian then
+    failf "guardianless-generation-hides-guardian:path=%s" hidden_guardian;
+  if semantic_phase <> Exited then
+    failf "guardianless-semantic-journal-not-terminal";
+  match semantic_events with
+  | (first : journal_event) :: _
+    when first.seq = 1 && first.kind = "SESSION_STARTED"
+         && first.utc < guardian_release_utc -> ()
+  | (first : journal_event) :: _
+    when first.seq = 1 && first.kind = "SESSION_STARTED" ->
+      failf "guardianless-session-after-guardian-release:started=%s:release=%s"
+        first.utc guardian_release_utc
+  | _ -> failf "guardianless-session-start-receipt-missing"
+
+let load_verified_session_journals values =
+  let runtime = table_value values "runtime_version" in
+  let semantic_path = table_value values "journal_file" in
+  if semantic_path = "" then failf "semantic-journal-required";
+  if not (Sys.file_exists semantic_path) then
+    failf "semantic-journal-missing:path=%s" semantic_path;
+  let semantic_events, semantic_phase, semantic_head =
+    load_and_verify_journal semantic_path
+  in
+  let guardian_path = table_value values "guardian_journal_file" in
+  let guardian_journal =
+    if guardian_path = "" then (
+      if not (List.mem runtime guardianless_runtime_versions) then
+        failf "guardian-journal-required:runtime-version=%s"
+          (if runtime = "" then "unknown" else runtime);
+      verify_guardianless_generation values semantic_path runtime semantic_events
+        semantic_phase;
+      None)
+    else (
+      if not (Sys.file_exists guardian_path) then
+        failf "guardian-journal-missing:path=%s" guardian_path;
+      let events, _, _, head =
+        load_and_verify_guardian_journal guardian_path
+      in
+      Some (events, head))
+  in
+  { semantic_events; semantic_head; guardian_journal }
+
 let session_spectral_events (_, values) =
-  let semantic_events, _, semantic_head =
-    load_and_verify_journal (table_value values "journal_file")
+  let journals = load_verified_session_journals values in
+  let guardian_events =
+    match journals.guardian_journal with
+    | None -> []
+    | Some (events, head) ->
+        List.map (spectral_event values "guardian" head) events
   in
-  let guardian_events, _, _, guardian_head =
-    load_and_verify_guardian_journal
-      (table_value values "guardian_journal_file")
-  in
-  List.map (spectral_event values "semantic" semantic_head) semantic_events
-  @ List.map (spectral_event values "guardian" guardian_head) guardian_events
+  ( List.map
+      (spectral_event values "semantic" journals.semantic_head)
+      journals.semantic_events
+    @ guardian_events,
+    journals.guardian_journal = None )
 
 let epistemic_spectral_events root =
   Loom_epistemic.spectral_events root
@@ -3509,45 +3589,58 @@ let epistemic_spectral_events root =
              journal_head_sha256 = event.spectral_head_sha256;
              verified = true })
 
-let spectral_events root =
-  let session_events =
+type spectral_projection = {
+  spectral_rows : Loom_arrow.event list;
+  guardian_sessions : int;
+  legacy_semantic_only_sessions : int;
+}
+
+let spectral_projection root =
+  let session_events, guardian_sessions, legacy_semantic_only_sessions =
     session_descriptors root
     |> List.fold_left
-         (fun events descriptor ->
-           List.rev_append (session_spectral_events descriptor) events)
-         []
+         (fun (events, guardian_count, legacy_count) descriptor ->
+           let projected, legacy = session_spectral_events descriptor in
+           ( List.rev_append projected events,
+             guardian_count + (if legacy then 0 else 1),
+             legacy_count + (if legacy then 1 else 0) ))
+         ([], 0, 0)
   in
-  session_events @ epistemic_spectral_events root
-  |> List.sort (fun left right ->
-         compare
-           ( left.Loom_arrow.observed_at_utc,
-             left.agent,
-             left.lane,
-             left.journal,
-             left.sequence )
-           ( right.Loom_arrow.observed_at_utc,
-             right.agent,
-             right.lane,
-             right.journal,
-             right.sequence ))
+  let spectral_rows =
+    session_events @ epistemic_spectral_events root
+    |> List.sort (fun left right ->
+           compare
+             ( left.Loom_arrow.observed_at_utc,
+               left.agent,
+               left.lane,
+               left.journal,
+               left.sequence )
+             ( right.Loom_arrow.observed_at_utc,
+               right.agent,
+               right.lane,
+               right.journal,
+               right.sequence ))
+  in
+  { spectral_rows; guardian_sessions; legacy_semantic_only_sessions }
 
 let events_arrow root =
-  let events = spectral_events root in
+  let projection = spectral_projection root in
   let bytes =
-    try Loom_arrow.encode events
+    try Loom_arrow.encode projection.spectral_rows
     with Failure message -> failf "arrow-ipc-encode:%s" message
   in
-  (bytes, List.length events)
+  (bytes, projection)
 
 let export_events_arrow_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
   let output = required cli "--out" in
-  let bytes, rows = events_arrow root in
+  let bytes, projection = events_arrow root in
   atomic_write output bytes;
   Printf.printf
-    "LOOM_ARROW_EXPORTED schema=loom-spectral-events-v1 authority=verified-derived rows=%d bytes=%d output=%s\n%!"
-    rows (String.length bytes) output
+    "LOOM_ARROW_EXPORTED schema=loom-spectral-events-v1 authority=verified-derived rows=%d guardian_sessions=%d legacy_semantic_only_sessions=%d bytes=%d output=%s\n%!"
+    (List.length projection.spectral_rows) projection.guardian_sessions
+    projection.legacy_semantic_only_sessions (String.length bytes) output
 
 let verify_events_arrow_command cli =
   let path = required cli "--file" in
@@ -3930,31 +4023,31 @@ let session_events_json (_, values) =
   let instance = table_value values "instance_id" in
   let state = table_value values "state" in
   try
-    let semantic_events, _, semantic_head =
-      load_and_verify_journal (table_value values "journal_file")
-    in
-    let guardian_events, _, _, guardian_head =
-      load_and_verify_guardian_journal
-        (table_value values "guardian_journal_file")
+    let journals = load_verified_session_journals values in
+    let guardian_events, guardian_head, journal_profile =
+      match journals.guardian_journal with
+      | Some (events, head) -> (events, head, "semantic+guardian")
+      | None -> ([], "", "semantic-only-legacy")
     in
     let recoveries =
       List.fold_left
         (fun count (event : journal_event) ->
           if event.kind = "KERNEL_RECOVERED" then count + 1 else count)
-        0 semantic_events
+        0 journals.semantic_events
     in
     let events =
       (List.map (fun event -> (event.utc, journal_event_json "semantic" event))
-         (take_last 128 semantic_events))
+         (take_last 128 journals.semantic_events))
       @ (List.map (fun event -> (event.utc, journal_event_json "guardian" event))
            (take_last 128 guardian_events))
       |> List.sort (fun (left, _) (right, _) -> compare left right)
       |> List.map snd |> String.concat ","
     in
     Printf.sprintf
-      "{\"agent\":\"%s\",\"lane\":\"%s\",\"instance_id\":\"%s\",\"state\":\"%s\",\"verified\":true,\"recoveries\":%d,\"semantic_head\":\"%s\",\"guardian_head\":\"%s\",\"events\":[%s]}"
+      "{\"agent\":\"%s\",\"lane\":\"%s\",\"instance_id\":\"%s\",\"state\":\"%s\",\"verified\":true,\"journal_profile\":\"%s\",\"recoveries\":%d,\"semantic_head\":\"%s\",\"guardian_head\":\"%s\",\"events\":[%s]}"
       (json_escape agent) (json_escape lane) (json_escape instance)
-      (json_escape state) recoveries (json_escape semantic_head)
+      (json_escape state) (json_escape journal_profile) recoveries
+      (json_escape journals.semantic_head)
       (json_escape guardian_head) events
   with error ->
     Printf.sprintf
@@ -6708,12 +6801,19 @@ let serve_http cli =
                  http_response "200 OK" "application/json" (events_json root)
                else if path = "/api/events.arrow" then
                  (try
-                    let body, rows = events_arrow root in
+                    let body, projection = events_arrow root in
                     http_response
                       ~headers:
                         [ ("X-Loom-Schema", "loom-spectral-events-v1");
                           ("X-Loom-Authority", "verified-derived");
-                          ("X-Loom-Rows", string_of_int rows) ]
+                          ( "X-Loom-Rows",
+                            string_of_int
+                              (List.length projection.spectral_rows) );
+                          ( "X-Loom-Guardian-Sessions",
+                            string_of_int projection.guardian_sessions );
+                          ( "X-Loom-Legacy-Semantic-Only-Sessions",
+                            string_of_int
+                              projection.legacy_semantic_only_sessions ) ]
                       "200 OK" "application/vnd.apache.arrow.stream" body
                   with error ->
                     http_response "409 Conflict" "application/json"

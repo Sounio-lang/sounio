@@ -90,6 +90,89 @@ cmp "$TEST_ROOT/events.arrow" "$TEST_ROOT/http.arrow" >/dev/null || \
   fail 'CLI and HTTP projections diverged over the same journal snapshot'
 "$LOOM" verify-events-arrow --file "$TEST_ROOT/http.arrow" >/dev/null
 
+descriptor="$STATE_DIR/sessions/${AGENT}--${LANE}/session.state"
+[[ -f "$descriptor" ]] || fail 'session descriptor missing'
+cp "$descriptor" "$TEST_ROOT/current-session.state"
+legacy_instance=a42a648cdb2e2dc5c9736a6dd1dfd4ec
+legacy_dir="$STATE_DIR/sessions/legacy-arrow--pre-guardian"
+legacy_generation="$legacy_dir/generations/$legacy_instance"
+legacy_journal="$legacy_generation/journal.tsv"
+mkdir -p "$legacy_generation"
+cat > "$legacy_journal" <<'LEGACY_JOURNAL'
+1	0000000000000000000000000000000000000000000000000000000000000000	f724187be5efcdc5b3acb73110efcbc5a6c868c055cdac8f916b2a5e98c13d8b	2026-08-24T02:54:31.822423Z	SESSION_STARTED	61343261363438636462326532646335633937333661366464316466643465633a323332343632
+2	f724187be5efcdc5b3acb73110efcbc5a6c868c055cdac8f916b2a5e98c13d8b	c0bccc7d64c0a1249c35cd1ffcabc73db34a4805fdd47a9c07ae56b30c233780	2026-08-24T02:54:31.860836Z	OUTPUT	303a33363a33653035336231363133333339656464303134373332646565343036613530623732663132646563653063363132613731396134653734363736623834393965
+3	c0bccc7d64c0a1249c35cd1ffcabc73db34a4805fdd47a9c07ae56b30c233780	35591495e6b73ab7c4e1a380a538aa0edb4b2adc63667ddadb09bedc190bfbb4	2026-08-24T08:58:57.321789Z	SESSION_EXITED	313137
+LEGACY_JOURNAL
+cat > "$legacy_generation/session.state" <<LEGACY_GENERATION
+protocol=1
+runtime_version=2026.08.24.0
+state=exited
+agent=legacy-arrow
+lane=pre-guardian
+instance_id=$legacy_instance
+journal_file=$legacy_journal
+started_utc=2026-08-24T02:54:31.808998Z
+LEGACY_GENERATION
+cp "$legacy_generation/session.state" "$legacy_dir/session.state"
+
+"$LOOM" export-events-arrow --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+  --out "$TEST_ROOT/legacy.arrow" > "$TEST_ROOT/legacy.out"
+grep -q 'legacy_semantic_only_sessions=1' "$TEST_ROOT/legacy.out" || \
+  fail 'known pre-Guardian runtime did not declare semantic-only projection'
+curl -fsS -D "$TEST_ROOT/legacy.headers" \
+  "http://127.0.0.1:$port/api/events.arrow" -o "$TEST_ROOT/legacy-http.arrow"
+grep -qi '^X-Loom-Legacy-Semantic-Only-Sessions: 1' \
+  "$TEST_ROOT/legacy.headers" || \
+  fail 'HTTP projection hid its pre-Guardian session count'
+curl -fsS "http://127.0.0.1:$port/api/events" \
+  -o "$TEST_ROOT/legacy-events.json"
+grep -q '"journal_profile":"semantic-only-legacy"' \
+  "$TEST_ROOT/legacy-events.json" || \
+  fail 'JSON projection disagreed with the Arrow evolution profile'
+
+awk '
+  /^runtime_version=/ { print "runtime_version=2026.08.24.0"; next }
+  /^guardian_/ { next }
+  { print }
+' \
+  "$TEST_ROOT/current-session.state" > "$descriptor.current-missing"
+mv "$descriptor.current-missing" "$descriptor"
+curl -sS -D "$TEST_ROOT/current-missing.headers" \
+  "http://127.0.0.1:$port/api/events.arrow" \
+  -o "$TEST_ROOT/current-missing.json"
+grep -q '^HTTP/1.1 409 Conflict' "$TEST_ROOT/current-missing.headers" || \
+  fail 'current runtime without Guardian journal did not fail closed'
+grep -q 'guardianless-generation-runtime-mismatch:descriptor=2026.08.24.0:generation=2026.08.26.28' \
+  "$TEST_ROOT/current-missing.json" || \
+  fail 'descriptor-downgrade sabotage was refused by an unrelated rule'
+
+awk '/^guardian_journal_file=/ { next } { print }' \
+  "$TEST_ROOT/current-session.state" > "$descriptor.current-required"
+mv "$descriptor.current-required" "$descriptor"
+curl -sS -D "$TEST_ROOT/current-required.headers" \
+  "http://127.0.0.1:$port/api/events.arrow" \
+  -o "$TEST_ROOT/current-required.json"
+grep -q '^HTTP/1.1 409 Conflict' "$TEST_ROOT/current-required.headers" || \
+  fail 'current runtime without Guardian journal did not fail closed'
+grep -q 'guardian-journal-required:runtime-version=2026.08.26.28' \
+  "$TEST_ROOT/current-required.json" || \
+  fail 'current-runtime omission was refused by an unrelated rule'
+
+awk -v missing="$TEST_ROOT/missing-guardian.tsv" '
+  /^guardian_journal_file=/ { print "guardian_journal_file=" missing; next }
+  { print }
+' "$TEST_ROOT/current-session.state" > "$descriptor.file-missing"
+mv "$descriptor.file-missing" "$descriptor"
+curl -sS -D "$TEST_ROOT/file-missing.headers" \
+  "http://127.0.0.1:$port/api/events.arrow" \
+  -o "$TEST_ROOT/file-missing.json"
+grep -q '^HTTP/1.1 409 Conflict' "$TEST_ROOT/file-missing.headers" || \
+  fail 'declared but missing Guardian journal did not fail closed'
+grep -q "guardian-journal-missing:path=$TEST_ROOT/missing-guardian.tsv" \
+  "$TEST_ROOT/file-missing.json" || \
+  fail 'missing-file sabotage was refused by an unrelated rule'
+cp "$TEST_ROOT/current-session.state" "$descriptor"
+
 cp "$TEST_ROOT/events.arrow" "$TEST_ROOT/corrupt.arrow"
 printf '\x00' | dd of="$TEST_ROOT/corrupt.arrow" bs=1 seek=0 count=1 \
   conv=notrunc status=none
@@ -121,5 +204,5 @@ grep -q 'spectral_projection_refused' "$TEST_ROOT/refused.json" || \
 grep -q 'hash:event-digest-mismatch seq=1' "$TEST_ROOT/refused.json" || \
   fail 'HTTP sabotage refusal did not preserve the causal reason'
 
-printf 'SOUNIO_LOOM_ARROW_GATE_PASS=true schema=loom-spectral-events-v1 rows=%s sabotage=PASS runtime=OCaml+C\n' \
+printf 'SOUNIO_LOOM_ARROW_GATE_PASS=true schema=loom-spectral-events-v1 rows=%s legacy_profile=PASS downgrade=REFUSED current_missing=REFUSED missing_file=REFUSED sabotage=PASS runtime=OCaml+C\n' \
   "$rows"
