@@ -107,6 +107,12 @@ if [[ "$NOT_RUN" -eq 0 ]]; then
     'nc_emit_byte\(nc, 0x0b\)' "$CODEGEN_SOURCE"
   check_grep "live_path_uses_predicate" \
     'native_v2_empty_stub_would_fabricate\(func\)' "$CODEGEN_SOURCE"
+  check_grep "empty_stub_refusal_names_function" \
+    'NATIVE_REFUSAL kind=empty_stub_ud2 fn=' "$CODEGEN_SOURCE"
+  check_grep "empty_stub_refusal_has_stable_reason" \
+    'reason=missing_lowered_body' "$CODEGEN_SOURCE"
+  check_grep "empty_stub_refusal_summary" \
+    'NATIVE_REFUSAL_SUMMARY empty_stub_ud2=' "$CODEGEN_SOURCE"
 
   # Lean model: the two relations disagree exactly when there is something
   # to refuse, and refuse infects add.
