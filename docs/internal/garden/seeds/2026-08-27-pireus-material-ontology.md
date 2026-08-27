@@ -2,9 +2,9 @@
 topic_id: repo.docs.internal.garden.seeds.2026-08-27-pireus-material-ontology
 authority: repo_only
 audience: users
-last_validated: 2026-08-27
-validated_by: founder
-source_of_truth: this seed until concept registration
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-27-pireus-material-ontology
 -->
 
 # Pireus: The Material Port Of Sounio

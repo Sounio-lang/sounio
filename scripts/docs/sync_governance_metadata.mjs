@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   ACCEPTANCE_RELATIVE_PATH,
+  FROZEN_REPO_DOCS_RELATIVE_PATH,
   MATRIX_RELATIVE_PATH,
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
@@ -10,6 +11,8 @@ import {
   formatHistoricalStatusNote,
   formatRepoMetadataBlock,
   metadataFieldsForTopic,
+  readFrozenRepoDocs,
+  sha256Hex,
   stripStatusNote,
 } from './governance_registry.mjs';
 
@@ -73,9 +76,19 @@ function syncFrontmatter(content, topic) {
 
 async function main() {
   const registry = await buildGovernedTopicRegistry(rootDir);
+  const frozenManifest = await readFrozenRepoDocs(rootDir);
+  const frozenByPath = new Map(frozenManifest.documents.map((entry) => [entry.path, entry]));
   const registryAbsPath = path.join(rootDir, REGISTRY_RELATIVE_PATH);
   const matrixAbsPath = path.join(rootDir, MATRIX_RELATIVE_PATH);
   const acceptanceAbsPath = path.join(rootDir, ACCEPTANCE_RELATIVE_PATH);
+
+  for (const [relPath, entry] of frozenByPath) {
+    const content = await readFile(path.join(rootDir, relPath));
+    const actualHash = sha256Hex(content);
+    if (actualHash !== entry.sha256) {
+      throw new Error(`Frozen repo-doc hash mismatch for ${relPath}: expected ${entry.sha256}, found ${actualHash}`);
+    }
+  }
 
   await mkdir(path.dirname(registryAbsPath), { recursive: true });
   await mkdir(path.dirname(matrixAbsPath), { recursive: true });
@@ -89,6 +102,9 @@ async function main() {
   const websiteTopics = registry.topics.filter((topic) => Object.keys(topic.website_paths ?? {}).length > 0);
 
   for (const topic of repoTopics) {
+    if (frozenByPath.has(topic.repo_doc_path)) {
+      continue;
+    }
     const absPath = path.join(rootDir, topic.repo_doc_path);
     const current = await readFile(absPath, 'utf8');
     const next = syncRepoMetadata(current, topic, topic.repo_doc_path);
@@ -108,7 +124,7 @@ async function main() {
     }
   }
 
-  console.log(`Synced docs governance metadata for ${repoTopics.length} repo docs and ${websiteTopics.length} website topics.`);
+  console.log(`Synced docs governance metadata for ${repoTopics.length} repo docs and ${websiteTopics.length} website topics; preserved ${frozenByPath.size} hash-pinned repo docs from ${FROZEN_REPO_DOCS_RELATIVE_PATH}.`);
 }
 
 await main();

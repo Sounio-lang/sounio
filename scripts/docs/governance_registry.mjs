@@ -1,15 +1,53 @@
+import { createHash } from 'node:crypto';
 import { access, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 export const REGISTRY_RELATIVE_PATH = 'docs/governance/topic-registry.v1.json';
 export const MATRIX_RELATIVE_PATH = 'docs/governance/DOCS_AUTHORITY_MATRIX.md';
 export const ACCEPTANCE_RELATIVE_PATH = 'docs/governance/DOCS_ACCEPTANCE_REPORT.md';
+export const FROZEN_REPO_DOCS_RELATIVE_PATH = 'docs/governance/frozen-repo-docs.v1.json';
 export const LOCALES = ['en', 'pt', 'el', 'zh', 'ja', 'es'];
 export const NON_ENGLISH_LOCALES = LOCALES.filter((locale) => locale !== 'en');
 export const COLLECTIONS = ['docs', 'tutorials', 'showcases', 'blog'];
 export const REPO_META_MARKER = '<!-- docs:meta';
 export const STATUS_NOTE_START = '<!-- docs:status-note:start -->';
 export const STATUS_NOTE_END = '<!-- docs:status-note:end -->';
+
+export function sha256Hex(content) {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+export async function readFrozenRepoDocs(rootDir) {
+  const manifestPath = path.join(rootDir, FROZEN_REPO_DOCS_RELATIVE_PATH);
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile(manifestPath, 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { version: 1, documents: [] };
+    }
+    throw new Error(`Cannot read frozen repo-doc manifest: ${error.message}`);
+  }
+
+  if (parsed?.version !== 1 || !Array.isArray(parsed.documents)) {
+    throw new Error('Frozen repo-doc manifest must use version 1 and a documents array.');
+  }
+
+  const seen = new Set();
+  for (const entry of parsed.documents) {
+    if (!entry || typeof entry.path !== 'string' || !entry.path.startsWith('docs/') ||
+        !/^[0-9a-f]{64}$/.test(entry.sha256 ?? '') || typeof entry.reason !== 'string' ||
+        entry.reason.trim() === '') {
+      throw new Error('Frozen repo-doc entry requires a docs/ path, SHA-256, and reason.');
+    }
+    if (seen.has(entry.path)) {
+      throw new Error(`Duplicate frozen repo-doc path: ${entry.path}`);
+    }
+    seen.add(entry.path);
+  }
+
+  return parsed;
+}
 
 const ACTIVE_IMPLEMENTATION_DOCS = new Set([
   'docs/implementation/GPU_COMPILER_CONTRACTS.md',

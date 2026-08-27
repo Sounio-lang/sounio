@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,6 +85,20 @@ async function createBaseFixture() {
     'docs/archived/HISTORY.md',
     '# History\n\nLegacy notes preserved for lineage.\n'
   );
+  const frozenEvidence = '# Frozen Evidence\n\nThese bytes are receipt-bound.\n';
+  await writeFixtureFile(fixtureRoot, 'docs/research/frozen-evidence.md', frozenEvidence);
+  await writeFixtureFile(
+    fixtureRoot,
+    'docs/governance/frozen-repo-docs.v1.json',
+    `${JSON.stringify({
+      version: 1,
+      documents: [{
+        path: 'docs/research/frozen-evidence.md',
+        sha256: createHash('sha256').update(frozenEvidence).digest('hex'),
+        reason: 'selftest receipt binding',
+      }],
+    }, null, 2)}\n`
+  );
 
   await writeFixtureFile(
     fixtureRoot,
@@ -110,6 +125,10 @@ async function createBaseFixture() {
 
   const syncResult = await runNode(syncScript, fixtureRoot);
   assert(syncResult.ok, `Fixture sync failed:\n${syncResult.stderr || syncResult.stdout}`);
+  assert(
+    await readFile(path.join(fixtureRoot, 'docs/research/frozen-evidence.md'), 'utf8') === frozenEvidence,
+    'Sync mutated a hash-pinned repo doc'
+  );
 
   return fixtureRoot;
 }
@@ -200,7 +219,20 @@ async function main() {
       'missing evidence artifact detection'
     );
 
-    console.log('Docs registry selftest passed (5 failure scenarios + baseline).');
+    const frozenDriftDir = await cloneFixture(baseDir, 'frozen-drift');
+    cleanupPaths.push(frozenDriftDir);
+    await writeFixtureFile(
+      frozenDriftDir,
+      'docs/research/frozen-evidence.md',
+      '# Frozen Evidence\n\nThese bytes drifted.\n'
+    );
+    await expectFailure(
+      await runNode(registryCheckScript, frozenDriftDir),
+      'Frozen repo-doc hash mismatch for docs/research/frozen-evidence.md',
+      'frozen repo-doc drift detection'
+    );
+
+    console.log('Docs registry selftest passed (6 failure scenarios + baseline, frozen bytes preserved).');
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));
   }

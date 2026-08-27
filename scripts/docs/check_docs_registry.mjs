@@ -3,6 +3,7 @@ import { writeSync } from 'node:fs';
 import path from 'node:path';
 import {
   ACCEPTANCE_RELATIVE_PATH,
+  FROZEN_REPO_DOCS_RELATIVE_PATH,
   LOCALES,
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
@@ -10,7 +11,9 @@ import {
   metadataFieldsForTopic,
   parseFrontmatter,
   parseRepoMetadata,
+  readFrozenRepoDocs,
   readRegistryFile,
+  sha256Hex,
 } from './governance_registry.mjs';
 
 const rootDir = path.resolve(process.cwd());
@@ -135,6 +138,29 @@ async function main() {
   const errors = [];
   const expectedRegistry = await buildGovernedTopicRegistry(rootDir);
   const actualRegistry = await readRegistryFile(rootDir);
+  let frozenManifest = { version: 1, documents: [] };
+  try {
+    frozenManifest = await readFrozenRepoDocs(rootDir);
+  } catch (error) {
+    errors.push(error.message);
+  }
+  const frozenByPath = new Map(frozenManifest.documents.map((entry) => [entry.path, entry]));
+  const registryPaths = new Set(actualRegistry.topics.map((topic) => topic.repo_doc_path).filter(Boolean));
+
+  for (const [relPath, entry] of frozenByPath) {
+    if (!registryPaths.has(relPath)) {
+      errors.push(`${FROZEN_REPO_DOCS_RELATIVE_PATH} references an ungoverned path: ${relPath}`);
+      continue;
+    }
+    try {
+      const actualHash = sha256Hex(await readFile(path.join(rootDir, relPath)));
+      if (actualHash !== entry.sha256) {
+        errors.push(`Frozen repo-doc hash mismatch for ${relPath}: expected ${entry.sha256}, found ${actualHash}`);
+      }
+    } catch {
+      errors.push(`Missing frozen repo doc: ${relPath}`);
+    }
+  }
 
   if (!compareRegistry(expectedRegistry, actualRegistry)) {
     errors.push(`Checked-in ${REGISTRY_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs`);
@@ -155,10 +181,12 @@ async function main() {
       const absPath = path.join(rootDir, topic.repo_doc_path);
       try {
         const content = await readFile(absPath, 'utf8');
-        const actualMeta = parseRepoMetadata(content);
-        metadataMismatch(metadataFieldsForTopic(topic), actualMeta, topic.repo_doc_path, errors);
-        if ((topic.authority === 'historical' || topic.authority === 'archived') && !content.includes('Docs status:')) {
-          errors.push(`${topic.repo_doc_path} is missing a visible ${topic.authority} status note`);
+        if (!frozenByPath.has(topic.repo_doc_path)) {
+          const actualMeta = parseRepoMetadata(content);
+          metadataMismatch(metadataFieldsForTopic(topic), actualMeta, topic.repo_doc_path, errors);
+          if ((topic.authority === 'historical' || topic.authority === 'archived') && !content.includes('Docs status:')) {
+            errors.push(`${topic.repo_doc_path} is missing a visible ${topic.authority} status note`);
+          }
         }
       } catch {
         errors.push(`Missing repo doc path from registry: ${topic.repo_doc_path}`);
