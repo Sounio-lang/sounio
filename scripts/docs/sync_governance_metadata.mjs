@@ -24,19 +24,24 @@ function ensureTrailingNewline(content) {
 
 function syncRepoMetadata(content, topic, relPath) {
   const metadataBlock = `${formatRepoMetadataBlock(topic)}\n\n`;
+  const metadataPattern = /^(<!-- docs:meta\n[\s\S]*?\n-->)\n*/m;
   let next = content;
 
   if (next.startsWith('<!-- docs:meta\n')) {
-    next = next.replace(/^<!-- docs:meta\n[\s\S]*?\n-->\n*/m, metadataBlock);
+    next = next.replace(metadataPattern, metadataBlock);
   } else {
     next = `${metadataBlock}${next}`;
   }
 
   next = stripStatusNote(next).replace(/^\n+/, '');
+  next = next.replace(metadataPattern, (_match, block) => `${block}\n\n`);
 
   const statusNote = formatHistoricalStatusNote(topic, relPath);
   if (statusNote) {
-    next = next.replace(/^<!-- docs:meta\n[\s\S]*?\n-->\n*/m, (match) => `${match}${statusNote}\n\n`);
+    next = next.replace(
+      metadataPattern,
+      (_match, block) => `${block}\n\n\n${statusNote}\n\n`
+    );
   }
 
   return ensureTrailingNewline(next);

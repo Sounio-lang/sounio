@@ -130,6 +130,28 @@ async function createBaseFixture() {
     'Sync mutated a hash-pinned repo doc'
   );
 
+  const idempotencePaths = [
+    'docs/archived/HISTORY.md',
+    'docs/guide/getting-started.md',
+    'docs/governance/topic-registry.v1.json',
+    'docs/governance/DOCS_AUTHORITY_MATRIX.md',
+    'docs/governance/DOCS_ACCEPTANCE_REPORT.md',
+    'website/src/content/docs/en/getting-started.mdx',
+  ];
+  const firstSync = new Map(await Promise.all(idempotencePaths.map(async (relPath) => [
+    relPath,
+    await readFile(path.join(fixtureRoot, relPath), 'utf8'),
+  ])));
+  const secondSyncResult = await runNode(syncScript, fixtureRoot);
+  assert(
+    secondSyncResult.ok,
+    `Second fixture sync failed:\n${secondSyncResult.stderr || secondSyncResult.stdout}`
+  );
+  for (const relPath of idempotencePaths) {
+    const secondContent = await readFile(path.join(fixtureRoot, relPath), 'utf8');
+    assert(secondContent === firstSync.get(relPath), `Sync is not idempotent for ${relPath}`);
+  }
+
   return fixtureRoot;
 }
 
@@ -232,7 +254,7 @@ async function main() {
       'frozen repo-doc drift detection'
     );
 
-    console.log('Docs registry selftest passed (6 failure scenarios + baseline, frozen bytes preserved).');
+    console.log('Docs registry selftest passed (6 failure scenarios + baseline, idempotent sync, frozen bytes preserved).');
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));
   }
