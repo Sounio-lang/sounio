@@ -89,3 +89,70 @@ Two earlier source-built rebuilds that patched only the lexer/`keyword_lookup` p
 - Not a seed / `lean_single` change.
 - Not E220 for unknown components.
 - Not a claim that TypeEntry now stores provenance kind.
+
+## Addendum 2026-08-27 — rebased onto `main@055825a3f9`; the baseline row moved
+
+This change was written against `6ce6e4dafd`. Between that base and
+`main@055825a3f9`, PR #2102 landed `E241` in
+`self-hosted/parser/types.sio`: the Knowledge component loop's `else` arm is no
+longer a silent skip, it is `report_unknown_knowledge_component`, and a bare
+identifier is only an epsilon bound if a comparison operator follows it.
+
+**The premise of this change shifted; it was not refuted.** `Input` still needed
+a keyword. What changed is the symptom it removes.
+
+| program | claimed here (base `6ce6e4dafd`) | measured on `main@055825a3f9` **without** this change | measured **with** this change |
+|---|---|---|---|
+| `Knowledge[f64, Input]` | check rc=0 — "Ident; bracket else-arm skips it" | `error[E241]`, rc=1 — the Ident arm finds no comparison operator and refuses¹ | check rc=0, provenance `AstProvInput` |
+| `Knowledge<f64, Input>` | rc=1, `>` eaten as `CmpGt` | unchanged | check rc=0 |
+
+¹ Measured on the sibling identifiers that take the identical path: under the
+source-built compiler of this rebased tree, `Knowledge[f64, Source]`,
+`Knowledge[f64, Sourc]`, `Knowledge[f64, Literature]` and `Knowledge[f64, 123]`
+all return `error[E241]` rc=1, while `Knowledge[f64, Input]` returns rc=0. Before
+this change `Input` had no keyword and lexed as `Ident` exactly like `Sourc`.
+
+So the sentence "Not in this change: … the silent `else` skip" is now
+**vacuous rather than wrong** — there is no silent skip left to decline. What
+this change still does not do is `Source`, `Literature`, the
+absent-versus-`derived` collision, `bootstrap_v0.sio`, or `lean_single.sio`.
+
+Adding the keyword does **not** re-open the sink E241 closed: `Input` is now a
+`TokenKind`, so it never reaches the Ident-epsilon branch, and every other
+unknown component still refuses.
+
+### Re-measured on the rebased tree
+
+Source-built Madaros from this tree (`bash scripts/ci/build_modular_madaros.sh`,
+`build_rc=0`, ELF 101433577 bytes — the PR body's 100564677 was the old base's
+`main.sio`), local pod, `./bin/madaros check` / `build`:
+
+| program | check rc | run rc | stdout |
+|---|---:|---:|---|
+| `tests/run-pass/knowledge_provenance_input.sio` | 0 | 0 | `INPUT_KEYWORD_OK` |
+| `tests/run-pass/knowledge_provenance_measured.sio` | 0 | 0 | `MEASURED_KEYWORD_OK` |
+| `tests/run-pass/knowledge_input_lowercase_ident.sio` | 0 | 7 | (return `7`; intended) |
+
+Gates on the rebased tree:
+
+- `bash scripts/dev/knowledge_annotation_parser_coverage.sh` → **PASS**, after
+  re-pointing its pin (see below).
+- `bash scripts/ci/knowledge_unknown_component_live_refuse.sh` (source-built
+  Madaros) → **pass, total=3 passed=3 failed=0**, positive control fired.
+
+### One gate had to be re-pointed, and that is the rebase's real decision
+
+`scripts/dev/knowledge_annotation_parser_coverage.sh` did not exist at this
+change's base. It arrived with E241 and pinned, in three places, that `Input` is
+**not** a keyword and `AstProvInput` has **no** parser construction site —
+"that would mint a provenance surface we did not ask for". On the rebased tree it
+fired three times.
+
+That pin is a tripwire, not a veto: its own header says a moved pin means "either
+the gap closed, or the gap widened, and the audit must be re-read". Here the gap
+closed, under the founder ruling of 2026-08-19 that this change implements. The
+pin was therefore narrowed from `{Source, Literature, Input}` to
+`{Source, Literature}`, `constructed` from 3 to 4, and `Input` added to the
+must-be-present keyword list so it cannot silently regress.
+`docs/audit/KNOWLEDGE_ANNOTATION_PARSER_COVERAGE_2026-08-19.md` carries the
+matching addendum.

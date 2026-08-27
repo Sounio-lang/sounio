@@ -58,15 +58,21 @@ constructed=$(
     | sed -E 's/[^A-Za-z].*$//' \
     | sort -u
 )
-expected_constructed=$'AstProvComputed\nAstProvDerived\nAstProvMeasured'
+# 2026-08-27: constructed 3 -> 4. `Input` was moved out of the unreachable set
+# on purpose, under the founder ruling of 2026-08-19 (`asserted -> Input`) that
+# PR #2062 implements. The tripwire is not weakened, it is re-pointed: the pin
+# still says exactly which provenance words the parser may construct, and
+# `Source` / `Literature` remain unreachable. Loosening this line is a decision
+# a human reads in a diff, which is the whole point of writing the set out.
+expected_constructed=$'AstProvComputed\nAstProvDerived\nAstProvInput\nAstProvMeasured'
 if [[ "$constructed" != "$expected_constructed" ]]; then
   pin_fail "parser construction sites for AstProvenanceKind moved"
   printf '  got:\n%s\n  expected:\n%s\n' "$constructed" "$expected_constructed" >&2
 fi
 
-# The three unreachable cases must still have zero construction sites
+# The two remaining unreachable cases must still have zero construction sites
 # under self-hosted/parser/.
-for dead in AstProvSource AstProvLiterature AstProvInput; do
+for dead in AstProvSource AstProvLiterature; do
   if grep -q "AstProvenanceKind::${dead}" self-hosted/parser/*.sio; then
     pin_fail "$dead gained a parser construction site"
   fi
@@ -74,7 +80,7 @@ done
 
 # Lexer keywords: live Madaros table + the parser.sio duplicate.
 # Presence.
-for word in Derived Computed Measured Valid ValidUntil ValidWhile; do
+for word in Derived Computed Measured Input Valid ValidUntil ValidWhile; do
   if ! grep -q "return TokenKind::${word}" "$LEX_TABLES"; then
     pin_fail "lexer/tables.sio lost TokenKind::${word}"
   fi
@@ -83,9 +89,10 @@ for word in Derived Computed Measured Valid ValidUntil ValidWhile; do
   fi
 done
 
-# Absence of the three unreachable provenance words as keywords.
+# Absence of the two remaining unreachable provenance words as keywords.
 # E241 refuses a *bare* Source identifier; it does not make Source a provenance word.
-for word in Source Literature Input; do
+# `Input` left this list on 2026-08-27 — see the note above the constructed pin.
+for word in Source Literature; do
   if grep -q "return TokenKind::${word}" "$LEX_TABLES" "$LEX_PARSER"; then
     pin_fail "$word became a lexer keyword — that would mint a provenance surface we did not ask for"
   fi
@@ -116,7 +123,7 @@ for word in ValidUntil ValidWhile; do
   fi
 done
 
-note "STATIC: declared=6 constructed=3 unreachable=Source,Literature,Input E241=present Ident-epsilon-requires-cmp"
+note "STATIC: declared=6 constructed=4 unreachable=Source,Literature E241=present Ident-epsilon-requires-cmp"
 
 # ---------------------------------------------------------------------------
 # DYNAMIC — only against a source-built Madaros (SOUNIO_KCOV_DYNAMIC=1).
