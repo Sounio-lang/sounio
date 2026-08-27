@@ -5,10 +5,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 EXECUTION_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v2"
+LANE_HEALTH_MANIFEST="$ROOT_DIR/tools/loom/lane_health.freeze.v1"
 frozen_toolchain_root=''
+lane_health_toolchain_root=''
 
 cleanup() {
   [[ -z "$frozen_toolchain_root" ]] || rm -rf "$frozen_toolchain_root"
+  [[ -z "$lane_health_toolchain_root" ]] || rm -rf "$lane_health_toolchain_root"
+}
+
+prepare_lane_health_toolchain() {
+  local executable_commit wrapper_sha compiler_sha actual_wrapper_sha actual_compiler_sha
+  [[ -f "$LANE_HEALTH_MANIFEST" ]] || {
+    echo 'error: frozen Sounio lane-health manifest is required' >&2
+    exit 1
+  }
+  executable_commit="$(manifest_value "$LANE_HEALTH_MANIFEST" sounio_executable_commit)"
+  wrapper_sha="$(manifest_value "$LANE_HEALTH_MANIFEST" toolchain_wrapper_sha256)"
+  compiler_sha="$(manifest_value "$LANE_HEALTH_MANIFEST" toolchain_compiler_sha256)"
+  git -C "$ROOT_DIR" cat-file -e "${executable_commit}^{commit}" 2>/dev/null || {
+    echo "error: frozen lane-health Sounio toolchain commit is unavailable: $executable_commit" >&2
+    exit 1
+  }
+  lane_health_toolchain_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-lane-health-toolchain.XXXXXX")"
+  git -C "$ROOT_DIR" archive "$executable_commit" \
+    bin/souc bin/souc-lean-single-x86_64 | tar -x -C "$lane_health_toolchain_root"
+  actual_wrapper_sha="$(sha256sum "$lane_health_toolchain_root/bin/souc" | awk '{print $1}')"
+  actual_compiler_sha="$(sha256sum "$lane_health_toolchain_root/bin/souc-lean-single-x86_64" | awk '{print $1}')"
+  [[ "$actual_wrapper_sha" == "$wrapper_sha" && "$actual_compiler_sha" == "$compiler_sha" ]] || {
+    echo 'error: reconstructed lane-health Sounio toolchain failed hash verification' >&2
+    exit 1
+  }
 }
 trap cleanup EXIT
 
@@ -71,6 +98,10 @@ if [[ -z "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" || \
   -z "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
   prepare_frozen_toolchain
 fi
+if [[ -z "${SOUNIO_LOOM_LANE_HEALTH_PREBUILT:-}" || \
+  -z "${SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT:-}" ]]; then
+  prepare_lane_health_toolchain
+fi
 language_authority_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
 if [[ -n "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT" ]] || {
@@ -98,6 +129,33 @@ else
   SOUNIO_LOOM_EXECUTION_AUTHORITY_SOUC="$frozen_toolchain_root/bin/souc" \
     SOUNIO_LOOM_EXECUTION_AUTHORITY_OUTPUT="$execution_authority_output" \
     "$SCRIPT_DIR/build_sounio_loom_execution_authority.sh"
+fi
+lane_health_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-runtime"
+if [[ -n "${SOUNIO_LOOM_LANE_HEALTH_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_LANE_HEALTH_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_LANE_HEALTH_PREBUILT is not executable' >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$lane_health_output")"
+  install -m 0755 "$SOUNIO_LOOM_LANE_HEALTH_PREBUILT" "$lane_health_output"
+else
+  SOUNIO_LOOM_LANE_HEALTH_SOUC="$lane_health_toolchain_root/bin/souc" \
+    SOUNIO_LOOM_LANE_HEALTH_OUTPUT="$lane_health_output" \
+    "$SCRIPT_DIR/build_sounio_loom_lane_health.sh"
+fi
+lane_health_parity_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-parity-runtime"
+if [[ -n "${SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT is not executable' >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$lane_health_parity_output")"
+  install -m 0755 "$SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT" \
+    "$lane_health_parity_output"
+else
+  SOUNIO_LOOM_LANE_HEALTH_PARITY_SOUC="$lane_health_toolchain_root/bin/souc" \
+    SOUNIO_LOOM_LANE_HEALTH_PARITY_OUTPUT="$lane_health_parity_output" \
+    "$SCRIPT_DIR/build_sounio_loom_lane_health_parity.sh"
 fi
 "$SCRIPT_DIR/build_sounio_loom_continuity_adapter.sh"
 "$SCRIPT_DIR/build_sounio_loom_obligation_adapter.sh"

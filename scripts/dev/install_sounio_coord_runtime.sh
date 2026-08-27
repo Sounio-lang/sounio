@@ -115,6 +115,15 @@ activate_runtime() {
       16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff ]] || \
       die "installed native hook is not bound to the frozen Sounio authority: $runtime_id"
   fi
+  if grep -q '^capability=loom-truthful-lane-health-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-lane-health-runtime" && \
+      -x "$version_dir/bin/sounio-loom-lane-health-parity-runtime" ]] || \
+      die "installed runtime declares truthful lane health but omits its OCaml realization or frozen Sounio executables: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_lane_health_semantics_sha256)" == \
+      5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f ]] || \
+      die "installed truthful lane health is not bound to the frozen Sounio semantics: $runtime_id"
+  fi
   if grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest"; then
     grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" || \
       die "installed runtime declares native hook attestation without the native hook: $runtime_id"
@@ -404,6 +413,8 @@ fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
 loom_language_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_language_authority.sh"
+loom_lane_health_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_lane_health.sh"
+loom_lane_health_parity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_lane_health_parity.sh"
 loom_continuity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_continuity_adapter.sh"
 loom_obligation_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_obligation_adapter.sh"
 loom_epistemic_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_epistemic_adapter.sh"
@@ -419,6 +430,12 @@ loom_project="$SOURCE_ROOT/tools/loom"
 loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
 loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
 loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v1"
+loom_lane_health_entrypoint="$SOURCE_ROOT/tools/loom/lane_health_main.sio"
+loom_lane_health_parity_entrypoint="$SOURCE_ROOT/tools/loom/lane_health_parity_main.sio"
+loom_lane_health_module="$SOURCE_ROOT/stdlib/coordination/loom_lane_health.sio"
+loom_lane_health_freeze="$SOURCE_ROOT/tools/loom/lane_health.freeze.v1"
+loom_lane_health_ocaml_receipt="$SOURCE_ROOT/tools/loom/lane_health.ocaml.v1"
+loom_sha256_module="$SOURCE_ROOT/stdlib/crypto/sha256.sio"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
 loom_obligation_entrypoint="$SOURCE_ROOT/tools/loom/obligation_adapter_main.sio"
@@ -457,6 +474,9 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
 [[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
 [[ -x "$loom_language_authority_build_source" ]] || \
   die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
+[[ -x "$loom_lane_health_build_source" && \
+  -x "$loom_lane_health_parity_build_source" ]] || \
+  die "Loom lane-health build entrypoints are incomplete"
 [[ -x "$loom_continuity_build_source" ]] || \
   die "Loom continuity build entrypoint missing or not executable: $loom_continuity_build_source"
 [[ -x "$loom_obligation_build_source" ]] || \
@@ -485,6 +505,11 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
   -f "$loom_language_authority_module" && \
   -f "$loom_language_authority_freeze" ]] || \
   die "Loom frozen Sounio language-authority source bundle is incomplete"
+[[ -f "$loom_lane_health_entrypoint" && \
+  -f "$loom_lane_health_parity_entrypoint" && \
+  -f "$loom_lane_health_module" && -f "$loom_lane_health_freeze" && \
+  -f "$loom_lane_health_ocaml_receipt" && -f "$loom_sha256_module" ]] || \
+  die "Loom frozen Sounio lane-health source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
   die "Loom native Sounio obligation source bundle is incomplete"
 [[ -f "$loom_epistemic_entrypoint" && -f "$loom_epistemic_module" ]] || \
@@ -513,6 +538,7 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && \
   -f "$loom_project/src/loom_hook.ml" && \
+  -f "$loom_project/src/loom_lane_health.ml" && \
   -f "$loom_project/src/loom_witness.ml" && \
   -f "$loom_project/src/loom_witness_epoch.ml" && \
   -f "$loom_project/src/loom_witness_transparency.ml" && \
@@ -543,6 +569,8 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
+loom_lane_health_binary="$loom_project/.runtime/sounio-loom-lane-health-runtime"
+loom_lane_health_parity_binary="$loom_project/.runtime/sounio-loom-lane-health-parity-runtime"
 loom_continuity_binary="$loom_project/_build/default/src/sounio-loom-continuity-runtime"
 loom_obligation_binary="$loom_project/_build/default/src/sounio-loom-obligation-runtime"
 loom_epistemic_binary="$loom_project/_build/default/src/sounio-loom-epistemic-runtime"
@@ -557,6 +585,8 @@ loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_language_authority_binary" ]] || \
   die "Loom build omitted its frozen Sounio language-authority runtime"
+[[ -x "$loom_lane_health_binary" && -x "$loom_lane_health_parity_binary" ]] || \
+  die "Loom build omitted its frozen Sounio lane-health runtimes"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
 [[ -x "$loom_obligation_binary" ]] || \
@@ -599,6 +629,18 @@ read -r loom_language_authority_actual_sha _ < <(
 )
 [[ "$loom_language_authority_actual_sha" == "$loom_language_authority_expected_sha" ]] || \
   die "Loom language-authority runtime does not match its freeze manifest"
+loom_lane_health_probe="$(printf '0\n' | "$loom_lane_health_binary")"
+[[ "$loom_lane_health_probe" == \
+  'SOUNIO_LANE_HEALTH_SELFTEST PASS cases=28' ]] || \
+  die "Loom frozen Sounio lane-health runtime failed its install probe"
+loom_lane_health_expected_sha="$(
+  manifest_value "$loom_lane_health_freeze" executable_sha256
+)"
+read -r loom_lane_health_actual_sha _ < <(
+  sha256sum "$loom_lane_health_binary"
+)
+[[ "$loom_lane_health_actual_sha" == "$loom_lane_health_expected_sha" ]] || \
+  die "Loom lane-health runtime does not match its freeze manifest"
 loom_continuity_probe="$(
   printf '101 111 201 301 401 501 0 0 0 0 1 0 0\n' | "$loom_continuity_binary"
 )"
@@ -733,9 +775,14 @@ bundle_sources=(
   "$loom_build_source" "$loom_language_authority_build_source"
   "$loom_language_authority_entrypoint" "$loom_language_authority_module"
   "$loom_language_authority_freeze"
+  "$loom_lane_health_build_source" "$loom_lane_health_parity_build_source"
+  "$loom_lane_health_entrypoint" "$loom_lane_health_parity_entrypoint"
+  "$loom_lane_health_module" "$loom_lane_health_freeze"
+  "$loom_lane_health_ocaml_receipt" "$loom_sha256_module"
   "$loom_project/dune-project" "$loom_project/src/dune"
   "$loom_project/src/loom.ml" "$loom_project/src/loom_arrow.ml"
   "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_hook.ml"
+  "$loom_project/src/loom_lane_health.ml"
   "$loom_project/src/loom_witness.ml"
   "$loom_project/src/loom_witness_epoch.ml"
   "$loom_project/src/loom_witness_transparency.ml" "$loom_project/src/loom_ui.ml"
@@ -815,6 +862,10 @@ else
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
   install -m 0755 "$loom_language_authority_binary" \
     "$stage/bin/sounio-loom-language-authority-runtime"
+  install -m 0755 "$loom_lane_health_binary" \
+    "$stage/bin/sounio-loom-lane-health-runtime"
+  install -m 0755 "$loom_lane_health_parity_binary" \
+    "$stage/bin/sounio-loom-lane-health-parity-runtime"
   install -m 0755 "$loom_continuity_binary" \
     "$stage/bin/sounio-loom-continuity-runtime"
   install -m 0755 "$loom_obligation_binary" \
@@ -855,6 +906,12 @@ else
     printf 'loom_language_authority_frame=9020\n'
     printf 'loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\n'
     printf 'loom_language_authority_manifest_sha256=5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e\n'
+    printf 'loom_lane_health_language=Sounio\n'
+    printf 'loom_lane_health_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_lane_health_realization=OCaml\n'
+    printf 'loom_lane_health_frame=9030\n'
+    printf 'loom_lane_health_semantics_sha256=5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f\n'
+    printf 'loom_lane_health_manifest_sha256=c0ef8162883bc1e44d29dadb2f28ed618779f8abf4257070258abcd24c2fab71\n'
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'
@@ -892,6 +949,8 @@ else
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
+    printf 'capability=loom-truthful-lane-health-v1\n'
+    printf 'capability=loom-nondestructive-health-reconcile-v1\n'
     printf 'capability=loom-native-hook-binary-attestation-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-durable-obligation-v1\n'
@@ -937,6 +996,7 @@ else
     printf 'capability=loom-read-only-gui-v1\n'
     printf 'capability=loom-fusion-cockpit-v1\n'
     printf 'capability=loom-authority-overlay-v1\n'
+    printf 'capability=loom-authority-overlay-v2\n'
     printf 'capability=coord-cockpit-snapshot-v1\n'
     printf 'capability=loom-persistent-provider-custody-v1\n'
     printf 'capability=coord-reply-command-v1\n'

@@ -267,8 +267,8 @@ gui_html="$(curl -fsS "$gui_url/")"
 grep -qi 'Sounio Loom' <<< "$gui_html" || fail 'GUI did not serve its operational view'
 grep -Fq 'data-loom-ui="fusion-v1"' <<< "$gui_html" || fail 'GUI did not serve the Fusion cockpit'
 grep -Fq 'navigator.gpu' <<< "$gui_html" || fail 'GUI omitted its WebGPU spectral path'
-grep -Fq "list.find(s=>s.loom_state==='active')" <<< "$gui_html" || \
-  fail 'GUI does not explicitly select live work'
+grep -Fq "list.find(s=>s.health_state==='WORKING')" <<< "$gui_html" || \
+  fail 'GUI does not explicitly select Sounio-classified work'
 sessions_json="$(curl -fsS "$gui_url/api/sessions")"
 [[ "$sessions_json" == *"\"instance_id\":\"$instance_id\""* ]] || fail 'GUI observed the wrong generation'
 [[ "$sessions_json" == "[{\"agent\":\"$AGENT\",\"lane\":\"$LANE\""* ]] || \
@@ -276,8 +276,12 @@ sessions_json="$(curl -fsS "$gui_url/api/sessions")"
 [[ "$sessions_json" == *'"agent":"lost","lane":"pod-loss"'*'"state":"lost"'* ]] || \
   fail 'operator session list laundered a dead generation as active'
 fleet_json="$(curl -fsS "$gui_url/api/fleet")"
-[[ "$fleet_json" == *'"schema":"loom-authority-overlay-v1"'* ]] || \
+[[ "$fleet_json" == *'"schema":"loom-authority-overlay-v2"'* ]] || \
   fail 'GUI omitted the authority overlay schema'
+[[ "$fleet_json" == *'"health_authority":"Sounio"'* && \
+  "$fleet_json" == *'"health_realization":"OCaml"'* && \
+  "$fleet_json" == *'"health_semantics_sha256":"5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f"'* ]] || \
+  fail 'GUI omitted the frozen truthful-health authority chain'
 [[ "$fleet_json" == *"\"instance_id\":\"$instance_id\""* || \
   "$fleet_json" == *"\"loom_instance\":\"$instance_id\""* ]] || \
   fail 'authority overlay observed the wrong Loom generation'
@@ -752,25 +756,25 @@ fleet_loom fleet-enroll --state-dir "$FLEET_CATALOG_STATE" \
 fleet_loom fleet-enroll --state-dir "$FLEET_CATALOG_STATE" \
   --slot post-pod --kind claude --home "$TEST_ROOT" --cwd "$TEST_ROOT" >/dev/null
 fleet_plan="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
-  --cwd "$TEST_ROOT")"
-[[ "$fleet_plan" == *'slot=post-pod state=absent action=start mode=plan'* ]] || \
+  --cwd "$ROOT_DIR")"
+[[ "$fleet_plan" == *'slot=post-pod state=DEAD action=start mode=plan'* ]] || \
   fail 'fleet dry-run did not plan the absent post-Pod lane'
 [[ ! -e "$FAKE_FLEET_STATE/post-pod.starts" ]] || \
   fail 'fleet dry-run mutated launch state'
 fleet_apply="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
-  --cwd "$TEST_ROOT" --apply)"
-[[ "$fleet_apply" == *'slot=post-pod state=active action=started'* && \
+  --cwd "$ROOT_DIR" --apply)"
+[[ "$fleet_apply" == *'slot=post-pod state=DEAD action=started'* && \
   "$(cat "$FAKE_FLEET_STATE/post-pod.starts")" == 1 ]] || \
   fail 'fleet apply did not start exactly one post-Pod generation'
 fleet_repeat="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
-  --cwd "$TEST_ROOT" --apply)"
-[[ "$fleet_repeat" == *'slot=post-pod state=active action=noop'* && \
+  --cwd "$ROOT_DIR" --apply)"
+[[ "$fleet_repeat" == *'slot=post-pod state=DISCONNECTED action=operator-required'* && \
   "$(cat "$FAKE_FLEET_STATE/post-pod.starts")" == 1 ]] || \
-  fail 'repeated fleet reconciliation launched a duplicate generation'
+  fail 'repeated fleet reconciliation did not fail closed on an active disconnected generation'
 fleet_descriptor="$FLEET_CATALOG_STATE/fleet/post-pod.state"
 cp "$fleet_descriptor" "$FLEET_CATALOG_STATE/fleet/duplicate.state"
 if fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
-  --cwd "$TEST_ROOT" > "$TEST_ROOT/fleet-duplicate.out" 2>&1; then
+  --cwd "$ROOT_DIR" > "$TEST_ROOT/fleet-duplicate.out" 2>&1; then
   fail 'fleet catalog accepted duplicate desired authority for one slot'
 fi
 grep -q 'duplicate fleet slot' "$TEST_ROOT/fleet-duplicate.out" || \
@@ -780,7 +784,7 @@ cp "$fleet_descriptor" "$TEST_ROOT/fleet-descriptor.backup"
 sed 's/^kind=.*/kind=forged/' "$fleet_descriptor" > "$fleet_descriptor.tmp"
 mv "$fleet_descriptor.tmp" "$fleet_descriptor"
 if fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
-  --cwd "$TEST_ROOT" > "$TEST_ROOT/fleet-kind.out" 2>&1; then
+  --cwd "$ROOT_DIR" > "$TEST_ROOT/fleet-kind.out" 2>&1; then
   fail 'fleet catalog accepted a forged launcher kind'
 fi
 grep -q 'unsupported fleet kind' "$TEST_ROOT/fleet-kind.out" || \
@@ -790,10 +794,20 @@ fleet_loom fleet-disable --state-dir "$FLEET_CATALOG_STATE" \
   --slot post-pod --cwd "$TEST_ROOT" >/dev/null
 rm "$FAKE_FLEET_STATE/post-pod.active"
 fleet_disabled="$(fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
-  --cwd "$TEST_ROOT" --apply)"
+  --cwd "$ROOT_DIR" --apply)"
 [[ "$fleet_disabled" == *'loom_fleet_slots=0'* && \
   "$(cat "$FAKE_FLEET_STATE/post-pod.starts")" == 1 ]] || \
   fail 'disabled fleet intent relaunched after simulated Pod loss'
+fleet_loom fleet-enroll --state-dir "$FLEET_CATALOG_STATE" \
+  --slot unauthorized-observer --kind claude --home "$TEST_ROOT" \
+  --cwd "$TEST_ROOT" >/dev/null
+unauthorized_reconcile="$(SOUNIO_COORD_COMMAND="$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" \
+  fleet_loom fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
+  --cwd "$ROOT_DIR" --apply)"
+[[ "$unauthorized_reconcile" == *'slot=unauthorized-observer state=UNKNOWN action=operator-required'* && \
+  "$unauthorized_reconcile" == *'observation_authorized=false'* && \
+  ! -e "$FAKE_FLEET_STATE/unauthorized-observer.starts" ]] || \
+  fail 'fleet reconciliation mutated an absent lane under an unauthorized observer'
 if SOUNIO_LOOM_FLEET_AGENT_COMMAND="$TEST_ROOT/missing-fleet-agent" \
   "$LOOM" fleet-reconcile --state-dir "$FLEET_CATALOG_STATE" \
   --cwd "$TEST_ROOT" > "$TEST_ROOT/fleet-adapter.out" 2>&1; then
@@ -803,10 +817,12 @@ grep -q 'configured fleet agent command is unavailable' \
   "$TEST_ROOT/fleet-adapter.out" || \
   fail 'unavailable configured fleet adapter was refused for the wrong reason'
 
-if rg -n '\btmux\b' "$ROOT_DIR/tools/loom/src" "$ROOT_DIR/tools/loom/dune-project" \
-  "$ROOT_DIR/bin/sounio-loom" \
+if rg -n '\btmux\b' "$ROOT_DIR/tools/loom/src/loom.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
+  "$ROOT_DIR/tools/loom/dune-project" "$ROOT_DIR/bin/sounio-loom" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null; then
-  fail 'Loom attach path contains a tmux dependency'
+  fail 'Loom native attach kernel contains a tmux dependency'
 fi
 
 echo "sounio-loom-selftest: PASS language=OCaml protocol=1 instance=$instance_id guardian_instance=$guard_instance kernel_crashes=6 coord_generations=3 unacked_replay=delivered acked_replay=suppressed post_pod_reconcile=idempotent"

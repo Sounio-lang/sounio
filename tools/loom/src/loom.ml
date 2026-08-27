@@ -4369,9 +4369,19 @@ type authority_lane = {
   mutable authority_loom_instance : string;
   mutable authority_guardian_pid : string;
   mutable authority_harness_pid : string;
+  mutable authority_harness_pid_start : string;
   mutable authority_started_utc : string;
   mutable authority_command : string;
   mutable authority_cursor : int;
+  mutable authority_pending_obligations : int;
+  mutable authority_active_obligations : int;
+  mutable authority_blocker_active : bool;
+  mutable authority_obligation_census_complete : bool;
+  mutable authority_progress_observed : bool;
+  mutable authority_progress_window_complete : bool;
+  mutable authority_ready_observed : bool;
+  mutable authority_observation_authorized : bool;
+  mutable authority_sample_fresh : bool;
 }
 
 let empty_authority_lane agent lane =
@@ -4382,8 +4392,16 @@ let empty_authority_lane agent lane =
     authority_generation = ""; authority_pid = ""; authority_last_seen = "";
     authority_worktree = ""; authority_loom_state = "none";
     authority_loom_instance = ""; authority_guardian_pid = "";
-    authority_harness_pid = ""; authority_started_utc = "";
-    authority_command = ""; authority_cursor = 0 }
+    authority_harness_pid = ""; authority_harness_pid_start = "";
+    authority_started_utc = ""; authority_command = ""; authority_cursor = 0;
+    authority_pending_obligations = 0; authority_active_obligations = 0;
+    authority_blocker_active = false;
+    authority_obligation_census_complete = false;
+    authority_progress_observed = false;
+    authority_progress_window_complete = false;
+    authority_ready_observed = false;
+    authority_observation_authorized = false;
+    authority_sample_fresh = false }
 
 let authority_key agent lane = agent ^ "\000" ^ lane
 
@@ -4396,18 +4414,31 @@ let authority_entry lanes agent lane =
       Hashtbl.add lanes key value;
       value
 
+type coordination_snapshot_command = {
+  snapshot_command_path : string;
+  snapshot_command_authorized : bool;
+}
+
 let coordination_snapshot_command cwd =
   match Sys.getenv_opt "SOUNIO_COORD_COMMAND" with
-  | Some path when Sys.file_exists path -> Some path
+  | Some path when Sys.file_exists path ->
+      Some { snapshot_command_path = path; snapshot_command_authorized = false }
   | _ ->
       let sibling =
         Filename.concat (Filename.dirname Sys.executable_name)
           "sounio-coord-runtime"
       in
-      if Sys.file_exists sibling then Some sibling
+      if Sys.file_exists sibling then
+        Some
+          { snapshot_command_path = sibling;
+            snapshot_command_authorized = true }
       else
         let launcher = Filename.concat (Filename.concat cwd "bin") "sounio-coord" in
-        if Sys.file_exists launcher then Some launcher else None
+        if Sys.file_exists launcher then
+          Some
+            { snapshot_command_path = launcher;
+              snapshot_command_authorized = true }
+        else None
 
 let snapshot_fields values =
   let fields = Hashtbl.create 16 in
@@ -4423,12 +4454,13 @@ let snapshot_fields values =
 
 let load_authority_snapshot cwd lanes =
   match coordination_snapshot_command cwd with
-  | None -> (false, "")
-  | Some command ->
+  | None -> (false, "", false)
+  | Some command_spec ->
+      let command = command_spec.snapshot_command_path in
       let code, output =
         process_output_all cwd command [| command; "cockpit-snapshot" |]
       in
-      if code <> 0 then (false, "")
+      if code <> 0 then (false, "", false)
       else
         let valid = ref false and snapshot_utc = ref "" in
         output |> split_on '\n'
@@ -4472,11 +4504,148 @@ let load_authority_snapshot cwd lanes =
                          prefer "session_id" entry.authority_session_id;
                        entry.authority_generation <-
                          prefer "generation" entry.authority_generation;
-                       entry.authority_pid <- prefer "pid" entry.authority_pid))
+                       entry.authority_pid <- prefer "pid" entry.authority_pid;
+                       if table_value fields "ready" = "1" then
+                         entry.authority_ready_observed <- true))
                | _ -> ());
-        (!valid, !snapshot_utc)
+        (!valid, !snapshot_utc,
+         !valid && command_spec.snapshot_command_authorized)
 
-let operational_state lane =
+type authority_process_observation =
+  | Authority_process_verified
+  | Authority_process_absent
+  | Authority_process_unknown
+
+let authority_harness_matches lane arguments =
+  let expected = String.lowercase_ascii (trim lane.authority_harness) in
+  if expected = "" || expected = "unknown" then false
+  else
+    List.exists
+      (fun argument ->
+        let name =
+          argument |> Filename.basename |> String.lowercase_ascii
+        in
+        name = expected || starts_with name (expected ^ "-")
+        || starts_with name (expected ^ "_"))
+      arguments
+
+let authority_process_observation lane =
+  let observe pid expected_start verify_arguments =
+    if pid <= 1 then Authority_process_unknown
+    else if not (Sys.file_exists (Printf.sprintf "/proc/%d/stat" pid)) then
+      Authority_process_absent
+    else
+      try
+        if expected_start <> "" then
+          if process_start pid = expected_start then Authority_process_verified
+          else Authority_process_unknown
+        else if verify_arguments (process_arguments pid) then
+          Authority_process_verified
+        else Authority_process_unknown
+      with _ -> Authority_process_unknown
+  in
+  let positive_pid value =
+    try
+      let pid = int_of_string value in
+      if pid > 1 then Some pid else None
+    with _ -> None
+  in
+  match positive_pid lane.authority_harness_pid with
+  | Some pid ->
+      observe pid lane.authority_harness_pid_start (authority_harness_matches lane)
+  | None ->
+      (match positive_pid lane.authority_pid with
+      | Some pid -> observe pid "" (authority_harness_matches lane)
+      | None -> Authority_process_unknown)
+
+type authority_progress_sample = {
+  progress_generation : string;
+  progress_cursor : int;
+  progress_time : float;
+}
+
+let authority_progress_samples = Hashtbl.create 64
+let authority_progress_window_seconds = 5.0
+
+let authority_generation lane =
+  if lane.authority_loom_instance <> "" then lane.authority_loom_instance
+  else lane.authority_session_id ^ ":" ^ lane.authority_generation
+
+let observe_authority_progress lane =
+  let key = authority_key lane.authority_agent lane.authority_lane in
+  let generation = authority_generation lane in
+  let now = Unix.gettimeofday () in
+  match Hashtbl.find_opt authority_progress_samples key with
+  | None ->
+      Hashtbl.replace authority_progress_samples key
+        { progress_generation = generation; progress_cursor = lane.authority_cursor;
+          progress_time = now }
+  | Some previous when previous.progress_generation <> generation ->
+      Hashtbl.replace authority_progress_samples key
+        { progress_generation = generation; progress_cursor = lane.authority_cursor;
+          progress_time = now }
+  | Some previous ->
+      let elapsed = now -. previous.progress_time in
+      lane.authority_progress_observed <-
+        lane.authority_cursor > previous.progress_cursor;
+      lane.authority_progress_window_complete <-
+        elapsed >= authority_progress_window_seconds;
+      if lane.authority_progress_window_complete then
+        Hashtbl.replace authority_progress_samples key
+          { progress_generation = generation;
+            progress_cursor = lane.authority_cursor; progress_time = now }
+
+let authority_obligation_enricher =
+  ref (fun (_root : string) (_lanes : (string, authority_lane) Hashtbl.t) -> false)
+
+let authority_observation lane =
+  let process = authority_process_observation lane in
+  let liveness_window_complete =
+    lane.authority_presence = "unresponsive"
+    || lane.authority_presence = "orphaned"
+    || lane.authority_loom_state = "lost"
+    || lane.authority_loom_state = "exited"
+  in
+  let process_verified = process = Authority_process_verified in
+  { Loom_lane_health.policy_state =
+      (if lane.authority_observation_authorized
+          && lane.authority_sample_fresh then 1 else 0);
+    expected_lane = true;
+    claim_active = lane.authority_claim = "active";
+    record_residue =
+      lane.authority_loom_instance <> ""
+      || lane.authority_presence = "orphaned";
+    pane_or_harness_exists =
+      process_verified || lane.authority_loom_state = "active";
+    process_verified;
+    process_unresponsive =
+      process_verified && lane.authority_presence = "unresponsive";
+    process_absent =
+      lane.authority_presence = "orphaned"
+      || (liveness_window_complete && process = Authority_process_absent);
+    endpoint_verified = lane.authority_endpoint = "active";
+    endpoint_absent = lane.authority_endpoint = "unavailable";
+    endpoint_stale =
+      lane.authority_endpoint = "stale"
+      || lane.authority_endpoint = "drifted";
+    custody_active = lane.authority_loom_state = "active";
+    custody_recoverable = lane.authority_loom_state = "recoverable";
+    obligation_active = lane.authority_active_obligations > 0;
+    blocker_active = lane.authority_blocker_active;
+    obligation_census_complete =
+      lane.authority_obligation_census_complete;
+    progress_observed = lane.authority_progress_observed;
+    progress_window_complete = lane.authority_progress_window_complete;
+    liveness_window_complete;
+    ready_observed = lane.authority_ready_observed;
+    observation_authority_verified =
+      lane.authority_observation_authorized;
+    sample_fresh = lane.authority_sample_fresh }
+
+let truthful_state lane =
+  Loom_lane_health.classify (authority_observation lane)
+
+let legacy_operational_state lane =
   if lane.authority_loom_state = "active" then "active"
   else if lane.authority_presence = "live" then "live"
   else if lane.authority_presence = "unresponsive" then "unresponsive"
@@ -4485,27 +4654,32 @@ let operational_state lane =
   else if lane.authority_loom_state <> "none" then lane.authority_loom_state
   else "offline"
 
+let operational_state lane =
+  truthful_state lane |> Loom_lane_health.name |> String.lowercase_ascii
+
 let authority_rank lane =
-  if lane.authority_loom_state = "active"
-     && lane.authority_presence = "live"
-     && lane.authority_endpoint = "active"
-  then 0
-  else if lane.authority_presence = "live" && lane.authority_endpoint = "active" then 1
-  else
-    match operational_state lane with
-    | "active" -> 2
-    | "live" -> 3
-    | "claimed" -> 4
-    | "unresponsive" -> 5
-    | "recoverable" -> 6
-    | "orphaned" -> 7
-    | _ -> 8
+  match truthful_state lane with
+  | Loom_lane_health.Working -> 0
+  | Loom_lane_health.Blocked -> 1
+  | Loom_lane_health.Disconnected -> 2
+  | Loom_lane_health.Unresponsive -> 3
+  | Loom_lane_health.Idle -> 4
+  | Loom_lane_health.Orphaned -> 5
+  | Loom_lane_health.Dead -> 6
+  | Loom_lane_health.Conflicted -> 7
+  | Loom_lane_health.Unknown -> 8
 
 let authority_lane_json lane =
+  let health = truthful_state lane in
+  let boolean value = if value then "true" else "false" in
   Printf.sprintf
-    "{\"agent\":\"%s\",\"lane\":\"%s\",\"state\":\"%s\",\"claim_state\":\"%s\",\"presence_state\":\"%s\",\"presence_reason\":\"%s\",\"endpoint_state\":\"%s\",\"transport\":\"%s\",\"harness\":\"%s\",\"session_id\":\"%s\",\"generation\":\"%s\",\"pid\":\"%s\",\"last_seen_utc\":\"%s\",\"worktree\":\"%s\",\"loom_state\":\"%s\",\"loom_instance\":\"%s\",\"guardian_pid\":\"%s\",\"harness_pid\":\"%s\",\"started_utc\":\"%s\",\"command\":\"%s\",\"cursor\":%d}"
+    "{\"agent\":\"%s\",\"lane\":\"%s\",\"state\":\"%s\",\"health_state\":\"%s\",\"health_code\":%d,\"health_authority\":\"Sounio\",\"health_realization\":\"OCaml\",\"health_semantics_sha256\":\"%s\",\"legacy_state\":\"%s\",\"claim_state\":\"%s\",\"presence_state\":\"%s\",\"presence_reason\":\"%s\",\"endpoint_state\":\"%s\",\"transport\":\"%s\",\"harness\":\"%s\",\"session_id\":\"%s\",\"generation\":\"%s\",\"pid\":\"%s\",\"last_seen_utc\":\"%s\",\"worktree\":\"%s\",\"loom_state\":\"%s\",\"loom_instance\":\"%s\",\"guardian_pid\":\"%s\",\"harness_pid\":\"%s\",\"harness_pid_start\":\"%s\",\"started_utc\":\"%s\",\"command\":\"%s\",\"cursor\":%d,\"pending_obligations\":%d,\"active_obligations\":%d,\"blocker_active\":%s,\"obligation_census_complete\":%s,\"progress_observed\":%s,\"progress_window_complete\":%s,\"ready_observed\":%s,\"observation_authorized\":%s,\"sample_fresh\":%s}"
     (json_escape lane.authority_agent) (json_escape lane.authority_lane)
-    (operational_state lane) (json_escape lane.authority_claim)
+    (operational_state lane) (Loom_lane_health.name health)
+    (Loom_lane_health.code health)
+    Loom_lane_health.parent_semantics_sha256
+    (json_escape (legacy_operational_state lane))
+    (json_escape lane.authority_claim)
     (json_escape lane.authority_presence)
     (json_escape lane.authority_presence_reason)
     (json_escape lane.authority_endpoint)
@@ -4518,12 +4692,23 @@ let authority_lane_json lane =
     (json_escape lane.authority_loom_instance)
     (json_escape lane.authority_guardian_pid)
     (json_escape lane.authority_harness_pid)
+    (json_escape lane.authority_harness_pid_start)
     (json_escape lane.authority_started_utc)
     (json_escape lane.authority_command) lane.authority_cursor
+    lane.authority_pending_obligations lane.authority_active_obligations
+    (boolean lane.authority_blocker_active)
+    (boolean lane.authority_obligation_census_complete)
+    (boolean lane.authority_progress_observed)
+    (boolean lane.authority_progress_window_complete)
+    (boolean lane.authority_ready_observed)
+    (boolean lane.authority_observation_authorized)
+    (boolean lane.authority_sample_fresh)
 
-let fleet_json root cwd =
+let load_authority_lanes root cwd =
   let lanes = Hashtbl.create 64 in
-  let coordination_available, snapshot_utc = load_authority_snapshot cwd lanes in
+  let coordination_available, snapshot_utc, snapshot_authorized =
+    load_authority_snapshot cwd lanes
+  in
   session_descriptors root
   |> List.iter (fun (_, values) ->
          let agent = table_value values "agent" in
@@ -4535,6 +4720,8 @@ let fleet_json root cwd =
            entry.authority_loom_instance <- table_value values "instance_id";
            entry.authority_guardian_pid <- table_value values "guardian_pid";
            entry.authority_harness_pid <- table_value values "harness_pid";
+           entry.authority_harness_pid_start <-
+             table_value values "harness_pid_start";
            entry.authority_started_utc <- table_value values "started_utc";
            entry.authority_command <- table_value values "command";
            entry.authority_cursor <- file_size output;
@@ -4542,6 +4729,19 @@ let fleet_json root cwd =
              entry.authority_session_id <- table_value values "session_id";
            if entry.authority_worktree = "" then
              entry.authority_worktree <- table_value values "worktree"));
+  ignore ((!authority_obligation_enricher) root lanes);
+  Hashtbl.iter
+    (fun _ entry ->
+      entry.authority_observation_authorized <- snapshot_authorized;
+      entry.authority_sample_fresh <- coordination_available;
+      observe_authority_progress entry)
+    lanes;
+  (coordination_available, snapshot_utc, snapshot_authorized, lanes)
+
+let fleet_json root cwd =
+  let coordination_available, snapshot_utc, snapshot_authorized, lanes =
+    load_authority_lanes root cwd
+  in
   let values = Hashtbl.fold (fun _ value found -> value :: found) lanes [] in
   let values =
     List.sort
@@ -4557,16 +4757,28 @@ let fleet_json root cwd =
   let count predicate =
     List.fold_left (fun total value -> if predicate value then total + 1 else total) 0 values
   in
+  let count_health state = count (fun lane -> truthful_state lane = state) in
   Printf.sprintf
-    "{\"schema\":\"loom-authority-overlay-v1\",\"snapshot_utc\":\"%s\",\"coordination_available\":%s,\"summary\":{\"lanes\":%d,\"live\":%d,\"unresponsive\":%d,\"orphaned\":%d,\"loom_custody\":%d,\"active_endpoints\":%d},\"lanes\":[%s]}"
+    "{\"schema\":\"loom-authority-overlay-v2\",\"compatibility_schema\":\"loom-authority-overlay-v1\",\"snapshot_utc\":\"%s\",\"coordination_available\":%s,\"observation_authorized\":%s,\"health_authority\":\"Sounio\",\"health_realization\":\"OCaml\",\"health_semantics_sha256\":\"%s\",\"summary\":{\"lanes\":%d,\"live\":%d,\"raw_unresponsive\":%d,\"raw_orphaned\":%d,\"loom_custody\":%d,\"active_endpoints\":%d,\"working\":%d,\"idle\":%d,\"blocked\":%d,\"disconnected\":%d,\"unresponsive\":%d,\"orphaned\":%d,\"dead\":%d,\"conflicted\":%d,\"unknown\":%d},\"lanes\":[%s]}"
     (json_escape snapshot_utc)
     (if coordination_available then "true" else "false")
+    (if snapshot_authorized then "true" else "false")
+    Loom_lane_health.parent_semantics_sha256
     (List.length values)
     (count (fun lane -> lane.authority_presence = "live"))
     (count (fun lane -> lane.authority_presence = "unresponsive"))
     (count (fun lane -> lane.authority_presence = "orphaned"))
     (count (fun lane -> lane.authority_loom_state = "active" || lane.authority_loom_state = "recoverable"))
     (count (fun lane -> lane.authority_endpoint = "active"))
+    (count_health Loom_lane_health.Working)
+    (count_health Loom_lane_health.Idle)
+    (count_health Loom_lane_health.Blocked)
+    (count_health Loom_lane_health.Disconnected)
+    (count_health Loom_lane_health.Unresponsive)
+    (count_health Loom_lane_health.Orphaned)
+    (count_health Loom_lane_health.Dead)
+    (count_health Loom_lane_health.Conflicted)
+    (count_health Loom_lane_health.Unknown)
     (values |> List.map authority_lane_json |> String.concat ",")
 
 let legacy_html =
@@ -8420,6 +8632,37 @@ let obligation_views root =
     |> List.sort (fun left right ->
            String.compare left.obligation_message_id right.obligation_message_id)
 
+let () =
+  authority_obligation_enricher :=
+    (fun root lanes ->
+      try
+        Hashtbl.iter
+          (fun _ lane -> lane.authority_obligation_census_complete <- true)
+          lanes;
+        obligation_views root
+        |> List.iter (fun view ->
+               let actor, lane =
+                 if view.obligation_actor <> "" && view.obligation_lane <> "" then
+                   (view.obligation_actor, view.obligation_lane)
+                 else (view.obligation_to_agent, view.obligation_to_lane)
+               in
+               if actor <> "" && lane <> "" then (
+                 let entry = authority_entry lanes actor lane in
+                 entry.authority_obligation_census_complete <- true;
+                 if view.obligation_state = 1 then
+                   entry.authority_pending_obligations <-
+                     entry.authority_pending_obligations + 1
+                 else if
+                   view.obligation_state = 2 || view.obligation_state = 3
+                   || view.obligation_state = 4 || view.obligation_state = 5
+                 then (
+                   entry.authority_active_obligations <-
+                     entry.authority_active_obligations + 1;
+                   if view.obligation_state = 4 then
+                     entry.authority_blocker_active <- true)));
+        true
+      with _ -> false)
+
 let obligation_open_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
@@ -9123,31 +9366,94 @@ let fleet_run_loom root spec action =
   in
   run_captured ~environment:(fleet_provider_environment spec) runtime arguments
 
+let fleet_truthful_state coordination_available snapshot_authorized lanes spec
+    agentd_state loom_state =
+  let lane = authority_entry lanes spec.fleet_agent spec.fleet_slot in
+  let direct_active =
+    agentd_state = "active" || loom_state = "active"
+  in
+  let direct_absent =
+    agentd_state = "absent"
+    && (loom_state = "absent" || loom_state = "recoverable")
+  in
+  let direct_complete =
+    (agentd_state = "active" || agentd_state = "absent")
+    && (loom_state = "active" || loom_state = "recoverable"
+       || loom_state = "absent")
+  in
+  let endpoint_absent =
+    lane.authority_endpoint = "unavailable"
+    || (coordination_available && snapshot_authorized
+       && lane.authority_endpoint = "missing")
+  in
+  Loom_lane_health.classify
+    { Loom_lane_health.policy_state =
+        (if coordination_available && snapshot_authorized then 1 else 0);
+      expected_lane = true;
+      claim_active = lane.authority_claim = "active";
+      record_residue =
+        lane.authority_loom_instance <> ""
+        || lane.authority_presence = "orphaned"
+        || loom_state = "recoverable";
+      pane_or_harness_exists = direct_active;
+      process_verified = direct_active;
+      process_unresponsive =
+        direct_active && lane.authority_presence = "unresponsive";
+      process_absent = direct_absent;
+      endpoint_verified = lane.authority_endpoint = "active";
+      endpoint_absent;
+      endpoint_stale =
+        lane.authority_endpoint = "stale"
+        || lane.authority_endpoint = "drifted";
+      custody_active = loom_state = "active";
+      custody_recoverable = loom_state = "recoverable";
+      obligation_active = lane.authority_active_obligations > 0;
+      blocker_active = lane.authority_blocker_active;
+      obligation_census_complete =
+        lane.authority_obligation_census_complete;
+      progress_observed = lane.authority_progress_observed;
+      progress_window_complete = lane.authority_progress_window_complete;
+      liveness_window_complete = direct_complete;
+      ready_observed = lane.authority_ready_observed;
+      observation_authority_verified = snapshot_authorized;
+      sample_fresh = coordination_available }
+
 let fleet_reconcile_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
   let apply = flag cli "--apply" in
   let helper = fleet_agent_command () in
   let specs = load_fleet_specs root |> List.filter (fun spec -> spec.fleet_enabled) in
-  let started = ref 0 and recovered = ref 0 and healthy = ref 0 in
+  let coordination_available, _, snapshot_authorized, lanes =
+    load_authority_lanes root cwd
+  in
+  let started = ref 0 and recovered = ref 0 and healthy = ref 0
+  and deferred = ref 0 in
   List.iter
     (fun spec ->
       let agentd_state, _ = fleet_probe helper spec in
       let loom_state = fleet_loom_state root spec in
+      let health =
+        fleet_truthful_state coordination_available snapshot_authorized lanes spec
+          agentd_state loom_state
+      in
+      let health_name = Loom_lane_health.name health in
       if spec.fleet_custody = "agentd" then (
         if loom_state <> "absent" then
           failf "fleet-authority-conflict slot=%s desired=agentd observed=loom:%s"
             spec.fleet_slot loom_state;
-        if agentd_state = "active" then (
+        if health = Loom_lane_health.Working
+           || health = Loom_lane_health.Idle
+        then (
           incr healthy;
           Printf.printf
-            "LOOM_FLEET slot=%s state=active action=noop custody=agentd\n%!"
-            spec.fleet_slot)
-        else if not apply then
+            "LOOM_FLEET slot=%s state=%s action=noop custody=agentd\n%!"
+            spec.fleet_slot health_name)
+        else if health = Loom_lane_health.Dead && not apply then
           Printf.printf
-            "LOOM_FLEET slot=%s state=%s action=start mode=plan custody=agentd\n%!"
-            spec.fleet_slot agentd_state
-        else (
+            "LOOM_FLEET slot=%s state=DEAD action=start mode=plan custody=agentd\n%!"
+            spec.fleet_slot
+        else if health = Loom_lane_health.Dead then (
           let result =
             run_captured helper
               [ "launch-kind"; "--slot"; spec.fleet_slot; "--kind";
@@ -9162,8 +9468,13 @@ let fleet_reconcile_command cli =
             failf "fleet slot %s did not become active after launch" spec.fleet_slot;
           incr started;
           Printf.printf
-            "LOOM_FLEET slot=%s state=active action=started custody=agentd\n%!"
-            spec.fleet_slot))
+            "LOOM_FLEET slot=%s state=DEAD action=started custody=agentd post_state=active\n%!"
+            spec.fleet_slot)
+        else (
+          incr deferred;
+          Printf.printf
+            "LOOM_FLEET slot=%s state=%s action=operator-required custody=agentd agentd=%s loom=%s\n%!"
+            spec.fleet_slot health_name agentd_state loom_state))
       else (
         if spec.fleet_coord_dir = "" then
           failf "fleet coordination authority is missing for Loom slot %s"
@@ -9171,18 +9482,33 @@ let fleet_reconcile_command cli =
         if agentd_state = "active" then
           failf "fleet-authority-conflict slot=%s desired=loom observed=agentd:active"
             spec.fleet_slot;
-        if loom_state = "active" then (
+        if health = Loom_lane_health.Working
+           || health = Loom_lane_health.Idle
+        then (
           incr healthy;
           Printf.printf
-            "LOOM_FLEET slot=%s custody=loom state=active action=noop\n%!"
-            spec.fleet_slot)
-        else if not apply then
+            "LOOM_FLEET slot=%s custody=loom state=%s action=noop\n%!"
+            spec.fleet_slot health_name)
+        else if health = Loom_lane_health.Dead && not apply then
           Printf.printf
-            "LOOM_FLEET slot=%s custody=loom state=%s action=%s mode=plan\n%!"
-            spec.fleet_slot loom_state
-            (if loom_state = "recoverable" then "recover" else "provider-open")
-        else (
-          let action = if loom_state = "recoverable" then "recover" else "provider-open" in
+            "LOOM_FLEET slot=%s custody=loom state=DEAD action=provider-open mode=plan\n%!"
+            spec.fleet_slot
+        else if
+          health = Loom_lane_health.Orphaned && loom_state = "recoverable"
+          && not apply
+        then
+          Printf.printf
+            "LOOM_FLEET slot=%s custody=loom state=ORPHANED action=recover mode=plan\n%!"
+            spec.fleet_slot
+        else if
+          health = Loom_lane_health.Dead
+          || (health = Loom_lane_health.Orphaned
+             && loom_state = "recoverable")
+        then (
+          let action =
+            if health = Loom_lane_health.Orphaned then "recover"
+            else "provider-open"
+          in
           let result = fleet_run_loom root spec action in
           if result.captured_code <> 0 then
             failf "fleet Loom %s failed for %s: %s" action spec.fleet_slot
@@ -9193,11 +9519,19 @@ let fleet_reconcile_command cli =
               spec.fleet_slot action;
           if action = "recover" then incr recovered else incr started;
           Printf.printf
-            "LOOM_FLEET slot=%s custody=loom state=active action=%s\n%!"
-            spec.fleet_slot (if action = "recover" then "recovered" else "opened"))))
+            "LOOM_FLEET slot=%s custody=loom state=%s action=%s post_state=active\n%!"
+            spec.fleet_slot health_name
+            (if action = "recover" then "recovered" else "opened"))
+        else (
+          incr deferred;
+          Printf.printf
+            "LOOM_FLEET slot=%s custody=loom state=%s action=operator-required agentd=%s loom=%s\n%!"
+            spec.fleet_slot health_name agentd_state loom_state)))
     specs;
-  Printf.printf "loom_fleet_slots=%d healthy=%d started=%d recovered=%d mode=%s\n%!"
-    (List.length specs) !healthy !started !recovered
+  Printf.printf
+    "loom_fleet_slots=%d healthy=%d started=%d recovered=%d deferred=%d observation_authorized=%s mode=%s\n%!"
+    (List.length specs) !healthy !started !recovered !deferred
+    (if coordination_available && snapshot_authorized then "true" else "false")
     (if apply then "apply" else "plan")
 
 let usage () =
