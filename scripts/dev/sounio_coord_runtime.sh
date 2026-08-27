@@ -3509,7 +3509,7 @@ coord_obligation_supervisor_owned_pids() {
 
 coord_obligation_supervisor_service_command() {
   local action="$1"; shift
-  local interval=2 timeout=10 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
+  local interval=2 timeout=30 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
   local leader_lock="$STATE_DIR/.obligation-supervisor-leader.lock"
   local runtime_self log_file attempt previous_pid='' previous_start=''
   local expected_loom='' actual_loom='' ensured_state=started state_live=0 pid
@@ -3540,12 +3540,23 @@ coord_obligation_supervisor_service_command() {
     state_live=1
     previous_pid="$COORD_OBLIGATION_SUPERVISOR_PID"
     previous_start="$COORD_OBLIGATION_SUPERVISOR_PID_START"
+  fi
+  mapfile -t owned_pids < <(coord_obligation_supervisor_owned_pids)
+  if ((!state_live)) && [[ "$action" == ensure ]] && ((${#owned_pids[@]} == 1)); then
+    for ((attempt = 0; attempt < timeout * 10; attempt++)); do
+      if coord_obligation_supervisor_state; then
+        state_live=1
+        previous_pid="$COORD_OBLIGATION_SUPERVISOR_PID"
+        previous_start="$COORD_OBLIGATION_SUPERVISOR_PID_START"
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  if ((state_live)); then
     actual_loom="$(readlink -f "/proc/$previous_pid/exe" 2>/dev/null || true)"
     coord_obligation_supervisor_owned_executable "$actual_loom" ||
       die "refusing to signal unowned obligation supervisor pid=$previous_pid executable=${actual_loom:-unknown}"
-  fi
-  mapfile -t owned_pids < <(coord_obligation_supervisor_owned_pids)
-  if ((state_live)); then
     supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$previous_pid/status" 2>/dev/null || true)"
     array_contains "$supervisor_wrapper_pid" "${owned_pids[@]}" ||
       die "refusing to signal obligation supervisor outside the selected state directory: pid=$previous_pid wrapper=${supervisor_wrapper_pid:-unknown}"

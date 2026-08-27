@@ -519,6 +519,11 @@ output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
 grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
   fail 'control-service ensure was not idempotent'
+rm "$STATE/obligation-supervisor.state"
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
+  fail 'control-service ensure restarted a warming supervisor after snapshot loss'
 set +e
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" timeout 3 \
   bin/sounio-coord obligation-supervise --interval-seconds 1 2>&1)"
