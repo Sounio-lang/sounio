@@ -61,7 +61,13 @@ Before tagging a release:
 |----------|------|---------|
 | Native compiler (default) | `artifacts/omega/souc-bin/souc-linux-x86_64` | **Shipped engine**: self-hosted native-v2 (Madaros) x86-64 backend |
 | GPU compiler | `artifacts/omega/souc-bin/souc-linux-x86_64-gpu` | PTX/CUDA codegen |
-| JIT compiler (legacy) | `bin/souc` | Cranelift JIT backend — development/reference artifact only, **not** the shipped default |
+| Wrapper (legacy path) | `bin/souc` | A bash wrapper that routes to Madaros — **not** a Cranelift artifact and not an artifact at all. Development/reference entry point; not the shipped engine |
+
+> **The Cranelift row was removed rather than demoted — measured 2026-08-27.** It
+> read "Cranelift JIT backend"; `bin/souc` is a 318-line bash script whose
+> `--version` reports `elf=bin/madaros-linux-x86_64`, and no binary in this tree
+> has a Cranelift backend compiled in. Demoting the claim from "default" to
+> "legacy" left an object that does not exist still named in the Artifact Policy.
 
 ### Signing and Provenance
 

@@ -36,7 +36,10 @@ Why this is the default:
 On the current snapshot, that artifact reports:
 
 - `souc 1.0.0-beta.4`
-- Cranelift JIT enabled
+- **Cranelift JIT NOT compiled** — `souc info` prints `[-] Cranelift JIT - rebuild
+  with --features jit`. Measured 2026-08-27: no artifact enables it, no build path
+  passes the feature, and the binary exports no Cranelift symbol. This bullet
+  previously read "Cranelift JIT enabled" — not compiled
 - LLVM and GPU codegen disabled
 - LSP, SMT, distributed, and package-manager features disabled
 - ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
