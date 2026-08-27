@@ -15,7 +15,9 @@ The execution authority remains frozen under:
 `GARDEN -> SOUNIO_EXECUTABLE -> SEMANTICS_FROZEN -> PARITY_OPEN -> CLAIM_READY`
 
 The pinned execution-authority manifest is
-`44c275fe4894bb564797a64a6018f73c1759bf5dbb57023523a23606a08869a9`.
+`d07823382125e668eb0d7afe5d52092de3c58ec5bef9655fa2f1f56a9c84d8c0`.
+This successor manifest changes only the frozen selftest receipt hash; the
+Sounio source, entrypoint, executable, and semantics hashes remain unchanged.
 Python and Rust remain forbidden as Guardian implementations and semantic
 oracles. Shell and `jq` appear only in the adversarial test harness as
 mechanical transport and structured-data parsing.

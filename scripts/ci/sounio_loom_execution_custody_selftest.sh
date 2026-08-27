@@ -5,6 +5,7 @@ ROOT_DIR="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-custody.XXXXXX")"
 STATE_DIR="$TEST_ROOT/state"
+COORD_DIR="$TEST_ROOT/coord"
 LEAKED_CAPABILITY_DIR="$TEST_ROOT/leaked-v1-capabilities"
 FOREIGN_AGENTD_SOCKET="$TEST_ROOT/foreign-agentd.socket"
 FOREIGN_AGENTD_TOKEN="$TEST_ROOT/foreign-agentd.token"
@@ -169,6 +170,9 @@ export SOUNIO_LOOM_TEST_CAPABILITY_DIR="$LEAKED_CAPABILITY_DIR"
 export SOUNIO_LOOM_TEST_FOREIGN_AGENTD_SOCKET="$FOREIGN_AGENTD_SOCKET"
 export SOUNIO_LOOM_TEST_FOREIGN_AGENTD_TOKEN="$FOREIGN_AGENTD_TOKEN"
 export SOUNIO_LOOM_COORD_AUTO=0
+export SOUNIO_COORD_DIR="$COORD_DIR"
+export SOUNIO_COORD_RUNTIME_MODE=local
+export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
 
 set +e
 fixture_flag_output="$("$LOOM" agent-hook --agent codex \

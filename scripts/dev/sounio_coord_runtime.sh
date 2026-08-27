@@ -1533,8 +1533,13 @@ native_hook_parent_identity() {
     "$runtime_self" == "$local_runtime" && \
     "$NATIVE_HOOK_PARENT_EXECUTABLE" == "$local_loom" ]]; then
     [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == local && \
-      "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 && \
-      "$STATE_DIR" == "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord ]] || return 1
+      "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]] || return 1
+    case "$STATE_DIR" in
+      "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord | \
+        "${TMPDIR:-/tmp}"/sounio-loom-exec-capability.*/coord | \
+        "${TMPDIR:-/tmp}"/sounio-loom-custody.*/coord) ;;
+      *) return 1 ;;
+    esac
     NATIVE_HOOK_RUNTIME_ID="local-${SOUNIO_COORD_RUNTIME_VERSION}"
     NATIVE_HOOK_SOURCE_SHA="$(current_sha)"
     NATIVE_HOOK_WAKE_ELIGIBLE=0

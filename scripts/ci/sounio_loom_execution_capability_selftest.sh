@@ -131,15 +131,18 @@ printf '#!/usr/bin/env python\nprintf prohibited >%q\nexit 97\n' "$SENTINEL_MARK
   >"$SENTINEL_DIR/python-shebang"
 chmod 0755 "$SENTINEL_DIR/python-shebang"
 
-dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
-SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$LANGUAGE_RUNTIME" \
-  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" >/dev/null
-SOUNIO_LOOM_EXECUTION_AUTHORITY_OUTPUT="$EXECUTION_RUNTIME" \
-  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_authority.sh" >/dev/null
+bash "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+install -m 0755 \
+  "$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime" \
+  "$LANGUAGE_RUNTIME"
+install -m 0755 \
+  "$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime" \
+  "$EXECUTION_RUNTIME"
 
 export PATH="$SENTINEL_DIR:$PATH"
 export SOUNIO_COORD_DIR="$COORD_DIR"
 export SOUNIO_COORD_RUNTIME_MODE=local
+export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
 export SOUNIO_LOOM_HOOK_TEST_MODE=1
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$LANGUAGE_RUNTIME"
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$LANGUAGE_LOG"

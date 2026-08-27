@@ -5,7 +5,7 @@ exception Dynamic_command of string
 exception Authority_denied of int * string
 
 let pinned_manifest_sha256 =
-  "44c275fe4894bb564797a64a6018f73c1759bf5dbb57023523a23606a08869a9"
+  "d07823382125e668eb0d7afe5d52092de3c58ec5bef9655fa2f1f56a9c84d8c0"
 
 let max_file_bytes = 8 * 1024 * 1024
 let max_command_bytes = 64 * 1024
