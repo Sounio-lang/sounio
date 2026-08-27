@@ -114,6 +114,24 @@ mut       unsafe
 with      handle    on        resume    perform
 ```
 
+> **Measured 2026-08-19 — two of these tables are wrong, and one entry is
+> reserved against itself.** Each word was tested as an identifier
+> (`let <word> = 1`); a reserved word cannot be one. Both engines agree.
+>
+> | word | listed as | measured |
+> |---|---|---|
+> | `own` | type keyword | **not reserved** — compiles as an identifier |
+> | `handle` | effect keyword | **not reserved** — compiles as an identifier; it is *contextual*, recognised in the `handle<IO> { … }` position §7.3 measures |
+> | `mut` | type keyword | reserved, but refused **by design**: `error[E040]: Sounio uses \`var\` for mutable bindings, not \`let mut\`` |
+>
+> `mut` is reserved to teach against, not to use, so listing it beside `linear`
+> and `where` reads as an endorsement of a form the compiler exists to refuse.
+> The remaining ten refuse as parse failures and are reserved as documented.
+> `perform` is reserved on Madaros but resolves as an ordinary identifier under
+> `lean_single`, which reports `error[E200]: undefined identifier` — see
+> §7.3.4 in `S07_EFFECT_HANDLERS.md`.
+
+
 **Literal keywords:**
 ```
 true      false
@@ -129,11 +147,46 @@ uint      u8        u16       u32       u64       u128
 f32       f64       bool      char      string
 ```
 
+> **Measured 2026-08-19 — `int` and `uint` are listed and do not work.**
+> `let x: i64 = 0` checks; `let x: int = 0` gives
+> `error[E001]: this binding expects a different type`, as does `uint`. The two
+> widths this document might have been expected to be aspirational about,
+> `i128` and `u128`, **do** check — that guess was tested and was wrong.
+>
+> **A test in parameter position proves nothing here.** `fn f(x: T) -> i32 { 0 }`
+> checks under Madaros for *every* `T`, including `naoexiste_zorble`. An
+> undeclared parameter type is refused only once the function has a caller
+> (`error[E009]`), so the declaration is never interrogated on its own — the use
+> is. lean_single emits an ELF **either way**, caller or not.
+>
+> This is `SOUNIO-TYPE-INTERROGATION` at the level of the type namespace: a name
+> in a declaration is not asked to exist until something forces the question.
+
 ### 2.4 Built-in Effect Names
 
 ```
 IO        Mut       Alloc     Panic     Async     GPU       Prob      Div
 ```
+
+> **Measured 2026-08-19 — this list is a quarter of the table.** The compiler's
+> closed effect-name list holds **30** names
+> (`scripts/ci/effect_name_closed_list_gate.sh`, frozen at 2,845 sites). All
+> eight above are in it, so nothing here is wrong; **22 are missing**:
+>
+> `Approx  Audit  Causal  Chaotic  Confidence  Deterministic  Epistemic
+> Hypothesis  Learn  MultiTest  NarrowWidthApproximation  NaturalityG2  Network
+> NonAssoc  NonUnitary  Observe  Perturbative  Render  Sensor  Temporal  Witness
+> ZD`
+>
+> The omissions are not marginal: `ZD`, `Witness`, `Learn`, `Temporal` and
+> `Epistemic` carry the surgical-unlearning and epistemic-typing claims, and
+> `Observe` is named as a core effect in `CLAUDE.md` §7.
+>
+> **The list cannot be checked by writing one.** `fn g() -> i32 with Zorblex { 0 }`
+> gives `check: OK` under Madaros and an ELF under lean_single. An unknown effect
+> name is dropped in silence on both engines — §6.1 measures the same on the
+> declaration side — so membership of this table is unfalsifiable from outside
+> the compiler, and the closed-list gate exists because of that.
 
 ### 2.5 Operators
 

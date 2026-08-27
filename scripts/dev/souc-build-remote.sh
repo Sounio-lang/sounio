@@ -25,6 +25,9 @@
 #   scripts/dev/souc-build-remote.sh                       # build only
 #   scripts/dev/souc-build-remote.sh --gate full           # + madaros_full_gate.sh
 #   scripts/dev/souc-build-remote.sh --gate corpus         # + corpus regression gate
+#   scripts/dev/souc-build-remote.sh --gate check          # + gen1 typechecks main.sio
+#   SOUNIO_WITNESS_GLOB='tests/compiler/foo/*.sio' \
+#     scripts/dev/souc-build-remote.sh --gate witness      # + task witness gate
 #   scripts/dev/souc-build-remote.sh --gate full --gate corpus
 #   SOUNIO_REMOTE_PARTITION=cpu-ops SOUNIO_REMOTE_CPUS=32 ...
 #
@@ -40,6 +43,12 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+
+# The workspace pod carries a 16 GiB soft RLIMIT_AS even though its hard limit
+# is unlimited. Slurm propagates that soft limit to compute jobs, where the
+# source-generated seed then SIGSEGVs while compiling main.sio. Lift it before
+# srun so the remote build can use the memory granted by the selected node.
+ulimit -v unlimited 2>/dev/null || true
 
 # Target policy comes from the cluster-ops tier document
 # (~devsounio/beagle/k8s/hpc-sota/ops/cluster-cpu-tiers.md, 2026-06-27):
@@ -121,6 +130,83 @@ for g in $GATES; do
         bash scripts/ci/madaros_corpus_regression_gate.sh 2>&1 | tail -25
       echo "REMOTE: corpus_gate rc=\$?"
       ;;
+    check)
+      echo "REMOTE: --- gen1 check self-hosted/compiler/main.sio ---"
+      ulimit -s 524288 2>/dev/null || true
+      "\$W/madaros.elf" check self-hosted/compiler/main.sio > "\$W/fpcheck.log" 2>&1
+      fp_rc=\$?
+      fp_err=\$(grep -cE 'error\\[E[0-9]+\\]' "\$W/fpcheck.log" || true)
+      echo "REMOTE: fpcheck rc=\$fp_rc errors=\$fp_err"
+      grep -oE 'error\\[E[0-9]+\\]' "\$W/fpcheck.log" | sort | uniq -c | sort -rn | head -8 | sed 's/^/REMOTE: /'
+      if [ "\${fp_err:-0}" -gt 0 ]; then
+        grep '^error\\[' "\$W/fpcheck.log" | head -20 | sed 's/^/REMOTE: /'
+      fi
+      tail -3 "\$W/fpcheck.log" | sed 's/^/REMOTE: /'
+      if [ \$fp_rc -ne 0 ] || [ "\${fp_err:-0}" -gt 0 ]; then exit 1; fi
+      ;;
+    silent)
+      echo "REMOTE: --- silent verdict measurement ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      SOUNIO_SILENT_VERDICT_MADAROS="\$W/madaros.elf" \\
+        bash scripts/dev/measure_silent_verdicts.sh 2>&1 | tail -40
+      echo "REMOTE: silent rc=\$?"
+      ;;
+    sabotage)
+      echo "REMOTE: --- witness declares its sabotage ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      SOUNIO_WITNESS_SABOTAGE_MADAROS="\$W/madaros.elf" \\
+        bash scripts/ci/witness_declares_its_sabotage_gate.sh 2>&1 | tail -30
+      echo "REMOTE: sabotage_gate rc=\$?"
+      ;;
+    witness)
+      echo "REMOTE: --- witness ---"
+      export SOUNIO_STDLIB_PATH="\$W/stdlib"
+      ulimit -s 524288 2>/dev/null || true
+      WITNESS_GLOB="${SOUNIO_WITNESS_GLOB:-tests/run-pass/r1_i*_lorenz_peak.sio}"
+      if [ "\$WITNESS_GLOB" = 'tests/compiler/epistemic_payload_gate/*.sio' ]; then
+        MADAROS_RAW_BIN="\$W/madaros.elf" \
+          SOUNIO_WITNESS_GLOB="\$WITNESS_GLOB" \
+          bash scripts/ci/madaros_epistemic_payload_gate.sh 2>&1
+        wit_rc=\$?
+      else
+        wit_rc=0
+        for src in \$W/\$WITNESS_GLOB; do
+          echo "REMOTE: witness src=\$src"
+          # Positive control: sabotaged mul MUST fail the fixture.
+          out_bad=/tmp/witness-bad-\$\$.elf
+          SOUNIO_WIDE_MUL_SABOTAGE=1 "\$W/madaros.elf" build "\$src" "\$out_bad"
+          if [ \$? -eq 0 ]; then
+            chmod +x "\$out_bad"
+            "\$out_bad"
+            bad_rc=\$?
+            echo "REMOTE: sabotage run rc=\$bad_rc (must be non-zero)"
+            if [ \$bad_rc -eq 0 ]; then
+              echo "REMOTE: CONTROL_FAIL witness passed under sabotaged mul"
+              wit_rc=2
+              continue
+            fi
+            echo "REMOTE: CONTROL_PASS"
+          else
+            echo "REMOTE: sabotage build failed; treating as control pass (compile refused)"
+          fi
+          out=/tmp/witness-\$\$.elf
+          unset SOUNIO_WIDE_MUL_SABOTAGE
+          "\$W/madaros.elf" build "\$src" "\$out"
+          b_rc=\$?
+          echo "REMOTE: witness build rc=\$b_rc"
+          if [ \$b_rc -ne 0 ]; then wit_rc=\$b_rc; continue; fi
+          chmod +x "\$out"
+          "\$out"
+          r_rc=\$?
+          echo "REMOTE: witness run rc=\$r_rc"
+          if [ \$r_rc -ne 0 ]; then wit_rc=\$r_rc; fi
+        done
+      fi
+      echo "REMOTE: witness_gate rc=\$wit_rc"
+      if [ \$wit_rc -ne 0 ]; then exit \$wit_rc; fi
+      ;;
     *) echo "REMOTE: unknown gate \$g" ;;
   esac
 done
@@ -129,10 +215,11 @@ REMOTE
 )
 
 # tests/ is included only when a gate needs it -- it is the bulk of the payload.
-PAYLOAD="self-hosted stdlib bin/souc-linux-x86_64 scripts"
-case "$GATES" in *full*|*corpus*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
+PAYLOAD="self-hosted stdlib bin/souc bin/souc-linux-x86_64 scripts"
+case "$GATES" in *full*|*corpus*|*witness*|*sabotage*|*silent*) PAYLOAD="$PAYLOAD tests bin/madaros bin/madaros-linux-x86_64" ;; esac
 
 tar czf - $PAYLOAD 2>/dev/null \
   | srun --partition="$PARTITION" ${NODE:+--nodelist="$NODE"} --ntasks=1 \
+     --job-name="${SOUNIO_REMOTE_JOBNAME:-souc-${GATES:-build}-$$}" \
          --cpus-per-task="$CPUS" --time="$TIMELIMIT" bash -c "$REMOTE_SCRIPT" 2>&1 \
   | grep -vE "^srun: (job|Job)|couldn't chdir"

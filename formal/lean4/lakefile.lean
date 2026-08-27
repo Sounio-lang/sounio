@@ -96,6 +96,13 @@ lean_lib «SounioSedenionMeasurement» where
 @[default_target]
 lean_lib «SounioCDCocycle» where
 
+-- CD-tower ZD fibers: the fiber-antisymmetry development.  Mathlib-free, no `sorry`, no
+-- `native_decide`; imports only SounioCDCocycle.  Carries the deviation law
+-- (`deviation_law_all`) and both rows of the level transfer (`s3_level_recursion`,
+-- `cp2_level_recursion`).
+@[default_target]
+lean_lib «SounioZDFiberAntisym» where
+
 @[default_target]
 lean_lib «SounioCDTowerSeam» where
 
@@ -610,6 +617,12 @@ lean_lib «SounioFanoArcsBlocking» where
 @[default_target]
 lean_lib «SounioSunflower» where
 
+-- Measurement: seven xor-fibers of 12 as a partition of the 84, nested
+-- (not orthogonal) with the annihilator kernel. See
+-- docs/audit/SEVEN_FIBERS_OF_TWELVE_2026-08-19.md
+@[default_target]
+lean_lib «SounioSevenFibers» where
+
 -- Erdős [90] CLASSICAL planar attack: exact triangular-lattice (Eisenstein ℤ[ω]) lower
 -- bound u(n) ≥ ⌊3n−√(12n−3)⌋, witnessed. Baseline for the cluster search.
 -- See docs/research/erdos-90-planar-search-plan.md
@@ -641,6 +654,26 @@ lean_lib «EpistemicEffects» where
 -- epistemic gradual compilation §5.4 metatheory. Mathlib-free, no sorry.
 @[default_target]
 lean_lib «EpistemicEffectsV2» where
+
+-- First Lean importer of V2: the V1 `preservation_is_false` witness,
+-- inverted. `measure (lit_nat 0)` stays `Knowledge<Nat>` after reduction.
+@[default_target]
+lean_lib «EpistemicEffectsV2_measure_nat» where
+
+-- Second V2 importer: cites `preservation` on `kvalue` of `Knowledge<Nat>`.
+-- Dual of measure — the compiler's `check_knowledge_unwrap` path.
+@[default_target]
+lean_lib «EpistemicEffectsV2_kvalue_nat» where
+
+-- Third V2 importer: cites `invKraw` on the V1 propagation witness.
+-- `f (kraw nat)` with `f : Knowledge<Nat> → Knowledge<Nat>` is typable.
+@[default_target]
+lean_lib «EpistemicEffectsV2_invkraw_nat» where
+
+-- Fourth V2 importer: the inverted V1 witness at a payload the language
+-- ships. `f (kraw mg)` with `f : Knowledge<mg> → Knowledge<mg>` is typable.
+@[default_target]
+lean_lib «EpistemicEffectsV2_invkraw_mg» where
 
 -- Refusal as a first-class compilation outcome (E219 / P0-F). A well-typed
 -- program in the extern-call fragment produces a value or refuses; it never

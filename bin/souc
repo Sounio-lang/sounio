@@ -199,7 +199,17 @@ fi
 # Keep routing this through the lean_single bootstrap ELF even though Madaros is
 # the default verb-oriented engine; the modular launcher does not implement the
 # raw `SRC OUT` ABI.
+#
+# Fail-closed: a flag-looking second argument is not an output path.
+# `souc file.sio -o dest.elf` used to exec lean_single with OUT=`-o`, write a
+# file literally named `-o`, and exit 0. That is the silent-success class.
+# See docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md.
 if [[ $# -ge 2 && "${1:-}" == *.sio ]]; then
+  if [[ "${2:-}" == -* ]]; then
+    echo "souc: refused: bare form 'souc $1 $2 …' would treat '$2' as the output filename and exit 0" >&2
+    echo "souc: use: souc compile $1 -o <out>" >&2
+    exit 2
+  fi
   if _science_boundary_requested "$@"; then
     _reject_science_without_madaros
   fi
@@ -261,6 +271,35 @@ if MADAROS_ELF="$(_resolve_madaros)"; then
   case "${1:-}" in
     -h|--help|help) _print_souc_help; exit 0 ;;
   esac
+  # Provenance on STDERR, never stdout.
+  #
+  # `souc --version` prints "Madaros v0.80.0" and nothing about WHICH build that
+  # is, so a binary months behind its source is indistinguishable from a fresh
+  # one in every log, paste and report. Measured 2026-08-23: two agents
+  # independently concluded the compiler does not enforce the EpistemicComplete
+  # floor -- and that a dissertation contribution was inert -- from an rc=0 that
+  # came from the committed ELF, not from the source they were reading. Both had
+  # carefully unset the poisoned SOUC_BIN and SOUNIO_STDLIB_PATH first. Clearing
+  # the environment disarms one trap; the binary is a second one.
+  #
+  # The condition was not being omitted out of carelessness. There was nowhere to
+  # read it. This puts it where nobody has to remember.
+  #
+  # stdout stays byte-identical because ~657 call sites parse it; stderr is where
+  # the condition goes, so a human or a captured log sees it and a parser does not.
+  if [[ "${1:-}" == "--version" ]]; then
+    _prov_elf="$MADAROS_ELF"
+    _prov_sum="$( { md5sum "$_prov_elf" 2>/dev/null || echo '? -'; } | cut -c1-8 )"
+    _prov_src="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
+    _prov_dirty=""
+    if ! git -C "$ROOT_DIR" diff --quiet -- self-hosted 2>/dev/null; then
+      _prov_dirty=" self-hosted/ MODIFIED since this tree's HEAD"
+    fi
+    printf 'provenance: elf=%s md5=%s tree=%s%s\n' \
+      "${_prov_elf#$ROOT_DIR/}" "$_prov_sum" "$_prov_src" "$_prov_dirty" >&2
+    printf 'provenance: this ELF is the COMMITTED binary; it is not built from the tree above.\n' >&2
+    printf 'provenance: for a claim about compiler behaviour, build from source.\n' >&2
+  fi
   exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" "$@"
 fi
 

@@ -219,38 +219,112 @@ auto-deref miscompile was never what stopped Madaros compiling itself — the
 merge-capacity overflow was, and is. The Box repair removes a real
 miscompile that corrupts any `Box<T>` read (including the 174 ident-base
 sites in the compiler's own source), but the fixed-point ladder's next rung
-is gated by cross-module DCE (`spec_dce_unreachable_item_fns`) not running
-on the merge path, which is a separate task. The gate's own header names
-this wall and the 5997-of-10705 reachability gap behind it.
+is gated by a capacity overflow that cross-module DCE already runs against
+and still loses.
+
+Sharpened by an A/B on the post-repair build (2026-08-18, `ac82ead7…`):
+
+    SOUNIO_MM_SPEC_TRACE=1   dce marks=7029
+                             census 1891 + 7206 = 9097 (over by 906)
+    SOUNIO_DISABLE_MM_DCE=1  census 1891 + 10929 = 12820 (over by 4629)
+
+Cross-module DCE (`spec_dce_mark_across_programs`, wired onto the ordinary
+path by `146f5b039f`, hardened by `541536f777` and `731aee7b6f`) IS running
+and removes ~3700 dead functions. It is not that the pruning is missing — it
+is that the surviving 7206 live functions plus 1891 BSS globals still total
+9097 slots against a cap of `IR_MAX_FUNCS - 1 = 8191`. The gate's header
+records a name-based reachability census of 5997 live declarations, which
+would fit; the lowering's own count is higher because it counts every
+surviving `ItemFn` slot (impl methods included) and every BSS global, not
+just top-level reachable names. Closing rung gen2 therefore needs either a
+larger IR slot budget or a tighter live-set, not the Box fix.
 
 What this means: do not expect gen2 to turn green from the Box fix alone.
 The recorded rung stays `check`; the ladder is unchanged, and that is the
 correct, bounded result.
 
-## Fixed-point ladder — attribution, not progress
+Attempted the documented lever and found why it is not self-contained
+(2026-08-18, same lane). Raising `IR_MAX_FUNCS` 8192 → 16384 requires, in
+the same change:
 
-The Box repair was dispatched because it "blocks gen1 == gen2". Measured
-against the fixed-point ladder (`scripts/ci/madaros_fixed_point_gate.sh`),
-it neither advances nor regresses that ladder — and saying so precisely is
-the point.
+1. `ir_region_table_capacity()` (`self-hosted/ir/ir.sio:1141`, currently
+   8448) MUST exceed `IR_MAX_FUNCS` — its own comment records the bisect
+   ("8189 live slots compile, 8190 and 8191 do not"). At 16384 the region
+   table is the binding constraint and the contract check refuses.
+2. The coupled array literals: `IrModule.functions` (`[IrFunction; 8192]`),
+   `normalize.sio`'s two `[IrFunction; 8192]` sites, the four backends'
+   `fn_offsets: [i64; 8192]` (`codegen_x86_linux`, `elf`, `elf_bulk`,
+   `reloc`), and `SPEC_DCE_SLOTS`/`SPEC_DCE_MAX` plus the `[i64; 16384]`
+   mark arrays in `specializer.sio`.
+3. The fixture `tests/multimodule/ir_capacity/` raised past the old ceiling,
+   and the literal sweep the probe gate's header demands.
 
-Both the pre-fix build (SHA-256 `2dcaf159…`) and the post-repair build
-(SHA-256 `ac82ead7…`) reach rung **check** (the recorded rung) and fail the
-same way at rung **gen2**:
+A partial raise (constant + arrays, without the region table) was applied
+and reverted in this worktree; nothing shipped. The lever is real but it is
+a coordinated multi-file change with its own risk profile, not a one-line
+constant bump. That is the next task, named and scoped, and it is separate
+from the Box repair this audit is about.
 
-    IR slot census: globals 1891 + functions 7206 = 9097 (max 8191, over by 906)
-    IR lowering failed during merge: too many lowered items: combined globals
-    and functions exceed shared IR module capacity (max 8191 slots)
+The lever was then PROVEN by the minimal coordinated slice (2026-08-18,
+branch `lane/empryo-1/gen2-raise-measure-20260818`, source build SHA-256
+`da172b4f…`). All eight coupled files were free of claims at the time
+(grok-cli2's `lower.sio` claim expired between 17:55Z and 17:58Z; fable-1's
+`codegen_x86_linux.sio` claim had cleared). The slice raised `IR_MAX_FUNCS`
+8192 → 16384 together with every array indexed by the IrModule.functions
+slot — `IrModule.functions`, `normalize.sio`'s two `[IrFunction; …]` sites,
+`lower.sio`'s `elem_kinds`, `fn_offsets` in `codegen_x86_linux`/`elf`/
+`elf_bulk`/`reloc`/`frame`, `elf.sio`'s `name_offsets` — and the region
+table (`IR_REGION_*` arrays + `ir_region_table_capacity()` 8448 → 16640,
+keeping the +256 margin). The specializer needed no change: reachable marks
+are 7029, already under `SPEC_DCE_MAX=8192`.
 
-The wall is identical byte-for-byte across the two builds. So the Box
-auto-deref miscompile was never what stopped Madaros compiling itself — the
-merge-capacity overflow was, and is. The Box repair removes a real
-miscompile that corrupts any `Box<T>` read (including the 174 ident-base
-sites in the compiler's own source), but the fixed-point ladder's next rung
-is gated by cross-module DCE (`spec_dce_unreachable_item_fns`) not running
-on the merge path, which is a separate task. The gate's own header names
-this wall and the 5997-of-10705 reachability gap behind it.
+Result, measured on the from-source raise build:
 
-What this means: do not expect gen2 to turn green from the Box fix alone.
-The recorded rung stays `check`; the ladder is unchanged, and that is the
-correct, bounded result.
+    rung check   rc=0 errors=0          (gen1 typechecks main.sio)
+    rung gen2    rc=139 — but the slot-census wall is GONE. The failure is
+                 now a DIFFERENT wall: `run_compiler_main_self_tests` needs
+                 33829 IR instructions vs IR_MAX_INSTRS=16384, and the
+                 refusal path then segfaults.
+
+No regressions: `box_all_read_forms.sio` still prints `BOXMATRIX OK` rc=0,
+and the DCE reachability gate passes all three arms (keeps 602 live, drops
+300/303 dead, carries 6000 functions to a correct binary).
+
+SAFE STOP POINT, per the execution order: the coordinated `IR_MAX_FUNCS`
+raise is self-consistent and regression-free, and it is where this lane
+stops. The next wall is per-function `IR_MAX_INSTRS`, which is NOT a simple
+bump — `ir/dce.sio:31` caps liveness at `DCE_MAX_INSTRS=8192`, and the
+`irfunction_instr_capacity_coherence_gate.sh` header is explicit that a
+truncated liveness analysis is a WRONG analysis (a use past the cap is never
+recorded, so its definition looks dead and the sweep deletes live code,
+silently, at rc=0). Raising `IR_MAX_INSTRS` without raising `DCE_MAX_INSTRS`
+and every per-instruction context that stops at its own cap converts an
+honest refusal into silent miscompilation. That is a separate, larger task.
+
+The `IR_MAX_INSTRS` wall was then cleared WITHOUT raising any capacity
+(2026-08-18, branch `lane/empryo-1/normalize-byref-20260818`, source build
+SHA-256 `7ffc6c82…`). The compiler's own error message prescribed the fix:
+"split it into smaller functions". `run_compiler_main_self_tests`
+(`self-hosted/compiler/main.sio`, 5839-line body, 1163 independent test
+blocks) lowered to 33829 IR instructions — past the 16384 cap. Splitting it
+into ten part-functions (`compiler_main_self_tests_part_01..10`, ~116 blocks
+each) keeps every part far under the IR cap AND under the DCE/const-prop
+8192 caps, so every analysis pass stays complete on every part — no refusal,
+no truncation, and no capacity constant touched. `DCE_MAX_INSTRS`,
+`CP_MAX_INSTRS`, and every lateral array stay exactly where they are.
+
+Measured on the from-source split build:
+
+    fixed-point gate   GATE_RC=0, reached `check` as recorded.
+                       The 33829/IR_MAX_INSTRS wall is GONE (0 occurrences in
+                       the gen2 log). gen2 now progresses past typecheck into
+                       lowering before hitting a deeper, different SIGSEGV —
+                       a separate wall, not this one.
+    box_all_read_forms BOXMATRIX OK rc=0 — no regression
+    dce_reachability   all three arms pass
+    typecheck main.sio 80 errors before == 80 after (all pre-existing
+                       ontology E175); the split adds ZERO
+
+This is the safe stop point for the capacity question: the instruction wall
+did not need a raise, it needed the function split. Raising `IR_MAX_INSTRS`
+remains the wrong lever here, for the liveness-capacity reason above.

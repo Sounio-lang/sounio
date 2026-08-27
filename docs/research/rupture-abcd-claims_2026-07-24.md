@@ -92,7 +92,7 @@ is **ambiguous**. Use only the graded reading below.
 | **1b** | G₂ 3-form | 𝕆 | alternating form = associator | #1230 hinge | clinical state |
 | **2** | \(\det L_x=0\) | 𝕊 | \(|\det L_x|\), \(d_{\mathrm{sing}}\) | catastrophe scan | Petitot square |
 | **2′** | annihilating pair \(x\cdot y=0\) | 𝕊 | fiber label \(L=\mathrm{lo}\oplus\mathrm{hi}\) | `sedenion_zd_fibers` | “invisibility” slogan |
-| **2″** | **composed** annihilation | matrices / 𝕊 stacks | principal-angle **alignment** | probe-corrected-protocol | gap alone |
+| **2″** | **composed** annihilation | matrices / 𝕊 stacks | principal-angle **alignment** | `rupture_ord2_alignment_contract.py` (`ORD2_INSTRUMENT_OK`) | gap alone |
 | **3** | Massey / Borromean | topology / A∞ | ternary class | #1225 | ZD pairs |
 | **M** | Ollivier–Ricci \(\kappa\) | metric graph | \(\kappa\), law of \(\kappa\) | `orc.sio`, epistemic curvature | associator / ZD |
 | **P** | bifurcation of \(V(\cdot;c)\) | control space | stratum codimension | `petitot_potential.py` | 𝕆/𝕊 identity |
@@ -136,7 +136,9 @@ parallel faces until a green functor says otherwise.
 1. \(p_{\mathrm{ann}}(\varepsilon)=\mathbb{P}(\|X\cdot Y\|<\varepsilon\mid \|X\|,\|Y\|\ge\delta)\)  
 2. \(p_{\mathrm{fiber}}=\mathbb{P}(L(X)=L(Y)\mid\text{annihilation})\) — must be 1 on structural support  
 3. \(\mathrm{Var}[r_k]\) of product coordinates — Frente A contract  
-4. Subspace alignment for depth-\(T\) composition (ord 2″)  
+4. Subspace alignment for depth-\(T\) composition (ord 2″) — gated as
+   `ORD2_INSTRUMENT_OK` (`scripts/research/rupture_ord2_alignment_contract.py`);
+   trained LSTM/S4 discovery still open  
 5. **Never** `gap_dominance` alone  
 
 ### Contracts

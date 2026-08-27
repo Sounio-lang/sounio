@@ -12,12 +12,16 @@
 #   //@ ignore                — skip this test
 #   //@ check-only            — compile only, do not execute
 #   //@ expect-stdout: X      — stdout must contain X (run-pass only)
+#   //@ expect-stdout-contains: X — stdout must contain X (run-pass only)
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
 #   //@ requires: FEATURE     — feature dependency (e.g., requires: gpu)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
+#
+# Unknown `expect-*` / `expected-*` header keys fail the test. They used to
+# be skipped silently, so `expect-stdout-contains` asserted nothing.
 #
 # Usage:
 #   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
@@ -143,6 +147,8 @@ PASS=0
 FAIL=0
 SKIP=0
 KNOWN_FAILURE=0
+XPAS=0
+XPAS_LIST=""
 FLAKY=0
 VACUOUS_KNOWN=0
 VACUOUS_STALE=""
@@ -247,11 +253,33 @@ run_test() {
     local skip_if=""
     local requires=""
     local known_reason=""
+    local unknown_expect=""
     
     # Parse annotations
     while IFS= read -r line; do
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
+        fi
+        # Fail closed on invented stdout assertions. `expect-stdout-contains`
+        # was silently ignored because the harness only extracted
+        # `expect-stdout:`; the same hole would swallow `expected-output` or
+        # `expect-stdout-has`. Key extraction is identifier-only; the payload
+        # is still read by parameter expansion below (the vacuous-regex bug).
+        local expect_line="${line%"${line##*[![:space:]]}"}"
+        expect_line="${expect_line#"${expect_line%%[![:space:]]*}"}"
+        expect_line="${expect_line%$'\r'}"
+        if [[ "$expect_line" == "//@ expect"* || "$expect_line" == "//@ expected"* ]]; then
+            local expect_key="${expect_line#//@ }"
+            expect_key="${expect_key%%:*}"
+            expect_key="${expect_key%% *}"
+            case "$expect_key" in
+                expect-stdout|expect-stdout-contains) ;;
+                *)
+                    if [[ -z "$unknown_expect" ]]; then
+                        unknown_expect="$expect_key"
+                    fi
+                    ;;
+            esac
         fi
         case "$line" in
             *"//@ run-pass"*) is_run_pass=true ;;
@@ -299,6 +327,11 @@ run_test() {
 
     # Check filter
     if ! test_matches_filter "$basename"; then
+        return
+    fi
+
+    if [[ -n "$unknown_expect" ]]; then
+        echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"relfile\":\"$rel_file\",\"time\":0,\"output\":\"unknown annotation: $unknown_expect (expected: expect-stdout|expect-stdout-contains)\",\"idx\":$idx}" > "$output_file"
         return
     fi
     
@@ -355,6 +388,7 @@ run_test() {
     
     # Read expected patterns
     local expect_stdout=()
+    local expect_stdout_contains=()
     local error_patterns=()
     while IFS= read -r line; do
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
@@ -370,6 +404,9 @@ run_test() {
         # metacharacter class to get this wrong for either annotation.
         if [[ "$line" == "//@ expect-stdout: "* ]]; then
             expect_stdout+=("${line#*//@ expect-stdout: }")
+        fi
+        if [[ "$line" == "//@ expect-stdout-contains: "* ]]; then
+            expect_stdout_contains+=("${line#*//@ expect-stdout-contains: }")
         fi
         if [[ "$line" == "//@ error-pattern: "* ]]; then
             error_patterns+=("${line#*//@ error-pattern: }")
@@ -420,6 +457,15 @@ run_test() {
                     break
                 fi
             done
+            if [[ $exit_code -eq 0 ]]; then
+                for pattern in "${expect_stdout_contains[@]}"; do
+                    if ! grep -qF -- "$pattern" <<<"$output"; then
+                        exit_code=1
+                        test_output="missing stdout contains: $pattern"
+                        break
+                    fi
+                done
+            fi
         fi
         
     elif $is_compile_fail; then
@@ -707,10 +753,15 @@ for f in "$TEST_TMP"/result_*.json; do
             ((KNOWN_FAILURE++))
             ;;
         xpas)
-            ((PASS++))
-            if [[ "$VERBOSE" == "1" ]]; then
-                echo "  XPAS  $name (known failure now passes)"
-            fi
+            # A known-failure that passes is a stale claim, not a green test.
+            # Counted separately and always announced: swallowing it as PASS
+            # is how 240 imported/native 139 tags sat green until a census
+            # (docs/audit/KNOWN_FAILURE_XPAS_SIGNAL_2026-08-18.md). Same
+            # lesson as vxpas below.
+            ((XPAS++))
+            XPAS_LIST="${XPAS_LIST}    $name
+"
+            echo "  XPAS  $name (known failure now passes)"
             ;;
         vxfail)
             # Tolerated because it is listed in tests/vacuous_expect_baseline.txt.
@@ -757,10 +808,11 @@ echo "=== Results ==="
 echo "  Pass: $PASS"
 echo "  Fail: $FAIL"
 [[ $KNOWN_FAILURE -gt 0 ]] && echo "  Known failures: $KNOWN_FAILURE"
+[[ $XPAS -gt 0 ]] && echo "  Unexpected passes (stale known-failure): $XPAS"
 [[ $VACUOUS_KNOWN -gt 0 ]] && echo "  Vacuous-annotation baseline (tolerated): $VACUOUS_KNOWN"
 [[ $FLAKY -gt 0 ]] && echo "  Flaky: $FLAKY"
 echo "  Skip: $SKIP"
-echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN))"
+echo "  Total: $((PASS + FAIL + SKIP + KNOWN_FAILURE + VACUOUS_KNOWN + XPAS))"
 [[ $UNPARSED -gt 0 ]] && echo "  Unparsed: $UNPARSED"
 
 # Completeness: the counts above must describe every filtered test exactly
@@ -788,6 +840,18 @@ if [[ $EXPECTED_RESULTS -eq 0 ]]; then
     echo "WARNING: no test files matched the active filter -- this run measured nothing" >&2
 fi
 
+if [[ -n "$XPAS_LIST" ]]; then
+    echo ""
+    echo "=== Known-failure tags that passed in THIS run ==="
+    printf '%s' "$XPAS_LIST"
+    echo "  A known-failure that passes is a stale claim about this engine,"
+    echo "  not a green test. Drop the tag, or add //@ requires: <engine> if"
+    echo "  the claim is about a different engine than the one that just ran."
+    echo "  Madaros decides a Madaros-named tag; lean_single decides whether"
+    echo "  the file needs requires: madaros. Zeros on one engine do not"
+    echo "  license dropping a tag about the other."
+fi
+
 if [[ -n "$VACUOUS_STALE" ]]; then
     echo ""
     echo "=== Vacuous-annotation baseline entries that passed in THIS run ==="
@@ -805,7 +869,7 @@ if [[ "$FORMAT" == "junit" ]]; then
 <testsuites>
 XMLEOF
     
-    echo "  <testsuite name=\"sounio-test-suite\" tests=\"$((PASS + FAIL + KNOWN_FAILURE))\" failures=\"$FAIL\" skipped=\"$SKIP\" errors=\"0\">" >> "$JUNIT_FILE"
+    echo "  <testsuite name=\"sounio-test-suite\" tests=\"$((PASS + FAIL + KNOWN_FAILURE + XPAS))\" failures=\"$((FAIL + XPAS))\" skipped=\"$SKIP\" errors=\"0\">" >> "$JUNIT_FILE"
     
     for f in "$TEST_TMP"/result_*.json; do
         [[ -f "$f" ]] || continue
@@ -822,7 +886,7 @@ XMLEOF
                 ;;
             xpas)
                 echo "    <testcase name=\"$name\" time=\"$time\">" >> "$JUNIT_FILE"
-                echo "      <system-out>Known failure now passes</system-out>" >> "$JUNIT_FILE"
+                echo "      <failure message=\"stale known-failure: test now passes on this engine\"/>" >> "$JUNIT_FILE"
                 echo "    </testcase>" >> "$JUNIT_FILE"
                 ;;
             fail)
@@ -867,5 +931,20 @@ if [[ $FAIL -gt 0 ]]; then
     exit 1
 fi
 
+# SOUNIO_XPAS_FATAL=1 makes a stale known-failure tag fail the job.
+# Default off until the remaining seed XPASses owned by other lanes
+# (gum_fo_across_call, turbofish_concrete_type_mismatch) are classified.
+# The Madaros known-failure recheck sets this so compiler-only PRs cannot
+# rot requires:madaros tags in silence.
+if [[ $XPAS -gt 0 && "${SOUNIO_XPAS_FATAL:-}" == "1" ]]; then
+    echo ""
+    echo "XPAS_FATAL: $XPAS known-failure tag(s) passed on this engine"
+    exit 1
+fi
+
 echo ""
-echo "All tests passed!"
+if [[ $XPAS -gt 0 ]]; then
+    echo "Suite finished with $XPAS stale known-failure tag(s) (not a silent pass)."
+else
+    echo "All tests passed!"
+fi

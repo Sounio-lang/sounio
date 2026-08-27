@@ -4056,4 +4056,2190 @@ asking, at the Lean levels `m = 2,3,4`: `P1_hi_lo` 0 violations in 36032 instanc
 pair of graphs without determining either triangle count. `Ncnt_hi`'s `−4` is now a theorem at the
 level of the support; the moment is still open.
 
+### 57.6 — ⚠ CORRECTION to §57.4, and what the disjointness actually buys
+
+§57.4 wrote, of the two graphs, that "they miss the diagonal and, off it, the pairs where both masks
+are false". **The second clause is FALSE.** Measured at `m = 2,3,4` over every label and every
+off-diagonal pair of nonzero indices: the number of pairs where both masks are false is **0**. The
+two graphs do not merely avoid each other, they **PARTITION** the edges.
+
+The reason, now a theorem (Tier 61 `resB_hi_or_lo`): `resB`'s first two clauses are the A2_VACUITY
+pair, and at level `m+1` they are unconditional — `P1_symm` needs `x ⊕ L ≠ 0`, and the high label's
+`⊕` on a low index is `(x ⊕ W) + 2^(m+1)`, never `0`. So the high mask **is** its third clause,
+which Tier 60 turns into `−P1_low = P3_low`, the exact negation of the low third clause (both are
+`±1`). The single place the low mask fails for another reason is the low label's ISOLATED vertex
+`l = W` — precisely where `P1_symm`'s hypothesis fails — and there `P1 = −P3` outright, so the high
+mask carries that row and that column. That identity was already inside `Asig_isolated_row` and
+`Asig_isolated`, used only to conclude the mask fails; Tier 61 extracts it as `P1_iso_row` /
+`P1_iso_col`.
+
+**The object §57.4 wanted.** Subtracting kills the mask:
+
+| | |
+|---|---|
+| `Asig_hi_lo_diff` | `Asig l y W m − Asig l y (W+2^(m+1)) (m+1) = − P1 l y W m` |
+
+`−P1` is symmetric (`P1_symm`), `±1` (`P1_pm`), zero on the diagonal — **a Seidel matrix**, of which
+the two `Asig` are the two edge classes. That is the lane's own vocabulary: writing `P = −P1`,
+
+    tr(P³) = 6·( C(2^(m+1)−1, 3) − 2·|Ω_W| )      0 violations at m = 2,3,4
+
+where `Ω_W` is the **two-graph** of the label (the triples with `P_ij P_jk P_ki = −1`), so the
+`P`-term is a switching-class invariant and the mask-dependence of the deviation lives entirely in
+the mixed traces.
+
+*Measured and unexplained, recorded so it is not mistaken later for a finding:* the within-fibre
+deviations of `|Ω_W|` itself are `+168` at `m = 3` (`j = 3`) and `+1152 / +2328 / −1152` at `m = 4`
+(`j = 3, 4, 3`). The `168` is the same integer as `|GL(3,2)|`, which is all over this lane; at
+`m = 4` the `j = 3` values are `±1152`, not multiples of `168`, so the coincidence does **not**
+extend. No claim is attached to these numbers.
+
+**The four-term high-branch descent.** With `P = Alo − Ahi`, trilinearity gives, exactly,
+
+    t3(box) = t3(Alo) − 3·tr(Alo² P) + 3·tr(Alo P²) − t3(P)
+
+0 violations at `m = 2,3,4`. **This does not overturn §54.3.** What §54.3 refuted was a *two-term
+affine* recursion in `(t3′, t2′)`; the extra terms here are mixed traces, not multiples of those two.
+
+**Where the box sits.** Measured at `m = 3,4,5`, over every high label:
+
+| | |
+|---|---|
+| `t3(box_W) − t3(box_{8g+1})` | `= −27·8^(n−j)·[j,3]₂` with `n = m+2`, `j = lsb W`, parity on `g(W+2^(m+1))` — 0 viol |
+| `D(full level-(m+1) matrix)` | `= 8 · D(box)` — 0 viol / 63 at `m = 5`, with 3 nonzero instances |
+
+So the box **is** the level-`n` object and the `8` is `tri3_kron`'s, now checked on general labels
+and not only on the maximal seam. Before this, the factor was a theorem for the `2^n` label alone.
+
+**The parity corollary — and why it is NOT a finding.** `g(W + 2^(m+1)) = g(W) + 2^(m−2)`
+(0 violations), so `popcount`'s parity FLIPS: a low label and its box sit in fibres of opposite
+parity, and therefore exactly one of the two deviations is zero (0 violations). Hence
+
+    D_low + D_box = −27·8^(n−j)·[j,3]₂     with no parity case split
+
+which looks like a cleaner law than either half. It is not new content: it is (A) — the parity half,
+already a theorem — composed with the `g`-shift. Recorded as a corollary, per the lane's rule about
+checking whether a pattern is forced by cheaper structure before calling it a fingerprint.
+
+### 57.7 — Tier 62: the mask is an ARTEFACT
+
+The partition has a consequence stronger than the difference identity. The mask holds exactly where
+`P1 = P3` and fails exactly where `P1 = −P3` — the two are exhaustive because both products are
+`±1`, and the isolated row/column (the only place the first clause can fail on its own) is a
+`P1 = −P3` locus. Both cases are then the same formula:
+
+| | |
+|---|---|
+| `Asig_no_mask` | `2 · Asig l y Llo n = − (P1 l y Llo n + P3 l y Llo n)` |
+
+with hypotheses `l, y, Llo < 2^(n+1)`, `l ≠ 0`, `y ≠ 0`, `l ≠ y` — **`Llo ≠ 0` is not assumed**; it
+is derived in the two branches that use it. (The M1 reviewer found that same hypothesis superfluous
+in Tier 61's `resB_hi_or_lo`/`Asig_hi_lo_diff`, where the two providers disagreed; the argument that
+it is derivable — `l ⊕ W = 0` gives `l = W`, and `l ≠ 0` gives `W ≠ 0` — is correct, so both were
+tightened before committing.) Measured over every index including `0` and the diagonal: 0 failures
+at `m = 2,3,4`.
+
+`A_σ` is therefore a **polynomial in two `±1` matrices**, and `tri3` of it expands by trilinearity
+into eight words in `(P1, P3)` with no `resB` anywhere:
+
+    8 · tri3(A_σ) = − tri3(P1 + P3)        0 violations, m = 2,3, every label
+
+**⚠ A corollary I wrote down and then refuted.** Substituting Tier 60's `P1_hi = −P1_lo`,
+`P3_hi = P3_lo` into the box's copy gives `8·t3(box) = tri3(P1 − P3)` and hence the clean-looking
+`4·(t3(Alo) + t3(box)) = −tri3(P3) − 3·tri3m(P3,P1,P1)`. **This is FALSE at every label of
+`m = 2,3,4`.** Both substitutions carry hypotheses — `l ≠ y` for `P1_hi_lo`, `l,y ≠ 0` for both —
+and measuring `(P1_hi + P3_hi) − (P3_lo − P1_lo)` locates the damage exactly there:
+
+| level | off-diagonal | diagonal | touching index 0 |
+|---|---|---|---|
+| `m = 2` | **0** | 49 | 105 |
+| `m = 3` | **0** | 225 | 465 |
+| `m = 4` | **0** | 961 | 1953 |
+
+`tri3` sums over both of those loci. The per-level identity is right; the level LINK needs that
+correction, not computed here. Recorded because it was written into the Lean docstring before being
+measured, and the measurement is what caught it. **A first version of this paragraph said the
+damage was "exactly the diagonal"** — that was measured about `P1` alone; the index-0 row and column
+differ too, because both `hi_lo` lemmas exclude the index 0.
+
+### 57.8 — Tier 63: the diagonal correction, and the refuted corollary comes back exact
+
+The correction is one line. `P1` is `1` on the **whole** diagonal — `P1_diag` off the isolated
+corner, and at the corner the computation already inside `Asig_isolated_diag` — and `P3` is `−1`
+there. So
+
+| | | |
+|---|---|---|
+| `P1_diag_full` | `P1 l l Llo n = 1` | `l ≠ 0` only |
+| `diag_sum_zero` | `P1 + P3 = 0` on the diagonal | ← the combination `A_σ` is built from |
+| `diag_diff_two` | `P1 − P3 = 2` on the diagonal | ← the combination the level link needs |
+| `P1_add_P3_zero_row` / `_col` | `P1 + P3 = 0` on the index-`0` line | |
+
+**That asymmetry is the whole bug.** `2·A_σ = −(P1+P3)`, and the sum vanishes exactly where `A_σ`
+does — the diagonal and the index-`0` line — so masking `P1+P3` is a no-op. The box's copy needs
+`P1−P3`, which is `2` at each of the `2^(n+1)−1` diagonal entries and `±2` on the index-`0` line,
+and `tri3` sums over both loci. All five statements are Lean theorems, kernel-clean.
+
+With the mask put back, the corollary refuted in §57.7 is **exact**, 0 violations at `m = 2,3,4`,
+every label — writing `X̃` for `X` zeroed on the diagonal and on the index-`0` line:
+
+    8·t3(A_lo)  = − tri3(P1̃ + P3̃)        (the mask is a no-op here)
+    8·t3(A_box) =   tri3(P1̃ − P3̃)        (the mask is load-bearing here)
+    4·(t3(A_lo) + t3(A_box)) = − ( tri3(P3̃) + 3·tri3m(P3̃, P1̃, P1̃) )
+
+**What that buys.** The deviation law now reads entirely inside level `m`, on two Seidel matrices:
+
+    D[tri3(P3̃)] + 3·D[tri3m(P3̃,P1̃,P1̃)] = −4·(−27·8^(n−j)·[j,3]₂)     0 viol, m = 3,4,5
+
+and measuring the two terms separately: **every label with `j ≥ 3` moves, every label with `j < 3`
+does not, and off the maximal seam the two deviations are EQUAL**, each `= 27·8^(n−j)·[j,3]₂`. The
+single exception at each level is `W = 2^m`, where they differ (`m = 3`: `2016` vs `1632`; `m = 4`:
+`27936` vs `25248`; `m = 5`: `277920` vs `264480` — the identity still holds, the split does not).
+
+So the law is now equivalent to a statement about **one** moment of **one** Seidel matrix,
+`tri3(P3̃)` — i.e. about the two-graph of `P3` alone, with no `P1` and no mask. `tri3(P3̃)` takes
+only `2^(m−2)` distinct values per level.
+
+### 57.9 — Tier 64: `tri3(P3̃)`, and the label's TOP BIT is a SWITCHING
+
+Attacking the one moment §57.8 reduced the law to. Two things came out, both with the lane's own
+signed-graph vocabulary.
+
+**(1) The maximal seam is the empty two-graph.** At `W = 2^m` the spectrum of `P3̃` is exactly
+`{N−1 (×1), −1 (×N−1)}` — the spectrum of `J − I` — at `m = 2,3,4,5`. That is not a coincidence:
+`P3_pow2_top` (Tier 57) already says `P3 l y (2^n) n = μ(l)·μ(y)`, a RANK-ONE sign matrix, so every
+triple product is a square and `|Ω| = 0`. Hence
+
+    tri3(P3̃)|_{W = 2^m} = N(N−1)(N−2),  N = 2^(m+1)−1
+
+measured exactly: `210, 2730, 26970, 238266` at `m = 2,3,4,5`. (Verified rank-one on *all* distinct
+nonzero triples, including those through the seam vertex, where `P3_pow2_top`'s hypotheses exclude
+it: 0 bad triples.)
+
+**(2) The label's top bit acts by SWITCHING — now a theorem.** `tri3(P3̃)` depends only on
+`W mod 2^m` (0 violations, `m = 2,3,4,5`). The reason:
+
+| | |
+|---|---|
+| `epsTop x m` | `= −1` iff `2^m < x` — the switching vector |
+| `sigma_top_flip` | `cdSigma (c ⊕ 2^(k+1)) l = (−epsTop l)·cdSigma c l` |
+| `P3_top_switch` | `P3 l y (W + 2^(k+1)) = epsTop l · epsTop y · P3 l y W` |
+
+Switching is `S ↦ diag(ε)·S·diag(ε)`; it preserves every triple product `S_ab S_bc S_ca`, hence the
+two-graph, hence `tri3`. `P3` is a product of two `cdSigma` factors (`P3_red`), each picking up
+`−epsTop`, and the two minus signs cancel. Measured first: 0 violations in 139176 instances at
+nonzero indices.
+
+Two sharp boundaries, both measured and both reflected in the hypotheses:
+
+* **the index-`0` line FAILS** the switching law (42/210/930/3906 entries at `m = 2..5`) — `epsTop 0`
+  would have to be `−1` and it is `+1`. Tier 63 masks that line out of `tri3(P3̃)`, so the corollary
+  survives; the theorem carries `l ≠ 0`, `y ≠ 0` for exactly this reason.
+* **`P1` is NOT switched by the top bit** — not by `epsTop`, and not by any vector: at every label
+  of `m = 2,3,4` some triple product of `P1(W)·P1(W+2^m)` is `−1`. The property is specific to `P3`.
+
+### 57.10 — `D[tri3(P3̃)]`: the reference is a REGULAR two-graph, and the exception has a closed form
+
+**The fibre reference is regular.** Switching `P3̃` so that vertex `1`'s row is all `+1` and reading
+off the descendant graph at `W = 8g+1`:
+
+| `m` | vertices | degree | edges |
+|---|---|---|---|
+| 3 | 14 = 2 isolated + 12 | 4 | 24 |
+| 4 | 30 = 2 isolated + 28 | 12 | 168 |
+| 5 | 62 = 2 isolated + 60 | 28 | 840 |
+
+i.e. **regular of degree `2^m − 4` on `2^(m+1) − 4` vertices**, plus exactly two isolated ones, with
+`E = (2^(m+1)−4)(2^m−4)/2`. (At `m = 4` that edge count is `168` — noted, not claimed: the lane's
+`168`s have burned me before, and this one is a product of two binomials that happens to land there.)
+
+**The reduction.** For a two-graph with descendant graph `G` on `N` vertices, elementary counting
+gives `|Ω| = E·(N−2) − 2·Σ_v C(d_v,2) + 4·t(G)` with `t` the triangle count, so
+
+    tri3(P3̃) = 6·C(N,3) − 12·|Ω|
+
+turns `D[tri3(P3̃)]` into the deviation of three graph statistics. Measuring them separately shows
+the expected thing and is a useful control: **`ΔE`, `Δpaths` and `Δtriangles` are all
+root-dependent** (at `m = 5`, `W = 8` gives `ΔE = −204` while `W = 24` gives `ΔE = −432`) **while
+`Δ|Ω|` is not** — both give `−9216`. Only the switching-class invariant is stable, which is exactly
+what the theory demands.
+
+**The maximal-seam exception, in closed form.** §57.9 left it open. The excess of the measured
+deviation over the plain law is `288, 2016, 10080` at `m = 3,4,5` — that is `288·[m−1,2]₂`. So
+
+    D[tri3(P3̃)]|_{W = 2^m} = 27·8²·[m,3]₂ + 288·[m−1,2]₂
+
+**Confirmed out of sample at `m = 6`**, a level not used to find the pattern — three independent
+predictions, all exact:
+
+| prediction | value | |
+|---|---|---|
+| `tri3(P3̃)|_{W=2^m} = N(N−1)(N−2)`, `N = 127` | `2000250` | ✓ |
+| `D` at `j = 3` `= 27·8^(n−3)` | `884736` | ✓ |
+| `D` at the maximal seam `= 27·8²·[6,3]₂ + 288·[5,2]₂` | `2455200` | ✓ |
+
+Equivalently, the `g = 0` reference itself has a closed form,
+`tri3(P3̃)|_{W=1} = N(N−1)(N−2) − 1728·[m,3]₂ − 288·[m−1,2]₂`, checked at `m = 3,4,5,6`
+(`714, −966, −39654, −454950`).
+
+**Tier 65** makes the geometric half a theorem: `P3_pow2_coherent`, every triple product is `+1`
+at the maximal seam — because `P3_pow2_top` makes `P3` rank-one and each product becomes a product
+of three squares. **Scope, and it is narrower than "the two-graph is empty":** the theorem covers
+only the triples that AVOID the seam vertex `2^n`, which `P3_pow2_top`'s hypotheses exclude. The
+triples through `2^n` are coherent too, but that is measured (0 bad triples), not proved — the M1
+reviewer flagged the overstatement and both the docstring and this line were corrected before
+committing. The counting half (empty two-graph ⇒ `tri3 = N(N−1)(N−2)`) is the `sumLtI` argument of
+Tier 58 and was not redone.
+
+### 57.11 — `tri3(P3̃)` at EVERY fibre reference: a closed form, confirmed out of sample
+
+§57.10 left this open: the `g ≠ 0` references had no formula (`−39654, 15642, −7398, 11034` at
+`m = 5`). They do now, and the right coordinate is the WALSH basis.
+
+Fix a level `m`, write `b = m−3`, `N = 2^(m+1)−1`. The references are `W = 8g+1`, and
+`P3_top_switch` (Tier 64) makes `g` and `g + 2^b` switching-equivalent, so `g` runs over `[0, 2^b)`.
+Expand `g ↦ tri3(P3̃)(8g+1)` in characters of `(ℤ/2)^b`:
+
+    tri3(P3̃)(8g+1) = Σ_k w_k · (−1)^popcount(g ∧ k)
+
+| | |
+|---|---|
+| **(1) support** | `w_k = 0` unless the set bits of `k` form a **contiguous block** of positions — only `b(b+1)/2` of the `2^b` characters survive |
+| **(2) value** | for the block `[i, i+L−1]`: `w_k = −2304·(2^(i+1)−1)·8^(m−4−i) / 2^(L−1)` |
+| **(3) mean** | `w_0 = N(N−1)(N−2) − 1728·[m,3]₂ − 288·[m−1,2]₂ − Σ_{k≠0} w_k` (§57.10's `g=0` form) |
+
+Everything is fixed by the single-bit coefficients `s_i = −2304·(2^(i+1)−1)·8^(m−4−i)`; lengthening
+a block by one bit **halves** its coefficient. The level-to-level rule is `s_i(m+1) = 8·s_i(m)`, with
+one new coefficient appearing per level, `s_{m−4} = −2304·(2^(m−3)−1)`.
+
+**Evidence, and the order it came in.** Discovered on `m = 4,5,6` (1, 3 and 6 nonzero characters).
+Then, before extending the formula:
+
+| test | prediction | result |
+|---|---|---|
+| `m = 7`, the seven characters already present at `m = 6` | `w_7[k] = 8·w_6[k]` | exact, 7/7 |
+| `m = 7`, `k = 5 = 0b101` (not a block) | `w = 0` | exact |
+| **`m = 8`, ALL 32 reference values**, none used to build the formula | full closed form | **0 mismatches / 32** |
+
+The `m = 8` run is the real test: `N = 511`, thirty-two references, every value predicted before
+being computed. Probe: `scripts/research/zd_v1_p3_twograph_probe.py`.
+
+**What this is NOT.** A closed form for the REFERENCES, not a proof of the deviation law. The law
+`D[tri3(P3̃)] = 27·8^(n−j)·[j,3]₂` compares `W = 8g+2^j` with `8g+1`; this settles only the second
+term. And none of it is in Lean — the statement is a global count over `~N³` triples, not a
+pointwise identity like the tiers above, so it is a different kind of formalisation job.
+
+### 57.12 — attacking the contiguous-block law: two mechanisms REFUTED, one reformulation
+
+**(a) "each triple's coherence is `±` a character of `g`."** If that held, the support would be the
+set of characters realised by triples and the whole law would be a counting statement. **Refuted:**
+`10464 / 39711` triples at `m = 5` and `139032 / 333375` at `m = 6` have a coherence vector that is
+not `±` a character.
+
+**(b) "the entries are characters and the block structure is inherited."** **Refuted twice over.**
+Only `13164 / 16002` entries at `m = 6` are single characters at all (the rest have Walsh support of
+size 3, 5 or 7), and — decisively — those that are **realise the non-block character**: `k = 5 =
+0b101` occurs at `1624` entries. Block-ness is invisible at the entry level, so it cannot be
+inherited from there.
+
+**(c) What is true.** Splitting the triple sum at `m = 6` into the two classes of (a):
+
+| `k` | | from character triples | from the rest | total |
+|---|---|---|---|---|
+| 3 | block | `0` | `−73728` | `−73728` |
+| **5** | **NOT a block** | **`0`** | **`0`** | **`0`** |
+| 6 | block | `0` | `−27648` | `−27648` |
+| 7 | block | `0` | `−36864` | `−36864` |
+
+The non-block coefficient vanishes **in each class separately** — it is not a conspiracy between
+them, and any proof has to explain a cancellation that already holds inside each class. Note also
+that `k = 3, 6, 7` get *nothing* from the character triples: their whole coefficient comes from the
+triples that are not characters.
+
+**The reformulation.** Writing `x_t = (−1)^(bit t of g)` and
+
+    R_i = Σ_{L≥1} 2^{−(L−1)}·x_i x_{i+1} ⋯ x_{i+L−1}      equivalently   R_i = x_i·(1 + R_{i+1}/2)
+
+the two halves of the law — interval support **and** the halving — are together *equivalent* to
+
+    tri3(P3̃)(8g+1) = w_0 + Σ_i s_i·R_i(g)
+
+(algebra, not measurement; checked at `m = 5,6,7,8`, 0 violations). So the whole `g`-dependence
+enters through `b` nested dyadic quantities, one per bit position, each an affine function of the
+binary fraction whose digits are the **prefix parities** of `g` from that position on. That is the
+shape a proof has to produce, and the `2^{−(L−1)}` is a place value, not a coincidence.
+
+### 57.13 — the IDENTIFICATION check: the two standard families are EXCLUDED
+
+Consulted an outside reviewer on where the new knowledge in this lane is. Its first instruction was
+a novelty check to run **before** spending another rung, on the grounds that the lane's memory
+already records two label-drift near-misses and a firewall (the `168` freezing is Kirshtein 2012).
+The check has two halves and **both came back negative**, which is the outcome that keeps the object
+interesting rather than the one that deflates it.
+
+**(1) Not a bilinear-form two-graph.** If `P3̃` were `(−1)^(B(l,y)+f(l)+f(y))` for an `F₂`-bilinear
+`B` on the index space — the symplectic / quadratic-form two-graphs of Seidel, whose triple
+invariants and Seidel spectra are classical — then switching away `f` and taking the `F₂` logarithm
+would leave a matrix of rank `≤ m+1`. Measured instead:
+
+| `m` | 3 | 4 | 5 | 6 | 7 |
+|---|---|---|---|---|---|
+| `rank_F₂` of the switched sign-log | 4 | 12 | 28 | 60 | 124 |
+| `2^m − 4` | 4 | 12 | 28 | 60 | 124 |
+| bilinear-form bound `m+1` | 4 | 5 | 6 | 7 | 8 |
+| `N = 2^(m+1)−1` | 15 | 31 | 63 | 127 | 255 |
+
+**`rank_F₂ = 2^m − 4` exactly**, at every label of `m = 3,4,5` (all of them) and at six labels of
+`m = 6,7` — which is the descendant graph's DEGREE, and which exceeds the bilinear bound from `m = 4`
+on. The one exception is the maximal seam, where the rank is **`0`**: consistent, since there the
+two-graph is empty (Tier 65). So the family is not a bilinear-form two-graph, and `m = 3` is the
+coincidence level where `2^m − 4 = m + 1` — exactly the level that would have made this look settled.
+
+**(2) Not a regular two-graph.** The descendant graph at a reference is regular (§57.10), which
+would allow it, but it is not STRONGLY regular: at `m = 5`, `λ` takes the values `12,14,16,18,20,…`
+and `μ` takes `0,2,4,6,8,…`. So this is not an equiangular line system at the relative bound.
+
+**What this does and does not license.** It excludes the two identifications that would have made
+`tri3(P3̃)` a known computation, and it hands over a clean invariant (`rank_F₂ = 2^m − 4`, `0` at the
+seam) that a literature search can be run against. It does **not** establish novelty — the two-graph
+catalogues have not been searched, and that search is owed before any claim is made.
+
+### 57.14 — Tier 66: the level-transfer backbone, and where the defect lives
+
+Attacking the reviewer's recommended target. The recursion's `8` is supposed to be "each level-`m`
+triangle lifts `2³` ways across the doubling". Measuring the four blocks of the level-`(m+1)` matrix
+against the level-`m` one, at a label `W < 2^(m+1)` (valid at **both** levels), gives exactly that —
+and the `(0,0)` block is not approximately the level below, **it is it**:
+
+| block | agreement with `P3 l y W m` |
+|---|---|
+| `(0,0)` | **exact** — every `l, y, W`, index `0` and the diagonal included, 0 violations |
+| `(0,1)` | flips exactly on `l = W` and on the coset line `l ⊕ y = W` |
+| `(1,0)` | flips exactly on `y = W` and on `l ⊕ y = W` |
+| `(1,1)` | flips exactly on the isolated line `l = W` or `y = W` |
+
+The last three are measured at `m = 3,4`, **every** label (15/15 and 31/31), with `2(2^(m+1)−2)`
+exceptions each. So the defect is supported on the two loci this lane already has names and theorems
+for — the **isolated vertex** and the **coset line** — which is what makes the recursion look
+provable rather than merely true.
+
+**Tier 66 proves the first row:**
+
+| | |
+|---|---|
+| `P3_level_stable` | `P3 l y W (m+1) = P3 l y W m` for `l, y, W < 2^(m+1)` |
+
+no nonzero hypothesis, no `l ≠ y`. The proof is four branch reductions and nothing else: `R_lu` and
+`R_ul` peel the `hi` argument at both levels, `R_ll` identifies the two results, and the `if y = 0`
+branches that `R_ul` produces **match on the nose** on both sides — which is why the statement is
+hypothesis-free. Kernel-clean.
+
+**⚠ The `8×` shape is REFUTED — and both M1 providers called it before I measured.** Asked whether
+the block table licenses "each of the eight `(λ_a,λ_b,λ_c)` orthants contributes a copy of `tri3_m`",
+grok and zai both answered `[PROBLEM]`, with the same reason: `R_lu` transposes its arguments and
+`R_ul` adds a minus, so the cross-block products need not assemble that way. Measuring the eight
+orthant sums directly at `m = 3`, `W = 1` (`tri3_m = 714`):
+
+| orthant weight | sum | vs `tri3_m` |
+|---|---|---|
+| 0 | `714` | **exact** |
+| 1 (×3) | `−384` | `−1098` |
+| 2 (×3) | `−528` | `−1242` |
+| 3 | `1056` | `+342` |
+
+So only the all-low orthant is a copy. The orthant sum depends only on the **weight** of
+`(λ_a,λ_b,λ_c)`, at every label of `m = 3` and `m = 4` (15/15, 31/31), and the weight-0 orthant is
+exactly `tri3_m` (15/15, 31/31).
+
+⚠ **The weight-dependence is NOT a finding — see §57.19.** It is forced by `sumLtI3_cyc`, already in
+the file, and holds for an arbitrary matrix. Only the weight-0 half has content. What survives is the
+lane's own **1+3+3+1 word decomposition** — the same shape as §34's `B`/`E` ledger and Tier 54's
+`tri3_expand`:
+
+    tri3(P3̃)_{m+1} = O_0 + 3·O_1 + 3·O_2 + O_3,        O_0 = tri3(P3̃)_m
+
+Consistent with this, the defect `T_{m+1}(W) − 8·T_m(W)` is **not** a function of `j = lsb W` — at
+`m = 5` it takes eight distinct values. It is a function of the fibre, and by §57.11's closed form a
+combination of exactly the `b` **suffix** characters.
+
+The three off-blocks and the three unknown orthants `O_1, O_2, O_3` are measured, not proved.
+
+### 57.15 — Tier 67: the three off-blocks are theorems, and the exceptions ARE `antisym`'s failures
+
+The three off-blocks reduce exactly like the `(0,0)` one, and they all end at the same place: after
+the two branch reductions peel the `hi` arguments, what is left is a `cdSigma` pair **in the wrong
+order**, and `antisym` puts it right. So the exceptional loci measured in §57.14 are not a separate
+phenomenon — **they are precisely where `antisym`'s hypotheses fail**:
+
+| block | surviving pair | `antisym` applied to | breaks when |
+|---|---|---|---|
+| `(0,1)` | `σ(y⊕W, l)·σ(y, l⊕W)` | `σ(y, l⊕W)` | `l = W` or `l ⊕ y = W` |
+| `(1,0)` | `σ(l, y⊕W)·σ(l⊕W, y)` | `σ(l, y⊕W)` | `y = W` or `l ⊕ y = W` |
+| `(1,1)` | `−σ(l, y⊕W)·σ(y, l⊕W)` | **both** | `l = W` or `y = W` |
+
+which is the measured table exactly — the isolated vertex and the coset line, nothing else. Note the
+asymmetry the table explains: `(0,1)` does **not** need `y ≠ W`, because the factor `y ⊕ W` sits in
+the pair that cancels rather than the one `antisym` touches.
+
+All three are now Lean theorems (`P3_block01`, `P3_block10`, `P3_block11`), kernel-clean, with the
+hypotheses `l,y ≠ 0` plus the failure locus of the `antisym` each one uses. Measured first, with
+exactly the stated hypotheses: 0 violations in `252/2940/27900` (blocks 01 and 10) and
+`210/2730/26970` (block 11) instances at `m = 2,3,4`.
+
+⚠ **`(1,1)`'s theorem is NARROWER than the measured statement.** Its proof applies `antisym` twice
+and the coset line breaks both, so it carries `l ⊕ y ≠ W` — but the measurement says the identity
+still holds there, the two breakages cancelling (on that line both sides collapse to
+`−σ(l,l)·σ(y,y)`). That case is not proved.
+
+### 57.16 — `O_1, O_2, O_3`: two level constants, and the transfer collapses to ONE unknown
+
+`O_0 = tri3(P3̃)_m` was already known. The other three are not independent:
+
+| | value | scope |
+|---|---|---|
+| `O_1 − O_2` | `26·2^m − 64` | every label except the maximal seam |
+| `O_3 − O_0` | `54·2^m − 90` | every label except the maximal seam |
+| at `W = 2^m` | **both shift by `+288·[m−1,2]₂`** | |
+
+Found on `m = 3,4,5` (both constants are affine in `2^m`, the successive differences doubling) and
+then **confirmed out of sample at `m = 6`** — `c_1 = 1600` and `c_3 = 3366` at three different
+labels, and the seam shift `44640 = 288·[5,2]₂` for **both** constants, all exact.
+
+**★ The seam shift is the same number as §57.10's.** The maximal-seam excess in the deviation law
+and the maximal-seam anomaly in the transfer are the identical constant `288·[m−1,2]₂`. Two
+independent places, one number — which says the seam exception is a single phenomenon, not two.
+
+**The transfer, off the seam.** Substituting into `1+3+3+1`:
+
+    tri3(P3̃)_{m+1} = 2·tri3(P3̃)_m + 6·O_1 − 24·2^m + 102        0 violations, m = 4,5,6
+
+so the recursion has ONE unknown left. (Note `2 + 6 = 8`: the `8` heuristic survives, but split
+`2` on the level below and `6` on the weight-1 orthant, which is exactly what the refutation in
+§57.14 forced.)
+
+**And `O_1` is explicit at the fibre references.** Solving the line above with §57.11's closed form
+at both levels:
+
+    O_1(8g+1) = [ tri3(P3̃)_{m+1}(g) − 2·tri3(P3̃)_m(g) + 24·2^m − 102 ] / 6
+
+0 violations at `m = 4,5,6`. This is a closed form *derived from* two measured closed forms, so it
+adds no independent evidence — what it does is make `O_1` explicit wherever the deviation law lives,
+which is exactly the references.
+
+### 57.17 — `O_1` DERIVED from the block identities: down to ONE coset-line sum
+
+The honest route §57.16 owed. Take the weight-1 orthant `(λ_a,λ_b,λ_c) = (0,0,1)`: `a, b` low,
+`c = c₀ + H` high. Tiers 66/67 give each of the three factors:
+
+| factor | block | value |
+|---|---|---|
+| `M(a,b)` | `(0,0)` | `S(a,b)` — the level-`m` Seidel matrix, same masking |
+| `M(b,c)` | `(0,1)` | `ε₀₁·P(b,c₀)`, `ε₀₁ = −1` iff `b = W` or `b ⊕ c₀ = W` |
+| `M(c,a)` | `(1,0)` | `ε₁₀·P(c₀,a)`, `ε₁₀ = −1` iff `a = W` or `c₀ ⊕ a = W` |
+
+where `P` is the level-`m` `P3` with index `0` zeroed but the **diagonal kept** (`P(x,x) = −1`, by
+`P3_diag`) — because `b = c₀` and `c₀ = a` are legal at level `m+1`, the two indices living in
+different halves. And `c₀ = 0` is legal too (the index `H`), which Tier 67's lemmas exclude, so it is
+a separate slice. Expanding `ε₀₁ε₁₀ = 1 − 2u − 2v + 4uv`:
+
+    O_1 = S_0 − 2·S_u − 2·S_v + 4·S_uv + slice₀        verified for every label, m = 3,4
+
+and each piece then identifies:
+
+| piece | value | |
+|---|---|---|
+| `S_0` | `tri3_m − 2·N(N−1)` | since `P = S − I₁`, so `tri3m(S,P,P) = tri3(S) − 2·tr(S²)` |
+| `S_u` | `= S_v`, and splits as `{b = W} + {b ⊕ c = W}` with **empty** overlap | the overlap forces `c = 0` |
+| `S_uv` | `2(N−1)` | a level constant |
+| `slice₀` | `18·2^m − 30` off the seam, `N(N−1)` at it | |
+
+giving, off the maximal seam,
+
+    O_1 = tri3_m − 4·S_u + 2(N−1)(4−N) + 18·2^m − 30      0 violations, every label, m = 3,4
+
+and `S_u` splits further: its **isolated-row** half is itself a level constant `10·2^m − 22`
+(`58, 138, 298` at `m = 3,4,5`, and `154, 810, 3658` at the seam), so **all** the label dependence of
+`O_1` sits in one second-order sum, the **coset-line** term
+
+    Σ_coset(W) = Σ_{a,b} S(a,b)·P(b, b⊕W)·P(b⊕W, a)
+
+`S_uv`, `slice₀`, the seam value and the isolated-row constant were all confirmed **out of sample at
+`m = 5`** (`124`, `546`, `3906`, `298`, the last at five different labels).
+
+That is the derivation: `O_1`, a triple sum at level `m+1`, comes down to `tri3_m` plus level
+constants plus **one coset-line bilinear sum** — and the coset line is an object the lane already has
+theorems about (`cosetSum_eq` proves the `A_σ` analogue equals `−t2′`).
+
+*Measured and unexplained, recorded so it is not mistaken for a finding later:* at `m = 3` the coset
+term takes the values `−24` and `168`. The `168` does **not** extend — at `m = 4` the four values are
+`−504, 72, 264, 840`. No claim is attached.
+
+### 57.18 — `Σ_coset` in closed form, and the transfer recursion COMPLETES (the `8` comes back)
+
+`Σ_coset(W) = Σ_{a,b} S(a,b)·P(b, b⊕W)·P(b⊕W, a)` is **constant on each `g`-fibre** (every label,
+`m = 3,4,5`), and its Walsh expansion — now over `b = m−2` bits, with **no** top-bit identification —
+is far sparser than `tri3`'s:
+
+| | |
+|---|---|
+| support | exactly the `b` blocks **anchored at the top bit**, `k_L = 2^b − 2^(b−L)`, `L = 1…b` |
+| value | `w[k_L] = 24·2^(m+L−1) − 96·4^(L−1)` |
+| mean | `w[0] = 12·2^m − 24` |
+
+So `b+1` coefficients instead of `tri3`'s `b(b+1)/2`, and lengthening a top-anchored block
+**multiplies by 4** rather than dividing by 2. Found on `m = 3,4,5`; confirmed **out of sample** at
+`m = 6` (0 mismatches / 16 references) and again at `m = 7` (0 / 32).
+
+**★ Substituting back, the whole transfer collapses — and the factor `8` returns:**
+
+    tri3(P3̃)_{m+1} = 8·tri3(P3̃)_m − 24·Σ_coset(W) + c(m)
+    c(m) = −156·2^m + 450 + 12(N−1)(4−N),   N = 2^(m+1)−1
+
+verified for **every** non-seam label at `m = 3,4,5` (14/14, 30/30, 62/62). The heuristic "each
+level-`m` triangle lifts `2³` ways" survives after all — but only once the defect is named. §57.14
+refuted the naive version (the eight orthants are *not* eight copies); what is true is that after
+the `1+3+3+1` assembly and the `O_1` derivation, the `8` reassembles and the entire defect is
+**`−24` times the coset-line sum**, plus a level constant.
+
+That also retro-explains §57.11's `s_i(m+1) = 8·s_i(m)`: it **is** this `8`. And the one new Walsh
+coefficient per level comes from `Σ_coset`'s new top-anchored block.
+
+**Provenance.** The block identities this rests on (Tiers 66/67) are theorems. The constants, the
+`Σ_coset` closed form and the assembled recursion are measured — with out-of-sample confirmation at
+two levels for `Σ_coset` and none of it in Lean.
+
+### 57.19 — ⚠ DEFLATION: the `1+3+3+1` weight-dependence is forced, and Tier 68 proves what is not
+
+§57.14 recorded, as a measured finding, that the eight orthant sums depend only on the **weight** of
+`(λ_a,λ_b,λ_c)`. **That is not a finding.** `tri3`'s summand is `f a b · (f b c · f c a)`, which is
+invariant under the cyclic rotation `(a,b,c) ↦ (b,c,a)` — this file already contains that as
+`sumLtI3_cyc` — and the rotation sends the orthant `(λ_a,λ_b,λ_c)` to `(λ_b,λ_c,λ_a)`. So the three
+weight-1 orthants are equal for free, and likewise the three weight-2 ones.
+
+Null control, since the lane's rule demands one: on a **random** `{−1,0,1}` matrix the weight-1
+orthants are equal and the weight-2 orthants are equal, every trial. The property has nothing to do
+with `P3`.
+
+What the measurement did establish, and what is not free, is the **weight-0** statement `O_0 =
+tri3_m` — plus the refutation of the `8×` shape. **Tier 68 promotes the first from Tier 66's
+pointwise identity to the sum itself:**
+
+| | |
+|---|---|
+| `tri3_congr` | `tri3 N f = tri3 N g` when `f = g` on `[0,N)²` |
+| `tri3_low_orthant` | `tri3 (2^(m+1)) (P3 · · W (m+1)) = tri3 (2^(m+1)) (P3 · · W m)` |
+
+for `W < 2^(m+1)`, kernel-clean. `tri3_congr` applies to any matrix built pointwise from `P3`, the
+masked one included, because a mask depends only on the indices and so is the same on both sides.
+
+### 57.20 — Tier 69: the decomposition moves into `sumLtI`, and `1+3+3+1` is a THEOREM
+
+§57.16–57.18's expansion is written in ordinary mathematics. This tier moves its first half — the
+DECOMPOSITION — into the file's own formalism.
+
+`sumLtI_shift N N` is exactly an orthant cut: it splits a sum over `[0, N+N)` into the low half and
+the high half reindexed by `i ↦ N + i`. Applying it to each of `tri3`'s three nested sums (reaching
+under the binders with `sumLtI_congr`, pulling the splits out with `sumLtI_add`) gives:
+
+| | |
+|---|---|
+| `orth N f u v w` | the orthant with each index offset by `u`, `v`, `w` ∈ `{0, N}` |
+| `tri3_split8` | `tri3 (N+N) f` = the sum of the eight orthants |
+| `orth_cyc` | `orth N f u v w = orth N f w u v` |
+| `tri3_split_1331` | `tri3 (N+N) f = orth 0 0 0 + 3·orth 0 0 N + 3·orth 0 N N + orth N N N` |
+
+`orth_cyc` is `sumLtI3_cyc` plus a pointwise reassociation of the three factors, and it is the formal
+content of §57.19's deflation: the rotation of the summation variables `(a,b,c) ↦ (b,c,a)` rotates
+the offsets as `(u,v,w) ↦ (w,u,v)`, whose orbits are `{(0,0,0)}`, `{(0,0,N),(N,0,0),(0,N,0)}`,
+`{(0,N,N),(N,0,N),(N,N,0)}`, `{(N,N,N)}` — hence `1+3+3+1`, for **any** matrix. `tri3_split8` is
+kernel-clean at `[propext, Quot.sound]`, without even `Classical.choice`.
+
+Denotation check on **random** matrices (these are statements about `tri3`, not about `P3`): all
+three identities, 0 violations in 12 trials at `N = 3,4,5`. One build iteration: my first `1331`
+assembly rotated the offsets the other way and Lean rejected it — the surviving direction is the one
+the reviewer then confirmed independently.
+
+**What this does and does not close.** With `tri3_low_orthant` (Tier 68) giving `orth 0 0 0 = tri3_m`
+for `P3`, the SHAPE of the level transfer — the `1+3+3+1` and its leading term — is now a theorem.
+The three remaining orthant VALUES (`O_1, O_2, O_3`) are still measured, and so are the level
+constants and `Σ_coset`.
+
+### 57.21 — Tier 70: the `ε` of block `(0,1)` as a function, and the index-0 obstruction
+
+Tier 67's block identities hold only OFF their exceptional loci. That is fine pointwise and useless
+for rewriting a **sum**: `sumLtI_congr` needs a statement true at every index. This tier supplies the
+two missing cases for block `(0,1)` and packages all three with an explicit sign.
+
+| | |
+|---|---|
+| `P3_block01_iso` | at `l = W`: `P3 W (y+2^(m+1)) W (m+1) = − P3 W y W m` |
+| `P3_block01_cos` | at `l ⊕ y = W`: same flip |
+| `eps01 l y W` | `−1` iff `l = W` or `l ⊕ y = W`, else `+1` |
+| `P3_block01_eps` | `P3 l (y+2^(m+1)) W (m+1) = eps01 l y W · P3 l y W m`, for `l, y ≠ 0` |
+
+Both exceptional cases are Tier 67's computation with one `cdSigma` degenerating, so that `antisym`
+is skipped exactly once and its minus is the flip. The two loci are **disjoint** for `y ≠ 0` (they
+would force `y = 0`), so the `if … ∨ …` cannot hide a double sign — both providers checked that.
+Measured first, exactly as stated: 0 violations in `49/225/961`, `42/210/930` and `343/3375/29791`
+instances at `m = 2,3,4`.
+
+**⚠ The sum-level step does NOT follow, and both providers said so.** `sumLtI` ranges over `[0,N)`,
+which includes `0`, where `P3_block01_eps`'s hypotheses fail — and the summand there is **not** zero,
+so the index cannot be dropped. What is missing is either a separate identity for the `y = 0` row
+(and the `l = 0` one), or a proof that those rows contribute nothing to the outer sum. Neither is
+attempted. So this tier is the pointwise ingredient, not the sum.
+
+*A correction the reviewer forced:* my first docstring said that in the coset case "both surviving
+factors become `σ(x,x) = −1`". zai marked it `[OVERREACH]` — the `cdSigma` VALUES are `−1`, but the
+factors of the product are `−σ(x,x) = +1`. The arithmetic was right, the sentence was not; both the
+docstring and this paragraph now say it the reviewer's way.
+
+### 57.22 — Tier 71: the `y = 0` row, and the corrected list of what the sum still needs
+
+The row both providers named as the obstruction. It transfers with **no sign**:
+
+    P3 l (0 + 2^(m+1)) W (m+1) = P3 l 0 W m        for l ≠ 0;  0 violations / 49, 225, 961
+
+and it is a genuinely **separate** lemma, not a special case: at `y = 0` the two clauses of `eps01`
+coincide (`l ⊕ 0 = l`), so `eps01 l 0 W` reports `−1` whenever `l = W` — and measurement shows the
+identity has no sign there. Extending the `ε` form to `y = 0` fails at exactly those `2^(m+1) − 1`
+pairs. The computation says why: on the shifted side the second factor degenerates to `−1` (via
+`cdSigma 0 (l⊕W) = 1`), on the unshifted side to `1` (via `R_ul`'s `v = 0` branch), and the two
+degeneracies **cancel**.
+
+**⚠ My list of what remains was wrong in two directions, and each provider caught one.** The
+weight-1 orthant `orth N f 0 0 N` has summand `f a b · (f b (N+c) · f (N+c) a)`, so it uses blocks
+`(0,0)`, `(0,1)`, `(1,0)` — **not** `(1,1)`, which belongs to the weight-2 orthant (zai's catch); and
+block `(1,0)` needs more than its border rows (grok's catch). Corrected:
+
+| block | status |
+|---|---|
+| `(0,0)` | **done** — `P3_level_stable` has no nonzero hypotheses, so it already holds at every index |
+| `(0,1)` | Tier 70 at `b,c ≠ 0`, Tier 71 at `c = 0`; **missing** the `b = 0` row — measured FLIPPED, with `2^(m+1) − 1` exceptions, all at `c = W` |
+| `(1,0)` | **missing entirely as an `ε`-form** — Tier 67 gives only the off-locus version, so its isolated and coset cases still need packaging, and both border rows are open |
+
+None of that is attempted. What this rung establishes is one row and a corrected map of the rest.
+
+### 57.23 — Tier 72: the `l = 0` row, and block `(0,1)` closes (for `W ≠ 0`)
+
+The last gap in block `(0,1)`. On the `l = 0` row both `P3`s lose their FIRST factor to `cdSig0`, so
+the whole identity is carried by the second — and it **flips**, the opposite of the `y = 0` row of
+Tier 71, which does not. Three loci, three different `antisym` accidents:
+
+| locus | sign | why |
+|---|---|---|
+| `l = 0`, `y ≠ W` | **flip** | `antisym` fires once, unopposed |
+| `l = 0`, `y = W` | none | `antisym` degenerates — both sides are `σ(W,W)` |
+| `l = 0 = y` | **flip** | `σ(0,W) = 1` on the shifted side, `R_ul`'s `v = 0` branch on the other |
+
+Packaged as `eps01row0 y W = if y ⊕ W = 0 then 1 else −1`, holding at **every** `y`, corner included.
+Measured first: `0/42, 0/210, 0/930` generic, `0/7, 0/15, 0/31` seam and corner, and `0/56, 0/240,
+0/992` for the `ε` form over all `y`.
+
+**⚠ `W ≠ 0` is load-bearing, and I claimed coverage without it.** grok's `[PROBLEM]`: every row-0
+lemma assumes `hW0`, so a zero label is uncovered. Measured: at `W = 0` the row-0 `ε` form fails at
+**every** `y` (`8/8`, `16/16` at `m = 2,3`). A zero fibre label is outside this lane's scope — every
+`Asig_isolated`-style theorem carries `hL0` — but the claim has to say so, and now does.
+
+So with Tiers 67/70/71/72, **block `(0,1)` is proved at every pair `(l,y)` for `W ≠ 0`**. Block
+`(1,0)` is still missing entirely as an `ε`-form, border rows included; the weight-1 orthant needs
+`(0,0)` (done), `(0,1)` (done) and `(1,0)` (open).
+
+### 57.24 — Tier 73: the `ε` of block `(1,0)`
+
+The mirror of Tier 70. Block `(1,0)` reduces to the pair `σ(l, y⊕W)·σ(l⊕W, y)`, and the single
+`antisym` it needs sits on the **first** factor — so its exceptional loci are `y = W` (the second
+argument collapses to `0`, and `σ(l,0) = 1` replaces the `antisym`) and `l ⊕ y = W` (the two
+arguments coincide, both factors becoming `σ(x,x) = −1`). **Not** `l = W`, which is block `(0,1)`'s
+locus: the asymmetry between the two blocks is purely that `P3`'s two arguments are ordered.
+
+| | |
+|---|---|
+| `P3_block10_iso` | at `y = W`: flip |
+| `P3_block10_cos` | at `l ⊕ y = W`: flip |
+| `eps10 l y W` | `−1` iff `y = W` or `l ⊕ y = W` |
+| `P3_block10_eps` | the packaged form, at every pair of **nonzero** indices |
+
+The two loci are disjoint for `l ≠ 0` (together they force `l = 0`), so the `if … ∨ …` cannot hide a
+double sign — both providers checked that, and both also checked that the two hypotheses the `eps`
+proof derives inside its branches (`W ≠ 0` from `y = W`, `l ⊕ W ≠ 0` from `y = l ⊕ W`) come only
+from `y ≠ 0` and the branch equality, with nothing smuggled. Measured first: `0/49, 0/225, 0/961`
+iso, `0/42, 0/210, 0/930` cos, `0/343, 0/3375, 0/29791` for the packaged form.
+
+**⚠ SCOPE: nonzero indices only.** The two border rows are not proved. Measured, every label at
+`m = 2,3,4`: block `(1,0)`'s `l = 0` row FLIPS for every `y ≠ 0` **with no exception**, and its
+`y = 0` row flips except at `l = W` and at `l = 0`. With those, block `(1,0)` would close as block
+`(0,1)` did in Tier 72 — and the weight-1 orthant would have all three of its blocks.
+
+### 57.25 — Tier 74: the borders of block `(1,0)`, and every factor of the weight-1 orthant closes
+
+The last two rows, and they behave differently from each other for a reason worth stating:
+
+* **`l = 0` row** — both `P3`s lose their FIRST factor to `cdSig0`, and the two surviving second
+  factors differ by exactly one `R_ul` sign. **No `antisym` is involved, so there is no exceptional
+  locus**: the row flips at every `y ≠ 0`, and at `y = 0` the `R_ul` `v = 0` branch fires on both
+  sides and the flip disappears. It is the only border in this whole expansion with no `antisym` in
+  it — which is why I asked the reviewer to try to refute it specifically.
+* **`y = 0` column** — the SECOND factors die instead, and the first ones survive as `σ(l,W)` against
+  `σ(W,l)`: an `antisym`, hence two exceptional loci, `l = W` and `l = 0`.
+
+| | |
+|---|---|
+| `P3_block10_row0` | `l = 0`, `y ≠ 0`: flip |
+| `P3_block10_col0` | `y = 0`, `l ∉ {0, W}`: flip |
+| `P3_block10_col0_seam` | `y = 0`, `l = W`: no flip |
+| `P3_block10_corner` | `l = y = 0`: no flip — **shared** by the two borders, both packings reporting `+1` |
+
+Measured first, `m = 2,3,4`, every label: the `l = 0` row packaged as `[y = 0 → +1, else −1]` gives
+`0/56, 0/240, 0/992`; the `y = 0` column as `[l = W or l = 0 → +1, else −1]` the same.
+
+**★ Every factor of the weight-1 orthant is now a theorem at every index, for `W ≠ 0`.** grok
+confirmed the closure explicitly: the summand `f a b · (f b (N+c) · f (N+c) a)` only ever touches
+blocks `(0,0)`, `(0,1)` and `(1,0)`; `(1,1)` never appears. Tier 66 gives the first
+(hypothesis-free), Tiers 70/71/72 the second, Tiers 73/74 the third.
+
+**What is still missing** is the ASSEMBLY: carrying these three pointwise identities through
+`sumLtI_congr` and collecting the sign patterns into a value for `O_1`. That is the step §57.16–57.18
+did on paper and measured; it is not formalised, and no difficulty is recorded for it.
+
+### 57.26 — Tier 75: the TOTAL signs, and the weight-1 orthant ASSEMBLED
+
+Tiers 66–74 give blocks `(0,1)` and `(1,0)` at every index, but split across five lemmas each with
+its own hypotheses. `sumLtI_congr` wants ONE identity per factor, true everywhere. Glue them:
+
+    E01 l y W = if l = 0 then (if y ⊕ W = 0 then 1 else −1)
+                else if y = 0 then 1 else eps01 l y W
+    E10 l y W = if l = 0 then (if y = 0 then 1 else −1)
+                else if y = 0 then (if l ⊕ W = 0 then 1 else −1) else eps10 l y W
+
+| | |
+|---|---|
+| `P3_block01_total` | `P3 l (y+2^(m+1)) W (m+1) = E01 l y W · P3 l y W m` |
+| `P3_block10_total` | `P3 (l+2^(m+1)) y W (m+1) = E10 l y W · P3 l y W m` |
+
+for `W ≠ 0`, at **every** `(l,y)`. Measured as total functions: 0 violations / `448, 3840, 31744` at
+`m = 2,3,4`, borders and corner included.
+
+**★ And then the assembly goes through:**
+
+    orth_weight1_expand :
+      orth (2^(m+1)) (P3 · · W (m+1)) 0 0 (2^(m+1))
+        = Σ_a Σ_b Σ_c  P3 a b W m · (E01 b c W · P3 b c W m · (E10 c a W · P3 c a W m))
+
+three nested `sumLtI_congr`, a `Nat.zero_add` normalisation, a `Nat.add_comm` to match the block
+lemmas' shape, and the three total identities on the three factors. Kernel-clean, green first try.
+Denotation checked independently, both sides computed separately: 0 violations at `m = 2,3`, every
+label.
+
+**`E01` and `E10` are not each other's transpose**, and grok confirmed the asymmetry is real rather
+than a gluing error: block `(0,1)`'s interior locus is `l = W` and block `(1,0)`'s is `y = W`, and
+their borders differ too — block `(1,0)`'s `l = 0` row has no exceptional locus at all (Tier 74)
+while block `(0,1)`'s does (Tier 72). It also confirmed the factor-to-block matching, including that
+the third factor `f (N+c) (0+a)` is block `(1,0)` with `(l,y) = (c,a)` and not a transpose.
+
+**What this is and is not.** The weight-1 orthant is now a level-`m` triple sum with two explicit
+sign factors — as a THEOREM, where §57.16–57.18 had it by hand. It is not yet a VALUE: turning that
+sum into `tri3_m − 4·S_u + …` means evaluating the sign-weighted sums, which is §57.17's arithmetic
+and is not formalised.
+
+### 57.27 — Tier 76: §57.17's four-way split is now a THEOREM
+
+Tier 75 leaves the weight-1 orthant as a level-`m` triple sum carrying two `±1` weights. To evaluate
+it, write each weight as `1 − 2·χ` with `χ` the `0/1` indicator of its `−1` locus, multiply out, and
+split by linearity. That is exactly `S₀ − 2S_u − 2S_v + 4S_uv`, which §57.17 derived by hand and only
+measured.
+
+| | |
+|---|---|
+| `tri3w N A g` | `tri3` with a weight `g` on the triple |
+| `tri3w_add` / `tri3w_smul` / `tri3w_one` | linearity in the weight, and the unit weight is `tri3` |
+| `E01_eq` / `E10_eq` | `E = 1 − 2·χ` — pure case checks, needing only `propext` |
+| **`orth_weight1_split4`** | `orth … 0 0 N = tri3_m − 2·tri3w(χ01) − 2·tri3w(χ10) + 4·tri3w(χ01·χ10)` |
+
+Kernel-clean. Denotation checked with both sides computed independently: 0 violations at `m = 2,3`,
+every label.
+
+**On the `slice₀` of §57.17.** The hand derivation carried a separate term for the `c = 0` index,
+because the block lemmas it used excluded it. Here the border behaviour is folded into `χ01`/`χ10`'s
+if-chains, so no separate slice appears — grok confirmed the two forms agree with the slice absorbed.
+That is the payoff of Tiers 71/72/74: the totals made the split uniform.
+
+**What is still not evaluated.** `tri3w(χ01)`, `tri3w(χ10)` and `tri3w(χ01·χ10)` are now well-defined
+level-`m` objects, but their VALUES — §57.17's `S_uv = 2(N−1)`, the isolated-row constant
+`10·2^m − 22`, and the coset-line sum — are still measured only. Turning those into theorems means
+counting over the loci, which is a different kind of argument (cardinality, not rewriting) and is not
+attempted.
+
+### 57.28 — counting the loci of the four-way split
+
+Tier 76 leaves `tri3w(χ01)`, `tri3w(χ10)` and `tri3w(χ01·χ10)` as well-defined level-`m` objects with
+unknown values. Counting them, with `N = 2^(m+1) − 1`:
+
+| locus | size | `m = 3,4,5,6` |
+|---|---|---|
+| `χ01` | `3N − 1` | 44, 92, 188, 380 |
+| `χ10` | `4N − 2` | 58, 122, 250, 506 |
+| joint | `10N − 8` | 142, 302, 622, 1262 |
+
+**All three label-independent**, at every label of every level tested. The asymmetry `3N−1` against
+`4N−2` is the same ordered-arguments asymmetry as everywhere else in this expansion — blocks `(0,1)`
+and `(1,0)` do not have mirror-image loci, and the counts say so numerically.
+
+**The signed joint sum is label-independent too, and closed:**
+
+    tri3w(χ01 · χ10) = 4 − 6N        −38, −86, −182, −374 at m = 2,3,4,5
+
+confirmed out of sample at `m = 5`, and it decomposes exactly: of the `10N − 8` triples in the joint
+locus, `2N − 2` carry summand `+1` and `8N − 6` carry `−1`, and `(2N−2) − (8N−6) = 4 − 6N`.
+**Note `2N − 2 = 2(N−1)` is §57.17's `S_uv`** — the hand derivation and the total-sign formulation
+agree on that count, which is a real cross-check between the two routes.
+
+The two SINGLE sums are **not** label-independent: `tri3w(χ01)` takes 2 and 4 values and
+`tri3w(χ10)` takes 3 and 5 at `m = 3,4`, so they are fibre-dependent like `tri3` itself. That is
+where the label dependence of `O_1` lives, consistent with §57.17 having found it all in the
+coset-line term.
+
+**None of §57.28 is formalised**, and the reason is a change of kind: turning a locus count into a
+Lean theorem needs the Tier 58 machinery (`sumLtI_const_excl`, `cnt1/cnt2/cnt3`, `rep_iff`) — a
+cardinality argument, not the rewriting that carried Tiers 66–76. Not attempted, no difficulty
+recorded.
+
+### 57.29 — Tier 77: the joint locus FACTORISES over `c`
+
+§57.28 counted the three loci by brute force. The joint one has a reason: its indicator is
+`χ01 b c W · χ10 c a W`, in which `a` and `b` never meet — so for each `c` the sums over `a` and over
+`b` separate:
+
+    Σ_a Σ_b Σ_c χ01(b,c)·χ10(c,a) = Σ_c (Σ_b χ01(b,c))·(Σ_a χ10(c,a))
+
+`chi_joint_factor`, kernel-clean at `[propext, Quot.sound]` (no `Classical.choice`). Two
+`sumLtI_swap`s to bring `c` outside and two `sumLtI_mul`s to pull each factor through — and, as both
+providers confirmed, **it uses nothing about `χ01`/`χ10`**: it holds for arbitrary `F(b,c)` and
+`G(c,a)`. That is the honest scope of the result: it is Fubini plus distributivity, and what it buys
+is that the joint count reduces to two one-dimensional counts.
+
+**⚠ Two different `N`s, and both providers caught me conflating them.** The theorem's bound is the
+number of INDEX VALUES, `B = 2^(m+1)`; §57.28's `N` is the number of NONZERO indices, `B − 1`. My
+first docstring called both `N`, which made the arithmetic look off by one — grok computed the
+`10N − 17` that would follow. The theorem's variable is now `B`, and with the two apart:
+
+| | value at `c = 0` | at `c = W` | elsewhere | total |
+|---|---|---|---|---|
+| `Σ_b χ01 b c W` | `1` | `1` | `3` | `3N − 1` |
+| `Σ_a χ10 c a W` | `N` | `1` | `3` | `4N − 2` |
+
+`c` runs over `B = N + 1` values, two special, so the joint count is `1·N + 1·1 + 9·(B − 2) =
+10N − 8` — §57.28's number. Measured at `m = 3,4,5,6`, every label, for both inner counts.
+
+**The two inner counts are not proved, and both providers confirmed there is no rewriting route.**
+zai put it precisely: counting solutions of a boolean/`xor` equation needs induction on bits or
+Hamming weight, categorically different from evaluating sums by associativity and distributivity.
+That is the Tier 58 kind of work, and it is where this line of formalisation stops.
+
+### 57.30 — ⚠ CORRECTION, and Tier 78: the `χ01` inner count is PROVED
+
+§57.28 and §57.29 recorded the two inner counts as "a different **kind** of obligation — cardinality
+over an `xor` locus, not rewriting", and said there was no rewriting route. **That was wrong, and it
+was my framing, not the reviewers'.** They were answering about counting solutions of a general
+boolean equation, which genuinely is bit-induction work. These loci are not general:
+
+    b ⊕ W = 0        says        b = W
+    (b ⊕ c) ⊕ W = 0  says        b = c ⊕ W
+
+— **named points**, by `xor_zero_eq` and `xor_cancel`. So each inner sum is an indicator supported
+on one or three explicit points, and Tier 58's `cnt1`/`cnt3` evaluate exactly that.
+
+    chi01_col : Σ_{b < 2^(m+1)} χ01 b c W = if c = 0 ∨ c ⊕ W = 0 then 1 else 3
+
+kernel-clean at `[propext, Quot.sound]`. Three cases: at `c = 0` the indicator collapses to `b = 0`;
+at `c = W` the second disjunct never fires because `(b ⊕ c) ⊕ W = b ≠ 0`; otherwise the support is
+`{0, W, c ⊕ W}`, three distinct points. Measured first: 0 violations over every `(c,W)` at
+`m = 2,3,4`.
+
+**On putting the correction to the reviewers.** I asked them directly whether I had been
+overcorrecting. Both said no and both gave the reason back: `x ⊕ y = 0` is solvable by cancellation,
+so the constraint names points rather than describing a solution set, and the earlier framing
+answered the generic problem instead of this one. zai: *"The previous framing answered the generic
+problem of arbitrary boolean equations rather than the exact structure of this specific
+constraint."*
+
+**The lesson is the lane's own rule, and I broke it twice in two tiers:** do not record a difficulty
+you have not attempted. I recorded one, the reviewers echoed my framing back — agreement is not
+evidence when the question is the thing that is wrong — and it dissolved on contact with the actual
+loci.
+
+### 57.31 — Tier 79: the `χ10` count too, and both inner counts are now theorems
+
+    chi10_col : Σ_{a < 2^(m+1)} χ10 c a W
+      = if c = 0 then 2^(m+1) − 1 else (if c ⊕ W = 0 then 1 else 3)
+
+Kernel-clean, green first try, 0 violations over every `(c,W)` at `m = 2,3,4` (56, 240, 992 pairs).
+Three cases, mirroring `chi01_col` except at `c = 0`: there the summand **is** `if a = 0 then 0
+else 1`, so it is `sumLtI_const_excl` (constant off one excluded point) where the other block's was
+`cnt1` (an indicator at one point).
+
+**That single difference is the whole of the `N` against `1`**, and grok confirmed the reading: it is
+the ordered-arguments asymmetry of `P3` in its last visible form — `χ01`'s `l = 0` branch and
+`χ10`'s are genuinely different clauses, not an artefact of how I wrote the two if-chains.
+
+**Both inner counts are now theorems**, and Tier 80 closes the arithmetic:
+
+    chi_joint_count : Σ_{c < 2^(m+1)} (Σ_b χ01 b c W)·(Σ_a χ10 c a W)
+                        = 10·(2^(m+1) − 1) − 8
+
+kernel-clean, 0 violations at `m = 2,3,4`. Two `sumLtI_congr` steps — the first substitutes the two
+column lemmas, the second turns the product (which is `B−1` at `c = 0`, `1` at `c = W`, `9`
+elsewhere) into `9 + (B−10)·[c=0] + (−8)·[c=W]` — then `sumLtI_add`, `sumLtI_mul`, `cnt1` twice and
+`sumLtI_one`, giving `9B + (B−10) − 8 = 10B − 18 = 10N − 8`.
+
+Both providers checked the one thing that could have gone wrong silently: `c = 0` and `c = W` must
+be DISTINCT for the two indicator counts to add without overlap, and `W ≠ 0` guarantees it.
+
+**So §57.28's brute-force count is now a theorem**, and with it the chain from §57.26's assembly
+through §57.27's four-way split down to this number is formal, except for the two single sums.
+
+### 57.32 — Tier 81: the two single sums drop from triple to double
+
+The joint sum factorised because its weight carried no `A`. The two single ones do carry `A`, so
+they do not factorise — but each weight depends on only TWO of the three indices, and the third sum
+comes out anyway:
+
+| weight | reduction |
+|---|---|
+| `g b c` (`χ01`'s shape) | `Σ_b Σ_c g b c · A b c · (A²) c b` |
+| `g c a` (`χ10`'s shape) | `Σ_a Σ_c g c a · A c a · (A²) a c` |
+
+`tri3w_bc` and `tri3w_ca`, kernel-clean, green first try, and — as both providers confirmed —
+**using no property of `g` or `A` whatsoever**: pure index bookkeeping. Checked by denotation on
+RANDOM integer matrices (they are statements about `tri3w`, not about `P3`): 0 violations in 12
+trials at `B = 4,5,6`. Both also confirmed the orientations `(A²) c b` and `(A²) a c` are not
+transposed, which is the thing that would have been wrong silently.
+
+**Is triple→double a real reduction or bookkeeping dressed up?** I asked that as its own question,
+prepared to be told it was oversell. Both said it is real: the inner sum is a precomputable `A²`, so
+the object drops from `O(B³)` to `O(B²)` and, more to the point here, the weights are supported on
+the `~3N` explicit points of §57.28's loci — so what carries `O_1`'s fibre dependence is now a sum
+over those points against the SQUARE of the level-`m` matrix. That is the same object §57.17
+identified by hand as the coset-line term, reached formally.
+
+### 57.33 — `A²` on the `χ` loci: pointwise NO, sub-sums YES
+
+**Pointwise there is no closed form.** `A` here is the unmasked level-`m` `P3`, and the first thing
+the measurement says is that **`A` is not symmetric** — `P3_symm` needs both indices nonzero, so the
+index-`0` line breaks it. `A²` has diagonal `−(H−2)` at index `0` and `+(H−2)` elsewhere
+(`H = 2^(m+1)`), and off the diagonal it takes many values. Restricted to the three loci families
+`(A²)(c,0)`, `(A²)(c,W)`, `(A²)(c,c⊕W)` it still takes 2–6 distinct values each. **So the route
+"evaluate `A²` pointwise and substitute" does not close.**
+
+**But the three sub-sums do separate.** `tri3w(χ01)` is the sum of three pieces, one per branch of
+the locus, and they behave completely differently:
+
+| piece | off the maximal seam | at it |
+|---|---|---|
+| `b = 0` (isolated row) | `−18·2^m + 30` — a LEVEL CONSTANT | `−N(N−1)` |
+| `b = W` (isolated column) | `6·2^m − 18` — a LEVEL CONSTANT | `126, 750, 3534` at `m = 3,4,5` |
+| `b = c ⊕ W` (coset line) | **constant on each `g`-fibre**, as many values as fibres | |
+
+Confirmed **out of sample at `m = 5`**: `−546` and `174` at four different labels, and `−3906 =
+−N(N−1)` at the seam, all exactly as predicted from `m = 3,4`.
+
+**★ So all the fibre dependence of `tri3w(χ01)` sits in the coset-line piece, and it is a fibre
+invariant.** That is §57.17's conclusion — reached there by hand on a different decomposition —
+now localised to a single named term and verified independently. Two routes, one answer.
+
+### 57.34 — the coset piece IS §57.18's `Σ_coset`, offset by `2N − 2`
+
+I said the coset piece "resists because it IS the deviation law's content". It does not resist: it
+is an object this lane already has a closed form for, and the two routes meet exactly.
+
+Expanding `T_C(W) = Σ_{c ∉ {0,W}} A(c⊕W, c)·(A²)(c, c⊕W)` in Walsh characters of `g`:
+
+| `m` | `T_C`'s coefficients | `Σ_coset`'s (§57.18) |
+|---|---|---|
+| 3 | `44`; `96` | `72`; `96` |
+| 4 | `108`; `288, 384` | `168`; `288, 384` |
+| 5 | `236`; `672, 1152, 1536` | `360`; `672, 1152, 1536` |
+
+**Every non-constant coefficient is identical.** Only the mean differs, and by `28, 60, 124` —
+which is `2N − 2`. Directly:
+
+    T_C(W) = Σ_coset(W) − (2N − 2)        0 violations, m = 3,4,5, every label
+
+and therefore `T_C` inherits §57.18's closed form. **Confirmed out of sample at `m = 6`**: all eight
+fibres predicted from the `Σ_coset` formula minus `252`, all exact.
+
+**★ `2N − 2` is now this lane's third sighting of the same constant.** It is §57.17's `S_uv`; it is
+the `+1`-count of the joint locus in §57.28 (`2N−2` of the `10N−8` triples); and it is the offset
+between the two routes' coset terms. Three different computations, one number.
+
+**What this settles.** The formal chain (Tiers 66–81) and the hand route (§57.16–57.18) do not merely
+agree numerically — their coset terms are the same object up to an explicit constant, so the closed
+form transfers, and `tri3w(χ01)` is now determined: two level constants plus `Σ_coset − (2N−2)`.
+
+**What it does not.** `Σ_coset`'s closed form is itself measured, not proved (§57.18, confirmed out
+of sample at `m = 6,7`), so nothing here makes `D` a theorem. What changed is that the last piece is
+no longer an unknown — it is a known measured quantity, and the two routes to it are identified.
+
+### 57.35 — `Σ_coset` satisfies a first-order LEVEL RECURSION
+
+Before recording that `Σ_coset`'s Walsh closed form is hard to prove — the mistake I made twice
+already this session — I measured whether it has a level transfer, as `tri3` did. It does, and it is
+much simpler than the Walsh expansion:
+
+    Σ_coset(m+1, W) = 4 · Σ_coset(m, W) + (24·2^m − 24)
+
+**for every label `W < 2^(m+1)`** — that is, every label valid at both levels. 0 violations at
+`m = 3,4` over all labels, and confirmed **out of sample at `m = 5`** (`c(5) = 744`, predicted from
+`m = 3,4` before computing).
+
+The constant is `c(m) = 24·2^m − 24 = 12·2^(m+1) − 24`, which is §57.18's `w[0]` **at level `m+1`** —
+the recursion's constant is the next level's mean, exactly.
+
+**What the recursion does and does not determine.** It fixes `Σ_coset` at every label that exists one
+level down; the labels using the NEW top bit are not covered and are the extra input each level —
+the same structure as every other transfer in this expansion, and consistent with the Walsh picture,
+where each level adds exactly one new top-anchored character. Checked: the §57.18 closed form obeys
+the recursion on the shared fibres at `m = 2,3,4,5`.
+
+**Why this matters for proving it.** A Walsh expansion over `2^(m−2)` characters is a global
+statement; a first-order recursion in `m` is the shape the block identities of Tiers 66/70–74 were
+built for. The concrete route is: split the level-`(m+1)` coset sum into its four index blocks and
+apply those identities to the summand `S(a,b)·P(b,b⊕W)·P(b⊕W,a)`.
+
+### 57.36 — Tier 82: block `(1,1)`'s coset case, the gap Tier 67 flagged
+
+Working out which identities that route needs found a hole: the summand's middle factor is
+`P(b, b⊕W)`, and when `b` is high that pair is in block `(1,1)` **exactly on its coset line** — the
+one case Tier 67 left unproved, because its proof applies `antisym` twice and the coset line breaks
+both.
+
+    P3_block11_cos : P3 (l+2^(m+1)) ((l⊕W)+2^(m+1)) W (m+1) = P3 l (l⊕W) W m
+
+No flip, and **no `antisym` at all**: with `y = l ⊕ W` the two `hi` images SWAP the two indices, so
+`R_lu` and `R_ul` land directly on the diagonal and every surviving `cdSigma` is a `sigma_self`.
+Both sides are `−1`. Kernel-clean, green first try; measured first, 0 violations / 42, 210, 930 at
+`m = 2,3,4`.
+
+Both providers confirmed the closure: `hcos`'s failure locus is exactly `y = l ⊕ W`, Tier 67 covers
+the complement, this covers the locus, so **block `(1,1)` is now exhaustive for nonzero `l, y, W`** —
+and both confirmed the reading that `(b, b⊕W)` sits on that locus with `l := b`, which is why the
+recursion needed it. zai checked the bit arithmetic on a worked example rather than taking it on
+trust.
+
+### 57.37 — Tier 83: the four-block cut, and two claims of mine corrected
+
+`cosetU` is the coset sum with **no masks at all** — no diagonal, index-`0` or `b = W` exclusions.
+It has its own measured level recursion, `U(m+1,W) = 4·U(m,W) + (40·2^m − 48)`, 0 violations at
+`m = 2,3` over every label and confirmed **out of sample at `m = 4`** (`c'(4) = 592`, predicted
+before computing). And the cut:
+
+    cosetU_split4 : cosetU (m+1) W = [block (0,0)] + [block (0,1)] + ([block (1,0)] + [block (1,1)])
+
+kernel-clean at `[propext, Quot.sound]`, green first try. The cut is `split_inner` — Tier 69's
+lemma, now public — applied to the coset summand; it uses nothing about `P3` and carries no
+hypothesis.
+
+**⚠ Two claims of mine were wrong, and the reviewers caught both.**
+
+*First,* I implied `cosetU` could stand in for §57.35's masked `Σ_coset` because both are
+fibre-constant and both satisfy a recursion of the same shape. **Both providers rejected that**: the
+excluded set is not where the summand vanishes, so parallel behaviour does not licence discarding
+the masks. The two objects are related by terms I have not computed. `cosetU` is worth formalising
+on its own; it is not a substitute.
+
+*Second,* I claimed the four blocks are now covered by Tiers 66/70–74/82. grok showed that is
+licensed only for `W < 2^(m+1)`: the identity `(2^(m+1)+b) ⊕ W = (b ⊕ W) + 2^(m+1)` needs bit `m+1`
+of `W` clear, and for a label using the new top bit the middle factor `P3 (2^(m+1)+b)
+((2^(m+1)+b)⊕W)` is a **cross-half** pair, not block `(1,1)`. It also noted the corollary that
+leaving those `⊕` unsimplified in the statement is not tidiness but necessity. `W < 2^(m+1)` is
+exactly the range §57.35's recursion lives in, so the route survives — but the unqualified claim did
+not.
+
+### 57.38 — Tier 84: the four blocks collected, and the leading block proved
+
+Measuring the four blocks of `cosetU_split4` against `U = cosetU m W`, for `W < 2^(m+1)`:
+
+| block | value |
+|---|---|
+| `(0,0)` | `U` |
+| `(0,1)` | `U + 16·2^m − 16` |
+| `(1,0)` | `U + 12·2^m − 16` |
+| `(1,1)` | `U + 12·2^m − 16` |
+
+the last two **equal**, and the four summing to `4U + (40·2^m − 48)` — §57.35's recursion constant
+recovered as `(16·2^m − 16) + 2·(12·2^m − 16)`. Verified at `m = 2,3` and confirmed **out of sample
+at `m = 4`**, including at a label from a different fibre (`W = 9`, `U = −48`).
+
+**`cosetU_block00` proves the first row.** Every factor of that block is a low-low pair, so
+`P3_level_stable` — hypothesis-free — turns each into its level-`m` self and the block IS `cosetU m
+W`. Both providers confirmed no index escapes the low half, given `b ⊕ W < 2^(m+1)` from `xorlt`.
+
+**⚠ I was about to overstate this, and asked before doing so.** My question was whether it is fair
+to call the LEADING term of the recursion a theorem. Both said no, with the same correction: only
+**one** of the four `U`s is proved, so **the coefficient `4` is not a theorem either** — three of
+its four units come from the measured blocks. zai's phrasing: *"The recursion `4U + 40·2^m − 48`
+remains a measured conjecture; only the block `(0,0)` component (`1U`) is a theorem."*
+
+So the state is: the cut is a theorem (Tier 83), one of its four blocks is a theorem (Tier 84), and
+the recursion — coefficient and constant alike — remains measured.
+
+### 57.39 — Tier 85: block `(1,0)` collected; the other two are BLOCKED, and by what
+
+Of the three remaining blocks, `(1,0)` is the one whose three factors are all covered by lemmas that
+already hold at every index:
+
+| factor | block | lemma |
+|---|---|---|
+| `P3 (2^(m+1)+a) b` | `(1,0)` | `P3_block10_total` (Tier 75) |
+| `P3 b (b⊕W)` | `(0,0)` | `P3_level_stable` (Tier 66, hypothesis-free) |
+| `P3 (b⊕W) (2^(m+1)+a)` | `(0,1)` | `P3_block01_total` (Tier 75) |
+
+`cosetU_block10`, kernel-clean, green first try, 0 violations at `m = 2,3` every label.
+
+**The other two do not collect, and the obstructions are specific:**
+
+* **block `(0,1)`** — its middle factor `P3 (2^(m+1)+b) ((2^(m+1)+b)⊕W)` is block `(1,1)` on its
+  coset line, i.e. Tier 82 — but Tier 82 needs `b ≠ 0` **and** `b ⊕ W ≠ 0`, and the sum runs over
+  all `b`. Two border cases missing.
+* **block `(1,1)`** — its outer factors need an `E11` **total**, which was never built: Tier 67 gives
+  the off-locus version, Tier 82 the coset case, and the `l = W` / `y = W` loci and both borders are
+  open.
+
+I put that account to the reviewers rather than asserting it, and grok confirmed the gaps are exactly
+those with no further one. **This is one block of the three that were asked for**; the other two are
+named, not done, and I record no estimate for either.
+
+### 57.40 — Tier 86: Tier 82's two borders, and they differ
+
+The two points Tier 82 excluded — `l = 0` and `l = W` — are exactly what block `(0,1)` of the coset
+split needs, and they do **not** behave alike:
+
+| | |
+|---|---|
+| `P3_block11_cos_zero` | `P3 (0+2^(m+1)) (W+2^(m+1)) W (m+1) = − P3 0 W W m` — **flips** |
+| `P3_block11_cos_seam` | `P3 (W+2^(m+1)) (0+2^(m+1)) W (m+1) = P3 W 0 W m` — does not |
+
+Both kernel-clean, 0 violations / 7, 15, 31 each at `m = 2,3,4`. Same reduction chain as Tier 82,
+with `R_uu`'s `v = 0` branch firing on one side and not the other.
+
+**★ The asymmetry is not free — it is forced, and it forces something back.** I asked whether it can
+be consistent that swapping the same two indices changes the answer. grok's reply sharpened the
+question into a check: the two high indices `0+2^(m+1)` and `W+2^(m+1)` are **both nonzero**, so
+`P3_symm` applies to the two left-hand sides and they are EQUAL. Therefore the two lemmas together
+force
+
+    P3 W 0 W m = − P3 0 W W m
+
+at level `m` — legitimate only because `P3_symm` does **not** apply there, index `0` being one of the
+arguments. Measured, both the premise and the consequence: 0 violations at `m = 2,3,4,5`. Had either
+lemma carried a sign slip, this identity would have failed.
+
+**Block `(1,1)`'s coset line is now covered at every `l`**, which was the first of the two
+obstructions §57.39 named. The second — an `E11` total for block `(1,1)`'s outer factors — is
+untouched.
+
+**Status of (III).** Still reduced, not proven — but the reduction is now a single explicit
+first-order recursion in `m` whose only non-constant input is a coset-line sum with a closed form.
+What has not been attempted: proving the recursion (the constants and `Σ_coset` from the same
+block-identity expansion that produced `O_1`), the maximal-seam case, the `q`-binomial finish that
+would produce `[j,3]₂` from the solved recursion, the coset-line case of block `(1,1)`, and the fibre
+variation of `tr(Alo²P)` / `tr(AloP²)`. No difficulty is recorded for any of them.
+
 **(III) is still reduced, not proven.**
+
+### §57.41 — Tier 87: block (0,1) collected, and what block (1,1) actually still needs
+
+Tier 86's two borders glue to Tier 82's interior into one total on the coset line of block `(1,1)`:
+
+    P3 (b+2^(m+1)) ((b⊕W)+2^(m+1)) W (m+1)  =  E11cos b · P3 b (b⊕W) W m,
+    E11cos b = −1 at b = 0, +1 otherwise.
+
+`E11cos` does not depend on `W` — the flip sits at `b = 0` only, and the seam `b = W` carries `+1`.
+With it and a bit lemma (`(2^(m+1)+b) ⊕ W = (b⊕W) + 2^(m+1)` for `W < 2^(m+1)`), block `(0,1)` of
+`cosetU_split4` reduces to level `m` with weight `E01 · E11cos · E10`. Three of the four blocks are
+now theorems (`(0,0)`, `(1,0)`, `(0,1)`).
+
+**Correction to §57.39, from the M1 review.** I described block `(1,1)`'s remaining work as "the
+`l = W` / `y = W` loci and the two borders". That under-counts. Its outer factors are GENERAL
+block-`(1,1)` pairs, not coset ones, so what is required is a full `E11` total valid at EVERY index —
+the same kind of object as `E01` and `E10`, not a list of special cases. The loci and borders are the
+missing inputs to that total; the total itself, glued from them together with Tier 67's interior and
+the coset line above, is the deliverable.
+
+Two structural notes that fall out. Because `W < 2^(m+1)`, `b` and `b ⊕ W` always lie in the SAME
+half — the middle factor of the coset sum never crosses, which is why the four blocks pair as they
+do. And the level-`m` right-hand sides of all four blocks are the same three-factor shape, so the
+recursion, once block `(1,1)` closes, is a statement about the four ε-weights alone.
+
+### §57.42 — Tier 88: block (1,1)'s total, and it is rank-one (a switching off index 0)
+
+Six new pointwise lemmas (`row0`, `corner`, `col0`, `seamrow`, `seam2`, `seamcol`) complete block
+`(1,1)` at every index, and the assembled sign is
+
+    E11 l y W = g(l) · h(y),   g(l) = −1 iff l = W,   h(y) = −1 iff y ∈ {0, W}.
+
+This answers §57.41's obligation in the reviewer's own terms — a total on every index — and gives
+more than was asked: **`E11` factorises**, where `E01` and `E10` do not. Their `(l⊕y)⊕W = 0` clause
+is a coset condition, and the sign set of a rank-one matrix is a rectangle, never a diagonal. The
+discriminating test is `E(a,b)E(a',b')E(a,b')E(a',b) = 1`, which holds for `E11` on all 28672 and
+983040 quadruples at `m = 2,3` and fails for `E01`/`E10` on 9408 and 201600 of them.
+
+With this, `cosetU_block11` collects the LAST of `cosetU_split4`'s four blocks, so all four are now
+theorems and the recursion is a statement about the four ε-weights alone.
+
+**Correction, from the M1 review, to a claim I made and one provider passed.** I wrote that rank-one
+means a SWITCHING and therefore that the lift preserves every triple product. It does not: a
+two-sided weight `g(l)h(y)` multiplies `E(l,y)E(y,z)E(l,z)` by `g(y)h(y)`, which is `1` for all `y`
+only when `g = h`, and here `g(0) = +1` while `h(0) = −1`. Measured: 1036/3584 and 10140/61440
+triples change at `m = 2,3`. grok answered `[OK]`; zai did the computation and answered `[PROBLEM]`.
+zai is right, and grok's agreement was not evidence.
+
+The true statement is sharper. `g` and `h` differ at `y = 0` and nowhere else — both are `−1` at
+`y = W` and `+1` elsewhere — so on the NONZERO indices `σ = g = h` and the lift IS a switching:
+0/2401 and 0/50625 triples change at `m = 2,3`.
+
+**Second correction, to the correction itself.** I then wrote that the masked two-graph is therefore
+preserved and the deviation law's moment blind to this lift, "as in Tier 64". Both halves overreach.
+The measurement ranges over triples with all three indices HIGH and nonzero, so what it establishes
+is the `(1,1,1)` ORTHANT identity — the top mirror of Tier 68's `tri3_low_orthant`. The level-`(m+1)`
+moment is a sum of eight orthants; the other seven are untouched, and the moment is manifestly not
+level-invariant (§57.9's 210, 2730, 26970, …). And Tier 64 is structurally different: it switches
+the whole matrix at a fixed level, which does give moment invariance, whereas this tier relates a
+sub-block at level `m+1` to the whole matrix at level `m`. The defensible form: the induced two-graph
+on the high half's nonzero indices is switching-equivalent to the level-`m` two-graph. Stating the
+orthant identity in Lean — the mirror of Tier 68 — is what would upgrade this from measured to
+proved, and it is the obvious next rung.
+
+One hypothesis dropped: `P3_block11_corner` needs no `W ≠ 0`. The linter flagged it unused, and the
+identity does hold at `W = 0` (measured `m = 2,3,4`); both `P3`s collapse through `cdSig0`/`cdSig0'`
+before the label can matter.
+
+### §57.43 — Tier 89: the (1,1,1) orthant is a theorem, via switching-invariance of tri3
+
+§57.42 ended by naming the orthant identity as measured-not-proved and the obvious next rung. It is
+now proved, and the general lemma it needed is worth more than the instance:
+
+    tri3_switch:  f x y = s x · s y · g x y  with  s : ℕ → ℤ  valued in {±1}
+                  ⟹  tri3 N f = tri3 N g
+
+— nothing about `P3` enters; each vertex sign occurs exactly twice in the cyclic product and squares
+away. This is the formal content of "switching preserves the two-graph", now available to the lane
+as a lemma rather than as a phrase.
+
+Tier 88's `E11` is of that form, `E11 l y W = sigRow l · sigRow y`, but **only for `y ≠ 0`** — the
+`g ≠ h` obstruction of §57.42, in one line. So the theorem is about the ZERO-MASKED matrices, and
+the mask is load-bearing rather than tidy: measured, the unmasked sum identity fails at EVERY label
+(7/7 and 15/15 at `m = 2,3`) while the masked one holds at every label.
+
+    tri3_high_orthant:  tri3 (zmsk (lift to the high block at level m+1)) = tri3 (zmsk (level m))
+
+The asymmetry with Tier 68 is the content. The low orthant needs no mask and no hypothesis because
+`P3_level_stable` is an equality of ENTRIES; the high orthant is an equality of TRIPLE PRODUCTS
+only, so it needs the mask and the switching lemma. Two of the eight orthants of the level transfer
+are now theorems.
+
+Both M1 providers passed all three questions, including the one I expected to lose: masking only the
+index-`0` lines, where §57.8's `P3̃` also kills the diagonal, does not weaken the claim — diagonal
+terms put a squared factor in the cyclic product and are immaterial to this identity.
+
+### §57.44 — Tier 90: the six remaining orthants, and the level transfer of tri3 in full
+
+The six are two. `orth_cyc` makes the three weight-1 orthants equal and the three weight-2 ones
+equal, and `tri3_split_1331` already carries the 1/3/3/1 multiplicities; what was missing were the
+weight-2 expansion and the weight-3 expansion as an identity of raw sums. Both are now theorems, and
+with Tier 68's weight-0 leg they compose into
+
+    tri3_level_transfer:  tri3 at level m+1 over [0, 2^(m+2))
+      = tri3 at level m  +  3·[E01,E10 sum]  +  3·[E01,E11,E10 sum]  +  [E11,E11,E11 sum],
+
+every term a level-`m` triple sum with explicit ±1 weights. Denotation: 0 labels fail at `m = 2,3`.
+
+**This is a complete reduction and evaluates nothing.** The four ε-weighted sums have no values yet
+— §57.17's `S₀ − 2S_u − 2S_v + 4S_uv` split lives in the weight-1 one, and the other two now admit
+the same treatment. Nothing here computes `tri3(P3̃)` or bears on the deviation law. Both providers
+were asked directly whether "complete reduction" is already too strong; both said it is accurate.
+
+One asymmetry, and it is why Tier 89 and this tier coexist without contradiction: the weight-3
+expansion needs NO mask because `P3_block11_total` is an identity of ENTRIES, index `0` included.
+What fails at index `0` is only the further step of cancelling the three `E11` weights against each
+other — that is Tier 89's identity, and it is the one that needs `E11` to be a switching.
+
+### §57.45 — Tier 91: the ε-weights factored (three elementary signs), and what that does NOT do
+
+The task was to evaluate the four ε-weighted sums of §57.44. What came out is one genuine evaluation
+and one change of unknown, and the M1 review made me relabel the tier accordingly.
+
+**The weights.** All three are products of three elementary signs, and of no others:
+
+    sigRow x W = −1 iff x = W       (the switching of Tier 89)
+    epsZero x  = −1 iff x = 0       (the index-0 flip)
+    tauW l y W = −1 iff l ⊕ y = W   (the COSET flip — the only two-index factor)
+
+    E11 l y = sigRow l · (sigRow y · epsZero y)
+    E01 l y = epsZero l · (sigRow l · tauW l y)
+    E10 l y = epsZero l · (tauW l y · (sigRow y · epsZero y))
+
+all for `W ≠ 0`, which is load-bearing: at `W = 0`, `l = y = 0` the `E11` identity reads `1 = −1`,
+and I found that from a failed proof rather than from the measurement. Both providers confirm there
+is no other degenerate case. This is the precise sense in which `E01`/`E10` "are not switchings":
+each carries `tauW`, which is not a row×column product, and `E11` does not. The loci that Tiers
+70–88 discovered one border at a time are these three signs and nothing more.
+
+`P3_coset_value`: off its two borders, `P3` is CONSTANT `−1` on the line `y = l ⊕ W`. So the coset
+flip's carrier is a permutation matrix, and `X = tauW ⊙ M = M + 2Π_W` up to those borders — zai
+re-derived the sign of that `+2` independently rather than take it.
+
+**The sums (measured, no matrix layer in the file).** With `M = P3` at level `m`, `X = tauW ⊙ M`,
+`D = diag(sigRow)`, `Z = diag(epsZero)`: `M01 = Z D X`, `M10 = Z X D Z`, `M11 = D M D Z`, and
+
+    T3 = tr((M Z)³) = S₀ + 6·(u′ᵀ M′ u′) − 2      with u = P3 · 0, primes = index-0 deleted
+    T2 = tr(X (D M D) X)
+    T1 = tr((D Z) M (D Z) X Z X)
+
+all 53/53 labels at `m = 2,3,4`. The `D`s cancel out of `T3` entirely — Tier 89's switching
+invariance reappearing as an algebraic identity rather than a lemma.
+
+**⚠ The providers split on the framing and I took the harsher reading.** I titled the tier "the
+ε-weights EVALUATED". grok returned `[OVERREACH]`: the four sums' values are explicitly untouched,
+so this is a change of unknown, not an evaluation in the sense the request used the word. zai called
+the framing honest and precise. grok's objection is about the word the task itself used, so it wins;
+the tier is now "the ε-weights FACTORED". `T3` is the one sum that really is evaluated.
+
+### §57.46 — Tier 92: T1 and T2 ε-reduced to M and M², via the cyclic weights
+
+Multiplying Tier 91's factored weights around a triangle is where the factoring pays:
+
+    E11 ab · E11 bc · E11 ca = epsZero a · epsZero b · epsZero c
+    E01 ab · E11 bc · E10 ca = sigRow b · sigRow c · tauW ab · tauW ca
+    E01 bc · E10 ca          = epsZero a·b·c · sigRow a·sigRow b · tauW bc · tauW ca
+
+Every switching leaves the first, every index-0 flip leaves the second. The bookkeeping for the
+second: `E01` carries `epsZero` on its first index, `E11` on its second, `E10` on both — so `a` gets
+it twice, `c` twice, and `b` not at all. Each index that gets it at all gets it exactly twice.
+
+**T2.** Its weight, for fixed `a`, is `f_a(b)·f_a(c)` with `f_a x = sigRow x · tauW a x`, and two new
+theorems say what `f_a` is: `f_0 ≡ 1` (the switching locus and the coset locus COLLIDE at `a = 0`),
+and for `a ≠ 0`, `f_a = −1` exactly on the two-point set `{W, a ⊕ W}`. Inclusion–exclusion:
+
+    T2 = S₀ − 2A − 2B + 4C,  A = Σ_{a≠0} Σ_{b∈S_a} M_ab (M²)_ba,  B = Σ_{a≠0} Σ_{c∈S_a} (M²)_ac M_ca,
+    C = Σ_{a≠0} Σ_{b,c∈S_a} M_ab M_bc M_ca   (four terms per a).
+
+**T1.** Here `c` sits in BOTH coset flips, so the `c`-sum is a three-point parity correction:
+
+    T1 = Σ_{a,b} P_a P_b M_ab · [ (M²)_ba − 2 Σ_{c∈T_ab} M_bc M_ca ],  P = diag(epsZero·sigRow),
+
+`T_ab` = the points of the multiset `{0, b⊕W, a⊕W}` hit an odd number of times, which collide
+exactly at `b = W`, `a = W`, `a = b`. Both forms: 53/53 labels at `m = 2,3,4`.
+
+**What this is.** All three ε-sums are now expressions in `M` and `M²` — no weighted triple sums
+remain. `S₀` and `M²` are NOT evaluated, and `S₀` at level `m` is the same object as at level `m+1`,
+which is exactly what makes the whole thing a recursion rather than a closed form. grok returned
+`[TIGHTENABLE]` on my title "EVALUATED" — "prefer ε-reduced to M/M², or evaluated mod S₀,M²" — and I
+took it, for the second tier running on the same kind of word.
+
+grok also returned `[OVERREACH]` on the `f_a` description, and that one changed the FILE rather than the
+prose: I had stated the two-point support as a measurement. It is now `sig_tau_zero` and
+`sig_tau_pts`, both theorems, both at the purest kernel level `[propext, Quot.sound]`.
+
+### §57.47 — Tier 93: S₀ against the masked object, and the mask's exact cost
+
+    S₀ − tri3(P3̃) = −3N² − 25N + 64 − 288·[m−1,2]₂·⟦W = 2^m⟧,   N = 2^(m+1) − 1
+
+measured at EVERY label, m = 2…6 (243/243). Off the maximal seam the correction is label-independent,
+so there `S₀` and the masked object differ by a constant. The exception is the seam once more, and
+its excess `288·[m−1,2]₂` is the SAME constant Tier 65 recorded for the masked object's own seam
+anomaly. A first sweep gave 239/243; the four failures were the seam at m = 3…6 — at m = 2 the
+Gaussian binomial vanishes and the seam is not exceptional. Re-deriving the descriptor from its own
+numbers, rather than accepting "almost", is what turned a broken formula into the right one.
+
+Formalised: the generators of the correction. `P3_col_zero` (the index-0 column is the label's
+cocycle row), `P3_row_zero`, `P3_zero_antisym` (**P3 0 y = −P3 y 0** for y ≠ 0) and `P3_zero_corner`
+(the corner is `+1`, the one entry not negated).
+
+**Two `[OVERREACH]`s from grok, both on prose, both taken.** (i) "differ by a constant ⇒ same Walsh
+spectrum apart from the mean" is valid only OFF the seam: the seam term is a spike, whose transform
+is flat, so on a domain containing `W = 2^m` it would move every coefficient. The spectral claim
+rests on the direct check at `m = 4,5,6`, whose domain is the references `W = 8g+1` — none of them
+the seam. (ii) "the antisymmetry is WHY the cost is quadratic" is motivation: antisymmetry gives that
+the two lines ADD; the degree `N²` is measured. zai passed both; grok's scoping is right.
+
+---
+
+## §58 — STRATEGY RESET (2026-08-07): the arc is pointed at its least publishable component
+
+Consulted Fable-5 for a plan toward real novelty, with the whole arc laid out including the worry
+that a 30-rung tower reducing X to X may never terminate. Its read, and the actions taken.
+
+### §58.1 The headline is NOT the deviation law
+
+The most likely publishable result in this material is the **spectral completeness theorem**: the
+adjacency spectrum of the signed annihilation graph is a complete isomorphism invariant for the
+CD-tower zero-divisor fiber geometries, with `3·2^{n−5}` classes at level `n`, proved ∀n. It sits in
+the van Dam–Haemers "which graphs are determined by their spectrum" programme, where explicit
+algebraically-defined infinite families with a proven complete spectral invariant are rare, and the
+genre "spectra of zero-divisor graphs" already exists for commutative rings while nobody has done
+Cayley–Dickson. Zhilina–Guterman compute diameters and cliques, not spectra — that is the daylight.
+
+The Fano fibration, the antisymmetry, the rank bound and the spectral halving all become supporting
+machinery of that paper instead of orphan lemmas. The Lean formalisation earns zero novelty credit
+from a math referee; it is a secondary selling point and a possible companion ITP/CPP paper.
+
+### §58.2 The pivot that dissolves the non-termination worry
+
+**`tri3` is `tr(A³)` — the third spectral moment. (I) is the second. The whole deviation-law arc has
+been the moment-separation half of the completeness theorem under a different name.** And it needs
+strictly less than what I have been chasing: not the closed form `−27·8^{n−j}·[j,3]₂`, only that the
+deviations are **pairwise distinct across `j`**.
+
+**Checked immediately, and it is better than hoped.** `v₂(27·8^{n−j}·[j,3]₂) = 3(n−j) + v₂([j,3]₂)`,
+and **`[j,3]₂` is ODD for every `j`** — numerator and denominator of `(2^j−1)(2^{j−1}−1)(2^{j−2}−1)
+/ ((2³−1)(2²−1)(2−1))` are products of odd numbers. Verified `j = 3…12`. So
+
+    v₂(D(n,j)) = 3(n−j)  exactly,
+
+pairwise distinct across `j` by construction, with no possible conspiracy — no Kummer-carry analysis
+needed, and the parity is a one-line proof. The 2-adic route to moment separation is open.
+
+### §58.3 Abandon
+
+- the exact Walsh closed form / contiguous-block coefficients — demote to a stated conjecture with
+  its out-of-sample confirmation at `m = 8`; not load-bearing once separation is valuation-only;
+- the `tri3 → tri3` self-recursion as a programme (keep the level-transfer LEMMAS, they feed the
+  valuation argument);
+- the per-label mask-correction identities (§57.47) — appendix at most;
+- any further work on the 168 action (Kirshtein's territory, already scoped);
+- two-graph family identification beyond one catalogue afternoon;
+- **counting rungs as progress.** The only metric from here is distance to moment separation ∀n and
+  the class count ∀n.
+
+### §58.4 Mandatory literature gate — BEFORE any novelty claim
+
+A threat not on my list at all: **Dugger–Isaksen, "Eigentheory of Cayley–Dickson algebras"
+(arXiv:0905.2987)** — a paper whose entire subject is eigenvalues of multiplication operators in CD
+algebras — and **Biss–Dugger–Isaksen, "Large annihilators in Cayley–Dickson algebras" I/II
+(math/0511691, math/0702075)**, which prove ∀n annihilator structure theorems including the maximal
+dimension `2ⁿ−4n+4`, via a splitting that may be our hi/lo decomposition. Must determine whether
+(a) `seam_coincidence` is a reformulation of BDI's characterisation of maximal-annihilator elements,
+and (b) our spectrum is derivable from their eigentheory of `L_a`. Also: de Marrais's box-kites are
+the highest rediscovery risk for the FIBRATION itself, and Zhilina's sedenion relation graph must be
+compared with our `n = 4` annihilation graph.
+
+### §58.5 Mis-scopings called out, and fixed
+
+- **"beats Weisfeiler–Leman" was impossible as stated.** 2-WL-equivalent graphs are cospectral, so
+  the spectrum can never strictly refine 2-WL. Our `wl_signature` refines by (own colour, multiset
+  of neighbour colours) — that is **1-WL / colour refinement**. Fixed in the classifier doc.
+- **`tri3` switching-invariance (Tier 89) is classical** — it is Seidel's defining invariant of a
+  two-graph. It must be presented as a formalisation of a classical fact, never as our lemma.
+- **The review pipeline is weaker than it feels.** Two LLM reviewers passing every rung while I
+  self-catch overclaims means they validate proof-step locality, not research direction — which is
+  exactly how one builds a tower reducing X to X. One human expert (signed graphs / spectral graph
+  theory) must see the completeness statement and the related-work section before submission.
+
+### §58.6 — the literature gate of §58.4 is CLEARED (2026-08-07)
+
+Read directly, full text: [DDD] math/0511691, [DDDD] math/0702075, [Eig] arXiv:0905.2987. Report:
+`docs/research/cd_tower_bdi_dugger_isaksen_gate_2026-08-07.md`.
+
+**None of the three defines a graph, an adjacency matrix, or a graph spectrum; none uses a binary-
+index/XOR condition.** [DDD] is about annihilator DIMENSIONS of continuous elements and the topology
+of the strata (Stiefel varieties); [DDDD]'s "splitting" is the ±`i_n` eigen-splitting `{a,b}` of one
+doubling step — a real-linear decomposition of `H⊥_{n+1}`, not our index involution; [Eig] is the
+eigentheory of `M_a = L_{a*}L_a/|a|²`, an operator on the `2^n`-dimensional ALGEBRA, whose spectrum
+is not ours in any sense either paper supplies.
+
+**The positive finding is worth more than the clearance.** [Eig] closes with **Question 9.3/9.4:
+"Fix `n`. Describe the space of all possible spectra of elements / of zero-divisors in `A_n`" —
+"We don't even have a guess."** So the question our completeness theorem is a discrete analogue of is
+an explicitly stated, unanswered open question of this school since 2009. That is the framing
+citation. ⚠ We do NOT answer it — different operator — and must never say we do.
+
+**⚠ One residual risk, now named precisely instead of vaguely.** [DDDD]'s criterion "if `a` and `b`
+are `C`-orthogonal then `{a,b}` is a zero-divisor" becomes a condition on INDICES when restricted to
+standard basis elements (`e_i e_j*` is `±e_k`, which lies in `C_n` exactly when `k` is `0` or the
+index of `i_n`). `seam_coincidence` lives in that register. Its ∀n anchor-free Lean proof is ours
+regardless, but its mathematical CONTENT may be a basis-level specialisation of [DDDD] §5, and the
+paper must either show it is not or cite it as such. This is the one item the gate does not close.
+
+Still owed: de Marrais (box-kites — highest rediscovery risk for the FIBRATION), Zhilina's sedenion
+relation graph vs our `n = 4` annihilation graph, the van Dam–Haemers DS survey, two-graph catalogues.
+
+### §58.7 — the seam_coincidence question is SETTLED, with a concession (2026-08-07)
+
+Report: `docs/research/cd_tower_seam_vs_dddd_criterion_2026-08-07.md`. Settled by computation against
+the cocycle at `bits = 4…7`, not by reading.
+
+First, a fact I had not checked about my own predicate: `isZD` is defined as "has a TWO-TERM
+annihilator", a priori stronger than being a zero-divisor — and on the loHi locus **the two
+coincide** (0 disagreements at `bits = 4,5,6`, with `dim Ann ∈ {0}` on-seam and `{4,12,20,28}`
+off-seam). So the content is genuinely about zero-divisors and the comparison is live.
+
+**The concession.** Writing `x = e_l + e_u` as `{p,q}` in [DDDD]'s ±`i_n` splitting, their Theorem
+1.3/1.5 applies wherever `p,q ≠ 0` and both slots lie in `C⊥_n`, and there the dimension formula is
+confirmed exactly (182/182 at `bits = 5`, 870/870 at `bits = 6`). On that covered set **their
+dichotomy is our dichotomy**: every off-seam pair has `p,q` C-orthogonal (168/168, 840/840), so
+"C-orthogonal ⟹ zero-divisor" gives our off-seam half; every on-seam covered pair misses the D-locus
+and gets `dim Ann = 0` (14/14, 30/30). **The ZD clause of `seam_coincidence` is a basis-level
+specialisation of [DDDD] Thm 1.5 and must be cited as such** — at `n = 4` it is [DDD] Prop 12.1,
+i.e. Moreno / Khalil–Yiu.
+
+**What survives as ours.** (i) The **two-term annihilator with an explicit witness** —
+`hasXorAnnih = offSeam` says the annihilator can always be taken with support 2, though its dimension
+reaches 28 at `bits = 6`; [DDD]/[DDDD] compute dimensions and describe subspaces, never minimal
+support, and nothing in their machinery yields it. (ii) **`anti0 = ¬offSeam`**, the operator identity
+`{L_l,L_u} = 0`, absent from their work. (iii) A **closed** `O(1)` criterion where theirs is an
+inductive reduction the authors call "not as explicit as we might like". (iv) The corners their
+hypotheses exclude — 24%/12%/6% of the locus at `bits = 5,6,7`, namely the pairs meeting `i_{n−1}`:
+**their splitting has its own seam, one level below ours.**
+
+`seam_coincidence` is hereby downgraded in the arc from "our theorem" to "our formalisation and our
+refinement of a known dichotomy". The claim carried forward is the COINCIDENCE, not the dichotomy.
+
+---
+
+## §59 — the coset involution, and the arc stops being a reduction (2026-08-07)
+
+After the strategy reset and a direct challenge on timidity, three tiers that are not another rung of
+the same ladder.
+
+### §59.1 Tier 94 — `Π M Π = D M`, and it is one-sided
+
+    P3(x ⊕ W, y ⊕ W, W, n) = δ(x) · P3(x, y, W, n),   δ = −1 exactly on {0, W}
+
+Conjugating `P3` by the coset involution rescales its ROWS and leaves its columns alone. Measured
+first (0 violations / 294080 at `m = 2…5`, every `W ≠ 0`) — after a WRONG first guess at the sign
+that the sweep killed in seconds, 283440 violations. The one-sidedness is real: `Π M Π ≠ M D`, and
+the reviewer's resolution of the apparent paradox is that full symmetry would collapse left into
+right, while `M` is not fully symmetric — rows `0` and `W` are exactly where `δ_x ≠ δ_y`.
+
+`δ = epsZero · sigRow`, the diagonal that had already appeared alone in Tier 92's `T1`. So two of
+Tier 91's three "elementary signs" are not independent accidents: they are the coset involution's
+character. All six reviewer checks `[OK]`, including the full-strength reading: *"no hidden weakening"*.
+
+**The spectral corollary.** `Π Δ Π = Δ`, so `Π(ΔM) = MΠ`: **`Π` swaps `M` and `ΔM`**. Hence
+`spec(M) = spec(ΔM)` — `M` is similar to its own two-row negation, a rank-2 perturbation preserving
+the whole spectrum. 53/53 labels; **null control: 0/200 on random ±1 matrices.** This is the register
+the §58 headline lives in, and it gives `tr(M^k) = tr((ΔM)^k)` for every `k`.
+
+### §59.2 Tier 95 — the δ-weight is invisible to `tri3`
+
+Three reindexings by `x ↦ x ⊕ W` plus Tier 94 give `tri3(P3) = Σ δ(a)δ(b)δ(c) P3_ab P3_bc P3_ca`.
+(The reindexing lemma `sumLtI_xor` was already in the file, proved via `sumLtI_reindex`; I had begun
+rebuilding it by induction on the level before finding it. Cheapest kind of waste, recorded.)
+
+Asked directly whether the identity is VACUOUS: **it is.** With `S₃ = 0` and `S₂ = S₁/2` it reads
+`3S₁ − 3S₁ = 0`. The content is the closed form of `S₁ = (M³)₀₀ + (M³)_WW`, measured
+**label-independent** and equal to `−16(2^m − 1)`, confirmed out of sample at `m = 6` (19 labels).
+
+### §59.3 Tier 96 — the cancellation, and the file's first import
+
+Both special rows are built from ONE vector, because `σ(x ⊕ W, W) = σ(W, x)` off `{0,W}` — `antisym`
+supplies one sign, the cocycle `L² = −I` the other, and they cancel. Hence `S1_summand_zero`: the two
+triple products are exact negatives at every `(b,c)` outside `{0,W}`.
+
+⚠ **This file now has an import.** Self-contained for 96 tiers; the cocycle is the one thing it never
+had and cannot cheaply rebuild (a module's worth of bit-list development). Rather than re-derive it
+for the sake of a self-imposed rule, `import SounioCDCocycle`, after checking that
+`cdSigma_cocycle` is `[propext, Quot.sound]` — no `native_decide`, no choice. The bridge is a width
+induction, not `rfl`. Reviewer: no soundness objection; "project self-containment preference is not a
+math defect".
+
+⚠ **`[OVERREACH]` taken:** the docstring read as if the closed form were established here. It is not
+— only the cancellation is. What remains, and the reviewer confirms there is nothing else: evaluate
+the boundary locus `b ∈ {0,W}` or `c ∈ {0,W}` term by term, then count.
+
+### §57.45 — Tier 91: the ε-weights EVALUATED — a switching, a coset flip, an index-0 flip
+
+Tier 90 left four level-`m` sums carrying `E01`, `E10`, `E11`. Each of the three weights is,
+pointwise and at every index (`W ≠ 0`), a product of three elementary signs:
+
+    sigRow x W = −1 exactly at x = W      (the switching sign, Tier 89)
+    epsZero x  = −1 exactly at x = 0      (the index-0 flip)
+    tauW l y W = −1 exactly on l ⊕ y = W  (the coset flip)
+
+    E11 = sigRow l · (sigRow y · epsZero y)
+    E01 = epsZero l · (sigRow l · tauW l y)
+    E10 = epsZero l · (tauW l y · (sigRow y · epsZero y))
+
+The borders and loci that cost six lemmas apiece in Tiers 71–88 are, in hindsight, exactly where one
+of these three factors turns over; `E11`'s `−1` at `y = 0`, which §57.42's correction had to work
+around, is now a named factor rather than an exception. The three-versus-four factor asymmetry
+between `E01` and `E10` is real and was checked: it comes from the `y = 0` base case, where `E01` is
+identically `+1` (and `tauW l 0` collapses to `sigRow l`, absorbing the missing `epsZero 0`) while
+`E10 l 0 = −sigRow l`, which needs the extra flip.
+
+The disjunction-to-product step is licensed by `loci_disjoint`: `l = W` and `l ⊕ y = W` together
+force `y = 0`, so off the index-0 line the two `−1` loci of `eps01` are disjoint and their OR is a
+product. Both providers confirmed the hypothesis is exactly tight — drop it and `y = 0, l = W`
+breaks it.
+
+In matrix language, with `D = diag(sigRow)`, `E = diag(epsZero)`, `X = tauW ⊙ P3`:
+
+    M01 = E D X,   M10 = E X D E,   M11 = D M D E     (0 mismatches, all 53 labels, m = 2,3,4)
+
+so the four ε-sums are TRACES OF WORDS in `M`, `X` and two diagonal sign matrices. Measured, 53/53,
+none of it formalised:
+
+    T3 = tr((M E)³) = S₀ + 6·(u′ᵀ M′ u′) − 2      u_x = P3 x 0 W m, ′ = drop index 0
+    T2 = tr(X · (D M D) · X)
+    T1 = tr((D E) M (D E) X E X)
+
+And `P3_coset_value` says the coset flip's carrier is CONSTANT: off its two border points, `P3` is
+identically `−1` on `y = l ⊕ W`, so `X = P3 + 2·Π_W` there, `Π_W` the perfect matching `l ↦ l ⊕ W`
+— the same `K_N`-minus-a-matching picture the `y = 0` base case of (III) already had.
+
+**This evaluates the WEIGHTS, not the SUMS.** It is a change of variables: the four sums still have
+no values, and `S₀` is `tri3` one level down, which is the object the recursion is about. Both
+providers were asked whether even "evaluating the weights" overreaches; both said it does not.
+
+### §57.46 — Tier 92: the three matrix forms proved, and the weight-3 orthant loses its switching
+
+§57.45 recorded the matrix forms as measurement only. They are now theorems. There is no matrix
+library in the file and none is needed: a diagonal factor on the left is a weight depending only on
+the row index and one on the right a weight depending only on the column, so
+
+    M01 = E D X,   M10 = E X D E,   M11 = D M D E     (D = diag(sigRow), E = diag(epsZero), X = tauW ⊙ P3)
+
+each IS the corresponding entrywise identity, re-associated — `M01_entry`, `M10_entry`, `M11_entry`.
+
+The payoff is not the bookkeeping but what the shape of the words permits. In `M11 = D M D E` the
+two `D`s carry the SAME function on both sides, so `tri3_switch` (Tier 89) cancels them:
+
+    weight3_switch:  tri3 (E11 ⊙ P3)  =  tri3 (epsZero-column-weighted P3)
+
+**The weight-3 orthant cannot see the locus `x = W` at all.** In the cyclic product the weights are
+`(D_a D_b E_b)(D_b D_c E_c)(D_c D_a E_a)`; every `D` occurs twice and squares away, leaving
+`E_a E_b E_c`. This is the Lean form of the measured `T3 = tr((M E)³)`.
+
+No analogous cancellation exists for the other two, and the obstruction is real rather than a gap in
+my search: `tri3_switch` needs the weight on `(a,b)` to be exactly `s_a s_b`. In weight-2 the pair
+`(a,b)` carries only a coset flip and no `D` at all, so `D_b, D_c` cannot pair up; in weight-1 the
+pair `(a,b)` carries no weight from the ε's whatsoever. Both words are proved in the form the
+obstruction makes visible (`weight2_word`, `weight1_word`), so their `sigRow` dependence is real.
+
+⚠ Process note: the M1 fan-out DEGRADED on this tier. grok timed out on three attempts (180 s cap),
+including one with a stripped-down input; zai returned a complete verdict block, `[OK]` on all five
+checks, having independently derived the `D_a² D_b² D_c² = 1` cancellation and the exact reason
+weight-1 and weight-2 cannot be cancelled. Substitute evidence for the missing provider is the
+denotation: all three sum-level identities hold at every label at `m = 2,3`.
+
+### §57.47 — Tier 93: the weight-1 and weight-2 sums, carrier-decomposed and reduced
+
+Tier 92 showed no switching cancels in these two words. The way through is not a switching but the
+CARRIER. `P3_coset_value` says `P3` is identically `−1` on `y = l ⊕ W` off its two borders, and the
+borders are now computed (`P3 0 W = 1`, `P3 W 0 = −1` — the ordered-arguments asymmetry at one
+point). Together, proved pointwise at every index:
+
+    tauW ⊙ P3  =  P3 + 2·Π_W − 4·e₀e_Wᵀ          (Π_W the matching l ↦ l ⊕ W)
+
+The coset flip is a rank-one-corrected permutation perturbation of `P3`, not a new matrix. Expanding
+both words in `P3 + 2Π − 4e` gives nine terms, and the five rank-one ones cancel EXACTLY
+(`tr(eYM) = 2^(m+1) = −tr(MYe)`, `tr(eYΠ) = −1 = −tr(ΠYe)`, `tr(eYe) = 0`). What survives:
+
+    T1 = tr(A M E M) + 4·tr(A M E Π_W) + 2^(m+3) − 16      A = (D E) M (D E)
+    T2 = tr(M Y M)   + 4·tr(M Y Π_W)   + 2^(m+3) + 8       Y = D M D
+
+116/116 labels at `m = 2,3,4,5`. **The coset structure enters each sum linearly, through exactly one
+`Π_W` trace.** Two label-independent difference laws make the constants explicit and are themselves
+closed forms: `tr(Π Y M) − tr(M Y Π) = 2^(m+3)` and `tr(A Π E M) − tr(A M E Π) = 2^(m+3) − 8`. Both
+are the same word read in the two orders, so what they measure is the ordered-arguments asymmetry of
+`P3`.
+
+**The constants are derived, not fitted — and I only found that out because a reviewer caught a
+factor of two in my arithmetic.** I had written `2·tr(MYΠ) + 2·tr(ΠYM) = 4·tr(MYΠ) + 2^(m+3)`; it is
+`2^(m+4)`. With the correction the rest closes: `Π` is a fixed-point-free involution and `D² = I`, so
+`tr(ΠYΠ) = tr(Y) = tr(P3)`, and `P3_diag` — in the file since Tier 2 — gives `tr(P3) = 2 − 2^(m+1)`
+(measured 116/116). Then `2^(m+4) + 4(2 − 2^(m+1)) = 2^(m+3) + 8`. The `+8` is `4·tr(P3)` and
+nothing else. grok flagged the constant as unidentified on the strength of the same intermediate,
+having dropped the `2^(m+4)`; zai did the arithmetic correctly and its version matches measurement.
+
+**NOT "evaluated"** — both reviewers rejected the word and they are right. `tr(A M E M)` and
+`tr(M Y M)` are open traces. Each sum was REDUCED from a word containing `X` to one open trace, one
+coset trace, and a closed constant. Only the carrier decomposition and the two seam entries are
+formalised.
+
+One duplicate caught by the compiler: I wrote `P3_diag` again, and it had been in the file since
+Tier 2. The lane's own rule — look for the cheaper structure before adding a lemma — applies to my
+own file, not just to the literature.
+
+### §57.48 — Tier 94: the three signs are rank-one perturbations, and where T2 ends up
+
+`sigRow` differs from `1` at one index, `epsZero` at one index, `tauW` on one perfect matching:
+
+    sigRow = 1 − 2·χ_seam,    epsZero = 1 − 2·χ_zero,    tauW = 1 − 2·χ_cos
+
+so as operators `D = I − 2 e_W e_Wᵀ` and `E = I − 2 e₀ e₀ᵀ` are genuine RANK-ONE perturbations of
+the identity. The third is not, and both reviewers rejected my coinage "matching-rank": `tauW ⊙ ·`
+is a **diagonal sign-flip operator supported on the `W`-matching** — diagonal on entries, flipping
+the `2^(m+1)` entries `(l, l⊕W)`. Their phrasing, adopted.
+
+Carried through §57.47's two traces (measured 53/53, `m = 2,3,4`; derivation confirmed by both from
+`P M P = M_WW·P`, `tr(P X) = X_WW`, `M_WW = −1`):
+
+    tr(M · D M D · M)   = S₀ − 4·(M³)_WW − 4·(M²)_WW
+    tr(M · D M D · Π_W) = tr(M²Π_W) − 2·(M Π_W M)_WW − 2·(Π_W M²)_WW − 4·(Π_W M)_WW
+
+with `(Π_W M)_WW = M_{0,W} = 1` already a theorem (`P3_zero_seam`). Substituting:
+
+    T2 = S₀ − 4(M³)_WW − 4(M²)_WW + 4·tr(M²Π_W) − 8(MΠ_W M)_WW − 8(Π_W M²)_WW + 2^(m+3) − 8
+
+verified 53/53. Every surviving term is level-`m` with a graph reading: `(M²)_WW` and `(M³)_WW` are
+CLOSED WALKS AT THE SEAM VERTEX, `tr(M²Π_W)` sums walks between coset partners.
+
+**Correction to my own scope claim, from both reviewers.** I wrote that the weight-2 sum "sees the
+label only through the seam vertex and the matching". That is false as a locality statement: `S₀` is
+`tr(M³)` with `M = P3(·,·,W,m)` and carries unrestricted `W`-dependence. The accurate version, in
+their words: *`T2` is reduced to the recursive trace object `S₀` plus level-`m` terms that depend on
+`W` only through (i) the seam vertex `W` and (ii) the coset matching `Π_W`.*
+
+Formalised: the three `1 − 2χ` identities and the two support lemmas. The trace substitutions are
+measured and need matrix machinery the file does not have; the walk counts are unevaluated. This
+locates what is left, it does not compute it.
+
+### §57.49 — THE AFTERNOON TEST: the 35-tier reduction closes as a 2×2 transfer matrix
+
+An adviser's read of tiers 60–94 was that the arc is "a transfer-matrix computation being done
+without admitting it is one", and that one afternoon of measurement would decide whether it closes
+or is infinite regress. It closes.
+
+Probing 13 scalars per (level, label) and solving for span membership exactly over ℚ: the data has
+rank 7, generated by `{s3, cp2, cp3, 1, H, H², H³}` with `H = 2^(m+1)`. Eight of the probed scalars
+are label-independent closed forms in `H` (`s2 = (H−2)²`, `a2 = H−2`, `z2 = −(H−2)`, `z3 = 32−10H`,
+`a3 = 2H−16`, `mpm = −(H−2)`, `pm2 = H−2`, `mp2 = −(H−2)`). Only three are dynamic, and they satisfy
+exactly:
+
+    s3(m+1)  = 8·s3(m) + 24·cp2(m) − 176 + 72H
+    cp2(m+1) = 4·cp2(m)            +  36 − 16H
+    cp3(m+1) = 8·cp3(m)            + 240 − 168H + 24H²
+
+where `s3 = tr(M³)` (the unmasked tri3), `cp2 = tr(M²Π_W)`, `cp3 = tr(M³Π_W)`. Fitted on 75
+transitions (`m = 3..8`, `W = 1..15`); **out of sample on 92 transitions with labels never used in
+the fit (`W ≥ 16`, `m = 4..7`), 0 failures.**
+
+**`cp3` does not feed `s3`.** So `tri3`'s own transfer is the 2×2 upper-triangular matrix
+`[[8, 24], [0, 4]]`, eigenvalues 8 and 4. The inhomogeneity is label-independent, so within-fibre
+DIFFERENCES obey the homogeneous system.
+
+**The deviation law follows.** On the reference pairs (`W = 2^j` against `W = 1`) the coset
+coordinate is fibre-blind — `Δcp2 = 0` at every `m` and `j` tested — so `Δs3(m+1) = 8·Δs3(m)`
+exactly (measured ratios `8.0`, no drift), giving
+
+    D[tri3](m) = 1728 · 8^(m−j) · [j,3]₂ = 27 · 8^(m−j+2) · [j,3]₂
+
+with the q-binomial appearing ONCE, as the base case at `m = j`. The `8^(m−j)` is the eigenvalue-8
+channel; no recursion is left in it.
+
+**★ THE MAXIMAL-SEAM EXCEPTION IS AN ARTIFACT OF THE MASK.** The lane has carried an extra
+`288·[m−1,2]₂` term at `j = m` since §57.9. On the UNMASKED `tri3` the law holds at `j = m` with no
+exception; the masked object deviates by exactly `288·[m−1,2]₂` — both reviewers verified the three
+numbers independently (2016, 10080, 44640 against `288·{7,35,155}`). The mask is the only
+`j = m`-sensitive operation in play, so the clean law is the native one.
+
+**Status: measured, and the proof is now three finite obligations instead of an open law.**
+(i) derive the three-line recursion from `tri3_level_transfer` (Lean, Tier 90); (ii) prove
+`Δcp2 = 0` on references; (iii) compute one base case. Both providers passed the derivation and the
+artifact reading, and corrected two accounting slips of mine: the 13-component tally (3 dynamic + 8
+closed forms + 2 bookkeeping, not "8 + 3"), and that the augmentation needs `H²`, which is not in
+`span{1, H}` because `cp3` carries `24H²`.
+
+### §57.50 — the three obligations, made exact (and what "prove" still costs)
+
+§57.49 left the deviation law resting on three obligations stated in words. Each is now an exact
+identity, verified; none is yet a Lean theorem, and the honest report is that converting them cost
+one afternoon and proving them will cost tiers.
+
+**(i) The transfer step.** Not decomposable into the three ε-sums separately — measured, `T1`, `T2`
+and `T3` are each OUTSIDE the span of `{s3, cp2, cp3, 1, H, H², H³}`; only their combination is
+inside it. So the obligation is exactly
+
+    3·T1 + 3·T2 + T3 = 7·s3 + 24·cp2 − 176 + 72H        [139/139, m = 3..7, all labels < 32]
+
+with `T1`, `T2`, `T3` the sums Tier 90 already produced as theorems. That the pieces do not close
+but the combination does is information — the closure is a property of the orthant SUM.
+
+⚠ It is NOT, however, evidence that evaluating the three separately is a harder problem, which is
+what I first wrote. Both reviewers rejected the inference: falling outside one probed 7-element span
+says nothing about a larger natural basis (more fibre invariants, parity projectors, `tr(M)`-type
+terms), and in a bigger basis the separate route may reduce to cross-cancellation of the
+out-of-basis parts. The honest statement is that the combination closes in THIS basis and the pieces
+do not; which route is easier is untested.
+
+(A by-product, worth its own look: `T1 − T2` is label-independent off the maximal seam — 1408 at
+`m = 5` for every label tested except `W = 2^m`.)
+
+**(ii) The coset coordinate on the references.** Stronger and cleaner than "Δcp2 = 0": `cp2` is
+FIBRE-CONSTANT — it depends on the label only through `g = (W ∧ (W−1)) ≫ 3`, and the classes match
+exactly (30/30 classes, `m = 3..6`). On the reference class it has a closed form:
+
+    cp2 = −(H−2)(H−6)   for every W with g(W) = 0    [50/50, m = 3..7]
+
+Since every reference label `W = 2^j` has `g = 0`, `Δcp2 = 0` follows. This is a better target than
+the difference: an equality of two unknowns became a closed form, and the lane already has
+fibre-invariance machinery for `g` (Tier 23, proven end to end for the count `N`).
+
+**(iii) The base case.** Exact, at every level tested:
+
+    s3(2^m) − s3(1) = 1728 · [m,3]₂          [m = 3..7]
+
+i.e. the q-binomial enters once, as the gap between the maximal seam and the `g = 0` reference at
+the level where the label first exists. Both ends are wanted as closed forms; the maximal seam
+should be the easier one, since Tier 65 already proves `P3` is coherent there (every triple product
+`+1`), which is exactly the structure that makes such a sum computable.
+
+**(0) The obligation I had not listed — and both reviewers found it.** The chain "(i) ⇒ within-fibre
+differences obey the homogeneous 2×2 ⇒ Δs3 scales by 8" hides a step. For `Δcp2 = 0` at one level to
+stay zero at the next, the system must be UPPER-TRIANGULAR — `M₂₁ = 0`, i.e. `cp2`'s evolution must
+not depend on `s3`. That is the second measured line,
+
+    cp2(m+1) = 4·cp2(m) + 36 − 16H        [measured, 75 + 92 transitions]
+
+and I had listed only the `s3` line as an obligation. zai isolated it exactly; grok made the same
+point as "the 2×2 must be derived from the rewritten transfer map, and that derivation is an
+unlisted obligation".
+
+**And that is the argument for (ii)'s absolute form that I could not give when asked.** grok's
+`[TIGHTENABLE]` on "better proof target" was that stronger ≠ better, since the chain only needs the
+difference to vanish. It is better, for a reason neither of us stated at the time: if `cp2` is
+pinned ABSOLUTELY on the `g = 0` class, then `Δcp2 = 0` holds at every level directly, with no
+propagation argument — so obligation (0) is discharged for free rather than added. The absolute form
+removes an obligation instead of creating one.
+
+**Status, stated plainly: four obligations, each now an exact identity verified over the accessible
+range. NONE is proven, and "the deviation law reduces to these" is not yet earned** — grok:
+"not entitled yet — isolate the 2×2 step before claiming reduction". What is earned: the law is now
+a finite, explicitly listed set of statements instead of an open conjecture. The remaining Lean work
+is a tier apiece at least — (0) and (i) evaluations of orthant sums, (ii) a fibre-invariance plus a
+closed-form count, (iii) two closed forms — and nothing in §57.49 or here should be read as more
+than measured until they are done.
+
+### §57.51 — Tier 95: obligation (ii) split, and its counting half PROVED
+
+Measurement split obligation (ii) cleanly. For `g(W) = 0` — and, measured, for no other label — the
+`cp2` summand has a complete pointwise description: it is MINUS A PRODUCT OF FOUR ELEMENTARY SIGNS,
+
+    P3 a b W m · P3 b (a⊕W) W m = −( δ(a,b) · tauW(a,b,W) · epsZero a · epsZero b )
+
+with `δ = −1` exactly on the diagonal. Three of the four are already the file's vocabulary (Tier 91);
+the fourth is the diagonal. Off `g = 0` the description fails — at `m = 4, W = 9` the generic class
+already carries both values, which is precisely why `cp2`'s closed form lives on `g = 0`.
+
+`cp2_count` proves the counting half: **the pointwise law forces the closed form.** The pointwise law
+is the hypothesis, so what remains of obligation (ii) is exactly one four-factor identity in the CD
+cocycle, and everything downstream of it is now a theorem. Both providers confirmed the split is
+honest and that nothing is smuggled past the hypothesis.
+
+The count, and where the shape comes from:
+
+    Σ_b δ·τ·e(a)e(b) = e(a)(H−2) − 2 − 2·e(a)e(a⊕W)      then Σ_a  ⇒  (H−2)² − 2H − 2(H−4)
+                                                                    = H² − 8H + 12 = (H−2)(H−6)
+
+The `−2` is the diagonal point; the `−2·e(a)e(a⊕W)` the coset point. Two support lemmas carry it,
+both now theorems: `epsZero_sum : Σ_a epsZero a = H − 2` and
+`epsZero_shift_sum : Σ_a epsZero a · epsZero(a⊕W) = H − 4` — the two `−1`s in the latter being
+exactly where the coset matching meets index `0`.
+
+**What this does and does not do.** It proves the counting half of (ii) only. Fibre-constancy of
+`cp2` off `g = 0` is untouched, and the pointwise law is assumed, not proved. But the obligation is
+now a single sign identity rather than a sum evaluation — and since pinning `cp2` absolutely on
+`g = 0` also discharges obligation (0), closing that one identity would settle two of the four.
+
+### §57.52 — Tier 96: the four-factor identity is the CORE INVOLUTION, and reduces to the mask
+
+The identity Tier 95 left open is not a new sign computation. Its second factor carries its index
+shifted by `W`, which is exactly what this file's core involution does, and the lemma has been
+available since Tier 2:
+
+    P3 b (a⊕W)  =  P3 (a⊕W) b        [P3_symm]
+                =  − P1 a b           [core_P3]
+
+so the `cp2` summand is **`−(P1 · P3)` at the same index** (`cp2_summand_core`, 0 violations /
+32274). That is the lane's own pair, and `resB` is *defined* as their agreement. With `P1_pm`/`P3_pm`
+the product is `±1`, and for `a, b ∉ {0, W}` the first two clauses of `resB` are `A2_VACUITY`, so
+
+    P1 · P3 = +1 exactly when resB holds        (`P1_mul_P3_mask`, 0 violations / 31092)
+
+What remains of obligation (ii) is therefore no longer cocycle algebra:
+
+    **resB a b W m holds exactly off the six lines a = 0, b = 0, a = b, a ⊕ b = W, a = W, b = W**,
+    for g(W) = 0.
+
+That is mask combinatorics, and the lane already has resB lemmas for several of those lines
+(`resB_zero_row`, `resB_zero_col`, `resB_coset`, `resB_pow2_top`, `resB_hi_or_lo`, …). Measured, the
+six-line description is exact on `g = 0` and fails off it — at `m = 4`, `W = 9` the generic class
+already splits, which is the same boundary the pointwise law had.
+
+**What this is and is not.** It does not prove the identity; it exchanges it for a statement about
+which index lines `resB` covers.
+
+**Scope correction, from the review.** My "now equivalent to the six-line statement" was too strong.
+Under the hypotheses the two theorems actually carry (`a, b ∉ {0, W}`), only TWO of the six lines are
+visible — the diagonal and the coset — and what the reduction delivers there is
+
+    χ(resB) = δ · tauW · epsZero a · epsZero b,   i.e. resB fails exactly on a = b and a ⊕ b = W.
+
+The lines `a = W` and `b = W` lie OUTSIDE both `cp2_summand_core` and `P1_mul_P3_mask` (they are
+where `P1_symm` and `core_P3` lose their hypotheses), so the original identity on those loci is NOT
+discharged by `resB` alone and still needs direct case-work — either the `δ/τ/ε` computation or the
+existing `resB_*` lemmas. In grok's accounting: no loss of content once those cases are kept, and no
+gain of free discharge either.
+
+**On the question I most wanted answered — real progress or relabelling?** `[OK] real progress`: the
+reduction re-uses `core_P3`/`P3_symm` from Tier 2 to eliminate the shift, and turns the remaining
+sign algebra into a mask-membership statement already partially covered by
+`resB_zero_row`/`resB_zero_col`/`resB_coset`; the residual work is combinatorics on known lines, not
+new cocycle identities.
+
+⚠ Process note, and it corrects §57.52's own first version. I recorded this tier as "M1 DEGRADED —
+no verdict from either provider". That was WRONG for grok: it had answered in full on two of the
+attempts, and the fan-out driver dropped the output while leaving the raw JSON on disk. What is true
+is that zai was unavailable — a 5-hour usage cap (`code 1308`, reset 2026-08-09 07:16), not an
+authentication problem. The lesson for this lane: when the driver prints nothing, READ THE RAW JSON
+before recording a provider as silent.
+
+### §57.53 — Tier 97: the two seam lines closed, via a FIBRE FLIP of the cocycle itself
+
+The lines `a = W` and `b = W` were left open because they are exactly where `P1_symm` and `core_P3`
+lose their hypotheses. Reducing both by `P3_red` collapses them onto ONE two-factor statement, and
+it is a fibre antisymmetry one level below the lane's usual one:
+
+    sigma_fibre_flip:   cdSigma (a ⊕ W) W k = − cdSigma a W k        for a ∉ {0, W}, W ≠ 0
+
+— the vector `a ↦ σ(a, W)` ANTI-COMMUTES with the involution `a ↦ a ⊕ W` off that involution's
+degenerate locus. Measured first (5094/5094 at `k = 2..6`, this form and its mirror), then proved
+∀ levels by induction with the four branch cases, the same shape as `antisym`'s own proof. Two of
+the four branches need the mirror form, which `antisym` converts back into this one — so the two
+forms are one theorem, and the conversion is where `a ≠ 0` earns its keep (`W ≠ a ⊕ W` **is**
+`a ≠ 0`). The reviewer confirmed the routing is not circular: `flip_mirror` takes the induction
+hypothesis as an argument rather than re-invoking the theorem.
+
+With it, both lines close to `−1` (`four_factor_seamrow`, `four_factor_seamcol`, 0 violations / 1182
+each), which is exactly what the four-sign law predicts there: off `{0, W}` all of `δ`, `τ` and both
+`epsZero` factors are `+1`.
+
+**Residue of obligation (ii).** Proved: the two seam lines. Not proved: the diagonal `a = b`, the
+coset `a ⊕ b = W`, and the index-`0` rows `a = 0` / `b = 0`.
+
+⚠ This paragraph first said "Proved: the generic interior (Tier 96) and the two seam lines". That
+was WRONG and is corrected here: Tier 96 REDUCED the interior (summand `= −(P1·P3)`, and `P1·P3 = +1`
+iff `resB`), it did not prove it — "resB holds off the six lines" is still open. The reviewer of
+Tier 98 confirmed the corrected accounting.
+
+The name is deliberate and was checked: this is NOT the lane's existing fibre antisymmetry for
+`A_σ` — that one is about the annihilation matrix; this is about the cocycle itself.
+
+
+### §57.54 — Tier 98: the diagonal, the coset, the two index-0 rows, and the four corners
+
+Four of the five remaining loci close, and two of them need nothing new:
+
+    diagonal a = b   : P3 x x = −1 (P3_diag, Tier 2) and P3 a (a⊕W) = −1 (P3_coset_value, Tier 91)
+    coset b = a ⊕ W  : the same two theorems with their roles exchanged
+
+Both products are `+1`. That the coset line's value and the diagonal's were already in the file is
+the point: the carrier decomposition of Tier 93 was built out of exactly these two, so the loci where
+the four-factor law is hardest to see are the ones the lane had already computed.
+
+The two index-`0` rows need Tier 97's flip, once each and in its two forms — `P3 0 b · P3 b W =
+(−σ(W,b))·(−σ(b⊕W,W)) = σ(W,b)² = +1`, and the mirror for `b = 0`. (Both factors carry a minus; my
+first draft of that line dropped one, and the reviewer marked it `[WRONG]`. The Lean was right.)
+
+**And four CORNERS that no theorem covered.** The line theorems all exclude their pairwise
+intersections, so `(0,0)`, `(0,W)`, `(W,0)`, `(W,W)` were on no line's domain and are not interior —
+without them "the residue is the interior alone" would have been false. The reviewer caught it. They
+close immediately from `P3_zero_seam`, `P3_seam_zero`, `P3_diag` and `P3 0 0 = 1`, with values
+`+1, −1, −1, +1`, matching the law at each (0 violations / 212).
+
+**Residue of obligation (ii): the generic interior, and nothing else.** There the summand is
+`−(P1·P3)` and `P1·P3 = +1` iff `resB` (Tier 96), so what is left is exactly `resB` holding off the
+six lines — a mask statement, on lines the lane already has `resB` lemmas near.
+
+### §57.55 — a search for what closes the interior: two routes ruled out, one target sharpened
+
+The residue is the generic interior, where the claim reduces (proved) to `resB = true` off the six
+lines. I searched the file for what could close it. Three findings, reviewed:
+
+**(1) The statement already exists — and its proof does not generalise.** `resB_pow2_top` IS the
+interior statement, with exactly the right hypothesis set, but only for the label `W = 2^n`. Its
+proof goes through `P1_pow2_top`/`P3_pow2_top`, which say that at the maximal seam BOTH matrices are
+RANK-ONE (`muTop l · muTop y`). That cannot hold at other labels: if `P3` were rank-one at every
+label, every triple product would be `+1` and `tri3` would be label-independent, contradicting the
+deviation law itself. Confirmed `[OK]`. So the existing theorem is not a special case of a general
+technique — it is special because the maximal seam is degenerate.
+
+**(2) A measured equivalence that is content-free as a route.** `resB` off the six lines is exactly
+the fibre antisymmetry of `P3`: `resB(l,y,W,m) ⟺ P3 (l⊕W) y = − P3 l y`, 28728/28728. But `core_P3`
+gives `P3 (l⊕W) y = − P1 l y` unconditionally, so the equivalence is `P1 = P3` rearranged. The
+reviewer's correction to my wording, adopted: it is not a *tautology*, it is **definitionally
+equivalent mod `core_P3`** — content-free as a proof strategy, which is the operative point. Note
+also that the lane's existing fibre antisymmetry for `A_σ` does NOT discharge this, because there
+the mask is part of the definition.
+
+**(3) The interior statement holds for a label iff `g(W) = 0`** — the lane's own fibre invariant,
+measured exact at `m = 3,4,5`. My proposed next target was "connect interior `resB` to `g`", and the
+reviewer marked that `[OVERREACH]`: a coincidence does not by itself give a proof direction, and
+routing through `g` helps only if the existing `g`-tier already classifies `g = 0` by an algebraic
+criterion that implies `P1 = P3` off the six lines — otherwise it is finding (2) again, one
+restatement further out.
+
+**The sharpened target, in the reviewer's formulation:** characterise directly the labels `W` for
+which `P1(·,·,W) = P3(·,·,W)` off the six lines — via the carry/bit structure of `W` — and only then
+match that set against `g⁻¹(0)`. That is a statement about the cocycle's bit arithmetic, which is
+the kind of thing this file's `R_*` machinery is built for.
+
+### §57.56 — Tier 99: the reference labels, characterised by bit structure
+
+§57.55's sharpened target was to characterise the labels `W` for which `P1(·,·,W) = P3(·,·,W)` off
+the six lines. The answer is closed:
+
+    g(W) = 0   ⟺   W < 8   or   W is a POWER OF TWO
+
+`W ∧ (W−1)` clears `W`'s lowest set bit, so `g(W) = 0` says every OTHER bit of `W` sits below
+position 3. If `W` has two or more bits, the higher ones must be at positions ≤ 2, which forces the
+lowest below them and hence `W < 8`; otherwise `W` has exactly one bit. Verified exhaustively for
+every `W < 2^20`, and the interior-`resB` label set was confirmed to match at `m = 6` — out of the
+sample the class was found on — giving `{1,…,7, 8, 16, 32, 64}`.
+
+**Both halves mean something in Cayley–Dickson terms**, which is why this is worth stating and not
+just computing. Labels are BASIS INDICES `0 … 2^(n+1)−1`, so `W < 8` is a label inside the OCTONION
+sub-algebra — the last alternative one, one doubling below where zero divisors begin. And `W = 2^p`
+is the index of the `p`-th DOUBLING GENERATOR, the imaginary unit adjoined at the `p`-th CD step. So:
+
+> the mask is full exactly when the fibre label is either a doubling generator or an octonion index.
+
+⚠ My first phrasing called `W = 2^p` "a single basis index", which is empty — every label is a basis
+index. One reviewer spent its whole budget unable to decide whether `W` was an index or a bitmask,
+and that confusion is what exposed the sloppiness; the corrected phrasing is above.
+
+In Lean the class is stated as `refLabel W := W < 8 ∨ ∃ p, W = 2^p`, without proving its equivalence
+to the `∧`/`≫` form: nothing downstream needs the bit-arithmetic bridge, because what the deviation
+law needs is only that every reference label `W = 2^j` is in the class, which is one line
+(`refLabel_pow`). The open statement is named — `InteriorMask W m` — and `resB_pow2_top` is recorded
+as its `W = 2^m` instance (`interiorMask_pow2_top`), so the file now carries the conjecture and its
+one proved case side by side.
+
+⚠ The interior statement for the class remains OPEN, and §57.55 records why the proved case does not
+generalise.
+
+### §57.57 — the interior: the induction closes, and the base case is already a theorem
+
+The residue was: prove `resB` on the interior for the reference labels. Applying the four `R_*` rules
+to `P1 = P3` reduces it, entirely at level `m+1`, to one identity:
+
+    (*)   σ(l,y) · σ(y⊕W, l⊕W)  =  − σ(y⊕W, l) · σ(l⊕W, y)
+
+**The induction step closes, for EVERY label.** Splitting `l` and `y` by their top bit at level `n`
+and applying `R_ll`/`R_lu`/`R_ul`/`R_uu`, all four branches reduce to `(*)` one level down at the
+halved indices — and in three of them the reduction needs `antisym` to re-pair the factors, which is
+exactly what `sigma_fibre_flip` could not do for itself (there the second argument was pinned to `W`;
+here both arguments move). Verified as an exact equivalence, not just an implication:
+
+    interior (*) at level n  ⟺  (*) at (l mod h, y mod h) at level n−1
+    672/672 at n = 4,  10080/10080 at n = 5,  104160/104160 at n = 6, over every low-half label.
+
+**So the label condition does not live in the induction step at all — it lives in the BASE.** The
+failing labels fail because the failure propagates upward from the bottom: at `W = 9`, `m = 4`, every
+one of the 384 interior failures reduces to a point where `(*)` is FALSE one level down, and none of
+them reduces to a non-interior point. The step is innocent.
+
+**And for `W = 2^p` the descent bottoms out exactly at the maximal seam.** The recursion descends
+while `W` stays in the low half, i.e. while `2^(n−1) > W`; it stops at `n = p+1`, where
+`W = 2^p = 2^(n−1)` IS the top bit — the maximal-seam label, whose interior statement is already a
+theorem in the file (`resB_pow2_top`, via the rank-one `P1_pow2_top`/`P3_pow2_top`). Measured at the
+base: 24/24, 168/168, 840/840, 3720/3720 at `n = 3,4,5,6`.
+
+**Proof architecture for every reference label `W = 2^j`, with one named gap:**
+
+1. the induction step (four branches + `antisym`) — derived, verified, not yet in Lean;
+2. the base `W = 2^(n−1)` — ALREADY PROVED (`resB_pow2_top`);
+3. the points whose reduction leaves the interior — 504, 2520, 11160 of them at `n = 4,5,6`, i.e.
+   where `l₀` or `y₀` hits `0`, or `l₀ = y₀`, or `y₀ = l₀ ⊕ W`. These are the borders, and they are
+   the same shape of case-work every tier in this arc has needed.
+
+That is the residue reduced from "an open mask statement" to "an induction whose step is verified and
+whose base is a theorem, plus borders".
+
+### §57.58 — why the truth set has that shape: every descent bottoms out, and the bottom decides
+
+§57.57 showed the induction step for `(*)` is label-blind, so the classification is decided at the
+bottom of the descent. The descent runs while `W` stays in the LOW half and stops at the level where
+`W` sits in the top half — `n = W.bit_length()`. Measured at each bottom:
+
+    W < 4         bottom n = 2 (quaternions)   — vacuous, 0 interior points
+    4 ≤ W < 8     bottom n = 3 (OCTONIONS)     — 24/24 hold
+    W = 2^p       bottom n = p+1, W = 2^(n−1)  — the MAXIMAL SEAM, already a theorem
+    W = 9,10,12,13  bottom n = 4 (SEDENIONS)   — 96 of 168 interior points FAIL
+    W = 24, 25      bottom n = 5               — 672/840 and 288/840 FAIL
+
+So the classification is not about `W`'s arithmetic at all. **A label's interior statement holds iff
+its descent bottoms out at or below the octonions, or at a maximal seam** — and it fails exactly when
+the bottom lands in the sedenions or above, which is where zero divisors and the failure of
+alternativity begin. That is the answer to "why `W < 8` or a power of two": those are precisely the
+labels whose bottom is not a sedenion bottom.
+
+**The two families' bases hold for DIFFERENT reasons, and one of them came from the offload.** A
+model I asked to attack the problem supplied the octonion half: in `𝕆` the non-associativity of a
+basis triple requires `a ⊕ b ⊕ c = 0` (the Fano lines are the triples summing to zero), and the
+interior hypotheses exclude exactly the two ways the relevant triples can sum to zero — `l = y` and
+`y = l ⊕ W`. So both triples associate and `(*)` is immediate. The maximal-seam half is the
+rank-one collapse already proved (`P1_pow2_top`/`P3_pow2_top`).
+
+⚠ Its scope needs care, and the model did not state it: the Fano argument applies at the BOTTOM of
+the descent, where the indices are octonion indices — not at the top, where `l, y` range over the
+whole level. It is the descent of §57.57 that brings the general case down to where the argument is
+available.
+
+**A second suggestion from the same call is REFUTED.** It proposed the standard closed form
+`σ(a,b) = (−1)^{Σ_{i<j} a_j b_i}`. Tested against this lane's `cdSigma` in four index conventions at
+`n = 3,4,5`: 25/49, 33/49, 125/225, 529/961 — chance. This cocycle is not that quadratic form, which
+is consistent with the lane's standing result that it is not a character sum and that the Walsh route
+is excluded. Had it matched, `(*)` would have been a parity computation.
+
+### §57.59 — Tier 100: the interior's induction step, PROVED
+
+`starP n l y W` names the single-level identity `(*)`, and the four branch lemmas prove the step:
+
+    starP_step_ll / _lu / _ul / _uu :  starP (n+1) (halved indices) W  →  starP (n+2) (lifted) W
+
+Both-low is `R_ll` four times and needs NO side conditions. The other three produce the factors in
+the wrong order — `R_lu`/`R_ul` swap two, `R_uu` swaps all four — and `antisym` puts them back. That
+is why the step carries `≠ 0` and distinctness hypotheses AT THE LOWER LEVEL: `y₀ ≠ l` and
+`y₀ ≠ l ⊕ W` do not follow from the upper-level interior, since `y = y₀ + 2^(n+1)` is automatically
+distinct from `l`. The reviewer confirmed the accounting: every `antisym`/`if_neg` is discharged by a
+stated hypothesis, none is derivable from the lift, and no branch carries an extra.
+
+Coverage: with `W < 2^(n+1)`, the high bit of `x ⊕ W` equals the high bit of `x`, so the four
+`(l-bit, y-bit)` cases exhaust `l, y < 2^(n+2)`. The low-half restriction on `W` is the explicit
+induction guard, not hidden work.
+
+**The step is label-blind and that is a feature, not an oversight.** Each lemma is an implication
+between identities of the four `cdSigma` values, valid whether or not those values satisfy `(*)` —
+so it holds for every `W < 2^(n+1)`, including labels for which `(*)` is FALSE. §57.58 measured why:
+the classification is decided at the bottom of the descent, not in the step.
+
+Denotation before review: 0 violations over 20552 / 19158 / 17976 / 17976 instances of the four
+branches at `n = 2,3,4`.
+
+**Residue.** The step is proved; the BOTTOM (where `W` enters the top half — the maximal seam for
+`W = 2^p`, the octonions for `W < 8`) and the BORDER points (where the reduced pair leaves the
+interior) are not.
+
+### §57.60 — Tier 101: the first border family, and the flip pays a third time
+
+The step of Tier 100 covers every interior point whose halved pair is still interior. The remainder
+is six border families — `l₀ = 0`, `y₀ = 0`, `l₀ = W`, `y₀ = W`, `l₀ = y₀`, `y₀ = l₀ ⊕ W` — each
+where the halving lands on an excluded line although the full pair does not. Over the reference
+labels they are perfectly balanced: 84 points apiece at `n = 4`, 224 apiece at `n = 5`, all holding.
+
+This tier proves the first, `l₀ = 0` (`l` = the hub `2^(n+1)`), in both sub-cases. Each collapses
+the same way: three of the four `cdSigma` factors go to `±1` — through `cdSig0`/`cdSig0'` after an
+`R_ul`/`R_lu` with a zero argument in the low case, through `R_uu`'s `v = 0` branch in the high one
+— and what is left is exactly
+
+    σ(W, y ⊕ W) = − σ(W, y)
+
+the MIRROR of Tier 97's fibre flip, now extracted as `sigma_fibre_flip_mirror` for reuse. **That is
+the third distinct use of the same fact** — it closed the two seam lines of the four-factor identity,
+it appeared inside Tier 97's own induction, and it closes these borders — which is why it was worth
+isolating as a theorem rather than inlining.
+
+Denotation: 0 violations / 1182 each. Residue: five border families, and the bottom of the descent.

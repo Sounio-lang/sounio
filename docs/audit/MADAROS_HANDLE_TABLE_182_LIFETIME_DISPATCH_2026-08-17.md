@@ -16,6 +16,11 @@ and from the println/SIGSEGV-139 family
 ([`MADAROS_PRINTLN_BOOL_SCALARKIND_SEGV_2026-08-17.md`](MADAROS_PRINTLN_BOOL_SCALARKIND_SEGV_2026-08-17.md)).
 **Status:** mechanism CONFIRMED with a quantified minimal witness; root cause
 KNOWN and OPEN. This is a dispatch (classification + fix directions), not a fix.
+**E230:** the proposed *named count/capacity diagnostic* was closed by
+refutation on 2026-08-18 — the wall already prints `madaros: handles full`
+and exits 182; it does not emit E230 or `count=`. See
+[`HANDLE_TABLE_E230_REFUTATION_2026-08-18.md`](HANDLE_TABLE_E230_REFUTATION_2026-08-18.md).
+Do not reopen E230 to invent a number for a gate to grep.
 **Owner:** Madaros native GC lane (compiler). Merge/authority: codex-2.
 **Prior art:** `docs/handoff/repros/handle_table_2pow20_wrap_madaros.sio` (2²⁰
 era); commits `a1959e00c2` (Sprint 90 GC activation), `0b6a03c58a` (4096→2²⁰),

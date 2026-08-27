@@ -32,7 +32,7 @@ use check::types::{TypeEntry, empty_type_entry}
 // measured the requirement: main.sio declares 10705 functions of which 5997 are
 // reachable, and self-compilation needs the reachable set to fit. BSS is
 // byte-identical at 2048/4096/8192 because the IrModule is allocated at runtime.
-pub let IR_MAX_FUNCS: i64 = 8192
+pub let IR_MAX_FUNCS: i64 = 16384
 pub let IR_MAX_STRINGS: i64 = 4096
 pub let IR_MAX_INSTRS: i64 = 16384
 pub let IR_MAX_PARAMS: i64 = 64
@@ -1128,17 +1128,121 @@ pub fn ir_arena_load(at: i64) -> IrInstr with Mut, Panic, Div {
 }
 pub fn ir_instr_arena_capacity() -> i64 { 1048576 }
 
-pub var IR_REGION_BASE: [i64; 8448] = [0; 8448]
-pub var IR_REGION_CAP: [i64; 8448] = [0; 8448]
-pub var IR_REGION_LEN: [i64; 8448] = [0; 8448]
-pub var IR_REGION_GEN: [i64; 8448] = [0; 8448]
-pub var IR_REGION_STATE: [i64; 8448] = [0; 8448]
+pub var IR_REGION_BASE: [i64; 16640] = [0; 16640]
+pub var IR_REGION_CAP: [i64; 16640] = [0; 16640]
+pub var IR_REGION_LEN: [i64; 16640] = [0; 16640]
+pub var IR_REGION_GEN: [i64; 16640] = [0; 16640]
+pub var IR_REGION_STATE: [i64; 16640] = [0; 16640]
 // MUST EXCEED IR_MAX_FUNCS; both were 8192. Slot 0 is the quarantine and
 // module_frontend_loaded_ir_slot_limit reserves one transient slot, leaving 8190
 // regions for 8191 permitted functions -- so the top of the range got no region,
 // lowering returned ir_region_invalid() and the contract check refused.
 // Bisected: 8189 live slots compile, 8190 and 8191 do not.
-pub fn ir_region_table_capacity() -> i64 { 8448 }
+pub fn ir_region_table_capacity() -> i64 { 16640 }
+
+// ============================================================================
+// IrCapacities: ONE object for all coupled capacity constants.
+// ============================================================================
+//
+// SEMANTIC DECLARATION (before code, per FOUNDER_INTENT):
+//
+// A capacity ceiling that silently drops is a lie. The Sounio compiler exists
+// to make such lies impossible. Every capacity in this object is coupled to at
+// least one other by a hard invariant; violating the coupling produces either
+// a silent miscompile (truncated liveness deleting live code) or a silent drop
+// (function symbols and offsets vanishing past the literal, exit 0, no error).
+// Both are exactly what this language was built to prevent.
+//
+// INVARIANTS enforced by ir_capacities_validate:
+//   1. region_slots > max_functions
+//      The region table MUST have more slots than the maximum function count.
+//      Slot 0 is quarantine; module_frontend_loaded_ir_slot_limit reserves one
+//      transient slot. If region_slots <= max_functions, the top functions get
+//      no region, lowering returns ir_region_invalid(), and the contract check
+//      refuses. Bisected 2026-08: 8189 live slots compile, 8190 and 8191 do not.
+//
+//   2. dce_liveness_slots > 0
+//      NOT `dce_liveness_slots >= max_instructions`. Production keeps
+//      dce_liveness_slots=8192 and max_instructions=IR_MAX_INSTRS=16384.
+//      Main chose that on purpose in 042c29be53: dce_run_impl REFUSES any
+//      function above DCE_MAX_INSTRS rather than raising the ceiling. A
+//      truncated liveness analysis is a WRONG analysis, not a weaker one.
+//      Converting that refuse into a panic on every compile would contradict
+//      the measured choice. The IR_MAX_INSTRS / DCE_MAX_INSTRS coupling is a
+//      POLICY invariant pinned by
+//      scripts/ci/irfunction_instr_capacity_coherence_gate.sh (the pass must
+//      refuse, not truncate). The runtime object only requires DCE to have
+//      nonzero capacity. Refusal is detectable via DCE_REFUSAL_COUNT.
+//
+//   3. backend_offset_slots >= max_functions
+//      The backend fn_offsets arrays are indexed by the IrModule.functions slot.
+//      If they are smaller than max_functions, functions past the offset array
+//      get no symbol and no offset — dropped silently.
+//
+// The object does NOT yet move arrays to dynamic allocation. That is the next
+// turn and changes IrModule entirely. This turn: the object, the invariants,
+// and the constructor that refuses to construct a violating configuration.
+
+pub struct IrCapacities {
+    max_functions: i64,
+    region_slots: i64,
+    max_instructions: i64,
+    dce_liveness_slots: i64,
+    backend_offset_slots: i64,
+}
+
+// The current production configuration. All values match the existing
+// constants; the object makes the coupling explicit and checkable.
+pub fn ir_capacities_default() -> IrCapacities {
+    IrCapacities {
+        max_functions: IR_MAX_FUNCS,
+        region_slots: 16640,
+        max_instructions: IR_MAX_INSTRS,
+        dce_liveness_slots: 8192,
+        backend_offset_slots: IR_MAX_FUNCS,
+    }
+}
+
+// Validate the invariant coupling. Panics on violation — a capacity object
+// that can be constructed in a violating state is no object at all.
+pub fn ir_capacities_validate(cap: &IrCapacities) with Panic {
+    // Invariant 1: region_slots > max_functions
+    if (*cap).region_slots <= (*cap).max_functions {
+        panic("IrCapacities: region_slots must exceed max_functions")
+    }
+    // Invariant 2: dce_liveness_slots > 0.
+    // The production config has dce_liveness_slots=8192 < max_instructions=16384.
+    // That is SAFE and DELIBERATE: dce_run_impl (dce.sio:818-821, since 042c29be53)
+    // REFUSES functions above DCE_MAX_INSTRS and returns empty stats — main chose
+    // "refuse the function" over "raise the ceiling". A truncated liveness analysis
+    // is a wrong analysis, not a weaker one. The refusal is now DETECTABLE via
+    // DCE_REFUSAL_COUNT (dce.sio), so the driver can observe that DCE declined.
+    // The coupling "IR_MAX_INSTRS cannot rise without DCE_MAX_INSTRS" is a POLICY
+    // invariant enforced by irfunction_instr_capacity_coherence_gate.sh, not a
+    // runtime panic here. The runtime invariant is simply: DCE must have nonzero
+    // capacity.
+    if (*cap).dce_liveness_slots <= 0 {
+        panic("IrCapacities: dce_liveness_slots must be > 0 (DCE must have capacity to function)")
+    }
+    // Invariant 3: backend_offset_slots >= max_functions
+    if (*cap).backend_offset_slots < (*cap).max_functions {
+        panic("IrCapacities: backend_offset_slots must be >= max_functions")
+    }
+}
+
+// Self-test: the default configuration must pass validation and match the
+// live constants. Wired into test_ir.sio's runner.
+pub fn ir_capacities_self_test() -> bool with Panic {
+    let cap = ir_capacities_default()
+    // If this panics, the default configuration is broken and the test fails loudly.
+    ir_capacities_validate(&cap)
+    if cap.max_functions != IR_MAX_FUNCS { return false }
+    if cap.region_slots != 16640 { return false }
+    if cap.max_instructions != IR_MAX_INSTRS { return false }
+    if cap.dce_liveness_slots != 8192 { return false }
+    if cap.backend_offset_slots != IR_MAX_FUNCS { return false }
+    true
+}
 
 pub var IR_ARENA_TOP: i64 = 0
 pub var IR_REGION_COUNT: i64 = 0
@@ -1181,6 +1285,11 @@ pub fn ir_region_invalid() -> IrInstrRegion {
 // ---------------------------------------------------------------------------
 
 pub fn ir_instr_arena_init() -> i64 with Mut, Panic, Div {
+    // WS-D: the capacity object's invariants are checked here, where every
+    // compile path arms the arena. A violating configuration panics loudly
+    // instead of arming a ceiling that will silently drop past it.
+    let ir_cap_check = ir_capacities_default()
+    ir_capacities_validate(&ir_cap_check)
     var i: i64 = 0
     while i < ir_region_table_capacity() {
         IR_REGION_BASE[i as usize] = 0
@@ -3158,7 +3267,7 @@ pub fn ir_empty_epistemic_section_boxed() -> Box<IrEpistemicSection> with Alloc,
 }
 
 pub struct IrModule {
-    pub functions: [IrFunction; 8192],
+    pub functions: [IrFunction; 16384],
     pub fn_count: i64,
     pub string_table: [Name; 4096],
     pub string_count: i64,
@@ -5307,7 +5416,7 @@ pub fn ir_reset_function_in_place(f: &! IrFunction, name: Name) with Mut, Panic,
 
 pub fn ir_empty_module() -> IrModule {
     IrModule {
-        functions: [ir_empty_function(); 8192],
+        functions: [ir_empty_function(); 16384],
         fn_count: 0,
         string_table: [ir_empty_name(); 4096],
         string_count: 0,

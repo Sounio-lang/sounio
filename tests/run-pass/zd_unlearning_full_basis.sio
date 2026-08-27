@@ -1,0 +1,73 @@
+//@ run-pass
+//@ requires: madaros
+//@ exit-code: 0
+//@ description: machine-unlearning with a 4-generator contribution — the old 2-of-4 projection leaves g1/g2 residual, the fixed stdlib forget_contribution (4-of-4) erases it exactly
+// Full Test Suite CI uses souc-stage2 (lean_single). Madaros runs this graph.
+//
+// examples/zd_machine_unlearning.sio uses an INLINE 2-vector projection (g0,g3)
+// and places Alice only on those two generators, so it never exercises the full
+// kernel. This test constructs a contribution that spans all four generators and
+// shows the difference the #2111 fix makes:
+//   OLD (2-of-4, replicated inline): Alice's g1/g2 components SURVIVE forgetting.
+//   NEW (stdlib forget_contribution): the whole contribution is erased, exact.
+// Integer coefficients ⇒ exact comparisons.
+
+use algebra::sedenion::{sed_norm_sq}
+use privacy::exactly_private::{forget_contribution}
+
+fn main() -> i64 with IO, Mut, Div, Panic, ZD {
+    var ok: i64 = 1
+
+    // kernel generators
+    var g0: [f64; 16] = [0.0; 16]; g0[6] = 1.0;  g0[15] = 0.0 - 1.0
+    var g1: [f64; 16] = [0.0; 16]; g1[4] = 1.0;  g1[13] = 1.0
+    var g2: [f64; 16] = [0.0; 16]; g2[5] = 1.0;  g2[12] = 0.0 - 1.0
+    var g3: [f64; 16] = [0.0; 16]; g3[7] = 1.0;  g3[14] = 1.0
+
+    // Bob = retained model (non-kernel), Alice = user contribution across ALL 4
+    // generators: 3 g0 + 2 g1 + 5 g2 + 1 g3. W_full = Bob + Alice.
+    var bob: [f64; 16] = [0.0; 16]; bob[0] = 1.0            // e0, non-kernel
+    var w_full: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        w_full[i] = bob[i] + 3.0*g0[i] + 2.0*g1[i] + 5.0*g2[i] + 1.0*g3[i]
+        i = i + 1
+    }
+
+    // OLD method (2-of-4): project out only g0 and g3 (g_k·g_k = 2 ⇒ ·0.5).
+    var c0 = 0.0; var c3 = 0.0
+    i = 0
+    while i < 16 { c0 = c0 + w_full[i]*g0[i]; c3 = c3 + w_full[i]*g3[i]; i = i + 1 }
+    c0 = c0 * 0.5; c3 = c3 * 0.5
+    var old_forget: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 { old_forget[i] = w_full[i] - c0*g0[i] - c3*g3[i]; i = i + 1 }
+    // residual vs Bob = what the OLD method failed to forget (should be 2 g1 + 5 g2)
+    var old_leak: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 { old_leak[i] = old_forget[i] - bob[i]; i = i + 1 }
+    let old_leak_nsq = sed_norm_sq(&old_leak)   // 2 g1 + 5 g2: 2·(4) + 2·(25) = 58
+
+    // NEW method: the fixed 4-of-4 stdlib forget.
+    let new_forget = forget_contribution(&w_full)
+    var new_leak: [f64; 16] = [0.0; 16]
+    i = 0
+    while i < 16 { new_leak[i] = new_forget[i] - bob[i]; i = i + 1 }
+    let new_leak_nsq = sed_norm_sq(&new_leak)   // exactly Bob recovered ⇒ 0
+
+    print("OLD (2-of-4) leak nsq = "); print(old_leak_nsq); print("  (g1/g2 survive)\n")
+    print("NEW (4-of-4) leak nsq = "); print(new_leak_nsq); print("  (exact erasure)\n")
+
+    // the bug: old method leaves exactly 2 g1 + 5 g2 (norm² 58)
+    if old_leak_nsq != 58.0 { ok = 0 }
+    // the fix: nothing of Alice survives
+    if new_leak_nsq != 0.0 { ok = 0 }
+
+    if ok == 1 {
+        print("ZD UNLEARNING FULL-BASIS: fix erases 4-generator contribution PASS\n")
+        0
+    } else {
+        print("ZD UNLEARNING FULL-BASIS FAIL\n")
+        1
+    }
+}

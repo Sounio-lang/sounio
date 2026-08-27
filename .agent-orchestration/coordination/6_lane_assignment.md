@@ -70,17 +70,19 @@ from goldens.
   3. If souc rebuild needed: `bash scripts/ci/lean_single_fixed_point_gate.sh`
      to confirm self-host fixed-point still green; rebuild only if
      fixed-point is broken or souc rejects current source.
-  4. Run `bash scripts/ci/kaxi_ptx_capture.sh` to regenerate goldens.
-  5. Run `bash scripts/ci/kaxi_ptx_golden_gate.sh` — must show 318/318
-     PASS, 0 FAIL, 0 MISSING.
+  4. Run `bash scripts/gpu/kaxi_ptx_capture.sh` to regenerate goldens.
+  5. Run `bash scripts/ci/kaxi_ptx_golden_gate.sh`. The May 2026
+     closeout target was 318/318 PASS, 0 FAIL, 0 MISSING. That
+     number is stale. Live measurement 2026-08-18 (#1915): **0/318**,
+     rc=1, 80 s. Do not treat 318/318 as current health.
   6. Diff the regenerated goldens vs HEAD: if huge diff, ROLLBACK and
      classify as `compiler-semantics` Blocker (souc producing wrong PTX,
      not goldens being stale).
   7. Commit goldens; PR title `[lane-1] regenerate kaxi_ptx goldens vs
      post-Phase-Y emitter source`.
-- **Build target**: `bash scripts/ci/kaxi_ptx_golden_gate.sh` returns
-  rc=0, output line `PASS:    318` (or current N), `FAIL:    0`,
-  `MISSING: 0`.
+- **Build target (May 2026 closeout, stale):** `kaxi_ptx_golden_gate.sh`
+  rc=0, `PASS: 318`, `FAIL: 0`, `MISSING: 0`. Live 2026-08-18 (#1915):
+  rc=1, 0/318 PASS. Do not use 318/318 as a current pass criterion.
 - **Merge status**: merged via PR #95.
 
 ### Lane 2 — `dissertation-evidence` (Codex #1)

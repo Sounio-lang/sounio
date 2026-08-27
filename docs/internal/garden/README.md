@@ -42,6 +42,13 @@ Use these labels inside every seed:
 | `Hypothesis` | A precise direction that could become testable but is not yet proven. |
 | `Executable` | Backed by a repo command, test, gate, artifact, or implementation path. |
 | `Claim-ready` | Suitable for paper or public use only after explicit validation and review. |
+| `Reserved` | The name is taken and the system **refuses every use** with a named diagnostic, pending implementation. Beside the ladder, not on it. |
+
+The ladder is **monotone**: each state requires every state beneath it. A
+seed or kind cannot be `Claim-ready` without being `Executable`. `Reserved`
+sits beside the ladder — it has not failed to reach `Executable`, it is held
+short of it on purpose. See `docs/internal/concepts/MATURITY_LADDER.md` for
+the two-program test that decides a position.
 
 Most seeds should start as `Garden` or `Hypothesis`. A seed becomes
 `Executable` only when it names a concrete artifact or gate. A seed becomes

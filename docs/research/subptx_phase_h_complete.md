@@ -53,7 +53,7 @@ emitter body raised from 2 to 16.
 
 | Gate | Result | Note |
 |---|---|---|
-| `kaxi_ptx_golden_gate.sh` | PASS 318/318 byte-identical | Backward compat — streaming and accumulator emit the SAME bytes in the SAME order |
+| `kaxi_ptx_golden_gate.sh` | PASS 318/318 byte-identical **(2026-05-11 receipt; live 2026-08-18 is 0/318, #1915)** | Backward compat on that date — streaming and accumulator emit the SAME bytes in the SAME order |
 | `kretikos_kaxi_lse8_gate.sh` | PASS 7/7 | Small kernel sanity |
 | `kretikos_kaxi_sinkhorn16_gate.sh` | PASS 7/7 | At 16 iters: lands on analytic fixed point u = -7.08746, v ≈ 0; 3-run bit-deterministic |
 | `kretikos_kaxi_fmad_invariance_gate.sh` | PASS 18/18 | At the 5.26 MB PTX scale, ptxas refuses to fuse any of ~480k mul+add chains — `.rn` discipline holds |

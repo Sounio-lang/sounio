@@ -1361,6 +1361,20 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
         if !name_is_empty(e.name) {
             var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
         }
+    } else if e.kind == ExprKind::ExprIdent {
+        // First-class fn refs (`call_it(square, x)`, `let f = square`) are
+        // ExprIdent, not ExprCall. Without marking the name, spec_dce deletes
+        // the target function and LoadFnRef binds to a stale/wrong fn_id.
+        if !name_is_empty(e.name) {
+            var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(e.name))
+        }
+    } else if e.kind == ExprKind::ExprPath {
+        if e.path.seg_count == 1 {
+            let n = spec_path_single_name(e.path)
+            if !name_is_empty(n) {
+                var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
+            }
+        }
     }
     match e.left {
         Some(b) => spec_dce_scan_expr(*b, marks, count)
@@ -1468,8 +1482,10 @@ fn spec_dce_scan_block(b: Block, marks: &! [i64; 16384], count: &! i64) with Mut
     }
 }
 
-// If item is a marked callable (top-level ItemFn or impl/trait method),
-// scan its body and extend the mark set. Returns true if any new hash
+// If item is a body the filter can delete (a top-level ItemFn), scan its
+// body only when it is marked. Impl and trait methods are never deleted by
+// the filter, so their bodies are scanned unconditionally — a retained body
+// must contribute its callees to the mark set. Returns true if any new hash
 // was inserted.
 fn spec_dce_scan_item_if_marked(
     it: Item,
@@ -1486,6 +1502,20 @@ fn spec_dce_scan_item_if_marked(
             }
         }
     } else if it.kind == ItemKind::ItemImpl {
+        // Method bodies are scanned UNCONDITIONALLY, not only when the bare
+        // method name is marked. The filter below never deletes an ItemImpl,
+        // and the dep body pass lowers every method of a kept impl, so a
+        // method body is retained even when nothing reachable calls it. A
+        // retained body's callees must therefore be marked, or the callee is
+        // deleted from the item list while the wrapper that calls it still
+        // lowers — the call then binds to an instr_count==0 stub and native
+        // codegen traps it (ud2). Measured 2026-08-19 on madaros_root2_associated_
+        // import: Epistemic::measured lowered with a real delegation body while
+        // ep_measured (called only from that impl) was filtered out — SIGILL
+        // rc=132; the same program runs green with SOUNIO_DISABLE_MM_DCE=1. The
+        // associated call could not mark "measured" either, because
+        // spec_call_expr_callee_name returns empty for multi-segment paths —
+        // so the gate could never open for this shape at all.
         match it.impl_def {
             Some(id) => {
                 var mcur = (*id).methods
@@ -1496,12 +1526,9 @@ fn spec_dce_scan_item_if_marked(
                         Some(mlist) => {
                             let mit = (*mlist).head
                             if mit.kind == ItemKind::ItemFn {
-                                let mh = ast_name_hash(mit.name)
-                                if spec_dce_hash_find(marks, *count, mh) {
-                                    match mit.fn_def {
-                                        Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
-                                        None => {}
-                                    }
+                                match mit.fn_def {
+                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    None => {}
                                 }
                             }
                             mcur = (*mlist).tail
@@ -1512,6 +1539,9 @@ fn spec_dce_scan_item_if_marked(
             None => {}
         }
     } else if it.kind == ItemKind::ItemTrait {
+        // Same unconditional scan as ItemImpl above: the filter keeps
+        // ItemTrait whole, so a default-method body is retained and its
+        // callees must be marked.
         match it.trait_def {
             Some(td) => {
                 var mcur = (*td).methods
@@ -1522,12 +1552,9 @@ fn spec_dce_scan_item_if_marked(
                         Some(mlist) => {
                             let mit = (*mlist).head
                             if mit.kind == ItemKind::ItemFn {
-                                let mh = ast_name_hash(mit.name)
-                                if spec_dce_hash_find(marks, *count, mh) {
-                                    match mit.fn_def {
-                                        Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
-                                        None => {}
-                                    }
+                                match mit.fn_def {
+                                    Some(fd) => spec_dce_scan_block((*fd).body, marks, count)
+                                    None => {}
                                 }
                             }
                             mcur = (*mlist).tail

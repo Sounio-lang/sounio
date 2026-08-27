@@ -28,7 +28,10 @@ artifacts/omega/souc-bin/souc-linux-x86_64-gpu
 On the current snapshot, `souc info` for the default JIT profile reports:
 
 - version `1.0.0-beta.4`
-- Cranelift JIT enabled
+- **Cranelift JIT NOT compiled** — `souc info` prints `[-] Cranelift JIT - rebuild
+  with --features jit`. Measured 2026-08-27: no artifact enables it, no build path
+  passes the feature, and the binary exports no Cranelift symbol. This bullet
+  previously read "Cranelift JIT enabled" — not compiled
 - LLVM disabled in the checked artifact
 - GPU codegen disabled in the checked JIT artifact
 - LSP, SMT, distributed, and package-manager features disabled in the checked artifact

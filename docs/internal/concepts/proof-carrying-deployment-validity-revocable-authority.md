@@ -169,3 +169,10 @@ remains pending. A future adapter must be case-scoped, site-scoped,
 version-scoped, jurisdiction-scoped, time-bounded, revocable, auditable, and
 issued by a competent external institution. Sounio may check that capability;
 the standard library must not invent it.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.
