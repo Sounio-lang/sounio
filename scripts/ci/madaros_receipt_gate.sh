@@ -97,14 +97,28 @@ actual_sha="$(sha256sum "$BINARY" | awk '{print $1}')"
 require_nonempty "$actual_sha" "sha256sum produced nothing for $BINARY"
 
 if [[ "$actual_sha" != "$claimed_sha" ]]; then
+  # Name the path actually hashed. The subject is the receipt's `artifact=`
+  # field, NOT the directory the receipt happens to live in -- an earlier
+  # version of this message hard-coded `artifacts/self-hosted/madaros` and
+  # sent at least one reader looking at an untracked file while the real
+  # subject was bin/madaros-linux-x86_64.
+  echo "  subject:       $claimed_artifact (the receipt's artifact= field)"
   echo "  receipt claims $claimed_sha"
-  echo "  file is       $actual_sha"
+  echo "  file is        $actual_sha"
   echo
-  echo "  This ELF is not the one the receipt was written for. It is resolved as an"
-  echo "  oracle by ~82 scripts and preferred by scripts/install.sh over the committed"
-  echo "  bin/madaros-linux-x86_64. Rebuild and re-emit the receipt, or delete the ELF:"
-  echo "    make build-madaros && bash scripts/ci/madaros_write_receipt.sh"
-  gate_fail "artifacts/self-hosted/madaros does not match its own receipt"
+  echo "  This ELF is not the one the receipt was written for."
+  if [[ "$claimed_artifact" == "artifacts/self-hosted/madaros" ]]; then
+    echo "  It is resolved as an oracle by ~82 scripts and preferred by"
+    echo "  scripts/install.sh over the committed bin/madaros-linux-x86_64."
+  fi
+  echo
+  echo "  If the binary is the one you want, re-gate it and re-emit the receipt"
+  echo "  FOR THAT SAME ARTIFACT (the argument is not optional -- omitting it"
+  echo "  defaults to artifacts/self-hosted/madaros, which may not be the subject):"
+  echo "    bash scripts/ci/madaros_full_gate.sh"
+  echo "    bash scripts/ci/madaros_write_receipt.sh $claimed_artifact madaros_full_gate.sh <checks>"
+  echo "  If it is stale, rebuild first with: make build-madaros"
+  gate_fail "$claimed_artifact does not match its own receipt"
 fi
 
 gate_pass "binary matches its receipt ($actual_sha)"
