@@ -32,9 +32,9 @@ it recorded whether a document is current canon or lineage.
 
 > **For every path under `docs/research/`, `authority` is not measured. It is
 > `ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'`, and
-> `ACTIVE_RESEARCH_DOCS` is a Set of three path literals. The CI checker enforces
+> `ACTIVE_RESEARCH_DOCS` is an explicit Set of four path literals. The CI checker enforces
 > the field and requires the auto-inserted lineage status note. A research page
-> that claims to be current (`repo_only`) without membership of that three-item
+> that claims to be current (`repo_only`) without membership of that explicit
 > whitelist is a gate failure. The gate is green when almost every research
 > finding declares it is historical lineage.**
 
@@ -48,6 +48,7 @@ while declaring `Status: EXECUTABLE`. The defect is not described at arm's lengt
 ```
 scripts/docs/governance_registry.mjs:32   const ACTIVE_RESEARCH_DOCS = new Set([
                                             'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
+                                            'docs/research/cd-tower-automorphism-freeze.md',
                                             'docs/research/epistemic_algebra_review.md',
                                             'docs/research/vancomycin-uncertainty.md',
                                           ]);
@@ -61,20 +62,20 @@ status note on historical pages.
 
 ## 3. Verified, and how
 
-Measured 2026-07-31; the contract re-measures on every run.
+Re-measured 2026-08-27; the contract re-measures on every run.
 
 | clause | | |
 |---|---|---|
-| `V1_WHITELIST_IS_THREE` | Set at :32 has exactly three path literals, all under `docs/research/` | currency is a three-name list |
+| `V1_WHITELIST_IS_EXPLICIT` | Set at :32 contains only four explicit path literals, all under `docs/research/` | currency is a named-path list |
 | `V2_DEFAULT_IS_HISTORICAL` | path rule :387–392 is ternary on that Set → `repo_only` / `historical` | default is lineage |
-| `V3_CORPUS_IS_LINEAGE_DEFAULT` | 320 research topics: historical 317, repo_only 2, dual 1; 317/317 historical pages carry the lineage note; all 317 non-whitelist paths are historical | almost everything is lineage by default |
+| `V3_CORPUS_IS_LINEAGE_DEFAULT` | 350 research topics: historical 346, repo_only 3, dual 1; 346/346 historical pages carry the lineage note; all 346 non-whitelist paths are historical | almost everything is lineage by default |
 | `V4_GATE_REJECTS_CURRENT` | hermetic synced farm; unmodified → rc=0; R24's page given `authority: repo_only` → rc=1 with `expected "historical"` | claiming currency fails |
 
 ## 4. Why this rung belongs to this line
 
 R22 and R23 showed fields that answer the wrong question under measurement names.
 `authority` varies (`historical` / `repo_only` / `dual`) and still does not
-measure currency: it measures membership of a three-path Set plus a path prefix.
+measure currency: it measures membership of an explicit path Set plus a path prefix.
 An EXECUTABLE research finding of this line is green in CI only when it agrees
 to be historical lineage — the same family of inverted enforcement.
 
@@ -83,8 +84,8 @@ to be historical lineage — the same family of inverted enforcement.
 - **Not a claim that historical is always wrong.** Many pages are genuinely
   lineage. The finding is that the field cannot tell the difference, and the
   gate enforces the path default.
-- **Not a claim about the three whitelist entries.** Whether those three deserve
-  `repo_only` is unmeasured here.
+- **Not a claim about the four whitelist entries.** Whether those four deserve
+  active authority is unmeasured here.
 - **Not fixed.** Expanding the whitelist, or deriving authority from last
   commit / gate run, is a separate rung; doing it here would destroy the
   evidence.

@@ -40,13 +40,15 @@ git -C "$REPO" worktree add -q -b second-lane "$SECOND"
 run_hook() {
   local agent="$1" cwd="$2" payload="$3"
   printf '%s\n' "$payload" | SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+    SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
     python3 "$cwd/scripts/dev/sounio_coord_agent_hook.py" --agent "$agent"
 }
 
 run_coord() {
   local cwd="$1"
   shift
-  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord "$@")
+  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    bin/sounio-coord "$@")
 }
 
 output="$(run_hook codex "$REPO" \

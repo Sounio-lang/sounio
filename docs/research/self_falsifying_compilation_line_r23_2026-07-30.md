@@ -60,13 +60,13 @@ against `metadataFieldsForTopic(topic)` and fails on any difference.
 
 ## 3. Verified, and how
 
-Corpus figures measured 2026-07-30; the contract re-measures them on every run.
+Corpus figures re-measured 2026-08-27; the contract re-measures them on every run.
 
 | clause | | |
 |---|---|---|
-| `V1_FIELD_EQUALS_OWNER_AGENT` | two generator sites; `metadataFieldsForTopic` over 1216 topics → match=1216, mismatch=0 | field is owner_agent |
-| `V2_PATH_PREFIX_OWNS_RESEARCH` | path rule at :387; 310 research topics, all owner A6; 310 docs declare `validated_by: A6` | research is one label |
-| `V3_CORPUS_IS_PATH_OWNERSHIP` | 1066 governed repo docs: match=1066, mismatch=0 | never a non-owner validator |
+| `V1_FIELD_EQUALS_OWNER_AGENT` | two generator sites; `metadataFieldsForTopic` over 1269 topics → match=1269, mismatch=0 | field is owner_agent |
+| `V2_PATH_PREFIX_OWNS_RESEARCH` | path rule at :387; 350 research topics, all owner A6; 350 docs declare `validated_by: A6` | research is one label |
+| `V3_CORPUS_IS_PATH_OWNERSHIP` | 1119 governed repo docs: match=1119, mismatch=0 | never a non-owner validator |
 | `V4_GATE_REJECTS_TRUE_VALIDATOR` | hermetic synced farm; unmodified → rc=0; one research page given `validated_by: human` → rc=1 with `metadata mismatch for validated_by: expected "A6"` | the check rejects a non-owner name |
 
 **V4 has two arms on purpose**, as in R22. Unmodified farm must stay green;

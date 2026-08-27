@@ -12,7 +12,7 @@ fail(){ echo "SELF_FALSIFYING_COMPILATION_LINE_R25_GATE_FAIL: $*" >&2; exit 1; }
 command -v node >/dev/null 2>&1 || fail "node absent -- the enforcement arm cannot be exercised"
 OUT="$(python3 "$CONTRACT" 2>&1)" || { echo "$OUT"; fail "contract exited non-zero"; }
 echo "$OUT"
-for c in V1_WHITELIST_IS_THREE V2_DEFAULT_IS_HISTORICAL \
+for c in V1_WHITELIST_IS_EXPLICIT V2_DEFAULT_IS_HISTORICAL \
          V3_CORPUS_IS_LINEAGE_DEFAULT V4_GATE_REJECTS_CURRENT; do
     grep -q "^${c} PASS" <<<"$OUT" || fail "${c} did not PASS"
 done

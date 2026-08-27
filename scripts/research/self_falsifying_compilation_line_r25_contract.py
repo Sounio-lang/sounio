@@ -12,17 +12,17 @@ For docs/research/, authority is not measured. It is:
 
     ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'
 
-ACTIVE_RESEARCH_DOCS is a three-path Set in the generator. Everything else under
+ACTIVE_RESEARCH_DOCS is an explicit path Set in the generator. Everything else under
 docs/research/ is stamped historical, and check_docs_registry.mjs enforces both
 the authority field and the auto-inserted "Docs status: historical" note that
 says the page is preserved for lineage.
 
 So a research finding written today as EXECUTABLE is green only when it claims
-to be historical lineage — unless someone hand-edits a three-item whitelist.
+to be historical lineage — unless someone hand-edits the explicit whitelist.
 
 CLAUSES:
-  V1_WHITELIST_IS_THREE           ACTIVE_RESEARCH_DOCS is a Set of three path
-                                  literals in the generator.
+  V1_WHITELIST_IS_EXPLICIT        ACTIVE_RESEARCH_DOCS contains only explicit
+                                  docs/research/ path literals.
   V2_DEFAULT_IS_HISTORICAL        the path rule is ternary on that Set; research
                                   not in the Set is historical.
   V3_CORPUS_IS_LINEAGE_DEFAULT    census of research authority + status notes:
@@ -32,7 +32,7 @@ CLAUSES:
                                   checker rejects (expected "historical").
 
 WHAT THIS DOES NOT MEASURE. Whether historical is a useful label for some pages.
-Whether the three whitelist entries deserve repo_only. Only: the field is not a
+Whether the whitelist entries deserve active authority. Only: the field is not a
 measurement of currency, and the gate enforces the path default.
 """
 
@@ -84,7 +84,7 @@ def clause_v1() -> tuple[bool, set[str]]:
     m = ACTIVE_SET_RE.search(src)
     if not m:
         print("V1 ACTIVE_RESEARCH_DOCS Set not found")
-        print("V1_WHITELIST_IS_THREE FAIL")
+        print("V1_WHITELIST_IS_EXPLICIT FAIL")
         print()
         return False, set()
     paths = set(re.findall(r"'([^']+)'", m.group(1)))
@@ -98,8 +98,11 @@ def clause_v1() -> tuple[bool, set[str]]:
     print(f"    governance_registry.mjs:{line_n}  Set size={len(paths)}")
     for p in sorted(paths):
         print(f"        {p}")
-    ok = len(paths) == 3 and all(p.startswith("docs/research/") for p in paths)
-    print(f"V1_WHITELIST_IS_THREE {'PASS' if ok else 'FAIL'}")
+    residue = re.sub(r"'[^']+'|[\s,]", "", m.group(1))
+    ok = bool(paths) and not residue and all(
+        p.startswith("docs/research/") for p in paths
+    )
+    print(f"V1_WHITELIST_IS_EXPLICIT {'PASS' if ok else 'FAIL'}")
     print()
     return ok, paths
 
@@ -137,7 +140,7 @@ def clause_v3(whitelist: set[str]) -> bool:
     auth_census: dict[str, int] = {}
     note_hist = 0
     note_missing = 0
-    whitelist_repo_only = 0
+    whitelist_active = 0
     non_whitelist_historical = 0
     for t in research:
         rel = t["repo_doc_path"]
@@ -152,8 +155,8 @@ def clause_v3(whitelist: set[str]) -> bool:
                 note_hist += 1
             else:
                 note_missing += 1
-        if rel in whitelist and a == "repo_only":
-            whitelist_repo_only += 1
+        if rel in whitelist and a in {"repo_only", "dual"}:
+            whitelist_active += 1
         if rel not in whitelist and a == "historical":
             non_whitelist_historical += 1
 
@@ -161,20 +164,22 @@ def clause_v3(whitelist: set[str]) -> bool:
     print(f"    authority census: {auth_census}")
     print(f"    historical docs with lineage status note: {note_hist}")
     print(f"    historical docs missing status note: {note_missing}")
-    print(f"    whitelist paths that are repo_only: {whitelist_repo_only}/{len(whitelist)}")
+    print(f"    whitelist paths that are active: {whitelist_active}/{len(whitelist)}")
     print(
         f"    non-whitelist paths that are historical: "
         f"{non_whitelist_historical}/{len(research) - len(whitelist)}"
     )
-    # Nearly all research is historical; lineage note is present; whitelist is tiny.
+    # Every non-whitelist research path is historical; whitelisted website-backed
+    # topics may be dual rather than repo_only.
     hist = auth_census.get("historical", 0)
+    non_whitelist = len(research) - len(whitelist)
     ok = (
         len(research) > 100
-        and hist >= len(research) - 5  # allow dual/repo_only few
+        and hist == non_whitelist
         and note_missing == 0
         and note_hist == hist
-        and len(whitelist) == 3
-        and non_whitelist_historical >= len(research) - 5
+        and whitelist_active == len(whitelist)
+        and non_whitelist_historical == non_whitelist
     )
     print(f"V3_CORPUS_IS_LINEAGE_DEFAULT {'PASS' if ok else 'FAIL'}")
     print()
