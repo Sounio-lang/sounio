@@ -44,6 +44,12 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# The workspace pod carries a 16 GiB soft RLIMIT_AS even though its hard limit
+# is unlimited. Slurm propagates that soft limit to compute jobs, where the
+# source-generated seed then SIGSEGVs while compiling main.sio. Lift it before
+# srun so the remote build can use the memory granted by the selected node.
+ulimit -v unlimited 2>/dev/null || true
+
 # Target policy comes from the cluster-ops tier document
 # (~devsounio/beagle/k8s/hpc-sota/ops/cluster-cpu-tiers.md, 2026-06-27):
 #
