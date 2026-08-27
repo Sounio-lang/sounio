@@ -137,6 +137,21 @@ create no endpoint. The fixture's wake exception requires local runtime mode,
 both native-hook selftest flags, and an exact temporary state-root shape; its
 capability remains `wake_eligible=0` and cannot authorize a production wake.
 
+Runtime `2026.08.27.36` makes native adoption independent of the lane's Git
+lineage. Each immutable shared bundle contains a language-authority capsule with
+the frozen manifest, exact Sounio source, and exact Sounio entrypoint. The
+bundle manifest binds all three hashes independently, and activation rechecks
+them. A worktree that contains the policy continues to use and validate its
+local frozen bytes; a worktree with no LOOM product tree falls back to the
+capsule beside the executing runtime. Hook configurations resolve `current`
+once, then pass the matching capsule root and executable from that same physical
+bundle. A concurrent runtime activation can therefore cause an explicit
+attestation refusal, but cannot combine policy from one generation with OCaml
+from another. Decision receipts record `semantic_authority_origin=worktree` or
+`runtime-capsule`. The sabotage gate modifies only the packaged Sounio source
+and requires `Sounio-authority-source-hash-mismatch`, proving that the capsule
+binding itself causes the refusal.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic

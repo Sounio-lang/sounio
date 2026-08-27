@@ -9,6 +9,7 @@ SECOND="$TEST_ROOT/second-worktree"
 STATE="$TEST_ROOT/state"
 ALT="$TEST_ROOT/upgrade-source"
 BAD="$TEST_ROOT/bad-source"
+POLICYLESS="$TEST_ROOT/policyless-worktree"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
@@ -291,6 +292,22 @@ grep -q '^capability=loom-native-agent-hook-v1$' "$first_manifest" || \
   fail 'installed runtime omitted the native-agent-hook capability'
 grep -q '^loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff$' \
   "$first_manifest" || fail 'installed native hook is not bound to frozen Sounio semantics'
+authority_capsule="$RUNTIME_ROOT/versions/$first_id/policy/language-authority"
+[[ -f "$authority_capsule/tools/loom/language_authority.freeze.v1" && \
+  -f "$authority_capsule/tools/loom/language_authority_main.sio" && \
+  -f "$authority_capsule/stdlib/coordination/loom_language_authority.sio" ]] || \
+  fail 'installed runtime omitted the frozen Sounio authority capsule'
+for binding in \
+  "loom_language_authority_policy_manifest_sha256:$authority_capsule/tools/loom/language_authority.freeze.v1" \
+  "loom_language_authority_policy_source_sha256:$authority_capsule/stdlib/coordination/loom_language_authority.sio" \
+  "loom_language_authority_policy_entrypoint_sha256:$authority_capsule/tools/loom/language_authority_main.sio"; do
+  key="${binding%%:*}"
+  path="${binding#*:}"
+  expected="$(sed -n "s/^${key}=//p" "$first_manifest")"
+  actual="$(sha256sum "$path" | awk '{print $1}')"
+  [[ -n "$expected" && "$actual" == "$expected" ]] || \
+    fail "installed authority capsule binding drifted: key=$key"
+done
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-continuity-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio continuity adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-obligation-runtime" ]] || \
@@ -367,7 +384,7 @@ grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/man
 for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
-  loom-native-hook-binary-attestation-v1 \
+  loom-native-hook-binary-attestation-v1 loom-runtime-authority-capsule-v1 \
   loom-transactional-custody-transfer-v1 \
   loom-truthful-lane-health-v1 loom-nondestructive-health-reconcile-v1 \
   loom-native-sounio-continuity-v1 \
@@ -434,8 +451,53 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.35$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.27.36$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
+
+mkdir -p "$POLICYLESS/bin"
+git init -q "$POLICYLESS"
+cp "$ROOT_DIR/bin/sounio-coord" "$POLICYLESS/bin/"
+capsule_session="runtime-capsule-$$"
+capsule_receipt="$TEST_ROOT/runtime-capsule.tsv"
+capsule_runtime="$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime"
+capsule_harness="$TEST_ROOT/codex"
+cp "$(command -v bash)" "$capsule_harness"
+chmod 0755 "$capsule_harness"
+capsule_event="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$capsule_session\",\"cwd\":\"$POLICYLESS\"}"
+capsule_hook_command='runtime_dir="$(readlink -f "${SOUNIO_COORD_RUNTIME_DIR:-$(git rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime}/current")" && test -n "$runtime_dir" && exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$runtime_dir/policy/language-authority" "$runtime_dir/bin/sounio-loom-runtime" agent-hook --agent codex'
+output="$(
+  cd "$POLICYLESS"
+  printf '%s\n' "$capsule_event" | \
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+    SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$capsule_receipt" \
+    "$capsule_harness" -c \
+      '/bin/bash -c "$1"; hook_status=$?; exit "$hook_status"' \
+      _ "$capsule_hook_command"
+)"
+grep -Fq 'decision=ALLOW' "$capsule_receipt" || \
+  fail 'policyless worktree did not reach an ALLOW receipt'
+grep -Fq 'semantic_authority_origin=runtime-capsule' "$capsule_receipt" || \
+  fail 'policyless worktree did not use the installed authority capsule'
+
+capsule_source="$authority_capsule/stdlib/coordination/loom_language_authority.sio"
+cp "$capsule_source" "$TEST_ROOT/authority-source.saved"
+printf 'sabotaged\n' > "$capsule_source"
+set +e
+capsule_sabotage_output="$(
+  cd "$POLICYLESS"
+  printf '%s\n' "$capsule_event" | \
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+    SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$capsule_receipt" \
+    "$capsule_runtime" agent-hook --agent codex 2>&1
+)"
+capsule_sabotage_rc=$?
+set -e
+mv "$TEST_ROOT/authority-source.saved" "$capsule_source"
+[[ "$capsule_sabotage_rc" -ne 0 && \
+  "$capsule_sabotage_output" == *'Sounio-authority-source-hash-mismatch'* ]] || \
+  fail "authority capsule sabotage was not refused: rc=$capsule_sabotage_rc output=$capsule_sabotage_output"
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'fleet selected a different runtime id'

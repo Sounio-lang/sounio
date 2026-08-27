@@ -288,7 +288,7 @@ grep -Fq $'decision=DENY\treason=Sounio-authority-runtime-hash-mismatch' "$DECIS
   fail "decision log omitted the runtime-tamper DENY"
 grep -Fq $'decision=DENY\treason=write-path-missing' "$DECISION_LOG" ||
   fail "decision log omitted the pathless-write DENY"
-grep -Fq $'sounio_source_sha256=64bb0118793fe46dcb392abc1a9212eb15bd55047461576a3ef1a6cefa3f17da\tsemantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\tproducing_language=OCaml\tlanguage_role=OPERATIONAL_REALIZATION\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY' \
+grep -Fq $'sounio_source_sha256=64bb0118793fe46dcb392abc1a9212eb15bd55047461576a3ef1a6cefa3f17da\tsemantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\tproducing_language=OCaml\tlanguage_role=OPERATIONAL_REALIZATION\tsemantic_authority_language=Sounio\tsemantic_authority_role=SEMANTIC_AUTHORITY\tsemantic_authority_origin=worktree' \
   "$DECISION_LOG" || fail "decision receipt omitted the authority chain"
 grep -Fq $'\ttoolchain=OCaml ' "$DECISION_LOG" ||
   fail "decision receipt omitted the toolchain"

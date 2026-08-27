@@ -729,6 +729,17 @@ coordination lock for the first attempt, refuses the first endpoint registration
 after presence succeeds, and requires the same kernel to converge without
 terminal input.
 
+Native lifecycle hooks are rooted in the active shared runtime, not in a
+possibly old worktree. The hook command resolves the content-addressed runtime
+behind `current` once and uses both its OCaml executable and its frozen Sounio
+language-authority capsule. The capsule carries the exact manifest, source, and
+entrypoint bytes with independent hashes in the runtime manifest. Worktrees
+that predate the LOOM product can therefore join the same native control plane
+without Python and without importing semantics from OCaml. Missing or modified
+capsule bytes, a broken activation link, or a bundle switch during attestation
+fails closed. Each hook receipt identifies whether authority came from the
+worktree or the immutable runtime capsule.
+
 ## Durable Obligations
 
 A directed coordination `request` is now projected into a durable Loom

@@ -634,6 +634,7 @@ type authority_receipt = {
   language_role : string;
   semantic_authority_language : string;
   semantic_authority_role : string;
+  semantic_authority_origin : string;
   toolchain : string;
   toolchain_sha256 : string;
   hardware : string;
@@ -662,6 +663,7 @@ let operational_receipt raw_event command =
     language_role = "OPERATIONAL_REALIZATION";
     semantic_authority_language = "unverified";
     semantic_authority_role = "unverified";
+    semantic_authority_origin = "unverified";
     toolchain;
     toolchain_sha256 = sha256_file executable;
     hardware;
@@ -670,11 +672,36 @@ let operational_receipt raw_event command =
     command_sha256 = sha256 raw_event;
     result = "unavailable" }
 
+let runtime_authority_root () =
+  let binary_dir = Filename.dirname (Unix.realpath Sys.executable_name) in
+  Filename.concat (Filename.dirname binary_dir) "policy/language-authority"
+
+let authority_policy_root worktree_root =
+  let local_manifest =
+    Filename.concat worktree_root "tools/loom/language_authority.freeze.v1"
+  in
+  let selected =
+    match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT" with
+    | Some path when path <> "" -> path
+    | _ when Sys.file_exists local_manifest -> worktree_root
+    | _ -> runtime_authority_root ()
+  in
+  let selected = Unix.realpath selected in
+  let runtime_root = runtime_authority_root () in
+  let origin =
+    if selected = Unix.realpath worktree_root then "worktree"
+    else if Sys.file_exists runtime_root && selected = Unix.realpath runtime_root then
+      "runtime-capsule"
+    else "explicit-root"
+  in
+  (selected, origin)
+
 let authorize_guard root _raw_event base_receipt =
+  let policy_root, policy_origin = authority_policy_root root in
   let manifest_path =
     match Sys.getenv_opt "SOUNIO_LOOM_LANGUAGE_AUTHORITY_MANIFEST" with
     | Some path when path <> "" -> path
-    | _ -> Filename.concat root "tools/loom/language_authority.freeze.v1"
+    | _ -> Filename.concat policy_root "tools/loom/language_authority.freeze.v1"
   in
   if not (Sys.file_exists manifest_path) then failf "Sounio-authority-policy-missing";
   if sha256_file manifest_path <> pinned_manifest_sha256 then
@@ -686,8 +713,8 @@ let authorize_guard root _raw_event base_receipt =
      || required manifest "parity_open" <> "false"
      || required manifest "claim_ready" <> "false"
   then failf "Sounio-authority-policy-state-invalid";
-  let source_path = Filename.concat root (required manifest "source_path") in
-  let entrypoint_path = Filename.concat root (required manifest "entrypoint_path") in
+  let source_path = Filename.concat policy_root (required manifest "source_path") in
+  let entrypoint_path = Filename.concat policy_root (required manifest "entrypoint_path") in
   if sha256_file source_path <> required manifest "source_sha256" then
     failf "Sounio-authority-source-hash-mismatch";
   if sha256_file entrypoint_path <> required manifest "entrypoint_sha256" then
@@ -695,7 +722,7 @@ let authorize_guard root _raw_event base_receipt =
   if sha256 (read_file source_path ^ read_file entrypoint_path)
      <> required manifest "semantics_sha256"
   then failf "Sounio-authority-semantics-hash-mismatch";
-  let runtime = authority_runtime root manifest in
+  let runtime = authority_runtime policy_root manifest in
   let source = digest_u32_field manifest "source_sha256_u32" in
   let semantics = digest_u32_field manifest "semantics_sha256_u32" in
   let toolchain = digest_u32_of_hex base_receipt.toolchain_sha256 in
@@ -708,7 +735,7 @@ let authorize_guard root _raw_event base_receipt =
         source; semantics; semantics; toolchain; hardware; command; zero; zero ]
     ^ "\n"
   in
-  let result = run_process ~input:frame ~cwd:root runtime [] in
+  let result = run_process ~input:frame ~cwd:policy_root runtime [] in
   let decision = trim result.output in
   if result.code <> 0
      || not (starts_with decision "SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 ")
@@ -719,6 +746,7 @@ let authorize_guard root _raw_event base_receipt =
     semantics_sha256 = required manifest "semantics_sha256";
     semantic_authority_language = required manifest "producing_language";
     semantic_authority_role = required manifest "language_role";
+    semantic_authority_origin = policy_origin;
     result = decision }
 
 let utc_now () =
@@ -760,6 +788,7 @@ let append_decision_log root decision reason agent lane event receipt =
             "language_role=" ^ receipt.language_role;
             "semantic_authority_language=" ^ receipt.semantic_authority_language;
             "semantic_authority_role=" ^ receipt.semantic_authority_role;
+            "semantic_authority_origin=" ^ receipt.semantic_authority_origin;
             "toolchain=" ^ log_escape receipt.toolchain;
             "toolchain_sha256=" ^ receipt.toolchain_sha256;
             "hardware=" ^ log_escape receipt.hardware;

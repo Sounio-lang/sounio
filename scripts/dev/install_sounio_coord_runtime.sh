@@ -125,6 +125,20 @@ activate_runtime() {
       16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff ]] || \
       die "installed native hook is not bound to the frozen Sounio authority: $runtime_id"
   fi
+  if grep -q '^capability=loom-runtime-authority-capsule-v1$' "$manifest"; then
+    local authority_capsule="$version_dir/policy/language-authority"
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" || \
+      die "installed runtime declares an authority capsule without the native hook: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_language_authority_policy_manifest_sha256 \
+      "$authority_capsule/tools/loom/language_authority.freeze.v1"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_language_authority_policy_source_sha256 \
+      "$authority_capsule/stdlib/coordination/loom_language_authority.sio"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_language_authority_policy_entrypoint_sha256 \
+      "$authority_capsule/tools/loom/language_authority_main.sio"
+  fi
   if grep -q '^capability=loom-truthful-lane-health-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-lane-health-runtime" && \
@@ -888,7 +902,9 @@ else
     [[ -z "${stage:-}" ]] || rm -rf "$stage"
   }
   trap cleanup_stage EXIT
-  mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal"
+  mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal" \
+    "$stage/policy/language-authority/tools/loom" \
+    "$stage/policy/language-authority/stdlib/coordination"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
@@ -899,6 +915,12 @@ else
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
   install -m 0755 "$loom_language_authority_binary" \
     "$stage/bin/sounio-loom-language-authority-runtime"
+  install -m 0644 "$loom_language_authority_freeze" \
+    "$stage/policy/language-authority/tools/loom/language_authority.freeze.v1"
+  install -m 0644 "$loom_language_authority_entrypoint" \
+    "$stage/policy/language-authority/tools/loom/language_authority_main.sio"
+  install -m 0644 "$loom_language_authority_module" \
+    "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio"
   install -m 0755 "$loom_custody_transfer_binary" \
     "$stage/bin/sounio-loom-custody-transfer-runtime"
   install -m 0755 "$loom_lane_health_binary" \
@@ -932,6 +954,15 @@ else
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   coord_runtime_sha256="$(sha256sum "$stage/bin/sounio-coord-runtime" | awk '{print $1}')"
   loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
+  loom_language_authority_policy_manifest_sha256="$(
+    sha256sum "$stage/policy/language-authority/tools/loom/language_authority.freeze.v1" | awk '{print $1}'
+  )"
+  loom_language_authority_policy_source_sha256="$(
+    sha256sum "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio" | awk '{print $1}'
+  )"
+  loom_language_authority_policy_entrypoint_sha256="$(
+    sha256sum "$stage/policy/language-authority/tools/loom/language_authority_main.sio" | awk '{print $1}'
+  )"
   loom_custody_transfer_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}'
   )"
@@ -948,6 +979,12 @@ else
     printf 'loom_language_authority_frame=9020\n'
     printf 'loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\n'
     printf 'loom_language_authority_manifest_sha256=5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e\n'
+    printf 'loom_language_authority_policy_manifest_sha256=%s\n' \
+      "$loom_language_authority_policy_manifest_sha256"
+    printf 'loom_language_authority_policy_source_sha256=%s\n' \
+      "$loom_language_authority_policy_source_sha256"
+    printf 'loom_language_authority_policy_entrypoint_sha256=%s\n' \
+      "$loom_language_authority_policy_entrypoint_sha256"
     printf 'loom_custody_transfer_language=Sounio\n'
     printf 'loom_custody_transfer_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_custody_transfer_stage=SEMANTICS_FROZEN\n'
@@ -1000,6 +1037,7 @@ else
     printf 'capability=loom-kernel-v1\n'
     printf 'capability=loom-transactional-custody-transfer-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
+    printf 'capability=loom-runtime-authority-capsule-v1\n'
     printf 'capability=loom-truthful-lane-health-v1\n'
     printf 'capability=loom-nondestructive-health-reconcile-v1\n'
     printf 'capability=loom-native-hook-binary-attestation-v1\n'

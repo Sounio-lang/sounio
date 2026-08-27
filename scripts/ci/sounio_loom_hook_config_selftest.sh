@@ -20,7 +20,7 @@ fail() {
 
 native_count() {
   local file="$1" agent="$2"
-  grep -Fc "bin/sounio-loom\\\" agent-hook --agent $agent" "$file" || true
+  grep -Fc "bin/sounio-loom-runtime\\\" agent-hook --agent $agent" "$file" || true
 }
 
 validate_no_legacy_bridge() {
@@ -61,6 +61,18 @@ run_native_roundtrip() {
   fail "Codex lifecycle/write hooks are not all native"
 [[ "$(native_count "$CLAUDE_HOOKS" claude)" -eq 6 ]] ||
   fail "Claude lifecycle/write hooks are not all native"
+[[ "$(grep -Fc 'SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT=\"$runtime_dir/policy/language-authority\"' "$CODEX_HOOKS")" -eq 5 ]] ||
+  fail "Codex hooks do not pin the frozen authority capsule to the selected runtime"
+[[ "$(grep -Fc 'SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT=\"$runtime_dir/policy/language-authority\"' "$CLAUDE_HOOKS")" -eq 6 ]] ||
+  fail "Claude hooks do not pin the frozen authority capsule to the selected runtime"
+[[ "$(grep -Fc 'readlink -f' "$CODEX_HOOKS")" -eq 5 ]] ||
+  fail "Codex hooks do not resolve the active runtime exactly once"
+[[ "$(grep -Fc 'readlink -f' "$CLAUDE_HOOKS")" -eq 6 ]] ||
+  fail "Claude hooks do not resolve the active runtime exactly once"
+[[ "$(grep -Fc 'exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT=' "$CODEX_HOOKS")" -eq 5 ]] ||
+  fail "Codex hooks do not replace the command shell with the native runtime"
+[[ "$(grep -Fc 'exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT=' "$CLAUDE_HOOKS")" -eq 6 ]] ||
+  fail "Claude hooks do not replace the command shell with the native runtime"
 validate_no_legacy_bridge "$CODEX_HOOKS" ||
   fail "Codex hook config retains a prohibited Python/Rust bridge"
 validate_no_legacy_bridge "$CLAUDE_HOOKS" ||
@@ -81,7 +93,7 @@ case "$runtime_selection" in
   shared|local) ;;
   *) fail "hook launcher selected an unknown runtime source: ${runtime_selection:-missing}" ;;
 esac
-grep -Fq 'runtime_version=2026.08.27.35' <<< "$runtime_info" ||
+grep -Fq 'runtime_version=2026.08.27.36' <<< "$runtime_info" ||
   fail "hook launcher selected the wrong runtime version"
 grep -Fq 'language=OCaml' <<< "$runtime_info" ||
   fail "hook launcher did not select the native OCaml runtime"
@@ -90,11 +102,11 @@ run_native_roundtrip codex
 run_native_roundtrip claude
 
 cp "$CODEX_HOOKS" "$TEST_ROOT/codex-sabotaged.json"
-sed -i 's#bin/sounio-loom\\" agent-hook#scripts/dev/sounio_coord_agent_hook.py\\"#' \
+sed -i 's#bin/sounio-loom-runtime\\" agent-hook#scripts/dev/sounio_coord_agent_hook.py\\"#' \
   "$TEST_ROOT/codex-sabotaged.json"
 if validate_no_legacy_bridge "$TEST_ROOT/codex-sabotaged.json"; then
   fail "causal sabotage did not trip the native-bridge rule"
 fi
 
 printf '%s\n' \
-  "sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 launcher_runtime=$runtime_selection:2026.08.27.35 local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused"
+  "sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 launcher_runtime=$runtime_selection:2026.08.27.36 hook_runtime=git-common-dir/current authority=runtime-capsule local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused"
