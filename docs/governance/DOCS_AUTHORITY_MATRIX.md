@@ -978,6 +978,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.receipts.pireus-v0-20260827 | historical | docs/research/receipts/pireus_v0_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-v01-target-profile-20260827 | historical | docs/research/receipts/pireus_v01_target_profile_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-xed-permute-import-20260827 | historical | docs/research/receipts/pireus_xed_permute_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-xor-convolution-operation-20260827 | historical | docs/research/receipts/pireus_xor_convolution_operation_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.sounio-pdf-flate-content-reader-20260827 | historical | docs/research/receipts/sounio_pdf_flate_content_reader_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.sounio-pdf-text-projection-20260827 | historical | docs/research/receipts/sounio_pdf_text_projection_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.sounio-rfc1950-rfc1951-inflater-20260827 | historical | docs/research/receipts/sounio_rfc1950_rfc1951_inflater_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
