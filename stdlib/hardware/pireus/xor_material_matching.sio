@@ -11,6 +11,15 @@ use hardware::pireus::xor_convolution_operation::{
     pireus_xor_operation_evaluate,
     pireus_xor_operation_matches_frozen_semantics,
 }
+use hardware::pireus::xed_import::{
+    pireus_xed_load, pireus_xed_parse, pireus_xed_digest_matches,
+    pireus_xed_inventory_store, pireus_xed_query_forms_by,
+    PIREUS_XED_HAS_CORPUS, PIREUS_XED_HAS_ICLASS,
+    PIREUS_XED_CORPUS_AVX512F_2026_08_23,
+    PIREUS_XED_ICLASS_VPERMI2PD, PIREUS_XED_ICLASS_VPERMPD,
+    PIREUS_XED_ICLASS_VPERMT2PD,
+}
+use ontology::query::sparql_result_count
 use crypto::sha256::{
     SHA256State,
     sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
@@ -59,8 +68,10 @@ pub struct PireusXorXedEvidence {
     pub vpermpd_forms: i64,
     pub vpermi2pd_forms: i64,
     pub vpermt2pd_forms: i64,
-    pub counts_from_frozen_receipt: bool,
+    pub frozen_receipt_counts_bound: bool,
+    pub vendor_corpus_digest_match: bool,
     pub counts_derived_from_vendor_bytes_in_current_execution: bool,
+    pub counts_match_frozen_receipt: bool,
     pub candidate_family_present: bool,
     pub selector_behavior_derived_from_form_presence: bool,
     pub selector_semantics_receipt_present: bool,
@@ -115,6 +126,8 @@ pub struct PireusXorMaterialResult {
     pub chunk_lanes: i64,
     pub chunk_count: i64,
     pub operation_parent_live_match: bool,
+    pub operation_result_digest: [i64; 8],
+    pub operation_result_digest_match: bool,
     pub operation_semantics_sha256: [i64; 8],
     pub operation_receipt_sha256: [i64; 8],
     pub operation_parent_binding_valid: bool,
@@ -150,6 +163,13 @@ pub fn pireus_xor_material_operation_receipt_hash() -> [i64; 8] {
     [
         0x9e1e416d, 0xefa4a1cf, 0xc477f063, 0x0623321e,
         0x12209a40, 0xc9f5f878, 0xb85cce40, 0xbe83d330,
+    ]
+}
+
+pub fn pireus_xor_material_operation_result_digest() -> [i64; 8] {
+    [
+        0x84edf6ba, 0xe148754e, 0xbd0e8722, 0x368e2eb0,
+        0x6095cd92, 0x9779c36d, 0xef4f3bb5, 0x000013a3,
     ]
 }
 
@@ -366,17 +386,38 @@ fn pxm_count_one_source_groups(selector: &PireusXorSelectorTable) -> i64 {
     passed
 }
 
-fn pxm_xed_evidence() -> PireusXorXedEvidence {
+fn pxm_xed_evidence(path: string) -> PireusXorXedEvidence
+    with IO, Mut, Panic, Div, Alloc {
     let frozen = pireus_xor_material_xed_frozen_content_hash()
     let envelope = pireus_xor_material_xed_current_envelope_hash()
     let receipt = pireus_xor_material_xed_current_receipt_hash()
-    let total_forms: i64 = 8
-    let vpermpd_forms: i64 = 4
-    let vpermi2pd_forms: i64 = 2
-    let vpermt2pd_forms: i64 = 2
+    var corpus = pireus_xed_load(path)
+    let vendor_corpus_digest_match = pireus_xed_digest_matches(&corpus)
+    let inventory = pireus_xed_parse(&corpus, true)
+    var store = pireus_xed_inventory_store(&inventory)
+    let all_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_CORPUS,
+        PIREUS_XED_CORPUS_AVX512F_2026_08_23)
+    let i2_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS,
+        PIREUS_XED_ICLASS_VPERMI2PD)
+    let perm_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS,
+        PIREUS_XED_ICLASS_VPERMPD)
+    let t2_forms = pireus_xed_query_forms_by(
+        &store, PIREUS_XED_HAS_ICLASS,
+        PIREUS_XED_ICLASS_VPERMT2PD)
+    let total_forms = sparql_result_count(&all_forms)
+    let vpermi2pd_forms = sparql_result_count(&i2_forms)
+    let vpermpd_forms = sparql_result_count(&perm_forms)
+    let vpermt2pd_forms = sparql_result_count(&t2_forms)
+    let counts_match_frozen_receipt = total_forms == 8 &&
+        vpermpd_forms == 4 && vpermi2pd_forms == 2 &&
+        vpermt2pd_forms == 2
     let candidate_family_present = vpermpd_forms > 0
     let valid = pxm_hash_nonzero(&frozen) &&
         pxm_hash_nonzero(&envelope) && pxm_hash_nonzero(&receipt) &&
+        vendor_corpus_digest_match && counts_match_frozen_receipt &&
         total_forms == vpermpd_forms + vpermi2pd_forms + vpermt2pd_forms &&
         candidate_family_present
     PireusXorXedEvidence {
@@ -387,8 +428,10 @@ fn pxm_xed_evidence() -> PireusXorXedEvidence {
         vpermpd_forms: vpermpd_forms,
         vpermi2pd_forms: vpermi2pd_forms,
         vpermt2pd_forms: vpermt2pd_forms,
-        counts_from_frozen_receipt: true,
-        counts_derived_from_vendor_bytes_in_current_execution: false,
+        frozen_receipt_counts_bound: true,
+        vendor_corpus_digest_match: vendor_corpus_digest_match,
+        counts_derived_from_vendor_bytes_in_current_execution: true,
+        counts_match_frozen_receipt: counts_match_frozen_receipt,
         candidate_family_present: candidate_family_present,
         selector_behavior_derived_from_form_presence: false,
         selector_semantics_receipt_present: false,
@@ -657,9 +700,11 @@ fn pxm_digest_evidence(xed: &PireusXorXedEvidence,
     state = pxm_digest_add_i64(state, xed.vpermpd_forms)
     state = pxm_digest_add_i64(state, xed.vpermi2pd_forms)
     state = pxm_digest_add_i64(state, xed.vpermt2pd_forms)
-    state = pxm_digest_add_bool(state, xed.counts_from_frozen_receipt)
+    state = pxm_digest_add_bool(state, xed.frozen_receipt_counts_bound)
+    state = pxm_digest_add_bool(state, xed.vendor_corpus_digest_match)
     state = pxm_digest_add_bool(
         state, xed.counts_derived_from_vendor_bytes_in_current_execution)
+    state = pxm_digest_add_bool(state, xed.counts_match_frozen_receipt)
     state = pxm_digest_add_bool(state, xed.candidate_family_present)
     state = pxm_digest_add_bool(
         state, xed.selector_behavior_derived_from_form_presence)
@@ -721,21 +766,26 @@ fn pxm_digest_negatives(neg: &PireusXorMaterialNegatives)
     pxm_digest_finish(state)
 }
 
-pub fn pireus_xor_material_evaluate() -> PireusXorMaterialResult
-    with Mut, Panic, Div {
+pub fn pireus_xor_material_evaluate(xed_path: string)
+    -> PireusXorMaterialResult with IO, Mut, Panic, Div, Alloc {
     let operation = pireus_xor_operation_evaluate()
     let operation_live_match =
         pireus_xor_operation_matches_frozen_semantics(&operation)
+    let expected_operation_result =
+        pireus_xor_material_operation_result_digest()
+    let operation_result_digest_match = pxm_hash_equal(
+        &operation.result_digest.words, &expected_operation_result)
     let operation_hash = pireus_xor_material_operation_semantics_hash()
     let operation_receipt = pireus_xor_material_operation_receipt_hash()
     let parent_binding_valid = operation_live_match &&
+        operation_result_digest_match &&
         pxm_hash_nonzero(&operation_hash) &&
         pxm_hash_nonzero(&operation_receipt)
     let selector = pxm_build_selector()
     let reconstructed_cells = pxm_count_reconstructed(&selector)
     let one_source_groups = pxm_count_one_source_groups(&selector)
     let one_source = one_source_groups == PIREUS_XOR_MATERIAL_GROUP_COUNT
-    let xed = pxm_xed_evidence()
+    let xed = pxm_xed_evidence(xed_path)
     let targets = pxm_targets()
     let negatives = pxm_exercise_negatives()
     let shape_valid = pxm_shape_valid(
@@ -778,8 +828,10 @@ pub fn pireus_xor_material_evaluate() -> PireusXorMaterialResult
     else if selector.count != PIREUS_XOR_MATERIAL_CELL_COUNT ||
         reconstructed_cells != selector.count || !one_source {
         error = PIREUS_XOR_MATERIAL_ERR_SELECTOR
-    } else if !xed.valid || !xed.counts_from_frozen_receipt ||
-        xed.counts_derived_from_vendor_bytes_in_current_execution ||
+    } else if !xed.valid || !xed.frozen_receipt_counts_bound ||
+        !xed.vendor_corpus_digest_match ||
+        !xed.counts_derived_from_vendor_bytes_in_current_execution ||
+        !xed.counts_match_frozen_receipt ||
         xed.selector_behavior_derived_from_form_presence ||
         !claim_boundary_valid {
         error = PIREUS_XOR_MATERIAL_ERR_XED_EVIDENCE
@@ -818,6 +870,8 @@ pub fn pireus_xor_material_evaluate() -> PireusXorMaterialResult
         chunk_lanes: PIREUS_XOR_MATERIAL_CHUNK_LANES,
         chunk_count: PIREUS_XOR_MATERIAL_CHUNK_COUNT,
         operation_parent_live_match: operation_live_match,
+        operation_result_digest: operation.result_digest.words,
+        operation_result_digest_match: operation_result_digest_match,
         operation_semantics_sha256: operation_hash,
         operation_receipt_sha256: operation_receipt,
         operation_parent_binding_valid: parent_binding_valid,
