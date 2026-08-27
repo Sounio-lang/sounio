@@ -1,0 +1,522 @@
+//! Rollback witness for Loom epoch handoffs through an external Merkle log.
+//!
+//! The OCaml host verifies the operator signature, recomputes the RFC6962-style
+//! Merkle roots from materialized leaves, verifies the active handoff as the
+//! latest leaf, and verifies a fresh 3-of-4 Witness Mesh v1 checkpoint before
+//! presenting frame 9016. This layer joins those summaries and keeps them
+//! linear. It does not claim availability, trusted time, freeze detection,
+//! consensus, or safety with two dishonest witnesses.
+
+pub effect LoomWitnessEpochTransparencyHostTrust {}
+
+struct EpochTransparencyDigest256 {
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+}
+
+linear struct VerifiedEpochTransparencyHandoff {
+    from_epoch: i64,
+    to_epoch: i64,
+    handoff: EpochTransparencyDigest256,
+    previous_handoff: EpochTransparencyDigest256,
+}
+
+linear struct VerifiedEpochTransparencyCheckpoint {
+    tree_size: i64,
+    tree_root: EpochTransparencyDigest256,
+    anchor_sequence: i64,
+    journal_event_count: i64,
+    journal_head: EpochTransparencyDigest256,
+    certificate: EpochTransparencyDigest256,
+    membership: EpochTransparencyDigest256,
+    operator_key: EpochTransparencyDigest256,
+}
+
+linear struct VerifiedEpochTransparency {
+    from_epoch: i64,
+    to_epoch: i64,
+    tree_size: i64,
+    tree_root: EpochTransparencyDigest256,
+    handoff: EpochTransparencyDigest256,
+    journal_head: EpochTransparencyDigest256,
+    certificate: EpochTransparencyDigest256,
+}
+
+linear struct HostEpochTransparencyReceipt {
+    from_epoch: i64,
+    to_epoch: i64,
+    tree_size: i64,
+    tree_root: EpochTransparencyDigest256,
+    handoff: EpochTransparencyDigest256,
+    journal_head: EpochTransparencyDigest256,
+    certificate: EpochTransparencyDigest256,
+}
+
+pub fn admit_epoch_transparency_digest256(
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+) -> EpochTransparencyDigest256 {
+    EpochTransparencyDigest256 {
+        limb0: limb0,
+        limb1: limb1,
+        limb2: limb2,
+        limb3: limb3,
+        limb4: limb4,
+        limb5: limb5,
+        limb6: limb6,
+        limb7: limb7,
+    }
+}
+
+fn epoch_transparency_digest_is_canonical(
+    digest: EpochTransparencyDigest256,
+) -> bool {
+    digest.limb0 >= 0 && digest.limb0 <= 4294967295 &&
+    digest.limb1 >= 0 && digest.limb1 <= 4294967295 &&
+    digest.limb2 >= 0 && digest.limb2 <= 4294967295 &&
+    digest.limb3 >= 0 && digest.limb3 <= 4294967295 &&
+    digest.limb4 >= 0 && digest.limb4 <= 4294967295 &&
+    digest.limb5 >= 0 && digest.limb5 <= 4294967295 &&
+    digest.limb6 >= 0 && digest.limb6 <= 4294967295 &&
+    digest.limb7 >= 0 && digest.limb7 <= 4294967295
+}
+
+fn epoch_transparency_digest_is_zero(
+    digest: EpochTransparencyDigest256,
+) -> bool {
+    digest.limb0 == 0 && digest.limb1 == 0 && digest.limb2 == 0 &&
+    digest.limb3 == 0 && digest.limb4 == 0 && digest.limb5 == 0 &&
+    digest.limb6 == 0 && digest.limb7 == 0
+}
+
+fn epoch_transparency_digest_is_nonzero(
+    digest: EpochTransparencyDigest256,
+) -> bool {
+    epoch_transparency_digest_is_canonical(digest) &&
+    !epoch_transparency_digest_is_zero(digest)
+}
+
+fn epoch_transparency_digest_equal(
+    left: EpochTransparencyDigest256,
+    right: EpochTransparencyDigest256,
+) -> bool {
+    left.limb0 == right.limb0 && left.limb1 == right.limb1 &&
+    left.limb2 == right.limb2 && left.limb3 == right.limb3 &&
+    left.limb4 == right.limb4 && left.limb5 == right.limb5 &&
+    left.limb6 == right.limb6 && left.limb7 == right.limb7
+}
+
+fn epoch_transparency_handoff_is_verified(
+    handoff_verified: i64,
+    from_epoch: i64,
+    to_epoch: i64,
+    handoff: EpochTransparencyDigest256,
+    previous_handoff: EpochTransparencyDigest256,
+) -> bool {
+    handoff_verified == 1 &&
+    from_epoch >= 1 && from_epoch <= 64 &&
+    to_epoch == from_epoch + 1 &&
+    epoch_transparency_digest_is_nonzero(handoff) &&
+    epoch_transparency_digest_is_canonical(previous_handoff) &&
+    if from_epoch == 1 {
+        epoch_transparency_digest_is_zero(previous_handoff)
+    } else {
+        epoch_transparency_digest_is_nonzero(previous_handoff)
+    }
+}
+
+fn epoch_transparency_log_is_reachable_and_signed(
+    log_reachable: i64,
+    operator_signature_verified: i64,
+) -> bool {
+    log_reachable == 1 && operator_signature_verified == 1
+}
+
+fn epoch_transparency_quorum_is_verified(
+    quorum_verified: i64,
+    required_quorum: i64,
+    member_count: i64,
+    anchor_sequence: i64,
+    journal_event_count: i64,
+    journal_head: EpochTransparencyDigest256,
+    certificate: EpochTransparencyDigest256,
+    membership: EpochTransparencyDigest256,
+) -> bool {
+    quorum_verified == 1 && required_quorum == 3 && member_count == 4 &&
+    anchor_sequence > 0 && journal_event_count > 0 &&
+    epoch_transparency_digest_is_nonzero(journal_head) &&
+    epoch_transparency_digest_is_nonzero(certificate) &&
+    epoch_transparency_digest_is_nonzero(membership)
+}
+
+fn epoch_transparency_operator_is_independent(
+    operator_token: i64,
+    local_principal_token: i64,
+    member1_token: i64,
+    member2_token: i64,
+    member3_token: i64,
+    member4_token: i64,
+    operator_key: EpochTransparencyDigest256,
+) -> bool {
+    operator_token > 0 && local_principal_token > 0 &&
+    member1_token > 0 && member2_token > 0 &&
+    member3_token > 0 && member4_token > 0 &&
+    operator_token != local_principal_token &&
+    operator_token != member1_token && operator_token != member2_token &&
+    operator_token != member3_token && operator_token != member4_token &&
+    member1_token != member2_token && member1_token != member3_token &&
+    member1_token != member4_token && member2_token != member3_token &&
+    member2_token != member4_token && member3_token != member4_token &&
+    epoch_transparency_digest_is_nonzero(operator_key)
+}
+
+fn epoch_transparency_append_is_monotonic(
+    previous_tree_size: i64,
+    current_tree_size: i64,
+    active_leaf_index: i64,
+    previous_tree_root: EpochTransparencyDigest256,
+    current_tree_root: EpochTransparencyDigest256,
+) -> bool {
+    previous_tree_size >= 0 && previous_tree_size < 64 &&
+    current_tree_size == previous_tree_size + 1 &&
+    active_leaf_index == current_tree_size &&
+    epoch_transparency_digest_is_nonzero(previous_tree_root) &&
+    epoch_transparency_digest_is_nonzero(current_tree_root) &&
+    !epoch_transparency_digest_equal(previous_tree_root, current_tree_root)
+}
+
+fn epoch_transparency_proofs_are_verified(
+    inclusion_verified: i64,
+    consistency_verified: i64,
+    roots_recomputed: i64,
+    previous_tree_root: EpochTransparencyDigest256,
+    recomputed_previous_tree_root: EpochTransparencyDigest256,
+    current_tree_root: EpochTransparencyDigest256,
+    recomputed_current_tree_root: EpochTransparencyDigest256,
+) -> bool {
+    inclusion_verified == 1 && consistency_verified == 1 &&
+    roots_recomputed == 1 &&
+    epoch_transparency_digest_equal(
+        previous_tree_root, recomputed_previous_tree_root,
+    ) &&
+    epoch_transparency_digest_equal(
+        current_tree_root, recomputed_current_tree_root,
+    )
+}
+
+fn epoch_transparency_leaf_binds_handoff(
+    order_verified: i64,
+    handoff: EpochTransparencyDigest256,
+    leaf_handoff: EpochTransparencyDigest256,
+    previous_handoff: EpochTransparencyDigest256,
+    leaf_previous_handoff: EpochTransparencyDigest256,
+) -> bool {
+    order_verified == 1 &&
+    epoch_transparency_digest_equal(handoff, leaf_handoff) &&
+    epoch_transparency_digest_equal(
+        previous_handoff, leaf_previous_handoff,
+    )
+}
+
+fn epoch_transparency_latest_epoch_matches(
+    latest_verified: i64,
+    to_epoch: i64,
+    current_tree_size: i64,
+    active_leaf_index: i64,
+    journal_event_count: i64,
+) -> bool {
+    latest_verified == 1 &&
+    to_epoch == current_tree_size + 1 &&
+    active_leaf_index == current_tree_size &&
+    journal_event_count == current_tree_size
+}
+
+pub fn host_epoch_transparency_frame_accepts(
+    handoff_verified: i64,
+    log_reachable: i64,
+    operator_signature_verified: i64,
+    inclusion_verified: i64,
+    consistency_verified: i64,
+    roots_recomputed: i64,
+    order_verified: i64,
+    latest_verified: i64,
+    quorum_verified: i64,
+    required_quorum: i64,
+    member_count: i64,
+    from_epoch: i64,
+    to_epoch: i64,
+    previous_tree_size: i64,
+    current_tree_size: i64,
+    active_leaf_index: i64,
+    anchor_sequence: i64,
+    journal_event_count: i64,
+    operator_token: i64,
+    local_principal_token: i64,
+    member1_token: i64,
+    member2_token: i64,
+    member3_token: i64,
+    member4_token: i64,
+    handoff: EpochTransparencyDigest256,
+    leaf_handoff: EpochTransparencyDigest256,
+    previous_handoff: EpochTransparencyDigest256,
+    leaf_previous_handoff: EpochTransparencyDigest256,
+    previous_tree_root: EpochTransparencyDigest256,
+    recomputed_previous_tree_root: EpochTransparencyDigest256,
+    current_tree_root: EpochTransparencyDigest256,
+    recomputed_current_tree_root: EpochTransparencyDigest256,
+    journal_head: EpochTransparencyDigest256,
+    certificate: EpochTransparencyDigest256,
+    membership: EpochTransparencyDigest256,
+    operator_key: EpochTransparencyDigest256,
+) -> bool with LoomWitnessEpochTransparencyHostTrust {
+    epoch_transparency_handoff_is_verified(
+        handoff_verified, from_epoch, to_epoch, handoff, previous_handoff,
+    ) &&
+    epoch_transparency_log_is_reachable_and_signed(
+        log_reachable, operator_signature_verified,
+    ) &&
+    epoch_transparency_quorum_is_verified(
+        quorum_verified, required_quorum, member_count,
+        anchor_sequence, journal_event_count, journal_head,
+        certificate, membership,
+    ) &&
+    epoch_transparency_operator_is_independent(
+        operator_token, local_principal_token,
+        member1_token, member2_token, member3_token, member4_token,
+        operator_key,
+    ) &&
+    epoch_transparency_append_is_monotonic(
+        previous_tree_size, current_tree_size, active_leaf_index,
+        previous_tree_root, current_tree_root,
+    ) &&
+    epoch_transparency_proofs_are_verified(
+        inclusion_verified, consistency_verified, roots_recomputed,
+        previous_tree_root, recomputed_previous_tree_root,
+        current_tree_root, recomputed_current_tree_root,
+    ) &&
+    epoch_transparency_leaf_binds_handoff(
+        order_verified, handoff, leaf_handoff,
+        previous_handoff, leaf_previous_handoff,
+    ) &&
+    epoch_transparency_latest_epoch_matches(
+        latest_verified, to_epoch, current_tree_size,
+        active_leaf_index, journal_event_count,
+    )
+}
+
+pub fn verify_epoch_transparency_handoff(
+    handoff_verified: i64,
+    from_epoch: i64,
+    to_epoch: i64,
+    handoff: EpochTransparencyDigest256,
+    previous_handoff: EpochTransparencyDigest256,
+) -> Option<VerifiedEpochTransparencyHandoff>
+    with LoomWitnessEpochTransparencyHostTrust {
+    if epoch_transparency_handoff_is_verified(
+        handoff_verified, from_epoch, to_epoch, handoff, previous_handoff,
+    ) {
+        Some(VerifiedEpochTransparencyHandoff {
+            from_epoch: from_epoch,
+            to_epoch: to_epoch,
+            handoff: handoff,
+            previous_handoff: previous_handoff,
+        })
+    } else {
+        None
+    }
+}
+
+pub fn admit_verified_epoch_transparency_handoff(
+    handoff_verified: i64,
+    from_epoch: i64,
+    to_epoch: i64,
+    handoff: EpochTransparencyDigest256,
+    previous_handoff: EpochTransparencyDigest256,
+) -> VerifiedEpochTransparencyHandoff
+    with LoomWitnessEpochTransparencyHostTrust, Panic {
+    if !epoch_transparency_handoff_is_verified(
+        handoff_verified, from_epoch, to_epoch, handoff, previous_handoff,
+    ) {
+        panic("epoch transparency handoff summary is not verified")
+    }
+    VerifiedEpochTransparencyHandoff {
+        from_epoch: from_epoch,
+        to_epoch: to_epoch,
+        handoff: handoff,
+        previous_handoff: previous_handoff,
+    }
+}
+
+pub fn verify_epoch_transparency_checkpoint(
+    log_reachable: i64,
+    operator_signature_verified: i64,
+    quorum_verified: i64,
+    required_quorum: i64,
+    member_count: i64,
+    tree_size: i64,
+    tree_root: EpochTransparencyDigest256,
+    anchor_sequence: i64,
+    journal_event_count: i64,
+    journal_head: EpochTransparencyDigest256,
+    certificate: EpochTransparencyDigest256,
+    membership: EpochTransparencyDigest256,
+    operator_key: EpochTransparencyDigest256,
+) -> Option<VerifiedEpochTransparencyCheckpoint>
+    with LoomWitnessEpochTransparencyHostTrust {
+    if epoch_transparency_log_is_reachable_and_signed(
+        log_reachable, operator_signature_verified,
+    ) && epoch_transparency_quorum_is_verified(
+        quorum_verified, required_quorum, member_count,
+        anchor_sequence, journal_event_count, journal_head,
+        certificate, membership,
+    ) && tree_size > 0 && epoch_transparency_digest_is_nonzero(tree_root) &&
+       epoch_transparency_digest_is_nonzero(operator_key) {
+        Some(VerifiedEpochTransparencyCheckpoint {
+            tree_size: tree_size,
+            tree_root: tree_root,
+            anchor_sequence: anchor_sequence,
+            journal_event_count: journal_event_count,
+            journal_head: journal_head,
+            certificate: certificate,
+            membership: membership,
+            operator_key: operator_key,
+        })
+    } else {
+        None
+    }
+}
+
+pub fn admit_verified_epoch_transparency_checkpoint(
+    log_reachable: i64,
+    operator_signature_verified: i64,
+    quorum_verified: i64,
+    required_quorum: i64,
+    member_count: i64,
+    tree_size: i64,
+    tree_root: EpochTransparencyDigest256,
+    anchor_sequence: i64,
+    journal_event_count: i64,
+    journal_head: EpochTransparencyDigest256,
+    certificate: EpochTransparencyDigest256,
+    membership: EpochTransparencyDigest256,
+    operator_key: EpochTransparencyDigest256,
+) -> VerifiedEpochTransparencyCheckpoint
+    with LoomWitnessEpochTransparencyHostTrust, Panic {
+    if !epoch_transparency_log_is_reachable_and_signed(
+        log_reachable, operator_signature_verified,
+    ) || !epoch_transparency_quorum_is_verified(
+        quorum_verified, required_quorum, member_count,
+        anchor_sequence, journal_event_count, journal_head,
+        certificate, membership,
+    ) || tree_size <= 0 || !epoch_transparency_digest_is_nonzero(tree_root) ||
+       !epoch_transparency_digest_is_nonzero(operator_key) {
+        panic("epoch transparency checkpoint summary is not verified")
+    }
+    VerifiedEpochTransparencyCheckpoint {
+        tree_size: tree_size,
+        tree_root: tree_root,
+        anchor_sequence: anchor_sequence,
+        journal_event_count: journal_event_count,
+        journal_head: journal_head,
+        certificate: certificate,
+        membership: membership,
+        operator_key: operator_key,
+    }
+}
+
+pub fn join_epoch_transparency(
+    handoff: VerifiedEpochTransparencyHandoff,
+    checkpoint: VerifiedEpochTransparencyCheckpoint,
+    inclusion_verified: i64,
+    consistency_verified: i64,
+    roots_recomputed: i64,
+    order_verified: i64,
+    latest_verified: i64,
+    previous_tree_size: i64,
+    active_leaf_index: i64,
+    leaf_handoff: EpochTransparencyDigest256,
+    leaf_previous_handoff: EpochTransparencyDigest256,
+    previous_tree_root: EpochTransparencyDigest256,
+    recomputed_previous_tree_root: EpochTransparencyDigest256,
+    recomputed_current_tree_root: EpochTransparencyDigest256,
+) -> Option<VerifiedEpochTransparency> {
+    let VerifiedEpochTransparencyHandoff {
+        from_epoch, to_epoch, handoff, previous_handoff,
+    } = handoff
+    let VerifiedEpochTransparencyCheckpoint {
+        tree_size, tree_root, anchor_sequence: _, journal_event_count,
+        journal_head, certificate, membership: _, operator_key: _,
+    } = checkpoint
+    if epoch_transparency_append_is_monotonic(
+        previous_tree_size, tree_size, active_leaf_index,
+        previous_tree_root, tree_root,
+    ) && epoch_transparency_proofs_are_verified(
+        inclusion_verified, consistency_verified, roots_recomputed,
+        previous_tree_root, recomputed_previous_tree_root,
+        tree_root, recomputed_current_tree_root,
+    ) && epoch_transparency_leaf_binds_handoff(
+        order_verified, handoff, leaf_handoff,
+        previous_handoff, leaf_previous_handoff,
+    ) && epoch_transparency_latest_epoch_matches(
+        latest_verified, to_epoch, tree_size,
+        active_leaf_index, journal_event_count,
+    ) {
+        Some(VerifiedEpochTransparency {
+            from_epoch: from_epoch,
+            to_epoch: to_epoch,
+            tree_size: tree_size,
+            tree_root: tree_root,
+            handoff: handoff,
+            journal_head: journal_head,
+            certificate: certificate,
+        })
+    } else {
+        None
+    }
+}
+
+fn host_export_epoch_transparency(
+    verified: VerifiedEpochTransparency,
+) -> HostEpochTransparencyReceipt with LoomWitnessEpochTransparencyHostTrust {
+    let VerifiedEpochTransparency {
+        from_epoch, to_epoch, tree_size, tree_root, handoff,
+        journal_head, certificate,
+    } = verified
+    HostEpochTransparencyReceipt {
+        from_epoch: from_epoch,
+        to_epoch: to_epoch,
+        tree_size: tree_size,
+        tree_root: tree_root,
+        handoff: handoff,
+        journal_head: journal_head,
+        certificate: certificate,
+    }
+}
+
+pub fn consume_verified_epoch_transparency(
+    verified: VerifiedEpochTransparency,
+) -> HostEpochTransparencyReceipt with LoomWitnessEpochTransparencyHostTrust {
+    host_export_epoch_transparency(verified)
+}
+
+pub fn close_host_epoch_transparency_receipt(
+    receipt: HostEpochTransparencyReceipt,
+) -> i64 {
+    let HostEpochTransparencyReceipt {
+        from_epoch: _, to_epoch: _, tree_size, tree_root: _, handoff: _,
+        journal_head: _, certificate: _,
+    } = receipt
+    tree_size
+}

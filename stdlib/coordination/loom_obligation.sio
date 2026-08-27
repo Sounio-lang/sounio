@@ -1,0 +1,475 @@
+//! Linear durable-work algebra for Sounio Loom obligations.
+//!
+//! The OCaml supervisor verifies and replays the append-only journal before it
+//! enters `LoomObligationHostTrust`.  This module owns the nominal state
+//! transitions and the evidence-binding rule used by native frame 9007.
+
+pub effect LoomObligationHostTrust {}
+
+struct ObligationDigest256 {
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+}
+
+linear struct LoomObligationHostSeal {
+    obligation_token: i64,
+    message_digest: ObligationDigest256,
+    next_receipt_id: i64,
+}
+
+linear struct HostObligationTransitionReceipt {
+    receipt_id: i64,
+    transition_kind: i64,
+    previous_state: i64,
+    next_state: i64,
+    obligation_token: i64,
+    actor_token: i64,
+    generation_token: i64,
+    claim_token: i64,
+    lease_deadline: i64,
+    message_digest: ObligationDigest256,
+    outcome_digest: ObligationDigest256,
+    evidence_digest: ObligationDigest256,
+}
+
+linear struct DurableObligation {
+    obligation_token: i64,
+    message_digest: ObligationDigest256,
+}
+
+linear struct ConsumedObligation {
+    obligation_token: i64,
+    actor_token: i64,
+    generation_token: i64,
+    lease_deadline: i64,
+    message_digest: ObligationDigest256,
+}
+
+linear struct ExclusiveWorkClaim {
+    obligation_token: i64,
+    actor_token: i64,
+    generation_token: i64,
+    claim_token: i64,
+    lease_deadline: i64,
+    message_digest: ObligationDigest256,
+}
+
+linear struct InterruptedObligation {
+    obligation_token: i64,
+    actor_token: i64,
+    generation_token: i64,
+    predecessor_claim_token: i64,
+    message_digest: ObligationDigest256,
+}
+
+linear struct RecoverableObligation {
+    obligation_token: i64,
+    actor_token: i64,
+    generation_token: i64,
+    predecessor_claim_token: i64,
+    message_digest: ObligationDigest256,
+}
+
+linear struct CompletedObligation {
+    obligation_token: i64,
+    actor_token: i64,
+    generation_token: i64,
+    claim_token: i64,
+    message_digest: ObligationDigest256,
+    outcome_digest: ObligationDigest256,
+    evidence_digest: ObligationDigest256,
+}
+
+pub fn admit_obligation_digest256(
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+) -> ObligationDigest256 {
+    ObligationDigest256 {
+        limb0: limb0,
+        limb1: limb1,
+        limb2: limb2,
+        limb3: limb3,
+        limb4: limb4,
+        limb5: limb5,
+        limb6: limb6,
+        limb7: limb7,
+    }
+}
+
+fn obligation_digest_is_canonical(digest: ObligationDigest256) -> bool {
+    digest.limb0 >= 0 && digest.limb0 <= 4294967295 &&
+    digest.limb1 >= 0 && digest.limb1 <= 4294967295 &&
+    digest.limb2 >= 0 && digest.limb2 <= 4294967295 &&
+    digest.limb3 >= 0 && digest.limb3 <= 4294967295 &&
+    digest.limb4 >= 0 && digest.limb4 <= 4294967295 &&
+    digest.limb5 >= 0 && digest.limb5 <= 4294967295 &&
+    digest.limb6 >= 0 && digest.limb6 <= 4294967295 &&
+    digest.limb7 >= 0 && digest.limb7 <= 4294967295
+}
+
+fn obligation_digest_is_nonzero(digest: ObligationDigest256) -> bool {
+    digest.limb0 != 0 || digest.limb1 != 0 || digest.limb2 != 0 ||
+    digest.limb3 != 0 || digest.limb4 != 0 || digest.limb5 != 0 ||
+    digest.limb6 != 0 || digest.limb7 != 0
+}
+
+fn obligation_digest_is_zero(digest: ObligationDigest256) -> bool {
+    !obligation_digest_is_nonzero(digest)
+}
+
+fn completion_evidence_is_bound(
+    outcome_digest: ObligationDigest256,
+    evidence_digest: ObligationDigest256,
+) -> bool {
+    obligation_digest_is_canonical(outcome_digest) &&
+    obligation_digest_is_canonical(evidence_digest) &&
+    obligation_digest_is_nonzero(outcome_digest) &&
+    obligation_digest_is_nonzero(evidence_digest) &&
+    !obligation_digest_equal(outcome_digest, evidence_digest)
+}
+
+fn open_obligation_host_bridge(
+    obligation_token: i64,
+    message_digest: ObligationDigest256,
+) -> LoomObligationHostSeal with LoomObligationHostTrust, Panic {
+    if obligation_token <= 0 || !obligation_digest_is_canonical(message_digest) ||
+        !obligation_digest_is_nonzero(message_digest) {
+        panic("obligation host identity is not canonical")
+    }
+    LoomObligationHostSeal {
+        obligation_token: obligation_token,
+        message_digest: message_digest,
+        next_receipt_id: 1,
+    }
+}
+
+fn transition_shape_is_canonical(
+    transition_kind: i64,
+    previous_state: i64,
+    next_state: i64,
+    actor_token: i64,
+    generation_token: i64,
+    claim_token: i64,
+    lease_deadline: i64,
+    outcome_digest: ObligationDigest256,
+    evidence_digest: ObligationDigest256,
+) -> bool {
+    let empty_result = obligation_digest_is_zero(outcome_digest) &&
+        obligation_digest_is_zero(evidence_digest)
+    (transition_kind == 1 && previous_state == 0 && next_state == 1 &&
+        actor_token == 0 && generation_token == 0 && claim_token == 0 &&
+        lease_deadline == 0 && empty_result) ||
+    (transition_kind == 2 && previous_state == 1 && next_state == 2 &&
+        actor_token > 0 && generation_token > 0 && claim_token == 0 &&
+        lease_deadline > 0 && empty_result) ||
+    (transition_kind == 3 && (previous_state == 2 || previous_state == 5) &&
+        next_state == 3 && actor_token > 0 && generation_token > 0 &&
+        claim_token > 0 && lease_deadline > 0 && empty_result) ||
+    (transition_kind == 4 && previous_state == 3 && next_state == 3 &&
+        actor_token > 0 && generation_token > 0 && claim_token > 0 &&
+        lease_deadline > 0 && empty_result) ||
+    (transition_kind == 5 && (previous_state == 2 || previous_state == 3) &&
+        next_state == 4 && actor_token > 0 && generation_token > 0 &&
+        ((previous_state == 2 && claim_token == 0) ||
+         (previous_state == 3 && claim_token > 0)) &&
+        lease_deadline > 0 && empty_result) ||
+    (transition_kind == 6 && previous_state == 4 && next_state == 5 &&
+        actor_token > 0 && generation_token > 0 && claim_token >= 0 &&
+        lease_deadline == 0 && empty_result) ||
+    (transition_kind == 7 && previous_state == 3 && next_state == 6 &&
+        actor_token > 0 && generation_token > 0 && claim_token > 0 &&
+        lease_deadline > 0 &&
+        completion_evidence_is_bound(outcome_digest, evidence_digest))
+}
+
+fn admit_host_obligation_transition(
+    seal: LoomObligationHostSeal,
+    receipt_transition_kind: i64,
+    receipt_previous_state: i64,
+    receipt_next_state: i64,
+    receipt_obligation_token: i64,
+    receipt_actor_token: i64,
+    receipt_generation_token: i64,
+    receipt_claim_token: i64,
+    receipt_lease_deadline: i64,
+    receipt_message_digest: ObligationDigest256,
+    receipt_outcome_digest: ObligationDigest256,
+    receipt_evidence_digest: ObligationDigest256,
+) -> (LoomObligationHostSeal, HostObligationTransitionReceipt) with LoomObligationHostTrust, Panic {
+    let LoomObligationHostSeal {
+        obligation_token,
+        message_digest,
+        next_receipt_id,
+    } = seal
+    let identity_matches = receipt_obligation_token == obligation_token &&
+        obligation_digest_equal(receipt_message_digest, message_digest)
+    if !identity_matches || !transition_shape_is_canonical(
+        receipt_transition_kind, receipt_previous_state, receipt_next_state,
+        receipt_actor_token, receipt_generation_token, receipt_claim_token,
+        receipt_lease_deadline, receipt_outcome_digest, receipt_evidence_digest,
+    ) {
+        panic("host obligation transition is not canonical")
+    }
+    let next_seal = LoomObligationHostSeal {
+        obligation_token: obligation_token,
+        message_digest: message_digest,
+        next_receipt_id: next_receipt_id + 1,
+    }
+    let receipt = HostObligationTransitionReceipt {
+        receipt_id: next_receipt_id,
+        transition_kind: receipt_transition_kind,
+        previous_state: receipt_previous_state,
+        next_state: receipt_next_state,
+        obligation_token: receipt_obligation_token,
+        actor_token: receipt_actor_token,
+        generation_token: receipt_generation_token,
+        claim_token: receipt_claim_token,
+        lease_deadline: receipt_lease_deadline,
+        message_digest: receipt_message_digest,
+        outcome_digest: receipt_outcome_digest,
+        evidence_digest: receipt_evidence_digest,
+    }
+    (next_seal, receipt)
+}
+
+fn close_obligation_host_bridge(seal: LoomObligationHostSeal) with Panic {
+    let LoomObligationHostSeal {
+        obligation_token,
+        message_digest,
+        next_receipt_id,
+    } = seal
+    if obligation_token <= 0 || next_receipt_id <= 1 ||
+        !obligation_digest_is_nonzero(message_digest) {
+        panic("obligation host bridge closed without an admitted transition")
+    }
+}
+
+fn obligation_digest_equal(
+    left: ObligationDigest256,
+    right: ObligationDigest256,
+) -> bool {
+    left.limb0 == right.limb0 && left.limb1 == right.limb1 &&
+    left.limb2 == right.limb2 && left.limb3 == right.limb3 &&
+    left.limb4 == right.limb4 && left.limb5 == right.limb5 &&
+    left.limb6 == right.limb6 && left.limb7 == right.limb7
+}
+
+pub fn import_durable_obligation(
+    receipt: HostObligationTransitionReceipt,
+) -> Option<DurableObligation> {
+    let HostObligationTransitionReceipt {
+        receipt_id: _, transition_kind, previous_state, next_state,
+        obligation_token, actor_token: _, generation_token: _, claim_token: _,
+        lease_deadline: _, message_digest, outcome_digest: _, evidence_digest: _,
+    } = receipt
+    if transition_kind != 1 || previous_state != 0 || next_state != 1 {
+        return None
+    }
+    Some(DurableObligation {
+        obligation_token: obligation_token,
+        message_digest: message_digest,
+    })
+}
+
+pub fn consume_durable_obligation(
+    durable: DurableObligation,
+    actor_token: i64,
+    generation_token: i64,
+    lease_deadline: i64,
+) -> Option<ConsumedObligation> {
+    let DurableObligation { obligation_token, message_digest } = durable
+    if actor_token <= 0 || generation_token <= 0 || lease_deadline <= 0 {
+        return None
+    }
+    Some(ConsumedObligation {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        lease_deadline: lease_deadline,
+        message_digest: message_digest,
+    })
+}
+
+pub fn claim_consumed_obligation(
+    consumed: ConsumedObligation,
+    claim_token: i64,
+    lease_deadline: i64,
+) -> Option<ExclusiveWorkClaim> {
+    let ConsumedObligation {
+        obligation_token, actor_token, generation_token, lease_deadline: _,
+        message_digest,
+    } = consumed
+    if claim_token <= 0 || lease_deadline <= 0 { return None }
+    Some(ExclusiveWorkClaim {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        claim_token: claim_token,
+        lease_deadline: lease_deadline,
+        message_digest: message_digest,
+    })
+}
+
+pub fn interrupt_consumed_obligation(
+    consumed: ConsumedObligation,
+) -> InterruptedObligation {
+    let ConsumedObligation {
+        obligation_token, actor_token, generation_token, lease_deadline: _,
+        message_digest,
+    } = consumed
+    InterruptedObligation {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        predecessor_claim_token: 0,
+        message_digest: message_digest,
+    }
+}
+
+pub fn renew_work_claim(
+    claim: ExclusiveWorkClaim,
+    next_lease_deadline: i64,
+) -> Option<ExclusiveWorkClaim> {
+    let ExclusiveWorkClaim {
+        obligation_token, actor_token, generation_token, claim_token,
+        lease_deadline, message_digest,
+    } = claim
+    if next_lease_deadline <= lease_deadline { return None }
+    Some(ExclusiveWorkClaim {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        claim_token: claim_token,
+        lease_deadline: next_lease_deadline,
+        message_digest: message_digest,
+    })
+}
+
+pub fn interrupt_work_claim(
+    claim: ExclusiveWorkClaim,
+) -> InterruptedObligation {
+    let ExclusiveWorkClaim {
+        obligation_token, actor_token, generation_token, claim_token,
+        lease_deadline: _, message_digest,
+    } = claim
+    InterruptedObligation {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        predecessor_claim_token: claim_token,
+        message_digest: message_digest,
+    }
+}
+
+pub fn recover_interrupted_obligation(
+    interrupted: InterruptedObligation,
+    next_actor_token: i64,
+    next_generation_token: i64,
+) -> Option<RecoverableObligation> {
+    let InterruptedObligation {
+        obligation_token,
+        actor_token,
+        generation_token,
+        predecessor_claim_token,
+        message_digest,
+    } = interrupted
+    if next_actor_token <= 0 || next_generation_token <= 0 ||
+        (next_actor_token == actor_token && next_generation_token == generation_token) {
+        return None
+    }
+    Some(RecoverableObligation {
+        obligation_token: obligation_token,
+        actor_token: next_actor_token,
+        generation_token: next_generation_token,
+        predecessor_claim_token: predecessor_claim_token,
+        message_digest: message_digest,
+    })
+}
+
+pub fn claim_recoverable_obligation(
+    recoverable: RecoverableObligation,
+    claim_token: i64,
+    lease_deadline: i64,
+) -> Option<ExclusiveWorkClaim> {
+    let RecoverableObligation {
+        obligation_token, actor_token, generation_token,
+        predecessor_claim_token, message_digest,
+    } = recoverable
+    if claim_token <= 0 || claim_token == predecessor_claim_token ||
+        lease_deadline <= 0 { return None }
+    Some(ExclusiveWorkClaim {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        claim_token: claim_token,
+        lease_deadline: lease_deadline,
+        message_digest: message_digest,
+    })
+}
+
+pub fn complete_work_claim(
+    claim: ExclusiveWorkClaim,
+    outcome_digest: ObligationDigest256,
+    evidence_digest: ObligationDigest256,
+) -> Option<CompletedObligation> {
+    let ExclusiveWorkClaim {
+        obligation_token, actor_token, generation_token, claim_token,
+        lease_deadline: _, message_digest,
+    } = claim
+    if !completion_evidence_is_bound(outcome_digest, evidence_digest) {
+        return None
+    }
+    Some(CompletedObligation {
+        obligation_token: obligation_token,
+        actor_token: actor_token,
+        generation_token: generation_token,
+        claim_token: claim_token,
+        message_digest: message_digest,
+        outcome_digest: outcome_digest,
+        evidence_digest: evidence_digest,
+    })
+}
+
+pub fn completed_obligation_token(completed: CompletedObligation) -> i64 {
+    completed.obligation_token
+}
+
+fn host_obligation_transition_accepts(
+    requested_transition_kind: i64,
+    requested_previous_state: i64,
+    requested_next_state: i64,
+    requested_obligation_token: i64,
+    requested_actor_token: i64,
+    requested_generation_token: i64,
+    requested_claim_token: i64,
+    requested_lease_deadline: i64,
+    requested_message_digest: ObligationDigest256,
+    requested_outcome_digest: ObligationDigest256,
+    requested_evidence_digest: ObligationDigest256,
+) -> bool with LoomObligationHostTrust, Panic {
+    let shape_is_valid = transition_shape_is_canonical(
+        requested_transition_kind, requested_previous_state,
+        requested_next_state, requested_actor_token, requested_generation_token,
+        requested_claim_token, requested_lease_deadline,
+        requested_outcome_digest, requested_evidence_digest,
+    )
+    if !shape_is_valid { return false }
+    if requested_obligation_token <= 0 ||
+        !obligation_digest_is_canonical(requested_message_digest) ||
+        !obligation_digest_is_nonzero(requested_message_digest) {
+        return false
+    }
+    true
+}

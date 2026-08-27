@@ -1,0 +1,414 @@
+//! Nominal policy algebra for the Loom Counterfactual Attention Compiler.
+//!
+//! The OCaml host owns candidate parsing, world/claim references, stable ID
+//! tie-breaking, and journal replay. Frame 9009 proves bounded pairwise policy
+//! admission and completion identity.
+
+pub effect LoomAttentionHostTrust {}
+
+struct AttentionDigest256 {
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+}
+
+linear struct AttentionBudget {
+    remaining: i64,
+}
+
+linear struct CompiledAttentionPlan {
+    plan_token: i64,
+    candidate_token: i64,
+    resource_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    reserved_cost: i64,
+    evidence_digest: AttentionDigest256,
+    falsifier_digest: AttentionDigest256,
+    candidate_set_digest: AttentionDigest256,
+}
+
+linear struct CompletedAttentionPlan {
+    plan_token: i64,
+    candidate_token: i64,
+    outcome_digest: AttentionDigest256,
+}
+
+linear struct AttentionHostSeal {
+    next_receipt_id: i64,
+}
+
+linear struct HostAttentionDecisionReceipt {
+    receipt_id: i64,
+    transition_kind: i64,
+    plan_token: i64,
+    candidate_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    outcome_digest: AttentionDigest256,
+}
+
+pub fn admit_attention_digest256(
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+) -> AttentionDigest256 {
+    AttentionDigest256 {
+        limb0: limb0,
+        limb1: limb1,
+        limb2: limb2,
+        limb3: limb3,
+        limb4: limb4,
+        limb5: limb5,
+        limb6: limb6,
+        limb7: limb7,
+    }
+}
+
+fn attention_digest_is_canonical(digest: AttentionDigest256) -> bool {
+    digest.limb0 >= 0 && digest.limb0 <= 4294967295 &&
+    digest.limb1 >= 0 && digest.limb1 <= 4294967295 &&
+    digest.limb2 >= 0 && digest.limb2 <= 4294967295 &&
+    digest.limb3 >= 0 && digest.limb3 <= 4294967295 &&
+    digest.limb4 >= 0 && digest.limb4 <= 4294967295 &&
+    digest.limb5 >= 0 && digest.limb5 <= 4294967295 &&
+    digest.limb6 >= 0 && digest.limb6 <= 4294967295 &&
+    digest.limb7 >= 0 && digest.limb7 <= 4294967295
+}
+
+fn attention_digest_is_nonzero(digest: AttentionDigest256) -> bool {
+    digest.limb0 != 0 || digest.limb1 != 0 || digest.limb2 != 0 ||
+    digest.limb3 != 0 || digest.limb4 != 0 || digest.limb5 != 0 ||
+    digest.limb6 != 0 || digest.limb7 != 0
+}
+
+fn attention_digest_is_zero(digest: AttentionDigest256) -> bool {
+    !attention_digest_is_nonzero(digest)
+}
+
+fn attention_axis_is_bounded(value: i64) -> bool {
+    value >= 1 && value <= 1000
+}
+
+fn attention_risk_is_bounded(value: i64) -> bool {
+    value >= 0 && value <= 1000
+}
+
+fn information_first_precedes_or_ties(
+    selected_information: i64,
+    selected_falsification: i64,
+    selected_divergence: i64,
+    selected_cost: i64,
+    selected_risk: i64,
+    rival_information: i64,
+    rival_falsification: i64,
+    rival_divergence: i64,
+    rival_cost: i64,
+    rival_risk: i64,
+) -> bool {
+    selected_information > rival_information ||
+    (selected_information == rival_information &&
+     (selected_falsification > rival_falsification ||
+      (selected_falsification == rival_falsification &&
+       (selected_divergence > rival_divergence ||
+        (selected_divergence == rival_divergence &&
+         (selected_risk < rival_risk ||
+          (selected_risk == rival_risk && selected_cost <= rival_cost)))))))
+}
+
+fn falsification_first_precedes_or_ties(
+    selected_information: i64,
+    selected_falsification: i64,
+    selected_divergence: i64,
+    selected_cost: i64,
+    selected_risk: i64,
+    rival_information: i64,
+    rival_falsification: i64,
+    rival_divergence: i64,
+    rival_cost: i64,
+    rival_risk: i64,
+) -> bool {
+    selected_falsification > rival_falsification ||
+    (selected_falsification == rival_falsification &&
+     (selected_information > rival_information ||
+      (selected_information == rival_information &&
+       (selected_divergence > rival_divergence ||
+        (selected_divergence == rival_divergence &&
+         (selected_risk < rival_risk ||
+          (selected_risk == rival_risk && selected_cost <= rival_cost)))))))
+}
+
+fn counterfactual_first_precedes_or_ties(
+    selected_information: i64,
+    selected_falsification: i64,
+    selected_divergence: i64,
+    selected_cost: i64,
+    selected_risk: i64,
+    rival_information: i64,
+    rival_falsification: i64,
+    rival_divergence: i64,
+    rival_cost: i64,
+    rival_risk: i64,
+) -> bool {
+    selected_divergence > rival_divergence ||
+    (selected_divergence == rival_divergence &&
+     (selected_falsification > rival_falsification ||
+      (selected_falsification == rival_falsification &&
+       (selected_information > rival_information ||
+        (selected_information == rival_information &&
+         (selected_risk < rival_risk ||
+          (selected_risk == rival_risk && selected_cost <= rival_cost)))))))
+}
+
+fn attention_selected_not_dominated(
+    policy: i64,
+    budget: i64,
+    selected_information: i64,
+    selected_falsification: i64,
+    selected_divergence: i64,
+    selected_cost: i64,
+    selected_risk: i64,
+    rival_information: i64,
+    rival_falsification: i64,
+    rival_divergence: i64,
+    rival_cost: i64,
+    rival_risk: i64,
+) -> bool {
+    if rival_cost > budget { return true }
+    if policy == 1 {
+        return information_first_precedes_or_ties(
+            selected_information, selected_falsification,
+            selected_divergence, selected_cost, selected_risk,
+            rival_information, rival_falsification, rival_divergence,
+            rival_cost, rival_risk,
+        )
+    }
+    if policy == 2 {
+        return falsification_first_precedes_or_ties(
+            selected_information, selected_falsification,
+            selected_divergence, selected_cost, selected_risk,
+            rival_information, rival_falsification, rival_divergence,
+            rival_cost, rival_risk,
+        )
+    }
+    if policy == 3 {
+        return counterfactual_first_precedes_or_ties(
+            selected_information, selected_falsification,
+            selected_divergence, selected_cost, selected_risk,
+            rival_information, rival_falsification, rival_divergence,
+            rival_cost, rival_risk,
+        )
+    }
+    false
+}
+
+fn attention_compile_shape_is_canonical(
+    policy: i64,
+    budget: i64,
+    plan_token: i64,
+    selected_token: i64,
+    rival_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    selected_information: i64,
+    selected_falsification: i64,
+    selected_divergence: i64,
+    selected_cost: i64,
+    selected_risk: i64,
+    rival_information: i64,
+    rival_falsification: i64,
+    rival_divergence: i64,
+    rival_cost: i64,
+    rival_risk: i64,
+    evidence: AttentionDigest256,
+    falsifier: AttentionDigest256,
+    candidate_set: AttentionDigest256,
+    outcome: AttentionDigest256,
+) -> bool {
+    policy >= 1 && policy <= 3 && budget > 0 &&
+    plan_token > 0 && selected_token > 0 && rival_token > 0 &&
+    owner_token > 0 && generation_token > 0 &&
+    attention_axis_is_bounded(selected_information) &&
+    attention_axis_is_bounded(selected_falsification) &&
+    attention_axis_is_bounded(selected_divergence) &&
+    selected_cost > 0 && selected_cost <= budget &&
+    attention_risk_is_bounded(selected_risk) &&
+    attention_axis_is_bounded(rival_information) &&
+    attention_axis_is_bounded(rival_falsification) &&
+    attention_axis_is_bounded(rival_divergence) &&
+    rival_cost > 0 && attention_risk_is_bounded(rival_risk) &&
+    attention_digest_is_canonical(evidence) &&
+    attention_digest_is_canonical(falsifier) &&
+    attention_digest_is_canonical(candidate_set) &&
+    attention_digest_is_nonzero(evidence) &&
+    attention_digest_is_nonzero(falsifier) &&
+    attention_digest_is_nonzero(candidate_set) &&
+    attention_digest_is_zero(outcome) &&
+    attention_selected_not_dominated(
+        policy, budget,
+        selected_information, selected_falsification, selected_divergence,
+        selected_cost, selected_risk,
+        rival_information, rival_falsification, rival_divergence,
+        rival_cost, rival_risk,
+    )
+}
+
+fn attention_completion_shape_is_canonical(
+    policy: i64,
+    budget: i64,
+    plan_token: i64,
+    selected_token: i64,
+    rival_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    selected_information: i64,
+    selected_falsification: i64,
+    selected_divergence: i64,
+    selected_cost: i64,
+    selected_risk: i64,
+    rival_information: i64,
+    rival_falsification: i64,
+    rival_divergence: i64,
+    rival_cost: i64,
+    rival_risk: i64,
+    evidence: AttentionDigest256,
+    falsifier: AttentionDigest256,
+    candidate_set: AttentionDigest256,
+    outcome: AttentionDigest256,
+) -> bool {
+    policy == 0 && budget == 0 && plan_token > 0 && selected_token > 0 &&
+    rival_token == 0 && owner_token > 0 && generation_token > 0 &&
+    selected_information == 0 && selected_falsification == 0 &&
+    selected_divergence == 0 && selected_cost == 0 && selected_risk == 0 &&
+    rival_information == 0 && rival_falsification == 0 &&
+    rival_divergence == 0 && rival_cost == 0 && rival_risk == 0 &&
+    attention_digest_is_zero(evidence) &&
+    attention_digest_is_zero(falsifier) &&
+    attention_digest_is_zero(candidate_set) &&
+    attention_digest_is_canonical(outcome) &&
+    attention_digest_is_nonzero(outcome)
+}
+
+pub fn host_attention_frame_accepts(
+    kind: i64,
+    policy: i64,
+    budget: i64,
+    plan_token: i64,
+    selected_token: i64,
+    rival_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    selected_information: i64,
+    selected_falsification: i64,
+    selected_divergence: i64,
+    selected_cost: i64,
+    selected_risk: i64,
+    rival_information: i64,
+    rival_falsification: i64,
+    rival_divergence: i64,
+    rival_cost: i64,
+    rival_risk: i64,
+    evidence: AttentionDigest256,
+    falsifier: AttentionDigest256,
+    candidate_set: AttentionDigest256,
+    outcome: AttentionDigest256,
+) -> bool with LoomAttentionHostTrust {
+    (kind == 1 && attention_compile_shape_is_canonical(
+        policy, budget, plan_token, selected_token, rival_token,
+        owner_token, generation_token,
+        selected_information, selected_falsification, selected_divergence,
+        selected_cost, selected_risk,
+        rival_information, rival_falsification, rival_divergence,
+        rival_cost, rival_risk, evidence, falsifier, candidate_set, outcome,
+    )) ||
+    (kind == 2 && attention_completion_shape_is_canonical(
+        policy, budget, plan_token, selected_token, rival_token,
+        owner_token, generation_token,
+        selected_information, selected_falsification, selected_divergence,
+        selected_cost, selected_risk,
+        rival_information, rival_falsification, rival_divergence,
+        rival_cost, rival_risk, evidence, falsifier, candidate_set, outcome,
+    ))
+}
+
+pub fn acquire_attention_budget(total: i64) -> AttentionBudget with Panic {
+    if total <= 0 { panic("attention budget must be positive") }
+    AttentionBudget { remaining: total }
+}
+
+pub fn compile_attention_plan(
+    budget: AttentionBudget,
+    plan_token: i64,
+    candidate_token: i64,
+    resource_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    cost: i64,
+    evidence: AttentionDigest256,
+    falsifier: AttentionDigest256,
+    candidate_set: AttentionDigest256,
+) -> (AttentionBudget, CompiledAttentionPlan) with Panic {
+    let AttentionBudget { remaining } = budget
+    if plan_token <= 0 || candidate_token <= 0 || resource_token <= 0 ||
+        owner_token <= 0 || generation_token <= 0 || cost <= 0 ||
+        cost > remaining || !attention_digest_is_nonzero(evidence) ||
+        !attention_digest_is_nonzero(falsifier) ||
+        !attention_digest_is_nonzero(candidate_set) {
+        panic("attention plan is not canonical")
+    }
+    (
+        AttentionBudget { remaining: remaining - cost },
+        CompiledAttentionPlan {
+            plan_token: plan_token,
+            candidate_token: candidate_token,
+            resource_token: resource_token,
+            owner_token: owner_token,
+            generation_token: generation_token,
+            reserved_cost: cost,
+            evidence_digest: evidence,
+            falsifier_digest: falsifier,
+            candidate_set_digest: candidate_set,
+        },
+    )
+}
+
+pub fn complete_attention_plan(
+    plan: CompiledAttentionPlan,
+    outcome: AttentionDigest256,
+) -> CompletedAttentionPlan with Panic {
+    let CompiledAttentionPlan {
+        plan_token, candidate_token, resource_token: _, owner_token: _,
+        generation_token: _, reserved_cost: _, evidence_digest: _,
+        falsifier_digest: _, candidate_set_digest: _,
+    } = plan
+    if !attention_digest_is_nonzero(outcome) {
+        panic("attention completion requires an outcome digest")
+    }
+    CompletedAttentionPlan {
+        plan_token: plan_token,
+        candidate_token: candidate_token,
+        outcome_digest: outcome,
+    }
+}
+
+pub fn close_attention_budget(budget: AttentionBudget) -> i64 {
+    let AttentionBudget { remaining } = budget
+    remaining
+}
+
+pub fn close_completed_attention_plan(plan: CompletedAttentionPlan) -> i64 {
+    let CompletedAttentionPlan {
+        plan_token, candidate_token, outcome_digest: _,
+    } = plan
+    plan_token + candidate_token
+}

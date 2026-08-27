@@ -1,0 +1,372 @@
+//! Linear quorum algebra for externally witnessed Loom journal checkpoints.
+//!
+//! OCaml verifies Ed25519 signatures, canonical witness receipts, and each
+//! transmitted epistemic-journal segment. Frame 9013 checks the fixed
+//! membership, 2-of-3 quorum, common checkpoint, and monotonic advance before
+//! producing a one-use checkpoint proof.
+
+pub effect LoomWitnessMeshHostTrust {}
+
+struct WitnessMeshDigest256 {
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+}
+
+linear struct VerifiedWitnessShare {
+    member_token: i64,
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessMeshDigest256,
+}
+
+linear struct VerifiedWitnessMeshCheckpoint {
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessMeshDigest256,
+}
+
+linear struct HostWitnessMeshReceipt {
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessMeshDigest256,
+}
+
+pub fn admit_witness_mesh_digest256(
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+) -> WitnessMeshDigest256 {
+    WitnessMeshDigest256 {
+        limb0: limb0,
+        limb1: limb1,
+        limb2: limb2,
+        limb3: limb3,
+        limb4: limb4,
+        limb5: limb5,
+        limb6: limb6,
+        limb7: limb7,
+    }
+}
+
+fn witness_mesh_digest_is_canonical(digest: WitnessMeshDigest256) -> bool {
+    digest.limb0 >= 0 && digest.limb0 <= 4294967295 &&
+    digest.limb1 >= 0 && digest.limb1 <= 4294967295 &&
+    digest.limb2 >= 0 && digest.limb2 <= 4294967295 &&
+    digest.limb3 >= 0 && digest.limb3 <= 4294967295 &&
+    digest.limb4 >= 0 && digest.limb4 <= 4294967295 &&
+    digest.limb5 >= 0 && digest.limb5 <= 4294967295 &&
+    digest.limb6 >= 0 && digest.limb6 <= 4294967295 &&
+    digest.limb7 >= 0 && digest.limb7 <= 4294967295
+}
+
+fn witness_mesh_digest_is_zero(digest: WitnessMeshDigest256) -> bool {
+    digest.limb0 == 0 && digest.limb1 == 0 && digest.limb2 == 0 &&
+    digest.limb3 == 0 && digest.limb4 == 0 && digest.limb5 == 0 &&
+    digest.limb6 == 0 && digest.limb7 == 0
+}
+
+fn witness_mesh_digest_equal(
+    left: WitnessMeshDigest256,
+    right: WitnessMeshDigest256,
+) -> bool {
+    left.limb0 == right.limb0 && left.limb1 == right.limb1 &&
+    left.limb2 == right.limb2 && left.limb3 == right.limb3 &&
+    left.limb4 == right.limb4 && left.limb5 == right.limb5 &&
+    left.limb6 == right.limb6 && left.limb7 == right.limb7
+}
+
+fn witness_mesh_members_are_separated(
+    member1: i64,
+    member2: i64,
+    member3: i64,
+) -> bool {
+    member1 > 0 && member2 > 0 && member3 > 0 &&
+    member1 != member2 && member1 != member3 && member2 != member3
+}
+
+fn witness_mesh_quorum_is_satisfied(
+    required_quorum: i64,
+    signature1: i64,
+    signature2: i64,
+    signature3: i64,
+) -> bool {
+    let flags_are_canonical =
+        (signature1 == 0 || signature1 == 1) &&
+        (signature2 == 0 || signature2 == 1) &&
+        (signature3 == 0 || signature3 == 1)
+    required_quorum == 2 && flags_are_canonical &&
+    signature1 + signature2 + signature3 >= required_quorum
+}
+
+fn witness_mesh_receipt_membership_slot_accepts(
+    signature_verified: i64,
+    member_token: i64,
+    receipt_member_token: i64,
+    expected_membership: WitnessMeshDigest256,
+    receipt_membership: WitnessMeshDigest256,
+) -> bool {
+    if signature_verified == 1 {
+        member_token == receipt_member_token &&
+        witness_mesh_digest_equal(expected_membership, receipt_membership)
+    } else {
+        receipt_member_token == 0 &&
+        witness_mesh_digest_is_zero(receipt_membership)
+    }
+}
+
+fn witness_mesh_receipts_match_membership(
+    signature1: i64,
+    signature2: i64,
+    signature3: i64,
+    member1: i64,
+    member2: i64,
+    member3: i64,
+    receipt_member1: i64,
+    receipt_member2: i64,
+    receipt_member3: i64,
+    expected_membership: WitnessMeshDigest256,
+    receipt_membership1: WitnessMeshDigest256,
+    receipt_membership2: WitnessMeshDigest256,
+    receipt_membership3: WitnessMeshDigest256,
+) -> bool {
+    witness_mesh_digest_is_canonical(expected_membership) &&
+    !witness_mesh_digest_is_zero(expected_membership) &&
+    witness_mesh_receipt_membership_slot_accepts(
+        signature1, member1, receipt_member1,
+        expected_membership, receipt_membership1,
+    ) &&
+    witness_mesh_receipt_membership_slot_accepts(
+        signature2, member2, receipt_member2,
+        expected_membership, receipt_membership2,
+    ) &&
+    witness_mesh_receipt_membership_slot_accepts(
+        signature3, member3, receipt_member3,
+        expected_membership, receipt_membership3,
+    )
+}
+
+fn witness_mesh_checkpoint_slot_accepts(
+    signature_verified: i64,
+    expected_domain: i64,
+    receipt_domain: i64,
+    expected_anchor_sequence: i64,
+    receipt_anchor_sequence: i64,
+    expected_event_count: i64,
+    receipt_event_count: i64,
+    expected_head: WitnessMeshDigest256,
+    receipt_head: WitnessMeshDigest256,
+) -> bool {
+    if signature_verified == 1 {
+        expected_domain == receipt_domain &&
+        expected_anchor_sequence == receipt_anchor_sequence &&
+        expected_event_count == receipt_event_count &&
+        witness_mesh_digest_equal(expected_head, receipt_head)
+    } else {
+        receipt_domain == 0 && receipt_anchor_sequence == 0 &&
+        receipt_event_count == 0 && witness_mesh_digest_is_zero(receipt_head)
+    }
+}
+
+fn witness_mesh_checkpoint_agrees(
+    signature1: i64,
+    signature2: i64,
+    signature3: i64,
+    expected_domain: i64,
+    receipt_domain1: i64,
+    receipt_domain2: i64,
+    receipt_domain3: i64,
+    expected_anchor_sequence: i64,
+    receipt_anchor_sequence1: i64,
+    receipt_anchor_sequence2: i64,
+    receipt_anchor_sequence3: i64,
+    expected_event_count: i64,
+    receipt_event_count1: i64,
+    receipt_event_count2: i64,
+    receipt_event_count3: i64,
+    expected_head: WitnessMeshDigest256,
+    receipt_head1: WitnessMeshDigest256,
+    receipt_head2: WitnessMeshDigest256,
+    receipt_head3: WitnessMeshDigest256,
+) -> bool {
+    expected_domain > 0 &&
+    witness_mesh_digest_is_canonical(expected_head) &&
+    !witness_mesh_digest_is_zero(expected_head) &&
+    witness_mesh_checkpoint_slot_accepts(
+        signature1, expected_domain, receipt_domain1,
+        expected_anchor_sequence, receipt_anchor_sequence1,
+        expected_event_count, receipt_event_count1, expected_head, receipt_head1,
+    ) &&
+    witness_mesh_checkpoint_slot_accepts(
+        signature2, expected_domain, receipt_domain2,
+        expected_anchor_sequence, receipt_anchor_sequence2,
+        expected_event_count, receipt_event_count2, expected_head, receipt_head2,
+    ) &&
+    witness_mesh_checkpoint_slot_accepts(
+        signature3, expected_domain, receipt_domain3,
+        expected_anchor_sequence, receipt_anchor_sequence3,
+        expected_event_count, receipt_event_count3, expected_head, receipt_head3,
+    )
+}
+
+fn witness_mesh_checkpoint_advances(
+    previous_anchor_sequence: i64,
+    anchor_sequence: i64,
+    previous_event_count: i64,
+    event_count: i64,
+) -> bool {
+    previous_anchor_sequence >= 0 && previous_event_count >= 0 &&
+    anchor_sequence > previous_anchor_sequence &&
+    event_count > previous_event_count
+}
+
+pub fn host_witness_mesh_frame_accepts(
+    required_quorum: i64,
+    signature1: i64,
+    signature2: i64,
+    signature3: i64,
+    member1: i64,
+    member2: i64,
+    member3: i64,
+    receipt_member1: i64,
+    receipt_member2: i64,
+    receipt_member3: i64,
+    expected_domain: i64,
+    receipt_domain1: i64,
+    receipt_domain2: i64,
+    receipt_domain3: i64,
+    previous_anchor_sequence: i64,
+    anchor_sequence: i64,
+    receipt_anchor_sequence1: i64,
+    receipt_anchor_sequence2: i64,
+    receipt_anchor_sequence3: i64,
+    previous_event_count: i64,
+    event_count: i64,
+    receipt_event_count1: i64,
+    receipt_event_count2: i64,
+    receipt_event_count3: i64,
+    expected_membership: WitnessMeshDigest256,
+    receipt_membership1: WitnessMeshDigest256,
+    receipt_membership2: WitnessMeshDigest256,
+    receipt_membership3: WitnessMeshDigest256,
+    expected_head: WitnessMeshDigest256,
+    receipt_head1: WitnessMeshDigest256,
+    receipt_head2: WitnessMeshDigest256,
+    receipt_head3: WitnessMeshDigest256,
+) -> bool with LoomWitnessMeshHostTrust {
+    witness_mesh_members_are_separated(member1, member2, member3) &&
+    witness_mesh_quorum_is_satisfied(
+        required_quorum, signature1, signature2, signature3,
+    ) &&
+    witness_mesh_receipts_match_membership(
+        signature1, signature2, signature3,
+        member1, member2, member3,
+        receipt_member1, receipt_member2, receipt_member3,
+        expected_membership,
+        receipt_membership1, receipt_membership2, receipt_membership3,
+    ) &&
+    witness_mesh_checkpoint_agrees(
+        signature1, signature2, signature3,
+        expected_domain, receipt_domain1, receipt_domain2, receipt_domain3,
+        anchor_sequence,
+        receipt_anchor_sequence1,
+        receipt_anchor_sequence2,
+        receipt_anchor_sequence3,
+        event_count,
+        receipt_event_count1,
+        receipt_event_count2,
+        receipt_event_count3,
+        expected_head,
+        receipt_head1,
+        receipt_head2,
+        receipt_head3,
+    ) &&
+    witness_mesh_checkpoint_advances(
+        previous_anchor_sequence, anchor_sequence,
+        previous_event_count, event_count,
+    )
+}
+
+pub fn admit_verified_witness_share(
+    member_token: i64,
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessMeshDigest256,
+) -> VerifiedWitnessShare with LoomWitnessMeshHostTrust, Panic {
+    if member_token <= 0 || domain_token <= 0 || anchor_sequence <= 0 ||
+        event_count <= 0 || witness_mesh_digest_is_zero(journal_head) {
+        panic("verified witness share is not canonical")
+    }
+    VerifiedWitnessShare {
+        member_token: member_token,
+        domain_token: domain_token,
+        anchor_sequence: anchor_sequence,
+        event_count: event_count,
+        journal_head: journal_head,
+    }
+}
+
+pub fn combine_verified_witness_shares(
+    first: VerifiedWitnessShare,
+    second: VerifiedWitnessShare,
+) -> VerifiedWitnessMeshCheckpoint with LoomWitnessMeshHostTrust, Panic {
+    let VerifiedWitnessShare {
+        member_token, domain_token, anchor_sequence, event_count, journal_head,
+    } = first
+    let first_member = member_token
+    let first_domain = domain_token
+    let first_sequence = anchor_sequence
+    let first_count = event_count
+    let first_head = journal_head
+    let VerifiedWitnessShare {
+        member_token, domain_token, anchor_sequence, event_count, journal_head,
+    } = second
+    if first_member == member_token || first_domain != domain_token ||
+        first_sequence != anchor_sequence || first_count != event_count ||
+        !witness_mesh_digest_equal(first_head, journal_head) {
+        panic("verified witness shares do not form a checkpoint quorum")
+    }
+    VerifiedWitnessMeshCheckpoint {
+        domain_token: first_domain,
+        anchor_sequence: first_sequence,
+        event_count: first_count,
+        journal_head: first_head,
+    }
+}
+
+pub fn consume_verified_witness_mesh_checkpoint(
+    checkpoint: VerifiedWitnessMeshCheckpoint,
+) -> HostWitnessMeshReceipt {
+    let VerifiedWitnessMeshCheckpoint {
+        domain_token, anchor_sequence, event_count, journal_head,
+    } = checkpoint
+    HostWitnessMeshReceipt {
+        domain_token: domain_token,
+        anchor_sequence: anchor_sequence,
+        event_count: event_count,
+        journal_head: journal_head,
+    }
+}
+
+pub fn close_host_witness_mesh_receipt(
+    receipt: HostWitnessMeshReceipt,
+) -> i64 {
+    let HostWitnessMeshReceipt {
+        domain_token, anchor_sequence, event_count, journal_head: _,
+    } = receipt
+    domain_token + anchor_sequence + event_count
+}

@@ -1,0 +1,404 @@
+//! Nominal policy algebra for exact Pareto portfolio attention compilation.
+//!
+//! OCaml owns subset enumeration, frontier construction, resource identity,
+//! claim references, and stable tie-breaking. Frame 9010 checks bounded
+//! aggregate selection against every frontier rival and completion identity.
+
+pub effect LoomPortfolioHostTrust {}
+
+struct PortfolioDigest256 {
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+}
+
+linear struct PortfolioBudget {
+    tokens: i64,
+    wall: i64,
+    gpu: i64,
+    quota: i64,
+}
+
+linear struct CompiledAttentionPortfolio {
+    portfolio_token: i64,
+    selected_set_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    token_cost: i64,
+    wall_cost: i64,
+    gpu_cost: i64,
+    quota_cost: i64,
+    selected_set_digest: PortfolioDigest256,
+    frontier_digest: PortfolioDigest256,
+}
+
+linear struct CompletedAttentionPortfolio {
+    portfolio_token: i64,
+    selected_set_token: i64,
+    outcome_digest: PortfolioDigest256,
+}
+
+linear struct PortfolioHostSeal {
+    next_receipt_id: i64,
+}
+
+linear struct HostPortfolioDecisionReceipt {
+    receipt_id: i64,
+    transition_kind: i64,
+    portfolio_token: i64,
+    selected_set_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    outcome_digest: PortfolioDigest256,
+}
+
+pub fn admit_portfolio_digest256(
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+) -> PortfolioDigest256 {
+    PortfolioDigest256 {
+        limb0: limb0,
+        limb1: limb1,
+        limb2: limb2,
+        limb3: limb3,
+        limb4: limb4,
+        limb5: limb5,
+        limb6: limb6,
+        limb7: limb7,
+    }
+}
+
+fn portfolio_digest_is_canonical(digest: PortfolioDigest256) -> bool {
+    digest.limb0 >= 0 && digest.limb0 <= 4294967295 &&
+    digest.limb1 >= 0 && digest.limb1 <= 4294967295 &&
+    digest.limb2 >= 0 && digest.limb2 <= 4294967295 &&
+    digest.limb3 >= 0 && digest.limb3 <= 4294967295 &&
+    digest.limb4 >= 0 && digest.limb4 <= 4294967295 &&
+    digest.limb5 >= 0 && digest.limb5 <= 4294967295 &&
+    digest.limb6 >= 0 && digest.limb6 <= 4294967295 &&
+    digest.limb7 >= 0 && digest.limb7 <= 4294967295
+}
+
+fn portfolio_digest_is_nonzero(digest: PortfolioDigest256) -> bool {
+    digest.limb0 != 0 || digest.limb1 != 0 || digest.limb2 != 0 ||
+    digest.limb3 != 0 || digest.limb4 != 0 || digest.limb5 != 0 ||
+    digest.limb6 != 0 || digest.limb7 != 0
+}
+
+fn portfolio_digest_is_zero(digest: PortfolioDigest256) -> bool {
+    !portfolio_digest_is_nonzero(digest)
+}
+
+fn portfolio_benefit_is_bounded(value: i64) -> bool {
+    value >= 1 && value <= 18000
+}
+
+fn portfolio_burden_is_bounded(value: i64) -> bool {
+    value >= 0 && value <= 18000000
+}
+
+fn information_portfolio_precedes_or_ties(
+    si: i64, sf: i64, sd: i64, sr: i64,
+    st: i64, sw: i64, sg: i64, sq: i64,
+    ri: i64, rf: i64, rd: i64, rr: i64,
+    rt: i64, rw: i64, rg: i64, rq: i64,
+) -> bool {
+    si > ri ||
+    (si == ri && (sf > rf ||
+     (sf == rf && (sd > rd ||
+      (sd == rd && (sr < rr ||
+       (sr == rr && (st < rt ||
+        (st == rt && (sw < rw ||
+         (sw == rw && (sg < rg ||
+          (sg == rg && sq <= rq)))))))))))))
+}
+
+fn falsification_portfolio_precedes_or_ties(
+    si: i64, sf: i64, sd: i64, sr: i64,
+    st: i64, sw: i64, sg: i64, sq: i64,
+    ri: i64, rf: i64, rd: i64, rr: i64,
+    rt: i64, rw: i64, rg: i64, rq: i64,
+) -> bool {
+    sf > rf ||
+    (sf == rf && (si > ri ||
+     (si == ri && (sd > rd ||
+      (sd == rd && (sr < rr ||
+       (sr == rr && (st < rt ||
+        (st == rt && (sw < rw ||
+         (sw == rw && (sg < rg ||
+          (sg == rg && sq <= rq)))))))))))))
+}
+
+fn counterfactual_portfolio_precedes_or_ties(
+    si: i64, sf: i64, sd: i64, sr: i64,
+    st: i64, sw: i64, sg: i64, sq: i64,
+    ri: i64, rf: i64, rd: i64, rr: i64,
+    rt: i64, rw: i64, rg: i64, rq: i64,
+) -> bool {
+    sd > rd ||
+    (sd == rd && (sf > rf ||
+     (sf == rf && (si > ri ||
+      (si == ri && (sr < rr ||
+       (sr == rr && (st < rt ||
+        (st == rt && (sw < rw ||
+         (sw == rw && (sg < rg ||
+          (sg == rg && sq <= rq)))))))))))))
+}
+
+fn portfolio_selected_not_dominated(
+    policy: i64,
+    si: i64, sf: i64, sd: i64, sr: i64,
+    st: i64, sw: i64, sg: i64, sq: i64,
+    ri: i64, rf: i64, rd: i64, rr: i64,
+    rt: i64, rw: i64, rg: i64, rq: i64,
+) -> bool {
+    if policy == 1 {
+        return information_portfolio_precedes_or_ties(
+            si, sf, sd, sr, st, sw, sg, sq,
+            ri, rf, rd, rr, rt, rw, rg, rq,
+        )
+    }
+    if policy == 2 {
+        return falsification_portfolio_precedes_or_ties(
+            si, sf, sd, sr, st, sw, sg, sq,
+            ri, rf, rd, rr, rt, rw, rg, rq,
+        )
+    }
+    if policy == 3 {
+        return counterfactual_portfolio_precedes_or_ties(
+            si, sf, sd, sr, st, sw, sg, sq,
+            ri, rf, rd, rr, rt, rw, rg, rq,
+        )
+    }
+    false
+}
+
+fn portfolio_compile_shape_is_canonical(
+    policy: i64,
+    token_budget: i64,
+    wall_budget: i64,
+    gpu_budget: i64,
+    quota_budget: i64,
+    portfolio_token: i64,
+    selected_set_token: i64,
+    rival_set_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    si: i64, sf: i64, sd: i64, sr: i64,
+    st: i64, sw: i64, sg: i64, sq: i64,
+    ri: i64, rf: i64, rd: i64, rr: i64,
+    rt: i64, rw: i64, rg: i64, rq: i64,
+    candidate_set: PortfolioDigest256,
+    frontier: PortfolioDigest256,
+    selected_set: PortfolioDigest256,
+    evidence: PortfolioDigest256,
+    falsifier: PortfolioDigest256,
+    outcome: PortfolioDigest256,
+) -> bool {
+    policy >= 1 && policy <= 3 && token_budget > 0 && wall_budget > 0 &&
+    gpu_budget >= 0 && quota_budget >= 0 &&
+    portfolio_token > 0 && selected_set_token > 0 && rival_set_token > 0 &&
+    owner_token > 0 && generation_token > 0 &&
+    portfolio_benefit_is_bounded(si) && portfolio_benefit_is_bounded(sf) &&
+    portfolio_benefit_is_bounded(sd) && portfolio_burden_is_bounded(sr) &&
+    st > 0 && st <= token_budget && sw > 0 && sw <= wall_budget &&
+    sg >= 0 && sg <= gpu_budget && sq >= 0 && sq <= quota_budget &&
+    portfolio_benefit_is_bounded(ri) && portfolio_benefit_is_bounded(rf) &&
+    portfolio_benefit_is_bounded(rd) && portfolio_burden_is_bounded(rr) &&
+    rt > 0 && rt <= token_budget && rw > 0 && rw <= wall_budget &&
+    rg >= 0 && rg <= gpu_budget && rq >= 0 && rq <= quota_budget &&
+    portfolio_digest_is_canonical(candidate_set) &&
+    portfolio_digest_is_canonical(frontier) &&
+    portfolio_digest_is_canonical(selected_set) &&
+    portfolio_digest_is_canonical(evidence) &&
+    portfolio_digest_is_canonical(falsifier) &&
+    portfolio_digest_is_nonzero(candidate_set) &&
+    portfolio_digest_is_nonzero(frontier) &&
+    portfolio_digest_is_nonzero(selected_set) &&
+    portfolio_digest_is_nonzero(evidence) &&
+    portfolio_digest_is_nonzero(falsifier) &&
+    portfolio_digest_is_zero(outcome) &&
+    portfolio_selected_not_dominated(
+        policy, si, sf, sd, sr, st, sw, sg, sq,
+        ri, rf, rd, rr, rt, rw, rg, rq,
+    )
+}
+
+fn portfolio_completion_shape_is_canonical(
+    policy: i64,
+    token_budget: i64,
+    wall_budget: i64,
+    gpu_budget: i64,
+    quota_budget: i64,
+    portfolio_token: i64,
+    selected_set_token: i64,
+    rival_set_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    si: i64, sf: i64, sd: i64, sr: i64,
+    st: i64, sw: i64, sg: i64, sq: i64,
+    ri: i64, rf: i64, rd: i64, rr: i64,
+    rt: i64, rw: i64, rg: i64, rq: i64,
+    candidate_set: PortfolioDigest256,
+    frontier: PortfolioDigest256,
+    selected_set: PortfolioDigest256,
+    evidence: PortfolioDigest256,
+    falsifier: PortfolioDigest256,
+    outcome: PortfolioDigest256,
+) -> bool {
+    policy == 0 && token_budget == 0 && wall_budget == 0 &&
+    gpu_budget == 0 && quota_budget == 0 && portfolio_token > 0 &&
+    selected_set_token > 0 && rival_set_token == 0 && owner_token > 0 &&
+    generation_token > 0 && si == 0 && sf == 0 && sd == 0 && sr == 0 &&
+    st == 0 && sw == 0 && sg == 0 && sq == 0 &&
+    ri == 0 && rf == 0 && rd == 0 && rr == 0 &&
+    rt == 0 && rw == 0 && rg == 0 && rq == 0 &&
+    portfolio_digest_is_zero(candidate_set) &&
+    portfolio_digest_is_zero(frontier) &&
+    portfolio_digest_is_zero(selected_set) &&
+    portfolio_digest_is_zero(evidence) &&
+    portfolio_digest_is_zero(falsifier) &&
+    portfolio_digest_is_canonical(outcome) &&
+    portfolio_digest_is_nonzero(outcome)
+}
+
+pub fn host_portfolio_frame_accepts(
+    kind: i64,
+    policy: i64,
+    token_budget: i64,
+    wall_budget: i64,
+    gpu_budget: i64,
+    quota_budget: i64,
+    portfolio_token: i64,
+    selected_set_token: i64,
+    rival_set_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    si: i64, sf: i64, sd: i64, sr: i64,
+    st: i64, sw: i64, sg: i64, sq: i64,
+    ri: i64, rf: i64, rd: i64, rr: i64,
+    rt: i64, rw: i64, rg: i64, rq: i64,
+    candidate_set: PortfolioDigest256,
+    frontier: PortfolioDigest256,
+    selected_set: PortfolioDigest256,
+    evidence: PortfolioDigest256,
+    falsifier: PortfolioDigest256,
+    outcome: PortfolioDigest256,
+) -> bool with LoomPortfolioHostTrust {
+    (kind == 1 && portfolio_compile_shape_is_canonical(
+        policy, token_budget, wall_budget, gpu_budget, quota_budget,
+        portfolio_token, selected_set_token, rival_set_token,
+        owner_token, generation_token,
+        si, sf, sd, sr, st, sw, sg, sq,
+        ri, rf, rd, rr, rt, rw, rg, rq,
+        candidate_set, frontier, selected_set, evidence, falsifier, outcome,
+    )) ||
+    (kind == 2 && portfolio_completion_shape_is_canonical(
+        policy, token_budget, wall_budget, gpu_budget, quota_budget,
+        portfolio_token, selected_set_token, rival_set_token,
+        owner_token, generation_token,
+        si, sf, sd, sr, st, sw, sg, sq,
+        ri, rf, rd, rr, rt, rw, rg, rq,
+        candidate_set, frontier, selected_set, evidence, falsifier, outcome,
+    ))
+}
+
+pub fn acquire_portfolio_budget(
+    tokens: i64,
+    wall: i64,
+    gpu: i64,
+    quota: i64,
+) -> PortfolioBudget with Panic {
+    if tokens <= 0 || wall <= 0 || gpu < 0 || quota < 0 {
+        panic("portfolio budget is not canonical")
+    }
+    PortfolioBudget { tokens: tokens, wall: wall, gpu: gpu, quota: quota }
+}
+
+pub fn compile_attention_portfolio(
+    budget: PortfolioBudget,
+    portfolio_token: i64,
+    selected_set_token: i64,
+    owner_token: i64,
+    generation_token: i64,
+    token_cost: i64,
+    wall_cost: i64,
+    gpu_cost: i64,
+    quota_cost: i64,
+    selected_set_digest: PortfolioDigest256,
+    frontier_digest: PortfolioDigest256,
+) -> (PortfolioBudget, CompiledAttentionPortfolio) with Panic {
+    let PortfolioBudget { tokens, wall, gpu, quota } = budget
+    if portfolio_token <= 0 || selected_set_token <= 0 || owner_token <= 0 ||
+        generation_token <= 0 || token_cost <= 0 || wall_cost <= 0 ||
+        gpu_cost < 0 || quota_cost < 0 || token_cost > tokens ||
+        wall_cost > wall || gpu_cost > gpu || quota_cost > quota ||
+        !portfolio_digest_is_nonzero(selected_set_digest) ||
+        !portfolio_digest_is_nonzero(frontier_digest) {
+        panic("compiled portfolio is not canonical")
+    }
+    (
+        PortfolioBudget {
+            tokens: tokens - token_cost,
+            wall: wall - wall_cost,
+            gpu: gpu - gpu_cost,
+            quota: quota - quota_cost,
+        },
+        CompiledAttentionPortfolio {
+            portfolio_token: portfolio_token,
+            selected_set_token: selected_set_token,
+            owner_token: owner_token,
+            generation_token: generation_token,
+            token_cost: token_cost,
+            wall_cost: wall_cost,
+            gpu_cost: gpu_cost,
+            quota_cost: quota_cost,
+            selected_set_digest: selected_set_digest,
+            frontier_digest: frontier_digest,
+        },
+    )
+}
+
+pub fn complete_attention_portfolio(
+    portfolio: CompiledAttentionPortfolio,
+    outcome: PortfolioDigest256,
+) -> CompletedAttentionPortfolio with Panic {
+    let CompiledAttentionPortfolio {
+        portfolio_token, selected_set_token, owner_token: _,
+        generation_token: _, token_cost: _, wall_cost: _, gpu_cost: _,
+        quota_cost: _, selected_set_digest: _, frontier_digest: _,
+    } = portfolio
+    if !portfolio_digest_is_nonzero(outcome) {
+        panic("portfolio completion requires an outcome digest")
+    }
+    CompletedAttentionPortfolio {
+        portfolio_token: portfolio_token,
+        selected_set_token: selected_set_token,
+        outcome_digest: outcome,
+    }
+}
+
+pub fn close_portfolio_budget(budget: PortfolioBudget) -> i64 {
+    let PortfolioBudget { tokens, wall, gpu, quota } = budget
+    tokens + wall + gpu + quota
+}
+
+pub fn close_completed_attention_portfolio(
+    portfolio: CompletedAttentionPortfolio,
+) -> i64 {
+    let CompletedAttentionPortfolio {
+        portfolio_token, selected_set_token, outcome_digest: _,
+    } = portfolio
+    portfolio_token + selected_set_token
+}

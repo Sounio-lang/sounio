@@ -1,0 +1,432 @@
+//! Linear joint-quorum handoff between immutable Loom Witness Mesh v1 epochs.
+//!
+//! The OCaml host verifies each complete 3-of-4 mesh through frame 9014 before
+//! presenting the compact summaries admitted here. Frame 9015 joins those two
+//! already-verified quorums only when they describe adjacent epochs, distinct
+//! memberships and state roots, and identical domain, event-count, and
+//! journal-head coordinates. Anchor sequences remain side-specific.
+
+pub effect LoomWitnessEpochHandoffHostTrust {}
+
+struct WitnessEpochDigest256 {
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+}
+
+linear struct VerifiedOldEpochQuorum {
+    epoch: i64,
+    membership: WitnessEpochDigest256,
+    state_root: WitnessEpochDigest256,
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessEpochDigest256,
+    certificate: WitnessEpochDigest256,
+}
+
+linear struct VerifiedNewEpochQuorum {
+    epoch: i64,
+    membership: WitnessEpochDigest256,
+    state_root: WitnessEpochDigest256,
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessEpochDigest256,
+    certificate: WitnessEpochDigest256,
+}
+
+linear struct VerifiedWitnessEpochHandoff {
+    from_epoch: i64,
+    to_epoch: i64,
+    old_membership: WitnessEpochDigest256,
+    new_membership: WitnessEpochDigest256,
+    old_state_root: WitnessEpochDigest256,
+    new_state_root: WitnessEpochDigest256,
+    domain_token: i64,
+    old_anchor_sequence: i64,
+    new_anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessEpochDigest256,
+    old_certificate: WitnessEpochDigest256,
+    new_certificate: WitnessEpochDigest256,
+    previous_handoff: WitnessEpochDigest256,
+}
+
+linear struct HostWitnessEpochHandoffReceipt {
+    from_epoch: i64,
+    to_epoch: i64,
+    old_membership: WitnessEpochDigest256,
+    new_membership: WitnessEpochDigest256,
+    old_state_root: WitnessEpochDigest256,
+    new_state_root: WitnessEpochDigest256,
+    domain_token: i64,
+    old_anchor_sequence: i64,
+    new_anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessEpochDigest256,
+    old_certificate: WitnessEpochDigest256,
+    new_certificate: WitnessEpochDigest256,
+    previous_handoff: WitnessEpochDigest256,
+}
+
+pub fn admit_witness_epoch_digest256(
+    limb0: i64,
+    limb1: i64,
+    limb2: i64,
+    limb3: i64,
+    limb4: i64,
+    limb5: i64,
+    limb6: i64,
+    limb7: i64,
+) -> WitnessEpochDigest256 {
+    // This is a representation constructor. Every authority admission below
+    // independently checks canonical nonzero limbs before minting a token.
+    WitnessEpochDigest256 {
+        limb0: limb0,
+        limb1: limb1,
+        limb2: limb2,
+        limb3: limb3,
+        limb4: limb4,
+        limb5: limb5,
+        limb6: limb6,
+        limb7: limb7,
+    }
+}
+
+fn witness_epoch_digest_is_canonical(digest: WitnessEpochDigest256) -> bool {
+    digest.limb0 >= 0 && digest.limb0 <= 4294967295 &&
+    digest.limb1 >= 0 && digest.limb1 <= 4294967295 &&
+    digest.limb2 >= 0 && digest.limb2 <= 4294967295 &&
+    digest.limb3 >= 0 && digest.limb3 <= 4294967295 &&
+    digest.limb4 >= 0 && digest.limb4 <= 4294967295 &&
+    digest.limb5 >= 0 && digest.limb5 <= 4294967295 &&
+    digest.limb6 >= 0 && digest.limb6 <= 4294967295 &&
+    digest.limb7 >= 0 && digest.limb7 <= 4294967295
+}
+
+fn witness_epoch_digest_is_zero(digest: WitnessEpochDigest256) -> bool {
+    digest.limb0 == 0 && digest.limb1 == 0 && digest.limb2 == 0 &&
+    digest.limb3 == 0 && digest.limb4 == 0 && digest.limb5 == 0 &&
+    digest.limb6 == 0 && digest.limb7 == 0
+}
+
+fn witness_epoch_digest_is_nonzero_canonical(
+    digest: WitnessEpochDigest256,
+) -> bool {
+    witness_epoch_digest_is_canonical(digest) &&
+    !witness_epoch_digest_is_zero(digest)
+}
+
+fn witness_epoch_digest_equal(
+    left: WitnessEpochDigest256,
+    right: WitnessEpochDigest256,
+) -> bool {
+    left.limb0 == right.limb0 && left.limb1 == right.limb1 &&
+    left.limb2 == right.limb2 && left.limb3 == right.limb3 &&
+    left.limb4 == right.limb4 && left.limb5 == right.limb5 &&
+    left.limb6 == right.limb6 && left.limb7 == right.limb7
+}
+
+fn witness_epoch_quorum_summary_is_verified(
+    quorum_verified: i64,
+    required_quorum: i64,
+    member_count: i64,
+) -> bool {
+    quorum_verified == 1 && required_quorum == 3 && member_count == 4
+}
+
+fn witness_epoch_quorums_are_verified(
+    old_quorum_verified: i64,
+    new_quorum_verified: i64,
+    old_required_quorum: i64,
+    new_required_quorum: i64,
+    old_member_count: i64,
+    new_member_count: i64,
+) -> bool {
+    witness_epoch_quorum_summary_is_verified(
+        old_quorum_verified, old_required_quorum, old_member_count,
+    ) &&
+    witness_epoch_quorum_summary_is_verified(
+        new_quorum_verified, new_required_quorum, new_member_count,
+    )
+}
+
+fn witness_epoch_epochs_are_adjacent(
+    from_epoch: i64,
+    to_epoch: i64,
+) -> bool {
+    from_epoch >= 1 && from_epoch <= 64 &&
+    to_epoch == from_epoch + 1
+}
+
+fn witness_epoch_memberships_change(
+    old_membership: WitnessEpochDigest256,
+    new_membership: WitnessEpochDigest256,
+) -> bool {
+    witness_epoch_digest_is_nonzero_canonical(old_membership) &&
+    witness_epoch_digest_is_nonzero_canonical(new_membership) &&
+    !witness_epoch_digest_equal(old_membership, new_membership)
+}
+
+fn witness_epoch_roots_are_separated(
+    old_state_root: WitnessEpochDigest256,
+    new_state_root: WitnessEpochDigest256,
+) -> bool {
+    witness_epoch_digest_is_nonzero_canonical(old_state_root) &&
+    witness_epoch_digest_is_nonzero_canonical(new_state_root) &&
+    !witness_epoch_digest_equal(old_state_root, new_state_root)
+}
+
+fn witness_epoch_checkpoint_agrees(
+    old_domain_token: i64,
+    new_domain_token: i64,
+    old_anchor_sequence: i64,
+    new_anchor_sequence: i64,
+    old_event_count: i64,
+    new_event_count: i64,
+    old_journal_head: WitnessEpochDigest256,
+    new_journal_head: WitnessEpochDigest256,
+) -> bool {
+    old_domain_token > 0 && old_domain_token == new_domain_token &&
+    old_anchor_sequence > 0 && new_anchor_sequence > 0 &&
+    old_event_count > 0 && old_event_count == new_event_count &&
+    witness_epoch_digest_is_canonical(old_journal_head) &&
+    witness_epoch_digest_is_canonical(new_journal_head) &&
+    !witness_epoch_digest_is_zero(old_journal_head) &&
+    witness_epoch_digest_equal(old_journal_head, new_journal_head)
+}
+
+fn witness_epoch_certificates_are_bound(
+    old_certificate: WitnessEpochDigest256,
+    new_certificate: WitnessEpochDigest256,
+) -> bool {
+    witness_epoch_digest_is_nonzero_canonical(old_certificate) &&
+    witness_epoch_digest_is_nonzero_canonical(new_certificate) &&
+    !witness_epoch_digest_equal(old_certificate, new_certificate)
+}
+
+fn witness_epoch_chain_is_well_formed(
+    from_epoch: i64,
+    previous_handoff: WitnessEpochDigest256,
+) -> bool {
+    witness_epoch_digest_is_canonical(previous_handoff) &&
+    if from_epoch == 1 {
+        witness_epoch_digest_is_zero(previous_handoff)
+    } else {
+        !witness_epoch_digest_is_zero(previous_handoff)
+    }
+}
+
+pub fn host_witness_epoch_handoff_frame_accepts(
+    old_quorum_verified: i64,
+    new_quorum_verified: i64,
+    from_epoch: i64,
+    to_epoch: i64,
+    old_required_quorum: i64,
+    new_required_quorum: i64,
+    old_member_count: i64,
+    new_member_count: i64,
+    old_domain_token: i64,
+    new_domain_token: i64,
+    old_anchor_sequence: i64,
+    new_anchor_sequence: i64,
+    old_event_count: i64,
+    new_event_count: i64,
+    old_membership: WitnessEpochDigest256,
+    new_membership: WitnessEpochDigest256,
+    old_state_root: WitnessEpochDigest256,
+    new_state_root: WitnessEpochDigest256,
+    old_journal_head: WitnessEpochDigest256,
+    new_journal_head: WitnessEpochDigest256,
+    old_certificate: WitnessEpochDigest256,
+    new_certificate: WitnessEpochDigest256,
+    previous_handoff: WitnessEpochDigest256,
+) -> bool with LoomWitnessEpochHandoffHostTrust {
+    witness_epoch_quorums_are_verified(
+        old_quorum_verified, new_quorum_verified,
+        old_required_quorum, new_required_quorum,
+        old_member_count, new_member_count,
+    ) &&
+    witness_epoch_epochs_are_adjacent(from_epoch, to_epoch) &&
+    witness_epoch_memberships_change(old_membership, new_membership) &&
+    witness_epoch_roots_are_separated(old_state_root, new_state_root) &&
+    witness_epoch_checkpoint_agrees(
+        old_domain_token, new_domain_token,
+        old_anchor_sequence, new_anchor_sequence,
+        old_event_count, new_event_count,
+        old_journal_head, new_journal_head,
+    ) &&
+    witness_epoch_certificates_are_bound(old_certificate, new_certificate) &&
+    witness_epoch_chain_is_well_formed(from_epoch, previous_handoff)
+}
+
+pub fn admit_verified_old_epoch_quorum(
+    epoch: i64,
+    quorum_verified: i64,
+    required_quorum: i64,
+    member_count: i64,
+    membership: WitnessEpochDigest256,
+    state_root: WitnessEpochDigest256,
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessEpochDigest256,
+    certificate: WitnessEpochDigest256,
+) -> VerifiedOldEpochQuorum with LoomWitnessEpochHandoffHostTrust, Panic {
+    if epoch < 1 || epoch > 64 ||
+        !witness_epoch_quorum_summary_is_verified(
+            quorum_verified, required_quorum, member_count,
+        ) ||
+        !witness_epoch_digest_is_nonzero_canonical(membership) ||
+        !witness_epoch_digest_is_nonzero_canonical(state_root) ||
+        !witness_epoch_digest_is_nonzero_canonical(certificate) || domain_token <= 0 ||
+        anchor_sequence <= 0 || event_count <= 0 ||
+        !witness_epoch_digest_is_nonzero_canonical(journal_head) {
+        panic("old epoch quorum is not one verified canonical 3-of-4 summary")
+    }
+    VerifiedOldEpochQuorum {
+        epoch: epoch,
+        membership: membership,
+        state_root: state_root,
+        domain_token: domain_token,
+        anchor_sequence: anchor_sequence,
+        event_count: event_count,
+        journal_head: journal_head,
+        certificate: certificate,
+    }
+}
+
+pub fn admit_verified_new_epoch_quorum(
+    epoch: i64,
+    quorum_verified: i64,
+    required_quorum: i64,
+    member_count: i64,
+    membership: WitnessEpochDigest256,
+    state_root: WitnessEpochDigest256,
+    domain_token: i64,
+    anchor_sequence: i64,
+    event_count: i64,
+    journal_head: WitnessEpochDigest256,
+    certificate: WitnessEpochDigest256,
+) -> VerifiedNewEpochQuorum with LoomWitnessEpochHandoffHostTrust, Panic {
+    if epoch < 2 || epoch > 65 ||
+        !witness_epoch_quorum_summary_is_verified(
+            quorum_verified, required_quorum, member_count,
+        ) ||
+        !witness_epoch_digest_is_nonzero_canonical(membership) ||
+        !witness_epoch_digest_is_nonzero_canonical(state_root) ||
+        !witness_epoch_digest_is_nonzero_canonical(certificate) || domain_token <= 0 ||
+        anchor_sequence <= 0 || event_count <= 0 ||
+        !witness_epoch_digest_is_nonzero_canonical(journal_head) {
+        panic("new epoch quorum is not one verified canonical 3-of-4 summary")
+    }
+    VerifiedNewEpochQuorum {
+        epoch: epoch,
+        membership: membership,
+        state_root: state_root,
+        domain_token: domain_token,
+        anchor_sequence: anchor_sequence,
+        event_count: event_count,
+        journal_head: journal_head,
+        certificate: certificate,
+    }
+}
+
+pub fn join_verified_witness_epoch_quorums(
+    old_quorum: VerifiedOldEpochQuorum,
+    new_quorum: VerifiedNewEpochQuorum,
+    from_epoch: i64,
+    to_epoch: i64,
+    previous_handoff: WitnessEpochDigest256,
+) -> VerifiedWitnessEpochHandoff with LoomWitnessEpochHandoffHostTrust, Panic {
+    let VerifiedOldEpochQuorum {
+        epoch, membership, state_root, domain_token, anchor_sequence, event_count,
+        journal_head, certificate,
+    } = old_quorum
+    let old_epoch = epoch
+    let old_membership = membership
+    let old_root = state_root
+    let old_domain = domain_token
+    let old_anchor = anchor_sequence
+    let old_count = event_count
+    let old_head = journal_head
+    let old_certificate = certificate
+    let VerifiedNewEpochQuorum {
+        epoch, membership, state_root, domain_token, anchor_sequence, event_count,
+        journal_head, certificate,
+    } = new_quorum
+    if old_epoch != from_epoch || epoch != to_epoch ||
+        !witness_epoch_epochs_are_adjacent(from_epoch, to_epoch) ||
+        !witness_epoch_memberships_change(old_membership, membership) ||
+        !witness_epoch_roots_are_separated(old_root, state_root) ||
+        !witness_epoch_checkpoint_agrees(
+            old_domain, domain_token, old_anchor, anchor_sequence,
+            old_count, event_count, old_head, journal_head,
+        ) ||
+        !witness_epoch_certificates_are_bound(old_certificate, certificate) ||
+        !witness_epoch_chain_is_well_formed(from_epoch, previous_handoff) {
+        panic("old and new epoch quorums do not form one handoff")
+    }
+    VerifiedWitnessEpochHandoff {
+        from_epoch: from_epoch,
+        to_epoch: to_epoch,
+        old_membership: old_membership,
+        new_membership: membership,
+        old_state_root: old_root,
+        new_state_root: state_root,
+        domain_token: domain_token,
+        old_anchor_sequence: old_anchor,
+        new_anchor_sequence: anchor_sequence,
+        event_count: event_count,
+        journal_head: journal_head,
+        old_certificate: old_certificate,
+        new_certificate: certificate,
+        previous_handoff: previous_handoff,
+    }
+}
+
+pub fn consume_verified_witness_epoch_handoff(
+    handoff: VerifiedWitnessEpochHandoff,
+) -> HostWitnessEpochHandoffReceipt {
+    let VerifiedWitnessEpochHandoff {
+        from_epoch, to_epoch, old_membership, new_membership,
+        old_state_root, new_state_root, domain_token, old_anchor_sequence,
+        new_anchor_sequence, event_count, journal_head, old_certificate,
+        new_certificate, previous_handoff,
+    } = handoff
+    HostWitnessEpochHandoffReceipt {
+        from_epoch: from_epoch,
+        to_epoch: to_epoch,
+        old_membership: old_membership,
+        new_membership: new_membership,
+        old_state_root: old_state_root,
+        new_state_root: new_state_root,
+        domain_token: domain_token,
+        old_anchor_sequence: old_anchor_sequence,
+        new_anchor_sequence: new_anchor_sequence,
+        event_count: event_count,
+        journal_head: journal_head,
+        old_certificate: old_certificate,
+        new_certificate: new_certificate,
+        previous_handoff: previous_handoff,
+    }
+}
+
+pub fn close_host_witness_epoch_handoff_receipt(
+    receipt: HostWitnessEpochHandoffReceipt,
+) -> i64 {
+    let HostWitnessEpochHandoffReceipt {
+        from_epoch: _, to_epoch: _, old_membership: _, new_membership: _,
+        old_state_root: _, new_state_root: _, domain_token: _,
+        old_anchor_sequence: _, new_anchor_sequence: _, event_count,
+        journal_head: _, old_certificate: _, new_certificate: _,
+        previous_handoff: _,
+    } = receipt
+    event_count
+}
