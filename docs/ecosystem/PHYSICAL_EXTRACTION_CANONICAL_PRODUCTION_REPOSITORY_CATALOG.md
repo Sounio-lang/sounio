@@ -86,3 +86,53 @@ source drift.
 The adversarial gate is
 `scripts/ci/physical_extraction_canonical_production_repository_catalog_gate.py`
 and is composed into `scripts/ci/sounio_package_support_gate.sh`.
+
+## Re-measured 2026-08-27 on rebase onto `origin/main@055825a3f9`
+
+This lane's artifacts were recorded against canonical head
+`5cf8be05b96c0a5c2ab101e022b36019dd61ebef` (catalog `7bc56947…`, observed
+2026-07-20) and last integrated `origin/main@22111d11`. Rebasing onto
+`055825a3f9` re-runs the same two read-only checks the
+`20260720T030329Z/drift-observation.v1.json` recorded. **One of them no longer
+holds, and it is named here rather than by editing the point-in-time record,
+which was accurate when taken and is bound by `SHA256SUMS`.**
+
+Destination repositories — **all five still match the catalog**, unchanged:
+
+| Target | Repository | Cataloged head | Live head 2026-08-27 |
+|---|---|---|---|
+| `distribution:epistemic-core` | `Sounio-lang/epistemic-core` | `3e7d49fb…` | `3e7d49fb…` |
+| `distribution:sounio-formats` | `Sounio-lang/sounio-formats` | `c412c0d1…` | `c412c0d1…` |
+| `distribution:sounio-io-primitives` | `Sounio-lang/sounio-io-primitives` | `8e593615…` | `8e593615…` |
+| `distribution:sounio-research-examples` | `Sounio-lang/sounio-examples` | `a22f66e0…` | `a22f66e0…` |
+| `distribution:sounio-units` | `Sounio-lang/sounio-units` | `229d310f…` | `229d310f…` |
+
+Governed source trees — **four of five unchanged; `examples` has drifted**:
+
+| Source path | Bound tree OID | `origin/main@055825a3f9` | |
+|---|---|---|---|
+| `packages/epistemic-core` | `41bb77d1704b…` | `41bb77d1704b…` | unchanged |
+| `packages/sounio-formats` | `a08b1e7cf51e…` | `a08b1e7cf51e…` | unchanged |
+| `packages/sounio-io-primitives` | `d923d77a9df3…` | `d923d77a9df3…` | unchanged |
+| `packages/sounio-units` | `44cf83512b96…` | `44cf83512b96…` | unchanged |
+| `examples` | `fd977569a836…` | `e8b39d89ffb0…` | **CHANGED** |
+
+`5cf8be05` is still an ancestor of `055825a3f9`, so the lineage the catalog
+records is intact; what moved is the content of one governed unit.
+
+The drifted unit is the one mapped to `distribution:sounio-research-examples`.
+By this document's own Authority Boundary — *"the existing mapping contract
+requires a new selection record after catalog or canonical source drift"* — the
+five-row mapping in `20260720T030329Z/mapping-proposal.v1.json` may **not** be
+carried forward to today's source on the strength of the 2026-07-20 selection
+alone. It remains `proposed-not-approved`, execution authority `none`, and it is
+now also **out of date with respect to one of its five source units**. A fresh
+catalog, inventory and human selection are required before this proposal is read
+as describing the current tree.
+
+Re-measured with:
+
+```bash
+git rev-parse 055825a3f9:examples          # e8b39d89ffb0…
+gh api repos/Sounio-lang/epistemic-core/commits/main --jq .sha
+```
