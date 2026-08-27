@@ -962,6 +962,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.r2-continuous-law-theorem-spec-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-aarchmrs-tbl-import-20260827 | historical | docs/research/receipts/pireus_aarchmrs_tbl_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-apple-metal-family-import-20260827 | historical | docs/research/receipts/pireus_apple_metal_family_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-apple-metal-table-cells-20260827 | historical | docs/research/receipts/pireus_apple_metal_table_cells_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-execution-engine-20260827 | historical | docs/research/receipts/pireus_execution_engine_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-ptx-prmt-import-20260827 | historical | docs/research/receipts/pireus_ptx_prmt_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-v0-20260827 | historical | docs/research/receipts/pireus_v0_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
