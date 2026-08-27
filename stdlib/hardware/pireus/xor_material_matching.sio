@@ -59,7 +59,10 @@ pub struct PireusXorXedEvidence {
     pub vpermpd_forms: i64,
     pub vpermi2pd_forms: i64,
     pub vpermt2pd_forms: i64,
+    pub counts_from_frozen_receipt: bool,
+    pub counts_derived_from_vendor_bytes_in_current_execution: bool,
     pub candidate_family_present: bool,
+    pub selector_behavior_derived_from_form_presence: bool,
     pub selector_semantics_receipt_present: bool,
     pub instruction_match_authorized: bool,
     pub immediate_sufficiency_authorized: bool,
@@ -125,6 +128,7 @@ pub struct PireusXorMaterialResult {
     pub instruction_match_count: i64,
     pub lowering_count: i64,
     pub cost_record_count: i64,
+    pub loom_guardian_external_required: bool,
     pub selector_digest: PireusXorMaterialDigest,
     pub evidence_digest: PireusXorMaterialDigest,
     pub target_digest: PireusXorMaterialDigest,
@@ -383,7 +387,10 @@ fn pxm_xed_evidence() -> PireusXorXedEvidence {
         vpermpd_forms: vpermpd_forms,
         vpermi2pd_forms: vpermi2pd_forms,
         vpermt2pd_forms: vpermt2pd_forms,
+        counts_from_frozen_receipt: true,
+        counts_derived_from_vendor_bytes_in_current_execution: false,
         candidate_family_present: candidate_family_present,
+        selector_behavior_derived_from_form_presence: false,
         selector_semantics_receipt_present: false,
         instruction_match_authorized: false,
         immediate_sufficiency_authorized: false,
@@ -435,28 +442,49 @@ fn pxm_targets_valid(targets: &PireusXorMaterialTargets) -> bool {
         targets.unresolved[2]
 }
 
-fn pxm_receipt_guard(claimed: bool, required_receipt: bool) -> bool {
-    !claimed || required_receipt
+fn pxm_claim_boundary_values_valid(
+    selector_semantics_receipt: bool,
+    instruction_match_claimed: bool,
+    immediate_sufficiency_claimed: bool,
+    two_source_necessity_claimed: bool,
+    target_observed: bool,
+    target_material_receipt: bool,
+    emitted_use_claimed: bool,
+    emitted_code_receipt: bool,
+    cost_record_count: i64,
+    cost_receipt: bool,
+    parity_open: bool,
+    semantics_frozen: bool,
+    loom_parity_receipt: bool,
+    claim_ready: bool,
+) -> bool {
+    if instruction_match_claimed && !selector_semantics_receipt {
+        return false
+    }
+    if immediate_sufficiency_claimed && !selector_semantics_receipt {
+        return false
+    }
+    if two_source_necessity_claimed &&
+        !(selector_semantics_receipt && target_material_receipt) {
+        return false
+    }
+    if target_observed && !target_material_receipt { return false }
+    if emitted_use_claimed && !(target_observed && emitted_code_receipt) {
+        return false
+    }
+    if cost_record_count > 0 && !cost_receipt { return false }
+    if parity_open && !(semantics_frozen && loom_parity_receipt) {
+        return false
+    }
+    if claim_ready && !(parity_open && target_material_receipt) {
+        return false
+    }
+    true
 }
 
-fn pxm_two_source_claim_valid(claimed: bool,
-    selector_semantics_receipt: bool, material_receipt: bool) -> bool {
-    !claimed || (selector_semantics_receipt && material_receipt)
+fn pxm_semantic_producer_role_valid(language: i64) -> bool {
+    language == 1
 }
-
-fn pxm_emitted_use_claim_valid(claimed: bool,
-    target_observed: bool, emitted_code_receipt: bool) -> bool {
-    !claimed || (target_observed && emitted_code_receipt)
-}
-
-fn pxm_transition_claim_valid(parity_requested: bool,
-    claim_requested: bool, semantics_frozen: bool,
-    parity_receipt_valid: bool) -> bool {
-    (!parity_requested || semantics_frozen) &&
-        (!claim_requested || (semantics_frozen && parity_receipt_valid))
-}
-
-fn pxm_language_can_produce(language: i64) -> bool { language == 1 }
 
 fn pxm_exercise_negatives() -> PireusXorMaterialNegatives {
     let operation_hash = pireus_xor_material_operation_semantics_hash()
@@ -488,24 +516,62 @@ fn pxm_exercise_negatives() -> PireusXorMaterialNegatives {
         !pxm_selector_cell_valid(9, 0, 3, 3, 10, 0, 2)
     let corrupted_source_lane =
         !pxm_selector_cell_valid(6, 1, 5, 13, 11, 1, 2)
-    let layout_to_two_source_necessity =
-        !pxm_two_source_claim_valid(true, false, false)
-    let imm8_without_vendor_semantics =
-        !pxm_receipt_guard(true, false)
-    let form_presence_to_behavior =
-        !pxm_receipt_guard(true, false)
-    let capability_to_emitted_use =
-        !pxm_emitted_use_claim_valid(true, false, false)
-    let target_observation_without_receipt =
-        !pxm_receipt_guard(true, false)
-    let cost_without_material_receipt =
-        !pxm_receipt_guard(true, false)
-    let parity_or_claim_before_transition =
-        !pxm_transition_claim_valid(true, false, false, false) &&
-        !pxm_transition_claim_valid(false, true, true, false)
+    let boundary_baseline = pxm_claim_boundary_values_valid(
+        false, false, false, false,
+        false, false, false, false,
+        0, false, false, false, false, false,
+    )
+    let layout_to_two_source_necessity = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, true,
+            false, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let imm8_without_vendor_semantics = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, true, false,
+            false, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let form_presence_to_behavior = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, true, false, false,
+            false, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let capability_to_emitted_use = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, true, false,
+            0, false, false, false, false, false,
+        )
+    let target_observation_without_receipt = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            true, false, false, false,
+            0, false, false, false, false, false,
+        )
+    let cost_without_material_receipt = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, false, false,
+            1, false, false, false, false, false,
+        )
+    let parity_or_claim_before_transition = boundary_baseline &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, false, false,
+            0, false, true, false, false, false,
+        ) &&
+        !pxm_claim_boundary_values_valid(
+            false, false, false, false,
+            false, false, false, false,
+            0, false, false, true, false, true,
+        )
     let prohibited_oracle_language =
-        pxm_language_can_produce(1) &&
-        !pxm_language_can_produce(7) && !pxm_language_can_produce(8)
+        pxm_semantic_producer_role_valid(1) &&
+        !pxm_semantic_producer_role_valid(7) &&
+        !pxm_semantic_producer_role_valid(8)
 
     var passed: i64 = 0
     if missing_operation_parent_hash { passed = passed + 1 }
@@ -591,7 +657,12 @@ fn pxm_digest_evidence(xed: &PireusXorXedEvidence,
     state = pxm_digest_add_i64(state, xed.vpermpd_forms)
     state = pxm_digest_add_i64(state, xed.vpermi2pd_forms)
     state = pxm_digest_add_i64(state, xed.vpermt2pd_forms)
+    state = pxm_digest_add_bool(state, xed.counts_from_frozen_receipt)
+    state = pxm_digest_add_bool(
+        state, xed.counts_derived_from_vendor_bytes_in_current_execution)
     state = pxm_digest_add_bool(state, xed.candidate_family_present)
+    state = pxm_digest_add_bool(
+        state, xed.selector_behavior_derived_from_form_presence)
     state = pxm_digest_add_bool(
         state, xed.selector_semantics_receipt_present)
     state = pxm_digest_add_bool(state, xed.instruction_match_authorized)
@@ -674,6 +745,32 @@ pub fn pireus_xor_material_evaluate() -> PireusXorMaterialResult
         PIREUS_XOR_MATERIAL_CHUNK_LANES,
         PIREUS_XOR_MATERIAL_CHUNK_COUNT,
     )
+    var any_target_observed = false
+    var any_material_receipt = false
+    var target_index: i64 = 0
+    while target_index < targets.count {
+        if targets.observed[target_index] { any_target_observed = true }
+        if targets.material_receipts[target_index] {
+            any_material_receipt = true
+        }
+        target_index = target_index + 1
+    }
+    let claim_boundary_valid = pxm_claim_boundary_values_valid(
+        xed.selector_semantics_receipt_present,
+        xed.instruction_match_authorized,
+        xed.immediate_sufficiency_authorized,
+        xed.two_source_necessity_authorized,
+        any_target_observed,
+        any_material_receipt,
+        false,
+        false,
+        0,
+        false,
+        false,
+        false,
+        false,
+        false,
+    )
 
     var error = PIREUS_XOR_MATERIAL_OK
     if !parent_binding_valid { error = PIREUS_XOR_MATERIAL_ERR_PARENT }
@@ -681,10 +778,10 @@ pub fn pireus_xor_material_evaluate() -> PireusXorMaterialResult
     else if selector.count != PIREUS_XOR_MATERIAL_CELL_COUNT ||
         reconstructed_cells != selector.count || !one_source {
         error = PIREUS_XOR_MATERIAL_ERR_SELECTOR
-    } else if !xed.valid || xed.selector_semantics_receipt_present ||
-        xed.instruction_match_authorized ||
-        xed.immediate_sufficiency_authorized ||
-        xed.two_source_necessity_authorized {
+    } else if !xed.valid || !xed.counts_from_frozen_receipt ||
+        xed.counts_derived_from_vendor_bytes_in_current_execution ||
+        xed.selector_behavior_derived_from_form_presence ||
+        !claim_boundary_valid {
         error = PIREUS_XOR_MATERIAL_ERR_XED_EVIDENCE
     } else if !pxm_targets_valid(&targets) {
         error = PIREUS_XOR_MATERIAL_ERR_TARGET
@@ -734,6 +831,7 @@ pub fn pireus_xor_material_evaluate() -> PireusXorMaterialResult
         instruction_match_count: 0,
         lowering_count: 0,
         cost_record_count: 0,
+        loom_guardian_external_required: true,
         selector_digest: selector_digest,
         evidence_digest: evidence_digest,
         target_digest: target_digest,
