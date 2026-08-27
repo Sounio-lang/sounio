@@ -7540,6 +7540,8 @@ type fleet_spec = {
   fleet_coord_dir : string;
   fleet_enabled : bool;
   fleet_session_id : string;
+  fleet_provider_mode : string;
+  fleet_provider_session : string;
   fleet_prompt_file : string;
   fleet_prompt_sha256 : string;
   fleet_model : string;
@@ -7547,7 +7549,7 @@ type fleet_spec = {
 }
 
 let fleet_kinds = [ "claude"; "codex"; "kimi"; "grok"; "cursor"; "empryo" ]
-let persistent_fleet_kinds = [ "codex"; "kimi" ]
+let persistent_fleet_kinds = [ "claude"; "codex"; "kimi" ]
 
 let fleet_directory root = Filename.concat root "fleet"
 
@@ -7561,7 +7563,7 @@ let fleet_prompt_path root slot =
 
 let fleet_spec_fields spec =
   [
-    ("version", "2");
+    ("version", "3");
     ("enabled", if spec.fleet_enabled then "true" else "false");
     ("slot", spec.fleet_slot);
     ("kind", spec.fleet_kind);
@@ -7571,6 +7573,8 @@ let fleet_spec_fields spec =
     ("cwd", spec.fleet_cwd);
     ("coord_dir", spec.fleet_coord_dir);
     ("session_id", spec.fleet_session_id);
+    ("provider_mode", spec.fleet_provider_mode);
+    ("provider_session", spec.fleet_provider_session);
     ("prompt_file", spec.fleet_prompt_file);
     ("prompt_sha256", spec.fleet_prompt_sha256);
     ("model", spec.fleet_model);
@@ -7583,7 +7587,7 @@ let validate_fleet_atom name value =
 
 let fleet_spec_of_values path values =
   let version = table_value values "version" in
-  if version <> "1" && version <> "2" then
+  if version <> "1" && version <> "2" && version <> "3" then
     failf "fleet catalog version is not supported: %s" path;
   let slot = table_value values "slot" in
   let kind = table_value values "kind" in
@@ -7612,6 +7616,13 @@ let fleet_spec_of_values path values =
     | _ -> failf "invalid enabled state in %s" path
   in
   let session_id = if version = "1" then "" else table_value values "session_id" in
+  let provider_mode =
+    if version = "3" then table_value values "provider_mode"
+    else if custody = "loom" then "new" else ""
+  in
+  let provider_session =
+    if version = "3" then table_value values "provider_session" else ""
+  in
   let prompt_file = if version = "1" then "" else table_value values "prompt_file" in
   let prompt_sha256 = if version = "1" then "" else table_value values "prompt_sha256" in
   let model = if version = "1" then "" else table_value values "model" in
@@ -7638,19 +7649,34 @@ let fleet_spec_of_values path values =
     let actual_prompt_sha256 = sha256 (read_file prompt_file) in
     if prompt_sha256 = "" || actual_prompt_sha256 <> prompt_sha256 then
       failf "fleet prompt digest mismatch for slot %s" slot;
+    if provider_mode <> "new" && provider_mode <> "resume" then
+      failf "invalid fleet provider mode for slot %s: %s" slot provider_mode;
+    if provider_mode = "new" && provider_session <> "" then
+      failf "new fleet provider contains resume identity for slot %s" slot;
+    if provider_mode = "resume" then (
+      if provider_session = "" then
+        failf "fleet provider resume identity is missing for slot %s" slot;
+      if kind <> "claude" then
+        failf "persistent provider resume unavailable for slot %s kind %s"
+          slot kind;
+      if kind = "claude" && not (provider_uuid provider_session)
+      then failf "invalid fleet provider resume identity for slot %s" slot);
     if coord_dir <> ""
        && (Filename.is_relative coord_dir || not (Sys.file_exists coord_dir)
            || not (Sys.is_directory coord_dir))
     then failf "fleet coordination authority is unavailable for slot %s: %s"
       slot coord_dir)
   else if
-    session_id <> "" || prompt_file <> "" || prompt_sha256 <> ""
+    session_id <> "" || provider_mode <> "" || provider_session <> ""
+    || prompt_file <> "" || prompt_sha256 <> ""
     || coord_dir <> "" || model <> "" || unsafe_auto
   then failf "agentd fleet slot %s contains Loom-only authority fields" slot;
   { fleet_slot = slot; fleet_kind = kind; fleet_custody = custody;
     fleet_agent = agent; fleet_home = home; fleet_cwd = cwd;
     fleet_coord_dir = coord_dir; fleet_enabled = enabled;
     fleet_session_id = session_id;
+    fleet_provider_mode = provider_mode;
+    fleet_provider_session = provider_session;
     fleet_prompt_file = prompt_file; fleet_prompt_sha256 = prompt_sha256;
     fleet_model = model; fleet_unsafe_auto = unsafe_auto }
 
@@ -8036,6 +8062,14 @@ let provider_argv spec lifecycle executable mode cwd session_id provider_session
   | "codex", "persistent", "new" ->
       [ executable; "--no-alt-screen"; "-C"; cwd ]
       @ model_args @ unsafe_args @ [ prompt ]
+  | "claude", "persistent", "new" ->
+      [ executable; "--session-id"; session_id;
+        "--setting-sources"; "user,local" ]
+      @ model_args @ unsafe_args
+  | "claude", "persistent", "resume" ->
+      [ executable; "--resume"; provider_session;
+        "--setting-sources"; "user,local" ]
+      @ model_args @ unsafe_args
   | "kimi", "persistent", "new" ->
       [ executable ] @ model_args @ unsafe_args
   | _, "persistent", _ ->
@@ -8057,8 +8091,6 @@ let provider_plan cli default_lifecycle =
   in
   if lifecycle <> "turn" && lifecycle <> "persistent" then
     failf "invalid-provider-lifecycle:%s" lifecycle;
-  if lifecycle = "persistent" && mode <> "new" then
-    failf "persistent-provider-resume-unavailable:%s" spec.provider_id;
   let cwd = cwd_option cli in
   let session_id = required cli "--session-id" in
   let provider_session = Option.value ~default:"" (optional cli "--provider-session") in
@@ -8079,7 +8111,9 @@ let provider_plan cli default_lifecycle =
       model unsafe_auto context_isolation prompt
   in
   let prompt_transport =
-    if lifecycle = "persistent" && spec.provider_id = "kimi" then "loom-wake"
+    if lifecycle = "persistent"
+       && (spec.provider_id = "claude" || spec.provider_id = "kimi")
+    then "loom-wake"
     else "argv"
   in
   { plan_spec = spec; plan_lifecycle = lifecycle;
@@ -8157,10 +8191,11 @@ let provider_open_command cli =
   let plan = provider_plan cli "persistent" in
   if plan.plan_lifecycle <> "persistent" then
     failf "provider-open-requires-persistent-lifecycle";
-  if
-    plan.plan_prompt_transport = "loom-wake"
-    && plan.plan_argv <> [ plan.plan_executable ]
-  then failf "provider-loom-wake-requires-executable-only-argv";
+  if plan.plan_prompt_transport = "loom-wake" && plan.plan_prompt <> ""
+     && List.exists
+          (fun argument -> string_contains argument plan.plan_prompt)
+          plan.plan_argv
+  then failf "provider-loom-wake-argv-contains-prompt";
   let runtime = Unix.realpath Sys.executable_name in
   let start_cli =
     { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2;
@@ -9398,33 +9433,59 @@ let fleet_enroll_command cli =
   if custody = "agentd"
      && (optional cli "--prompt" <> None || optional cli "--prompt-file" <> None
          || optional cli "--session-id" <> None || optional cli "--model" <> None
+         || optional cli "--mode" <> None
+         || optional cli "--provider-session" <> None
          || optional cli "--coord-dir" <> None || flag cli "--unsafe-auto"
          || flag cli "--adopt-active")
   then failf "agentd fleet enrollment contains Loom-only authority options";
   if custody = "loom" && not (List.mem kind persistent_fleet_kinds) then
     failf "persistent fleet provider unavailable for kind %s" kind;
-  let prompt, prompt_file, prompt_sha256, session_id, coord_dir, model, unsafe_auto =
+  let prompt, prompt_file, prompt_sha256, session_id, provider_mode,
+      provider_session, coord_dir, model, unsafe_auto =
     if custody = "loom" then (
-      ignore
-        (match provider_executable (provider_spec kind) with
+      let provider = provider_spec kind in
+      let executable =
+        match provider_executable provider with
         | Some path -> path
-        | None -> failf "provider-executable-not-found:%s" kind);
+        | None -> failf "provider-executable-not-found:%s" kind
+      in
       let prompt = provider_prompt cli in
       let session_id =
         Option.value ~default:(random_provider_uuid ()) (optional cli "--session-id")
       in
       if not (provider_uuid session_id) then
         failf "provider-session-id-must-be-uuid:%s" kind;
+      let provider_mode = Option.value ~default:"new" (optional cli "--mode") in
+      if provider_mode <> "new" && provider_mode <> "resume" then
+        failf "invalid-provider-mode:%s" provider_mode;
+      let provider_session =
+        Option.value ~default:"" (optional cli "--provider-session")
+      in
+      if provider_mode = "new" && provider_session <> "" then
+        failf "provider-session-is-resume-only";
+      if provider_mode = "resume" && provider_session = "" then
+        failf "provider-session-is-required-for-resume";
+      if provider_mode = "resume"
+         && provider.provider_session_binding = "caller"
+         && not (provider_uuid provider_session)
+      then failf "provider-session-must-be-uuid:%s" kind;
+      let model = Option.value ~default:"" (optional cli "--model") in
+      let unsafe_auto = flag cli "--unsafe-auto" in
+      ignore
+        (provider_argv provider "persistent" executable provider_mode cwd
+           session_id provider_session model unsafe_auto false prompt);
       (prompt, fleet_prompt_path root slot, sha256 prompt, session_id,
-       fleet_coordination_dir cli,
-       Option.value ~default:"" (optional cli "--model"), flag cli "--unsafe-auto"))
-    else ("", "", "", "", "", "", false)
+       provider_mode, provider_session,
+       fleet_coordination_dir cli, model, unsafe_auto))
+    else ("", "", "", "", "", "", "", "", false)
   in
   let spec =
     { fleet_slot = slot; fleet_kind = kind; fleet_custody = custody;
       fleet_agent = agent; fleet_home = home; fleet_cwd = cwd;
       fleet_coord_dir = coord_dir; fleet_enabled = true;
       fleet_session_id = session_id;
+      fleet_provider_mode = provider_mode;
+      fleet_provider_session = provider_session;
       fleet_prompt_file = prompt_file; fleet_prompt_sha256 = prompt_sha256;
       fleet_model = model; fleet_unsafe_auto = unsafe_auto }
   in
@@ -9472,8 +9533,10 @@ let fleet_enroll_command cli =
   if custody = "loom" then atomic_write prompt_file prompt;
   atomic_write path (descriptor_text (fleet_spec_fields spec));
   Printf.printf
-    "LOOM_FLEET_ENROLLED slot=%s kind=%s custody=%s agent=%s session_id=%s coord_dir=%s cwd=%s state=enabled adopted=%s\n%!"
+    "LOOM_FLEET_ENROLLED slot=%s kind=%s custody=%s agent=%s session_id=%s provider_mode=%s provider_session=%s coord_dir=%s cwd=%s state=enabled adopted=%s\n%!"
     slot kind custody agent (if session_id = "" then "-" else session_id)
+    (if provider_mode = "" then "-" else provider_mode)
+    (if provider_session = "" then "-" else provider_session)
     (if coord_dir = "" then "-" else coord_dir)
     cwd
     (if flag cli "--adopt-active" then "active" else "no")
@@ -9489,7 +9552,10 @@ let fleet_run_loom root spec action =
       [ "provider-open"; "--provider"; spec.fleet_kind;
         "--agent"; spec.fleet_agent; "--lane"; spec.fleet_slot;
         "--session-id"; spec.fleet_session_id; "--cwd"; spec.fleet_cwd;
-        "--state-dir"; root; "--prompt-file"; spec.fleet_prompt_file ]
+        "--state-dir"; root; "--prompt-file"; spec.fleet_prompt_file;
+        "--mode"; spec.fleet_provider_mode ]
+      @ (if spec.fleet_provider_session = "" then []
+         else [ "--provider-session"; spec.fleet_provider_session ])
       @ (if spec.fleet_model = "" then [] else [ "--model"; spec.fleet_model ])
       @ (if spec.fleet_unsafe_auto then [ "--unsafe-auto" ] else [])
   in
@@ -9665,9 +9731,9 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
-  Printf.eprintf "  provider-open persistent providers: codex, kimi\n";
+  Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
   Printf.eprintf
     "\nSpectral data plane:\n  export-events-arrow --out PATH [--state-dir DIR]\n  verify-events-arrow --file PATH\n";
   Printf.eprintf
@@ -9681,7 +9747,7 @@ let usage () =
   Printf.eprintf
     "\nWitness Mesh v0/v1:\n  witness-serve --witness-state-dir DIR --membership FILE --witness ID --private-key PEM [--bind IP] [--port N]\n  witness-mesh-anchor --state-dir DIR --world W --membership FILE --endpoints FILE --anchor-private-key PEM\n  witness-mesh-verify --state-dir DIR --world W --membership FILE --endpoints FILE [--policy byzantine-strict|crash-quorum]\n  witness-epoch-handoff --epoch-state-dir DIR --world W --from-epoch N --to-epoch N --old-state-dir DIR --old-membership FILE --old-endpoints FILE --new-state-dir DIR --new-membership FILE --new-endpoints FILE\n  witness-epoch-verify --epoch-state-dir DIR --world W --active-state-dir DIR --membership FILE --endpoints FILE\n  witness-epoch-log-serve --log-state-dir DIR --operator ID --operator-public-key PEM --operator-private-key PEM --publisher-public-key PEM [--bind IP] [--log-port N]\n  witness-epoch-log-status --log-host HOST --log-port N --operator ID --operator-public-key PEM --world W\n  witness-epoch-transparency-publish --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --publisher-public-key PEM --publisher-private-key PEM --transparency-membership FILE --transparency-endpoints FILE --transparency-anchor-private-key PEM\n  witness-epoch-transparency-verify --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --transparency-membership FILE --transparency-endpoints FILE\n";
   Printf.eprintf
-    "\nFleet catalog v2:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
+    "\nFleet catalog v3:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--mode new|resume] [--provider-session S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
 
 let arguments_after_command () =
   let values = Array.to_list Sys.argv in

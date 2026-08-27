@@ -12,6 +12,8 @@ SESSION_ID='11111111-1111-4111-8111-111111111111'
 AGENT='provider-abi-test'
 LANE='codex-headless'
 PERSISTENT_LANE='codex-persistent'
+CLAUDE_PERSISTENT_LANE='claude-persistent'
+CLAUDE_RESUME_LANE='claude-resume'
 KIMI_LANE='kimi-headless'
 KIMI_PERSISTENT_LANE='kimi-persistent'
 
@@ -25,6 +27,10 @@ cleanup() {
     --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$PERSISTENT_LANE" >/dev/null 2>&1 || true
+  "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+    --agent "$AGENT" --lane "$CLAUDE_PERSISTENT_LANE" >/dev/null 2>&1 || true
+  "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+    --agent "$AGENT" --lane "$CLAUDE_RESUME_LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$KIMI_LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
@@ -89,6 +95,17 @@ case "$name:${1:-}:${2:-}" in
     ;;
   fake-claude:auth:login)
     printf 'FAKE_LOGIN provider=claude\n'
+    ;;
+  fake-claude:--session-id:*|fake-claude:--resume:*)
+    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
+      printf 'parent harness identity leaked into persistent Claude process\n' >&2
+      exit 47
+    fi
+    printf 'FAKE_CLAUDE_TUI_READY:%s\n' "$*"
+    while IFS= read -r wake; do
+      printf 'FAKE_CLAUDE_TUI_WAKE:%s\n' "$wake"
+      [[ "$wake" == /exit ]] && break
+    done
     ;;
   fake-kimi:--version:)
     printf '0.38.0-provider-abi-test\n'
@@ -253,14 +270,45 @@ grep -q 'provider-context-isolation-unavailable:kimi' \
   "$TEST_ROOT/kimi-isolation.err" || \
   fail 'Kimi context isolation was refused by the wrong rule'
 
-if "$LOOM" provider-plan --provider claude --lifecycle persistent \
-  --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt test \
-  > "$TEST_ROOT/persistent-claude.out" 2> "$TEST_ROOT/persistent-claude.err"; then
-  fail 'persistent provider accepted an unimplemented Claude adapter'
+claude_persistent_plan="$($LOOM provider-plan --provider claude \
+  --lifecycle persistent --session-id "$SESSION_ID" --cwd "$TEST_ROOT" \
+  --prompt "$secret" --json)"
+if grep -Fq "$secret" <<< "$claude_persistent_plan"; then
+  fail 'persistent Claude plan disclosed the lease-delivered prompt'
 fi
-grep -q 'persistent-provider-unavailable:claude:new' \
-  "$TEST_ROOT/persistent-claude.err" || \
-  fail 'unimplemented persistent provider was refused by the wrong rule'
+jq -e --arg session "$SESSION_ID" '
+  .provider == "claude" and .lifecycle == "persistent" and
+  .mode == "new" and .prompt_transport == "loom-wake" and
+  .stdin_authority == "loom-lease" and
+  (.argv | index("--session-id") != null) and
+  (.argv | index($session) != null) and
+  (.argv | index("--setting-sources") != null) and
+  (.argv | index("user,local") != null) and
+  (.argv | index("--continue") == null) and
+  (.argv | index("--fork-session") == null) and
+  (.argv | index("--resume") == null)' \
+  <<< "$claude_persistent_plan" >/dev/null || \
+  fail 'persistent Claude new-session plan lost exact identity binding'
+
+CLAUDE_PROVIDER_SESSION='22222222-2222-4222-8222-222222222222'
+claude_persistent_resume_plan="$($LOOM provider-plan --provider claude \
+  --lifecycle persistent --mode resume \
+  --provider-session "$CLAUDE_PROVIDER_SESSION" --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$secret" --json)"
+if grep -Fq "$secret" <<< "$claude_persistent_resume_plan"; then
+  fail 'persistent Claude resume plan disclosed the lease-delivered prompt'
+fi
+jq -e --arg provider_session "$CLAUDE_PROVIDER_SESSION" '
+  .provider == "claude" and .lifecycle == "persistent" and
+  .mode == "resume" and .prompt_transport == "loom-wake" and
+  .provider_session == $provider_session and
+  (.argv | index("--resume") != null) and
+  (.argv | index($provider_session) != null) and
+  (.argv | index("--session-id") == null) and
+  (.argv | index("--continue") == null) and
+  (.argv | index("--fork-session") == null)' \
+  <<< "$claude_persistent_resume_plan" >/dev/null || \
+  fail 'persistent Claude resume plan lost exact provider identity'
 
 if "$LOOM" provider-start --provider codex --lifecycle persistent \
   --state-dir "$STATE_DIR" --agent "$AGENT" --lane refused-start \
@@ -529,6 +577,58 @@ guardian_journal="$(sed -n 's/^guardian_journal_file=//p' "$persistent_descripto
   grep -q '^GUARDIAN_JOURNAL_OK ' || \
   fail 'persistent provider Guardian journal did not verify'
 
+CLAUDE_NEW_SESSION='33333333-3333-4333-8333-333333333333'
+claude_new_prompt='CLAUDE_PERSISTENT_NEW_WITNESS'
+CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
+CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=parent CLAUDE_CODE_SESSION_ID=parent-claude \
+TMUX=parent-tmux TMUX_PANE=parent-pane TMUX_TMPDIR=parent-tmp \
+"$LOOM" provider-open --provider claude --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$CLAUDE_PERSISTENT_LANE" \
+  --session-id "$CLAUDE_NEW_SESSION" --cwd "$TEST_ROOT" \
+  --prompt "$claude_new_prompt" > "$TEST_ROOT/claude-new-open.out"
+grep -q 'LOOM_PROVIDER_OPENED schema=loom-provider-abi-v1 provider=claude lifecycle=persistent stdin_authority=loom-lease prompt_transport=loom-wake' \
+  "$TEST_ROOT/claude-new-open.out" || \
+  fail 'persistent Claude new session omitted its custody receipt'
+claude_new_replay=''
+for _ in $(seq 1 100); do
+  claude_new_replay="$($LOOM snapshot --state-dir "$STATE_DIR" \
+    --agent "$AGENT" --lane "$CLAUDE_PERSISTENT_LANE" --cwd "$TEST_ROOT" \
+    --cursor 0 2>/dev/null || true)"
+  grep -q "FAKE_CLAUDE_TUI_WAKE:$claude_new_prompt" \
+    <<< "$claude_new_replay" && break
+  sleep 0.05
+done
+grep -q "FAKE_CLAUDE_TUI_READY:--session-id $CLAUDE_NEW_SESSION --setting-sources user,local" \
+  <<< "$claude_new_replay" || fail 'persistent Claude new argv was not exact'
+grep -q "FAKE_CLAUDE_TUI_WAKE:$claude_new_prompt" <<< "$claude_new_replay" || \
+  fail 'persistent Claude new bootstrap did not cross the Loom lease'
+"$LOOM" stop --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$CLAUDE_PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null
+
+CLAUDE_RESUME_SESSION='44444444-4444-4444-8444-444444444444'
+claude_resume_prompt='CLAUDE_PERSISTENT_RESUME_WITNESS'
+"$LOOM" provider-open --provider claude --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$CLAUDE_RESUME_LANE" \
+  --session-id "$CLAUDE_RESUME_SESSION" --mode resume \
+  --provider-session "$CLAUDE_PROVIDER_SESSION" --cwd "$TEST_ROOT" \
+  --prompt "$claude_resume_prompt" > "$TEST_ROOT/claude-resume-open.out"
+claude_resume_replay=''
+for _ in $(seq 1 100); do
+  claude_resume_replay="$($LOOM snapshot --state-dir "$STATE_DIR" \
+    --agent "$AGENT" --lane "$CLAUDE_RESUME_LANE" --cwd "$TEST_ROOT" \
+    --cursor 0 2>/dev/null || true)"
+  grep -q "FAKE_CLAUDE_TUI_WAKE:$claude_resume_prompt" \
+    <<< "$claude_resume_replay" && break
+  sleep 0.05
+done
+grep -q "FAKE_CLAUDE_TUI_READY:--resume $CLAUDE_PROVIDER_SESSION --setting-sources user,local" \
+  <<< "$claude_resume_replay" || fail 'persistent Claude resume argv was not exact'
+grep -q "FAKE_CLAUDE_TUI_WAKE:$claude_resume_prompt" \
+  <<< "$claude_resume_replay" || \
+  fail 'persistent Claude resume bootstrap did not cross the Loom lease'
+"$LOOM" stop --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$CLAUDE_RESUME_LANE" --cwd "$TEST_ROOT" >/dev/null
+
 kimi_persistent_prompt='KIMI_PERSISTENT_INITIAL_WITNESS'
 CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
 CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=parent CLAUDE_CODE_SESSION_ID=parent-claude \
@@ -628,4 +728,4 @@ grep -q "FAKE_KIMI_TUI_WAKE:$kimi_post_recovery" \
 "$LOOM" stop --state-dir "$STATE_DIR" --agent "$AGENT" \
   --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null
 
-printf 'sounio-loom-provider-abi-selftest: PASS providers=5 credentials=native prompt=redacted prompt_transport=typed wake_argv=executable-only bootstrap_identity=provider+session+prompt unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed persistent_stdin=loom-lease kernel_recovery=stable-provider session_binding=typed replay=verified\n'
+printf 'sounio-loom-provider-abi-selftest: PASS providers=5 credentials=native prompt=redacted prompt_transport=typed wake_argv=prompt-free bootstrap_identity=provider+session+prompt unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed persistent_stdin=loom-lease kernel_recovery=stable-provider session_binding=typed replay=verified\n'

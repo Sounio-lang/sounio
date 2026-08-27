@@ -1,4 +1,4 @@
-# Loom Fleet Catalog v2
+# Loom Fleet Catalog v3
 
 ## Purpose
 
@@ -15,12 +15,15 @@ reconciler observes both authorities before it mutates either surface.
 
 ## Stored authority
 
-Every v2 record stores:
+Catalog v3 additionally seals whether a provider starts a new conversation or
+resumes an existing native session. Every v3 record stores:
 
 - enabled state, slot, provider kind, agent identity, credential home, and cwd;
 - the selected custody implementation and shared coordination authority;
 - for Loom custody, a stable session UUID, optional model, and explicit unsafe
   policy;
+- `provider_mode=new|resume` and, for resume, the native provider-session
+  identity;
 - a private bootstrap prompt path and its SHA-256 digest.
 
 The bootstrap prompt is copied to `<state>/fleet/prompts/<slot>.txt` with mode
@@ -42,8 +45,9 @@ still refreshes presence and endpoint records in the selected Sounio bus. A
 legacy v2 entry without this field can be re-enrolled with `--replace`; until
 then, mutation refuses rather than registering into an implicit local bus.
 
-Version 1 records remain readable and mean `custody=agentd`. The next successful
-enrollment rewrites them as version 2 without changing that authority.
+Version 1 records remain readable and mean `custody=agentd`. Version 2 Loom
+records remain readable and mean `provider_mode=new`. The next successful
+enrollment rewrites either older form as version 3 without changing authority.
 
 ## Reconciliation state machine
 
@@ -89,10 +93,11 @@ hide with process discovery.
 
 ## Current boundary
 
-Persistent catalog custody is available for Codex and Kimi because both have a
-verified `provider-open` adapter. Kimi's initial prompt crosses the authenticated
-Loom input lease after the TUI is under Guardian custody; it is not placed in an
-unsupported positional argv. Other provider kinds fail closed. Provider or
+Persistent catalog custody is available for Claude, Codex, and Kimi because all
+three have verified `provider-open` adapters. Claude can bind a new caller UUID
+or resume one exact native UUID. Claude and Kimi initial prompts cross the
+authenticated Loom input lease after the TUI is under Guardian custody; they
+are not placed in unsupported positional argv. Other provider kinds fail closed. Provider or
 Guardian loss permits a new physical generation from the sealed bootstrap
 intent; it cannot preserve the dead provider process or claim that the new
 conversation is the old one. Kernel-only loss preserves the Guardian, provider
@@ -106,6 +111,7 @@ scripts/ci/sounio_loom_fleet_custody_selftest.sh
 
 It proves prompt tamper refusal, forged-custody refusal, dual-authority refusal,
 exact refusal of a provider without a persistent adapter, explicit active
-adoption, idempotent Codex and Kimi reconciliation, Kimi lease bootstrap, and
-stable-provider kernel recovery. It also sabotages same-HOME native-store
+adoption, idempotent Claude, Codex, and Kimi reconciliation, Claude exact-session
+resume, Claude/Kimi lease bootstrap, and stable-provider kernel recovery. It
+also sabotages same-HOME native-store
 aliasing and requires refusal by the exact catalog isolation rule.

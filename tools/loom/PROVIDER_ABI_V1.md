@@ -73,19 +73,22 @@ and gives input authority only to Loom's exclusive interactive lease and
 authenticated wake path. Kernel recovery preserves the Guardian PID, provider
 PID, instance identity, output cursor, and provider conversation.
 
-Persistent mode supports Codex and Kimi. Codex receives its initial prompt in
-the native TUI argv. Kimi's TUI has no positional bootstrap-prompt contract, so
-Loom starts the native process first and sends the initial prompt through the
-same authenticated input lease used for later wakes. The plan and receipt expose
-this distinction as `prompt_transport=argv|loom-wake`; Kimi's bootstrap prompt
-does not appear in the process argv. `loom-wake` is executable-only by
-construction: any future adapter that adds even one provider argument under
-that transport is refused before the process starts. The bootstrap message ID
-is derived from provider kind, Loom session UUID, and prompt digest, preventing
-same-prompt sessions from aliasing one durable wake identity.
+Persistent mode supports Claude, Codex, and Kimi. Codex receives its initial
+prompt in the native TUI argv. Claude and Kimi start before Loom sends the
+initial prompt through the same authenticated input lease used for later wakes.
+The plan and receipt expose this distinction as
+`prompt_transport=argv|loom-wake`; a lease-delivered bootstrap prompt does not
+appear in the process argv. `loom-wake` plans are refused if the generated argv
+contains the prompt. The bootstrap message ID is derived from provider kind,
+Loom session UUID, and prompt digest, preventing same-prompt sessions from
+aliasing one durable wake identity.
 
-Persistent Claude, Grok, OpenCode, and Cursor adapters are refused until each
-has a tested native input and session-resume contract. `provider-open` also
+Claude new sessions use the caller-supplied UUID with `--session-id`. Resume
+uses exactly `--resume <provider-session-uuid>`. Both select only the native
+`user,local` setting sources. The adapter never uses directory-most-recent
+`--continue` or identity-changing `--fork-session`. Grok, OpenCode, and Cursor
+persistent adapters are refused until each has a tested native input and
+session-resume contract. `provider-open` also
 refuses `--isolate-context`: neither supported TUI currently exposes isolation
 equivalent to its headless contract.
 
@@ -159,6 +162,7 @@ status parsing, prompt redaction, unsafe opt-in, UUID enforcement, override
 validation, context-isolation mappings, inherited-harness removal, native login
 delegation, headless stdin closure, persistent input leasing, kernel replacement
 with stable Guardian/provider identities, Kimi bootstrap through authenticated
+`loom-wake`, exact Claude new/resume argv, Claude bootstrap through authenticated
 `loom-wake`, provider/session-bound bootstrap identity, and verified terminal
 replay. Harness removal covers Codex, Claude, Kimi, Cursor, Grok, tmux, and
 inherited Sounio agentd/session identities without removing provider credential
@@ -180,7 +184,7 @@ Provider ABI v1 does not yet:
 - project stream-observed or native-store provider session IDs into a durable
   provider catalog;
 - normalize provider event payloads into a shared typed event algebra;
-- expose persistent interactive adapters beyond Codex and Kimi;
+- expose persistent interactive adapters beyond Claude, Codex, and Kimi;
 - resume a native-store Kimi session after its provider process dies;
 - resume a persistent provider after Guardian or host loss;
 - broker or replicate credentials;
