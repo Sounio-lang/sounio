@@ -169,6 +169,27 @@ previous `current` symlink and re-ensures the previous generation before the
 installer refuses. This removes first-lane warm-up from the hook path and makes
 upgrade and rollback causally visible to the runtime selftest.
 
+## Transactional Promotion
+
+`scripts/dev/install_sounio_loom_native_hooks.sh` promotes these configurations
+into a separate control checkout without treating shell as a semantic oracle.
+The script is a lifecycle adapter: it verifies the active runtime and authority
+capsule against their manifest hashes, freezes the two candidate files, acquires
+a repository-wide promotion lock, and creates the target worktree's Git
+`index.lock` so a concurrent branch switch fails before it can change the
+surface being promoted. It retains both original configurations outside the
+worktree, replaces each file atomically, and runs the exact configured command
+through a production-mode policyless `codex` harness.
+
+The canary must produce three Sounio-authorized ALLOW receipts from the runtime
+capsule, expose a live `NATIVE_HOOK_ATTESTED wake_eligible=1` capability, and
+remove that capability at `SessionEnd`. Any failure restores both original
+files before releasing the Git lock. The selftest additionally requires exact
+rollback after an after-swap sabotage, refusal of dirty target hooks, and
+preservation of a foreign Git index lock. Successful promotion leaves an audit
+receipt and backup under the target Git common directory; committing the two
+working-tree changes remains the serialized integration owner's responsibility.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic

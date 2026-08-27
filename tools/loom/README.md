@@ -740,6 +740,15 @@ capsule bytes, a broken activation link, or a bundle switch during attestation
 fails closed. Each hook receipt identifies whether authority came from the
 worktree or the immutable runtime capsule.
 
+Native hook adoption across a control checkout uses
+`scripts/dev/install_sounio_loom_native_hooks.sh --target-root PATH --activate`.
+It freezes the candidate bytes, holds the target Git index against branch
+switches, keeps an out-of-worktree backup, swaps both provider configurations
+atomically, and runs a production-mode policyless canary before returning. A
+failed canary restores both files. The installer is operational machinery only;
+the ALLOW decisions and semantic hashes still come from the packaged Sounio
+authority.
+
 ## Durable Obligations
 
 A directed coordination `request` is now projected into a durable Loom

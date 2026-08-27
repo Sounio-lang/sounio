@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook-promotion.XXXXXX")"
+RUNTIME_ROOT="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime"
+STATE_ROOT="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-common-dir)/sounio-coord-state"
+INSTALLER="$ROOT_DIR/scripts/dev/install_sounio_loom_native_hooks.sh"
+
+cleanup() {
+  rm -rf "$TEST_ROOT"
+}
+trap cleanup EXIT
+
+fail() {
+  printf 'sounio-loom-native-hook-promotion-selftest: FAIL: %s\n' "$*" >&2
+  exit 1
+}
+
+create_target() {
+  local target="$1"
+  mkdir -p "$target/.codex" "$target/.claude" "$target/bin"
+  git init -q "$target"
+  printf '{"legacy":"codex"}\n' > "$target/.codex/hooks.json"
+  printf '{"legacy":"claude"}\n' > "$target/.claude/settings.json"
+  cp "$ROOT_DIR/bin/sounio-coord" "$target/bin/"
+  git -C "$target" add .codex/hooks.json .claude/settings.json bin/sounio-coord
+  git -C "$target" -c user.name='LOOM selftest' -c user.email='loom-selftest@invalid' \
+    commit -q -m 'fixture'
+}
+
+config_sha() {
+  sha256sum "$1/.codex/hooks.json" "$1/.claude/settings.json" |
+    awk '{print $1}' | paste -sd ':' -
+}
+
+[[ -x "$INSTALLER" ]] || fail 'promotion installer is not executable'
+[[ -L "$RUNTIME_ROOT/current" ]] || fail 'shared runtime is not active'
+
+positive="$TEST_ROOT/positive"
+create_target "$positive"
+output="$(
+  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+    "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$positive" --activate
+)"
+grep -q '^LOOM_NATIVE_HOOKS_ACTIVATED ' <<< "$output" ||
+  fail 'positive promotion omitted its activation receipt'
+[[ "$(sha256sum "$positive/.codex/hooks.json" | awk '{print $1}')" == \
+  "$(sha256sum "$ROOT_DIR/.codex/hooks.json" | awk '{print $1}')" ]] ||
+  fail 'positive promotion installed the wrong Codex configuration'
+[[ "$(sha256sum "$positive/.claude/settings.json" | awk '{print $1}')" == \
+  "$(sha256sum "$ROOT_DIR/.claude/settings.json" | awk '{print $1}')" ]] ||
+  fail 'positive promotion installed the wrong Claude configuration'
+[[ ! -e "$positive/.git/index.lock" ]] ||
+  fail 'positive promotion retained the target Git index lock'
+receipt="$(sed -n 's/.* receipt=\(.*\)$/\1/p' <<< "$output")"
+[[ -f "$receipt" ]] || fail 'positive promotion receipt is missing'
+grep -q '^result=ACTIVATED$' "$receipt" || fail 'positive promotion receipt is not activated'
+grep -q '^canary_allow_receipts=3$' "$receipt" ||
+  fail 'positive promotion did not retain its three-ALLOW canary proof'
+grep -q '^canary_runtime_capsule_receipts=3$' "$receipt" ||
+  fail 'positive promotion did not retain its runtime-capsule proof'
+
+rollback="$TEST_ROOT/rollback"
+create_target "$rollback"
+rollback_before="$(config_sha "$rollback")"
+set +e
+rollback_output="$(
+  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  SOUNIO_LOOM_NATIVE_HOOK_PROMOTION_SABOTAGE_AFTER_SWAP=1 \
+    "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$rollback" --activate 2>&1
+)"
+rollback_rc=$?
+set -e
+[[ "$rollback_rc" -ne 0 ]] || fail 'after-swap sabotage did not refuse promotion'
+grep -q 'error: sabotage-after-swap' <<< "$rollback_output" ||
+  fail 'after-swap sabotage did not cause the refusal'
+grep -q '^ROLLED_BACK transaction=' <<< "$rollback_output" ||
+  fail 'after-swap sabotage did not report rollback'
+[[ "$(config_sha "$rollback")" == "$rollback_before" ]] ||
+  fail 'after-swap sabotage did not restore both configurations exactly'
+[[ ! -e "$rollback/.git/index.lock" ]] ||
+  fail 'rollback retained the target Git index lock'
+
+dirty="$TEST_ROOT/dirty"
+create_target "$dirty"
+printf 'dirty\n' >> "$dirty/.codex/hooks.json"
+dirty_before="$(config_sha "$dirty")"
+if SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$dirty" --activate \
+  >/dev/null 2>&1; then
+  fail 'promotion accepted a dirty target hook configuration'
+fi
+[[ "$(config_sha "$dirty")" == "$dirty_before" ]] ||
+  fail 'dirty-target refusal changed a configuration'
+
+locked="$TEST_ROOT/locked"
+create_target "$locked"
+printf 'foreign-index-lock\n' > "$locked/.git/index.lock"
+locked_before="$(config_sha "$locked")"
+if SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$STATE_ROOT" \
+  "$INSTALLER" --source-root "$ROOT_DIR" --target-root "$locked" --activate \
+  >/dev/null 2>&1; then
+  fail 'promotion ignored an existing target Git index lock'
+fi
+[[ "$(config_sha "$locked")" == "$locked_before" ]] ||
+  fail 'index-lock refusal changed a configuration'
+grep -q '^foreign-index-lock$' "$locked/.git/index.lock" ||
+  fail 'promotion removed a foreign target Git index lock'
+
+printf '%s\n' \
+  'sounio-loom-native-hook-promotion-selftest: PASS promotion=atomic runtime=manifest-bound git_index=locked policyless_canary=3-ALLOW rollback=exact dirty_target=refused foreign_lock=preserved python_oracle=absent rust_oracle=absent'
