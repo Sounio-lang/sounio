@@ -230,6 +230,24 @@ fi
 grep -q 'state=ROLLED_BACK' "$TEST_ROOT/target-failure.out" || \
   fail 'target failure omitted rollback receipt'
 assert_agentd "$failure_state" "$failure_slot"
+reset_output="$(loom fleet-transfer-reset --state-dir "$failure_state" \
+  --slot "$failure_slot" --cwd "$WORKTREE")"
+[[ "$reset_output" == *'state=ARCHIVED'* \
+  && "$reset_output" == *'authority=Sounio'* ]] || \
+  fail 'rolled-back transfer was not archived under Sounio authority'
+[[ ! -e "$failure_state/fleet/transfers/$failure_slot" ]] || \
+  fail 'reset retained the active transfer directory'
+retry_output="$(run_transfer "$failure_state" "$failure_slot" "$failure_session")"
+[[ "$retry_output" == *'state=COMPLETE'* ]] || \
+  fail 'archived rollback could not be retried to completion'
+assert_loom "$failure_state" "$failure_slot"
+if loom fleet-transfer-reset --state-dir "$failure_state" \
+  --slot "$failure_slot" --cwd "$WORKTREE" \
+  > "$TEST_ROOT/reset-committed.out" 2>&1; then
+  fail 'committed transfer journal was reset'
+fi
+grep -q 'reset-requires-rolled-back-state' "$TEST_ROOT/reset-committed.out" || \
+  fail 'committed reset was refused by the wrong rule'
 
 dual_state="$TEST_ROOT/dual-state"
 dual_slot='transfer-dual-authority'
@@ -347,4 +365,4 @@ for crash_point in after-stage after-quiesce after-target after-commit; do
 done
 
 printf '%s\n' \
-  'sounio-loom-custody-transfer-runtime-selftest: PASS authority=Sounio realization=OCaml happy=committed target_failure=rolled-back dual_authority=abort-target source_drift=refused silent_stop=refused forged_stop=refused python_oracle=refused source_reappears=rolled-back crash_points=after-stage,after-quiesce,after-target,after-commit'
+  'sounio-loom-custody-transfer-runtime-selftest: PASS authority=Sounio realization=OCaml happy=committed target_failure=rolled-back retry=committed committed_reset=refused dual_authority=abort-target source_drift=refused silent_stop=refused forged_stop=refused python_oracle=refused source_reappears=rolled-back crash_points=after-stage,after-quiesce,after-target,after-commit'

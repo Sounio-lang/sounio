@@ -10403,6 +10403,51 @@ let fleet_transfer_recover_command cli =
       fleet_transfer_drive root (fleet_agent_command ()) transfer
         (fleet_transfer_deadline cli))
 
+let fleet_transfer_reset_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let slot = required cli "--slot" in
+  let paths = fleet_transfer_paths root slot in
+  with_fleet_transfer_lock paths (fun () ->
+      let transfer = load_fleet_transfer root slot in
+      if transfer.custody_phase <> 6 || transfer.custody_catalog_committed then
+        failf "fleet-custody-transfer-reset-requires-rolled-back-state";
+      (match fleet_transfer_catalog_state root transfer with
+      | `Agentd -> ()
+      | `Loom -> failf "fleet-custody-transfer-reset-refuses-loom-catalog");
+      (match fleet_loom_state root transfer.custody_target with
+      | "absent" -> ()
+      | state ->
+          failf "fleet-custody-transfer-reset-target-not-absent:state=%s" state);
+      let source_state, source_identity, _ =
+        fleet_transfer_source_observation (fleet_agent_command ()) transfer
+      in
+      if source_state <> "active" || not source_identity then
+        failf "fleet-custody-transfer-reset-source-not-restored";
+      let receipt =
+        require_custody_transfer_decision 9
+          (fleet_transfer_frame transfer true true
+             empty_fleet_transfer_target_observation false true true)
+      in
+      let transfer = fleet_transfer_policy_receipt transfer receipt in
+      let archive_root =
+        Filename.concat
+          (Filename.concat (fleet_directory root) "transfer-archive")
+          (slug slot)
+      in
+      mkdir_p archive_root;
+      let attempt = sha256 (read_file paths.transfer_journal_path) in
+      let archive_path =
+        Filename.concat archive_root (String.sub attempt 0 24)
+      in
+      if Sys.file_exists archive_path then
+        failf "fleet-custody-transfer-reset-archive-conflict";
+      Unix.rename paths.transfer_directory archive_path;
+      Printf.printf
+        "LOOM_FLEET_TRANSFER_RESET slot=%s state=ARCHIVED archive=%s authority=Sounio semantics_sha256=%s policy_receipt_sha256=%s\n%!"
+        slot archive_path custody_transfer_semantics_sha256
+        transfer.custody_policy_receipt_sha256)
+
 let fleet_truthful_state coordination_available snapshot_authorized lanes spec
     agentd_state loom_state =
   let lane = authority_entry lanes spec.fleet_agent spec.fleet_slot in
@@ -10589,7 +10634,7 @@ let usage () =
   Printf.eprintf
     "\nWitness Mesh v0/v1:\n  witness-serve --witness-state-dir DIR --membership FILE --witness ID --private-key PEM [--bind IP] [--port N]\n  witness-mesh-anchor --state-dir DIR --world W --membership FILE --endpoints FILE --anchor-private-key PEM\n  witness-mesh-verify --state-dir DIR --world W --membership FILE --endpoints FILE [--policy byzantine-strict|crash-quorum]\n  witness-epoch-handoff --epoch-state-dir DIR --world W --from-epoch N --to-epoch N --old-state-dir DIR --old-membership FILE --old-endpoints FILE --new-state-dir DIR --new-membership FILE --new-endpoints FILE\n  witness-epoch-verify --epoch-state-dir DIR --world W --active-state-dir DIR --membership FILE --endpoints FILE\n  witness-epoch-log-serve --log-state-dir DIR --operator ID --operator-public-key PEM --operator-private-key PEM --publisher-public-key PEM [--bind IP] [--log-port N]\n  witness-epoch-log-status --log-host HOST --log-port N --operator ID --operator-public-key PEM --world W\n  witness-epoch-transparency-publish --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --publisher-public-key PEM --publisher-private-key PEM --transparency-membership FILE --transparency-endpoints FILE --transparency-anchor-private-key PEM\n  witness-epoch-transparency-verify --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --transparency-membership FILE --transparency-endpoints FILE\n";
   Printf.eprintf
-    "\nFleet catalog v3:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--mode new|resume] [--provider-session S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n  fleet-transfer --slot S --session-id S --provider-session S --source-lane L [--source-agent A] [--source-session S] --coord-dir DIR (--prompt TEXT|--prompt-file PATH) [--deadline-seconds N]\n  fleet-transfer-recover --slot S [--deadline-seconds N]\n"
+    "\nFleet catalog v3:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--mode new|resume] [--provider-session S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n  fleet-transfer --slot S --session-id S --provider-session S --source-lane L [--source-agent A] [--source-session S] --coord-dir DIR (--prompt TEXT|--prompt-file PATH) [--deadline-seconds N]\n  fleet-transfer-recover --slot S [--deadline-seconds N]\n  fleet-transfer-reset --slot S\n"
 
 let arguments_after_command () =
   let values = Array.to_list Sys.argv in
@@ -10701,6 +10746,7 @@ let main () =
     | "fleet-reconcile" -> fleet_reconcile_command cli; 0
     | "fleet-transfer" -> fleet_transfer_command cli; 0
     | "fleet-transfer-recover" -> fleet_transfer_recover_command cli; 0
+    | "fleet-transfer-reset" -> fleet_transfer_reset_command cli; 0
     | "verify-journal" -> verify_command cli; 0
     | "verify-guardian-journal" -> verify_guardian_command cli; 0
     | "verify-continuity-receipt" -> verify_continuity_receipt_command cli; 0
