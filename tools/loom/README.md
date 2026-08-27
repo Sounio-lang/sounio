@@ -718,6 +718,17 @@ A woken lane can answer with
 the command derives the original sender and thread instead of requiring the
 provider to reconstruct routing metadata.
 
+The kernel treats claim refresh, process presence, and the Loom delivery
+endpoint as one convergent registration attempt. A failed operation exits the
+refresh child nonzero; the parent retries after lane-jittered delays of 1, 2, 4,
+8, 16, and at most 30 seconds. Only a complete endpoint registration restores
+the five-minute steady-state refresh period. A transient lock refusal or an
+endpoint-specific refusal therefore cannot silently leave a live lane
+unreachable for the rest of its lease. The integration gate holds the
+coordination lock for the first attempt, refuses the first endpoint registration
+after presence succeeds, and requires the same kernel to converge without
+terminal input.
+
 ## Durable Obligations
 
 A directed coordination `request` is now projected into a durable Loom
@@ -743,19 +754,27 @@ lock, asks native Sounio frame `9007` to admit each transition, and fsyncs the
 event before reporting success.
 
 `obligation-supervisor-ensure` owns the tmux-free service lifecycle. It takes a
-state-local bootstrap lock, validates both PID and Linux process-start tick,
-refuses duplicate starts, and uses `setsid` to launch the physically selected
-immutable runtime bundle. If `current` moves during an upgrade or rollback,
-the next ensure replaces the old-bundle supervisor with a new generation.
-`obligation-supervisor-stop` terminates the verified OCaml process and waits
-until its identity is no longer live. Before sending any signal, both commands
-also require the executable to belong to an installed immutable Loom bundle (or
-the expected local build), so a corrupted state file cannot redirect lifecycle
-control at an unrelated reused PID. The detached service explicitly closes the
-bootstrap-lock descriptor before `exec`; killing an `ensure` caller mid-start
-therefore cannot leave a surviving daemon that holds the election lock. These
-commands are the inner control-plane API; a Pod-external guardian such as Beagle
-should call `ensure` after a Pod restart rather than manufacturing a tmux session.
+state-local bootstrap lock and uses `setsid` to launch the physically selected
+immutable runtime bundle. The detached wrapper holds a separate nonblocking
+lifetime leader lock; a raw second `obligation-supervise` therefore exits 73
+before replay. Lifecycle discovery enumerates only same-UID, PID-1-parented
+wrappers whose immutable script and coordination state match this repository.
+It also validates the published OCaml child by PID, Linux process-start tick,
+parent wrapper, and executable path. If `current` moves during an upgrade or
+rollback, the next ensure retires every matching legacy wrapper and starts one
+new generation. A singleton wrapper whose OCaml child is still replaying is
+given a bounded warm-up period instead of being mistaken for a dead service.
+Restart waits for descendant-held lifetime locks to be released.
+`obligation-supervisor-stop` terminates the verified wrapper and waits until its
+identity is no longer live. These checks prevent a corrupted state file from
+redirecting lifecycle control at an unrelated reused PID. The detached service
+explicitly closes the bootstrap-lock descriptor before launch; killing an
+`ensure` caller mid-start therefore cannot leave a surviving daemon that holds
+the bootstrap election. These commands are the inner control-plane API; a
+Pod-external guardian such as Beagle should call `ensure` after a Pod restart
+rather than manufacturing a tmux session. The production and sabotage receipts
+are recorded in
+`tools/loom/evidence/loom-autonomous-coordination-v1-20260827.txt`.
 
 The authoritative state lives under the shared coordination directory in
 `loom-obligations/*/journal.tsv`. The TUI, GUI, JSON endpoint, and supervisor are
