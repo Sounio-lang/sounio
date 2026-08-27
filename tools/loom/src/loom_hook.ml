@@ -319,6 +319,40 @@ let parse_json value =
   if !index <> length then invalid "trailing-data";
   parsed
 
+let json_escape value =
+  let output = Buffer.create (String.length value + 8) in
+  String.iter
+    (fun character ->
+      match character with
+      | '"' -> Buffer.add_string output "\\\""
+      | '\\' -> Buffer.add_string output "\\\\"
+      | '\b' -> Buffer.add_string output "\\b"
+      | '\012' -> Buffer.add_string output "\\f"
+      | '\n' -> Buffer.add_string output "\\n"
+      | '\r' -> Buffer.add_string output "\\r"
+      | '\t' -> Buffer.add_string output "\\t"
+      | value when Char.code value < 32 ->
+          Buffer.add_string output (Printf.sprintf "\\u%04x" (Char.code value))
+      | value -> Buffer.add_char output value)
+    value;
+  Buffer.contents output
+
+let rec json_string = function
+  | Json_object fields ->
+      "{" ^
+      String.concat ","
+        (List.map
+           (fun (name, value) ->
+             "\"" ^ json_escape name ^ "\":" ^ json_string value)
+           fields)
+      ^ "}"
+  | Json_array values -> "[" ^ String.concat "," (List.map json_string values) ^ "]"
+  | Json_string value -> "\"" ^ json_escape value ^ "\""
+  | Json_number value -> value
+  | Json_bool true -> "true"
+  | Json_bool false -> "false"
+  | Json_null -> "null"
+
 let object_field value name =
   match value with
   | Json_object fields -> List.assoc_opt name fields
@@ -329,6 +363,67 @@ let string_field ?(default = "") value name =
   | Some (Json_string found) -> found
   | Some Json_null | None -> default
   | Some _ -> failf "invalid-json:%s-must-be-string" name
+
+let replace_object_field value name replacement =
+  match value with
+  | Json_object fields ->
+      if not (List.mem_assoc name fields) then failf "invalid-json:missing-%s" name;
+      Json_object
+        (List.map
+           (fun (field_name, field_value) ->
+             if field_name = name then (field_name, replacement)
+             else (field_name, field_value))
+           fields)
+  | _ -> failf "invalid-json:tool_input-must-be-object"
+
+let execution_tool name =
+  List.mem name [ "Bash"; "Exec"; "exec_command"; "shell"; "Shell" ]
+
+let execution_command input =
+  match input with
+  | Json_object fields ->
+      let found =
+        List.filter_map
+          (fun name ->
+            match List.assoc_opt name fields with
+            | Some (Json_string command) -> Some (name, command)
+            | Some Json_null -> None
+            | Some _ -> failf "invalid-json:%s-must-be-string" name
+            | None -> None)
+          [ "command"; "cmd"; "script" ]
+      in
+      (match found with
+      | [ value ] -> value
+      | [] -> failf "execution-command-missing"
+      | _ -> failf "execution-command-ambiguous")
+  | _ -> failf "invalid-json:tool_input-must-be-object"
+
+let execution_cwd event input root =
+  let event_cwd = string_field ~default:root event "cwd" in
+  let selected =
+    match input with
+    | Json_object fields ->
+        (match List.assoc_opt "workdir" fields, List.assoc_opt "cwd" fields with
+        | Some (Json_string value), _ when value <> "" -> value
+        | Some Json_null, Some (Json_string value) when value <> "" -> value
+        | None, Some (Json_string value) when value <> "" -> value
+        | Some (Json_string _), _ | Some Json_null, _ | None, None -> event_cwd
+        | Some _, _ -> failf "invalid-json:workdir-must-be-string"
+        | None, Some _ -> failf "invalid-json:cwd-must-be-string")
+    | _ -> failf "invalid-json:tool_input-must-be-object"
+  in
+  if Filename.is_relative selected then Filename.concat event_cwd selected else selected
+
+let execution_hook_output input field replacement =
+  let updated_input = replace_object_field input field (Json_string replacement) in
+  Json_object
+    [ ("hookSpecificOutput",
+       Json_object
+         [ ("hookEventName", Json_string "PreToolUse");
+           ("permissionDecision", Json_string "allow");
+           ("permissionDecisionReason",
+            Json_string "Sounio 9021 authorized one single-use execution capability");
+           ("updatedInput", updated_input) ]) ]
 
 let rec collect_named_strings names value =
   match value with
@@ -855,7 +950,8 @@ let execute_event tool_root root event agent lane raw_session_id =
     ignore
       (coord_ok tool_root root
          [ "release"; "--agent"; agent; "--lane"; lane; "--reason";
-           "agent session ended" ]))
+           "agent session ended" ]);
+    None)
   else if event_name = "PreToolUse" then (
     let paths = extract_paths event in
     let tool_name = string_field event "tool_name" in
@@ -881,7 +977,20 @@ let execute_event tool_root root event agent lane raw_session_id =
         if scoped.code <> 0 then (
           notify_conflict tool_root root agent lane target_paths scoped.output;
           failf "coordination-write-refused:%s" (trim scoped.output)));
-      refresh_endpoint tool_root presence_root agent lane))
+      refresh_endpoint tool_root presence_root agent lane);
+    if execution_tool tool_name then (
+      let input =
+        match object_field event "tool_input" with
+        | Some value -> value
+        | None -> failf "execution-tool-input-missing"
+      in
+      let field, command = execution_command input in
+      let cwd = execution_cwd event input root in
+      refresh_presence tool_root presence_root root agent lane raw_session_id;
+      refresh_endpoint tool_root presence_root agent lane;
+      let replacement = Loom_exec.authorize_and_issue ~root ~cwd ~command in
+      Some (execution_hook_output input field replacement))
+    else None)
   else (
     let claim =
       if event_name = "SessionStart" then run_coord tool_root root ([ "scope" ] @ common)
@@ -901,7 +1010,8 @@ let execute_event tool_root root event agent lane raw_session_id =
         "Sounio coordination joined: agent=%s lane=%s. Use this same agent/lane with `bin/sounio-coord scope` before write-bearing Bash commands.\n%!"
         agent lane;
     if event_name = "UserPromptSubmit" || event_name = "PostToolUse" then
-      inject_messages tool_root root agent lane)
+      inject_messages tool_root root agent lane;
+    None)
 
 let parse_agent arguments =
   let loop = function
@@ -940,12 +1050,16 @@ let run arguments =
     receipt := Some base_receipt;
     let authorized_receipt = authorize_guard current_root raw_event base_receipt in
     receipt := Some authorized_receipt;
+    let hook_output =
+      execute_event current_root current_root event !agent !lane raw_session_id
+    in
     append_decision_log current_root "ALLOW" authorized_receipt.result !agent !lane
       !event_name authorized_receipt;
-    execute_event current_root current_root event !agent !lane raw_session_id;
+    (match hook_output with Some output -> print_endline (json_string output) | None -> ());
     0
   with
   | Error message
+  | Loom_exec.Error message
   | Sys_error message ->
       (match !root, !receipt with
       | Some current_root, Some current_receipt ->

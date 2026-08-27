@@ -66,9 +66,9 @@ grep -Fq '"matcher": "apply_patch|Edit|Write"' "$CODEX_HOOKS" ||
 grep -Fq '"matcher": "Write|Edit|MultiEdit|NotebookEdit"' "$CLAUDE_HOOKS" ||
   fail "Claude structured-write matcher drifted"
 ! grep -Eq '"matcher": "[^"]*(Bash|Exec)' "$CODEX_HOOKS" ||
-  fail "Codex Bash/Exec was attached before Sounio policy v2"
+  fail "Codex Bash/Exec was attached before capability-custody and outcome gates"
 ! grep -Eq '"matcher": "[^"]*(Bash|Exec)' "$CLAUDE_HOOKS" ||
-  fail "Claude Bash/Exec was attached before Sounio policy v2"
+  fail "Claude Bash/Exec was attached before capability-custody and outcome gates"
 
 runtime_info="$($ROOT_DIR/bin/sounio-loom runtime-info)"
 grep -Fq 'selection=shared' <<< "$runtime_info" ||
@@ -87,4 +87,4 @@ if validate_no_legacy_bridge "$TEST_ROOT/codex-sabotaged.json"; then
 fi
 
 printf '%s\n' \
-  'sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 roundtrip=codex+claude bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=pending-sounio-v2 sabotage=refused runtime=2026.08.27.30'
+  'sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 roundtrip=codex+claude bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused runtime=2026.08.27.30'

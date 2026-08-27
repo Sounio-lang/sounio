@@ -35,6 +35,19 @@ else
   SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$language_authority_output" \
     "$SCRIPT_DIR/build_sounio_loom_language_authority.sh"
 fi
+execution_authority_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
+if [[ -n "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT is not executable' >&2
+    exit 1
+  }
+  mkdir -p "$(dirname "$execution_authority_output")"
+  install -m 0755 "$SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT" \
+    "$execution_authority_output"
+else
+  SOUNIO_LOOM_EXECUTION_AUTHORITY_OUTPUT="$execution_authority_output" \
+    "$SCRIPT_DIR/build_sounio_loom_execution_authority.sh"
+fi
 "$SCRIPT_DIR/build_sounio_loom_continuity_adapter.sh"
 "$SCRIPT_DIR/build_sounio_loom_obligation_adapter.sh"
 "$SCRIPT_DIR/build_sounio_loom_epistemic_adapter.sh"
