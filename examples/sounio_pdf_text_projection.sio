@@ -1,0 +1,383 @@
+//@ run-pass
+//!
+//! First Sounio semantic-authority witness for the ordered text-object
+//! projection of Apple's pinned Metal feature-table PDF.
+
+use document::pdf_text::{
+    SounioPdfLineProjection,
+    SounioPdfOperatorCensus,
+    SOUNIO_PDF_TEXT_OK,
+    sounio_pdf_text_resource_import,
+    sounio_pdf_text_operator_census,
+    sounio_pdf_text_glyph_code_census,
+    sounio_pdf_text_unicode_census,
+    sounio_pdf_text_projection_empty,
+    sounio_pdf_line_projection_empty,
+    sounio_pdf_text_project,
+    sounio_pdf_text_project_lines,
+    sounio_pdf_text_projection_digest,
+}
+
+fn operator_count(
+    census: &SounioPdfOperatorCensus,
+    name: string,
+) -> i64 with Mut, Panic, Div {
+    var found: i64 = -1
+    var operator: i64 = 0
+    while operator < census.distinct_operators {
+        if census.operator_length[operator as usize] == str_len(name) {
+            var matches = true
+            var at: i64 = 0
+            while at < str_len(name) {
+                if census.operator_bytes[(operator * 16 + at) as usize] !=
+                    str_char_at(name, at) {
+                    matches = false
+                }
+                at = at + 1
+            }
+            if matches {
+                if found >= 0 { return -2 }
+                found = census.operator_count[operator as usize]
+            }
+        }
+        operator = operator + 1
+    }
+    found
+}
+
+fn print_inline_int(value: i64) with IO, Mut, Panic, Div {
+    if value == 0 { print_char(48); return }
+    var remaining = value
+    if remaining < 0 { print_char(45); remaining = 0 - remaining }
+    var digits: [i64; 20] = [0; 20]
+    var count: i64 = 0
+    while remaining > 0 {
+        digits[count as usize] = remaining % 10
+        count = count + 1
+        remaining = remaining / 10
+    }
+    while count > 0 {
+        count = count - 1
+        print_char(48 + digits[count as usize])
+    }
+}
+
+fn print_hex_scalar(value: i64) with IO, Mut, Panic {
+    var width: i64 = 4
+    if value > 0xffff { width = 6 }
+    var shift = (width - 1) * 4
+    while shift >= 0 {
+        let digit = (value >> shift) & 15
+        if digit < 10 { print_char(48 + digit) }
+        else { print_char(55 + digit) }
+        shift = shift - 4
+    }
+}
+
+fn print_hex_byte(value: i64) with IO, Mut, Panic {
+    let high = (value >> 4) & 15
+    let low = value & 15
+    if high < 10 { print_char(48 + high) }
+    else { print_char(55 + high) }
+    if low < 10 { print_char(48 + low) }
+    else { print_char(55 + low) }
+}
+
+fn print_projection_scalar(value: i64) with IO, Mut, Panic {
+    if value >= 32 && value <= 126 && value != 92 {
+        print_char(value)
+    } else {
+        if value == 92 { print("\\\\") }
+        else {
+            print("<U+")
+            print_hex_scalar(value)
+            print(">")
+        }
+    }
+}
+
+fn line_before(
+    left: i64,
+    right: i64,
+    lines: &SounioPdfLineProjection,
+) -> bool with Panic {
+    let left_page = lines.line_page[left as usize]
+    let right_page = lines.line_page[right as usize]
+    if left_page != right_page { return left_page < right_page }
+    let left_y = lines.line_anchor_y[left as usize]
+    let right_y = lines.line_anchor_y[right as usize]
+    if left_y != right_y { return left_y > right_y }
+    left < right
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 1 {
+        print("usage: sounio_pdf_text_projection <Metal-Feature-Set-Tables.pdf>\n")
+        return 2
+    }
+    let resources = sounio_pdf_text_resource_import(get_arg(0))
+    let operators = sounio_pdf_text_operator_census(get_arg(0))
+    let glyphs = sounio_pdf_text_glyph_code_census(get_arg(0))
+    let unicode = sounio_pdf_text_unicode_census(get_arg(0))
+    var projection = sounio_pdf_text_projection_empty()
+    let project_error = sounio_pdf_text_project(get_arg(0), &!projection)
+    var lines = sounio_pdf_line_projection_empty()
+    let line_error = sounio_pdf_text_project_lines(&projection, &!lines)
+    let digest = sounio_pdf_text_projection_digest(&projection, &lines)
+    print("PDF_TEXT_RESOURCES error="); print_inline_int(resources.error)
+    print(" pages="); print_inline_int(resources.pages)
+    print(" direct="); print_inline_int(resources.direct_resources)
+    print(" indirect="); print_inline_int(resources.indirect_resources)
+    print(" inherited="); print_inline_int(resources.inherited_resources)
+    print(" depth="); print_inline_int(resources.max_resource_depth)
+    print(" bindings="); print_inline_int(resources.font_bindings)
+    print(" fonts="); print_inline_int(resources.unique_fonts)
+    print(" tounicode="); print_inline_int(resources.fonts_with_tounicode)
+    print(" without_tounicode="); print_inline_int(resources.fonts_without_tounicode)
+    print(" encoding="); print_inline_int(resources.fonts_with_encoding)
+    print(" descendants="); print_inline_int(resources.fonts_with_descendants)
+    print("\n")
+
+    print("PDF_TEXT_OPERATORS error="); print_inline_int(operators.error)
+    print(" pages="); print_inline_int(operators.pages)
+    print(" bytes="); print_inline_int(operators.decoded_bytes)
+    print(" comments="); print_inline_int(operators.comments)
+    print(" names="); print_inline_int(operators.names)
+    print(" numbers="); print_inline_int(operators.numbers)
+    print(" literals="); print_inline_int(operators.literal_strings)
+    print(" hex="); print_inline_int(operators.hexadecimal_strings)
+    print(" array_opens="); print_inline_int(operators.array_opens)
+    print(" array_closes="); print_inline_int(operators.array_closes)
+    print(" dict_opens="); print_inline_int(operators.dictionary_opens)
+    print(" dict_closes="); print_inline_int(operators.dictionary_closes)
+    print(" operators="); print_inline_int(operators.operator_tokens)
+    print(" distinct="); print_inline_int(operators.distinct_operators)
+    print(" BT="); print_inline_int(operator_count(&operators, "BT"))
+    print(" Tm="); print_inline_int(operator_count(&operators, "Tm"))
+    print(" Tf="); print_inline_int(operator_count(&operators, "Tf"))
+    print(" TJ="); print_inline_int(operator_count(&operators, "TJ"))
+    print(" Tj="); print_inline_int(operator_count(&operators, "Tj"))
+    print(" Tc="); print_inline_int(operator_count(&operators, "Tc"))
+    print(" ET="); print_inline_int(operator_count(&operators, "ET"))
+    print("\n")
+
+    print("PDF_TEXT_GLYPHS error="); print_inline_int(glyphs.error)
+    print(" pages="); print_inline_int(glyphs.pages)
+    print(" objects="); print_inline_int(glyphs.text_objects)
+    print(" fonts="); print_inline_int(glyphs.font_selections)
+    print(" matrices="); print_inline_int(glyphs.text_matrices)
+    print(" spacing="); print_inline_int(glyphs.character_spacings)
+    print(" strings="); print_inline_int(glyphs.text_show_strings)
+    print(" arrays="); print_inline_int(glyphs.text_show_arrays)
+    print(" adjustments="); print_inline_int(glyphs.array_adjustments)
+    print(" codes="); print_inline_int(glyphs.glyph_codes)
+    print(" non_ascii="); print_inline_int(glyphs.non_ascii_codes)
+    print(" stack="); print_inline_int(glyphs.max_operand_stack)
+    print("\n")
+
+    print("PDF_TEXT_UNICODE error="); print_inline_int(unicode.error)
+    print(" fonts="); print_inline_int(unicode.fonts)
+    print(" cmaps="); print_inline_int(unicode.cmap_streams)
+    print(" codespaces="); print_inline_int(unicode.codespace_ranges)
+    print(" bfchar="); print_inline_int(unicode.bfchar_ranges)
+    print(" bfrange="); print_inline_int(unicode.bfranges)
+    print(" entries="); print_inline_int(unicode.cmap_entries)
+    print(" glyphs="); print_inline_int(unicode.glyph_codes)
+    print(" macroman="); print_inline_int(unicode.macroman_scalars)
+    print(" cmap="); print_inline_int(unicode.cmap_scalars)
+    print(" non_ascii="); print_inline_int(unicode.non_ascii_scalars)
+    print(" private_use="); print_inline_int(unicode.private_use_scalars)
+    print("\n")
+
+    print("PDF_TEXT_PROJECTION error="); print_inline_int(projection.error)
+    print(" pages="); print_inline_int(projection.pages)
+    print(" objects="); print_inline_int(projection.text_objects)
+    print(" nonempty="); print_inline_int(projection.nonempty_objects)
+    print(" empty="); print_inline_int(projection.empty_objects)
+    print(" matrixless="); print_inline_int(projection.matrixless_objects)
+    print(" multiple_matrix="); print_inline_int(projection.multiple_matrix_objects)
+    print(" shows="); print_inline_int(projection.show_operations)
+    print(" scalars="); print_inline_int(projection.scalars)
+    print(" graphics_depth="); print_inline_int(projection.max_graphics_depth)
+    print("\n")
+
+    print("PDF_TEXT_LINES error="); print_inline_int(lines.error)
+    print(" pages="); print_inline_int(lines.pages)
+    print(" objects="); print_inline_int(lines.objects)
+    print(" lines="); print_inline_int(lines.lines)
+    print(" tolerance="); print_inline_int(lines.tolerance)
+    print(" max_spread="); print_inline_int(lines.max_line_spread)
+    print(" min_gap="); print_inline_int(lines.min_interline_gap)
+    print(" ambiguous="); print_inline_int(lines.ambiguous_assignments)
+    print("\n")
+
+    print("PDF_TEXT_DIGEST error="); print_inline_int(digest.error)
+    print(" bytes="); print_inline_int(digest.serialized_bytes)
+    print(" sha256=")
+    let expected_digest: [i64; 32] = [
+        0xae, 0xbd, 0xea, 0x50, 0x34, 0xdc, 0x20, 0x20,
+        0x1e, 0xdf, 0x55, 0x5b, 0xbb, 0x25, 0x7e, 0x29,
+        0x71, 0xeb, 0x86, 0x12, 0x7b, 0xe6, 0x02, 0xe6,
+        0x30, 0xbe, 0x11, 0x35, 0x56, 0x4f, 0x93, 0xf8
+    ]
+    var digest_at: i64 = 0
+    var digest_matches = true
+    while digest_at < 32 {
+        print_hex_byte(digest.bytes[digest_at as usize])
+        if digest.bytes[digest_at as usize] !=
+            expected_digest[digest_at as usize] {
+            digest_matches = false
+        }
+        digest_at = digest_at + 1
+    }
+    let expected = resources.error == SOUNIO_PDF_TEXT_OK &&
+        resources.base_error == 0 && resources.base_expected &&
+        resources.pages == 18 &&
+        resources.direct_resources == 0 &&
+        resources.indirect_resources == 18 &&
+        resources.inherited_resources == 0 &&
+        resources.max_resource_depth == 0 &&
+        resources.font_bindings == 99 &&
+        resources.unique_fonts == 10 &&
+        resources.fonts_with_tounicode == 3 &&
+        resources.fonts_without_tounicode == 7 &&
+        resources.fonts_with_encoding == 10 &&
+        resources.fonts_with_descendants == 0 &&
+        operators.error == SOUNIO_PDF_TEXT_OK &&
+        operators.pages == 18 && operators.decoded_bytes == 1095453 &&
+        operators.comments == 0 && operators.names == 16451 &&
+        operators.numbers == 125383 &&
+        operators.literal_strings == 25062 &&
+        operators.hexadecimal_strings == 0 &&
+        operators.array_opens == 2397 && operators.array_closes == 2397 &&
+        operators.dictionary_opens == 5319 &&
+        operators.dictionary_closes == 5319 &&
+        operators.operator_tokens == 77986 &&
+        operators.distinct_operators == 27 &&
+        operator_count(&operators, "BT") == 3193 &&
+        operator_count(&operators, "Tm") == 3190 &&
+        operator_count(&operators, "Tf") == 3236 &&
+        operator_count(&operators, "TJ") == 2397 &&
+        operator_count(&operators, "Tj") == 839 &&
+        operator_count(&operators, "Tc") == 1148 &&
+        operator_count(&operators, "ET") == 3193 &&
+        glyphs.error == SOUNIO_PDF_TEXT_OK &&
+        glyphs.pages == 18 && glyphs.text_objects == 3193 &&
+        glyphs.font_selections == 3236 &&
+        glyphs.text_matrices == 3190 &&
+        glyphs.character_spacings == 1148 &&
+        glyphs.text_show_strings == 25032 &&
+        glyphs.text_show_arrays == 2397 &&
+        glyphs.array_adjustments == 21822 &&
+        glyphs.glyph_codes == 35978 &&
+        glyphs.non_ascii_codes == 78 &&
+        glyphs.max_operand_stack == 6 &&
+        unicode.error == SOUNIO_PDF_TEXT_OK &&
+        unicode.fonts == 10 && unicode.cmap_streams == 3 &&
+        unicode.codespace_ranges == 3 &&
+        unicode.bfchar_ranges == 0 && unicode.bfranges == 4 &&
+        unicode.cmap_entries == 4 && unicode.glyph_codes == 35978 &&
+        unicode.macroman_scalars == 35904 &&
+        unicode.cmap_scalars == 74 &&
+        unicode.non_ascii_scalars == 152 &&
+        unicode.private_use_scalars == 2 &&
+        projection.error == SOUNIO_PDF_TEXT_OK &&
+        projection.pages == 18 &&
+        projection.text_objects == 3193 &&
+        projection.nonempty_objects == 3190 &&
+        projection.empty_objects == 3 &&
+        projection.matrixless_objects == 3 &&
+        projection.multiple_matrix_objects == 0 &&
+        projection.show_operations == 3236 &&
+        projection.scalars == 35978 &&
+        projection.max_graphics_depth == 2 &&
+        lines.error == SOUNIO_PDF_TEXT_OK &&
+        lines.pages == 18 &&
+        lines.objects == 3190 &&
+        lines.lines == 730 &&
+        lines.tolerance == 5000000 &&
+        lines.max_line_spread == 5000000 &&
+        lines.min_interline_gap == 6000000 &&
+        lines.ambiguous_assignments == 0 &&
+        digest.error == SOUNIO_PDF_TEXT_OK &&
+        digest.serialized_bytes == 891830 &&
+        digest_matches
+    print(" expected="); if expected { print("1") } else { print("0") }
+    print("\n")
+
+    var order: [i64; 4096] = [0; 4096]
+    var line: i64 = 0
+    while line < lines.lines {
+        order[line as usize] = line
+        line = line + 1
+    }
+    var order_at: i64 = 1
+    while order_at < lines.lines {
+        let key = order[order_at as usize]
+        var before = order_at - 1
+        while before >= 0 && line_before(
+            key, order[before as usize], &lines) {
+            order[(before + 1) as usize] = order[before as usize]
+            before = before - 1
+        }
+        order[(before + 1) as usize] = key
+        order_at = order_at + 1
+    }
+
+    order_at = 0
+    while order_at < lines.lines {
+        line = order[order_at as usize]
+        print("PDF_TEXT_LINE index="); print_inline_int(order_at)
+        print(" source_line="); print_inline_int(line)
+        print(" page="); print_inline_int(lines.line_page[line as usize])
+        print(" y="); print_inline_int(lines.line_anchor_y[line as usize])
+        print(" min_y="); print_inline_int(lines.line_min_y[line as usize])
+        print(" max_y="); print_inline_int(lines.line_max_y[line as usize])
+        print(" objects="); print_inline_int(lines.line_object_count[line as usize])
+        print(" text=")
+        var emitted: i64 = 0
+        var last_x: i64 = -9223372036854775807
+        var last_object: i64 = -1
+        while emitted < lines.line_object_count[line as usize] {
+            var candidate: i64 = -1
+            var candidate_x: i64 = 9223372036854775807
+            var object: i64 = 0
+            while object < projection.text_objects {
+                if projection.object_scalar_count[object as usize] > 0 &&
+                    lines.object_line[object as usize] == line {
+                    let x = projection.object_device_x[object as usize]
+                    let follows = x > last_x ||
+                        (x == last_x && object > last_object)
+                    if follows && (candidate < 0 || x < candidate_x ||
+                        (x == candidate_x && object < candidate)) {
+                        candidate = object
+                        candidate_x = x
+                    }
+                }
+                object = object + 1
+            }
+            if candidate < 0 { return 1 }
+            if emitted > 0 { print("|") }
+            let scalar_start = projection.object_scalar_start[candidate as usize]
+            let scalar_count = projection.object_scalar_count[candidate as usize]
+            var at: i64 = 0
+            while at < scalar_count {
+                print_projection_scalar(projection.scalar_value[
+                    (scalar_start + at) as usize])
+                at = at + 1
+            }
+            last_x = candidate_x
+            last_object = candidate
+            emitted = emitted + 1
+        }
+        print("\n")
+        order_at = order_at + 1
+    }
+    if project_error != SOUNIO_PDF_TEXT_OK ||
+        projection.error != SOUNIO_PDF_TEXT_OK ||
+        line_error != SOUNIO_PDF_TEXT_OK ||
+        lines.error != SOUNIO_PDF_TEXT_OK ||
+        digest.error != SOUNIO_PDF_TEXT_OK ||
+        !expected { return 1 }
+    0
+}

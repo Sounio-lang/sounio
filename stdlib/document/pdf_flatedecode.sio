@@ -99,6 +99,14 @@ pub struct SounioPdfFlateInventory {
     pub aggregate_digest_words: [i64; 8],
 }
 
+pub struct SounioPdfObjectSlice {
+    pub error: i64,
+    pub object: i64,
+    pub generation: i64,
+    pub dictionary_start: i64,
+    pub dictionary_end: i64,
+}
+
 fn pdf_inventory_empty() -> SounioPdfFlateInventory {
     SounioPdfFlateInventory {
         error: SOUNIO_PDF_OK,
@@ -140,6 +148,16 @@ fn pdf_inventory_empty() -> SounioPdfFlateInventory {
         decoded_lengths: [0; 64],
         content_digest_words: [0; 512],
         aggregate_digest_words: [0; 8],
+    }
+}
+
+fn pdf_object_slice_empty() -> SounioPdfObjectSlice {
+    SounioPdfObjectSlice {
+        error: SOUNIO_PDF_ERR_OBJECT,
+        object: 0,
+        generation: 0,
+        dictionary_start: 0,
+        dictionary_end: 0,
     }
 }
 
@@ -1269,6 +1287,112 @@ pub fn sounio_pdf_expected_inventory(
         i = i + 1
     }
     true
+}
+
+pub fn sounio_pdf_loaded_byte(
+    inv: &SounioPdfFlateInventory,
+    index: i64,
+) -> i64 with Panic, Div {
+    if inv.error != SOUNIO_PDF_OK || !inv.digest_match ||
+        inv.total_bytes != SOUNIO_PDF_EXPECTED_BYTES ||
+        index < 0 || index >= inv.total_bytes {
+        return -1
+    }
+    pdf_byte(index)
+}
+
+pub fn sounio_pdf_object_dictionary_slice(
+    inv: &SounioPdfFlateInventory,
+    object: i64,
+    generation: i64,
+) -> SounioPdfObjectSlice with Mut, Panic, Div {
+    var slice = pdf_object_slice_empty()
+    slice.object = object
+    slice.generation = generation
+    if inv.error != SOUNIO_PDF_OK || !inv.digest_match ||
+        object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY {
+        return slice
+    }
+    var xref = pdf_xref_empty()
+    let (xref_error, root_object, root_generation, trailer_start, trailer_end) =
+        pdf_parse_xref(inv.total_bytes, inv.xref_offset, &!xref)
+    if xref_error != SOUNIO_PDF_OK || trailer_start <= 0 ||
+        trailer_end <= trailer_start || root_object != inv.root_object ||
+        root_generation != inv.root_generation ||
+        xref.declared_size != inv.declared_objects ||
+        xref.in_use != inv.xref_objects {
+        slice.error = SOUNIO_PDF_ERR_XREF
+        return slice
+    }
+    let (dict_error, dict_start, dict_end) =
+        pdf_object_dictionary(inv.total_bytes, &xref, object, generation)
+    if dict_error != SOUNIO_PDF_OK {
+        slice.error = dict_error
+        return slice
+    }
+    slice.dictionary_start = dict_start
+    slice.dictionary_end = dict_end
+    slice.error = SOUNIO_PDF_OK
+    slice
+}
+
+pub fn sounio_pdf_decode_flate_object(
+    inv: &SounioPdfFlateInventory,
+    object: i64,
+    generation: i64,
+    result: &!SounioInflateResult,
+) -> i64 with Mut, Panic, Div {
+    if inv.error != SOUNIO_PDF_OK || !inv.digest_match ||
+        object < 0 || object >= SOUNIO_PDF_OBJECT_CAPACITY {
+        return SOUNIO_PDF_ERR_OBJECT
+    }
+    var xref = pdf_xref_empty()
+    let (xref_error, root_object, root_generation, trailer_start, trailer_end) =
+        pdf_parse_xref(inv.total_bytes, inv.xref_offset, &!xref)
+    if xref_error != SOUNIO_PDF_OK || trailer_start <= 0 ||
+        trailer_end <= trailer_start || root_object != inv.root_object ||
+        root_generation != inv.root_generation ||
+        xref.declared_size != inv.declared_objects ||
+        xref.in_use != inv.xref_objects {
+        return SOUNIO_PDF_ERR_XREF
+    }
+    let (dict_error, dict_start, dict_end) =
+        pdf_object_dictionary(inv.total_bytes, &xref, object, generation)
+    if dict_error != SOUNIO_PDF_OK { return dict_error }
+    let (filter_pos, filter_last, filter_count) =
+        pdf_find_key(dict_start, dict_end, "Filter")
+    if !pdf_filter_shape_admitted(
+        filter_count,
+        pdf_direct_name_is(dict_end, filter_pos, "FlateDecode"),
+        pdf_direct_name_is(dict_end, filter_last, "FlateDecode")) {
+        return SOUNIO_PDF_ERR_FILTER
+    }
+    let (length_pos, length_last, length_count) =
+        pdf_find_key(dict_start, dict_end, "Length")
+    let (length_ok, length, length_after) =
+        pdf_parse_direct_uint(dict_end, length_pos)
+    if length_count != 1 || length_ok != 1 || length_after <= length_pos {
+        return SOUNIO_PDF_ERR_STREAM
+    }
+    let length_error = pdf_content_length_error(length)
+    if length_error != SOUNIO_PDF_OK { return length_error }
+    let (payload_start, payload_end, omitted_endobj) =
+        pdf_stream_payload(inv.total_bytes, &xref, dict_end, length)
+    if payload_start <= 0 || payload_end - payload_start != length ||
+        omitted_endobj < 0 {
+        return SOUNIO_PDF_ERR_STREAM
+    }
+    var input = pdf_inflate_input_empty()
+    var i: i64 = 0
+    while i < length {
+        input.bytes[i as usize] = pdf_byte(payload_start + i)
+        i = i + 1
+    }
+    sounio_inflate_zlib(&input, length, result)
+    if result.error != SOUNIO_INFLATE_OK {
+        return SOUNIO_PDF_ERR_INFLATE_BASE + result.error
+    }
+    SOUNIO_PDF_OK
 }
 
 pub fn sounio_pdf_negative_digest() -> bool with Mut, Panic, Div {
