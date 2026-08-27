@@ -112,20 +112,62 @@ pub fn trust_store_find_by_subject(store: &TrustStore, subject: &X509Name) -> i6
 // (the real system CA bundle legitimately contains cross-signed roots that
 // share a Subject DN with a different key, so "first match" is also wrong
 // on its own terms, not just insecure) and requires both subject equality
-// AND byte-identical RSA public key material (modulus and exponent) on the
-// SAME entry before treating the candidate as trusted.
+// AND byte-identical public key material on the SAME entry before treating
+// the candidate as trusted.
+//
+// D17 (2026-08-27) -- the 2026-08-25 fix above closed that bypass for RSA
+// ONLY, and left it wide open for EC. The previous signature took just
+// `(subject, modulus, exponent)`, and `x509_parse_certificate` never
+// populates `modulus`/`public_exponent` for an EC certificate: a P-256
+// key is decoded into `cert.ec_public_key` and both BigInts stay at
+// `bigint_zero()` (stdlib/x509/cert.sio's `else if is_ec_alg &&
+// is_p256_curve` branch). So for every EC certificate the key check
+// degenerated to `bigint_cmp(zero, zero) == 0` twice -- vacuously true --
+// and the function fell back to exactly the pre-fix "any self-signed cert
+// whose Subject DN string-matches a trust-store entry" behaviour.
+// Demonstrated with an executed proof-of-concept: a forged self-signed
+// P-256 CA carrying a genuine root's Subject DN and an attacker's own key,
+// supplied as an intermediate, was accepted as a trust anchor and
+// `x509_verify_chain` returned CHAIN_OK against a trust store holding only
+// the genuine root. See tests/run-pass/x509_chain_forged_ec_root_dn_collision.sio.
+//
+// The parameter is now the whole candidate `Certificate` so the comparison
+// can be algorithm-aware. Three requirements, all on the SAME entry:
+//   1. the algorithms match, and
+//   2. the Subject DNs match, and
+//   3. the algorithm's OWN key material is byte-identical.
+// An algorithm whose key material this parser does not decode
+// (PUBKEY_ALG_UNKNOWN -- an unsupported curve, a compressed EC point, RSA-PSS,
+// Ed25519, ...) can never be a trust anchor: every such certificate leaves
+// ALL THREE key fields at zero, so any two of them would compare equal to
+// each other. Rejected up front, fail-closed.
 pub fn trust_store_has_matching_key_for_subject(
     store: &TrustStore,
-    subject: &X509Name,
-    modulus: &BigInt,
-    exponent: &BigInt,
+    cert: &Certificate,
 ) -> bool {
+    if cert.public_key_algorithm != PUBKEY_ALG_RSA && cert.public_key_algorithm != PUBKEY_ALG_EC_P256 {
+        return false
+    }
+    // Field-by-field access on the array element, never `let entry =
+    // store.certs[i]`: a Certificate is ~46 KB and this loop runs over all
+    // ~150 system roots on every DFS step (chain.sio's ARENA DISCIPLINE
+    // note, and D16). The by-value bind this replaces burned ~6.9 MB of
+    // never-reclaimed arena per call.
     var i: i64 = 0
     while i < (store.count as i64) {
-        let entry = store.certs[i as usize]
-        if x509_name_eq(&entry.subject, subject) {
-            if bigint_cmp(&entry.modulus, modulus) == 0 && bigint_cmp(&entry.public_exponent, exponent) == 0 {
-                return true
+        if store.certs[i as usize].public_key_algorithm == cert.public_key_algorithm {
+            if x509_name_eq(&store.certs[i as usize].subject, &cert.subject) {
+                if cert.public_key_algorithm == PUBKEY_ALG_RSA {
+                    if bigint_cmp(&store.certs[i as usize].modulus, &cert.modulus) == 0
+                        && bigint_cmp(&store.certs[i as usize].public_exponent, &cert.public_exponent) == 0 {
+                        return true
+                    }
+                } else {
+                    if bigint_cmp(&store.certs[i as usize].ec_public_key.x, &cert.ec_public_key.x) == 0
+                        && bigint_cmp(&store.certs[i as usize].ec_public_key.y, &cert.ec_public_key.y) == 0 {
+                        return true
+                    }
+                }
             }
         }
         i = i + 1
