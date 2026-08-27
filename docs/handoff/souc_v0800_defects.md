@@ -1267,14 +1267,18 @@ to a bounded wait.
 > "1.1.1.1 chain VERIFIED", re-measured live on 2026-08-27 — see the
 > updated `tests/interop/tls_connect_1111_sha384_probe.sio`.
 >
-> **Residual, out of this closeout's scope:**
+> **Fix-round update:** the stale test flagged above,
 > `tests/run-pass/x509_ecdsa_sha384_p384_issuer_rejected.sio` (committed
-> before P-384 recognition existed) now fails the suite, because it
-> asserts `inter.public_key_algorithm == PUBKEY_ALG_UNKNOWN` for a P-384
-> intermediate — an assumption this very fix invalidates by design. It was
-> not modified as part of this closeout (out of file scope for the task
-> that closed D20); it needs to be updated or retired to assert the new,
-> correct behaviour instead of the old fail-closed one.
+> before P-384 recognition existed, asserting the real Cloudflare
+> intermediate stayed `PUBKEY_ALG_UNKNOWN` and that
+> `x509_verify_signature` returned `false`), has now been updated in place
+> and renamed to `tests/run-pass/x509_chain_ecdsa_p384_cloudflare_accepted.sio`.
+> It keeps its real, live-fetched Cloudflare leaf/intermediate DER bytes —
+> the single most valuable fixture in this plan, the literal motivating
+> case — but now asserts the correct, post-fix behaviour:
+> `inter.public_key_algorithm == PUBKEY_ALG_EC_P384` and
+> `x509_verify_signature(...) == true`. Suite re-verified green with this
+> flip in place (see this plan's task-6-report.md, fix round).
 
 **Symptom chain, and two wrong diagnoses corrected along the way**: while
 testing `Sounio-lang/conclave-search`'s Task 9 (a DNS-over-HTTPS resolver)

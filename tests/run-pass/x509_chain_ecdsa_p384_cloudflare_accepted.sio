@@ -1,18 +1,21 @@
 //@ run-pass
 
-// D15, second half: the ecdsa-with-SHA384 fix must NOT become an
-// algorithm-confusion hole.
+// D15/D20 -> P-384 plan closeout: this is the REAL Cloudflare 1.1.1.1
+// chain, and it now verifies correctly.
 //
-// Fixing `x509_verify_signature`'s SHA-384 path added a new dispatch into
-// P-256 curve arithmetic. Per RFC 5480 SS2 an ecdsa-with-SHA384 signature
-// says nothing about the ISSUER key's curve, so the SHA-384 branch must
-// still reject any issuer key that is not P-256 -- exactly as the
-// ecdsa-with-SHA256 branch beside it already did. Feeding a P-384 key into
-// P-256 math would be the classic confusion bug: the wrong group order and
-// the wrong field prime, producing a verdict that means nothing.
+// History: fixing `x509_verify_signature`'s SHA-384 path (D15) added a
+// dispatch into P-256 curve arithmetic. Per RFC 5480 SS2 an
+// ecdsa-with-SHA384 signature says nothing about the ISSUER key's curve,
+// so at that point in the plan (before P-384 support existed) the
+// SHA-384 branch had to reject any issuer key that was not P-256 --
+// exactly as the ecdsa-with-SHA256 branch beside it already did. Feeding
+// a P-384 key into P-256 math would have been the classic confusion bug:
+// the wrong group order and the wrong field prime, producing a verdict
+// that means nothing. This file originally pinned that fail-closed
+// rejection as the correct interim behaviour.
 //
-// This is not hypothetical. The certificates pinned below are REAL, fetched
-// live on 2026-08-27 with:
+// The certificates pinned below are REAL, fetched live on 2026-08-27
+// with:
 //   openssl s_client -connect 1.1.1.1:443 -servername cloudflare-dns.com \
 //     -showcerts </dev/null
 //
@@ -21,12 +24,31 @@
 //   intermediate: CN=SSL.com SSL Intermediate CA ECC R2  (the issuer)
 //                 key **P-384**, Signature Algorithm: ecdsa-with-SHA384
 //
-// So Cloudflare's own 1.1.1.1 chain is ecdsa-with-SHA384 signed by a P-384
-// key. The D15 fix (P-256 issuer + SHA-384) is real and separately proven
-// in x509_chain_ecdsa_sha384_signature.sio, but it does NOT unblock this
-// chain, and must not pretend to: `stdlib/crypto/ecdsa_p256.sio` implements
-// P-256 only. The correct behaviour here is a clean, fail-closed `false`,
-// which is what this test pins.
+// So Cloudflare's own 1.1.1.1 chain is ecdsa-with-SHA384 signed by a
+// P-384 key. The D15 fix (P-256 issuer + SHA-384) is real and separately
+// proven in x509_chain_ecdsa_sha384_signature.sio, but on its own it did
+// NOT unblock this chain: `stdlib/crypto/ecdsa_p256.sio` implements P-256
+// only, so the algorithm guard correctly refused to run a P-384 key
+// through P-256 arithmetic.
+//
+// UPDATE (2026-08-27, madaros-ecdsa-p384-design plan): full P-384 support
+// has since landed -- curve constants and verifier
+// (`stdlib/crypto/ecdsa_p384.sio`), the secp384r1 OID
+// (`stdlib/x509/oid.sio`), `PUBKEY_ALG_EC_P384` public-key recognition
+// (`stdlib/x509/cert.sio`), and dispatch by issuer key algorithm in
+// `x509_verify_signature`. See
+// docs/superpowers/specs/2026-08-27-madaros-ecdsa-p384-design.md. This
+// exact real intermediate now correctly classifies as
+// `PUBKEY_ALG_EC_P384` (not `PUBKEY_ALG_UNKNOWN`), and the leaf's
+// ecdsa-with-SHA384 signature now correctly VERIFIES against it -- proven
+// below against the live-fetched Cloudflare bytes themselves, the single
+// most valuable fixture in this plan (this is the literal motivating
+// case, not a synthetic stand-in). The synthetic, openssl-independent
+// analogue of this same P-256-leaf/P-384-issuer shape is pinned in
+// `tests/run-pass/x509_chain_ecdsa_p384_signature.sio`; the adversarial
+// per-curve rejection case (this same leaf against an UNRELATED P-256
+// root) is pinned in
+// `tests/run-pass/x509_chain_ecdsa_p384_cross_curve_rejected.sio`.
 //
 // Note this asserts nothing about validity dates -- only signature
 // verification -- so these fixtures do not rot when the certificates expire.
@@ -262,20 +284,23 @@ fn main() -> i64 with IO, Mut {
     if leaf.public_key_algorithm != PUBKEY_ALG_EC_P256 { print_int(3); return 1 }
     assert(leaf.public_key_algorithm == PUBKEY_ALG_EC_P256)
 
-    // ...while the issuing intermediate's P-384 key is deliberately NOT
-    // classified as P-256. `x509_parse_certificate` compares the named-curve
-    // OID against prime256v1 and falls through to UNKNOWN for every other
-    // curve, which is what makes the guard below sound.
-    if inter.public_key_algorithm != PUBKEY_ALG_UNKNOWN { print_int(4); return 1 }
-    assert(inter.public_key_algorithm == PUBKEY_ALG_UNKNOWN)
+    // ...and the issuing intermediate's P-384 key IS now recognized as
+    // such. `x509_parse_certificate` parses the 97-byte uncompressed
+    // point against the secp384r1 OID and classifies it
+    // `PUBKEY_ALG_EC_P384` (stdlib/x509/cert.sio, Task 4 of the P-384
+    // plan) -- it no longer falls through to UNKNOWN for this curve.
+    if inter.public_key_algorithm != PUBKEY_ALG_EC_P384 { print_int(4); return 1 }
+    assert(inter.public_key_algorithm == PUBKEY_ALG_EC_P384)
 
     // The load-bearing assertion: a genuine, correctly-signed
-    // ecdsa-with-SHA384 signature whose issuer key is P-384 must be
-    // REJECTED, not run through P-256 arithmetic.
+    // ecdsa-with-SHA384 signature whose issuer key is P-384 must now
+    // VERIFY, dispatched through real P-384 curve arithmetic
+    // (`ecdsa_p384_verify_sha384`), not rejected and not run through
+    // P-256 arithmetic.
     let ok = x509_verify_signature(&leaf_buf, &leaf, &inter)
-    if ok == true { print_int(5); return 1 }
-    assert(ok == false)
+    if ok == false { print_int(5); return 1 }
+    assert(ok == true)
 
-    println("x509_ecdsa_sha384_p384_issuer_rejected: P-384 issuer key rejected fail-closed")
+    println("x509_chain_ecdsa_p384_cloudflare_accepted: P-384 issuer key correctly verified (real Cloudflare 1.1.1.1 chain)")
     return 0
 }
