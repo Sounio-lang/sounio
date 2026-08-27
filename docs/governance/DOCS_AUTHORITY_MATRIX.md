@@ -504,6 +504,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.pireus-target-profile-ontology | repo_only | docs/internal/concepts/pireus-target-profile-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-xed-permute-import | repo_only | docs/internal/concepts/pireus-xed-permute-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-xor-convolution-operation | repo_only | docs/internal/concepts/pireus-xor-convolution-operation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.pireus-xor-lowering-legality | repo_only | docs/internal/concepts/pireus-xor-lowering-legality.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-xor-material-matching | repo_only | docs/internal/concepts/pireus-xor-material-matching.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.precision-preservation | repo_only | docs/internal/concepts/precision-preservation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.readme | repo_only | docs/internal/concepts/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -956,6 +957,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.pireus-v01-target-profile-semantics | historical | docs/research/pireus_v01_target_profile_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-xed-permute-import-semantics | historical | docs/research/pireus_xed_permute_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-xor-convolution-operation-semantics | historical | docs/research/pireus_xor_convolution_operation_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.pireus-xor-lowering-legality-semantics | historical | docs/research/pireus_xor_lowering_legality_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-xor-material-matching-semantics | historical | docs/research/pireus_xor_material_matching_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.prereg-piloto1-addendum1 | historical | docs/research/PREREG-piloto1-addendum1.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.prereg-piloto1-addendum2 | historical | docs/research/PREREG-piloto1-addendum2.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -987,6 +989,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.receipts.pireus-v01-target-profile-20260827 | historical | docs/research/receipts/pireus_v01_target_profile_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-xed-permute-import-20260827 | historical | docs/research/receipts/pireus_xed_permute_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-xor-convolution-operation-20260827 | historical | docs/research/receipts/pireus_xor_convolution_operation_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-xor-lowering-legality-20260827 | historical | docs/research/receipts/pireus_xor_lowering_legality_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-xor-material-matching-20260827 | historical | docs/research/receipts/pireus_xor_material_matching_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.sounio-pdf-flate-content-reader-20260827 | historical | docs/research/receipts/sounio_pdf_flate_content_reader_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.sounio-pdf-text-projection-20260827 | historical | docs/research/receipts/sounio_pdf_text_projection_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
