@@ -1,0 +1,75 @@
+// D15 live probe. Like every other file in tests/interop/, it carries no
+// harness annotation and is NOT part of the automated suite: it needs
+// outbound network access and the system CA bundle.
+//
+// WHAT THIS PROBE MEASURED (2026-08-27, after the ecdsa-with-SHA384 fix):
+// `tls_connect` against Cloudflare's `1.1.1.1:443` still returns
+// **-8** (TLS_CONNECT_ERR_CERT_CHAIN). That is the CORRECT result, and it
+// corrects D15's own stated root cause, which was incomplete.
+//
+// D15 recorded that `1.1.1.1` was blocked because its chain is signed
+// ecdsa-with-SHA384 while `ecdsa_p256_verify` only hashed with SHA-256.
+// The hash half of that is true and is now fixed. But fetching the real
+// chain (`openssl s_client -connect 1.1.1.1:443 -servername
+// cloudflare-dns.com -showcerts`) shows the other, larger half:
+//
+//   leaf          CN=cloudflare-dns.com                  key P-256
+//                 Signature Algorithm: ecdsa-with-SHA384
+//   intermediate  CN=SSL.com SSL Intermediate CA ECC R2  key **P-384**
+//                 Signature Algorithm: ecdsa-with-SHA384
+//
+// The leaf's signature was made by the intermediate's **P-384** key, so
+// verifying it needs P-384 curve arithmetic -- a different curve, not a
+// different hash. `stdlib/crypto/ecdsa_p256.sio` implements P-256 only, so
+// `x509_verify_signature`'s algorithm guard rejects the link fail-closed
+// (measured directly, and pinned as a regression test in
+// `tests/run-pass/x509_ecdsa_sha384_p384_issuer_rejected.sio`).
+//
+// So: this probe returning -8 is the expected state until P-384 support
+// exists. It is kept because it is the honest, re-runnable measurement of
+// that residual gap, and because it will be the first thing to flip to 0
+// when P-384 lands. The ecdsa-with-SHA384 fix itself is proven against a
+// real openssl-generated P-256 chain in
+// `tests/run-pass/x509_chain_ecdsa_sha384_signature.sio`.
+//
+// Run: souc run tests/interop/tls_connect_1111_sha384_probe.sio
+
+use tls::client::*
+use x509::trust_store::*
+use x509::cert::*
+use net::socket::*
+
+fn now_unix() -> i64 with IO {
+    syscall6(201, 0, 0, 0, 0, 0, 0)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let (store, terr) = trust_store_load()
+    if terr != 0 {
+        println("probe: trust_store_load failed")
+        print_int(terr)
+        return 1
+    }
+    println("probe: trust store roots:")
+    print_int(store.count as i64)
+
+    let host_text = "1.1.1.1"
+    let host_len = str_len(host_text)
+    let host = rawbuf_new(host_len + 8)
+    var hi: i64 = 0
+    while hi < host_len {
+        rawbuf_set(&host, hi, str_char_at(host_text, hi))
+        hi = hi + 1
+    }
+
+    let (conn, rc) = tls_connect(&host, host_len, 443 as u16, &store, now_unix())
+    println("probe: tls_connect rc (0 == handshake + chain verified;")
+    println("       -8 == TLS_CONNECT_ERR_CERT_CHAIN, expected until P-384):")
+    print_int(rc)
+    if rc != 0 {
+        return 1
+    }
+    tls_close(conn)
+    println("probe: 1.1.1.1 chain VERIFIED")
+    return 0
+}
