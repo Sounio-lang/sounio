@@ -130,6 +130,18 @@ else
     SOUNIO_LOOM_EXECUTION_AUTHORITY_OUTPUT="$execution_authority_output" \
     "$SCRIPT_DIR/build_sounio_loom_execution_authority.sh"
 fi
+custody_transfer_output="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-custody-transfer-runtime"
+if [[ -n "${SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT is not executable' >&2
+    exit 1
+  }
+  install -m 0755 "$SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT" \
+    "$custody_transfer_output"
+else
+  SOUNIO_LOOM_CUSTODY_TRANSFER_OUTPUT="$custody_transfer_output" \
+    "$SCRIPT_DIR/build_sounio_loom_custody_transfer.sh"
+fi
 lane_health_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-runtime"
 if [[ -n "${SOUNIO_LOOM_LANE_HEALTH_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_LANE_HEALTH_PREBUILT" ]] || {

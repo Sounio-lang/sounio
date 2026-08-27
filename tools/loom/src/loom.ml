@@ -8661,6 +8661,61 @@ let run_captured_input executable arguments input =
   { captured_code = process_exit_code status;
     captured_output = trim (Buffer.contents output) }
 
+let run_captured_input_timeout ~timeout_seconds executable arguments input =
+  let stdin_reader, stdin_writer = Unix.pipe () in
+  let output_reader, output_writer = Unix.pipe () in
+  Unix.set_close_on_exec stdin_writer;
+  Unix.set_close_on_exec output_reader;
+  let pid =
+    Unix.create_process executable (Array.of_list (executable :: arguments))
+      stdin_reader output_writer output_writer
+  in
+  Unix.close stdin_reader;
+  Unix.close output_writer;
+  let status = ref None in
+  let close descriptor = try Unix.close descriptor with _ -> () in
+  let reap () =
+    match !status with
+    | Some _ -> ()
+    | None ->
+        (try Unix.kill pid Sys.sigkill with _ -> ());
+        (try
+           let _, observed = Unix.waitpid [] pid in
+           status := Some observed
+         with _ -> ())
+  in
+  Fun.protect
+    ~finally:(fun () -> close stdin_writer; close output_reader; reap ())
+    (fun () ->
+      write_all stdin_writer input;
+      close stdin_writer;
+      let output = Buffer.create 512 in
+      let bytes = Bytes.create 4096 in
+      let deadline = Unix.gettimeofday () +. timeout_seconds in
+      let eof = ref false in
+      while not (!eof && Option.is_some !status) do
+        let remaining = deadline -. Unix.gettimeofday () in
+        if remaining <= 0. then
+          failf "captured-input-process-timeout:%s" executable;
+        (match Unix.waitpid [ WNOHANG ] pid with
+        | 0, _ -> ()
+        | _, observed -> status := Some observed);
+        if not !eof then (
+          let ready, _, _ =
+            Unix.select [ output_reader ] [] [] (min remaining 0.05)
+          in
+          if ready <> [] then
+            match Unix.read output_reader bytes 0 (Bytes.length bytes) with
+            | 0 -> eof := true
+            | count -> Buffer.add_subbytes output bytes 0 count
+            | exception Unix_error (EINTR, _, _) -> ())
+        else if Option.is_none !status then
+          ignore (Unix.select [] [] [] (min remaining 0.01))
+      done;
+      let observed = Option.get !status in
+      { captured_code = process_exit_code observed;
+        captured_output = trim (Buffer.contents output) })
+
 let obligation_zero_digest = String.make 64 '0'
 
 let verify_obligation_native_transition transition previous next view actor lane
@@ -9297,23 +9352,20 @@ let fleet_agent_command () =
       if Sys.file_exists sibling then sibling
       else failf "sounio-fleet-agent-runtime is not installed beside Loom"
 
-let fleet_observed_state output slot =
+let fleet_observed_fields output slot =
   let status_prefix = "FLEET_SLOT_STATUS" in
-  let rec field name = function
-    | [] -> ""
-    | token :: rest ->
-        let prefix = name ^ "=" in
-        if starts_with token prefix then
-          String.sub token (String.length prefix) (String.length token - String.length prefix)
-        else field name rest
-  in
   split_on '\n' output
   |> List.find_map (fun line ->
          let tokens = split_on ' ' (trim line) in
          match tokens with
-         | prefix :: fields when prefix = status_prefix && field "slot" fields = slot ->
-             Some (field "state" fields)
+         | prefix :: values when prefix = status_prefix ->
+             let fields = snapshot_fields values in
+             if table_value fields "slot" = slot then Some fields else None
          | _ -> None)
+
+let fleet_observed_state output slot =
+  fleet_observed_fields output slot
+  |> Option.map (fun fields -> table_value fields "state")
 
 let fleet_probe helper spec =
   let result =
@@ -9561,6 +9613,807 @@ let fleet_run_loom root spec action =
   in
   run_captured ~environment:(fleet_provider_environment spec) runtime arguments
 
+let custody_transfer_semantics_sha256 =
+  "5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c"
+
+let custody_transfer_manifest_sha256 =
+  "ee4e5d128bf5b0fd7166e74c9815a17506a5b9844730c1be2155ac68c370be66"
+
+let custody_transfer_executable_sha256 =
+  "958398e61763d6118c5bd8b86292533dd1b5cc73449df1ede5fb117e37b54ce4"
+
+let custody_transfer_policy_command () =
+  let candidate =
+    match Sys.getenv_opt "SOUNIO_LOOM_CUSTODY_TRANSFER_COMMAND" with
+    | Some path when path <> "" -> path
+    | _ ->
+        Filename.concat (Filename.dirname Sys.executable_name)
+          "sounio-loom-custody-transfer-runtime"
+  in
+  if Filename.is_relative candidate then
+    failf "custody-transfer-policy-command-must-be-absolute";
+  let resolved =
+    try Unix.realpath candidate
+    with _ -> failf "custody-transfer-policy-command-is-unavailable:%s" candidate
+  in
+  (try Unix.access resolved [ X_OK ]
+   with _ -> failf "custody-transfer-policy-command-is-not-executable:%s" resolved);
+  let digest = sha256 (read_file resolved) in
+  if digest <> custody_transfer_executable_sha256 then
+    failf
+      "custody-transfer-policy-digest-mismatch:expected=%s:observed=%s"
+      custody_transfer_executable_sha256 digest;
+  resolved
+
+type custody_transfer_frame = {
+  transfer_phase : int;
+  transfer_policy_state : int;
+  transfer_source_catalog_agentd : int;
+  transfer_catalog_committed_loom : int;
+  transfer_target_staged : int;
+  transfer_target_descriptor_sealed : int;
+  transfer_resume_identity_bound : int;
+  transfer_source_active : int;
+  transfer_source_identity_verified : int;
+  transfer_source_quiesced : int;
+  transfer_target_active : int;
+  transfer_target_presence_verified : int;
+  transfer_target_endpoint_verified : int;
+  transfer_target_session_verified : int;
+  transfer_rollback_available : int;
+  transfer_deadline_expired : int;
+  transfer_observation_authority_verified : int;
+  transfer_sample_fresh : int;
+}
+
+let custody_transfer_frame_line frame =
+  [ 9040; frame.transfer_phase; frame.transfer_policy_state;
+    frame.transfer_source_catalog_agentd;
+    frame.transfer_catalog_committed_loom; frame.transfer_target_staged;
+    frame.transfer_target_descriptor_sealed;
+    frame.transfer_resume_identity_bound; frame.transfer_source_active;
+    frame.transfer_source_identity_verified; frame.transfer_source_quiesced;
+    frame.transfer_target_active; frame.transfer_target_presence_verified;
+    frame.transfer_target_endpoint_verified;
+    frame.transfer_target_session_verified; frame.transfer_rollback_available;
+    frame.transfer_deadline_expired;
+    frame.transfer_observation_authority_verified;
+    frame.transfer_sample_fresh ]
+  |> List.map string_of_int |> String.concat " " |> fun line -> line ^ "\n"
+
+let custody_transfer_decision frame =
+  let command = custody_transfer_policy_command () in
+  let result =
+    run_captured_input_timeout ~timeout_seconds:2.0 command []
+      (custody_transfer_frame_line frame)
+  in
+  let output = trim result.captured_output in
+  let fields = split_on ' ' output |> snapshot_fields in
+  if table_value fields "authority" <> "Sounio" then
+    failf "custody-transfer-policy-authority-missing:%s" output;
+  let code =
+    try int_of_string (table_value fields "code")
+    with _ -> failf "custody-transfer-policy-result-invalid:%s" output
+  in
+  if code < 101 && result.captured_code <> 0 then
+    failf "custody-transfer-policy-exit-mismatch:code=%d:exit=%d"
+      code result.captured_code;
+  if code >= 101 && result.captured_code <> code then
+    failf "custody-transfer-policy-exit-mismatch:code=%d:exit=%d"
+      code result.captured_code;
+  (code, table_value fields "decision", output)
+
+let require_custody_transfer_decision expected frame =
+  let code, decision, receipt = custody_transfer_decision frame in
+  if code <> expected then
+    failf "custody-transfer-policy-refused:expected=%d:observed=%d:decision=%s"
+      expected code decision;
+  receipt
+
+type fleet_transfer_paths = {
+  transfer_directory : string;
+  transfer_candidate_path : string;
+  transfer_prompt_path : string;
+  transfer_journal_path : string;
+  transfer_lock_path : string;
+}
+
+let fleet_transfer_paths root slot =
+  let directory =
+    Filename.concat (Filename.concat (fleet_directory root) "transfers")
+      (slug slot)
+  in
+  { transfer_directory = directory;
+    transfer_candidate_path = Filename.concat directory "candidate.state";
+    transfer_prompt_path =
+      Filename.concat (Filename.concat directory "prompts") (slug slot ^ ".txt");
+    transfer_journal_path = Filename.concat directory "transfer.state";
+    transfer_lock_path = Filename.concat directory "transfer.lock" }
+
+let with_fleet_transfer_lock paths operation =
+  mkdir_p paths.transfer_directory;
+  let descriptor =
+    Unix.openfile paths.transfer_lock_path [ O_WRONLY; O_CREAT ] 0o600
+  in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      (try Unix.lockf descriptor F_TLOCK 0
+       with Unix_error ((EACCES | EAGAIN), _, _) ->
+         failf "fleet-custody-transfer-is-already-running");
+      operation ())
+
+type fleet_transfer = {
+  custody_paths : fleet_transfer_paths;
+  custody_source : fleet_spec;
+  custody_target : fleet_spec;
+  custody_source_agent : string;
+  custody_source_lane : string;
+  custody_source_session : string;
+  custody_phase : int;
+  custody_source_quiesced : bool;
+  custody_catalog_committed : bool;
+  custody_quiescence_receipt_sha256 : string;
+  custody_policy_receipt_sha256 : string;
+  custody_created_utc : string;
+}
+
+let fleet_transfer_journal_fields transfer =
+  [ ("schema", "loom-transactional-custody-transfer-v1");
+    ("semantics_sha256", custody_transfer_semantics_sha256);
+    ("manifest_sha256", custody_transfer_manifest_sha256);
+    ("phase", string_of_int transfer.custody_phase);
+    ("source_quiesced",
+     if transfer.custody_source_quiesced then "true" else "false");
+    ("catalog_committed",
+     if transfer.custody_catalog_committed then "true" else "false");
+    ("source_slot", transfer.custody_source.fleet_slot);
+    ("source_kind", transfer.custody_source.fleet_kind);
+    ("source_catalog_agent", transfer.custody_source.fleet_agent);
+    ("source_home", transfer.custody_source.fleet_home);
+    ("source_cwd", transfer.custody_source.fleet_cwd);
+    ("source_agent", transfer.custody_source_agent);
+    ("source_lane", transfer.custody_source_lane);
+    ("source_session", transfer.custody_source_session);
+    ("target_candidate", transfer.custody_paths.transfer_candidate_path);
+    ("target_candidate_sha256",
+     sha256 (read_file transfer.custody_paths.transfer_candidate_path));
+    ("quiescence_receipt_sha256",
+     transfer.custody_quiescence_receipt_sha256);
+    ("policy_receipt_sha256", transfer.custody_policy_receipt_sha256);
+    ("created_utc", transfer.custody_created_utc);
+    ("updated_utc", utc_now ()) ]
+
+let write_fleet_transfer_journal transfer =
+  atomic_write transfer.custody_paths.transfer_journal_path
+    (descriptor_text (fleet_transfer_journal_fields transfer))
+
+let fleet_transfer_bool fields name =
+  match table_value fields name with
+  | "true" -> true
+  | "false" -> false
+  | value -> failf "fleet-custody-transfer-invalid-%s:%s" name value
+
+let fleet_transfer_phase fields =
+  try
+    let phase = int_of_string (table_value fields "phase") in
+    if phase < 1 || phase > 6 then failf "fleet-custody-transfer-invalid-phase";
+    phase
+  with Failure _ -> failf "fleet-custody-transfer-invalid-phase"
+
+let load_fleet_transfer root slot =
+  let paths = fleet_transfer_paths root slot in
+  if not (Sys.file_exists paths.transfer_journal_path) then
+    failf "fleet-custody-transfer-journal-missing:%s" slot;
+  let fields = parse_key_values paths.transfer_journal_path in
+  if table_value fields "schema" <> "loom-transactional-custody-transfer-v1"
+  then failf "fleet-custody-transfer-journal-schema-invalid";
+  if table_value fields "semantics_sha256" <> custody_transfer_semantics_sha256
+  then failf "fleet-custody-transfer-semantics-drift";
+  if table_value fields "manifest_sha256" <> custody_transfer_manifest_sha256
+  then failf "fleet-custody-transfer-manifest-drift";
+  if table_value fields "source_slot" <> slot then
+    failf "fleet-custody-transfer-slot-drift";
+  if table_value fields "target_candidate" <> paths.transfer_candidate_path then
+    failf "fleet-custody-transfer-candidate-path-drift";
+  if not (Sys.file_exists paths.transfer_candidate_path) then
+    failf "fleet-custody-transfer-candidate-missing";
+  let candidate_sha256 = sha256 (read_file paths.transfer_candidate_path) in
+  if table_value fields "target_candidate_sha256" <> candidate_sha256 then
+    failf "fleet-custody-transfer-candidate-digest-mismatch";
+  let target =
+    fleet_spec_of_values paths.transfer_candidate_path
+      (parse_key_values paths.transfer_candidate_path)
+  in
+  if target.fleet_slot <> slot || target.fleet_custody <> "loom" then
+    failf "fleet-custody-transfer-candidate-authority-invalid";
+  let source =
+    { fleet_slot = slot; fleet_kind = table_value fields "source_kind";
+      fleet_custody = "agentd";
+      fleet_agent = table_value fields "source_catalog_agent";
+      fleet_home = table_value fields "source_home";
+      fleet_cwd = table_value fields "source_cwd"; fleet_coord_dir = "";
+      fleet_enabled = true; fleet_session_id = "";
+      fleet_provider_mode = ""; fleet_provider_session = "";
+      fleet_prompt_file = ""; fleet_prompt_sha256 = "";
+      fleet_model = ""; fleet_unsafe_auto = false }
+  in
+  List.iter (fun (name, value) -> validate_fleet_atom name value)
+    [ ("source_kind", source.fleet_kind);
+      ("source_catalog_agent", source.fleet_agent);
+      ("source_home", source.fleet_home); ("source_cwd", source.fleet_cwd);
+      ("source_agent", table_value fields "source_agent");
+      ("source_lane", table_value fields "source_lane");
+      ("source_session", table_value fields "source_session") ];
+  { custody_paths = paths; custody_source = source; custody_target = target;
+    custody_source_agent = table_value fields "source_agent";
+    custody_source_lane = table_value fields "source_lane";
+    custody_source_session = table_value fields "source_session";
+    custody_phase = fleet_transfer_phase fields;
+    custody_source_quiesced = fleet_transfer_bool fields "source_quiesced";
+    custody_catalog_committed = fleet_transfer_bool fields "catalog_committed";
+    custody_quiescence_receipt_sha256 =
+      table_value fields "quiescence_receipt_sha256";
+    custody_policy_receipt_sha256 = table_value fields "policy_receipt_sha256";
+    custody_created_utc = table_value fields "created_utc" }
+
+let fleet_transfer_catalog_target root transfer =
+  { transfer.custody_target with
+    fleet_prompt_file =
+      fleet_prompt_path root transfer.custody_target.fleet_slot }
+
+let output_key_values output =
+  let fields = Hashtbl.create 16 in
+  split_on '\n' output
+  |> List.iter (fun line ->
+         match String.index_opt line '=' with
+         | None -> ()
+         | Some index ->
+             Hashtbl.replace fields (String.sub line 0 index)
+               (String.sub line (index + 1) (String.length line - index - 1)));
+  fields
+
+let fleet_transfer_source_plan helper transfer =
+  let source = transfer.custody_source in
+  let result =
+    run_captured helper
+      [ "plan-kind"; "--slot"; source.fleet_slot; "--kind";
+        source.fleet_kind; "--home"; source.fleet_home; "--cwd";
+        source.fleet_cwd ]
+  in
+  if result.captured_code <> 0 then
+    failf "fleet-custody-transfer-rollback-plan-failed:%s"
+      (trim result.captured_output);
+  let fields = output_key_values result.captured_output in
+  if table_value fields "agent" <> transfer.custody_source_agent
+     || table_value fields "lane" <> transfer.custody_source_lane
+     || table_value fields "session_id" <> transfer.custody_source_session
+     || table_value fields "identity" <> "exact"
+  then failf "fleet-custody-transfer-rollback-identity-unavailable";
+  sha256 result.captured_output
+
+let fleet_transfer_source_observation helper transfer =
+  let source = transfer.custody_source in
+  let result =
+    run_captured helper
+      [ "status"; "--cwd"; source.fleet_cwd; "--slot"; source.fleet_slot ]
+  in
+  match fleet_observed_fields result.captured_output source.fleet_slot with
+  | Some fields ->
+      let state = table_value fields "state" in
+      let identity =
+        state = "active"
+        && table_value fields "agent" = transfer.custody_source_agent
+        && table_value fields "lane" = transfer.custody_source_lane
+        && table_value fields "session_id" = transfer.custody_source_session
+        && table_value fields "identity" = "exact"
+      in
+      if state = "active" && not identity then
+        failf "fleet-custody-transfer-source-identity-drift";
+      (state, identity, result.captured_output)
+  | None
+    when List.exists
+           (fun line -> trim line = "fleet_slots=0 unhealthy=0")
+           (split_on '\n' result.captured_output) ->
+      ("absent", false, result.captured_output)
+  | None ->
+      failf "fleet-custody-transfer-source-observation-failed:%s"
+        (trim result.captured_output)
+
+let fleet_transfer_quiesce_source helper transfer =
+  let source = transfer.custody_source in
+  let result =
+    run_captured helper
+      [ "stop"; "--cwd"; source.fleet_cwd; "--slot"; source.fleet_slot ]
+  in
+  let stop_states =
+    split_on '\n' result.captured_output
+    |> List.filter_map (fun line ->
+           match split_on ' ' (trim line) with
+           | "FLEET_SLOT_STOPPED" :: values ->
+               let fields = snapshot_fields values in
+               if table_value fields "slot" = source.fleet_slot then
+                 Some (table_value fields "state")
+               else None
+           | _ -> None)
+  in
+  if result.captured_code <> 0
+     || not (stop_states = [ "active" ] || stop_states = [ "absent" ])
+  then
+    failf "fleet-custody-transfer-source-stop-unproved:%s"
+      (trim result.captured_output);
+  let state, _, observation = fleet_transfer_source_observation helper transfer in
+  if state <> "absent" then
+    failf "fleet-custody-transfer-source-did-not-quiesce:state=%s" state;
+  sha256 (result.captured_output ^ "\000" ^ observation)
+
+let fleet_transfer_restore_source helper transfer =
+  let source = transfer.custody_source in
+  let result =
+    run_captured helper
+      [ "launch-kind"; "--slot"; source.fleet_slot; "--kind";
+        source.fleet_kind; "--home"; source.fleet_home; "--cwd";
+        source.fleet_cwd; "--no-attach" ]
+  in
+  if result.captured_code <> 0 then
+    failf "fleet-custody-transfer-source-rollback-failed:%s"
+      (trim result.captured_output);
+  let state, identity, _ = fleet_transfer_source_observation helper transfer in
+  if state <> "active" || not identity then
+    failf "fleet-custody-transfer-source-rollback-unproved";
+  sha256 result.captured_output
+
+type fleet_transfer_target_observation = {
+  target_is_active : bool;
+  target_presence_is_verified : bool;
+  target_endpoint_is_verified : bool;
+  target_session_is_verified : bool;
+  target_observation_is_authorized : bool;
+  target_sample_is_fresh : bool;
+}
+
+let fleet_transfer_target_observation root cwd target =
+  let loom_state = fleet_loom_state root target in
+  let _, _, authorized, lanes = load_authority_lanes root cwd in
+  let lane = authority_entry lanes target.fleet_agent target.fleet_slot in
+  { target_is_active = loom_state = "active";
+    target_presence_is_verified =
+      authorized && lane.authority_presence = "live";
+    target_endpoint_is_verified =
+      authorized && lane.authority_endpoint = "active";
+    target_session_is_verified =
+      loom_state = "active"
+      && (lane.authority_session_id = ""
+          || lane.authority_session_id = target.fleet_session_id);
+    target_observation_is_authorized = true;
+    target_sample_is_fresh = true }
+
+let fleet_transfer_frame transfer source_active source_identity target
+    deadline_expired observation_authorized sample_fresh =
+  { transfer_phase = transfer.custody_phase; transfer_policy_state = 1;
+    transfer_source_catalog_agentd =
+      (if transfer.custody_catalog_committed then 0 else 1);
+    transfer_catalog_committed_loom =
+      (if transfer.custody_catalog_committed then 1 else 0);
+    transfer_target_staged = 1; transfer_target_descriptor_sealed = 1;
+    transfer_resume_identity_bound = 1;
+    transfer_source_active = if source_active then 1 else 0;
+    transfer_source_identity_verified = if source_identity then 1 else 0;
+    transfer_source_quiesced =
+      if transfer.custody_source_quiesced then 1 else 0;
+    transfer_target_active = if target.target_is_active then 1 else 0;
+    transfer_target_presence_verified =
+      if target.target_presence_is_verified then 1 else 0;
+    transfer_target_endpoint_verified =
+      if target.target_endpoint_is_verified then 1 else 0;
+    transfer_target_session_verified =
+      if target.target_session_is_verified then 1 else 0;
+    transfer_rollback_available = 1;
+    transfer_deadline_expired = if deadline_expired then 1 else 0;
+    transfer_observation_authority_verified =
+      if observation_authorized then 1 else 0;
+    transfer_sample_fresh = if sample_fresh then 1 else 0 }
+
+let empty_fleet_transfer_target_observation =
+  { target_is_active = false; target_presence_is_verified = false;
+    target_endpoint_is_verified = false; target_session_is_verified = false;
+    target_observation_is_authorized = true;
+    target_sample_is_fresh = true }
+
+let fleet_transfer_crash point =
+  match Sys.getenv_opt "SOUNIO_LOOM_TRANSFER_CRASH_AT" with
+  | Some requested when requested = point ->
+      failf "fleet-custody-transfer-crash-injected:%s" point
+  | _ -> ()
+
+let fleet_transfer_target_identity_equal left right =
+  left.fleet_slot = right.fleet_slot
+  && left.fleet_kind = right.fleet_kind
+  && left.fleet_custody = right.fleet_custody
+  && left.fleet_agent = right.fleet_agent
+  && left.fleet_home = right.fleet_home
+  && left.fleet_cwd = right.fleet_cwd
+  && left.fleet_coord_dir = right.fleet_coord_dir
+  && left.fleet_enabled = right.fleet_enabled
+  && left.fleet_session_id = right.fleet_session_id
+  && left.fleet_provider_mode = right.fleet_provider_mode
+  && left.fleet_provider_session = right.fleet_provider_session
+  && left.fleet_prompt_sha256 = right.fleet_prompt_sha256
+  && left.fleet_model = right.fleet_model
+  && left.fleet_unsafe_auto = right.fleet_unsafe_auto
+
+let fleet_transfer_catalog_state root transfer =
+  let path = fleet_spec_path root transfer.custody_source.fleet_slot in
+  if not (Sys.file_exists path) then failf "fleet-custody-transfer-catalog-missing";
+  let observed = fleet_spec_of_values path (parse_key_values path) in
+  if observed.fleet_custody = "agentd" then (
+    if observed.fleet_slot <> transfer.custody_source.fleet_slot
+       || observed.fleet_kind <> transfer.custody_source.fleet_kind
+       || observed.fleet_home <> transfer.custody_source.fleet_home
+       || observed.fleet_cwd <> transfer.custody_source.fleet_cwd
+    then failf "fleet-custody-transfer-source-catalog-drift";
+    `Agentd)
+  else
+    let expected = fleet_transfer_catalog_target root transfer in
+    if not (fleet_transfer_target_identity_equal observed expected) then
+      failf "fleet-custody-transfer-target-catalog-drift";
+    `Loom
+
+let fleet_transfer_stop_target root transfer =
+  let target = transfer.custody_target in
+  let options = Hashtbl.create 8 in
+  Hashtbl.replace options "--state-dir" root;
+  Hashtbl.replace options "--agent" target.fleet_agent;
+  Hashtbl.replace options "--lane" target.fleet_slot;
+  Hashtbl.replace options "--cwd" target.fleet_cwd;
+  let cli = { options; flags = Hashtbl.create 2; rest = [] } in
+  (try stop_command cli with _ -> ());
+  match fleet_loom_state root target with
+  | "absent" -> ()
+  | state -> failf "fleet-custody-transfer-target-stop-unproved:state=%s" state
+
+let fleet_transfer_policy_receipt transfer receipt =
+  let updated =
+    { transfer with custody_policy_receipt_sha256 = sha256 receipt }
+  in
+  write_fleet_transfer_journal updated;
+  updated
+
+let fleet_transfer_rollback root helper transfer reason =
+  let target = fleet_transfer_target_observation root
+      transfer.custody_target.fleet_cwd transfer.custody_target in
+  let source_state, source_identity, _ =
+    fleet_transfer_source_observation helper transfer
+  in
+  let source_active = source_state = "active" in
+  let frame =
+    fleet_transfer_frame transfer source_active source_identity target true
+      target.target_observation_is_authorized target.target_sample_is_fresh
+  in
+  let code, _, receipt = custody_transfer_decision frame in
+  let transfer = fleet_transfer_policy_receipt transfer receipt in
+  let transfer =
+    if code = 6 then (
+      fleet_transfer_stop_target root transfer;
+      { transfer with custody_phase = 6 })
+    else if code = 5 || code = 8 || code = 9 then
+      { transfer with custody_phase = 6 }
+    else
+      failf "fleet-custody-transfer-rollback-refused:code=%d:reason=%s" code reason
+  in
+  write_fleet_transfer_journal transfer;
+  let target = fleet_transfer_target_observation root
+      transfer.custody_target.fleet_cwd transfer.custody_target in
+  if target.target_is_active then
+    failf "fleet-custody-transfer-rollback-target-still-active";
+  let source_state, source_identity, _ =
+    fleet_transfer_source_observation helper transfer
+  in
+  let transfer =
+    if source_state = "active" && source_identity then transfer
+    else (
+      let frame =
+        fleet_transfer_frame transfer false false target false true true
+      in
+      let receipt = require_custody_transfer_decision 5 frame in
+      let transfer = fleet_transfer_policy_receipt transfer receipt in
+      ignore (fleet_transfer_restore_source helper transfer);
+      transfer)
+  in
+  let source_state, source_identity, _ =
+    fleet_transfer_source_observation helper transfer
+  in
+  let final_frame =
+    fleet_transfer_frame transfer (source_state = "active") source_identity
+      target false true true
+  in
+  let receipt = require_custody_transfer_decision 9 final_frame in
+  let transfer = fleet_transfer_policy_receipt transfer receipt in
+  write_fleet_transfer_journal transfer;
+  Printf.printf
+    "LOOM_FLEET_TRANSFER state=ROLLED_BACK slot=%s reason=%s authority=Sounio semantics_sha256=%s\n%!"
+    transfer.custody_source.fleet_slot (field_escape reason)
+    custody_transfer_semantics_sha256
+
+let fleet_transfer_commit root transfer =
+  let committed = fleet_transfer_catalog_target root transfer in
+  mkdir_p (Filename.dirname committed.fleet_prompt_file);
+  atomic_write committed.fleet_prompt_file
+    (read_file transfer.custody_target.fleet_prompt_file);
+  atomic_write (fleet_spec_path root committed.fleet_slot)
+    (descriptor_text (fleet_spec_fields committed));
+  let updated =
+    { transfer with custody_phase = 5; custody_catalog_committed = true }
+  in
+  write_fleet_transfer_journal updated;
+  updated
+
+let rec fleet_transfer_finish_committed root helper transfer deadline =
+  let target = fleet_transfer_catalog_target root transfer in
+  let target_observation =
+    fleet_transfer_target_observation root target.fleet_cwd target
+  in
+  let source_state, source_identity, _ =
+    fleet_transfer_source_observation helper transfer
+  in
+  let frame =
+    fleet_transfer_frame transfer (source_state = "active") source_identity
+      target_observation (Unix.gettimeofday () >= deadline)
+      target_observation.target_observation_is_authorized
+      target_observation.target_sample_is_fresh
+  in
+  let code, _, receipt = custody_transfer_decision frame in
+  let transfer = fleet_transfer_policy_receipt transfer receipt in
+  match code with
+  | 4 ->
+      Printf.printf
+        "LOOM_FLEET_TRANSFER state=COMPLETE slot=%s custody=loom provider=%s provider_session=%s authority=Sounio semantics_sha256=%s\n%!"
+        target.fleet_slot target.fleet_kind target.fleet_provider_session
+        custody_transfer_semantics_sha256
+  | 10 ->
+      ignore (fleet_transfer_quiesce_source helper transfer);
+      fleet_transfer_finish_committed root helper transfer deadline
+  | 11 ->
+      let state = fleet_loom_state root target in
+      let action = if state = "recoverable" then "recover" else "provider-open" in
+      let result = fleet_run_loom root target action in
+      if result.captured_code <> 0 then
+        failf "fleet-custody-transfer-target-%s-failed:%s" action
+          (trim result.captured_output);
+      fleet_transfer_finish_committed root helper transfer deadline
+  | 7 when Unix.gettimeofday () < deadline ->
+      Unix.sleepf 0.05;
+      fleet_transfer_finish_committed root helper transfer deadline
+  | _ ->
+      failf "fleet-custody-transfer-committed-recovery-refused:code=%d" code
+
+let rec fleet_transfer_drive root helper transfer deadline =
+  let catalog_state = fleet_transfer_catalog_state root transfer in
+  let transfer =
+    match (catalog_state, transfer.custody_catalog_committed) with
+    | `Agentd, false -> transfer
+    | `Loom, true -> transfer
+    | `Loom, false
+      when (transfer.custody_phase = 3 || transfer.custody_phase = 4)
+           && transfer.custody_policy_receipt_sha256 <> "" ->
+        let promoted =
+          { transfer with custody_phase = 5; custody_catalog_committed = true }
+        in
+        write_fleet_transfer_journal promoted;
+        promoted
+    | `Loom, false ->
+        failf "fleet-custody-transfer-catalog-commit-without-policy-receipt"
+    | `Agentd, true ->
+        failf "fleet-custody-transfer-catalog-rollback-after-commit"
+  in
+  match transfer.custody_phase with
+  | 1 ->
+      let source_state, source_identity, _ =
+        fleet_transfer_source_observation helper transfer
+      in
+      if fleet_loom_state root transfer.custody_target <> "absent" then
+        failf "fleet-custody-transfer-provisional-target-preexists";
+      let transfer =
+        if source_state = "active" && source_identity then (
+          let frame =
+            fleet_transfer_frame transfer true true
+              empty_fleet_transfer_target_observation false true true
+          in
+          let receipt = require_custody_transfer_decision 1 frame in
+          fleet_transfer_policy_receipt transfer receipt)
+        else if source_state = "absent"
+                && transfer.custody_policy_receipt_sha256 <> ""
+        then transfer
+        else failf "fleet-custody-transfer-source-is-not-active"
+      in
+      let quiescence = fleet_transfer_quiesce_source helper transfer in
+      let next =
+        { transfer with custody_phase = 2; custody_source_quiesced = true;
+          custody_quiescence_receipt_sha256 = quiescence;
+          custody_policy_receipt_sha256 = "" }
+      in
+      write_fleet_transfer_journal next;
+      fleet_transfer_crash "after-quiesce";
+      fleet_transfer_drive root helper next deadline
+  | 2 ->
+      let source_state, source_identity, _ =
+        fleet_transfer_source_observation helper transfer
+      in
+      if source_state = "active" && source_identity then
+        fleet_transfer_rollback root helper transfer
+          "source-reappeared-before-target"
+      else if source_state <> "absent" then
+        failf "fleet-custody-transfer-source-reappeared-with-identity-drift"
+      else (
+        let observed =
+          fleet_transfer_target_observation root
+            transfer.custody_target.fleet_cwd transfer.custody_target
+        in
+        let next =
+          if observed.target_is_active
+             && transfer.custody_policy_receipt_sha256 <> ""
+          then { transfer with custody_phase = 3 }
+          else (
+            let frame =
+              fleet_transfer_frame transfer false true observed false true true
+            in
+            let receipt = require_custody_transfer_decision 2 frame in
+            let authorized = fleet_transfer_policy_receipt transfer receipt in
+            { authorized with custody_phase = 3 })
+        in
+        write_fleet_transfer_journal next;
+        if not observed.target_is_active then (
+          let result = fleet_run_loom root next.custody_target "provider-open" in
+          if result.captured_code <> 0 then (
+            fleet_transfer_rollback root helper next "target-start-failed";
+            failf "fleet-custody-transfer-target-start-failed:%s"
+              (trim result.captured_output)));
+        fleet_transfer_crash "after-target";
+        fleet_transfer_drive root helper next deadline)
+  | 3 | 4 ->
+      let target =
+        fleet_transfer_target_observation root transfer.custody_target.fleet_cwd
+          transfer.custody_target
+      in
+      let source_state, source_identity, _ =
+        fleet_transfer_source_observation helper transfer
+      in
+      let expired = Unix.gettimeofday () >= deadline in
+      let frame =
+        fleet_transfer_frame transfer (source_state = "active") source_identity
+          target expired target.target_observation_is_authorized
+          target.target_sample_is_fresh
+      in
+      let code, _, receipt = custody_transfer_decision frame in
+      let transfer = fleet_transfer_policy_receipt transfer receipt in
+      (match code with
+      | 3 ->
+          fleet_transfer_crash "before-commit";
+          let committed = fleet_transfer_commit root transfer in
+          fleet_transfer_crash "after-commit";
+          fleet_transfer_finish_committed root helper committed deadline
+      | 7 when not expired ->
+          Unix.sleepf 0.05;
+          fleet_transfer_drive root helper transfer deadline
+      | 5 | 6 | 8 ->
+          fleet_transfer_rollback root helper transfer
+            (Printf.sprintf "precommit-policy-%d" code)
+      | _ ->
+          fleet_transfer_rollback root helper transfer
+            (Printf.sprintf "precommit-refusal-%d" code))
+  | 5 -> fleet_transfer_finish_committed root helper transfer deadline
+  | 6 -> fleet_transfer_rollback root helper transfer "resume-rollback"
+  | _ -> failf "fleet-custody-transfer-phase-unreachable"
+
+let fleet_transfer_deadline cli =
+  let seconds =
+    match optional cli "--deadline-seconds" with
+    | None -> 10
+    | Some value ->
+        (try int_of_string value
+         with _ -> failf "fleet-custody-transfer-deadline-invalid")
+  in
+  if seconds < 1 || seconds > 60 then
+    failf "fleet-custody-transfer-deadline-out-of-range";
+  Unix.gettimeofday () +. float_of_int seconds
+
+let fleet_transfer_stage root _cwd cli =
+  let slot = required cli "--slot" in
+  let paths = fleet_transfer_paths root slot in
+  if Sys.file_exists paths.transfer_journal_path then
+    failf "fleet-custody-transfer-already-staged:%s" slot;
+  let catalog_path = fleet_spec_path root slot in
+  if not (Sys.file_exists catalog_path) then
+    failf "fleet-custody-transfer-source-catalog-missing:%s" slot;
+  let source = fleet_spec_of_values catalog_path (parse_key_values catalog_path) in
+  if source.fleet_custody <> "agentd" || not source.fleet_enabled then
+    failf "fleet-custody-transfer-source-catalog-is-not-active-agentd";
+  if source.fleet_kind <> "claude" then
+    failf "fleet-custody-transfer-provider-not-supported:%s" source.fleet_kind;
+  let provider = provider_spec source.fleet_kind in
+  let executable =
+    match provider_executable provider with
+    | Some path -> path
+    | None -> failf "provider-executable-not-found:%s" source.fleet_kind
+  in
+  let loom_session = required cli "--session-id" in
+  let provider_session = required cli "--provider-session" in
+  if not (provider_uuid loom_session) then
+    failf "provider-session-id-must-be-uuid:%s" source.fleet_kind;
+  if not (provider_uuid provider_session) then
+    failf "provider-session-must-be-uuid:%s" source.fleet_kind;
+  let source_agent =
+    Option.value ~default:source.fleet_kind (optional cli "--source-agent")
+  in
+  let source_lane = required cli "--source-lane" in
+  let source_session =
+    Option.value ~default:provider_session (optional cli "--source-session")
+  in
+  if source_session <> provider_session then
+    failf "fleet-custody-transfer-provider-source-session-mismatch";
+  let prompt = provider_prompt cli in
+  let model = Option.value ~default:"" (optional cli "--model") in
+  let unsafe_auto = flag cli "--unsafe-auto" in
+  ignore
+    (provider_argv provider "persistent" executable "resume" source.fleet_cwd
+       loom_session
+       provider_session model unsafe_auto false prompt);
+  mkdir_p (Filename.dirname paths.transfer_prompt_path);
+  atomic_write paths.transfer_prompt_path prompt;
+  let target =
+    { fleet_slot = slot; fleet_kind = source.fleet_kind; fleet_custody = "loom";
+      fleet_agent =
+        Option.value ~default:source.fleet_agent (optional cli "--agent");
+      fleet_home = source.fleet_home; fleet_cwd = source.fleet_cwd;
+      fleet_coord_dir = fleet_coordination_dir cli; fleet_enabled = true;
+      fleet_session_id = loom_session; fleet_provider_mode = "resume";
+      fleet_provider_session = provider_session;
+      fleet_prompt_file = paths.transfer_prompt_path;
+      fleet_prompt_sha256 = sha256 prompt; fleet_model = model;
+      fleet_unsafe_auto = unsafe_auto }
+  in
+  atomic_write paths.transfer_candidate_path
+    (descriptor_text (fleet_spec_fields target));
+  let transfer =
+    { custody_paths = paths; custody_source = source; custody_target = target;
+      custody_source_agent = source_agent; custody_source_lane = source_lane;
+      custody_source_session = source_session; custody_phase = 1;
+      custody_source_quiesced = false; custody_catalog_committed = false;
+      custody_quiescence_receipt_sha256 = "";
+      custody_policy_receipt_sha256 = ""; custody_created_utc = utc_now () }
+  in
+  ignore (fleet_transfer_source_plan (fleet_agent_command ()) transfer);
+  let state, identity, _ =
+    fleet_transfer_source_observation (fleet_agent_command ()) transfer
+  in
+  if state <> "active" || not identity then
+    failf "fleet-custody-transfer-source-preflight-failed";
+  if fleet_loom_state root target <> "absent" then
+    failf "fleet-custody-transfer-target-preflight-failed";
+  write_fleet_transfer_journal transfer;
+  fleet_transfer_crash "after-stage";
+  transfer
+
+let fleet_transfer_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let slot = required cli "--slot" in
+  let paths = fleet_transfer_paths root slot in
+  with_fleet_transfer_lock paths (fun () ->
+      let transfer = fleet_transfer_stage root cwd cli in
+      fleet_transfer_drive root (fleet_agent_command ()) transfer
+        (fleet_transfer_deadline cli))
+
+let fleet_transfer_recover_command cli =
+  let cwd = cwd_option cli in
+  let root = root_option cli cwd in
+  let slot = required cli "--slot" in
+  let paths = fleet_transfer_paths root slot in
+  with_fleet_transfer_lock paths (fun () ->
+      let transfer = load_fleet_transfer root slot in
+      fleet_transfer_drive root (fleet_agent_command ()) transfer
+        (fleet_transfer_deadline cli))
+
 let fleet_truthful_state coordination_available snapshot_authorized lanes spec
     agentd_state loom_state =
   let lane = authority_entry lanes spec.fleet_agent spec.fleet_slot in
@@ -9747,7 +10600,7 @@ let usage () =
   Printf.eprintf
     "\nWitness Mesh v0/v1:\n  witness-serve --witness-state-dir DIR --membership FILE --witness ID --private-key PEM [--bind IP] [--port N]\n  witness-mesh-anchor --state-dir DIR --world W --membership FILE --endpoints FILE --anchor-private-key PEM\n  witness-mesh-verify --state-dir DIR --world W --membership FILE --endpoints FILE [--policy byzantine-strict|crash-quorum]\n  witness-epoch-handoff --epoch-state-dir DIR --world W --from-epoch N --to-epoch N --old-state-dir DIR --old-membership FILE --old-endpoints FILE --new-state-dir DIR --new-membership FILE --new-endpoints FILE\n  witness-epoch-verify --epoch-state-dir DIR --world W --active-state-dir DIR --membership FILE --endpoints FILE\n  witness-epoch-log-serve --log-state-dir DIR --operator ID --operator-public-key PEM --operator-private-key PEM --publisher-public-key PEM [--bind IP] [--log-port N]\n  witness-epoch-log-status --log-host HOST --log-port N --operator ID --operator-public-key PEM --world W\n  witness-epoch-transparency-publish --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --publisher-public-key PEM --publisher-private-key PEM --transparency-membership FILE --transparency-endpoints FILE --transparency-anchor-private-key PEM\n  witness-epoch-transparency-verify --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --transparency-membership FILE --transparency-endpoints FILE\n";
   Printf.eprintf
-    "\nFleet catalog v3:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--mode new|resume] [--provider-session S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n"
+    "\nFleet catalog v3:\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR --custody agentd|loom [--agent A] [--session-id S] [--mode new|resume] [--provider-session S] [--coord-dir DIR] [--prompt TEXT|--prompt-file PATH] [--model M] [--unsafe-auto] [--adopt-active]\n  fleet-transfer --slot S --session-id S --provider-session S --source-lane L [--source-agent A] [--source-session S] --coord-dir DIR (--prompt TEXT|--prompt-file PATH) [--deadline-seconds N]\n  fleet-transfer-recover --slot S [--deadline-seconds N]\n"
 
 let arguments_after_command () =
   let values = Array.to_list Sys.argv in
@@ -9857,6 +10710,8 @@ let main () =
     | "fleet-enroll" -> fleet_enroll_command cli; 0
     | "fleet-disable" -> fleet_disable_command cli; 0
     | "fleet-reconcile" -> fleet_reconcile_command cli; 0
+    | "fleet-transfer" -> fleet_transfer_command cli; 0
+    | "fleet-transfer-recover" -> fleet_transfer_recover_command cli; 0
     | "verify-journal" -> verify_command cli; 0
     | "verify-guardian-journal" -> verify_guardian_command cli; 0
     | "verify-continuity-receipt" -> verify_continuity_receipt_command cli; 0

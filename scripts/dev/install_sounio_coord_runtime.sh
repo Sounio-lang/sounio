@@ -107,6 +107,16 @@ activate_runtime() {
     [[ -x "$version_dir/bin/sounio-loom-runtime" ]] || \
       die "installed runtime declares Loom but omits its OCaml kernel: $runtime_id"
   fi
+  if grep -q '^capability=loom-transactional-custody-transfer-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-custody-transfer-runtime" ]] || \
+      die "installed runtime declares transactional custody transfer but omits Loom or frozen Sounio frame 9040: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_custody_transfer_semantics_sha256)" == \
+      5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c ]] || \
+      die "installed custody transfer is not bound to frozen Sounio semantics: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_custody_transfer_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-custody-transfer-runtime"
+  fi
   if grep -q '^capability=loom-native-agent-hook-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-language-authority-runtime" ]] || \
@@ -413,6 +423,7 @@ fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
 loom_language_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_language_authority.sh"
+loom_custody_transfer_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_custody_transfer.sh"
 loom_lane_health_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_lane_health.sh"
 loom_lane_health_parity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_lane_health_parity.sh"
 loom_continuity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_continuity_adapter.sh"
@@ -430,6 +441,9 @@ loom_project="$SOURCE_ROOT/tools/loom"
 loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
 loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
 loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v1"
+loom_custody_transfer_entrypoint="$SOURCE_ROOT/tools/loom/custody_transfer_main.sio"
+loom_custody_transfer_module="$SOURCE_ROOT/stdlib/coordination/loom_custody_transfer.sio"
+loom_custody_transfer_freeze="$SOURCE_ROOT/tools/loom/custody_transfer.freeze.v1"
 loom_lane_health_entrypoint="$SOURCE_ROOT/tools/loom/lane_health_main.sio"
 loom_lane_health_parity_entrypoint="$SOURCE_ROOT/tools/loom/lane_health_parity_main.sio"
 loom_lane_health_module="$SOURCE_ROOT/stdlib/coordination/loom_lane_health.sio"
@@ -474,6 +488,8 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
 [[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
 [[ -x "$loom_language_authority_build_source" ]] || \
   die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
+[[ -x "$loom_custody_transfer_build_source" ]] || \
+  die "Loom custody-transfer build entrypoint missing or not executable: $loom_custody_transfer_build_source"
 [[ -x "$loom_lane_health_build_source" && \
   -x "$loom_lane_health_parity_build_source" ]] || \
   die "Loom lane-health build entrypoints are incomplete"
@@ -505,6 +521,10 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
   -f "$loom_language_authority_module" && \
   -f "$loom_language_authority_freeze" ]] || \
   die "Loom frozen Sounio language-authority source bundle is incomplete"
+[[ -f "$loom_custody_transfer_entrypoint" && \
+  -f "$loom_custody_transfer_module" && \
+  -f "$loom_custody_transfer_freeze" ]] || \
+  die "Loom frozen Sounio custody-transfer source bundle is incomplete"
 [[ -f "$loom_lane_health_entrypoint" && \
   -f "$loom_lane_health_parity_entrypoint" && \
   -f "$loom_lane_health_module" && -f "$loom_lane_health_freeze" && \
@@ -569,6 +589,7 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
 loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
+loom_custody_transfer_binary="$loom_project/_build/default/src/sounio-loom-custody-transfer-runtime"
 loom_lane_health_binary="$loom_project/.runtime/sounio-loom-lane-health-runtime"
 loom_lane_health_parity_binary="$loom_project/.runtime/sounio-loom-lane-health-parity-runtime"
 loom_continuity_binary="$loom_project/_build/default/src/sounio-loom-continuity-runtime"
@@ -585,6 +606,8 @@ loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_language_authority_binary" ]] || \
   die "Loom build omitted its frozen Sounio language-authority runtime"
+[[ -x "$loom_custody_transfer_binary" ]] || \
+  die "Loom build omitted its frozen Sounio custody-transfer runtime"
 [[ -x "$loom_lane_health_binary" && -x "$loom_lane_health_parity_binary" ]] || \
   die "Loom build omitted its frozen Sounio lane-health runtimes"
 [[ -x "$loom_continuity_binary" ]] || \
@@ -629,6 +652,18 @@ read -r loom_language_authority_actual_sha _ < <(
 )
 [[ "$loom_language_authority_actual_sha" == "$loom_language_authority_expected_sha" ]] || \
   die "Loom language-authority runtime does not match its freeze manifest"
+loom_custody_transfer_probe="$(printf '0\n' | "$loom_custody_transfer_binary")"
+[[ "$loom_custody_transfer_probe" == \
+  'SOUNIO_CUSTODY_TRANSFER_SELFTEST PASS cases=30' ]] || \
+  die "Loom frozen Sounio custody-transfer runtime failed its install probe"
+loom_custody_transfer_expected_sha="$(
+  manifest_value "$loom_custody_transfer_freeze" executable_sha256
+)"
+read -r loom_custody_transfer_actual_sha _ < <(
+  sha256sum "$loom_custody_transfer_binary"
+)
+[[ "$loom_custody_transfer_actual_sha" == "$loom_custody_transfer_expected_sha" ]] || \
+  die "Loom custody-transfer runtime does not match its freeze manifest"
 loom_lane_health_probe="$(printf '0\n' | "$loom_lane_health_binary")"
 [[ "$loom_lane_health_probe" == \
   'SOUNIO_LANE_HEALTH_SELFTEST PASS cases=28' ]] || \
@@ -775,6 +810,8 @@ bundle_sources=(
   "$loom_build_source" "$loom_language_authority_build_source"
   "$loom_language_authority_entrypoint" "$loom_language_authority_module"
   "$loom_language_authority_freeze"
+  "$loom_custody_transfer_build_source" "$loom_custody_transfer_entrypoint"
+  "$loom_custody_transfer_module" "$loom_custody_transfer_freeze"
   "$loom_lane_health_build_source" "$loom_lane_health_parity_build_source"
   "$loom_lane_health_entrypoint" "$loom_lane_health_parity_entrypoint"
   "$loom_lane_health_module" "$loom_lane_health_freeze"
@@ -862,6 +899,8 @@ else
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
   install -m 0755 "$loom_language_authority_binary" \
     "$stage/bin/sounio-loom-language-authority-runtime"
+  install -m 0755 "$loom_custody_transfer_binary" \
+    "$stage/bin/sounio-loom-custody-transfer-runtime"
   install -m 0755 "$loom_lane_health_binary" \
     "$stage/bin/sounio-loom-lane-health-runtime"
   install -m 0755 "$loom_lane_health_parity_binary" \
@@ -893,6 +932,9 @@ else
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
   coord_runtime_sha256="$(sha256sum "$stage/bin/sounio-coord-runtime" | awk '{print $1}')"
   loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
+  loom_custody_transfer_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}'
+  )"
   {
     printf 'runtime_id=%s\n' "$runtime_id"
     printf 'protocol_version=%s\n' "$protocol"
@@ -906,6 +948,12 @@ else
     printf 'loom_language_authority_frame=9020\n'
     printf 'loom_language_authority_semantics_sha256=16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff\n'
     printf 'loom_language_authority_manifest_sha256=5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e\n'
+    printf 'loom_custody_transfer_language=Sounio\n'
+    printf 'loom_custody_transfer_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_custody_transfer_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_custody_transfer_frame=9040\n'
+    printf 'loom_custody_transfer_semantics_sha256=5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c\n'
+    printf 'loom_custody_transfer_manifest_sha256=ee4e5d128bf5b0fd7166e74c9815a17506a5b9844730c1be2155ac68c370be66\n'
     printf 'loom_lane_health_language=Sounio\n'
     printf 'loom_lane_health_role=SEMANTIC_AUTHORITY\n'
     printf 'loom_lane_health_realization=OCaml\n'
@@ -938,6 +986,8 @@ else
     printf 'bundle_sha256=%s\n' "$bundle_sha"
     printf 'coord_runtime_sha256=%s\n' "$coord_runtime_sha256"
     printf 'loom_runtime_sha256=%s\n' "$loom_runtime_sha256"
+    printf 'loom_custody_transfer_runtime_sha256=%s\n' \
+      "$loom_custody_transfer_runtime_sha256"
     printf 'source_sha=%s\n' "$source_sha"
     printf 'source_state=%s\n' "$source_state"
     printf 'capability=causal-experiment-receipts-v1\n'
@@ -948,6 +998,7 @@ else
     printf 'capability=agentd-logical-command-v1\n'
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
+    printf 'capability=loom-transactional-custody-transfer-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
     printf 'capability=loom-truthful-lane-health-v1\n'
     printf 'capability=loom-nondestructive-health-reconcile-v1\n'
@@ -1007,6 +1058,7 @@ else
     printf 'capability=loom-dual-journal-v1\n'
     printf 'capability=loom-persistent-fleet-catalog-v1\n'
     printf 'capability=loom-fleet-custody-catalog-v2\n'
+    printf 'capability=loom-fleet-custody-catalog-v3\n'
     printf 'capability=loom-conflict-free-active-adoption-v1\n'
     printf 'capability=loom-coordination-authority-binding-v1\n'
     printf 'capability=loom-post-pod-reconcile-v1\n'
