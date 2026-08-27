@@ -34,6 +34,9 @@ struct LowerLocalStack {
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
     // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
     tuple_float_mask: [i64; 4096],
+    // Layout index of the named struct element inside tuple slot 0 when that
+    // slot is a fixed array. -1 for every other local shape.
+    tuple0_array_elem_layout: [i64; 4096],
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: [i64; 4096],
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
@@ -64,6 +67,7 @@ fn empty_lower_local_stack() -> LowerLocalStack {
         is_ref: [0; 4096],
         scalar_kind: [0; 4096],
         tuple_float_mask: [0; 4096],
+        tuple0_array_elem_layout: [-1; 4096],
         variance_regs: [-1; 4096],
         closure_fn_id: [-1; 4096],
         box_inner_layout: [-1; 4096],
@@ -1977,8 +1981,8 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         var fn_slot_sig = (*module_box_sig).functions[fn_id_sig as usize]
                                         fn_slot_sig.compile_strategy = strategy_sig
                                         fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
-                                        fn_slot_sig.return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
-                                        fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                        fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
+                                        fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -2456,8 +2460,8 @@ fn lowerer_preseed_fn_signature_mut(
     var fn_slot = (*module_box).functions[fn_id as usize]
     fn_slot.compile_strategy = strategy
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
-    fn_slot.return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
-    fn_slot.return_struct_name = lower_opt_type_named_name(return_type)
+    fn_slot.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
+    fn_slot.return_struct_name = lower_opt_type_return_layout_name(return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -2756,7 +2760,7 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                                                elem_type_name_id: ir_intern_name(ir_empty_name()),
+                                                elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                             }
@@ -3298,8 +3302,8 @@ fn lowerer_preseed_program_items_mut(
                                     var fn_slot_sig = (*module_box_sig).functions[fn_id_sig as usize]
                                     fn_slot_sig.compile_strategy = strategy_sig
                                     fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
-                                    fn_slot_sig.return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
-                                    fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                    fn_slot_sig.return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
+                                    fn_slot_sig.return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                     fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                     fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                     if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -3432,8 +3436,8 @@ fn ir_fast_summary_preseed_fn_signature(
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     module_value.functions[fn_id as usize].compile_strategy = strategy
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
-    module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
-    module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
+    module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
+    module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_return_layout_name(return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3560,8 +3564,8 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     let strategy = lowerer_compute_strategy_from_ast_ref(return_type, effects)
     module_value.functions[fn_id as usize].compile_strategy = strategy
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
-    module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
-    module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
+    module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
+    module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_return_layout_name(return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3878,8 +3882,8 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                 module.functions[fn_id as usize].compile_strategy = strategy
                                 module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
-                                module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
-                                module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
+                                module.functions[fn_id as usize].return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                 module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                 module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3972,8 +3976,8 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         let strategy = lowerer_compute_strategy_from_ast_ref(&(*fd).return_type, &(*fd).effects)
                                                         module.functions[fn_id as usize].compile_strategy = strategy
                                                         module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
-                                                        module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
-                                                        module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                                        module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_return_fixed_array_code(&(*fd).return_type)
+                                                        module.functions[fn_id as usize].return_struct_name = lower_opt_type_return_layout_name(&(*fd).return_type)
                                                         module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                                         module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -4045,6 +4049,7 @@ fn lowerer_bind_local_mut(
         (*locals_box).is_global[idx as usize] = 0
         (*locals_box).is_ref[idx as usize] = 0
         (*locals_box).scalar_kind[idx as usize] = 0
+        (*locals_box).tuple0_array_elem_layout[idx as usize] = 0 - 1
         (*locals_box).variance_regs[idx as usize] = -1
         // Explicit -1: the locals stack is REUSED across functions (count is
         // reset, arrays are not), so a stale box_inner_layout from an earlier
@@ -4520,8 +4525,8 @@ fn lowerer_lower_fn_item_mut(
         (*strategy_func_box).compile_strategy = strategy
     }
     (*strategy_func_box).returns_float = lower_opt_return_float_code(&fd.return_type)
-    (*strategy_func_box).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
-    (*strategy_func_box).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+    (*strategy_func_box).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
+    (*strategy_func_box).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*lo).current_func = strategy_func_box
 
@@ -5401,6 +5406,61 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
         }
         None => ir_empty_name(),
     }
+}
+
+fn lower_type_expr_array_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind != TypeExprKind::TypeArray {
+        return ir_empty_name()
+    }
+    match (*ty).inner {
+        Some(elem) => {
+            if (*elem).kind == TypeExprKind::TypeNamed {
+                return ir_path_first_name((*elem).path)
+            }
+            ir_empty_name()
+        }
+        None => ir_empty_name(),
+    }
+}
+
+// Parser tuple-let desugaring turns `let (arr, n) = f()` into a temporary
+// tuple plus `let arr = __tup.0`. Preserve the receiver layout needed by
+// `arr[i].field` when slot 0 is a fixed array of a named struct.
+fn lower_opt_type_tuple0_array_elem_struct_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(tuple_ty) => {
+            if (*tuple_ty).kind != TypeExprKind::TypeTuple {
+                return ir_empty_name()
+            }
+            match (*tuple_ty).type_args {
+                Some(types) => lower_type_expr_array_named_elem_name(&(*types).head),
+                None => ir_empty_name(),
+            }
+        }
+        None => ir_empty_name(),
+    }
+}
+
+// Reuse IrFunction's existing return metadata without changing its aggregate
+// layout. -2 is distinct from -1 (not a fixed array) and every fixed-array
+// consumer already requires >= 0.
+fn lower_tuple0_array_struct_return_sentinel() -> i64 {
+    0 - 2
+}
+
+fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    if lower_opt_type_tuple0_array_elem_struct_name(opt).len > 0 {
+        return lower_tuple0_array_struct_return_sentinel()
+    }
+    lower_opt_type_word_scalar_array_len(opt)
+}
+
+fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    let direct = lower_opt_type_named_name(opt)
+    if direct.len > 0 {
+        return direct
+    }
+    lower_opt_type_tuple0_array_elem_struct_name(opt)
 }
 
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
@@ -7627,6 +7687,7 @@ impl Lowerer {
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*stk).scalar_kind[idx as usize] = 0
                 (*stk).tuple_float_mask[idx as usize] = 0
+                (*stk).tuple0_array_elem_layout[idx as usize] = 0 - 1
                 (*stk).variance_regs[idx as usize] = -1
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*stk).box_inner_layout[idx as usize] = 0 - 1
@@ -7681,6 +7742,33 @@ impl Lowerer {
             i = i - 1
         }
         0
+    }
+
+    fn bind_local_tuple0_array_elem_layout(self, name: Name, layout_idx: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        if layout_idx < 0 { return self }
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*stk).depths[i as usize] <= lo.scope_depth && ir_name_eq((*stk).names[i as usize], name) {
+                (*stk).tuple0_array_elem_layout[i as usize] = layout_idx
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_tuple0_array_elem_layout(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*self.locals).depths[i as usize] <= self.scope_depth && ir_name_eq((*self.locals).names[i as usize], name) {
+                return (*self.locals).tuple0_array_elem_layout[i as usize]
+            }
+            i = i - 1
+        }
+        0 - 1
     }
 
     fn bind_local_fixed_array_len(self, name: Name, array_len: i64) -> Lowerer with Mut, Alloc, Panic, Div {
@@ -11265,7 +11353,19 @@ impl Lowerer {
 
     fn return_struct_name_for_fn_id(self, fn_id: i64) -> Name with Mut, Panic, Div, Alloc {
         if fn_id >= 0 && fn_id < self.module.fn_count {
+            if self.module.functions[fn_id as usize].return_fixed_array_len == lower_tuple0_array_struct_return_sentinel() {
+                return ir_empty_name()
+            }
             return self.module.functions[fn_id as usize].return_struct_name
+        }
+        ir_empty_name()
+    }
+
+    fn return_tuple0_array_elem_struct_name_for_fn_id(self, fn_id: i64) -> Name with Mut, Panic, Div, Alloc {
+        if fn_id >= 0 && fn_id < self.module.fn_count {
+            if self.module.functions[fn_id as usize].return_fixed_array_len == lower_tuple0_array_struct_return_sentinel() {
+                return self.module.functions[fn_id as usize].return_struct_name
+            }
         }
         ir_empty_name()
     }
@@ -11320,6 +11420,31 @@ impl Lowerer {
                 }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_struct_name_for_fn_id(fn_id)
+            }
+            None => ir_empty_name(),
+        }
+    }
+
+    fn expr_call_return_tuple0_array_elem_struct_name_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
+        match (*expr).left {
+            Some(callee_expr) => {
+                var callee_name = ir_empty_name()
+                if (*callee_expr).kind == ExprKind::ExprIdent {
+                    callee_name = (*callee_expr).name
+                } else if (*callee_expr).kind == ExprKind::ExprPath {
+                    let first = ir_path_first_name((*callee_expr).path)
+                    let last = ir_path_last_name((*callee_expr).path)
+                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
+                        callee_name = ir_mangle_method_name(first, last)
+                    } else {
+                        callee_name = first
+                    }
+                } else {
+                    return ir_empty_name()
+                }
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                self.return_tuple0_array_elem_struct_name_for_fn_id(fn_id)
             }
             None => ir_empty_name(),
         }
@@ -11956,32 +12081,9 @@ impl Lowerer {
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if self.field_is_float_for_struct(type_name, field_name) {
-                        return true
-                    }
-                }
-                // The offset half of this lives in field_idx_for_base_ref, and both
-                // used to stop at ExprIdent. Fixing only the offset gives a value
-                // that PRINTS correctly and computes as an integer: with a user
-                // struct spelling `value`, print_f64(ks[0].value) showed 1.000000
-                // while ks[0].value - 1.0 evaluated to 4607182418800017408 -- the
-                // bit pattern of the double 1.0, read as an int because the float
-                // marking never arrived. Same family as the println scalar-kind
-                // loss: the value survives, the kind does not.
-                if (*base_expr).kind == ExprKind::ExprIndex {
-                    match (*base_expr).left {
-                        Some(arr_expr) => {
-                            if (*arr_expr).kind == ExprKind::ExprIdent {
-                                let elem_type = self.lookup_local_struct_type((*arr_expr).name)
-                                if self.field_is_float_for_struct(elem_type, field_name) {
-                                    return true
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len > 0 && self.field_is_float_for_struct(type_name, field_name) {
+                    return true
                 }
                 false
             }
@@ -11992,37 +12094,9 @@ impl Lowerer {
     fn field_idx_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
-                if (*base_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*base_expr).name)
-                    if type_name.len > 0 {
-                        return self.field_idx_from_name(type_name, field_name)
-                    }
-                }
-                // `arr[i].field`: the receiver is an index, not an ident, so this
-                // used to fall to the global name scan -- and the scan returns the
-                // FIRST layout carrying that name, whichever it is.
-                //
-                // #2126 fixed one direction of that (the synthetic Knowledge layout
-                // shadowing user structs) by deferring Knowledge. It reversed the
-                // victim rather than removing the ambiguity: with a user struct
-                // holding `value` at slot 1, `ks[i].value` on a [Knowledge<f64>; N]
-                // returned 0.010000 -- the VARIANCE -- where 1.000000 belongs. Both
-                // directions are "first name wins".
-                //
-                // The array's element type is on the local, so ask it. Identity is a
-                // property of (receiver layout, field), not of the lexeme.
-                if (*base_expr).kind == ExprKind::ExprIndex {
-                    match (*base_expr).left {
-                        Some(arr_expr) => {
-                            if (*arr_expr).kind == ExprKind::ExprIdent {
-                                let elem_type = self.lookup_local_struct_type((*arr_expr).name)
-                                if elem_type.len > 0 {
-                                    return self.field_idx_from_name(elem_type, field_name)
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
+                let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
+                if type_name.len > 0 {
+                    return self.field_idx_from_name(type_name, field_name)
                 }
                 self.field_idx_from_name_simple(field_name)
             }
@@ -12033,18 +12107,15 @@ impl Lowerer {
     fn field_array_elem_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(owner_expr) => {
-                if (*owner_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*owner_expr).name)
+                let type_name = self.expr_receiver_struct_type_ref(&(*owner_expr))
+                if type_name.len > 0 {
                     // When the owner local has a known struct type, trust THAT
                     // layout only. Cross-struct by-name fallback poisons
                     // CDElementExact{,__i64}.c (i64 / generic F) via CDElement.c
                     // (f64 array, is_float=2) once both live in one specialized
                     // collapse module — Wave12 cd_exact residual: index lower
                     // marks i64 component loads as float (field_array_float=1).
-                    if type_name.len > 0 {
-                        return self.field_array_elem_is_float_for_struct(type_name, field_name)
-                    }
-                    return self.field_array_elem_is_float_by_name_simple(field_name)
+                    return self.field_array_elem_is_float_for_struct(type_name, field_name)
                 }
                 self.field_array_elem_is_float_by_name_simple(field_name)
             }
@@ -12139,14 +12210,37 @@ impl Lowerer {
     fn field_array_elem_type_name_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(owner_expr) => {
-                if (*owner_expr).kind == ExprKind::ExprIdent {
-                    let type_name = self.lookup_local_struct_type((*owner_expr).name)
+                let type_name = self.expr_receiver_struct_type_ref(&(*owner_expr))
+                if type_name.len > 0 {
                     return self.field_array_elem_type_name_for_struct(type_name, field_name)
                 }
                 ir_empty_name()
             }
             _ => ir_empty_name(),
         }
+    }
+
+    // Receiver layout for a field access. Array indexing preserves the element
+    // layout, including an array reached through another field access such as
+    // `candidates[0].buffers[0]`.
+    fn expr_receiver_struct_type_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*expr).name)
+        }
+        if (*expr).kind == ExprKind::ExprIndex {
+            match (*expr).left {
+                Some(indexed) => {
+                    if (*indexed).kind == ExprKind::ExprIdent {
+                        return self.lookup_local_struct_type((*indexed).name)
+                    }
+                    if (*indexed).kind == ExprKind::ExprFieldAccess {
+                        return self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)
+                    }
+                }
+                _ => {}
+            }
+        }
+        ir_empty_name()
     }
 
     fn index_base_elem_struct_type_ref(self, base_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
@@ -13024,8 +13118,8 @@ impl Lowerer {
         func.name = name
         func.compile_strategy = strategy
         func.returns_float = lower_opt_return_float_code(return_type)
-        func.return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
-        func.return_struct_name = lower_opt_type_named_name(return_type)
+        func.return_fixed_array_len = lower_opt_type_return_fixed_array_code(return_type)
+        func.return_struct_name = lower_opt_type_return_layout_name(return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
@@ -13712,8 +13806,8 @@ impl Lowerer {
             (*lo.current_func).compile_strategy = strategy
         }
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
-        (*lo.current_func).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
-        (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
+        (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         // Sprint 44: allocate profiling counter for instrumented functions
@@ -13898,8 +13992,8 @@ impl Lowerer {
             (*lo.current_func).compile_strategy = strategy
         }
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
-        (*lo.current_func).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
-        (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        (*lo.current_func).return_fixed_array_len = lower_opt_type_return_fixed_array_code(&fd.return_type)
+        (*lo.current_func).return_struct_name = lower_opt_type_return_layout_name(&fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -14748,6 +14842,11 @@ impl Lowerer {
                         Some(c) => lo.expr_to_callee_name_ref(&(*c)),
                         None => ir_empty_name(),
                     }
+                    let tuple0_elem_name = lo.expr_call_return_tuple0_array_elem_struct_name_ref(&(*expr_box))
+                    if tuple0_elem_name.len > 0 {
+                        let tuple0_layout = lower_struct_layout_index_of(&(*lo.struct_layouts), tuple0_elem_name)
+                        lo = lo.bind_local_tuple0_array_elem_layout(s.name, tuple0_layout)
+                    }
                     // Box detection must look at the callee PATH's first segment, not at the
                     // name expr_to_callee_name_ref returns. For `Box::new(...)` that function
                     // sees an ExprPath with first="Box" and last="new" and, since they differ,
@@ -14785,6 +14884,23 @@ impl Lowerer {
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprFieldAccess {
+                    // Tuple-let desugaring emits `let arr = __tup.0`. The call
+                    // binding above recorded the named element layout for slot
+                    // 0; project it onto `arr` so `arr[i].field` stays typed.
+                    if lower_name_tuple_index((*expr_box).name) == 0 {
+                        match (*expr_box).left {
+                            Some(tuple_base) => {
+                                if (*tuple_base).kind == ExprKind::ExprIdent {
+                                    let tuple0_layout = lo.lookup_local_tuple0_array_elem_layout((*tuple_base).name)
+                                    if tuple0_layout >= 0 && tuple0_layout < (*lo.struct_layouts).count {
+                                        let tuple0_type = (*lo.struct_layouts).entries[tuple0_layout as usize].type_name
+                                        lo = lo.bind_local_struct_type(s.name, tuple0_type)
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     // `let p = h.inner` where the FIELD is a Box: propagate "Box" into the
                     // local's struct-type slot, exactly as the Box::new branch above does, so
                     // that `*p` lowers to the field-0 read (box deref through the handle)
