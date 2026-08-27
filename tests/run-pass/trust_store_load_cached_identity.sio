@@ -1,70 +1,104 @@
-// trust_store_load() is memoised per process (D16). This test pins the two
-// properties that memo has to have:
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: trust_store_load_cached_identity: OK
+// trust_store_load() is memoised per process (D16). This test pins the
+// properties that memo has to have.
 //
-//   1. IDENTITY -- the cached store is field-for-field the same store an
-//      uncached load produces. This is not a formality on this compiler:
-//      whole-struct assignment of a value containing `[Certificate; 512]`
-//      into module-level state is exactly the shape that stdlib/x509/cert.sio
-//      documents as miscompiling in other positions, and the trust store is
-//      security-critical -- a silently truncated or garbled cached root set
-//      is a chain-validation bypass, not a performance bug.
+// WHY THE PREVIOUS SHAPE OF THIS TEST COULD NOT WORK:
 //
-//   2. REPEATABILITY -- repeated trust_store_load() calls keep returning the
-//      full store. Before the memo each call re-parsed ~150 roots at ~8.8 MB
-//      of never-reclaimed arena apiece, so the SEVENTH call in a process died
-//      with `madaros: arena full`. Fifty calls here would have been fatal.
-
+//   1. It carried no `//@` annotation at all, so the suite classified it
+//      "no-annotation" and SKIPPED it. It had never run.
+//   2. Run under Madaros by hand it aborts: it performed a full
+//      `trust_store_load_uncached()` AND a cold `trust_store_load()`, and
+//      two full loads do not fit (~1.3 GB each; seven loads exhaust the
+//      arena on this bundle, D16's probe six on a 150-root one).
+//   3. Its witness compared `fresh.count == cached.count` and then ten of
+//      Certificate's twenty-eight fields, omitting the serial, path-length
+//      constraint, AKI, EC key, extensions, SANs and SCTs that chain
+//      validation reads. A partial witness on a security-critical copy
+//      certifies what it did not inspect.
+//
+// The shape below fixes all three: it is annotated, it performs exactly
+// ONE full load, and it compares with the complete twenty-eight-field
+// witness `x509_certificate_eq` against roots parsed INDEPENDENTLY from
+// the bundle rather than against a second full load.
 use bignum::bigint::*
-use x509::cert::*
 use x509::trust_store::*
+use x509::cert::*
+use x509::pem::*
+
+// How many roots to re-parse independently. A full second load would be
+// the strongest witness and is what this test SHOULD do; it cannot, because
+// each load costs ~1.3 GB of never-reclaimed arena and the process admits
+// only a handful in total. Widen this the day per-certificate parse scratch
+// becomes reclaimable -- that is tracked as the open half of D16, and this
+// sampling bound is a symptom of it, not a judgment that eight is enough.
+const WITNESS_ROOTS: i64 = 8
 
 fn main() -> i64 with IO, Mut, Div, Panic {
-    let (fresh, ferr) = trust_store_load_uncached()
-    assert(ferr == 0)
-    assert(fresh.count > 0)
-
+    // ONE full load. Every later trust_store_load() must be a memo hit.
     let (cached, cerr) = trust_store_load()
     assert(cerr == 0)
-    assert(cached.count == fresh.count)
+    let n: i64 = cached.count as i64
+    assert(n > 0)
 
-    // Field-for-field over every root actually loaded.
-    var i: i64 = 0
-    while i < (fresh.count as i64) {
-        let a = fresh.certs[i as usize]
-        let b = cached.certs[i as usize]
-        assert(x509_name_eq(&a.subject, &b.subject))
-        assert(x509_name_eq(&a.issuer, &b.issuer))
-        assert(bigint_cmp(&a.modulus, &b.modulus) == 0)
-        assert(bigint_cmp(&a.public_exponent, &b.public_exponent) == 0)
-        assert(a.public_key_algorithm == b.public_key_algorithm)
-        assert(a.is_ca == b.is_ca)
-        assert(a.key_usage_bits == b.key_usage_bits)
-        assert(a.not_before_unix == b.not_before_unix)
-        assert(a.not_after_unix == b.not_after_unix)
-        assert(a.subject_key_id_len == b.subject_key_id_len)
-        var k: i32 = 0
-        while k < a.subject_key_id_len {
-            assert(a.subject_key_id[k as usize] == b.subject_key_id[k as usize])
-            k = k + 1
-        }
-        i = i + 1
+    // The memo is installed and the process is holding snapshot 1.
+    assert(trust_store_is_loaded())
+    assert(trust_store_generation() == 1)
+
+    // Independently re-parse the first WITNESS_ROOTS roots straight from
+    // the bundle -- a source the memo did not produce -- and require the
+    // cached store to match them field for field.
+    let content: string = read_file(trust_store_source_path())
+    let blen: i64 = str_len(content)
+    assert(blen > 0)
+    let bundle = rawbuf_new(blen + 8)
+    var b: i64 = 0
+    while b < blen {
+        rawbuf_set(&bundle, b, str_char_at(content, b))
+        b = b + 1
     }
 
-    // The cached store still answers real trust-store queries.
-    let probe_subject = fresh.certs[0].subject
-    assert(trust_store_find_by_subject(&cached, &probe_subject) >= 0)
-    // D17: this helper now takes the whole candidate certificate, so the
-    // key comparison can be algorithm-aware (an EC root's key lives in
-    // `ec_public_key`, not in `modulus`/`public_exponent`).
-    assert(trust_store_has_matching_key_for_subject(&cached, &fresh.certs[0]))
+    var checked: i64 = 0
+    var offset: i64 = 0
+    while offset >= 0 && checked < WITNESS_ROOTS && checked < n {
+        let (der, der_len, next, perr) = pem_decode_next(&bundle, blen, offset)
+        assert(perr == 0)
+        if der_len > 0 {
+            let (parsed, kerr) = x509_parse_certificate(&der, der_len)
+            assert(kerr == 0)
+            let stored = cached.certs[checked as usize]
+            // The complete witness: all twenty-eight fields, including the
+            // path-length constraint, AKI/SKI, EC key, extensions and SANs
+            // that chain validation actually reads.
+            assert(x509_certificate_eq(&parsed, &stored))
+            checked = checked + 1
+        }
+        offset = next
+    }
+    assert(checked == WITNESS_ROOTS)
 
-    // Fifty loads in one process: fatal before the memo, free after it.
-    var n: i64 = 0
-    while n < 50 {
+    // The cached store still answers real trust-store queries.
+    let probe_subject = cached.certs[0].subject
+    assert(trust_store_find_by_subject(&cached, &probe_subject) >= 0)
+    // D17 (empty-Subject / EC trust anchor): this helper now takes the whole
+    // candidate certificate, so the key comparison can be algorithm-aware --
+    // an EC root's key lives in `ec_public_key`, not in
+    // `modulus`/`public_exponent`.
+    assert(trust_store_has_matching_key_for_subject(&cached, &cached.certs[0]))
+
+    // REPEATABILITY. Before the memo each call re-parsed the whole bundle
+    // at ~1.3 GB of never-reclaimed arena, so a process died within a
+    // handful of calls. These 200 must all be memo hits: same root count,
+    // and the generation counter must not move, which is what proves no
+    // re-load happened rather than merely that the answers agreed.
+    var i: i64 = 0
+    while i < 200 {
         let (again, aerr) = trust_store_load()
         assert(aerr == 0)
-        assert(again.count == fresh.count)
-        n = n + 1
+        assert((again.count as i64) == n)
+        assert(trust_store_generation() == 1)
+        i = i + 1
     }
 
     println("trust_store_load_cached_identity: OK")

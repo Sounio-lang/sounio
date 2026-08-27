@@ -56,8 +56,16 @@ use x509::pem::*
 use x509::cert::*
 
 pub const TRUST_STORE_MAX_CERTS: i64 = 512
+// TRANSIENT: the bundle could not be read at all. An unmounted /etc/ssl,
+// a not-yet-populated container filesystem and a permissions problem all
+// land here, and all three can be fixed while the process is still
+// running -- so this failure is NOT memoised (see trust_store_load).
 pub const TRUST_STORE_ERR_READ_FAILED: i64 = 0 - 1
+// PERMANENT: content-level failures. The bytes were read fine; they do
+// not describe a usable trust store. Re-reading the same bytes cannot
+// change the outcome, so these ARE memoised.
 pub const TRUST_STORE_ERR_TOO_MANY_CERTS: i64 = 0 - 2
+pub const TRUST_STORE_ERR_MALFORMED: i64 = 0 - 3
 
 pub struct TrustStore {
     certs: [Certificate; 512],
@@ -85,6 +93,160 @@ pub fn x509_name_eq(a: &X509Name, b: &X509Name) -> bool {
         }
         i = i + 1
     }
+    true
+}
+
+fn x509_general_name_eq(a: &GeneralName, b: &GeneralName) -> bool {
+    if a.tag != b.tag { return false }
+    if a.value_len != b.value_len { return false }
+    if a.oid_len != b.oid_len { return false }
+    var i: i32 = 0
+    while i < a.value_len {
+        if a.value[i as usize] != b.value[i as usize] { return false }
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < a.oid_len {
+        if a.oid[j as usize] != b.oid[j as usize] { return false }
+        j = j + 1
+    }
+    true
+}
+
+fn x509_extension_eq(a: &ExtensionEntry, b: &ExtensionEntry) -> bool {
+    if a.oid_len != b.oid_len { return false }
+    if a.critical != b.critical { return false }
+    if a.value_len != b.value_len { return false }
+    var i: i32 = 0
+    while i < a.oid_len {
+        if a.oid[i as usize] != b.oid[i as usize] { return false }
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < a.value_len {
+        if a.value[j as usize] != b.value[j as usize] { return false }
+        j = j + 1
+    }
+    true
+}
+
+fn x509_sct_eq(a: &SctEntry, b: &SctEntry) -> bool {
+    if a.version != b.version { return false }
+    if a.timestamp_ms != b.timestamp_ms { return false }
+    if a.extensions_len != b.extensions_len { return false }
+    if a.sig_algorithm_hash != b.sig_algorithm_hash { return false }
+    if a.sig_algorithm_sign != b.sig_algorithm_sign { return false }
+    if a.signature_len != b.signature_len { return false }
+    var i: i64 = 0
+    while i < 32 {
+        if a.log_id[i as usize] != b.log_id[i as usize] { return false }
+        i = i + 1
+    }
+    var j: i32 = 0
+    while j < a.signature_len {
+        if a.signature[j as usize] != b.signature[j as usize] { return false }
+        j = j + 1
+    }
+    true
+}
+
+// Complete structural equality over EVERY field of Certificate.
+//
+// This exists because a PARTIAL witness is worse than none for a trust
+// store: the memo installs a whole-struct copy of a value containing
+// `[Certificate; 512]` into module-level state, which is the aggregate
+// assignment shape cert.sio documents as miscompiling in other positions.
+// A comparison that checks ten of the twenty-eight fields certifies a copy
+// it has not actually inspected. Chain validation reads path-length
+// constraints, AKI/SKI, EC keys, extensions and SANs, so a witness that
+// skips them is not a witness for the thing being trusted.
+pub fn x509_certificate_eq(a: &Certificate, b: &Certificate) -> bool {
+    if a.version != b.version { return false }
+    if a.tbs_start != b.tbs_start { return false }
+    if a.tbs_len != b.tbs_len { return false }
+    if a.not_before_unix != b.not_before_unix { return false }
+    if a.not_after_unix != b.not_after_unix { return false }
+    if a.public_key_algorithm != b.public_key_algorithm { return false }
+    if a.is_ca != b.is_ca { return false }
+    if a.path_len_constraint != b.path_len_constraint { return false }
+    if a.key_usage_bits != b.key_usage_bits { return false }
+
+    if bigint_cmp(&a.serial_number, &b.serial_number) != 0 { return false }
+    if bigint_cmp(&a.modulus, &b.modulus) != 0 { return false }
+    if bigint_cmp(&a.public_exponent, &b.public_exponent) != 0 { return false }
+    if bigint_cmp(&a.ec_public_key.x, &b.ec_public_key.x) != 0 { return false }
+    if bigint_cmp(&a.ec_public_key.y, &b.ec_public_key.y) != 0 { return false }
+
+    if !x509_name_eq(&a.issuer, &b.issuer) { return false }
+    if !x509_name_eq(&a.subject, &b.subject) { return false }
+
+    if a.outer_sig_alg_oid_len != b.outer_sig_alg_oid_len { return false }
+    var i: i32 = 0
+    while i < a.outer_sig_alg_oid_len {
+        if a.outer_sig_alg_oid[i as usize] != b.outer_sig_alg_oid[i as usize] { return false }
+        i = i + 1
+    }
+    if a.tbs_sig_alg_oid_len != b.tbs_sig_alg_oid_len { return false }
+    var t: i32 = 0
+    while t < a.tbs_sig_alg_oid_len {
+        if a.tbs_sig_alg_oid[t as usize] != b.tbs_sig_alg_oid[t as usize] { return false }
+        t = t + 1
+    }
+    if a.outer_signature_len != b.outer_signature_len { return false }
+    var g: i32 = 0
+    while g < a.outer_signature_len {
+        if a.outer_signature[g as usize] != b.outer_signature[g as usize] { return false }
+        g = g + 1
+    }
+    if a.subject_key_id_len != b.subject_key_id_len { return false }
+    var k: i32 = 0
+    while k < a.subject_key_id_len {
+        if a.subject_key_id[k as usize] != b.subject_key_id[k as usize] { return false }
+        k = k + 1
+    }
+    if a.authority_key_id_len != b.authority_key_id_len { return false }
+    var m: i32 = 0
+    while m < a.authority_key_id_len {
+        if a.authority_key_id[m as usize] != b.authority_key_id[m as usize] { return false }
+        m = m + 1
+    }
+
+    if a.extension_count != b.extension_count { return false }
+    var e: i32 = 0
+    while e < a.extension_count {
+        let ea = a.extensions[e as usize]
+        let eb = b.extensions[e as usize]
+        if !x509_extension_eq(&ea, &eb) { return false }
+        e = e + 1
+    }
+
+    if a.san_count != b.san_count { return false }
+    var sn: i32 = 0
+    while sn < a.san_count {
+        let sa = a.san_entries[sn as usize]
+        let sb = b.san_entries[sn as usize]
+        if !x509_general_name_eq(&sa, &sb) { return false }
+        sn = sn + 1
+    }
+
+    if a.issuer_alt_name_count != b.issuer_alt_name_count { return false }
+    var ia: i32 = 0
+    while ia < a.issuer_alt_name_count {
+        let ga = a.issuer_alt_names[ia as usize]
+        let gb = b.issuer_alt_names[ia as usize]
+        if !x509_general_name_eq(&ga, &gb) { return false }
+        ia = ia + 1
+    }
+
+    if a.sct_count != b.sct_count { return false }
+    var sc: i32 = 0
+    while sc < a.sct_count {
+        let ca = a.sct_entries[sc as usize]
+        let cb = b.sct_entries[sc as usize]
+        if !x509_sct_eq(&ca, &cb) { return false }
+        sc = sc + 1
+    }
+
     true
 }
 
@@ -203,53 +365,136 @@ const CA_BUNDLE_PATH: string = "/etc/ssl/certs/ca-certificates.crt"
 // Each uncached load parses all ~150 roots of the real Debian/Ubuntu CA
 // bundle, and `x509_parse_certificate` spends ~8.8 MB of the Madaros
 // runtime's NEVER-RECLAIMED process arena per call. One load therefore
-// costs ~1.3 GB, and the 8 GiB arena admits only SIX of them before
-// `madaros: arena full` (exit 181, uncatchable) -- measured by
-// `tests/interop/trust_store_load_arena_cost_probe.sio`. Any consumer that
-// calls trust_store_load() once per TLS-using stage (rather than once per
-// process, threading a `&TrustStore` through) hits that wall inside a
-// single ordinary workload; Sounio-lang/conclave-search did, at ~14 loads
-// for one query.
+// costs ~1.3 GB, and the 8 GiB arena admits only a handful before
+// `madaros: arena full` (exit 181, uncatchable). D16 measured a ceiling of
+// SIX loads against a 150-root bundle; seven against a 146-root Debian one
+// here. Either way a
+// consumer that calls trust_store_load() once per TLS-using stage (rather
+// than once per process, threading a `&TrustStore` through) hits the wall
+// inside a single ordinary workload; Sounio-lang/conclave-search did, at
+// ~14 loads for one query.
 //
 // Memoising here fixes every such consumer without a source change on
 // their side, and is sound because the store is immutable after load and
 // its `bufs` are arena handles that are never reclaimed for the life of
 // the process -- there is nothing to invalidate. Callers that genuinely
-// need a re-read from disk (probes measuring the uncached cost, tests
-// exercising a changed CA bundle) call `trust_store_load_uncached`.
+// need a re-read from disk call `trust_store_reload` (refreshes the memo)
+// or `trust_store_load_uncached` (bypasses it entirely).
 //
 // Returning the memo by value is arena-cheap on this compiler: 3,000
 // consecutive returns of a cached TrustStore did not move the arena at all
-// (large aggregates are not deep-copied per element here), so this does
-// not trade one arena leak for another.
+// -- re-verified for this change, on a real 146-root bundle, by
+// tests/interop/trust_store_memo_arena_probe.sio. This does not trade one
+// arena leak for another.
+//
+// WHAT THIS IS NOT: a fix for the arena defect. It divides an unbounded
+// N x 1.3 GB into a one-off 1.3 GB that is then held for the life of the
+// process. ~1.3 GB to hold 150 immutable roots remains extraordinary, and
+// the per-certificate ~8.8 MB of unreclaimable parse scratch is UNCHANGED
+// and still open. See the D16 dispatch.
+//
+// TRUST SNAPSHOT: because the memo lives for the whole process, a
+// long-running server keeps validating against the roots it observed at
+// first use. If the system removes a compromised CA or installs a new
+// root, this process does not see it until it restarts or calls
+// trust_store_reload(). `trust_store_generation` lets a caller observe
+// which snapshot it is holding.
 var TRUST_STORE_CACHE: TrustStore = TrustStore {
     certs: [certificate_zero(); 512],
     bufs: [rawbuf_new(1); 512],
     count: 0,
 }
-// 0 = cold, 1 = loaded successfully, 2 = load attempted and failed
+// 0 = cold, 1 = loaded successfully, 2 = failed PERMANENTLY (content-level)
 var TRUST_STORE_CACHE_STATE: i64 = 0
 var TRUST_STORE_CACHE_ERR: i64 = 0
+// Increments on every successful load that replaces the memo. A caller can
+// record it alongside a validation decision to say which root set that
+// decision was made against.
+var TRUST_STORE_CACHE_GENERATION: i64 = 0
+
+// Which snapshot of the trust store this process currently holds: 0 before
+// the first successful load, then 1, 2, ... after each one.
+pub fn trust_store_generation() -> i64 {
+    TRUST_STORE_CACHE_GENERATION
+}
+
+// The absolute path this process loads its roots from.
+pub fn trust_store_source_path() -> string {
+    CA_BUNDLE_PATH
+}
+
+// True once a successful load has been memoised.
+pub fn trust_store_is_loaded() -> bool {
+    TRUST_STORE_CACHE_STATE == 1
+}
+
+// A transient failure is one where the SAME call can succeed later in the
+// same process: the bundle was unreadable, not unusable. Only permanent,
+// content-level failures are memoised.
+fn trust_store_err_is_permanent(err: i64) -> bool {
+    err == TRUST_STORE_ERR_MALFORMED || err == TRUST_STORE_ERR_TOO_MANY_CERTS
+}
 
 pub fn trust_store_load() -> (TrustStore, i64) with IO, Mut, Div, Panic {
     if TRUST_STORE_CACHE_STATE == 1 {
         return (TRUST_STORE_CACHE, 0)
     }
     if TRUST_STORE_CACHE_STATE == 2 {
-        // A failed load is memoised too: retrying it costs another ~1.3 GB
-        // of unreclaimable arena and, since the failure modes are "CA
-        // bundle unreadable" and "CA bundle malformed", cannot succeed on
-        // a later call within the same process.
+        // Content-level failure: the bytes parsed to something unusable.
+        // Re-reading identical bytes cannot change that, and retrying
+        // costs another ~1.3 GB of unreclaimable arena, so this verdict
+        // stands for the life of the process.
         return (TRUST_STORE_CACHE, TRUST_STORE_CACHE_ERR)
     }
     let (loaded, err) = trust_store_load_uncached()
     if err == 0 {
         TRUST_STORE_CACHE = loaded
         TRUST_STORE_CACHE_STATE = 1
+        TRUST_STORE_CACHE_GENERATION = TRUST_STORE_CACHE_GENERATION + 1
         return (TRUST_STORE_CACHE, 0)
     }
-    TRUST_STORE_CACHE_STATE = 2
-    TRUST_STORE_CACHE_ERR = err
+    if trust_store_err_is_permanent(err) {
+        TRUST_STORE_CACHE_STATE = 2
+        TRUST_STORE_CACHE_ERR = err
+    }
+    // A TRANSIENT failure leaves the memo cold, so a later call retries --
+    // an unmounted /etc/ssl or a filesystem that is still coming up must
+    // not sentence the process to a TLS-dead lifetime. The caller pays
+    // another ~1.3 GB for that retry, which is why only genuinely
+    // recoverable failures get one.
+    //
+    // Every failure path returns the SAME store the failed load produced,
+    // whether it is the first failure or a memoised one, so a caller that
+    // ignores `err` cannot observe two different stores for one error.
+    (loaded, err)
+}
+
+// Force a re-read of the CA bundle and, on success, replace the memo.
+//
+// This is how a long-running process picks up a rotated or revoked root
+// without restarting. It costs a full ~1.3 GB of unreclaimable arena, so
+// it is a deliberate operation, not something to call per request: the
+// process admits only a handful of loads in total, reloads included.
+//
+// A failed reload leaves the previously memoised store in place -- a
+// process that already has good roots must not lose them because a refresh
+// attempt hit a half-written bundle.
+pub fn trust_store_reload() -> (TrustStore, i64) with IO, Mut, Div, Panic {
+    let (loaded, err) = trust_store_load_uncached()
+    if err == 0 {
+        TRUST_STORE_CACHE = loaded
+        TRUST_STORE_CACHE_STATE = 1
+        TRUST_STORE_CACHE_ERR = 0
+        TRUST_STORE_CACHE_GENERATION = TRUST_STORE_CACHE_GENERATION + 1
+        return (TRUST_STORE_CACHE, 0)
+    }
+    if TRUST_STORE_CACHE_STATE == 1 {
+        return (TRUST_STORE_CACHE, err)
+    }
+    if trust_store_err_is_permanent(err) {
+        TRUST_STORE_CACHE_STATE = 2
+        TRUST_STORE_CACHE_ERR = err
+    }
     (loaded, err)
 }
 
@@ -284,7 +529,12 @@ pub fn trust_store_load_uncached() -> (TrustStore, i64) with IO, Mut, Div, Panic
             // skipped with pem_decode_next's actual contract (next == 0
             // is not a resumable position), so this fails the whole load
             // rather than looping forever or silently truncating it.
-            return (store, TRUST_STORE_ERR_READ_FAILED)
+            //
+            // This is a CONTENT failure, distinct from the unreadable-file
+            // case above: the bytes arrived and do not parse. Re-reading
+            // them cannot help, so trust_store_load memoises this verdict
+            // where it deliberately does not memoise a read failure.
+            return (store, TRUST_STORE_ERR_MALFORMED)
         } else if der_len > 0 {
             if (store.count as i64) >= TRUST_STORE_MAX_CERTS {
                 return (store, TRUST_STORE_ERR_TOO_MANY_CERTS)

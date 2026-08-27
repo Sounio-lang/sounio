@@ -4,6 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-26
 validated_by: controller (tls-on-madaros branch, TLS 1.3 handshake sub-project)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.arena-exhaustion-tls-handshake-chain-verification-dispatch-2026-08-26
 -->
 
 # Forensic dispatch — real-CA TLS handshakes exhaust the never-reclaimed process arena after 2 connections

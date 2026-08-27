@@ -4,6 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-27
 validated_by: controller (tls-on-madaros branch, TLS 1.3 handshake sub-project)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.d16-trust-store-load-per-stage-arena-exhaustion-dispatch-2026-08-27
 -->
 
 # Forensic dispatch — `trust_store_load()` costs ~1.3 GB of arena per call, and a process survives only six
@@ -227,3 +228,61 @@ Best case fits with room; **worst case still overruns**. So:
 The lifetime defect itself. The arena is still never reclaimed; this dispatch
 removes a 14× multiplier on the largest single consumer of it. As D12 put it:
 the wall moved, it did not disappear.
+
+---
+
+## Follow-up (2026-08-27) — memo hardening
+
+Review of the memo shipped above found four defects in it.
+
+1. **The identity witness had never run.**
+   `tests/run-pass/trust_store_load_cached_identity.sio` carried no `//@`
+   annotation, so the suite classified it `no-annotation` and skipped it. It
+   could not have run anyway: the x509 stack does not typecheck under
+   lean_single (`bigint_mul` arity, sha384/sha512 IVs, `sct.sio` `[struct;8]`
+   vs `[struct;9]`), which is the suite's stage2 engine, and a
+   `//@ requires: madaros` annotation is skipped unless
+   `SOUNIO_MADAROS_AVAILABLE` is set. It is now annotated **and** run by
+   `scripts/ci/trust_store_memo_gate.sh`, because annotation alone still
+   executes nothing.
+
+2. **Run by hand under Madaros, the witness aborted.** It performed a full
+   `trust_store_load_uncached()` *and* a cold `trust_store_load()`, and two
+   full loads do not fit. The witness now performs exactly ONE load and
+   compares against roots re-parsed independently from the bundle. Seven
+   loads exhaust the arena on a 146-root Debian bundle here, consistent with
+   the six this dispatch measured on 150 roots.
+
+3. **The witness was partial.** It compared ten of `Certificate`'s
+   twenty-eight fields, omitting the serial, path-length constraint, AKI, EC
+   key, extensions, SANs, SCTs, TBS offsets and the DER buffers -- several of
+   which chain validation reads. A partial witness on a security-critical
+   copy certifies what it did not inspect. Replaced by `x509_certificate_eq`,
+   a complete twenty-eight-field witness.
+
+4. **Failures were memoised indiscriminately, and inconsistently.**
+   The code claimed a failed load "cannot succeed on a later call within the
+   same process". That is false for an unmounted `/etc/ssl`, a container
+   filesystem still coming up, or a permissions problem — and the first
+   failing call burned ~1.3 GB *and* poisoned the state permanently, so such
+   a container was TLS-dead for its whole life. The failure paths also
+   returned two different stores for one error: `loaded` (the partial store
+   from the failed parse) on the first failure, and the never-assigned zero
+   `TRUST_STORE_CACHE` on every call after.
+
+   Now: `TRUST_STORE_ERR_MALFORMED` (new) and `TRUST_STORE_ERR_TOO_MANY_CERTS`
+   are content-level and permanent, and are memoised.
+   `TRUST_STORE_ERR_READ_FAILED` is transient and leaves the memo cold so a
+   later call retries. Every failure path returns the same store.
+
+**Trust snapshot.** `trust_store_reload()` refreshes the memo (and keeps the
+previously loaded roots if the refresh fails); `trust_store_generation()`,
+`trust_store_is_loaded()` and `trust_store_source_path()` let a caller say
+which root set a decision was made against. Reload is verified working from a
+cold cache — and is **practically unusable after a normal load on an 8 GiB
+arena**, because that is already the second load. That is not a flaw in
+reload; it is the open half of this dispatch restated.
+
+**Unchanged:** the ~8.8 MB of unreclaimable arena per `x509_parse_certificate`,
+and the ~1.3 GB to hold 150 immutable roots. The memo divides N × 1.3 GB into
+one × 1.3 GB. It is a lifetime mitigation, not the reclamation model.
