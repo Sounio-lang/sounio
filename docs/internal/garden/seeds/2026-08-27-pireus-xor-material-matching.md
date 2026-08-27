@@ -37,13 +37,22 @@ operation_semantics_sha256=40fe69829b1feb5843ea8b4720b70516303e8eda37c144989909b
 operation_receipt_sha256=9e1e416defa4a1cfc477f0630623321e12209a40c9f5f878b85cce40be83d330
 xor_convolution_semantics_sha256=da782da938ee5f9e0a49cb1f95dfbb6acac8aa706c9eb6d711565adcb9031502
 graph_identity_semantics_sha256=8dc9c6c90d4f21b13c07d8ec3e914839b9f3bfaa1e32f222a25bdcb267c943cb
-xed_import_semantics_sha256=d96d6d57ba1e296930caec5f4f0aff8e2898b3b1d5df6bfaacb96a19333266f7
+xed_import_frozen_content_sha256=5d9a56cd05eb141b24dfa80bbab74f41306bb19a01902c25fb0feeda63265612
+xed_import_current_envelope_sha256=d96d6d57ba1e296930caec5f4f0aff8e2898b3b1d5df6bfaacb96a19333266f7
+xed_import_current_receipt_sha256=2dfc243381acb8d365112b3b4075ccabf944de6ff081b4626f9a4f693f136af6
 ```
 
-The XED hash above is the frozen importer semantics document, not an
-instruction-behavior theorem. The executable must bind the exact current hash
-from `docs/research/pireus_xed_permute_import_semantics.md`; if this displayed
-value does not match the file, Garden validation must fail before code exists.
+The XED importer froze the semantic content before documentation governance
+added a `historical` metadata envelope. Git lineage proves that the content at
+commit `2bdf61194c68747f94a9a054824f5bfcff2c22b2` hashes to `5d9a...`; commit
+`32f7151419bdccf37115901dcbf76c6574366aec` added only the metadata and status
+envelope, yielding the current `d96d...` file. The executable must bind both
+objects and the current receipt file, and must reject drift in any of them.
+
+This is a frozen XED evidence snapshot, not an instruction-behavior theorem
+and not a claim that the current historically labelled page is a canonical
+documentation surface. The frozen content remains useful only for the narrow
+form-presence facts already recorded by the Sounio importer receipt.
 
 ## Admitted Darwin Candidate Layout
 
