@@ -1328,3 +1328,107 @@ Not a GitHub issue. Recorded here and in the dispatch per this file's
 convention. **Next highest-value work is unchanged from D12's own nomination:
 `x509_parse_certificate`'s ~8.8–11.5 MB per call**, now the sole term in a
 trust-store load and the dominant term in every handshake.
+
+## D17 — the reported empty-Subject parsing defect does not exist; the EC trust-anchor bypass found while disproving it does
+
+**Status:** reported defect **NOT REPRODUCED** (hypothesis refuted by
+measurement in four configurations); a **separate, security-critical
+chain-validation bypass** found during the investigation is **RESOLVED**.
+
+**Full forensic dispatch:**
+[`docs/audit/D17_EMPTY_SUBJECT_CERTIFICATE_AND_EC_TRUST_ANCHOR_DISPATCH_2026-08-27.md`](../audit/D17_EMPTY_SUBJECT_CERTIFICATE_AND_EC_TRUST_ANCHOR_DISPATCH_2026-08-27.md)
+
+### Reported symptom
+The live `searxng-https-tls` leaf (namespace `beagle`) — a real
+`cert-manager` certificate with an **empty Subject DN**, valid
+`Aug 27 01:09:33 2026` → `Nov 25 01:09:33 2026` — rejected by
+`x509_verify_chain` with `CHAIN_ERR_EXPIRED` (−2) at ~`Aug 27 09:00 2026`.
+Hypothesis under test: the zero-length Subject `SEQUENCE` throws off
+`x509_parse_certificate`'s Validity byte offsets.
+
+### Part 1 — refuted, structurally and by measurement
+The hypothesis cannot hold: in a `TBSCertificate` the Validity field
+**precedes** the Subject (RFC 5280 §4.1.2). `openssl asn1parse` on the
+reported certificate puts the two `UTCTIME`s at offsets **89** and **104**
+and the empty Subject at **119** — the Subject's length is not an input to
+any offset the date decode uses.
+
+Measured live on this worktree's `bin/souc` (Madaros v0.80.0):
+
+| Configuration | Result |
+|---|---|
+| `x509_parse_certificate` standalone | `status = 0`, dates **exactly** `1787792973` / `1795568973` |
+| `x509_verify_chain`, trust store = the real internal CA | **`CHAIN_OK`** |
+| `x509_verify_chain`, trust store = `trust_store_load()`'s 150 real Debian roots **+** the internal CA | **`CHAIN_OK`** |
+| Live **TLS 1.3 handshake** via `tls_connect` against an equivalently-shaped empty-Subject P-256 leaf with an IP SAN | **`err = 0`** |
+
+On the −2 itself: `grep -rn "= 0 - 2$" stdlib/` returns **ten distinct
+constants** across `chain`/`cert`/`ocsp`/`trust_store`/`pem`/`der`/`socket`/
+`tls`, so a bare −2 is not evidence for `CHAIN_ERR_EXPIRED` specifically —
+the same lesson D15 filed. Two measured data points: a too-early `now_unix`
+yields **−3** (`NOT_YET_VALID`), not −2; and a `GeneralizedTime`-encoded
+validity field **does** yield a genuine spurious `CHAIN_ERR_EXPIRED` (the
+parser is UTCTime-only), which remains the leading candidate for any real
+instance of this symptom — though not for the reported certificate, whose
+dates are both UTCTime.
+
+### Part 2 — the real defect (found in the code the reporter was exercising)
+`chain_is_trusted_root`'s "byte-identical public key" requirement — added
+2026-08-25 to close a trust-anchor forgery bypass — compared **only**
+`modulus` and `public_exponent`, which `x509_parse_certificate` **never
+populates for an EC certificate** (a P-256 key goes to `ec_public_key`; both
+BigInts stay `bigint_zero()`). For every EC certificate the guard was
+`bigint_cmp(zero, zero) == 0` twice — vacuously true — so it silently
+degraded to the pre-fix "any self-signed cert whose Subject DN matches"
+behaviour. Same hole for `PUBKEY_ALG_UNKNOWN`.
+
+That is the key type this entire sub-project uses (P-256 chosen deliberately
+to dodge D15's ECDSA-SHA384 gap).
+
+**Proof of concept, executed.** Genuine P-256 root (key A) alone in the trust
+store; attacker's self-signed P-256 root with the **identical Subject DN** and
+key B supplied as an intermediate; leaf issued by the forged root:
+
+```
+before:  verify result = 0    (CHAIN_OK -- attacker root accepted)
+after:   verify result = -6   (CHAIN_ERR_BAD_SIGNATURE -- rejected)
+```
+
+### Fix
+`stdlib/x509/trust_store.sio`: `trust_store_has_matching_key_for_subject` now
+takes the whole candidate `&Certificate` instead of
+`(subject, modulus, exponent)`, and requires, on the **same** entry, matching
+`public_key_algorithm` **and** matching Subject DN **and** byte-identical key
+material *for that algorithm* (RSA modulus+exponent, or `ec_public_key.x`/`.y`).
+Algorithms this parser does not decode are rejected up front, fail-closed —
+all their key fields are zero, so any two would compare equal. Sole non-test
+caller updated (`chain.sio:145`). The rewrite also drops a
+`let entry = store.certs[i]` by-value bind that burned ~6.9 MB of
+never-reclaimed arena per call (~46 KB × ~150 roots), against this module's
+own ARENA DISCIPLINE note and D16.
+
+### Regression tests
+- `tests/run-pass/x509_empty_subject_certificate.sio` — the real live
+  empty-Subject leaf + its CA: exact dates, `subject.count == 0`, everything
+  after the empty Subject still decoding, `CHAIN_OK` inside the window **and**
+  `CHAIN_ERR_EXPIRED` one second past `notAfter` (so the positive assertion is
+  a live check, not one that never runs).
+- `tests/run-pass/x509_chain_forged_ec_root_dn_collision.sio` — the EC half of
+  the forged-root bypass, mirroring the RSA test, with its preconditions
+  asserted explicitly so it cannot silently stop testing them. `-days 8400`
+  fixtures, fixed `now_unix`: it does not rot.
+
+### Test evidence
+`x509` **24 pass / 0 fail** · `tls` **7/0** · `pem` **2/0** ·
+`trust_store` **2/0**. The 151-root chain verification and the live TLS 1.3
+handshake were both re-run after the fix and are unchanged — no legitimate EC
+trust anchor is broken.
+
+### Filed
+Not a GitHub issue. Recorded here and in the dispatch per this file's
+convention. **The originally reported failure remains unexplained**: this
+entry refutes the stated mechanism, it does not explain what the reporter
+observed. If it recurs, print the `x509_verify_chain` return value *together
+with the name of the function that produced it*, plus `not_before_unix`,
+`not_after_unix` and `now_unix` from the same process, before re-opening a
+parser hypothesis.
