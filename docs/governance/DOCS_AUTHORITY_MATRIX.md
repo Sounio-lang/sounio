@@ -950,7 +950,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.pb-highwidth-microkernel-2026-06-23 | historical | docs/research/pb-highwidth-microkernel-2026-06-23.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.petitot-semantic-potential | historical | docs/research/petitot-semantic-potential.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-aarchmrs-tbl-import-semantics | historical | docs/research/pireus_aarchmrs_tbl_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.pireus-apple-a64-tbl-lowering-semantics | historical | docs/research/pireus_apple_a64_tbl_lowering_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-apple-metal-family-import-semantics | historical | docs/research/pireus_apple_metal_family_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.pireus-dgx-ptx-shfl-lowering-semantics | historical | docs/research/pireus_dgx_ptx_shfl_lowering_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-execution-engine-semantics | historical | docs/research/pireus_execution_engine_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-graph-identity-composition-semantics | historical | docs/research/pireus_graph_identity_composition_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-intel-vpermpd-selector-semantics | historical | docs/research/pireus_intel_vpermpd_selector_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -981,8 +983,10 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.r2-continuous-law-theorem-falsifiers-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_falsifiers_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.r2-continuous-law-theorem-spec-2026-07-25 | historical | docs/research/r2_continuous_law_theorem_spec_2026-07-25.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-aarchmrs-tbl-import-20260827 | historical | docs/research/receipts/pireus_aarchmrs_tbl_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-apple-a64-tbl-lowering-20260827 | historical | docs/research/receipts/pireus_apple_a64_tbl_lowering_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-apple-metal-family-import-20260827 | historical | docs/research/receipts/pireus_apple_metal_family_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-apple-metal-table-cells-20260827 | historical | docs/research/receipts/pireus_apple_metal_table_cells_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-dgx-ptx-shfl-lowering-20260827 | historical | docs/research/receipts/pireus_dgx_ptx_shfl_lowering_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-execution-engine-20260827 | historical | docs/research/receipts/pireus_execution_engine_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-graph-identity-composition-20260827 | historical | docs/research/receipts/pireus_graph_identity_composition_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-intel-vpermpd-selector-semantics-20260827 | historical | docs/research/receipts/pireus_intel_vpermpd_selector_semantics_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

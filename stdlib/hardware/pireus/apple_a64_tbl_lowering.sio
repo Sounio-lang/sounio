@@ -1,0 +1,1359 @@
+//! Sounio-first Apple Silicon CPU candidate for the frozen XOR selector.
+//!
+//! The importer verifies the committed Garden and frozen parent artifacts,
+//! parses the pinned A64 TBL XML structurally, recognizes the bounded ASL
+//! rules, and derives a finite selector candidate. A64 architectural semantics
+//! remain distinct from Apple material support and compiler emission.
+
+use crypto::sha256::{
+    SHA256State, SHA256Digest,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+use hardware::pireus::xor_lowering_legality::{
+    PIREUS_XOR_LOWERING_BITS,
+    PIREUS_XOR_LOWERING_DIMENSION,
+}
+use hardware::pireus::aarchmrs_import::{
+    pireus_aarchmrs_expected_sha256,
+}
+
+pub const PIREUS_APPLE_A64_OK: i64 = 0
+pub const PIREUS_APPLE_A64_ERR_FILE: i64 = 1
+pub const PIREUS_APPLE_A64_ERR_HASH: i64 = 2
+pub const PIREUS_APPLE_A64_ERR_XML: i64 = 3
+pub const PIREUS_APPLE_A64_ERR_SHAPE: i64 = 4
+pub const PIREUS_APPLE_A64_ERR_PARENT: i64 = 5
+pub const PIREUS_APPLE_A64_ERR_CANDIDATE: i64 = 6
+pub const PIREUS_APPLE_A64_ERR_AUTHORITY: i64 = 7
+
+const AX_TAG_INSTRUCTIONSECTION: i64 = 1
+const AX_TAG_DOCVAR: i64 = 2
+const AX_TAG_ICLASS: i64 = 3
+const AX_TAG_ENCODING: i64 = 4
+const AX_TAG_BOX: i64 = 5
+const AX_TAG_PS: i64 = 6
+const AX_TAG_PSTEXT: i64 = 7
+
+const AX_NAME_NONE: i64 = 0
+const AX_NAME_Q: i64 = 1
+const AX_NAME_LEN: i64 = 2
+const AX_NAME_TBL_ICLASS: i64 = 3
+
+const AX_KEY_NONE: i64 = 0
+const AX_KEY_INSTR_CLASS: i64 = 1
+const AX_KEY_ISA: i64 = 2
+const AX_KEY_MNEMONIC: i64 = 3
+
+const AX_VALUE_NONE: i64 = 0
+const AX_VALUE_ADVSIMD: i64 = 1
+const AX_VALUE_A64: i64 = 2
+const AX_VALUE_TBL: i64 = 3
+
+const AX_SECTION_NONE: i64 = 0
+const AX_SECTION_DECODE: i64 = 1
+const AX_SECTION_EXECUTE: i64 = 2
+
+pub struct PireusAppleDigest {
+    pub words: [i64; 8],
+}
+
+struct AppleFileDigest {
+    valid: bool,
+    bytes: i64,
+    words: [i64; 8],
+}
+
+pub struct PireusAppleParentBindings {
+    pub garden_match: bool,
+    pub lowering_source_match: bool,
+    pub lowering_semantics_match: bool,
+    pub lowering_receipt_match: bool,
+    pub aarchmrs_source_match: bool,
+    pub aarchmrs_semantics_match: bool,
+    pub aarchmrs_receipt_match: bool,
+    pub aarchmrs_corpus_binding_match: bool,
+    pub tbl_xml_match: bool,
+    pub tbx_xml_match: bool,
+    pub notice_xml_match: bool,
+    pub archive_sha256: [i64; 8],
+    pub valid: bool,
+}
+
+pub struct PireusAppleA64Semantics {
+    pub root_sections: i64,
+    pub advsimd_docvars: i64,
+    pub a64_docvars: i64,
+    pub tbl_docvars: i64,
+    pub encoding_count: i64,
+    pub declared_encodings: i64,
+    pub q_field_width: i64,
+    pub len_field_width: i64,
+    pub decode_blocks: i64,
+    pub execute_blocks: i64,
+    pub datasize_rule: bool,
+    pub elements_rule: bool,
+    pub registers_rule: bool,
+    pub tbl_discriminator_rule: bool,
+    pub table_storage_rule: bool,
+    pub table_register_rule: bool,
+    pub zero_default_rule: bool,
+    pub byte_index_rule: bool,
+    pub table_bound_rule: bool,
+    pub byte_lookup_rule: bool,
+    pub destination_write_rule: bool,
+    pub complete: bool,
+}
+
+pub struct PireusAppleA64Candidate {
+    pub logical_bits: i64,
+    pub logical_dimension: i64,
+    pub displacement_count: i64,
+    pub logical_cells: i64,
+    pub matched_cells: i64,
+    pub mismatched_cells: i64,
+    pub in_domain_source_cells: i64,
+    pub out_of_domain_source_cells: i64,
+    pub bijective_displacements: i64,
+    pub dimension_matches_bits: bool,
+    pub table_registers: i64,
+    pub table_bits: i64,
+    pub table_bytes: i64,
+    pub output_bits: i64,
+    pub output_bytes: i64,
+    pub f64_bytes: i64,
+    pub f64_per_table: i64,
+    pub f64_per_output: i64,
+    pub output_vectors_per_displacement: i64,
+    pub abstract_tbl_applications: i64,
+    pub byte_control_cells: i64,
+    pub matched_byte_controls: i64,
+    pub symbolic_payload_bits: i64,
+    pub matched_payload_bits: i64,
+    pub max_control: i64,
+    pub out_of_range_controls: i64,
+    pub same_source_group_per_output: bool,
+    pub logical_index_coverage: bool,
+    pub symbolic_payload_address_preservation: bool,
+    pub xor_permute_candidate: bool,
+    pub unresolved_other_nodes: i64,
+    pub exact_tree_reduction_refused: bool,
+    pub digest: PireusAppleDigest,
+}
+
+pub struct PireusAppleA64Negatives {
+    pub parent_hash_drift: bool,
+    pub missing_decode_rule: bool,
+    pub missing_execute_rule: bool,
+    pub wrong_q_width: bool,
+    pub wrong_len_width: bool,
+    pub out_of_range_control: bool,
+    pub aliased_logical_index: bool,
+    pub swapped_payload_byte: bool,
+    pub selector_promoted_to_operation: bool,
+    pub tree_promoted_to_exact: bool,
+    pub architecture_promoted_to_observation: bool,
+    pub parity_before_freeze: bool,
+    pub claim_before_parity: bool,
+    pub canonical_target_missing: bool,
+    pub non_sounio_authority: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct PireusAppleA64Result {
+    pub valid: bool,
+    pub error: i64,
+    pub parents: PireusAppleParentBindings,
+    pub semantics: PireusAppleA64Semantics,
+    pub candidate: PireusAppleA64Candidate,
+    pub negatives: PireusAppleA64Negatives,
+    pub apple_silicon_canonical: bool,
+    pub apple_silicon_observed: bool,
+    pub apple_material_receipt_count: i64,
+    pub compiler_emission_count: i64,
+    pub cost_record_count: i64,
+    pub parity_open: bool,
+    pub claim_ready: bool,
+    pub failures: i64,
+}
+
+struct AppleTagMeta {
+    id_tbl: bool,
+    title_tbl_a64: bool,
+    type_instruction: bool,
+    key_kind: i64,
+    value_kind: i64,
+    name_kind: i64,
+    width: i64,
+    no_encodings: i64,
+    secttype_operation: bool,
+    section_kind: i64,
+    malformed: bool,
+}
+
+struct AppleXmlParser {
+    tag: [i8; 2048],
+    tag_len: i64,
+    tag_overflow: bool,
+    in_tag: bool,
+    tag_quote: i64,
+    in_comment: bool,
+    comment_dash_run: i64,
+    stack_names: [i8; 4096],
+    stack_lens: [i64; 64],
+    depth: i64,
+    operation_ps_depth: i64,
+    capture_kind: i64,
+    capture_depth: i64,
+    line: [i8; 512],
+    line_len: i64,
+    line_overflow: bool,
+    semantics: PireusAppleA64Semantics,
+    error: i64,
+}
+
+fn ax_zero_digest() -> PireusAppleDigest {
+    PireusAppleDigest { words: [0; 8] }
+}
+
+fn ax_hash_words(digest: &SHA256Digest) -> [i64; 8]
+with Mut, Panic {
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                (sha256_digest_byte(digest, (word * 4 + byte) as i32) as i64)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    words
+}
+
+fn ax_file_digest(path: string) -> AppleFileDigest
+with IO, Mut, Panic, Div, Alloc {
+    let size = file_size(path)
+    if size < 0 || size >= 1048576 {
+        return AppleFileDigest { valid: false, bytes: size, words: [0; 8] }
+    }
+    let raw = read_file(path)
+    var state = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var b = raw[(pos + i) as usize] as i64
+            if b < 0 { b = b + 256 }
+            window[i as usize] = b as u8
+            i = i + 1
+        }
+        state = sha256_update(state, window, count as i32)
+        pos = pos + count
+    }
+    let digest = sha256_finalize(state)
+    AppleFileDigest { valid: true, bytes: size, words: ax_hash_words(&digest) }
+}
+
+fn ax_hash_equal(left: &[i64; 8], right: &[i64; 8]) -> bool
+with Mut, Panic {
+    var i: i64 = 0
+    while i < 8 {
+        if left[i] != right[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn ax_expected_garden_hash() -> [i64; 8] {
+    [0x85c03626, 0xb396563e, 0xe69460da, 0xcad6faa9,
+     0xa7cb8719, 0xad661aca, 0x26692e0e, 0x099df5a0]
+}
+
+fn ax_expected_lowering_source_hash() -> [i64; 8] {
+    [0x7087649a, 0x5cfdb41a, 0x884aa9a2, 0xe1b0b64b,
+     0xbe2d25da, 0x3ca3cd1d, 0x54d5b704, 0x29854edb]
+}
+
+fn ax_expected_lowering_semantics_hash() -> [i64; 8] {
+    [0x9e92f256, 0xc25a7749, 0x79a1b02c, 0xb10d5d39,
+     0xa1ae702c, 0xcec3a273, 0x044f9193, 0x0f03a970]
+}
+
+fn ax_expected_lowering_receipt_hash() -> [i64; 8] {
+    [0xdaef832e, 0xe6370b65, 0x6e93ae84, 0xc76ba6d1,
+     0x7c98aaf5, 0xad1dd866, 0x74dee27b, 0xa0f84346]
+}
+
+fn ax_expected_aarchmrs_source_hash() -> [i64; 8] {
+    [0xce0693e5, 0x1f5204f8, 0x9c67b791, 0x7fd129dc,
+     0x1976f069, 0x675323ec, 0x73d4e2c4, 0x2913078b]
+}
+
+fn ax_expected_aarchmrs_semantics_hash() -> [i64; 8] {
+    [0xed66cc2e, 0x2fe27ce0, 0x6842c1ef, 0x2091e2f4,
+     0x82b8bcb2, 0xd4b84e4e, 0x649361ca, 0x957b7b14]
+}
+
+fn ax_expected_aarchmrs_receipt_hash() -> [i64; 8] {
+    [0xcd64c91c, 0x330c9a81, 0xe554408a, 0x10de4bcc,
+     0xbdf99843, 0x95ec049c, 0x48dc9914, 0x8aa11934]
+}
+
+fn ax_expected_tbl_hash() -> [i64; 8] {
+    [0x48ef32ed, 0x67b9824b, 0xa39eb585, 0x18faec19,
+     0x6472c3a5, 0x74cf1bbe, 0x1f3a4948, 0x11a6cbbe]
+}
+
+fn ax_expected_tbx_hash() -> [i64; 8] {
+    [0xfa21f8c0, 0x784ec327, 0xca908955, 0x2d22b55e,
+     0x0eb4b9dd, 0x6e0a2eeb, 0x078eeed0, 0xe203ca79]
+}
+
+fn ax_expected_notice_hash() -> [i64; 8] {
+    [0x7f6e2780, 0x187dc8eb, 0x12b53d97, 0xeb435be1,
+     0x9597b1af, 0x256a84fb, 0x44d4b5bd, 0x41846747]
+}
+
+fn ax_expected_archive_hash() -> [i64; 8] {
+    [0x845ed227, 0xa6692ddb, 0x6b602da2, 0xecbbac77,
+     0x6620195a, 0x9c001ec5, 0x76ced3a9, 0xa53dc26b]
+}
+
+fn ax_ascii_string_eq(left: string, right: string) -> bool with Mut, Panic {
+    let n = str_len(left)
+    if n != str_len(right) { return false }
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(left, i) != str_char_at(right, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn ax_parent_bindings(
+    garden_path: string,
+    lowering_source_path: string,
+    lowering_semantics_path: string,
+    lowering_receipt_path: string,
+    aarchmrs_source_path: string,
+    aarchmrs_semantics_path: string,
+    aarchmrs_receipt_path: string,
+    tbl_path: string,
+    tbx_path: string,
+    notice_path: string,
+) -> PireusAppleParentBindings with IO, Mut, Panic, Div, Alloc {
+    let garden = ax_file_digest(garden_path)
+    let lowering_source = ax_file_digest(lowering_source_path)
+    let lowering_semantics = ax_file_digest(lowering_semantics_path)
+    let lowering_receipt = ax_file_digest(lowering_receipt_path)
+    let aarchmrs_source = ax_file_digest(aarchmrs_source_path)
+    let aarchmrs_semantics = ax_file_digest(aarchmrs_semantics_path)
+    let aarchmrs_receipt = ax_file_digest(aarchmrs_receipt_path)
+    let tbl = ax_file_digest(tbl_path)
+    let tbx = ax_file_digest(tbx_path)
+    let notice = ax_file_digest(notice_path)
+    let expected_garden = ax_expected_garden_hash()
+    let expected_lowering_source = ax_expected_lowering_source_hash()
+    let expected_lowering_semantics = ax_expected_lowering_semantics_hash()
+    let expected_lowering_receipt = ax_expected_lowering_receipt_hash()
+    let expected_aarchmrs_source = ax_expected_aarchmrs_source_hash()
+    let expected_aarchmrs_semantics = ax_expected_aarchmrs_semantics_hash()
+    let expected_aarchmrs_receipt = ax_expected_aarchmrs_receipt_hash()
+    let expected_tbl = ax_expected_tbl_hash()
+    let expected_tbx = ax_expected_tbx_hash()
+    let expected_notice = ax_expected_notice_hash()
+    let expected_archive = ax_expected_archive_hash()
+    let garden_match = garden.valid && garden.bytes == 10528 &&
+        ax_hash_equal(&garden.words, &expected_garden)
+    let lowering_source_match = lowering_source.valid &&
+        ax_hash_equal(&lowering_source.words, &expected_lowering_source)
+    let lowering_semantics_match = lowering_semantics.valid &&
+        ax_hash_equal(&lowering_semantics.words, &expected_lowering_semantics)
+    let lowering_receipt_match = lowering_receipt.valid &&
+        ax_hash_equal(&lowering_receipt.words, &expected_lowering_receipt)
+    let aarchmrs_source_match = aarchmrs_source.valid &&
+        ax_hash_equal(&aarchmrs_source.words, &expected_aarchmrs_source)
+    let aarchmrs_semantics_match = aarchmrs_semantics.valid &&
+        ax_hash_equal(&aarchmrs_semantics.words, &expected_aarchmrs_semantics)
+    let aarchmrs_receipt_match = aarchmrs_receipt.valid &&
+        ax_hash_equal(&aarchmrs_receipt.words, &expected_aarchmrs_receipt)
+    let corpus_binding = ax_ascii_string_eq(
+        pireus_aarchmrs_expected_sha256(),
+        "bedf5f8fc142d6232f15caaa170b9fab996a732db0b04bf4604e91fb10c3244b")
+    let tbl_match = tbl.valid && tbl.bytes == 14897 &&
+        ax_hash_equal(&tbl.words, &expected_tbl)
+    let tbx_match = tbx.valid && tbx.bytes == 14962 &&
+        ax_hash_equal(&tbx.words, &expected_tbx)
+    let notice_match = notice.valid && notice.bytes == 5212 &&
+        ax_hash_equal(&notice.words, &expected_notice)
+    let valid = garden_match && lowering_source_match &&
+        lowering_semantics_match && lowering_receipt_match &&
+        aarchmrs_source_match && aarchmrs_semantics_match &&
+        aarchmrs_receipt_match && corpus_binding && tbl_match && tbx_match &&
+        notice_match
+    PireusAppleParentBindings {
+        garden_match: garden_match,
+        lowering_source_match: lowering_source_match,
+        lowering_semantics_match: lowering_semantics_match,
+        lowering_receipt_match: lowering_receipt_match,
+        aarchmrs_source_match: aarchmrs_source_match,
+        aarchmrs_semantics_match: aarchmrs_semantics_match,
+        aarchmrs_receipt_match: aarchmrs_receipt_match,
+        aarchmrs_corpus_binding_match: corpus_binding,
+        tbl_xml_match: tbl_match,
+        tbx_xml_match: tbx_match,
+        notice_xml_match: notice_match,
+        archive_sha256: expected_archive,
+        valid: valid,
+    }
+}
+
+fn ax_semantics_empty() -> PireusAppleA64Semantics {
+    PireusAppleA64Semantics {
+        root_sections: 0,
+        advsimd_docvars: 0,
+        a64_docvars: 0,
+        tbl_docvars: 0,
+        encoding_count: 0,
+        declared_encodings: 0,
+        q_field_width: 0,
+        len_field_width: 0,
+        decode_blocks: 0,
+        execute_blocks: 0,
+        datasize_rule: false,
+        elements_rule: false,
+        registers_rule: false,
+        tbl_discriminator_rule: false,
+        table_storage_rule: false,
+        table_register_rule: false,
+        zero_default_rule: false,
+        byte_index_rule: false,
+        table_bound_rule: false,
+        byte_lookup_rule: false,
+        destination_write_rule: false,
+        complete: false,
+    }
+}
+
+fn ax_parser_new() -> AppleXmlParser with Mut {
+    AppleXmlParser {
+        tag: [0; 2048],
+        tag_len: 0,
+        tag_overflow: false,
+        in_tag: false,
+        tag_quote: 0,
+        in_comment: false,
+        comment_dash_run: 0,
+        stack_names: [0; 4096],
+        stack_lens: [0; 64],
+        depth: 0,
+        operation_ps_depth: 0,
+        capture_kind: AX_SECTION_NONE,
+        capture_depth: 0,
+        line: [0; 512],
+        line_len: 0,
+        line_overflow: false,
+        semantics: ax_semantics_empty(),
+        error: PIREUS_APPLE_A64_OK,
+    }
+}
+
+fn ax_is_ws(b: i64) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn ax_tag_char(parser: &AppleXmlParser, index: i64) -> i64 with Panic {
+    parser.tag[index as usize] as i64
+}
+
+fn ax_tag_range_eq(
+    parser: &AppleXmlParser, start: i64, end: i64, value: string,
+) -> bool with Mut, Panic, Div {
+    let n = str_len(value)
+    if end - start != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if ax_tag_char(parser, start + i) != str_char_at(value, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ax_parse_decimal(
+    parser: &AppleXmlParser, start: i64, end: i64,
+) -> i64 with Mut, Panic {
+    if start >= end { return -1 }
+    var value: i64 = 0
+    var i = start
+    while i < end {
+        let b = ax_tag_char(parser, i)
+        if b < 48 || b > 57 { return -1 }
+        value = value * 10 + b - 48
+        i = i + 1
+    }
+    value
+}
+
+fn ax_tag_kind(
+    parser: &AppleXmlParser, start: i64, end: i64,
+) -> i64 with Mut, Panic, Div {
+    if ax_tag_range_eq(parser, start, end, "instructionsection") {
+        return AX_TAG_INSTRUCTIONSECTION
+    }
+    if ax_tag_range_eq(parser, start, end, "docvar") { return AX_TAG_DOCVAR }
+    if ax_tag_range_eq(parser, start, end, "iclass") { return AX_TAG_ICLASS }
+    if ax_tag_range_eq(parser, start, end, "encoding") { return AX_TAG_ENCODING }
+    if ax_tag_range_eq(parser, start, end, "box") { return AX_TAG_BOX }
+    if ax_tag_range_eq(parser, start, end, "ps") { return AX_TAG_PS }
+    if ax_tag_range_eq(parser, start, end, "pstext") { return AX_TAG_PSTEXT }
+    0
+}
+
+fn ax_meta_empty() -> AppleTagMeta {
+    AppleTagMeta {
+        id_tbl: false,
+        title_tbl_a64: false,
+        type_instruction: false,
+        key_kind: AX_KEY_NONE,
+        value_kind: AX_VALUE_NONE,
+        name_kind: AX_NAME_NONE,
+        width: -1,
+        no_encodings: -1,
+        secttype_operation: false,
+        section_kind: AX_SECTION_NONE,
+        malformed: false,
+    }
+}
+
+fn ax_parse_tag_meta(
+    parser: &AppleXmlParser, start: i64,
+) -> AppleTagMeta with Mut, Panic, Div {
+    var meta = ax_meta_empty()
+    var i = start
+    while i < parser.tag_len {
+        while i < parser.tag_len && ax_is_ws(ax_tag_char(parser, i)) {
+            i = i + 1
+        }
+        if i >= parser.tag_len || ax_tag_char(parser, i) == 47 { break }
+        let name_start = i
+        while i < parser.tag_len && !ax_is_ws(ax_tag_char(parser, i)) &&
+            ax_tag_char(parser, i) != 61 && ax_tag_char(parser, i) != 47 {
+            i = i + 1
+        }
+        let name_end = i
+        while i < parser.tag_len && ax_is_ws(ax_tag_char(parser, i)) {
+            i = i + 1
+        }
+        if i >= parser.tag_len || ax_tag_char(parser, i) != 61 {
+            meta.malformed = true
+            return meta
+        }
+        i = i + 1
+        while i < parser.tag_len && ax_is_ws(ax_tag_char(parser, i)) {
+            i = i + 1
+        }
+        if i >= parser.tag_len {
+            meta.malformed = true
+            return meta
+        }
+        let quote = ax_tag_char(parser, i)
+        if quote != 34 && quote != 39 {
+            meta.malformed = true
+            return meta
+        }
+        i = i + 1
+        let value_start = i
+        while i < parser.tag_len && ax_tag_char(parser, i) != quote {
+            i = i + 1
+        }
+        if i >= parser.tag_len {
+            meta.malformed = true
+            return meta
+        }
+        let value_end = i
+        i = i + 1
+
+        if ax_tag_range_eq(parser, name_start, name_end, "id") &&
+            ax_tag_range_eq(parser, value_start, value_end, "TBL_advsimd") {
+            meta.id_tbl = true
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "title") &&
+            ax_tag_range_eq(parser, value_start, value_end, "TBL -- A64") {
+            meta.title_tbl_a64 = true
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "type") &&
+            ax_tag_range_eq(parser, value_start, value_end, "instruction") {
+            meta.type_instruction = true
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "key") {
+            if ax_tag_range_eq(parser, value_start, value_end, "instr-class") {
+                meta.key_kind = AX_KEY_INSTR_CLASS
+            }
+            if ax_tag_range_eq(parser, value_start, value_end, "isa") {
+                meta.key_kind = AX_KEY_ISA
+            }
+            if ax_tag_range_eq(parser, value_start, value_end, "mnemonic") {
+                meta.key_kind = AX_KEY_MNEMONIC
+            }
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "value") {
+            if ax_tag_range_eq(parser, value_start, value_end, "advsimd") {
+                meta.value_kind = AX_VALUE_ADVSIMD
+            }
+            if ax_tag_range_eq(parser, value_start, value_end, "A64") {
+                meta.value_kind = AX_VALUE_A64
+            }
+            if ax_tag_range_eq(parser, value_start, value_end, "TBL") {
+                meta.value_kind = AX_VALUE_TBL
+            }
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "name") {
+            if ax_tag_range_eq(parser, value_start, value_end, "Q") {
+                meta.name_kind = AX_NAME_Q
+            }
+            if ax_tag_range_eq(parser, value_start, value_end, "len") {
+                meta.name_kind = AX_NAME_LEN
+            }
+            if ax_tag_range_eq(parser, value_start, value_end, "Advanced SIMD") {
+                meta.name_kind = AX_NAME_TBL_ICLASS
+            }
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "width") {
+            meta.width = ax_parse_decimal(parser, value_start, value_end)
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "no_encodings") {
+            meta.no_encodings = ax_parse_decimal(parser, value_start, value_end)
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "secttype") &&
+            ax_tag_range_eq(parser, value_start, value_end, "Operation") {
+            meta.secttype_operation = true
+        }
+        if ax_tag_range_eq(parser, name_start, name_end, "section") {
+            if ax_tag_range_eq(parser, value_start, value_end, "Decode") {
+                meta.section_kind = AX_SECTION_DECODE
+            }
+            if ax_tag_range_eq(parser, value_start, value_end, "Execute") {
+                meta.section_kind = AX_SECTION_EXECUTE
+            }
+        }
+    }
+    meta
+}
+
+fn ax_line_reset(parser: &!AppleXmlParser) with Mut {
+    parser.line_len = 0
+    parser.line_overflow = false
+}
+
+fn ax_line_push(parser: &!AppleXmlParser, b: i64) with Mut, Panic {
+    if b == 32 || b == 9 || b == 13 { return }
+    if parser.line_len < 512 {
+        parser.line[parser.line_len as usize] = b as i8
+    } else {
+        parser.line_overflow = true
+        parser.error = PIREUS_APPLE_A64_ERR_SHAPE
+    }
+    parser.line_len = parser.line_len + 1
+}
+
+fn ax_line_eq(parser: &AppleXmlParser, value: string) -> bool
+with Mut, Panic {
+    if parser.line_overflow { return false }
+    let n = str_len(value)
+    if parser.line_len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.line[i as usize] as i64 != str_char_at(value, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ax_finish_line(parser: &!AppleXmlParser) with Mut, Panic {
+    if parser.line_len == 0 {
+        ax_line_reset(parser)
+        return
+    }
+    if parser.capture_kind == AX_SECTION_DECODE {
+        if ax_line_eq(parser, "letdatasize:integer{}=64&lt;&lt;UInt(Q);") {
+            parser.semantics.datasize_rule = true
+        }
+        if ax_line_eq(parser, "letelements:integer=datasizeDIV8;") {
+            parser.semantics.elements_rule = true
+        }
+        if ax_line_eq(parser, "letregs:integer{}=UInt(len)+1;") {
+            parser.semantics.registers_rule = true
+        }
+        if ax_line_eq(parser, "letis_tbl:boolean=(op=='0');") {
+            parser.semantics.tbl_discriminator_rule = true
+        }
+    }
+    if parser.capture_kind == AX_SECTION_EXECUTE {
+        if ax_line_eq(parser, "vartable:bits(128*regs)=Zeros{};") {
+            parser.semantics.table_storage_rule = true
+        }
+        if ax_line_eq(parser, "table[i*:128]=V{128}((n+i)MOD32);") {
+            parser.semantics.table_register_rule = true
+        }
+        if ax_line_eq(parser, "result=ifis_tblthenZeros{datasize}elseV{datasize}(d);") {
+            parser.semantics.zero_default_rule = true
+        }
+        if ax_line_eq(parser, "index=UInt(indices[i*:8]);") {
+            parser.semantics.byte_index_rule = true
+        }
+        if ax_line_eq(parser, "ifindex&lt;16*regsthen") {
+            parser.semantics.table_bound_rule = true
+        }
+        if ax_line_eq(parser, "result[i*:8]=table[index*:8];") {
+            parser.semantics.byte_lookup_rule = true
+        }
+        if ax_line_eq(parser, "V{datasize}(d)=result;") {
+            parser.semantics.destination_write_rule = true
+        }
+    }
+    ax_line_reset(parser)
+}
+
+fn ax_stack_push(
+    parser: &!AppleXmlParser, start: i64, end: i64,
+) with Mut, Panic {
+    if parser.depth >= 64 || end - start <= 0 || end - start > 63 {
+        parser.error = PIREUS_APPLE_A64_ERR_XML
+        return
+    }
+    let len = end - start
+    var i: i64 = 0
+    while i < len {
+        parser.stack_names[(parser.depth * 64 + i) as usize] =
+            parser.tag[(start + i) as usize]
+        i = i + 1
+    }
+    parser.stack_lens[parser.depth as usize] = len
+    parser.depth = parser.depth + 1
+}
+
+fn ax_stack_matches(
+    parser: &AppleXmlParser, start: i64, end: i64,
+) -> bool with Mut, Panic {
+    if parser.depth <= 0 { return false }
+    let len = end - start
+    if parser.stack_lens[(parser.depth - 1) as usize] != len { return false }
+    var i: i64 = 0
+    while i < len {
+        if parser.stack_names[((parser.depth - 1) * 64 + i) as usize] !=
+            parser.tag[(start + i) as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn ax_process_tag(parser: &!AppleXmlParser) with Mut, Panic, Div {
+    if parser.error != PIREUS_APPLE_A64_OK || parser.tag_overflow { return }
+    var i: i64 = 0
+    while i < parser.tag_len && ax_is_ws(ax_tag_char(parser, i)) { i = i + 1 }
+    if i >= parser.tag_len { return }
+    let first = ax_tag_char(parser, i)
+    if first == 33 || first == 63 { return }
+    var closing = false
+    if first == 47 {
+        closing = true
+        i = i + 1
+        while i < parser.tag_len && ax_is_ws(ax_tag_char(parser, i)) { i = i + 1 }
+    }
+    let name_start = i
+    while i < parser.tag_len && !ax_is_ws(ax_tag_char(parser, i)) &&
+        ax_tag_char(parser, i) != 47 {
+        i = i + 1
+    }
+    let name_end = i
+    if name_end <= name_start {
+        parser.error = PIREUS_APPLE_A64_ERR_XML
+        return
+    }
+    let kind = ax_tag_kind(parser, name_start, name_end)
+    let meta = ax_parse_tag_meta(parser, name_end)
+    if meta.malformed {
+        parser.error = PIREUS_APPLE_A64_ERR_XML
+        return
+    }
+    var tag_end = parser.tag_len
+    while tag_end > 0 && ax_is_ws(ax_tag_char(parser, tag_end - 1)) {
+        tag_end = tag_end - 1
+    }
+    let self_closing = tag_end > 0 && ax_tag_char(parser, tag_end - 1) == 47
+
+    if closing {
+        if !ax_stack_matches(parser, name_start, name_end) {
+            parser.error = PIREUS_APPLE_A64_ERR_XML
+            return
+        }
+        if kind == AX_TAG_PSTEXT && parser.capture_kind != AX_SECTION_NONE &&
+            parser.depth == parser.capture_depth {
+            ax_finish_line(parser)
+            parser.capture_kind = AX_SECTION_NONE
+            parser.capture_depth = 0
+        }
+        if kind == AX_TAG_PS && parser.operation_ps_depth == parser.depth {
+            parser.operation_ps_depth = 0
+        }
+        parser.depth = parser.depth - 1
+        return
+    }
+
+    if kind == AX_TAG_INSTRUCTIONSECTION {
+        if !meta.id_tbl || !meta.title_tbl_a64 || !meta.type_instruction {
+            parser.error = PIREUS_APPLE_A64_ERR_SHAPE
+            return
+        }
+        parser.semantics.root_sections = parser.semantics.root_sections + 1
+    }
+    if kind == AX_TAG_DOCVAR {
+        if meta.key_kind == AX_KEY_INSTR_CLASS &&
+            meta.value_kind == AX_VALUE_ADVSIMD {
+            parser.semantics.advsimd_docvars = parser.semantics.advsimd_docvars + 1
+        }
+        if meta.key_kind == AX_KEY_ISA && meta.value_kind == AX_VALUE_A64 {
+            parser.semantics.a64_docvars = parser.semantics.a64_docvars + 1
+        }
+        if meta.key_kind == AX_KEY_MNEMONIC && meta.value_kind == AX_VALUE_TBL {
+            parser.semantics.tbl_docvars = parser.semantics.tbl_docvars + 1
+        }
+    }
+    if kind == AX_TAG_ICLASS && meta.name_kind == AX_NAME_TBL_ICLASS {
+        parser.semantics.declared_encodings = meta.no_encodings
+    }
+    if kind == AX_TAG_ENCODING {
+        parser.semantics.encoding_count = parser.semantics.encoding_count + 1
+    }
+    if kind == AX_TAG_BOX && meta.name_kind == AX_NAME_Q && meta.width > 0 {
+        parser.semantics.q_field_width = meta.width
+    }
+    if kind == AX_TAG_BOX && meta.name_kind == AX_NAME_LEN && meta.width > 0 {
+        parser.semantics.len_field_width = meta.width
+    }
+    if kind == AX_TAG_PS && meta.secttype_operation {
+        parser.operation_ps_depth = parser.depth + 1
+    }
+
+    if !self_closing { ax_stack_push(parser, name_start, name_end) }
+    if parser.error != PIREUS_APPLE_A64_OK { return }
+
+    if kind == AX_TAG_PSTEXT && meta.section_kind != AX_SECTION_NONE {
+        if parser.capture_kind != AX_SECTION_NONE {
+            parser.error = PIREUS_APPLE_A64_ERR_XML
+            return
+        }
+        if meta.section_kind == AX_SECTION_DECODE {
+            parser.semantics.decode_blocks = parser.semantics.decode_blocks + 1
+        }
+        if meta.section_kind == AX_SECTION_EXECUTE {
+            if parser.operation_ps_depth == 0 {
+                parser.error = PIREUS_APPLE_A64_ERR_SHAPE
+                return
+            }
+            parser.semantics.execute_blocks = parser.semantics.execute_blocks + 1
+        }
+        parser.capture_kind = meta.section_kind
+        parser.capture_depth = parser.depth
+        ax_line_reset(parser)
+    }
+}
+
+fn ax_tag_push(parser: &!AppleXmlParser, b: i64) with Mut, Panic {
+    if parser.tag_len < 2048 {
+        parser.tag[parser.tag_len as usize] = b as i8
+    } else {
+        parser.tag_overflow = true
+        parser.error = PIREUS_APPLE_A64_ERR_XML
+    }
+    parser.tag_len = parser.tag_len + 1
+}
+
+fn ax_feed(parser: &!AppleXmlParser, b: i64) with Mut, Panic, Div {
+    if parser.error != PIREUS_APPLE_A64_OK { return }
+    if parser.in_comment {
+        if b == 45 {
+            parser.comment_dash_run = parser.comment_dash_run + 1
+            if parser.comment_dash_run > 2 { parser.comment_dash_run = 2 }
+        } else {
+            if b == 62 && parser.comment_dash_run >= 2 {
+                parser.in_comment = false
+                parser.in_tag = false
+                parser.tag_len = 0
+                parser.tag_overflow = false
+            }
+            parser.comment_dash_run = 0
+        }
+        return
+    }
+    if !parser.in_tag {
+        if b == 60 {
+            parser.in_tag = true
+            parser.tag_len = 0
+            parser.tag_overflow = false
+            parser.tag_quote = 0
+            return
+        }
+        if parser.capture_kind != AX_SECTION_NONE {
+            if b == 10 { ax_finish_line(parser) }
+            else { ax_line_push(parser, b) }
+        }
+        return
+    }
+    if parser.tag_quote != 0 {
+        ax_tag_push(parser, b)
+        if b == parser.tag_quote { parser.tag_quote = 0 }
+        return
+    }
+    if b == 34 || b == 39 {
+        parser.tag_quote = b
+        ax_tag_push(parser, b)
+        return
+    }
+    if b == 62 {
+        ax_process_tag(parser)
+        parser.in_tag = false
+        parser.tag_len = 0
+        parser.tag_overflow = false
+        return
+    }
+    ax_tag_push(parser, b)
+    if parser.tag_len == 3 &&
+        parser.tag[0] as i64 == 33 && parser.tag[1] as i64 == 45 &&
+        parser.tag[2] as i64 == 45 {
+        parser.in_comment = true
+        parser.comment_dash_run = 0
+    }
+}
+
+fn ax_parse_tbl(path: string) -> PireusAppleA64Semantics
+with IO, Mut, Panic, Div, Alloc {
+    var parser = ax_parser_new()
+    let size = file_size(path)
+    if size < 0 || size >= 1048576 {
+        parser.error = PIREUS_APPLE_A64_ERR_FILE
+        return parser.semantics
+    }
+    let raw = read_file(path)
+    var i: i64 = 0
+    while i < size {
+        var b = raw[i as usize] as i64
+        if b < 0 { b = b + 256 }
+        ax_feed(&!parser, b)
+        if parser.error != PIREUS_APPLE_A64_OK { break }
+        i = i + 1
+    }
+    if parser.error == PIREUS_APPLE_A64_OK {
+        if parser.in_tag || parser.in_comment || parser.depth != 0 ||
+            parser.capture_kind != AX_SECTION_NONE {
+            parser.error = PIREUS_APPLE_A64_ERR_XML
+        }
+    }
+    var semantics = parser.semantics
+    semantics.complete = parser.error == PIREUS_APPLE_A64_OK &&
+        semantics.root_sections == 1 && semantics.advsimd_docvars >= 2 &&
+        semantics.a64_docvars >= 2 && semantics.tbl_docvars >= 2 &&
+        semantics.encoding_count == 4 && semantics.declared_encodings == 4 &&
+        semantics.q_field_width == 1 && semantics.len_field_width == 2 &&
+        semantics.decode_blocks == 1 && semantics.execute_blocks == 1 &&
+        semantics.datasize_rule && semantics.elements_rule &&
+        semantics.registers_rule && semantics.tbl_discriminator_rule &&
+        semantics.table_storage_rule && semantics.table_register_rule &&
+        semantics.zero_default_rule && semantics.byte_index_rule &&
+        semantics.table_bound_rule && semantics.byte_lookup_rule &&
+        semantics.destination_write_rule
+    semantics
+}
+
+fn ax_digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        bytes[i as usize] = ((value >> (56 - i * 8)) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn ax_candidate_from_semantics(
+    semantics: &PireusAppleA64Semantics,
+) -> PireusAppleA64Candidate with Mut, Panic, Div {
+    if !semantics.complete {
+        return PireusAppleA64Candidate {
+            logical_bits: PIREUS_XOR_LOWERING_BITS,
+            logical_dimension: PIREUS_XOR_LOWERING_DIMENSION,
+            displacement_count: 0, logical_cells: 0, matched_cells: 0,
+            mismatched_cells: 0, in_domain_source_cells: 0,
+            out_of_domain_source_cells: 0, bijective_displacements: 0,
+            dimension_matches_bits: false,
+            table_registers: 0, table_bits: 0,
+            table_bytes: 0, output_bits: 0, output_bytes: 0, f64_bytes: 8,
+            f64_per_table: 0, f64_per_output: 0,
+            output_vectors_per_displacement: 0, abstract_tbl_applications: 0,
+            byte_control_cells: 0, matched_byte_controls: 0,
+            symbolic_payload_bits: 0, matched_payload_bits: 0,
+            max_control: -1, out_of_range_controls: 0,
+            same_source_group_per_output: false,
+            logical_index_coverage: false,
+            symbolic_payload_address_preservation: false,
+            xor_permute_candidate: false, unresolved_other_nodes: 4,
+            exact_tree_reduction_refused: true, digest: ax_zero_digest(),
+        }
+    }
+    let table_registers = 1 << semantics.len_field_width
+    let table_bits = 128 * table_registers
+    let table_bytes = table_bits / 8
+    let output_bits = 64 << ((1 << semantics.q_field_width) - 1)
+    let output_bytes = output_bits / 8
+    let f64_bytes: i64 = 8
+    let f64_per_table = table_bytes / f64_bytes
+    let f64_per_output = output_bytes / f64_bytes
+    let vectors_per_displacement =
+        PIREUS_XOR_LOWERING_DIMENSION / f64_per_output
+    var logical_cells: i64 = 0
+    var matched_cells: i64 = 0
+    var in_domain_sources: i64 = 0
+    var out_of_domain_sources: i64 = 0
+    var bijective_displacements: i64 = 0
+    var byte_cells: i64 = 0
+    var matched_bytes: i64 = 0
+    var payload_bits: i64 = 0
+    var matched_bits: i64 = 0
+    var max_control: i64 = -1
+    var out_of_range: i64 = 0
+    var same_group = true
+    let dimension_matches_bits = PIREUS_XOR_LOWERING_DIMENSION ==
+        (1 << PIREUS_XOR_LOWERING_BITS) &&
+        PIREUS_XOR_LOWERING_DIMENSION <= 256
+    var state = ax_digest_add_i64(sha256_init(), 0x415054424c583031)
+    var d: i64 = 0
+    while d < PIREUS_XOR_LOWERING_DIMENSION {
+        var seen_sources: [i64; 256] = [0; 256]
+        var vector: i64 = 0
+        while vector < vectors_per_displacement {
+            var vector_group: i64 = -1
+            var element: i64 = 0
+            while element < f64_per_output {
+                let i = vector * f64_per_output + element
+                let source = i ^ d
+                let source_in_domain = source >= 0 &&
+                    source < PIREUS_XOR_LOWERING_DIMENSION && source < 256
+                if source_in_domain {
+                    in_domain_sources = in_domain_sources + 1
+                    seen_sources[source as usize] =
+                        seen_sources[source as usize] + 1
+                } else {
+                    out_of_domain_sources = out_of_domain_sources + 1
+                }
+                let source_group = source / f64_per_table
+                let source_local = source - source_group * f64_per_table
+                if vector_group < 0 { vector_group = source_group }
+                if vector_group != source_group { same_group = false }
+                var decoded_source: i64 = -1
+                var byte: i64 = 0
+                while byte < f64_bytes {
+                    let control = source_local * f64_bytes + byte
+                    if control > max_control { max_control = control }
+                    if control < 0 || control >= table_bytes {
+                        out_of_range = out_of_range + 1
+                    }
+                    let decoded_local = control / f64_bytes
+                    let decoded_byte = control - decoded_local * f64_bytes
+                    decoded_source = source_group * f64_per_table + decoded_local
+                    byte_cells = byte_cells + 1
+                    if source_in_domain && decoded_source == source &&
+                        decoded_byte == byte {
+                        matched_bytes = matched_bytes + 1
+                    }
+                    var bit: i64 = 0
+                    while bit < 8 {
+                        let expected_bit = source * 64 + byte * 8 + bit
+                        let reconstructed_bit = decoded_source * 64 +
+                            decoded_byte * 8 + bit
+                        payload_bits = payload_bits + 1
+                        if source_in_domain && decoded_source == source &&
+                            decoded_byte == byte &&
+                            expected_bit == reconstructed_bit {
+                            matched_bits = matched_bits + 1
+                        }
+                        state = ax_digest_add_i64(state, expected_bit)
+                        state = ax_digest_add_i64(state, reconstructed_bit)
+                        bit = bit + 1
+                    }
+                    state = ax_digest_add_i64(state, d)
+                    state = ax_digest_add_i64(state, vector)
+                    state = ax_digest_add_i64(state, element)
+                    state = ax_digest_add_i64(state, byte)
+                    state = ax_digest_add_i64(state, source_group)
+                    state = ax_digest_add_i64(state, control)
+                    state = ax_digest_add_i64(state, decoded_source)
+                    byte = byte + 1
+                }
+                logical_cells = logical_cells + 1
+                if source_in_domain && decoded_source == source {
+                    matched_cells = matched_cells + 1
+                }
+                element = element + 1
+            }
+            vector = vector + 1
+        }
+        var displacement_bijective = dimension_matches_bits
+        var source_index: i64 = 0
+        while source_index < PIREUS_XOR_LOWERING_DIMENSION &&
+            source_index < 256 {
+            if seen_sources[source_index as usize] != 1 {
+                displacement_bijective = false
+            }
+            source_index = source_index + 1
+        }
+        if displacement_bijective {
+            bijective_displacements = bijective_displacements + 1
+        }
+        d = d + 1
+    }
+    let digest_raw = sha256_finalize(state)
+    let digest = PireusAppleDigest { words: ax_hash_words(&digest_raw) }
+    let logical_coverage = logical_cells ==
+        PIREUS_XOR_LOWERING_DIMENSION * PIREUS_XOR_LOWERING_DIMENSION &&
+        dimension_matches_bits && in_domain_sources == logical_cells &&
+        out_of_domain_sources == 0 &&
+        bijective_displacements == PIREUS_XOR_LOWERING_DIMENSION &&
+        matched_cells == logical_cells && same_group && out_of_range == 0
+    let bit_preservation = payload_bits == logical_cells * 64 &&
+        matched_bits == payload_bits && matched_bytes == byte_cells
+    PireusAppleA64Candidate {
+        logical_bits: PIREUS_XOR_LOWERING_BITS,
+        logical_dimension: PIREUS_XOR_LOWERING_DIMENSION,
+        displacement_count: PIREUS_XOR_LOWERING_DIMENSION,
+        logical_cells: logical_cells,
+        matched_cells: matched_cells,
+        mismatched_cells: logical_cells - matched_cells,
+        in_domain_source_cells: in_domain_sources,
+        out_of_domain_source_cells: out_of_domain_sources,
+        bijective_displacements: bijective_displacements,
+        dimension_matches_bits: dimension_matches_bits,
+        table_registers: table_registers,
+        table_bits: table_bits,
+        table_bytes: table_bytes,
+        output_bits: output_bits,
+        output_bytes: output_bytes,
+        f64_bytes: f64_bytes,
+        f64_per_table: f64_per_table,
+        f64_per_output: f64_per_output,
+        output_vectors_per_displacement: vectors_per_displacement,
+        abstract_tbl_applications:
+            vectors_per_displacement * PIREUS_XOR_LOWERING_DIMENSION,
+        byte_control_cells: byte_cells,
+        matched_byte_controls: matched_bytes,
+        symbolic_payload_bits: payload_bits,
+        matched_payload_bits: matched_bits,
+        max_control: max_control,
+        out_of_range_controls: out_of_range,
+        same_source_group_per_output: same_group,
+        logical_index_coverage: logical_coverage,
+        symbolic_payload_address_preservation: bit_preservation,
+        xor_permute_candidate: logical_coverage && bit_preservation,
+        unresolved_other_nodes: 4,
+        exact_tree_reduction_refused: true,
+        digest: digest,
+    }
+}
+
+fn ax_candidate_gate(
+    parents: bool,
+    decode_semantics: bool,
+    execute_semantics: bool,
+    q_width: i64,
+    len_width: i64,
+    control: i64,
+    decoded_source: i64,
+    expected_source: i64,
+    decoded_byte: i64,
+    expected_byte: i64,
+    other_nodes_resolved: i64,
+    tree_exact: bool,
+    observed: bool,
+    material_receipts: i64,
+    parity_open: bool,
+    claim_ready: bool,
+    canonical: bool,
+    sounio_authority: bool,
+) -> bool {
+    parents && decode_semantics && execute_semantics &&
+        q_width == 1 && len_width == 2 &&
+        control >= 0 && control < (1 << len_width) * 16 &&
+        decoded_source == expected_source &&
+        decoded_byte == expected_byte && other_nodes_resolved == 0 &&
+        !tree_exact && (!observed || material_receipts > 0) &&
+        !parity_open && !claim_ready && canonical && sounio_authority
+}
+
+fn ax_negative_case(witness: i64) -> bool {
+    var parents = true
+    var decode_semantics = true
+    var execute_semantics = true
+    var q_width: i64 = 1
+    var len_width: i64 = 2
+    var control: i64 = 63
+    var decoded_source: i64 = 7
+    var expected_source: i64 = 7
+    var decoded_byte: i64 = 7
+    var expected_byte: i64 = 7
+    var other_nodes_resolved: i64 = 0
+    var tree_exact = false
+    var observed = false
+    var material_receipts: i64 = 0
+    var parity_open = false
+    var claim_ready = false
+    var canonical = true
+    var sounio_authority = true
+    if witness == 1 { parents = false }
+    if witness == 2 { decode_semantics = false }
+    if witness == 3 { execute_semantics = false }
+    if witness == 4 { q_width = 2 }
+    if witness == 5 { len_width = 3 }
+    if witness == 6 { control = 64 }
+    if witness == 7 { decoded_source = 6 }
+    if witness == 8 { decoded_byte = 6 }
+    if witness == 9 { other_nodes_resolved = 4 }
+    if witness == 10 { tree_exact = true }
+    if witness == 11 { observed = true }
+    if witness == 12 { parity_open = true }
+    if witness == 13 { claim_ready = true }
+    if witness == 14 { canonical = false }
+    if witness == 15 { sounio_authority = false }
+    let baseline = ax_candidate_gate(
+        true, true, true, 1, 2, 63, 7, 7, 7, 7, 0, false, false, 0,
+        false, false, true, true)
+    baseline && !ax_candidate_gate(
+        parents, decode_semantics, execute_semantics, q_width, len_width,
+        control, decoded_source, expected_source, decoded_byte, expected_byte,
+        other_nodes_resolved, tree_exact, observed, material_receipts,
+        parity_open, claim_ready, canonical, sounio_authority)
+}
+
+fn ax_negatives() -> PireusAppleA64Negatives with Mut, Panic {
+    let values: [bool; 15] = [
+        ax_negative_case(1), ax_negative_case(2), ax_negative_case(3),
+        ax_negative_case(4), ax_negative_case(5), ax_negative_case(6),
+        ax_negative_case(7), ax_negative_case(8), ax_negative_case(9),
+        ax_negative_case(10), ax_negative_case(11), ax_negative_case(12),
+        ax_negative_case(13), ax_negative_case(14), ax_negative_case(15)
+    ]
+    var passed: i64 = 0
+    var i: i64 = 0
+    while i < 15 {
+        if values[i] { passed = passed + 1 }
+        i = i + 1
+    }
+    PireusAppleA64Negatives {
+        parent_hash_drift: values[0],
+        missing_decode_rule: values[1],
+        missing_execute_rule: values[2],
+        wrong_q_width: values[3],
+        wrong_len_width: values[4],
+        out_of_range_control: values[5],
+        aliased_logical_index: values[6],
+        swapped_payload_byte: values[7],
+        selector_promoted_to_operation: values[8],
+        tree_promoted_to_exact: values[9],
+        architecture_promoted_to_observation: values[10],
+        parity_before_freeze: values[11],
+        claim_before_parity: values[12],
+        canonical_target_missing: values[13],
+        non_sounio_authority: values[14],
+        passed: passed,
+        total: 15,
+    }
+}
+
+pub fn pireus_apple_a64_tbl_evaluate(
+    garden_path: string,
+    lowering_source_path: string,
+    lowering_semantics_path: string,
+    lowering_receipt_path: string,
+    aarchmrs_source_path: string,
+    aarchmrs_semantics_path: string,
+    aarchmrs_receipt_path: string,
+    tbl_path: string,
+    tbx_path: string,
+    notice_path: string,
+) -> PireusAppleA64Result with IO, Mut, Panic, Div, Alloc {
+    let parents = ax_parent_bindings(
+        garden_path, lowering_source_path, lowering_semantics_path,
+        lowering_receipt_path, aarchmrs_source_path, aarchmrs_semantics_path,
+        aarchmrs_receipt_path, tbl_path, tbx_path, notice_path)
+    let semantics = ax_parse_tbl(tbl_path)
+    let candidate = ax_candidate_from_semantics(&semantics)
+    let negatives = ax_negatives()
+    let apple_silicon_canonical = true
+    let apple_silicon_observed = false
+    let apple_material_receipt_count: i64 = 0
+    let compiler_emission_count: i64 = 0
+    let cost_record_count: i64 = 0
+    let parity_open = false
+    let claim_ready = false
+    let decode_semantics = semantics.decode_blocks == 1 &&
+        semantics.datasize_rule && semantics.elements_rule &&
+        semantics.registers_rule && semantics.tbl_discriminator_rule
+    let execute_semantics = semantics.execute_blocks == 1 &&
+        semantics.table_storage_rule && semantics.table_register_rule &&
+        semantics.zero_default_rule && semantics.byte_index_rule &&
+        semantics.table_bound_rule && semantics.byte_lookup_rule &&
+        semantics.destination_write_rule
+    let authority_gate = ax_candidate_gate(
+        parents.valid, decode_semantics, execute_semantics,
+        semantics.q_field_width, semantics.len_field_width,
+        candidate.max_control,
+        candidate.matched_cells, candidate.logical_cells,
+        candidate.matched_byte_controls, candidate.byte_control_cells,
+        4 - candidate.unresolved_other_nodes,
+        !candidate.exact_tree_reduction_refused,
+        apple_silicon_observed, apple_material_receipt_count,
+        parity_open, claim_ready, apple_silicon_canonical, true)
+    var error = PIREUS_APPLE_A64_OK
+    if !parents.valid { error = PIREUS_APPLE_A64_ERR_PARENT }
+    else if !semantics.complete { error = PIREUS_APPLE_A64_ERR_SHAPE }
+    else if !candidate.xor_permute_candidate ||
+        candidate.matched_cells != candidate.logical_cells ||
+        !candidate.exact_tree_reduction_refused {
+        error = PIREUS_APPLE_A64_ERR_CANDIDATE
+    } else if !authority_gate || negatives.passed != negatives.total {
+        error = PIREUS_APPLE_A64_ERR_AUTHORITY
+    }
+    var failures: i64 = 0
+    if error != PIREUS_APPLE_A64_OK { failures = failures + 1 }
+    if !apple_silicon_canonical || apple_silicon_observed ||
+        apple_material_receipt_count != 0 || compiler_emission_count != 0 ||
+        cost_record_count != 0 || parity_open || claim_ready {
+        failures = failures + 1
+    }
+    PireusAppleA64Result {
+        valid: failures == 0,
+        error: error,
+        parents: parents,
+        semantics: semantics,
+        candidate: candidate,
+        negatives: negatives,
+        apple_silicon_canonical: apple_silicon_canonical,
+        apple_silicon_observed: apple_silicon_observed,
+        apple_material_receipt_count: apple_material_receipt_count,
+        compiler_emission_count: compiler_emission_count,
+        cost_record_count: cost_record_count,
+        parity_open: parity_open,
+        claim_ready: claim_ready,
+        failures: failures,
+    }
+}
