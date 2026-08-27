@@ -38,6 +38,37 @@ fail() {
 [[ -f "$SPEC" ]] || fail "spec doc missing: $SPEC"
 [[ -f "$CONTRACT" ]] || fail "contract missing: $CONTRACT"
 
+ensure_audited_history() {
+    local -a audited=(
+        daa0635d000c808cb8e96f5e6831b79f3baea607
+        ec579a24c7508eae93d8b10c14d062492326878f
+        eb38e9ce5ddace586ca4547360823faeb97be65f
+    )
+    local -a missing=()
+    local sha
+
+    for sha in "${audited[@]}"; do
+        if ! git cat-file -e "${sha}^{commit}" 2>/dev/null || \
+           ! git cat-file -e "${sha}^" 2>/dev/null; then
+            missing+=("$sha")
+        fi
+    done
+    ((${#missing[@]} == 0)) && return 0
+
+    [[ "$(git rev-parse --is-shallow-repository)" == true ]] || \
+        fail "audited history is absent from a non-shallow checkout: ${missing[*]}"
+    git fetch --quiet --no-tags --depth=2 origin "${missing[@]}" || \
+        fail "could not materialize audited commits from origin: ${missing[*]}"
+
+    for sha in "${missing[@]}"; do
+        git cat-file -e "${sha}^{commit}" 2>/dev/null && \
+            git cat-file -e "${sha}^" 2>/dev/null || \
+            fail "audited commit or parent remains unavailable after fetch: $sha"
+    done
+}
+
+ensure_audited_history
+
 OUT="$(python3 "$CONTRACT" 2>&1)" || {
     echo "$OUT"
     fail "contract exited non-zero"
