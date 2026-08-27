@@ -3,6 +3,51 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
+LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
+EXECUTION_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v2"
+frozen_toolchain_root=''
+
+cleanup() {
+  [[ -z "$frozen_toolchain_root" ]] || rm -rf "$frozen_toolchain_root"
+}
+trap cleanup EXIT
+
+manifest_value() {
+  local manifest="$1" key="$2"
+  sed -n "s/^${key}=//p" "$manifest" | head -1
+}
+
+prepare_frozen_toolchain() {
+  local executable_commit wrapper_sha compiler_sha execution_wrapper_sha
+  local execution_compiler_sha actual_wrapper_sha actual_compiler_sha
+  [[ -f "$LANGUAGE_AUTHORITY_MANIFEST" && -f "$EXECUTION_AUTHORITY_MANIFEST" ]] || {
+    echo 'error: frozen Sounio authority manifests are required' >&2
+    exit 1
+  }
+  executable_commit="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" sounio_executable_commit)"
+  wrapper_sha="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_wrapper_sha256)"
+  compiler_sha="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST" toolchain_compiler_sha256)"
+  execution_wrapper_sha="$(manifest_value "$EXECUTION_AUTHORITY_MANIFEST" toolchain_wrapper_sha256)"
+  execution_compiler_sha="$(manifest_value "$EXECUTION_AUTHORITY_MANIFEST" toolchain_compiler_sha256)"
+  [[ "$wrapper_sha" == "$execution_wrapper_sha" && \
+    "$compiler_sha" == "$execution_compiler_sha" ]] || {
+    echo 'error: frozen Sounio authorities disagree on their toolchain' >&2
+    exit 1
+  }
+  git -C "$ROOT_DIR" cat-file -e "${executable_commit}^{commit}" 2>/dev/null || {
+    echo "error: frozen Sounio toolchain commit is unavailable: $executable_commit" >&2
+    exit 1
+  }
+  frozen_toolchain_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-frozen-toolchain.XXXXXX")"
+  git -C "$ROOT_DIR" archive "$executable_commit" \
+    bin/souc bin/souc-lean-single-x86_64 | tar -x -C "$frozen_toolchain_root"
+  actual_wrapper_sha="$(sha256sum "$frozen_toolchain_root/bin/souc" | awk '{print $1}')"
+  actual_compiler_sha="$(sha256sum "$frozen_toolchain_root/bin/souc-lean-single-x86_64" | awk '{print $1}')"
+  [[ "$actual_wrapper_sha" == "$wrapper_sha" && "$actual_compiler_sha" == "$compiler_sha" ]] || {
+    echo 'error: reconstructed frozen Sounio toolchain failed hash verification' >&2
+    exit 1
+  }
+}
 
 command -v ocamlopt >/dev/null 2>&1 || {
   echo 'error: ocamlopt is required to build Sounio Loom' >&2
@@ -22,6 +67,10 @@ command -v openssl >/dev/null 2>&1 || {
 }
 
 dune build --root "$ROOT_DIR/tools/loom" src/loom.exe
+if [[ -z "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" || \
+  -z "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
+  prepare_frozen_toolchain
+fi
 language_authority_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
 if [[ -n "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT" ]] || {
@@ -32,7 +81,8 @@ if [[ -n "${SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT:-}" ]]; then
   install -m 0755 "$SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT" \
     "$language_authority_output"
 else
-  SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$language_authority_output" \
+  SOUNIO_LOOM_LANGUAGE_AUTHORITY_SOUC="$frozen_toolchain_root/bin/souc" \
+    SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$language_authority_output" \
     "$SCRIPT_DIR/build_sounio_loom_language_authority.sh"
 fi
 execution_authority_output="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
@@ -45,7 +95,8 @@ if [[ -n "${SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT:-}" ]]; then
   install -m 0755 "$SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT" \
     "$execution_authority_output"
 else
-  SOUNIO_LOOM_EXECUTION_AUTHORITY_OUTPUT="$execution_authority_output" \
+  SOUNIO_LOOM_EXECUTION_AUTHORITY_SOUC="$frozen_toolchain_root/bin/souc" \
+    SOUNIO_LOOM_EXECUTION_AUTHORITY_OUTPUT="$execution_authority_output" \
     "$SCRIPT_DIR/build_sounio_loom_execution_authority.sh"
 fi
 "$SCRIPT_DIR/build_sounio_loom_continuity_adapter.sh"

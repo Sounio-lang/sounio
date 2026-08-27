@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+CLIENT_PROTOCOL=1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SOURCE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+manifest_value() {
+  local manifest="$1" key="$2"
+  sed -n "s/^${key}=//p" "$manifest" | head -1
+}
+
+WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+[[ -n "$WORKTREE" ]] || die "run this command from a Git worktree"
+WORKTREE="$(cd "$WORKTREE" && pwd -P)"
+GIT_COMMON_DIR="$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[[ -n "$GIT_COMMON_DIR" ]] || die "cannot resolve the shared Git directory"
+
+RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
+LOCAL_RUNTIME="$SOURCE_ROOT/scripts/dev/sounio_coord_agentd.py"
+selection=local
+selected="$LOCAL_RUNTIME"
+manifest=''
+
+if [[ "${SOUNIO_COORD_RUNTIME_MODE:-shared}" != local && \
+  ( -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ) ]]; then
+  current="$(readlink -f "$RUNTIME_ROOT/current" 2>/dev/null || true)"
+  [[ -n "$current" ]] || die "shared coordination runtime has a broken current link: $RUNTIME_ROOT/current"
+  manifest="$current/manifest"
+  selected="$current/bin/sounio-agentd-runtime"
+  [[ -f "$manifest" && -x "$selected" ]] || \
+    die "shared coordination runtime has no agent supervisor: $current"
+  protocol="$(manifest_value "$manifest" agentd_protocol_version)"
+  [[ "$protocol" == "$CLIENT_PROTOCOL" ]] || \
+    die "incompatible shared agentd runtime: client_protocol=$CLIENT_PROTOCOL runtime_protocol=${protocol:-missing}"
+  selection=shared
+fi
+[[ -x "$selected" ]] || die "agentd runtime missing or not executable: $selected"
+
+if [[ "${1:-}" == runtime-info ]]; then
+  printf 'selection=%s\n' "$selection"
+  printf 'client_protocol=%s\n' "$CLIENT_PROTOCOL"
+  printf 'runtime_root=%s\n' "$RUNTIME_ROOT"
+  printf 'runtime_path=%s\n' "$selected"
+  if [[ -n "$manifest" ]]; then
+    printf 'runtime_id=%s\n' "$(manifest_value "$manifest" runtime_id)"
+    printf 'bundle_sha256=%s\n' "$(manifest_value "$manifest" bundle_sha256)"
+    printf 'source_sha=%s\n' "$(manifest_value "$manifest" source_sha)"
+  fi
+  exec "$selected" runtime-version
+fi
+
+exec "$selected" "$@"

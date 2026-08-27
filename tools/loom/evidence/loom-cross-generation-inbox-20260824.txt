@@ -1,0 +1,128 @@
+Sounio Loom generation-scoped inbox replay receipt
+===================================================
+
+Captured UTC: 2026-08-24T14:33:00Z
+Worktree: /workspace/.wt/codex-1
+Branch: lane/codex-1/20260814
+Source base: 704feb03ce8b
+Validation mode: source-worktree local runtime before promotion
+
+Claim under test
+----------------
+
+The coordinator previously keyed a wake receipt by message ID and lane-stable
+endpoint ID. If a recipient generation received a wake and died before ACK, its
+successor reused that endpoint ID and the durable bus incorrectly suppressed
+the pending wake.
+
+The repaired rule keys delivery by message ID, endpoint ID, and verified process
+generation. Delivery is at least once across generations, deduplicated within a
+generation, and suppressed for every later generation after the recipient's
+durable ACK. A wake receipt proves transport delivery only. It does not prove
+hook execution, agent response, or exactly-once execution of message effects.
+
+Crash witness
+-------------
+
+`scripts/ci/sounio_loom_selftest.sh` starts a Loom-owned coordination endpoint,
+delivers one directed request, retries it in the same generation, and observes
+deduplication. It then sends SIGKILL to kernel, Guardian, and harness without
+acknowledging the message. A distinct successor generation receives the same
+message and deduplicates its own retry. The bus exposes two wake receipts with
+different generation IDs. After recipient ACK, a third complete generation is
+started; retry is refused as acknowledged, the third PTY contains no message ID,
+and the durable wake count remains two.
+
+Final receipt:
+
+  sounio-loom-selftest: PASS language=OCaml protocol=1
+  kernel_crashes=6 coord_generations=3
+  unacked_replay=delivered acked_replay=suppressed
+  post_pod_reconcile=idempotent
+
+Trust-boundary witness
+----------------------
+
+`stdlib/coordination/loom_continuity.sio` admits host assertions only through a
+private linear `LoomHostTrustSeal`. One linear host receipt can be imported once
+into an observed nominal state, after which transition-specific verifiers admit
+initial generation, clean respawn, or Pod resurrection.
+
+The negative gate establishes:
+
+  private host admission -> E175
+  private state construction -> E176
+  wrong-state promotion -> E009
+  reuse of one linear host receipt -> E039
+
+Sabotage controls establish causality:
+
+  1. Changing exactly `fn admit_runtime_continuity` to `pub fn` removes E175.
+  2. Removing exactly the predecessor semantic-head guard exposes the Pod
+     resurrection negative witness at runtime.
+
+Final receipt:
+
+  loom-continuity-typestate: PASS positive_engine=lean_single
+  negative_engine=madaros host-seal=E175 private=E176 wrong-state=E009
+  linear-reuse=E039 sabotage-host-seal=1 sabotage-predecessor-guard=1
+
+Compatibility gates
+-------------------
+
+  sounio-coord-wake-selftest: PASS
+  sounio-coord-selftest: PASS
+  sounio-coord-runtime-selftest: PASS
+  sounio-coord-agentd-selftest: PASS transport=agentd cross_worktree=1
+  sounio-loom-beagle-bridge-selftest: PASS websocket=pass journals=verified
+  sounio-loom-kubernetes-hook-selftest: PASS rolling_update=refused
+
+Shared runtime promotion
+------------------------
+
+After every focused gate passed and commits 4d851aec1b and e666d38e8d were
+pushed, the content-addressed installer atomically activated:
+
+  runtime_id=p3-2026.08.24.1-6693eda5bd71
+  source_sha=e666d38e8dd1
+  protocol_version=3
+  bundle_sha256=6693eda5bd718205fc0769c5df0d16f2ca318fa6dabff6ef0269b36aff0076b2
+  capability=coord-generation-scoped-wake-v1
+
+`bin/sounio-coord runtime-info` selected that shared runtime, and shared-mode
+`endpoint-status` verified the active Codex lane endpoint after activation.
+The prior runtime remains immutable and available through `install-runtime
+--activate <runtime-id>` rollback.
+
+The first full Loom attempt stopped at the pre-existing timing-sensitive
+`after_broadcast` boundary. A second attempt completed the new three-generation
+control and then exposed an overbroad no-tmux audit matching an evidence file.
+The audit was narrowed to executable Loom sources and launchers; the final full
+run above passed.
+
+Source hashes
+-------------
+
+  7cb063009f6e1e4d22922aab236565a0c2f060b27b6f23486b605156a9b8d88a  scripts/dev/sounio_coord_runtime.sh
+  94a65b456fc9803c45bb66d0e70de9e2c8885333133edf930881ab77b66900db  scripts/ci/sounio_loom_selftest.sh
+  5439ec0284a02c002c682b8f39df8412eaf6718453ff14a8c512c4a9fb3573ac  stdlib/coordination/loom_continuity.sio
+  7b67be45050e5470fb0e3d55cae82ad4fba365b39c5270317c10167e3302476f  scripts/ci/loom_continuity_typestate_gate.sh
+
+Evidence boundary
+-----------------
+
+This receipt proves local source-level generation-scoped wake replay through an
+OCaml Loom endpoint and a language-level Sounio admission seal, followed by
+atomic promotion of the tested coordinator bundle. The coordinator implementation
+remains the compatibility shell runtime, and the native host is still the trusted
+computing base. This is not a cryptographic same-UID proof, a direct
+OCaml-to-Sounio production adapter, exactly-once effect processing, a separate-Pod
+pending-inbox result, cross-node recovery, production authority, PL/CS novelty,
+or priority evidence.
+
+Next falsifiable step
+---------------------
+
+Run the same pending message, generation receipt, dedupe, and ACK sequence
+across deletion of an isolated shadow Workspace Agent Pod, then bind its verified
+lineage JSON into the sealed Sounio value through a native OCaml host adapter.
