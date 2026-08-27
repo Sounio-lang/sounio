@@ -4,14 +4,15 @@
 core-equivalent rows (`by_contra`, `set`, `push_cast`, `ring`, `nlinarith`,
 `norm_num`, …) and fixes the failures you can diagnose from the error message alone.
 
-> **Where that table lives, as of 2026-08-17.** It is `formal/lean4/README.md` +
+> **Where that table lives.** It is `formal/lean4/README.md` +
 > `formal/lean4/TACTICS_CORE_WITNESSES.lean`, authored by lane `kimi-cli1` in commit
 > `1fdea6f3bb`. That lane hit a hard quota wall (reset 2026-08-22) with the branch
-> never pushed, so the commit is rescued onto a clean base in **PR #1772**, message
-> and authorship intact. Until #1772 lands, both files are absent from `origin/main`
-> and from this branch, and the references to them below will not resolve. This is
-> recorded rather than hidden: if you followed a dead link, that is why. The two
-> documents were split deliberately (see Provenance) — neither duplicates the other.
+> never pushed, so the commit was rescued onto a clean base in **PR #1772**.
+>
+> **Re-measured 2026-08-27:** #1772 is **merged** (`1bb2db46fc` on `main`). Both files
+> are present on `origin/main` and the references below resolve. The paragraph that
+> used to stand here said "until #1772 lands, both files are absent" — that was true
+> when this file was written on 2026-08-17 and is no longer true.
 >
 > One correction crosses the split: that table listed `push_cast` as Mathlib-only,
 > and it is not. See §11 here, and the same correction applied at source in #1772.
@@ -322,23 +323,32 @@ and `#check`-ing each name gives:
 
 | Comment | Name | Verdict |
 |---|---|---|
-| `SounioGradedModal.lean:133` | `Nat.div_le_div_left` | **EXISTS** — claim false |
-| `SounioGradedModal.lean:133` | `Nat.pow_le_pow_right` | **EXISTS** — claim false |
-| `SounioGradedModal.lean:133` | `Nat.div_le_div_right` | **EXISTS** — claim false |
-| `SounioGradedModal.lean:133` | `Nat.pos_pow_of_pos` | absent — claim correct |
+| `SounioGradedModal.lean:133` *(retired — see below)* | `Nat.div_le_div_left` | **EXISTS** — claim was false |
+| `SounioGradedModal.lean:133` *(retired — see below)* | `Nat.pow_le_pow_right` | **EXISTS** — claim was false |
+| `SounioGradedModal.lean:133` *(retired — see below)* | `Nat.div_le_div_right` | **EXISTS** — claim was false |
+| `SounioGradedModal.lean:133` *(retired — see below)* | `Nat.pos_pow_of_pos` | absent — claim was correct |
 | `SounioRealCauchy.lean:63` | `Rat.div_pos` | absent — but see below |
 | `SounioRealOrderAxiomsImpl.lean:20` | `Rat.zero_lt_one` | absent — claim correct |
 | `SounioMultiquadIndep.lean:722` | `Rat.zero_sub` | absent — claim correct |
 | `SounioSqrtFieldReal.lean:22` | `Rat.add_le_add` | absent — claim correct |
 
+**Re-measured 2026-08-27.** The last four rows still hold at those exact lines on
+`origin/main`. The `SounioGradedModal.lean:133` rows are now **historical**: #1772
+landed (`1bb2db46fc`), the false comment is gone, `div_le_of_divisor_le` is proved in
+the file, and `SounioGradedModal.lean` contains **no `sorry`**. The rows are kept
+because the *lesson* is the point — but do not go looking for that comment at line 133,
+it is not there any more.
+
 Two things worth acting on.
 
-**`SounioGradedModal.lean:133` is three-quarters wrong and sits directly above a
-`sorry`.** The comment reads "Core Lean 4 lacks `Nat.div_le_div_left`,
+**`SounioGradedModal.lean:133` was three-quarters wrong and sat directly above a
+`sorry`.** The comment read "Core Lean 4 lacks `Nat.div_le_div_left`,
 `Nat.pow_le_pow_right`, `Nat.div_le_div_right`, and `Nat.pos_pow_of_pos`. Needs Mathlib
 Nat lemmas." Three of the four exist. `kimi-cli1` independently found two of them and
-proved that `sorry`; that fix is in **PR #1772**, which retires the comment. This audit
-adds the third and confirms only `Nat.pos_pow_of_pos` is genuinely missing.
+proved that `sorry`; that fix is **PR #1772**, now merged, which retired the comment.
+This audit added the third and confirmed only `Nat.pos_pow_of_pos` is genuinely
+missing. Past tense as of 2026-08-27: the comment and the `sorry` are both gone from
+`main`.
 
 **`SounioRealCauchy.lean:63` names a real absence but draws the wrong conclusion.**
 `Rat.div_pos` is indeed absent, but the comment goes on to say it "would need to be

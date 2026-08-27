@@ -35,6 +35,12 @@ SounioGradedModal.lean: 2
 TOTAL real sorry tactics: 4
 ```
 
+> **Re-measured 2026-08-27 against `origin/main` (146 Lean files in `formal/lean4`):
+> `TOTAL real sorry tactics: 0`.** All four listed above were closed on `main` after
+> this handoff was written — `SounioGradedModal.lean`'s two by #1772 (`1bb2db46fc`).
+> The block above is the 2026-08-16 measurement and is kept as the record of what was
+> true then; it is not the current state.
+
 ## 0. Reconciling the two `sorry` readings — they never conflicted
 
 The founder measured four `sorry` at lines **48, 65, 74, 81**. This agent at
@@ -295,7 +301,8 @@ FAIL**. The reviews earned their keep three times:
    if it does not, the graph in the paper needs restating.
 3. **Settle the census sign reduction**, or retire the census rows in favour of
    Theorem 3.2, which is strictly stronger over `isKDiff`.
-4. Four real `sorry` remain elsewhere in `formal/lean4`: `EpistemicEffects.lean`
-   (1), `SounioDeGreyChi5Real.lean` (1), `SounioGradedModal.lean` (2). The
-   `iSum_perm` / `iSum_reindex` pattern in §4(a) is reusable if any of them are
-   blocked on the same `whnf` wall.
+4. ~~Four real `sorry` remain elsewhere in `formal/lean4`: `EpistemicEffects.lean`
+   (1), `SounioDeGreyChi5Real.lean` (1), `SounioGradedModal.lean` (2).~~
+   **Done — re-measured 2026-08-27: zero real `sorry` tactics remain anywhere in
+   `formal/lean4`.** The `iSum_perm` / `iSum_reindex` pattern in §4(a) remains
+   reusable for any future proof that hits the same `whnf` wall.
