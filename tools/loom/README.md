@@ -678,8 +678,9 @@ the native status or login operation and never reads or copies token files.
 Dangerous auto-approval flags are absent unless `--unsafe-auto` is explicit.
 
 `provider-start` executes the selected CLI without a shell through an internal
-OCaml trampoline that closes stdin and removes inherited Codex, Claude, and tmux
-harness identity variables. `--isolate-context` maps provider-specific
+OCaml trampoline that closes stdin and removes inherited Codex, Claude, Kimi,
+Cursor, Grok, tmux, and Sounio agentd/session identity variables while retaining
+native provider credentials. `--isolate-context` maps provider-specific
 reductions in memory, rules, and subagent context; it is deliberately not
 described as a sandbox. The provider remains the Guardian-owned child, so kernel
 recovery does not replace its process identity. Codex, Claude Code, Kimi Code,
@@ -785,6 +786,9 @@ Verified persistent catalog kinds are currently `codex` and `kimi`. The Kimi
 bootstrap is delivered only after the native TUI is under Loom custody, and the
 catalog sabotage gate proves that changing the stored kind to an unverified
 provider such as Cursor is refused by the persistent-adapter allowlist.
+Because Kimi binds sessions through its native store, concurrent cataloged Kimi
+slots must use distinct HOME directories; same-HOME enrollment fails before a
+second prompt or descriptor is published.
 
 `fleet-reconcile` is a no-mutation plan by default. It observes both the legacy
 fleet adapter and Loom before taking action. A slot whose non-selected authority

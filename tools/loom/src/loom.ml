@@ -7424,6 +7424,10 @@ let provider_open_command cli =
   let plan = provider_plan cli "persistent" in
   if plan.plan_lifecycle <> "persistent" then
     failf "provider-open-requires-persistent-lifecycle";
+  if
+    plan.plan_prompt_transport = "loom-wake"
+    && plan.plan_argv <> [ plan.plan_executable ]
+  then failf "provider-loom-wake-requires-executable-only-argv";
   let runtime = Unix.realpath Sys.executable_name in
   let start_cli =
     { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2;
@@ -7434,8 +7438,13 @@ let provider_open_command cli =
     let wake_cli =
       { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2; rest = [] }
     in
+    let bootstrap_digest =
+      sha256
+        (plan.plan_spec.provider_id ^ "\000" ^ plan.plan_session_id ^ "\000"
+       ^ plan.plan_prompt)
+    in
     Hashtbl.replace wake_cli.options "--message-id"
-      ("provider-bootstrap-" ^ String.sub (sha256 plan.plan_prompt) 0 16);
+      ("provider-bootstrap-" ^ String.sub bootstrap_digest 0 16);
     Hashtbl.replace wake_cli.options "--prompt" plan.plan_prompt;
     (try wake_command wake_cli
      with error ->
@@ -7464,15 +7473,18 @@ let provider_auth_login_command cli =
 let provider_clean_environment () =
   let harness_keys =
     [ "CODEX_SESSION_ID"; "CODEX_THREAD_ID"; "CODEX_CI"; "CLAUDECODE";
-      "CLAUDE_CODE_ENTRYPOINT"; "CLAUDE_CODE_SESSION_ID"; "TMUX";
-      "TMUX_PANE"; "TMUX_TMPDIR" ]
+      "CLAUDE_CODE_ENTRYPOINT"; "CLAUDE_CODE_SESSION_ID";
+      "KIMI_SESSION_ID"; "KIMI_CLI_SESSION_ID";
+      "CURSOR_SESSION_ID"; "CURSOR_AGENT_SESSION_ID"; "GROK_SESSION_ID";
+      "SOUNIO_AGENT_ID"; "SOUNIO_LANE_ID"; "TMUX"; "TMUX_PANE";
+      "TMUX_TMPDIR" ]
   in
+  let harness_prefixes = [ "SOUNIO_AGENTD_" ] in
   Unix.environment () |> Array.to_list
   |> List.filter (fun entry ->
          not
-           (List.exists
-              (fun key -> starts_with entry (key ^ "="))
-              harness_keys))
+           (List.exists (fun key -> starts_with entry (key ^ "=")) harness_keys
+           || List.exists (fun prefix -> starts_with entry prefix) harness_prefixes))
   |> Array.of_list
 
 let provider_exec_command arguments =
@@ -8652,6 +8664,21 @@ let fleet_enroll_command cli =
       fleet_prompt_file = prompt_file; fleet_prompt_sha256 = prompt_sha256;
       fleet_model = model; fleet_unsafe_auto = unsafe_auto }
   in
+  if custody = "loom" then (
+    let provider = provider_spec kind in
+    if provider.provider_session_binding = "native-store" then
+      match
+        load_fleet_specs root
+        |> List.find_opt (fun existing ->
+               existing.fleet_enabled && existing.fleet_slot <> slot
+               && existing.fleet_custody = "loom"
+               && existing.fleet_kind = kind && existing.fleet_home = home)
+      with
+      | Some existing ->
+          failf
+            "fleet-native-store-home-conflict provider=%s home=%s existing_slot=%s requested_slot=%s"
+            kind home existing.fleet_slot slot
+      | None -> ());
   let directory = fleet_directory root in
   mkdir_p directory;
   let path = fleet_spec_path root slot in
@@ -8783,7 +8810,7 @@ let fleet_reconcile_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf "  provider-open persistent providers: codex, kimi\n";
   Printf.eprintf

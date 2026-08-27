@@ -306,6 +306,17 @@ kimi_enrolled="$(loom fleet-enroll --state-dir "$KIMI_STATE_DIR" \
 [[ "$kimi_enrolled" == *'kind=kimi custody=loom'* ]] || \
   fail 'catalog did not admit verified persistent Kimi custody'
 kimi_descriptor="$KIMI_STATE_DIR/fleet/$KIMI_LANE.state"
+if loom fleet-enroll --state-dir "$KIMI_STATE_DIR" \
+  --slot kimi-native-store-alias --kind kimi --custody loom \
+  --agent kimi-native-store-alias --home "$HOME_DIR" \
+  --session-id 99999999-9999-4999-8999-999999999999 \
+  --coord-dir "$COORD_DIR" --prompt "$kimi_prompt" --cwd "$WORKTREE" \
+  > "$TEST_ROOT/kimi-home-alias.out" 2>&1; then
+  fail 'catalog admitted two native-store Kimi lanes with one HOME'
+fi
+grep -q 'fleet-native-store-home-conflict provider=kimi .*existing_slot=catalog-kimi requested_slot=kimi-native-store-alias' \
+  "$TEST_ROOT/kimi-home-alias.out" || \
+  fail 'same-HOME native-store alias was refused by an unrelated rule'
 
 kimi_plan="$(loom fleet-reconcile --state-dir "$KIMI_STATE_DIR" --cwd "$WORKTREE")"
 [[ "$kimi_plan" == *'custody=loom state=absent action=provider-open mode=plan'* ]] || \
@@ -381,4 +392,4 @@ mv "$TEST_ROOT/kimi-catalog.backup" "$kimi_descriptor"
 stop_lane "$STATE_DIR" "$LANE"
 stop_lane "$ADOPT_STATE_DIR" "$ADOPT_LANE"
 stop_lane "$KIMI_STATE_DIR" "$KIMI_LANE" "$KIMI_AGENT"
-printf 'sounio-loom-fleet-custody-selftest: PASS catalog=v2 custody=typed providers=codex,kimi prompt=sealed prompt_transport=loom-wake dual_authority=refused unsupported_persistent=refused adoption=explicit kernel_recovery=stable-provider\n'
+printf 'sounio-loom-fleet-custody-selftest: PASS catalog=v2 custody=typed providers=codex,kimi prompt=sealed prompt_transport=loom-wake native_store_home=isolated dual_authority=refused unsupported_persistent=refused adoption=explicit kernel_recovery=stable-provider\n'
