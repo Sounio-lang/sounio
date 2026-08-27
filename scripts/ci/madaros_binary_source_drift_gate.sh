@@ -111,6 +111,33 @@ check_row "epistemic channel index is refused" \
           tests/compile-fail/epistemic_index_must_refuse.sio \
           refuse
 
+# `second_order_mean` builtin. The source recognises the call at type-check time
+# via the predicate call_expr_is_builtin_second_order_mean (check.sio:14793);
+# a shipped binary that predates the predicate refuses with E137 (use of
+# undeclared variable) -- measured on the pre-#2115 rebuild. The fixture here
+# is the minimum call that exercises the predicate and compiles under a
+# current binary.
+check_row "second_order_mean builtin (E2[f] Hessian correction)" \
+          'call_expr_is_builtin_second_order_mean' \
+          self-hosted/check/check.sio \
+          tests/run-pass/drift_gate_second_order_mean.sio \
+          accept
+
+# `hessian_of` transcendental chain rule. NOTE: the hessian_of function itself
+# is much older (call_expr_is_builtin_hessian_of has been present since #1588
+# and is in every shipped binary still on disk) and is NOT a useful drift
+# marker. What #2119 actually added is the chain rule for sin/cos/exp/log,
+# expressed in the new second-order block in lower.sio; the distinctive
+# fingerprint of that block is the comment `// Second order: H_jk(f(g)) = ...`.
+# On pre-#2119 source the marker is absent and this row SKIPs (gate goes red
+# with every_row_skipped if no other row measures), which is the designed
+# failure mode for "the source no longer claims this capability".
+check_row "hessian_of transcendental chain rule (kind-6 second-order transfer)" \
+          'H_jk\(f\(g\)\)' \
+          self-hosted/ir/lower.sio \
+          tests/run-pass/drift_gate_hessian_of.sio \
+          accept
+
 echo
 echo "  capabilities probed: $total   behind: $behind   skipped: $skipped"
 
