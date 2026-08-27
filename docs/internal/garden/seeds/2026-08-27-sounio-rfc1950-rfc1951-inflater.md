@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.internal.garden.seeds.2026-08-27-sounio-rfc1950-rfc1951-inflater
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.garden.seeds.2026-08-27-sounio-rfc1950-rfc1951-inflater
+-->
+
 # Sounio: The Stream That Opens The Charts
 
 > **Status**: Garden | **Date**: 2026-08-27 | **Authority**: founder direction
