@@ -1107,6 +1107,23 @@ own completion report.**
 handshakes/process). The underlying lifetime defect is UNCHANGED and still
 open — the wall moved ~47×, it did not disappear.
 
+> **Amended 2026-08-27 — this entry's ceiling is real but not the whole
+> budget. See [D16](#d16--trust_store_load-costs-13-gb-of-never-reclaimed-arena-and-a-process-survives-only-six-calls-exit-181).**
+> The "95 handshakes/process" figure is measured with the trust store loaded
+> **exactly once, outside** the probe's handshake loop
+> (`tests/interop/tls_arena_multi_handshake_probe.sio:36`). That is the
+> correct usage — and therefore the one that never measures the cost of the
+> wrong usage. A single `trust_store_load()` costs **~1.3 GB** (150 real CA
+> roots × this entry's own per-parse figure), so a process admits only **six**
+> loads. Do not read "95 handshakes" as "95 TLS-using operations": a consumer
+> that loads the trust store per stage exhausts the arena long before the
+> 95th handshake, which is exactly what `conclave-search` did on one query.
+> The two secondary figures below are also refined by D16's measurements:
+> `certificate_zero()`'s cost does **not** apply to the
+> `[certificate_zero(); N]` array-repeat form (measured: ~0), and the
+> per-handshake cost is chain-dependent by ~4.8× (~70 MB vs `8.8.8.8`,
+> ~335 MB vs `1.1.1.1`), not a single constant.
+
 **Full forensic dispatch:**
 [`docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md`](../audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md)
 
@@ -1239,3 +1256,75 @@ new entry — it was already self-documented at its own definition site in
 `stdlib/x509/cert.sio` when the original TLS plan scoped ECDSA to SHA-256
 only; this entry exists to record that it is now confirmed load-bearing
 against real-world traffic, not just theoretical.
+
+## D16 — `trust_store_load()` costs ~1.3 GB of never-reclaimed arena, and a process survives only six calls (exit 181)
+
+**Status:** RESOLVED for the reported workload (ceiling **6 → unbounded**
+loads/process, via a process-lifetime memo). The underlying lifetime defect
+is UNCHANGED and still open, and the post-fix budget for the reported
+workload is adequate but not comfortable — see the dispatch's residual-risk
+section.
+
+**Full forensic dispatch:**
+[`docs/audit/D16_TRUST_STORE_LOAD_PER_STAGE_ARENA_EXHAUSTION_DISPATCH_2026-08-27.md`](../audit/D16_TRUST_STORE_LOAD_PER_STAGE_ARENA_EXHAUSTION_DISPATCH_2026-08-27.md)
+
+### Symptom
+`Sounio-lang/conclave-search` aborts on a **single ordinary query**, far short
+of D12's 95-handshake ceiling:
+```
+conclave-search: fetch_memory_context failed (unreachable beagle-core, or no atoms)
+conclave-search: continuing with empty enrichment
+madaros: arena full          (exit 181)
+```
+Not an OOM — 10 Gi container limit, container does not crash, the Madaros
+runtime aborts internally.
+
+### Root cause — distinct from D12, not a recurrence of it
+D12 measured the per-HANDSHAKE cost. This is a per-TRUST-STORE-LOAD cost that
+D12's probe was structurally blind to, because
+`tests/interop/tls_arena_multi_handshake_probe.sio:36` loads the store exactly
+**once, outside** its handshake loop — the correct usage, and therefore the one
+that never measures the wrong usage's cost.
+
+`trust_store_load()` parses all **150** roots of the real Debian CA bundle, at
+D12's own ~8.8–11.5 MB per `x509_parse_certificate`: **~1.3 GB per load**.
+`conclave-search` calls it once per TLS-using stage — including **once per
+candidate URL** in `search/dns_resolve.sio:248` (`resolve_a_record`) — so one
+query issues `4 + N_candidates` loads, up to **14** at `MAX_RESULTS = 10`.
+The process admits six; it dies at load #7, the fourth candidate's DoH
+resolution.
+
+### Measurements (`tests/interop/trust_store_load_arena_cost_probe.sio`)
+| Measurement | Value |
+|---|---:|
+| `trust_store_load()` calls before exit 181 | **6** (7th aborts) |
+| Implied cost per load (8 GiB arena) | ~1.3 GB |
+| `TrustStore` value construction alone | 20,000 iterations, **no exhaustion** (~0) |
+| Real handshakes vs `8.8.8.8` (rc 0) | 95 → ~70 MB each |
+| Real handshakes vs `1.1.1.1` (rc −8, D15's ECDSA-SHA384 gap) | **20 → ~335 MB each** |
+
+Two secondary findings, both measured: the `[certificate_zero(); 512]`
+array-repeat is **not** 512 allocations (a natural suspicion, refuted), and a
+**failing** chain verification is not cheap — Cloudflare's chain costs ~4.8×
+Google's per handshake and still fails.
+
+### Fix
+`stdlib/x509/trust_store.sio`: the previous body is preserved verbatim as
+`trust_store_load_uncached()`; `trust_store_load()` now memoises it in
+module-level state (failures memoised too — neither failure mode can be fixed
+by a retry, and a retry costs another 1.3 GB). Sound because the store is
+immutable after load and its `bufs` are arena handles that are never
+reclaimed, so nothing can dangle. Returning the memo by value is arena-cheap
+on this compiler — **measured**: 3,000 consecutive returns did not move the
+arena.
+
+Pinned by `tests/run-pass/trust_store_load_cached_identity.sio`: field-for-field
+comparison of cached vs fresh across all 150 roots, live trust-store queries
+against the cached store, and 50 loads in one process (fatal before, free
+after). `tests/run-pass/{x509_*,tls*,pem_*}`: **35 pass, 0 fail**.
+
+### Filed
+Not a GitHub issue. Recorded here and in the dispatch per this file's
+convention. **Next highest-value work is unchanged from D12's own nomination:
+`x509_parse_certificate`'s ~8.8–11.5 MB per call**, now the sole term in a
+trust-store load and the dominant term in every handshake.
