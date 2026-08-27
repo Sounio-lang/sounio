@@ -156,7 +156,65 @@ pub fn trust_store_find_by_ski(store: &TrustStore, ski: &[u8; 32], ski_len: i32)
 // covers it with no size argument needed on this call at all.
 const CA_BUNDLE_PATH: string = "/etc/ssl/certs/ca-certificates.crt"
 
+// Process-lifetime memo for trust_store_load (see D16).
+//
+// Each uncached load parses all ~150 roots of the real Debian/Ubuntu CA
+// bundle, and `x509_parse_certificate` spends ~8.8 MB of the Madaros
+// runtime's NEVER-RECLAIMED process arena per call. One load therefore
+// costs ~1.3 GB, and the 8 GiB arena admits only SIX of them before
+// `madaros: arena full` (exit 181, uncatchable) -- measured by
+// `tests/interop/trust_store_load_arena_cost_probe.sio`. Any consumer that
+// calls trust_store_load() once per TLS-using stage (rather than once per
+// process, threading a `&TrustStore` through) hits that wall inside a
+// single ordinary workload; Sounio-lang/conclave-search did, at ~14 loads
+// for one query.
+//
+// Memoising here fixes every such consumer without a source change on
+// their side, and is sound because the store is immutable after load and
+// its `bufs` are arena handles that are never reclaimed for the life of
+// the process -- there is nothing to invalidate. Callers that genuinely
+// need a re-read from disk (probes measuring the uncached cost, tests
+// exercising a changed CA bundle) call `trust_store_load_uncached`.
+//
+// Returning the memo by value is arena-cheap on this compiler: 3,000
+// consecutive returns of a cached TrustStore did not move the arena at all
+// (large aggregates are not deep-copied per element here), so this does
+// not trade one arena leak for another.
+var TRUST_STORE_CACHE: TrustStore = TrustStore {
+    certs: [certificate_zero(); 512],
+    bufs: [rawbuf_new(1); 512],
+    count: 0,
+}
+// 0 = cold, 1 = loaded successfully, 2 = load attempted and failed
+var TRUST_STORE_CACHE_STATE: i64 = 0
+var TRUST_STORE_CACHE_ERR: i64 = 0
+
 pub fn trust_store_load() -> (TrustStore, i64) with IO, Mut, Div, Panic {
+    if TRUST_STORE_CACHE_STATE == 1 {
+        return (TRUST_STORE_CACHE, 0)
+    }
+    if TRUST_STORE_CACHE_STATE == 2 {
+        // A failed load is memoised too: retrying it costs another ~1.3 GB
+        // of unreclaimable arena and, since the failure modes are "CA
+        // bundle unreadable" and "CA bundle malformed", cannot succeed on
+        // a later call within the same process.
+        return (TRUST_STORE_CACHE, TRUST_STORE_CACHE_ERR)
+    }
+    let (loaded, err) = trust_store_load_uncached()
+    if err == 0 {
+        TRUST_STORE_CACHE = loaded
+        TRUST_STORE_CACHE_STATE = 1
+        return (TRUST_STORE_CACHE, 0)
+    }
+    TRUST_STORE_CACHE_STATE = 2
+    TRUST_STORE_CACHE_ERR = err
+    (loaded, err)
+}
+
+// The real loader: reads and re-parses the whole CA bundle every call.
+// ~1.3 GB of never-reclaimed arena per call -- call `trust_store_load`
+// instead unless you specifically need to bypass the memo.
+pub fn trust_store_load_uncached() -> (TrustStore, i64) with IO, Mut, Div, Panic {
     var store = TrustStore {
         certs: [certificate_zero(); 512],
         bufs: [rawbuf_new(1); 512],
