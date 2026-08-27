@@ -46,8 +46,6 @@ command -v node >/dev/null 2>&1 || fail 'node is required'
 mkdir -p "$REPO/bin" "$REPO/scripts/dev"
 cp "$ROOT_DIR/bin/sounio-coord" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/"*
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Wake Selftest'
@@ -478,24 +476,6 @@ coord "$SECOND" endpoint-register --agent codex --lane recipient --harness codex
 coord "$SECOND" release --agent codex --lane recipient --reason 'lifecycle sabotage' >/dev/null
 if coord "$SECOND" endpoint-status --agent codex --lane recipient >/dev/null 2>&1; then
   fail 'claim release left a delivery endpoint active'
-fi
-
-hook_event="{\"session_id\":\"hook-wake\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}"
-printf '%s\n' "$hook_event" | env \
-  SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DIR="$STATE" \
-  TMUX="$SOCKET,1,0" TMUX_PANE="$pane" \
-  python3 "$SECOND/scripts/dev/sounio_coord_agent_hook.py" --agent codex >/dev/null
-output="$(coord "$SECOND" endpoint-status --agent codex --lane session-hook-wake)"
-grep -q '^ENDPOINT_STATUS .* state=active .* harness=codex transport=tmux ' <<< "$output" || \
-  fail 'session hook did not auto-register its verified tmux endpoint'
-
-hook_event="{\"session_id\":\"hook-wake\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionEnd\"}"
-printf '%s\n' "$hook_event" | env \
-  SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_DIR="$STATE" \
-  TMUX="$SOCKET,1,0" TMUX_PANE="$pane" \
-  python3 "$SECOND/scripts/dev/sounio_coord_agent_hook.py" --agent codex >/dev/null
-if coord "$SECOND" endpoint-status --agent codex --lane session-hook-wake >/dev/null 2>&1; then
-  fail 'session end left its delivery endpoint active'
 fi
 
 # A hook from a successor process may see the durable message, but it cannot

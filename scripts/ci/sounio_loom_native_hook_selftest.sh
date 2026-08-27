@@ -15,8 +15,22 @@ SIBLING_ADDED=0
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 SESSION_ID="native-hook-selftest-$$"
 SESSION_LANE="session-${SESSION_ID:0:24}"
+TMUX_SOCKET="$TEST_ROOT/native-hook-tmux.sock"
+TMUX_SESSION="native-hook-$$"
+TMUX_SESSION_ID="native-tmux-selftest-$$"
+TMUX_SESSION_LANE="session-${TMUX_SESSION_ID:0:24}"
+TMUX_HARNESS="$TEST_ROOT/codex"
+TMUX_HARNESS_SCRIPT="$TEST_ROOT/native-hook-harness.sh"
+TMUX_READY="$TEST_ROOT/native-hook.ready"
+TMUX_LOG="$TEST_ROOT/native-hook-tmux.log"
+WRONG_CWD_SESSION="native-hook-wrong-cwd-$$"
+WRONG_CWD_ID="native-tmux-wrong-cwd-$$"
+WRONG_CWD_LANE="session-${WRONG_CWD_ID:0:24}"
+WRONG_CWD_READY="$TEST_ROOT/native-hook-wrong-cwd.ready"
+WRONG_CWD_LOG="$TEST_ROOT/native-hook-wrong-cwd.log"
 
 cleanup() {
+  tmux -S "$TMUX_SOCKET" kill-server >/dev/null 2>&1 || true
   SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
     "$ROOT_DIR/bin/sounio-coord" obligation-supervisor-stop \
     --timeout-seconds 5 >/dev/null 2>&1 || true
@@ -40,6 +54,28 @@ run_hook() {
   set -e
 }
 
+wait_for_file() {
+  local path="$1" attempt
+  for attempt in $(seq 1 100); do
+    [[ -f "$path" ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+wait_for_endpoint_absence() {
+  local lane="$1" attempt
+  for attempt in $(seq 1 100); do
+    if ! SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+      "$ROOT_DIR/bin/sounio-coord" endpoint-status \
+      --agent codex --lane "$lane" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 mkdir -p "$SENTINEL_DIR"
 for forbidden in python python3 pypy pypy3 cargo rustc; do
   printf '#!/usr/bin/env bash\nprintf prohibited >%q\nexit 97\n' "$SENTINEL_MARKER" \
@@ -60,6 +96,7 @@ export SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$AUTHORITY_RUNTIME"
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$DECISION_LOG"
 export SOUNIO_LOOM_HOOK_TEST_MODE=1
 export SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1
+export SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST=1
 unset TMUX TMUX_PANE SOUNIO_AGENTD_SOCKET SOUNIO_AGENTD_TOKEN_FILE SOUNIO_AGENTD_WORKTREE
 
 session_start="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$SESSION_ID\",\"cwd\":\"$ROOT_DIR\"}"
@@ -260,5 +297,104 @@ status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
   "$ROOT_DIR/bin/sounio-coord" status)"
 [[ "$status" != *"session-$SESSION_ID"* ]] || fail "SessionEnd left an active native-hook claim"
 
+command -v tmux >/dev/null 2>&1 || fail 'tmux is required for the native endpoint fixture'
+cp "$(command -v bash)" "$TMUX_HARNESS"
+chmod 0755 "$TMUX_HARNESS"
+cat >"$TMUX_HARNESS_SCRIPT" <<'HARNESS'
+#!/usr/bin/env bash
+set -euo pipefail
+
+loom="$1"
+root="$2"
+session_id="$3"
+ready="$4"
+log="$5"
+session_start="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$session_id\",\"cwd\":\"$root\"}"
+printf '%s\n' "$session_start" | "$loom" agent-hook --agent codex >>"$log" 2>&1
+: >"$ready"
+while IFS= read -r input; do
+  if [[ "$input" == __END__ ]]; then
+    event="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$session_id\",\"cwd\":\"$root\"}"
+    printf '%s\n' "$event" | "$loom" agent-hook --agent codex >>"$log" 2>&1
+    break
+  fi
+  event="{\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"$session_id\",\"cwd\":\"$root\"}"
+  printf '%s\n' "$event" | "$loom" agent-hook --agent codex >>"$log" 2>&1
+done
+HARNESS
+chmod 0755 "$TMUX_HARNESS_SCRIPT"
+
+mkdir -p "$TEST_ROOT/not-a-repository"
+tmux -S "$TMUX_SOCKET" new-session -d -s "$WRONG_CWD_SESSION" \
+  -c "$TEST_ROOT/not-a-repository" \
+  "$TMUX_HARNESS '$TMUX_HARNESS_SCRIPT' '$LOOM' '$ROOT_DIR' '$WRONG_CWD_ID' '$WRONG_CWD_READY' '$WRONG_CWD_LOG'"
+wait_for_file "$WRONG_CWD_READY" || fail 'wrong-cwd native harness did not start'
+wrong_cwd_capability="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" hook-capability-status \
+  --agent codex --lane "$WRONG_CWD_LANE")"
+[[ "$wrong_cwd_capability" == *'state=NATIVE_HOOK_ATTESTED wake_eligible=0 '* ]] ||
+  fail "wrong-cwd harness omitted its local native attestation: $wrong_cwd_capability"
+if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" endpoint-status \
+  --agent codex --lane "$WRONG_CWD_LANE" >/dev/null 2>&1; then
+  fail 'native hook registered a tmux pane whose current path was not the session repository'
+fi
+tmux -S "$TMUX_SOCKET" kill-session -t "$WRONG_CWD_SESSION"
+
+missing_pane_id="native-tmux-missing-pane-$$"
+missing_pane_lane="session-${missing_pane_id:0:24}"
+missing_pane_event="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$missing_pane_id\",\"cwd\":\"$ROOT_DIR\"}"
+missing_pane_output="$(printf '%s\n' "$missing_pane_event" | env \
+  TMUX="$TMUX_SOCKET,1,0" TMUX_PANE='%99999' \
+  "$TMUX_HARNESS" -c 'read -r event; printf "%s\n" "$event" | "$1" agent-hook --agent codex' \
+  _ "$LOOM" 2>&1)"
+[[ "$missing_pane_output" == *'Sounio coordination joined:'* ]] ||
+  fail "missing-pane native hook did not complete lifecycle registration: $missing_pane_output"
+if SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" endpoint-status \
+  --agent codex --lane "$missing_pane_lane" >/dev/null 2>&1; then
+  fail 'native hook registered a nonexistent tmux pane'
+fi
+
+tmux -S "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" -c "$ROOT_DIR" \
+  "$TMUX_HARNESS '$TMUX_HARNESS_SCRIPT' '$LOOM' '$ROOT_DIR' '$TMUX_SESSION_ID' '$TMUX_READY' '$TMUX_LOG'"
+wait_for_file "$TMUX_READY" || fail 'native tmux harness did not start'
+tmux_pane="$(tmux -S "$TMUX_SOCKET" display-message -p -t "$TMUX_SESSION" '#{pane_id}')"
+endpoint_status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" endpoint-status \
+  --agent codex --lane "$TMUX_SESSION_LANE")"
+[[ "$endpoint_status" == *" state=active "* && \
+  "$endpoint_status" == *" transport=tmux address=$tmux_pane "* ]] ||
+  fail "native hook omitted its verified tmux endpoint: $endpoint_status"
+
+SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" claim --agent sender --lane native-tmux-fixture \
+  --intent 'native tmux wake fixture sender' --files native-tmux-fixture.test >/dev/null
+wake_output="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  SOUNIO_COORD_DURABLE_OBLIGATIONS=0 SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS=5000 \
+  "$ROOT_DIR/bin/sounio-coord" send --agent sender --lane native-tmux-fixture \
+  --to-agent codex --to-lane "$TMUX_SESSION_LANE" --kind request \
+  --message 'native OCaml tmux wake fixture')"
+wake_message="$(sed -n 's/^SENT message_id=\([^ ]*\).*/\1/p' <<<"$wake_output")"
+[[ -n "$wake_message" ]] || fail 'native tmux wake returned no message id'
+grep -q "^WAKE_STARTED message_id=$wake_message .*address=$tmux_pane .*generation=" \
+  <<<"$wake_output" || fail "native hook did not confirm the tmux wake: $wake_output"
+message_status="$(SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" message-status --agent sender \
+  --lane native-tmux-fixture --message "$wake_message")"
+grep -q 'injected=1 .*wakes=1 wake_pending=0$' <<<"$message_status" ||
+  fail "native tmux wake did not close its durable handshake: $message_status"
+grep -q "MESSAGE id=$wake_message " "$TMUX_LOG" ||
+  fail 'native prompt hook did not read the durable message body after the metadata wake'
+
+tmux -S "$TMUX_SOCKET" send-keys -l -t "$tmux_pane" '__END__'
+tmux -S "$TMUX_SOCKET" send-keys -t "$tmux_pane" Enter
+wait_for_endpoint_absence "$TMUX_SESSION_LANE" ||
+  fail 'native SessionEnd left its tmux endpoint active'
+tmux -S "$TMUX_SOCKET" kill-session -t "$TMUX_SESSION" >/dev/null 2>&1 || true
+SOUNIO_COORD_DIR="$COORD_DIR" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$ROOT_DIR/bin/sounio-coord" release --agent sender --lane native-tmux-fixture \
+  --reason 'native tmux fixture complete' >/dev/null
+
 printf '%s\n' \
-  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio session=roundtrip hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused log_redirect=refused decision_receipt=complete python=not-executed rust=not-executed'
+  'sounio-loom-native-hook-selftest: PASS language=OCaml semantic_authority=Sounio session=roundtrip hook_state=NATIVE_HOOK_ATTESTED production_wake_eligible=no source_binding_tamper=refused direct_shell_mint=refused exec_shell_mint=refused prompt_boundary=injected retry_supervisor=live tmux_endpoint=native tmux_wake=started missing_pane=refused wrong_cwd_pane=refused writes=authorized outside_write=refused sibling_worktree=refused pathless_write=refused malformed=refused strict_json=refused duplicate_json=refused policy_missing=refused policy_tamper=refused runtime_tamper=refused log_redirect=refused decision_receipt=complete python=not-executed rust=not-executed'

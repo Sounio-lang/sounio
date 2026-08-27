@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.34
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.27.35
 
 usage() {
   cat <<'USAGE'
@@ -1595,8 +1595,14 @@ native_hook_caller_matches_presence() {
 
 native_hook_wake_selftest_fixture() {
   [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == local && \
-    "${SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST:-0}" == 1 && \
-    "$STATE_DIR" == "${TMPDIR:-/tmp}"/sounio-coord-wake-selftest.*/state ]]
+    "${SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST:-0}" == 1 ]] || return 1
+  case "$STATE_DIR" in
+    "${TMPDIR:-/tmp}"/sounio-coord-wake-selftest.*/state) return 0 ;;
+    "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord)
+      [[ "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 HOOK_CAPABILITY_REASON='absent'

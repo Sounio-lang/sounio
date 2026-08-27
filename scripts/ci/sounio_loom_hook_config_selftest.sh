@@ -73,7 +73,7 @@ grep -Fq '"matcher": "Write|Edit|MultiEdit|NotebookEdit"' "$CLAUDE_HOOKS" ||
 runtime_info="$($ROOT_DIR/bin/sounio-loom runtime-info)"
 grep -Fq 'selection=shared' <<< "$runtime_info" ||
   fail "hook launcher did not select the shared runtime"
-grep -Fq 'runtime_version=2026.08.27.30' <<< "$runtime_info" ||
+grep -Fq 'runtime_version=2026.08.27.35' <<< "$runtime_info" ||
   fail "hook launcher selected the wrong runtime version"
 
 run_native_roundtrip codex
@@ -87,4 +87,4 @@ if validate_no_legacy_bridge "$TEST_ROOT/codex-sabotaged.json"; then
 fi
 
 printf '%s\n' \
-  'sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 roundtrip=codex+claude bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused runtime=2026.08.27.30'
+  'sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 roundtrip=codex+claude bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused runtime=2026.08.27.35'

@@ -128,6 +128,15 @@ revalidates the socket, pane, process, harness, worktree, and generation before
 any wake. Missing or inconsistent tmux identity creates no endpoint and cannot
 be promoted by the native-hook capability alone.
 
+Runtime `2026.08.27.35` adds an executable native tmux fixture. It launches an
+exact `codex` harness process in a real tmux pane, crosses the OCaml SessionStart
+and UserPromptSubmit boundaries, and requires a generation-bound `WAKE_STARTED`
+with `injected=1`, `wakes=1`, and `wake_pending=0`. Separate panes prove that a
+nonexistent pane and a pane whose current directory is not the session repository
+create no endpoint. The fixture's wake exception requires local runtime mode,
+both native-hook selftest flags, and an exact temporary state-root shape; its
+capability remains `wake_eligible=0` and cannot authorize a production wake.
+
 ## Deliberate Boundary
 
 V1 does not yet attach to Exec/Bash. Treating all shell commands as semantic
