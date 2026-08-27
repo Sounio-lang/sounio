@@ -1432,3 +1432,156 @@ observed. If it recurs, print the `x509_verify_chain` return value *together
 with the name of the function that produced it*, plus `not_before_unix`,
 `not_after_unix` and `now_unix` from the same process, before re-opening a
 parser hypothesis.
+
+## D18 — the live-handshake `CHAIN_ERR_EXPIRED` is a scalar-field offset defect on `ChainCandidate`, not a handshake-framing defect
+
+**Status:** reported symptom **ROOT-CAUSED and FIXED**. The handshake is
+**still blocked**, on a second, distinct instance of the same defect class,
+which is characterised here and deliberately **NOT fixed** (it is a compiler
+defect; CLAUDE.md §8 forbids patching `self-hosted/` ad hoc).
+
+**Full forensic dispatch:**
+[`docs/audit/D18_CHAIN_CANDIDATE_SCALAR_FIELD_OFFSET_DISPATCH_2026-08-27.md`](../audit/D18_CHAIN_CANDIDATE_SCALAR_FIELD_OFFSET_DISPATCH_2026-08-27.md)
+
+### Reported symptom
+D17 refuted the empty-Subject hypothesis by testing the parser on a
+statically-extracted PEM, but never drove a live handshake. Re-run through a
+real `tls_connect` against the deployed `10.96.250.10:443`, on D17's own fix
+commit `ece1420be` and a byte-identical CA bundle, it still fails:
+`chain_result = -2` for a chain `openssl verify` accepts.
+
+### Part 1 — the framing hypothesis is refuted
+The proposed cause was that `decode_certificate_message` mis-strips the TLS
+1.3 CertificateEntry framing (3-byte cert length, 2-byte extensions block).
+Measured on the live wire bytes, it does not:
+
+| Measurement | Expected | Observed |
+|---|---:|---:|
+| `cert_len` | 398 | **398** |
+| first 4 bytes of `leaf_buf` | `30 82 01 7D` | **48, 130, 1, 125** |
+| `leaf_buf.cap` | 393 | **393** |
+| byte-sum of `leaf_buf[0..385]` | 30515 | **30515** |
+| `intermediate_count` | 0 | **0** |
+
+The reference values come from the server's own DER, captured separately with
+`openssl s_client -showcerts`. The framing also reconciles exactly:
+`4+1+3+3+385+2 = 398`, nothing left over. **Extraction is byte-perfect.**
+
+### Part 2 — actual root cause of the −2 (fixed)
+`ChainCandidate` is `{ certs: [Certificate; 11], bufs: [RawBuf; 11], len: i32 }`
+— ~506 KB per element, ~8 MB for the `[ChainCandidate; 16]` array. **Scalar-field
+access through an element of that array resolves to a wrong offset landing
+inside the element's own `bufs`:**
+
+| Measurement | Expected | Observed |
+|---|---:|---:|
+| `rc.len` at record time (plain local) | 2 | **2** ✓ |
+| `candidates[i].len` right after `candidates[i] = rc` | 2 | **503099** ✗ |
+| `candidates[0].len` straight out of the `len: 0` initialiser | 0 | **495821** ✗ |
+| `candidates[0].bufs[0].cap` (from `rawbuf_new(1)`) | 1 | **255** ✗ |
+| `path_len` reaching `chain_verify_path` | 2 | **504725** ✗ |
+
+The garbage tracks arena state (it moves run to run; the two candidates differ
+by a constant 428 every time) — they are arena pointers. `chain_verify_path`
+then walks past the real path into zeroed slots whose `not_after_unix` is `0`,
+and `now_unix > 0`, so it reports `CHAIN_ERR_EXPIRED`.
+
+Reads and writes share the same wrong offset, so they are self-consistent —
+which makes the obvious repair a trap, and it was measured and rejected:
+`candidates[0].len = 7` reads back `7`, but clobbers `bufs[0].cap` from 1 to 0
+and makes `bufs[10].cap` **segfault**. Taking a *reference* to a whole array
+field (`&candidates[c].certs`) is unaffected.
+
+**Why D17 could not see it:** it is a cross-module / imported-module native
+path defect (CLAUDE.md §13's D3/D4 family). From a test module the same calls
+give `CHAIN_OK`. `chain.sio`'s own 2026-08-25 comment already recorded this
+symptom — a known-good chain returning −2 — and guessed "a second, still-live
+instance of the same defect class". It was right; this entry gives the
+mechanism. **The existing `tests/run-pass/x509_*` tests structurally cannot
+catch it**, and no new single-module test can either.
+
+**Fix:** `x509_verify_chain`'s inlined DFS no longer materialises paths into
+`[ChainCandidate; 16]`. Each path is verified in place, at the moment the DFS
+reaches a trusted root, while `path_certs`/`path_bufs`/`depth` are still plain
+locals. Search order, first-`CHAIN_OK` early return, hostname/OCSP checks, the
+`MAX_CHAIN_CANDIDATES` cap and "deepest failure wins" reporting are all
+preserved. It also drops ~8 MB of never-reclaimed arena per verification
+(D12/D16). `chain_build_candidates`, the non-shipping duplicate, is left alone
+per the standing instruction that kept the inlined copy.
+
+### Part 3 — the next blocker (characterised, NOT fixed)
+With the path length correct, verification proceeds and fails
+`CHAIN_ERR_BAD_SIGNATURE` (−6), then exhausts the arena on the second
+candidate. This is **not** a crypto gap: the chain is `ecdsa-with-SHA256` over
+P-256 throughout (deliberately chosen to dodge D15's SHA-384 hole) and
+`openssl verify` returns OK.
+
+Instrumented **at `x509_parse_certificate`'s return** inside
+`stdlib/tls/handshake.sio`:
+
+| Field of the returned `Certificate` | True | Observed |
+|---|---:|---:|
+| `tbs_start` | 4 | **255** ✗ |
+| `tbs_len` | 295 | **44** ✗ |
+| `not_before_unix` | 1787792973 | **1787792973** ✓ |
+| `not_after_unix` | 1795568973 | **1795568973** ✓ |
+
+Two things make this distinct from Part 2: it is corrupt **at the callee's
+return**, before any tuple/array/struct copy — so the large 6-tuple return is
+**exonerated**, not implicated; and the corrupt fields are `Certificate`'s
+**2nd and 3rd** members while much later members are correct, so it is not a
+monotonic layout divergence. `x509_verify_signature` hashes `tbs_start..+tbs_len`,
+so it hashes the wrong 44 bytes and fails.
+
+**Consequence: a real TLS handshake against these endpoints cannot complete
+until this compiler defect is fixed**, regardless of further `stdlib/` work.
+`10.96.250.20:443` presents an identically-shaped leaf and behaves the same.
+
+**This is D2's family** (this file, "large-aggregate struct cross-module
+arity-mismatch segfault"): fixed-size-array struct, corrupt across a module
+boundary, and D2's own repros crash **only** cross-module, never
+single-module — the same split seen here. Start from
+`docs/handoff/repros/d2_*.sio`, not from scratch. D2's variable is aggregate
+*parameter* arity; the natural next experiment is aggregate *return* values,
+which is the shape `x509_parse_certificate` has.
+
+Four single-module synthetic repros failed to reproduce the offset defect
+(including at the real ~46 KB element magnitude with the real field shape);
+the one shape that did misbehave returned **255** — the same value seen for
+`bufs[0].cap` and `tbs_start` on the live path.
+
+### Test evidence
+Worktree compiler (`SOUC_BIN=$PWD/bin/souc`), `SOUNIO_TEST_JOBS=4`, only
+`chain.sio` differing between columns:
+
+| Pattern | Clean tree (`ece1420be`) | With the D18 fix |
+|---|---|---|
+| `x509` | 11 pass / 13 fail / 3 skip | **13 pass / 11 fail / 3 skip** |
+| `tls` | — | **7 / 0** |
+| `pem` | — | **2 / 0** |
+
+No regressions — the 11 remaining failures are a **strict subset** of the
+baseline 13; `x509_chain_adversarial.sio` and
+`x509_chain_forged_root_dn_collision.sio` flip fail → pass. The 11 are
+pre-existing and consistent with Part 3 (`tests/run-pass/` programs are
+cross-module too); `x509_chain_verify_positive.sio` now fails one step later,
+at `-7` rather than in path verification.
+
+> Two harness notes that cost time here. (1) `run_sio_test_suite.sh` defaults
+> to the **shared** `/workspace/sounio/bin/souc`, not your worktree's — from a
+> worktree that fails *every* test, including ones unrelated to your diff,
+> which reads as a catastrophic regression. Always pass
+> `SOUC_BIN=$PWD/bin/souc SOUNIO_STDLIB_PATH=$PWD/stdlib`. (2) It defaults to
+> `nproc` parallel jobs (64 on this pod) and **recycled the workspace pod**
+> mid-run, exactly as CLAUDE.md §4 warns; use `SOUNIO_TEST_JOBS=4`.
+>
+> D17 recorded `x509` at 24 pass / 0 fail; re-measured at D17's own commit it
+> is 11 pass / 13 fail / 3 skip. Most likely the two figures are measurements
+> of two different binaries (see note 1), not a regression between them —
+> flagged rather than silently reconciled.
+
+### Filed
+Not a GitHub issue. Recorded here and in the dispatch per this file's
+convention. **Next highest-value work: the Part 3 compiler defect** —
+`x509_parse_certificate`'s returned `Certificate` carrying wrong
+`tbs_start`/`tbs_len` across a module boundary.
