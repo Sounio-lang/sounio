@@ -1954,6 +1954,9 @@ struct Options {
   std::string fixture_manifest;
   std::string fixture_bundle;
   std::string barrier_runtime;
+  std::string host_barrier_runtime;
+  std::string systemd_run;
+  std::string systemctl;
   std::string frame;
   std::string second_frame;
   std::string journal;
@@ -1998,6 +2001,12 @@ Options parse_options(int argc, char** argv) {
       options.fixture_bundle = value;
     } else if (argument == "--barrier-runtime") {
       options.barrier_runtime = value;
+    } else if (argument == "--host-barrier-runtime") {
+      options.host_barrier_runtime = value;
+    } else if (argument == "--systemd-run") {
+      options.systemd_run = value;
+    } else if (argument == "--systemctl") {
+      options.systemctl = value;
     } else if (argument == "--frame") {
       options.frame = value;
     } else if (argument == "--second-frame") {
@@ -2058,6 +2067,14 @@ void require_exec_quorum_selftest_artifacts(const Options& options) {
   }
 }
 
+void require_host_exec_quorum_selftest_artifacts(const Options& options) {
+  require_exec_quorum_selftest_artifacts(options);
+  if (options.host_barrier_runtime.empty() || options.systemd_run.empty() ||
+      options.systemctl.empty()) {
+    throw Error("host barrier runtime, systemd-run, and systemctl are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2096,6 +2113,15 @@ int main(int argc, char** argv) {
           options.controller_runtime, options.fixture_manifest,
           options.fixture_bundle, options.resident_runtime,
           options.barrier_runtime);
+    }
+    if (options.mode == "--selftest-host-exec-quorum") {
+      require_host_exec_quorum_selftest_artifacts(options);
+      return selftest_host_exec_quorum(
+          options.controller_root, options.controller_manifest,
+          options.controller_runtime, options.fixture_manifest,
+          options.fixture_bundle, options.resident_runtime,
+          options.barrier_runtime, options.host_barrier_runtime,
+          options.systemd_run, options.systemctl);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");
