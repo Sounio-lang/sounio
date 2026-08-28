@@ -1,0 +1,268 @@
+//! Sounio-owned ingestion boundary for Apple CPU material envelopes.
+//!
+//! This module maps transport and raw C++ facts into a typed admission state.
+//! It never promotes an unsealed C++ summary into a material observation.
+
+use hardware::pireus::apple_cpu_dependency_latency_interface_feasibility::{
+    PIREUS_INTERFACE_VERDICT_UNASSESSED,
+}
+
+pub const PIREUS_APPLE_MATERIAL_INGEST_INVALID: i64 = 709900
+pub const PIREUS_APPLE_MATERIAL_INGEST_TRANSPORT_FAILURE: i64 = 709901
+pub const PIREUS_APPLE_MATERIAL_INGEST_FACTS_UNSEALED: i64 = 709902
+
+pub struct PireusAppleMaterialIngestionResult {
+    pub valid: bool,
+    pub status: i64,
+    pub transport_failure: bool,
+    pub material_facts_present: bool,
+    pub parity_receipt_valid: bool,
+    pub material_observation_ready: bool,
+    pub classification_requested: bool,
+    pub classification_allowed: bool,
+    pub semantic_verdict_emitted_by_child: bool,
+    pub cost_present: bool,
+    pub claim_ready: bool,
+    pub authority_verdict: i64,
+}
+
+fn paim_invalid() -> PireusAppleMaterialIngestionResult {
+    PireusAppleMaterialIngestionResult {
+        valid: false,
+        status: PIREUS_APPLE_MATERIAL_INGEST_INVALID,
+        transport_failure: false,
+        material_facts_present: false,
+        parity_receipt_valid: false,
+        material_observation_ready: false,
+        classification_requested: false,
+        classification_allowed: false,
+        semantic_verdict_emitted_by_child: false,
+        cost_present: false,
+        claim_ready: false,
+        authority_verdict: PIREUS_INTERFACE_VERDICT_UNASSESSED,
+    }
+}
+
+fn paim_span_eq(
+    raw: string, start: i64, end: i64, expected: string,
+) -> bool with Mut, Panic {
+    let expected_len = str_len(expected)
+    if end - start != expected_len { return false }
+    var i: i64 = 0
+    while i < expected_len {
+        if str_char_at(raw, start + i) != str_char_at(expected, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn paim_span_starts_with(
+    raw: string, start: i64, end: i64, prefix: string,
+) -> bool with Mut, Panic {
+    let prefix_len = str_len(prefix)
+    if end - start < prefix_len { return false }
+    var i: i64 = 0
+    while i < prefix_len {
+        if str_char_at(raw, start + i) != str_char_at(prefix, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn paim_line_count(raw: string, expected: string) -> i64
+with Mut, Panic {
+    let size = str_len(raw)
+    var count: i64 = 0
+    var start: i64 = 0
+    while start < size {
+        var end = start
+        while end < size && str_char_at(raw, end) != 10 { end = end + 1 }
+        var line_end = end
+        if line_end > start && str_char_at(raw, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        if paim_span_eq(raw, start, line_end, expected) { count = count + 1 }
+        start = end + 1
+    }
+    count
+}
+
+fn paim_prefix_count(raw: string, prefix: string) -> i64
+with Mut, Panic {
+    let size = str_len(raw)
+    var count: i64 = 0
+    var start: i64 = 0
+    while start < size {
+        var end = start
+        while end < size && str_char_at(raw, end) != 10 { end = end + 1 }
+        var line_end = end
+        if line_end > start && str_char_at(raw, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        if paim_span_starts_with(raw, start, line_end, prefix) {
+            count = count + 1
+        }
+        start = end + 1
+    }
+    count
+}
+
+fn paim_nonempty_line_count(raw: string) -> i64 with Mut, Panic {
+    let size = str_len(raw)
+    var count: i64 = 0
+    var start: i64 = 0
+    while start < size {
+        var end = start
+        while end < size && str_char_at(raw, end) != 10 { end = end + 1 }
+        var line_end = end
+        if line_end > start && str_char_at(raw, line_end - 1) == 13 {
+            line_end = line_end - 1
+        }
+        if line_end > start { count = count + 1 }
+        start = end + 1
+    }
+    count
+}
+
+fn paim_has_one(raw: string, expected: string) -> bool with Mut, Panic {
+    paim_line_count(raw, expected) == 1
+}
+
+fn paim_transport_failure_valid(raw: string) -> bool with Mut, Panic {
+    paim_nonempty_line_count(raw) == 28 &&
+        paim_has_one(raw,
+            "schema=pireus-apple-cpu-interface-material-failure.v1") &&
+        paim_has_one(raw, "phase=tailnet_status") &&
+        paim_has_one(raw, "failure_class=TRANSPORT") &&
+        paim_has_one(raw, "exit_code=1") &&
+        paim_has_one(raw, "transport_failure=true") &&
+        paim_has_one(raw, "transport_failure_reason=peer-offline") &&
+        paim_has_one(raw,
+            "login_locator=demetrios@sounio-language-macbook") &&
+        paim_has_one(raw, "transport_address=100.91.184.41") &&
+        paim_prefix_count(raw,
+            "tailnet_status=100.91.184.41    sounio-language-macbook ") == 1 &&
+        paim_has_one(raw, "sounio_source_sha256=d8c7e6f9410c36f6858fb2379efa010a5adbaa32c615d89edc3e764a0606a6be") &&
+        paim_has_one(raw, "sounio_semantics_sha256=6819916ac4240923a149dd95ee9dcbeaba8d3826b7452dd819e177ff62ce8c7f") &&
+        paim_has_one(raw,
+            "authority_commit=ba85ed0689484f747e392783de4f912001153360") &&
+        paim_has_one(raw, "cpp_sha256=b0ac066a1b2bb085296d05b25eac0e8c25d38c8c662d911b806af32c7d6e075f") &&
+        paim_has_one(raw, "toolchain_sha256=3414db5a78a90d416dd1460d7daaa8f89b7e34def45f9a0a9bf243df58ae5c6d") &&
+        paim_has_one(raw, "hardware_sha256=842335c33446d81dc1887fae3e89222fcfcd98a071262dac8bfe8fec65b6a8b6") &&
+        paim_has_one(raw, "command_sha256=dc5e5cd5d56db9eac0455743b36abfa00e01da5e329019c29d0f6463ea8819a4") &&
+        paim_has_one(raw, "preexec_frame_sha256=312a8be683a5f4125e809591c5f44dce1b590d612d5ab1cce4f0c0b611d9cb31") &&
+        paim_has_one(raw, "preexec_decision=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN") &&
+        paim_has_one(raw, "remote_write_started=false") &&
+        paim_has_one(raw, "cpp_execution_requested=false") &&
+        paim_has_one(raw, "cpp_execution_confirmed=false") &&
+        paim_has_one(raw, "producer_language=NONE") &&
+        paim_has_one(raw, "producer_role=TRANSPORT_ONLY") &&
+        paim_has_one(raw, "parity_receipt_valid=false") &&
+        paim_has_one(raw, "classification_requested=false") &&
+        paim_has_one(raw, "semantic_verdict_emitted=false") &&
+        paim_has_one(raw, "cost_present=false") &&
+        paim_has_one(raw, "claim_ready=false") &&
+        paim_prefix_count(raw, "verdict=") == 0 &&
+        paim_line_count(raw, "producer_language=C++") == 0
+}
+
+fn paim_material_summary_valid(raw: string) -> bool with Mut, Panic {
+    paim_has_one(raw, "PIREUS_APPLE_CPU_INTERFACE_MATERIAL_PARITY_V1") &&
+        paim_has_one(raw, "producer_language=C++") &&
+        paim_has_one(raw, "producer_role=MATERIAL_PARITY") &&
+        paim_has_one(raw, "sounio_source_sha256=d8c7e6f9410c36f6858fb2379efa010a5adbaa32c615d89edc3e764a0606a6be") &&
+        paim_has_one(raw, "sounio_semantics_sha256=6819916ac4240923a149dd95ee9dcbeaba8d3826b7452dd819e177ff62ce8c7f") &&
+        paim_has_one(raw,
+            "authority_commit=ba85ed0689484f747e392783de4f912001153360") &&
+        paim_has_one(raw, "semantic_write=false") &&
+        paim_has_one(raw, "expected_result_write=false") &&
+        paim_has_one(raw, "classification_requested=false") &&
+        paim_has_one(raw, "semantic_verdict_emitted=false") &&
+        paim_has_one(raw, "cost_present=false") &&
+        paim_has_one(raw, "measurand_validated=false") &&
+        paim_has_one(raw, "requested_warmups=128") &&
+        paim_has_one(raw, "requested_samples=1001") &&
+        paim_has_one(raw, "candidate_count=6") &&
+        paim_has_one(raw, "hostname=Sounio-Language-MacBook") &&
+        paim_has_one(raw, "os=Darwin") &&
+        paim_has_one(raw, "os_release=27.0.0") &&
+        paim_has_one(raw, "architecture=arm64") &&
+        paim_has_one(raw, "model=Mac17,7") &&
+        paim_has_one(raw, "cpu=Apple M5 Max") &&
+        paim_has_one(raw, "target=J714c") &&
+        paim_has_one(raw, "candidate_0_family=CORE_CYCLE_COUNTER") &&
+        paim_has_one(raw,
+            "candidate_1_family=PROCESS_PMU_CYCLE_EVENT") &&
+        paim_has_one(raw,
+            "candidate_2_family=SYSTEM_TRACE_CYCLE_EVENT") &&
+        paim_has_one(raw,
+            "candidate_3_family=ARCHITECTURAL_TIMER_TICK") &&
+        paim_has_one(raw, "candidate_4_family=OS_MONOTONIC_TIME") &&
+        paim_has_one(raw,
+            "candidate_5_family=FREQUENCY_DERIVED_ESTIMATE") &&
+        paim_has_one(raw, "candidate_5_native_cycle_claim=false") &&
+        paim_has_one(raw, "probe_completed=true") &&
+        paim_prefix_count(raw, "verdict=") == 0 &&
+        paim_line_count(raw, "classification_requested=true") == 0 &&
+        paim_line_count(raw, "semantic_verdict_emitted=true") == 0 &&
+        paim_line_count(raw, "cost_present=true") == 0
+}
+
+pub fn pireus_apple_material_ingest_text(
+    raw: string,
+) -> PireusAppleMaterialIngestionResult with Mut, Panic {
+    if paim_transport_failure_valid(raw) {
+        return PireusAppleMaterialIngestionResult {
+            valid: true,
+            status: PIREUS_APPLE_MATERIAL_INGEST_TRANSPORT_FAILURE,
+            transport_failure: true,
+            material_facts_present: false,
+            parity_receipt_valid: false,
+            material_observation_ready: false,
+            classification_requested: false,
+            classification_allowed: false,
+            semantic_verdict_emitted_by_child: false,
+            cost_present: false,
+            claim_ready: false,
+            authority_verdict: PIREUS_INTERFACE_VERDICT_UNASSESSED,
+        }
+    }
+    if paim_material_summary_valid(raw) {
+        return PireusAppleMaterialIngestionResult {
+            valid: true,
+            status: PIREUS_APPLE_MATERIAL_INGEST_FACTS_UNSEALED,
+            transport_failure: false,
+            material_facts_present: true,
+            parity_receipt_valid: false,
+            material_observation_ready: false,
+            classification_requested: false,
+            classification_allowed: false,
+            semantic_verdict_emitted_by_child: false,
+            cost_present: false,
+            claim_ready: false,
+            authority_verdict: PIREUS_INTERFACE_VERDICT_UNASSESSED,
+        }
+    }
+    paim_invalid()
+}
+
+pub fn pireus_apple_material_ingest_file(
+    path: string,
+) -> PireusAppleMaterialIngestionResult
+with IO, Mut, Panic, Div, Alloc {
+    let size = file_size(path)
+    if size <= 0 || size >= 1048576 { return paim_invalid() }
+    pireus_apple_material_ingest_text(read_file(path))
+}
+
+pub fn pireus_apple_material_ingestion_classification_allowed(
+    result: &PireusAppleMaterialIngestionResult,
+) -> bool {
+    result.valid && result.parity_receipt_valid &&
+        result.material_observation_ready && result.classification_requested &&
+        !result.semantic_verdict_emitted_by_child && !result.cost_present
+}
