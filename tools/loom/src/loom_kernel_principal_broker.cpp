@@ -598,8 +598,16 @@ class ResidentV4 {
     if (poisoned_) throw Error("resident generation poisoned");
     int status = 0;
     const pid_t waited = waitpid(pid_, &status, WNOHANG);
-    if (waited != 0 || process_start_tick(pid_) != start_tick_ ||
-        process_executable(pid_) != runtime_) {
+    bool identity_valid = waited == 0;
+    if (identity_valid) {
+      try {
+        identity_valid = process_start_tick(pid_) == start_tick_ &&
+                         process_executable(pid_) == runtime_;
+      } catch (...) {
+        identity_valid = false;
+      }
+    }
+    if (!identity_valid) {
       poison("resident identity drift");
       throw Error("resident identity drift");
     }
@@ -701,11 +709,13 @@ class ResidentV4 {
     const std::string output = read_response(deadline);
     const std::string prefix = route == 1 ? "SOUNIO_RESIDENT_AUTHORITY_"
                                          : "SOUNIO_KERNEL_EXEC_GRANT_CELL_";
-    if (output.rfind(prefix, 0) != 0 ||
-        output.size() < std::string(" stage=SEMANTICS_FROZEN").size() ||
-        output.substr(output.size() -
-                      std::string(" stage=SEMANTICS_FROZEN").size()) !=
-            " stage=SEMANTICS_FROZEN") {
+    const bool stage_valid =
+        route == 1
+            ? output.ends_with(" stage=SEMANTICS_FROZEN")
+            : (output.ends_with(" stage=SEMANTICS_FROZEN") ||
+               output.ends_with(" stage=SOUNIO_EXECUTABLE") ||
+               output.ends_with(" stage=INVALID"));
+    if (output.rfind(prefix, 0) != 0 || !stage_valid) {
       throw Error("resident decision malformed");
     }
     const std::size_t marker = output.find(" code=");
@@ -1475,10 +1485,12 @@ int selftest_exec_grant_resident(const std::string& exec_grant_manifest_path,
   const std::string generation = resident.generation();
   const ResidentDecision current = resident.decide_exec_grant(current_frame);
   const ResidentDecision python = resident.decide_exec_grant(python_frame);
+  const ResidentDecision malformed = resident.decide_exec_grant("9030 3");
   if (current.code != 491 || python.code != 499 || current.sequence != 1 ||
-      python.sequence != 2 || resident.pid() != pid ||
+      python.sequence != 2 || malformed.code != 424 || malformed.sequence != 3 ||
+      resident.pid() != pid ||
       resident.start_tick() != start_tick || resident.generation() != generation ||
-      resident.sequence() != 2 || resident.poisoned()) {
+      resident.sequence() != 3 || resident.poisoned()) {
     throw Error("resident v4 action 9030 parity selftest diverged");
   }
   std::cout
@@ -1489,7 +1501,7 @@ int selftest_exec_grant_resident(const std::string& exec_grant_manifest_path,
       << " resident_runtime_sha256=" << resident.runtime_sha256()
       << " resident_pid=" << pid << " resident_start_tick=" << start_tick
       << " resident_generation_sha256=" << generation
-      << " sequences=1,2 current=DENY491 python=DENY499"
+      << " sequences=1,2,3 current=DENY491 python=DENY499 malformed=DENY424"
       << " process_identity=stable generation_poisoned=false"
       << " launch_open=false material_grant=false material_execution=false"
       << " exec_attached=false\n";

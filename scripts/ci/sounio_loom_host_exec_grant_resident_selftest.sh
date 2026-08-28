@@ -88,7 +88,7 @@ steady="$($BROKER_ONE --selftest-exec-grant-resident \
   --frame "$CURRENT_FRAME" --second-frame "$PYTHON_FRAME")"
 [[ "$steady" == LOOM_KERNEL_PRINCIPAL_BROKER_RESIDENT_SELFTEST\ PASS* ]] ||
   fail "resident steady-state gate failed: $steady"
-[[ "$steady" == *'sequences=1,2 current=DENY491 python=DENY499'* ]] ||
+[[ "$steady" == *'sequences=1,2,3 current=DENY491 python=DENY499 malformed=DENY424'* ]] ||
   fail 'resident decisions or monotonic sequence diverged'
 [[ "$steady" == *'process_identity=stable generation_poisoned=false'* ]] ||
   fail 'resident process identity was not stable'
@@ -144,7 +144,7 @@ grep -Fq 'START -> REQUEST -> route 5/action 9030 -> RESPONSE' "$GARDEN" ||
 grep -Fq 'A semantic `DENY491` must not write or release' "$GARDEN" ||
   fail 'Garden omitted DENY491 non-release'
 
-printf 'sounio-loom-host-exec-grant-resident-selftest: PASS semantic_authority=Sounio material_producer=C++20+resident-Sounio material_role=MATERIAL_PARITY actions=9024+9030 exec_grant_manifest_sha256=%s resident_manifest_sha256=%s broker_sha256=%s resident_runtime_sha256=%s rebuilds=2 process_identity=stable sequence=monotonic current=DENY491 python=DENY499 exec_manifest_tamper=refused resident_manifest_tamper=refused resident_runtime_tamper=refused death=poisoned timeout=poisoned malformed=poisoned replay_after_poison=refused runtime_dependencies=clean resident_action_9030_attached=local-gate decision_transport_material=true host_socket_attached=false launch_open=false material_grant=false material_execution=false exec_attached=false parity_open=false claim_ready=false\n' \
+printf 'sounio-loom-host-exec-grant-resident-selftest: PASS semantic_authority=Sounio material_producer=C++20+resident-Sounio material_role=MATERIAL_PARITY actions=9024+9030 exec_grant_manifest_sha256=%s resident_manifest_sha256=%s broker_sha256=%s resident_runtime_sha256=%s rebuilds=2 process_identity=stable sequence=monotonic current=DENY491 python=DENY499 malformed=DENY424 exec_manifest_tamper=refused resident_manifest_tamper=refused resident_runtime_tamper=refused death=poisoned timeout=poisoned malformed_output=poisoned replay_after_poison=refused runtime_dependencies=clean resident_action_9030_attached=local-gate decision_transport_material=true host_socket_attached=false launch_open=false material_grant=false material_execution=false exec_attached=false parity_open=false claim_ready=false\n' \
   "$(sha256sum "$EXEC_GRANT_MANIFEST" | cut -d ' ' -f 1)" \
   "$(sha256sum "$RESIDENT_MANIFEST" | cut -d ' ' -f 1)" \
   "$(sha256sum "$BROKER_ONE" | cut -d ' ' -f 1)" \
