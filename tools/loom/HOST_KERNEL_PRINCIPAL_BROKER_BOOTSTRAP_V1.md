@@ -57,8 +57,10 @@ opening the lease journal unless all of the following hold:
 - `LISTEN_PID` names the broker and `LISTEN_FDS=1`;
 - inherited descriptor 3 is an `AF_UNIX` listening socket;
 - the socket path is exactly the configured `/run/sounio` path;
-- the socket inode and parent directory are root-owned and not group/world
-  writable;
+- both the inherited socket descriptor and socket pathname are root-owned; the
+  pathname is mode `0600` and its parent directory is root-owned and not
+  group/world writable (the sockfs descriptor inode and filesystem pathname
+  inode are distinct kernel objects and are not compared for numeric equality);
 - the broker was not entered through `sudo`, `doas`, or another interactive
   privilege-regain environment;
 - the frozen manifest and authority executable are regular, non-symlink,

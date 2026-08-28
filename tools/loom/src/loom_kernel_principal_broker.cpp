@@ -360,8 +360,9 @@ bool inherited_socket_valid(const std::string& expected_path) {
     return false;
   }
   return S_ISSOCK(descriptor_info.st_mode) && S_ISSOCK(path_info.st_mode) &&
-         descriptor_info.st_ino == path_info.st_ino && path_info.st_uid == 0 &&
-         path_info.st_gid == 0 && (path_info.st_mode & 0777) == 0600 &&
+         descriptor_info.st_uid == 0 && descriptor_info.st_gid == 0 &&
+         path_info.st_uid == 0 && path_info.st_gid == 0 &&
+         (path_info.st_mode & 0777) == 0600 &&
          S_ISDIR(directory_info.st_mode) && directory_info.st_uid == 0 &&
          directory_info.st_gid == 0 &&
          (directory_info.st_mode & (S_IWGRP | S_IWOTH)) == 0;
