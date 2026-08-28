@@ -46,8 +46,31 @@ static_assert(LOOM_EFFECT_POLICY_VERSION == 3 ||
               LOOM_EFFECT_POLICY_VERSION == 4 ||
               LOOM_EFFECT_POLICY_VERSION == 5 ||
               LOOM_EFFECT_POLICY_VERSION == 6 ||
-              LOOM_EFFECT_POLICY_VERSION == 7);
-#if LOOM_EFFECT_POLICY_VERSION == 7
+              LOOM_EFFECT_POLICY_VERSION == 7 ||
+              LOOM_EFFECT_POLICY_VERSION == 8);
+#if LOOM_EFFECT_POLICY_VERSION == 8
+constexpr std::string_view kPolicyManifestSha256 =
+    "f97bd4c3c8cd93978da27b361bc7fec3d8316775fb58a9a4bf94ddf53513293a";
+constexpr std::string_view kPolicySchema =
+    "loom-process-witness-effect-policy-plan-v8-freeze-v1";
+constexpr std::string_view kPolicyBundleSha256 =
+    "470e670b13602ca3131170d3e09d6fe7045b602867209d356707018471a18f0d";
+constexpr std::string_view kPolicyRootPath =
+    "/loom/effect-policy-v8.freeze.v1";
+constexpr std::string_view kPolicyFilename = "effect-policy-v8.freeze.v1";
+constexpr std::string_view kSelftestPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V8_SELFTEST PASS";
+constexpr std::string_view kReadyPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V8_ROOT_READY PASS";
+constexpr std::string_view kVersionRootReceipt =
+    " systemd_mount=/run/systemd/incoming systemd_sys_mount=/sys"
+    " systemd_sys_ready_filesystem=sysfs systemd_sys_ready_read_only=true"
+    " var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP"
+    " principal_readable=false principal_enumeration=forbidden"
+    " empty_observer=ROOT_HOST mount_observer=ROOT_HOST"
+    " extinction_observer=ROOT_HOST"
+    " typed_file_bounds=effect-cell-16MiB+payload-1MiB+manifests-64KiB";
+#elif LOOM_EFFECT_POLICY_VERSION == 7
 constexpr std::string_view kPolicyManifestSha256 =
     "cc7ca5a17babb43e145678879607b2804bdbfc66665f994b73f8649c86e420d9";
 constexpr std::string_view kPolicySchema =
@@ -163,20 +186,27 @@ std::string sha256(std::string_view value) {
   return sha256(value.data(), value.size());
 }
 
-std::string read_regular_file(const std::string& path,
-                              std::size_t maximum = 128 * 1024) {
+std::string read_regular_file(
+    const std::string& path, std::size_t maximum = 128 * 1024,
+    std::string_view object = "policy_manifest") {
   struct stat info {};
-  if (lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
-      info.st_nlink != 1 || info.st_size <= 0 ||
+  if (lstat(path.c_str(), &info) != 0) {
+    throw Error("bounded root file stat failed: object=" +
+                std::string(object) + " path=" + path +
+                " configured_max=" + std::to_string(maximum));
+  }
+  if (!S_ISREG(info.st_mode) || info.st_nlink != 1 || info.st_size <= 0 ||
       static_cast<std::uint64_t>(info.st_size) > maximum) {
-    throw Error("policy manifest is not one bounded regular file");
+    throw Error("bounded root file rejected: object=" + std::string(object) +
+                " observed_size=" + std::to_string(info.st_size) +
+                " configured_max=" + std::to_string(maximum));
   }
   std::ifstream input(path, std::ios::binary);
-  if (!input) throw Error("cannot open policy manifest");
+  if (!input) throw Error("cannot open bounded root file: " + std::string(object));
   std::string contents((std::istreambuf_iterator<char>(input)),
                        std::istreambuf_iterator<char>());
   if (input.bad() || contents.size() != static_cast<std::size_t>(info.st_size)) {
-    throw Error("cannot read policy manifest");
+    throw Error("cannot read bounded root file: " + std::string(object));
   }
   return contents;
 }
@@ -198,7 +228,12 @@ void require_line(std::string_view contents, std::string_view line) {
 }
 
 std::string load_policy_manifest(const std::string& path) {
+#if LOOM_EFFECT_POLICY_VERSION == 8
+  const std::string contents =
+      read_regular_file(path, 64 * 1024, "policy_manifest");
+#else
   const std::string contents = read_regular_file(path, 32 * 1024 * 1024);
+#endif
   const std::string digest = sha256(contents);
   if (digest != kPolicyManifestSha256) {
     throw Error("frozen Sounio V3 policy manifest hash mismatch");
@@ -246,7 +281,45 @@ std::string load_policy_manifest(const std::string& path) {
   require_line(contents, "schema=" + std::string(kPolicySchema));
   require_line(contents,
                "bundle_sha256=" + std::string(kPolicyBundleSha256));
-#if LOOM_EFFECT_POLICY_VERSION == 7
+#if LOOM_EFFECT_POLICY_VERSION == 8
+  for (const std::string_view line : {
+           "effect_cell_min_bytes=1",
+           "effect_cell_max_bytes=16777216",
+           "payload_min_bytes=1",
+           "payload_max_bytes=1048576",
+           "policy_manifest_min_bytes=1",
+           "policy_manifest_max_bytes=65536",
+           "payload_manifest_min_bytes=1",
+           "payload_manifest_max_bytes=65536",
+           "file_identity=size+root_owned+single_link+non_writable+sha256",
+           "file_bound_diagnostic=object+observed_size+configured_max",
+           "systemd_mount_path=/run/systemd/incoming",
+           "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
+           "principal_observer_exists=true",
+           "principal_observer_root_owned=true",
+           "principal_observer_writable=false",
+           "principal_observer_readable=false",
+           "principal_observer_enumeration=forbidden",
+           "empty_observer=ROOT_HOST",
+           "mount_observer=ROOT_HOST",
+           "extinction_observer=ROOT_HOST",
+           "systemd_sys_mount_path=/sys",
+           "systemd_sys_ready_filesystem=sysfs",
+           "systemd_sys_ready_source=sysfs",
+           "systemd_sys_ready_read_only=true",
+           "systemd_var_tmp_path=/var/tmp",
+           "systemd_var_tmp_ready_source=IMMUTABLE_ROOT_TMP",
+           "systemd_var_tmp_ready_read_only=true",
+           "bootstrap_treatment_code=0",
+           "bootstrap_missing_incoming_code=226",
+           "bootstrap_missing_sys_code=226",
+           "bootstrap_missing_var_tmp_code=226",
+           "v7_materializable=false",
+           "v8_required_for_native=true",
+       }) {
+    require_line(contents, line);
+  }
+#elif LOOM_EFFECT_POLICY_VERSION == 7
   for (const std::string_view line : {
            "systemd_mount_path=/run/systemd/incoming",
            "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
@@ -364,7 +437,7 @@ void require_directory(const std::string& path, bool empty) {
   }
 }
 
-#if LOOM_EFFECT_POLICY_VERSION == 7
+#if LOOM_EFFECT_POLICY_VERSION >= 7
 void require_opaque_directory(const std::string& path) {
   errno = 0;
   DIR* directory = opendir(path.c_str());
@@ -380,7 +453,9 @@ void require_opaque_directory(const std::string& path) {
 #endif
 
 std::string require_root_regular(const std::string& path, bool executable,
-                                 std::string_view expected_digest) {
+                                 std::string_view expected_digest,
+                                 std::size_t maximum = 128 * 1024,
+                                 std::string_view object = "root_file") {
   struct stat info {};
   if (lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
       info.st_uid != 0 || info.st_gid != 0 || info.st_nlink != 1 ||
@@ -388,7 +463,7 @@ std::string require_root_regular(const std::string& path, bool executable,
       (executable && (info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)) {
     throw Error("immutable-root file metadata drifted: " + path);
   }
-  const std::string contents = read_regular_file(path);
+  const std::string contents = read_regular_file(path, maximum, object);
   const std::string digest = sha256(contents);
   if (!expected_digest.empty() && digest != expected_digest) {
     throw Error("immutable-root file hash drifted: " + path);
@@ -437,7 +512,7 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
 #if LOOM_EFFECT_POLICY_VERSION >= 4
   require_directory("/run", false);
   require_directory("/run/systemd", false);
-#if LOOM_EFFECT_POLICY_VERSION == 7
+#if LOOM_EFFECT_POLICY_VERSION >= 7
   require_directory("/run/systemd/incoming", false);
   require_opaque_directory("/run/systemd/incoming");
 #else
@@ -471,6 +546,18 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
       major(null_info.st_rdev) != 1 || minor(null_info.st_rdev) != 3) {
     throw Error("immutable root lacks exact /dev/null");
   }
+#if LOOM_EFFECT_POLICY_VERSION == 8
+  const std::string cell_digest = require_root_regular(
+      "/loom/effect-cell", true, {}, 16 * 1024 * 1024, "effect_cell");
+  require_root_regular("/loom/payload", true, kPayloadSha256,
+                       1024 * 1024, "payload");
+  require_root_regular("/loom/payload.freeze.v1", false,
+                       kPayloadManifestSha256, 64 * 1024,
+                       "payload_manifest");
+  require_root_regular(std::string(kPolicyRootPath), false,
+                       kPolicyManifestSha256, 64 * 1024,
+                       "policy_manifest");
+#else
   const std::string cell_digest =
       require_root_regular("/loom/effect-cell", true, {});
   require_root_regular("/loom/payload", true, kPayloadSha256);
@@ -478,6 +565,7 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
                        kPayloadManifestSha256);
   require_root_regular(std::string(kPolicyRootPath), false,
                        kPolicyManifestSha256);
+#endif
   if (policy_manifest_path != kPolicyRootPath) {
     throw Error("root-hold policy path escaped the frozen root schema");
   }
