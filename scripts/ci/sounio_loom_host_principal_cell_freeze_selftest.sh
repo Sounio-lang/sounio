@@ -80,6 +80,12 @@ expect protect_system strict
 expect protect_proc invisible
 expect private_network true
 expect capabilities zero
+expect sabotage_cgroup_distinct true
+expect sabotage_signal_cross_cell ALLOWED
+expect sabotage_copied_pidfd_signal ALLOWED
+expect sabotage_reciprocal ALLOWED
+expect causal_rule kernel-distinct-principal
+expect causal_sabotage PASS
 expect process_cleanup observed
 expect result HOST_MEASUREMENT_PASS
 expect kernel_distinct_principal_candidate true
@@ -95,14 +101,20 @@ expect claim_ready false
 
 CONTRACT_PATH="$(value preregistered_contract_path)"
 CONTRACT_COMMIT="$(value preregistered_contract_commit)"
+SABOTAGE_CONTRACT_PATH="$(value sabotage_contract_path)"
+SABOTAGE_CONTRACT_COMMIT="$(value sabotage_contract_commit)"
 SOURCE_PATH="$(value material_source_path)"
 SOURCE_COMMIT="$(value material_source_commit)"
 [[ "$CONTRACT_PATH" == tools/loom/HOST_EXEC_GRANT_PRINCIPAL_CELL_V1.md ]] || fail 'contract path drifted'
+[[ "$SABOTAGE_CONTRACT_PATH" == tools/loom/HOST_EXEC_GRANT_PRINCIPAL_CELL_SABOTAGE_V1.md ]] || fail 'sabotage contract path drifted'
 [[ "$SOURCE_PATH" == tools/loom/src/loom_host_principal_cell.cpp ]] || fail 'material source path drifted'
 git -C "$ROOT_DIR" cat-file -e "$CONTRACT_COMMIT^{commit}" 2>/dev/null || fail 'contract commit is absent'
+git -C "$ROOT_DIR" cat-file -e "$SABOTAGE_CONTRACT_COMMIT^{commit}" 2>/dev/null || fail 'sabotage contract commit is absent'
 git -C "$ROOT_DIR" cat-file -e "$SOURCE_COMMIT^{commit}" 2>/dev/null || fail 'material source commit is absent'
 [[ "$(sha_at_commit "$CONTRACT_COMMIT" "$CONTRACT_PATH")" == "$(value preregistered_contract_sha256)" ]] ||
   fail 'preregistered contract bytes differ from evidence'
+[[ "$(sha_at_commit "$SABOTAGE_CONTRACT_COMMIT" "$SABOTAGE_CONTRACT_PATH")" == "$(value sabotage_contract_sha256)" ]] ||
+  fail 'preregistered sabotage contract bytes differ from evidence'
 [[ "$(sha_at_commit "$SOURCE_COMMIT" "$SOURCE_PATH")" == "$(value material_source_sha256)" ]] ||
   fail 'material source commit bytes differ from evidence'
 
@@ -132,10 +144,13 @@ for receipt in "$transport_receipt" "$host_receipt"; do
 done
 for control in signal_cross_uid=EPERM ptrace_cross_uid=EPERM \
   process_vm_readv_cross_uid=EPERM copied_pidfd_signal=EPERM \
-  copied_pidfd_getfd=EPERM reciprocal_attacks=refused; do
+  copied_pidfd_getfd=EPERM reciprocal_attacks=refused \
+  sabotage_signal_cross_cell=ALLOWED sabotage_copied_pidfd_signal=ALLOWED \
+  sabotage_reciprocal=ALLOWED causal_rule=kernel-distinct-principal \
+  causal_sabotage=PASS; do
   [[ " $host_receipt " == *" $control "* ]] || fail "host receipt omitted hostile control: $control"
 done
 
-printf 'sounio-loom-host-principal-cell-freeze-selftest: PASS semantic_authority=Sounio action=9030 evidence_sha256=%s material_source_sha256=%s material_binary_sha256=%s host_gate_sha256=%s transport_sha256=%s host=t560-proxmox kernel=7.0.2-5-pve dynamic_user=true uid_distinct=true gid_distinct=true cgroup_distinct=true pidfd_live=true start_tick_stable=true cross_signal=EPERM ptrace=EPERM process_vm_readv=EPERM copied_pidfd_signal=EPERM copied_pidfd_getfd=EPERM reciprocal_attacks=refused kernel_distinct_principal_candidate=true same_uid_peer_isolation=false material_grant=false grant_extinction=false exec_attached=false commit_attached=false ci_attached=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'sounio-loom-host-principal-cell-freeze-selftest: PASS semantic_authority=Sounio action=9030 evidence_sha256=%s material_source_sha256=%s material_binary_sha256=%s host_gate_sha256=%s transport_sha256=%s host=t560-proxmox kernel=7.0.2-5-pve dynamic_user=true uid_distinct=true gid_distinct=true cgroup_distinct=true pidfd_live=true start_tick_stable=true cross_signal=EPERM ptrace=EPERM process_vm_readv=EPERM copied_pidfd_signal=EPERM copied_pidfd_getfd=EPERM reciprocal_attacks=refused same_principal_signal=ALLOWED same_principal_copied_pidfd_signal=ALLOWED causal_rule=kernel-distinct-principal causal_sabotage=PASS kernel_distinct_principal_candidate=true same_uid_peer_isolation=false material_grant=false grant_extinction=false exec_attached=false commit_attached=false ci_attached=false launch_open=false parity_open=false claim_ready=false\n' \
   "$(sha256sum "$EVIDENCE" | cut -d ' ' -f 1)" "$(value material_source_sha256)" \
   "$(value material_binary_sha256)" "$(value host_gate_sha256)" "$(value transport_sha256)"
