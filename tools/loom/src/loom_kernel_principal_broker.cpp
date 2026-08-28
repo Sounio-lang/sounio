@@ -5,6 +5,8 @@
 #include <openssl/sha.h>
 
 #include <sys/file.h>
+#include <sys/prctl.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -16,9 +18,11 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
@@ -42,13 +46,18 @@ constexpr std::string_view kFrozenCapsuleManifestSha256 =
     "76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f";
 constexpr std::string_view kFrozenInvocationCellManifestSha256 =
     "61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e";
+constexpr std::string_view kFrozenExecGrantCellManifestSha256 =
+    "8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051";
+constexpr std::string_view kFrozenResidentV4ManifestSha256 =
+    "f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473";
 constexpr std::string_view kZeroDigest =
     "0000000000000000000000000000000000000000000000000000000000000000";
 constexpr std::size_t kMaximumAuthorityOutput = 1024 * 1024;
 constexpr std::size_t kMaximumInvocationFrame = 64 * 1024;
-constexpr std::size_t kMaximumRequest = kMaximumInvocationFrame + 6;
+constexpr std::size_t kMaximumRequest = kMaximumInvocationFrame + 12;
 constexpr std::size_t kMaximumResponse = 4096;
 constexpr auto kAuthorityTimeout = std::chrono::seconds(5);
+constexpr auto kResidentTimeout = std::chrono::seconds(5);
 
 class Error : public std::runtime_error {
  public:
@@ -294,6 +303,47 @@ Manifest load_invocation_cell_manifest(const std::string& path) {
   return manifest;
 }
 
+Manifest load_exec_grant_cell_manifest(const std::string& path) {
+  Manifest manifest = parse_frozen_manifest(
+      path, kFrozenExecGrantCellManifestSha256, "action 9030");
+  if (manifest.require("schema") !=
+          "loom-kernel-exec-grant-cell-authority-freeze-v1" ||
+      manifest.require("stage") != "SEMANTICS_FROZEN" ||
+      manifest.require("producing_language") != "Sounio" ||
+      manifest.require("language_role") != "SEMANTIC_AUTHORITY" ||
+      manifest.require("action") != "9030" ||
+      manifest.require("handle_is_bearer") != "false" ||
+      manifest.require("material_grant") != "false" ||
+      manifest.require("same_uid_peer_isolation") != "false" ||
+      manifest.require("parity_open") != "false" ||
+      manifest.require("claim_ready") != "false") {
+    throw Error("manifest does not describe frozen Sounio action 9030");
+  }
+  return manifest;
+}
+
+Manifest load_resident_v4_manifest(const std::string& path) {
+  Manifest manifest = parse_frozen_manifest(
+      path, kFrozenResidentV4ManifestSha256, "resident v4");
+  if (manifest.require("schema") != "loom-resident-membrane-runtime-v4" ||
+      manifest.require("stage") != "SOUNIO_RESIDENT_REALIZATION" ||
+      manifest.require("producing_language") != "Sounio" ||
+      manifest.require("language_role") != "SEMANTIC_AUTHORITY" ||
+      manifest.require("actions") != "9023,9024,9025,9029,9030" ||
+      manifest.require("parent_9030_sha256") !=
+          kFrozenExecGrantCellManifestSha256 ||
+      manifest.require("route_9024") != "1" ||
+      manifest.require("route_9030") != "5" ||
+      manifest.require("route_stop") != "0" ||
+      manifest.require("process_model") != "single-resident-sounio-pid" ||
+      manifest.require("material_grant") != "false" ||
+      manifest.require("same_uid_peer_isolation") != "false" ||
+      manifest.require("exec_attached") != "false") {
+    throw Error("manifest does not describe frozen Sounio resident v4");
+  }
+  return manifest;
+}
+
 void verify_authority(const Manifest& manifest, const std::string& authority_path,
                       std::string_view label) {
   if (file_sha256(authority_path) != manifest.require("executable_sha256")) {
@@ -321,6 +371,403 @@ std::optional<std::uint64_t> parse_u64(std::string_view text) {
   }
   return value;
 }
+
+std::int64_t monotonic_microseconds() {
+  timespec value{};
+  if (clock_gettime(CLOCK_MONOTONIC, &value) != 0 || value.tv_sec < 0 ||
+      value.tv_nsec < 0) {
+    throw Error("monotonic clock failed");
+  }
+  return static_cast<std::int64_t>(value.tv_sec) * 1000000LL +
+         static_cast<std::int64_t>(value.tv_nsec) / 1000LL;
+}
+
+std::string random_generation_sha256() {
+  std::array<unsigned char, 32> bytes{};
+  std::size_t offset = 0;
+  while (offset < bytes.size()) {
+    const ssize_t count =
+        getrandom(bytes.data() + offset, bytes.size() - offset, 0);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+    } else if (count < 0 && errno == EINTR) {
+      continue;
+    } else {
+      throw Error("resident generation random source failed");
+    }
+  }
+  return sha256(std::string_view(
+      reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+}
+
+std::string digest_u32_words(std::string_view digest) {
+  if (digest.size() != 64) throw Error("resident digest width invalid");
+  std::ostringstream output;
+  for (std::size_t word = 0; word < 8; ++word) {
+    std::uint64_t value = 0;
+    for (std::size_t nibble = 0; nibble < 8; ++nibble) {
+      const unsigned char character = digest[word * 8 + nibble];
+      std::uint64_t digit = 0;
+      if (character >= '0' && character <= '9') {
+        digit = character - '0';
+      } else if (character >= 'a' && character <= 'f') {
+        digit = character - 'a' + 10;
+      } else {
+        throw Error("resident digest is not lowercase hexadecimal");
+      }
+      value = value * 16 + digit;
+    }
+    if (word != 0) output << ' ';
+    output << value;
+  }
+  return output.str();
+}
+
+std::uint64_t process_start_tick(pid_t pid) {
+  const std::string record = read_file("/proc/" + std::to_string(pid) + "/stat");
+  const std::size_t close = record.rfind(')');
+  if (close == std::string::npos || close + 2 >= record.size()) {
+    throw Error("resident process stat malformed");
+  }
+  std::istringstream input(record.substr(close + 2));
+  std::string field;
+  for (int index = 0; index <= 19; ++index) {
+    if (!(input >> field)) throw Error("resident process start tick missing");
+  }
+  const auto parsed = parse_u64(field);
+  if (!parsed || *parsed == 0) throw Error("resident process start tick invalid");
+  return *parsed;
+}
+
+std::string process_executable(pid_t pid) {
+  const std::string path = "/proc/" + std::to_string(pid) + "/exe";
+  std::array<char, 4096> buffer{};
+  const ssize_t count = readlink(path.c_str(), buffer.data(), buffer.size() - 1);
+  if (count <= 0) throw Error("resident process executable unavailable");
+  return std::string(buffer.data(), static_cast<std::size_t>(count));
+}
+
+std::string canonical_path(const std::string& path) {
+  std::array<char, PATH_MAX> buffer{};
+  if (realpath(path.c_str(), buffer.data()) == nullptr) {
+    throw Error("cannot canonicalize resident runtime");
+  }
+  return buffer.data();
+}
+
+struct ResidentDecision {
+  std::uint64_t code = 0;
+  std::string output;
+  std::uint64_t sequence = 0;
+  std::int64_t latency_us = 0;
+};
+
+class ResidentV4 {
+ public:
+  ResidentV4(const Manifest& manifest, std::string runtime)
+      : manifest_(manifest), runtime_(canonical_path(runtime)),
+        generation_(random_generation_sha256()) {
+    if (file_sha256(runtime_) != manifest_.require("runtime_sha256")) {
+      throw Error("Sounio resident v4 runtime hash mismatch");
+    }
+    spawn();
+    const auto deadline = std::chrono::steady_clock::now() + kResidentTimeout;
+    const std::string start = transport_frame(1, 0, 0, false, false,
+                                              sha256("start"), sha256("start"));
+    const ResidentDecision decision = invoke(1, start, deadline);
+    if (decision.code != 0) {
+      poison("resident START refused");
+      throw Error("resident START refused");
+    }
+  }
+
+  ResidentV4(const ResidentV4&) = delete;
+  ResidentV4& operator=(const ResidentV4&) = delete;
+
+  ~ResidentV4() { close_noexcept(); }
+
+  ResidentDecision decide_exec_grant(const std::string& frame) {
+    ensure_alive();
+    if (frame.empty() || frame.size() > kMaximumInvocationFrame ||
+        frame.find('\n') != std::string::npos ||
+        frame.find('\r') != std::string::npos) {
+      throw Error("ExecGrantCell frame is empty, multiline, or oversized");
+    }
+    const auto deadline = std::chrono::steady_clock::now() + kResidentTimeout;
+    const std::uint64_t next = sequence_ + 1;
+    const std::string request_hash = sha256(frame);
+    try {
+      const ResidentDecision request =
+          invoke(1,
+                 transport_frame(2, next, sequence_, true, false, request_hash,
+                                 sha256("pending")),
+                 deadline);
+      if (request.code != 0) throw Error("resident REQUEST refused");
+      ResidentDecision semantic = invoke(5, frame, deadline);
+      const ResidentDecision response =
+          invoke(1,
+                 transport_frame(3, next, sequence_, true, true, request_hash,
+                                 sha256(semantic.output)),
+                 deadline);
+      if (response.code != 0) throw Error("resident RESPONSE refused");
+      sequence_ = next;
+      semantic.sequence = sequence_;
+      return semantic;
+    } catch (const std::exception& error) {
+      poison(error.what());
+      throw;
+    }
+  }
+
+  pid_t pid() const { return pid_; }
+  std::uint64_t start_tick() const { return start_tick_; }
+  const std::string& generation() const { return generation_; }
+  const std::string& runtime_sha256() const {
+    return manifest_.require("runtime_sha256");
+  }
+  std::uint64_t sequence() const { return sequence_; }
+  bool poisoned() const { return poisoned_; }
+
+  void test_only_kill() {
+    if (pid_ > 0) kill(pid_, SIGKILL);
+  }
+  void test_only_stop() {
+    if (pid_ > 0) kill(pid_, SIGSTOP);
+  }
+  void test_only_inject_output() { output_buffer_ = "MALFORMED\n"; }
+
+ private:
+  void spawn() {
+    int input_pipe[2];
+    int output_pipe[2];
+    if (pipe2(input_pipe, O_CLOEXEC) != 0 ||
+        pipe2(output_pipe, O_CLOEXEC) != 0) {
+      throw Error("cannot create resident v4 pipes");
+    }
+    UniqueFd input_read(input_pipe[0]);
+    UniqueFd input_write(input_pipe[1]);
+    UniqueFd output_read(output_pipe[0]);
+    UniqueFd output_write(output_pipe[1]);
+    const pid_t parent = getpid();
+    pid_ = fork();
+    if (pid_ < 0) throw Error("cannot fork resident v4");
+    if (pid_ == 0) {
+      input_write = UniqueFd();
+      output_read = UniqueFd();
+      if (dup2(input_read.get(), STDIN_FILENO) < 0 ||
+          dup2(output_write.get(), STDOUT_FILENO) < 0 ||
+          dup2(output_write.get(), STDERR_FILENO) < 0 ||
+          prctl(PR_SET_PDEATHSIG, SIGKILL) != 0 || getppid() != parent) {
+        _exit(126);
+      }
+      char* const arguments[] = {const_cast<char*>(runtime_.c_str()), nullptr};
+      execv(runtime_.c_str(), arguments);
+      _exit(127);
+    }
+    input_read = UniqueFd();
+    output_write = UniqueFd();
+    input_ = std::move(input_write);
+    output_ = std::move(output_read);
+    const int input_flags = fcntl(input_.get(), F_GETFL, 0);
+    const int output_flags = fcntl(output_.get(), F_GETFL, 0);
+    if (input_flags < 0 || output_flags < 0 ||
+        fcntl(input_.get(), F_SETFL, input_flags | O_NONBLOCK) != 0 ||
+        fcntl(output_.get(), F_SETFL, output_flags | O_NONBLOCK) != 0) {
+      poison("cannot configure resident pipes");
+      throw Error("cannot configure resident pipes");
+    }
+    const auto deadline = std::chrono::steady_clock::now() + kResidentTimeout;
+    for (;;) {
+      int status = 0;
+      const pid_t waited = waitpid(pid_, &status, WNOHANG);
+      if (waited == pid_) throw Error("resident exited before identity admission");
+      try {
+        start_tick_ = process_start_tick(pid_);
+        if (process_executable(pid_) == runtime_) break;
+      } catch (...) {
+      }
+      if (std::chrono::steady_clock::now() >= deadline) {
+        poison("resident identity admission timeout");
+        throw Error("resident identity admission timeout");
+      }
+      poll(nullptr, 0, 1);
+    }
+  }
+
+  void ensure_alive() {
+    if (poisoned_) throw Error("resident generation poisoned");
+    int status = 0;
+    const pid_t waited = waitpid(pid_, &status, WNOHANG);
+    if (waited != 0 || process_start_tick(pid_) != start_tick_ ||
+        process_executable(pid_) != runtime_) {
+      poison("resident identity drift");
+      throw Error("resident identity drift");
+    }
+  }
+
+  std::string transport_frame(int event_kind, std::uint64_t sequence,
+                              std::uint64_t previous, bool request_present,
+                              bool response_present,
+                              const std::string& request_hash,
+                              const std::string& result_hash) const {
+    const std::int64_t deadline_us = monotonic_microseconds() +
+                                     std::chrono::duration_cast<
+                                         std::chrono::microseconds>(
+                                         kResidentTimeout)
+                                         .count();
+    const std::string deadline_hash = sha256(
+        "deadline_monotonic_us=" + std::to_string(deadline_us) + "\n");
+    const std::string zero = "0 0 0 0 0 0 0 0";
+    std::ostringstream frame;
+    frame << "9024 3 " << event_kind << " 1 1 " << sequence << ' '
+          << previous << ' ' << (request_present ? 1 : 0) << ' '
+          << (response_present ? 1 : 0)
+          << " 1 1 1 0 "
+          << digest_u32_words(manifest_.require("parent_9023_sha256")) << ' '
+          << digest_u32_words(generation_) << ' '
+          << (request_present ? digest_u32_words(request_hash) : zero) << ' '
+          << (response_present ? digest_u32_words(result_hash) : zero) << ' '
+          << digest_u32_words(deadline_hash);
+    return frame.str();
+  }
+
+  void wait_for(int descriptor, short events,
+                std::chrono::steady_clock::time_point deadline,
+                std::string_view timeout_reason) {
+    for (;;) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) throw Error(std::string(timeout_reason));
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - now);
+      pollfd candidate{descriptor, events, 0};
+      const int ready = poll(&candidate, 1, static_cast<int>(remaining.count()) + 1);
+      if (ready > 0) return;
+      if (ready == 0) throw Error(std::string(timeout_reason));
+      if (errno != EINTR) throw Error("resident pipe poll failed");
+    }
+  }
+
+  void write_request(std::string_view value,
+                     std::chrono::steady_clock::time_point deadline) {
+    std::size_t offset = 0;
+    while (offset < value.size()) {
+      wait_for(input_.get(), POLLOUT, deadline, "resident request timeout");
+      const ssize_t count =
+          write(input_.get(), value.data() + offset, value.size() - offset);
+      if (count > 0) {
+        offset += static_cast<std::size_t>(count);
+      } else if (count < 0 &&
+                 (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+        continue;
+      } else {
+        throw Error("resident request write failed");
+      }
+    }
+  }
+
+  std::string read_response(std::chrono::steady_clock::time_point deadline) {
+    std::array<char, 4096> bytes{};
+    for (;;) {
+      const std::size_t newline = output_buffer_.find('\n');
+      if (newline != std::string::npos) {
+        const std::string line = output_buffer_.substr(0, newline);
+        output_buffer_.erase(0, newline + 1);
+        if (!output_buffer_.empty()) {
+          throw Error("resident returned unsolicited extra output");
+        }
+        return line;
+      }
+      if (output_buffer_.size() > kMaximumInvocationFrame) {
+        throw Error("resident response exceeded limit");
+      }
+      wait_for(output_.get(), POLLIN | POLLHUP, deadline,
+               "resident response timeout");
+      const ssize_t count = read(output_.get(), bytes.data(), bytes.size());
+      if (count > 0) {
+        output_buffer_.append(bytes.data(), static_cast<std::size_t>(count));
+      } else if (count == 0) {
+        throw Error("resident response EOF");
+      } else if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+        throw Error("resident response read failed");
+      }
+    }
+  }
+
+  ResidentDecision invoke(int route, const std::string& frame,
+                          std::chrono::steady_clock::time_point deadline) {
+    ensure_alive();
+    const auto started = std::chrono::steady_clock::now();
+    write_request(std::to_string(route) + "\n" + frame + "\n", deadline);
+    const std::string output = read_response(deadline);
+    const std::string prefix = route == 1 ? "SOUNIO_RESIDENT_AUTHORITY_"
+                                         : "SOUNIO_KERNEL_EXEC_GRANT_CELL_";
+    if (output.rfind(prefix, 0) != 0 ||
+        output.size() < std::string(" stage=SEMANTICS_FROZEN").size() ||
+        output.substr(output.size() -
+                      std::string(" stage=SEMANTICS_FROZEN").size()) !=
+            " stage=SEMANTICS_FROZEN") {
+      throw Error("resident decision malformed");
+    }
+    const std::size_t marker = output.find(" code=");
+    if (marker == std::string::npos) throw Error("resident decision code missing");
+    const std::size_t start = marker + 6;
+    const std::size_t end = output.find(' ', start);
+    const auto code = parse_u64(std::string_view(output).substr(start, end - start));
+    if (!code) throw Error("resident decision code invalid");
+    const auto latency = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - started);
+    return {*code, output, 0, latency.count()};
+  }
+
+  void poison(std::string_view) {
+    if (poisoned_) return;
+    poisoned_ = true;
+    if (pid_ > 0) {
+      kill(pid_, SIGKILL);
+      while (waitpid(pid_, nullptr, 0) < 0 && errno == EINTR) {
+      }
+    }
+    input_ = UniqueFd();
+    output_ = UniqueFd();
+  }
+
+  void close_noexcept() {
+    if (pid_ <= 0) return;
+    if (!poisoned_) {
+      try {
+        const auto deadline = std::chrono::steady_clock::now() + kResidentTimeout;
+        const ResidentDecision stop =
+            invoke(1,
+                   transport_frame(4, sequence_, sequence_, false, false,
+                                   sha256("stop"), sha256("stop")),
+                   deadline);
+        if (stop.code != 0) throw Error("resident STOP refused");
+        write_request("0\n", deadline);
+        input_ = UniqueFd();
+        int status = 0;
+        while (waitpid(pid_, &status, 0) < 0 && errno == EINTR) {
+        }
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+          poisoned_ = true;
+        }
+      } catch (...) {
+        poison("resident close failed");
+      }
+    }
+    pid_ = -1;
+  }
+
+  Manifest manifest_;
+  std::string runtime_;
+  std::string generation_;
+  UniqueFd input_;
+  UniqueFd output_;
+  std::string output_buffer_;
+  pid_t pid_ = -1;
+  std::uint64_t start_tick_ = 0;
+  std::uint64_t sequence_ = 0;
+  bool poisoned_ = false;
+};
 
 bool environment_u64_equals(const char* name, std::uint64_t expected) {
   const char* raw = std::getenv(name);
@@ -999,6 +1446,95 @@ int diagnose_invocation_cell(const std::string& manifest_path,
   return 0;
 }
 
+int selftest_exec_grant_resident(const std::string& exec_grant_manifest_path,
+                                 const std::string& resident_manifest_path,
+                                 const std::string& resident_runtime_path,
+                                 const std::string& current_frame_path,
+                                 const std::string& python_frame_path) {
+  if (getuid() == 0 || geteuid() == 0) {
+    throw Error("resident selftest refuses root execution");
+  }
+  const Manifest exec_grant_manifest =
+      load_exec_grant_cell_manifest(exec_grant_manifest_path);
+  const Manifest resident_manifest =
+      load_resident_v4_manifest(resident_manifest_path);
+  const std::string current_frame = load_invocation_frame(current_frame_path);
+  const std::string python_frame = load_invocation_frame(python_frame_path);
+  ResidentV4 resident(resident_manifest, resident_runtime_path);
+  const pid_t pid = resident.pid();
+  const std::uint64_t start_tick = resident.start_tick();
+  const std::string generation = resident.generation();
+  const ResidentDecision current = resident.decide_exec_grant(current_frame);
+  const ResidentDecision python = resident.decide_exec_grant(python_frame);
+  if (current.code != 491 || python.code != 499 || current.sequence != 1 ||
+      python.sequence != 2 || resident.pid() != pid ||
+      resident.start_tick() != start_tick || resident.generation() != generation ||
+      resident.sequence() != 2 || resident.poisoned()) {
+    throw Error("resident v4 action 9030 parity selftest diverged");
+  }
+  std::cout
+      << "LOOM_KERNEL_PRINCIPAL_BROKER_RESIDENT_SELFTEST PASS"
+      << " semantic_authority=Sounio actions=9024+9030"
+      << " exec_grant_manifest_sha256=" << exec_grant_manifest.digest
+      << " resident_manifest_sha256=" << resident_manifest.digest
+      << " resident_runtime_sha256=" << resident.runtime_sha256()
+      << " resident_pid=" << pid << " resident_start_tick=" << start_tick
+      << " resident_generation_sha256=" << generation
+      << " sequences=1,2 current=DENY491 python=DENY499"
+      << " process_identity=stable generation_poisoned=false"
+      << " launch_open=false material_grant=false material_execution=false"
+      << " exec_attached=false\n";
+  return 0;
+}
+
+int selftest_exec_grant_resident_faults(
+    const std::string& exec_grant_manifest_path,
+    const std::string& resident_manifest_path,
+    const std::string& resident_runtime_path,
+    const std::string& frame_path) {
+  if (getuid() == 0 || geteuid() == 0) {
+    throw Error("resident fault selftest refuses root execution");
+  }
+  static_cast<void>(load_exec_grant_cell_manifest(exec_grant_manifest_path));
+  const Manifest resident_manifest =
+      load_resident_v4_manifest(resident_manifest_path);
+  const std::string frame = load_invocation_frame(frame_path);
+  auto must_poison = [&](std::string_view label, auto sabotage) {
+    ResidentV4 resident(resident_manifest, resident_runtime_path);
+    sabotage(resident);
+    bool refused = false;
+    try {
+      static_cast<void>(resident.decide_exec_grant(frame));
+    } catch (const std::exception&) {
+      refused = true;
+    }
+    if (!refused || !resident.poisoned()) {
+      throw Error("resident fault did not poison generation: " +
+                  std::string(label));
+    }
+    bool replay_refused = false;
+    try {
+      static_cast<void>(resident.decide_exec_grant(frame));
+    } catch (const std::exception&) {
+      replay_refused = true;
+    }
+    if (!replay_refused) {
+      throw Error("poisoned resident generation accepted another request");
+    }
+  };
+  must_poison("death", [](ResidentV4& resident) { resident.test_only_kill(); });
+  must_poison("timeout", [](ResidentV4& resident) { resident.test_only_stop(); });
+  must_poison("malformed",
+              [](ResidentV4& resident) { resident.test_only_inject_output(); });
+  std::cout
+      << "LOOM_KERNEL_PRINCIPAL_BROKER_RESIDENT_FAULT_SELFTEST PASS"
+      << " death=poisoned timeout=poisoned malformed=poisoned"
+      << " restart_within_generation=false replay_after_poison=refused"
+      << " launch_open=false material_grant=false material_execution=false"
+      << " exec_attached=false\n";
+  return 0;
+}
+
 void write_response(int descriptor, const std::string& response) {
   std::size_t offset = 0;
   while (offset < response.size()) {
@@ -1284,7 +1820,11 @@ struct Options {
   std::string capsule_authority;
   std::string invocation_manifest;
   std::string invocation_authority;
+  std::string exec_grant_manifest;
+  std::string resident_manifest;
+  std::string resident_runtime;
   std::string frame;
+  std::string second_frame;
   std::string journal;
   std::string socket_path = "/run/sounio/loom-principal-broker.sock";
 };
@@ -1309,8 +1849,16 @@ Options parse_options(int argc, char** argv) {
       options.invocation_manifest = value;
     } else if (argument == "--invocation-authority") {
       options.invocation_authority = value;
+    } else if (argument == "--exec-grant-manifest") {
+      options.exec_grant_manifest = value;
+    } else if (argument == "--resident-manifest") {
+      options.resident_manifest = value;
+    } else if (argument == "--resident-runtime") {
+      options.resident_runtime = value;
     } else if (argument == "--frame") {
       options.frame = value;
+    } else if (argument == "--second-frame") {
+      options.second_frame = value;
     } else if (argument == "--journal") {
       options.journal = value;
     } else if (argument == "--socket-path") {
@@ -1346,6 +1894,14 @@ void require_invocation_artifacts(const Options& options) {
   }
 }
 
+void require_resident_selftest_artifacts(const Options& options) {
+  if (options.exec_grant_manifest.empty() || options.resident_manifest.empty() ||
+      options.resident_runtime.empty() || options.frame.empty() ||
+      options.second_frame.empty()) {
+    throw Error("ExecGrantCell manifest, resident manifest, resident runtime, and two frames are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1360,6 +1916,22 @@ int main(int argc, char** argv) {
       return diagnose_invocation_cell(options.invocation_manifest,
                                       options.invocation_authority,
                                       options.frame);
+    }
+    if (options.mode == "--selftest-exec-grant-resident") {
+      require_resident_selftest_artifacts(options);
+      return selftest_exec_grant_resident(
+          options.exec_grant_manifest, options.resident_manifest,
+          options.resident_runtime, options.frame, options.second_frame);
+    }
+    if (options.mode == "--selftest-exec-grant-resident-faults") {
+      if (options.exec_grant_manifest.empty() ||
+          options.resident_manifest.empty() ||
+          options.resident_runtime.empty() || options.frame.empty()) {
+        throw Error("ExecGrantCell manifest, resident manifest, resident runtime, and frame are required");
+      }
+      return selftest_exec_grant_resident_faults(
+          options.exec_grant_manifest, options.resident_manifest,
+          options.resident_runtime, options.frame);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");
