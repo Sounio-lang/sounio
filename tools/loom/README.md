@@ -90,8 +90,9 @@ Action `9024` is the Sounio-first transport authority for the planned resident
 decision process. It binds every generation to the frozen `9023` parent,
 requires strict request/response sequencing and correlation, and makes timeout,
 unhealthy transport, or poisoned-generation reuse explicit refusals. Its native
-executable and adversarial gate exist; its semantics are not yet frozen and the
-OCaml resident realization therefore remains intentionally unopened.
+executable, adversarial gate, and content-addressed semantic freeze now exist.
+The OCaml resident realization has not yet started and cannot alter the frozen
+decision bundle.
 
 The gate includes two single-rule sabotages. Removing only the frozen-parent
 rule admits an unchanged orphan request, and removing only strict progression
