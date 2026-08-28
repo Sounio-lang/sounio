@@ -31,6 +31,9 @@ def main() -> int:
         "madaros-witness-gate": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
+        "gate-wave-0": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "sounio-lint": any(truthy(impact.get(key)) for key in ("compiler", "stdlib", "tests", "sio", "full")),
         "lean-proofs": truthy(impact.get("lean")) or truthy(impact.get("full")),
         "website": truthy(impact.get("website")) or truthy(impact.get("full")),
