@@ -72,6 +72,14 @@ const ACTIVE_RESEARCH_DOCS = new Set([
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
   'docs/research/cd-tower-automorphism-freeze.md',
+  'docs/research/pireus_apple_cpu_dependency_latency_interface_feasibility_semantics.md',
+  'docs/research/receipts/pireus_apple_cpu_dependency_latency_interface_feasibility_20260828.md',
+]);
+
+const REPO_DOC_VALIDATION_DATES = new Map([
+  ['docs/internal/concepts/pireus-apple-cpu-dependency-latency-interface-feasibility.md', '2026-08-28'],
+  ['docs/research/pireus_apple_cpu_dependency_latency_interface_feasibility_semantics.md', '2026-08-28'],
+  ['docs/research/receipts/pireus_apple_cpu_dependency_latency_interface_feasibility_20260828.md', '2026-08-28'],
 ]);
 
 const WEBSITE_DOC_OVERRIDES = {
@@ -680,12 +688,13 @@ export function topicSourceOfTruth(topicId) {
 }
 
 export function formatRepoMetadataBlock(topic) {
+  const lastValidated = REPO_DOC_VALIDATION_DATES.get(topic.repo_doc_path) ?? '2026-03-07';
   return [
     '<!-- docs:meta',
     `topic_id: ${topic.topic_id}`,
     `authority: ${topic.authority}`,
     `audience: ${topic.audience}`,
-    'last_validated: 2026-03-07',
+    `last_validated: ${lastValidated}`,
     `validated_by: ${topic.owner_agent}`,
     `source_of_truth: ${topicSourceOfTruth(topic.topic_id)}`,
     '-->',
@@ -762,11 +771,12 @@ export function parseFrontmatter(content) {
 }
 
 export function metadataFieldsForTopic(topic) {
+  const lastValidated = REPO_DOC_VALIDATION_DATES.get(topic.repo_doc_path) ?? '2026-03-07';
   return {
     topic_id: topic.topic_id,
     authority: topic.authority,
     audience: topic.audience,
-    last_validated: '2026-03-07',
+    last_validated: lastValidated,
     validated_by: topic.owner_agent,
     source_of_truth: topicSourceOfTruth(topic.topic_id),
   };
