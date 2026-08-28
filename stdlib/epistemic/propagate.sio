@@ -1,4 +1,4 @@
-//! stdlib/epistemic/propagate.d
+//! stdlib/epistemic/propagate.sio
 //!
 //! Variance Propagation: The Delta Method
 //!
@@ -10,170 +10,150 @@
 //! - Multivariate functions (products, quotients, compositions)
 //! - Monte Carlo propagation for complex cases
 //!
-//! # Example
-//!
-//! ```sounio
-//! use epistemic::{Knowledge, propagate}
-//!
-//! let x = Knowledge::measured(10.0, 1.0, "sensor")
-//!
-//! // Delta method propagation
-//! let y = propagate::exp(x)  // Var(e^x) ≈ e^(2x) · Var(x)
-//!
-//! // Monte Carlo for complex functions
-//! let z = propagate::monte_carlo(x, |v| complex_function(v), 10000)
-//! ```
+//! Madaros native-import (2026-07-20 / Wave6 C):
+//!   Multi-module path is green for free-function Epistemic + delta-method
+//!   product / exp / ln / sin / cos and for value-style LCG MC kernels
+//!   (monte_carlo_identity, monte_carlo_square).
+//!   Call sites named literally `exp`/`cos` were SEGV under multi-module
+//!   Madaros when codegen name-matched float intrinsics (#1287 workaround
+//!   used exp_delta/cos_delta). Fixed: empty-stub builtins only
+//!   (instr_count == 0) — user/stdlib bodies keep their IR
+//!   (self-hosted/native/codegen_x86_linux.sio). exp_delta/cos_delta remain
+//!   as aliases of exp/cos for source-compat.
+//!   Remaining caveats:
+//!     - exclusive-ref xoshiro inside imported bodies is untrustworthy —
+//!       MC uses return-by-value Knuth LCG + CLT (rapamycin pattern).
+//!     - generic monte_carlo(x, f, n) with fn-ptr may still be fragile;
+//!       prefer the fixed kernels for native witnesses.
+//!   product_nonassoc lives in epistemic::product_nonassoc (PnOct leaf).
+//!   Does NOT claim lean_single ≡ Madaros.
 
-use epistemic::knowledge::{Epistemic, Beta, BetaConfidence, Provenance};
+use epistemic::knowledge::{Epistemic, ep_clamp_conf, ep_min_conf, ep_decay, ep_combine};
 
 // ============================================================================
-// UNIVARIATE PROPAGATION (already in Knowledge, but explicit here)
+// UNIVARIATE PROPAGATION
 // ============================================================================
 
 // Propagate variance through exponential: e^x
 // Var(e^X) ≈ e^(2X) · Var(X)
-pub fn exp(x: Epistemic) -> Epistemic {
-    let value = exp_f64(x.value)
-    let variance = exp_f64(2.0 * x.value) * x.variance
-
+// Canonical export name under Madaros multi-module (Wave6 C / codegen fix:
+// user-bodied free fns named exp are no longer hijacked by float intrinsics).
+pub fn exp(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let value = prop_exp_series(x.val)
+    let variance = prop_exp_series(2.0 * x.val) * x.variance
     Epistemic {
-        value: value,
+        val: value,
         variance: variance,
-        confidence: x.confidence.decay(0.95),
-        provenance: x.provenance.with_step("exp"),
+        confidence: ep_decay(x.confidence, 0.95),
     }
+}
+
+// Alias of exp (kept for #1287-era witnesses / docs that used exp_delta).
+pub fn exp_delta(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    exp(x)
 }
 
 // Propagate variance through natural log: ln(x)
 // Var(ln X) ≈ Var(X) / X²
-pub fn ln(x: Epistemic) -> Epistemic {
-    let value = ln_f64(x.value)
-    let variance = x.variance / (x.value * x.value)
+pub fn ln(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let value = ln_f64(x.val)
+    let variance = x.variance / (x.val * x.val)
 
     Epistemic {
-        value: value,
+        val: value,
         variance: variance,
-        confidence: x.confidence.decay(0.95),
-        provenance: x.provenance.with_step("ln"),
-    }
-}
-
-// Propagate variance through square root: √x
-// Var(√X) ≈ Var(X) / (4X)
-pub fn sqrt(x: Epistemic) -> Epistemic {
-    let value = sqrt_f64(x.value)
-    let variance = x.variance / (4.0 * x.value)
-
-    Epistemic {
-        value: value,
-        variance: variance,
-        confidence: x.confidence.decay(0.98),
-        provenance: x.provenance.with_step("sqrt"),
-    }
-}
-
-// Propagate variance through square: x²
-// Var(X²) ≈ 4X² · Var(X)
-pub fn square(x: Epistemic) -> Epistemic {
-    let value = x.value * x.value
-    let variance = 4.0 * value * x.variance
-
-    Epistemic {
-        value: value,
-        variance: variance,
-        confidence: x.confidence.decay(0.98),
-        provenance: x.provenance.with_step("square"),
+        confidence: ep_decay(x.confidence, 0.95),
     }
 }
 
 // Propagate variance through power: x^n
 // Var(X^n) ≈ n² · X^(2n-2) · Var(X)
-pub fn pow(x: Epistemic, n: f64) -> Epistemic {
-    let value = pow_f64(x.value, n)
-    let derivative = n * pow_f64(x.value, n - 1.0)
+pub fn pow(x: Epistemic, n: f64) -> Epistemic with Mut, Div, Panic {
+    let value = pow_f64(x.val, n)
+    let derivative = n * pow_f64(x.val, n - 1.0)
     let variance = derivative * derivative * x.variance
 
     Epistemic {
-        value: value,
+        val: value,
         variance: variance,
-        confidence: x.confidence.decay(0.95),
-        provenance: x.provenance.with_step("pow"),
+        confidence: ep_decay(x.confidence, 0.95),
     }
 }
 
 // Propagate variance through sine: sin(x)
 // Var(sin X) ≈ cos²(X) · Var(X)
-pub fn sin(x: Epistemic) -> Epistemic {
-    let value = sin_f64(x.value)
-    let cos_x = cos_f64(x.value)
+pub fn sin(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let value = sin_f64(x.val)
+    let cos_x = cos_f64(x.val)
     let variance = cos_x * cos_x * x.variance
 
     Epistemic {
-        value: value,
+        val: value,
         variance: variance,
-        confidence: x.confidence.decay(0.98),
-        provenance: x.provenance.with_step("sin"),
+        confidence: ep_decay(x.confidence, 0.98),
     }
 }
 
 // Propagate variance through cosine: cos(x)
 // Var(cos X) ≈ sin²(X) · Var(X)
-pub fn cos(x: Epistemic) -> Epistemic {
-    let value = cos_f64(x.value)
-    let sin_x = sin_f64(x.value)
+// Canonical export name under Madaros multi-module (see exp above).
+pub fn cos(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let value = sin_f64(x.val + 1.5707963267948966)
+    let sin_x = sin_f64(x.val)
     let variance = sin_x * sin_x * x.variance
-
     Epistemic {
-        value: value,
+        val: value,
         variance: variance,
-        confidence: x.confidence.decay(0.98),
-        provenance: x.provenance.with_step("cos"),
+        confidence: ep_decay(x.confidence, 0.98),
     }
 }
 
+// Alias of cos (kept for #1287-era witnesses / docs that used cos_delta).
+pub fn cos_delta(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    cos(x)
+}
+
+
 // Propagate variance through tangent: tan(x)
 // Var(tan X) ≈ sec⁴(X) · Var(X)
-pub fn tan(x: Epistemic) -> Epistemic {
-    let value = sin_f64(x.value) / cos_f64(x.value)
-    let sec = 1.0 / cos_f64(x.value)
+pub fn tan(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let value = sin_f64(x.val) / cos_f64(x.val)
+    let sec = 1.0 / cos_f64(x.val)
     let sec4 = sec * sec * sec * sec
     let variance = sec4 * x.variance
 
     Epistemic {
-        value: value,
+        val: value,
         variance: variance,
-        confidence: x.confidence.decay(0.95),
-        provenance: x.provenance.with_step("tan"),
+        confidence: ep_decay(x.confidence, 0.95),
     }
 }
 
 // Propagate variance through inverse: 1/x
 // Var(1/X) ≈ Var(X) / X⁴
-pub fn inverse(x: Epistemic) -> Epistemic {
-    let value = 1.0 / x.value
-    let x4 = x.value * x.value * x.value * x.value
+pub fn inverse(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let value = 1.0 / x.val
+    let x4 = x.val * x.val * x.val * x.val
     let variance = x.variance / x4
 
     Epistemic {
-        value: value,
+        val: value,
         variance: variance,
-        confidence: x.confidence.decay(0.97),
-        provenance: x.provenance.with_step("inverse"),
+        confidence: ep_decay(x.confidence, 0.97),
     }
 }
 
 // Propagate variance through logistic sigmoid: 1/(1 + e^(-x))
 // Var(σ(X)) ≈ σ(X)² · (1 - σ(X))² · Var(X)
-pub fn sigmoid(x: Epistemic) -> Epistemic {
-    let s = 1.0 / (1.0 + exp_f64(0.0 - x.value))
+pub fn sigmoid(x: Epistemic) -> Epistemic with Mut, Div, Panic {
+    let s = 1.0 / (1.0 + prop_exp_series(0.0 - x.val))
     let derivative = s * (1.0 - s)
     let variance = derivative * derivative * x.variance
 
     Epistemic {
-        value: s,
+        val: s,
         variance: variance,
-        confidence: x.confidence.decay(0.95),
-        provenance: x.provenance.with_step("sigmoid"),
+        confidence: ep_decay(x.confidence, 0.95),
     }
 }
 
@@ -185,13 +165,9 @@ pub fn sigmoid(x: Epistemic) -> Epistemic {
 // Var(X + Y) = Var(X) + Var(Y)
 pub fn sum(x: Epistemic, y: Epistemic) -> Epistemic {
     Epistemic {
-        value: x.value + y.value,
+        val: x.val + y.val,
         variance: x.variance + y.variance,
-        confidence: x.confidence.combine(&y.confidence).decay(0.99),
-        provenance: Provenance {
-            source: "sum",
-            steps: Vec::new(),
-        },
+        confidence: ep_combine(x.confidence, y.confidence),
     }
 }
 
@@ -199,48 +175,36 @@ pub fn sum(x: Epistemic, y: Epistemic) -> Epistemic {
 // Var(X - Y) = Var(X) + Var(Y)
 pub fn diff(x: Epistemic, y: Epistemic) -> Epistemic {
     Epistemic {
-        value: x.value - y.value,
+        val: x.val - y.val,
         variance: x.variance + y.variance,
-        confidence: x.confidence.combine(&y.confidence).decay(0.99),
-        provenance: Provenance {
-            source: "diff",
-            steps: Vec::new(),
-        },
+        confidence: ep_combine(x.confidence, y.confidence),
     }
 }
 
 // Product with variance propagation
 // Var(XY) ≈ Y²Var(X) + X²Var(Y)
 pub fn product(x: Epistemic, y: Epistemic) -> Epistemic {
-    let variance = y.value * y.value * x.variance
-                 + x.value * x.value * y.variance
+    let variance = y.val * y.val * x.variance
+                 + x.val * x.val * y.variance
 
     Epistemic {
-        value: x.value * y.value,
+        val: x.val * y.val,
         variance: variance,
-        confidence: x.confidence.combine(&y.confidence).decay(0.98),
-        provenance: Provenance {
-            source: "product",
-            steps: Vec::new(),
-        },
+        confidence: ep_combine(x.confidence, y.confidence),
     }
 }
 
 // Quotient with variance propagation
 // Var(X/Y) ≈ (1/Y²)Var(X) + (X²/Y⁴)Var(Y)
-pub fn quotient(x: Epistemic, y: Epistemic) -> Epistemic {
-    let y2 = y.value * y.value
+pub fn quotient(x: Epistemic, y: Epistemic) -> Epistemic with Div, Panic {
+    let y2 = y.val * y.val
     let y4 = y2 * y2
-    let variance = x.variance / y2 + x.value * x.value * y.variance / y4
+    let variance = x.variance / y2 + x.val * x.val * y.variance / y4
 
     Epistemic {
-        value: x.value / y.value,
+        val: x.val / y.val,
         variance: variance,
-        confidence: x.confidence.combine(&y.confidence).decay(0.97),
-        provenance: Provenance {
-            source: "quotient",
-            steps: Vec::new(),
-        },
+        confidence: ep_combine(x.confidence, y.confidence),
     }
 }
 
@@ -251,13 +215,9 @@ pub fn linear_combo(
     b: f64, y: Epistemic,
 ) -> Epistemic {
     Epistemic {
-        value: a * x.value + b * y.value,
+        val: a * x.val + b * y.val,
         variance: a * a * x.variance + b * b * y.variance,
-        confidence: x.confidence.combine(&y.confidence).decay(0.99),
-        provenance: Provenance {
-            source: "linear_combo",
-            steps: Vec::new(),
-        },
+        confidence: ep_combine(x.confidence, y.confidence),
     }
 }
 
@@ -271,18 +231,14 @@ pub fn sum_correlated(
     x: Epistemic,
     y: Epistemic,
     correlation: f64,
-) -> Epistemic {
+) -> Epistemic with Mut, Div, Panic {
     let cov = correlation * sqrt_f64(x.variance) * sqrt_f64(y.variance)
     let variance = x.variance + y.variance + 2.0 * cov
 
     Epistemic {
-        value: x.value + y.value,
-        variance: max_f64(variance, 0.0),  // Ensure non-negative
-        confidence: x.confidence.combine(&y.confidence).decay(0.98),
-        provenance: Provenance {
-            source: "sum_correlated",
-            steps: Vec::new(),
-        },
+        val: x.val + y.val,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_combine(x.confidence, y.confidence),
     }
 }
 
@@ -292,127 +248,254 @@ pub fn product_correlated(
     x: Epistemic,
     y: Epistemic,
     correlation: f64,
-) -> Epistemic {
+) -> Epistemic with Mut, Div, Panic {
     let cov = correlation * sqrt_f64(x.variance) * sqrt_f64(y.variance)
-    let variance = y.value * y.value * x.variance
-                 + x.value * x.value * y.variance
-                 + 2.0 * x.value * y.value * cov
+    let variance = y.val * y.val * x.variance
+                 + x.val * x.val * y.variance
+                 + 2.0 * x.val * y.val * cov
 
     Epistemic {
-        value: x.value * y.value,
+        val: x.val * y.val,
         variance: max_f64(variance, 0.0),
-        confidence: x.confidence.combine(&y.confidence).decay(0.97),
-        provenance: Provenance {
-            source: "product_correlated",
-            steps: Vec::new(),
-        },
+        confidence: ep_combine(x.confidence, y.confidence),
     }
 }
 
 // ============================================================================
-// MONTE CARLO PROPAGATION
+// NON-ASSOCIATIVE STRUCTURAL PROPAGATION
+// ============================================================================
+//
+// When a scalar observable is computed through a product of non-associative
+// quantities (octonions, sedenions), the *order* of multiplication is not
+// free: (a·b)·c ≠ a·(b·c). That order-indeterminacy is a genuine, structural
+// uncertainty on the result — distinct from measurement variance — and the
+// associator [a,b,c] = (a·b)·c − a·(b·c) measures it exactly.
+//
+// This is the join of the two theses the language is built on: non-associativity
+// is not merely *blocked* at the optimizer (the Fano reassociation gate in
+// ir/egraph.sio) — it *feeds* the uncertainty budget here. Certainty about
+// evaluation order is something you must earn (an associative / Fano triple,
+// where ‖α‖² = 0), not something assumed for convenience:
+//
+//   Var_total = Var_GUM + κ·‖[a,b,c]‖²
+//
+// Associative triple   ⇒ ‖α‖² = 0 ⇒ no augmentation (order was safe).
+// Non-associative triple ⇒ variance grows by exactly the order-ambiguity carried.
+//
+// Canonical implementation lives in epistemic::product_nonassoc (PnOct leaf).
+// Import that module directly — do not reintroduce algebra::associator_field
+// into this file (exclusive-ref multi-module path SEGVs under Madaros native).
+
+// ============================================================================
+// FINITE-DIFF JACOBIAN HELPERS (for bivariate propagation)
 // ============================================================================
 
-// Monte Carlo variance propagation for arbitrary functions
-//
-// When the delta method is insufficient (non-differentiable functions,
-// complex compositions), Monte Carlo provides a numerical estimate.
-//
-// Samples from N(value, variance) and computes empirical variance of f(samples).
-pub fn monte_carlo<F>(
+// Propagate bivariate f(x,y) with uncertainty via central-difference Jacobian.
+// Uses delta method: Var(f) ≈ (df/dx)²·Var(x) + (df/dy)²·Var(y)
+// plus cross-term for correlated propagation.
+pub fn propagate_fn_2d(
+    f: fn(f64, f64) -> f64,
     x: Epistemic,
-    f: F,
-    n_samples: i64,
-) -> Epistemic
-where F: fn(f64) -> f64
-{
-    let std = sqrt_f64(x.variance)
+    y: Epistemic,
+) -> Epistemic with Mut, Div, Panic {
+    let eps = 1.0e-7
 
-    // Generate samples and apply function
+    // Central differences for partial derivatives
+    let hx = if x.val != 0.0 { eps * abs_f64(x.val) } else { eps }
+    let hy = if y.val != 0.0 { eps * abs_f64(y.val) } else { eps }
+
+    let f_xy = f(x.val, y.val)
+    let f_xp = f(x.val + hx, y.val)
+    let f_xm = f(x.val - hx, y.val)
+    let f_yp = f(x.val, y.val + hy)
+    let f_ym = f(x.val, y.val - hy)
+
+    let df_dx = (f_xp - f_xm) / (2.0 * hx)
+    let df_dy = (f_yp - f_ym) / (2.0 * hy)
+
+    let variance = df_dx * df_dx * x.variance + df_dy * df_dy * y.variance
+
+    Epistemic {
+        val: f_xy,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_combine(x.confidence, y.confidence),
+    }
+}
+
+// Bivariate propagation with explicit partial derivatives (analytical)
+pub fn propagate_2d_analytic(
+    f_val: f64,
+    df_dx: f64, x: Epistemic,
+    df_dy: f64, y: Epistemic
+) -> Epistemic {
+    let variance = df_dx * df_dx * x.variance + df_dy * df_dy * y.variance
+    Epistemic {
+        val: f_val,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_combine(x.confidence, y.confidence),
+    }
+}
+
+// ============================================================================
+// MONTE CARLO PROPAGATION (value-style LCG; Madaros-native)
+// ============================================================================
+
+
+
+// Monte Carlo variance propagation for arbitrary functions
+
+// ---------------------------------------------------------------------------
+// Value-style LCG + CLT normal (Madaros-native MC)
+// Pattern from tests/run-pass/rapamycin_gum_vs_mc.sio (single-file proven).
+// No exclusive refs; no tuples on the hot path — struct NormalDraw only.
+// ---------------------------------------------------------------------------
+
+struct PropNormalDraw {
+    value: f64
+    seed: i64
+}
+
+fn prop_lcg_next(state: i64) -> i64 {
+    state * 6364136223846793005 + 1442695040888963407
+}
+
+fn prop_lcg_uniform(seed: i64) -> f64 with Mut, Div {
+    var s = seed
+    if s < 0 { s = 0 - s }
+    let m = 1073741824
+    var r = s
+    if r < 0 { r = 0 - r }
+    let bucket = r - (r / m) * m
+    (bucket as f64) / (m as f64)
+}
+
+fn prop_normal_sample(seed: i64) -> PropNormalDraw with Mut, Div {
+    var s = seed
+    var sum = 0.0
+    var j = 0
+    while j < 12 {
+        s = prop_lcg_next(s)
+        let u = prop_lcg_uniform(s)
+        sum = sum + u
+        j = j + 1
+    }
+    PropNormalDraw { value: sum - 6.0, seed: s }
+}
+
+// Madaros-native MC without function-pointer arguments.
+// Fixed kernels are the trustworthy surface under multi-module native.
+
+pub fn monte_carlo_identity(x: Epistemic, n_samples: i64) -> Epistemic with Prob, Mut, Div, Panic {
+    let std = sqrt_f64(x.variance)
     var sum = 0.0
     var sum_sq = 0.0
-    var rng_state = 12345_u64
-
+    var seed = 12345
     var i = 0
     while i < n_samples {
-        // Box-Muller for normal sample
-        let (u1, u2, new_state) = random_pair(rng_state)
-        rng_state = new_state
-        let z = sqrt_f64(-2.0 * ln_f64(u1)) * cos_f64(2.0 * 3.141592653589793 * u2)
-        let sample = x.value + z * std
+        let z = prop_normal_sample(seed)
+        seed = z.seed
+        let y = x.val + z.value * std
+        sum = sum + y
+        sum_sq = sum_sq + y * y
+        i = i + 1
+    }
+    let n = n_samples as f64
+    let mean = sum / n
+    let variance = (sum_sq / n) - (mean * mean)
+    Epistemic {
+        val: mean,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_clamp_conf((900.0 * min_f64(n, 1000.0) / 1000.0) as i64),
+    }
+}
 
-        // Apply function
+pub fn monte_carlo_square(x: Epistemic, n_samples: i64) -> Epistemic with Prob, Mut, Div, Panic {
+    let std = sqrt_f64(x.variance)
+    var sum = 0.0
+    var sum_sq = 0.0
+    var seed = 12345
+    var i = 0
+    while i < n_samples {
+        let z = prop_normal_sample(seed)
+        seed = z.seed
+        let sample = x.val + z.value * std
+        let y = sample * sample
+        sum = sum + y
+        sum_sq = sum_sq + y * y
+        i = i + 1
+    }
+    let n = n_samples as f64
+    let mean = sum / n
+    let variance = (sum_sq / n) - (mean * mean)
+    Epistemic {
+        val: mean,
+        variance: max_f64(variance, 0.0),
+        confidence: ep_clamp_conf((900.0 * min_f64(n, 1000.0) / 1000.0) as i64),
+    }
+}
+
+// Generic MC with fn-ptr — value-style LCG; fn-ptr may still be fragile under
+// multi-module (prefer monte_carlo_identity / monte_carlo_square).
+pub fn monte_carlo(
+    x: Epistemic,
+    f: fn(f64) -> f64,
+    n_samples: i64,
+) -> Epistemic with Prob, Mut, Div, Panic {
+    let std = sqrt_f64(x.variance)
+    var sum = 0.0
+    var sum_sq = 0.0
+    var seed = 12345
+    var i = 0
+    while i < n_samples {
+        let z = prop_normal_sample(seed)
+        seed = z.seed
+        let sample = x.val + z.value * std
         let y = f(sample)
         sum = sum + y
         sum_sq = sum_sq + y * y
-
         i = i + 1
     }
-
     let n = n_samples as f64
     let mean = sum / n
     let variance = (sum_sq / n) - (mean * mean)
-
-    // Confidence based on sample size (0.9 rate, scaled by n up to 1000)
-    let conf_n = min_f64(n, 1000.0)
-    let conf = BetaConfidence { dist: Beta { alpha: 0.9 * conf_n + 1.0, beta: 0.1 * conf_n + 1.0 } }
-
     Epistemic {
-        value: mean,
+        val: mean,
         variance: max_f64(variance, 0.0),
-        confidence: conf,
-        provenance: x.provenance.with_step("monte_carlo"),
+        confidence: ep_clamp_conf((900.0 * min_f64(n, 1000.0) / 1000.0) as i64),
     }
 }
 
-// Monte Carlo for bivariate function
-pub fn monte_carlo_2d<F>(
+pub fn monte_carlo_2d(
     x: Epistemic,
     y: Epistemic,
-    f: F,
+    f: fn(f64, f64) -> f64,
     n_samples: i64,
-) -> Epistemic
-where F: fn(f64, f64) -> f64
-{
+) -> Epistemic with Prob, Mut, Div, Panic {
     let std_x = sqrt_f64(x.variance)
     let std_y = sqrt_f64(y.variance)
-
     var sum = 0.0
     var sum_sq = 0.0
-    var rng_state = 67890_u64
-
+    var seed = 67890
     var i = 0
     while i < n_samples {
-        // Two independent normals
-        let (u1, u2, s1) = random_pair(rng_state)
-        let (u3, u4, s2) = random_pair(s1)
-        rng_state = s2
-
-        let z1 = sqrt_f64(-2.0 * ln_f64(u1)) * cos_f64(2.0 * 3.141592653589793 * u2)
-        let z2 = sqrt_f64(-2.0 * ln_f64(u3)) * cos_f64(2.0 * 3.141592653589793 * u4)
-
-        let sample_x = x.value + z1 * std_x
-        let sample_y = y.value + z2 * std_y
-
+        let zx = prop_normal_sample(seed)
+        seed = zx.seed
+        let zy = prop_normal_sample(seed)
+        seed = zy.seed
+        let sample_x = x.val + zx.value * std_x
+        let sample_y = y.val + zy.value * std_y
         let result = f(sample_x, sample_y)
         sum = sum + result
         sum_sq = sum_sq + result * result
-
         i = i + 1
     }
-
     let n = n_samples as f64
     let mean = sum / n
     let variance = (sum_sq / n) - (mean * mean)
-
     Epistemic {
-        value: mean,
+        val: mean,
         variance: max_f64(variance, 0.0),
-        confidence: BetaConfidence { dist: Beta { alpha: 0.9 * min_f64(n, 1000.0) + 1.0, beta: 0.1 * min_f64(n, 1000.0) + 1.0 } },
-        provenance: Provenance {
-            source: "monte_carlo_2d",
-            steps: Vec::new(),
-        },
+        confidence: ep_clamp_conf((900.0 * min_f64(n, 1000.0) / 1000.0) as i64),
     }
 }
 
@@ -420,22 +503,35 @@ where F: fn(f64, f64) -> f64
 // HELPER FUNCTIONS
 // ============================================================================
 
-fn exp_f64(x: f64) -> f64 {
-    if x > 10.0 { return 22026.465794806718 * exp_f64(x - 10.0) }
-    if x < -10.0 { return 0.00004539992976248485 * exp_f64(x + 10.0) }
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
 
+fn prop_exp_series(x: f64) -> f64 with Mut, Div, Panic {
+    // Iterative range reduction (no recursive self-call). Madaros imported-module
+    // path SEGV'd on the recursive form for some callers (measured 2026-07-20).
+    var xx = x
+    var scale = 1.0
+    while xx > 1.0 {
+        xx = xx - 1.0
+        scale = scale * 2.71828182845904523536
+    }
+    while xx < 0.0 - 1.0 {
+        xx = xx + 1.0
+        scale = scale * 0.36787944117144232159
+    }
     var result = 1.0
     var term = 1.0
     var i = 1
-    while i < 20 {
-        term = term * x / (i as f64)
+    while i < 24 {
+        term = term * xx / (i as f64)
         result = result + term
         i = i + 1
     }
-    result
+    result * scale
 }
 
-fn ln_f64(x: f64) -> f64 {
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 - 999999.0 }
     if x == 1.0 { return 0.0 }
 
@@ -451,7 +547,7 @@ fn ln_f64(x: f64) -> f64 {
     2.0 * result
 }
 
-fn sqrt_f64(x: f64) -> f64 {
+fn sqrt_f64(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
     var y = x
     y = 0.5 * (y + x / y)
@@ -465,32 +561,29 @@ fn sqrt_f64(x: f64) -> f64 {
     y
 }
 
-fn pow_f64(base: f64, exp: f64) -> f64 {
-    exp_f64(exp * ln_f64(base))
+fn pow_f64(base: f64, exp: f64) -> f64 with Mut, Div, Panic {
+    prop_exp_series(exp * ln_f64(base))
 }
 
-fn sin_f64(x: f64) -> f64 {
-    // Reduce to [-π, π]
+fn sin_f64(x: f64) -> f64 with Mut, Div, Panic {
     let pi = 3.141592653589793
     var x_mod = x
     while x_mod > pi { x_mod = x_mod - 2.0 * pi }
     while x_mod < 0.0 - pi { x_mod = x_mod + 2.0 * pi }
-
-    // Taylor series
+    let x2 = x_mod * x_mod
     var result = x_mod
     var term = x_mod
     var i = 1
     while i < 10 {
-        term = 0.0 - term * x_mod * x_mod / ((2.0 * i as f64) * (2.0 * i as f64 + 1.0))
+        term = 0.0 - term * x2 / ((2.0 * i as f64) * (2.0 * i as f64 + 1.0))
         result = result + term
         i = i + 1
     }
     result
 }
 
-fn cos_f64(x: f64) -> f64 {
-    let pi = 3.141592653589793
-    sin_f64(x + pi / 2.0)
+fn cos_f64(x: f64) -> f64 with Mut, Div, Panic {
+    sin_f64(x + 1.5707963267948966)
 }
 
 fn max_f64(a: f64, b: f64) -> f64 {
@@ -499,18 +592,4 @@ fn max_f64(a: f64, b: f64) -> f64 {
 
 fn min_f64(a: f64, b: f64) -> f64 {
     if a < b { a } else { b }
-}
-
-// Simple LCG random number generator
-fn random_pair(state: u64) -> (f64, f64, u64) {
-    let a = 6364136223846793005_u64
-    let c = 1442695040888963407_u64
-
-    let s1 = state * a + c
-    let s2 = s1 * a + c
-
-    let u1 = ((s1 >> 32) as f64) / 4294967296.0
-    let u2 = ((s2 >> 32) as f64) / 4294967296.0
-
-    (max_f64(u1, 0.0000001), u2, s2)
 }

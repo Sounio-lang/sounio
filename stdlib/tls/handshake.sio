@@ -1,0 +1,325 @@
+// stdlib/tls/handshake.sio -- TLS 1.3 handshake message wire codec
+// (RFC 8446 SS4). Pure encode/decode -- no I/O beyond RawBuf byte
+// access, no crypto, no connection state. Every function here operates
+// on already-decrypted handshake-layer bytes (the 4-byte
+// `msg_type || uint24 length` header plus body of a single handshake
+// message) -- record-layer framing/decryption is `stdlib/tls/record.sio`'s
+// job, not this file's.
+//
+// Handshake message types (RFC 8446 SS4, "HandshakeType" enum):
+//   client_hello(1), server_hello(2), new_session_ticket(4),
+//   encrypted_extensions(8), certificate(11), certificate_verify(15),
+//   finished(20), key_update(24).
+//
+// Extension framing within ClientHello/ServerHello/EncryptedExtensions
+// bodies (RFC 8446 SS4.2): `extension_type (2 bytes) ||
+// extension_data length (2 bytes) || extension_data`.
+//
+// Signature scheme codepoints (RFC 8446 SS4.2.3's own "SignatureScheme"
+// enum, independently re-verified against a freshly fetched copy of RFC
+// 8446 for this task): rsa_pss_rsae_sha256(0x0804),
+// rsa_pss_rsae_sha384(0x0805), ecdsa_secp256r1_sha256(0x0403).
+//
+// TWO REAL, MEASURED MADAROS COMPILER DEFECTS surfaced while building
+// this module (2026-08-25, this task) -- both are distinct from every
+// case catalogued in `docs/handoff/souc_v0800_defects.md` (D1-D8), so
+// they are documented here in detail rather than assumed to be one of
+// those:
+//
+// (1) Cross-struct field-name collision corrupts fixed-array struct
+//     fields at a cross-module tuple-return boundary. `decode_server_hello`
+//     originally lived in this file and returned `(ServerHelloInfo, bool)`
+//     where `ServerHelloInfo` has `random: [u8;32]` and
+//     `x25519_public: [u8;32]` fields -- the SAME field names as this
+//     file's `ClientHelloParams` struct. With both structs compiled into
+//     the same final program, `x25519_public` came back corrupted
+//     (observed equal to unrelated bytes) at the caller's tuple-
+//     destructure point, despite every field reading correctly right up
+//     to `decode_server_hello`'s own `return`. The fix (verified): move
+//     `ServerHelloInfo`/`decode_server_hello` into their own file
+//     (`stdlib/tls/server_hello.sio`) and re-export via `pub use` below --
+//     renaming the colliding fields alone was also independently
+//     confirmed to fix it, but moving the struct/function out entirely is
+//     the safer fix given this task's own field names are fixed by the
+//     plan brief. See `server_hello.sio`'s own doc comment for the full
+//     investigation trail (bisection down to a ~40-line standalone repro,
+//     module-name-independent, content-dependent).
+//
+// (2) `rawbuf_set`'s own documented write-clobber behaviour (already
+//     noted elsewhere in this codebase, e.g. `stdlib/x509/cert.sio`'s
+//     "Finding 20"/write-clobber comment): every `rawbuf_set` call also
+//     clobbers the FOLLOWING 7 bytes of the buffer. Writing a buffer's
+//     bytes in ascending, uninterrupted order is safe (each write's
+//     clobber is overwritten a moment later by the very next write) --
+//     but going BACK to patch an earlier length field (writing the
+//     4-byte header only after the body has already been written, or
+//     patching an extensions-length field after the extensions
+//     themselves) is NOT safe: that out-of-sequence write's forward
+//     clobber corrupts real body bytes with nothing left to correct it.
+//     `encode_client_hello`'s original implementation did exactly that
+//     and silently corrupted `ClientHelloParams.random` in its own
+//     returned buffer. The fix (verified, see `client_hello.sio`): every
+//     length this function needs is a pure function of its inputs and is
+//     computed BEFORE any byte is written, so header-through-last-
+//     extension is written in one single ascending pass.
+//
+// Given (1), this file also keeps `ClientHelloParams`/`encode_client_hello`
+// in their own file (`stdlib/tls/client_hello.sio`), re-exported below,
+// so that no two structs with overlapping fixed-array field names are
+// ever compiled into this same file again.
+//
+// Compiler defect SSD8 (`docs/handoff/souc_v0800_defects.md`): `var x =
+// *ref` on any fixed-array reference (`&[T;N]`) ALIASES the caller's
+// array instead of copying it, even with a type annotation. This file
+// never does that.
+//
+// Sentinel bool/i64 error convention throughout -- never
+// `Result<T,E>`/`Option<T>`.
+
+use net::socket::*
+use x509::cert::*
+
+// See stdlib/tls/server_hello.sio's own doc comment -- defect (1) above.
+pub use tls::server_hello::*
+// See stdlib/tls/client_hello.sio's own doc comment -- defect (2) above.
+pub use tls::client_hello::*
+
+pub const HS_NEW_SESSION_TICKET: u8 = 4
+pub const HS_ENCRYPTED_EXTENSIONS: u8 = 8
+pub const HS_CERTIFICATE: u8 = 11
+pub const HS_CERTIFICATE_VERIFY: u8 = 15
+pub const HS_FINISHED: u8 = 20
+pub const HS_KEY_UPDATE: u8 = 24
+
+pub struct CertificateVerifyInfo {
+    signature_scheme: u16,
+    cv_signature: RawBuf,
+    cv_signature_len: i64,
+}
+
+// --- small big-endian RawBuf accessors -------------------------------
+
+fn buf_set_u8(buf: &RawBuf, pos: i64, v: i64) with IO {
+    rawbuf_set(buf, pos, v & 255)
+}
+
+fn buf_set_u24(buf: &RawBuf, pos: i64, v: i64) with IO {
+    rawbuf_set(buf, pos, (v >> 16) & 255)
+    rawbuf_set(buf, pos + 1, (v >> 8) & 255)
+    rawbuf_set(buf, pos + 2, v & 255)
+}
+
+fn buf_get_u8(buf: &RawBuf, pos: i64) -> i64 with IO {
+    rawbuf_get(buf, pos)
+}
+
+fn buf_get_u16(buf: &RawBuf, pos: i64) -> i64 with IO {
+    (rawbuf_get(buf, pos) << 8) | rawbuf_get(buf, pos + 1)
+}
+
+fn buf_get_u24(buf: &RawBuf, pos: i64) -> i64 with IO {
+    (rawbuf_get(buf, pos) << 16) | (rawbuf_get(buf, pos + 1) << 8) | rawbuf_get(buf, pos + 2)
+}
+
+fn certificate_verify_info_zero() -> CertificateVerifyInfo with IO {
+    CertificateVerifyInfo {
+        signature_scheme: 0 as u16,
+        cv_signature: rawbuf_new(1),
+        cv_signature_len: 0,
+    }
+}
+
+// --- Certificate ---------------------------------------------------------
+
+// Decodes a Certificate message (RFC 8446 SS4.4.2): a 1-byte
+// `certificate_request_context` length + bytes (always empty in a
+// server's own Certificate message -- this plan is client-only, never
+// sends a CertificateRequest to have a context echoed back), followed by
+// a 3-byte `certificate_list` length and a list of
+// `(cert_data, extensions)` CertificateEntry pairs. Per-entry extensions
+// (e.g. OCSP `status_request`) are skipped, not decoded -- out of scope
+// per this task's brief.
+//
+// Return tuple order matches `x509_verify_chain`'s own parameter order
+// exactly: (leaf, leaf_buf, intermediates, intermediate_bufs,
+// intermediate_count, ok) -- so Task 7/8 can pass this straight into
+// `x509_verify_chain` with no reshaping.
+pub fn decode_certificate_message(msg_bytes: &RawBuf, msg_len: i64) -> (Certificate, RawBuf, [Certificate; 8], [RawBuf; 8], i32, bool) with IO {
+    var intermediates: [Certificate; 8] = [certificate_zero(); 8]
+    var intermediate_bufs: [RawBuf; 8] = [rawbuf_new(1); 8]
+    let empty_leaf = certificate_zero()
+    let empty_buf = rawbuf_new(1)
+
+    if msg_len < 4 {
+        return (empty_leaf, empty_buf, intermediates, intermediate_bufs, 0, false)
+    }
+    if (buf_get_u8(msg_bytes, 0) as u8) != HS_CERTIFICATE {
+        return (empty_leaf, empty_buf, intermediates, intermediate_bufs, 0, false)
+    }
+    let body_len = buf_get_u24(msg_bytes, 1)
+    if 4 + body_len > msg_len {
+        return (empty_leaf, empty_buf, intermediates, intermediate_bufs, 0, false)
+    }
+
+    var pos: i64 = 4
+    let ctx_len = buf_get_u8(msg_bytes, pos)
+    pos = pos + 1 + ctx_len
+
+    let list_len = buf_get_u24(msg_bytes, pos)
+    pos = pos + 3
+    let list_end = pos + list_len
+
+    var leaf = empty_leaf
+    var leaf_buf = empty_buf
+    var have_leaf = false
+    var count: i32 = 0
+
+    while pos < list_end {
+        let cert_data_len = buf_get_u24(msg_bytes, pos)
+        pos = pos + 3
+
+        // Extract this entry's raw DER bytes into their own RawBuf, with
+        // trailing slack matching this plan's established
+        // x509_parse_certificate call-site convention
+        // (stdlib/x509/cert.sio's own `entry.value_len as i64 + 8`).
+        let cert_buf = rawbuf_new(cert_data_len + 8)
+        var bi: i64 = 0
+        while bi < cert_data_len {
+            rawbuf_set(&cert_buf, bi, buf_get_u8(msg_bytes, pos + bi))
+            bi = bi + 1
+        }
+        pos = pos + cert_data_len
+
+        let ext_len = buf_get_u16(msg_bytes, pos)
+        pos = pos + 2 + ext_len // this plan does not decode per-entry extensions
+
+        let (parsed_cert, status) = x509_parse_certificate(&cert_buf, cert_data_len)
+        if status != X509_OK {
+            var fail_intermediates: [Certificate; 8] = [certificate_zero(); 8]
+            var fail_bufs: [RawBuf; 8] = [rawbuf_new(1); 8]
+            return (empty_leaf, empty_buf, fail_intermediates, fail_bufs, 0, false)
+        }
+
+        if have_leaf == false {
+            leaf = parsed_cert
+            leaf_buf = cert_buf
+            have_leaf = true
+        } else {
+            if count >= 8 {
+                // More than 8 intermediates: fail with a negative
+                // sentinel rather than silently truncating, per the
+                // task brief.
+                var overflow_intermediates: [Certificate; 8] = [certificate_zero(); 8]
+                var overflow_bufs: [RawBuf; 8] = [rawbuf_new(1); 8]
+                return (empty_leaf, empty_buf, overflow_intermediates, overflow_bufs, 0 - 1, false)
+            }
+            intermediates[count as usize] = parsed_cert
+            intermediate_bufs[count as usize] = cert_buf
+            count = count + 1
+        }
+    }
+
+    if have_leaf == false {
+        return (empty_leaf, empty_buf, intermediates, intermediate_bufs, 0, false)
+    }
+
+    (leaf, leaf_buf, intermediates, intermediate_bufs, count, true)
+}
+
+// --- CertificateVerify -----------------------------------------------------
+
+// Decodes a CertificateVerify message (RFC 8446 SS4.4.3):
+// `signature_scheme (2 bytes) || signature length (2 bytes) || signature`.
+pub fn decode_certificate_verify(msg_bytes: &RawBuf, msg_len: i64) -> (CertificateVerifyInfo, bool) with IO {
+    let zero = certificate_verify_info_zero()
+    if msg_len < 4 {
+        return (zero, false)
+    }
+    if (buf_get_u8(msg_bytes, 0) as u8) != HS_CERTIFICATE_VERIFY {
+        return (zero, false)
+    }
+    let body_len = buf_get_u24(msg_bytes, 1)
+    if 4 + body_len > msg_len {
+        return (zero, false)
+    }
+
+    var pos: i64 = 4
+    let scheme = buf_get_u16(msg_bytes, pos)
+    pos = pos + 2
+    let sig_len = buf_get_u16(msg_bytes, pos)
+    pos = pos + 2
+
+    if pos + sig_len > 4 + body_len {
+        return (zero, false)
+    }
+
+    let sig_buf = rawbuf_new(sig_len + 8)
+    var si: i64 = 0
+    while si < sig_len {
+        rawbuf_set(&sig_buf, si, buf_get_u8(msg_bytes, pos + si))
+        si = si + 1
+    }
+
+    let info = CertificateVerifyInfo {
+        signature_scheme: scheme as u16,
+        cv_signature: sig_buf,
+        cv_signature_len: sig_len,
+    }
+    (info, true)
+}
+
+// --- Finished ------------------------------------------------------------
+
+// Encodes a Finished message (RFC 8446 SS4.4.4): the handshake-layer
+// header plus `verify_data` verbatim as the body. Header written first
+// (see defect (2) above) so its own forward write-clobber is corrected
+// by the immediately-following ascending body writes; the extra 8 bytes
+// of trailing allocation slack absorb the final body byte's own
+// uncorrected clobber.
+pub fn encode_finished(verify_data: &RawBuf, verify_data_len: i64) -> (RawBuf, i64) with IO {
+    let total = 4 + verify_data_len
+    let out = rawbuf_new(total + 8)
+    buf_set_u8(&out, 0, HS_FINISHED as i64)
+    buf_set_u24(&out, 1, verify_data_len)
+    var i: i64 = 0
+    while i < verify_data_len {
+        rawbuf_set(&out, 4 + i, rawbuf_get(verify_data, i))
+        i = i + 1
+    }
+    (out, total)
+}
+
+// Decodes a Finished message, extracting `verify_data` (the whole body).
+pub fn decode_finished(msg_bytes: &RawBuf, msg_len: i64) -> (RawBuf, i64) with IO {
+    if msg_len < 4 {
+        return (rawbuf_new(1), 0)
+    }
+    if (buf_get_u8(msg_bytes, 0) as u8) != HS_FINISHED {
+        return (rawbuf_new(1), 0)
+    }
+    let body_len = buf_get_u24(msg_bytes, 1)
+    if 4 + body_len > msg_len {
+        return (rawbuf_new(1), 0)
+    }
+
+    let out = rawbuf_new(body_len + 8)
+    var i: i64 = 0
+    while i < body_len {
+        rawbuf_set(&out, i, buf_get_u8(msg_bytes, 4 + i))
+        i = i + 1
+    }
+    (out, body_len)
+}
+
+// --- trivial type-tag checks ---------------------------------------------
+
+// Task 8's tls_recv uses these to decide to discard (NewSessionTicket) or
+// rekey (KeyUpdate) a post-handshake message without fully decoding its
+// body.
+pub fn is_new_session_ticket(msg_type: u8) -> bool {
+    msg_type == HS_NEW_SESSION_TICKET
+}
+
+pub fn is_key_update(msg_type: u8) -> bool {
+    msg_type == HS_KEY_UPDATE
+}

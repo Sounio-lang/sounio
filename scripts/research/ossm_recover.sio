@@ -1,0 +1,115 @@
+// §3 associator-recovery, positive control (no BPTT, no autograd).
+// Label depends ONLY on the octonion associator of the inputs; commutator is
+// held constant across the alpha sweep. Two observers:
+//   OCT: computes proj([u,v,w])  -> can see the associator
+//   ASS: computes proj(uv - vu)  -> associative/commutator handle only
+// Same noise, same samples for every alpha. alpha scales the associator signal.
+
+struct Oct { a: f64, b: f64, c: f64, d: f64, e: f64, f: f64, g: f64, h: f64 }
+
+fn oct_mul(a: Oct, b: Oct) -> Oct {
+    let c0 = a.a*b.a - a.b*b.b - a.c*b.c - a.d*b.d - a.e*b.e - a.f*b.f - a.g*b.g - a.h*b.h
+    let c1 = a.a*b.b + a.b*b.a + a.c*b.d - a.d*b.c + a.e*b.f - a.f*b.e - a.g*b.h + a.h*b.g
+    let c2 = a.a*b.c - a.b*b.d + a.c*b.a + a.d*b.b + a.e*b.g + a.f*b.h - a.g*b.e - a.h*b.f
+    let c3 = a.a*b.d + a.b*b.c - a.c*b.b + a.d*b.a + a.e*b.h - a.f*b.g + a.g*b.f - a.h*b.e
+    let c4 = a.a*b.e - a.b*b.f - a.c*b.g - a.d*b.h + a.e*b.a + a.f*b.b + a.g*b.c + a.h*b.d
+    let c5 = a.a*b.f + a.b*b.e - a.c*b.h + a.d*b.g - a.e*b.b + a.f*b.a - a.g*b.d + a.h*b.c
+    let c6 = a.a*b.g + a.b*b.h + a.c*b.e - a.d*b.f - a.e*b.c + a.f*b.d + a.g*b.a - a.h*b.b
+    let c7 = a.a*b.h - a.b*b.g + a.c*b.f + a.d*b.e - a.e*b.d - a.f*b.c + a.g*b.b + a.h*b.a
+    Oct { a: c0, b: c1, c: c2, d: c3, e: c4, f: c5, g: c6, h: c7 }
+}
+fn oct_sub(a: Oct, b: Oct) -> Oct {
+    Oct { a: a.a-b.a, b: a.b-b.b, c: a.c-b.c, d: a.d-b.d,
+          e: a.e-b.e, f: a.f-b.f, g: a.g-b.g, h: a.h-b.h }
+}
+fn assoc(x: Oct, y: Oct, z: Oct) -> Oct {
+    oct_sub(oct_mul(oct_mul(x, y), z), oct_mul(x, oct_mul(y, z)))
+}
+// fixed linear functional on the imaginary part
+fn proj(o: Oct) -> f64 {
+    o.b - o.c + o.d - o.e + o.f - o.g + o.h
+}
+fn fabs(v: f64) -> f64 { if v < 0.0 { 0.0 - v } else { v } }
+
+var RA: i64 = 1
+var RB: i64 = 1
+fn rseed(s: i64) with Mut {
+    RA = s + 1
+    RB = s * 13 + 1234567
+    var w = 0
+    while w < 4 { let t = rnext(); w = w + 1 }
+}
+fn rnext() -> i64 with Mut {
+    var x = RA; let y = RB; RA = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RB = x; let r = x + y; if r < 0 { 0 - r } else { r }
+}
+fn rf() -> f64 with Mut, Div {
+    let r = rnext(); let m = r % 20000
+    (m as f64) / 10000.0 - 1.0
+}
+fn rand_oct() -> Oct with Mut, Div {
+    Oct { a: rf(), b: rf(), c: rf(), d: rf(), e: rf(), f: rf(), g: rf(), h: rf() }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    println("== associator recovery (positive control) ==")
+    println("alpha   BA_oct(permil)  BA_assoc(permil)   [0=random, 1000=perfect]")
+    let sigma = 0.9
+    let N = 400
+    // alpha sweep
+    var ai = 0
+    let ALPHAS: [f64; 6] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0]
+    while ai < 6 {
+        let alpha = ALPHAS[ai]
+        var cp = 0; var cn = 0
+        var okp = 0; var okn = 0        // OCT observer
+        var okp2 = 0; var okn2 = 0      // ASS observer
+        var i = 0
+        while i < N {
+            // sample (u,v,w) fixed per i, identical across alpha
+            rseed(i + 1)
+            let u = rand_oct(); let v = rand_oct(); let w = rand_oct()
+            let s = proj(assoc(u, v, w))            // associator signal
+            if fabs(s) > 0.000001 {
+                let ypos = s > 0.0
+                // noise fixed per i (independent of alpha)
+                rseed(i + 777)
+                let n1 = rf(); let n2 = rf()
+                let f_oct = alpha * s + sigma * n1
+                let comm = proj(oct_sub(oct_mul(u, v), oct_mul(v, u)))
+                let f_ass = comm + sigma * n2
+                let pred_oct = f_oct > 0.0
+                let pred_ass = f_ass > 0.0
+                if ypos {
+                    cp = cp + 1
+                    if pred_oct { okp = okp + 1 }
+                    if pred_ass { okp2 = okp2 + 1 }
+                } else {
+                    cn = cn + 1
+                    if !pred_oct { okn = okn + 1 }
+                    if !pred_ass { okn2 = okn2 + 1 }
+                }
+            }
+            i = i + 1
+        }
+        // balanced accuracy in permil (float division; guard against empty class)
+        var ba_oct = 0 - 1
+        var ba_ass = 0 - 1
+        if cp > 0 && cn > 0 {
+            let cpf = cp as f64
+            let cnf = cn as f64
+            ba_oct = (500.0 * ((okp as f64) / cpf + (okn as f64) / cnf)) as i64
+            ba_ass = (500.0 * ((okp2 as f64) / cpf + (okn2 as f64) / cnf)) as i64
+        }
+        print_int((alpha * 100.0) as i64)
+        print("cc     ")
+        print_int(ba_oct)
+        print("            ")
+        print_int(ba_ass)
+        println("")
+        ai = ai + 1
+    }
+    println("(alpha printed x100; commutator identical across the sweep by construction)")
+    0
+}

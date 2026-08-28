@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { useAudience } from '../../lib/useAudience';
 
 interface Measurement {
@@ -130,7 +130,7 @@ if ${p.resultLabel.toLowerCase().replace(/[^a-z]/g, '_')}.\u03B5 >= ${threshold.
 
         {/* Preset selector */}
         <div className="flex justify-center gap-2 mb-8">
-          {Object.entries(PRESETS).map(([key, val]) => (
+          {Object.entries(PRESETS).map(([key]) => (
             <button
               key={key}
               onClick={() => switchPreset(key as keyof typeof PRESETS)}

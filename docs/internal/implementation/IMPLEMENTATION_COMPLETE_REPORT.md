@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.implementation-complete-report
 -->
 
-
 # Relatório Final - Implementação do Sistema de Otimização MIR
 
 ## 🎯 Resumo Executivo

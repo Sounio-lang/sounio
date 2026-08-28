@@ -16,6 +16,13 @@ EXPECTED_LOG="$OUT_DIR/struct_basic.expected"
 
 mkdir -p "$OUT_DIR"
 
+run_sub_gate() {
+  local name="$1"
+  shift
+  echo "[native-v2-struct] running $name"
+  "$@"
+}
+
 printf '[native-v2-struct] souc=%s\n' "$SOUC_BIN"
 printf '[native-v2-struct] out=%s\n' "$OUT_DIR"
 
@@ -40,7 +47,36 @@ if ! cmp -s "$EXPECTED_LOG" "$STDOUT_LOG"; then
   exit 1
 fi
 
-# Regression: original serious-track gate must still pass
-bash scripts/ci/native_v2_serious_track_gate.sh
+run_sub_gate serious_track bash scripts/ci/native_v2_serious_track_gate.sh
 
-echo "[native-v2-struct] PASS"
+STRUCT_SUB_GATES=(
+  native_v2_algebra_law_gate.sh
+  native_v2_array_gate.sh
+  native_v2_logical_gate.sh
+  native_v2_enum_match_gate.sh
+  native_v2_nested_field_gate.sh
+  native_v2_struct_mutation_gate.sh
+  native_v2_struct_param_gate.sh
+  native_v2_struct_return_gate.sh
+  native_v2_out_param_boundary_gate.sh
+)
+
+for gate in "${STRUCT_SUB_GATES[@]}"; do
+  run_sub_gate "$gate" bash "scripts/ci/$gate"
+done
+
+# Avoid re-entering the CPU umbrella when struct_gate is already running under it.
+run_sub_gate imported_core_abi env SOUNIO_NATIVE_V2_FRONTEND_RUN_CPU_UMBRELLA=0 \
+  bash scripts/ci/native_v2_imported_core_abi_gate.sh
+run_sub_gate imported_hof_abi env SOUNIO_NATIVE_V2_FRONTEND_RUN_CPU_UMBRELLA=0 \
+  bash scripts/ci/native_v2_imported_hof_abi_gate.sh
+
+run_sub_gate metal_algebra bash scripts/ci/native_v2_metal_algebra_gate.sh
+
+if [[ "${SOUNIO_NATIVE_V2_NVIDIA_BARE_METAL_GATE_RUN:-0}" == "1" ]]; then
+  run_sub_gate nvidia_bare_metal bash scripts/ci/native_v2_nvidia_bare_metal_gate.sh
+else
+  echo "[native-v2-struct] skipping nvidia_bare_metal (set SOUNIO_NATIVE_V2_NVIDIA_BARE_METAL_GATE_RUN=1 on GPU hosts)"
+fi
+
+echo "[native-v2-struct] PASS: orchestrated struct/native-v2 regression suite"

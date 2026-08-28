@@ -1,0 +1,99 @@
+//! Column statistics that reduce a DataFrame to a scalar: sample variance, median, quantile, and
+//! pairwise Pearson correlation / sample covariance. Complements the base data::dataframe reductions
+//! (col_mean/std/min/max/sum).
+//!
+//! Self-contained: uses only the public data::dataframe accessors. Read-only (the input is never
+//! modified). Caps at 1024 rows for the sort-based verbs (the DataFrame row capacity).
+
+use data::dataframe::{DataFrame, df_get, df_nrows, df_col_mean}
+
+/// Sample variance (n-1 denominator) of column `col`. Returns 0.0 for fewer than 2 rows.
+pub fn df_col_var(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    let n = df_nrows(df)
+    if n < 2 { return 0.0 }
+    let m = df_col_mean(df, col)
+    var ss = 0.0
+    var r: i64 = 0
+    while r < n {
+        let d = df_get(df, r, col) - m
+        ss = ss + d * d
+        r = r + 1
+    }
+    ss / ((n - 1) as f64)
+}
+
+// Copy column `col` into buf (ascending sorted), returns count. Insertion sort, cap 1024.
+fn sorted_col(df: &DataFrame, col: i64, buf: &![f64; 1024]) -> i64 with Mut, Div, Panic {
+    let n = df_nrows(df)
+    var i: i64 = 0
+    while i < n && i < 1024 { buf[i as usize] = df_get(df, i, col); i = i + 1 }
+    var a: i64 = 1
+    while a < n && a < 1024 {
+        let cur = buf[a as usize]
+        var b = a - 1
+        var placed = false
+        while b >= 0 && !placed {
+            if buf[b as usize] > cur { buf[(b + 1) as usize] = buf[b as usize]; b = b - 1 } else { placed = true }
+        }
+        buf[(b + 1) as usize] = cur
+        a = a + 1
+    }
+    n
+}
+
+/// The `q`-quantile of column `col` (q in [0,1]), linear interpolation between order statistics
+/// (numpy/pandas default). q is clamped to [0,1].
+pub fn df_quantile(df: &DataFrame, col: i64, q: f64) -> f64 with Mut, Div, Panic {
+    let n = df_nrows(df)
+    if n <= 0 { return 0.0 }
+    var buf: [f64; 1024] = [0.0; 1024]
+    let m = sorted_col(df, col, &!buf)
+    if m == 1 { return buf[0] }
+    var qq = q
+    if qq < 0.0 { qq = 0.0 }
+    if qq > 1.0 { qq = 1.0 }
+    let pos = qq * ((m - 1) as f64)
+    let lo = (pos as i64)
+    var hi = lo + 1
+    if hi > m - 1 { hi = m - 1 }
+    let frac = pos - (lo as f64)
+    buf[lo as usize] + (buf[hi as usize] - buf[lo as usize]) * frac
+}
+
+/// Median of column `col` (the 0.5-quantile).
+pub fn df_col_median(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    df_quantile(df, col, 0.5)
+}
+
+/// Sample covariance (n-1) between columns `a` and `b`. Returns 0.0 for fewer than 2 rows.
+pub fn df_cov(df: &DataFrame, a: i64, b: i64) -> f64 with Mut, Div, Panic {
+    let n = df_nrows(df)
+    if n < 2 { return 0.0 }
+    let ma = df_col_mean(df, a)
+    let mb = df_col_mean(df, b)
+    var s = 0.0
+    var r: i64 = 0
+    while r < n {
+        s = s + (df_get(df, r, a) - ma) * (df_get(df, r, b) - mb)
+        r = r + 1
+    }
+    s / ((n - 1) as f64)
+}
+
+// Newton sqrt for the correlation denominator (no libm dependency across modules).
+fn s_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i: i64 = 0
+    while i < 40 { g = 0.5 * (g + x / g); i = i + 1 }
+    g
+}
+
+/// Pearson correlation between columns `a` and `b`, in [-1, 1]. Returns 0.0 if either column has zero
+/// variance or there are fewer than 2 rows.
+pub fn df_corr(df: &DataFrame, a: i64, b: i64) -> f64 with Mut, Div, Panic {
+    let va = df_col_var(df, a)
+    let vb = df_col_var(df, b)
+    if va <= 0.0 || vb <= 0.0 { return 0.0 }
+    df_cov(df, a, b) / (s_sqrt(va) * s_sqrt(vb))
+}

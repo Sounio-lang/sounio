@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from .knowledge import Knowledge
@@ -23,13 +24,6 @@ from .types import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-# Matches every Knowledge line in souc stdout.
-_KV_RE = re.compile(
-    r'Knowledge\s*\{\s*value:\s*([0-9eE+\-.]+)\s+'
-    r'epsilon:\s*([0-9eE+\-.]+)\s+'
-    r'prov:\s*"([^"]*)"\s*\}'
-)
 
 # Detect stage headers emitted by full_pipeline.sio
 _STAGE1_RE = re.compile(r"STAGE 1")
@@ -108,26 +102,29 @@ class DrugDiscoveryPipeline:
 
     def _find_pipeline_dir(self) -> str:
         """Locate the drug-discovery directory."""
+        here = Path(__file__).resolve().parent
+        
         candidates = [
-            os.environ.get("SOUNIO_DRUG_DISCOVERY_PATH", ""),
-            # sounio-py/python/sounio/ → ../../drug-discovery
-            os.path.join(os.path.dirname(__file__), "..", "..", "..", "drug-discovery"),
-            # repo root / ecosystem / drug-discovery
-            os.path.join(
-                os.path.dirname(__file__),
-                "..", "..", "..", "..", "ecosystem", "drug-discovery"
-            ),
+            Path(p) for p in [os.environ.get("SOUNIO_DRUG_DISCOVERY_PATH", "")]
+            if p
         ]
+        
+        # sounio-py/python/sounio/ → ../../../drug-discovery
+        candidates.append(here.parent.parent.parent / "drug-discovery")
+        # repo root / ecosystem / drug-discovery
+        candidates.append(here.parent.parent.parent.parent / "ecosystem" / "drug-discovery")
+
         for c in candidates:
-            if c and os.path.isdir(c):
-                return os.path.abspath(c)
+            if c.is_dir():
+                return str(c.resolve())
+                
         raise FileNotFoundError(
             "drug-discovery directory not found. "
             "Set SOUNIO_DRUG_DISCOVERY_PATH or pass pipeline_dir=."
         )
 
     def _example(self, filename: str) -> str:
-        return os.path.join(self.pipeline_dir, "examples", filename)
+        return str(Path(self.pipeline_dir) / "examples" / filename)
 
     # ---- Individual stages -----------------------------------------------
 
@@ -230,6 +227,7 @@ class DrugDiscoveryPipeline:
             molecules_passed=molecules_passed,
             pk_fitted=pk_fitted,
             simulation=sim,
+            knowledge_values=kvs,
             provenance_chain=provenance_chain,
             stdout=stdout,
             exit_code=result.exit_code,
@@ -307,17 +305,18 @@ class DrugDiscoveryPipeline:
             "bioavailability", "absorption_rate", "elimination_rate",
             "volume_distribution",
         }
-        kmap = _kv_map(
-            [Knowledge(0.0, 0.0, p) for p in result.provenance_chain]
-        )
-        # Re-parse from stdout to get actual values
-        parsed_kvs = [
-            Knowledge(float(v), float(e), p)
-            for v, e, p in _KV_RE.findall(result.stdout)
-        ]
+        
+        # Filter knowledge values for PK parameters
         pk_table = {
             k.provenance: k
-            for k in parsed_kvs
+            for k in result.knowledge_values
+            if k.provenance in pk_keys
+        }
+        
+        # Filter knowledge values for PK parameters
+        pk_table = {
+            k.provenance: k
+            for k in result.knowledge_values
             if k.provenance in pk_keys
         }
         if pk_table:
@@ -353,7 +352,7 @@ class DrugDiscoveryPipeline:
         return [
             stage
             for fname, stage in mapping.items()
-            if os.path.isfile(self._example(fname))
+            if Path(self._example(fname)).is_file()
         ]
 
     def __repr__(self) -> str:

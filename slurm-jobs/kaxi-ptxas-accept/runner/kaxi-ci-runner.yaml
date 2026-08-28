@@ -1,0 +1,67 @@
+# Self-hosted GitHub Actions runner for the K-AXI PTX acceptance gate.
+# Runs inside the cluster network so kubectl reaches the slurm-pilot login pod;
+# authenticates to k8s with the ambient ServiceAccount token (no kubeconfig /
+# no SLURM_KUBECONFIG secret in GitHub).
+#
+# Prereqs:
+#   1. kubectl apply -f runner/kaxi-ci-runner-rbac.yaml
+#   2. kubectl -n slurm-pilot create secret generic kaxi-ci-runner-gh \
+#        --from-literal=ACCESS_TOKEN='<github-pat-that-can-manage-runners>'
+#   3. Build/push the image from runner/Dockerfile.kaxi-runner and set `image:` below.
+#
+# Apply:
+#   kubectl apply -f slurm-jobs/kaxi-ptxas-accept/runner/kaxi-ci-runner.yaml
+#   kubectl -n slurm-pilot logs deploy/kaxi-ci-runner -f   # watch it register
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kaxi-ci-runner
+  namespace: slurm-pilot
+  labels:
+    app: kaxi-ci-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kaxi-ci-runner
+  template:
+    metadata:
+      labels:
+        app: kaxi-ci-runner
+    spec:
+      serviceAccountName: kaxi-ci-runner   # ambient in-cluster kubeconfig
+      containers:
+        - name: runner
+          image: REPLACE_ME/kaxi-ci-runner:1   # ← push from Dockerfile.kaxi-runner
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REPO_URL
+              value: "https://github.com/Sounio-lang/sounio"
+            - name: ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kaxi-ci-runner-gh
+                  key: ACCESS_TOKEN
+            - name: RUNNER_NAME
+              value: "kaxi-ci-runner"
+            - name: LABELS
+              value: "self-hosted,linux,x64,kaxi-slurm"   # set repo var KAXI_RUNNER_LABELS=kaxi-slurm
+            - name: RUNNER_SCOPE
+              value: "repo"
+            - name: RUNNER_WORKDIR
+              value: "/tmp/runner-work"
+            - name: DISABLE_AUTO_UPDATE
+              value: "true"
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          volumeMounts:
+            - name: work
+              mountPath: /tmp/runner-work
+      volumes:
+        - name: work
+          emptyDir: {}

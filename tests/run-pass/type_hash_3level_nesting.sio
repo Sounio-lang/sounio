@@ -1,0 +1,57 @@
+//@ run-pass
+//@ expect-stdout: type-hash 3-level PASS
+// Regression for the i64 type-hash overflow on 3-level pointer nesting
+// (closed in 2523ee2f4 by composite-type interning in lean_single.sio).
+//
+// Pre-fix: ref_hash_make compounded the inner hash by *256 per level while
+// the inner still carried the 2^50 band, so &Option<Box<Struct>> wrapped
+// mod 2^64 and corrupted the struct hash — field access reported
+// "unknown field" and shapes collided.
+//
+// Post-fix: composite inners are interned (CT_INNER_HASH[4096]) and only
+// a small surrogate id is multiplied, keeping the encoded hash inside
+// [2^50, 2^51) at arbitrary depth.
+//
+// This fixture exercises field access through two structurally distinct
+// 3-level nestings simultaneously to assert they do not alias: the same
+// compile unit creates and reads both &Option<Box<A>> and &Option<Box<B>>.
+// Under the bug, the two struct hashes would collide after the ×256 wrap
+// (different inner structs, same wrapped surrogate), so the field offsets
+// would be wrong for at least one of them.
+
+struct A { x: i64, y: i64 }
+struct B { p: i64, q: i64, r: i64 }
+
+fn read_a(slot: &Option<Box<A>>) -> i64 with Mut, Panic, Div {
+    match *slot {
+        Some(n) => (*n).x + (*n).y,
+        None => 0 - 1,
+    }
+}
+
+fn read_b(slot: &Option<Box<B>>) -> i64 with Mut, Panic, Div {
+    match *slot {
+        Some(n) => (*n).p + (*n).q + (*n).r,
+        None => 0 - 1,
+    }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    let ba = Box::new(A { x: 10, y: 20 })
+    let ha: Option<Box<A>> = Some(ba)
+
+    let bb = Box::new(B { p: 100, q: 200, r: 300 })
+    let hb: Option<Box<B>> = Some(bb)
+
+    let va = read_a(&ha)
+    let vb = read_b(&hb)
+
+    assert(va == 30)
+    assert(vb == 600)
+
+    // The deepest nesting: read across two distinct 3-level types in the
+    // same translation unit. Pre-fix the hash collision would corrupt at
+    // least one of the field reads; post-fix both decode cleanly.
+    print("type-hash 3-level PASS\n")
+    0
+}

@@ -1,0 +1,178 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/km.sio — Kaplan-Meier survival summaries
+//
+// The non-parametric survival estimator, reported as scalar summaries rather
+// than a full step curve (so the caller gets auditable numbers directly):
+//
+//   km(time, event, n, t_query) -> KMResult
+//
+// Ŝ(t) = Π_{t_(j) ≤ t} ( 1 − d_j / n_j ),  product over distinct death times,
+// with d_j deaths and n_j = #{i : timeᵢ ≥ t_(j)} at risk.  Right-censored
+// observations (event = 0) leave the estimator flat but reduce the risk set.
+//
+// Returns: Ŝ at the queried time, the median survival (first death time whose
+// Ŝ ≤ ½, or −1 if never reached), the final Ŝ, and the event count.
+//
+// Pure Sounio: an ordered walk over distinct death times (no sort, no nested
+// data-array calls); the risk set is counted inline. O(n²) for n ≤ 256.
+//
+// References:
+//   Kaplan & Meier (1958) JASA 53:457; Collett, "Modelling Survival Data" 3e.
+
+module stats::km
+
+pub struct KMResult {
+    pub s_at_query: f64,  // Ŝ(t_query)
+    pub median: f64,      // median survival time, or -1 if Ŝ never drops to ½
+    pub s_final: f64,     // Ŝ at the largest death time
+    pub n_events: i64,    // total deaths
+}
+
+/// Kaplan-Meier survival summaries.
+///
+/// Parâmetros: time — follow-up times; event — 1 death / 0 censored; n — size
+///             (<=256); t_query — time at which to report Ŝ.
+/// Retorno: KMResult (s_at_query, median, s_final, n_events).
+/// Referências: Kaplan & Meier (1958).
+pub fn km(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> KMResult with Mut, Div, Panic {
+    if n < 1 { return KMResult { s_at_query: 1.0, median: 0.0 - 1.0, s_final: 1.0, n_events: 0 } }
+    var surv = 1.0
+    var s_query = 1.0
+    var median = 0.0 - 1.0
+    var n_events = 0
+    // ordered walk over distinct death times: repeatedly take the smallest
+    // death time strictly greater than the previous one processed.
+    var prev = 0.0 - 1.0e300
+    var have_prev = false
+    var guard = 0
+    while guard <= n {
+        // find the next distinct death time
+        var found = false
+        var tau = 0.0
+        var i = 0
+        while i < n {
+            if event[i as usize] == 1 {
+                let ti = time[i as usize]
+                let after_prev = if have_prev { ti > prev } else { true }
+                if after_prev {
+                    if found == false || ti < tau { tau = ti; found = true }
+                }
+            }
+            i = i + 1
+        }
+        if found == false { guard = n + 1 }
+        else {
+            // deaths at tau and risk set (time >= tau)
+            var d = 0
+            var at_risk = 0
+            var j = 0
+            while j < n {
+                let tj = time[j as usize]
+                if tj >= tau { at_risk = at_risk + 1 }
+                if tj == tau && event[j as usize] == 1 { d = d + 1 }
+                j = j + 1
+            }
+            n_events = n_events + d
+            if at_risk > 0 {
+                surv = surv * (1.0 - (d as f64) / (at_risk as f64))
+            }
+            if tau <= t_query { s_query = surv }
+            if median < 0.0 && surv <= 0.5 { median = tau }
+            prev = tau
+            have_prev = true
+            guard = guard + 1
+        }
+    }
+    return KMResult { s_at_query: s_query, median: median, s_final: surv, n_events: n_events as i64 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// No censoring: times 1..5, all deaths.
+// S(1)=.8, S(2)=.6, S(3)=.4, S(4)=.2, S(5)=0. median=3 (first S<=.5).
+fn test_km_nocensor() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    let r = km(&t, &e, 5, 2.0)
+    var ok = true
+    ok = check(1, approx(r.s_at_query, 0.6, 1.0e-9)) && ok    // S(2)
+    ok = check(2, approx(r.median, 3.0, 1.0e-9)) && ok
+    ok = check(3, approx(r.s_final, 0.0, 1.0e-9)) && ok
+    ok = check(4, r.n_events == 5) && ok
+    return ok
+}
+
+// Same data, query at 4 -> S(4)=0.2.
+fn test_km_query4() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1; e[4]=1
+    let r = km(&t, &e, 5, 4.0)
+    return check(10, approx(r.s_at_query, 0.2, 1.0e-9))
+}
+
+// Censoring: times 1..5, events {1,0,1,0,1}.
+// death t=1: n=5,d=1 -> S=.8; t=3: n=3,d=1 -> S=.8·2/3=.533333; t=5: n=1,d=1 -> S=0.
+// median: first S<=.5 is at t=5. S(4)=0.533333. n_events=3.
+fn test_km_censor() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=3.0; t[3]=4.0; t[4]=5.0
+    e[0]=1; e[1]=0; e[2]=1; e[3]=0; e[4]=1
+    let r = km(&t, &e, 5, 4.0)
+    var ok = true
+    ok = check(20, approx(r.s_at_query, 0.533333, 1.0e-5)) && ok
+    ok = check(21, approx(r.median, 5.0, 1.0e-9)) && ok
+    ok = check(22, r.n_events == 3) && ok
+    return ok
+}
+
+// Tied death times: two deaths at t=2.
+// t=1: n=4,d=1 -> S=.75; t=2: n=3,d=2 -> S=.75·(1-2/3)=.75·1/3=.25. median=2.
+fn test_km_ties() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=2.0; t[2]=2.0; t[3]=3.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=0
+    let r = km(&t, &e, 4, 2.0)
+    var ok = true
+    ok = check(30, approx(r.s_at_query, 0.25, 1.0e-9)) && ok
+    ok = check(31, approx(r.median, 2.0, 1.0e-9)) && ok
+    ok = check(32, r.n_events == 3) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_km_nocensor() && ok
+    ok = test_km_query4() && ok
+    ok = test_km_censor() && ok
+    ok = test_km_ties() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

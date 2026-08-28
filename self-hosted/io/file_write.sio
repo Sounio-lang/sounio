@@ -9,12 +9,7 @@ use io::trace::{io_trace_append_byte, io_trace_append_string, io_trace_append_js
 // NOTE: lexer::mod import removed to avoid transitive parser::ast::* stack overflow.
 // io_read_source_file (which needs LexerState) moved to io::source_reader.sio.
 
-pub fn io_write_bytes_to_file(path: string, data: [i8; 65536], len: i64) -> bool with IO {
-    let result = write_file(path, data, len)
-    result >= 0
-}
-
-fn io_write_elf_to_file(path: string, elf: Elf64Binary) -> bool with IO, Mut {
+pub(crate) fn io_write_elf_to_file(path: string, elf: Elf64Binary) -> bool with IO, Mut {
     let result = write_file(path, elf.bytes, elf.len)
     result >= 0
 }
@@ -38,127 +33,17 @@ pub fn io_write_huge_binary(path: string, bytes: [i8; 16777216], len: i64) -> bo
     result >= 0
 }
 
+// K-AXI artifacts are 2MB (KaxiAsmBuf.data is [i8; 2097152]); sits between
+// io_write_meg_binary (1MB) and io_write_huge_binary (16MB).
+pub fn io_write_kaxi_binary(path: string, bytes: [i8; 2097152], len: i64) -> bool with IO {
+    let result = write_file(path, bytes, len)
+    result >= 0
+}
+
 pub fn io_make_executable(path: string) -> bool with IO {
     syscall6(90, path, 493, 0, 0, 0, 0) >= 0
 }
 
-
-pub fn io_trace_append_byte(buf: [i8; 65536], pos: i64, b: i64) -> ([i8; 65536], i64) with Mut, Panic, Div {
-    var out = buf
-    var p = pos
-    var n = b % 256
-    if n < 0 { n = n + 256 }
-    if p >= 0 && p < 65536 {
-        out[p as usize] = n as i8
-        p = p + 1
-    }
-    (out, p)
-}
-
-pub fn io_trace_append_string(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with Mut, Panic, Div {
-    var out = buf
-    var p = pos
-    var i: i64 = 0
-    let n = str_len(s)
-    while i < n && p < 65536 {
-        out[p as usize] = str_char_at(s, i) as i8
-        p = p + 1
-        i = i + 1
-    }
-    (out, p)
-}
-
-pub fn io_trace_append_json_string(buf: [i8; 65536], pos: i64, s: string) -> ([i8; 65536], i64) with Mut, Panic, Div {
-    var out = buf
-    var p = pos
-    var i: i64 = 0
-    let n = str_len(s)
-    while i < n && p < 65536 {
-        let ch = str_char_at(s, i)
-        if ch == 34 {
-            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
-            out = pair1.0
-            p = pair1.1
-            let pair2 = io_trace_append_byte(out, p, 34)   // '"'
-            out = pair2.0
-            p = pair2.1
-        } else if ch == 92 {
-            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
-            out = pair1.0
-            p = pair1.1
-            let pair2 = io_trace_append_byte(out, p, 92)   // '\'
-            out = pair2.0
-            p = pair2.1
-        } else if ch == 10 {
-            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
-            out = pair1.0
-            p = pair1.1
-            let pair2 = io_trace_append_byte(out, p, 110)  // 'n'
-            out = pair2.0
-            p = pair2.1
-        } else if ch == 13 {
-            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
-            out = pair1.0
-            p = pair1.1
-            let pair2 = io_trace_append_byte(out, p, 114)  // 'r'
-            out = pair2.0
-            p = pair2.1
-        } else if ch == 9 {
-            let pair1 = io_trace_append_byte(out, p, 92)   // '\'
-            out = pair1.0
-            p = pair1.1
-            let pair2 = io_trace_append_byte(out, p, 116)  // 't'
-            out = pair2.0
-            p = pair2.1
-        } else {
-            let pair = io_trace_append_byte(out, p, ch)
-            out = pair.0
-            p = pair.1
-        }
-        i = i + 1
-    }
-    (out, p)
-}
-
-pub fn io_trace_bool_string(v: bool) -> string {
-    if v { "true" } else { "false" }
-}
-
-pub fn io_trace_i64_string(v: i64) -> string with Mut, Panic, Div {
-    if v == 0 { return "0" }
-
-    var n = v
-    var neg: bool = false
-    if n < 0 {
-        neg = true
-        n = 0 - n
-    }
-
-    var rev: [i8; 32] = [0; 32]
-    var rev_len: i64 = 0
-    while n > 0 && rev_len < 31 {
-        let digit = n % 10
-        rev[rev_len as usize] = (48 + digit) as i8
-        rev_len = rev_len + 1
-        n = n / 10
-    }
-
-    var out: [i8; 64] = [0; 64]
-    var out_len: i64 = 0
-    if neg {
-        out[out_len as usize] = 45 as i8
-        out_len = out_len + 1
-    }
-
-    var i = rev_len - 1
-    while i >= 0 {
-        out[out_len as usize] = rev[i as usize]
-        out_len = out_len + 1
-        if i == 0 { break }
-        i = i - 1
-    }
-    str_from_bytes(out, out_len)
-}
 
 pub fn io_write_native_decision_trace(
     path: string,
@@ -518,7 +403,7 @@ fn io_write_provenance_json(path: string, prov: KernelProvenance) -> bool with I
 }
 
 
-fn io_write_kernel_response_json(path: string, resp: KernelResponse) -> bool with IO, Mut, Panic, Div {
+pub(crate) fn io_write_kernel_response_json(path: string, resp: KernelResponse) -> bool with IO, Mut, Panic, Div {
     var buf: [i8; 65536] = [0; 65536]
     var p: i64 = 0
     let p0 = io_trace_append_byte(buf, p, 123)
@@ -564,7 +449,7 @@ fn io_write_kernel_response_json(path: string, resp: KernelResponse) -> bool wit
     io_write_bytes_to_file(path, buf, p)
 }
 
-fn io_write_version_json(path: string) -> bool with IO, Mut, Panic, Div {
+pub(crate) fn io_write_version_json(path: string) -> bool with IO, Mut, Panic, Div {
     var buf: [i8; 65536] = [0; 65536]
     var p: i64 = 0
     let p0 = io_trace_append_byte(buf, p, 123)

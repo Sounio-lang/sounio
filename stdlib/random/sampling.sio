@@ -17,54 +17,47 @@
 // RNG (inline from rng.d for self-contained module)
 // ============================================================================
 
-struct SmpPcg64 {
-    state_hi: i64,
-    state_lo: i64,
-    inc_hi: i64,
-    inc_lo: i64,
+// R.2.8 Phase D — SmpPcg64 unified via type alias over canonical PcgState.
+use stdlib::random::pcg64_core::{
+    PcgState, pcg_u_lt, pcg_u128_add, pcg_umod, pcg_step, pcg_next_f64, pcg_next_f64_nonzero,
 }
+
+type SmpPcg64 = PcgState
+
+// ─── PCG64-XSL-RR-128/64 step + canonical seeding (matches pcg-cpp) ───────
 
 fn smp_pcg64_new(seed: i64) -> SmpPcg64 {
-    SmpPcg64 {
-        state_hi: seed ^ 0x853c49e6748fea9b,
-        state_lo: seed * 6364136223846793005,
-        inc_hi: 1,
-        inc_lo: 1,
-    }
+    let inc_hi: i64 = 6364136223846793005
+    let inc_lo: i64 = 1442695040888963407
+    let s0 = PcgState { state_hi: 0, state_lo: 0, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r1 = pcg_step(s0)
+    let mid = r1.0
+    let add = pcg_u128_add(mid.state_hi, mid.state_lo, 0, seed)
+    let s2 = PcgState { state_hi: add.hi, state_lo: add.lo, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r2 = pcg_step(s2)
+    return r2.0
 }
 
-fn smp_pcg64_next_i64(rng: SmpPcg64) -> (SmpPcg64, i64) {
-    let old_state = rng.state_lo
-    let new_lo = rng.state_lo * 6364136223846793005 + rng.inc_lo
-    let new_hi = rng.state_hi + rng.inc_hi
+fn smp_pcg64_next_i64(rng: SmpPcg64) -> (SmpPcg64, i64) { return pcg_step(rng) }
 
-    let xorshifted = (old_state >> 18) ^ old_state
-    let rot = (old_state >> 59) & 63
-    let result = xorshifted >> rot
+fn smp_pcg64_next_f64(rng: SmpPcg64) -> (SmpPcg64, f64) { return pcg_next_f64(rng) }
 
-    return (SmpPcg64 {
-        state_hi: new_hi,
-        state_lo: new_lo,
-        inc_hi: rng.inc_hi,
-        inc_lo: rng.inc_lo,
-    }, result)
-}
-
-fn smp_pcg64_next_f64(rng: SmpPcg64) -> (SmpPcg64, f64) {
-    let result = smp_pcg64_next_i64(rng)
-    let bits = result.1
-    let positive = if bits < 0 { 0 - bits } else { bits }
-    let fraction = (positive as f64) / 9223372036854775807.0
-    return (result.0, fraction)
-}
-
-// Generate integer in [0, n)
+// Generate integer in [0, n) with unbiased rejection-modulo.
 fn smp_pcg64_bounded(rng: SmpPcg64, n: i64) -> (SmpPcg64, i64) {
-    let result = smp_pcg64_next_i64(rng)
-    let x = result.1
-    let positive = if x < 0 { 0 - x } else { x }
-    let bounded = positive % n
-    return (result.0, bounded)
+    if n <= 0 { return (rng, 0) }
+    let neg_n = 0 - n
+    let threshold = pcg_umod(neg_n, n)
+    var current = rng
+    var attempts: i64 = 0
+    while attempts < 100 {
+        let r = pcg_step(current)
+        current = r.0
+        if !pcg_u_lt(r.1, threshold) {
+            return (current, pcg_umod(r.1, n))
+        }
+        attempts = attempts + 1
+    }
+    return (current, 0)
 }
 
 // ============================================================================
@@ -81,17 +74,7 @@ extern "C" {
 fn smp_pi() -> f64 { 3.14159265358979323846 }
 
 fn smp_pcg64_next_f64_nonzero(rng: SmpPcg64) -> (SmpPcg64, f64) {
-    var current = rng
-    var attempts = 0
-    while attempts < 10 {
-        let result = smp_pcg64_next_f64(current)
-        current = result.0
-        if result.1 > 0.0 {
-            return (current, result.1)
-        }
-        attempts = attempts + 1
-    }
-    return (current, 0.0000001)
+    return pcg_next_f64_nonzero(rng)
 }
 
 fn sample_normal(mean: f64, std: f64, rng: SmpPcg64) -> (SmpPcg64, f64) {

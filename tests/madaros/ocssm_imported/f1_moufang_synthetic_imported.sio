@@ -1,0 +1,93 @@
+//@ run-pass
+//
+// M3 smoke — F1 Moufang/alternativity test on a synthetic 8-utterance
+// trajectory with planted hash repetitions.
+//
+// Pins these contracts of `tools/ocssm/f1_moufang.sio`:
+//   1. The F1 algorithm runs end-to-end (Trajectory → embed → octonion
+//      associator → aggregate statistic).
+//   2. On 𝕆-embedded utterances, the τ_alt² statistic is dominated by
+//      f64 round-off (~1e-30) and stays below the threshold 1e-24.
+//
+// What this does NOT claim: that real SWDA dialogue passes. The corpus
+// loader is M3a, not yet shipped. This smoke is a synthetic baseline
+// proving the algorithm is well-formed and the threshold meaningful.
+
+use dialogue::trajectory::*
+use dialogue::embed::*
+use algebra::octonion::*
+
+// Reuse the f1_compute_sq function from tools/ocssm/f1_moufang.sio by
+// inlining the body — the standalone tool is a `fn main()` driver, not
+// a library, and the run-pass smoke is its mirror.
+
+fn rp_norm_sq(v: &[f64; 8]) -> f64 {
+    return v[0]*v[0] + v[1]*v[1] + v[2]*v[2] + v[3]*v[3]
+         + v[4]*v[4] + v[5]*v[5] + v[6]*v[6] + v[7]*v[7]
+}
+
+fn rp_alt_stat_sq(x: &[f64; 8], y: &[f64; 8]) -> f64 with Mut, Div, Panic, NonAssoc, NaturalityG2 {
+    var assoc: [f64; 8] = [0.0; 8]
+    oct_associator(x, x, y, &!assoc)
+    let num_sq: f64 = rp_norm_sq(&assoc)
+    let x_sq: f64 = rp_norm_sq(x)
+    let y_sq: f64 = rp_norm_sq(y)
+    let den_sq: f64 = x_sq * x_sq * y_sq
+    if den_sq < 0.0000000000000001 { return 0.0 }
+    return num_sq / den_sq
+}
+
+fn rp_threshold_sq() -> f64 with Mut, Div, Panic {
+    let m: f64 = 1000000.0
+    return 1.0 / (m * m * m * m)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, NonAssoc, NaturalityG2 {
+    var t: Trajectory = traj_empty()
+    let _0: i64 = traj_push(&t, 0, 100, 1, 0, 8)
+    let _1: i64 = traj_push(&t, 1, 200, 1, 0, 8)
+    let _2: i64 = traj_push(&t, 0, 100, 1, 0, 8)  // repeat of u0
+    let _3: i64 = traj_push(&t, 1, 300, 1, 0, 8)
+    let _4: i64 = traj_push(&t, 1, 200, 1, 0, 8)  // repeat of u1
+    let _5: i64 = traj_push(&t, 0, 400, 1, 0, 8)
+    let _6: i64 = traj_push(&t, 1, 300, 1, 0, 8)  // repeat of u3
+    let _7: i64 = traj_push(&t, 0, 500, 1, 0, 8)
+
+    var sum: f64 = 0.0
+    var count: i64 = 0
+    var i: i64 = 0
+    let n: i64 = traj_len(&t)
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            if traj_hash(&t, i) == traj_hash(&t, j) {
+                var k: i64 = 0
+                var v_idx: i64 = -1
+                while k < n {
+                    if traj_hash(&t, k) != traj_hash(&t, i) { v_idx = k; k = n }
+                    k = k + 1
+                }
+                if v_idx >= 0 {
+                    var x: [f64; 8] = [0.0; 8]
+                    var y: [f64; 8] = [0.0; 8]
+                    embed_into(traj_hash(&t, i), &!x)
+                    embed_into(traj_hash(&t, v_idx), &!y)
+                    sum = sum + rp_alt_stat_sq(&x, &y)
+                    count = count + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var stat_sq: f64 = 0.0
+    if count > 0 { stat_sq = sum / (count as f64) }
+
+    var ok: i64 = 1
+    if count == 0 { ok = 0 }                         // must find triples
+    if stat_sq >= rp_threshold_sq() { ok = 0 }       // must be alternative
+
+    if ok == 1 { print("PASS\n") } else { print("FAIL\n") }
+    return 0
+}

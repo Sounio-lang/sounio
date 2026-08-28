@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.scientific-pipelines-blockers-analyse
 -->
 
-
 # Análise de Blockers para Pipelines Científicos Completos no Sounio
 
 ## 🔍 Estado Atual do Sistema

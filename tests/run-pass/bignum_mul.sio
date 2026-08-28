@@ -1,0 +1,75 @@
+//@ run-pass
+//@ requires: madaros
+
+use bignum::bigint::*
+
+fn main() -> i64 with IO {
+    // Small, hand-computable case
+    let a = bigint_from_u32(123)
+    let b = bigint_from_u32(456)
+    let product = bigint_mul(&a, &b)   // 123 * 456 = 56088
+    let expected = bigint_from_u32(56088)
+    if bigint_cmp(&product, &expected) != 0 {
+        print_int(1)
+        return 1
+    }
+
+    // THE critical test: multiply two values whose product's bit 63 would
+    // be set if computed via naive 32-bit-limb math -- this is exactly the
+    // failure mode this whole design (16-bit limbs) exists to avoid.
+    // 4294967295 * 4294967295 = 18446744065119617025 = 0xFFFFFFFE00000001
+    // (bit 63 of this 64-bit product IS set -- this is precisely the value
+    // used to discover Finding 11 in the first place).
+    let big_a = bigint_from_u32(4294967295)
+    let big_b = bigint_from_u32(4294967295)
+    let big_product = bigint_mul(&big_a, &big_b)
+
+    // Expected result as a BigInt: 0xFFFFFFFE00000001 split into 16-bit
+    // limbs, little-endian: limb0=0x0001, limb1=0x0000, limb2=0xFFFE, limb3=0xFFFF
+    var expected_big = bigint_zero()
+    expected_big.limbs[0] = 1
+    expected_big.limbs[1] = 0
+    expected_big.limbs[2] = 65534   // 0xFFFE
+    expected_big.limbs[3] = 65535   // 0xFFFF
+    expected_big.len = 4
+    if bigint_cmp(&big_product, &expected_big) != 0 {
+        print_int(2)
+        return 1
+    }
+
+    // Multiplication by zero
+    let zero = bigint_zero()
+    let zero_product = bigint_mul(&a, &zero)
+    if zero_product.len != 0 {
+        print_int(3)
+        return 1
+    }
+
+    // Truncation regression: under the OLD (buggy) 256-limb BIGINT_MAX_LIMBS
+    // definition, squaring a 200-limb all-max-value operand produces a true
+    // product needing ~399-400 limbs, which used to get silently clamped to
+    // 256. With BIGINT_MAX_LIMBS now 512, the full untruncated length must
+    // come through. We don't hand-verify every limb (infeasible by hand for
+    // a 200-limb operand) -- proving `len` lands around 399-400 instead of
+    // being capped at the old 256 ceiling is sufficient to prove no silent
+    // truncation occurred.
+    var wide = bigint_zero()
+    var w = 0
+    while w < 200 {
+        wide.limbs[w as usize] = 65535
+        w = w + 1
+    }
+    wide.len = 200
+
+    // Exact expected width: (2^3200 - 1)^2 = 2^6400 - 2^3201 + 1, whose most
+    // significant set bit is bit 6399, i.e. exactly 6400 bits = 400 limbs of
+    // 16 bits. Asserted exactly (not as a range) for a sharp regression check.
+    let wide_square = bigint_mul(&wide, &wide)
+    if wide_square.len != 400 {
+        print_int(4)
+        return 1
+    }
+
+    print_int(0)
+    return 0
+}

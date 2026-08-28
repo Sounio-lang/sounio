@@ -1,0 +1,80 @@
+//@ run-pass
+//@ timeout: 90
+// Proves the ω² (IIV) and u_c (epistemic GUM) axes are INDEPENDENT in the nested
+// population×epistemic layer (pop_epistemic.sio), and that u_c→0 collapses to the
+// flat virtual-population semantics (backward compatibility).
+//
+// Because sample_normal consumes the RNG independently of (mean, sd), the same
+// seed gives an identical standard-normal stream across configs, so the
+// separation is EXACT (cross-effects vanish to f64 round-off), not statistical:
+//   · varying ω  changes the IIV P95/P5 ratio but NOT the epistemic median CV
+//   · varying u_c changes the epistemic median CV but NOT the IIV P95/P5 ratio
+
+use darwin_pbpk::population::pop_epistemic::{pop_epistemic_run, PopEpiResult}
+
+fn sabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("Nested population × epistemic separation — pop_epistemic.sio")
+    println("")
+
+    let cl = 12.4      // rapamycin population CL (L/h)
+    let dose = 5.0
+    let f = 1.0        // IV
+    let M = 200        // epistemic draws
+    let N = 64         // individuals per population
+    let seed = 42
+
+    // Four configs sharing the SAME seed → identical standard-normal stream.
+    let base = pop_epistemic_run(cl, 0.20, 0.30, M, N, dose, f, seed) // u_c=0.20, ω=0.30
+    let om2  = pop_epistemic_run(cl, 0.20, 0.60, M, N, dose, f, seed) // ω doubled
+    let uc2  = pop_epistemic_run(cl, 0.40, 0.30, M, N, dose, f, seed) // u_c doubled
+    let coll = pop_epistemic_run(cl, 0.00, 0.30, M, N, dose, f, seed) // u_c → 0
+
+    print("base : median="); print(base.median_pop); print(" iiv_ratio="); print(base.iiv_ratio); print(" epi_cv%="); println(base.epi_cv)
+    print("ω×2  : median="); print(om2.median_pop);  print(" iiv_ratio="); print(om2.iiv_ratio);  print(" epi_cv%="); println(om2.epi_cv)
+    print("u_c×2: median="); print(uc2.median_pop);  print(" iiv_ratio="); print(uc2.iiv_ratio);  print(" epi_cv%="); println(uc2.epi_cv)
+    print("u_c=0: median="); print(coll.median_pop); print(" iiv_ratio="); print(coll.iiv_ratio); print(" epi_cv%="); println(coll.epi_cv)
+    println("")
+
+    let eps = 1.0e-6
+
+    // SEPARATION — cross-effects must vanish:
+    //  (a) doubling ω leaves the epistemic median CV unchanged
+    let sep_a = sabs(om2.epi_cv - base.epi_cv) < eps
+    //  (b) doubling u_c leaves the IIV P95/P5 ratio unchanged
+    let sep_b = sabs(uc2.iiv_ratio - base.iiv_ratio) < eps
+    // DIRECT effects — each knob moves its OWN axis:
+    //  (c) doubling u_c grows the epistemic median CV (>1.5×)
+    let dir_c = uc2.epi_cv > base.epi_cv * 1.5
+    //  (d) doubling ω widens the IIV P95/P5 ratio (>1.5×)
+    let dir_d = om2.iiv_ratio > base.iiv_ratio * 1.5
+
+    print("  (a) ω⊥epistemic   |Δepi_cv|="); print(sabs(om2.epi_cv - base.epi_cv)); println(sep_a ? "  OK" : "  FAIL")
+    print("  (b) u_c⊥IIV       |Δiiv_ratio|="); print(sabs(uc2.iiv_ratio - base.iiv_ratio)); println(sep_b ? "  OK" : "  FAIL")
+    print("  (c) u_c→epi_cv    ratio="); print(uc2.epi_cv / base.epi_cv); println(dir_c ? "  OK" : "  FAIL")
+    print("  (d) ω→iiv_ratio   ratio="); print(om2.iiv_ratio / base.iiv_ratio); println(dir_d ? "  OK" : "  FAIL")
+    println("")
+
+    if sep_a && sep_b && dir_c && dir_d {
+        println("POP_EPISTEMIC_SEPARATION_PASS")
+    } else {
+        println("POP_EPISTEMIC_SEPARATION_FAIL")
+    }
+
+    // COLLAPSE — u_c→0 ⇒ negligible epistemic band (single population = baseline),
+    // and the IIV interval is unchanged from base (same ω). epi_cv is a PERCENT;
+    // u_c=0 drives it to the numerical floor (~1e-3 %), a >1000× collapse from the
+    // base 20.9% — i.e. the epistemic band vanishes, recovering flat PopSim.
+    let coll_epi_zero = coll.epi_cv < 0.01 && coll.epi_cv < base.epi_cv * 0.001
+    let coll_iiv_same = sabs(coll.iiv_ratio - base.iiv_ratio) < eps
+    print("  u_c=0 epi_cv≈0 (% , floor): "); print(coll.epi_cv); println(coll_epi_zero ? "  OK" : "  FAIL")
+    print("  u_c=0 IIV==base: |Δ|="); print(sabs(coll.iiv_ratio - base.iiv_ratio)); println(coll_iiv_same ? "  OK" : "  FAIL")
+    if coll_epi_zero && coll_iiv_same {
+        println("POP_EPISTEMIC_COLLAPSE_TO_BASELINE_PASS")
+    } else {
+        println("POP_EPISTEMIC_COLLAPSE_TO_BASELINE_FAIL")
+    }
+
+    return 0
+}

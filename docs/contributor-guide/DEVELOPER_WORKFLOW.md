@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.contributor-gu
 
 # Sounio Developer Workflow Guide
 
+> **⚠️ Command reality updated 2026-07-11 (doc-reality audit).** This guide predates the Rust→self-hosted cutover; the `cargo` / `crates/` / `./target/release/souc` commands below do **not** work (no `Cargo.toml`). Real equivalents on this checkout: the compiler is **prebuilt** — use `./bin/souc` directly. `cargo run -- <args>` → `./bin/souc <args>`; `cargo build --release` → `make build`; `cargo test` → `make test` or `bash scripts/run_sio_test_suite.sh`. The Make targets `make verify` / `verify-quick` / `test-selfhost` / `test-all` do **not** exist — real ones include `make build`, `make check`, `make test`, `make test-stdlib`, `make test-madaros-identity`, `make lint`. Project-structure paths have moved: `check/type_check.sio` → `self-hosted/check/check.sio`; `lexer/lexer.sio` → `self-hosted/lexer/mod.sio`; the frontend lives under `self-hosted/`.
+
+
 **Target Audience**: Contributors working on the self-hosted compiler
 **Last Updated**: 2026-02-13
 

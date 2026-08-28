@@ -1,0 +1,193 @@
+// examples/dissertation_pgx_compile_gate_demo.sio
+//
+// Dissertation narrative: CYP2D6 + ABCB1 + DRD2 PGx gate for haloperidol.
+//
+// Three patients — NM, PM, UM — at 5 mg QD haloperidol.
+// Shows:
+//   1. How PGx genotype shifts steady-state plasma and D2 occupancy
+//   2. Per-patient aggregate PGx confidence (aggregate_rss)
+//   3. Gate verdict: which patients are in the therapeutic window
+//
+// The compile-time gate enforces that a function annotated Confidence(750)
+// CANNOT be called unless the CL measurement confidence ≥ 750/1000.
+// See tests/compile-fail/halo_pgx_gate_refuse.sio for the refusal path.
+//
+// Run:
+//   SOUNIO_STDLIB_PATH=/workspace/sounio/stdlib \
+//     ./bin/souc run examples/dissertation_pgx_compile_gate_demo.sio
+
+use darwin_pbpk::bbb::bbb_core::{BBBParams, bbb_integrate_constant_plasma, bbb_c_isf_u}
+use darwin_pbpk::drugs::haloperidol::{haloperidol_bbb_params, haloperidol_d2_params}
+use darwin_pbpk::pd::d2_occupancy::{d2_occupancy, d2_occupancy_pct}
+use darwin_pbpk::pgx::cyp2d6_haloperidol::{halo_cyp2d6_adjusted_cl, halo_cyp2d6_prior_conf}
+use darwin_pbpk::pgx::abcb1::{abcb1_prior_conf}
+use darwin_pbpk::pgx::drd2_taq1a::{drd2_prior_conf}
+use darwin_pbpk::aggregate_confidence::{MultiDrugInput, multi_drug_input_zero, aggregate_rss, rho_identity}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+fn demo_c_plasma_ss(dose_mg: f64, cl_l_h: f64) -> f64 with Div, Panic {
+    0.65 * dose_mg / (cl_l_h * 24.0)
+}
+
+fn demo_d2_occ(c_plasma: f64, bbb: BBBParams) -> f64 with Div, Panic, Mut {
+    let st = bbb_integrate_constant_plasma(c_plasma, 500.0, 0.1, bbb)
+    let c_isf_free = bbb_c_isf_u(st, bbb)
+    d2_occupancy(c_isf_free, haloperidol_d2_params())
+}
+
+fn pgx_agg_conf(cyp_conf: f64, abc_conf: f64, drd_conf: f64) -> f64 with Div, Panic, Mut {
+    var inp = multi_drug_input_zero()
+    inp.n_drugs = 3
+    inp.confidence[0] = cyp_conf
+    inp.confidence[1] = abc_conf
+    inp.confidence[2] = drd_conf
+    inp.rho = rho_identity()
+    aggregate_rss(inp)
+}
+
+fn gate_label(agg: f64) -> i32 {
+    // Returns: 2 = PASS (≥0.75), 1 = WARN (0.60–0.75), 0 = REFUSE (<0.60)
+    if agg >= 0.75 { return 2 }
+    if agg >= 0.60 { return 1 }
+    return 0
+}
+
+fn print_gate(g: i32) with IO {
+    if g == 2 { println("  Gate: PASS (Confidence ≥ 750 met)") }
+    if g == 1 { println("  Gate: WARN (confidence borderline — additional testing recommended)") }
+    if g == 0 { println("  Gate: REFUSE (Confidence < 600 — genotyping required before prescribing)") }
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() with IO, Mut, Div, Panic {
+    println("======================================================================")
+    println("  Haloperidol PGx Prescribing Gate — Dissertation Demo")
+    println("  CYP2D6 × ABCB1 × DRD2 TaqI A")
+    println("======================================================================")
+    println("")
+    println("Dose: 5 mg haloperidol QD (once daily, oral tablet)")
+    println("Base CL (NM reference): 40 L/h (Forsman & Ohman 1977)")
+    println("Therapeutic window: D2 occupancy 60–80% (Farde 1992 PET)")
+    println("EPS threshold: > 80%")
+    println("")
+
+    let base_cl: f64 = 40.0
+    let bbb_ref  = haloperidol_bbb_params()   // CC genotype default
+
+    // -----------------------------------------------------------------------
+    // PATIENT A: NM + CC + A2A2 — the reference patient
+    // -----------------------------------------------------------------------
+    println("----------------------------------------------------------------------")
+    println("  PATIENT A: CYP2D6 NM (normal), ABCB1 CC, DRD2 A2A2")
+    println("----------------------------------------------------------------------")
+    let cl_a = halo_cyp2d6_adjusted_cl(base_cl, 2)   // NM
+    let c_a   = demo_c_plasma_ss(5.0, cl_a)
+    let occ_a = demo_d2_occ(c_a, bbb_ref)
+    let conf_cyp_a = halo_cyp2d6_prior_conf(2)   // NM: 0.75
+    let conf_abc_a = abcb1_prior_conf(0)           // CC: 0.70
+    let conf_drd_a = drd2_prior_conf(2)            // A2A2: 0.65
+    let agg_a = pgx_agg_conf(conf_cyp_a, conf_abc_a, conf_drd_a)
+
+    print("  CL_individual = "); print_f64(cl_a); println(" L/h")
+    print("  C_plasma_ss   = "); print_f64(c_a * 1000.0); println(" ng/mL")
+    print("  D2 occupancy  = "); print_f64(occ_a * 100.0); println("%")
+    print("  PGx aggregate confidence (RSS) = "); print_f64(agg_a); println("")
+    print_gate(gate_label(agg_a))
+    if occ_a >= 0.60 && occ_a < 0.80 {
+        println("  Clinical: IN therapeutic window — prescribing authorised")
+    } else {
+        println("  Clinical: OUTSIDE therapeutic window")
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // PATIENT B: PM + TT + A1A1 — worst-case combined PGx
+    // -----------------------------------------------------------------------
+    println("----------------------------------------------------------------------")
+    println("  PATIENT B: CYP2D6 PM (poor), ABCB1 TT, DRD2 A1A1")
+    println("----------------------------------------------------------------------")
+    let cl_b = halo_cyp2d6_adjusted_cl(base_cl, 0)   // PM: reduced CL
+    let c_b   = demo_c_plasma_ss(5.0, cl_b)
+    let occ_b = demo_d2_occ(c_b, bbb_ref)           // BBB at CC for PD comparison
+    let conf_cyp_b = halo_cyp2d6_prior_conf(0)   // PM: 0.55
+    let conf_abc_b = abcb1_prior_conf(2)           // TT: 0.55
+    let conf_drd_b = drd2_prior_conf(0)            // A1A1: 0.55
+    let agg_b = pgx_agg_conf(conf_cyp_b, conf_abc_b, conf_drd_b)
+
+    print("  CL_individual = "); print_f64(cl_b); println(" L/h")
+    print("  C_plasma_ss   = "); print_f64(c_b * 1000.0); println(" ng/mL")
+    print("  D2 occupancy  = "); print_f64(occ_b * 100.0); println("%")
+    print("  PGx aggregate confidence (RSS) = "); print_f64(agg_b); println("")
+    print_gate(gate_label(agg_b))
+    if occ_b >= 0.80 {
+        println("  Clinical: EPS RISK — dose reduction indicated")
+    } else if occ_b >= 0.60 {
+        println("  Clinical: high end of therapeutic window")
+    } else {
+        println("  Clinical: sub-therapeutic")
+    }
+    println("")
+    println("  NOTE: Even at 5 mg, PM plasma is elevated. At 10 mg dose,")
+    println("  D2 > 80% is expected — see haloperidol_pgx_gate.sio T2.")
+    println("")
+
+    // -----------------------------------------------------------------------
+    // PATIENT C: UM + CC + A2A2 — undertreated at standard dose
+    // -----------------------------------------------------------------------
+    println("----------------------------------------------------------------------")
+    println("  PATIENT C: CYP2D6 UM (ultra-rapid), ABCB1 CC, DRD2 A2A2")
+    println("----------------------------------------------------------------------")
+    let cl_c = halo_cyp2d6_adjusted_cl(base_cl, 3)   // UM: elevated CL
+    let c_c   = demo_c_plasma_ss(5.0, cl_c)
+    let occ_c = demo_d2_occ(c_c, bbb_ref)
+    let conf_cyp_c = halo_cyp2d6_prior_conf(3)   // UM: 0.55
+    let conf_abc_c = abcb1_prior_conf(0)           // CC: 0.70
+    let conf_drd_c = drd2_prior_conf(2)            // A2A2: 0.65
+    let agg_c = pgx_agg_conf(conf_cyp_c, conf_abc_c, conf_drd_c)
+
+    print("  CL_individual = "); print_f64(cl_c); println(" L/h")
+    print("  C_plasma_ss   = "); print_f64(c_c * 1000.0); println(" ng/mL")
+    print("  D2 occupancy  = "); print_f64(occ_c * 100.0); println("%")
+    print("  PGx aggregate confidence (RSS) = "); print_f64(agg_c); println("")
+    print_gate(gate_label(agg_c))
+    if occ_c < 0.60 {
+        println("  Clinical: UNDERTREATED — dose escalation or alternative indicated")
+    } else {
+        println("  Clinical: in therapeutic range")
+    }
+    println("")
+
+    // -----------------------------------------------------------------------
+    // COMPILE-TIME GATE NARRATIVE
+    // -----------------------------------------------------------------------
+    println("======================================================================")
+    println("  Compile-Time Gate Illustration")
+    println("======================================================================")
+    println("")
+    println("  BEFORE genotyping (unknown phenotype):")
+    println("    CL prior: 40 ± 20 L/h (CV=50%, population without PGx data)")
+    println("    measure(40.0, uncertainty: 20.0) → confidence = 500/1000")
+    println("    fn prescribe_haloperidol() with Confidence(750) → COMPILE FAILS")
+    println("    >> error: EpistemicComplete violation (conf=500 < 750)")
+    println("")
+    println("  AFTER genotyping (NM confirmed):")
+    println("    CL estimate: 40 ± 1.6 L/h (CV=4%, genotype-guided)")
+    println("    measure(40.0, uncertainty: 1.6) → confidence = 960/1000")
+    println("    fn prescribe_haloperidol() with Confidence(750) → COMPILES OK")
+    println("    >> dose_mg emitted, prescribing authorised")
+    println("")
+    println("  Dissertation claim: For patients with unknown CYP2D6 phenotype,")
+    println("  the compiler refuses to generate a haloperidol prescription.")
+    println("  Genotyping is provably required before the program can compile.")
+    println("")
+    println("  See: tests/compile-fail/halo_pgx_gate_refuse.sio (refuse path)")
+    println("       tests/run-pass/halo_pgx_gate_pass.sio   (pass path)")
+    println("======================================================================")
+    println("  PGx DEMO OK")
+}

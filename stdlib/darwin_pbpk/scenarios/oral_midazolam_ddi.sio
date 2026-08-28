@@ -1,0 +1,153 @@
+// oral_midazolam_ddi.sio — production scenario: oral midazolam ± ketoconazole.
+//
+// Couples first-order oral absorption with the adaptive Tsit5 PBPK14 systemic
+// solver (the production integrator — the parity gate instead uses a fixed-step
+// RK4 in tests/run-pass/dissertation_pbpk28_parity_ref_midazolam.sio, since
+// bit-for-bit parity on an adaptive controller is intractable).
+//
+// The CYP3A drug–drug interaction enters mechanistically and WITHOUT extending
+// absorption.sio: drugs/midazolam.sio derives, from a single CYP3A intrinsic
+// clearance CLint_h, both the systemic CL_h (-> PBPKParams14.cl_hepatic) and the
+// oral bioavailability F = Fa·FG·FH (-> AbsorptionParams.f_bio). A ketoconazole
+// inhibition factor lowers CL_h and raises F consistently (no double-count), so
+// the oral AUC ratio reproduces the iconic ~15× (Olkkola 1994).
+//
+// Inhibitor held static at steady state. Units: mg, L, L/h, h, mg/L.
+
+use darwin_pbpk::absorption::*
+use darwin_pbpk::tsit5_pbpk14::*
+use darwin_pbpk::drugs::midazolam::*
+use darwin_pbpk::ddi::cyp3a_competitive::*
+
+pub struct OralMidazolamTrace {
+    n_points:     i32,
+    times_h:      [f64; 32],
+    c_plasma:     [f64; 32],   // total blood concentration (mg/L)
+    a_gut:        [f64; 32],   // gut-depot mass remaining (mg)
+    released_cum: [f64; 32],   // cumulative mass delivered to blood (mg)
+    auc_plasma:   f64,         // trapezoidal plasma AUC (mg·h/L)
+    success:      bool,
+}
+
+pub fn oral_midazolam_trace_zero() -> OralMidazolamTrace {
+    OralMidazolamTrace {
+        n_points: 0,
+        times_h:      [0.0; 32],
+        c_plasma:     [0.0; 32],
+        a_gut:        [0.0; 32],
+        released_cum: [0.0; 32],
+        auc_plasma:   0.0,
+        success:      false,
+    }
+}
+
+// Single oral dose, adaptive Tsit5 systemic integration under supplied params
+// (sys_prm carries the inhibited CL_h; abs_prm carries the inhibited F).
+pub fn oral_midazolam_run(
+    sys_prm:     PBPKParams14,
+    abs_prm:     AbsorptionParams,
+    dose_mg:     f64,
+    checkpoints: [f64; 32],
+    n_points:    i32
+) -> OralMidazolamTrace with Mut, Div, Panic {
+    let cfg = tight_ode_config()
+
+    var trace = oral_midazolam_trace_zero()
+    trace.n_points = n_points
+
+    var sys_st = pbpk_state_zero()
+    var abs_st = absorption_state_with_dose(dose_mg)
+
+    trace.times_h[0]      = 0.0
+    trace.c_plasma[0]     = sys_st.blood
+    trace.a_gut[0]        = abs_st.a_gut
+    trace.released_cum[0] = 0.0
+
+    var t: f64       = 0.0
+    var dt_sys       = cfg.dt_init
+    var point_i: i32 = 1
+
+    while point_i < n_points {
+        let idx    = point_i as usize
+        let target = checkpoints[idx]
+
+        var nsteps:  i64 = 0
+        var nreject: i64 = 0
+
+        while t < target && nsteps < cfg.max_steps {
+            let dt_use = if t + dt_sys > target { target - t } else { dt_sys }
+
+            let released_before = abs_st.released_cum
+            let abs_next = absorption_step(abs_st, t, dt_use, abs_prm)
+            let rel_mg = abs_next.released_cum - released_before
+
+            var st_in = sys_st
+            if rel_mg > 0.0 {
+                st_in.blood = st_in.blood + absorption_mass_to_blood_delta(rel_mg, sys_prm.v_blood)
+            }
+
+            let result   = tsit5_step_pbpk(st_in, t, dt_use, sys_prm)
+            let err_norm = compute_error_norm_14(result.err, st_in, result.state_new, cfg.rtol, cfg.atol)
+
+            if err_norm <= 1.0 {
+                sys_st = result.state_new
+                abs_st = abs_next
+                t      = t + dt_use
+                nsteps = nsteps + 1
+                dt_sys = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            } else {
+                nreject = nreject + 1
+                dt_sys  = optimal_step_14(dt_use, err_norm, cfg.safety, cfg.max_growth, cfg.min_shrink)
+            }
+            if dt_sys < cfg.dt_min { dt_sys = cfg.dt_min }
+            if dt_sys > cfg.dt_max { dt_sys = cfg.dt_max }
+            if nreject > 10000 { return trace }
+        }
+
+        trace.times_h[idx]      = target
+        trace.c_plasma[idx]     = sys_st.blood
+        trace.a_gut[idx]        = abs_st.a_gut
+        trace.released_cum[idx] = abs_st.released_cum
+
+        point_i = point_i + 1
+    }
+
+    var auc_p: f64 = 0.0
+    var k: i32 = 0
+    while k < n_points - 1 {
+        let ka = k as usize
+        let kb = (k + 1) as usize
+        let h  = trace.times_h[kb] - trace.times_h[ka]
+        auc_p  = auc_p + 0.5 * h * (trace.c_plasma[ka] + trace.c_plasma[kb])
+        k = k + 1
+    }
+    trace.auc_plasma = auc_p
+    trace.success    = true
+    trace
+}
+
+// Oral solo run (no inhibitor).
+pub fn oral_midazolam_solo(dose_mg: f64, checkpoints: [f64; 32], n_points: i32)
+    -> OralMidazolamTrace with Mut, Div, Panic
+{
+    return oral_midazolam_run(midazolam_pbpk_params(), midazolam_absorption_params(), dose_mg, checkpoints, n_points)
+}
+
+// Oral + ketoconazole run (static steady-state inhibition).
+pub fn oral_midazolam_keto(dose_mg: f64, checkpoints: [f64; 32], n_points: i32)
+    -> OralMidazolamTrace with Mut, Div, Panic
+{
+    let factor = cyp3a_factor_of(ketoconazole_inhibitor())
+    return oral_midazolam_run(midazolam_pbpk_params_ddi(factor), midazolam_absorption_params_ddi(factor), dose_mg, checkpoints, n_points)
+}
+
+// Tsit5-path AUC ratio (solo vs ketoconazole) — production cross-check of the
+// closed-form ~15× (the parity gate validates the fixed-step path to f64).
+pub fn oral_midazolam_aucr(dose_mg: f64, checkpoints: [f64; 32], n_points: i32)
+    -> f64 with Mut, Div, Panic
+{
+    let solo = oral_midazolam_solo(dose_mg, checkpoints, n_points)
+    let keto = oral_midazolam_keto(dose_mg, checkpoints, n_points)
+    if solo.auc_plasma > 0.0 { return keto.auc_plasma / solo.auc_plasma }
+    return 0.0
+}

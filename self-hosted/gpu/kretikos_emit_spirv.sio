@@ -1,0 +1,191 @@
+// self-hosted/gpu/kretikos_emit_spirv.sio
+// Kretikos SPIR-V emission driver — produces a minimal SPIR-V kernel.
+//
+// Usage: souc kretikos_emit_spirv.sio /tmp/driver.elf
+//        /tmp/driver.elf <pattern>
+//
+// Supported patterns:
+//   exit_only  - minimal kernel that returns immediately
+//   self-check - run SPIR-V self-check suite
+//   vec_add    - kernel with GetTid + Add ops
+//   epistemic_dual_output_f32 - value, uncertainty, and validity lane ops
+//   tid_kernel - kernel with GetTid only
+
+use spirv::*
+
+fn print_byte_decimal(b: i64) with IO, Mut, Panic {
+    var v = b
+    if v < 0 {
+        print("-")
+        v = 0 - v
+    }
+    if v >= 10 {
+        print_byte_decimal(v / 10)
+    }
+    let digit = v % 10
+    if digit == 0 { print("0") }
+    else if digit == 1 { print("1") }
+    else if digit == 2 { print("2") }
+    else if digit == 3 { print("3") }
+    else if digit == 4 { print("4") }
+    else if digit == 5 { print("5") }
+    else if digit == 6 { print("6") }
+    else if digit == 7 { print("7") }
+    else if digit == 8 { print("8") }
+    else if digit == 9 { print("9") }
+}
+
+fn emit_exit_only_spirv() -> SpvBuf with Mut, Panic, Div {
+    var b = spv_buf_new()
+
+    // Header: magic, version 1.5, generator, bound=10, schema=0
+    b = spv_emit_header(b, 10)
+
+    // Capabilities
+    b = spv_emit_capability(b, 17)  // Kernel
+    b = spv_emit_capability(b, 1)   // Shader
+
+    // Memory model: Physical64, OpenCL
+    b = spv_emit_memory_model(b, 2, 2)
+
+    // Entry point: Kernel, function id 1, "main"
+    var interface_ids: [i64; 8] = [0; 8]
+    b = spv_emit_entry_point(b, 6, 1, "main", interface_ids, 0)
+
+    // Execution mode: LocalSize 1 1 1
+    b = spv_emit_execution_mode(b, 1, 17)
+
+    // Types
+    // %void = OpTypeVoid 2
+    b = spv_emit_type_void(b, 2)
+    // %fn = OpTypeFunction 3 %void
+    b = spv_emit_type_function(b, 3, 2)
+
+    // Function: %main = OpFunction %void None %fn
+    b = spv_emit_function(b, 2, 1, 0, 3)
+
+    // Label: %entry = OpLabel
+    b = spv_emit_label(b, 4)
+
+    // Return
+    b = spv_emit_return(b)
+
+    // Function end
+    b = spv_emit_function_end(b)
+
+    b
+}
+
+fn emit_vec_add_spirv() -> SpvBuf with Mut, Panic, Div {
+    var b = spv_buf_new()
+
+    // Structural compute module with a real OpFAdd. This avoids the generic
+    // lowering path until its register-map stack behaviour is repaired.
+    b = spv_emit_header(b, 9)
+    b = spv_emit_capability(b, 1)     // Shader
+    b = spv_emit_memory_model(b, 0, 1) // Logical, GLSL450
+
+    var interface_ids: [i64; 8] = [0; 8]
+    b = spv_emit_entry_point(b, 5, 7, "main", interface_ids, 0)
+    b = spv_emit_local_size(b, 7, 1, 1, 1)
+
+    b = spv_emit_type_void(b, 1)
+    b = spv_emit_type_function(b, 2, 1)
+    b = spv_emit_type_float(b, 3, 32)
+    b = spv_emit_constant_u32(b, 3, 4, 1065353216) // 1.0f
+    b = spv_emit_constant_u32(b, 3, 5, 1073741824) // 2.0f
+
+    b = spv_emit_function(b, 1, 7, 0, 2)
+    b = spv_emit_label(b, 8)
+    b = spv_emit_binary_op(b, 129, 3, 6, 4, 5) // OpFAdd %float %6 %4 %5
+    b = spv_emit_return(b)
+    b = spv_emit_function_end(b)
+
+    b
+}
+
+fn emit_epistemic_dual_output_spirv() -> SpvBuf with Mut, Panic, Div {
+    var b = spv_buf_new()
+
+    // Structural module for Knowledge-like lanes:
+    // value = a + b; eps2 = a_eps^2 + b_eps^2; valid = valid_a & valid_b;
+    // provenance = validity carrier XOR deterministic provenance seed.
+    b = spv_emit_header(b, 20)
+    b = spv_emit_capability(b, 1)      // Shader
+    b = spv_emit_memory_model(b, 0, 1) // Logical, GLSL450
+
+    var interface_ids: [i64; 8] = [0; 8]
+    b = spv_emit_entry_point(b, 5, 14, "main", interface_ids, 0)
+    b = spv_emit_local_size(b, 14, 1, 1, 1)
+
+    b = spv_emit_type_void(b, 1)
+    b = spv_emit_type_function(b, 2, 1)
+    b = spv_emit_type_float(b, 3, 32)
+    b = spv_emit_type_int(b, 4, 32, 0)
+    b = spv_emit_constant_u32(b, 3, 5, 1065353216) // 1.0f
+    b = spv_emit_constant_u32(b, 3, 6, 1073741824) // 2.0f
+    b = spv_emit_constant_u32(b, 3, 7, 1008981770) // 0.01f-ish epsilon
+    b = spv_emit_constant_u32(b, 3, 8, 1017370378) // 0.02f-ish epsilon
+    b = spv_emit_constant_u32(b, 4, 9, 1)
+    b = spv_emit_constant_u32(b, 4, 10, 1)
+    b = spv_emit_constant_u32(b, 4, 16, 305419896) // 0x12345678 provenance seed
+
+    b = spv_emit_function(b, 1, 14, 0, 2)
+    b = spv_emit_label(b, 15)
+    b = spv_emit_binary_op(b, 129, 3, 11, 5, 6)  // OpFAdd value lane
+    b = spv_emit_binary_op(b, 133, 3, 12, 7, 7)  // OpFMul eps_a^2
+    b = spv_emit_binary_op(b, 133, 3, 13, 8, 8)  // OpFMul eps_b^2
+    b = spv_emit_binary_op(b, 129, 3, 5, 12, 13) // OpFAdd epsilon-squared lane
+    b = spv_emit_binary_op(b, 197, 4, 6, 9, 10)  // OpBitwiseAnd validity carrier
+    b = spv_emit_binary_op(b, 199, 4, 17, 6, 16) // OpBitwiseXor provenance carrier
+    b = spv_emit_return(b)
+    b = spv_emit_function_end(b)
+
+    b
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let argc = arg_count()
+    if argc < 1 {
+        println("kretikos_emit_spirv: error - expected <pattern>")
+        println("")
+        println("Supported patterns:")
+        println("  exit_only - minimal kernel that returns immediately")
+        println("  vec_add - structural f32 value addition")
+        println("  epistemic_dual_output_f32 - structural value/uncertainty/valid lanes")
+        println("  tid_kernel - kernel with GetTid only")
+        println("  self-check - run SPIR-V self-check suite")
+        return 1
+    }
+
+    let pattern = get_arg(0)
+    var buf: SpvBuf
+
+    if str_eq(pattern, "exit_only") {
+        buf = emit_exit_only_spirv()
+    } else if str_eq(pattern, "self-check") {
+        let ok = spirv_driver_self_check()
+        if ok { print("PASS spirv_driver_self_check\n") } else { print("FAIL spirv_driver_self_check\n") }
+        return 0
+    } else if str_eq(pattern, "vec_add") {
+        buf = emit_vec_add_spirv()
+    } else if str_eq(pattern, "epistemic_dual_output_f32") {
+        buf = emit_epistemic_dual_output_spirv()
+    } else if str_eq(pattern, "tid_kernel") {
+        buf = spirv_emit_tid_kernel()
+    } else {
+        print("kretikos_emit_spirv: error - unknown pattern '")
+        print(pattern)
+        println("'")
+        return 1
+    }
+
+    // Print as decimal words, one per line
+    var i: i64 = 0
+    while i < buf.word_count {
+        print_byte_decimal(buf.words[i as usize])
+        print("\n")
+        i = i + 1
+    }
+    0
+}

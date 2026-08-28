@@ -17,15 +17,15 @@ let GPU_FUSION_MAX_PARAMS: i64 = 8
 let GPU_FUSION_MAX_OPS: i64 = 1024
 let GPU_FUSION_MAX_SHARED_BYTES: i64 = 233472
 
-struct GpuFusionConfig {
-    max_rounds: i64,
-    max_ops_per_kernel: i64,
-    max_shared_bytes: i64,
-    min_benefit_score: i64,
-    max_register_sum: i64,
+pub struct GpuFusionConfig {
+    pub max_rounds: i64,
+    pub max_ops_per_kernel: i64,
+    pub max_shared_bytes: i64,
+    pub min_benefit_score: i64,
+    pub max_register_sum: i64,
 }
 
-fn gpu_fusion_config_default() -> GpuFusionConfig {
+pub fn gpu_fusion_config_default() -> GpuFusionConfig {
     GpuFusionConfig {
         max_rounds: 8,
         max_ops_per_kernel: GPU_FUSION_MAX_OPS,
@@ -134,8 +134,18 @@ fn gpu_fusion_merge_thread_hint(a: GpuKernelIr, b: GpuKernelIr) -> i64 {
     }
 }
 
+fn gpu_name_eq(a: Name, b: Name) -> bool {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.buf[i as usize] != b.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
 fn gpu_fusion_param_eq(a: GpuParam, b: GpuParam) -> bool with Mut, Panic, Div {
-    ir_name_eq(a.name, b.name) && a.ty == b.ty
+    gpu_name_eq(a.name, b.name) && a.ty == b.ty
 }
 
 fn gpu_fusion_param_find_index(params: [GpuParam; 8], count: i64, p: GpuParam) -> i64 with Mut, Panic, Div {
@@ -149,7 +159,7 @@ fn gpu_fusion_param_find_index(params: [GpuParam; 8], count: i64, p: GpuParam) -
     -1
 }
 
-fn gpu_fusion_overlap_params(a: GpuKernelIr, b: GpuKernelIr) -> i64 with Mut, Panic, Div {
+pub fn gpu_fusion_overlap_params(a: GpuKernelIr, b: GpuKernelIr) -> i64 with Mut, Panic, Div {
     var overlap: i64 = 0
     var i: i64 = 0
     while i < a.param_count {
@@ -231,7 +241,7 @@ fn gpu_fusion_can_fuse_pair(left: GpuKernelIr, right: GpuKernelIr, cfg: GpuFusio
     true
 }
 
-fn gpu_fusion_score_pair(left: GpuKernelIr, right: GpuKernelIr) -> i64 with Mut, Panic, Div {
+pub fn gpu_fusion_score_pair(left: GpuKernelIr, right: GpuKernelIr) -> i64 with Mut, Panic, Div {
     let rl = gpu_fusion_resource_from_kernel(left)
     let rr = gpu_fusion_resource_from_kernel(right)
 
@@ -467,10 +477,10 @@ fn gpu_fusion_remap_op(op: GpuOp, off: GpuFusionRegOffsets) -> GpuOp with Mut, P
 fn gpu_fusion_build_param_map(
     left: GpuKernelIr,
     right: GpuKernelIr
-) -> (GpuKernelIr, [i64; 8], bool) with Mut, Panic, Div {
+) -> (GpuKernelIr, [i64; 8]) with Mut, Panic, Div {
     var fused = gpu_kernel_new()
     var map: [i64; 8] = [-1; 8]
-    var ok = true
+    var failed = false
 
     // Keep left kernel identity and params first.
     fused.kernel_name = left.kernel_name
@@ -495,7 +505,7 @@ fn gpu_fusion_build_param_map(
                 map[r as usize] = fused.param_count
                 fused.param_count = fused.param_count + 1
             } else {
-                ok = false
+                failed = true
                 map[r as usize] = 0
             }
         }
@@ -508,7 +518,10 @@ fn gpu_fusion_build_param_map(
         r = r + 1
     }
 
-    (fused, map, ok)
+    if failed {
+        fused.param_count = 0 - 1
+    }
+    (fused, map)
 }
 
 fn gpu_fusion_append_ops(
@@ -534,7 +547,7 @@ fn gpu_fusion_append_ops(
         remapped = gpu_fusion_remap_op_param_idx(remapped, param_map)
 
         let append = gpu_append_op_checked(out, remapped)
-        out = append.kernel
+        out = append.result_kernel
         if append.error == GpuError::GpuOpBufferOverflow {
             ok = false
             break
@@ -546,13 +559,13 @@ fn gpu_fusion_append_ops(
     (out, ok)
 }
 
-fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) with Mut, Panic, Div {
+pub fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) with Mut, Panic, Div {
     let prepared = gpu_fusion_build_param_map(left, right)
     var fused = prepared.0
     let right_param_map = prepared.1
-    var ok = prepared.2
+    var ok: bool = true
 
-    if !ok {
+    if fused.param_count < 0 {
         return (gpu_kernel_new(), false)
     }
 
@@ -593,7 +606,8 @@ fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) w
     }
 
     // Combine shared memory declarations.
-    fused.shared_bytes = right_offsets.shared_addr + (if right.shared_mem_bytes > right.shared_bytes { right.shared_mem_bytes } else { right.shared_bytes })
+    let right_shared_bytes = if right.shared_mem_bytes > right.shared_bytes { right.shared_mem_bytes } else { right.shared_bytes }
+    fused.shared_bytes = right_offsets.shared_addr + right_shared_bytes
     fused.shared_mem_bytes = fused.shared_bytes
 
     // Combine register maxima.
@@ -608,8 +622,9 @@ fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) w
     // If fusion removed left ret and right had no ret, append one.
     var has_ret = false
     var oi: i64 = 0
+    var fused_ops: [GpuOp; 1024] = fused.ops
     while oi < fused.op_count {
-        if fused.ops[oi as usize].opcode == GpuOpcode::GpuRet {
+        if fused_ops[oi as usize].opcode == GpuOpcode::GpuRet {
             has_ret = true
             break
         }
@@ -619,7 +634,7 @@ fn gpu_fuse_pair(left: GpuKernelIr, right: GpuKernelIr) -> (GpuKernelIr, bool) w
         var ret_op = gpu_op_new()
         ret_op.opcode = GpuOpcode::GpuRet
         let appended = gpu_append_op_checked(fused, ret_op)
-        fused = appended.kernel
+        fused = appended.result_kernel
         if appended.error == GpuError::GpuOpBufferOverflow {
             return (gpu_kernel_new(), false)
         }
@@ -636,28 +651,27 @@ fn gpu_fusion_apply_once(
     kernels: [GpuKernelIr; 64],
     count: i64,
     cfg: GpuFusionConfig
-) -> ([GpuKernelIr; 64], i64, bool) with Mut, Panic, Div {
+) -> ([GpuKernelIr; 64], i64) with Mut, Panic, Div {
     var out: [GpuKernelIr; 64] = kernels
-    var out_count = count
 
     let cand = gpu_fusion_find_best_adjacent(kernels, count, cfg)
     if !cand.can_fuse {
-        return (out, out_count, false)
+        return (out, -1)
     }
     if cand.score < cfg.min_benefit_score {
-        return (out, out_count, false)
+        return (out, -1)
     }
 
     let left_idx = cand.left_index
     let right_idx = cand.right_index
 
     if left_idx < 0 || right_idx < 0 || right_idx != (left_idx + 1) {
-        return (out, out_count, false)
+        return (out, -1)
     }
 
     let fused_pair = gpu_fuse_pair(kernels[left_idx as usize], kernels[right_idx as usize])
     if !fused_pair.1 {
-        return (out, out_count, false)
+        return (out, -1)
     }
 
     // Rebuild compact kernel list with the fused kernel replacing [left,right].
@@ -681,11 +695,10 @@ fn gpu_fusion_apply_once(
         dst = dst + 1
     }
 
-    out_count = count - 1
-    (out, out_count, true)
+    (out, count - 1)
 }
 
-fn gpu_fusion_run(
+pub fn gpu_fusion_run(
     kernels: [GpuKernelIr; 64],
     count: i64,
     cfg: GpuFusionConfig
@@ -697,10 +710,10 @@ fn gpu_fusion_run(
     while round < cfg.max_rounds {
         let step = gpu_fusion_apply_once(current, current_count, cfg)
         current = step.0
-        current_count = step.1
-        if !step.2 {
+        if step.1 < 0 {
             break
         }
+        current_count = step.1
         round = round + 1
     }
 
@@ -714,7 +727,7 @@ fn gpu_fusion_run_default(
     gpu_fusion_run(kernels, count, gpu_fusion_config_default())
 }
 
-fn hlir_gpu_apply_fusion(
+pub fn hlir_gpu_apply_fusion(
     lowered: HlirGpuLoweredModule,
     cfg: GpuFusionConfig
 ) -> HlirGpuLoweredModule with Mut, Panic, Div {
@@ -725,7 +738,7 @@ fn hlir_gpu_apply_fusion(
     out
 }
 
-fn hlir_gpu_apply_fusion_default(lowered: HlirGpuLoweredModule) -> HlirGpuLoweredModule with Mut, Panic, Div {
+pub fn hlir_gpu_apply_fusion_default(lowered: HlirGpuLoweredModule) -> HlirGpuLoweredModule with Mut, Panic, Div {
     hlir_gpu_apply_fusion(lowered, gpu_fusion_config_default())
 }
 

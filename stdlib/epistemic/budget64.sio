@@ -32,7 +32,7 @@ fn b64_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 // BUDGET ENTRY
 // ============================================================================
 
-struct BudgetEntry64 {
+pub struct BudgetEntry64 {
     source_type: i64,    // 0=Type A (statistical), 1=Type B (systematic/literature)
     param_idx: i64,      // Index into ODEParams (for attribution)
     estimate: f64,       // Parameter value (xi)
@@ -72,10 +72,10 @@ fn b64_empty_entry() -> BudgetEntry64 {
 // UNCERTAINTY BUDGET — 64 entries, array-based
 // ============================================================================
 
-struct Budget64 {
-    result_value: f64,
-    confidence: f64,
-    entry_count: i64,
+pub struct Budget64 {
+    pub result_value: f64,
+    pub confidence: f64,
+    pub entry_count: i64,
 
     // Array storage for entries (flat arrays — Sounio does not support [Struct; N])
     source_types: [i64; 64],
@@ -86,16 +86,16 @@ struct Budget64 {
     contributions: [f64; 64],
     dofs: [f64; 64],
 
-    // Computed fields
-    combined_variance: f64,
-    combined_std_uncert: f64,
-    effective_dof: f64,
+    // Computed result fields (read cross-module by consumers — must be pub)
+    pub combined_variance: f64,
+    pub combined_std_uncert: f64,
+    pub effective_dof: f64,
 
     // Ranking (indices of entries sorted by contribution, descending)
     rank_indices: [i64; 64],
 }
 
-fn budget64_new(result_value: f64, confidence: f64) -> Budget64 {
+pub fn budget64_new(result_value: f64, confidence: f64) -> Budget64 {
     Budget64 {
         result_value: result_value, confidence: confidence, entry_count: 0,
         source_types: [0; 64], param_indices: [-1; 64],
@@ -110,7 +110,7 @@ fn budget64_new(result_value: f64, confidence: f64) -> Budget64 {
 // ADD ENTRIES
 // ============================================================================
 
-fn budget64_add_type_a(
+pub fn budget64_add_type_a(
     b: &!Budget64, param_idx: i64,
     estimate: f64, std_uncert: f64, sensitivity: f64, n_samples: f64
 ) with Mut {
@@ -128,7 +128,7 @@ fn budget64_add_type_a(
     b.entry_count = idx + 1
 }
 
-fn budget64_add_type_b(
+pub fn budget64_add_type_b(
     b: &!Budget64, param_idx: i64,
     estimate: f64, std_uncert: f64, sensitivity: f64
 ) with Mut {
@@ -149,7 +149,7 @@ fn budget64_add_type_b(
 // FINALIZATION: compute combined variance, effective DOF, ranking
 // ============================================================================
 
-fn budget64_finalize(b: &!Budget64) with Mut {
+pub fn budget64_finalize(b: &!Budget64) with Mut {
     // Combined variance = sum of contributions
     var total_var = 0.0
     var i = 0
@@ -206,18 +206,18 @@ fn budget64_finalize(b: &!Budget64) with Mut {
 // QUERY
 // ============================================================================
 
-fn budget64_percent(b: &Budget64, idx: i64) -> f64 {
+pub fn budget64_percent(b: &Budget64, idx: i64) -> f64 {
     if b.combined_variance < 1.0e-15 { return 0.0 }
     if idx < 0 || idx >= b.entry_count { return 0.0 }
     100.0 * b.contributions[idx] / b.combined_variance
 }
 
-fn budget64_dominant_idx(b: &Budget64) -> i64 {
+pub fn budget64_dominant_idx(b: &Budget64) -> i64 {
     if b.entry_count == 0 { return -1 }
     b.rank_indices[0]
 }
 
-fn budget64_dominant_percent(b: &Budget64) -> f64 {
+pub fn budget64_dominant_percent(b: &Budget64) -> f64 {
     if b.entry_count == 0 { return 0.0 }
     budget64_percent(b, b.rank_indices[0])
 }
@@ -247,19 +247,19 @@ fn b64_coverage_factor(dof: f64, conf: f64) -> f64 {
     return 2.576
 }
 
-fn budget64_expanded(b: &Budget64, conf: f64) -> f64 {
+pub fn budget64_expanded(b: &Budget64, conf: f64) -> f64 {
     let k = b64_coverage_factor(b.effective_dof, conf)
     k * b.combined_std_uncert
 }
 
-struct ConfInterval64 {
+pub struct ConfInterval64 {
     lower: f64,
     upper: f64,
     coverage_k: f64,
     confidence: f64,
 }
 
-fn budget64_interval(b: &Budget64, conf: f64) -> ConfInterval64 {
+pub fn budget64_interval(b: &Budget64, conf: f64) -> ConfInterval64 {
     let k = b64_coverage_factor(b.effective_dof, conf)
     let u_exp = k * b.combined_std_uncert
     ConfInterval64 {
@@ -282,13 +282,13 @@ fn budget64_interval(b: &Budget64, conf: f64) -> ConfInterval64 {
 // This gives the JCGM 100:2008 eq. 10 decomposition by parameter.
 // ============================================================================
 
-struct ODEParams64 {
+pub struct ODEParams64 {
     params: [f64; 64],
     param_variances: [f64; 64],
     n_params: i64,
 }
 
-fn budget64_from_ode_params(
+pub fn budget64_from_ode_params(
     result_value: f64,
     confidence: f64,
     params: &ODEParams64,
@@ -315,7 +315,7 @@ fn budget64_from_ode_params(
 // TEXT REPORT (ISO GUM Table H.1 style)
 // ============================================================================
 
-fn budget64_print_report(b: &Budget64) with IO, Mut {
+pub fn budget64_print_report(b: &Budget64) with IO, Mut {
     println("================================================================")
     println("  GUM UNCERTAINTY BUDGET (JCGM 100:2008)")
     println("================================================================")
@@ -326,7 +326,16 @@ fn budget64_print_report(b: &Budget64) with IO, Mut {
         100.0 * b.combined_std_uncert / b64_abs(b.result_value)
     } else { 0.0 }
     println("  Relative uncertainty: "); println(rel_pct); println(" %")
-    println("  Effective DOF: "); println(b.effective_dof)
+    // Type-B / Welch fallback stores DOF as 1e30. Madaros print_f64 saturates
+    // any |x| ≳ 1e19 through cvttsd2si indefinite → 2^63 (Family B; not the
+    // April variance_of slot overflow). Print the sentinel as "inf" so a thesis
+    // table cannot quote 9223372036854775808 as a degree of freedom.
+    println("  Effective DOF: ")
+    if b.effective_dof > 1.0e20 {
+        println("inf")
+    } else {
+        println(b.effective_dof)
+    }
 
     let ci = budget64_interval(b, b.confidence)
     println("  Expanded uncertainty (k="); println(ci.coverage_k); println("): ")

@@ -1,0 +1,314 @@
+//@ run-pass
+// Epistemic multi-compartment ODE E2E (lean_single; self-contained).
+//
+// Structural claim (slice, not full SciML):
+//   Integrate linear PK with GUM uncertainty on parameters and emit an
+//   ISO-style uncertainty budget (CL vs V contributions to terminal u_c).
+//   Joint DiffEq.jl ∩ Measurements.jl gap: trajectory value + metrological u.
+//
+// Case 1 — 1-cmt IV closed form + GUM linearisation (hard oracle):
+//   Dose=100, CL=5, V=50, u_CL=0.5, u_V=2.5, t=4
+//   C0=2, k=0.1, C(t)=C0·e^{-kt} = 1.340640092071279
+//   ∂C/∂CL = −(t/V)·C ; ∂C/∂V = (C/V)·(k·t − 1)
+//   u_c = √((∂C/∂CL·u_CL)² + (∂C/∂V·u_V)²) = 0.067032004603564
+//   budget |∂C/∂θ|u_θ / sum → frac_CL=4/7, frac_V=3/7
+//
+// Case 2 — 2-cmt linear IV amounts (A1,A2), fixed-step RK4:
+//   dA1/dt = −(CL/V1+k12)·A1 + k21·A2
+//   dA2/dt =  k12·A1 − k21·A2
+//   C1=A1/V1; assert mass conservation and C1>0; print terminal ± step-u.
+//
+// Engine: SOUNIO_SOUC_ENGINE=lean_single
+// Gate:   bash scripts/epistemic_ode_e2e_gate.sh
+//
+// claims_not_made: full DiffEq.jl, SciML events/DAE, Madaros multi-module,
+//                  bedside dosing, NONMEM FOCE parity
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn near_f64(a: f64, b: f64, tol: f64) -> bool {
+    return abs_f64(a - b) < tol
+}
+
+fn sqrt_nr(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 40 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    return y
+}
+
+// exp via series after range reduction into [-ln2, ln2]
+fn exp_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 80.0 { return 1.0e30 }
+    if x < 0.0 - 80.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    var n = 0
+    var z = x
+    while z > ln2 {
+        z = z - ln2
+        n = n + 1
+    }
+    while z < 0.0 - ln2 {
+        z = z + ln2
+        n = n - 1
+    }
+    var sum = 1.0
+    var term = 1.0
+    var k = 1
+    while k < 30 {
+        term = term * z / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    var out = sum
+    var i = 0
+    if n > 0 {
+        while i < n {
+            out = out * 2.0
+            i = i + 1
+        }
+    } else {
+        var m = 0 - n
+        while i < m {
+            out = out * 0.5
+            i = i + 1
+        }
+    }
+    return out
+}
+
+fn fail(code: i32) -> i32 with IO {
+    print("FAIL code ")
+    print(code)
+    print("\n")
+    return code
+}
+
+// =============================================================================
+// Case 1: 1-cmt IV analytic + GUM budget
+// =============================================================================
+
+fn case1_one_cmt() -> i32 with IO, Mut, Div, Panic {
+    let dose = 100.0
+    let cl = 5.0
+    let v = 50.0
+    let u_cl = 0.5
+    let u_v = 2.5
+    let t = 4.0
+
+    let k = cl / v
+    let c0 = dose / v
+    let c = c0 * exp_f64(0.0 - k * t)
+
+    // GUM §5.1.2 first-order sensitivities of C(t; CL, V)
+    let d_cl = 0.0 - (t / v) * c
+    let d_v = (c / v) * (k * t - 1.0)
+    let term_cl = d_cl * u_cl
+    let term_v = d_v * u_v
+    let u_c = sqrt_nr(term_cl * term_cl + term_v * term_v)
+    let contrib_cl = abs_f64(term_cl)
+    let contrib_v = abs_f64(term_v)
+    let sum_c = contrib_cl + contrib_v
+    let frac_cl = contrib_cl / sum_c
+    let frac_v = contrib_v / sum_c
+
+    // Derived oracles (Phase-1; not retrofitted)
+    let exp_c = 1.340640092071279
+    let exp_u = 0.067032004603564
+    let exp_fcl = 0.571428571428572
+    let exp_fv = 0.428571428571429
+
+    if !near_f64(c, exp_c, 1.0e-9) { return fail(1) }
+    if !near_f64(u_c, exp_u, 1.0e-9) { return fail(2) }
+    if !near_f64(frac_cl, exp_fcl, 1.0e-9) { return fail(3) }
+    if !near_f64(frac_v, exp_fv, 1.0e-9) { return fail(4) }
+    if frac_cl <= 0.0 || frac_v <= 0.0 { return fail(5) }
+    // contributions must sum to 1
+    if !near_f64(frac_cl + frac_v, 1.0, 1.0e-12) { return fail(6) }
+
+    print("EPISTEMIC_ODE_E2E c1_c=")
+    print(c)
+    print(" c1_u=")
+    print(u_c)
+    print(" frac_cl=")
+    print(frac_cl)
+    print(" frac_v=")
+    print(frac_v)
+    print("\n")
+    return 0
+}
+
+// =============================================================================
+// Case 2: 2-cmt linear IV — RK4 amounts + state-u Euler-GUM step
+// =============================================================================
+
+fn rhs_a1(a1: f64, a2: f64, cl: f64, v1: f64, k12: f64, k21: f64) -> f64 with Mut, Div, Panic {
+    return 0.0 - (cl / v1 + k12) * a1 + k21 * a2
+}
+
+fn rhs_a2(a1: f64, a2: f64, k12: f64, k21: f64) -> f64 with Mut, Div, Panic {
+    return k12 * a1 - k21 * a2
+}
+
+fn case2_two_cmt() -> i32 with IO, Mut, Div, Panic {
+    // Parameters
+    let dose = 100.0
+    let cl = 5.0
+    let v1 = 50.0
+    let k12 = 0.3
+    let k21 = 0.2
+    let t_end = 4.0
+    let n_steps: i32 = 400
+    let dt = t_end / (n_steps as f64)
+
+    // Initial: bolus into central; Type-B u on amounts from V1 uncertainty only at t=0
+    // A1(0)=Dose, A2(0)=0; u_A1(0) from u_V ignored on amount; set u_A1 from 1% dose
+    var a1 = dose
+    var a2 = 0.0
+    var u1 = 1.0   // fixed small absolute u on A1
+    var u2 = 0.0
+
+    var step: i32 = 0
+    while step < n_steps {
+        // Classic RK4 on amounts (values)
+        let k1_1 = rhs_a1(a1, a2, cl, v1, k12, k21)
+        let k1_2 = rhs_a2(a1, a2, k12, k21)
+
+        let a1b = a1 + 0.5 * dt * k1_1
+        let a2b = a2 + 0.5 * dt * k1_2
+        let k2_1 = rhs_a1(a1b, a2b, cl, v1, k12, k21)
+        let k2_2 = rhs_a2(a1b, a2b, k12, k21)
+
+        let a1c = a1 + 0.5 * dt * k2_1
+        let a2c = a2 + 0.5 * dt * k2_2
+        let k3_1 = rhs_a1(a1c, a2c, cl, v1, k12, k21)
+        let k3_2 = rhs_a2(a1c, a2c, k12, k21)
+
+        let a1d = a1 + dt * k3_1
+        let a2d = a2 + dt * k3_2
+        let k4_1 = rhs_a1(a1d, a2d, cl, v1, k12, k21)
+        let k4_2 = rhs_a2(a1d, a2d, k12, k21)
+
+        let da1 = (dt / 6.0) * (k1_1 + 2.0 * k2_1 + 2.0 * k3_1 + k4_1)
+        let da2 = (dt / 6.0) * (k1_2 + 2.0 * k2_2 + 2.0 * k3_2 + k4_2)
+
+        // Linearised derivative u: |∂f/∂A|·u (local Jacobian row abs sum)
+        // f1 = −(CL/V1+k12)·A1 + k21·A2  → |∂f1/∂A1|=CL/V1+k12, |∂f1/∂A2|=k21
+        // f2 = k12·A1 − k21·A2           → |∂f2/∂A1|=k12, |∂f2/∂A2|=k21
+        let ke = cl / v1 + k12
+        let uf1 = ke * u1 + k21 * u2
+        let uf2 = k12 * u1 + k21 * u2
+        // GUM combine on step: u' = sqrt(u^2 + (dt·u_f)^2)
+        let nu1 = sqrt_nr(u1 * u1 + (dt * uf1) * (dt * uf1))
+        let nu2 = sqrt_nr(u2 * u2 + (dt * uf2) * (dt * uf2))
+
+        a1 = a1 + da1
+        a2 = a2 + da2
+        u1 = nu1
+        u2 = nu2
+        step = step + 1
+    }
+
+    let c1 = a1 / v1
+    let u_c1 = u1 / v1
+    let mass = a1 + a2
+
+    // Sanity oracles (physics, not retrofitted):
+    // - positive central concentration
+    // - mass within bolus (no elimination of A2 sink — CL removes from A1 so mass ≤ dose)
+    // - mass decreased from dose (elimination)
+    if c1 <= 0.0 { return fail(20) }
+    if mass > dose + 1.0e-6 { return fail(21) }
+    if mass >= dose { return fail(22) }  // some elimination must have occurred
+    if u_c1 <= 0.0 { return fail(23) }
+    // Terminal C1 must be below pure 1-cmt C(t) at same CL,V1? Not necessarily with distribution.
+    // Soft bound: C1 < Dose/V1
+    if c1 >= dose / v1 { return fail(24) }
+
+    // Growth: uncertainty on central amount should not collapse to zero
+    if u1 < 0.5 { return fail(25) }
+
+    print("EPISTEMIC_ODE_E2E c2_c1=")
+    print(c1)
+    print(" c2_u_c1=")
+    print(u_c1)
+    print(" c2_a1=")
+    print(a1)
+    print(" c2_a2=")
+    print(a2)
+    print(" c2_mass=")
+    print(mass)
+    print(" c2_u1=")
+    print(u1)
+    print("\n")
+    return 0
+}
+
+// =============================================================================
+// Case 3: multi-state harmonic (2-D) via same step pattern — smoke multi-state
+// =============================================================================
+
+fn case3_harmonic_smoke() -> i32 with IO, Mut, Div, Panic {
+    // y' = [y2, -y1], y0=[1,0], u0=[0.01,0.01], t=π/2 → y≈[0,−1]
+    var y1 = 1.0
+    var y2 = 0.0
+    var u1 = 0.01
+    var u2 = 0.01
+    let t_end = 1.5707963267948966
+    let n_steps: i32 = 500
+    let dt = t_end / (n_steps as f64)
+    var step: i32 = 0
+    while step < n_steps {
+        let k1_1 = y2
+        let k1_2 = 0.0 - y1
+        let k2_1 = y2 + 0.5 * dt * k1_2
+        let k2_2 = 0.0 - (y1 + 0.5 * dt * k1_1)
+        let k3_1 = y2 + 0.5 * dt * k2_2
+        let k3_2 = 0.0 - (y1 + 0.5 * dt * k2_1)
+        let k4_1 = y2 + dt * k3_2
+        let k4_2 = 0.0 - (y1 + dt * k3_1)
+        let dy1 = (dt / 6.0) * (k1_1 + 2.0 * k2_1 + 2.0 * k3_1 + k4_1)
+        let dy2 = (dt / 6.0) * (k1_2 + 2.0 * k2_2 + 2.0 * k3_2 + k4_2)
+        // f1=y2 → u_f1=u2; f2=-y1 → u_f2=u1
+        let nu1 = sqrt_nr(u1 * u1 + (dt * u2) * (dt * u2))
+        let nu2 = sqrt_nr(u2 * u2 + (dt * u1) * (dt * u1))
+        y1 = y1 + dy1
+        y2 = y2 + dy2
+        u1 = nu1
+        u2 = nu2
+        step = step + 1
+    }
+    // At π/2: y1≈0, y2≈−1
+    if !near_f64(y1, 0.0, 0.02) { return fail(30) }
+    if !near_f64(y2, 0.0 - 1.0, 0.02) { return fail(31) }
+    if u1 <= 0.0 || u2 <= 0.0 { return fail(32) }
+
+    print("EPISTEMIC_ODE_E2E c3_y1=")
+    print(y1)
+    print(" c3_y2=")
+    print(y2)
+    print(" c3_u1=")
+    print(u1)
+    print(" c3_u2=")
+    print(u2)
+    print("\n")
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let r1 = case1_one_cmt()
+    if r1 != 0 { return r1 }
+    let r2 = case2_two_cmt()
+    if r2 != 0 { return r2 }
+    let r3 = case3_harmonic_smoke()
+    if r3 != 0 { return r3 }
+    print("EPISTEMIC_ODE_E2E_OK\n")
+    return 0
+}

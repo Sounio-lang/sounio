@@ -1,0 +1,65 @@
+//@ run-pass
+// Acceptance test 3 for compiler prerequisite #1 (generic-struct-return monomorphization).
+// Tests generic struct return with type parameter instantiated at a user-defined struct.
+// Also tests generic->generic function chaining.
+// Expected output: 3, then "structf PASS"
+//
+// NOTE: bare generic-struct constructor literals in NON-generic code (e.g. directly
+// inside main) are out of compiler scope. All `CDExact { ... }` construction below
+// happens inside a generic helper fn (`make_cdexact4<F>`) reached via turbofish from
+// main. `RatLike { ... }` literals stay in main since RatLike is a concrete
+// (non-generic) struct, not a generic-struct constructor.
+
+struct RatLike {
+    num: i64,
+    den: i64,
+}
+
+struct CDExact<F> {
+    c: [F; 4],
+    bits: i64,
+}
+
+// Helper: add two RatLike values (naive, no reduction)
+fn rat_add(a: RatLike, b: RatLike) -> RatLike {
+    RatLike {
+        num: a.num * b.den + b.num * a.den,
+        den: a.den * b.den,
+    }
+}
+
+// Generic constructor helper: builds a CDExact<F> literal from four components.
+// This is the only place a `CDExact { ... }` literal is written; main only ever
+// calls this (and the generic add/double helpers below) via explicit turbofish.
+fn make_cdexact4<F>(c0: F, c1: F, c2: F, c3: F, bits: i64) -> CDExact<F> with Mut, Panic {
+    CDExact { c: [c0, c1, c2, c3], bits: bits }
+}
+
+// Generic function returning CDExact<F>
+fn cd_add_generic<F>(a: CDExact<F>, b: CDExact<F>) -> CDExact<F> with Mut {
+    var out = CDExact { c: a.c, bits: a.bits }
+    out
+}
+
+// Generic function that calls another generic function internally.
+// This tests generic->generic chaining.
+fn cd_double_generic<F>(a: CDExact<F>) -> CDExact<F> with Mut {
+    cd_add_generic::<F>(a, a)
+}
+
+fn main() with IO, Mut {
+    let z = RatLike { num: 0, den: 1 }
+    let a = make_cdexact4::<RatLike>(RatLike { num: 3, den: 1 }, z, z, z, 4)
+    let b = make_cdexact4::<RatLike>(RatLike { num: 2, den: 1 }, z, z, z, 4)
+
+    let r = cd_add_generic::<RatLike>(a, b)
+    let doubled = cd_double_generic::<RatLike>(r)
+
+    // cd_add_generic (as written) just copies `a` through, so r.c[0] == a.c[0].
+    // doubled.c[0] likewise copies r.c[0] through cd_double_generic's internal
+    // cd_add_generic::<F>(a, a) call. We print r.c[0].num to keep the assertion
+    // simple: should be 3 (from a.c[0].num).
+    let final_val = r.c[0]
+    println(final_val.num)
+    println("structf PASS")
+}

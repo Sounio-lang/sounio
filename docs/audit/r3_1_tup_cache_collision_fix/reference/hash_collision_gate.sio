@@ -1,0 +1,46 @@
+// R.3.0 Phase A — minimum reproducer for the rng.sio Phase D blocker.
+//
+// Both `(Pcg64=PcgState, i64)` and `(RngXoshiro256, i64)` encode to
+// tuple-return hash `200004005` because the encoding only uses
+// `tcount * 1000000 + first_nslots * 1000 + total_nslots`. Different
+// 4-field structs that share that slot signature collide.
+//
+// Pre-Phase-D rng.sio worked because Pcg64 was a concrete struct and
+// got registered into TUP_CACHE first. With `type Pcg64 = PcgState`,
+// Pcg64's tuple-return registration is deferred to Pass 1c.5 — by
+// which point RngXoshiro256's collision-hashed entry is already
+// stuck. tup_cache_register is idempotent on the hash key, so
+// PcgState's correct (first_ty, first_hash) never lands.
+//
+// Consequence: `r.0` accesses in pcg64_bounded resolve to
+// RngXoshiro256_hash, and `var current: PcgState; current = r.0`
+// fails with `assignment type mismatch`.
+//
+// Two minimal probes below isolate the collision.
+
+use stdlib::random::pcg64_core::{PcgState, pcg_step}
+
+type Pcg64 = PcgState
+
+struct OtherFour { a: i64, b: i64, c: i64, d: i64 }
+
+fn other_step(o: OtherFour) -> (OtherFour, i64) {
+    return (OtherFour { a: o.a + 1, b: o.b, c: o.c, d: o.d }, o.a)
+}
+
+// pcg64_bounded-shaped consumer of Pcg64 alias:
+fn pcg_loop(seed: i64) -> i64 with Mut {
+    var current = PcgState { state_hi: seed, state_lo: 0, inc_hi: 1, inc_lo: 1 }
+    var i: i64 = 0
+    while i < 3 {
+        let r = pcg_step(current)
+        current = r.0  // FAILS: assignment type mismatch
+        i = i + 1
+    }
+    return current.state_hi
+}
+
+fn main() -> i64 with IO, Mut {
+    println(pcg_loop(42))
+    return 0
+}

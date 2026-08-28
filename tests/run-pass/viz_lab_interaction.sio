@@ -1,0 +1,118 @@
+// tests/run-pass/viz_lab_interaction.sio - live Visual IR lab interaction proof
+//
+// Expected output includes:
+//   VIZ_LAB_INTERACTION_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{Event, EV_KEY_PRESS, EV_MOUSE_PRESS, EV_MOTION, KEY_TAB, KEY_SPACE, KEY_RIGHT, MOUSE_LEFT}
+use viz::ir::{
+    viz_scene_new, viz_layout_rect, viz_style_rgb,
+    viz_add_line_chart, viz_add_uncertainty_band, viz_add_heatmap, viz_add_molecule,
+    viz_add_scalar_field, viz_add_control, viz_scene_set_tag,
+    viz_scene_set_parent, viz_scene_dump,
+    VIZ_CONTROL_SLIDER, VIZ_CONTROL_TABS, VIZ_CONTROL_TOGGLE,
+}
+use viz::physchem::{molecule_h2o, scalar_field_radial}
+use viz::viz_app::{viz_app_new, viz_app_handle_event, viz_app_frame_hash}
+use viz::viz_canvas::{viz_canvas_render_scene}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: 0 }
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    var app = viz_app_new(8, 12, 18)
+    var canvas = make_canvas(320, 240)
+
+    var xs: [f64; 1024] = [0.0; 1024]
+    var ys: [f64; 1024] = [0.0; 1024]
+    var vars: [f64; 1024] = [0.0; 1024]
+    var i: i64 = 0
+    while i < 16 {
+        xs[i as usize] = i as f64
+        ys[i as usize] = 4.0 + (i as f64) * 0.25
+        vars[i as usize] = 0.05 + (i as f64) * 0.01
+        i = i + 1
+    }
+
+    let mol = molecule_h2o()
+    let field = scalar_field_radial(8, 8)
+
+    let plot = viz_add_line_chart(&!scene, &xs, &ys, 16, viz_layout_rect(16, 16, 130, 80), viz_style_rgb(255, 140, 90))
+    let band = viz_add_uncertainty_band(&!scene, &xs, &ys, &vars, 16, viz_layout_rect(164, 16, 130, 80), viz_style_rgb(90, 190, 255))
+    let heat = viz_add_heatmap(&!scene, &field.values, field.rows, field.cols, field.min_value, field.max_value, viz_layout_rect(16, 116, 110, 80))
+    let slider = viz_add_control(&!scene, VIZ_CONTROL_SLIDER, viz_layout_rect(156, 130, 120, 22), 2.0, 0.0, 10.0)
+    let toggle = viz_add_control(&!scene, VIZ_CONTROL_TOGGLE, viz_layout_rect(236, 132, 28, 18), 0.0, 0.0, 1.0)
+    let mol_node = viz_add_molecule(&!scene, mol, viz_layout_rect(148, 168, 72, 54), viz_style_rgb(210, 220, 240))
+    let field_node = viz_add_scalar_field(&!scene, field, viz_layout_rect(236, 168, 64, 54))
+    let tabs = viz_add_control(&!scene, VIZ_CONTROL_TABS, viz_layout_rect(16, 204, 108, 20), 0.0, 0.0, 3.0)
+
+    viz_scene_set_tag(&!scene, plot, 1001)
+    viz_scene_set_tag(&!scene, band, 1002)
+    viz_scene_set_tag(&!scene, slider, 2001)
+    viz_scene_set_tag(&!scene, toggle, 2002)
+    viz_scene_set_tag(&!scene, tabs, 2003)
+    viz_scene_set_parent(&!scene, band, plot)
+    viz_scene_set_parent(&!scene, slider, plot)
+    viz_scene_set_parent(&!scene, toggle, band)
+    assert(scene.node_count == 8)
+    assert(scene.nodes[band as usize].parent_id == scene.nodes[plot as usize].id)
+    assert(scene.nodes[slider as usize].tag == 2001)
+    assert(heat >= 0)
+    assert(mol_node >= 0)
+    assert(field_node >= 0)
+
+    canvas_clear(&!canvas, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!canvas)
+    app.frame = app.frame + 1
+    app.dirty = false
+    let initial_hash = viz_app_frame_hash(&app, &scene, &canvas)
+    assert(app.frame == 1)
+    assert(initial_hash != 0)
+
+    assert(viz_app_handle_event(&!app, &!scene, ev(EV_MOUSE_PRESS, MOUSE_LEFT, 168, 140)))
+    assert(scene.selected_node == slider)
+    assert(scene.focused_node == slider)
+    assert(viz_app_handle_event(&!app, &!scene, ev(EV_MOTION, 0, 216, 140)))
+    assert(scene.time == 5.0)
+    assert(scene.nodes[slider as usize].value == 5.0)
+
+    assert(viz_app_handle_event(&!app, &!scene, ev(EV_MOUSE_PRESS, MOUSE_LEFT, 98, 212)))
+    assert(scene.selected_node == tabs)
+    assert(scene.active_tab == 3)
+    assert(viz_app_handle_event(&!app, &!scene, ev(EV_KEY_PRESS, KEY_RIGHT, 0, 0)))
+    assert(scene.active_tab == 3)
+
+    scene.selected_node = 0 - 1
+    scene.hovered_node = 0 - 1
+    scene.focused_node = slider
+    assert(viz_app_handle_event(&!app, &!scene, ev(EV_KEY_PRESS, KEY_TAB, 0, 0)))
+    assert(scene.focused_node == toggle)
+    assert(viz_app_handle_event(&!app, &!scene, ev(EV_KEY_PRESS, KEY_SPACE, 0, 0)))
+    assert(scene.nodes[toggle as usize].value == 1.0)
+
+    canvas_clear(&!canvas, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!canvas)
+    app.frame = app.frame + 1
+    app.dirty = false
+    let final_hash = viz_app_frame_hash(&app, &scene, &canvas)
+    assert(final_hash != initial_hash)
+    assert(read_px(&canvas, 30, 30) != 0)
+    assert(read_px(&canvas, 20, 120) != 0)
+    assert(read_px(&canvas, 160, 195) != 0)
+
+    viz_scene_dump(&scene)
+
+    heap_free(canvas.pixels as *mut i8)
+    println("VIZ_LAB_INTERACTION_PASS")
+}

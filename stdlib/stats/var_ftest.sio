@@ -1,0 +1,234 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/var_ftest.sio — two-sample F-test for equality of variances
+//
+// The classical variance-ratio test: under normality the ratio of two sample
+// variances follows an F distribution, giving a two-sided test of σ₁² = σ₂²:
+//
+//   var_ftest(x, nx, y, ny) -> VarFResult
+//
+//   F = s₁²/s₂²  ~  F(n₁−1, n₂−1),
+//   two-sided p = 2·min( P(F ≤ f), P(F ≥ f) ).
+// (Powerful under normality, but sensitive to it — prefer Levene/Bartlett for
+// k>2 or non-normal data.)
+//
+// Pure Sounio: one pass per sample for the variances; the F tail via inline
+// Lanczos log-gamma + continued-fraction incomplete beta. No nested data-array
+// calls.
+//
+// References:
+//   Snedecor & Cochran, "Statistical Methods" 8e, §6.11.
+
+module stats::var_ftest
+
+fn vf_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / vf_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn vf_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn vf_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * vf_ln(tt) - tt + vf_ln(a)
+}
+
+fn vf_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+fn vf_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = vf_lgamma(a) + vf_lgamma(b) - vf_lgamma(a + b)
+    let front = vf_exp(a * vf_ln(x) + b * vf_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) { return front * vf_betacf(a, b, x) / a }
+    return 1.0 - front * vf_betacf(b, a, 1.0 - x) / b
+}
+
+// F cdf P(F_{d1,d2} <= f)
+fn vf_f_cdf(f: f64, d1: f64, d2: f64) -> f64 with Mut, Div, Panic {
+    if f <= 0.0 { return 0.0 }
+    let x = d1 * f / (d1 * f + d2)
+    return vf_ibeta(d1 * 0.5, d2 * 0.5, x)
+}
+
+fn variance(a: &[f64; 256], off: i32, n: i32) -> f64 with Mut, Div, Panic {
+    let nf = n as f64
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + a[(off + i) as usize]; i = i + 1 }
+    let mean = s / nf
+    var ss = 0.0
+    var j = 0
+    while j < n { let d = a[(off + j) as usize] - mean; ss = ss + d * d; j = j + 1 }
+    return ss / (nf - 1.0)
+}
+
+pub struct VarFResult {
+    pub f: f64,      // s1²/s2²
+    pub df1: i64,    // n1 - 1
+    pub df2: i64,    // n2 - 1
+    pub p: f64,      // two-sided p
+    pub var1: f64,
+    pub var2: f64,
+}
+
+/// Two-sample F-test for equality of variances.
+///
+/// Parâmetros: x — sample 1; nx — size (>=2); y — sample 2; ny — size (>=2).
+/// Retorno: VarFResult (f, df1, df2, p, var1, var2).
+/// Referências: Snedecor & Cochran §6.11.
+pub fn var_ftest(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> VarFResult with Mut, Div, Panic {
+    if nx < 2 || ny < 2 {
+        return VarFResult { f: 0.0, df1: 0, df2: 0, p: 1.0, var1: 0.0, var2: 0.0 }
+    }
+    let v1 = variance(x, 0, nx)
+    let v2 = variance(y, 0, ny)
+    if v2 <= 0.0 { return VarFResult { f: 0.0, df1: (nx-1) as i64, df2: (ny-1) as i64, p: 1.0, var1: v1, var2: v2 } }
+    let f = v1 / v2
+    let d1 = (nx - 1) as f64
+    let d2 = (ny - 1) as f64
+    let lower = vf_f_cdf(f, d1, d2)
+    let upper = 1.0 - lower
+    var tail = lower
+    if upper < lower { tail = upper }
+    var p = 2.0 * tail
+    if p > 1.0 { p = 1.0 }
+    return VarFResult { f: f, df1: (nx - 1) as i64, df2: (ny - 1) as i64, p: p, var1: v1, var2: v2 }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1,2,3,4,5} var 2.5; y={2,4,6,8,10} var 10. F=0.25, df1=df2=4.
+// P(F<=0.25)=I_{0.2}(2,2)=0.04·(3-0.4)=0.104. two-sided p=2·0.104=0.208.
+fn test_var_ftest() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=2.0; y[1]=4.0; y[2]=6.0; y[3]=8.0; y[4]=10.0
+    let r = var_ftest(&x, 5, &y, 5)
+    var ok = true
+    ok = check(1, approx(r.f, 0.25, 1.0e-9)) && ok
+    ok = check(2, approx(r.var1, 2.5, 1.0e-9)) && ok
+    ok = check(3, approx(r.var2, 10.0, 1.0e-9)) && ok
+    ok = check(4, r.df1 == 4) && ok
+    ok = check(5, approx(r.p, 0.208, 1.0e-3)) && ok
+    return ok
+}
+
+// equal variances -> F=1, p=1.
+fn test_equal() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0
+    y[0]=11.0; y[1]=12.0; y[2]=13.0; y[3]=14.0
+    let r = var_ftest(&x, 4, &y, 4)
+    var ok = true
+    ok = check(10, approx(r.f, 1.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.p, 1.0, 1.0e-6)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_var_ftest() && ok
+    ok = test_equal() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

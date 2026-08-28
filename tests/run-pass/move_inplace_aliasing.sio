@@ -1,0 +1,99 @@
+//@ run-pass
+//@ expect-stdout: 47531047531
+// Golden regression test that DISTINGUISHES a correct SRET-by-value compile
+// from a move-codegen aliasing miscompile of the hazard `c = combine(c, g(c))`.
+//
+// V4 is a SMALL aggregate (4 i64) so today's copy-everywhere souc compiles and
+// runs it WITHOUT stack overflow. The functions return V4 BY VALUE (SRET).
+//
+// Two hazard variants, to cover both inner-slot aliasing and arg-order
+// sensitivity (the future arg-move wedge):
+//   Leg 1:  c = combine(c, g(c))     (inner SRET g(c) may clobber c's slot)
+//   Leg 2:  d = combine(g(d), d)     (arg order swapped; 2nd arg d may be
+//                                      clobbered by g(d)'s SRET into d's slot)
+//
+// Values chosen with a place-weighted checksum so correct and broken numbers
+// diverge and cannot collide:
+//   start    = {1, 2, 3, 4}
+//   g(start) = {10, 20, 30, 40}                 (fields * 10)
+//   CORRECT  combine reads ORIGINAL start in both legs -> {11, 22, 33, 44}
+//   BROKEN   start clobbered to g(start) first -> combine({10,20,30,40},
+//            {10,20,30,40}) = {20, 40, 60, 80}
+// checksum(v) = v.a*1 + v.b*10 + v.c*100 + v.d*1000
+//   CORRECT  per-leg = 11 + 220 + 3300 + 44000 = 47531
+//   BROKEN   per-leg = 20 + 400 + 6000 + 80000 = 86420
+// packed = checksum(c) * 1000000 + checksum(d)
+//   CORRECT  = 47531 * 1000000 + 47531 = 47531047531
+//   any break in either leg -> a DIFFERENT packed integer
+//   (e.g. 86420047531, 47531086420, or 86420086420)
+
+struct V4 { a: i64, b: i64, c: i64, d: i64 }
+
+fn mk() -> V4 {
+    V4 { a: 1, b: 2, c: 3, d: 4 }
+}
+
+fn g(x: V4) -> V4 {
+    V4 { a: x.a * 10, b: x.b * 10, c: x.c * 10, d: x.d * 10 }
+}
+
+fn combine(x: V4, y: V4) -> V4 {
+    V4 { a: x.a + y.a, b: x.b + y.b, c: x.c + y.c, d: x.d + y.d }
+}
+
+fn checksum(v: V4) -> i64 {
+    v.a * 1 + v.b * 10 + v.c * 100 + v.d * 1000
+}
+
+// Print an i64 as exact decimal digits with NO implicit newline, then one '\n'.
+// (print(i64) would append its own newline; we want exactly one trailing \n.)
+fn print_line_i64(n: i64) with IO, Mut, Panic, Div {
+    if n == 0 {
+        print("0")
+        print("\n")
+        return
+    }
+    var val: i64 = n
+    if val < 0 {
+        print("-")
+        val = 0 - val
+    }
+    var buf: [i64; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                           0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    var len: i64 = 0
+    while val > 0 {
+        buf[len as usize] = val - (val / 10) * 10
+        val = val / 10
+        len = len + 1
+    }
+    var j: i64 = len - 1
+    while j >= 0 {
+        let dgt = buf[j as usize]
+        if dgt == 0 { print("0") }
+        if dgt == 1 { print("1") }
+        if dgt == 2 { print("2") }
+        if dgt == 3 { print("3") }
+        if dgt == 4 { print("4") }
+        if dgt == 5 { print("5") }
+        if dgt == 6 { print("6") }
+        if dgt == 7 { print("7") }
+        if dgt == 8 { print("8") }
+        if dgt == 9 { print("9") }
+        j = j - 1
+    }
+    print("\n")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Leg 1: inner-slot aliasing hazard.
+    var c: V4 = mk()
+    c = combine(c, g(c))
+
+    // Leg 2: arg-order-swapped hazard.
+    var d: V4 = mk()
+    d = combine(g(d), d)
+
+    let packed: i64 = checksum(c) * 1000000 + checksum(d)
+    print_line_i64(packed)
+    return 0
+}

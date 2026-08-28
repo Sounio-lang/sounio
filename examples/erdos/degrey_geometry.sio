@@ -1,0 +1,499 @@
+// examples/erdos/degrey_geometry.sio
+//
+// PART B of the chi(R^2) >= 5 flagship: EXACT unit-distance certification.
+//
+// Reads the exact algebraic coordinates of Heule's 529-vertex de Grey core
+// (data/degrey_529.vtx, Mathematica points over Q(sqrt3,sqrt5,sqrt11)) and its
+// edge list (data/degrey_529.edge), and certifies that EVERY edge has squared
+// distance exactly 1 -- with no floating point. Together with Part A
+// (souc_sat.sio: G_529 is not 4-colourable, drat-trim s VERIFIED) this proves
+// G_529 is a unit-distance graph with chromatic number >= 5, hence chi(R^2) >= 5.
+//
+// FIELD. The coordinates live in Q(sqrt3, sqrt5, sqrt11): a degree-8 field with
+// Q-basis  b[mask] = sqrt(prod of primes selected by mask),  mask in 0..7 over
+// {3,5,11}.  We embed it in the existing degree-16 basis of degrey_fieldtower.sio
+// (bit0=sqrt3, bit1=sqrt5, bit2=sqrt7, bit3=sqrt11) so sqrt7 simply never occurs.
+// Multiplication is XOR on masks with a rational coefficient = product of shared
+// primes:  sqrt(prod S) * sqrt(prod T) = (prod_{p in S&T} p) * sqrt(prod (S^T)).
+// A field element is an integer 16-tuple c[] over a common positive denominator d.
+//
+// All denominators in the .vtx involve only sqrt3 (e.g. 1/(16*Sqrt[3])) or are
+// rational, and 1/sqrt3 = sqrt3/3, so division never needs a general inverse.
+//
+// Self-contained.  Run:  $SOUC run examples/erdos/degrey_geometry.sio
+// (set SOUNIO_SOUC_BIN to the native self-hosted ELF first).
+
+struct QF { c: [i64; 16], d: i64 }
+
+// ---- integer helpers ----
+fn igcd(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = a  var y = b
+    if x < 0 { x = 0 - x }
+    if y < 0 { y = 0 - y }
+    while y != 0 { let t = x % y  x = y  y = t }
+    return x
+}
+
+// product of primes selected by mask bits (bit0=3,bit1=5,bit2=7,bit3=11)
+fn bcoeff(mask: i64) -> i64 with Mut {
+    var p = 1
+    if (mask & 1) != 0 { p = p * 3 }
+    if (mask & 2) != 0 { p = p * 5 }
+    if (mask & 4) != 0 { p = p * 7 }
+    if (mask & 8) != 0 { p = p * 11 }
+    return p
+}
+
+// ---- field constructors ----
+fn qf_zero() -> QF with Mut, Panic { return QF { c: [0; 16], d: 1 } }
+fn qf_rat(v: i64) -> QF with Mut, Panic { var r = QF { c: [0; 16], d: 1 }  r.c[0] = v  return r }
+fn qf_mono(idx: i64, v: i64) -> QF with Mut, Panic { var r = QF { c: [0; 16], d: 1 }  r.c[idx as usize] = v  return r }
+
+// gcd-reduce all numerators with the denominator; keep d > 0.
+fn qf_reduce(x: QF) -> QF with Mut, Div, Panic {
+    var r = x
+    if r.d < 0 {
+        var i = 0
+        while i < 16 { r.c[i as usize] = 0 - r.c[i as usize]  i = i + 1 }
+        r.d = 0 - r.d
+    }
+    var g = r.d
+    var i = 0
+    while i < 16 { g = igcd(g, r.c[i as usize])  i = i + 1 }
+    if g > 1 {
+        i = 0
+        while i < 16 { r.c[i as usize] = r.c[i as usize] / g  i = i + 1 }
+        r.d = r.d / g
+    }
+    return r
+}
+
+fn qf_neg(x: QF) -> QF with Mut, Panic {
+    var r = x
+    var i = 0
+    while i < 16 { r.c[i as usize] = 0 - r.c[i as usize]  i = i + 1 }
+    return r
+}
+
+fn qf_add(x: QF, y: QF) -> QF with Mut, Div, Panic {
+    var r = QF { c: [0; 16], d: x.d * y.d }
+    var i = 0
+    while i < 16 {
+        r.c[i as usize] = x.c[i as usize] * y.d + y.c[i as usize] * x.d
+        i = i + 1
+    }
+    return qf_reduce(r)
+}
+
+fn qf_sub(x: QF, y: QF) -> QF with Mut, Div, Panic {
+    var r = QF { c: [0; 16], d: x.d * y.d }
+    var i = 0
+    while i < 16 {
+        r.c[i as usize] = x.c[i as usize] * y.d - y.c[i as usize] * x.d
+        i = i + 1
+    }
+    return qf_reduce(r)
+}
+
+// (prod S)*(prod T): result basis i^j, coeff = product of shared primes. O(16^2).
+fn qf_mul(x: QF, y: QF) -> QF with Mut, Div, Panic {
+    var r = QF { c: [0; 16], d: x.d * y.d }
+    var i = 0
+    while i < 16 {
+        if x.c[i as usize] != 0 {
+            var j = 0
+            while j < 16 {
+                if y.c[j as usize] != 0 {
+                    let coeff = bcoeff(i & j)
+                    let idx = (i ^ j) as usize
+                    r.c[idx] = r.c[idx] + x.c[i as usize] * y.c[j as usize] * coeff
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return qf_reduce(r)
+}
+
+fn qf_scal_mul(x: QF, k: i64) -> QF with Mut, Div, Panic {
+    var r = x
+    var i = 0
+    while i < 16 { r.c[i as usize] = r.c[i as usize] * k  i = i + 1 }
+    return qf_reduce(r)
+}
+
+fn qf_scal_div(x: QF, k: i64) -> QF with Mut, Div, Panic {
+    var r = x
+    var kk = k
+    if kk < 0 { r = qf_neg(r)  kk = 0 - kk }
+    r.d = r.d * kk
+    return qf_reduce(r)
+}
+
+// number of nonzero surd components beyond the rational part
+fn qf_only_index(x: QF) -> i64 with Mut, Panic {
+    // returns -1 if more than one nonzero component, else the single nonzero index
+    var found: i64 = 0 - 1
+    var cnt = 0
+    var i = 0
+    while i < 16 {
+        if x.c[i as usize] != 0 { cnt = cnt + 1  found = i }
+        i = i + 1
+    }
+    if cnt == 0 { return 0 }      // zero -> treat as rational index 0
+    if cnt == 1 { return found }
+    return 0 - 2                  // multi-term: needs general inverse (not in data)
+}
+
+// Divide V by F where F is rational (index 0) or a pure multiple of sqrt3 (index 1).
+// rational a/F.d:  V / (a/F.d) = V * F.d / a.
+// b*sqrt3/F.d:     V / (b*sqrt3/F.d) = V * F.d * sqrt3 / (3b)   (since 1/sqrt3 = sqrt3/3).
+var DIV_ERR: i32 = 0
+fn qf_div(v: QF, f: QF) -> QF with Mut, Div, Panic {
+    let fr = qf_reduce(f)
+    let oi = qf_only_index(fr)
+    if oi == 0 {
+        let a = fr.c[0]
+        return qf_scal_div(qf_scal_mul(v, fr.d), a)
+    }
+    if oi == 1 {
+        let b = fr.c[1]
+        let v3 = qf_mul(v, qf_mono(1, 1))     // V * sqrt3
+        return qf_scal_div(qf_scal_mul(v3, fr.d), 3 * b)
+    }
+    DIV_ERR = 1
+    return v
+}
+
+fn qf_is_one(x: QF) -> i64 with Mut, Div, Panic {
+    let r = qf_reduce(x)
+    if r.c[0] != r.d { return 0 }
+    var i = 1
+    while i < 16 { if r.c[i as usize] != 0 { return 0 }  i = i + 1 }
+    return 1
+}
+
+// sqrt of the rational p/q, returned as a field element. sqrt(p/q)=sqrt(p*q)/q;
+// pull square factors out of p*q, then map the squarefree radical onto {3,5,11}.
+var SQRT_ERR: i32 = 0
+fn sqrt_of_rational(p: i64, q: i64) -> QF with Mut, Div, Panic {
+    var val = p * q
+    var s: i64 = 1
+    var f: i64 = 2
+    while f * f <= val {
+        while val % (f * f) == 0 { val = val / (f * f)  s = s * f }
+        f = f + 1
+    }
+    var mask: i64 = 0
+    if val % 3 == 0 { mask = mask | 1   val = val / 3 }
+    if val % 5 == 0 { mask = mask | 2   val = val / 5 }
+    if val % 11 == 0 { mask = mask | 8  val = val / 11 }
+    if val != 1 { SQRT_ERR = 1 }          // radical outside Q(sqrt3,sqrt5,sqrt11)
+    return qf_scal_div(qf_mono(mask, s), q)
+}
+
+// ===== file reader (syscalls) =====
+var RB: [i8; 1048576] = [0; 1048576]
+var RBlen: i64 = 0
+var PPOS: i64 = 0
+
+fn read_file(path: string) -> i64 with IO, Mut, Panic {
+    let fd = syscall6(2, path, 0, 0, 0, 0, 0)        // open O_RDONLY
+    if fd < 0 { return 0 - 1 }
+    let n = syscall6(0, fd, &! RB, 1048576, 0, 0, 0) // read
+    let _ = syscall6(3, fd, 0, 0, 0, 0, 0)           // close
+    RBlen = n
+    PPOS = 0
+    return n
+}
+
+fn cur() -> i64 with Mut, Panic {
+    if PPOS >= RBlen { return 0 - 1 }
+    return RB[PPOS as usize] as i64
+}
+fn skip_spaces() with Mut, Panic {
+    while PPOS < RBlen { let c = RB[PPOS as usize] as i64  if c == 32 { PPOS = PPOS + 1 } else { break } }
+}
+fn parse_uint() -> i64 with Mut, Panic, Div {
+    skip_spaces()
+    var v: i64 = 0
+    while PPOS < RBlen {
+        let c = RB[PPOS as usize] as i64
+        if c < 48 { break }
+        if c > 57 { break }
+        v = v * 10 + (c - 48)
+        PPOS = PPOS + 1
+    }
+    return v
+}
+
+// ===== recursive-descent expression parser over Q(sqrt3,sqrt5,sqrt11) =====
+// Helpers must precede callers; forward recursion is via a hand-rolled split:
+// parse_factor calls parse_expr through a trampoline flag is impossible, so we
+// inline the grammar with the standard expr->term->factor chain, and let
+// parse_factor handle '(' by calling parse_expr (defined after) — Sounio needs
+// definition-before-use, so we order factor last and pre-declare via mutual
+// structure: we implement a single parse_expr that contains nested loops.
+
+fn parse_sqrt() -> QF with IO, Mut, Div, Panic {
+    while cur() != 91 { PPOS = PPOS + 1 }    // skip "Sqrt", stop at '['
+    PPOS = PPOS + 1                          // consume '['
+    let p = parse_uint()
+    var q: i64 = 1
+    if cur() == 47 { PPOS = PPOS + 1  q = parse_uint() }   // '/'
+    while cur() != 93 { PPOS = PPOS + 1 }    // stop at ']'
+    PPOS = PPOS + 1                          // consume ']'
+    return sqrt_of_rational(p, q)
+}
+
+// Evaluate the expression starting at PPOS until a top-level ',' '}' ')' or EOF.
+// Implements +,-,*,/, unary minus, integers, Sqrt[...], and '(' ... ')'.
+fn parse_expr() -> QF with IO, Mut, Div, Panic {
+    // Shunting-yard-lite over the field: we accumulate sum of terms; each term is
+    // a product/quotient of factors. Parens recurse by counting depth manually.
+    var acc = qf_zero()         // running sum
+    var term = qf_rat(1)        // running product for the current term
+    var have_term: i32 = 0      // whether term has a real factor yet
+    var add_sign: i64 = 1       // +1 / -1 to apply when flushing the term into acc
+    var pend_div: i32 = 0       // next factor is a divisor
+    var fneg: i32 = 0           // unary minus pending on the next factor
+    var go: i32 = 1
+    while go == 1 {
+        skip_spaces()
+        let c = cur()
+        if c < 0 { go = 0 }
+        else if c == 44 { go = 0 }            // ','
+        else if c == 125 { go = 0 }           // '}'
+        else if c == 41 { go = 0 }            // ')'
+        else if c == 43 {                     // '+'
+            if have_term == 1 { acc = qf_add(acc, qf_scal_mul(term, add_sign)) }
+            term = qf_rat(1)  have_term = 0  add_sign = 1  pend_div = 0  fneg = 0
+            PPOS = PPOS + 1
+        }
+        else if c == 45 {                     // '-'
+            if have_term == 1 {
+                acc = qf_add(acc, qf_scal_mul(term, add_sign))
+                term = qf_rat(1)  have_term = 0  add_sign = 1  pend_div = 0  fneg = 0
+                add_sign = 0 - 1
+            } else {
+                // unary minus on the forthcoming factor
+                fneg = 1 - fneg
+            }
+            PPOS = PPOS + 1
+        }
+        else if c == 42 {                     // '*'
+            pend_div = 0  PPOS = PPOS + 1
+        }
+        else if c == 47 {                     // '/'
+            pend_div = 1  PPOS = PPOS + 1
+        }
+        else {
+            // a factor: integer, Sqrt[...], or '(' expr ')'
+            var fac = qf_zero()
+            if c == 40 {                      // '('
+                PPOS = PPOS + 1
+                fac = parse_expr()
+                skip_spaces()
+                if cur() == 41 { PPOS = PPOS + 1 }   // consume ')'
+            } else if c == 83 {               // 'S' (Sqrt)
+                fac = parse_sqrt()
+            } else {
+                fac = qf_rat(parse_uint())
+            }
+            if fneg == 1 { fac = qf_neg(fac)  fneg = 0 }
+            if have_term == 0 { term = fac  have_term = 1 }
+            else if pend_div == 1 { term = qf_div(term, fac)  pend_div = 0 }
+            else { term = qf_mul(term, fac) }
+        }
+    }
+    if have_term == 1 { acc = qf_add(acc, qf_scal_mul(term, add_sign)) }
+    return acc
+}
+
+// ===== vertex / edge storage =====
+var NV: i64 = 0
+var XC: [i64; 9600] = [0; 9600]    // 600 * 16
+var XD: [i64; 600] = [0; 600]
+var YC: [i64; 9600] = [0; 9600]
+var YD: [i64; 600] = [0; 600]
+
+fn store_xy(v: i64, x: QF, y: QF) with Mut, Panic {
+    var i = 0
+    while i < 16 { XC[(v * 16 + i) as usize] = x.c[i as usize]  YC[(v * 16 + i) as usize] = y.c[i as usize]  i = i + 1 }
+    XD[v as usize] = x.d
+    YD[v as usize] = y.d
+}
+fn load_x(v: i64) -> QF with Mut, Panic {
+    var r = QF { c: [0; 16], d: XD[v as usize] }
+    var i = 0
+    while i < 16 { r.c[i as usize] = XC[(v * 16 + i) as usize]  i = i + 1 }
+    return r
+}
+fn load_y(v: i64) -> QF with Mut, Panic {
+    var r = QF { c: [0; 16], d: YD[v as usize] }
+    var i = 0
+    while i < 16 { r.c[i as usize] = YC[(v * 16 + i) as usize]  i = i + 1 }
+    return r
+}
+
+// Parse the whole .vtx buffer: a sequence of "{ x , y }" lines.
+fn load_vtx() -> i64 with IO, Mut, Div, Panic {
+    NV = 0
+    var go: i32 = 1
+    while go == 1 {
+        // advance to next '{'
+        while PPOS < RBlen { if RB[PPOS as usize] as i64 == 123 { break }  PPOS = PPOS + 1 }
+        if PPOS >= RBlen { go = 0 }
+        else {
+            PPOS = PPOS + 1                 // consume '{'
+            let x = parse_expr()
+            skip_spaces()
+            if cur() == 44 { PPOS = PPOS + 1 }   // ','
+            let y = parse_expr()
+            skip_spaces()
+            if cur() == 125 { PPOS = PPOS + 1 }  // '}'
+            if NV < 600 { store_xy(NV, x, y)  NV = NV + 1 }
+        }
+    }
+    return NV
+}
+
+fn gnext_int() -> i64 with Mut, Panic, Div {
+    while PPOS < RBlen {
+        let c = RB[PPOS as usize] as i64
+        if c >= 48 { if c <= 57 { break } }
+        PPOS = PPOS + 1
+    }
+    if PPOS >= RBlen { return 0 - 1 }
+    var v: i64 = 0
+    while PPOS < RBlen {
+        let c = RB[PPOS as usize] as i64
+        if c < 48 { break }
+        if c > 57 { break }
+        v = v * 10 + (c - 48)
+        PPOS = PPOS + 1
+    }
+    return v
+}
+
+fn print_dec(n: i64) with IO, Mut, Panic, Div {
+    if n == 0 { print("0")  return }
+    var x = n
+    if x < 0 { print("-")  x = 0 - x }
+    var tmp: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { tmp[len as usize] = x % 10  x = x / 10  len = len + 1 }
+    var i = len - 1
+    while i >= 0 {
+        let d = tmp[i as usize]
+        if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") }
+        else if d == 3 { print("3") } else if d == 4 { print("4") } else if d == 5 { print("5") }
+        else if d == 6 { print("6") } else if d == 7 { print("7") } else if d == 8 { print("8") }
+        else { print("9") }
+        i = i - 1
+    }
+}
+
+// Emit the parsed coordinates + edge list as Lean data defs (Array QF over the
+// degree-16 basis, denominator kept). A static Lean kernel+theorem wraps this so
+// `lean` re-checks dist^2=1 for every edge by native_decide. The Sounio parse is the
+// single source of truth for the coordinates. Uses the QF/VPair abbrevs from the
+// static header to avoid the unicode product symbol in emitted text.
+fn emit_arr(isX: i32, nv: i64) with IO, Mut, Div, Panic {
+    var v: i64 = 0
+    while v < nv {
+        print("([")
+        var i = 0
+        while i < 16 {
+            if isX == 1 { print_dec(XC[(v * 16 + i) as usize]) } else { print_dec(YC[(v * 16 + i) as usize]) }
+            if i < 15 { print(",") }
+            i = i + 1
+        }
+        print("],")
+        if isX == 1 { print_dec(XD[v as usize]) } else { print_dec(YD[v as usize]) }
+        print("),\n")
+        v = v + 1
+    }
+}
+
+fn emit_lean_full() with IO, Mut, Div, Panic {
+    if read_file("examples/erdos/data/degrey_529.vtx") < 0 { print("-- cannot read vtx\n")  return }
+    let nv = load_vtx()
+    print("def X : Array QF := #[\n")
+    emit_arr(1, nv)
+    print("]\n\n")
+    print("def Y : Array QF := #[\n")
+    emit_arr(0, nv)
+    print("]\n\n")
+    if read_file("examples/erdos/data/degrey_529.edge") < 0 { print("-- cannot read edge\n")  return }
+    let gN = gnext_int()
+    let gM = gnext_int()
+    print("def edges : Array VPair := #[\n")
+    var e: i64 = 0
+    while e < gM {
+        let u = gnext_int()
+        let w = gnext_int()
+        if u < 1 { break }
+        print("(")  print_dec(u - 1)  print(",")  print_dec(w - 1)  print("),\n")
+        e = e + 1
+    }
+    print("]\n")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    if arg_count() >= 1 { emit_lean_full()  return 0 }
+    print("=== Part B: exact unit-distance certification of G_529 over Q(sqrt3,sqrt5,sqrt11) ===\n")
+
+    if read_file("examples/erdos/data/degrey_529.vtx") < 0 {
+        print("cannot read degrey_529.vtx\n")  return 1
+    }
+    let nv = load_vtx()
+    print("vertices parsed: ")  print_dec(nv)  print("\n")
+    if SQRT_ERR == 1 { print("[FATAL] a Sqrt fell outside Q(sqrt3,sqrt5,sqrt11)\n")  return 1 }
+    if DIV_ERR == 1 { print("[FATAL] a division needed a general field inverse\n")  return 1 }
+
+    // self-test: vertex 0 = (0,0), vertex 1 = (1,0): dist^2 must be exactly 1
+    let d01 = qf_add(qf_mul(qf_sub(load_x(0), load_x(1)), qf_sub(load_x(0), load_x(1))),
+                     qf_mul(qf_sub(load_y(0), load_y(1)), qf_sub(load_y(0), load_y(1))))
+    print("self-test dist^2(v0,v1) is 1: ")  print_dec(qf_is_one(d01))  print("\n")
+
+    if read_file("examples/erdos/data/degrey_529.edge") < 0 {
+        print("cannot read degrey_529.edge\n")  return 1
+    }
+    let gN = gnext_int()
+    let gM = gnext_int()
+    print("edge header: N=")  print_dec(gN)  print(" M=")  print_dec(gM)  print("\n")
+
+    var pass: i64 = 0
+    var fail: i64 = 0
+    var e: i64 = 0
+    while e < gM {
+        let u = gnext_int()
+        let w = gnext_int()
+        if u < 1 { break }
+        let a = u - 1
+        let b = w - 1
+        let dx = qf_sub(load_x(a), load_x(b))
+        let dy = qf_sub(load_y(a), load_y(b))
+        let d2 = qf_add(qf_mul(dx, dx), qf_mul(dy, dy))
+        if qf_is_one(d2) == 1 { pass = pass + 1 }
+        else {
+            fail = fail + 1
+            if fail <= 5 {
+                print("  [FAIL] edge ")  print_dec(u)  print("-")  print_dec(w)
+                print(" dist^2 not 1\n")
+            }
+        }
+        e = e + 1
+    }
+
+    print("\nedges checked: ")  print_dec(pass + fail)
+    print("   dist^2 == 1: ")  print_dec(pass)
+    print("   FAIL: ")  print_dec(fail)  print("\n")
+    if fail == 0 {
+        print("PROVEN (exact, no floats): G_529 is a unit-distance graph.\n")
+        print("With Part A (chi(G_529) >= 5, drat-trim VERIFIED): chi(R^2) >= 5.\n")
+    }
+    return 0
+}

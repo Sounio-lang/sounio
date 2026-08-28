@@ -1,0 +1,841 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Cohort-confounding test for the octonion-associator DDI finding
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Established: η²(|asymmetry| | m-direction) = 0.421 across 21 non-associative
+// CYP-triples from openFDA-expanded FAERS (oct_associator_expanded.sio,
+// commit 352aab8f). The m-direction is computed from the octonion
+// multiplication table, zero free parameters.
+//
+// PPCR-grade pre-specified confounder analysis (pre-registered steps):
+//
+//   Step 1. Measure 4 candidate demographic confounders per triple:
+//     C_age  = mean patient age
+//     C_fem  = female fraction
+//     C_hcp  = HCP-reporter fraction
+//     C_us   = US-report fraction
+//
+//   Step 2. For each C_i, test two associations (both must hold for C_i
+//   to be a valid confounder):
+//     (a) η²(C_i | m) > 0.10  — m stratifies the candidate
+//     (b) |ρ(C_i, |asymmetry|)| > 0.15 — candidate predicts the outcome
+//
+//   Step 3. For each C_i that qualifies, residualize |asymmetry| on C_i
+//   (simple linear regression y = a + bC), compute η²(residual | m).
+//
+//   Step 4. Report adjusted partial η² after each single-confounder
+//   adjustment and after simultaneous multivariate adjustment (via
+//   sequential residualization).
+//
+//   Pre-specified interpretation rule:
+//     adjusted_partial_η² ≥ 0.30  → finding ROBUST to demographic confounding
+//     adjusted_partial_η² in [0.15, 0.30) → PARTIALLY ATTRIBUTABLE
+//     adjusted_partial_η² < 0.15 → FINDING ACCOUNTED FOR BY DEMOGRAPHICS
+//
+// Filter: include only triples with temporal ≥ 5 to give each triple's
+// |asymmetry| meaningful precision. This is PRE-specified, not selected
+// post-hoc.
+
+use math::octonion::*;
+
+fn sqrt_s(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y: f64 = x
+    var i: i64 = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+fn abs_s(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn oct_basis_j(j: i64) -> Octonion {
+    if j == 0 { return oct(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 1 { return oct(0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 2 { return oct(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 3 { return oct(0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0) }
+    if j == 4 { return oct(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0) }
+    if j == 5 { return oct(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0) }
+    if j == 6 { return oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0) }
+    oct(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+}
+
+fn oct_sub(a: Octonion, b: Octonion) -> Octonion {
+    oct(a.a - b.a, a.b - b.b, a.c - b.c, a.d - b.d,
+        a.e - b.e, a.f - b.f, a.g - b.g, a.h - b.h)
+}
+
+fn oct_comp(o: Octonion, j: i64) -> f32 {
+    if j == 0 { return o.a }
+    if j == 1 { return o.b }
+    if j == 2 { return o.c }
+    if j == 3 { return o.d }
+    if j == 4 { return o.e }
+    if j == 5 { return o.f }
+    if j == 6 { return o.g }
+    o.h
+}
+
+fn assoc_dir(i: i64, j: i64, k: i64) -> i64 with Div, Panic {
+    let a: Octonion = oct_basis_j(i)
+    let b: Octonion = oct_basis_j(j)
+    let c: Octonion = oct_basis_j(k)
+    let ab_c: Octonion = oct_mul(oct_mul(a, b), c)
+    let a_bc: Octonion = oct_mul(a, oct_mul(b, c))
+    let diff: Octonion = oct_sub(ab_c, a_bc)
+    var max_abs: f32 = 0.0
+    var best_m: i64 = 0 - 1
+    var m: i64 = 0
+    while m < 8 {
+        let cv: f32 = oct_comp(diff, m)
+        let av: f32 = if cv < 0.0 { 0.0 - cv } else { cv }
+        if av > max_abs { max_abs = av; best_m = m }
+        m = m + 1
+    }
+    if max_abs < 0.001 { 0 - 1 } else { best_m }
+}
+
+// ─── Data rows (from data/faers_expanded.csv + data/faers_demographics.csv) ──
+
+fn row_a(i: i64) -> i64 {
+    if i ==  0 { return 1 }
+    if i ==  1 { return 1 }
+    if i ==  2 { return 1 }
+    if i ==  3 { return 1 }
+    if i ==  4 { return 1 }
+    if i ==  5 { return 1 }
+    if i ==  6 { return 1 }
+    if i ==  7 { return 1 }
+    if i ==  8 { return 1 }
+    if i ==  9 { return 1 }
+    if i == 10 { return 1 }
+    if i == 11 { return 1 }
+    if i == 12 { return 1 }
+    if i == 13 { return 1 }
+    if i == 14 { return 1 }
+    if i == 15 { return 2 }
+    if i == 16 { return 2 }
+    if i == 17 { return 2 }
+    if i == 18 { return 2 }
+    if i == 19 { return 2 }
+    if i == 20 { return 2 }
+    if i == 21 { return 2 }
+    if i == 22 { return 2 }
+    if i == 23 { return 2 }
+    if i == 24 { return 2 }
+    if i == 25 { return 3 }
+    if i == 26 { return 3 }
+    if i == 27 { return 3 }
+    if i == 28 { return 3 }
+    if i == 29 { return 3 }
+    if i == 30 { return 3 }
+    if i == 31 { return 4 }
+    if i == 32 { return 4 }
+    if i == 33 { return 4 }
+    if i == 34 { return 5 }
+    -1
+}
+
+fn row_b(i: i64) -> i64 {
+    if i ==  0 { return 2 }
+    if i ==  1 { return 2 }
+    if i ==  2 { return 2 }
+    if i ==  3 { return 2 }
+    if i ==  4 { return 2 }
+    if i ==  5 { return 3 }
+    if i ==  6 { return 3 }
+    if i ==  7 { return 3 }
+    if i ==  8 { return 3 }
+    if i ==  9 { return 4 }
+    if i == 10 { return 4 }
+    if i == 11 { return 4 }
+    if i == 12 { return 5 }
+    if i == 13 { return 5 }
+    if i == 14 { return 6 }
+    if i == 15 { return 3 }
+    if i == 16 { return 3 }
+    if i == 17 { return 3 }
+    if i == 18 { return 3 }
+    if i == 19 { return 4 }
+    if i == 20 { return 4 }
+    if i == 21 { return 4 }
+    if i == 22 { return 5 }
+    if i == 23 { return 5 }
+    if i == 24 { return 6 }
+    if i == 25 { return 4 }
+    if i == 26 { return 4 }
+    if i == 27 { return 4 }
+    if i == 28 { return 5 }
+    if i == 29 { return 5 }
+    if i == 30 { return 6 }
+    if i == 31 { return 5 }
+    if i == 32 { return 5 }
+    if i == 33 { return 6 }
+    if i == 34 { return 6 }
+    -1
+}
+
+fn row_c(i: i64) -> i64 {
+    if i ==  0 { return 3 }
+    if i ==  1 { return 4 }
+    if i ==  2 { return 5 }
+    if i ==  3 { return 6 }
+    if i ==  4 { return 7 }
+    if i ==  5 { return 4 }
+    if i ==  6 { return 5 }
+    if i ==  7 { return 6 }
+    if i ==  8 { return 7 }
+    if i ==  9 { return 5 }
+    if i == 10 { return 6 }
+    if i == 11 { return 7 }
+    if i == 12 { return 6 }
+    if i == 13 { return 7 }
+    if i == 14 { return 7 }
+    if i == 15 { return 4 }
+    if i == 16 { return 5 }
+    if i == 17 { return 6 }
+    if i == 18 { return 7 }
+    if i == 19 { return 5 }
+    if i == 20 { return 6 }
+    if i == 21 { return 7 }
+    if i == 22 { return 6 }
+    if i == 23 { return 7 }
+    if i == 24 { return 7 }
+    if i == 25 { return 5 }
+    if i == 26 { return 6 }
+    if i == 27 { return 7 }
+    if i == 28 { return 6 }
+    if i == 29 { return 7 }
+    if i == 30 { return 7 }
+    if i == 31 { return 6 }
+    if i == 32 { return 7 }
+    if i == 33 { return 7 }
+    if i == 34 { return 7 }
+    -1
+}
+
+fn row_asym(i: i64) -> f64 {
+    if i ==  0 { return -1.0 }
+    if i ==  1 { return 1.0 }
+    if i ==  2 { return 1.0 }
+    if i ==  3 { return -1.0 }
+    if i ==  4 { return -1.0 }
+    if i ==  5 { return -1.0 }
+    if i ==  6 { return -1.0 }
+    if i ==  7 { return -1.0 }
+    if i ==  8 { return -1.0 }
+    if i ==  9 { return 0.25 }
+    if i == 10 { return 1.0 }
+    if i == 11 { return 1.0 }
+    if i == 12 { return 0.7 }
+    if i == 13 { return 0.5455 }
+    if i == 14 { return 1.0 }
+    if i == 15 { return -1.0 }
+    if i == 16 { return 0.3333 }
+    if i == 17 { return 1.0 }
+    if i == 18 { return 0.5 }
+    if i == 19 { return 0.2889 }
+    if i == 20 { return 0.0 }
+    if i == 21 { return 0.1111 }
+    if i == 22 { return 0.0714 }
+    if i == 23 { return 0.0049 }
+    if i == 24 { return 0.6429 }
+    if i == 25 { return 1.0 }
+    if i == 26 { return 1.0 }
+    if i == 27 { return 0.0 }
+    if i == 28 { return 0.3333 }
+    if i == 29 { return 0.2222 }
+    if i == 30 { return 1.0 }
+    if i == 31 { return 0.125 }
+    if i == 32 { return 0.125 }
+    if i == 33 { return 0.0 }
+    if i == 34 { return 0.1197 }
+    0.0 - 1.0
+}
+
+fn row_temporal(i: i64) -> i64 {
+    if i ==  0 { return 0 }
+    if i ==  1 { return 1 }
+    if i ==  2 { return 1 }
+    if i ==  3 { return 0 }
+    if i ==  4 { return 0 }
+    if i ==  5 { return 0 }
+    if i ==  6 { return 0 }
+    if i ==  7 { return 0 }
+    if i ==  8 { return 0 }
+    if i ==  9 { return 4 }
+    if i == 10 { return 1 }
+    if i == 11 { return 1 }
+    if i == 12 { return 20 }
+    if i == 13 { return 11 }
+    if i == 14 { return 1 }
+    if i == 15 { return 0 }
+    if i == 16 { return 6 }
+    if i == 17 { return 1 }
+    if i == 18 { return 4 }
+    if i == 19 { return 45 }
+    if i == 20 { return 4 }
+    if i == 21 { return 18 }
+    if i == 22 { return 84 }
+    if i == 23 { return 205 }
+    if i == 24 { return 70 }
+    if i == 25 { return 1 }
+    if i == 26 { return 1 }
+    if i == 27 { return 2 }
+    if i == 28 { return 3 }
+    if i == 29 { return 18 }
+    if i == 30 { return 3 }
+    if i == 31 { return 40 }
+    if i == 32 { return 104 }
+    if i == 33 { return 8 }
+    if i == 34 { return 259 }
+    -1
+}
+
+fn row_nreports(i: i64) -> i64 {
+    if i ==  0 { return 0 }
+    if i ==  1 { return 4 }
+    if i ==  2 { return 47 }
+    if i ==  3 { return 4 }
+    if i ==  4 { return 75 }
+    if i ==  5 { return 0 }
+    if i ==  6 { return 2 }
+    if i ==  7 { return 0 }
+    if i ==  8 { return 2 }
+    if i ==  9 { return 26 }
+    if i == 10 { return 2 }
+    if i == 11 { return 11 }
+    if i == 12 { return 64 }
+    if i == 13 { return 162 }
+    if i == 14 { return 27 }
+    if i == 15 { return 3 }
+    if i == 16 { return 15 }
+    if i == 17 { return 3 }
+    if i == 18 { return 15 }
+    if i == 19 { return 219 }
+    if i == 20 { return 36 }
+    if i == 21 { return 156 }
+    if i == 22 { return 455 }
+    if i == 23 { return 1000 }
+    if i == 24 { return 296 }
+    if i == 25 { return 6 }
+    if i == 26 { return 3 }
+    if i == 27 { return 3 }
+    if i == 28 { return 14 }
+    if i == 29 { return 72 }
+    if i == 30 { return 10 }
+    if i == 31 { return 164 }
+    if i == 32 { return 645 }
+    if i == 33 { return 92 }
+    if i == 34 { return 978 }
+    -1
+}
+
+fn row_meanage(i: i64) -> f64 {
+    if i ==  0 { return -1.0 }
+    if i ==  1 { return 60.25 }
+    if i ==  2 { return 67.52 }
+    if i ==  3 { return 74.0 }
+    if i ==  4 { return 77.12 }
+    if i ==  5 { return -1.0 }
+    if i ==  6 { return 25.0 }
+    if i ==  7 { return -1.0 }
+    if i ==  8 { return 74.0 }
+    if i ==  9 { return 56.89 }
+    if i == 10 { return 59.07 }
+    if i == 11 { return 65.0 }
+    if i == 12 { return 65.11 }
+    if i == 13 { return 70.54 }
+    if i == 14 { return 73.9 }
+    if i == 15 { return 57.47 }
+    if i == 16 { return 68.06 }
+    if i == 17 { return 69.25 }
+    if i == 18 { return 79.66 }
+    if i == 19 { return 61.7 }
+    if i == 20 { return 57.13 }
+    if i == 21 { return 62.62 }
+    if i == 22 { return 69.9 }
+    if i == 23 { return 71.61 }
+    if i == 24 { return 71.81 }
+    if i == 25 { return 70.44 }
+    if i == 26 { return 71.14 }
+    if i == 27 { return 67.59 }
+    if i == 28 { return 73.62 }
+    if i == 29 { return 72.84 }
+    if i == 30 { return 71.88 }
+    if i == 31 { return 54.92 }
+    if i == 32 { return 61.0 }
+    if i == 33 { return 62.94 }
+    if i == 34 { return 69.6 }
+    0.0 - 1.0
+}
+
+fn row_fracfemale(i: i64) -> f64 {
+    if i ==  0 { return -1.0 }
+    if i ==  1 { return 0.5 }
+    if i ==  2 { return 0.3721 }
+    if i ==  3 { return 1.0 }
+    if i ==  4 { return 0.0299 }
+    if i ==  5 { return -1.0 }
+    if i ==  6 { return 1.0 }
+    if i ==  7 { return -1.0 }
+    if i ==  8 { return 0.5 }
+    if i ==  9 { return 0.68 }
+    if i == 10 { return 0.5 }
+    if i == 11 { return 0.4545 }
+    if i == 12 { return 0.3966 }
+    if i == 13 { return 0.5294 }
+    if i == 14 { return 0.2083 }
+    if i == 15 { return 0.6667 }
+    if i == 16 { return 0.5714 }
+    if i == 17 { return 0.6667 }
+    if i == 18 { return 0.4667 }
+    if i == 19 { return 0.639 }
+    if i == 20 { return 0.5429 }
+    if i == 21 { return 0.4558 }
+    if i == 22 { return 0.6432 }
+    if i == 23 { return 0.4804 }
+    if i == 24 { return 0.5404 }
+    if i == 25 { return 0.6 }
+    if i == 26 { return 0.3333 }
+    if i == 27 { return 0.0 }
+    if i == 28 { return 0.4615 }
+    if i == 29 { return 0.4776 }
+    if i == 30 { return 0.3333 }
+    if i == 31 { return 0.5425 }
+    if i == 32 { return 0.6332 }
+    if i == 33 { return 0.6941 }
+    if i == 34 { return 0.5593 }
+    0.0 - 1.0
+}
+
+fn row_frachcp(i: i64) -> f64 {
+    if i ==  0 { return -1.0 }
+    if i ==  1 { return 0.5 }
+    if i ==  2 { return 0.7209 }
+    if i ==  3 { return 0.5 }
+    if i ==  4 { return 0.875 }
+    if i ==  5 { return -1.0 }
+    if i ==  6 { return 0.0 }
+    if i ==  7 { return -1.0 }
+    if i ==  8 { return 0.5 }
+    if i ==  9 { return 0.5217 }
+    if i == 10 { return 1.0 }
+    if i == 11 { return 0.1429 }
+    if i == 12 { return 0.7833 }
+    if i == 13 { return 0.7394 }
+    if i == 14 { return 0.84 }
+    if i == 15 { return 0.0 }
+    if i == 16 { return 0.8462 }
+    if i == 17 { return 0.3333 }
+    if i == 18 { return 0.7857 }
+    if i == 19 { return 0.5312 }
+    if i == 20 { return 0.3571 }
+    if i == 21 { return 0.7097 }
+    if i == 22 { return 0.7807 }
+    if i == 23 { return 0.6389 }
+    if i == 24 { return 0.8045 }
+    if i == 25 { return 0.25 }
+    if i == 26 { return 0.5 }
+    if i == 27 { return 0.0 }
+    if i == 28 { return 0.5833 }
+    if i == 29 { return 0.75 }
+    if i == 30 { return 0.625 }
+    if i == 31 { return 0.5571 }
+    if i == 32 { return 0.491 }
+    if i == 33 { return 0.6712 }
+    if i == 34 { return 0.7525 }
+    0.0 - 1.0
+}
+
+fn row_fracus(i: i64) -> f64 {
+    if i ==  0 { return -1.0 }
+    if i ==  1 { return 1.0 }
+    if i ==  2 { return 0.4468 }
+    if i ==  3 { return 0.75 }
+    if i ==  4 { return 0.0533 }
+    if i ==  5 { return -1.0 }
+    if i ==  6 { return 1.0 }
+    if i ==  7 { return -1.0 }
+    if i ==  8 { return 0.5 }
+    if i ==  9 { return 0.7308 }
+    if i == 10 { return 0.5 }
+    if i == 11 { return 0.8182 }
+    if i == 12 { return 0.4375 }
+    if i == 13 { return 0.3951 }
+    if i == 14 { return 0.3704 }
+    if i == 15 { return 1.0 }
+    if i == 16 { return 0.4667 }
+    if i == 17 { return 0.6667 }
+    if i == 18 { return 0.2 }
+    if i == 19 { return 0.8584 }
+    if i == 20 { return 0.7222 }
+    if i == 21 { return 0.7821 }
+    if i == 22 { return 0.3429 }
+    if i == 23 { return 0.605 }
+    if i == 24 { return 0.2331 }
+    if i == 25 { return 1.0 }
+    if i == 26 { return 1.0 }
+    if i == 27 { return 1.0 }
+    if i == 28 { return 0.5714 }
+    if i == 29 { return 0.2083 }
+    if i == 30 { return 0.4 }
+    if i == 31 { return 0.8963 }
+    if i == 32 { return 0.831 }
+    if i == 33 { return 0.5435 }
+    if i == 34 { return 0.2832 }
+    0.0 - 1.0
+}
+
+
+// ─── Analysis: primary + per-confounder adjustment ───────────────────────────
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("═══════════════════════════════════════════════════════")
+    println("  PPCR-grade cohort-confounding test for η²=0.421 finding")
+    println("  Pre-specified 4 demographic confounders")
+    println("  Filter: temporal ≥ 5 (sufficient per-triple precision)")
+    println("═══════════════════════════════════════════════════════")
+    println("")
+
+    let N_ROWS: i64 = 35
+    let TEMP_MIN: i64 = 5
+
+    // Storage for filtered valid rows.
+    var v_m:   [i64; 40] = [0; 40]
+    var v_y:   [f64; 40] = [0.0; 40]    // |asymmetry|
+    var v_age: [f64; 40] = [0.0; 40]
+    var v_fem: [f64; 40] = [0.0; 40]
+    var v_hcp: [f64; 40] = [0.0; 40]
+    var v_us:  [f64; 40] = [0.0; 40]
+    var N: i64 = 0
+
+    var i: i64 = 0
+    while i < N_ROWS {
+        let a: i64 = row_a(i)
+        let b: i64 = row_b(i)
+        let c: i64 = row_c(i)
+        let m: i64 = assoc_dir(a, b, c)
+        let t: i64 = row_temporal(i)
+        let age: f64 = row_meanage(i)
+        if m >= 0 {
+            if t >= TEMP_MIN {
+                if age > 0.0 {
+                    v_m[N]   = m
+                    v_y[N]   = row_asym(i)
+                    v_age[N] = age
+                    v_fem[N] = row_fracfemale(i)
+                    v_hcp[N] = row_frachcp(i)
+                    v_us[N]  = row_fracus(i)
+                    N = N + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    print("Valid rows (non-assoc, temporal≥5, age_valid): "); print_int(N); println("")
+    println("")
+
+    // ─── eta²(y | m) helper ─────────────────────────────────────────────────
+    // Accepts an arbitrary [f64; 40] values array; computes between/total SS.
+    var eta_work: [f64; 40] = [0.0; 40]   // scratch
+
+    // Primary η²(y | m)
+    let eta_primary: f64 = eta_sq(v_y, v_m, N)
+    print("PRIMARY:  η²(|asymmetry| | m) = "); print(eta_primary); println("")
+    println("")
+
+    // For each confounder: η²(C|m), |ρ(C,y)|
+    println("=== Confounder screen (pre-specified) ===")
+    println("  Var   η²(C|m)   ρ(C,y)   Qualifies?  (η²>0.10 AND |ρ|>0.15)")
+    println("  ---   -------   ------   ----------")
+
+    let eta_age: f64 = eta_sq(v_age, v_m, N)
+    let r_age:   f64 = pearson(v_age, v_y, N)
+    let q_age:   bool = qualify(eta_age, r_age)
+    print_conf("age ", eta_age, r_age, q_age)
+
+    let eta_fem: f64 = eta_sq(v_fem, v_m, N)
+    let r_fem:   f64 = pearson(v_fem, v_y, N)
+    let q_fem:   bool = qualify(eta_fem, r_fem)
+    print_conf("fem ", eta_fem, r_fem, q_fem)
+
+    let eta_hcp: f64 = eta_sq(v_hcp, v_m, N)
+    let r_hcp:   f64 = pearson(v_hcp, v_y, N)
+    let q_hcp:   bool = qualify(eta_hcp, r_hcp)
+    print_conf("hcp ", eta_hcp, r_hcp, q_hcp)
+
+    let eta_us:  f64 = eta_sq(v_us, v_m, N)
+    let r_us:    f64 = pearson(v_us, v_y, N)
+    let q_us:    bool = qualify(eta_us, r_us)
+    print_conf("us  ", eta_us, r_us, q_us)
+
+    println("")
+
+    // Residualize y on each qualifying confounder separately, compute η² on residual.
+    println("=== Single-confounder adjustment (partial η²) ===")
+    println("  Adj var  partial η²(residual | m)  Δ from primary")
+    println("  -------  ------------------------  --------------")
+    var pe_age: f64 = eta_primary
+    var pe_fem: f64 = eta_primary
+    var pe_hcp: f64 = eta_primary
+    var pe_us:  f64 = eta_primary
+    if q_age {
+        residualize_to_global(v_y, v_age, N)
+        pe_age = eta_sq(RES_OUT, v_m, N)
+    }
+    if q_fem {
+        residualize_to_global(v_y, v_fem, N)
+        pe_fem = eta_sq(RES_OUT, v_m, N)
+    }
+    if q_hcp {
+        residualize_to_global(v_y, v_hcp, N)
+        pe_hcp = eta_sq(RES_OUT, v_m, N)
+    }
+    if q_us {
+        residualize_to_global(v_y, v_us, N)
+        pe_us = eta_sq(RES_OUT, v_m, N)
+    }
+    print_partial("age ", pe_age, eta_primary, q_age)
+    print_partial("fem ", pe_fem, eta_primary, q_fem)
+    print_partial("hcp ", pe_hcp, eta_primary, q_hcp)
+    print_partial("us  ", pe_us,  eta_primary, q_us)
+    println("")
+
+    // Sequential multivariate adjustment via V_RES global (Sounio passes arrays
+    // by value, so we use globals to persist results across residualize calls).
+    var k1: i64 = 0
+    while k1 < N { V_RES[k1] = v_y[k1]; k1 = k1 + 1 }
+    if q_age {
+        residualize_to_global(V_RES, v_age, N)
+        var u: i64 = 0
+        while u < N { V_RES[u] = RES_OUT[u]; u = u + 1 }
+    }
+    if q_fem {
+        residualize_to_global(V_RES, v_fem, N)
+        var u: i64 = 0
+        while u < N { V_RES[u] = RES_OUT[u]; u = u + 1 }
+    }
+    if q_hcp {
+        residualize_to_global(V_RES, v_hcp, N)
+        var u: i64 = 0
+        while u < N { V_RES[u] = RES_OUT[u]; u = u + 1 }
+    }
+    if q_us {
+        residualize_to_global(V_RES, v_us, N)
+        var u: i64 = 0
+        while u < N { V_RES[u] = RES_OUT[u]; u = u + 1 }
+    }
+    let eta_multi: f64 = eta_sq(V_RES, v_m, N)
+
+    println("=== Multivariate sequential adjustment ===")
+    print("  Simultaneous adjustment for qualifying confounders: η² = ")
+    print(eta_multi); println("")
+    print("  Δ from primary = "); print(eta_multi - eta_primary); println("")
+    println("")
+
+    // Pre-specified interpretation
+    println("───────────────────────────────────────────────────────")
+    print("  Primary η² = "); print(eta_primary); println("")
+    print("  Adjusted (multivariate) η² = "); print(eta_multi); println("")
+    if eta_multi >= 0.30 {
+        println("  VERDICT: ROBUST — demographic confounding does not explain the finding")
+    } else {
+        if eta_multi >= 0.15 {
+            println("  VERDICT: PARTIALLY ATTRIBUTABLE — confounding explains some but not all")
+        } else {
+            println("  VERDICT: ACCOUNTED FOR — finding collapses under demographic adjustment")
+        }
+    }
+    println("───────────────────────────────────────────────────────")
+    println("")
+
+    // Assertions
+    var passed: i32 = 0
+    var failed: i32 = 0
+
+    if N >= 8 {
+        print("T1 PASS: N="); print_int(N); println(" valid rows")
+        passed = passed + 1
+    } else {
+        print("T1 FAIL: N="); print_int(N); println("")
+        failed = failed + 1
+    }
+
+    if eta_primary > 0.25 {
+        print("T2 PASS: primary η²="); print(eta_primary); println(" > 0.25 (reproduces prior)")
+        passed = passed + 1
+    } else {
+        print("T2 FAIL: primary η²="); print(eta_primary); println("")
+        failed = failed + 1
+    }
+
+    // T3 REPORT: pre-specified verdict outcome (any of 3 is a valid result)
+    print("T3 REPORT: multivariate-adjusted η² = "); print(eta_multi); println("")
+    passed = passed + 1
+
+    // T4 REPORT: how many confounders qualified
+    var nq: i64 = 0
+    if q_age { nq = nq + 1 }
+    if q_fem { nq = nq + 1 }
+    if q_hcp { nq = nq + 1 }
+    if q_us  { nq = nq + 1 }
+    print("T4 REPORT: "); print_int(nq); println("/4 confounders qualified by pre-spec threshold")
+    passed = passed + 1
+
+    // T5 — sanity: residuals variance should be ≤ original y variance
+    let var_y: f64 = variance(v_y, N)
+    let var_res: f64 = variance(V_RES, N)
+    if var_res <= var_y + 0.01 {
+        print("T5 PASS: var(residuals)="); print(var_res)
+        print(" ≤ var(y)=");                print(var_y); println("")
+        passed = passed + 1
+    } else {
+        println("T5 FAIL: residual variance exceeds original")
+        failed = failed + 1
+    }
+
+    println("")
+    print("Passed: "); print_int(passed); println("")
+    print("Failed: "); print_int(failed); println("")
+    if failed == 0 { println("ALL PASS") } else { println("SOME TESTS FAILED") }
+    failed
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn variance(vals: [f64; 40], n: i64) -> f64 with Div {
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < n { s = s + vals[i]; i = i + 1 }
+    let mean: f64 = s / (n as f64)
+    var ss: f64 = 0.0
+    i = 0
+    while i < n {
+        let d: f64 = vals[i] - mean
+        ss = ss + d * d
+        i = i + 1
+    }
+    ss / (n as f64)
+}
+
+fn eta_sq(vals: [f64; 40], groups: [i64; 40], n: i64) -> f64 with Mut, Div {
+    // Total mean
+    var s: f64 = 0.0
+    var i: i64 = 0
+    while i < n { s = s + vals[i]; i = i + 1 }
+    let mean: f64 = s / (n as f64)
+    // Total SS
+    var ss_tot: f64 = 0.0
+    i = 0
+    while i < n {
+        let d: f64 = vals[i] - mean
+        ss_tot = ss_tot + d * d
+        i = i + 1
+    }
+    if ss_tot < 0.00001 { return 0.0 }
+    // Group SS: Σ n_g (mean_g − mean)²
+    var ss_bet: f64 = 0.0
+    var g: i64 = 0
+    while g < 8 {
+        var s_g: f64 = 0.0
+        var n_g: i64 = 0
+        var j: i64 = 0
+        while j < n {
+            if groups[j] == g {
+                s_g = s_g + vals[j]
+                n_g = n_g + 1
+            }
+            j = j + 1
+        }
+        if n_g > 0 {
+            let mg: f64 = s_g / (n_g as f64)
+            let d:  f64 = mg - mean
+            ss_bet = ss_bet + (n_g as f64) * d * d
+        }
+        g = g + 1
+    }
+    ss_bet / ss_tot
+}
+
+fn pearson(x: [f64; 40], y: [f64; 40], n: i64) -> f64 with Mut, Div, Panic {
+    var sx: f64 = 0.0
+    var sy: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        sx = sx + x[i]; sy = sy + y[i]; i = i + 1
+    }
+    let mx: f64 = sx / (n as f64)
+    let my: f64 = sy / (n as f64)
+    var num: f64 = 0.0
+    var sxx: f64 = 0.0
+    var syy: f64 = 0.0
+    i = 0
+    while i < n {
+        let dx: f64 = x[i] - mx
+        let dy: f64 = y[i] - my
+        num = num + dx * dy
+        sxx = sxx + dx * dx
+        syy = syy + dy * dy
+        i = i + 1
+    }
+    let denom: f64 = sqrt_s(sxx * syy)
+    if denom < 0.00001 { return 0.0 }
+    num / denom
+}
+
+fn qualify(eta: f64, rho: f64) -> bool {
+    let e_ok: bool = eta > 0.10
+    let r_ok: bool = abs_s(rho) > 0.15
+    if e_ok { if r_ok { true } else { false } } else { false }
+}
+
+fn print_conf(name: str, eta: f64, rho: f64, q: bool) with IO {
+    print("  "); print(name); print("    ")
+    print(eta); print("    ")
+    print(rho); print("    ")
+    if q { print("YES") } else { print("no ") }
+    println("")
+}
+
+fn print_partial(name: str, partial: f64, primary: f64, q: bool) with IO {
+    print("  "); print(name); print("    ")
+    print(partial); print("                  ")
+    print(partial - primary)
+    if q == false { print("  (n/a — did not qualify)") }
+    println("")
+}
+
+// Residualize writes into global RES_OUT — Sounio passes arrays by value, so
+// function-scoped `out` parameters don't propagate back to the caller.
+var RES_OUT: [f64; 40] = [0.0; 40]
+var V_RES:   [f64; 40] = [0.0; 40]
+
+fn residualize_to_global(y: [f64; 40], x: [f64; 40], n: i64)
+    with Mut, Div, Panic {
+    var sx: f64 = 0.0
+    var sy: f64 = 0.0
+    var i: i64 = 0
+    while i < n { sx = sx + x[i]; sy = sy + y[i]; i = i + 1 }
+    let mx: f64 = sx / (n as f64)
+    let my: f64 = sy / (n as f64)
+    var num: f64 = 0.0
+    var den: f64 = 0.0
+    i = 0
+    while i < n {
+        let dx: f64 = x[i] - mx
+        let dy: f64 = y[i] - my
+        num = num + dx * dy
+        den = den + dx * dx
+        i = i + 1
+    }
+    var slope: f64 = 0.0
+    if den > 0.0000001 { slope = num / den }
+    let inter: f64 = my - slope * mx
+    i = 0
+    while i < n {
+        RES_OUT[i] = y[i] - (inter + slope * x[i])
+        i = i + 1
+    }
+}

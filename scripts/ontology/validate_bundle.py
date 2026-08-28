@@ -37,16 +37,35 @@ def read_bundle(path: Path) -> dict:
     return json.loads(payload.decode("utf-8"))
 
 
+def validate_bundle_payload(path: Path) -> str:
+    payload = read_bundle(path)
+    ontology = payload.get("ontology", "").lower()
+    if not ontology:
+        raise ValueError(f"{path} missing ontology field")
+    if payload.get("term_count", 0) <= 0:
+        raise ValueError(f"{path} has no terms")
+    terms = payload.get("terms", [])
+    term_curies = {term.get("curie") for term in terms}
+    if payload.get("term_count") != len(terms):
+        raise ValueError(f"{path} term_count does not match terms")
+    disjoints = payload.get("disjoints", [])
+    if payload.get("disjoint_count", len(disjoints)) != len(disjoints):
+        raise ValueError(f"{path} disjoint_count does not match disjoints")
+    for pair in disjoints:
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise ValueError(f"{path} has invalid disjoint pair {pair!r}")
+        left, right = pair
+        if left == right:
+            raise ValueError(f"{path} has reflexive disjoint pair {pair!r}")
+        if left not in term_curies or right not in term_curies:
+            raise ValueError(f"{path} has disjoint pair with unknown term {pair!r}")
+    return ontology
+
+
 def validate_bundle_dir(bundle_dir: Path) -> None:
     found = set()
     for path in sorted(bundle_dir.glob("*.dontology")):
-        payload = read_bundle(path)
-        ontology = payload.get("ontology", "").lower()
-        if not ontology:
-            raise ValueError(f"{path} missing ontology field")
-        if payload.get("term_count", 0) <= 0:
-            raise ValueError(f"{path} has no terms")
-        found.add(ontology)
+        found.add(validate_bundle_payload(path))
 
     missing = REQUIRED - found
     if missing:
@@ -70,10 +89,20 @@ def validate_mapping_dir(mapping_dir: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle-dir", default="data/ontology/bundles")
+    parser.add_argument(
+        "--bundle",
+        action="append",
+        default=[],
+        help="Validate one explicit .dontology bundle. May be repeated.",
+    )
     parser.add_argument("--mapping-dir", default="data/ontology/bundles/mappings")
     args = parser.parse_args()
 
-    validate_bundle_dir(Path(args.bundle_dir))
+    if args.bundle:
+        for bundle in args.bundle:
+            validate_bundle_payload(Path(bundle))
+    else:
+        validate_bundle_dir(Path(args.bundle_dir))
     validate_mapping_dir(Path(args.mapping_dir))
     print("ontology bundles: OK")
     return 0

@@ -1,0 +1,128 @@
+//! Provenance / lineage tracking for derived measurement values — the auditability a float64 engine
+//! like pandas cannot provide. In a regulated lab (clinical, metrology, pharma) a reported value must
+//! be traceable: which raw columns fed it, through how many operations, at what computation depth. A
+//! pandas cell is just a number with no record of how it was produced.
+//!
+//! A `LineageLog` is an append-only DAG of computation steps. Each step is either a SOURCE (a raw
+//! input column) or an OP applied to one or two earlier steps. Every step gets a monotonically
+//! increasing id (parents always precede children), so ancestry queries are exact forward/backward
+//! sweeps — no recursion. Given any step id you can ask: its depth (longest path to a source), how many
+//! operations produced it, and how many distinct source columns it draws on.
+//!
+//! Self-contained; no compiler changes. Capacity: 256 steps.
+
+pub struct LineageLog {
+    op: [i64; 256],    // OP_SOURCE=0, or a caller-defined op code (>=1)
+    a:  [i64; 256],    // parent step 0 (-1 if none)
+    b:  [i64; 256],    // parent step 1 (-1 if none / unary)
+    src:[i64; 256],    // for a SOURCE step, the raw column id (-1 otherwise)
+    n:  i64,           // number of steps
+}
+
+pub fn lin_new() -> LineageLog {
+    LineageLog { op: [0; 256], a: [0-1; 256], b: [0-1; 256], src: [0-1; 256], n: 0 }
+}
+
+/// Record a raw source column `col_id`; returns its step id.
+pub fn lin_source(log: &!LineageLog, col_id: i64) -> i64 with Mut, Panic {
+    let id = log.n
+    if id >= 256 { return 0 - 1 }
+    log.op[id as usize] = 0
+    log.a[id as usize] = 0 - 1
+    log.b[id as usize] = 0 - 1
+    log.src[id as usize] = col_id
+    log.n = id + 1
+    id
+}
+
+/// Record an operation `op` (>=1) applied to parent steps `pa` and `pb` (pass -1 for `pb` if unary);
+/// returns the new step id.
+pub fn lin_op(log: &!LineageLog, op: i64, pa: i64, pb: i64) -> i64 with Mut, Panic {
+    let id = log.n
+    if id >= 256 { return 0 - 1 }
+    log.op[id as usize] = op
+    log.a[id as usize] = pa
+    log.b[id as usize] = pb
+    log.src[id as usize] = 0 - 1
+    log.n = id + 1
+    id
+}
+
+pub fn lin_op_of(log: &LineageLog, id: i64) -> i64 with Panic { log.op[id as usize] }
+pub fn lin_parent0(log: &LineageLog, id: i64) -> i64 with Panic { log.a[id as usize] }
+pub fn lin_parent1(log: &LineageLog, id: i64) -> i64 with Panic { log.b[id as usize] }
+pub fn lin_src_col(log: &LineageLog, id: i64) -> i64 with Panic { log.src[id as usize] }
+pub fn lin_is_source(log: &LineageLog, id: i64) -> bool with Panic { log.op[id as usize] == 0 }
+
+// Mark all ancestors of `id` (inclusive) into `marked` (0/1). Parents precede children, so a single
+// top-down-to-0 sweep propagates the marks.
+fn mark_ancestors(log: &LineageLog, id: i64, marked: &![i64; 256]) with Mut, Panic {
+    var j: i64 = 0
+    while j < 256 { marked[j as usize] = 0; j = j + 1 }
+    if id < 0 || id >= log.n { return }
+    marked[id as usize] = 1
+    var k = id
+    while k >= 0 {
+        if marked[k as usize] == 1 {
+            let pa = log.a[k as usize]
+            let pb = log.b[k as usize]
+            if pa >= 0 { marked[pa as usize] = 1 }
+            if pb >= 0 { marked[pb as usize] = 1 }
+        }
+        k = k - 1
+    }
+}
+
+/// The number of OPERATION steps (non-source) among the ancestors of `id` (inclusive) — how many
+/// operations produced the value at `id`.
+pub fn lin_op_count(log: &LineageLog, id: i64) -> i64 with Mut, Panic {
+    var marked: [i64; 256] = [0; 256]
+    mark_ancestors(log, id, &!marked)
+    var cnt: i64 = 0
+    var j: i64 = 0
+    while j < log.n {
+        if marked[j as usize] == 1 && log.op[j as usize] != 0 { cnt = cnt + 1 }
+        j = j + 1
+    }
+    cnt
+}
+
+/// The number of DISTINCT source columns feeding `id`.
+pub fn lin_source_count(log: &LineageLog, id: i64) -> i64 with Mut, Panic {
+    var marked: [i64; 256] = [0; 256]
+    mark_ancestors(log, id, &!marked)
+    var seen: [i64; 256] = [0; 256]
+    var m: i64 = 0
+    var j: i64 = 0
+    while j < log.n {
+        if marked[j as usize] == 1 && log.op[j as usize] == 0 {
+            let c = log.src[j as usize]
+            var dup = false
+            var t: i64 = 0
+            while t < m { if seen[t as usize] == c { dup = true } t = t + 1 }
+            if !dup && m < 256 { seen[m as usize] = c; m = m + 1 }
+        }
+        j = j + 1
+    }
+    m
+}
+
+/// The depth of `id`: the longest path to a source (0 for a source). Forward DP over the DAG.
+pub fn lin_depth(log: &LineageLog, id: i64) -> i64 with Mut, Panic {
+    var d: [i64; 256] = [0; 256]
+    var j: i64 = 0
+    while j <= id && j < log.n {
+        if log.op[j as usize] == 0 {
+            d[j as usize] = 0
+        } else {
+            let pa = log.a[j as usize]
+            let pb = log.b[j as usize]
+            var mx: i64 = 0
+            if pa >= 0 { mx = d[pa as usize] }
+            if pb >= 0 { if d[pb as usize] > mx { mx = d[pb as usize] } }
+            d[j as usize] = mx + 1
+        }
+        j = j + 1
+    }
+    d[id as usize]
+}

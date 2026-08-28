@@ -1,0 +1,207 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/reliability.sio — inter-rater and internal-consistency reliability
+//
+// Two workhorses of measurement reliability:
+//
+//   icc(data, n_subj, n_rater)        -> ICC(2,1)      (two-way random, single rater)
+//   cronbach_alpha(data, n_subj, n_item) -> alpha       (internal consistency)
+//
+// ICC(2,1) from a subjects×raters matrix by two-way ANOVA:
+//   ICC = (MSR − MSE) / (MSR + (k−1)·MSE + (k/n)·(MSC − MSE))
+//   where MSR = between-subjects, MSC = between-raters, MSE = residual mean square.
+// Cronbach's alpha:  α = (k/(k−1))·(1 − Σ var(item)/var(total score)).
+//
+// `data` is the n×k matrix in row-major order (subjects × raters/items, n·k ≤ 256).
+//
+// Pure Sounio, no external dependency (matrices are small; loops are inlined so no
+// nested call is made while the matrix is live — issue #852).
+//
+// References:
+//   Shrout & Fleiss (1979) "Intraclass correlations"; Cronbach (1951);
+//   Koo & Li (2016) — ICC selection guidance.
+
+module stats::reliability
+
+pub struct ICCResult {
+    pub icc: f64,
+    pub ms_subjects: f64,
+    pub ms_raters: f64,
+    pub ms_error: f64,
+    pub n_subj: i64,
+    pub n_rater: i64,
+}
+
+/// ICC(2,1): two-way random-effects, absolute-agreement, single measurement.
+///
+/// Parâmetros: data — subjects×raters, row-major; n_subj, n_rater (n·k <= 256).
+/// Retorno: ICCResult (ICC and the mean squares).
+/// Referências: Shrout & Fleiss (1979).
+pub fn icc(data: &[f64; 256], n_subj: i32, n_rater: i32) -> ICCResult with Mut, Div, Panic {
+    let n = n_subj as f64
+    let k = n_rater as f64
+
+    // grand mean
+    var grand = 0.0
+    var i = 0
+    while i < n_subj {
+        var j = 0
+        while j < n_rater { grand = grand + data[(i * n_rater + j) as usize]; j = j + 1 }
+        i = i + 1
+    }
+    grand = grand / (n * k)
+
+    // sums of squares
+    var ss_total = 0.0
+    var ss_rows = 0.0
+    var a = 0
+    while a < n_subj {
+        var rowsum = 0.0
+        var b = 0
+        while b < n_rater {
+            let x = data[(a * n_rater + b) as usize]
+            let dt = x - grand
+            ss_total = ss_total + dt * dt
+            rowsum = rowsum + x
+            b = b + 1
+        }
+        let rm = rowsum / k - grand
+        ss_rows = ss_rows + k * rm * rm
+        a = a + 1
+    }
+    var ss_cols = 0.0
+    var c = 0
+    while c < n_rater {
+        var colsum = 0.0
+        var r = 0
+        while r < n_subj { colsum = colsum + data[(r * n_rater + c) as usize]; r = r + 1 }
+        let cm = colsum / n - grand
+        ss_cols = ss_cols + n * cm * cm
+        c = c + 1
+    }
+    var ss_err = ss_total - ss_rows - ss_cols
+    if ss_err < 0.0 { ss_err = 0.0 }
+
+    let df_rows = n - 1.0
+    let df_cols = k - 1.0
+    let df_err = (n - 1.0) * (k - 1.0)
+    var msr = 0.0
+    if df_rows > 0.0 { msr = ss_rows / df_rows }
+    var msc = 0.0
+    if df_cols > 0.0 { msc = ss_cols / df_cols }
+    var mse = 0.0
+    if df_err > 0.0 { mse = ss_err / df_err }
+
+    let denom = msr + (k - 1.0) * mse + (k / n) * (msc - mse)
+    var v = 0.0
+    if denom > 1.0e-300 { v = (msr - mse) / denom }
+    return ICCResult { icc: v, ms_subjects: msr, ms_raters: msc, ms_error: mse,
+                       n_subj: n_subj as i64, n_rater: n_rater as i64 }
+}
+
+/// Cronbach's alpha (internal consistency) of a subjects×items matrix.
+///
+/// Parâmetros: data — subjects×items, row-major; n_subj, n_item (n·k <= 256).
+/// Retorno: alpha (usually in [0,1]).
+/// Referências: Cronbach (1951).
+pub fn cronbach_alpha(data: &[f64; 256], n_subj: i32, n_item: i32) -> f64 with Mut, Div, Panic {
+    let n = n_subj as f64
+    let k = n_item as f64
+    if n_subj < 2 || n_item < 2 { return 0.0 }
+
+    // sum of item variances (n-1 basis)
+    var sum_item_var = 0.0
+    var j = 0
+    while j < n_item {
+        var s = 0.0
+        var ss = 0.0
+        var i = 0
+        while i < n_subj {
+            let x = data[(i * n_item + j) as usize]
+            s = s + x
+            ss = ss + x * x
+            i = i + 1
+        }
+        let var_j = (ss - s * s / n) / (n - 1.0)
+        sum_item_var = sum_item_var + var_j
+        j = j + 1
+    }
+
+    // variance of the total (row-sum) score
+    var st = 0.0
+    var sst = 0.0
+    var r = 0
+    while r < n_subj {
+        var rowsum = 0.0
+        var c = 0
+        while c < n_item { rowsum = rowsum + data[(r * n_item + c) as usize]; c = c + 1 }
+        st = st + rowsum
+        sst = sst + rowsum * rowsum
+        r = r + 1
+    }
+    let var_total = (sst - st * st / n) / (n - 1.0)
+    if var_total <= 1.0e-300 { return 0.0 }
+    return (k / (k - 1.0)) * (1.0 - sum_item_var / var_total)
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// perfect agreement: 4 subjects, 2 raters, ratings identical across raters -> ICC=1.
+fn test_icc_perfect() -> bool with IO, Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    d[0]=1.0; d[1]=1.0; d[2]=2.0; d[3]=2.0; d[4]=3.0; d[5]=3.0; d[6]=4.0; d[7]=4.0
+    let r = icc(&d, 4, 2)
+    return check(1, approx(r.icc, 1.0, 1.0e-9))
+}
+
+// partial agreement (raters differ) -> ICC strictly between 0 and 1.
+fn test_icc_partial() -> bool with IO, Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    // subject rows: (9,2)(6,1)(8,4)(7,1)  -> raters disagree in level
+    d[0]=9.0; d[1]=2.0; d[2]=6.0; d[3]=1.0; d[4]=8.0; d[5]=4.0; d[6]=7.0; d[7]=1.0
+    let r = icc(&d, 4, 2)
+    return check(10, r.icc > 0.0 && r.icc < 1.0)
+}
+
+// Cronbach: 4 subjects, 3 items.
+// items var: 5/3, 2, 2.25 -> sum 5.916667. total-score var 15.583333.
+// alpha = (3/2)(1 - 5.916667/15.583333) = 1.5·0.620321 = 0.930481.
+fn test_cronbach() -> bool with IO, Mut, Div, Panic {
+    var d: [f64; 256] = [0.0; 256]
+    d[0]=5.0; d[1]=4.0; d[2]=4.0
+    d[3]=3.0; d[4]=3.0; d[5]=2.0
+    d[6]=4.0; d[7]=4.0; d[8]=5.0
+    d[9]=2.0; d[10]=1.0; d[11]=2.0
+    let alpha = cronbach_alpha(&d, 4, 3)
+    return check(20, approx(alpha, 0.930481, 1.0e-5))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_icc_perfect() && ok
+    ok = test_icc_partial() && ok
+    ok = test_cronbach() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

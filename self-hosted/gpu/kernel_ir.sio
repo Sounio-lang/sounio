@@ -11,8 +11,39 @@
 // - Fixed register allocation for now
 // - Struct-based representation (no enum field destructuring - not supported by self-hosted)
 
+pub struct Name {
+    pub buf: [i8; 128],
+    pub len: i64,
+}
+
+pub fn ki_empty_name() -> Name {
+    Name { buf: [0; 128], len: 0 }
+}
+
+pub fn ki_ir_name_from_bytes(a: i8, b: i8, c: i8, d: i8, len: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 128], len: len }
+    if len > 0 { n.buf[0] = a }
+    if len > 1 { n.buf[1] = b }
+    if len > 2 { n.buf[2] = c }
+    if len > 3 { n.buf[3] = d }
+    n
+}
+
+// Build a Name from a string literal (any length up to 128).
+// Uses str_char_at so all bytes are set in one-level ops — avoids the
+// two-level nested-store miscompilation (var.field1.field2[i] = v).
+pub fn ki_ir_name_from_str(s: string, len: i64) -> Name with Mut, Panic {
+    var n = Name { buf: [0; 128], len: len }
+    var i: i64 = 0
+    while i < len {
+        n.buf[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    n
+}
+
 // GPU data types (full type coverage for all kernels)
-enum GpuType {
+pub enum GpuType {
     GpuU32,
     GpuU64,
     GpuF32,
@@ -29,7 +60,7 @@ enum GpuType {
 }
 
 // GPU operation opcodes (simple enum, no fields)
-enum GpuOpcode {
+pub enum GpuOpcode {
     GpuGetTid,       // Get thread ID
     GpuCvt,          // Type conversion
     GpuMulImm,       // Multiply with immediate
@@ -72,6 +103,56 @@ enum GpuOpcode {
     // Phase 5: Tensor core
     GpuWmma,            // Warp matrix multiply-accumulate
     GpuMma,             // Matrix multiply-accumulate
+    GpuWmmaTile,        // Compound m16n16k16 tile: load.a(shared)+load.b(shared,col)+mma+store.d(global)
+    //   lhs_reg = sA shared-addr reg (row-major f16), rhs_reg = sH shared-addr reg (col-major f16),
+    //   addr_reg = D global-addr reg (row-major f32), rhs_imm = leading dim (16).
+    GpuOctBatchStage,   // Compound staging for oct_batch_mul: thread 0 builds L(a) (σ·a[k⊕j], row-major
+    //   f16) at shared[0..512] and stages H (col-major f16) at shared[512..1024], from the octonion
+    //   pointer in lhs_reg (a[8]) and the batch pointer in rhs_reg (H[16*8]). bar.sync at the end.
+    GpuOctPostAddBx,    // O-SSM post-add: thread 0 adds S[k][b] += B[k]·x[b] to the f32 tile output.
+    //   lhs_reg = B pointer (B[dim] f64), rhs_reg = x pointer (x[16] f64), addr_reg = S/out global
+    //   f32 pointer (16×16 row-major), rhs_imm = dim (8 octonion / 16 sedenion).
+    GpuOctCell,         // Full O-SSM octonion cell (one timestep): y = Re(C⊗sigmoid(A⊗h_prev + B·x)).
+    //   Two wmma tiles (L(A)·H, L(C)·h) in shared + cubic sigmoid + Re. Pointers carried in the op's
+    //   cell_* fields (pA,pB,px,pC,pH in lhs/rhs/addr/src/shared_addr; pY in compare_reg).
+    GpuOctRecur,        // O-SSM recurrence over T timesteps: for t<T, h_t=sigmoid(A⊗h_{t-1}+B·x_t),
+    //   y_t=Re(C⊗h_t). H persists in shared across steps; x_t/y_t indexed by t. Same pointer fields as
+    //   GpuOctCell plus the timestep count register in byte_offset (px/py sized T×16).
+    GpuOctAssoc,        // Batched hypercomplex associator [a,b,H] = (a⊗b)⊗H − a⊗(b⊗H) over a 16-state
+    //   batch. THREE m16n16k16 tiles: q=L(b)·H, r=L(a)·q, p=L(a⊗b)·H, then out=p−r. a⊗b is formed
+    //   into a global scratch (ossm_ab) via the σ(i,j) table (ossm_absgn). Pointers pa,pb,pH,pout in
+    //   lhs_reg/rhs_reg/addr_reg/src_reg; rhs_imm = dim (8 octonion / 16 sedenion).
+    GpuOctAssocBwdDh,   // VJP of the batched associator w.r.t. its input H: given dD, compute
+    //   dH = L(a⊗b)ᵀ·dD − L(b)ᵀ·(L(a)ᵀ·dD) — 3 transposed m16n16k16 tiles + subtract, mirroring the
+    //   forward associator (lbuild→lbuild_t, order a↔b swapped by the transpose, input dD D-layout).
+    //   Makes the associator a differentiable layer over its batched input. pa,pb,pdD,pdH in
+    //   lhs/rhs/addr/src; rhs_imm = dim (8 octonion / 16 sedenion).
+    GpuOctVjp,          // Backward / VJP of the batched multiply D = L(a)·H over a 16-state batch:
+    //   given upstream dD, compute dH = L(a)ᵀ·dD (ONE tensor-core tile with L(a) transposed) and
+    //   da[p] = Σ_{k,b} σ(p,k⊕p)·H[k⊕p,b]·dD[k,b] (runtime accumulation). Pointers pa,pH,pdD,pdH,pda
+    //   in lhs_reg/rhs_reg/addr_reg/src_reg/shared_addr; rhs_imm = dim (8 octonion / 16 sedenion).
+    GpuOctBwd,          // One BPTT backward step: dHprev = L(a)ᵀ·dHt (transposed tile, D-layout output
+    //   that chains directly as the next step's dHt) + dA += da(Hprev, dHt) accumulated IN-PLACE across
+    //   timesteps. Like GpuOctVjp but D-layout dHprev + in-place dA (no zeroing). Pointers pa,pHprev,
+    //   pdHt,pdHprev,pdA in lhs/rhs/addr/src/shared_addr; rhs_imm = dim (8 octonion / 16 sedenion).
+    GpuOctBwdNl,        // NONLINEAR BPTT backward step: like GpuOctBwd but applies the cubic-sigmoid
+    //   derivative dS = dHt ⊙ σ'(S), σ'(s)=(3/64)s²+1/4, using the pre-activation S, BEFORE the
+    //   backward multiply — so it trains h_t = σ(A⊗h_{t-1}+B·x_t). Extra pS pointer. Pointers pa,pHprev,
+    //   pdHt,pS,pdHprev,pdA in lhs/rhs/addr/src/shared_addr/compare_reg; rhs_imm = dim.
+    GpuOctReadout,      // O-SSM real readout y[b] = Re(C⊗h)[b] = Σ_p σ(p,p)·C[p]·h[p,b] = C[0]h[0,b]
+    //   − Σ_{p≥1}C[p]h[p,b] (the diagonal p⊕q=0 terms). h is D-layout [p*16+b]; y is real [16].
+    //   A σ(p,p)-signed reduction (no tile — Re is diagonal). pC,pH,py in lhs/rhs/addr; rhs_imm = dim.
+    GpuOctStepF64,      // FULL-f64 O-SSM step S[k,b] = Σ_j σ(k⊕j,j)·A[k⊕j]·H[j,b] + B[k]·x[b], computed
+    //   entirely in f64 (no f16 tile) → EXACT forward for sharp gradients / a clean FD check. Output S
+    //   is f64 D-layout [k*16+b]. pA,pB,px,pH,pout in lhs/rhs/addr/src/shared_addr; rhs_imm = dim.
+    GpuOctMatvec,       // Hypercomplex MATRIX-vector on tensor cores — REAL CAPACITY: H_out[i]=Σ_j A[i][j]⊗H[j]
+    //   over D_h octonion channels, packed as the dense block-left-mult matmul A_big(N×N)·H_big(N×16),
+    //   N=D_h·8, A_big[(i·8+k)][(j·8+l)]=σ(k⊕l,l)·A[i][j][k⊕l]. f16 m16n16k16 tiles: (N/16)² of them.
+    //   pA(D_h²·8), pH(D_h·8·16), pout in lhs/rhs/addr; rhs_imm = D_h.
+    GpuOctBatchF64,     // Batched hypercomplex multiply D = L(a)·H on F64 TENSOR CORES (wmma m8n8k4.f64,
+    //   sm_80+): exact f64 at tile throughput. L(a) built f64 in shared; H loaded col-major from global;
+    //   D(dim×16) tiled as (dim/8) m-tiles × 2 n-tiles × (dim/4) k-chunks of m8n8k4. pa,pH,pout in
+    //   lhs/rhs/addr; rhs_imm = dim (8 octonion / 16 sedenion).
     GpuTmaLoad,         // Tensor memory access load (sm_90+)
     GpuTmaStore,        // Tensor memory access store (sm_90+)
 
@@ -147,7 +228,7 @@ enum GpuOpcode {
 }
 
 // GPU memory space (for load/store address space qualification)
-enum GpuMemorySpace {
+pub enum GpuMemorySpace {
     GpuMemGlobal,
     GpuMemShared,
     GpuMemLocal,
@@ -155,7 +236,7 @@ enum GpuMemorySpace {
 }
 
 // Phase 6: Atomic operation selector (used by GpuAtomicCas, GpuAtomicExch, etc.)
-enum GpuAtomicOp {
+pub enum GpuAtomicOp {
     GpuAtomAdd,
     GpuAtomCas,
     GpuAtomExch,
@@ -167,7 +248,7 @@ enum GpuAtomicOp {
 }
 
 // Phase 6: Cache hint for loads/stores (maps to PTX cache operators)
-enum GpuCacheHint {
+pub enum GpuCacheHint {
     GpuCacheDefault,  // .ca — cache at all levels (default)
     GpuCacheCA,       // .ca — cache at all levels
     GpuCacheCG,       // .cg — cache at L2 only
@@ -176,18 +257,18 @@ enum GpuCacheHint {
     GpuCacheCV,       // .cv — volatile (don't cache)
 }
 
-enum GpuEpistemicMode {
+pub enum GpuEpistemicMode {
     GpuEpistemicStrict,
     GpuEpistemicFast,
 }
 
-enum GpuError {
+pub enum GpuError {
     GpuOk,
     GpuOpBufferOverflow,
 }
 
 // Phase 7: Multi-target profile and legalization contracts.
-enum GpuTargetVendor {
+pub enum GpuTargetVendor {
     GpuVendorCuda,
     GpuVendorRocm,
     GpuVendorSpirv,
@@ -195,21 +276,21 @@ enum GpuTargetVendor {
     GpuVendorUnknown,
 }
 
-enum GpuTargetMemoryModel {
+pub enum GpuTargetMemoryModel {
     GpuMemoryCuda,
     GpuMemoryHsa,
     GpuMemorySpirv,
     GpuMemoryUnknown,
 }
 
-enum GpuBinaryFormat {
+pub enum GpuBinaryFormat {
     GpuBinaryFatbin,
     GpuBinaryCubin,
     GpuBinaryHsaco,
     GpuBinaryMulti,
 }
 
-enum GpuWorkloadTag {
+pub enum GpuWorkloadTag {
     GpuWorkloadGeneral,
     GpuWorkloadMl,
     GpuWorkloadOnn,
@@ -221,7 +302,7 @@ enum GpuWorkloadTag {
     GpuWorkloadExceptional,
 }
 
-enum GpuLegalizationCode {
+pub enum GpuLegalizationCode {
     GpuLegalizationPass,
     GpuLegalizationTensorCoreUnavailable,
     GpuLegalizationAsyncCopyUnavailable,
@@ -229,16 +310,16 @@ enum GpuLegalizationCode {
     GpuLegalizationFp16Unavailable,
 }
 
-struct GpuTargetProfile {
-    vendor: GpuTargetVendor,
-    arch: Name,
-    warp_width: i64,
-    wave_width: i64,
-    supports_tensor_core: bool,
-    supports_async_copy: bool,
-    supports_tf32: bool,
-    supports_fp16: bool,
-    memory_model: GpuTargetMemoryModel,
+pub struct GpuTargetProfile {
+    pub vendor: GpuTargetVendor,
+    pub arch: Name,
+    pub warp_width: i64,
+    pub wave_width: i64,
+    pub supports_tensor_core: bool,
+    pub supports_async_copy: bool,
+    pub supports_tf32: bool,
+    pub supports_fp16: bool,
+    pub memory_model: GpuTargetMemoryModel,
 }
 
 struct GpuOpCapabilityRequirement {
@@ -256,103 +337,103 @@ struct GpuLegalizationDiagnostic {
     is_error: bool,
 }
 
-struct GpuKernelSsaV2 {
-    version_major: i64,
-    version_minor: i64,
-    pipeline_id: Name,
-    provenance_tag: Name,
-    workload_tag: GpuWorkloadTag,
-    target_profile: GpuTargetProfile,
-    kernel: GpuKernelIr,
-    capability_reqs: [GpuOpCapabilityRequirement; 1024],
-    capability_req_count: i64,
-    diagnostics: [GpuLegalizationDiagnostic; 1024],
-    diagnostic_count: i64,
+pub struct GpuKernelSsaV2 {
+    pub version_major: i64,
+    pub version_minor: i64,
+    pub pipeline_id: Name,
+    pub provenance_tag: Name,
+    pub workload_tag: GpuWorkloadTag,
+    pub target_profile: GpuTargetProfile,
+    pub source_kernel: GpuKernelIr,
+    pub capability_reqs: [GpuOpCapabilityRequirement; 1024],
+    pub capability_req_count: i64,
+    pub diagnostics: [GpuLegalizationDiagnostic; 1024],
+    pub diagnostic_count: i64,
 }
 
 // Return value used by checked op append APIs.
-struct GpuAppendResult {
-    kernel: GpuKernelIr,
-    error: GpuError,
+pub struct GpuAppendResult {
+    pub result_kernel: GpuKernelIr,
+    pub error: GpuError,
 }
 
 // GPU operation (struct with all possible fields, like IrInstr)
-struct GpuOp {
-    opcode: GpuOpcode,
-    dst_reg: i64,
-    src_reg: i64,
-    lhs_reg: i64,
-    rhs_reg: i64,
-    addr_reg: i64,
-    rhs_imm: i64,
-    param_idx: i64,
-    axis: i64,  // 0=x, 1=y, 2=z for GetTid
-    shared_addr: i64,  // Shared memory address/offset
-    ty: GpuType,
-    dst_ty: GpuType,
-    src_ty: GpuType,
+pub struct GpuOp {
+    pub opcode: GpuOpcode,
+    pub dst_reg: i64,
+    pub src_reg: i64,
+    pub lhs_reg: i64,
+    pub rhs_reg: i64,
+    pub addr_reg: i64,
+    pub rhs_imm: i64,
+    pub param_idx: i64,
+    pub axis: i64,  // 0=x, 1=y, 2=z for GetTid
+    pub shared_addr: i64,  // Shared memory address/offset
+    pub ty: GpuType,
+    pub dst_ty: GpuType,
+    pub src_ty: GpuType,
     // Phase 5 extensions
-    memory_space: GpuMemorySpace,   // Address space for load/store ops
-    pred_reg: i64,                  // Predicate register for conditional ops (-1 = none)
-    mask: i64,                      // Warp mask for shuffle/vote ops (0xFFFFFFFF = all lanes)
+    pub memory_space: GpuMemorySpace,   // Address space for load/store ops
+    pub pred_reg: i64,                  // Predicate register for conditional ops (-1 = none)
+    pub mask: i64,                      // Warp mask for shuffle/vote ops (0xFFFFFFFF = all lanes)
     // Phase 6 extensions
-    atomic_op: GpuAtomicOp,         // Operation selector for atomic ops
-    cache_hint: GpuCacheHint,       // Cache policy for loads/stores
-    compare_reg: i64,               // CAS compare value register (-1 = none)
-    num_regs: i64,                  // Tile register count (tensor core fragments)
-    byte_offset: i64,               // Byte offset for cp.async
-    scope: i64,                     // Fence scope: 0=cta, 1=gl, 2=sys
-    cg_size: i64,                   // Cooperative group size (tiled_partition width)
+    pub atomic_op: GpuAtomicOp,         // Operation selector for atomic ops
+    pub cache_hint: GpuCacheHint,       // Cache policy for loads/stores
+    pub compare_reg: i64,               // CAS compare value register (-1 = none)
+    pub num_regs: i64,                  // Tile register count (tensor core fragments)
+    pub byte_offset: i64,               // Byte offset for cp.async
+    pub scope: i64,                     // Fence scope: 0=cta, 1=gl, 2=sys
+    pub cg_size: i64,                   // Cooperative group size (tiled_partition width)
 }
 
 // GPU kernel parameter (e.g., .param .u64 param_a)
-struct GpuParam {
-    name: Name,
-    ty: GpuType,
+pub struct GpuParam {
+    pub name: Name,
+    pub ty: GpuType,
 }
 
 // GPU kernel IR (represents a single kernel)
-struct GpuKernelIr {
-    kernel_name: Name,
-    workload_tag: GpuWorkloadTag,
-    params: [GpuParam; 8],
-    param_count: i64,
+pub struct GpuKernelIr {
+    pub kernel_name: Name,
+    pub workload_tag: GpuWorkloadTag,
+    pub params: [GpuParam; 8],
+    pub param_count: i64,
     // Stage-5 hardening target: allow up to 1024 IR ops per kernel
     // (large enough for the shared-memory/tiled-family kernels in this phase).
-    ops: [GpuOp; 1024],
-    op_count: i64,
+    pub ops: [GpuOp; 1024],
+    pub op_count: i64,
 
     // Shared-memory region size (in bytes) used by this kernel.
     // 0 means no dynamic shared declaration.
-    shared_bytes: i64,
+    pub shared_bytes: i64,
 
     // Register allocation info (simple for now)
-    max_reg_u32: i64,
-    max_reg_u64: i64,
-    max_reg_f32: i64,
-    max_reg_f64: i64,
-    max_reg_i32: i64,
-    max_reg_i64: i64,
-    max_reg_pred: i64,
+    pub max_reg_u32: i64,
+    pub max_reg_u64: i64,
+    pub max_reg_f32: i64,
+    pub max_reg_f64: i64,
+    pub max_reg_i32: i64,
+    pub max_reg_i64: i64,
+    pub max_reg_pred: i64,
     // Phase 5 extensions
-    shared_mem_bytes: i64,  // Total shared memory allocated (bytes)
-    max_threads: i64,       // Maximum threads per block hint (0 = default)
+    pub shared_mem_bytes: i64,  // Total shared memory allocated (bytes)
+    pub max_threads: i64,       // Maximum threads per block hint (0 = default)
     // Phase 6 extensions
-    num_barriers: i64,      // Named barrier count (bar.sync n)
-    cta_size_x: i64,        // Compile-time blockDim.x (0 = dynamic)
-    cta_size_y: i64,        // Compile-time blockDim.y (0 = dynamic)
-    cta_size_z: i64,        // Compile-time blockDim.z (0 = dynamic)
-    cluster_x: i64,         // Thread block cluster dim x (sm_90+, 0 = none)
-    cluster_y: i64,         // Thread block cluster dim y (sm_90+, 0 = none)
+    pub num_barriers: i64,      // Named barrier count (bar.sync n)
+    pub cta_size_x: i64,        // Compile-time blockDim.x (0 = dynamic)
+    pub cta_size_y: i64,        // Compile-time blockDim.y (0 = dynamic)
+    pub cta_size_z: i64,        // Compile-time blockDim.z (0 = dynamic)
+    pub cluster_x: i64,         // Thread block cluster dim x (sm_90+, 0 = none)
+    pub cluster_y: i64,         // Thread block cluster dim y (sm_90+, 0 = none)
 }
 
 // Lowered module: collection of kernels post-HLIR-to-GPU lowering, pre-optimization.
-struct HlirGpuLoweredModule {
-    kernels: [GpuKernelIr; 64],
-    kernel_count: i64,
+pub struct HlirGpuLoweredModule {
+    pub kernels: [GpuKernelIr; 64],
+    pub kernel_count: i64,
 }
 
-fn hlir_gpu_lowered_module_new() -> HlirGpuLoweredModule {
+pub fn hlir_gpu_lowered_module_new() -> HlirGpuLoweredModule {
     HlirGpuLoweredModule {
         kernels: [gpu_kernel_new(); 64],
         kernel_count: 0,
@@ -361,9 +442,9 @@ fn hlir_gpu_lowered_module_new() -> HlirGpuLoweredModule {
 
 // Constructors and helpers
 
-fn gpu_kernel_new() -> GpuKernelIr {
+pub fn gpu_kernel_new() -> GpuKernelIr {
     GpuKernelIr {
-        kernel_name: ir_empty_name(),
+        kernel_name: ki_empty_name(),
         workload_tag: GpuWorkloadTag::GpuWorkloadGeneral,
         params: [gpu_param_new(); 8],
         param_count: 0,
@@ -388,43 +469,43 @@ fn gpu_kernel_new() -> GpuKernelIr {
     }
 }
 
-fn gpu_kernel_max_ops() -> i64 {
+pub fn gpu_kernel_max_ops() -> i64 {
     1024
 }
 
-fn gpu_append_op_checked(kernel: GpuKernelIr, op: GpuOp) -> GpuAppendResult with Mut, Panic, Div {
+pub fn gpu_append_op_checked(kernel: GpuKernelIr, op: GpuOp) -> GpuAppendResult with Mut, Panic, Div {
     if kernel.op_count >= gpu_kernel_max_ops() {
-        GpuAppendResult { kernel: kernel, error: GpuError::GpuOpBufferOverflow }
+        GpuAppendResult { result_kernel: kernel, error: GpuError::GpuOpBufferOverflow }
     } else {
         var out = kernel
         out.ops[kernel.op_count as usize] = op
         out.op_count = out.op_count + 1
-        GpuAppendResult { kernel: out, error: GpuError::GpuOk }
+        GpuAppendResult { result_kernel: out, error: GpuError::GpuOk }
     }
 }
 
-fn gpu_add_op_checked(kernel: GpuKernelIr, op: GpuOp) -> GpuAppendResult with Mut, Panic, Div {
+pub fn gpu_add_op_checked(kernel: GpuKernelIr, op: GpuOp) -> GpuAppendResult with Mut, Panic, Div {
     gpu_append_op_checked(kernel, op)
 }
 
-fn gpu_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic, Div {
+pub fn gpu_append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic, Div {
     let out = gpu_append_op_checked(kernel, op)
-    out.kernel
+    out.result_kernel
 }
 
-fn gpu_add_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic, Div {
+pub fn gpu_add_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr with Mut, Panic, Div {
     let out = gpu_add_op_checked(kernel, op)
-    out.kernel
+    out.result_kernel
 }
 
-fn gpu_param_new() -> GpuParam {
+pub fn gpu_param_new() -> GpuParam {
     GpuParam {
-        name: ir_empty_name(),
+        name: ki_empty_name(),
         ty: GpuType::GpuU64,
     }
 }
 
-fn gpu_op_new() -> GpuOp {
+pub fn gpu_op_new() -> GpuOp {
     GpuOp {
         opcode: GpuOpcode::GpuRet,
         dst_reg: -1,
@@ -452,7 +533,19 @@ fn gpu_op_new() -> GpuOp {
     }
 }
 
-fn gpu_target_vendor_to_string(vendor: GpuTargetVendor) -> string {
+// Construct a compound m16n16k16 tensor-core tile op. sA/sB are u32 shared-address registers
+// (A row-major f16, B col-major f16); dOut is the u64 global-address register for D (row-major f32).
+pub fn gpu_op_wmma_tile(sA_reg: i64, sB_reg: i64, d_out_reg: i64, ldm: i64) -> GpuOp {
+    var op = gpu_op_new()
+    op.opcode = GpuOpcode::GpuWmmaTile
+    op.lhs_reg = sA_reg
+    op.rhs_reg = sB_reg
+    op.addr_reg = d_out_reg
+    op.rhs_imm = ldm
+    op
+}
+
+pub fn gpu_target_vendor_to_string(vendor: GpuTargetVendor) -> string {
     match vendor {
         GpuTargetVendor::GpuVendorCuda => "cuda"
         GpuTargetVendor::GpuVendorRocm => "rocm"
@@ -471,7 +564,7 @@ fn gpu_binary_format_to_string(fmt: GpuBinaryFormat) -> string {
     }
 }
 
-fn gpu_workload_tag_to_string(tag: GpuWorkloadTag) -> string {
+pub fn gpu_workload_tag_to_string(tag: GpuWorkloadTag) -> string {
     match tag {
         GpuWorkloadTag::GpuWorkloadGeneral => "general"
         GpuWorkloadTag::GpuWorkloadMl => "ml"
@@ -485,7 +578,7 @@ fn gpu_workload_tag_to_string(tag: GpuWorkloadTag) -> string {
     }
 }
 
-fn gpu_kernel_set_workload_tag(kernel: GpuKernelIr, tag: GpuWorkloadTag) -> GpuKernelIr {
+fn gpu_kernel_set_workload_tag(kernel: GpuKernelIr, tag: GpuWorkloadTag) -> GpuKernelIr with Mut {
     var out = kernel
     out.workload_tag = tag
     out
@@ -494,7 +587,7 @@ fn gpu_kernel_set_workload_tag(kernel: GpuKernelIr, tag: GpuWorkloadTag) -> GpuK
 fn gpu_target_profile_unknown() -> GpuTargetProfile {
     GpuTargetProfile {
         vendor: GpuTargetVendor::GpuVendorUnknown,
-        arch: ir_empty_name(),
+        arch: ki_empty_name(),
         warp_width: 0,
         wave_width: 0,
         supports_tensor_core: false,
@@ -505,8 +598,8 @@ fn gpu_target_profile_unknown() -> GpuTargetProfile {
     }
 }
 
-fn gpu_target_profile_cuda_sm80() -> GpuTargetProfile with Mut, Panic, Div {
-    var arch = ir_name_from_bytes(99, 117, 100, 97, 9)  // "cuda-sm80"
+pub fn gpu_target_profile_cuda_sm80() -> GpuTargetProfile with Mut, Panic, Div {
+    var arch = ki_ir_name_from_bytes(99, 117, 100, 97, 9)  // "cuda-sm80"
     arch.buf[4] = 45   // '-'
     arch.buf[5] = 115  // 's'
     arch.buf[6] = 109  // 'm'
@@ -526,7 +619,7 @@ fn gpu_target_profile_cuda_sm80() -> GpuTargetProfile with Mut, Panic, Div {
 }
 
 fn gpu_target_profile_rocm_gfx942() -> GpuTargetProfile with Mut, Panic, Div {
-    var arch = ir_name_from_bytes(114, 111, 99, 109, 11)  // "rocm-gfx942"
+    var arch = ki_ir_name_from_bytes(114, 111, 99, 109, 11)  // "rocm-gfx942"
     arch.buf[4] = 45   // '-'
     arch.buf[5] = 103  // 'g'
     arch.buf[6] = 102  // 'f'
@@ -561,7 +654,7 @@ fn gpu_op_capability_requirement_new() -> GpuOpCapabilityRequirement {
     }
 }
 
-fn gpu_capability_requirement_from_op(op: GpuOp) -> GpuOpCapabilityRequirement {
+fn gpu_capability_requirement_from_op(op: GpuOp) -> GpuOpCapabilityRequirement with Mut {
     var req = gpu_op_capability_requirement_new()
     req.opcode = op.opcode
 
@@ -632,7 +725,7 @@ fn gpu_legalization_diagnostic_new(op_index: i64, opcode: GpuOpcode, code: GpuLe
 }
 
 fn gpu_ssa_v2_pipeline_id() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(103, 112, 117, 95, 10)  // "gpu_ssa_v2"
+    var n = ki_ir_name_from_bytes(103, 112, 117, 95, 10)  // "gpu_ssa_v2"
     n.buf[4] = 115  // 's'
     n.buf[5] = 115  // 's'
     n.buf[6] = 97   // 'a'
@@ -643,7 +736,7 @@ fn gpu_ssa_v2_pipeline_id() -> Name with Mut, Panic, Div {
 }
 
 fn gpu_ssa_v2_provenance_tag() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(110, 97, 116, 105, 13)  // "native_shadow"
+    var n = ki_ir_name_from_bytes(110, 97, 116, 105, 13)  // "native_shadow"
     n.buf[4] = 118   // 'v'
     n.buf[5] = 101   // 'e'
     n.buf[6] = 95    // '_'
@@ -664,7 +757,7 @@ fn gpu_kernel_ssa_v2_new(kernel: GpuKernelIr, target: GpuTargetProfile) -> GpuKe
         provenance_tag: gpu_ssa_v2_provenance_tag(),
         workload_tag: kernel.workload_tag,
         target_profile: target,
-        kernel: kernel,
+        source_kernel: kernel,
         capability_reqs: [gpu_op_capability_requirement_new(); 1024],
         capability_req_count: 0,
         diagnostics: [gpu_legalization_diag_default(); 1024],
@@ -672,7 +765,7 @@ fn gpu_kernel_ssa_v2_new(kernel: GpuKernelIr, target: GpuTargetProfile) -> GpuKe
     }
 }
 
-fn gpu_legalize_kernel_to_ssa_v2(kernel: GpuKernelIr, target: GpuTargetProfile) -> GpuKernelSsaV2 with Mut, Panic, Div {
+pub fn gpu_legalize_kernel_to_ssa_v2(kernel: GpuKernelIr, target: GpuTargetProfile) -> GpuKernelSsaV2 with Mut, Panic, Div {
     var out = gpu_kernel_ssa_v2_new(kernel, target)
     var i: i64 = 0
     while i < kernel.op_count {
@@ -691,11 +784,11 @@ fn gpu_legalize_kernel_to_ssa_v2(kernel: GpuKernelIr, target: GpuTargetProfile) 
     out
 }
 
-fn gpu_ssa_v2_is_legal(ssa: GpuKernelSsaV2) -> bool {
+pub fn gpu_ssa_v2_is_legal(ssa: GpuKernelSsaV2) -> bool {
     ssa.diagnostic_count == 0
 }
 
-fn gpu_type_to_string(ty: GpuType) -> string {
+pub fn gpu_type_to_string(ty: GpuType) -> string {
     match ty {
         GpuType::GpuU32  => "u32",
         GpuType::GpuU64  => "u64",
@@ -734,35 +827,15 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
     var k = gpu_kernel_new()
 
     // Kernel name: "vec_add"
-    k.kernel_name = ir_name_from_bytes(118, 101, 99, 95, 7)  // "vec_add" (7 chars)
-    k.kernel_name.buf[4] = 97   // 'a'
-    k.kernel_name.buf[5] = 100  // 'd'
-    k.kernel_name.buf[6] = 100  // 'd'
+    k.kernel_name = ki_ir_name_from_str("vec_add", 7)
 
     // Parameters: .param .u64 param_a, param_b, param_c
-    k.params[0] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_a"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[0].name.buf[4] = 109  // 'm'
-    k.params[0].name.buf[5] = 95   // '_'
-    k.params[0].name.buf[6] = 97   // 'a'
-
-    k.params[1] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_b"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[1].name.buf[4] = 109  // 'm'
-    k.params[1].name.buf[5] = 95   // '_'
-    k.params[1].name.buf[6] = 98   // 'b'
-
-    k.params[2] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_c"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[2].name.buf[4] = 109  // 'm'
-    k.params[2].name.buf[5] = 95   // '_'
-    k.params[2].name.buf[6] = 99   // 'c'
+    var p0 = GpuParam { name: ki_ir_name_from_str("param_a", 7), ty: GpuType::GpuPtr }
+    k.params[0] = p0
+    var p1 = GpuParam { name: ki_ir_name_from_str("param_b", 7), ty: GpuType::GpuPtr }
+    k.params[1] = p1
+    var p2 = GpuParam { name: ki_ir_name_from_str("param_c", 7), ty: GpuType::GpuPtr }
+    k.params[2] = p2
 
     k.param_count = 3
 
@@ -784,6 +857,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         ty: GpuType::GpuU32,
         dst_ty: GpuType::GpuU32,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -802,6 +885,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         axis: 0,
         shared_addr: -1,
         ty: GpuType::GpuU64,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -820,6 +913,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -838,6 +941,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         ty: GpuType::GpuU64,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -856,6 +969,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         ty: GpuType::GpuU64,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -874,6 +997,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         ty: GpuType::GpuU64,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -892,6 +1025,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -910,6 +1053,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -928,6 +1081,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -946,6 +1109,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuF32,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -964,6 +1137,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuF32,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -982,6 +1165,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuF32,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1000,6 +1193,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         shared_addr: -1,
         dst_ty: GpuType::GpuF32,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1018,6 +1221,16 @@ fn gpu_build_vec_add_ir() -> GpuKernelIr with Mut, Panic, Div {
         ty: GpuType::GpuU64,
         dst_ty: GpuType::GpuU64,
         src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1054,29 +1267,12 @@ fn gpu_build_vec_binop_ir(
     k.kernel_name = kernel_name
 
     // Parameters: .param .u64 param_a, param_b, param_c (same for all vec binops)
-    k.params[0] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_a"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[0].name.buf[4] = 109  // 'm'
-    k.params[0].name.buf[5] = 95   // '_'
-    k.params[0].name.buf[6] = 97   // 'a'
-
-    k.params[1] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_b"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[1].name.buf[4] = 109  // 'm'
-    k.params[1].name.buf[5] = 95   // '_'
-    k.params[1].name.buf[6] = 98   // 'b'
-
-    k.params[2] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_c"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[2].name.buf[4] = 109  // 'm'
-    k.params[2].name.buf[5] = 95   // '_'
-    k.params[2].name.buf[6] = 99   // 'c'
+    var qp0 = GpuParam { name: ki_ir_name_from_str("param_a", 7), ty: GpuType::GpuPtr }
+    k.params[0] = qp0
+    var qp1 = GpuParam { name: ki_ir_name_from_str("param_b", 7), ty: GpuType::GpuPtr }
+    k.params[1] = qp1
+    var qp2 = GpuParam { name: ki_ir_name_from_str("param_c", 7), ty: GpuType::GpuPtr }
+    k.params[2] = qp2
 
     k.param_count = 3
 
@@ -1095,6 +1291,16 @@ fn gpu_build_vec_binop_ir(
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, shared_addr: -1,
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1106,6 +1312,16 @@ fn gpu_build_vec_binop_ir(
         lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1117,6 +1333,16 @@ fn gpu_build_vec_binop_ir(
         src_reg: -1, rhs_reg: -1, addr_reg: -1,
         param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1127,6 +1353,16 @@ fn gpu_build_vec_binop_ir(
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1137,6 +1373,16 @@ fn gpu_build_vec_binop_ir(
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1147,6 +1393,16 @@ fn gpu_build_vec_binop_ir(
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1157,6 +1413,16 @@ fn gpu_build_vec_binop_ir(
         ty: GpuType::GpuU64,
         src_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1167,6 +1433,16 @@ fn gpu_build_vec_binop_ir(
         ty: GpuType::GpuU64,
         src_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1177,6 +1453,16 @@ fn gpu_build_vec_binop_ir(
         ty: GpuType::GpuU64,
         src_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1188,6 +1474,16 @@ fn gpu_build_vec_binop_ir(
         src_reg: -1, lhs_reg: -1, rhs_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: elem_ty, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1199,6 +1495,16 @@ fn gpu_build_vec_binop_ir(
         src_reg: -1, lhs_reg: -1, rhs_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: elem_ty, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1209,6 +1515,16 @@ fn gpu_build_vec_binop_ir(
         ty: elem_ty,
         src_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: elem_ty, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1220,6 +1536,16 @@ fn gpu_build_vec_binop_ir(
         dst_reg: -1, lhs_reg: -1, rhs_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         dst_ty: elem_ty, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1229,6 +1555,16 @@ fn gpu_build_vec_binop_ir(
         dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -1236,10 +1572,13 @@ fn gpu_build_vec_binop_ir(
 
     // Register tracking
     // i32 uses %r shared with tid, so needs more u32 regs
-    k.max_reg_u32 = if elem_ty == GpuType::GpuI32 { 5 } else { 3 }
+    let max_reg_u32 = if elem_ty == GpuType::GpuI32 { 5 } else { 3 }
+    k.max_reg_u32 = max_reg_u32
     k.max_reg_u64 = 9
-    k.max_reg_f32 = if elem_ty == GpuType::GpuF32 { 4 } else { 0 }
-    k.max_reg_f64 = if elem_ty == GpuType::GpuF64 { 4 } else { 0 }
+    let max_reg_f32 = if elem_ty == GpuType::GpuF32 { 4 } else { 0 }
+    let max_reg_f64 = if elem_ty == GpuType::GpuF64 { 4 } else { 0 }
+    k.max_reg_f32 = max_reg_f32
+    k.max_reg_f64 = max_reg_f64
     k.max_reg_pred = 2
 
     k
@@ -1249,7 +1588,7 @@ fn gpu_build_vec_binop_ir(
 
 fn gpu_name_vec_add_f64() -> Name with Mut, Panic, Div {
     // "vec_add_f64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)  // "vec_"
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)  // "vec_"
     n.buf[4] = 97    // 'a'
     n.buf[5] = 100   // 'd'
     n.buf[6] = 100   // 'd'
@@ -1262,7 +1601,7 @@ fn gpu_name_vec_add_f64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_add_i32() -> Name with Mut, Panic, Div {
     // "vec_add_i32" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 97    // 'a'
     n.buf[5] = 100   // 'd'
     n.buf[6] = 100   // 'd'
@@ -1275,7 +1614,7 @@ fn gpu_name_vec_add_i32() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_add_i64() -> Name with Mut, Panic, Div {
     // "vec_add_i64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 97    // 'a'
     n.buf[5] = 100   // 'd'
     n.buf[6] = 100   // 'd'
@@ -1288,7 +1627,7 @@ fn gpu_name_vec_add_i64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_sub() -> Name with Mut, Panic, Div {
     // "vec_sub" (7 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 7)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 7)
     n.buf[4] = 115   // 's'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 98    // 'b'
@@ -1297,7 +1636,7 @@ fn gpu_name_vec_sub() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_sub_f64() -> Name with Mut, Panic, Div {
     // "vec_sub_f64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 115   // 's'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 98    // 'b'
@@ -1310,7 +1649,7 @@ fn gpu_name_vec_sub_f64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_sub_i32() -> Name with Mut, Panic, Div {
     // "vec_sub_i32" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 115   // 's'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 98    // 'b'
@@ -1323,7 +1662,7 @@ fn gpu_name_vec_sub_i32() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_sub_i64() -> Name with Mut, Panic, Div {
     // "vec_sub_i64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 115   // 's'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 98    // 'b'
@@ -1336,7 +1675,7 @@ fn gpu_name_vec_sub_i64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_mul() -> Name with Mut, Panic, Div {
     // "vec_mul" (7 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 7)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 7)
     n.buf[4] = 109   // 'm'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 108   // 'l'
@@ -1345,7 +1684,7 @@ fn gpu_name_vec_mul() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_mul_f64() -> Name with Mut, Panic, Div {
     // "vec_mul_f64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 109   // 'm'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 108   // 'l'
@@ -1358,7 +1697,7 @@ fn gpu_name_vec_mul_f64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_mul_i32() -> Name with Mut, Panic, Div {
     // "vec_mul_i32" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 109   // 'm'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 108   // 'l'
@@ -1371,7 +1710,7 @@ fn gpu_name_vec_mul_i32() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_mul_i64() -> Name with Mut, Panic, Div {
     // "vec_mul_i64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 109   // 'm'
     n.buf[5] = 117   // 'u'
     n.buf[6] = 108   // 'l'
@@ -1384,7 +1723,7 @@ fn gpu_name_vec_mul_i64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_div() -> Name with Mut, Panic, Div {
     // "vec_div" (7 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 7)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 7)
     n.buf[4] = 100   // 'd'
     n.buf[5] = 105   // 'i'
     n.buf[6] = 118   // 'v'
@@ -1393,7 +1732,7 @@ fn gpu_name_vec_div() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_div_f64() -> Name with Mut, Panic, Div {
     // "vec_div_f64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 100   // 'd'
     n.buf[5] = 105   // 'i'
     n.buf[6] = 118   // 'v'
@@ -1406,7 +1745,7 @@ fn gpu_name_vec_div_f64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_div_i32() -> Name with Mut, Panic, Div {
     // "vec_div_i32" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 100   // 'd'
     n.buf[5] = 105   // 'i'
     n.buf[6] = 118   // 'v'
@@ -1419,7 +1758,7 @@ fn gpu_name_vec_div_i32() -> Name with Mut, Panic, Div {
 
 fn gpu_name_vec_div_i64() -> Name with Mut, Panic, Div {
     // "vec_div_i64" (11 chars)
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 100   // 'd'
     n.buf[5] = 105   // 'i'
     n.buf[6] = 118   // 'v'
@@ -1503,53 +1842,53 @@ fn gpu_build_vec_div_i64_ir() -> GpuKernelIr with Mut, Panic, Div {
 // --- Phase 3: Reduction kernel name helpers ---
 
 fn gpu_name_vec_sum() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 7)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 7)
     n.buf[4] = 115; n.buf[5] = 117; n.buf[6] = 109
     n
 }
 
 fn gpu_name_vec_sum_f64() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 115; n.buf[5] = 117; n.buf[6] = 109
     n.buf[7] = 95; n.buf[8] = 102; n.buf[9] = 54; n.buf[10] = 52
     n
 }
 
 fn gpu_name_vec_sum_i32() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 115; n.buf[5] = 117; n.buf[6] = 109
     n.buf[7] = 95; n.buf[8] = 105; n.buf[9] = 51; n.buf[10] = 50
     n
 }
 
 fn gpu_name_vec_sum_i64() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 115; n.buf[5] = 117; n.buf[6] = 109
     n.buf[7] = 95; n.buf[8] = 105; n.buf[9] = 54; n.buf[10] = 52
     n
 }
 
 fn gpu_name_vec_max() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 7)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 7)
     n.buf[4] = 109; n.buf[5] = 97; n.buf[6] = 120
     n
 }
 
 fn gpu_name_vec_max_i32() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 109; n.buf[5] = 97; n.buf[6] = 120
     n.buf[7] = 95; n.buf[8] = 105; n.buf[9] = 51; n.buf[10] = 50
     n
 }
 
 fn gpu_name_vec_min() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 7)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 7)
     n.buf[4] = 109; n.buf[5] = 105; n.buf[6] = 110
     n
 }
 
 fn gpu_name_vec_min_i32() -> Name with Mut, Panic, Div {
-    var n = ir_name_from_bytes(118, 101, 99, 95, 11)
+    var n = ki_ir_name_from_bytes(118, 101, 99, 95, 11)
     n.buf[4] = 109; n.buf[5] = 105; n.buf[6] = 110
     n.buf[7] = 95; n.buf[8] = 105; n.buf[9] = 51; n.buf[10] = 50
     n
@@ -1572,16 +1911,25 @@ fn gpu_build_reduction_ir(
     k.kernel_name = name
 
     // param_in, param_out
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
-    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95
-    k.params[1].name.buf[6] = 111; k.params[1].name.buf[7] = 117; k.params[1].name.buf[8] = 116
+    var rp0 = GpuParam { name: ki_ir_name_from_str("param_in", 8), ty: GpuType::GpuPtr }
+    k.params[0] = rp0
+    var rp1 = GpuParam { name: ki_ir_name_from_str("param_out", 9), ty: GpuType::GpuPtr }
+    k.params[1] = rp1
     k.param_count = 2
 
     var idx: i64 = 0
-    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 ,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
 
     // 1. r1 = tid.x
     var op = default_op
@@ -1709,35 +2057,35 @@ fn gpu_build_vec_min_i32_ir() -> GpuKernelIr with Mut, Panic, Div {
 
 fn gpu_name_fma_f32() -> Name with Mut, Panic, Div {
     // "fma_f32" (7 chars)
-    var n = ir_name_from_bytes(102, 109, 97, 95, 7)  // "fma_"
+    var n = ki_ir_name_from_bytes(102, 109, 97, 95, 7)  // "fma_"
     n.buf[4] = 102; n.buf[5] = 51; n.buf[6] = 50    // "f32"
     n
 }
 
 fn gpu_name_fma_f64() -> Name with Mut, Panic, Div {
     // "fma_f64" (7 chars)
-    var n = ir_name_from_bytes(102, 109, 97, 95, 7)  // "fma_"
+    var n = ki_ir_name_from_bytes(102, 109, 97, 95, 7)  // "fma_"
     n.buf[4] = 102; n.buf[5] = 54; n.buf[6] = 52    // "f64"
     n
 }
 
 fn gpu_name_gemm_f32() -> Name with Mut, Panic, Div {
     // "gemm_f32" (8 chars)
-    var n = ir_name_from_bytes(103, 101, 109, 109, 8)  // "gemm"
+    var n = ki_ir_name_from_bytes(103, 101, 109, 109, 8)  // "gemm"
     n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 51; n.buf[7] = 50  // "_f32"
     n
 }
 
 fn gpu_name_gemm_f64() -> Name with Mut, Panic, Div {
     // "gemm_f64" (8 chars)
-    var n = ir_name_from_bytes(103, 101, 109, 109, 8)  // "gemm"
+    var n = ki_ir_name_from_bytes(103, 101, 109, 109, 8)  // "gemm"
     n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 54; n.buf[7] = 52  // "_f64"
     n
 }
 
 fn gpu_name_gemm_shared_f32() -> Name with Mut, Panic, Div {
     // "gemm_shared_f32" (15 chars)
-    var n = ir_name_from_bytes(103, 101, 109, 109, 15)  // "gemm"
+    var n = ki_ir_name_from_bytes(103, 101, 109, 109, 15)  // "gemm"
     n.buf[4] = 95; n.buf[5] = 115; n.buf[6] = 104; n.buf[7] = 97  // "_sha"
     n.buf[8] = 114; n.buf[9] = 101; n.buf[10] = 100; n.buf[11] = 95  // "red_"
     n.buf[12] = 102; n.buf[13] = 51  // "f32"
@@ -1747,7 +2095,7 @@ fn gpu_name_gemm_shared_f32() -> Name with Mut, Panic, Div {
 
 fn gpu_name_gemm_shared_f64() -> Name with Mut, Panic, Div {
     // "gemm_shared_f64" (15 chars)
-    var n = ir_name_from_bytes(103, 101, 109, 109, 15)  // "gemm"
+    var n = ki_ir_name_from_bytes(103, 101, 109, 109, 15)  // "gemm"
     n.buf[4] = 95; n.buf[5] = 115; n.buf[6] = 104; n.buf[7] = 97  // "_sha"
     n.buf[8] = 114; n.buf[9] = 101; n.buf[10] = 100; n.buf[11] = 95  // "red_"
     n.buf[12] = 102; n.buf[13] = 54  // "f64"
@@ -1757,14 +2105,14 @@ fn gpu_name_gemm_shared_f64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_grid_f32() -> Name with Mut, Panic, Div {
     // "grid_f32" (8 chars)
-    var n = ir_name_from_bytes(103, 114, 105, 100, 8)  // "grid"
+    var n = ki_ir_name_from_bytes(103, 114, 105, 100, 8)  // "grid"
     n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 51; n.buf[7] = 50  // "_f32"
     n
 }
 
 fn gpu_name_grid_f64() -> Name with Mut, Panic, Div {
     // "grid_f64" (8 chars)
-    var n = ir_name_from_bytes(103, 114, 105, 100, 8)  // "grid"
+    var n = ki_ir_name_from_bytes(103, 114, 105, 100, 8)  // "grid"
     n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 54; n.buf[7] = 52  // "_f64"
     n
 }
@@ -1777,15 +2125,26 @@ fn gpu_build_fma_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with Mut
     k.kernel_name = kernel_name
 
     // 3 params: param_a, param_b, param_c
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95; k.params[0].name.buf[6] = 97
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95; k.params[1].name.buf[6] = 98
-    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95; k.params[2].name.buf[6] = 99
+    var fa0 = GpuParam { name: ki_ir_name_from_str("param_a", 7), ty: GpuType::GpuPtr }
+    k.params[0] = fa0
+    var fa1 = GpuParam { name: ki_ir_name_from_str("param_b", 7), ty: GpuType::GpuPtr }
+    k.params[1] = fa1
+    var fa2 = GpuParam { name: ki_ir_name_from_str("param_c", 7), ty: GpuType::GpuPtr }
+    k.params[2] = fa2
     k.param_count = 3
 
-    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 ,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
     var idx: i64 = 0
     var op = default_op
 
@@ -1874,15 +2233,26 @@ fn gpu_build_gemm_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with Mu
     k.kernel_name = kernel_name
 
     // 3 params: param_a, param_b, param_c
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95; k.params[0].name.buf[6] = 97
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95; k.params[1].name.buf[6] = 98
-    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95; k.params[2].name.buf[6] = 99
+    var fa0 = GpuParam { name: ki_ir_name_from_str("param_a", 7), ty: GpuType::GpuPtr }
+    k.params[0] = fa0
+    var fa1 = GpuParam { name: ki_ir_name_from_str("param_b", 7), ty: GpuType::GpuPtr }
+    k.params[1] = fa1
+    var fa2 = GpuParam { name: ki_ir_name_from_str("param_c", 7), ty: GpuType::GpuPtr }
+    k.params[2] = fa2
     k.param_count = 3
 
-    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 ,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
     var idx: i64 = 0
     var op = default_op
 
@@ -1990,36 +2360,25 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
     k.kernel_name = kernel_name
 
     // 6 params: param_a, param_b, param_c, m, n, k
-    k.params[0] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_a"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95; k.params[0].name.buf[6] = 97
-
-    k.params[1] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_b"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95; k.params[1].name.buf[6] = 98
-
-    k.params[2] = GpuParam {
-        name: ir_name_from_bytes(112, 97, 114, 97, 7),  // "param_c"
-        ty: GpuType::GpuPtr,
-    }
-    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95; k.params[2].name.buf[6] = 99
+    var gs0 = GpuParam { name: ki_ir_name_from_str("param_a", 7), ty: GpuType::GpuPtr }
+    k.params[0] = gs0
+    var gs1 = GpuParam { name: ki_ir_name_from_str("param_b", 7), ty: GpuType::GpuPtr }
+    k.params[1] = gs1
+    var gs2 = GpuParam { name: ki_ir_name_from_str("param_c", 7), ty: GpuType::GpuPtr }
+    k.params[2] = gs2
 
     k.params[3] = GpuParam {
-        name: ir_name_from_bytes(109, 0, 0, 0, 1),    // "m"
+        name: ki_ir_name_from_bytes(109, 0, 0, 0, 1),    // "m"
         ty: GpuType::GpuU32,
     }
 
     k.params[4] = GpuParam {
-        name: ir_name_from_bytes(110, 0, 0, 0, 1),      // "n"
+        name: ki_ir_name_from_bytes(110, 0, 0, 0, 1),      // "n"
         ty: GpuType::GpuU32,
     }
 
     k.params[5] = GpuParam {
-        name: ir_name_from_bytes(107, 0, 0, 0, 1),      // "k"
+        name: ki_ir_name_from_bytes(107, 0, 0, 0, 1),      // "k"
         ty: GpuType::GpuU32,
     }
 
@@ -2038,6 +2397,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, shared_addr: -1,
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2049,6 +2418,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
         lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2060,6 +2439,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU64,
         src_reg: -1, rhs_reg: -1, addr_reg: -1,
         param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2070,6 +2459,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuPtr, dst_ty: GpuType::GpuPtr, src_ty: GpuType::GpuU64,
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2079,6 +2478,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuPtr, dst_ty: GpuType::GpuPtr, src_ty: GpuType::GpuU64,
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2088,6 +2497,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuPtr, dst_ty: GpuType::GpuPtr, src_ty: GpuType::GpuU64,
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2098,6 +2517,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2107,6 +2536,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2116,6 +2555,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
         src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2124,10 +2573,19 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         opcode: GpuOpcode::GpuSetpLt,
         dst_reg: 0, lhs_reg: 1, rhs_reg: 6,
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
-        src_reg: -1, rhs_imm: 0, rhs_reg: -1, addr_reg: -1,
+        src_reg: -1, rhs_imm: 0, addr_reg: -1,
         param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
-    k.ops[idx].rhs_reg = 6
     idx = idx + 1
 
     k.ops[idx] = GpuOp {
@@ -2136,8 +2594,17 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
         src_reg: -1, rhs_imm: 0, addr_reg: -1,
         param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
-    k.ops[idx].rhs_reg = 7
     idx = idx + 1
 
     k.ops[idx] = GpuOp {
@@ -2146,32 +2613,71 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         ty: GpuType::GpuU32, dst_ty: GpuType::GpuU32, src_ty: GpuType::GpuU32,
         src_reg: -1, rhs_imm: 0, addr_reg: -1,
         param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
-    k.ops[idx].rhs_reg = 8
     idx = idx + 1
 
     // rd9 = rd3 + r2, rd10 = rd4 + r2, rd11 = rd5 + r2
     k.ops[idx] = GpuOp {
         opcode: GpuOpcode::GpuAdd, dst_reg: 9, lhs_reg: 3, rhs_reg: 2,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU64,
-        src_reg: -1, rhs_reg: 2, addr_reg: -1,
+        src_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
     k.ops[idx] = GpuOp {
         opcode: GpuOpcode::GpuAdd, dst_reg: 10, lhs_reg: 4, rhs_reg: 2,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU64,
-        src_reg: -1, rhs_reg: 2, addr_reg: -1,
+        src_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
     k.ops[idx] = GpuOp {
         opcode: GpuOpcode::GpuAdd, dst_reg: 11, lhs_reg: 5, rhs_reg: 2,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU64,
-        src_reg: -1, rhs_reg: 2, addr_reg: -1,
+        src_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2181,50 +2687,130 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
             opcode: GpuOpcode::GpuLoadGlobalPred, dst_reg: 1, addr_reg: 9, lhs_reg: 0,
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
             src_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuLoadGlobalPred, dst_reg: 2, addr_reg: 10, lhs_reg: 1,
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
             src_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuStoreSharedPred, src_reg: 1, shared_addr: 0, lhs_reg: 0,
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
-            dst_reg: -1, lhs_reg: 0, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, addr_reg: -1,
-        }
+            dst_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, addr_reg: -1,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuStoreSharedPred, src_reg: 2, shared_addr: 4 * elem_sizeof, lhs_reg: 1,
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
             dst_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
     } else {
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuLoadGlobalPred, dst_reg: 1, addr_reg: 9, lhs_reg: 0,
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             src_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuLoadGlobalPred, dst_reg: 2, addr_reg: 10, lhs_reg: 1,
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             src_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuStoreSharedPred, src_reg: 1, shared_addr: 0, lhs_reg: 0,
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             dst_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuStoreSharedPred, src_reg: 2, shared_addr: 8 * elem_sizeof, lhs_reg: 1,
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             dst_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
     }
 
@@ -2234,6 +2820,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2244,20 +2840,50 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
             src_reg: -1, rhs_reg: -1, shared_addr: 0, rhs_imm: 0,
             param_idx: -1, axis: 0, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuLoadSharedPred, dst_reg: 4, lhs_reg: 1,
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
             src_reg: -1, rhs_reg: -1, shared_addr: 4 * elem_sizeof, rhs_imm: 0,
             param_idx: -1, axis: 0, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuSelp, dst_reg: 5, lhs_reg: 3, rhs_reg: 4, src_reg: 2,
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
             rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
     } else {
         k.ops[idx] = GpuOp {
@@ -2265,20 +2891,50 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             src_reg: -1, rhs_reg: -1, shared_addr: 0, rhs_imm: 0,
             param_idx: -1, axis: 0, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuLoadSharedPred, dst_reg: 4, lhs_reg: 1,
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             src_reg: -1, rhs_reg: -1, shared_addr: 8 * elem_sizeof, rhs_imm: 0,
             param_idx: -1, axis: 0, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
         k.ops[idx] = GpuOp {
             opcode: GpuOpcode::GpuSelp, dst_reg: 5, lhs_reg: 3, rhs_reg: 4, src_reg: 2,
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, addr_reg: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
     }
 
@@ -2289,7 +2945,17 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
             addr_reg: 11, src_reg: 5, lhs_reg: 0,
             ty: GpuType::GpuF32, dst_ty: GpuType::GpuF32, src_ty: GpuType::GpuF32,
             dst_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
     } else {
         k.ops[idx] = GpuOp {
@@ -2297,7 +2963,17 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
             addr_reg: 11, src_reg: 5, lhs_reg: 0,
             ty: GpuType::GpuF64, dst_ty: GpuType::GpuF64, src_ty: GpuType::GpuF64,
             dst_reg: -1, rhs_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
-        }
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
         idx = idx + 1
     }
 
@@ -2307,6 +2983,16 @@ fn gpu_build_gemm_shared_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr 
         dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1,
         rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     idx = idx + 1
 
@@ -2333,13 +3019,24 @@ fn gpu_build_grid_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with Mu
     k.kernel_name = kernel_name
 
     // 2 params: param_a, param_b
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95; k.params[0].name.buf[6] = 97
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95; k.params[1].name.buf[6] = 98
+    var gr0 = GpuParam { name: ki_ir_name_from_str("param_a", 7), ty: GpuType::GpuPtr }
+    k.params[0] = gr0
+    var gr1 = GpuParam { name: ki_ir_name_from_str("param_b", 7), ty: GpuType::GpuPtr }
+    k.params[1] = gr1
     k.param_count = 2
 
-    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 ,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
     var idx: i64 = 0
     var op = default_op
 
@@ -2465,7 +3162,7 @@ fn gpu_build_grid_f64_ir() -> GpuKernelIr with Mut, Panic, Div {
 fn gpu_name_conv1d_f32() -> Name with Mut, Panic, Div {
     // "conv1d_f32" (10 chars)
     // c=99 o=111 n=110 v=118 1=49 d=100 _=95 f=102 3=51 2=50
-    var n = ir_name_from_bytes(99, 111, 110, 118, 10)
+    var n = ki_ir_name_from_bytes(99, 111, 110, 118, 10)
     n.buf[4] = 49; n.buf[5] = 100; n.buf[6] = 95
     n.buf[7] = 102; n.buf[8] = 51; n.buf[9] = 50
     n
@@ -2473,7 +3170,7 @@ fn gpu_name_conv1d_f32() -> Name with Mut, Panic, Div {
 
 fn gpu_name_conv1d_f64() -> Name with Mut, Panic, Div {
     // "conv1d_f64" (10 chars)
-    var n = ir_name_from_bytes(99, 111, 110, 118, 10)
+    var n = ki_ir_name_from_bytes(99, 111, 110, 118, 10)
     n.buf[4] = 49; n.buf[5] = 100; n.buf[6] = 95
     n.buf[7] = 102; n.buf[8] = 54; n.buf[9] = 52
     n
@@ -2481,7 +3178,7 @@ fn gpu_name_conv1d_f64() -> Name with Mut, Panic, Div {
 
 fn gpu_name_conv1d_i32() -> Name with Mut, Panic, Div {
     // "conv1d_i32" (10 chars)
-    var n = ir_name_from_bytes(99, 111, 110, 118, 10)
+    var n = ki_ir_name_from_bytes(99, 111, 110, 118, 10)
     n.buf[4] = 49; n.buf[5] = 100; n.buf[6] = 95
     n.buf[7] = 105; n.buf[8] = 51; n.buf[9] = 50
     n
@@ -2496,20 +3193,14 @@ fn gpu_build_conv1d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
     k.kernel_name = kernel_name
 
     // 4 params: param_in, param_w, param_out, param_n
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
-    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110  // "param_in"
-
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95; k.params[1].name.buf[6] = 119  // "param_w"
-
-    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
-    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95
-    k.params[2].name.buf[6] = 111; k.params[2].name.buf[7] = 117  // "param_ou"
-    k.params[2].name.buf[8] = 116  // "t"
-
-    k.params[3] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuU32 }
-    k.params[3].name.buf[4] = 109; k.params[3].name.buf[5] = 95; k.params[3].name.buf[6] = 110  // "param_n"
+    var c0 = GpuParam { name: ki_ir_name_from_str("param_in", 8), ty: GpuType::GpuPtr }
+    k.params[0] = c0
+    var c1 = GpuParam { name: ki_ir_name_from_str("param_w", 7), ty: GpuType::GpuPtr }
+    k.params[1] = c1
+    var c2 = GpuParam { name: ki_ir_name_from_str("param_out", 9), ty: GpuType::GpuPtr }
+    k.params[2] = c2
+    var c3 = GpuParam { name: ki_ir_name_from_str("param_n", 7), ty: GpuType::GpuU32 }
+    k.params[3] = c3
 
     k.param_count = 4
 
@@ -2521,6 +3212,16 @@ fn gpu_build_conv1d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
         opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1,
         addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     var idx: i64 = 0
     var op = default_op
@@ -2721,7 +3422,7 @@ fn gpu_build_conv1d_i32_ir() -> GpuKernelIr with Mut, Panic, Div {
 fn gpu_name_conv2d_f32() -> Name with Mut, Panic, Div {
     // "conv2d_f32" (10 chars)
     // c=99 o=111 n=110 v=118 2=50 d=100 _=95 f=102 3=51 2=50
-    var n = ir_name_from_bytes(99, 111, 110, 118, 10)
+    var n = ki_ir_name_from_bytes(99, 111, 110, 118, 10)
     n.buf[4] = 50; n.buf[5] = 100; n.buf[6] = 95
     n.buf[7] = 102; n.buf[8] = 51; n.buf[9] = 50
     n
@@ -2729,7 +3430,7 @@ fn gpu_name_conv2d_f32() -> Name with Mut, Panic, Div {
 
 fn gpu_name_conv2d_f64() -> Name with Mut, Panic, Div {
     // "conv2d_f64" (10 chars)
-    var n = ir_name_from_bytes(99, 111, 110, 118, 10)
+    var n = ki_ir_name_from_bytes(99, 111, 110, 118, 10)
     n.buf[4] = 50; n.buf[5] = 100; n.buf[6] = 95
     n.buf[7] = 102; n.buf[8] = 54; n.buf[9] = 52
     n
@@ -2743,27 +3444,16 @@ fn gpu_build_conv2d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
     k.kernel_name = kernel_name
 
     // 5 params: param_in, param_w, param_out, param_wid, param_hgt
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
-    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110  // "param_in"
-
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95; k.params[1].name.buf[6] = 119  // "param_w"
-
-    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
-    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95
-    k.params[2].name.buf[6] = 111; k.params[2].name.buf[7] = 117
-    k.params[2].name.buf[8] = 116  // "param_out"
-
-    k.params[3] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuU32 }
-    k.params[3].name.buf[4] = 109; k.params[3].name.buf[5] = 95
-    k.params[3].name.buf[6] = 119; k.params[3].name.buf[7] = 105
-    k.params[3].name.buf[8] = 100  // "param_wid"
-
-    k.params[4] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuU32 }
-    k.params[4].name.buf[4] = 109; k.params[4].name.buf[5] = 95
-    k.params[4].name.buf[6] = 104; k.params[4].name.buf[7] = 103
-    k.params[4].name.buf[8] = 116  // "param_hgt"
+    var d0 = GpuParam { name: ki_ir_name_from_str("param_in", 8), ty: GpuType::GpuPtr }
+    k.params[0] = d0
+    var d1 = GpuParam { name: ki_ir_name_from_str("param_w", 7), ty: GpuType::GpuPtr }
+    k.params[1] = d1
+    var d2 = GpuParam { name: ki_ir_name_from_str("param_out", 9), ty: GpuType::GpuPtr }
+    k.params[2] = d2
+    var d3 = GpuParam { name: ki_ir_name_from_str("param_wid", 9), ty: GpuType::GpuU32 }
+    k.params[3] = d3
+    var d4 = GpuParam { name: ki_ir_name_from_str("param_hgt", 9), ty: GpuType::GpuU32 }
+    k.params[4] = d4
 
     k.param_count = 5
 
@@ -2774,6 +3464,16 @@ fn gpu_build_conv2d_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with 
         opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1,
         addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1,
         ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
     }
     var idx: i64 = 0
     var op = default_op
@@ -3118,21 +3818,21 @@ fn gpu_build_conv2d_f64_ir() -> GpuKernelIr with Mut, Panic, Div {
 // Name helpers for scan kernels
 fn gpu_name_scan_f32() -> Name with Mut, Panic, Div {
     // "scan_f32" (8 chars)
-    var n = ir_name_from_bytes(115, 99, 97, 110, 8)
+    var n = ki_ir_name_from_bytes(115, 99, 97, 110, 8)
     n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 51; n.buf[7] = 50
     n
 }
 
 fn gpu_name_scan_f64() -> Name with Mut, Panic, Div {
     // "scan_f64" (8 chars)
-    var n = ir_name_from_bytes(115, 99, 97, 110, 8)
+    var n = ki_ir_name_from_bytes(115, 99, 97, 110, 8)
     n.buf[4] = 95; n.buf[5] = 102; n.buf[6] = 54; n.buf[7] = 52
     n
 }
 
 fn gpu_name_scan_i32() -> Name with Mut, Panic, Div {
     // "scan_i32" (8 chars)
-    var n = ir_name_from_bytes(115, 99, 97, 110, 8)
+    var n = ki_ir_name_from_bytes(115, 99, 97, 110, 8)
     n.buf[4] = 95; n.buf[5] = 105; n.buf[6] = 51; n.buf[7] = 50
     n
 }
@@ -3145,18 +3845,27 @@ fn gpu_build_scan_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr with Mu
     let sizeof_ty = gpu_type_sizeof(elem_ty)
 
     // param_in, param_out, param_n
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
-    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95
-    k.params[1].name.buf[6] = 111; k.params[1].name.buf[7] = 117; k.params[1].name.buf[8] = 116
-    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 7), ty: GpuType::GpuU32 }
-    k.params[2].name.buf[4] = 109; k.params[2].name.buf[5] = 95; k.params[2].name.buf[6] = 110
+    var sc0 = GpuParam { name: ki_ir_name_from_str("param_in", 8), ty: GpuType::GpuPtr }
+    k.params[0] = sc0
+    var sc1 = GpuParam { name: ki_ir_name_from_str("param_out", 9), ty: GpuType::GpuPtr }
+    k.params[1] = sc1
+    var sc2 = GpuParam { name: ki_ir_name_from_str("param_n", 7), ty: GpuType::GpuU32 }
+    k.params[2] = sc2
     k.param_count = 3
 
     var idx: i64 = 0
-    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 ,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
     var op = default_op
 
     // 1. r1 = tid.x
@@ -3282,21 +3991,21 @@ fn gpu_build_scan_i32_ir() -> GpuKernelIr with Mut, Panic, Div {
 
 fn gpu_name_transpose_f32() -> Name with Mut, Panic, Div {
     // "xpose_f32" (9 chars) — "transpose" is 9 but we use "xpose" to fit
-    var n = ir_name_from_bytes(120, 112, 111, 115, 9)
+    var n = ki_ir_name_from_bytes(120, 112, 111, 115, 9)
     n.buf[4] = 101; n.buf[5] = 95; n.buf[6] = 102; n.buf[7] = 51; n.buf[8] = 50
     n
 }
 
 fn gpu_name_transpose_f64() -> Name with Mut, Panic, Div {
     // "xpose_f64" (9 chars)
-    var n = ir_name_from_bytes(120, 112, 111, 115, 9)
+    var n = ki_ir_name_from_bytes(120, 112, 111, 115, 9)
     n.buf[4] = 101; n.buf[5] = 95; n.buf[6] = 102; n.buf[7] = 54; n.buf[8] = 52
     n
 }
 
 fn gpu_name_transpose_i32() -> Name with Mut, Panic, Div {
     // "xpose_i32" (9 chars)
-    var n = ir_name_from_bytes(120, 112, 111, 115, 9)
+    var n = ki_ir_name_from_bytes(120, 112, 111, 115, 9)
     n.buf[4] = 101; n.buf[5] = 95; n.buf[6] = 105; n.buf[7] = 51; n.buf[8] = 50
     n
 }
@@ -3311,20 +4020,29 @@ fn gpu_build_transpose_ir(kernel_name: Name, elem_ty: GpuType) -> GpuKernelIr wi
     k.shared_bytes = 32 * 32 * sizeof_ty  // TILE * TILE * sizeof
 
     // param_in, param_out, param_rows, param_cols
-    k.params[0] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 8), ty: GpuType::GpuPtr }
-    k.params[0].name.buf[4] = 109; k.params[0].name.buf[5] = 95
-    k.params[0].name.buf[6] = 105; k.params[0].name.buf[7] = 110
-    k.params[1] = GpuParam { name: ir_name_from_bytes(112, 97, 114, 97, 9), ty: GpuType::GpuPtr }
-    k.params[1].name.buf[4] = 109; k.params[1].name.buf[5] = 95
-    k.params[1].name.buf[6] = 111; k.params[1].name.buf[7] = 117; k.params[1].name.buf[8] = 116
-    k.params[2] = GpuParam { name: ir_name_from_bytes(112, 95, 114, 111, 6), ty: GpuType::GpuU32 }
-    k.params[2].name.buf[4] = 119; k.params[2].name.buf[5] = 115
-    k.params[3] = GpuParam { name: ir_name_from_bytes(112, 95, 99, 111, 6), ty: GpuType::GpuU32 }
-    k.params[3].name.buf[4] = 108; k.params[3].name.buf[5] = 115
+    var tr0 = GpuParam { name: ki_ir_name_from_str("param_in", 8), ty: GpuType::GpuPtr }
+    k.params[0] = tr0
+    var tr1 = GpuParam { name: ki_ir_name_from_str("param_out", 9), ty: GpuType::GpuPtr }
+    k.params[1] = tr1
+    var tr2 = GpuParam { name: ki_ir_name_from_str("p_rows", 6), ty: GpuType::GpuU32 }
+    k.params[2] = tr2
+    var tr3 = GpuParam { name: ki_ir_name_from_str("p_cols", 6), ty: GpuType::GpuU32 }
+    k.params[3] = tr3
     k.param_count = 4
 
     var idx: i64 = 0
-    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 }
+    let default_op = GpuOp { opcode: GpuOpcode::GpuRet, dst_reg: -1, src_reg: -1, lhs_reg: -1, rhs_reg: -1, addr_reg: -1, rhs_imm: 0, param_idx: -1, axis: 0, shared_addr: -1, ty: GpuType::GpuU64, dst_ty: GpuType::GpuU64, src_ty: GpuType::GpuU32 ,
+        memory_space: GpuMemorySpace::GpuMemGlobal,
+        pred_reg: -1,
+        mask: 4294967295,
+        atomic_op: GpuAtomicOp::GpuAtomAdd,
+        cache_hint: GpuCacheHint::GpuCacheDefault,
+        compare_reg: -1,
+        num_regs: 0,
+        byte_offset: 0,
+        scope: 0,
+        cg_size: 0,
+    }
     var op = default_op
 
     // === Compute source (row-major) address ===
@@ -3576,31 +4294,22 @@ fn gpu_build_epistemic_wmma_matmul_16x16_ir() -> GpuKernelIr with Mut, Panic, Di
     var k = gpu_kernel_new()
 
     // Kernel name: "epi_wmma_mm16" (13 chars)
-    k.kernel_name = ir_name_from_bytes(101, 112, 105, 95, 13)  // "epi_"
-    k.kernel_name.buf[4] = 119   // 'w'
-    k.kernel_name.buf[5] = 109   // 'm'
-    k.kernel_name.buf[6] = 109   // 'm'
-    k.kernel_name.buf[7] = 97    // 'a'
-    k.kernel_name.buf[8] = 95    // '_'
-    k.kernel_name.buf[9] = 109   // 'm'
-    k.kernel_name.buf[10] = 109  // 'm'
-    k.kernel_name.buf[11] = 49   // '1'
-    k.kernel_name.buf[12] = 54   // '6'
+    k.kernel_name = ki_ir_name_from_str("epi_wmma_mm16", 13)
 
     // ── 8 Parameters (all .u64 pointers) ────────────────────────
     // 0: param_a_val  1: param_a_eps  2: param_b_val  3: param_b_eps
     // 4: param_c_val  5: param_c_eps  6: param_c_vld  7: param_c_prv
 
-    let param_names: [i8; 8] = [118, 101, 118, 101, 118, 101, 118, 112]  // v,e,v,e,v,e,v,p
-    let param_suffix: [i8; 8] = [108, 115, 108, 115, 108, 115, 100, 118]  // l,s,l,s,l,s,d,v
-    let param_prefix: [i8; 8] = [97, 97, 98, 98, 99, 99, 99, 99]  // a,a,b,b,c,c,c,c
+    let param_names: [i64; 8] = [118, 101, 118, 101, 118, 101, 118, 112]  // v,e,v,e,v,e,v,p
+    let param_suffix: [i64; 8] = [108, 115, 108, 115, 108, 115, 100, 118]  // l,s,l,s,l,s,d,v
+    let param_prefix: [i64; 8] = [97, 97, 98, 98, 99, 99, 99, 99]  // a,a,b,b,c,c,c,c
 
     var pi: i64 = 0
     while pi < 8 {
-        var pname = ir_name_from_bytes(112, 95, 0, 95, 6) // "p_?_??" (6 chars)
-        pname.buf[2] = param_prefix[pi as usize]
-        pname.buf[4] = param_names[pi as usize]
-        pname.buf[5] = param_suffix[pi as usize]
+        var pname = ki_ir_name_from_bytes(112, 95, 0, 95, 6) // "p_?_??" (6 chars)
+        pname.buf[2] = param_prefix[pi as usize] as i8
+        pname.buf[4] = param_names[pi as usize] as i8
+        pname.buf[5] = param_suffix[pi as usize] as i8
         k.params[pi as usize] = GpuParam { name: pname, ty: GpuType::GpuPtr }
         pi = pi + 1
     }
@@ -4101,12 +4810,7 @@ fn gpu_build_epistemic_tiled_gemm_ir() -> GpuKernelIr with Mut, Panic, Div {
     var k = gpu_kernel_new()
 
     // Kernel name: "epi_tgemm" (9 chars)
-    k.kernel_name = ir_name_from_bytes(101, 112, 105, 95, 9)  // "epi_"
-    k.kernel_name.buf[4] = 116   // 't'
-    k.kernel_name.buf[5] = 103   // 'g'
-    k.kernel_name.buf[6] = 101   // 'e'
-    k.kernel_name.buf[7] = 109   // 'm'
-    k.kernel_name.buf[8] = 109   // 'm'
+    k.kernel_name = ki_ir_name_from_str("epi_tgemm", 9)
 
     // Shared memory: 2048 bytes (A_tile at 0, B_tile at 1024)
     k.shared_bytes = 2048
@@ -4115,16 +4819,16 @@ fn gpu_build_epistemic_tiled_gemm_ir() -> GpuKernelIr with Mut, Panic, Div {
     // 0: param_a_val  1: param_a_eps  2: param_b_val  3: param_b_eps
     // 4: param_c_val  5: param_c_eps  6: param_c_vld  7: param_c_prv
 
-    let param_names: [i8; 8] = [118, 101, 118, 101, 118, 101, 118, 112]
-    let param_suffix: [i8; 8] = [108, 115, 108, 115, 108, 115, 100, 118]
-    let param_prefix: [i8; 8] = [97, 97, 98, 98, 99, 99, 99, 99]
+    let param_names: [i64; 8] = [118, 101, 118, 101, 118, 101, 118, 112]
+    let param_suffix: [i64; 8] = [108, 115, 108, 115, 108, 115, 100, 118]
+    let param_prefix: [i64; 8] = [97, 97, 98, 98, 99, 99, 99, 99]
 
     var pi: i64 = 0
     while pi < 8 {
-        var pname = ir_name_from_bytes(112, 95, 0, 95, 6)
-        pname.buf[2] = param_prefix[pi as usize]
-        pname.buf[4] = param_names[pi as usize]
-        pname.buf[5] = param_suffix[pi as usize]
+        var pname = ki_ir_name_from_bytes(112, 95, 0, 95, 6)
+        pname.buf[2] = param_prefix[pi as usize] as i8
+        pname.buf[4] = param_names[pi as usize] as i8
+        pname.buf[5] = param_suffix[pi as usize] as i8
         k.params[pi as usize] = GpuParam { name: pname, ty: GpuType::GpuPtr }
         pi = pi + 1
     }
@@ -4846,31 +5550,23 @@ fn gpu_build_epistemic_wmma_backward_ir() -> GpuKernelIr with Mut, Panic, Div {
     var k = gpu_kernel_new()
 
     // Kernel name: "epi_wmma_bwd" (12 chars)
-    k.kernel_name = ir_name_from_bytes(101, 112, 105, 95, 12)  // "epi_"
-    k.kernel_name.buf[4] = 119   // 'w'
-    k.kernel_name.buf[5] = 109   // 'm'
-    k.kernel_name.buf[6] = 109   // 'm'
-    k.kernel_name.buf[7] = 97    // 'a'
-    k.kernel_name.buf[8] = 95    // '_'
-    k.kernel_name.buf[9] = 98    // 'b'
-    k.kernel_name.buf[10] = 119  // 'w'
-    k.kernel_name.buf[11] = 100  // 'd'
+    k.kernel_name = ki_ir_name_from_str("epi_wmma_bwd", 12)
 
     // ── 8 Parameters (all .u64 pointers) ────────────────────────
     // 0: p_grad_c_val  1: p_grad_c_eps  2: p_a_val  3: p_a_eps
     // 4: p_b_val       5: p_b_eps       6: p_grad_a_out  7: p_grad_b_out
 
-    let param_names_b: [i8; 8]  = [103, 103, 97, 97, 98, 98, 103, 103]   // g,g,a,a,b,b,g,g
-    let param_names_b2: [i8; 8] = [99, 99, 118, 118, 118, 118, 97, 98]   // c,c,v,v,v,v,a,b
-    let param_suffix_b: [i8; 8] = [118, 101, 108, 101, 108, 101, 111, 111] // v,e,l,e,l,e,o,o
+    let param_names_b: [i64; 8]  = [103, 103, 97, 97, 98, 98, 103, 103]   // g,g,a,a,b,b,g,g
+    let param_names_b2: [i64; 8] = [99, 99, 118, 118, 118, 118, 97, 98]   // c,c,v,v,v,v,a,b
+    let param_suffix_b: [i64; 8] = [118, 101, 108, 101, 108, 101, 111, 111] // v,e,l,e,l,e,o,o
 
     var pi: i64 = 0
     while pi < 8 {
-        var pname = ir_name_from_bytes(112, 95, 0, 0, 7) // "p_????" (7 chars)
-        pname.buf[2] = param_names_b[pi as usize]
-        pname.buf[3] = param_names_b2[pi as usize]
+        var pname = ki_ir_name_from_bytes(112, 95, 0, 0, 7) // "p_????" (7 chars)
+        pname.buf[2] = param_names_b[pi as usize] as i8
+        pname.buf[3] = param_names_b2[pi as usize] as i8
         pname.buf[4] = 95  // '_'
-        pname.buf[5] = param_suffix_b[pi as usize]
+        pname.buf[5] = param_suffix_b[pi as usize] as i8
         pname.buf[6] = 116  // 't' (suffix pad)
         k.params[pi as usize] = GpuParam { name: pname, ty: GpuType::GpuPtr }
         pi = pi + 1

@@ -13,7 +13,15 @@ module native::regalloc
 // Constants
 // ============================================================================
 
-pub let RA_MAX_INTERVALS: i64 = 512
+pub let RA_MAX_INTERVALS: i64 = 2048
+// Max distinct vreg ids tracked by liveness / RA (matches NC_MAX_VREGS).
+pub let RA_MAX_VREGS: i64 = 2048
+// Max RaSimpleInstr entries accepted by liveness_compute_intervals.
+// Align with MIR_MAX_INSTRS so the machine_ir / streaming path does not
+// silently truncate liveness after the MIR buffer was raised past 2048.
+// Note: Madaros core_ir path (compile_ir_function_v2_core_ir_into) does not use
+// RA; large straight-line bodies are gated by IR_MAX_INSTRS instead.
+pub let RA_MAX_SIMPLE_INSTRS: i64 = 4096
 pub let RA_MAX_ACTIVE: i64 = 64
 pub let RA_MAX_HINTS: i64 = 256
 pub let RA_SPILLED: i64 = 0 - 1          // sentinel: no physical register assigned
@@ -40,7 +48,7 @@ pub struct RegHint {
 
 // Full allocator state.
 pub struct RegAllocState {
-    pub intervals: [LiveInterval; 512],
+    pub intervals: [LiveInterval; 2048],
     pub count: i64,
     pub spill_count: i64,          // number of spill slots allocated so far
     pub num_pregs: i64,            // total physical registers available
@@ -76,7 +84,7 @@ pub fn empty_reg_hint() -> RegHint {
 
 pub fn regalloc_new() -> RegAllocState {
     RegAllocState {
-        intervals: [empty_live_interval(); 512],
+        intervals: [empty_live_interval(); 2048],
         count: 0,
         spill_count: 0,
         num_pregs: 14,
@@ -433,17 +441,17 @@ pub fn regalloc_spill_info(state: RegAllocState) -> SpillInfo {
 
 // Liveness workspace: tracks def/use per vreg to build intervals.
 pub struct LivenessMap {
-    pub defs: [i64; 512],    // first definition point per vreg
-    pub uses: [i64; 512],    // last use point per vreg
-    pub seen: [i64; 512],    // 1 if vreg has been seen, 0 otherwise
+    pub defs: [i64; 2048],    // first definition point per vreg
+    pub uses: [i64; 2048],    // last use point per vreg
+    pub seen: [i64; 2048],    // 1 if vreg has been seen, 0 otherwise
     pub max_vreg: i64,
 }
 
 pub fn liveness_map_new() -> LivenessMap {
     LivenessMap {
-        defs: [0; 512],
-        uses: [0; 512],
-        seen: [0; 512],
+        defs: [0; 2048],
+        uses: [0; 2048],
+        seen: [0; 2048],
         max_vreg: 0,
     }
 }
@@ -453,7 +461,7 @@ pub fn liveness_def_point(
     map: LivenessMap, vreg: i64, position: i64
 ) -> LivenessMap with Mut, Panic, Div {
     var m = map
-    if vreg >= 0 && vreg < 512 {
+    if vreg >= 0 && vreg < RA_MAX_VREGS {
         if m.seen[vreg as usize] == 0 {
             m.defs[vreg as usize] = position
             m.uses[vreg as usize] = position
@@ -475,7 +483,7 @@ pub fn liveness_use_point(
     map: LivenessMap, vreg: i64, position: i64
 ) -> LivenessMap with Mut, Panic, Div {
     var m = map
-    if vreg >= 0 && vreg < 512 {
+    if vreg >= 0 && vreg < RA_MAX_VREGS {
         if m.seen[vreg as usize] == 0 {
             // Use before def (parameter or phi): treat position as both
             m.defs[vreg as usize] = position
@@ -524,7 +532,7 @@ pub fn ra_empty_simple_instr() -> RaSimpleInstr {
 // High-level: compute intervals from an array of RaSimpleInstr.
 // Walks instructions sequentially, recording defs (dst) and uses (src1, src2).
 pub fn liveness_compute_intervals(
-    instrs: [RaSimpleInstr; 512], instr_count: i64
+    instrs: [RaSimpleInstr; 4096], instr_count: i64
 ) -> RegAllocState with Mut, Panic, Div {
     var map = liveness_map_new()
     var pos: i64 = 0
@@ -871,7 +879,7 @@ pub fn test_regalloc_zero_length() -> i64 with Mut, Panic, Div {
 // Test runner
 // ============================================================================
 
-pub fn regalloc_run_tests() -> i64 with Mut, Panic, Div {
+pub fn regalloc_run_tests() -> i64 with IO, Mut, Panic, Div {
     var fail: i64 = 0
 
     let t01 = test_regalloc_empty()

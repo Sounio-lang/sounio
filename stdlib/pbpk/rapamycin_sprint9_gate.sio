@@ -1,0 +1,169 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint9_gate.sio — Sprint 9 ISO §E.2 budget-guided improvement gate
+//
+// 56 assertions proving that the uncertainty budget identifies the dominant source
+// and that targeted reduction (of the dominant source only) promotes the clinical
+// gate from UNCERTAIN to THERAPEUTIC, while non-targeted reduction does not.
+//
+// Standard scenario: IV bolus rapamycin, ke=0.05 h⁻¹, Vc=70 L, D=2 mg, t=24h.
+// Baseline variances: ke_var=0.003 (dominant, 75%), k12_var=0.001 (non-dominant, 25%).
+//
+// Dissertation headline (Section E, assertions 25–28):
+//   Budget identifies ke as dominant → reduce ke_var÷4 → THERAPEUTIC
+//   Budget identifies k12 as non-dominant → reduce k12_var÷4 → UNCERTAIN
+//   Same total effort, qualitatively different outcome.
+//
+// Assertion map:
+//   A (1–8):   val_1cmt_k12var_params field correctness
+//   B (9–14):  Baseline UNCERTAIN — combined variance too large
+//   C (15–20): Targeted improvement → THERAPEUTIC
+//   D (21–26): Blind improvement → still UNCERTAIN
+//   E (27–32): Dominance detection and budget_improvement_fires
+//   F (33–38): Confidence score values before/after improvement
+//   G (39–44): Conf monotonicity: more targeted reduction → ≥ conf
+//   H (45–48): Effective-variance equivalence (1-cmt vs 2-cmt)
+//   I (49–52): Decision sentinel values
+//   J (53–56): Cross-checks: wrapper vs direct classify
+
+use pbpk::rapamycin_validation::{val_1cmt_k12var_params}
+use pbpk::rapamycin_budget_guide::{
+    classify_2cmt_trough, conf_2cmt_trough, dominant_source_2cmt,
+    classify_standard_2cmt, conf_standard_2cmt, dominant_standard_2cmt,
+    budget_improvement_fires
+}
+use pbpk::rapamycin_budget::{simulate_budget, budget_dominant, budget_sum_ok}
+use pbpk::rapamycin_clinical::{decision_therapeutic, decision_uncertain, conf_clinical_min}
+
+var SPR9_PASS: [i64; 2] = [0; 2]
+
+fn s9_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR9_PASS[0] = SPR9_PASS[0] + 1
+    } else {
+        SPR9_PASS[1] = SPR9_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint9_gate() with IO, Epistemic, Mut, Div, Panic {
+
+    // ── Section A: val_1cmt_k12var_params field correctness (8 assertions) ─────
+    // Degenerate 1-cmt: k12_val=k21_val=0, k12_var set, ke_var set.
+
+    let a_p = val_1cmt_k12var_params(0.05, 0.003, 0.001, 70.0)
+    s9_chk(a_p.ke_val  == 0.05)     // 1
+    s9_chk(a_p.ke_var  == 0.003)    // 2
+    s9_chk(a_p.k12_val == 0.0)      // 3
+    s9_chk(a_p.k12_var == 0.001)    // 4
+    s9_chk(a_p.k21_val == 0.0)      // 5
+    s9_chk(a_p.k21_var == 0.0)      // 6
+    s9_chk(a_p.vc_val  == 70.0)     // 7
+    s9_chk(a_p.krel_val == 0.0)     // 8
+
+    // ── Section B: Baseline UNCERTAIN (6 assertions) ──────────────────────────
+    // ke_var=0.003, k12_var=0.001 → total ≈ 0.004 → conf=700 < 800 → UNCERTAIN.
+
+    s9_chk(classify_standard_2cmt(0.003, 0.001) == decision_uncertain())    // 9
+    s9_chk(classify_standard_2cmt(0.003, 0.001) != decision_therapeutic())  // 10
+    s9_chk(conf_standard_2cmt(0.003, 0.001) == 700)                         // 11
+    s9_chk(conf_standard_2cmt(0.003, 0.001) < conf_clinical_min())          // 12
+    // Budget check: both ke_var and k12_var contribute — dominant is ke (idx=0)
+    s9_chk(dominant_standard_2cmt(0.003, 0.001) == 0)                       // 13 (ke dominant)
+    s9_chk(dominant_standard_2cmt(0.003, 0.001) != 1)                       // 14 (not k12)
+
+    // ── Section C: Targeted improvement → THERAPEUTIC (6 assertions) ─────────
+    // ke_var÷4 = 0.00075, k12_var unchanged = 0.001 → total ≈ 0.00175 → THERAPEUTIC.
+
+    s9_chk(classify_standard_2cmt(0.00075, 0.001) == decision_therapeutic()) // 15
+    s9_chk(classify_standard_2cmt(0.00075, 0.001) != decision_uncertain())   // 16
+    s9_chk(conf_standard_2cmt(0.00075, 0.001) == 820)                        // 17
+    s9_chk(conf_standard_2cmt(0.00075, 0.001) >= conf_clinical_min())        // 18
+    // After targeting, k12 becomes dominant (ke_var/4 < k12_var)
+    s9_chk(dominant_standard_2cmt(0.00075, 0.001) == 1)                      // 19 (k12 now dominant)
+    s9_chk(dominant_standard_2cmt(0.00075, 0.001) != 0)                      // 20
+
+    // ── Section D: Blind improvement → still UNCERTAIN (6 assertions) ─────────
+    // ke_var unchanged = 0.003, k12_var÷4 = 0.00025 → total ≈ 0.00325 → UNCERTAIN.
+
+    s9_chk(classify_standard_2cmt(0.003, 0.00025) == decision_uncertain())   // 21
+    s9_chk(classify_standard_2cmt(0.003, 0.00025) != decision_therapeutic()) // 22
+    s9_chk(conf_standard_2cmt(0.003, 0.00025) == 700)                        // 23
+    s9_chk(conf_standard_2cmt(0.003, 0.00025) < conf_clinical_min())         // 24
+    // ke still dominant after blind reduction (ke_var >> k12_var/4)
+    s9_chk(dominant_standard_2cmt(0.003, 0.00025) == 0)                      // 25 (ke still dominant)
+    s9_chk(dominant_standard_2cmt(0.003, 0.00025) != 1)                      // 26
+
+    // ── Section E: Budget improvement gate (6 assertions) ─────────────────────
+    // budget_improvement_fires: baseline→UNCERTAIN, targeted→THERAPEUTIC, blind→UNCERTAIN.
+
+    s9_chk(budget_improvement_fires(0.003, 0.001))                            // 27
+    s9_chk(!budget_improvement_fires(0.0001, 0.001))                          // 28 (baseline THERAPEUTIC, gate off)
+    s9_chk(!budget_improvement_fires(0.001, 0.001))                            // 29 (baseline THERAPEUTIC → gate off)
+    // Asymmetric: gate only fires if reducing dominant (ke) actually changes the decision
+    s9_chk(classify_standard_2cmt(0.0001, 0.001) == decision_therapeutic())  // 30 (very tight ke_var)
+    s9_chk(classify_standard_2cmt(0.003,  0.001) == decision_uncertain())    // 31 (original baseline)
+    s9_chk(classify_standard_2cmt(0.003,  0.001) != classify_standard_2cmt(0.00075, 0.001))  // 32 (gate flip)
+
+    // ── Section F: Confidence score values (6 assertions) ─────────────────────
+
+    s9_chk(conf_standard_2cmt(0.003, 0.001)   == 700)   // 33 (baseline)
+    s9_chk(conf_standard_2cmt(0.00075, 0.001) == 820)   // 34 (targeted)
+    s9_chk(conf_standard_2cmt(0.003, 0.00025) == 700)   // 35 (blind)
+    // Targeted gives strictly higher confidence than baseline
+    s9_chk(conf_standard_2cmt(0.00075, 0.001) > conf_standard_2cmt(0.003, 0.001))  // 36
+    // Blind gives same confidence as baseline (ke_var still dominates)
+    s9_chk(conf_standard_2cmt(0.003, 0.00025) == conf_standard_2cmt(0.003, 0.001)) // 37
+    // Targeted gives same conf as blind is FALSE — targeted is better
+    s9_chk(conf_standard_2cmt(0.00075, 0.001) != conf_standard_2cmt(0.003, 0.00025)) // 38
+
+    // ── Section G: Confidence monotonicity (6 assertions) ─────────────────────
+    // Reducing the dominant source further improves conf; non-dominant barely moves.
+
+    s9_chk(conf_standard_2cmt(0.001,   0.001) >= conf_standard_2cmt(0.003, 0.001))  // 39
+    s9_chk(conf_standard_2cmt(0.0005,  0.001) >= conf_standard_2cmt(0.001, 0.001))  // 40
+    s9_chk(conf_standard_2cmt(0.00075, 0.001) >= conf_standard_2cmt(0.001, 0.001))  // 41
+    // With k12_var=0.001 floor, ke_var=0.0001 gives effective=0.0011 → conf=820
+    s9_chk(conf_standard_2cmt(0.0001, 0.001) == 820)                                // 42
+    s9_chk(conf_standard_2cmt(0.0001, 0.001) >= conf_standard_2cmt(0.003, 0.001))  // 43 (820 >= 700)
+    s9_chk(conf_standard_2cmt(0.0001, 0.001) > conf_standard_2cmt(0.003,  0.001))  // 44 (820 > 700)
+
+    // ── Section H: Effective variance equivalence (4 assertions) ──────────────
+    // For 1-cmt (k12_val=0), total effective variance = ke_var + k12_var.
+    // So classify_standard_2cmt(a,b) matches classify_standard_2cmt(a+b, 0.0) approximately.
+    // (Budget splits contribution; sum determines the outcome.)
+
+    s9_chk(classify_standard_2cmt(0.004, 0.0) == decision_uncertain())    // 45 (all in ke_var)
+    s9_chk(classify_standard_2cmt(0.003, 0.001) == decision_uncertain())  // 46 (split)
+    s9_chk(classify_standard_2cmt(0.00175, 0.0) == decision_therapeutic()) // 47 (total of targeted)
+    s9_chk(classify_standard_2cmt(0.00075, 0.001) == classify_standard_2cmt(0.00175, 0.0)) // 48
+
+    // ── Section I: Decision sentinel values (4 assertions) ────────────────────
+
+    s9_chk(decision_therapeutic() == 1)    // 49
+    s9_chk(decision_uncertain()   == 3)    // 50
+    s9_chk(conf_clinical_min()    == 800)  // 51
+    s9_chk(decision_uncertain() != decision_therapeutic())  // 52
+
+    // ── Section J: Cross-checks wrapper vs direct (4 assertions) ─────────────
+
+    s9_chk(classify_standard_2cmt(0.003, 0.001) ==
+           classify_2cmt_trough(0.05, 0.003, 0.001, 70.0, 2.0, 24.0, 1.0, 25, 24))   // 53
+    s9_chk(classify_standard_2cmt(0.00075, 0.001) ==
+           classify_2cmt_trough(0.05, 0.00075, 0.001, 70.0, 2.0, 24.0, 1.0, 25, 24)) // 54
+    s9_chk(conf_standard_2cmt(0.003, 0.001) ==
+           conf_2cmt_trough(0.05, 0.003, 0.001, 70.0, 2.0, 24.0, 1.0, 25, 24))       // 55
+    s9_chk(dominant_standard_2cmt(0.003, 0.001) ==
+           dominant_source_2cmt(0.05, 0.003, 0.001, 70.0, 2.0, 24.0, 1.0, 25))       // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint9_gate()
+    if SPR9_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

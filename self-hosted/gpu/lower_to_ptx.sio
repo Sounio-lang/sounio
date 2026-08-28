@@ -3,13 +3,76 @@
 // Converts GpuKernelIr to PTX text using the ptx.sio emitter functions.
 // This is "phase 1" of GPU codegen: structured IR-driven lowering.
 
+use gpu::kernel_ir::*
+use gpu::ptx::*
+
 // Lower a complete GPU kernel IR to PTX
-fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var buf = ptx_buf_new()
 
-    // 1. Emit header (.version, .target, .address_size)
-    buf = ptx_emit_header(buf)
-    buf = gpu_emit_kernel_mode_metadata(buf, kernel)
+    // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
+    // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
+    if gpu_has_wmma_tile(kernel) {
+        buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
+    } else {
+        buf = ptx_emit_header(buf)
+    }
+    // Module-scope sign table for the O-SSM cell/recur L(m) build (before the .entry).
+    if gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) {
+        let cdim = gpu_cell_dim(kernel)
+        let cbits = if cdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(cdim, cbits))
+    }
+    // Module-scope tables for the batched associator: ossm_Lsgn (σ(k⊕j,j) for the L-build, shared
+    // with the cell), ossm_absgn (σ(i,j) to form a⊗b), and the ossm_ab global f64 scratch.
+    if gpu_has_oct_assoc(kernel) || gpu_has_oct_assoc_bwd_dh(kernel) {
+        let adim = gpu_assoc_dim2(kernel)
+        let abits = if adim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(adim, abits))
+        buf = ptx_push_str(buf, gpu_emit_assoc_absgn_table(adim, abits))
+        buf = ptx_push_str(buf, "    .global .align 8 .b64 ossm_ab[16];\n\n")
+    }
+    // VJP tables: ossm_Lsgn σ(k⊕j,j) for the transposed L(a)ᵀ build, ossm_absgn σ(i,j) for the da
+    // accumulation. No ossm_ab scratch (no product formed).
+    if gpu_has_oct_vjp(kernel) {
+        let vdim = gpu_vjp_dim(kernel)
+        let vbits = if vdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(vdim, vbits))
+        buf = ptx_push_str(buf, gpu_emit_assoc_absgn_table(vdim, vbits))
+    }
+    // BPTT backward-step tables: same as the VJP (ossm_Lsgn for L(A)ᵀ, ossm_absgn for da).
+    if gpu_has_oct_bwd(kernel) {
+        let wdim = gpu_bwd_dim(kernel)
+        let wbits = if wdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(wdim, wbits))
+        buf = ptx_push_str(buf, gpu_emit_assoc_absgn_table(wdim, wbits))
+    }
+    // Nonlinear BPTT backward-step tables: same (ossm_Lsgn + ossm_absgn).
+    if gpu_has_oct_bwd_nl(kernel) {
+        let ndim = gpu_bwd_nl_dim(kernel)
+        let nbits = if ndim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(ndim, nbits))
+        buf = ptx_push_str(buf, gpu_emit_assoc_absgn_table(ndim, nbits))
+    }
+    // Full-f64 step: ossm_Lsgn σ(k⊕j,j) for the L(A) build (read at runtime in the j-loop).
+    if gpu_has_oct_step_f64(kernel) {
+        let fdim = gpu_step_f64_dim(kernel)
+        let fbits = if fdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(fdim, fbits))
+    }
+    // f64 tensor-core tile: ossm_Lsgn σ(k⊕j,j) for the f64 L(a) build.
+    if gpu_has_oct_batch_f64(kernel) {
+        let tdim = gpu_batch_f64_dim(kernel)
+        let tbits = if tdim == 16 { 4 } else { 3 }
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(tdim, tbits))
+    }
+    // matvec: octonion σ(k⊕l,l) table (dim=8) for the block-L A_big build.
+    if gpu_has_oct_matvec(kernel) {
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(8, 3))
+    }
+    // gpu_emit_kernel_mode_metadata skipped: calls gpu_legalize_kernel_to_ssa_v2 which
+    // returns GpuKernelSsaV2 by value (~28MB frame) → SIGSEGV in lean_single-compiled binary.
+    // The function only emits cosmetic PTX comment lines; skip it for correctness.
 
     // 2. Emit kernel signature
     buf = gpu_emit_kernel_signature(buf, kernel)
@@ -106,28 +169,60 @@ fn gpu_emit_kernel_signature(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mu
 }
 
 // Emit register declarations based on kernel.max_reg_*
+// Does this kernel contain a compound wmma tile op? (drives fragment reg decls.)
+fn gpu_has_wmma_tile(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let oc = kernel.ops[i as usize].opcode
+        if oc == GpuOpcode::GpuWmmaTile || oc == GpuOpcode::GpuOctAssocBwdDh || oc == GpuOpcode::GpuOctCell || oc == GpuOpcode::GpuOctRecur || oc == GpuOpcode::GpuOctAssoc || oc == GpuOpcode::GpuOctVjp || oc == GpuOpcode::GpuOctBwd || oc == GpuOpcode::GpuOctBwdNl || oc == GpuOpcode::GpuOctBatchF64 || oc == GpuOpcode::GpuOctMatvec { return true }
+        i = i + 1
+    }
+    false
+}
+
 fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
 
     out = ptx_push_str(out, "{\n")
 
-    // .reg .pred %p<N>
-    if kernel.max_reg_pred > 0 {
+    let stage = gpu_has_oct_stage(kernel)
+    let postadd = gpu_has_oct_postadd(kernel)
+    // The associator, VJP and BPTT-backward need the same register classes as the cell.
+    let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_assoc_bwd_dh(kernel) || gpu_has_oct_vjp(kernel) || gpu_has_oct_bwd(kernel) || gpu_has_oct_bwd_nl(kernel)
+    let readout = gpu_has_oct_readout(kernel)
+    let stepf64 = gpu_has_oct_step_f64(kernel)
+    let tc64 = gpu_has_oct_batch_f64(kernel)
+    let matvec = gpu_has_oct_matvec(kernel)
+    let stage_or_pa = stage || postadd || cell || readout || stepf64 || tc64 || matvec
+
+    // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
+    var pred_count = kernel.max_reg_pred
+    if stage_or_pa && pred_count < 2 { pred_count = 2 }
+    if pred_count > 0 {
         out = ptx_push_str(out, "    .reg .pred %p<")
-        out = gpu_push_i64(out, kernel.max_reg_pred)
+        out = gpu_push_i64(out, pred_count)
         out = ptx_push_str(out, ">;\n")
     }
 
-    // .reg .b32 %r<N> — covers both u32 and i32 (signedness is in opcode, not register)
-    let b32_count = if kernel.max_reg_u32 > kernel.max_reg_i32 { kernel.max_reg_u32 } else { kernel.max_reg_i32 }
+    // .reg .b32 %r<N> — covers both u32 and i32. The staging loop needs %r1..%r4.
+    var b32_count = if kernel.max_reg_u32 > kernel.max_reg_i32 { kernel.max_reg_u32 } else { kernel.max_reg_i32 }
+    if stage_or_pa && b32_count < 8 { b32_count = 8 }
+    if cell && b32_count < 12 { b32_count = 12 }
+    if readout && b32_count < 6 { b32_count = 6 }
+    if stepf64 && b32_count < 12 { b32_count = 12 }
+    if tc64 && b32_count < 12 { b32_count = 12 }
+    if matvec && b32_count < 12 { b32_count = 12 }
     if b32_count > 0 {
         out = ptx_push_str(out, "    .reg .b32 %r<")
         out = gpu_push_i64(out, b32_count)
         out = ptx_push_str(out, ">;\n")
     }
 
-    // .reg .b64 %rd<N> — covers both u64 and i64
-    let b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
+    // .reg .b64 %rd<N> — covers both u64 and i64. The O-SSM cell uses %rd7 as address scratch
+    // (params occupy %rd0..%rd5, so scratch must avoid clobbering them, e.g. pC=%rd3).
+    var b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
+    // The cell and the O-SSM-step post-add both use %rd7 as address scratch (runtime loops).
+    if (cell || postadd || readout || stepf64 || tc64 || matvec) && b64_count < 8 { b64_count = 8 }
     if b64_count > 0 {
         out = ptx_push_str(out, "    .reg .b64 %rd<")
         out = gpu_push_i64(out, b64_count)
@@ -138,22 +233,1355 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
         out = ptx_emit_shared_decl(out, kernel.shared_bytes)
     }
 
-    // .reg .f32 %f<N>
-    if kernel.max_reg_f32 > 0 {
+    // .reg .f32 %f<N> — the post-add needs %f1..%f3; the full cell needs %f1..%f6.
+    var f32_count = kernel.max_reg_f32
+    if postadd && f32_count < 4 { f32_count = 4 }
+    if stepf64 && f32_count < 1 { f32_count = 1 }
+    if tc64 && f32_count < 1 { f32_count = 1 }
+    if matvec && f32_count < 2 { f32_count = 2 }
+    if cell && f32_count < 8 { f32_count = 8 }
+    if f32_count > 0 {
         out = ptx_push_str(out, "    .reg .f32 %f<")
-        out = gpu_push_i64(out, kernel.max_reg_f32)
+        out = gpu_push_i64(out, f32_count)
         out = ptx_push_str(out, ">;\n")
     }
 
-    // .reg .f64 %fd<N>
-    if kernel.max_reg_f64 > 0 {
+    // .reg .f64 %fd<N> — staging needs %fd0; post-add/cell need %fd1..%fd2.
+    var f64_count = kernel.max_reg_f64
+    if stage && f64_count < 2 { f64_count = 2 }
+    if (postadd || cell || readout || stepf64) && f64_count < 3 { f64_count = 3 }
+    if tc64 && f64_count < 14 { f64_count = 14 }
+    if matvec && f64_count < 3 { f64_count = 3 }
+    if f64_count > 0 {
         out = ptx_push_str(out, "    .reg .f64 %fd<")
-        out = gpu_push_i64(out, kernel.max_reg_f64)
+        out = gpu_push_i64(out, f64_count)
         out = ptx_push_str(out, ">;\n")
+    }
+
+    // Tensor-core m16n16k16 fragment registers (8 each): matrix_a/matrix_b packed f16 in .b32,
+    // accumulator/D in .f32. Declared only when the kernel emits a wmma tile.
+    if gpu_has_wmma_tile(kernel) {
+        out = ptx_push_str(out, "    .reg .b32 %wa<8>;\n")
+        out = ptx_push_str(out, "    .reg .b32 %wb<8>;\n")
+        out = ptx_push_str(out, "    .reg .f32 %wd<8>;\n")
+    }
+
+    // oct_batch_mul / O-SSM-cell staging scratch: b16 registers for the f16 conversion.
+    if stage || cell || matvec {
+        out = ptx_push_str(out, "    .reg .b16 %rs<2>;\n")
     }
 
     out = ptx_push_str(out, "\n")
     out
+}
+
+// Emit a fragment register group {%<pfx>0, ..., %<pfx>7}.
+fn gpu_wmma_frag8(pfx: string) -> string with Mut, Panic, Div, Alloc {
+    var s = "{"
+    var i: i64 = 0
+    while i < 8 {
+        if i > 0 { s = str_concat(s, ", ") }
+        s = str_concat(str_concat(s, pfx), i64_to_string(i))
+        i = i + 1
+    }
+    str_concat(s, "}")
+}
+
+// Does this kernel contain the oct-batch staging op?
+fn gpu_has_oct_stage(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBatchStage { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Cayley-Dickson sign σ(a,b) for e_a·e_b = σ·e_{a⊕b} (bits levels, Convention X).
+fn gpu_cd_sigma(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return gpu_cd_sigma(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return gpu_cd_sigma(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return gpu_cd_sigma(a_lo, 0, bits - 1) }
+        return 0 - gpu_cd_sigma(a_lo, b_lo, bits - 1)
+    }
+    if b_lo == 0 { return 0 - gpu_cd_sigma(0, a_lo, bits - 1) }
+    gpu_cd_sigma(b_lo, a_lo, bits - 1)
+}
+
+// Emit the oct_batch_mul staging: thread 0 builds L(a) (row-major f16) at shared[0] and stages
+// H (col-major f16) at shared[512], from octonion pointer paR (a[8], f64) and batch pointer pHR
+// (H[16*8], f64). L[k][j] = σ(k⊕j,j,3)·a[k⊕j] for k,j<8 (else 0); sH[b*16+r] = H[b*8+r] for r<8.
+// Stage L(a) + H into the shared f16 buffers for a Cayley-Dickson algebra of dimension `dim`
+// (octonion 8/bits=3, sedenion 16/bits=4). The wmma tile is always 16×16, so shared strides stay
+// 16; octonion uses the top-left 8×8 with the rest zero-filled, sedenion fills all 16×16.
+fn gpu_emit_cd_batch_stage(paR: string, pHR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    // thread-0 guard, then zero-fill both 512-byte shared halves (512 u16 total)
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $STGDONE;\n"
+    t = str_concat(t, "    mov.u16 %rs1, 0;\n    mov.u32 %r2, 0;\n    mov.u32 %r3, shared_array;\n$STGZ:\n")
+    t = str_concat(t, "    add.u32 %r4, %r3, %r2;\n    st.shared.u16 [%r4], %rs1;\n")
+    t = str_concat(t, "    add.u32 %r2, %r2, 2;\n    setp.lt.u32 %p1, %r2, 1024;\n    @%p1 bra $STGZ;\n")
+    // build L(a): dim×dim in 16×16, L[k][j] = σ(k⊕j,j,bits)·a[k⊕j]
+    var k: i64 = 0
+    while k < dim {
+        var j: i64 = 0
+        while j < dim {
+            let i = k ^ j
+            t = str_concat(str_concat(t, "    ld.global.f64 %fd0, ["), paR)
+            t = str_concat(str_concat(t, "+"), i64_to_string(i * 8))
+            t = str_concat(t, "];\n")
+            if gpu_cd_sigma(i, j, bits) < 0 { t = str_concat(t, "    neg.f64 %fd0, %fd0;\n") }
+            t = str_concat(t, "    cvt.rn.f16.f64 %rs0, %fd0;\n    st.shared.u16 [shared_array+")
+            t = str_concat(str_concat(t, i64_to_string((k * 16 + j) * 2)), "], %rs0;\n")
+            j = j + 1
+        }
+        k = k + 1
+    }
+    // stage H col-major: sH[b*16+r] = H[b*dim+r], at shared offset 512
+    var b: i64 = 0
+    while b < 16 {
+        var r: i64 = 0
+        while r < dim {
+            t = str_concat(str_concat(t, "    ld.global.f64 %fd0, ["), pHR)
+            t = str_concat(str_concat(t, "+"), i64_to_string((b * dim + r) * 8))
+            t = str_concat(t, "];\n    cvt.rn.f16.f64 %rs0, %fd0;\n    st.shared.u16 [shared_array+")
+            t = str_concat(str_concat(t, i64_to_string(512 + (b * 16 + r) * 2)), "], %rs0;\n")
+            r = r + 1
+        }
+        b = b + 1
+    }
+    t = str_concat(t, "$STGDONE:\n    bar.sync 0;\n")
+    t
+}
+
+// Does this kernel contain the O-SSM B·x post-add op?
+fn gpu_has_oct_postadd(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctPostAddBx { return true }
+        i = i + 1
+    }
+    false
+}
+
+// O-SSM linear-recurrence post-add: after the tile writes S = L(A)·H (f32, row-major) to global,
+// thread 0 adds S[k][b] += B[k]·x[b] for k<dim, b<16. B/x are f64; the accumulate is in f32.
+fn gpu_emit_oct_postadd_bx(BR: string, xR: string, SR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    // Runtime loop over idx = k*16+b (k<dim, b<16): S[idx] += B[k]·x[b]. Runtime (not unrolled) so the
+    // sedenion step (dim=16 → 256 iterations) stays well under the 64 KB PtxBuf; short literals.
+    var t = "    bar.sync 0;\n    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $PADONE;\n"
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$PAD:\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    // B[k] → %f1
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), BR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    cvt.rn.f32.f64 %f1, %fd1;\n")
+    // x[b] → %f2
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r7, 8;\n    add.s64 %rd7, "), xR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    cvt.rn.f32.f64 %f2, %fd2;\n")
+    // S[idx] += B[k]·x[b]  (idx = k*16+b = %r5)
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n    add.s64 %rd7, "), SR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f32 %f3, [%rd7];\n")
+    t = str_concat(t, "    fma.rn.f32 %f3, %f1, %f2, %f3;\n    st.global.f32 [%rd7], %f3;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $PAD;\n$PADONE:\n")
+    t
+}
+
+// Does this kernel contain the full O-SSM cell op?
+fn gpu_has_oct_cell(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctCell { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Emit one m16n16k16 tile sL·sH → sS, all in shared: A(row f16)@[shared_array],
+// B(col f16)@[shared_array+512], D(row f32)@[shared_array+1024].
+fn gpu_emit_cell_shared_tile() -> string with Mut, Panic, Div, Alloc {
+    let fa = gpu_wmma_frag8("%wa")
+    let fb = gpu_wmma_frag8("%wb")
+    let fd = gpu_wmma_frag8("%wd")
+    // wmma load/store use register shared addresses (symbol+offset misbehaves for store.d.shared).
+    var t = "    mov.u32 %r1, shared_array;\n    add.u32 %r2, %r1, 512;\n    add.u32 %r4, %r1, 1024;\n"
+    var zi: i64 = 0
+    while zi < 8 {
+        t = str_concat(str_concat(t, "    mov.f32 %wd"), i64_to_string(zi))
+        t = str_concat(t, ", 0f00000000;\n")
+        zi = zi + 1
+    }
+    t = str_concat(str_concat(t, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 "), fa)
+    t = str_concat(t, ", [%r1], 16;\n")
+    t = str_concat(str_concat(t, "    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 "), fb)
+    t = str_concat(t, ", [%r2], 16;\n")
+    t = str_concat(str_concat(t, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 "), fd)
+    t = str_concat(str_concat(str_concat(t, ", "), fa), ", ")
+    t = str_concat(str_concat(str_concat(t, fb), ", "), fd)
+    t = str_concat(t, ";\n")
+    t = str_concat(str_concat(t, "    wmma.store.d.sync.aligned.row.m16n16k16.shared.f32 [%r4], "), fd)
+    t = str_concat(t, ", 16;\n")
+    t
+}
+
+// The dim of the cell/recur op (8 octonion / 16 sedenion), for the module-scope sign table.
+fn gpu_cell_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let oc = kernel.ops[i as usize].opcode
+        if oc == GpuOpcode::GpuOctCell || oc == GpuOpcode::GpuOctRecur {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Module-scope Cayley-Dickson sign table for the O-SSM cell/recur L(m) build:
+// ossm_Lsgn[k*dim+j] = σ(k⊕j, j, bits) as f32 ±1. Emitted before the .entry.
+fn gpu_emit_cell_sign_table(dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat("    .global .align 4 .b32 ossm_Lsgn[", i64_to_string(dim * dim))
+    t = str_concat(t, "] = {")
+    var idx: i64 = 0
+    while idx < dim * dim {
+        let k = idx / dim
+        let j = idx - k * dim
+        let i = k ^ j
+        if idx > 0 { t = str_concat(t, ", ") }
+        if gpu_cd_sigma(i, j, bits) < 0 { t = str_concat(t, "0fBF800000") } else { t = str_concat(t, "0f3F800000") }
+        idx = idx + 1
+    }
+    t = str_concat(t, "};\n\n")
+    t
+}
+
+// Module-scope σ(i,j,bits) table for forming the associator product a⊗b: ossm_absgn[i*dim+j] as
+// f32 ±1. Used by the a⊗b accumulation loop (ab[i⊕j] += σ(i,j)·a[i]·b[j]). Emitted before .entry.
+fn gpu_emit_assoc_absgn_table(dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat("    .global .align 4 .b32 ossm_absgn[", i64_to_string(dim * dim))
+    t = str_concat(t, "] = {")
+    var idx: i64 = 0
+    while idx < dim * dim {
+        let i = idx / dim
+        let j = idx - i * dim
+        if idx > 0 { t = str_concat(t, ", ") }
+        if gpu_cd_sigma(i, j, bits) < 0 { t = str_concat(t, "0fBF800000") } else { t = str_concat(t, "0f3F800000") }
+        idx = idx + 1
+    }
+    t = str_concat(t, "};\n\n")
+    t
+}
+
+// Stage H (dim comps per state, col-major f16) into sH[shared_array+512] via a runtime loop, from
+// f64 pointer pHR. Same as gpu_emit_cell_hstage but with a `tag`-unique label so the associator can
+// stage H twice (tile1 L(b)·H and tile3 L(a⊗b)·H) without a duplicate $HSTG label.
+fn gpu_emit_assoc_hstage(pHR: string, dim: i64, tag: i64) -> string with Mut, Panic, Div, Alloc {
+    let sh = if dim == 16 { 4 } else { 3 }
+    var t = str_concat(str_concat("    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$AHS", i64_to_string(tag)), ":\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
+    t = str_concat(str_concat(t, ";\n    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r6, 16, %r7;\n    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(16 * dim))
+    t = str_concat(str_concat(t, ";\n    @%p1 bra $AHS"), i64_to_string(tag))
+    t = str_concat(t, ";\n")
+    t
+}
+
+// Batched hypercomplex associator [a,b,H_b] = (a⊗b)⊗H_b − a⊗(b⊗H_b) over a 16-state batch, on
+// tensor cores. Shared: sL@[0], sH@[512], sS(f32 tile out)@[1024], sR(saved r, f32)@[2048]. a⊗b is
+// formed once into the ossm_ab global (σ from ossm_absgn); the L-builds read ossm_Lsgn. THREE tiles:
+//   q = L(b)·H   →  repack q into sH  →  r = L(a)·q   →  save r to sR
+//   p = L(a⊗b)·H →  out[k*16+b] = p − r  (f32, matching the batch-mul output convention).
+// All builds/loops run on thread 0 (guarded); the wmma tiles are warp-collective (32 threads).
+// Slim driver: the associator emit is split into phase helpers to keep each Madaros stack frame
+// small (a single ~90-statement function segfaults in the lean_single-compiled emitter — the
+// "many locals across many calls" codegen limit). Thread-0 guards ($AS0..$AS2) wrap the builds;
+// the wmma tiles are warp-collective. Every str_concat literal stays short (≲90 chars).
+fn gpu_emit_oct_assoc(paR: string, pbR: string, pHR: string, poutR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    let sh = if dim == 16 { 4 } else { 3 }
+    // tile1: q = L(b)·H  (also forms a⊗b into the ossm_ab global first)
+    var t = "    mov.u32 %r1, %tid.x;\n"
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $AS0;\n")
+    t = str_concat(t, gpu_emit_assoc_ab_product(paR, pbR, dim, sh))
+    t = str_concat(t, gpu_emit_assoc_zero_shared(0, 0, 1024))
+    t = str_concat(t, gpu_emit_cell_lbuild(pbR, dim, bits, 20))
+    t = str_concat(t, gpu_emit_assoc_hstage(pHR, dim, 0))
+    t = str_concat(t, "$AS0:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // tile2: r = L(a)·q  (repack q → sH col-major, build L(a))
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $AS1;\n")
+    t = str_concat(t, gpu_emit_assoc_zero_shared(1, 512, 1024))
+    t = str_concat(t, gpu_emit_assoc_repack(dim))
+    t = str_concat(t, gpu_emit_cell_lbuild(paR, dim, bits, 21))
+    t = str_concat(t, "$AS1:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // tile3: p = L(a⊗b)·H  (save r → sR first, then build L(ab), stage H)
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $AS2;\n")
+    t = str_concat(t, gpu_emit_assoc_save_r(dim))
+    t = str_concat(t, gpu_emit_assoc_zero_shared(2, 0, 1024))
+    t = str_concat(t, "    mov.u64 %rd5, ossm_ab;\n")
+    t = str_concat(t, gpu_emit_cell_lbuild("%rd5", dim, bits, 22))
+    t = str_concat(t, gpu_emit_assoc_hstage(pHR, dim, 1))
+    t = str_concat(t, "$AS2:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // out[k*16+b] = p − r (f32), thread 0
+    t = str_concat(t, gpu_emit_assoc_subtract(poutR, dim))
+    t
+}
+
+// thread 0: form ab = a⊗b into the ossm_ab global. ab[i⊕j] += σ(i,j)·a[i]·b[j] via a runtime double
+// loop (idx=i*dim+j), reading σ(i,j) from ossm_absgn. Caller has already guarded on tid==0.
+fn gpu_emit_assoc_ab_product(paR: string, pbR: string, dim: i64, sh: i64) -> string with Mut, Panic, Div, Alloc {
+    // zero ossm_ab[0..dim]
+    var t = "    mov.u64 %rd5, ossm_ab;\n"
+    t = str_concat(t, "    mov.f64 %fd0, 0d0000000000000000;\n")
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$AZAB:\n")
+    t = str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n")
+    t = str_concat(t, "    add.s64 %rd7, %rd5, %rd7;\n")
+    t = str_concat(t, "    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim))
+    t = str_concat(t, ";\n    @%p1 bra $AZAB;\n")
+    // double loop
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$ABL:\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
+    t = str_concat(str_concat(t, ";\n    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), paR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r7, 8;\n    add.s64 %rd7, "), pbR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_absgn;\n")
+    t = str_concat(t, "    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n")
+    t = str_concat(t, "    cvt.f64.f32 %fd1, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    xor.b32 %r8, %r6, %r7;\n")
+    t = str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_ab;\n")
+    t = str_concat(t, "    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f64 %fd2, [%rd7];\n")
+    t = str_concat(t, "    add.f64 %fd2, %fd2, %fd0;\n")
+    t = str_concat(t, "    st.global.f64 [%rd7], %fd2;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim))
+    t = str_concat(t, ";\n    @%p1 bra $ABL;\n")
+    t
+}
+
+// thread 0: repack the tile output q (sS@1024, row-major f32, q[k][b]) into sH@512 as a col-major
+// f16 batch (sH[(b*16+k)]), so tile2 can consume it as B. idx 0..dim*16, k=idx>>4, b=idx&15.
+fn gpu_emit_assoc_repack(dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$ARP:\n"
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r6, 16, %r7;\n")
+    t = str_concat(t, "    mul.lo.u32 %r8, %r8, 4;\n    add.u32 %r8, %r8, 1024;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    ld.shared.f32 %f1, [%r9];\n")
+    t = str_concat(t, "    cvt.rn.f16.f32 %rs0, %f1;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r7, 16, %r6;\n")
+    t = str_concat(t, "    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $ARP;\n")
+    t
+}
+
+// thread 0: save r (sS@1024, row-major f32) to the sR scratch (shared_array+2048), so tile3's output
+// p can be subtracted against it. idx 0..dim*16 over (k*16+b)*4.
+fn gpu_emit_assoc_save_r(dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$ASV:\n"
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r6, 16, %r7;\n    mul.lo.u32 %r8, %r8, 4;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    add.u32 %r9, %r9, 1024;\n")
+    t = str_concat(t, "    ld.shared.f32 %f1, [%r9];\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    add.u32 %r9, %r9, 2048;\n")
+    t = str_concat(t, "    st.shared.f32 [%r9], %f1;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $ASV;\n")
+    t
+}
+
+// thread 0: out[k*16+b] = p (sS@1024) − r (sR@2048), stored f32 to poutR (matches the batch-mul
+// output convention). Includes its own tid==0 guard ($AS3). idx 0..dim*16 over (k*16+b)*4.
+fn gpu_emit_assoc_subtract(poutR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n"
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $AS3;\n")
+    t = str_concat(t, "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$ASUB:\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r6, 16, %r7;\n    mul.lo.u32 %r8, %r8, 4;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    add.u32 %r9, %r9, 1024;\n")
+    t = str_concat(t, "    ld.shared.f32 %f1, [%r9];\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    add.u32 %r9, %r9, 2048;\n")
+    t = str_concat(t, "    ld.shared.f32 %f2, [%r9];\n")
+    t = str_concat(t, "    sub.f32 %f3, %f1, %f2;\n")
+    t = str_concat(t, "    cvt.u64.u32 %rd7, %r8;\n")
+    t = str_concat(str_concat(t, "    add.s64 %rd7, "), poutR)
+    t = str_concat(t, ", %rd7;\n    st.global.f32 [%rd7], %f3;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $ASUB;\n")
+    t = str_concat(t, "$AS3:\n")
+    t
+}
+
+// Zero the shared region [shared_array+base .. shared_array+endb) as f16 (thread 0). `tag` names the
+// unique loop label ($AZ<tag>). Used between associator tiles to clear sL/sH padding.
+fn gpu_emit_assoc_zero_shared(tag: i64, base: i64, endb: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat("    mov.u16 %rs0, 0;\n    mov.u32 %r2, ", i64_to_string(base))
+    t = str_concat(str_concat(t, ";\n    mov.u32 %r3, shared_array;\n$AZ"), i64_to_string(tag))
+    t = str_concat(t, ":\n    add.u32 %r4, %r3, %r2;\n")
+    t = str_concat(t, "    st.shared.u16 [%r4], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r2, %r2, 2;\n    setp.lt.u32 %p1, %r2, "), i64_to_string(endb))
+    t = str_concat(str_concat(t, ";\n    @%p1 bra $AZ"), i64_to_string(tag))
+    t = str_concat(t, ";\n")
+    t
+}
+
+// ── Backward / VJP of the batched multiply D = L(a)·H ──────────────────────────────────────────
+// dH = L(a)ᵀ·dD (one transposed tensor-core tile) + da[p] = Σ_{k,b} σ(p,k⊕p)·H[k⊕p,b]·dD[k,b].
+// Split into phase helpers so each Madaros stack frame stays small (see gpu_emit_oct_assoc).
+fn gpu_emit_oct_vjp(paR: string, pHR: string, pdDR: string, pdHR: string, pdaR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    // tile: build L(a)ᵀ into sL, stage dD col-major into sH, tile → sS = L(a)ᵀ·dD = dH_tile
+    var t = "    mov.u32 %r1, %tid.x;\n"
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $VS0;\n")
+    t = str_concat(t, gpu_emit_assoc_zero_shared(5, 0, 1024))
+    t = str_concat(t, gpu_emit_cell_lbuild_t(paR, dim, bits, 30))
+    t = str_concat(t, gpu_emit_vjp_dstage(pdDR, dim))
+    t = str_concat(t, "$VS0:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: store dH (sS → pdH state-major, f32→f64) + accumulate da
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $VS1;\n")
+    t = str_concat(t, gpu_emit_vjp_store_dh(pdHR, dim))
+    t = str_concat(t, gpu_emit_vjp_da_accum(pHR, pdDR, pdaR, dim))
+    t = str_concat(t, "$VS1:\n")
+    t
+}
+
+// Build L(m)ᵀ (the TRANSPOSE of L(m)) into sL[shared_array], row-major f16. Same value as lbuild
+// (σ(k⊕j,j)·m[k⊕j]) but stored at (col*16+row) instead of (row*16+col) — used for dH = L(a)ᵀ·dD.
+fn gpu_emit_cell_lbuild_t(mR: string, dim: i64, bits: i64, tagnum: i64) -> string with Mut, Panic, Div, Alloc {
+    let sh = if dim == 16 { 4 } else { 3 }
+    var t = str_concat(str_concat("    mov.u32 %r5, 0;\n$LB", i64_to_string(tagnum)), ":\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
+    t = str_concat(t, ";\n    xor.b32 %r8, %r6, %r7;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), mR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    t = str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n")
+    t = str_concat(t, "    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n")
+    t = str_concat(t, "    cvt.f64.f32 %fd1, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mov.u32 %r3, shared_array;\n")
+    // TRANSPOSED store: dest = (col=%r7)*16 + (row=%r6)
+    t = str_concat(t, "    mad.lo.u32 %r9, %r7, 16, %r6;\n")
+    t = str_concat(t, "    mul.lo.u32 %r9, %r9, 2;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r9;\n")
+    t = str_concat(t, "    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim))
+    t = str_concat(str_concat(t, ";\n    @%p1 bra $LB"), i64_to_string(tagnum))
+    t = str_concat(t, ";\n")
+    t
+}
+
+// thread 0: stage dD (global f64, layout dD[k*16+b]) col-major f16 into sH@512: sH[(b*16+k)] =
+// dD[k*16+b]. Since k=idx>>4, b=idx&15 ⇒ k*16+b == idx, the source address is just pdDR+idx*8.
+fn gpu_emit_vjp_dstage(pdDR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$VDS:\n"
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pdDR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    t = str_concat(t, "    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r7, 16, %r6;\n")
+    t = str_concat(t, "    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $VDS;\n")
+    t
+}
+
+// thread 0: store dH from the tile output sS@1024 (row-major f32, dH_tile[j][b] at (j*16+b)==idx)
+// to pdH state-major (dH[b*dim+j]) as f64. j=idx>>4, b=idx&15.
+fn gpu_emit_vjp_store_dh(pdHR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$VSH:\n"
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    t = str_concat(t, "    mul.lo.u32 %r8, %r5, 4;\n    add.u32 %r8, %r8, 1024;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    ld.shared.f32 %f1, [%r9];\n")
+    t = str_concat(t, "    cvt.f64.f32 %fd0, %f1;\n")
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r8, %r7, "), i64_to_string(dim))
+    t = str_concat(t, ", %r6;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), pdHR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $VSH;\n")
+    t
+}
+
+// thread 0: da[p] = Σ_{k,b} σ(p,k⊕p)·H[k⊕p,b]·dD[k,b], accumulated in-place into pda (f64).
+// Flat loop idx 0..dim·dim·16: p=idx>>psh, rem=idx&(dim·16−1), k=rem>>4, b=rem&15, m=k⊕p.
+fn gpu_emit_vjp_da_accum(pHR: string, pdDR: string, pdaR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    let psh = if dim == 16 { 8 } else { 7 }
+    let remmask = dim * 16 - 1
+    // zero da[0..dim]
+    var t = "    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r5, 0;\n$VDAZ:\n"
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pdaR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim))
+    t = str_concat(t, ";\n    @%p1 bra $VDAZ;\n")
+    // accumulate
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$VDA:\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(psh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r10, %r5, "), i64_to_string(remmask))
+    t = str_concat(t, ";\n    shr.u32 %r8, %r10, 4;\n    and.b32 %r9, %r10, 15;\n")
+    t = str_concat(t, "    xor.b32 %r7, %r8, %r6;\n")
+    // H[b*dim+m]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r9, "), i64_to_string(dim))
+    t = str_concat(str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    // dD[k*16+b]
+    t = str_concat(t, "    mad.lo.u32 %r10, %r8, 16, %r9;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pdDR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    // sign absgn[p*dim+m]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r6, "), i64_to_string(dim))
+    t = str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_absgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd1, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    // da[p] +=
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pdaR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    add.f64 %fd1, %fd1, %fd0;\n    st.global.f64 [%rd7], %fd1;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $VDA;\n")
+    t
+}
+
+// ── One BPTT backward step: dHprev = L(A)ᵀ·dHt (D-layout) + dA += da(Hprev, dHt) in-place ─────────
+// Like the VJP but the recurrent gradient dHprev is written in D-layout (dHprev[k*16+b] = sS[k*16+b],
+// so it chains directly as the previous step's dHt) and dA is ACCUMULATED (no zeroing) so summing
+// across timesteps is just repeated launches. Phase-split; short literals; small stack frames.
+fn gpu_emit_oct_bwd(paR: string, pHprevR: string, pdHtR: string, pdHprevR: string, pdaR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    // tile: build L(A)ᵀ into sL, stage dHt col-major into sH, tile → sS = L(A)ᵀ·dHt
+    var t = "    mov.u32 %r1, %tid.x;\n"
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BW0;\n")
+    t = str_concat(t, gpu_emit_assoc_zero_shared(6, 0, 1024))
+    t = str_concat(t, gpu_emit_cell_lbuild_t(paR, dim, bits, 40))
+    t = str_concat(t, gpu_emit_vjp_dstage(pdHtR, dim))
+    t = str_concat(t, "$BW0:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: store dHprev (sS → pdHprev D-layout f64) + accumulate dA in-place
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BW1;\n")
+    t = str_concat(t, gpu_emit_bwd_store_dhprev(pdHprevR, dim))
+    t = str_concat(t, gpu_emit_bwd_da_accum(pHprevR, pdHtR, pdaR, dim))
+    t = str_concat(t, "$BW1:\n")
+    t
+}
+
+// thread 0: store the tile output sS@1024 (row-major f32) to pdHprev in D-layout f64 directly
+// (dHprev[idx] = sS[idx], idx 0..dim*16) — no transpose, so it chains as the next step's dHt.
+fn gpu_emit_bwd_store_dhprev(pdHprevR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$BST:\n"
+    t = str_concat(t, "    mul.lo.u32 %r8, %r5, 4;\n    add.u32 %r8, %r8, 1024;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    ld.shared.f32 %f1, [%r9];\n")
+    t = str_concat(t, "    cvt.f64.f32 %fd0, %f1;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pdHprevR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $BST;\n")
+    t
+}
+
+// thread 0: dA[p] += Σ_{k,b} σ(p,k⊕p)·Hprev[k⊕p,b]·dHt[k,b], accumulated IN-PLACE (no zeroing — the
+// harness zeroes dA once before the backward loop, then sums across timesteps via repeated launches).
+fn gpu_emit_bwd_da_accum(pHR: string, pdDR: string, pdaR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    let psh = if dim == 16 { 8 } else { 7 }
+    let remmask = dim * 16 - 1
+    var t = "    mov.u32 %r5, 0;\n$BDA:\n"
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(psh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r10, %r5, "), i64_to_string(remmask))
+    t = str_concat(t, ";\n    shr.u32 %r8, %r10, 4;\n    and.b32 %r9, %r10, 15;\n")
+    t = str_concat(t, "    xor.b32 %r7, %r8, %r6;\n")
+    // Hprev[b*dim+m]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r9, "), i64_to_string(dim))
+    t = str_concat(str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    // dHt[k*16+b]
+    t = str_concat(t, "    mad.lo.u32 %r10, %r8, 16, %r9;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pdDR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    // sign absgn[p*dim+m]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r6, "), i64_to_string(dim))
+    t = str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_absgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd1, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    // dA[p] +=
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pdaR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    add.f64 %fd1, %fd1, %fd0;\n    st.global.f64 [%rd7], %fd1;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $BDA;\n")
+    t
+}
+
+// ── NONLINEAR BPTT backward step: dS = dHt ⊙ σ'(S), then dHprev = L(A)ᵀ·dS + dA += da(Hprev, dS) ──
+// σ'(s) = (3/64)s² + 1/4 (derivative of the cubic sigmoid). The pre-activation S is applied on the
+// fly inside the dS-staging and da-accumulation loops (no scratch buffer). Trains h_t=σ(A⊗h+B·x).
+fn gpu_emit_oct_bwd_nl(paR: string, pHprevR: string, pdHtR: string, pSR: string, pdHprevR: string, pdaR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    // tile: build L(A)ᵀ into sL, stage dS = dHt⊙σ'(S) col-major into sH, tile → sS = L(A)ᵀ·dS
+    var t = "    mov.u32 %r1, %tid.x;\n"
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BN0;\n")
+    t = str_concat(t, gpu_emit_assoc_zero_shared(7, 0, 1024))
+    t = str_concat(t, gpu_emit_cell_lbuild_t(paR, dim, bits, 50))
+    t = str_concat(t, gpu_emit_nl_dstage(pdHtR, pSR, dim))
+    t = str_concat(t, "$BN0:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: store dHprev (D-layout f64) + accumulate dA in-place (with σ' applied)
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BN1;\n")
+    t = str_concat(t, gpu_emit_bwd_store_dhprev(pdHprevR, dim))
+    t = str_concat(t, gpu_emit_nl_da_accum(pHprevR, pdHtR, pSR, pdaR, dim))
+    t = str_concat(t, "$BN1:\n")
+    t
+}
+
+// thread 0: stage dS = dHt ⊙ σ'(S) (col-major f16) into sH@512. dHt, S are D-layout [k*16+b]==idx;
+// σ'(s) = (3/64)s² + 1/4 (0d3FA8000000000000, 0d3FD0000000000000). k=idx>>4, b=idx&15.
+fn gpu_emit_nl_dstage(pdHtR: string, pSR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$NDS:\n"
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pdHtR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pSR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    mul.f64 %fd2, %fd1, %fd1;\n")
+    t = str_concat(t, "    mul.f64 %fd2, %fd2, 0d3FA8000000000000;\n")
+    t = str_concat(t, "    add.f64 %fd2, %fd2, 0d3FD0000000000000;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd2;\n    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r7, 16, %r6;\n")
+    t = str_concat(t, "    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $NDS;\n")
+    t
+}
+
+// thread 0: dA[p] += Σ_{k,b} σ(p,k⊕p)·Hprev[k⊕p,b]·dS[k,b], dS[k,b] = dHt[k,b]·σ'(S[k,b]). In-place.
+fn gpu_emit_nl_da_accum(pHR: string, pdHtR: string, pSR: string, pdaR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    let psh = if dim == 16 { 8 } else { 7 }
+    let remmask = dim * 16 - 1
+    var t = "    mov.u32 %r5, 0;\n$NDA:\n"
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(psh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r10, %r5, "), i64_to_string(remmask))
+    t = str_concat(t, ";\n    shr.u32 %r8, %r10, 4;\n    and.b32 %r9, %r10, 15;\n")
+    t = str_concat(t, "    xor.b32 %r7, %r8, %r6;\n")
+    // Hprev[b*dim+m] → %fd0
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r9, "), i64_to_string(dim))
+    t = str_concat(str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    // dHt[k*16+b] → %fd1 ; S[k*16+b] → %fd2 → σ'(S)
+    t = str_concat(t, "    mad.lo.u32 %r10, %r8, 16, %r9;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pdHtR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pSR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n")
+    t = str_concat(t, "    mul.f64 %fd2, %fd2, %fd2;\n")
+    t = str_concat(t, "    mul.f64 %fd2, %fd2, 0d3FA8000000000000;\n")
+    t = str_concat(t, "    add.f64 %fd2, %fd2, 0d3FD0000000000000;\n")
+    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n")   // dS = dHt·σ'
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")   // Hprev·dS
+    // sign absgn[p*dim+m]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r6, "), i64_to_string(dim))
+    t = str_concat(t, ", %r7;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_absgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd2;\n")   // σ·Hprev·dS
+    // dA[p] +=
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pdaR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(t, "    add.f64 %fd1, %fd1, %fd0;\n    st.global.f64 [%rd7], %fd1;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $NDA;\n")
+    t
+}
+
+// Build L(m) (row-major f16, σ(k⊕j,j,bits)·m[k⊕j], dim×dim in the 16×16 tile) into sL[shared_array]
+// from the f64 pointer mR, via a RUNTIME loop reading the ossm_Lsgn sign table (so the sedenion
+// dim=16 build — 256 entries — stays under the 64 KB PtxBuf). `tag` makes the loop label unique.
+fn gpu_emit_cell_lbuild(mR: string, dim: i64, bits: i64, tagnum: i64) -> string with Mut, Panic, Div, Alloc {
+    // Short string-literal chunks per str_concat: Madaros mangles/aborts on literals ≳120 chars.
+    let sh = if dim == 16 { 4 } else { 3 }
+    var t = str_concat(str_concat("    mov.u32 %r5, 0;\n$LB", i64_to_string(tagnum)), ":\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
+    t = str_concat(t, ";\n    xor.b32 %r8, %r6, %r7;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), mR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    t = str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n")
+    t = str_concat(t, "    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n")
+    t = str_concat(t, "    cvt.f64.f32 %fd1, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mov.u32 %r3, shared_array;\n")
+    t = str_concat(t, "    mad.lo.u32 %r9, %r6, 16, %r7;\n")
+    t = str_concat(t, "    mul.lo.u32 %r9, %r9, 2;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r9;\n")
+    t = str_concat(t, "    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim))
+    t = str_concat(str_concat(t, ";\n    @%p1 bra $LB"), i64_to_string(tagnum))
+    t = str_concat(t, ";\n")
+    t
+}
+
+// Stage H (dim components per state, col-major f16) into sH[shared_array+512] via a runtime loop,
+// from f64 pointer pHR. idx runs 0..(16*dim) over the source layout H[b*dim+r]; dest sH[b*16+r].
+// Runtime (not unrolled) so the sedenion cell/recur (dim=16) stays under the 64 KB PtxBuf.
+fn gpu_emit_cell_hstage(pHR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    let sh = if dim == 16 { 4 } else { 3 }
+    var t = "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$HSTG:\n"
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
+    t = str_concat(str_concat(t, ";\n    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r6, 16, %r7;\n    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(16 * dim))
+    t = str_concat(t, ";\n    @%p1 bra $HSTG;\n")
+    t
+}
+
+// Full O-SSM octonion cell (one timestep): y = Re(C⊗sigmoid(A⊗h_prev + B·x)).
+// Shared: sL@[0], sH@[512], sS(f32)@[1024]. Cubic sigmoid = (1/64)s³ + (1/4)s + 1/2.
+fn gpu_emit_oct_cell(pAR: string, pBR: string, pxR: string, pCR: string, pHR: string, pyR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    // thread 0: zero sL+sH, build L(A), stage H col-major
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $CELL1;\n"
+    t = str_concat(t, "    mov.u16 %rs1, 0;\n    mov.u32 %r2, 0;\n    mov.u32 %r3, shared_array;\n$CZ:\n")
+    t = str_concat(t, "    add.u32 %r4, %r3, %r2;\n    st.shared.u16 [%r4], %rs1;\n")
+    t = str_concat(t, "    add.u32 %r2, %r2, 2;\n    setp.lt.u32 %p1, %r2, 1024;\n    @%p1 bra $CZ;\n")
+    t = str_concat(t, gpu_emit_cell_lbuild(pAR, dim, bits, 0))
+    t = str_concat(t, gpu_emit_cell_hstage(pHR, dim))
+    // tile1: S = L(A)·H → sS
+    t = str_concat(t, "$CELL1:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: h = sigmoid(S + B·x) → sH col-major (f16). Runtime loop over idx=k*16+b (k<8,b<16)
+    // to keep the emitted PTX small (the unrolled form overflows the 64 KB PtxBuf).
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $CELL2;\n")
+    t = str_concat(t, "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$CSIG:\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")  // k, b
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pBR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    cvt.rn.f32.f64 %f1, %fd1;\n")  // B[k]
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r7, 8;\n    add.s64 %rd7, "), pxR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    cvt.rn.f32.f64 %f2, %fd2;\n")  // x[b]
+    // S at shared_array + 1024 + (k*16+b)*4
+    t = str_concat(t, "    mad.lo.u32 %r8, %r6, 16, %r7;\n    mul.lo.u32 %r8, %r8, 4;\n    add.u32 %r8, %r8, 1024;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    ld.shared.f32 %f3, [%r9];\n")
+    t = str_concat(t, "    fma.rn.f32 %f3, %f1, %f2, %f3;\n")
+    // cubic sigmoid
+    t = str_concat(t, "    mul.f32 %f4, %f3, %f3;\n    mul.f32 %f5, %f4, %f3;\n")
+    t = str_concat(t, "    fma.rn.f32 %f6, %f3, 0f3E800000, 0f3F000000;\n")
+    t = str_concat(t, "    fma.rn.f32 %f3, %f5, 0f3C800000, %f6;\n    cvt.rn.f16.f32 %rs0, %f3;\n")
+    // h into sH col-major at 512 + (b*16+k)*2
+    t = str_concat(t, "    mad.lo.u32 %r8, %r7, 16, %r6;\n    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, ")
+    t = str_concat(str_concat(t, i64_to_string(dim * 16)), ";\n    @%p1 bra $CSIG;\n")
+    // thread 0: build L(C) into sL (padding stays zero from the initial clear)
+    t = str_concat(t, gpu_emit_cell_lbuild(pCR, dim, bits, 1))
+    t = str_concat(t, "$CELL2:\n    bar.sync 0;\n")
+    // tile2: CH = L(C)·h → sS
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: y[b] = Re(CH) = sS row 0
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $CELL3;\n")
+    var yb: i64 = 0
+    while yb < 16 {
+        t = str_concat(t, "    ld.shared.f32 %f1, [shared_array+")
+        t = str_concat(str_concat(t, i64_to_string(1024 + yb * 4)), "];\n    st.global.f32 [")
+        t = str_concat(str_concat(t, pyR), "+")
+        t = str_concat(str_concat(t, i64_to_string(yb * 4)), "], %f1;\n")
+        yb = yb + 1
+    }
+    t = str_concat(t, "$CELL3:\n")
+    t
+}
+
+// Does this kernel contain the O-SSM T-recurrence op?
+fn gpu_has_oct_recur(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctRecur { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Does this kernel contain the batched associator op?
+fn gpu_has_oct_assoc(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctAssoc { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the associator op (8 octonion / 16 sedenion), for the module-scope sign tables.
+fn gpu_assoc_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctAssoc {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Does this kernel contain the associator VJP-w.r.t.-H op?
+fn gpu_has_oct_assoc_bwd_dh(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctAssocBwdDh { return true }
+        i = i + 1
+    }
+    false
+}
+
+// dim of the associator forward OR its VJP-w.r.t.-H (for the shared sign tables + ossm_ab scratch).
+fn gpu_assoc_dim2(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        let oc = kernel.ops[i as usize].opcode
+        if oc == GpuOpcode::GpuOctAssoc || oc == GpuOpcode::GpuOctAssocBwdDh {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// thread 0: stage dD (D-layout [k*16+b]) col-major f16 into sH@512, like gpu_emit_vjp_dstage but with a
+// `tag`-unique label so the associator-VJP can stage dD twice (for the L(a)ᵀ and L(a⊗b)ᵀ tiles).
+fn gpu_emit_assoc_dstage(pdDR: string, dim: i64, tag: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = str_concat(str_concat("    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$ADS", i64_to_string(tag)), ":\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pdDR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r7, 16, %r6;\n    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(str_concat(t, ";\n    @%p1 bra $ADS"), i64_to_string(tag))
+    t = str_concat(t, ";\n")
+    t
+}
+
+// VJP of the batched associator w.r.t. its input H: given dD, dH = L(a⊗b)ᵀ·dD − L(b)ᵀ·(L(a)ᵀ·dD).
+// Mirrors gpu_emit_oct_assoc but with transposed L-builds (lbuild_t), the a↔b order swapped (transpose
+// reverses composition), and dD (D-layout) staged col-major. tile1: t2=L(a)ᵀ·dD; tile2: t3=L(b)ᵀ·t2;
+// tile3: t1=L(a⊗b)ᵀ·dD; then dH = t1 − t3.
+fn gpu_emit_oct_assoc_bwd_dh(paR: string, pbR: string, pdDR: string, pdHR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    let sh = if dim == 16 { 4 } else { 3 }
+    // tile1: t2 = L(a)ᵀ·dD  (form a⊗b into ossm_ab first, for tile3)
+    var t = "    mov.u32 %r1, %tid.x;\n"
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BH0;\n")
+    t = str_concat(t, gpu_emit_assoc_ab_product(paR, pbR, dim, sh))
+    t = str_concat(t, gpu_emit_assoc_zero_shared(0, 0, 1024))
+    t = str_concat(t, gpu_emit_cell_lbuild_t(paR, dim, bits, 60))
+    t = str_concat(t, gpu_emit_assoc_dstage(pdDR, dim, 0))
+    t = str_concat(t, "$BH0:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // tile2: t3 = L(b)ᵀ·t2  (repack t2 → sH col-major, build L(b)ᵀ)
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BH1;\n")
+    t = str_concat(t, gpu_emit_assoc_zero_shared(1, 512, 1024))
+    t = str_concat(t, gpu_emit_assoc_repack(dim))
+    t = str_concat(t, gpu_emit_cell_lbuild_t(pbR, dim, bits, 61))
+    t = str_concat(t, "$BH1:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // tile3: t1 = L(a⊗b)ᵀ·dD  (save t3 → sR first, build L(P)ᵀ from ossm_ab, stage dD)
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n")
+    t = str_concat(t, "    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BH2;\n")
+    t = str_concat(t, gpu_emit_assoc_save_r(dim))
+    t = str_concat(t, gpu_emit_assoc_zero_shared(2, 0, 1024))
+    t = str_concat(t, "    mov.u64 %rd5, ossm_ab;\n")
+    t = str_concat(t, gpu_emit_cell_lbuild_t("%rd5", dim, bits, 62))
+    t = str_concat(t, gpu_emit_assoc_dstage(pdDR, dim, 1))
+    t = str_concat(t, "$BH2:\n    bar.sync 0;\n")
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // dH = t1 − t3 (f32), thread 0
+    t = str_concat(t, gpu_emit_assoc_subtract(pdHR, dim))
+    t
+}
+
+// Does this kernel contain the VJP/backward op?
+fn gpu_has_oct_vjp(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctVjp { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the VJP op (8 octonion / 16 sedenion), for the module-scope sign tables.
+fn gpu_vjp_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctVjp {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Does this kernel contain the BPTT backward-step op?
+fn gpu_has_oct_bwd(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBwd { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the BPTT backward-step op (8 octonion / 16 sedenion), for the module-scope sign tables.
+fn gpu_bwd_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBwd {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Does this kernel contain the NONLINEAR BPTT backward-step op?
+fn gpu_has_oct_bwd_nl(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBwdNl { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the nonlinear BPTT backward-step op (8 octonion / 16 sedenion).
+fn gpu_bwd_nl_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBwdNl {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Does this kernel contain the real-readout op?
+fn gpu_has_oct_readout(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctReadout { return true }
+        i = i + 1
+    }
+    false
+}
+
+// Does this kernel contain the full-f64 step op?
+fn gpu_has_oct_step_f64(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctStepF64 { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the full-f64 step op (8 octonion / 16 sedenion), for the module-scope sign table.
+fn gpu_step_f64_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctStepF64 {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// FULL-f64 O-SSM step S[k,b] = Σ_j σ(k⊕j,j)·A[k⊕j]·H[b*dim+j] + B[k]·x[b], computed entirely in f64
+// (no f16 tile) → EXACT forward. thread 0, nested runtime loops: outer idx=k*16+b, inner j. σ(k⊕j,j)
+// read at runtime from ossm_Lsgn[k*dim+j]. Output S is f64 D-layout [k*16+b].
+fn gpu_emit_oct_step_f64(pAR: string, pBR: string, pxR: string, pHR: string, poutR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $F64DONE;\n"
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$F64B:\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")   // k=%r6, b=%r7
+    // acc = B[k]·x[b]
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pBR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r7, 8;\n    add.s64 %rd7, "), pxR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    mul.f64 %fd0, %fd1, %fd2;\n")
+    // inner: for j in 0..dim: acc += σ(k⊕j,j)·A[k⊕j]·H[b*dim+j]
+    t = str_concat(t, "    mov.u32 %r8, 0;\n$F64J:\n")
+    t = str_concat(t, "    xor.b32 %r9, %r6, %r8;\n")   // i = k⊕j
+    // A[i]
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), pAR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n")
+    // H[b*dim+j]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r7, "), i64_to_string(dim))
+    t = str_concat(str_concat(t, ", %r8;\n    mul.wide.u32 %rd7, %r10, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
+    // σ = ossm_Lsgn[k*dim+j]
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r6, "), i64_to_string(dim))
+    t = str_concat(t, ", %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, "), i64_to_string(dim))
+    t = str_concat(t, ";\n    @%p1 bra $F64J;\n")
+    // store S[k*16+b]
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), poutR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * 16))
+    t = str_concat(t, ";\n    @%p1 bra $F64B;\n$F64DONE:\n")
+    t
+}
+
+// Does this kernel contain the f64 tensor-core batched-multiply op?
+fn gpu_has_oct_batch_f64(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBatchF64 { return true }
+        i = i + 1
+    }
+    false
+}
+
+// The dim of the f64 tensor-core tile op (8 octonion / 16 sedenion), for the module-scope sign table.
+fn gpu_batch_f64_dim(kernel: GpuKernelIr) -> i64 {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctBatchF64 {
+            if kernel.ops[i as usize].rhs_imm == 16 { return 16 }
+            return 8
+        }
+        i = i + 1
+    }
+    8
+}
+
+// Does this kernel contain the hypercomplex matrix-vector (real-capacity) op?
+fn gpu_has_oct_matvec(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuOctMatvec { return true }
+        i = i + 1
+    }
+    false
+}
+
+// One output m-tile of the block-L matmul: fd = Σ_kc A_big[mt,kc]·H_big[kc], stored to pout (D-layout).
+// A_big row-major f16 @ sL[0] (ldm=N); H_big col-major f16 @ sL[sHoff] (ldm=N). f16 m16n16k16 tiles.
+fn gpu_emit_matvec_mtile(poutR: string, mt: i64, dh: i64, ntiles: i64) -> string with Mut, Panic, Div, Alloc {
+    let nn = dh * 8
+    let shoff = nn * nn * 2
+    let fa = gpu_wmma_frag8("%wa")
+    let fb = gpu_wmma_frag8("%wb")
+    let fd = gpu_wmma_frag8("%wd")
+    var t = ""
+    var zi: i64 = 0
+    while zi < 8 {
+        t = str_concat(str_concat(t, "    mov.f32 %wd"), i64_to_string(zi))
+        t = str_concat(t, ", 0f00000000;\n")
+        zi = zi + 1
+    }
+    var kc: i64 = 0
+    while kc < ntiles {
+        // A_big[mt*16 rows, kc*16 cols]: shared byte offset (mt*16*N + kc*16)*2
+        t = str_concat(str_concat(t, "    mov.u32 %r1, shared_array;\n    add.u32 %r1, %r1, "), i64_to_string((mt * 16 * nn + kc * 16) * 2))
+        t = str_concat(str_concat(t, ";\n    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 "), fa)
+        t = str_concat(str_concat(t, ", [%r1], "), i64_to_string(nn))
+        t = str_concat(t, ";\n")
+        // H_big[kc*16 rows, 16 cols]: shared byte offset shoff + kc*16*2
+        t = str_concat(str_concat(t, "    mov.u32 %r2, shared_array;\n    add.u32 %r2, %r2, "), i64_to_string(shoff + kc * 16 * 2))
+        t = str_concat(str_concat(t, ";\n    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 "), fb)
+        t = str_concat(str_concat(t, ", [%r2], "), i64_to_string(nn))
+        t = str_concat(t, ";\n")
+        t = str_concat(t, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+        t = str_concat(str_concat(str_concat(t, fd), ", "), fa)
+        t = str_concat(str_concat(str_concat(t, ", "), fb), ", ")
+        t = str_concat(str_concat(t, fd), ";\n")
+        kc = kc + 1
+    }
+    // store D[mt*16 rows, 16 cols] → pout D-layout [comp*16+b], ldm=16, base = pout + (mt*16*16)*4
+    t = str_concat(str_concat(t, "    add.s64 %rd7, "), poutR)
+    t = str_concat(str_concat(t, ", "), i64_to_string(mt * 16 * 16 * 4))
+    t = str_concat(str_concat(t, ";\n    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [%rd7], "), fd)
+    t = str_concat(t, ", 16;\n")
+    t
+}
+
+// Hypercomplex MATRIX-vector on tensor cores (real capacity): H_out[i] = Σ_j A[i][j]⊗H[j] over D_h
+// octonion channels, as the dense block-left-mult matmul A_big(N×N)·H_big(N×16), N=D_h·8. Thread 0
+// builds A_big (σ(k⊕l,l)·A[i][j][k⊕l], f16 row-major in shared) and stages H_big (f16), then the warp
+// runs (N/16)² m16n16k16 tiles. σ from ossm_Lsgn[k*8+l]. Output f32 D-layout [comp*16+batch].
+fn gpu_emit_oct_matvec(pAR: string, pHR: string, poutR: string, dh: i64) -> string with Mut, Panic, Div, Alloc {
+    let nn = dh * 8
+    let shiftn = if dh == 16 { 7 } else { 6 }
+    let shoff = nn * nn * 2
+    let ntiles = dh / 2
+    // thread 0: build A_big f16 row-major into sL[0]
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $MV0;\n"
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$MVA:\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(shiftn))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(nn - 1))
+    t = str_concat(t, ";\n    shr.u32 %r8, %r6, 3;\n    and.b32 %r9, %r6, 7;\n")   // i=row/8, k=row%8
+    t = str_concat(t, "    shr.u32 %r10, %r7, 3;\n    and.b32 %r7, %r7, 7;\n")     // j=col/8, l=col%8
+    t = str_concat(t, "    xor.b32 %r6, %r9, %r7;\n")                              // m = k⊕l
+    // a_idx = i*N + j*8 + m
+    t = str_concat(str_concat(t, "    mad.lo.u32 %r11, %r8, "), i64_to_string(nn))
+    t = str_concat(t, ", %r6;\n    mad.lo.u32 %r11, %r10, 8, %r11;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r11, 8;\n    add.s64 %rd7, "), pAR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    // σ = ossm_Lsgn[k*8+l]
+    t = str_concat(t, "    mad.lo.u32 %r11, %r9, 8, %r7;\n    mul.wide.u32 %rd7, %r11, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd1, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd0, %fd0, %fd1;\n    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(t, "    mov.u32 %r11, shared_array;\n    mul.lo.u32 %r6, %r5, 2;\n    add.u32 %r11, %r11, %r6;\n")
+    t = str_concat(t, "    st.shared.u16 [%r11], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(nn * nn))
+    t = str_concat(t, ";\n    @%p1 bra $MVA;\n")
+    // thread 0: stage H_big f16 into sL[shoff]  (same [b*N+cc] layout)
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$MVH:\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r5, 8;\n    add.s64 %rd7, "), pHR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n    cvt.rn.f16.f64 %rs0, %fd0;\n")
+    t = str_concat(str_concat(t, "    mov.u32 %r11, shared_array;\n    add.u32 %r11, %r11, "), i64_to_string(shoff))
+    t = str_concat(t, ";\n    mul.lo.u32 %r6, %r5, 2;\n    add.u32 %r11, %r11, %r6;\n    st.shared.u16 [%r11], %rs0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(nn * 16))
+    t = str_concat(t, ";\n    @%p1 bra $MVH;\n$MV0:\n    bar.sync 0;\n")
+    // warp-collective: (N/16) output m-tiles, each accumulating (N/16) k-chunks
+    var mt: i64 = 0
+    while mt < ntiles {
+        t = str_concat(t, gpu_emit_matvec_mtile(poutR, mt, dh, ntiles))
+        mt = mt + 1
+    }
+    t
+}
+
+// Batched hypercomplex multiply D = L(a)·H on F64 TENSOR CORES (wmma m8n8k4.f64). L(a) (σ(k⊕j,j)·a[k⊕j])
+// is built f64 row-major into sL[shared]; H is loaded col-major directly from the global batch pointer
+// (its state-major layout [state*dim+comp] already matches a col-major B). D(dim×16) is computed as
+// (dim/8) m-tiles × 2 n-tiles × (dim/4) k-chunks of m8n8k4; each (m,n) tile accumulates its k-chunks in
+// the f64 fragment {%fd10,%fd11} then stores to pout (D-layout [comp*16+state]).
+fn gpu_emit_oct_batch_f64(paR: string, pHR: string, poutR: string, dim: i64, bits: i64, transpose: bool, grid: bool) -> string with Mut, Panic, Div, Alloc {
+    let sh = if dim == 16 { 4 } else { 3 }
+    // grid: each block processes one independent problem — offset the pointers by %ctaid.x. a[dim],
+    // H[16*dim], D[256] per problem (all f64). The whole warp of each block runs its own tile.
+    var t = ""
+    if grid {
+        t = str_concat(t, "    mov.u32 %r2, %ctaid.x;\n")
+        t = str_concat(str_concat(t, "    mov.u32 %r3, "), i64_to_string(dim * 8))
+        t = str_concat(str_concat(t, ";\n    mul.wide.u32 %rd3, %r2, %r3;\n    add.s64 %rd3, "), paR)
+        t = str_concat(t, ", %rd3;\n")
+        t = str_concat(str_concat(t, "    mov.u32 %r3, "), i64_to_string(16 * dim * 8))
+        t = str_concat(str_concat(t, ";\n    mul.wide.u32 %rd4, %r2, %r3;\n    add.s64 %rd4, "), pHR)
+        t = str_concat(t, ", %rd4;\n")
+        t = str_concat(t, "    mov.u32 %r3, 2048;\n    mul.wide.u32 %rd5, %r2, %r3;\n    add.s64 %rd5, ")
+        t = str_concat(t, poutR)
+        t = str_concat(t, ", %rd5;\n")
+    }
+    let aR = if grid { "%rd3" } else { paR }
+    let hR = if grid { "%rd4" } else { pHR }
+    let oR = if grid { "%rd5" } else { poutR }
+    // thread 0: build L(a) f64 into sL[shared_array]. Normal: sL[k*dim+j] = σ(k⊕j,j)·a[k⊕j] (row-major).
+    // Transpose: sL[j*dim+k] = same value → L(a)ᵀ, so the tile computes L(a)ᵀ·B (the BPTT backward).
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $BF0;\n")
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$BFL:\n")
+    t = str_concat(str_concat(t, "    shr.u32 %r6, %r5, "), i64_to_string(sh))
+    t = str_concat(str_concat(t, ";\n    and.b32 %r7, %r5, "), i64_to_string(dim - 1))
+    t = str_concat(t, ";\n    xor.b32 %r8, %r6, %r7;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), aR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd0, [%rd7];\n")
+    t = str_concat(t, "    mul.wide.u32 %rd7, %r5, 4;\n    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd1, %f0;\n    mul.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    mov.u32 %r9, shared_array;\n")
+    if transpose {
+        // dest = (j*dim + k) = %r7*dim + %r6
+        t = str_concat(str_concat(t, "    mad.lo.u32 %r10, %r7, "), i64_to_string(dim))
+        t = str_concat(t, ", %r6;\n    mul.lo.u32 %r10, %r10, 8;\n")
+    } else {
+        t = str_concat(t, "    mul.lo.u32 %r10, %r5, 8;\n")
+    }
+    t = str_concat(t, "    add.u32 %r9, %r9, %r10;\n")
+    t = str_concat(t, "    st.shared.f64 [%r9], %fd0;\n")
+    t = str_concat(str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, "), i64_to_string(dim * dim))
+    t = str_concat(t, ";\n    @%p1 bra $BFL;\n$BF0:\n    bar.sync 0;\n")
+    // warp-collective: (dim/8) m-tiles × 2 n-tiles, each accumulating (dim/4) k-chunks of m8n8k4
+    let mtiles = dim / 8
+    let kchunks = dim / 4
+    var mt: i64 = 0
+    while mt < mtiles {
+        var nt: i64 = 0
+        while nt < 2 {
+            t = str_concat(t, gpu_emit_f64_mma_block(hR, oR, mt, nt, dim, kchunks))
+            nt = nt + 1
+        }
+        mt = mt + 1
+    }
+    t
+}
+
+// One (mt,nt) output tile: fd=0; accumulate kchunks m8n8k4 f64 mma; store D(8×8) to pout D-layout.
+fn gpu_emit_f64_mma_block(pHR: string, poutR: string, mt: i64, nt: i64, dim: i64, kchunks: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.f64 %fd10, 0d0000000000000000;\n    mov.f64 %fd11, 0d0000000000000000;\n"
+    var kc: i64 = 0
+    while kc < kchunks {
+        // A: sL 8×4 slice at (mt*8, kc*4), row-major ldm=dim → shared byte addr = (mt*8*dim + kc*4)*8
+        t = str_concat(str_concat(t, "    mov.u32 %r1, shared_array;\n    add.u32 %r1, %r1, "), i64_to_string((mt * 8 * dim + kc * 4) * 8))
+        t = str_concat(str_concat(t, ";\n    wmma.load.a.sync.aligned.row.m8n8k4.shared.f64 {%fd12}, [%r1], "), i64_to_string(dim))
+        t = str_concat(t, ";\n")
+        // B: H 4×8 slice at (kc*4, nt*8), col-major ldm=dim → global byte addr = (nt*8*dim + kc*4)*8
+        t = str_concat(str_concat(t, "    add.s64 %rd7, "), pHR)
+        t = str_concat(str_concat(t, ", "), i64_to_string((nt * 8 * dim + kc * 4) * 8))
+        t = str_concat(str_concat(t, ";\n    wmma.load.b.sync.aligned.col.m8n8k4.f64 {%fd13}, [%rd7], "), i64_to_string(dim))
+        t = str_concat(t, ";\n")
+        // mma accumulate
+        t = str_concat(t, "    wmma.mma.sync.aligned.row.col.m8n8k4.f64.f64.f64.f64.rn ")
+        t = str_concat(t, "{%fd10,%fd11}, {%fd12}, {%fd13}, {%fd10,%fd11};\n")
+        kc = kc + 1
+    }
+    // store D(8×8) at (mt*8 comps, nt*8 states) → pout D-layout [comp*16+state], ldm=16
+    t = str_concat(str_concat(t, "    add.s64 %rd7, "), poutR)
+    t = str_concat(str_concat(t, ", "), i64_to_string((mt * 8 * 16 + nt * 8) * 8))
+    t = str_concat(t, ";\n    wmma.store.d.sync.aligned.row.m8n8k4.f64 [%rd7], {%fd10,%fd11}, 16;\n")
+    t
+}
+
+// O-SSM real readout y[b] = Re(C⊗h)[b] = Σ_p σ(p,p)·C[p]·h[p,b], thread 0. σ(p,p)=+1 for p=0, −1 for
+// p≥1, so y[b] = C[0]·h[0,b] − Σ_{p≥1} C[p]·h[p,b]. h is D-layout [p*16+b]; the p-stride is 16*8=128
+// bytes (immediate offsets, p unrolled). b runs 0..16 as a runtime loop. CR/HR/yR are the pointers.
+fn gpu_emit_oct_readout(CR: string, HR: string, yR: string, dim: i64) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $RDONE;\n"
+    t = str_concat(t, "    mov.u32 %r5, 0;\n$RB:\n")
+    // %rd7 = HR + b*8  (base for h[p,b], p-stride +128)
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd6, %r5, 8;\n    add.s64 %rd7, "), HR)
+    t = str_concat(t, ", %rd6;\n")
+    // p=0: acc = C[0]·h[0,b]
+    t = str_concat(str_concat(t, "    ld.global.f64 %fd1, ["), CR)
+    t = str_concat(t, "];\n    ld.global.f64 %fd2, [%rd7];\n    mul.f64 %fd0, %fd1, %fd2;\n")
+    // p=1..dim-1: acc -= C[p]·h[p,b]  (immediate offsets p*8 on C, p*128 on h)
+    var p: i64 = 1
+    while p < dim {
+        t = str_concat(str_concat(t, "    ld.global.f64 %fd1, ["), CR)
+        t = str_concat(str_concat(t, "+"), i64_to_string(p * 8))
+        t = str_concat(t, "];\n")
+        t = str_concat(str_concat(t, "    ld.global.f64 %fd2, [%rd7+"), i64_to_string(p * 128))
+        t = str_concat(t, "];\n    mul.f64 %fd1, %fd1, %fd2;\n    sub.f64 %fd0, %fd0, %fd1;\n")
+        p = p + 1
+    }
+    // y[b] = acc
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd6, %r5, 8;\n    add.s64 %rd7, "), yR)
+    t = str_concat(t, ", %rd6;\n    st.global.f64 [%rd7], %fd0;\n")
+    t = str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, 16;\n    @%p1 bra $RB;\n$RDONE:\n")
+    t
+}
+
+// O-SSM recurrence over T timesteps. H0 staged once into sH; then a runtime loop over t<T:
+// h_t = sigmoid(A⊗h_{t-1} + B·x_t) (tile1 + post-add + cubic sigmoid → sH col-major),
+// y_t = Re(C⊗h_t) (tile2 → sS row 0). x_t at px[(t*16+b)], y_t at py[(t*16+b)]. TR = T register.
+fn gpu_emit_oct_recur(pAR: string, pBR: string, pxR: string, pCR: string, pHR: string, pyR: string, TR: string, dim: i64, bits: i64) -> string with Mut, Panic, Div, Alloc {
+    // thread 0: zero sL+sH, stage H0 col-major into sH
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $RINIT;\n"
+    t = str_concat(t, "    mov.u16 %rs1, 0;\n    mov.u32 %r2, 0;\n    mov.u32 %r3, shared_array;\n$RZ:\n")
+    t = str_concat(t, "    add.u32 %r4, %r3, %r2;\n    st.shared.u16 [%r4], %rs1;\n")
+    t = str_concat(t, "    add.u32 %r2, %r2, 2;\n    setp.lt.u32 %p1, %r2, 1024;\n    @%p1 bra $RZ;\n")
+    t = str_concat(t, gpu_emit_cell_hstage(pHR, dim))
+    // T bound in %r10, timestep t in %r11
+    t = str_concat(str_concat(t, "$RINIT:\n    bar.sync 0;\n    cvt.u32.u64 %r10, "), TR)
+    t = str_concat(t, ";\n    mov.u32 %r11, 0;\n$TLOOP:\n")
+    // thread 0: build L(A) into sL
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $RA;\n")
+    t = str_concat(t, gpu_emit_cell_lbuild(pAR, dim, bits, 0))
+    t = str_concat(t, "$RA:\n    bar.sync 0;\n")
+    // tile1: A⊗h_{t-1} → sS
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: sigmoid(sS + B·x_t) → sH col-major, then build L(C)
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $RC;\n")
+    t = str_concat(t, "    mov.u32 %r3, shared_array;\n    mov.u32 %r5, 0;\n$RSIG:\n")
+    t = str_concat(t, "    shr.u32 %r6, %r5, 4;\n    and.b32 %r7, %r5, 15;\n")  // k, b
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r6, 8;\n    add.s64 %rd7, "), pBR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    cvt.rn.f32.f64 %f1, %fd1;\n")  // B[k]
+    // x_t[b] at px + (t*16+b)*8
+    t = str_concat(t, "    mad.lo.u32 %r8, %r11, 16, %r7;\n    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, ")
+    t = str_concat(str_concat(t, pxR), ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    cvt.rn.f32.f64 %f2, %fd2;\n")
+    // S at shared_array + 1024 + (k*16+b)*4
+    t = str_concat(t, "    mad.lo.u32 %r8, %r6, 16, %r7;\n    mul.lo.u32 %r8, %r8, 4;\n    add.u32 %r8, %r8, 1024;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    ld.shared.f32 %f3, [%r9];\n")
+    t = str_concat(t, "    fma.rn.f32 %f3, %f1, %f2, %f3;\n")
+    t = str_concat(t, "    mul.f32 %f4, %f3, %f3;\n    mul.f32 %f5, %f4, %f3;\n")
+    t = str_concat(t, "    fma.rn.f32 %f6, %f3, 0f3E800000, 0f3F000000;\n")
+    t = str_concat(t, "    fma.rn.f32 %f3, %f5, 0f3C800000, %f6;\n    cvt.rn.f16.f32 %rs0, %f3;\n")
+    t = str_concat(t, "    mad.lo.u32 %r8, %r7, 16, %r6;\n    mul.lo.u32 %r8, %r8, 2;\n    add.u32 %r8, %r8, 512;\n")
+    t = str_concat(t, "    add.u32 %r9, %r3, %r8;\n    st.shared.u16 [%r9], %rs0;\n")
+    t = str_concat(t, "    add.u32 %r5, %r5, 1;\n    setp.lt.u32 %p1, %r5, ")
+    t = str_concat(str_concat(t, i64_to_string(dim * 16)), ";\n    @%p1 bra $RSIG;\n")
+    t = str_concat(t, gpu_emit_cell_lbuild(pCR, dim, bits, 1))
+    t = str_concat(t, "$RC:\n    bar.sync 0;\n")
+    // tile2: C⊗h_t → sS
+    t = str_concat(t, gpu_emit_cell_shared_tile())
+    t = str_concat(t, "    bar.sync 0;\n")
+    // thread 0: y_t[b] = sS row 0 → py + (t*16+b)*4
+    t = str_concat(t, "    mov.u32 %r1, %tid.x;\n    setp.ne.u32 %p1, %r1, 0;\n    @%p1 bra $RY;\n")
+    t = str_concat(t, "    mov.u32 %r3, shared_array;\n    mov.u32 %r7, 0;\n$RYL:\n")
+    // sS[0*16+b] at shared_array + 1024 + b*4
+    t = str_concat(t, "    mul.lo.u32 %r8, %r7, 4;\n    add.u32 %r8, %r8, 1024;\n    add.u32 %r9, %r3, %r8;\n    ld.shared.f32 %f1, [%r9];\n")
+    // py + (t*16+b)*4
+    t = str_concat(t, "    mad.lo.u32 %r8, %r11, 16, %r7;\n    mul.wide.u32 %rd7, %r8, 4;\n    add.s64 %rd7, ")
+    t = str_concat(str_concat(t, pyR), ", %rd7;\n    st.global.f32 [%rd7], %f1;\n")
+    t = str_concat(t, "    add.u32 %r7, %r7, 1;\n    setp.lt.u32 %p1, %r7, 16;\n    @%p1 bra $RYL;\n")
+    t = str_concat(t, "$RY:\n    bar.sync 0;\n")
+    t = str_concat(t, "    add.u32 %r11, %r11, 1;\n    setp.lt.u32 %p1, %r11, %r10;\n    @%p1 bra $TLOOP;\n")
+    t
 }
 
 // Lower all operations in sequence
@@ -186,20 +1614,50 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
 
         GpuOpcode::GpuCvt => {
             // cvt.dst_ty.src_ty %rdN, %rM — built dynamically from op.dst_ty / op.src_ty
-            let opcode = str_concat(str_concat("cvt.", gpu_type_to_string(op.dst_ty)), str_concat(".", gpu_type_to_string(op.src_ty)))
-            let dst_str = gpu_reg_u64(op.dst_reg)
-            let src_str = gpu_reg_u32(op.src_reg)
+            // NOTE: str_concat(str_concat(A,B), str_concat(C,D)) clobbers BUILTIN_SLOT_A/B in
+            // lean_single; break nested calls into sequential variable assignments.
+            let dst_ty_str = gpu_type_to_string(op.dst_ty)
+            let src_ty_str = gpu_type_to_string(op.src_ty)
+            let cvt_dst = str_concat("cvt.", dst_ty_str)
+            let dot_src = str_concat(".", src_ty_str)
+            let opcode = str_concat(cvt_dst, dot_src)
+            let dst_str = match op.dst_ty {
+                GpuType::GpuU32 => gpu_reg_u32(op.dst_reg),
+                GpuType::GpuU64 => gpu_reg_u64(op.dst_reg),
+                GpuType::GpuF32 => gpu_reg_f32(op.dst_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.dst_reg),
+                GpuType::GpuI32 => gpu_reg_i32(op.dst_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.dst_reg),
+                _ => gpu_reg_u64(op.dst_reg),
+            }
+            let src_str = match op.src_ty {
+                GpuType::GpuU32 => gpu_reg_u32(op.src_reg),
+                GpuType::GpuU64 => gpu_reg_u64(op.src_reg),
+                GpuType::GpuF32 => gpu_reg_f32(op.src_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.src_reg),
+                GpuType::GpuI32 => gpu_reg_i32(op.src_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.src_reg),
+                _ => gpu_reg_u32(op.src_reg),
+            }
 
             ptx_push_binary2(buf, opcode, dst_str, src_str)
         }
 
         GpuOpcode::GpuMulImm => {
-            // mul.lo.u64 %rdN, %rdM, imm
+            // mul.lo.u64 %rdN, %rdM, imm  (immediate via gpu_push_i64 — i64_to_string is UAF)
             let dst_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.dst_reg) } else { gpu_reg_u32(op.dst_reg) }
             let lhs_str = if op.ty == GpuType::GpuU64 { gpu_reg_u64(op.lhs_reg) } else { gpu_reg_u32(op.lhs_reg) }
-            let imm_str = i64_to_string(op.rhs_imm)
-
-            ptx_push_binary3(buf, ptx_opcode_mul_lo_u64(), dst_str, lhs_str, imm_str)
+            var mout = buf
+            mout = ptx_push_str(mout, "    ")
+            mout = ptx_push_str(mout, ptx_opcode_mul_lo_u64())
+            mout = ptx_push_str(mout, " ")
+            mout = ptx_push_str(mout, dst_str)
+            mout = ptx_push_str(mout, ", ")
+            mout = ptx_push_str(mout, lhs_str)
+            mout = ptx_push_str(mout, ", ")
+            mout = gpu_push_i64(mout, op.rhs_imm)
+            mout = ptx_push_str(mout, ";\n")
+            mout
         }
 
         GpuOpcode::GpuAdd => {
@@ -451,6 +1909,144 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             ptx_push_barrier_sync(buf)
         }
 
+        GpuOpcode::GpuOctBatchStage => {
+            // Build L(a) + stage H into the shared f16 buffers (thread 0). op.rhs_imm = algebra
+            // dimension (8 octonion / 16 sedenion); bits = 3 or 4.
+            let dim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let bits = if dim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_cd_batch_stage(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), dim, bits))
+        }
+
+        GpuOpcode::GpuOctPostAddBx => {
+            // O-SSM post-add S[k][b] += B[k]·x[b] on the f32 tile output (thread 0).
+            let dim = if op.rhs_imm == 16 { 16 } else { 8 }
+            ptx_push_str(buf, gpu_emit_oct_postadd_bx(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), dim))
+        }
+
+        GpuOpcode::GpuOctCell => {
+            // Full O-SSM cell: y = Re(C⊗sigmoid(A⊗H + B·x)). Pointers: pA=lhs, pB=rhs, px=addr,
+            // pC=src, pH=shared_addr, pY=compare_reg.
+            let cdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let cbits = if cdim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_cell(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), gpu_reg_u64(op.compare_reg), cdim, cbits))
+        }
+
+        GpuOpcode::GpuOctRecur => {
+            // O-SSM recurrence over T timesteps. Same pointers as the cell + T register in byte_offset.
+            let rdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let rbits = if rdim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_recur(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), gpu_reg_u64(op.compare_reg), gpu_reg_u64(op.byte_offset), rdim, rbits))
+        }
+
+        GpuOpcode::GpuOctAssoc => {
+            // Batched associator [a,b,H] = (a⊗b)⊗H − a⊗(b⊗H). Pointers: pa=lhs, pb=rhs, pH=addr, pout=src.
+            let adim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let abits = if adim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_assoc(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), adim, abits))
+        }
+
+        GpuOpcode::GpuOctAssocBwdDh => {
+            // Associator VJP w.r.t. H: dH = L(a⊗b)ᵀ·dD − L(b)ᵀ·(L(a)ᵀ·dD). pa=lhs, pb=rhs, pdD=addr, pdH=src.
+            let bdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let bbits = if bdim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_assoc_bwd_dh(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), bdim, bbits))
+        }
+
+        GpuOpcode::GpuOctVjp => {
+            // VJP of D=L(a)·H. Pointers: pa=lhs, pH=rhs, pdD=addr, pdH=src, pda=shared_addr.
+            let vdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let vbits = if vdim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_vjp(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), vdim, vbits))
+        }
+
+        GpuOpcode::GpuOctBwd => {
+            // BPTT backward step. Pointers: pA=lhs, pHprev=rhs, pdHt=addr, pdHprev=src, pdA=shared_addr.
+            let wdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let wbits = if wdim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_bwd(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), wdim, wbits))
+        }
+
+        GpuOpcode::GpuOctBwdNl => {
+            // Nonlinear BPTT backward step. Pointers: pA=lhs, pHprev=rhs, pdHt=addr, pS=src,
+            // pdHprev=shared_addr, pdA=compare_reg.
+            let ndim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let nbits = if ndim == 16 { 4 } else { 3 }
+            ptx_push_str(buf, gpu_emit_oct_bwd_nl(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), gpu_reg_u64(op.compare_reg), ndim, nbits))
+        }
+
+        GpuOpcode::GpuOctReadout => {
+            // O-SSM real readout y = Re(C⊗h). Pointers: pC=lhs, pH=rhs, py=addr.
+            let odim = if op.rhs_imm == 16 { 16 } else { 8 }
+            ptx_push_str(buf, gpu_emit_oct_readout(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), odim))
+        }
+
+        GpuOpcode::GpuOctStepF64 => {
+            // Full-f64 O-SSM step. Pointers: pA=lhs, pB=rhs, px=addr, pH=src, pout=shared_addr.
+            let fdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            ptx_push_str(buf, gpu_emit_oct_step_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), fdim))
+        }
+
+        GpuOpcode::GpuOctBatchF64 => {
+            // Batched hypercomplex multiply on f64 tensor cores (m8n8k4.f64). pa=lhs, pH=rhs, pout=addr.
+            // byte_offset==1 → transpose (L(a)ᵀ·B, the BPTT backward L(A)ᵀ·dS).
+            let tdim = if op.rhs_imm == 16 { 16 } else { 8 }
+            let tbits = if tdim == 16 { 4 } else { 3 }
+            let ttr = op.byte_offset == 1
+            let tgrid = op.byte_offset == 2
+            ptx_push_str(buf, gpu_emit_oct_batch_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), tdim, tbits, ttr, tgrid))
+        }
+
+        GpuOpcode::GpuOctMatvec => {
+            // Hypercomplex matrix-vector (real capacity) H_out = A ⊛ H over D_h channels. pa=lhs, pH=rhs, pout=addr.
+            let mvdh = if op.rhs_imm == 16 { 16 } else { 8 }
+            ptx_push_str(buf, gpu_emit_oct_matvec(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), mvdh))
+        }
+
+        GpuOpcode::GpuWmmaTile => {
+            // Compound m16n16k16 tensor-core tile: D = A·B where A (row-major f16) is at shared
+            // byte-offset lhs_reg, B (col-major f16) at shared byte-offset rhs_reg, and D
+            // (row-major f32) is stored to the global address register addr_reg. Leading dim =
+            // rhs_imm. Fragment groups %wa/%wb/%wd are declared by gpu_emit_reg_decls.
+            // Build the whole tile as ONE string via str_concat. NOTE: i64_to_string returns a
+            // shared static buffer in the Madaros binary, so a held `let ldm = i64_to_string(...)`
+            // is clobbered by later i64_to_string calls (e.g. the zero-init loop). Inline every
+            // numeric conversion so str_concat consumes it before the next call. frag8 results are
+            // safe because they are already fully-copied strings.
+            // frag8 / gpu_reg_u64 return fresh str_concat-built strings (safe to hold). But
+            // gpu_shared_addr_str (via ptx_to_string) and i64_to_string return shared static
+            // buffers, so they are INLINED at each use — consumed immediately by str_concat before
+            // the next shared-buffer call can clobber them.
+            let fa = gpu_wmma_frag8("%wa")
+            let fb = gpu_wmma_frag8("%wb")
+            let fd = gpu_wmma_frag8("%wd")
+            let dReg = gpu_reg_u64(op.addr_reg)
+            var t = ""
+            var zi: i64 = 0
+            while zi < 8 {
+                t = str_concat(str_concat(t, "    mov.f32 %wd"), i64_to_string(zi))
+                t = str_concat(t, ", 0f00000000;\n")
+                zi = zi + 1
+            }
+            t = str_concat(t, "    wmma.load.a.sync.aligned.row.m16n16k16.shared.f16 ")
+            t = str_concat(str_concat(t, fa), ", [")
+            t = str_concat(str_concat(t, gpu_shared_addr_str(op.lhs_reg)), "], ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            t = str_concat(t, "    wmma.load.b.sync.aligned.col.m16n16k16.shared.f16 ")
+            t = str_concat(str_concat(t, fb), ", [")
+            t = str_concat(str_concat(t, gpu_shared_addr_str(op.rhs_reg)), "], ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            t = str_concat(t, "    wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32 ")
+            t = str_concat(str_concat(t, fd), ", ")
+            t = str_concat(str_concat(t, fa), ", ")
+            t = str_concat(str_concat(t, fb), ", ")
+            t = str_concat(str_concat(t, fd), ";\n")
+            t = str_concat(t, "    wmma.store.d.sync.aligned.row.m16n16k16.global.f32 [")
+            t = str_concat(str_concat(t, dReg), "], ")
+            t = str_concat(str_concat(t, fd), ", ")
+            t = str_concat(str_concat(t, i64_to_string(op.rhs_imm)), ";\n")
+            ptx_push_str(buf, t)
+        }
+
         GpuOpcode::GpuShflDown => {
             // Negative rhs_imm => shfl.sync.up (for scan); positive => shfl.sync.down (for reduction)
             let is_up = op.rhs_imm < 0
@@ -484,7 +2080,18 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 GpuType::GpuI64 => gpu_reg_i64(op.src_reg),
                 _ => gpu_reg_f32(op.src_reg),
             }
-            ptx_push_shfl_down(buf, opcode, dst_str, src_str, i64_to_string(actual_offset))
+            // Inline shfl emission: i64_to_string(actual_offset) is UAF when passed to a fn
+            var shfl_out = buf
+            shfl_out = ptx_push_str(shfl_out, "    ")
+            shfl_out = ptx_push_str(shfl_out, opcode)
+            shfl_out = ptx_push_str(shfl_out, " ")
+            shfl_out = ptx_push_str(shfl_out, dst_str)
+            shfl_out = ptx_push_str(shfl_out, ", ")
+            shfl_out = ptx_push_str(shfl_out, src_str)
+            shfl_out = ptx_push_str(shfl_out, ", ")
+            shfl_out = gpu_push_i64(shfl_out, actual_offset)
+            shfl_out = ptx_push_str(shfl_out, ", 0xffffffff;\n")
+            shfl_out
         }
 
         GpuOpcode::GpuSetpLt => {
@@ -492,21 +2099,27 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 GpuType::GpuU32 => ptx_opcode_setp_lt_u32(),
                 GpuType::GpuU64 => ptx_opcode_setp_lt_u64(),
                 GpuType::GpuF32 => ptx_opcode_setp_lt_f32(),
+                GpuType::GpuF64 => ptx_opcode_setp_lt_f64(),
                 GpuType::GpuI32 => ptx_opcode_setp_lt_s32(),
+                GpuType::GpuI64 => ptx_opcode_setp_lt_s64(),
                 _ => ptx_opcode_setp_lt_u32(),
             }
             let lhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.lhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.lhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.lhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.lhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.lhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.lhs_reg),
                 _ => gpu_reg_u32(op.lhs_reg),
             }
             let rhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.rhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.rhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.rhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.rhs_reg),
                 _ => gpu_reg_u32(op.rhs_reg),
             }
             ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
@@ -517,21 +2130,27 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 GpuType::GpuU32 => ptx_opcode_setp_le_u32(),
                 GpuType::GpuU64 => ptx_opcode_setp_le_u64(),
                 GpuType::GpuF32 => ptx_opcode_setp_le_f32(),
+                GpuType::GpuF64 => ptx_opcode_setp_le_f64(),
                 GpuType::GpuI32 => ptx_opcode_setp_le_s32(),
+                GpuType::GpuI64 => ptx_opcode_setp_le_s64(),
                 _ => ptx_opcode_setp_le_u32(),
             }
             let lhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.lhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.lhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.lhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.lhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.lhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.lhs_reg),
                 _ => gpu_reg_u32(op.lhs_reg),
             }
             let rhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.rhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.rhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.rhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.rhs_reg),
                 _ => gpu_reg_u32(op.rhs_reg),
             }
             ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
@@ -557,10 +2176,21 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 _ => gpu_reg_u32(op.lhs_reg),
             }
             // If rhs_reg is -1, use immediate value instead of register
-            let rhs_str = if op.rhs_reg < 0 {
-                i64_to_string(op.rhs_imm)
+            if op.rhs_reg < 0 {
+                // Inline to avoid i64_to_string UAF when passed through function call boundary
+                var sge_out = buf
+                sge_out = ptx_push_str(sge_out, "    ")
+                sge_out = ptx_push_str(sge_out, opcode)
+                sge_out = ptx_push_str(sge_out, " ")
+                sge_out = ptx_push_str(sge_out, gpu_pred_reg(op.dst_reg))
+                sge_out = ptx_push_str(sge_out, ", ")
+                sge_out = ptx_push_str(sge_out, lhs_str)
+                sge_out = ptx_push_str(sge_out, ", ")
+                sge_out = gpu_push_i64(sge_out, op.rhs_imm)
+                sge_out = ptx_push_str(sge_out, ";\n")
+                sge_out
             } else {
-                match op.ty {
+                let rhs_str = match op.ty {
                     GpuType::GpuU32 => gpu_reg_u32(op.rhs_reg),
                     GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
                     GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
@@ -569,8 +2199,8 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                     GpuType::GpuI64 => gpu_reg_i64(op.rhs_reg),
                     _ => gpu_reg_u32(op.rhs_reg),
                 }
+                ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
             }
-            ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
         }
 
         GpuOpcode::GpuSetpEq => {
@@ -578,21 +2208,27 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 GpuType::GpuU32 => ptx_opcode_setp_eq_u32(),
                 GpuType::GpuU64 => ptx_opcode_setp_eq_u64(),
                 GpuType::GpuF32 => ptx_opcode_setp_eq_f32(),
+                GpuType::GpuF64 => ptx_opcode_setp_eq_f64(),
                 GpuType::GpuI32 => ptx_opcode_setp_eq_s32(),
+                GpuType::GpuI64 => ptx_opcode_setp_eq_s64(),
                 _ => ptx_opcode_setp_eq_u32(),
             }
             let lhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.lhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.lhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.lhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.lhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.lhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.lhs_reg),
                 _ => gpu_reg_u32(op.lhs_reg),
             }
             let rhs_str = match op.ty {
                 GpuType::GpuU32 => gpu_reg_u32(op.rhs_reg),
                 GpuType::GpuU64 => gpu_reg_u64(op.rhs_reg),
                 GpuType::GpuF32 => gpu_reg_f32(op.rhs_reg),
+                GpuType::GpuF64 => gpu_reg_f64(op.rhs_reg),
                 GpuType::GpuI32 => gpu_reg_i32(op.rhs_reg),
+                GpuType::GpuI64 => gpu_reg_i64(op.rhs_reg),
                 _ => gpu_reg_u32(op.rhs_reg),
             }
             ptx_push_setp2(buf, opcode, gpu_pred_reg(op.dst_reg), lhs_str, rhs_str)
@@ -798,11 +2434,17 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 ptx_opcode_ld_param_u64()
             } else if op.ty == GpuType::GpuU32 {
                 ptx_opcode_ld_param_u32()
+            } else if op.ty == GpuType::GpuF32 {
+                ptx_opcode_ld_param_f32()
+            } else if op.ty == GpuType::GpuF64 {
+                ptx_opcode_ld_param_f64()
             } else {
                 ptx_opcode_ld_param_u64()
             }
-            if op.ty == GpuType::GpuF64 {
-                ptx_push_binary_mem2(buf, ptx_opcode_ld_param_u64(), gpu_reg_f64(op.dst_reg), name_to_string(param_name))
+            if op.ty == GpuType::GpuF32 {
+                ptx_push_binary_mem2(buf, opcode, gpu_reg_f32(op.dst_reg), name_to_string(param_name))
+            } else if op.ty == GpuType::GpuF64 {
+                ptx_push_binary_mem2(buf, opcode, gpu_reg_f64(op.dst_reg), name_to_string(param_name))
             } else if op.ty == GpuType::GpuU64 {
                 ptx_push_binary_mem2(buf, opcode, gpu_reg_u64(op.dst_reg), name_to_string(param_name))
             } else if op.ty == GpuType::GpuU32 {
@@ -914,11 +2556,31 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
 
         // Phase 4: Add immediate (like MulImm but for addition)
         GpuOpcode::GpuAddImm => {
-            let opcode = if op.ty == GpuType::GpuU32 { ptx_opcode_add_u32() } else { ptx_opcode_add_u64() }
             let dst_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.dst_reg) } else { gpu_reg_u64(op.dst_reg) }
+            var aout = buf
+            // lhs_reg < 0 marks a PURE immediate (HLIR_OP_CONST): emit `mov dst, imm`.
+            // The `add dst, %reg0, imm` form would read the first kernel param as a bogus
+            // zero base and corrupt every integer constant (e.g. GEP indices).
+            if op.lhs_reg < 0 {
+                aout = ptx_push_str(aout, if op.ty == GpuType::GpuU32 { "    mov.u32 " } else { "    mov.u64 " })
+                aout = ptx_push_str(aout, dst_str)
+                aout = ptx_push_str(aout, ", ")
+                aout = gpu_push_i64(aout, op.rhs_imm)
+                aout = ptx_push_str(aout, ";\n")
+                return aout
+            }
+            let opcode = if op.ty == GpuType::GpuU32 { ptx_opcode_add_u32() } else { ptx_opcode_add_u64() }
             let src_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.lhs_reg) } else { gpu_reg_u64(op.lhs_reg) }
-            let imm_str = i64_to_string(op.rhs_imm)
-            ptx_push_binary3(buf, opcode, dst_str, src_str, imm_str)
+            aout = ptx_push_str(aout, "    ")
+            aout = ptx_push_str(aout, opcode)
+            aout = ptx_push_str(aout, " ")
+            aout = ptx_push_str(aout, dst_str)
+            aout = ptx_push_str(aout, ", ")
+            aout = ptx_push_str(aout, src_str)
+            aout = ptx_push_str(aout, ", ")
+            aout = gpu_push_i64(aout, op.rhs_imm)
+            aout = ptx_push_str(aout, ";\n")
+            aout
         }
 
         // ── Phase 5: Tensor Core (mma.sync) ────────────────────────
@@ -1049,7 +2711,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             if op.src_reg == 1 {
                 // Label definition
                 out = ptx_push_str(out, "LBB0_")
-                out = ptx_push_str(out, i64_to_string(op.rhs_imm))
+                out = gpu_push_i64(out, op.rhs_imm)
                 out = ptx_push_str(out, ":\n")
             } else {
                 // Branch instruction
@@ -1060,7 +2722,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 } else {
                     out = ptx_push_str(out, "    bra LBB0_")
                 }
-                out = ptx_push_str(out, i64_to_string(op.rhs_imm))
+                out = gpu_push_i64(out, op.rhs_imm)
                 out = ptx_push_str(out, ";\n")
             }
             out
@@ -1098,31 +2760,31 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
 }
 
 // Helper: Format register names dynamically using str_concat
-fn gpu_reg_u32(reg: i64) -> string { str_concat("%r", i64_to_string(reg)) }
-fn gpu_reg_u64(reg: i64) -> string { str_concat("%rd", i64_to_string(reg)) }
-fn gpu_reg_f32(reg: i64) -> string { str_concat("%f", i64_to_string(reg)) }
-fn gpu_reg_f64(reg: i64) -> string { str_concat("%fd", i64_to_string(reg)) }
-fn gpu_reg_i32(reg: i64) -> string { str_concat("%r", i64_to_string(reg)) }
-fn gpu_reg_i64(reg: i64) -> string { str_concat("%rd", i64_to_string(reg)) }
+fn gpu_reg_u32(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%r", i64_to_string(reg)) }
+fn gpu_reg_u64(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%rd", i64_to_string(reg)) }
+fn gpu_reg_f32(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%f", i64_to_string(reg)) }
+fn gpu_reg_f64(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%fd", i64_to_string(reg)) }
+fn gpu_reg_i32(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%r", i64_to_string(reg)) }
+fn gpu_reg_i64(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%rd", i64_to_string(reg)) }
 
 // Helper: Convert Name to string
-fn name_to_string(name: Name) -> string with Mut, Panic, Div, Alloc {
+pub fn name_to_string(name: Name) -> string with Mut, Panic, Div, Alloc {
     str_from_bytes(name.buf, name.len)
 }
 
-fn gpu_pred_reg(reg: i64) -> string { str_concat("%p", i64_to_string(reg)) }
+fn gpu_pred_reg(reg: i64) -> string with Mut, Panic, Div, Alloc { str_concat("%p", i64_to_string(reg)) }
 
 fn gpu_shared_addr_str(offset: i64) -> string with Mut, Panic, Div, Alloc {
     if offset <= 0 { "shared_array" } else {
         var b = ptx_buf_new()
         b = ptx_push_str(b, "shared_array+")
-        b = ptx_push_str(b, i64_to_string(offset))
+        b = gpu_push_i64(b, offset)
         ptx_to_string(b)
     }
 }
 
 // Helper: Convert i64 to string
-fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
+pub fn i64_to_string(n: i64) -> string with Mut, Panic, Div, Alloc {
     if n < 0 {
         return "0"
     }
@@ -1160,7 +2822,22 @@ fn gpu_push_name(buf: PtxBuf, name: Name) -> PtxBuf with Mut, Panic, Div {
     out
 }
 
-// Helper: Push i64 as ASCII digits
-fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div, Alloc {
-    ptx_push_str(buf, i64_to_string(n))
+// Helper: Push i64 as ASCII digits directly into PtxBuf (avoids i64_to_string UAF)
+pub fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
+    if n == 0 { return ptx_push_byte(buf, 48) }
+    var value: i64 = if n < 0 { 0 } else { n }
+    var digits: [i8; 20] = [0; 20]
+    var rev_len: i64 = 0
+    while value > 0 {
+        digits[rev_len as usize] = (48 + value % 10) as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+    var out = buf
+    var k: i64 = rev_len - 1
+    while k >= 0 {
+        out = ptx_push_byte(out, digits[k as usize])
+        k = k - 1
+    }
+    out
 }

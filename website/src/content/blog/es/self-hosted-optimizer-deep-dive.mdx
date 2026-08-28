@@ -1,0 +1,79 @@
+---
+title: "60 Sprints de Optimización: Construyendo un Compilador Native en Sounio"
+description: "Cómo construimos más de 20 pasos de optimización - desde el enfoque de constantes hasta la saturación de e-graph - en el compilador autohosted de Sounio, completamente en archivos de fuentes .sio."
+author: "The Sounio Team"
+publishedAt: "2026-03-13"
+tags: ["engineering", "compiler", "optimization"]
+topic_id: "website.blog.es.self-hosted-optimizer-deep-dive"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.blog.es.self-hosted-optimizer-deep-dive"
+---
+# 60 Sprints de Optimización
+
+Durante los últimos 60 sprints, construimos un compilador autohosted completo y optimizador para Sounio, escrito completamente en Sounio mismo. Este artículo explora la arquitectura, los claves de optimización y lo que aprendimos en el camino.
+
+## El punto de partida
+
+El Sprint 50 entregó el primer paso de diseño de funciones orientado por perfil. En ese punto, el compilador autohosted podía analizar el código fuente de Sounio, bajarlo a un IR personalizado (`IrModule`/`IrFunction`/`IrInstr`) y emitir código máquina x86-64 en binarios ELF. Pero el código generado era ingenuo: cada valor vivía en la pila, cada constante se cargaba fresca y el código muerto persistía en todas partes.
+
+## La pila de optimización
+
+Construimos los pasos de optimización de manera incremental, cada uno validado por un script de gate que reporta contadores PASS/FAIL/NOT_RUN. Aquí está la progresión:
+
+### Fase 1: Flujos de datos clásico (Sprints 51-54)**Fusión de constantes** (`ocp_const_fold`): Rastrea qué registros virtuales almacenan constantes conocidas a través de los arreglos `def_at[256]` y `val_at[256]`. Cuando ambos operandos de un `IrBinOp` son conocidos, se fusionan a `IrLoadImm`. Esto desbloquea todo lo que viene a continuación.
+
+**Eliminación de código muerto** (`ocp_dce`): Recorre en marcado y barrido sobre el arreglo de instrucciones. Marca todos los registros lectados por cualquier instrucción, luego barrido: cualquier instrucción con un destino no utilizados y sin efectos secundarios se convierte en `IrNop`.
+
+**Propagación de copias**: Traza las cadenas `IrCopy` para que `IrCopy(r5, r3)` donde `r3 = IrLoadImm(42)` permita que `r5` participe en la fusión de constantes.
+
+**Peepholes**: `IrCopy(r, r)` → `IrNop`. Eliminación de duplicados `IrLoadImm`. Estos se activan después de la asignación de registros limpia el IR.
+
+### Fase 2: Reducción de fuerza (Sprints 62-68)
+
+**Aritmética potencia de dos**: `x * 2^n` → `x << n`, `x / 2^n` → `x >> n`, `x % 2^n` → `x & (2^n - 1)`. La `def_at` del seguimiento de la fusión de constantes nos indica cuándo un divisor/multiplicador es un potencia de dos conocida.**Multiplicación no potencia de dos**: `x * 3` → `(x + x) + x`. Las pequeñas constantes de multiplicación se convierten en secuencias de sumas y desplazamientos.
+
+**Identidad/Anihilación**: `x * 1` → `IrCopy`, `x * 0` → `IrLoadImm(0)`, `x + 0` → `IrCopy`, `x - 0` → `IrCopy`, `x / 1` → `IrCopy`.
+
+### Fase 3: Razón algebraica (Sprint 71-77)
+
+**Plegada en el mismo registro**: `x - x` → `IrLoadImm(0)`, `x ^ x` → `IrLoadImm(0)`. Si los dos registros fuente de una resta o XOR son el mismo registro virtual, el resultado siempre es cero.
+
+**Plegada en cadena asociativa**: `(x + 3) + 5` → `x + 8`. Cuando un operando de una suma es otra suma con una constante conocida, combinar las constantes.
+
+**Saturación del grafo E**: Implementamos un pequeño motor de grafo E (`EgNode`/`EgClass`/`EgUnionFind`) que descubre equivalencias como `x * 0 = 0` a través de reglas de reescritura y unión-finde. El grafo E se activa para funciones pequeñas (≤ 8 instrucciones) para mantener los tiempos de compilación limitados.
+
+**Commutativo CSE**: Canonicizar operaciones comutativas (suma, multiplicación, o, y, xor) al ordenar los operandos `src1 ≤ src2`. Esto duplica la tasa de éxito de la tabla de hash CSE.
+
+### Fase 4: Flujo de control (Sprint 75-76, 101-106)
+
+**Foldeo de rama condicional**: `IrBranchTrue(known_const)` donde el constante es 1 → `IrJump`. Donde el constante es 0 → `IrNop`. Esto limpia las ramas después de la propagación constante demuestra una condición.
+
+**Saltar a la devolución**: `IrJump(L)` donde `L+1 = IrReturn` se colapsa directamente a `IrReturn`.
+
+**Simplificación booleana**: `(x == 0) == 0` → `IrCopy(x)`, `bool != 0` → `IrCopy(bool)`.
+
+**LICM**: Levantar instrucciones de carga invariante del ciclo pasadas por los bordes de regreso.
+
+**GVN**: Númeración de valores globales con una tabla de hash de 128 entradas y asignación de número de valor.
+
+## Alocaación de registros
+
+El almacenador de linear-scane se dirige a cuatro registros guardados por el llamador (`r12`-`r15`) con derrames de pila usando codificación adaptativa `disp8`/`disp32`. El tamaño del marco compacto garantiza que las funciones con ≤ 4 valores viven no utilizan ningún marco de pila en absoluto.
+
+## Optimización orientada al perfilEl completo ciclo PGO:
+1. Inyecta contadores `INC [RIP+disp32]` en las entradas de las funciones instrumentadas.
+2. `__prof_dump` escribirá los reccontos de ejecución en archivos `.sprof` en la salida.
+3. Recompilar con `--use-profile profile.sprof` para promover las funciones calientes.
+4. La optimización de callees es puntuada con bonificación de estrategia (+80 para AGGRESSIVE, +40 para PRECISION).
+5. El paso de disposición ordena las funciones calientes al principio para la localidad de la caché de instrucciones.
+
+## Verificación
+
+Cada paso de optimización tiene un script de gate. La matriz de pruebas actual tiene **347 pruebas auto verificación** en todas las etapas, con FAIL=0 y NOT_RUN=1 (JIT OOM en la prueba completa). Cada gate se ejecuta en menos de 60 segundos.
+
+## ¿Qué viene después
+
+La base está sólida. El backend nativo produce binarios ELF correctos para la aritmética, el control de flujo, las llamadas de función y la instrumentación de perfilación. El próximo reto es acercar la brecha en el ciclo de compilación completamente autónomo — donde el compilador autónomo compila a sí mismo en un binario nativo.El código se encuentra en `self-hosted/` en el repositorio. Cada paso, cada prueba, cada script de gate — escrito en Sounio.

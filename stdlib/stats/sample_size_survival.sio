@@ -1,0 +1,171 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/sample_size_survival.sio — sample size for a survival trial
+//
+// The required number of events (and enrolled subjects) to detect a hazard ratio
+// with a log-rank / Cox test — the planning tool for time-to-event studies:
+//
+//   ss_survival(hr, alpha, power, alloc, event_prob) -> SurvSSResult
+//
+//   events = (z_{1−α/2} + z_{1−β})² / ( πA·πB·(ln HR)² )        (Schoenfeld),
+//   n_total = events / P(event),
+// with allocation πA (group-A fraction), πB = 1−πA. For 1:1 allocation the
+// denominator is ¼(ln HR)².
+//
+// Pure Sounio: inline ln/sqrt and an Acklam inverse-normal-CDF. No external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Schoenfeld (1983) Biometrics 39:499.
+
+module stats::sample_size_survival
+
+fn ss_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn ss_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+// Acklam inverse normal CDF: returns z with Φ(z) = p, p in (0,1).
+fn ss_ninv(p: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 - 40.0 }
+    if p >= 1.0 { return 40.0 }
+    let a0 = 0.0 - 39.69683028665376
+    let a1 = 220.9460984245205
+    let a2 = 0.0 - 275.9285104469687
+    let a3 = 138.3577518672690
+    let a4 = 0.0 - 30.66479806614716
+    let a5 = 2.506628277459239
+    let b0 = 0.0 - 54.47609879822406
+    let b1 = 161.5858368580409
+    let b2 = 0.0 - 155.6989798598866
+    let b3 = 66.80131188771972
+    let b4 = 0.0 - 13.28068155288572
+    let c0 = 0.0 - 0.007784894002430293
+    let c1 = 0.0 - 0.3223964580411365
+    let c2 = 0.0 - 2.400758277161838
+    let c3 = 0.0 - 2.549732539343734
+    let c4 = 4.374664141464968
+    let c5 = 2.938163982698783
+    let d0 = 0.007784695709041462
+    let d1 = 0.3224671290700398
+    let d2 = 2.445134137142996
+    let d3 = 3.754408661907416
+    let plow = 0.02425
+    let phigh = 1.0 - plow
+    if p < plow {
+        let q = ss_sqrt(0.0 - 2.0 * ss_ln(p))
+        return (((((c0 * q + c1) * q + c2) * q + c3) * q + c4) * q + c5) / ((((d0 * q + d1) * q + d2) * q + d3) * q + 1.0)
+    }
+    if p <= phigh {
+        let q = p - 0.5
+        let r = q * q
+        return (((((a0 * r + a1) * r + a2) * r + a3) * r + a4) * r + a5) * q / (((((b0 * r + b1) * r + b2) * r + b3) * r + b4) * r + 1.0)
+    }
+    let q = ss_sqrt(0.0 - 2.0 * ss_ln(1.0 - p))
+    return 0.0 - (((((c0 * q + c1) * q + c2) * q + c3) * q + c4) * q + c5) / ((((d0 * q + d1) * q + d2) * q + d3) * q + 1.0)
+}
+
+pub struct SurvSSResult {
+    pub events: f64,    // required number of events (Schoenfeld)
+    pub n_total: i64,   // required enrolment (ceil events / event_prob)
+    pub z_alpha: f64,
+    pub z_beta: f64,
+}
+
+/// Schoenfeld sample size for a log-rank / Cox survival test.
+///
+/// Parâmetros: hr — target hazard ratio (>0, ≠1); alpha — two-sided level;
+///             power — 1−β; alloc — group-A fraction (0,1); event_prob — P(event).
+/// Retorno: SurvSSResult (events, n_total, z_alpha, z_beta).
+/// Referências: Schoenfeld (1983).
+pub fn ss_survival(hr: f64, alpha: f64, power: f64, alloc: f64, event_prob: f64) -> SurvSSResult with Mut, Div, Panic {
+    if hr <= 0.0 || alloc <= 0.0 || alloc >= 1.0 {
+        return SurvSSResult { events: 0.0, n_total: 0, z_alpha: 0.0, z_beta: 0.0 }
+    }
+    let za = ss_ninv(1.0 - alpha * 0.5)
+    let zb = ss_ninv(power)
+    let lnhr = ss_ln(hr)
+    if lnhr == 0.0 { return SurvSSResult { events: 0.0, n_total: 0, z_alpha: za, z_beta: zb } }
+    let events = (za + zb) * (za + zb) / (alloc * (1.0 - alloc) * lnhr * lnhr)
+    var n_total = 0
+    if event_prob > 0.0 {
+        let nf = events / event_prob
+        // ceiling
+        n_total = nf as i32
+        if (n_total as f64) < nf { n_total = n_total + 1 }
+    }
+    return SurvSSResult { events: events, n_total: n_total as i64, z_alpha: za, z_beta: zb }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// HR=2, alpha=0.05, power=0.8, 1:1. z_a=1.959964, z_b=0.841621.
+// events=(2.801585)²/(0.25·(ln2)²)=7.848877/(0.25·0.480453)=7.848877/0.120113=65.346.
+fn test_survival() -> bool with IO, Mut, Div, Panic {
+    let r = ss_survival(2.0, 0.05, 0.8, 0.5, 0.5)
+    var ok = true
+    ok = check(1, approx(r.z_alpha, 1.959964, 1.0e-4)) && ok
+    ok = check(2, approx(r.z_beta, 0.841621, 1.0e-4)) && ok
+    ok = check(3, approx(r.events, 65.346, 1.0e-1)) && ok
+    ok = check(4, r.n_total > 0) && ok
+    return ok
+}
+
+// larger HR (further from 1) needs fewer events.
+fn test_larger_hr() -> bool with IO, Mut, Div, Panic {
+    let r2 = ss_survival(2.0, 0.05, 0.8, 0.5, 0.5)
+    let r3 = ss_survival(3.0, 0.05, 0.8, 0.5, 0.5)
+    return check(10, r3.events < r2.events)
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_survival() && ok
+    ok = test_larger_hr() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

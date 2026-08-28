@@ -30,9 +30,15 @@ Releases are **event-driven**, not calendar-driven. A release is cut when:
 
 1. A significant feature milestone is reached (new stdlib domain, compiler backend, paper submission)
 2. A critical bug fix warrants immediate distribution
-3. The release-readiness dashboard (`.github/workflows/release-readiness-dashboard.yml`) reports green
+3. The release dashboard job in `.github/workflows/release-gate.yml` reports
+   green, including zero open issues labeled `release-blocker`
 
 There is no fixed cadence. Research languages evolve in bursts aligned with paper deadlines and sprint completions.
+
+Manual `Release Gate` runs may set `native-runtime-filter` to narrow the Apple
+Self-Host native runtime proof during blocker triage. Filtered runs are
+diagnostic evidence only; an unfiltered release gate is still required before a
+release can be considered ready.
 
 ## Release Checklist
 

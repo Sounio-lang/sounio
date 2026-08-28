@@ -1,0 +1,77 @@
+---
+title: "60 Sprints de Optimização: Construindo um Compilador Native em Sounio"
+description: "Como construímos mais de 20 passes de otimização — de folding constante até saturar o e-graph — no compilador self-hosted de Sounio, inteiramente em arquivos fonte .sio."
+author: "The Sounio Team"
+publishedAt: "2026-03-13"
+tags: ["engineering", "compiler", "optimization"]
+topic_id: "website.blog.pt.self-hosted-optimizer-deep-dive"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.blog.pt.self-hosted-optimizer-deep-dive"
+---
+# 60 Sprints de Optimização
+
+Ao longo dos últimos 60 sprints, construímos um backend nativo completamente otimizado para Sounio — escrito inteiramente em Sounio próprio. Este post explica a arquitetura, os principais passes de otimização e o que aprendemos ao longo do caminho.
+
+## O ponto de partida
+
+O Sprint 50 entregou o primeiro passo de layout de função orientado por perfil. Nesse ponto, o compilador self-hosted poderia analisar fontes de Sounio, baixá-las para um IR personalizado (`IrModule`/`IrFunction`/`IrInstr`), e emitir código máquina x86-64 em binários ELF. No entanto, o código gerado era ingenuo: cada valor vivia na pilha, cada constante era carregada fresca e o código morto permanecia por todas partes.
+
+## A pilha de otimização
+
+Construímos os passes incrementalmente, cada um validado por um script de portão que relata contagens PASS/FAIL/NOT_RUN. Aqui está a progressão:
+
+### Fase 1: Dataflow clássico (Sprints 51-54)**Foldamento constante** (`ocp_const_fold`): Faça o rastreamento de quais registros virtuais armazenam constantes conhecidas via arrays `def_at[256]` e `val_at[256]`. Quando ambos os operadores de uma `IrBinOp` são conhecidos, faça o foldamento para `IrLoadImm`. Isso desbloqueia tudo a seguir.
+
+**Eliminação de código morto** (`ocp_dce`): Realizar um algoritmo de marcação e varrer pelo array de instruções. Marque todos os registros lidos por qualquer instrução, então varre: qualquer instrução com um destino não utilizada e sem efeitos colaterais se torna `IrNop`.
+
+**Propagação de cópias**: Trazer as cadeias `IrCopy` para que `IrCopy(r5, r3)` onde `r3 = IrLoadImm(42)` habilita `r5` para participar no foldamento constante.
+
+**Peephole**: `IrCopy(r, r)` → `IrNop`. Eliminação de duplicação de `IrLoadImm`. Esses acionam depois da alocação de registros limpar o IR.
+
+### Fase 2: Redução de força (Sprints 62-68)
+
+**Aritmética de potência de dois**: `x * 2^n` → `x << n`, `x / 2^n` → `x >> n`, `x % 2^n` → `x & (2^n - 1)`. A rastreamento `def_at` do foldamento constante nos diz quando um divisório/multiplicador é um potência de dois conhecidos.**Multiplicação não de potência de dois**: `x * 3` → `(x + x) + x`. Multiplicações por pequenas constantes se transformam em sequências de somas e deslocamentos.
+
+**Identidade/extinguimento**: `x * 1` → `IrCopy`, `x * 0` → `IrLoadImm(0)`, `x + 0` → `IrCopy`, `x - 0` → `IrCopy`, `x / 1` → `IrCopy`.
+
+### Fase 3: Reflexão algebraica (Sprintes 71-77)
+
+**Folhetagem de registo igual**: `x - x` → `IrLoadImm(0)`, `x ^ x` → `IrLoadImm(0)`. Se os dois registros de origem de uma subtração ou XOR forem o mesmo registo virtual, o resultado sempre é zero.
+
+**Folhetagem de cadeia associativa**: `(x + 3) + 5` → `x + 8`. Quando um operando de uma soma é outro operando de soma com uma constante conhecida, combinamos as constantes.
+
+**Saturação do E-graph**: Implementamos um pequeno engine de E-graph (`EgNode`/`EgClass`/`EgUnionFind`) que descobre equivalências como `x * 0 = 0` por meio de regras de reescrita e união-enslavamento. O E-graph é ativado para pequenas funções (≤ 8 instruções) para manter os tempos de compilação limitados.**Comutativa CSE**: Canoabilize operações comutativas (soma, multiplicação, ou, e, xor) ordenando os operandos `src1 ≤ src2`. Isso duplica a taxa de acerto da hash table CSE.
+
+### Fase 4: Fluxo de controle (Sprintes 75-76, 101-106)
+
+**Enrolamento de branch condicional**: `IrBranchTrue(known_const)` onde o constante é 1 → `IrJump`. Quando o constante é 0 → `IrNop`. Isso limpa os branches depois da propagação constante prova uma condição.
+
+**Pulo para retornar**: `IrJump(L)` onde `L+1 = IrReturn` enrola diretamente para `IrReturn`.
+
+**Simplicidade booleana**: `(x == 0) == 0` → `IrCopy(x)`, `bool != 0` → `IrCopy(bool)`.
+
+**LICM**: Levantar instruções `IrLoadImm` invariáveis de loop para frente de retorno.
+
+**GVN**: Númeração de valor global com uma hash table de 128 entradas e atribuição de número de valor.
+
+## Alocação de registros
+
+O alocação de registros lineair alcança quatro registros salvados por chamada (`r12`-`r15`) com escoamento de pilha usando codificação adaptativa `disp8`/`disp32`. O tamanho compacto do frame garantirá que funções com &lt;= 4 valores em vida não usam nenhum frame de pilha.
+
+## Optimização orientada por perfilO full pipeline PGO:
+1. Injeção dos contadores `INC [RIP+disp32]` em entradas de funções instrumentadas.
+2. `__prof_dump` escreve contagens de execução para arquivos `.sprof` ao sair.
+3. Re-compilar com `--use-profile profile.sprof` para promover funções caloridas.
+4. A otimização orientada por perfil pontua chamados com bonuses de estratégia (+80 para AGGRESSIVE, +40 para PRECISION).
+5. Passo de disposição ordena funções caloridas para frente para localidade do cache de instruções.
+
+## Verificação
+
+Cada passagem de otimização tem um script de portão. A matriz de testes atuais está na **347 testes próprias** em todas as passagens, com FAIL=0 e NOT_RUN=1 (JIT OOM no teste completo). Cada portagem é executada em menos de 60 segundos.
+
+## Próximos passos
+
+A base está sóla. O backend nativo produz binários ELF corretos para aritmética, fluxo de controle, chamadas de função e instrumentação de perfil. O próximo fronteira é fechar a diferença no ciclo de compilação totalmente auto-hosted — onde o compilador auto-host compila para um binário nativo.O código está totalmente no repositório em `self-hosted/`. Cada passagem, cada teste, cada script de gate — escrito em Sounio.

@@ -1,0 +1,235 @@
+// examples/gui_hello/main.sio — Native GUI demo
+//
+// Demonstrates the stdlib/display + stdlib/ui stack:
+//   - 800×600 X11 window
+//   - Background gradient
+//   - 2 coloured panels
+//   - Labels and clickable buttons
+//   - Live mouse-coordinate display
+//   - Closes on ESC or window-close event
+//
+// Compile:
+//   ./artifacts/self-hosted/souc-self-hosted-x86_64 \
+//       examples/gui_hello/main.sio /tmp/gui_hello.elf
+// Run (requires X11):
+//   DISPLAY=:0 /tmp/gui_hello.elf
+
+use display::window::{Window, window_open, window_present, window_close,
+                       window_pending, window_next_event}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear,
+                       canvas_fill_rect, canvas_draw_text, canvas_fill_gradient_v}
+use display::event::{Event, EV_CLOSE, EV_KEY_PRESS, KEY_ESCAPE, event_is_close}
+use ui::widget::{Widget, UiState, ui_state_new, widget_zero, widget_panel, widget_label, widget_button,
+                  WIDGET_BUTTON}
+use ui::render::{ui_render, ui_handle_event, ui_was_clicked}
+
+// ============================================================
+// Widget IDs
+// ============================================================
+
+let ID_BG:      i64 = 1
+let ID_PANEL_L: i64 = 2
+let ID_PANEL_R: i64 = 3
+let ID_TITLE:   i64 = 4
+let ID_BTN_A:   i64 = 5
+let ID_BTN_B:   i64 = 6
+let ID_STATUS:  i64 = 7
+
+// ============================================================
+// Format mouse position into a fixed [i64; 64] string buffer
+// ============================================================
+
+fn fill_zeros(buf: &![i8; 64], n: i64) with Mut {
+    var i: i64 = 0
+    while i < n {
+        buf[i as usize] = 0 as i8
+        i = i + 1
+    }
+}
+
+fn write_prefix(buf: &![i8; 64], off: i64) -> i64 with Mut {
+    buf[off as usize]       = 77 as i8  // M
+    buf[(off+1) as usize]   = 111 as i8 // o
+    buf[(off+2) as usize]   = 117 as i8 // u
+    buf[(off+3) as usize]   = 115 as i8 // s
+    buf[(off+4) as usize]   = 101 as i8 // e
+    buf[(off+5) as usize]   = 58 as i8  // :
+    buf[(off+6) as usize]   = 32 as i8  // space
+    off + 7
+}
+
+// Write a decimal i64 into buf starting at off; returns new offset.
+fn write_decimal(buf: &![i8; 64], off: i64, v: i64) -> i64 with Mut, Div {
+    var n = v
+    if n < 0 {
+        buf[off as usize] = 45 as i8  // '-'
+        n = 0 - n
+    }
+    // Compute digits
+    var digits: [i8; 20] = [0; 20]
+    var dlen: i64 = 0
+    if n == 0 {
+        digits[0] = 48 as i8
+        dlen = 1
+    } else {
+        while n > 0 {
+            digits[dlen as usize] = (48 + n % 10) as i8
+            n = n / 10
+            dlen = dlen + 1
+        }
+    }
+    // Reverse digits into buf
+    var cur = off
+    var di = dlen - 1
+    while di >= 0 {
+        buf[cur as usize] = digits[di as usize]
+        cur = cur + 1
+        di = di - 1
+    }
+    cur
+}
+
+fn format_mouse(buf: &![i8; 64], mx: i64, my: i64) -> i64 with Mut, Div {
+    fill_zeros(buf, 64)
+    let off0 = write_prefix(buf, 0)
+    let off1 = write_decimal(buf, off0, mx)
+    buf[off1 as usize] = 44 as i8  // ','
+    buf[(off1+1) as usize] = 32 as i8  // ' '
+    let off2 = write_decimal(buf, off1 + 2, my)
+    off2
+}
+
+// ============================================================
+// Main application
+// ============================================================
+
+// Build a text [i8; 64] from a series of ASCII byte assignments
+fn make_text(buf: &![i8; 64], bytes: &[i8; 64], n: i64) with Mut {
+    var i: i64 = 0
+    while i < n {
+        buf[i as usize] = bytes[i as usize]
+        i = i + 1
+    }
+}
+
+fn make_widgets(widgets: &![Widget; 64], panel_l_r: i64, panel_l_g: i64, panel_l_b: i64) with Mut {
+    // Build text arrays one byte at a time (i64 literal → as i8)
+    // "Sounio GUI" = S o u n i o   G U I
+    var title_text: [i8; 64] = [0; 64]
+    title_text[0] = 83 as i8; title_text[1] = 111 as i8; title_text[2] = 117 as i8
+    title_text[3] = 110 as i8; title_text[4] = 105 as i8; title_text[5] = 111 as i8
+    title_text[6] = 32 as i8; title_text[7] = 71 as i8; title_text[8] = 85 as i8
+    title_text[9] = 73 as i8
+
+    // "Change Color" = C h a n g e   C o l o r
+    var btn_a_text: [i8; 64] = [0; 64]
+    btn_a_text[0]  = 67 as i8;  btn_a_text[1]  = 104 as i8; btn_a_text[2]  = 97 as i8
+    btn_a_text[3]  = 110 as i8; btn_a_text[4]  = 103 as i8; btn_a_text[5]  = 101 as i8
+    btn_a_text[6]  = 32 as i8;  btn_a_text[7]  = 67 as i8;  btn_a_text[8]  = 111 as i8
+    btn_a_text[9]  = 108 as i8; btn_a_text[10] = 111 as i8; btn_a_text[11] = 114 as i8
+
+    // "Reset" = R e s e t
+    var btn_b_text: [i8; 64] = [0; 64]
+    btn_b_text[0] = 82 as i8; btn_b_text[1] = 101 as i8; btn_b_text[2] = 115 as i8
+    btn_b_text[3] = 101 as i8; btn_b_text[4] = 116 as i8
+
+    // Background panel covering full window
+    (*widgets)[0] = widget_panel(ID_BG, 0, 0, 800, 600, 28, 28, 36)
+
+    // Left colored panel (mutable color)
+    (*widgets)[1] = widget_panel(ID_PANEL_L, 20, 80, 360, 480, panel_l_r, panel_l_g, panel_l_b)
+
+    // Right panel (fixed dark)
+    (*widgets)[2] = widget_panel(ID_PANEL_R, 420, 80, 360, 480, 45, 45, 60)
+
+    // Title label
+    (*widgets)[3] = widget_label(ID_TITLE, 0, 10, 800, 50, &title_text, 10,
+                                  28, 28, 36, 255, 220, 80)
+
+    // Button A: change color
+    (*widgets)[4] = widget_button(ID_BTN_A, 440, 120, 160, 40, &btn_a_text, 12)
+
+    // Button B: reset
+    (*widgets)[5] = widget_button(ID_BTN_B, 440, 180, 100, 40, &btn_b_text, 5)
+
+    // Status label (mouse coordinates)
+    (*widgets)[6] = widget_panel(ID_STATUS, 20, 560, 760, 30, 20, 20, 28)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var win = window_open(800, 600)
+
+    // Widget array — use widget_zero() to avoid struct-literal repeat-init field limit
+    var widgets: [Widget; 64] = [widget_zero(); 64]
+    let n_widgets: i64 = 7
+
+    var panel_r: i64 = 80
+    var panel_g: i64 = 120
+    var panel_b: i64 = 200
+
+    make_widgets(&!widgets, panel_r, panel_g, panel_b)
+
+    var state = ui_state_new()
+    var running = true
+    var mouse_buf: [i8; 64] = [0; 64]
+    var mouse_buf_256: [i8; 256] = [0; 256]
+
+    while running {
+        // Process all pending events
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if event_is_close(ev) {
+                running = false
+            } else if ev.kind == EV_KEY_PRESS && ev.key == KEY_ESCAPE {
+                running = false
+            } else {
+                ui_handle_event(ev, &widgets, n_widgets, &!state)
+            }
+        }
+
+        // Handle button clicks
+        if ui_was_clicked(&state, ID_BTN_A) {
+            // Cycle left panel color
+            let nr = (panel_r + 40) & 255
+            let ng = (panel_g + 80) & 255
+            let nb = (panel_b + 120) & 255
+            panel_r = nr
+            panel_g = ng
+            panel_b = nb
+            make_widgets(&!widgets, panel_r, panel_g, panel_b)
+        }
+
+        if ui_was_clicked(&state, ID_BTN_B) {
+            panel_r = 80
+            panel_g = 120
+            panel_b = 200
+            make_widgets(&!widgets, panel_r, panel_g, panel_b)
+        }
+
+        // Update mouse label in the status widget
+        let mlen = format_mouse(&!mouse_buf, state.mouse_x, state.mouse_y)
+        var i: i64 = 0
+        while i < 64 {
+            widgets[6].text[i as usize] = mouse_buf[i as usize]
+            i = i + 1
+        }
+        widgets[6].text_len = mlen
+        widgets[6].fg_r = 180
+        widgets[6].fg_g = 200
+        widgets[6].fg_b = 220
+
+        // Render frame
+        var canvas = canvas_from_window(&!win)
+        canvas_clear(&!canvas, 28, 28, 36)
+
+        // Gradient background
+        canvas_fill_gradient_v(&!canvas, 0, 0, 800, 600, 28, 28, 44, 20, 20, 30)
+
+        // Render UI
+        ui_render(&widgets, n_widgets, &state, &!canvas)
+
+        window_present(&!win)
+    }
+
+    window_close(&!win)
+}

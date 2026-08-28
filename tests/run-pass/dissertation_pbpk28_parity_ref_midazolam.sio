@@ -1,0 +1,304 @@
+//@ run-pass
+//@ timeout: 90
+// ============================================================================
+// DISSERTATION PARITY REFERENCE — MIDAZOLAM (CYP3A drug–drug interaction)
+//
+// Fifth canonical drug, and the suite's FIRST drug–drug interaction (DDI). Novel
+// surface (none of rapamycin/semaglutide/venlafaxine/haloperidol model enzyme
+// inhibition): mechanistic well-stirred oral first-pass + competitive CYP3A
+// inhibition by ketoconazole.
+//
+//   Oral bioavailability   F     = Fa · FG · FH
+//   gut-wall survival      FG    = Qg / (Qg + fu_g·CLint_g)
+//   hepatic first-pass     FH    = Qh / (Qh + fu·CLint_h)
+//   systemic clearance     CL_h  = Qh·fu·CLint_h / (Qh + fu·CLint_h)
+//   competitive inhibition CLint -> CLint / (1 + I/Ki)   (gut & hepatic, same enzyme)
+//
+// A SINGLE hepatic intrinsic clearance CLint_h drives BOTH FH and CL_h, so
+// inhibition raises FH and lowers CL_h consistently — NO double-count — and the
+// iconic oral midazolam+ketoconazole AUC rise (~15×) emerges honestly
+// (AUC = F·Dose/CL_h). The inhibitor is held STATIC at its steady-state unbound
+// concentration (as in clinical DDI studies). Systemic distribution Kp are
+// nominal midazolam-plausible values; the validated DDI quantities are F, CL_h
+// and AUCR (distribution-independent).
+//
+// Both this ref and the JS engine (pbpk28_core.mjs runMidazolamScenario /
+// runMidazolamDDIResponse) use a FIXED-STEP RK4 systemic integrator at the same
+// dt — the production scenario (scenarios/oral_midazolam_ddi.sio) uses adaptive
+// Tsit5, an intractable bit-for-bit parity target; the fidelity gap is disclosed
+// in the gist. Self-contained (no imports — lean_single blocks cross-module
+// private fields); all constants verbatim from drugs/midazolam.sio +
+// ddi/cyp3a_competitive.sio.
+//
+// Parity surface (gate cases 17-19): solo oral PK · ketoconazole-inhibited oral
+// PK · DDI inhibition curve (F, CL_h, AUCR across I/Ki).
+//
+// Sources: Heizmann 1984 (oral F~0.4), Thummel 1996 (gut+hepatic first-pass),
+// Gorski 1998 / Olkkola 1994,1996 (ketoconazole DDI ~15×), Yang 2007 (Qgut).
+// ============================================================================
+
+// Systemic well-stirred state: 0=blood,1=liver,2=kidney,3=brain,4=heart,5=lung,
+// 6=muscle,7=adipose,8=gut,9=skin,10=bone,11=spleen,12=pancreas,13=other.
+struct Sys14 { c: [f64; 14] }
+struct MdzState { sys: Sys14, a_gut: f64 }
+
+fn sys_zero() -> Sys14 { Sys14 { c: [0.0; 14] } }
+
+// ─── PBPK14 physiology (volumes L, flows L/h) + midazolam Kp ──────────────────
+fn v_at(i: i64) -> f64 {
+    if i ==  0 { return 5.2 }
+    if i ==  1 { return 1.69 }
+    if i ==  2 { return 0.31 }
+    if i ==  3 { return 1.37 }
+    if i ==  4 { return 0.31 }
+    if i ==  5 { return 1.17 }
+    if i ==  6 { return 29.0 }
+    if i ==  7 { return 18.2 }
+    if i ==  8 { return 1.65 }
+    if i ==  9 { return 7.8 }
+    if i == 10 { return 10.5 }
+    if i == 11 { return 0.19 }
+    if i == 12 { return 0.14 }
+    return 4.5
+}
+fn q_at(i: i64) -> f64 {
+    if i ==  1 { return 90.0 }
+    if i ==  2 { return 72.0 }
+    if i ==  3 { return 44.0 }
+    if i ==  4 { return 14.4 }
+    if i ==  5 { return 0.0 }
+    if i ==  6 { return 73.8 }
+    if i ==  7 { return 18.0 }
+    if i ==  8 { return 57.6 }
+    if i ==  9 { return 18.0 }
+    if i == 10 { return 21.6 }
+    if i == 11 { return 10.8 }
+    if i == 12 { return 4.5 }
+    if i == 13 { return 18.0 }
+    return 0.0
+}
+fn kp_at(i: i64) -> f64 {
+    if i ==  1 { return 2.0 }
+    if i ==  2 { return 1.5 }
+    if i ==  3 { return 1.5 }
+    if i ==  4 { return 1.2 }
+    if i ==  5 { return 1.5 }
+    if i ==  6 { return 1.0 }
+    if i ==  7 { return 2.0 }
+    if i ==  8 { return 1.5 }
+    if i ==  9 { return 1.2 }
+    if i == 10 { return 0.6 }
+    if i == 11 { return 1.2 }
+    if i == 12 { return 1.2 }
+    if i == 13 { return 1.0 }
+    return 1.0
+}
+fn fu_plasma() -> f64 { return 0.03 }
+fn rb_ratio() -> f64 { return 1.0 }
+fn cl_renal() -> f64 { return 0.0 }
+
+// First-pass + CYP3A metabolism (one CLint_h -> {FH, CL_h}; CLint_g -> FG).
+fn fp_qh() -> f64 { return 90.0 }
+fn fp_qg() -> f64 { return 18.0 }
+fn fp_fu() -> f64 { return 0.03 }
+fn fp_fu_gut() -> f64 { return 1.0 }
+fn fp_fa() -> f64 { return 0.95 }
+fn fp_clint_h() -> f64 { return 1090.0 }
+fn fp_clint_g() -> f64 { return 14.7 }
+
+// Ketoconazole perpetrator (static steady-state unbound, mg/L): I/Ki = 8 -> R = 9.
+fn keto_ki() -> f64 { return 0.008 }
+fn keto_i() -> f64 { return 0.064 }
+
+// Absorption (rapid oral, negligible lag).
+fn abs_ka() -> f64 { return 3.0 }
+fn abs_tlag() -> f64 { return 0.0 }
+
+// ─── Absorption exp(-x) — verbatim port of absorption.sio abs_exp_neg ─────────
+fn abs_exp_neg(x: f64) -> f64 with Div, Mut {
+    if x <= 0.0 { return 1.0 }
+    if x > 0.5 {
+        let half = abs_exp_neg(x * 0.5)
+        return half * half
+    }
+    var term = 1.0
+    var sum = 1.0
+    var k: i32 = 1
+    while k < 16 {
+        term = term * (0.0 - x) / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    return sum
+}
+
+// ─── Competitive CYP3A inhibition + well-stirred first-pass closed forms ──────
+fn inh_factor(i_conc: f64) -> f64 with Div { return 1.0 / (1.0 + i_conc / keto_ki()) }
+fn fg(i_conc: f64) -> f64 with Div {
+    let b = fp_fu_gut() * fp_clint_g() * inh_factor(i_conc)
+    return fp_qg() / (fp_qg() + b)
+}
+fn fh(i_conc: f64) -> f64 with Div {
+    let a = fp_fu() * fp_clint_h() * inh_factor(i_conc)
+    return fp_qh() / (fp_qh() + a)
+}
+fn clh(i_conc: f64) -> f64 with Div {
+    let a = fp_fu() * fp_clint_h() * inh_factor(i_conc)
+    return fp_qh() * a / (fp_qh() + a)
+}
+fn f_oral(i_conc: f64) -> f64 with Div { return fp_fa() * fg(i_conc) * fh(i_conc) }
+
+// ─── PBPK14 well-stirred RHS; cl_h is the inhibitor-dependent systemic hepatic
+// clearance on plasma (already embeds fu via the well-stirred form). ──────────
+fn sys_ode(st: Sys14, cl_h: f64) -> Sys14 with Mut, Div {
+    let c_blood = st.c[0]
+    let c_plasma = c_blood / rb_ratio()
+    var d = Sys14 { c: [0.0; 14] }
+    var d_blood = 0.0
+    var i = 1
+    while i < 14 {
+        let flux = (q_at(i) / v_at(i)) * (c_plasma - st.c[i] / kp_at(i))
+        d.c[i] = flux
+        d_blood = d_blood - (q_at(i) / v_at(0)) * rb_ratio() * (c_plasma - st.c[i] / kp_at(i))
+        i = i + 1
+    }
+    d_blood = d_blood - (cl_h / v_at(0)) * c_plasma * rb_ratio()
+    d_blood = d_blood - (cl_renal() / v_at(0)) * c_plasma * rb_ratio()
+    d.c[0] = d_blood
+    return d
+}
+
+fn sys_axpy(y: Sys14, k: Sys14, a: f64) -> Sys14 with Mut {
+    var r = Sys14 { c: [0.0; 14] }
+    var i = 0
+    while i < 14 { r.c[i] = y.c[i] + a * k.c[i]; i = i + 1 }
+    return r
+}
+
+fn sys_rk4(st: Sys14, dt: f64, cl_h: f64) -> Sys14 with Mut, Div {
+    let k1 = sys_ode(st, cl_h)
+    let k2 = sys_ode(sys_axpy(st, k1, 0.5 * dt), cl_h)
+    let k3 = sys_ode(sys_axpy(st, k2, 0.5 * dt), cl_h)
+    let k4 = sys_ode(sys_axpy(st, k3, dt), cl_h)
+    var r = Sys14 { c: [0.0; 14] }
+    let sixth = dt / 6.0
+    let third = dt / 3.0
+    var i = 0
+    while i < 14 {
+        r.c[i] = st.c[i] + sixth * k1.c[i] + third * k2.c[i] + third * k3.c[i] + sixth * k4.c[i]
+        i = i + 1
+    }
+    return r
+}
+
+// One fixed step: operator-split oral absorption (delivers Fa·FG·FH of the
+// released mass to blood) → systemic RK4. cl_h, f_or constant (static inhibitor).
+fn mdz_step(st: MdzState, t: f64, dt: f64, cl_h: f64, f_or: f64) -> MdzState with Mut, Div {
+    var a_gut = st.a_gut
+    var s0 = st.sys
+    if t + dt > abs_tlag() {
+        let t_active_start = if t < abs_tlag() { abs_tlag() } else { t }
+        let dt_active = (t + dt) - t_active_start
+        if dt_active > 0.0 {
+            let decay = abs_exp_neg(abs_ka() * dt_active)
+            let a_after = a_gut * decay
+            let to_blood = f_or * (a_gut - a_after)
+            a_gut = a_after
+            s0.c[0] = s0.c[0] + to_blood / v_at(0)
+        }
+    }
+    let s1 = sys_rk4(s0, dt, cl_h)
+    return MdzState { sys: s1, a_gut: a_gut }
+}
+
+fn integrate_to(st: MdzState, t_start: f64, t_end: f64, dt: f64, cl_h: f64, f_or: f64) -> MdzState with Mut, Div {
+    var s = st
+    var t = t_start
+    while t + 0.5 * dt < t_end {
+        s = mdz_step(s, t, dt, cl_h, f_or)
+        t = t + dt
+    }
+    return s
+}
+
+// Sample times (h) and DDI inhibition-curve grid (I/Ki).
+fn sample_at(idx: i32) -> f64 {
+    if idx == 0 { return 0.25 }
+    if idx == 1 { return 0.5 }
+    if idx == 2 { return 1.0 }
+    if idx == 3 { return 2.0 }
+    if idx == 4 { return 3.0 }
+    if idx == 5 { return 4.0 }
+    if idx == 6 { return 6.0 }
+    if idx == 7 { return 8.0 }
+    if idx == 8 { return 12.0 }
+    if idx == 9 { return 18.0 }
+    if idx == 10 { return 24.0 }
+    return 36.0
+}
+fn igrid_at(idx: i32) -> f64 {
+    if idx == 0 { return 0.0 }
+    if idx == 1 { return 0.25 }
+    if idx == 2 { return 0.5 }
+    if idx == 3 { return 1.0 }
+    if idx == 4 { return 2.0 }
+    if idx == 5 { return 4.0 }
+    if idx == 6 { return 8.0 }
+    return 16.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PBPK28_MIDAZOLAM_PARITY_REF v1")
+    println("model=pbpk14_wellstirred+mechanistic_firstpass+cyp3a_competitive_ddi")
+    println("integrator=fixed_step_rk4")
+    println("dt=0.002")
+    println("dose_mg=5.0")
+    println("inhibitor=ketoconazole_static_steady_state")
+    println("drug=midazolam")
+    println("samples=12")
+    println("igrid=8")
+
+    let dt = 0.002
+    let cl_h_solo = clh(0.0)
+    let f_solo = f_oral(0.0)
+    let cl_h_inh = clh(keto_i())
+    let f_inh = f_oral(keto_i())
+
+    // Cases 17-18: solo vs ketoconazole-inhibited oral PK, lockstep on a 5 mg dose.
+    var st_solo = MdzState { sys: sys_zero(), a_gut: 5.0 }
+    var st_inh  = MdzState { sys: sys_zero(), a_gut: 5.0 }
+    var prev = 0.0
+    var i: i32 = 0
+    while i < 12 {
+        let target = sample_at(i)
+        st_solo = integrate_to(st_solo, prev, target, dt, cl_h_solo, f_solo)
+        st_inh  = integrate_to(st_inh,  prev, target, dt, cl_h_inh,  f_inh)
+        let p_solo = st_solo.sys.c[0] / rb_ratio()
+        let p_inh  = st_inh.sys.c[0] / rb_ratio()
+        print("MDZ|t=");           println(target); println("")
+        print("MDZ|plasma_solo="); println(p_solo); println("")
+        print("MDZ|plasma_inh=");  println(p_inh);  println("")
+        prev = target
+        i = i + 1
+    }
+
+    // Case 19: DDI inhibition curve — F, CL_h, AUCR across I/Ki (closed form).
+    let f0 = f_oral(0.0)
+    let clh0 = clh(0.0)
+    var j: i32 = 0
+    while j < 8 {
+        let r = igrid_at(j)
+        let i_conc = r * keto_ki()
+        let ff = f_oral(i_conc)
+        let cc = clh(i_conc)
+        let aucr = (ff / f0) * (clh0 / cc)
+        print("MDZ|igrid="); println(r);    println("")
+        print("MDZ|F=");     println(ff);   println("")
+        print("MDZ|clh=");   println(cc);   println("")
+        print("MDZ|aucr=");  println(aucr); println("")
+        j = j + 1
+    }
+
+    println("DISSERTATION_PBPK28_MIDAZOLAM_PARITY_DONE")
+    return 0
+}

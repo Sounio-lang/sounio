@@ -1,3 +1,6 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
 // decomp.sio - Matrix Decompositions for Sounio Linear Algebra
 //
 // Fixed-size QR, Eigendecomposition, and SVD for matrices up to 8x8.
@@ -5,13 +8,8 @@
 //
 // Algorithms:
 //   QR:    Householder reflections
-//   Eigen: QR algorithm with Wilkinson shift
+//   Eigen: QR algorithm with Wilkinson shift (symmetric via tridiagonalization)
 //   SVD:   Via eigendecomposition of A^T A
-
-use linalg::eigen::{
-    eigen_workspace_reset, eigen_workspace_set, eigen_workspace_symmetric,
-    eigenvalue_get, eigenvector_get
-}
 
 // ============================================================================
 // HELPERS
@@ -693,32 +691,23 @@ fn eigen_decompose_symmetric_mat8(a: Matrix8) -> EigenResult with Mut, Panic, Di
     let n = a.rows
     var eigenvalues_real: [f64; 8] = [0.0; 8]
     var eigenvalues_imag: [f64; 8] = [0.0; 8]
-    var eigenvectors = mat8_zeros(n, n)
 
-    eigen_workspace_reset(n)
+    // Reduce to tridiagonal form via Householder reflections
+    var diag: [f64; 8] = [0.0; 8]
+    var subdiag: [f64; 8] = [0.0; 8]
+    let hmat = tridiag8_householder(a, &!diag, &!subdiag)
+
+    // Accumulate Householder transforms into eigenvector matrix
+    var eigenvectors = mat8_zeros(n, n)
+    tridiag8_accumulate_householder(hmat, &!eigenvectors)
+
+    // QR iteration on tridiagonal form
+    tridiag8_iter(&!diag, &!subdiag, n, &!eigenvectors)
+
     var i = 0
     while i < n {
-        var j = 0
-        while j < n {
-            eigen_workspace_set(i, j, mat8_get(a, i, j))
-            j = j + 1
-        }
-        i = i + 1
-    }
-
-    if !eigen_workspace_symmetric(n) {
-        return eigen_decompose_general_qr(a)
-    }
-
-    i = 0
-    while i < n {
-        eigenvalues_real[i] = eigenvalue_get(i)
+        eigenvalues_real[i] = diag[i]
         eigenvalues_imag[i] = 0.0
-        var j = 0
-        while j < n {
-            eigenvectors.data[i * eigenvectors.cols + j] = eigenvector_get(i, j)
-            j = j + 1
-        }
         i = i + 1
     }
 
@@ -1260,4 +1249,100 @@ fn svd_reconstruction_error(a: Matrix8, result: SVDResult) -> f64 with Mut, Pani
     let usv = mat8_multiply(result.u, sv)
     let diff = mat8_subtract(usv, a)
     return mat8_frobenius_norm(diff)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+var CNT: [i64; 2] = [0; 2]
+
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
+}
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+fn test_qr_3x3() with IO, Mut, Div, Panic {
+    // A = [[1,2,3],[4,5,6],[7,8,10]] (det != 0)
+    var a = mat8_zeros(3, 3)
+    a = mat8_set(a, 0, 0, 1.0); a = mat8_set(a, 0, 1, 2.0); a = mat8_set(a, 0, 2, 3.0)
+    a = mat8_set(a, 1, 0, 4.0); a = mat8_set(a, 1, 1, 5.0); a = mat8_set(a, 1, 2, 6.0)
+    a = mat8_set(a, 2, 0, 7.0); a = mat8_set(a, 2, 1, 8.0); a = mat8_set(a, 2, 2, 10.0)
+
+    let result = qr_decompose(a)
+
+    let recon_err = qr_reconstruction_error(a, result)
+    chk(1, near(recon_err, 0.0, 1e-10))
+
+    let orth_err = qr_orthogonality_error(result)
+    chk(2, near(orth_err, 0.0, 1e-10))
+
+    let tri_err = qr_upper_triangular_error(result)
+    chk(3, near(tri_err, 0.0, 1e-12))
+}
+
+fn test_qr_identity() with IO, Mut, Div, Panic {
+    let a = mat8_identity(4)
+    let result = qr_decompose(a)
+    let recon_err = qr_reconstruction_error(a, result)
+    chk(4, near(recon_err, 0.0, 1e-12))
+    let orth_err = qr_orthogonality_error(result)
+    chk(5, near(orth_err, 0.0, 1e-12))
+}
+
+fn test_mat8_basic() with IO, Mut, Div, Panic {
+    // Multiply identity by a matrix → same matrix
+    let a = mat8_identity(3)
+    var b = mat8_zeros(3, 3)
+    b = mat8_set(b, 0, 0, 2.0); b = mat8_set(b, 1, 1, 3.0); b = mat8_set(b, 2, 2, 4.0)
+    let c = mat8_multiply(a, b)
+    chk(6, near(mat8_get(c, 0, 0), 2.0, 1e-12))
+    chk(7, near(mat8_get(c, 1, 1), 3.0, 1e-12))
+    chk(8, near(mat8_get(c, 2, 2), 4.0, 1e-12))
+
+    // Frobenius norm of identity(3) = sqrt(3)
+    let fn3 = mat8_frobenius_norm(a)
+    chk(9, near(fn3, 1.7320508075688772, 1e-9))
+
+    // Transpose
+    var m = mat8_zeros(2, 2)
+    m = mat8_set(m, 0, 1, 5.0)
+    let mt = mat8_transpose(m)
+    chk(10, near(mat8_get(mt, 1, 0), 5.0, 1e-12))
+}
+
+fn test_eigen_diagonal() with IO, Mut, Div, Panic {
+    // Diagonal matrix: eigenvalues are the diagonal entries
+    var a = mat8_zeros(3, 3)
+    a = mat8_set(a, 0, 0, 3.0)
+    a = mat8_set(a, 1, 1, 1.0)
+    a = mat8_set(a, 2, 2, 2.0)
+
+    let eig = eigen_decompose_symmetric_mat8(a)
+    // After sorting, eigenvalues should be [1, 2, 3]
+    chk(11, near(eig.eigenvalues_real[0], 1.0, 1e-8))
+    chk(12, near(eig.eigenvalues_real[1], 2.0, 1e-8))
+    chk(13, near(eig.eigenvalues_real[2], 3.0, 1e-8))
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/linalg/decomp tests ───\n")
+    test_mat8_basic()
+    test_qr_identity()
+    test_qr_3x3()
+    test_eigen_diagonal()
+    print("─── "); print(CNT[0]); print("/"); print(CNT[0]+CNT[1]); print(" PASS ───\n")
+    if CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
 }

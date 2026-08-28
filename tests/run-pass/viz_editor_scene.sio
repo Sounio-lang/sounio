@@ -1,0 +1,99 @@
+// tests/run-pass/viz_editor_scene.sio - minimal native scene editor proof
+//
+// Expected output includes:
+//   data-viz-tag="7202"
+//   VIZ_EDITOR_SCENE_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{Event, EV_KEY_PRESS, KEY_RIGHT, KEY_DOWN}
+use viz::audit::{viz_audit_hash, viz_audit_node_hash}
+use viz::editor::{
+    viz_editor_resize_selected, viz_editor_set_selected_tag, viz_editor_set_selected_value,
+    viz_editor_trace_events,
+}
+use viz::inspector::{viz_inspector_draw, viz_inspector_select, viz_inspector_draw_node_highlights}
+use viz::ir::{
+    viz_scene_new, viz_layout_rect, viz_style_rgb,
+    viz_add_button, viz_add_slider, viz_scene_set_tag,
+}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn ev(kind: i64, key: i64, x: i64, y: i64, mods: i64) -> Event {
+    Event { kind: kind, key: key, x: x, y: y, mods: mods }
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    var label: [i8; 64] = [0; 64]
+    label[0] = 69
+    label[1] = 100
+    label[2] = 105
+    label[3] = 116
+
+    let button = viz_add_button(&!scene, &label, 4, viz_layout_rect(12, 12, 48, 18), viz_style_rgb(90, 180, 240))
+    let slider = viz_add_slider(&!scene, viz_layout_rect(72, 12, 90, 18), 0.25, 0.0, 1.0, viz_style_rgb(240, 190, 80))
+    viz_scene_set_tag(&!scene, button, 7201)
+    viz_scene_set_tag(&!scene, slider, 7200)
+
+    var c = make_canvas(280, 150)
+    canvas_clear(&!c, 5, 6, 7)
+    viz_canvas_render_scene(&scene, &!c)
+    viz_inspector_draw(&scene, &!c, 18, 48, 226, 92)
+
+    let selected = viz_inspector_select(&!scene, 18, 48, 226, 92, 30, 133)
+    assert(selected == slider)
+    let before_node = viz_audit_node_hash(&scene, slider)
+    assert(before_node != 0)
+
+    assert(viz_editor_set_selected_tag(&!scene, 7202))
+    assert(viz_editor_set_selected_value(&!scene, 0.75))
+    let resize_before_w = scene.nodes[slider as usize].layout.w
+    let resize_before_h = scene.nodes[slider as usize].layout.h
+    assert(viz_editor_resize_selected(&!scene, 10, 4, 8, 8))
+    assert(scene.nodes[slider as usize].tag == 7202)
+    assert(scene.nodes[slider as usize].value == 0.75)
+    let direct_w = scene.nodes[slider as usize].layout.w
+    let direct_h = scene.nodes[slider as usize].layout.h
+    assert(direct_w == resize_before_w + 10)
+    assert(direct_h == resize_before_h + 4)
+
+    var events: [Event; 32] = [ev(0, 0, 0, 0, 0); 32]
+    events[0] = ev(EV_KEY_PRESS, KEY_RIGHT, 0, 0, 0)
+    events[1] = ev(EV_KEY_PRESS, KEY_DOWN, 0, 0, 0)
+    events[2] = ev(EV_KEY_PRESS, KEY_RIGHT, 0, 0, 1)
+    let trace = viz_editor_trace_events(&!scene, &events, 3, 3)
+
+    assert(trace.count == 3)
+    assert(trace.frames[0].changed)
+    assert(trace.frames[1].changed)
+    assert(trace.frames[2].changed)
+    assert(trace.frames[2].selected_node == slider)
+    assert(trace.frames[2].node_hash == viz_audit_node_hash(&scene, slider))
+    assert(trace.frames[2].audit_hash == viz_audit_hash(&scene))
+    assert(scene.nodes[slider as usize].layout.x == 75)
+    assert(scene.nodes[slider as usize].layout.y == 15)
+    assert(scene.nodes[slider as usize].layout.w == direct_w + 3)
+    assert(viz_audit_node_hash(&scene, slider) != before_node)
+
+    canvas_clear(&!c, 5, 6, 7)
+    viz_canvas_render_scene(&scene, &!c)
+    viz_inspector_draw_node_highlights(&scene, &!c)
+    viz_inspector_draw(&scene, &!c, 18, 48, 226, 92)
+    assert(read_px(&c, 73, 10) != 0)
+    assert(read_px(&c, 30, 133) != 0)
+
+    viz_html_emit_scene(&scene, 220, 80)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_EDITOR_SCENE_PASS")
+}

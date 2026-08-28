@@ -1,0 +1,143 @@
+// self-hosted/ci/siep_section_probe.sio
+//
+// Locate and unpack the 24-byte SIEP section header from an ELF binary.
+// Replaces the Python parse_siep() heredoc in epistemic_witness_gate.sh
+// and epistemic_monotonicity_gate.sh.
+//
+// argv[0]: path to ELF binary
+// stdout:  "present:{instr_count}:{u_c_scaled}" or "absent:0:0"
+// exit:    always 0
+//
+// SIEP header layout (little-endian):
+//   bytes  0-3  : magic "SIEP" (0x53 0x49 0x45 0x50)
+//   bytes  4-7  : version  (u32 LE, unused here)
+//   bytes  8-15 : instr_count (u64 LE)
+//   bytes 16-23 : u_c_scaled  (u64 LE)
+
+use gpu::kaxi_backend::*
+
+const ELF_CAP: i64 = 2097152   // 2 MB — enough for any self-hosted binary
+
+var ELF_DATA: [i8; 2097152] = [0; 2097152]
+var ELF_LEN: i64 = 0
+
+var OUT_DATA: [i8; 128] = [0; 128]
+var OUT_LEN: i64 = 0
+
+fn out_push(c: i8) with Mut {
+    if OUT_LEN < 127 {
+        OUT_DATA[OUT_LEN as usize] = c
+        OUT_LEN = OUT_LEN + 1
+    }
+}
+
+fn out_push_str(s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        out_push(str_char_at(s, i) as i8)
+        i = i + 1
+    }
+}
+
+// Decimal conversion: write n as decimal digits into OUT_DATA.
+// Uses a local 20-byte digit stack then reverses.
+fn out_push_i64(n: i64) with Mut, Panic, Div {
+    if n < 0 {
+        out_push(48)  // guard: print '0' for unexpected negatives
+        return
+    }
+    if n == 0 {
+        out_push(48)  // '0'
+        return
+    }
+    var digits: [i8; 20] = [0; 20]
+    var dlen: i64 = 0
+    var v: i64 = n
+    while v > 0 {
+        let rem = v - ((v / 10) * 10)
+        digits[dlen as usize] = (48 + rem) as i8
+        dlen = dlen + 1
+        v = v / 10
+    }
+    var i: i64 = dlen - 1
+    while i >= 0 {
+        out_push(digits[i as usize])
+        i = i - 1
+    }
+}
+
+fn print_out() with IO, Mut, Panic, Div, Alloc {
+    var kb = kaxi_asm_new()
+    var i: i64 = 0
+    while i < OUT_LEN {
+        kb = kaxi_asm_push_byte(kb, OUT_DATA[i as usize])
+        i = i + 1
+    }
+    print(kaxi_asm_to_string(kb))
+}
+
+fn elf_byte(i: i64) -> i64 {
+    if i < 0 || i >= ELF_LEN { return 0 }
+    let v = ELF_DATA[i as usize] as i64
+    if v < 0 { v + 256 } else { v }
+}
+
+// Read 8 bytes at offset as unsigned 64-bit little-endian integer.
+fn elf_u64_le(off: i64) -> i64 {
+    let b0 = elf_byte(off)
+    let b1 = elf_byte(off + 1)
+    let b2 = elf_byte(off + 2)
+    let b3 = elf_byte(off + 3)
+    let b4 = elf_byte(off + 4)
+    let b5 = elf_byte(off + 5)
+    let b6 = elf_byte(off + 6)
+    let b7 = elf_byte(off + 7)
+    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24) |
+    (b4 << 32) | (b5 << 40) | (b6 << 48) | (b7 << 56)
+}
+
+fn main() with IO, Mut, Panic, Div, Alloc {
+    if arg_count() < 1 {
+        print("absent:0:0\n")
+        return
+    }
+    let path = get_arg(0)
+    let size = file_size(path)
+    if size <= 0 {
+        print("absent:0:0\n")
+        return
+    }
+    let bytes = read_file(path)
+    let cap: i64 = if size > ELF_CAP { ELF_CAP } else { size }
+    var i: i64 = 0
+    while i < cap {
+        ELF_DATA[i as usize] = bytes[i as usize] as i8
+        i = i + 1
+    }
+    ELF_LEN = cap
+    // Scan for SIEP magic: 'S'=83 'I'=73 'E'=69 'P'=80
+    var found: i64 = 0 - 1
+    var j: i64 = 0
+    while j + 24 <= ELF_LEN {
+        if elf_byte(j) == 83 && elf_byte(j + 1) == 73 &&
+           elf_byte(j + 2) == 69 && elf_byte(j + 3) == 80 {
+            found = j
+            j = ELF_LEN  // stop search
+        } else {
+            j = j + 1
+        }
+    }
+    if found < 0 {
+        print("absent:0:0\n")
+        return
+    }
+    let instr = elf_u64_le(found + 8)
+    let u_c   = elf_u64_le(found + 16)
+    out_push_str("present:")
+    out_push_i64(instr)
+    out_push(58)  // ':'
+    out_push_i64(u_c)
+    out_push(10)  // '\n'
+    print_out()
+}

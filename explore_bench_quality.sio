@@ -1,0 +1,101 @@
+// Benchmark: schedule quality.
+//
+// Build N synthetic DAGs (chains and trees) and measure makespan_mean +
+// confidence reported by the epistemic scheduler vs a naive "sequential"
+// makespan (just sum the latencies of the longest path).  Naive = what an
+// unscheduled, in-order emit would take.
+
+use native::codegen_plan::*
+
+fn build_chain(n_loads: i64) with Mut, Div, Panic {
+    cgplan_global_reset()
+    // Independent loads, no deps: scheduler can overlap them on different ports
+    var i: i64 = 0
+    while i < n_loads {
+        cgplan_global_add_dist(codegen_instr_with_port(i, CGOP_LOAD, i + 1, 0 - 1, 0 - 1, 4, 12, 1), 16)
+        i = i + 1
+    }
+    cgplan_global_build_deps()
+    cgplan_global_schedule()
+}
+
+// Tree reduction: 8 loads -> 4 adds -> 2 adds -> 1 add (15 instrs total)
+fn build_reduction_tree() with Mut, Div, Panic {
+    cgplan_global_reset()
+    // 8 loads
+    var i: i64 = 0
+    while i < 8 {
+        cgplan_global_add_dist(codegen_instr_with_port(i, CGOP_LOAD, i + 1, 0 - 1, 0 - 1, 4, 12, 1), 16)
+        i = i + 1
+    }
+    // 4 first-level adds
+    cgplan_global_add_dist(codegen_instr_with_port(8,  CGOP_ADD, 9,  1, 2, 1, 3, 2), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(9,  CGOP_ADD, 10, 3, 4, 1, 3, 2), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(10, CGOP_ADD, 11, 5, 6, 1, 3, 2), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(11, CGOP_ADD, 12, 7, 8, 1, 3, 2), 0)
+    // 2 second-level adds
+    cgplan_global_add_dist(codegen_instr_with_port(12, CGOP_ADD, 13, 9, 10, 1, 3, 2), 0)
+    cgplan_global_add_dist(codegen_instr_with_port(13, CGOP_ADD, 14, 11, 12, 1, 3, 2), 0)
+    // final add
+    cgplan_global_add_dist(codegen_instr_with_port(14, CGOP_ADD, 15, 13, 14, 1, 3, 2), 0)
+    cgplan_global_build_deps()
+    cgplan_global_schedule()
+}
+
+// Strict chain (each instr depends on previous) — scheduler should not help
+fn build_strict_chain(n: i64) with Mut, Div, Panic {
+    cgplan_global_reset()
+    // First a load
+    cgplan_global_add_dist(codegen_instr_with_port(0, CGOP_LOAD, 1, 0 - 1, 0 - 1, 4, 12, 1), 16)
+    // Then n-1 adds, each depending on the previous
+    var i: i64 = 1
+    while i < n {
+        cgplan_global_add_dist(codegen_instr_with_port(i, CGOP_ADD, i + 1, i, 0 - 1, 1, 3, 2), 0)
+        i = i + 1
+    }
+    cgplan_global_build_deps()
+    cgplan_global_schedule()
+}
+
+fn report(label: i64, n_instrs: i64, naive_makespan: i64) with IO, Mut, Div, Panic {
+    print("case ") print_int(label) print(":\n")
+    print("  instrs               = ") print_int(n_instrs) print("\n")
+    print("  naive (sum-latency)  = ") print_int(naive_makespan) print(" cycles\n")
+    print("  epistemic mean       = ") print_int(CGPLAN_MAKESPAN_MEAN) print(" cycles\n")
+    print("  epistemic var        = ") print_int(CGPLAN_MAKESPAN_VAR) print(" cycles^2\n")
+    print("  epistemic conf       = ") print_int(CGPLAN_MAKESPAN_CONF) print("/1000\n")
+    let reduction_x10 = ((naive_makespan - CGPLAN_MAKESPAN_MEAN) * 1000) / naive_makespan
+    print("  makespan reduction   = ") print_int(reduction_x10) print(" /1000\n")
+    print("\n")
+}
+
+fn main() with IO, Mut, Panic, Div {
+    print("=== Sounio epistemic scheduler — quality benchmark ===\n\n")
+
+    print("Case 1: 8 independent loads (perfectly parallelizable).\n")
+    build_chain(8)
+    // Naive sequential: each load takes 4 cycles, total = 8*4 = 32
+    report(1, 8, 32)
+
+    print("Case 2: 15-instr reduction tree (8 loads + 7 adds).\n")
+    build_reduction_tree()
+    // Naive sequential: 8*4 (loads) + 7*1 (adds) = 39 cycles
+    report(2, 15, 39)
+
+    print("Case 3: strict 20-instr chain (each depends on previous).\n")
+    build_strict_chain(20)
+    // Naive sequential: 4 (load) + 19*1 (chained adds) = 23 cycles
+    // Scheduler can't do better since each instr depends on prev.
+    report(3, 20, 23)
+
+    print("Case 4: 16 independent loads (wider).\n")
+    build_chain(16)
+    // Naive sequential: 16*4 = 64
+    report(4, 16, 64)
+
+    print("=== summary ===\n")
+    print("Cases 1, 2, 4 are parallelizable; case 3 is fundamentally sequential.\n")
+    print("A working scheduler should: (a) reduce makespan dramatically on 1/2/4,\n")
+    print("(b) preserve naive makespan on 3 (can't go below the critical path),\n")
+    print("(c) report calibrated confidence (lower for higher-variance loads).\n")
+}

@@ -1,0 +1,151 @@
+---
+title: "Construyendo un Modelo PK"
+description: "Defina los parámetros farmacocinéticos como estructuras tipadas con anotaciones de efecto"
+series: "drug-dosing"
+order: 2
+estimatedMinutes: 10
+prerequisites: ["drug-dosing-01-intro"]
+topic_id: "website.tutorials.es.drug-dosing-02-pk-model"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.es.drug-dosing-02-pk-model"
+---
+# Construyendo un Modelo PK
+
+Un modelo farmacocinético (PK) de una sola compartición describe cómo un medicamento se mueve por el cuerpo. Tiene tres parámetros fundamentales:
+
+- **Claridad (CL)**: cuán rápido el cuerpo elimina el medicamento (L/h)
+- **Volumen de distribución (Vd)**: el volumen aparente en el que el medicamento se distribuye (L)
+- **Vida útil (t½)**: tiempo para que la concentración plasmática se doble (h)
+
+Estos están relacionados: `t½ = 0.693 × Vd / CL`.
+
+## Definir el Modelo
+
+En Sounio, representamos los parámetros PK como una estructura:
+
+```sio
+struct PKParams {
+    clearance: f64,    // L/h
+    volume: f64,       // L
+    dose: f64,         // mg
+    tau: f64,          // intervalo de dosis, horas
+}
+```
+
+Ahora escribamos funciones que calculen cantidades derivadas. Observa las anotaciones de efecto:
+
+```sio
+fn half_life(pk: PKParams) -> f64 with Div {
+    0.693 * pk.volume / pk.clearance
+}
+
+fn elimination_rate(pk: PKParams) -> f64 with Div {
+    pk.clearance / pk.volume
+}
+```). Solo traduce los valores `title` y `description`. NO traduce claves como `topic_id` o `category`.
+5. NO traduce ningún bloque de código, comandos terminales, nombres de funciones o fragmentos de código en línea (`code`).
+6. Devuelve SOLO el documento traducido, sin preámbulo ni postámbulo conversacional.
+
+---
+
+# CONCENTRACIÓN PICO CRÍTICO
+
+## fn peak_concentration(pk: PKParams) -> f64 con Div
+
+```rust
+// Cmax después de la primera dosis (bolía IV, compartimento único)
+pk.dosis / pk.volumen
+```
+
+## fn trough_concentration(pk: PKParams, ke: f64) -> f64 con Div, Mut, Panic
+
+```rust
+// Cmin en el estado estático
+let cmax = peak_concentration(pk);
+let numerador = cmax * exp_aprox(0.0 - ke * pk.tau);
+let denominador = 1.0 - exp_aprox(0.0 - ke * pk.tau);
+numerador / denominador
+```
+
+Cada función declara exactamente los efectos que necesita:
+- `con Div` — realiza una división (puede dividir por cero si CL = 0)
+- `con Mut` — utiliza estado mutably interno
+- `con Panic` — puede acceder a campos de estructura (verificación de límites)
+
+## Calculando un Escenario de Dosis
+
+Vamos a unirlo con un escenario realista de vancomicina:
+
+```rust
+fn dosis(pk: PKParams, ke: f64, cmin: f64) -> f64 {
+    // Dosis inicial
+    let cmax = peak_concentration(pk);
+    let cmin = trough_concentration(pk, ke);
+    let dosis = cmax / cmin;
+
+    // Dosis final
+    dosis * 1.0
+}
+```
+
+Este ejemplo muestra cómo usar las funciones `peak_concentration` y `trough_concentration` para calcular una dosis realista de vancomicina.
+```sio
+```rust
+fn exp_approx(x: f64) -> f64 con Mut, Panic, Div {
+    if x > 10.0 {
+        let half = exp_approx(x / 2.0);
+        return half * half;
+    }
+    if x < 0.0 - 10.0 { return 1.0 / exp_approx(0.0 - x); }
+    var sum = 1.0;
+    var term = 1.0;
+    var n = 1;
+    while n &lt;= 25 {
+        term = term * x / (n as f64);
+        sum = sum + term;
+        n = n + 1;
+    }
+    sum;
+}
+
+fn main() -> i32 con IO, Mut, Panic, Div {
+    let pk = PKParams {
+        clearance: 4.5,  // L/h (typical for vancomycin)
+        volume: 50.0,    // L
+        dose: 1000.0,    // mg
+        tau: 12.0,       // q12h dosing
+    };
+
+    let ke = elimination_rate(pk);
+    let t_half = half_life(pk);
+    let cmax = peak_concentration(pk);
+    let cmin = trough_concentration(pk, ke);
+}
+``````markdown
+    imprimir("Vida útil crítica: ")
+    println(t_half)            // ~7.7 horas
+    imprimir("Pico (Cmax): ")
+    println(cmax)              // 20.0 mg/L
+    imprimir("Bajo (Cmin): ")
+    println(cmin)              // ~6.8 mg/L
+
+    0
+}
+```
+
+## El Problema: Incertidumbre Oculta
+
+Este modelo ofrece números precisos: Cmin = 6.8 mg/L. ¿Pero cuán confiable son esos? El valor de la claramente de la claridad de 4.5 L/h proviene de un promedio de población. Para *este* paciente, podría estar en algún lugar entre 3.0 y 6.0 L/h dependiendo de su función renal.
+
+La ventana terapéutica de vancomicina es de 15–20 mg/L para la trough (dosis orientada por AUC). ¿Es 6.8 mg/L segura debajo del umbral de toxicidad, o es la incertidumbre lo suficientemente grande que la verdadera trough podría ser altamente peligrosa?
+
+Con valores `f64` en bruto, no tenemos manera de responder esta pregunta. En la siguiente lección, reemplazaremos nuestros parámetros con valores `Knowledge<T>` que llevan incertidumbre.
+
+## Clave de Aprendizaje
+```- Las estructuras Sounio modelan los parámetros PK de manera natural
+- Las anotaciones de efecto (`with Div, Mut, Panic`) hacen explícitas las demandas computacionales
+- Los modelos tradicionales `f64` ofrecen una precisión falsa — ocultan la incertidumbre detrás de números precisos
+- El siguiente paso es hacer que la incertidumbre sea una parte primordial del modelo

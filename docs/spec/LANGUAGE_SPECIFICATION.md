@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.spec.language-
 **Status**: Release Candidate
 **Last Updated**: 2026-03-21
 
-> Note: Lambda/closure literals (Section 4.7) are specified but not yet implemented — use named function references instead (`let f = square`). All other features in this spec are implemented and tested. For the compiler’s current behavior and supported syntax, see `docs/compiler/KNOWN_LIMITATIONS.md`, `docs/MV_CORE_CHECKLIST.md`, and the runnable fixtures under `tests/`.
+> **Note (2026-05-27, updated):** Lambda/closure literals (Section 4.7.2) are **normative and implemented** — 16/17 `tests/run-pass/closure_*.sio` pass (the exception is `closure_linear.sio` which tests linear-resource closures, marked `//@ ignore`). The authoritative tiering for every feature in this spec is `docs/serious-language/public-claim-registry.v1.tsv` (see `closures.lambdas = validated_research`); for compiler limits and active gaps see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
 ---
 
@@ -114,6 +114,24 @@ mut       unsafe
 with      handle    on        resume    perform
 ```
 
+> **Measured 2026-08-19 — two of these tables are wrong, and one entry is
+> reserved against itself.** Each word was tested as an identifier
+> (`let <word> = 1`); a reserved word cannot be one. Both engines agree.
+>
+> | word | listed as | measured |
+> |---|---|---|
+> | `own` | type keyword | **not reserved** — compiles as an identifier |
+> | `handle` | effect keyword | **not reserved** — compiles as an identifier; it is *contextual*, recognised in the `handle<IO> { … }` position §7.3 measures |
+> | `mut` | type keyword | reserved, but refused **by design**: `error[E040]: Sounio uses \`var\` for mutable bindings, not \`let mut\`` |
+>
+> `mut` is reserved to teach against, not to use, so listing it beside `linear`
+> and `where` reads as an endorsement of a form the compiler exists to refuse.
+> The remaining ten refuse as parse failures and are reserved as documented.
+> `perform` is reserved on Madaros but resolves as an ordinary identifier under
+> `lean_single`, which reports `error[E200]: undefined identifier` — see
+> §7.3.4 in `S07_EFFECT_HANDLERS.md`.
+
+
 **Literal keywords:**
 ```
 true      false
@@ -129,11 +147,46 @@ uint      u8        u16       u32       u64       u128
 f32       f64       bool      char      string
 ```
 
+> **Measured 2026-08-19 — `int` and `uint` are listed and do not work.**
+> `let x: i64 = 0` checks; `let x: int = 0` gives
+> `error[E001]: this binding expects a different type`, as does `uint`. The two
+> widths this document might have been expected to be aspirational about,
+> `i128` and `u128`, **do** check — that guess was tested and was wrong.
+>
+> **A test in parameter position proves nothing here.** `fn f(x: T) -> i32 { 0 }`
+> checks under Madaros for *every* `T`, including `naoexiste_zorble`. An
+> undeclared parameter type is refused only once the function has a caller
+> (`error[E009]`), so the declaration is never interrogated on its own — the use
+> is. lean_single emits an ELF **either way**, caller or not.
+>
+> This is `SOUNIO-TYPE-INTERROGATION` at the level of the type namespace: a name
+> in a declaration is not asked to exist until something forces the question.
+
 ### 2.4 Built-in Effect Names
 
 ```
 IO        Mut       Alloc     Panic     Async     GPU       Prob      Div
 ```
+
+> **Measured 2026-08-19 — this list is a quarter of the table.** The compiler's
+> closed effect-name list holds **30** names
+> (`scripts/ci/effect_name_closed_list_gate.sh`, frozen at 2,845 sites). All
+> eight above are in it, so nothing here is wrong; **22 are missing**:
+>
+> `Approx  Audit  Causal  Chaotic  Confidence  Deterministic  Epistemic
+> Hypothesis  Learn  MultiTest  NarrowWidthApproximation  NaturalityG2  Network
+> NonAssoc  NonUnitary  Observe  Perturbative  Render  Sensor  Temporal  Witness
+> ZD`
+>
+> The omissions are not marginal: `ZD`, `Witness`, `Learn`, `Temporal` and
+> `Epistemic` carry the surgical-unlearning and epistemic-typing claims, and
+> `Observe` is named as a core effect in `CLAUDE.md` §7.
+>
+> **The list cannot be checked by writing one.** `fn g() -> i32 with Zorblex { 0 }`
+> gives `check: OK` under Madaros and an ELF under lean_single. An unknown effect
+> name is dropped in silence on both engines — §6.1 measures the same on the
+> declaration side — so membership of this table is unfalsifiable from outside
+> the compiler, and the closed-list gate exists because of that.
 
 ### 2.5 Operators
 
@@ -695,11 +748,11 @@ let result = add(1, 2)
 let chained = obj.method().another()
 ```
 
-### 4.7 Lambda Expressions and Function References
+### 4.7 Function References and Lambda Literals (both normative)
 
-> **Implementation status**: Lambda/closure literals (`|x| x + 1`) are specified but **not yet implemented**. The compiler supports named function references as an alternative. See `docs/compiler/KNOWN_LIMITATIONS.md`.
+Sounio has first-class **function references** and **lambda literals** (`|x| x + 1`). Both are normative, implemented, and gate-tested. The public-claim registry reflects this at `closures.lambdas = validated_research` (`docs/serious-language/public-claim-registry.v1.tsv`).
 
-#### 4.7.1 Named Function References (Implemented)
+#### 4.7.1 Named Function References (normative — implemented)
 
 ```sio
 fn square(x: i64) -> i64 { x * x }
@@ -716,13 +769,36 @@ fn main() -> i64 {
 
 Function references support higher-order programming: functions can be stored in variables, passed as arguments, and called indirectly.
 
-#### 4.7.2 Lambda Expressions (Planned, Not Yet Implemented)
+#### 4.7.2 Lambda Literals (normative — implemented)
+
+Lambda literals (`|params| body`) create anonymous functions. They may capture variables from the enclosing scope (closures), be passed to higher-order functions, and escape their definition scope.
 
 ```sio
-// These are SPECIFIED but do NOT compile yet:
-let add = |a: int, b: int| -> int { a + b }
-let double = |x| x * 2          // Type inferred
+fn apply(f: fn(i64) -> i64, val: i64) -> i64 with Mut, Panic, Div {
+    f(val)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // Zero-capture lambda
+    let double = |x: i64| x * 2
+    assert(double(5) == 10)
+
+    // Capturing closure
+    let offset = 100
+    let shifted = |x: i64| x + offset
+    assert(shifted(5) == 105)
+
+    // Passed to HOF
+    let r = apply(|x: i64| x * x, 7)
+    assert(r == 49)
+
+    // Escaping closure (multi-capture, heap env)
+    // See closure_returned.sio / closure_capture.sio for full gate tests.
+    0
+}
 ```
+
+**One open feature:** *linear closures* (capturing linear/affine resources) are not yet implemented. `closure_linear.sio` is `//@ ignore`. All other closure forms are gate-tested in `tests/run-pass/closure_*.sio`.
 
 ### 4.8 Effect Expressions
 
@@ -939,13 +1015,61 @@ D features a complete algebraic effect system. Effects describe computational si
 | Effect | Description | Operations |
 |--------|-------------|------------|
 | `IO` | Input/output | File, network, console operations |
-| `Mut` | Mutable state | Reading/writing mutable variables |
+| `Mut` | Mutable state that escapes the callee | Writing through an exclusive reference (`&!T`), a raw `*mut T`, or an array/struct reached through one. See §7.2.1. |
 | `Alloc` | Memory allocation | Heap allocation |
 | `Panic` | Recoverable failure | Panic and recovery |
 | `Async` | Asynchronous computation | Await, spawn |
 | `GPU` | GPU operations | Kernel launch, device memory |
 | `Prob` | Probabilistic computation | Sample, observe |
 | `Div` | Divergence | Potential non-termination |
+
+#### 7.2.1 `Mut` and local mutation — the escape rule
+
+`Mut` describes mutation that is **observable by the caller**. Mutating a
+function-local `var` is not: the binding dies with the frame, so it is invisible
+outside and does **not** require `Mut` in the signature.
+
+```sio
+// No `with Mut` needed: `y` is local, the mutation cannot escape.
+// (Division is omitted deliberately -- it would additionally require
+//  `with Div, Panic`, which is a separate obligation from `Mut`.)
+fn accumulate(n: i64) -> i64 {
+    var y = 1
+    y = y + n
+    y
+}
+
+// `with Mut` IS needed: the write is through an exclusive reference,
+// so the caller observes it.
+fn zero_first(buf: &![i64; 4]) with Mut {
+    (*buf)[0] = 0
+}
+```
+
+A mutation escapes — and therefore requires `Mut` — when it is written through
+an exclusive reference (`&!T`), a raw `*mut T`, an array or struct reached
+through either, or when it is captured by a closure that outlives the frame.
+The checker is intended to **infer** this from the function body rather than
+require the author to reason about it; the annotation is a declaration of the
+inferred fact, not an independent obligation.
+
+> **Implementation status (measured 2026-07-27, not a statement of intent).**
+> Neither shipped engine implements the rule above. Under the default compiler
+> (Madaros, `self-hosted/check/`) `Mut` is **not required for either case** —
+> `check_callee_effects` (`self-hosted/check/check.sio:11688`) enforces effects
+> only at *call sites*, propagating a callee's declared effects to its caller;
+> nothing demands `Mut` at an assignment. Under the frozen `lean_single`
+> bootstrap seed, `Mut` is required for **both** cases, including the local
+> `var` above. A live consequence: `self-hosted/ir/egraph.sio` fails
+> `SOUNIO_SOUC_ENGINE=lean_single souc check` at line 1549 — inside `eg_isqrt`
+> (`egraph.sio:1511`), on the statement `y = (y + x / y) / 2`, a mutation of a
+> function-local `var` in an otherwise pure integer helper. Verified by
+> isolation that the missing effect there is `Mut` and not `Div`: the seed
+> rejects a local `var` mutation with no division at all, and accepts a bare
+> division with no mutation. Closing this gap in the default compiler is
+> scoped in
+> `docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md`; the seed is
+> deliberately left frozen (see `docs/compiler/KNOWN_LIMITATIONS.md`).
 
 ### 7.3 Effect Annotations
 

@@ -1,0 +1,154 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/normalize.sio — feature scaling
+//
+// Rescales data onto a common range — the two standard non-standardising
+// scalers:
+//
+//   minmax(x, n, out) -> MinMaxResult          (xᵢ − min)/(max − min) → [0,1]
+//   robust_scale(x, n, out) -> RobustResult    (xᵢ − median)/IQR
+//
+// Min-max is the usual [0,1] scaler; robust scaling centres on the median and
+// divides by the inter-quartile range, so a few outliers do not dominate.
+//
+// Pure Sounio: min/max in one pass; the median and IQR via an inline sort. No
+// external dependency, no nested data-array calls.
+//
+// References:
+//   standard feature-scaling definitions (e.g. scikit-learn MinMaxScaler,
+//   RobustScaler).
+
+module stats::normalize
+
+// type-7 quantile of a sorted [256] buffer.
+fn nz_quantile_sorted(s: &[f64; 256], n: i32, p: f64) -> f64 with Mut, Div, Panic {
+    if n == 1 { return s[0] }
+    let h = ((n - 1) as f64) * p
+    var lo = 0
+    while (lo as f64) + 1.0 <= h { lo = lo + 1 }
+    let frac = h - (lo as f64)
+    if lo >= n - 1 { return s[(n - 1) as usize] }
+    return s[lo as usize] + frac * (s[(lo + 1) as usize] - s[lo as usize])
+}
+
+pub struct MinMaxResult {
+    pub min: f64,
+    pub max: f64,
+}
+
+pub struct RobustResult {
+    pub median: f64,
+    pub iqr: f64,
+}
+
+/// Min-max scale x onto [0,1]; fills out[0..n).
+pub fn minmax(x: &[f64; 256], n: i32, out: &![f64; 256]) -> MinMaxResult with Mut, Div, Panic {
+    if n < 1 { return MinMaxResult { min: 0.0, max: 0.0 } }
+    var mn = x[0]
+    var mx = x[0]
+    var i = 0
+    while i < n {
+        let v = x[i as usize]
+        if v < mn { mn = v }
+        if v > mx { mx = v }
+        i = i + 1
+    }
+    let rng = mx - mn
+    var k = 0
+    while k < n {
+        var s = 0.0
+        if rng > 1.0e-300 { s = (x[k as usize] - mn) / rng }
+        out[k as usize] = s
+        k = k + 1
+    }
+    return MinMaxResult { min: mn, max: mx }
+}
+
+/// Robust-scale x by median and IQR; fills out[0..n).
+pub fn robust_scale(x: &[f64; 256], n: i32, out: &![f64; 256]) -> RobustResult with Mut, Div, Panic {
+    if n < 2 { return RobustResult { median: 0.0, iqr: 0.0 } }
+    var buf: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < n { buf[i as usize] = x[i as usize]; i = i + 1 }
+    // insertion sort
+    var p = 1
+    while p < n {
+        let key = buf[p as usize]
+        var q = p - 1
+        while q >= 0 && buf[q as usize] > key { buf[(q + 1) as usize] = buf[q as usize]; q = q - 1 }
+        buf[(q + 1) as usize] = key
+        p = p + 1
+    }
+    let med = nz_quantile_sorted(&buf, n, 0.5)
+    let q1 = nz_quantile_sorted(&buf, n, 0.25)
+    let q3 = nz_quantile_sorted(&buf, n, 0.75)
+    let iqr = q3 - q1
+    var k = 0
+    while k < n {
+        var s = 0.0
+        if iqr > 1.0e-300 { s = (x[k as usize] - med) / iqr }
+        out[k as usize] = s
+        k = k + 1
+    }
+    return RobustResult { median: med, iqr: iqr }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// {1,2,3,4,5}: min1 max5. out=(0,0.25,0.5,0.75,1).
+fn test_minmax() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var o: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = minmax(&x, 5, &!o)
+    var ok = true
+    ok = check(1, approx(r.min, 1.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.max, 5.0, 1.0e-9)) && ok
+    ok = check(3, approx(o[0], 0.0, 1.0e-9)) && ok
+    ok = check(4, approx(o[2], 0.5, 1.0e-9)) && ok
+    ok = check(5, approx(o[4], 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+// robust: {1,2,3,4,5}: median 3, Q1=2, Q3=4, IQR=2. out=(x-3)/2 -> centre 0.
+fn test_robust() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var o: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    let r = robust_scale(&x, 5, &!o)
+    var ok = true
+    ok = check(10, approx(r.median, 3.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.iqr, 2.0, 1.0e-9)) && ok
+    ok = check(12, approx(o[2], 0.0, 1.0e-9)) && ok       // median maps to 0
+    ok = check(13, approx(o[0], 0.0 - 1.0, 1.0e-9)) && ok // (1-3)/2 = -1
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_minmax() && ok
+    ok = test_robust() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -189,19 +189,20 @@ pub fn native_target_policy_for(arch_id: i64, os_id: i64) -> NativeTargetPolicy 
     native_target_policy_empty()
 }
 
-pub fn native_target_policy_group_count(policy: NativeTargetPolicy, group: i64) -> i64 {
-    if group == native_policy_group_reserved() { return policy.reserved_count }
-    if group == native_policy_group_allocatable() { return policy.allocatable_count }
-    if group == native_policy_group_allocation_order() { return policy.allocation_order_count }
-    if group == native_policy_group_scratch() { return policy.scratch_count }
-    if group == native_policy_group_args() { return policy.arg_count }
-    if group == native_policy_group_returns() { return policy.ret_count }
+// Soft-keyword: Madaros parser rejects param name `policy`.
+pub fn native_target_policy_group_count(tgt_policy: NativeTargetPolicy, group: i64) -> i64 {
+    if group == native_policy_group_reserved() { return tgt_policy.reserved_count }
+    if group == native_policy_group_allocatable() { return tgt_policy.allocatable_count }
+    if group == native_policy_group_allocation_order() { return tgt_policy.allocation_order_count }
+    if group == native_policy_group_scratch() { return tgt_policy.scratch_count }
+    if group == native_policy_group_args() { return tgt_policy.arg_count }
+    if group == native_policy_group_returns() { return tgt_policy.ret_count }
     0
 }
 
-pub fn native_target_policy_group_name(policy: NativeTargetPolicy, group: i64, idx: i64) -> string {
-    if policy.arch_id == native_policy_arch_x86_64() &&
-       (policy.os_id == native_policy_os_linux() || policy.os_id == native_policy_os_macos() || policy.os_id == native_policy_os_windows()) {
+pub fn native_target_policy_group_name(tgt_policy: NativeTargetPolicy, group: i64, idx: i64) -> string {
+    if tgt_policy.arch_id == native_policy_arch_x86_64() &&
+       (tgt_policy.os_id == native_policy_os_linux() || tgt_policy.os_id == native_policy_os_macos() || tgt_policy.os_id == native_policy_os_windows()) {
         if group == native_policy_group_reserved() {
             if idx == 0 { return "rsp" }
             if idx == 1 { return "rbp" }
@@ -238,8 +239,8 @@ pub fn native_target_policy_group_name(policy: NativeTargetPolicy, group: i64, i
             if idx == 0 { return "rax" }
         }
     }
-    if policy.arch_id == native_policy_arch_aarch64() &&
-       (policy.os_id == native_policy_os_macos() || policy.os_id == native_policy_os_linux() || policy.os_id == native_policy_os_windows()) {
+    if tgt_policy.arch_id == native_policy_arch_aarch64() &&
+       (tgt_policy.os_id == native_policy_os_macos() || tgt_policy.os_id == native_policy_os_linux() || tgt_policy.os_id == native_policy_os_windows()) {
         if group == native_policy_group_reserved() {
             if idx == 0 { return "sp" }
             if idx == 1 { return "fp" }
@@ -314,4 +315,133 @@ pub fn native_target_policy_x86_allocatable_mask_for_reg(reg: i64) -> i64 {
     if reg == 14 { return 4 }
     if reg == 15 { return 8 }
     0
+}
+
+pub struct MicroarchLatency {
+    pub load_cycles: i64,
+    pub store_cycles: i64,
+    pub int_add_cycles: i64,
+    pub int_mul_cycles: i64,
+    pub fp_add_cycles: i64,
+    pub fp_mul_cycles: i64,
+    pub call_cycles: i64,
+}
+
+pub fn skylake_microarch_latency() -> MicroarchLatency {
+    MicroarchLatency {
+        load_cycles: 4,
+        store_cycles: 1,
+        int_add_cycles: 1,
+        int_mul_cycles: 3,
+        fp_add_cycles: 4,
+        fp_mul_cycles: 5,
+        call_cycles: 5,
+    }
+}
+
+// ============================================================================
+// Epistemic latency model
+//
+// Each op's cost is a distribution, not a point estimate.  variance is in
+// cycles² (independent variances add along a chain).  This is what the
+// scheduler needs to (a) propagate uncertainty through critical-path priority
+// computation, (b) make schedule choices based on upper quantile of makespan
+// rather than the mean, and (c) gate emission on a per-function confidence
+// budget.
+//
+// All variances here are integer cycles² — the scheduler uses isqrt to recover
+// sigma when forming the upper-quantile priority.
+//
+// Variance budget rationale (Skylake reference):
+//   load     : L1=4, L2=12, L3=40, mem≈200.  Even with a perfect predictor,
+//              the realised latency depends on the access pattern → big sigma.
+//   store    : pipelined; minimal jitter.
+//   int_add  : extremely stable.
+//   int_mul  : stable (no division).
+//   fp_add   : depends on SSE2 vs AVX2 vs AVX-512; ±1 cycle envelope.
+//   fp_mul   : same envelope.
+//   call     : branch prediction + I$ miss exposure; ±10 cycle envelope.
+//
+// "cross" profile = the envelope across Skylake / Sunny-Cove / Zen 4.  Used
+// when the compiler is asked to schedule for "x86_64 in general" without
+// pinning a specific µarch.
+// ============================================================================
+
+pub struct LatencyDist {
+    pub mean: i64,        // cycles
+    pub variance: i64,    // cycles² — independent variances add along a chain
+}
+
+pub fn latency_dist(mean: i64, variance: i64) -> LatencyDist {
+    LatencyDist { mean: mean, variance: variance }
+}
+
+pub fn latency_certain(cycles: i64) -> LatencyDist {
+    LatencyDist { mean: cycles, variance: 0 }
+}
+
+// Convenience: variance from a sigma in cycles (cleaner reading than squaring).
+pub fn latency_from_sigma(mean: i64, sigma: i64) -> LatencyDist {
+    LatencyDist { mean: mean, variance: sigma * sigma }
+}
+
+pub struct MicroarchLatencyEpistemic {
+    pub load_cycles: LatencyDist,
+    pub store_cycles: LatencyDist,
+    pub int_add_cycles: LatencyDist,
+    pub int_mul_cycles: LatencyDist,
+    pub fp_add_cycles: LatencyDist,
+    pub fp_mul_cycles: LatencyDist,
+    pub call_cycles: LatencyDist,
+}
+
+pub fn skylake_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(4, 8),    // L1 hit ± cache-tail dispersion
+        store_cycles:   latency_from_sigma(1, 1),
+        int_add_cycles: latency_certain(1),
+        int_mul_cycles: latency_certain(3),
+        fp_add_cycles:  latency_from_sigma(4, 1),    // SSE2/AVX2 envelope
+        fp_mul_cycles:  latency_from_sigma(5, 1),
+        call_cycles:    latency_from_sigma(5, 10),   // branch predictor / I$ jitter
+    }
+}
+
+pub fn sunny_cove_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(5, 9),    // 5-cycle L1 vs Skylake's 4
+        store_cycles:   latency_from_sigma(1, 1),
+        int_add_cycles: latency_certain(1),
+        int_mul_cycles: latency_certain(3),
+        fp_add_cycles:  latency_from_sigma(4, 1),
+        fp_mul_cycles:  latency_from_sigma(4, 1),    // 4 (vs Skylake 5)
+        call_cycles:    latency_from_sigma(5, 10),
+    }
+}
+
+pub fn zen4_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(4, 9),
+        store_cycles:   latency_from_sigma(1, 1),
+        int_add_cycles: latency_certain(1),
+        int_mul_cycles: latency_certain(3),
+        fp_add_cycles:  latency_from_sigma(3, 1),    // Zen4 FADD = 3
+        fp_mul_cycles:  latency_from_sigma(3, 1),
+        call_cycles:    latency_from_sigma(5, 12),
+    }
+}
+
+// Cross-µarch envelope: when the compiler must produce code that works
+// across Skylake / Sunny Cove / Zen 4, every op's variance widens to cover
+// the spread.  Schedule chosen under this profile is the most conservative.
+pub fn cross_microarch_epistemic() -> MicroarchLatencyEpistemic {
+    MicroarchLatencyEpistemic {
+        load_cycles:    latency_from_sigma(4, 10),
+        store_cycles:   latency_from_sigma(1, 2),
+        int_add_cycles: latency_from_sigma(1, 1),
+        int_mul_cycles: latency_from_sigma(3, 2),
+        fp_add_cycles:  latency_from_sigma(4, 2),
+        fp_mul_cycles:  latency_from_sigma(4, 2),
+        call_cycles:    latency_from_sigma(5, 15),
+    }
 }

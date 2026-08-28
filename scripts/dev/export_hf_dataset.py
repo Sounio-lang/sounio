@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT = ROOT / "datasets" / "sounio-code-examples"
 TEST_DIRS = [
     ("run-pass", ROOT / "tests" / "run-pass"),
@@ -251,13 +251,13 @@ This dataset is designed to make Sounio legible to code models quickly:
 ## Rebuild locally
 
 ```bash
-python3 scripts/export_hf_dataset.py
+python3 scripts/dev/export_hf_dataset.py
 ```
 
 ## Upload
 
 ```bash
-python3 scripts/export_hf_dataset.py --upload
+python3 scripts/dev/export_hf_dataset.py --upload
 ```
 
 Set `HF_TOKEN` or `HUGGINGFACE_HUB_TOKEN` before uploading.

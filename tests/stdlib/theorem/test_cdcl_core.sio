@@ -1,0 +1,107 @@
+//@ run-pass
+//
+// Milestone 1a gate for stdlib/theorem/cdcl.sio — the CDCL core must:
+//   * solve trivial SAT / UNSAT correctly,
+//   * on the pigeonhole family K_n/(n-1)-coloring (UNSAT), produce a DRUP proof
+//     that the INDEPENDENT built-in RUP checker certifies as VERIFIED.
+// A bug in the CDCL bookkeeping cannot fake a VERIFIED — the checker would reject it.
+//
+// NOTE on idioms (madaros-relocgate codegen): pass the context as `&!ctx` (never bare
+// `ctx`), and print integers via `print_int(x as i64)` (never `println(<raw int>)`).
+
+use theorem::cdcl::*
+
+fn print_int(n: i64) with IO { println(n as i32 as string) }
+
+// K_n with k colors (= pigeonhole PHP(n,k) when k=n-1). UNSAT iff k < n.
+// Returns the number of original clauses.
+fn build_clique(ctx: &!CdclCtx, n: i64, k: i64) -> i32 with Mut {
+    var arr: [i64; 1024] = [0 as i64; 1024]
+    var v: i64 = 0
+    while v < n {
+        var c: i64 = 0
+        while c < k { arr[c as usize] = v * k + c + 1  c = c + 1 }
+        let _ = cdcl_add_clause(ctx, &arr, k as i32)
+        v = v + 1
+    }
+    var a: i64 = 0
+    while a < n {
+        var b: i64 = a + 1
+        while b < n {
+            var c: i64 = 0
+            while c < k {
+                arr[0] = 0 - (a * k + c + 1)
+                arr[1] = 0 - (b * k + c + 1)
+                let _ = cdcl_add_clause(ctx, &arr, 2)
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    return cdcl_nclauses(ctx)
+}
+
+// Build a clause from up to 4 literals (slots beyond `n` ignored).
+fn add4(ctx: &!CdclCtx, l0: i64, l1: i64, l2: i64, l3: i64, n: i32) with Mut {
+    var arr: [i64; 1024] = [0 as i64; 1024]
+    arr[0] = l0  arr[1] = l1  arr[2] = l2  arr[3] = l3
+    let _ = cdcl_add_clause(ctx, &arr, n)
+}
+
+// Returns 1 if the pigeonhole K_n/(n-1) instance is solved UNSAT and RUP-VERIFIED.
+// Reuse one ctx allocation + cdcl_reset between instances (avoids repeated SRET).
+fn php_verified(ctx: &!CdclCtx, n: i64) -> i32 with IO, Mut, Div {
+    cdcl_reset(ctx)
+    let onc = build_clique(ctx, n, n - 1)
+    let r = cdcl_solve(ctx)
+    let vr = cdcl_verify(ctx, onc)
+    print("  K_n=")           print_int(n)
+    print("  clauses=")       print_int(onc as i64)
+    print("  result(0=UNSAT)=") print_int(r as i64)
+    print("  rup(1=OK)=")     print_int(vr as i64)
+    if r == 0 { if vr == 1 { return 1 } }
+    return 0
+}
+
+// Bounded CDCL gate — default Madaros path (no heap, no lean_single override).
+fn main() -> i32 with IO, Mut, Div {
+    var pass: i32 = 0
+    var fail: i32 = 0
+    var ctx = cdcl_new()
+
+    // T1: simple SAT — (x1) ∧ (x1 ∨ x2)
+    cdcl_reset(&!ctx)
+    add4(&!ctx, 1, 0, 0, 0, 1)
+    add4(&!ctx, 1, 2, 0, 0, 2)
+    var ok1: i32 = 0
+    if cdcl_solve(&!ctx) == 1 { ok1 = 1 }
+    if ok1 == 1 { println("T1 PASS: simple SAT")  pass = pass + 1 }
+    if ok1 == 0 { println("T1 FAIL: simple SAT")  fail = fail + 1 }
+
+    // T2: simple UNSAT — (x1) ∧ (¬x1), verify the empty-clause proof
+    cdcl_reset(&!ctx)
+    add4(&!ctx, 1, 0, 0, 0, 1)
+    add4(&!ctx, 0 - 1, 0, 0, 0, 1)
+    let onc2 = cdcl_nclauses(&!ctx)
+    let r2 = cdcl_solve(&!ctx)
+    let v2 = cdcl_verify(&!ctx, onc2)
+    var ok2: i32 = 0
+    if r2 == 0 { if v2 == 1 { ok2 = 1 } }
+    if ok2 == 1 { println("T2 PASS: simple UNSAT VERIFIED")  pass = pass + 1 }
+    if ok2 == 0 { println("T2 FAIL: UNSAT/RUP")  fail = fail + 1 }
+
+    // T3..T6: pigeonhole K_4..K_7, UNSAT, must verify VERIFIED.
+    var n: i64 = 4
+    while n <= 7 {
+        let okn = php_verified(&!ctx, n)
+        if okn == 1 { println("  -> PASS (UNSAT, RUP VERIFIED)")  pass = pass + 1 }
+        if okn == 0 { println("  -> FAIL")  fail = fail + 1 }
+        n = n + 1
+    }
+
+    println("---")
+    if fail == 0 { println("ALL PASS: cdcl core (1a)")  return 0 }
+    println("FAILURES present")
+    return 1
+}

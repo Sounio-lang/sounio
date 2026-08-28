@@ -1,0 +1,322 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Conjecture 5 Verification — Subspace Decomposition Validation
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Conjecture 5 (paper 168, line 217): T_k = 168 * (P_k - 4 * P_{k-1})
+//
+// Cohomological reformulation (this work):
+//   T_k = 168 * n_oct(k), where
+//   n_oct(k) := #{V ≤ (Z/2)^k : dim V = 3, ϕ_k|V ≅ ω_Fano}
+//
+// Conjecture 5 ⟺ n_oct(k) = P_k - 4 P_{k-1}.
+//
+// For k = 4 (sedenions): predicts n_oct(4) = 15 - 4 = 11.
+//   Of the 15 Fano subplanes in PG(3,2), exactly 11 are "octonionic"
+//   (carry the Fano cocycle restriction) and 4 are "trivial"
+//   (cocycle restriction trivializes).
+//
+// We verify this empirically:
+//   1. Build sedenion basis multiplication table from CD doubling formula.
+//   2. Enumerate all 15 3-dim subspaces of (Z/2)^4 via dual functionals.
+//   3. For each subspace, count nonzero associators.
+//   4. Classify: 168 = "octonionic", 0 = "trivial", other = "ANOMALY".
+//   5. Confirm decomposition is exactly 11 octonionic + 4 trivial.
+//
+// Plus k=3 sanity (1 = 1 + 0) and total recovery (11 * 168 = 1848).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Octonion multiplication table (Fano):
+// Triples: (1,2,4),(2,3,5),(3,4,6),(4,5,7),(5,6,1),(6,7,2),(7,1,3)
+var O_MUL: [i64; 64] = [0; 64]   // octonion product index
+var O_SGN: [i64; 64] = [0; 64]   // octonion product sign
+
+fn init_oct() with Mut {
+    var i = 0
+    while i < 8 {
+        // identity rows/cols
+        O_MUL[0 * 8 + i] = i
+        O_SGN[0 * 8 + i] = 1
+        O_MUL[i * 8 + 0] = i
+        O_SGN[i * 8 + 0] = 1
+        i = i + 1
+    }
+    i = 1
+    while i < 8 {
+        O_MUL[i * 8 + i] = 0
+        O_SGN[i * 8 + i] = 0 - 1
+        i = i + 1
+    }
+    var FA: [i64; 7] = [1, 2, 3, 4, 5, 6, 7]
+    var FB: [i64; 7] = [2, 3, 4, 5, 6, 7, 1]
+    var FC: [i64; 7] = [4, 5, 6, 7, 1, 2, 3]
+    var t = 0
+    while t < 7 {
+        let a = FA[t]
+        let b = FB[t]
+        let c = FC[t]
+        O_MUL[a * 8 + b] = c
+        O_SGN[a * 8 + b] = 1
+        O_MUL[b * 8 + a] = c
+        O_SGN[b * 8 + a] = 0 - 1
+        O_MUL[b * 8 + c] = a
+        O_SGN[b * 8 + c] = 1
+        O_MUL[c * 8 + b] = a
+        O_SGN[c * 8 + b] = 0 - 1
+        O_MUL[c * 8 + a] = b
+        O_SGN[c * 8 + a] = 1
+        O_MUL[a * 8 + c] = b
+        O_SGN[a * 8 + c] = 0 - 1
+        t = t + 1
+    }
+}
+
+// Sedenion (k=4) basis multiplication table built from CD doubling:
+// (a, b) * (c, d) = (a*c - conj(d)*b, d*a + b*conj(c))
+// Index i in 0..15:  bottom 3 bits = octonion part (0..7), bit 3 = "upper"
+var S_MUL: [i64; 256] = [0; 256]
+var S_SGN: [i64; 256] = [0; 256]
+
+fn init_sed() with Mut, Panic {
+    var i = 0
+    while i < 16 {
+        var j = 0
+        while j < 16 {
+            let a_part = i & 7
+            let top_a = (i >> 3) & 1
+            let b_part = j & 7
+            let top_b = (j >> 3) & 1
+
+            // Compute octonion products in both orders (used in different cases).
+            let ab_idx = O_MUL[a_part * 8 + b_part]
+            let ab_sgn = O_SGN[a_part * 8 + b_part]
+            let ba_idx = O_MUL[b_part * 8 + a_part]
+            let ba_sgn = O_SGN[b_part * 8 + a_part]
+
+            var r_idx = 0
+            var r_sgn = 0
+            var r_top = 0
+
+            if top_a == 0 {
+                if top_b == 0 {
+                    // Case 1: (e_a, 0) * (e_b, 0) = (e_a * e_b, 0)
+                    r_idx = ab_idx
+                    r_sgn = ab_sgn
+                    r_top = 0
+                } else {
+                    // Case 2: (e_a, 0) * (0, e_b) = (0, e_b * e_a)
+                    r_idx = ba_idx
+                    r_sgn = ba_sgn
+                    r_top = 1
+                }
+            } else {
+                if top_b == 0 {
+                    // Case 3: (0, e_a) * (e_b, 0) = (0, e_a * conj(e_b))
+                    // conj(e_b) = e_0 if b=0, else -e_b
+                    if b_part == 0 {
+                        r_idx = a_part
+                        r_sgn = 1
+                        r_top = 1
+                    } else {
+                        // e_a * (-e_b) = -e_a*e_b (use ab_idx, flip sign)
+                        r_idx = ab_idx
+                        r_sgn = 0 - ab_sgn
+                        r_top = 1
+                    }
+                } else {
+                    // Case 4: (0, e_a) * (0, e_b) = (-conj(e_b) * e_a, 0)
+                    if b_part == 0 {
+                        // conj(e_0) * e_a = e_a, so result = -e_a
+                        r_idx = a_part
+                        r_sgn = 0 - 1
+                        r_top = 0
+                    } else {
+                        // -(-e_b) * e_a = e_b * e_a
+                        r_idx = ba_idx
+                        r_sgn = ba_sgn
+                        r_top = 0
+                    }
+                }
+            }
+
+            // Pack: final index = r_idx + (r_top << 3)
+            S_MUL[i * 16 + j] = r_idx + (r_top << 3)
+            S_SGN[i * 16 + j] = r_sgn
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Sedenion basis multiply by (idx, sign) → fills SR_*.
+var SR_IDX: i64 = 0
+var SR_SGN: i64 = 0
+
+fn sed_bmul(i_idx: i64, i_sgn: i64, j_idx: i64, j_sgn: i64) with Mut, Panic {
+    SR_IDX = S_MUL[i_idx * 16 + j_idx]
+    SR_SGN = i_sgn * j_sgn * S_SGN[i_idx * 16 + j_idx]
+}
+
+// Test if associator [e_x, e_y, e_z] is nonzero in sedenions.
+fn sed_associator_nonzero(x: i64, y: i64, z: i64) -> i64 with Mut, Panic {
+    sed_bmul(x, 1, y, 1)
+    let li_tmp = SR_IDX
+    let ls_tmp = SR_SGN
+    sed_bmul(li_tmp, ls_tmp, z, 1)
+    let l_idx = SR_IDX
+    let l_sgn = SR_SGN
+    sed_bmul(y, 1, z, 1)
+    let ri_tmp = SR_IDX
+    let rs_tmp = SR_SGN
+    sed_bmul(x, 1, ri_tmp, rs_tmp)
+    let r_idx = SR_IDX
+    let r_sgn = SR_SGN
+    if l_idx != r_idx { return 1 }
+    if l_sgn != r_sgn { return 1 }
+    0
+}
+
+// Total nonzero sedenion associators (sanity check vs T_4 = 1848).
+fn count_total_sed() -> i64 with Mut, Panic {
+    var n = 0
+    var i = 1
+    while i < 16 {
+        var j = 1
+        while j < 16 {
+            var k = 1
+            while k < 16 {
+                if sed_associator_nonzero(i, j, k) == 1 {
+                    n = n + 1
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// For each nonzero c ∈ F_2^4 (a "dual functional"), the 3-dim subspace
+// V_c = {x ∈ F_2^4 : popcount(c & x) ≡ 0 mod 2}. There are 15 such V_c,
+// in bijection with 15 nonzero c. We enumerate.
+
+fn popcount_mod2(v: i64) -> i64 with Mut {
+    var p = 0
+    var w = v
+    while w > 0 {
+        p = p ^ (w & 1)
+        w = w >> 1
+    }
+    p
+}
+
+// Count nonzero associators among triples whose three indices ALL lie in V_c.
+// Returns the count. Octonionic ⟹ 168, trivial ⟹ 0.
+fn count_subspace_assoc(c: i64) -> i64 with Mut, Panic {
+    var n = 0
+    var i = 1
+    while i < 16 {
+        if popcount_mod2(c & i) == 0 {
+            var j = 1
+            while j < 16 {
+                if popcount_mod2(c & j) == 0 {
+                    var k = 1
+                    while k < 16 {
+                        if popcount_mod2(c & k) == 0 {
+                            if sed_associator_nonzero(i, j, k) == 1 {
+                                n = n + 1
+                            }
+                        }
+                        k = k + 1
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    n
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    println("═══════════════════════════════════════════════════════════════")
+    println("  Conjecture 5 Verification — Subspace Decomposition")
+    println("  n_oct(4) = 11 of 15 Fano subplanes are octonionic")
+    println("═══════════════════════════════════════════════════════════════")
+
+    init_oct()
+    init_sed()
+
+    var pass = 0
+    var fail = 0
+
+    // 1. Sanity: total sedenion associator count = 1848 (= 11 * 168).
+    let total = count_total_sed()
+    print("  Total sedenion associators: ")
+    print_int(total)
+    print(" (expected 1848)\n")
+    if total == 1848 {
+        print("  [PASS] T_4 = 1848 = 11 * 168\n")
+        pass = pass + 1
+    } else {
+        print("  [FAIL] T_4 mismatch\n")
+        fail = fail + 1
+    }
+
+    // 2. Enumerate 15 subspaces (one per nonzero c in F_2^4).
+    //    Count octonionic (= 168 nonzero) vs trivial (= 0) vs anomaly.
+    var n_oct = 0
+    var n_triv = 0
+    var n_anom = 0
+    var c = 1
+    while c < 16 {
+        let cnt = count_subspace_assoc(c)
+        if cnt == 168 {
+            n_oct = n_oct + 1
+        } else {
+            if cnt == 0 {
+                n_triv = n_triv + 1
+            } else {
+                n_anom = n_anom + 1
+                print("  [ANOMALY] c=")
+                print_int(c)
+                print(" subspace count=")
+                print_int(cnt)
+                print("\n")
+            }
+        }
+        c = c + 1
+    }
+    print("  Octonionic subspaces (168 each): ")
+    print_int(n_oct)
+    print(" (expected 11)\n")
+    print("  Trivial subspaces (0 each):     ")
+    print_int(n_triv)
+    print(" (expected 4)\n")
+    print("  Anomalous subspaces:            ")
+    print_int(n_anom)
+    print(" (expected 0)\n")
+
+    if n_oct == 11 {
+        if n_triv == 4 {
+            if n_anom == 0 {
+                print("  [PASS] n_oct(4) = 11 = P_4 - 4*P_3 (Conjecture 5)\n")
+                pass = pass + 1
+            } else { fail = fail + 1 }
+        } else { fail = fail + 1 }
+    } else { fail = fail + 1 }
+
+    print("\nPassed: ")
+    print_int(pass)
+    print("\nFailed: ")
+    print_int(fail)
+    print("\n")
+    if fail == 0 { println("ALL PASS") }
+    else { println("SOME FAILED") }
+    0
+}

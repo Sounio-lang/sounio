@@ -36,19 +36,19 @@ pub fn cache_entry_new(iri_id: i64) -> CacheEntry {
     }
 }
 
-pub fn cache_entry_mark_loaded(entry: &CacheEntry, size: i64, time: i64) {
+pub fn cache_entry_mark_loaded(entry: &CacheEntry, size: i64, time: i64) with Mut {
     entry.state = CACHE_LOADED
     entry.size_bytes = size
     entry.last_access = time
     entry.access_count = entry.access_count + 1
 }
 
-pub fn cache_entry_touch(entry: &CacheEntry, time: i64) {
+pub fn cache_entry_touch(entry: &CacheEntry, time: i64) with Mut {
     entry.last_access = time
     entry.access_count = entry.access_count + 1
 }
 
-pub fn cache_entry_evict(entry: &CacheEntry) {
+pub fn cache_entry_evict(entry: &CacheEntry) with Mut {
     entry.state = CACHE_EVICTED
 }
 
@@ -58,7 +58,7 @@ pub fn cache_entry_evict(entry: &CacheEntry) {
 
 // Cache for ontology concepts and properties
 pub struct OntologyCache {
-    pub entries: Vec<CacheEntry>,
+    pub entries: Seq<CacheEntry>,
     pub max_size_bytes: i64,
     pub current_size_bytes: i64,
     pub clock: i64,
@@ -68,7 +68,7 @@ pub struct OntologyCache {
 
 pub fn ontology_cache_new(max_size: i64) -> OntologyCache {
     OntologyCache {
-        entries: vec![],
+        entries: seq_new(),
         max_size_bytes: max_size,
         current_size_bytes: 0,
         clock: 0,
@@ -83,8 +83,8 @@ pub fn ontology_cache_default() -> OntologyCache {
 }
 
 // Find entry by IRI ID
-pub fn cache_find(cache: &OntologyCache, iri_id: i64) -> i64 {
-    let n = cache.entries.len()
+pub fn cache_find(cache: &OntologyCache, iri_id: i64) -> i64 with Epistemic {
+    let n = cache.entries.len().unwrap("n")
     for i in 0..n {
         if cache.entries[i].iri_id == iri_id {
             return i as i64
@@ -94,7 +94,7 @@ pub fn cache_find(cache: &OntologyCache, iri_id: i64) -> i64 {
 }
 
 // Check if entry is cached
-pub fn cache_contains(cache: &OntologyCache, iri_id: i64) -> bool {
+pub fn cache_contains(cache: &OntologyCache, iri_id: i64) -> bool with Epistemic {
     let idx = cache_find(cache, iri_id)
     if idx >= 0 {
         return cache.entries[idx as i64].state == CACHE_LOADED
@@ -103,13 +103,15 @@ pub fn cache_contains(cache: &OntologyCache, iri_id: i64) -> bool {
 }
 
 // Add or update cache entry
-pub fn cache_put(cache: &OntologyCache, iri_id: i64, size: i64) -> bool {
+pub fn cache_put(cache: &OntologyCache, iri_id: i64, size: i64) -> bool with Mut, Epistemic {
     cache.clock = cache.clock + 1
 
     let idx = cache_find(cache, iri_id)
     if idx >= 0 {
         // Already exists - update
-        cache_entry_mark_loaded(&cache.entries[idx as i64], size, cache.clock)
+        var existing = cache.entries[idx as i64]
+        cache_entry_mark_loaded(&existing, size, cache.clock)
+        cache.entries[idx as i64] = existing
         cache.hit_count = cache.hit_count + 1
         return true
     }
@@ -134,12 +136,14 @@ pub fn cache_put(cache: &OntologyCache, iri_id: i64, size: i64) -> bool {
 }
 
 // Get cache entry (updates access time)
-pub fn cache_get(cache: &OntologyCache, iri_id: i64) -> bool {
+pub fn cache_get(cache: &OntologyCache, iri_id: i64) -> bool with Mut, Epistemic {
     cache.clock = cache.clock + 1
 
     let idx = cache_find(cache, iri_id)
     if idx >= 0 && cache.entries[idx as i64].state == CACHE_LOADED {
-        cache_entry_touch(&cache.entries[idx as i64], cache.clock)
+        var existing = cache.entries[idx as i64]
+        cache_entry_touch(&existing, cache.clock)
+        cache.entries[idx as i64] = existing
         cache.hit_count = cache.hit_count + 1
         return true
     }
@@ -149,8 +153,8 @@ pub fn cache_get(cache: &OntologyCache, iri_id: i64) -> bool {
 }
 
 // Evict least recently used entry
-fn cache_evict_lru(cache: &OntologyCache) -> bool {
-    let n = cache.entries.len()
+fn cache_evict_lru(cache: &OntologyCache) -> bool with Mut, Epistemic {
+    let n = cache.entries.len().unwrap("n")
     if n == 0 {
         return false
     }
@@ -172,17 +176,21 @@ fn cache_evict_lru(cache: &OntologyCache) -> bool {
     }
 
     let freed = cache.entries[oldest_idx as i64].size_bytes
-    cache_entry_evict(&cache.entries[oldest_idx as i64])
+    var oldest = cache.entries[oldest_idx as i64]
+    cache_entry_evict(&oldest)
+    cache.entries[oldest_idx as i64] = oldest
     cache.current_size_bytes = cache.current_size_bytes - freed
 
     true
 }
 
 // Clear entire cache
-pub fn cache_clear(cache: &OntologyCache) {
-    let n = cache.entries.len()
+pub fn cache_clear(cache: &OntologyCache) with Mut, Epistemic {
+    let n = cache.entries.len().unwrap("n")
     for i in 0..n {
-        cache_entry_evict(&cache.entries[i])
+        var entry = cache.entries[i as i64]
+        cache_entry_evict(&entry)
+        cache.entries[i as i64] = entry
     }
     cache.current_size_bytes = 0
 }
@@ -240,18 +248,18 @@ pub fn lazy_ontology_needs_loading(ont: &LazyOntology) -> bool {
     ont.state == LAZY_NOT_LOADED
 }
 
-pub fn lazy_ontology_mark_loading(ont: &LazyOntology) {
+pub fn lazy_ontology_mark_loading(ont: &LazyOntology) with Mut {
     ont.state = LAZY_LOADING
 }
 
-pub fn lazy_ontology_mark_loaded(ont: &LazyOntology, concepts: i64, properties: i64, time_ms: i64) {
+pub fn lazy_ontology_mark_loaded(ont: &LazyOntology, concepts: i64, properties: i64, time_ms: i64) with Mut {
     ont.state = LAZY_LOADED
     ont.concept_count = concepts
     ont.property_count = properties
     ont.load_time_ms = time_ms
 }
 
-pub fn lazy_ontology_mark_error(ont: &LazyOntology) {
+pub fn lazy_ontology_mark_error(ont: &LazyOntology) with Mut {
     ont.state = LAZY_ERROR
 }
 
@@ -291,14 +299,14 @@ pub fn prefetch_superclasses(base: i64, depth: i64) -> PrefetchHint {
 // TESTS
 // ============================================================================
 
-fn test_cache_entry() -> bool {
+fn test_cache_entry() -> bool with Mut {
     var entry = cache_entry_new(100)
     cache_entry_mark_loaded(&entry, 1024, 1)
 
     entry.state == CACHE_LOADED && entry.size_bytes == 1024
 }
 
-fn test_cache_put_get() -> bool {
+fn test_cache_put_get() -> bool with Mut, Epistemic {
     var cache = ontology_cache_new(10000)
 
     cache_put(&cache, 1, 100)
@@ -307,7 +315,7 @@ fn test_cache_put_get() -> bool {
     cache_contains(&cache, 1) && cache_contains(&cache, 2) && !cache_contains(&cache, 3)
 }
 
-fn test_cache_eviction() -> bool {
+fn test_cache_eviction() -> bool with Mut, Epistemic {
     var cache = ontology_cache_new(500)
 
     // Add entries that will fill the cache
@@ -321,13 +329,13 @@ fn test_cache_eviction() -> bool {
     cache_contains(&cache, 1) && !cache_contains(&cache, 2) && cache_contains(&cache, 3)
 }
 
-fn test_lazy_ontology() -> bool {
+fn test_lazy_ontology() -> bool with Mut {
     var ont = lazy_ontology_new(100)
 
     lazy_ontology_needs_loading(&ont)
 }
 
-fn test_cache_stats() -> bool {
+fn test_cache_stats() -> bool with Mut, Epistemic {
     var cache = ontology_cache_new(10000)
 
     cache_put(&cache, 1, 100)
@@ -336,3 +344,5 @@ fn test_cache_stats() -> bool {
 
     let hit_rate = cache_hit_rate(&cache)
     // 2 hits (put + get for 1), 1 miss (get for 2) = 2/3 = 0.666
+    hit_rate > 0.6 && hit_rate < 0.7
+}

@@ -8,16 +8,16 @@ use lexer::cursor::*
 
 // Keep token storage out of Parser state so Parser method calls don't
 // repeatedly copy a 65k token array by value.
-var PARSER_TOKENS: [Token; 1048576] = [Token::new(); 1048576]
+var PARSER_TOKENS: [Token; 2097152] = [Token::new(); 2097152]
 // Boot4-compatible parallel scalar arrays (boot4 can't index struct-typed global arrays)
-var PT_KIND: [TokenKind; 1048576] = [TokenKind::Eof; 1048576]
-var PT_KIND_CODE: [i64; 1048576] = [0; 1048576]
-var PT_START: [i64; 1048576] = [0; 1048576]
-var PT_END: [i64; 1048576] = [0; 1048576]
-var PT_LINE: [i64; 1048576] = [0; 1048576]
-var PT_COL: [i64; 1048576] = [0; 1048576]
-var PT_TEXT_LEN: [i64; 1048576] = [0; 1048576]
-var PT_INT_VALUE: [i64; 1048576] = [0; 1048576]
+var PT_KIND: [TokenKind; 2097152] = [TokenKind::Eof; 2097152]
+var PT_KIND_CODE: [i64; 2097152] = [0; 2097152]
+var PT_START: [i64; 2097152] = [0; 2097152]
+var PT_END: [i64; 2097152] = [0; 2097152]
+var PT_LINE: [i64; 2097152] = [0; 2097152]
+var PT_COL: [i64; 2097152] = [0; 2097152]
+var PT_TEXT_LEN: [i64; 2097152] = [0; 2097152]
+var PT_INT_VALUE: [i64; 2097152] = [0; 2097152]
 // Boot4-safe: parse_item stores its result here instead of returning (Parser, Item)
 // which is 314+ slots and triggers IS_SPTR=4 hang. The caller reads this after parse_item returns.
 var LAST_PARSED_ITEM: Option<Box<Item> > = None
@@ -29,7 +29,7 @@ pub fn parser_store_expr_box(b: Box<Expr>) with Mut {
     LAST_EXPR = Some(b)
 }
 
-pub fn parser_take_expr_box() -> Box<Expr> with Mut, Alloc {
+pub fn parser_take_expr_box() -> Box<Expr> with Mut, Panic, Alloc {
     match LAST_EXPR {
         Some(b) => {
             LAST_EXPR = None
@@ -37,7 +37,7 @@ pub fn parser_take_expr_box() -> Box<Expr> with Mut, Alloc {
         },
         None => {
             LAST_EXPR = None
-            Box::new(error_expr(Span { file_id: 0, start: 0, end: 0 }))
+            panic("parser_take_expr_box: missing expr")
         },
     }
 }
@@ -56,7 +56,28 @@ var PARSER_FAST_SKIP_BLOCKS: bool = false
 var PARSER_LAST_HAD_ERROR: bool = false
 var PARSER_LAST_ERROR_COUNT: i64 = 0
 
-struct Parser {
+// String literals longer than Name's 128-byte buffer are CUT at current_name(),
+// and until now nothing said so. Measured 2026-08-04: the boundary is exactly
+// 128 — a 127-char literal prints whole, a 128-char one prints 127 and the
+// program carries on as if nothing happened. 324 literals in 14 files under
+// self-hosted/ and stdlib/ are over it, the longest 335 chars in
+// self-hosted/check/check.sio, so the compiler's own diagnostics are among the
+// text being silently shortened.
+//
+// The cut cannot simply be removed: Name is embedded in 88 fixed-size arrays,
+// some [Name; 4096], so widening the buffer to 512 would take Name storage from
+// 6.5 MB to 26 MB in a build that already emits 152 "stack frame too large"
+// warnings. So the cut stays and the SILENCE goes.
+//
+// Recorded in globals rather than printed on the spot because current_name()
+// carries only Mut/Panic/Div; giving it IO would push that effect onto every
+// caller. Same shape as PARSER_LAST_ERROR_COUNT above, reported once where IO
+// already exists.
+var PARSER_TRUNCATED_LITERALS: i64 = 0
+var PARSER_TRUNCATED_FIRST_LINE: i64 = 0
+var PARSER_TRUNCATED_LONGEST: i64 = 0
+
+pub struct Parser {
     token_count: i64,
     pos: i64,
     next_id: i64,
@@ -86,9 +107,9 @@ pub fn parser_new() -> Parser {
     }
 }
 
-fn parser_set_tokens(tokens: [Token; 1048576], token_count: i64) with Mut, Panic, Div {
+pub fn parser_set_tokens(tokens: [Token; 2097152], token_count: i64) with Mut, Panic, Div {
     var i: i64 = 0
-    while i < token_count && i < 1048576 {
+    while i < token_count && i < 2097152 {
         // Write to parallel scalar arrays (boot4-compatible)
         PT_KIND[i as usize] = tokens[i as usize].kind
         PT_KIND_CODE[i as usize] = tokens[i as usize].kind as i64
@@ -102,8 +123,8 @@ fn parser_set_tokens(tokens: [Token; 1048576], token_count: i64) with Mut, Panic
     }
 }
 
-fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
-    if idx >= 0 && idx < 1048576 {
+pub fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
+    if idx >= 0 && idx < 2097152 {
         // Write to parallel scalar arrays (boot4-compatible, avoids struct-typed global array write)
         PT_KIND[idx as usize] = tok.kind
         PT_KIND_CODE[idx as usize] = tok.kind as i64
@@ -117,7 +138,7 @@ fn parser_set_token_at(idx: i64, tok: Token) with Mut, Panic {
 }
 
 fn parser_get_token_at(idx: i64) -> Token with Panic {
-    if idx >= 0 && idx < 1048576 {
+    if idx >= 0 && idx < 2097152 {
         PARSER_TOKENS[idx as usize]
     } else {
         Token::with_kind(TokenKind::Eof, 0, 0, 0, 0)
@@ -127,7 +148,7 @@ fn parser_get_token_at(idx: i64) -> Token with Panic {
 // Boot4-safe: write token fields directly into PARSER_TOKENS without creating Token local
 // Avoids boot4's 4MB stack frame for functions with IS_SPTR=4 locals
 pub fn parser_set_token_scalar(idx: i64, kind: TokenKind, start: i64, end: i64, line: i64, col: i64) with Mut, Panic {
-    if idx >= 0 && idx < 1048576 {
+    if idx >= 0 && idx < 2097152 {
         // Parallel scalar arrays (boot4/stage0 compatible)
         PT_KIND[idx as usize] = kind
         PT_KIND_CODE[idx as usize] = kind as i64
@@ -141,13 +162,13 @@ pub fn parser_set_token_scalar(idx: i64, kind: TokenKind, start: i64, end: i64, 
 }
 
 pub fn parser_set_token_int_value(idx: i64, val: i64) with Mut, Panic {
-    if idx >= 0 && idx < 1048576 {
+    if idx >= 0 && idx < 2097152 {
         PT_INT_VALUE[idx as usize] = val
     }
 }
 
 fn parser_set_token_float_value(idx: i64, val: f64) with Mut, Panic {
-    if idx >= 0 && idx < 1048576 {
+    if idx >= 0 && idx < 2097152 {
         // float_value not in PT_* arrays yet — skip for boot4 compatibility
         let dummy = val
     }
@@ -156,14 +177,14 @@ fn parser_set_token_float_value(idx: i64, val: f64) with Mut, Panic {
 fn parser_set_token_text_byte(idx: i64, byte_idx: i64, val: i8) with Mut, Panic {
     // PARSER_TOKENS struct write skipped for stage0 compatibility
     // Token text is stored in PT_TEXT_* parallel arrays instead
-    if idx >= 0 && idx < 1048576 && byte_idx >= 0 && byte_idx < 256 {
+    if idx >= 0 && idx < 2097152 && byte_idx >= 0 && byte_idx < 256 {
         // Skip: PARSER_TOKENS[idx as usize].text[byte_idx as usize] = val
         let dummy = val
     }
 }
 
 fn parser_set_token_text_len(idx: i64, len: i64) with Mut, Panic {
-    if idx >= 0 && idx < 1048576 {
+    if idx >= 0 && idx < 2097152 {
         PT_TEXT_LEN[idx as usize] = len
     }
 }
@@ -171,7 +192,7 @@ fn parser_set_token_text_len(idx: i64, len: i64) with Mut, Panic {
 // Flat token setters for lexers that can't construct TokenKind/Token.
 // Sets all scalar fields at once using integer kind discriminant.
 pub fn parser_set_token_flat(idx: i64, kind: i64, start: i64, end: i64, line: i64, col: i64, int_value: i64) with Mut, Panic {
-    if idx >= 0 && idx < 1048576 {
+    if idx >= 0 && idx < 2097152 {
         PT_KIND_CODE[idx as usize] = kind
         // TokenKind enum discriminant table — lean compiler stores enums as i64
         // We construct the TokenKind via a dispatch to avoid needing enum literals
@@ -185,15 +206,18 @@ pub fn parser_set_token_flat(idx: i64, kind: i64, start: i64, end: i64, line: i6
         else if kind == 12 { PT_KIND[idx as usize] = TokenKind::Type }
         else if kind == 13 { PT_KIND[idx as usize] = TokenKind::Struct }
         else if kind == 14 { PT_KIND[idx as usize] = TokenKind::Enum }
+        else if kind == 19 { PT_KIND[idx as usize] = TokenKind::Ontology }
         else if kind == 20 { PT_KIND[idx as usize] = TokenKind::If }
         else if kind == 21 { PT_KIND[idx as usize] = TokenKind::Else }
         else if kind == 24 { PT_KIND[idx as usize] = TokenKind::While }
         else if kind == 28 { PT_KIND[idx as usize] = TokenKind::Return }
         else if kind == 30 { PT_KIND[idx as usize] = TokenKind::As }
+        else if kind == 31 { PT_KIND[idx as usize] = TokenKind::Where }
         else if kind == 32 { PT_KIND[idx as usize] = TokenKind::Pub }
         else if kind == 35 { PT_KIND[idx as usize] = TokenKind::True }
         else if kind == 36 { PT_KIND[idx as usize] = TokenKind::False }
         else if kind == 45 { PT_KIND[idx as usize] = TokenKind::With }
+        else if kind == 71 { PT_KIND[idx as usize] = TokenKind::Knowledge }
         else if kind == 123 { PT_KIND[idx as usize] = TokenKind::Ident }
         else if kind == 124 { PT_KIND[idx as usize] = TokenKind::IntLit }
         else if kind == 125 { PT_KIND[idx as usize] = TokenKind::FloatLit }
@@ -259,6 +283,7 @@ pub fn parser_set_token_flat(idx: i64, kind: i64, start: i64, end: i64, line: i6
         else if kind == 185 { PT_KIND[idx as usize] = TokenKind::Hash }
         else if kind == 186 { PT_KIND[idx as usize] = TokenKind::Underscore }
         else { PT_KIND[idx as usize] = TokenKind::Error }
+        PT_KIND_CODE[idx as usize] = kind
         PT_START[idx as usize] = start
         PT_END[idx as usize] = end
         PT_LINE[idx as usize] = line
@@ -290,6 +315,25 @@ pub fn parser_last_error_count() -> i64 {
     PARSER_LAST_ERROR_COUNT
 }
 
+pub fn parser_reset_truncated_literals() with Mut {
+    PARSER_TRUNCATED_LITERALS = 0
+    PARSER_TRUNCATED_FIRST_LINE = 0
+    PARSER_TRUNCATED_LONGEST = 0
+}
+
+
+pub fn parser_truncated_literal_count() -> i64 {
+    PARSER_TRUNCATED_LITERALS
+}
+
+pub fn parser_truncated_literal_first_line() -> i64 {
+    PARSER_TRUNCATED_FIRST_LINE
+}
+
+pub fn parser_truncated_literal_longest() -> i64 {
+    PARSER_TRUNCATED_LONGEST
+}
+
 // ============================================================
 // Boot4-safe parser operations using GP_* globals (no struct passing)
 // ============================================================
@@ -304,11 +348,11 @@ fn gp_init(token_count: i64) with Mut {
     GP_PENDING_GT = 0
 }
 
-fn gp_at_eof() -> bool with Panic {
+fn gp_at_eof() -> bool with Mut, Panic, Div {
     gp_peek_kind() == TokenKind::Eof
 }
 
-fn gp_peek_kind() -> TokenKind with Panic {
+fn gp_peek_kind() -> TokenKind with Mut, Panic, Div {
     if GP_PENDING_GT > 0 {
         TokenKind::Gt
     } else {
@@ -320,7 +364,7 @@ fn gp_peek_kind() -> TokenKind with Panic {
     }
 }
 
-fn gp_advance() with Mut, Panic {
+fn gp_advance() with Mut, Panic, Div {
     if GP_PENDING_GT > 0 {
         GP_PENDING_GT = GP_PENDING_GT - 1
         if GP_PENDING_GT > 0 { return }
@@ -350,17 +394,506 @@ fn gp_current_line() -> i64 with Panic {
 // Token access
 // ============================================================
 
-// Read token kind from parallel scalar array (boot4-compatible)
-pub fn pt_read_kind(idx: i64) -> TokenKind with Panic {
-    if idx >= 0 && idx < 1048576 {
-        PT_KIND[idx as usize]
+fn token_kind_from_flat_code(kind: i64) -> TokenKind {
+    if kind == 0 { return TokenKind::Eof }
+    if kind == 2 { return TokenKind::Newline }
+    if kind == 5 { return TokenKind::Use }
+    if kind == 7 { return TokenKind::Fn }
+    if kind == 8 { return TokenKind::Let }
+    if kind == 9 { return TokenKind::Var }
+    if kind == 12 { return TokenKind::Type }
+    if kind == 13 { return TokenKind::Struct }
+    if kind == 14 { return TokenKind::Enum }
+    if kind == 19 { return TokenKind::Ontology }
+    if kind == 20 { return TokenKind::If }
+    if kind == 21 { return TokenKind::Else }
+    if kind == 24 { return TokenKind::While }
+    if kind == 28 { return TokenKind::Return }
+    if kind == 30 { return TokenKind::As }
+    if kind == 31 { return TokenKind::Where }
+    if kind == 32 { return TokenKind::Pub }
+    if kind == 35 { return TokenKind::True }
+    if kind == 36 { return TokenKind::False }
+    if kind == 45 { return TokenKind::With }
+    if kind == 71 { return TokenKind::Knowledge }
+    if kind == 123 { return TokenKind::Ident }
+    if kind == 124 { return TokenKind::IntLit }
+    if kind == 125 { return TokenKind::FloatLit }
+    if kind == 126 { return TokenKind::StringLit }
+    if kind == 127 { return TokenKind::CharLit }
+    if kind == 128 { return TokenKind::BoolLit }
+    if kind == 129 { return TokenKind::HexLit }
+    if kind == 130 { return TokenKind::BinLit }
+    if kind == 131 { return TokenKind::OctLit }
+    if kind == 132 { return TokenKind::Plus }
+    if kind == 133 { return TokenKind::Minus }
+    if kind == 134 { return TokenKind::Star }
+    if kind == 135 { return TokenKind::Slash }
+    if kind == 136 { return TokenKind::Percent }
+    if kind == 137 { return TokenKind::Eq }
+    if kind == 138 { return TokenKind::Lt }
+    if kind == 139 { return TokenKind::Gt }
+    if kind == 140 { return TokenKind::Bang }
+    if kind == 141 { return TokenKind::Amp }
+    if kind == 142 { return TokenKind::Pipe }
+    if kind == 143 { return TokenKind::Caret }
+    if kind == 144 { return TokenKind::Tilde }
+    if kind == 145 { return TokenKind::Question }
+    if kind == 146 { return TokenKind::EqEq }
+    if kind == 147 { return TokenKind::BangEq }
+    if kind == 148 { return TokenKind::LtEq }
+    if kind == 149 { return TokenKind::GtEq }
+    if kind == 150 { return TokenKind::AmpAmp }
+    if kind == 151 { return TokenKind::PipePipe }
+    if kind == 152 { return TokenKind::Shl }
+    if kind == 153 { return TokenKind::Shr }
+    if kind == 154 { return TokenKind::PlusEq }
+    if kind == 155 { return TokenKind::MinusEq }
+    if kind == 156 { return TokenKind::StarEq }
+    if kind == 157 { return TokenKind::SlashEq }
+    if kind == 158 { return TokenKind::Arrow }
+    if kind == 159 { return TokenKind::FatArrow }
+    if kind == 160 { return TokenKind::DotDot }
+    if kind == 161 { return TokenKind::DotDotEq }
+    if kind == 162 { return TokenKind::ColonColon }
+    if kind == 163 { return TokenKind::AmpBang }
+    if kind == 164 { return TokenKind::PlusPlus }
+    if kind == 165 { return TokenKind::PipeEq }
+    if kind == 166 { return TokenKind::ShlEq }
+    if kind == 167 { return TokenKind::ShrEq }
+    if kind == 168 { return TokenKind::PercentEq }
+    if kind == 169 { return TokenKind::CaretEq }
+    if kind == 170 { return TokenKind::AmpEq }
+    if kind == 171 { return TokenKind::LeftArrow }
+    if kind == 172 { return TokenKind::DotDotDot }
+    if kind == 173 { return TokenKind::PlusMinus }
+    if kind == 174 { return TokenKind::LParen }
+    if kind == 175 { return TokenKind::RParen }
+    if kind == 176 { return TokenKind::LBrace }
+    if kind == 177 { return TokenKind::RBrace }
+    if kind == 178 { return TokenKind::LBracket }
+    if kind == 179 { return TokenKind::RBracket }
+    if kind == 180 { return TokenKind::Semi }
+    if kind == 181 { return TokenKind::Colon }
+    if kind == 182 { return TokenKind::Comma }
+    if kind == 183 { return TokenKind::Dot }
+    if kind == 184 { return TokenKind::At }
+    if kind == 185 { return TokenKind::Hash }
+    if kind == 186 { return TokenKind::Underscore }
+    TokenKind::Error
+}
+
+// Read token kind from parallel scalar code array. Avoid reading PT_KIND for
+// high-valued variants because the boot4 global enum array corrupts them.
+pub fn pt_read_kind(idx: i64) -> TokenKind with Mut, Panic, Div {
+    if idx >= 0 && idx < 2097152 {
+        let code = PT_KIND_CODE[idx as usize]
+        let start = PT_START[idx as usize]
+        let end = PT_END[idx as usize]
+        let len = end - start
+        if code == 0 && len == 0 {
+            return TokenKind::Eof
+        }
+        if len == 0 {
+            if code == 132 { return TokenKind::Plus }
+            if code == 133 { return TokenKind::Minus }
+            if code == 134 { return TokenKind::Star }
+            if code == 135 { return TokenKind::Slash }
+            if code == 136 { return TokenKind::Percent }
+            if code == 137 { return TokenKind::Eq }
+            if code == 138 { return TokenKind::Lt }
+            if code == 139 { return TokenKind::Gt }
+            if code == 140 { return TokenKind::Bang }
+            if code == 141 { return TokenKind::Amp }
+            if code == 142 { return TokenKind::Pipe }
+            if code == 143 { return TokenKind::Caret }
+            if code == 144 { return TokenKind::Tilde }
+            if code == 145 { return TokenKind::Question }
+            if code == 146 { return TokenKind::EqEq }
+            if code == 147 { return TokenKind::BangEq }
+            if code == 148 { return TokenKind::LtEq }
+            if code == 149 { return TokenKind::GtEq }
+            if code == 150 { return TokenKind::AmpAmp }
+            if code == 151 { return TokenKind::PipePipe }
+            if code == 152 { return TokenKind::Shl }
+            if code == 153 { return TokenKind::Shr }
+            if code == 154 { return TokenKind::PlusEq }
+            if code == 155 { return TokenKind::MinusEq }
+            if code == 156 { return TokenKind::StarEq }
+            if code == 157 { return TokenKind::SlashEq }
+            if code == 158 { return TokenKind::Arrow }
+            if code == 159 { return TokenKind::FatArrow }
+            if code == 160 { return TokenKind::DotDot }
+            if code == 161 { return TokenKind::DotDotEq }
+            if code == 162 { return TokenKind::ColonColon }
+            if code == 163 { return TokenKind::AmpBang }
+            if code == 164 { return TokenKind::PlusPlus }
+            if code == 165 { return TokenKind::PipeEq }
+            if code == 166 { return TokenKind::ShlEq }
+            if code == 167 { return TokenKind::ShrEq }
+            if code == 168 { return TokenKind::PercentEq }
+            if code == 169 { return TokenKind::CaretEq }
+            if code == 170 { return TokenKind::AmpEq }
+            if code == 171 { return TokenKind::LeftArrow }
+            if code == 172 { return TokenKind::DotDotDot }
+            if code == 173 { return TokenKind::PlusMinus }
+            if code == 174 { return TokenKind::LParen }
+            if code == 175 { return TokenKind::RParen }
+            if code == 176 { return TokenKind::LBrace }
+            if code == 177 { return TokenKind::RBrace }
+            if code == 178 { return TokenKind::LBracket }
+            if code == 179 { return TokenKind::RBracket }
+            if code == 180 { return TokenKind::Semi }
+            if code == 181 { return TokenKind::Colon }
+            if code == 182 { return TokenKind::Comma }
+            if code == 183 { return TokenKind::Dot }
+            if code == 184 { return TokenKind::At }
+            if code == 185 { return TokenKind::Hash }
+            if code == 186 { return TokenKind::Underscore }
+            if code == 43 { return TokenKind::Plus }
+            if code == 45 { return TokenKind::Minus }
+            if code == 42 { return TokenKind::Star }
+            if code == 47 { return TokenKind::Slash }
+            if code == 37 { return TokenKind::Percent }
+            if code == 61 { return TokenKind::Eq }
+            if code == 60 { return TokenKind::Lt }
+            if code == 62 { return TokenKind::Gt }
+            if code == 33 { return TokenKind::Bang }
+            if code == 38 { return TokenKind::Amp }
+            if code == 124 { return TokenKind::Pipe }
+            if code == 94 { return TokenKind::Caret }
+            if code == 126 { return TokenKind::Tilde }
+            if code == 63 { return TokenKind::Question }
+            if code == 40 { return TokenKind::LParen }
+            if code == 41 { return TokenKind::RParen }
+            if code == 123 { return TokenKind::LBrace }
+            if code == 125 { return TokenKind::RBrace }
+            if code == 91 { return TokenKind::LBracket }
+            if code == 93 { return TokenKind::RBracket }
+            if code == 59 { return TokenKind::Semi }
+            if code == 58 { return TokenKind::Colon }
+            if code == 44 { return TokenKind::Comma }
+            if code == 46 { return TokenKind::Dot }
+            if code == 64 { return TokenKind::At }
+            if code == 35 { return TokenKind::Hash }
+            if code == 95 { return TokenKind::Underscore }
+        }
+        if len > 0 {
+            let ch0_any = CURSOR_SOURCE[start as usize]
+            if ch0_any >= (48 as i8) && ch0_any <= (57 as i8) {
+                if len > 2 {
+                    let ch1_any = CURSOR_SOURCE[(start + 1) as usize]
+                    if ch0_any == (48 as i8) && (ch1_any == (120 as i8) || ch1_any == (88 as i8)) {
+                        return TokenKind::HexLit
+                    }
+                    if ch0_any == (48 as i8) && (ch1_any == (98 as i8) || ch1_any == (66 as i8)) {
+                        return TokenKind::BinLit
+                    }
+                    if ch0_any == (48 as i8) && (ch1_any == (111 as i8) || ch1_any == (79 as i8)) {
+                        return TokenKind::OctLit
+                    }
+                }
+                var digit_scan: i64 = 0
+                while digit_scan < len {
+                    let digit_ch = CURSOR_SOURCE[(start + digit_scan) as usize]
+                    if digit_ch == (46 as i8) || digit_ch == (101 as i8) || digit_ch == (69 as i8) {
+                        return TokenKind::FloatLit
+                    }
+                    digit_scan = digit_scan + 1
+                }
+                return TokenKind::IntLit
+            }
+            if ch0_any == (34 as i8) {
+                return TokenKind::StringLit
+            }
+            if ch0_any == (39 as i8) {
+                return TokenKind::CharLit
+            }
+        }
+        if len == 1 {
+            let ch = CURSOR_SOURCE[start as usize]
+            if ch == (43 as i8) { return TokenKind::Plus }
+            if ch == (45 as i8) { return TokenKind::Minus }
+            if ch == (42 as i8) { return TokenKind::Star }
+            if ch == (47 as i8) { return TokenKind::Slash }
+            if ch == (37 as i8) { return TokenKind::Percent }
+            if ch == (61 as i8) { return TokenKind::Eq }
+            if ch == (60 as i8) { return TokenKind::Lt }
+            if ch == (62 as i8) { return TokenKind::Gt }
+            if ch == (33 as i8) { return TokenKind::Bang }
+            if ch == (38 as i8) { return TokenKind::Amp }
+            if ch == (124 as i8) { return TokenKind::Pipe }
+            if ch == (94 as i8) { return TokenKind::Caret }
+            if ch == (126 as i8) { return TokenKind::Tilde }
+            if ch == (63 as i8) { return TokenKind::Question }
+            if ch == (40 as i8) { return TokenKind::LParen }
+            if ch == (41 as i8) { return TokenKind::RParen }
+            if ch == (123 as i8) { return TokenKind::LBrace }
+            if ch == (125 as i8) { return TokenKind::RBrace }
+            if ch == (91 as i8) { return TokenKind::LBracket }
+            if ch == (93 as i8) { return TokenKind::RBracket }
+            if ch == (59 as i8) { return TokenKind::Semi }
+            if ch == (58 as i8) { return TokenKind::Colon }
+            if ch == (44 as i8) { return TokenKind::Comma }
+            if ch == (46 as i8) { return TokenKind::Dot }
+            if ch == (64 as i8) { return TokenKind::At }
+            if ch == (35 as i8) { return TokenKind::Hash }
+            if ch == (95 as i8) { return TokenKind::Underscore }
+        }
+        if len == 2 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            if a == (102 as i8) && b == (110 as i8) { return TokenKind::Fn }
+            if a == (105 as i8) && b == (102 as i8) { return TokenKind::If }
+            if a == (105 as i8) && b == (110 as i8) { return TokenKind::In }
+            if a == (111 as i8) && b == (110 as i8) { return TokenKind::On }
+            if a == (97 as i8) && b == (115 as i8) { return TokenKind::As }
+            if a == (105 as i8) && b == (115 as i8) { return TokenKind::Is }
+            if a == (61 as i8) && b == (61 as i8) { return TokenKind::EqEq }
+            if a == (33 as i8) && b == (61 as i8) { return TokenKind::BangEq }
+            if a == (60 as i8) && b == (61 as i8) { return TokenKind::LtEq }
+            if a == (62 as i8) && b == (61 as i8) { return TokenKind::GtEq }
+            if a == (38 as i8) && b == (38 as i8) { return TokenKind::AmpAmp }
+            if a == (124 as i8) && b == (124 as i8) { return TokenKind::PipePipe }
+            if a == (60 as i8) && b == (60 as i8) { return TokenKind::Shl }
+            if a == (62 as i8) && b == (62 as i8) { return TokenKind::Shr }
+            if a == (43 as i8) && b == (61 as i8) { return TokenKind::PlusEq }
+            if a == (45 as i8) && b == (61 as i8) { return TokenKind::MinusEq }
+            if a == (42 as i8) && b == (61 as i8) { return TokenKind::StarEq }
+            if a == (47 as i8) && b == (61 as i8) { return TokenKind::SlashEq }
+            if a == (37 as i8) && b == (61 as i8) { return TokenKind::PercentEq }
+            if a == (38 as i8) && b == (61 as i8) { return TokenKind::AmpEq }
+            if a == (124 as i8) && b == (61 as i8) { return TokenKind::PipeEq }
+            if a == (94 as i8) && b == (61 as i8) { return TokenKind::CaretEq }
+            if a == (58 as i8) && b == (58 as i8) { return TokenKind::ColonColon }
+            if a == (45 as i8) && b == (62 as i8) { return TokenKind::Arrow }
+            if a == (61 as i8) && b == (62 as i8) { return TokenKind::FatArrow }
+            if a == (60 as i8) && b == (45 as i8) { return TokenKind::LeftArrow }
+            if a == (38 as i8) && b == (33 as i8) { return TokenKind::AmpBang }
+            if a == (46 as i8) && b == (46 as i8) { return TokenKind::DotDot }
+            if a == (43 as i8) && b == (43 as i8) { return TokenKind::PlusPlus }
+            if a == (43 as i8) && b == (45 as i8) { return TokenKind::PlusMinus }
+        }
+        if len == 3 {
+            let a3 = CURSOR_SOURCE[start as usize]
+            let b3 = CURSOR_SOURCE[(start + 1) as usize]
+            let c3 = CURSOR_SOURCE[(start + 2) as usize]
+            if a3 == (46 as i8) && b3 == (46 as i8) && c3 == (46 as i8) { return TokenKind::DotDotDot }
+            if a3 == (46 as i8) && b3 == (46 as i8) && c3 == (61 as i8) { return TokenKind::DotDotEq }
+            if a3 == (60 as i8) && b3 == (60 as i8) && c3 == (61 as i8) { return TokenKind::ShlEq }
+            if a3 == (62 as i8) && b3 == (62 as i8) && c3 == (61 as i8) { return TokenKind::ShrEq }
+        }
+        if len == 3 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            if a == (117 as i8) && b == (115 as i8) && c == (101 as i8) { return TokenKind::Use }
+            if a == (108 as i8) && b == (101 as i8) && c == (116 as i8) { return TokenKind::Let }
+            if a == (118 as i8) && b == (97 as i8) && c == (114 as i8) { return TokenKind::Var }
+            if a == (109 as i8) && b == (117 as i8) && c == (116 as i8) { return TokenKind::Mut }
+            if a == (112 as i8) && b == (117 as i8) && c == (98 as i8) { return TokenKind::Pub }
+            if a == (102 as i8) && b == (111 as i8) && c == (114 as i8) { return TokenKind::For }
+        }
+        if len == 4 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            if a == (119 as i8) && b == (105 as i8) && c == (116 as i8) && d == (104 as i8) { return TokenKind::With }
+            if a == (101 as i8) && b == (108 as i8) && c == (115 as i8) && d == (101 as i8) { return TokenKind::Else }
+            if a == (116 as i8) && b == (121 as i8) && c == (112 as i8) && d == (101 as i8) { return TokenKind::Type }
+            if a == (105 as i8) && b == (109 as i8) && c == (112 as i8) && d == (108 as i8) { return TokenKind::Impl }
+            if a == (108 as i8) && b == (111 as i8) && c == (111 as i8) && d == (112 as i8) { return TokenKind::Loop }
+            if a == (115 as i8) && b == (101 as i8) && c == (108 as i8) && d == (102 as i8) { return TokenKind::SelfLower }
+            if a == (83 as i8) && b == (101 as i8) && c == (108 as i8) && d == (102 as i8) { return TokenKind::SelfUpper }
+            if a == (116 as i8) && b == (114 as i8) && c == (117 as i8) && d == (101 as i8) { return TokenKind::True }
+            if a == (101 as i8) && b == (110 as i8) && c == (117 as i8) && d == (109 as i8) { return TokenKind::Enum }
+            if a == (117 as i8) && b == (110 as i8) && c == (105 as i8) && d == (116 as i8) { return TokenKind::Unit }
+        }
+        if len == 5 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            let e = CURSOR_SOURCE[(start + 4) as usize]
+            if a == (86 as i8) && b == (97 as i8) && c == (108 as i8) && d == (105 as i8) && e == (100 as i8) { return TokenKind::Valid }
+            if a == (77 as i8) && b == (111 as i8) && c == (100 as i8) && d == (101 as i8) && e == (108 as i8) { return TokenKind::Model }
+            // `crate` and `super`: absent here, so parse_pub_visibility fell
+            // past its Crate/Super branches into pub(path) and produced
+            // VISIBILITY_PUB_IN with an empty path — which fails
+            // ast_path_is_prefix, making pub(crate) strictly WORSE than
+            // private, since PUB_IN gets no same-module exemption.
+            if a == (99 as i8) && b == (114 as i8) && c == (97 as i8) && d == (116 as i8) && e == (101 as i8) { return TokenKind::Crate }
+            if a == (115 as i8) && b == (117 as i8) && c == (112 as i8) && d == (101 as i8) && e == (114 as i8) { return TokenKind::Super }
+            if a == (108 as i8) && b == (101 as i8) && c == (118 as i8) && d == (101 as i8) && e == (108 as i8) { return TokenKind::Level }
+            if a == (115 as i8) && b == (99 as i8) && c == (111 as i8) && d == (112 as i8) && e == (101 as i8) { return TokenKind::Scope }
+            if a == (99 as i8) && b == (111 as i8) && c == (110 as i8) && d == (115 as i8) && e == (116 as i8) { return TokenKind::Const }
+            if a == (116 as i8) && b == (114 as i8) && c == (97 as i8) && d == (105 as i8) && e == (116 as i8) { return TokenKind::Trait }
+            if a == (115 as i8) && b == (116 as i8) && c == (117 as i8) && d == (100 as i8) && e == (121 as i8) { return TokenKind::Study }
+            if a == (97 as i8) && b == (115 as i8) && c == (121 as i8) && d == (110 as i8) && e == (99 as i8) { return TokenKind::Async }
+            if a == (97 as i8) && b == (119 as i8) && c == (97 as i8) && d == (105 as i8) && e == (116 as i8) { return TokenKind::Await }
+            if a == (115 as i8) && b == (112 as i8) && c == (97 as i8) && d == (119 as i8) && e == (110 as i8) { return TokenKind::Spawn }
+            if a == (119 as i8) && b == (104 as i8) && c == (105 as i8) && d == (108 as i8) && e == (101 as i8) { return TokenKind::While }
+            if a == (119 as i8) && b == (104 as i8) && c == (101 as i8) && d == (114 as i8) && e == (101 as i8) { return TokenKind::Where }
+            if a == (98 as i8) && b == (114 as i8) && c == (101 as i8) && d == (97 as i8) && e == (107 as i8) { return TokenKind::Break }
+            if a == (102 as i8) && b == (97 as i8) && c == (108 as i8) && d == (115 as i8) && e == (101 as i8) { return TokenKind::False }
+            if a == (109 as i8) && b == (97 as i8) && c == (116 as i8) && d == (99 as i8) && e == (104 as i8) { return TokenKind::Match }
+        }
+        if len == 6 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            let e = CURSOR_SOURCE[(start + 4) as usize]
+            let f = CURSOR_SOURCE[(start + 5) as usize]
+            if a == (114 as i8) && b == (101 as i8) && c == (116 as i8) && d == (117 as i8) && e == (114 as i8) && f == (110 as i8) {
+                return TokenKind::Return
+            }
+            if a == (115 as i8) && b == (116 as i8) && c == (114 as i8) && d == (117 as i8) && e == (99 as i8) && f == (116 as i8) {
+                return TokenKind::Struct
+            }
+            if a == (105 as i8) && b == (109 as i8) && c == (112 as i8) && d == (111 as i8) && e == (114 as i8) && f == (116 as i8) {
+                return TokenKind::Import
+            }
+            // module removed — treated as Ident (too common as variable name)
+            if a == (101 as i8) && b == (120 as i8) && c == (112 as i8) && d == (111 as i8) && e == (114 as i8) && f == (116 as i8) {
+                return TokenKind::Export
+            }
+            if a == (101 as i8) && b == (120 as i8) && c == (116 as i8) && d == (101 as i8) && e == (114 as i8) && f == (110 as i8) {
+                return TokenKind::Extern
+            }
+            if a == (115 as i8) && b == (116 as i8) && c == (97 as i8) && d == (116 as i8) && e == (105 as i8) && f == (99 as i8) {
+                return TokenKind::Static
+            }
+            if a == (117 as i8) && b == (110 as i8) && c == (115 as i8) && d == (97 as i8) && e == (102 as i8) && f == (101 as i8) {
+                return TokenKind::Unsafe
+            }
+            if a == (101 as i8) && b == (102 as i8) && c == (102 as i8) && d == (101 as i8) && e == (99 as i8) && f == (116 as i8) {
+                return TokenKind::Effect
+            }
+            if a == (104 as i8) && b == (97 as i8) && c == (110 as i8) && d == (100 as i8) && e == (108 as i8) && f == (101 as i8) {
+                return TokenKind::Handle
+            }
+            if a == (114 as i8) && b == (101 as i8) && c == (115 as i8) && d == (117 as i8) && e == (109 as i8) && f == (101 as i8) {
+                return TokenKind::Resume
+            }
+            if a == (107 as i8) && b == (101 as i8) && c == (114 as i8) && d == (110 as i8) && e == (101 as i8) && f == (108 as i8) {
+                return TokenKind::Kernel
+            }
+            if a == (108 as i8) && b == (105 as i8) && c == (110 as i8) && d == (101 as i8) && e == (97 as i8) && f == (114 as i8) {
+                return TokenKind::Linear
+            }
+            if a == (97 as i8) && b == (102 as i8) && c == (102 as i8) && d == (105 as i8) && e == (110 as i8) && f == (101 as i8) {
+                return TokenKind::Affine
+            }
+            if a == (109 as i8) && b == (111 as i8) && c == (100 as i8) && d == (101 as i8) && e == (108 as i8) && f == (115 as i8) {
+                return TokenKind::ModelsLower
+            }
+            if a == (112 as i8) && b == (111 as i8) && c == (108 as i8) && d == (105 as i8) && e == (99 as i8) && f == (121 as i8) {
+                return TokenKind::PolicyLower
+            }
+        }
+        if len == 7 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            let e = CURSOR_SOURCE[(start + 4) as usize]
+            let f = CURSOR_SOURCE[(start + 5) as usize]
+            let g = CURSOR_SOURCE[(start + 6) as usize]
+            if a == (68 as i8) && b == (101 as i8) && c == (114 as i8) && d == (105 as i8) && e == (118 as i8) && f == (101 as i8) && g == (100 as i8) { return TokenKind::Derived }
+            if a == (97 as i8) && b == (108 as i8) && c == (103 as i8) && d == (101 as i8) && e == (98 as i8) && f == (114 as i8) && g == (97 as i8) {
+                return TokenKind::Algebra
+            }
+            if a == (104 as i8) && b == (97 as i8) && c == (110 as i8) && d == (100 as i8) && e == (108 as i8) && f == (101 as i8) && g == (114 as i8) {
+                return TokenKind::Handler
+            }
+            if a == (112 as i8) && b == (101 as i8) && c == (114 as i8) && d == (102 as i8) && e == (111 as i8) && f == (114 as i8) && g == (109 as i8) {
+                return TokenKind::Perform
+            }
+            if a == (67 as i8) && b == (111 as i8) && c == (110 as i8) && d == (116 as i8) && e == (101 as i8) && f == (115 as i8) && g == (116 as i8) {
+                return TokenKind::Contest
+            }
+            if a == (99 as i8) && b == (111 as i8) && c == (110 as i8) && d == (116 as i8) && e == (101 as i8) && f == (115 as i8) && g == (116 as i8) {
+                return TokenKind::ContestLower
+            }
+        }
+        if len == 8 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            let e = CURSOR_SOURCE[(start + 4) as usize]
+            let f = CURSOR_SOURCE[(start + 5) as usize]
+            let g = CURSOR_SOURCE[(start + 6) as usize]
+            let h = CURSOR_SOURCE[(start + 7) as usize]
+            if a == (67 as i8) && b == (111 as i8) && c == (109 as i8) && d == (112 as i8) && e == (117 as i8) && f == (116 as i8) && g == (101 as i8) && h == (100 as i8) { return TokenKind::Computed }
+            if a == (77 as i8) && b == (101 as i8) && c == (97 as i8) && d == (115 as i8) && e == (117 as i8) && f == (114 as i8) && g == (101 as i8) && h == (100 as i8) { return TokenKind::Measured }
+            if a == (99 as i8) && b == (111 as i8) && c == (110 as i8) && d == (116 as i8) && e == (105 as i8) && f == (110 as i8) && g == (117 as i8) && h == (101 as i8) {
+                return TokenKind::Continue
+            }
+            if a == (111 as i8) && b == (110 as i8) && c == (116 as i8) && d == (111 as i8) && e == (108 as i8) && f == (111 as i8) && g == (103 as i8) && h == (121 as i8) {
+                return TokenKind::Ontology
+            }
+        }
+        if len == 9 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            let e = CURSOR_SOURCE[(start + 4) as usize]
+            let f = CURSOR_SOURCE[(start + 5) as usize]
+            let g = CURSOR_SOURCE[(start + 6) as usize]
+            let h = CURSOR_SOURCE[(start + 7) as usize]
+            let i = CURSOR_SOURCE[(start + 8) as usize]
+            if a == (75 as i8) && b == (110 as i8) && c == (111 as i8) && d == (119 as i8) && e == (108 as i8) && f == (101 as i8) && g == (100 as i8) && h == (103 as i8) && i == (101 as i8) {
+                return TokenKind::Knowledge
+            }
+        }
+        if len == 10 {
+            let a = CURSOR_SOURCE[start as usize]
+            let b = CURSOR_SOURCE[(start + 1) as usize]
+            let c = CURSOR_SOURCE[(start + 2) as usize]
+            let d = CURSOR_SOURCE[(start + 3) as usize]
+            let e = CURSOR_SOURCE[(start + 4) as usize]
+            let f = CURSOR_SOURCE[(start + 5) as usize]
+            let g = CURSOR_SOURCE[(start + 6) as usize]
+            let h = CURSOR_SOURCE[(start + 7) as usize]
+            let i = CURSOR_SOURCE[(start + 8) as usize]
+            let j = CURSOR_SOURCE[(start + 9) as usize]
+            if a == (86 as i8) && b == (97 as i8) && c == (108 as i8) && d == (105 as i8) && e == (100 as i8) && f == (85 as i8) && g == (110 as i8) && h == (116 as i8) && i == (105 as i8) && j == (108 as i8) { return TokenKind::ValidUntil }
+            if a == (86 as i8) && b == (97 as i8) && c == (108 as i8) && d == (105 as i8) && e == (100 as i8) && f == (87 as i8) && g == (104 as i8) && h == (105 as i8) && i == (108 as i8) && j == (101 as i8) { return TokenKind::ValidWhile }
+        }
+        if len > 0 {
+            let ch0 = CURSOR_SOURCE[start as usize]
+            if (ch0 >= (97 as i8) && ch0 <= (122 as i8)) ||
+               (ch0 >= (65 as i8) && ch0 <= (90 as i8)) ||
+               ch0 == (95 as i8) {
+                return TokenKind::Ident
+            }
+        }
+        if code == 185 {
+            if len == 1 && CURSOR_SOURCE[start as usize] == (35 as i8) {
+                return TokenKind::Hash
+            }
+            return TokenKind::Ident
+        }
+        if code == 123 {
+            return TokenKind::Ident
+        }
+        if len == 2 &&
+           CURSOR_SOURCE[start as usize] == (102 as i8) &&
+           CURSOR_SOURCE[(start + 1) as usize] == (110 as i8) {
+            return TokenKind::Fn
+        }
+        token_kind_from_flat_code(code)
     } else {
         TokenKind::Eof
     }
 }
 
 pub fn pt_read_kind_code(idx: i64) -> i64 with Panic {
-    if idx >= 0 && idx < 1048576 {
+    if idx >= 0 && idx < 2097152 {
         PT_KIND_CODE[idx as usize]
     } else {
         0
@@ -368,21 +901,54 @@ pub fn pt_read_kind_code(idx: i64) -> i64 with Panic {
 }
 
 pub fn pt_read_start(idx: i64) -> i64 with Panic {
-    if idx >= 0 && idx < 1048576 { PT_START[idx as usize] } else { 0 }
+    if idx >= 0 && idx < 2097152 { PT_START[idx as usize] } else { 0 }
 }
 
 pub fn pt_read_end(idx: i64) -> i64 with Panic {
-    if idx >= 0 && idx < 1048576 { PT_END[idx as usize] } else { 0 }
+    if idx >= 0 && idx < 2097152 { PT_END[idx as usize] } else { 0 }
 }
 
 pub fn pt_read_int_value(idx: i64) -> i64 with Panic {
-    if idx >= 0 && idx < 1048576 { PT_INT_VALUE[idx as usize] } else { 0 }
+    if idx >= 0 && idx < 2097152 { PT_INT_VALUE[idx as usize] } else { 0 }
+}
+
+pub fn parser_assign_op_code(p: Parser) -> i64 with Panic {
+    if p.pending_gt > 0 { return -1 }
+    if p.pos < 0 || p.pos >= p.token_count { return -1 }
+    let code = PT_KIND_CODE[p.pos as usize]
+    if code == 137 { return 0 }
+    if code == 154 { return 1 }
+    if code == 155 { return 2 }
+    if code == 156 { return 3 }
+    if code == 157 { return 4 }
+    if code == 168 { return 5 }
+    let start = PT_START[p.pos as usize]
+    let end = PT_END[p.pos as usize]
+    let len = end - start
+    if len == 0 {
+        if code == 61 { return 0 }
+    }
+    if len == 1 {
+        if CURSOR_SOURCE[start as usize] == (61 as i8) { return 0 }
+    }
+    if len == 2 {
+        let a = CURSOR_SOURCE[start as usize]
+        let b = CURSOR_SOURCE[(start + 1) as usize]
+        if b == (61 as i8) {
+            if a == (43 as i8) { return 1 }
+            if a == (45 as i8) { return 2 }
+            if a == (42 as i8) { return 3 }
+            if a == (47 as i8) { return 4 }
+            if a == (37 as i8) { return 5 }
+        }
+    }
+    -1
 }
 
 // Free-function equivalents of Parser::peek / Parser::at_eof.
 // Use these when `p` is SIZE_HINT-typed (came from a tuple .0 field access)
 // to avoid the SIZE_HINT method-dispatch bug in the lean compiler.
-pub fn parser_peek(p: Parser) -> TokenKind with Panic {
+pub fn parser_peek(p: Parser) -> TokenKind with Mut, Panic, Div {
     if p.pending_gt > 0 {
         TokenKind::Gt
     } else if p.pos < p.token_count {
@@ -392,14 +958,373 @@ pub fn parser_peek(p: Parser) -> TokenKind with Panic {
     }
 }
 
-pub fn parser_at_eof(p: Parser) -> bool with Panic {
+pub fn parser_at_eof(p: Parser) -> bool with Mut, Panic, Div {
     if p.pending_gt > 0 { return false }
     if p.pos < 0 { return false }
     if p.pos >= p.token_count { return true }
     pt_read_kind(p.pos) == TokenKind::Eof
 }
 
-pub fn parser_peek_ahead(p: Parser, offset: i64) -> TokenKind with Panic {
+pub fn parser_advance(p_in: Parser) -> Parser with Mut, Panic, Div {
+    var p = p_in
+    if p.pending_gt > 0 {
+        p.pending_gt = p.pending_gt - 1
+        if p.pending_gt > 0 {
+            return p
+        }
+        if p.pos < p.token_count {
+            p.pos = p.pos + 1
+        }
+    } else if p.pos < p.token_count {
+        p.pos = p.pos + 1
+    }
+    while p.pos < p.token_count && pt_read_kind(p.pos) == TokenKind::Newline {
+        p.pos = p.pos + 1
+    }
+    p
+}
+
+// ---------------------------------------------------------------------------
+// Correctly-rounded decimal -> binary64, slow path (#1626).
+//
+// The fast paths below are exact only while the significand fits 53 bits and
+// |dexp| <= 22. Outside that window they cost one to two roundings, which left
+// four of 91 realistic literals one ULP out: two with 17 significant digits,
+// 1.602176634e-19, and 1e+300. Getting those right needs the exact quotient,
+// which needs integers wider than i64 -- so this is Clinger's AlgorithmM on a
+// small bignum.
+//
+// Base 2^31 limbs so that limb*10 + carry stays far inside i64. 64 limbs is
+// 1984 bits, against 1329 for 10^400, which is the clamp applied to dexp.
+//
+// Module-level rather than local arrays on purpose: boot4 corrupts
+// struct-by-value and large local aggregates, and the rest of this file
+// already uses the scalar-globals idiom for the same reason.
+var PFL_N: [i64; 64] = [0; 64]
+var PFL_NL: i64 = 0
+var PFL_D: [i64; 64] = [0; 64]
+var PFL_DL: i64 = 0
+
+fn pfl_set(is_num: bool, v: i64) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 64 {
+        if is_num { PFL_N[i as usize] = 0 } else { PFL_D[i as usize] = 0 }
+        i = i + 1
+    }
+    var x = v
+    var n: i64 = 0
+    while x > 0 {
+        if is_num { PFL_N[n as usize] = x % 2147483648 } else { PFL_D[n as usize] = x % 2147483648 }
+        x = x / 2147483648
+        n = n + 1
+    }
+    if is_num { PFL_NL = n } else { PFL_DL = n }
+}
+
+fn pfl_mul_small(is_num: bool, m: i64) with Mut, Panic, Div {
+    var len = if is_num { PFL_NL } else { PFL_DL }
+    var carry: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        let cur = if is_num { PFL_N[i as usize] } else { PFL_D[i as usize] }
+        let prod = cur * m + carry
+        if is_num { PFL_N[i as usize] = prod % 2147483648 } else { PFL_D[i as usize] = prod % 2147483648 }
+        carry = prod / 2147483648
+        i = i + 1
+    }
+    while carry > 0 && len < 64 {
+        if is_num { PFL_N[len as usize] = carry % 2147483648 } else { PFL_D[len as usize] = carry % 2147483648 }
+        carry = carry / 2147483648
+        len = len + 1
+    }
+    if is_num { PFL_NL = len } else { PFL_DL = len }
+}
+
+fn pfl_bits(is_num: bool) -> i64 with Mut, Panic, Div {
+    let len = if is_num { PFL_NL } else { PFL_DL }
+    if len == 0 { return 0 }
+    let top = if is_num { PFL_N[(len - 1) as usize] } else { PFL_D[(len - 1) as usize] }
+    var b: i64 = 0
+    var t = top
+    while t > 0 { b = b + 1  t = t / 2 }
+    (len - 1) * 31 + b
+}
+
+fn pfl_cmp() -> i64 with Mut, Panic, Div {
+    if PFL_NL != PFL_DL {
+        if PFL_NL > PFL_DL { return 1 }
+        return 0 - 1
+    }
+    var i = PFL_NL - 1
+    while i >= 0 {
+        let a = PFL_N[i as usize]
+        let b = PFL_D[i as usize]
+        if a != b {
+            if a > b { return 1 }
+            return 0 - 1
+        }
+        i = i - 1
+    }
+    0
+}
+
+// PFL_N -= PFL_D, assuming PFL_N >= PFL_D
+fn pfl_sub() with Mut, Panic, Div {
+    var borrow: i64 = 0
+    var i: i64 = 0
+    while i < PFL_NL {
+        var d = PFL_N[i as usize] - borrow
+        if i < PFL_DL { d = d - PFL_D[i as usize] }
+        if d < 0 { d = d + 2147483648  borrow = 1 } else { borrow = 0 }
+        PFL_N[i as usize] = d
+        i = i + 1
+    }
+    while PFL_NL > 0 && PFL_N[(PFL_NL - 1) as usize] == 0 { PFL_NL = PFL_NL - 1 }
+}
+
+fn pfl_shl(is_num: bool, k: i64) with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < k {
+        pfl_mul_small(is_num, 2)
+        j = j + 1
+    }
+}
+
+fn pfl_is_zero(is_num: bool) -> bool with Mut, Panic, Div {
+    if is_num { return PFL_NL == 0 }
+    PFL_DL == 0
+}
+
+// Multiply x by 2^k exactly, in two halves so a large negative k does not
+// underflow an intermediate on the way to a representable result.
+fn pfl_scale2(x: f64, k: i64) -> f64 with Mut, Panic, Div {
+    var v = x
+    var a = k / 2
+    var b = k - a
+    var n = a
+    while n > 0 { v = v * 2.0  n = n - 1 }
+    while n < 0 { v = v / 2.0  n = n + 1 }
+    n = b
+    while n > 0 { v = v * 2.0  n = n - 1 }
+    while n < 0 { v = v / 2.0  n = n + 1 }
+    v
+}
+
+// sig * 10^dexp, correctly rounded. Only called when the exact fast paths
+// cannot answer.
+fn pfl_slow(sig: i64, dexp: i64) -> f64 with Mut, Panic, Div {
+    pfl_set(true, sig)
+    pfl_set(false, 1)
+    var k: i64 = 0
+    if dexp > 0 {
+        while k < dexp { pfl_mul_small(true, 10)  k = k + 1 }
+    } else {
+        while k < 0 - dexp { pfl_mul_small(false, 10)  k = k + 1 }
+    }
+
+    // Normalise to 1 <= N/D < 2, tracking the binary exponent.
+    var e: i64 = 0
+    let diff = pfl_bits(true) - pfl_bits(false)
+    if diff > 0 { pfl_shl(false, diff)  e = e + diff }
+    if diff < 0 { pfl_shl(true, 0 - diff)  e = e + diff }
+    if pfl_cmp() < 0 { pfl_shl(true, 1)  e = e - 1 }
+
+    // How many significand bits this exponent can actually hold. 53 when the
+    // result is normal; fewer in the subnormal range, where binary64 loses
+    // precision gradually. Extracting 53 and then scaling down would round
+    // twice -- which is what left 610e-315 (6.1e-313, subnormal) one ULP out
+    // while every normal value was already exact.
+    var want: i64 = 53
+    if e < 0 - 1022 { want = e + 1075 }
+    if want < 1 { return 0.0 }
+    if want > 53 { want = 53 }
+
+    var q: i64 = 1
+    pfl_sub()
+    var i: i64 = 1
+    while i < want {
+        pfl_shl(true, 1)
+        q = q * 2
+        if pfl_cmp() >= 0 { pfl_sub()  q = q + 1 }
+        i = i + 1
+    }
+
+    // Round to nearest, ties to even.
+    pfl_shl(true, 1)
+    var round_up = false
+    if pfl_cmp() >= 0 {
+        pfl_sub()
+        if !pfl_is_zero(true) { round_up = true }
+        else { if q % 2 == 1 { round_up = true } }
+    }
+    if round_up { q = q + 1 }
+
+    // A carry out of the top bit renormalises; the extra bit comes for free
+    // from the exponent.
+    var qmax: i64 = 1
+    var z: i64 = 0
+    while z < want { qmax = qmax * 2  z = z + 1 }
+    if q >= qmax { q = q / 2  e = e + 1 }
+
+    // Every intermediate on the way down is representable because the target
+    // is, so the halving chain in pfl_scale2 is exact rather than repeatedly
+    // rounding.
+    pfl_scale2(q as f64, e - (want - 1))
+}
+
+// Exact powers of ten, built by multiplication rather than written out:
+// lean_single, which compiles this file, parses 10^19 as a NEGATIVE number, so
+// a literal table arrives poisoned. 10^k is exactly representable for k <= 22
+// and each 10^(k-1)*10 is an exact product, so this loop is exact. Clamped at
+// 22 because past that the result is no longer exact and callers rely on it.
+fn parser_pow10_exact(k: i64) -> f64 with Mut, Panic, Div {
+    var n = k
+    if n > 22 { n = 22 }
+    if n < 0 { n = 0 }
+    var v: f64 = 1.0
+    while n > 0 {
+        v = v * 10.0
+        n = n - 1
+    }
+    v
+}
+
+// Decimal -> binary64 (#1626). Exact significand + decimal exponent, scaled in
+// as few roundings as possible.
+//
+// The old code accumulated `frac = frac * 0.1`; 0.1 is not representable, so
+// every digit compounded a rounding and 32 of 91 realistic literals were wrong.
+// `0.99999999` came out one ULP high, which made the rebuilt log (#1626) look
+// as though it had a 2^-53 residual -- ulp(1.0)/1.0 IS 2^-53.
+//
+// `sig * 10 + digit` in f64 is exact while sig < 2^53, and 10^k is exact for
+// k <= 22, so within that window the single multiply or divide below is
+// CORRECTLY ROUNDED (Clinger 1990). Outside it, the two paths after the window
+// exist to keep the number of roundings small rather than let them accumulate:
+// a plain 10^|dexp| built by repeated multiplication costs up to 308 roundings
+// and is what put 1e-300 one ULP out.
+//
+// The significand is accumulated in i64, not f64. An f64 accumulator has to
+// stop at 2^53 and DISCARD the remaining digits, which costs up to 4 ULP on
+// ordinary 16-digit literals like 944.6810951079374. i64 absorbs 18 digits and
+// pays a single rounding at `as f64`. (I had this in f64 for a while on the
+// theory that the i64 cast was miscompiled -- that was the stray-brace
+// misdiagnosis, not a real defect.)
+fn parser_parse_float_token(start: i64, end: i64) -> f64 with Mut, Panic, Div {
+    var sig: i64 = 0
+    var dexp: i64 = 0
+    var seen_dot = false
+    var i = start
+    while i < end {
+        let ch = CURSOR_SOURCE[i as usize]
+        if ch == (95 as i8) {
+            i = i + 1
+            continue
+        }
+        if ch == (46 as i8) {
+            if seen_dot {
+                break
+            }
+            seen_dot = true
+            i = i + 1
+            continue
+        }
+        if ch >= (48 as i8) && ch <= (57 as i8) {
+            // 922337203685477580 is i64 max / 10: room for one more digit.
+            if sig < 922337203685477580 {
+                sig = sig * 10 + ((ch - (48 as i8)) as i64)
+                if seen_dot {
+                    dexp = dexp - 1
+                }
+            } else {
+                if !seen_dot {
+                    dexp = dexp + 1
+                }
+            }
+            i = i + 1
+            continue
+        }
+        break
+    }
+    if i < end && (CURSOR_SOURCE[i as usize] == (101 as i8) || CURSOR_SOURCE[i as usize] == (69 as i8)) {
+        i = i + 1
+        var exp_sign: i64 = 1
+        if i < end && CURSOR_SOURCE[i as usize] == (45 as i8) {
+            exp_sign = 0 - 1
+            i = i + 1
+        } else if i < end && CURSOR_SOURCE[i as usize] == (43 as i8) {
+            i = i + 1
+        }
+        var exp_value: i64 = 0
+        while i < end {
+            let ch2 = CURSOR_SOURCE[i as usize]
+            if ch2 == (95 as i8) {
+                i = i + 1
+                continue
+            }
+            if ch2 >= (48 as i8) && ch2 <= (57 as i8) {
+                exp_value = exp_value * 10 + ((ch2 - (48 as i8)) as i64)
+            } else {
+                break
+            }
+            i = i + 1
+        }
+        if exp_sign < 0 {
+            dexp = dexp - exp_value
+        } else {
+            dexp = dexp + exp_value
+        }
+    }
+    if sig == 0 {
+        return 0.0
+    }
+    let sf = sig as f64
+    // Past +-400 the answer is infinity or zero either way; clamping keeps a
+    // pathological literal from spinning the loops below.
+    if dexp > 400 { dexp = 400 }
+    if dexp < 0 - 400 { dexp = 0 - 400 }
+
+    // Correctly rounded window: significand exact in f64 AND an exact power of
+    // ten, so the single operation below is the only rounding.
+    if sig <= 9007199254740992 {
+        if dexp >= 0 && dexp <= 22 {
+            return sf * parser_pow10_exact(dexp)
+        }
+        if dexp < 0 && dexp >= 0 - 22 {
+            return sf / parser_pow10_exact(0 - dexp)
+        }
+    }
+
+    // Extended: walk the exponent DOWN into the exact window by growing the
+    // significand. Growing sig by 10 multiplies the value, so dexp drops by 1 to
+    // compensate -- every step exact while sig stays under 2^53, and one
+    // rounding overall once the window is reached.
+    //
+    // There is deliberately no mirror of this for dexp < -22. The same move
+    // there would need dexp to RISE toward the window while sig grows, and the
+    // algebra runs the other way: growing sig forces dexp down, i.e. further
+    // from the window. I wrote that mirror, measured it, and it turned
+    // 1.602176634e-19 from one ULP out into six orders of magnitude out.
+    if dexp > 22 && sig <= 9007199254740992 {
+        var s2 = sf
+        var e2 = dexp
+        while e2 > 22 && s2 <= 900719925474099.0 {
+            s2 = s2 * 10.0
+            e2 = e2 - 1
+        }
+        if e2 <= 22 {
+            return s2 * parser_pow10_exact(e2)
+        }
+    }
+
+    // Everything the exact windows cannot answer goes to the bignum path, which
+    // is correctly rounded by construction. It replaces a chunked 10^22 scaling
+    // that cost one rounding per chunk and left 1e300 and 1.602176634e-19 an ULP
+    // out.
+    pfl_slow(sig, dexp)
+}
+
+pub fn parser_peek_ahead(p: Parser, offset: i64) -> TokenKind with Mut, Panic, Div {
     if p.pending_gt > 0 {
         if offset < p.pending_gt {
             TokenKind::Gt
@@ -421,16 +1346,19 @@ impl Parser {
             tok.kind = PT_KIND[self.pos as usize]
             tok.start = PT_START[self.pos as usize]
             tok.int_value = PT_INT_VALUE[self.pos as usize]
+            if pt_read_kind(self.pos) == TokenKind::FloatLit {
+                tok.float_value = parser_parse_float_token(PT_START[self.pos as usize], PT_END[self.pos as usize])
+            }
             tok.text_len = PT_TEXT_LEN[self.pos as usize]
         }
         tok
     }
 
     fn current_int_value(self: Parser) -> i64 with Panic {
-        if self.pos >= 0 && self.pos < 1048576 { PT_INT_VALUE[self.pos as usize] } else { 0 }
+        if self.pos >= 0 && self.pos < 2097152 { PT_INT_VALUE[self.pos as usize] } else { 0 }
     }
 
-    fn peek(self: Parser) -> TokenKind with Panic, Div {
+    fn peek(self: Parser) -> TokenKind with Mut, Panic, Div {
         if self.pending_gt > 0 {
             TokenKind::Gt
         } else {
@@ -442,7 +1370,7 @@ impl Parser {
         }
     }
 
-    fn peek_ahead(self: Parser, offset: i64) -> TokenKind with Panic, Div {
+    fn peek_ahead(self: Parser, offset: i64) -> TokenKind with Mut, Panic, Div {
         if self.pending_gt > 0 {
             if offset < self.pending_gt {
                 TokenKind::Gt
@@ -464,11 +1392,11 @@ impl Parser {
         }
     }
 
-    fn at(self: Parser, kind: TokenKind) -> bool with Panic, Div {
+    fn at(self: Parser, kind: TokenKind) -> bool with Mut, Panic, Div {
         self.peek() == kind
     }
 
-    fn at_eof(self: Parser) -> bool with Panic, Div {
+    fn at_eof(self: Parser) -> bool with Mut, Panic, Div {
         self.peek() == TokenKind::Eof
     }
 
@@ -541,7 +1469,23 @@ impl Parser {
         var p = self
         p.had_error = true
         p.error_count = p.error_count + 1
-        print("parse error: expected token\n")
+        if p.error_count <= 20 {
+            print("parse error: expected token at line ")
+            if p.pos >= 0 && p.pos < 2097152 {
+                print_int(PT_LINE[p.pos as usize])
+                print(":")
+                print_int(PT_COL[p.pos as usize])
+                print(" expected=")
+                print_int(kind as i64)
+                print(" actual=")
+                print_int(PT_KIND_CODE[p.pos as usize])
+                print("\n")
+            } else {
+                print("unknown\n")
+            }
+        } else if p.error_count == 21 {
+            print("parse error: additional errors suppressed\n")
+        }
         p
     }
 
@@ -605,7 +1549,39 @@ impl Parser {
             let s = PT_START[self.pos as usize]
             let e = PT_END[self.pos as usize]
             var nlen = e - s
-            if nlen > 128 { nlen = 128 }
+            if nlen > 128 {
+                // Ask pt_read_kind, do NOT compare PT_KIND_CODE against a
+                // TokenKind cast. They are two different numberings: the enum's
+                // source order (StringLit is the 134th variant) and the flat
+                // scalar code the token tables actually store (a string literal
+                // carries 126, which in the code scheme means something else
+                // entirely — pt_read_kind:509-516 decodes 132..139 as
+                // Plus/Minus/Star/... and the header there records why the raw
+                // enum array cannot be trusted for high variants).
+                //
+                // A first attempt compared the raw code against
+                // `TokenKind::StringLit as i64` and therefore never matched, in
+                // silence. A probe that counted every truncation and PRINTED the
+                // kind is what found it: calls=5 trunc=1 firstkind=126 with
+                // longest=n+2, i.e. the site was reached, the condition was true,
+                // and only the comparison was wrong.
+                // nlen counts both quotes. Name holds 128 bytes, the opening
+                // quote takes one, and the closing quote is dropped at no cost —
+                // so 126 characters of text survive whole, 127 survive whole
+                // (the lost byte is the closing quote), and only from 128 does
+                // real text disappear. Measured, not reasoned: content 127 both
+                // prints 127 and loses nothing; content 128 prints 127.
+                // Warning at nlen > 128 fired one character early.
+                if nlen > 129 && pt_read_kind(self.pos) == TokenKind::StringLit {
+                    PARSER_TRUNCATED_LITERALS = PARSER_TRUNCATED_LITERALS + 1
+                    if PARSER_TRUNCATED_FIRST_LINE == 0 {
+                        PARSER_TRUNCATED_FIRST_LINE = PT_LINE[self.pos as usize]
+                    }
+                    // nlen counts the quotes; the text lost is nlen - 2 - 126.
+                    if nlen > PARSER_TRUNCATED_LONGEST { PARSER_TRUNCATED_LONGEST = nlen }
+                }
+                nlen = 128
+            }
             if nlen < 0 { nlen = 0 }
             var name = Name { buf: [0; 128], len: nlen }
             var i: i64 = 0
@@ -623,7 +1599,7 @@ impl Parser {
     // Utility: check if current token starts an expression
     // ============================================================
 
-    fn at_expr_start(self: Parser) -> bool with Panic, Div {
+    fn at_expr_start(self: Parser) -> bool with Mut, Panic, Div {
         let k = self.peek()
         k == TokenKind::IntLit
             || k == TokenKind::FloatLit
@@ -632,6 +1608,10 @@ impl Parser {
             || k == TokenKind::True
             || k == TokenKind::False
             || k == TokenKind::Ident
+            || k == TokenKind::Knowledge
+            || k == TokenKind::Close
+            || k == TokenKind::Unit
+            || k == TokenKind::Kernel
             || k == TokenKind::LParen
             || k == TokenKind::LBracket
             || k == TokenKind::LBrace
@@ -649,13 +1629,25 @@ impl Parser {
             || k == TokenKind::Continue
             || k == TokenKind::SelfLower
             || k == TokenKind::ContestLower
+            || k == TokenKind::Handle
+            || k == TokenKind::Async
+            || k == TokenKind::Spawn
+            || k == TokenKind::Perform
+            // Expression position and "does an expression follow" must admit the
+            // same identifiers, and only one list should say which. Without this
+            // call `return policy.count` parsed as a BARE return: the expression
+            // was discarded in silence, the return typed as (), and the failure
+            // surfaced as "expected i64, found ()" at a span pointing to the word
+            // `return`. A parser that REFUSES an identifier is found in one run;
+            // one that drops the expression is not.
+            || tk_is_contextual_ident(k)
     }
 
     // ============================================================
     // Utility: check if current token starts an item
     // ============================================================
 
-    fn at_item_start(self: Parser) -> bool with Panic, Div {
+    fn at_item_start(self: Parser) -> bool with Mut, Panic, Div {
         let k = self.peek()
         k == TokenKind::Fn
             || k == TokenKind::Struct
@@ -666,7 +1658,9 @@ impl Parser {
             || k == TokenKind::Use
             || k == TokenKind::Import
             || k == TokenKind::Linear
+            || k == TokenKind::Affine
             || k == TokenKind::Pub
+            || k == TokenKind::Async
     }
 }
 

@@ -1,0 +1,697 @@
+//@ run-pass
+// validated_lane: lean_single
+// EISA v2 (W3) witnesses: qd128 err lane closure contract on the EVM.
+//
+// W-A  v2 basic differential (EVM vs eisa::core_v2 reference chains)
+// W-B  closure contract keeps the cross-term v1's dd64 formula drops in emul
+// W-C  receipt-v3 machine state (gate count, deep err components populated)
+// W-D  I3 poison on v2 (overflow -> non-finite val/err -> poisoned gate)
+// W-E  frail predicate on v2 (band = max(u, |err.x0|), deeper lane)
+// W-F  fuel exhaustion on a v2 image (stop kind, fuel accounting)
+// W-G  v0/v1 regression pins + v2 twin val-lane agreement + hash separation
+// W-H  Rump 1988 hand-lowered v2 image — the flagship witness
+//
+// W-H honesty note (measured 2026-07-05, this lane): the final register's
+// val debris is -2^70 (s1e1093m0), so its err = round_qd(truth + 2^70) is
+// anchored at 2^70 and can only reach down to ~2^70 * 2^-211 ~ 2^-141.
+// truth's 4th component (~2^-163) lies BELOW that floor: the single-register
+// val+err reconstruction equals truth on components x0..x2 with x3 = 0 —
+// full 4-component bit-identity from ONE register is arithmetically
+// impossible (required span 70+163+53 > 212 bits). The exact value IS
+// receipt-recoverable bit-identically from the TWO gated source registers
+// (s2 with true = -2 exactly, and t4 with true = round_qd(77617/66192)):
+// their val+err reconstructions sum in qd to qd_div(-54767, 66192) with
+// zero tolerance. Both forms are asserted below on derived bits.
+
+use math::dd64::*
+use math::qd128::*
+use eisa::core_v2::*
+use eisa::format::*
+use eisa::evm::*
+
+fn wv2_bits_eq(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let pa = f64_parts(a)
+    let pb = f64_parts(b)
+    pa.sign == pb.sign && pa.exp == pb.exp && pa.mant == pb.mant
+}
+
+fn wv2_err_qd(m: &EvmMachine, r: i64) -> Qd128 with Panic {
+    Qd128 {
+        x0: evm_reg_ehi(m, r),
+        x1: evm_reg_elo(m, r),
+        x2: evm_reg_e2(m, r),
+        x3: evm_reg_e3(m, r),
+    }
+}
+
+fn wv2_pow2(n: i64) -> f64 with Mut {
+    var p = 1.0
+    var i = 0
+    while i < n {
+        p = p * 2.0
+        i = i + 1
+    }
+    p
+}
+
+// W-A: econst/eadd/emul chain, version 2. Constants built arithmetically
+// (2^54) — no long decimal literals through the lexer.
+fn wv2_build_wa() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 20)
+    b.consts[0] = wv2_pow2(54)
+    b.consts[1] = 1.0
+    b.consts[2] = 3.0
+    b.n_const = 3
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+
+    b.ops[3] = op_econst()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+
+    b.ops[4] = op_emul()
+    b.dsts[4] = 4
+    b.as_[4] = 2
+    b.bs_[4] = 3
+
+    b.ops[5] = op_egate()
+    b.dsts[5] = 4
+
+    b.ops[6] = op_ehalt()
+
+    b.n_code = 7
+    b
+}
+
+// W-B / W-C: e2 = 1/3, e4 = 2/3 (both with nonzero deep err), e5 = e2*e4.
+fn wv2_build_wbc() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 20)
+    b.consts[0] = 1.0
+    b.consts[1] = 3.0
+    b.consts[2] = 2.0
+    b.n_const = 3
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_ediv()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+
+    b.ops[3] = op_econst()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+
+    b.ops[4] = op_ediv()
+    b.dsts[4] = 4
+    b.as_[4] = 3
+    b.bs_[4] = 1
+
+    b.ops[5] = op_emul()
+    b.dsts[5] = 5
+    b.as_[5] = 2
+    b.bs_[5] = 4
+
+    b.ops[6] = op_egate()
+    b.dsts[6] = 5
+
+    b.ops[7] = op_ehalt()
+
+    b.n_code = 8
+    b
+}
+
+// W-D: emul of huge exact values overflows the val lane -> I3 poison.
+fn wv2_build_wd() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 20)
+    b.consts[0] = 1.0e308
+    b.consts[1] = 1.0
+    b.n_const = 2
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_emul()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 0
+
+    b.ops[3] = op_eadd()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 1
+
+    b.ops[4] = op_egate()
+    b.dsts[4] = 3
+
+    b.ops[5] = op_ehalt()
+
+    b.n_code = 6
+    b
+}
+
+// W-E: mirror of the v1 frail witness (U4) on the deeper lane:
+// e2 = 2^54 + 1 (val 2^54, err.x0 = 1), e3 = e2 - e0 (val 0, err.x0 = 1),
+// ebrz e3 -> decision at val 0 inside band 1 -> frail.
+fn wv2_build_we() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 20)
+    b.consts[0] = wv2_pow2(54)
+    b.consts[1] = 1.0
+    b.n_const = 2
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+
+    b.ops[3] = op_esub()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 0
+
+    b.ops[4] = op_ebrz()
+    b.dsts[4] = 0
+    b.as_[4] = 3
+    b.bs_[4] = 6
+
+    b.ops[5] = op_ehalt()
+
+    b.ops[6] = op_egate()
+    b.dsts[6] = 3
+
+    b.ops[7] = op_ehalt()
+
+    b.n_code = 8
+    b
+}
+
+// W-F: infinite ebr loop, fuel 5, version 2.
+fn wv2_build_wf() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 5)
+    b.ops[0] = op_ebr()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+    b.bs_[0] = 0
+    b.n_code = 1
+    b
+}
+
+// W-G: the U1 count-down loop from test_eisa_evm_v1.sio, parameterised by
+// version so the v1 image and its v2 twin share code and consts exactly.
+fn wv2_build_u1_twin(version: i64) -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, version)
+    b = eisax_build_set_fuel(b, 40)
+    b.consts[0] = 3.0
+    b.consts[1] = 1.0
+    b.consts[2] = 0.0
+    b.n_const = 3
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_econst()
+    b.dsts[2] = 3
+    b.as_[2] = 2
+
+    b.ops[3] = op_ebrz()
+    b.dsts[3] = 0
+    b.as_[3] = 0
+    b.bs_[3] = 7
+
+    b.ops[4] = op_eadd()
+    b.dsts[4] = 3
+    b.as_[4] = 3
+    b.bs_[4] = 1
+
+    b.ops[5] = op_esub()
+    b.dsts[5] = 0
+    b.as_[5] = 0
+    b.bs_[5] = 1
+
+    b.ops[6] = op_ebr()
+    b.dsts[6] = 0
+    b.as_[6] = 3
+
+    b.ops[7] = op_egate()
+    b.dsts[7] = 3
+
+    b.ops[8] = op_ebr()
+    b.dsts[8] = 0
+    b.as_[8] = 9
+
+    b.n_code = 9
+    b
+}
+
+// W-G: v0 regression program (U7 from test_eisa_evm_v1.sio).
+fn wv2_build_u7_v0() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b.consts[0] = 0.5
+    b.consts[1] = 7.25
+    b.n_const = 2
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_emul()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+
+    b.ops[3] = op_egate()
+    b.dsts[3] = 2
+
+    b.ops[4] = op_estore()
+    b.dsts[4] = 2
+    b.as_[4] = 0
+
+    b.n_code = 5
+    b
+}
+
+// W-H: Rump 1988 at (77617, 33096), hand-lowered, version 2, registers
+// e0..e14, 30 instructions, fuel 64. Mirrors rump_qd() op order from
+// tests/stdlib/math/test_qd128_rump.sio. Register dataflow (traced):
+//   e0 x        e1 y         e2 y2        e3 y4        e4 y6
+//   e5 y8       e6 x2        e7 scalar (333.75 -> 11 -> 121 -> 5.5)
+//   e8 t1       e9 x2y2 -> i1 -> i2 -> i3 -> i4 -> t2
+//   e10 121*y4 -> 2.0        e11 t3       e12 2y -> t4
+//   e13 s1 -> s2 (kept live) e14 r
+// No register is read after being clobbered: e7 and e10 are reloaded only
+// after their previous value's last use; e9 is a serial accumulator; e13 is
+// preserved past the final add so its receipt carries true = -2 exactly.
+fn wv2_build_wh_rump() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 64)
+    b.consts[0] = 77617.0
+    b.consts[1] = 33096.0
+    b.consts[2] = 333.75
+    b.consts[3] = 11.0
+    b.consts[4] = 121.0
+    b.consts[5] = 2.0
+    b.consts[6] = 5.5
+    b.n_const = 7
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_emul()
+    b.dsts[2] = 2
+    b.as_[2] = 1
+    b.bs_[2] = 1
+
+    b.ops[3] = op_emul()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 2
+
+    b.ops[4] = op_emul()
+    b.dsts[4] = 4
+    b.as_[4] = 3
+    b.bs_[4] = 2
+
+    b.ops[5] = op_emul()
+    b.dsts[5] = 5
+    b.as_[5] = 3
+    b.bs_[5] = 3
+
+    b.ops[6] = op_emul()
+    b.dsts[6] = 6
+    b.as_[6] = 0
+    b.bs_[6] = 0
+
+    b.ops[7] = op_econst()
+    b.dsts[7] = 7
+    b.as_[7] = 2
+
+    b.ops[8] = op_emul()
+    b.dsts[8] = 8
+    b.as_[8] = 4
+    b.bs_[8] = 7
+
+    b.ops[9] = op_econst()
+    b.dsts[9] = 7
+    b.as_[9] = 3
+
+    b.ops[10] = op_emul()
+    b.dsts[10] = 9
+    b.as_[10] = 6
+    b.bs_[10] = 2
+
+    b.ops[11] = op_emul()
+    b.dsts[11] = 9
+    b.as_[11] = 9
+    b.bs_[11] = 7
+
+    b.ops[12] = op_esub()
+    b.dsts[12] = 9
+    b.as_[12] = 9
+    b.bs_[12] = 4
+
+    b.ops[13] = op_econst()
+    b.dsts[13] = 7
+    b.as_[13] = 4
+
+    b.ops[14] = op_emul()
+    b.dsts[14] = 10
+    b.as_[14] = 3
+    b.bs_[14] = 7
+
+    b.ops[15] = op_esub()
+    b.dsts[15] = 9
+    b.as_[15] = 9
+    b.bs_[15] = 10
+
+    b.ops[16] = op_econst()
+    b.dsts[16] = 10
+    b.as_[16] = 5
+
+    b.ops[17] = op_esub()
+    b.dsts[17] = 9
+    b.as_[17] = 9
+    b.bs_[17] = 10
+
+    b.ops[18] = op_emul()
+    b.dsts[18] = 9
+    b.as_[18] = 6
+    b.bs_[18] = 9
+
+    b.ops[19] = op_econst()
+    b.dsts[19] = 7
+    b.as_[19] = 6
+
+    b.ops[20] = op_emul()
+    b.dsts[20] = 11
+    b.as_[20] = 5
+    b.bs_[20] = 7
+
+    b.ops[21] = op_emul()
+    b.dsts[21] = 12
+    b.as_[21] = 1
+    b.bs_[21] = 10
+
+    b.ops[22] = op_ediv()
+    b.dsts[22] = 12
+    b.as_[22] = 0
+    b.bs_[22] = 12
+
+    b.ops[23] = op_eadd()
+    b.dsts[23] = 13
+    b.as_[23] = 8
+    b.bs_[23] = 9
+
+    b.ops[24] = op_eadd()
+    b.dsts[24] = 13
+    b.as_[24] = 13
+    b.bs_[24] = 11
+
+    b.ops[25] = op_eadd()
+    b.dsts[25] = 14
+    b.as_[25] = 13
+    b.bs_[25] = 12
+
+    b.ops[26] = op_egate()
+    b.dsts[26] = 13
+
+    b.ops[27] = op_egate()
+    b.dsts[27] = 12
+
+    b.ops[28] = op_egate()
+    b.dsts[28] = 14
+
+    b.ops[29] = op_ehalt()
+
+    b.n_code = 30
+    b
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    // ---- W-A: v2 basic — EVM chain vs core_v2 reference chain. ----
+    let wa_img = eisax_encode(wv2_build_wa())
+    if eisax_validate(wa_img) != 0 { fails = fails + 1 }
+    var wa = evm_load(wa_img)
+    if evm_run(&!wa) != 0 { fails = fails + 1 }
+    if evm_version(&wa) != 2 { fails = fails + 1 }
+    if evm_gate_count(&wa) != 1 { fails = fails + 1 }
+    if evm_stop_kind(&wa) != 0 { fails = fails + 1 }
+
+    let ra = ereg2_exact(wv2_pow2(54))
+    let rb = ereg2_exact(1.0)
+    let rz = eadd2(ra, rb)
+    let rw = emul2(rz, ereg2_exact(3.0))
+    if !wv2_bits_eq(evm_reg_val(&wa, 2), rz.val) { fails = fails + 1 }
+    if !qd_eq(wv2_err_qd(&wa, 2), rz.err) { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_u(&wa, 2), rz.u) { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_val(&wa, 4), rw.val) { fails = fails + 1 }
+    if !qd_eq(wv2_err_qd(&wa, 4), rw.err) { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_u(&wa, 4), rw.u) { fails = fails + 1 }
+    // Deep lane really carries information on this chain (err.x0 = 1, = 3).
+    if !wv2_bits_eq(evm_reg_ehi(&wa, 2), 1.0) { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_ehi(&wa, 4), 3.0) { fails = fails + 1 }
+
+    // ---- W-B: the closure contract keeps the x.err*y.err cross-term. ----
+    let wb_img = eisax_encode(wv2_build_wbc())
+    if eisax_validate(wb_img) != 0 { fails = fails + 1 }
+    var wb = evm_load(wb_img)
+    if evm_run(&!wb) != 0 { fails = fails + 1 }
+
+    let xv = evm_reg_val(&wb, 2)
+    let xe = wv2_err_qd(&wb, 2)
+    let yv = evm_reg_val(&wb, 4)
+    let ye = wv2_err_qd(&wb, 4)
+    let zv = evm_reg_val(&wb, 5)
+    let ze = wv2_err_qd(&wb, 5)
+
+    // Expected err constructed in the test with qd128 calls (closure form).
+    if !wv2_bits_eq(zv, xv * yv) { fails = fails + 1 }
+    let tx = qd_add(qd_from_f64(xv), xe)
+    let ty = qd_add(qd_from_f64(yv), ye)
+    let tprod = qd_mul(tx, ty)
+    let expected_err = qd_sub(tprod, qd_from_f64(zv))
+    if !qd_eq(ze, expected_err) { fails = fails + 1 }
+
+    // The cross-term is nonzero and its removal changes the stored err:
+    // v1's dd64 emul formula (x.err*y.val + y.err*x.val + EFT residual)
+    // drops exactly this term.
+    let cross = qd_mul(xe, ye)
+    if cross.x0 == 0.0 { fails = fails + 1 }
+    let err_nocross = qd_sub(qd_sub(tprod, cross), qd_from_f64(zv))
+    if qd_eq(ze, err_nocross) { fails = fails + 1 }
+
+    // ---- W-C: receipt-v3 machine state on a gated v2 image. ----
+    var wc = evm_load(wb_img)
+    if evm_run(&!wc) != 0 { fails = fails + 1 }
+    if evm_gate_count(&wc) != 1 { fails = fails + 1 }
+    if evm_reg_poison(&wc, 5) != 0 { fails = fails + 1 }
+    // Deep components populated where derivable (measured via core_v2:
+    // err(1/3) and err(1/3 * 2/3) have nonzero x0, x1, x2; x3 = 0 here).
+    if evm_reg_elo(&wc, 2) == 0.0 { fails = fails + 1 }
+    if evm_reg_e2(&wc, 2) == 0.0 { fails = fails + 1 }
+    if evm_reg_elo(&wc, 5) == 0.0 { fails = fails + 1 }
+    if evm_reg_e2(&wc, 5) == 0.0 { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_e3(&wc, 5), 0.0) { fails = fails + 1 }
+
+    // ---- W-D: I3 poison on v2 (overflow), gate reports poisoned. ----
+    let wd_img = eisax_encode(wv2_build_wd())
+    if eisax_validate(wd_img) != 0 { fails = fails + 1 }
+    var wd = evm_load(wd_img)
+    if evm_run(&!wd) != 0 { fails = fails + 1 }
+    if evm_reg_poison(&wd, 2) != 1 { fails = fails + 1 }
+    if evm_reg_poison(&wd, 3) != 1 { fails = fails + 1 }
+    let wd_val = f64_parts(evm_reg_val(&wd, 3))
+    if wd_val.sign != 0 || wd_val.exp != 2047 || wd_val.mant != 1 { fails = fails + 1 }
+    let wd_u = f64_parts(evm_reg_u(&wd, 3))
+    if wd_u.exp != 2047 || wd_u.mant != 0 { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_ehi(&wd, 3), 0.0) { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_e2(&wd, 3), 0.0) { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_e3(&wd, 3), 0.0) { fails = fails + 1 }
+    if evm_gate_count(&wd) != 1 { fails = fails + 1 }
+
+    // ---- W-E: frail branch on the deeper lane counts exactly 1. ----
+    let we_img = eisax_encode(wv2_build_we())
+    if eisax_validate(we_img) != 0 { fails = fails + 1 }
+    var we = evm_load(we_img)
+    if evm_run(&!we) != 0 { fails = fails + 1 }
+    if evm_frail_count(&we) != 1 { fails = fails + 1 }
+    if evm_gate_count(&we) != 1 { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_val(&we, 3), 0.0) { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_ehi(&we, 3), 1.0) { fails = fails + 1 }
+
+    // ---- W-F: fuel exhaustion on a v2 image. ----
+    let wf_img = eisax_encode(wv2_build_wf())
+    if eisax_validate(wf_img) != 0 { fails = fails + 1 }
+    var wf = evm_load(wf_img)
+    if evm_run(&!wf) != 0 { fails = fails + 1 }
+    if evm_stop_kind(&wf) != 1 { fails = fails + 1 }
+    if evm_fuel_left(&wf) != 0 { fails = fails + 1 }
+    if evm_gate_count(&wf) != 0 { fails = fails + 1 }
+
+    // ---- W-G: v0/v1 regression pins + v2 twin. ----
+    // v0 pin (U7 pattern): mem[0] = 3.625, version 0, no v1 machinery.
+    let g0_img = eisax_encode(wv2_build_u7_v0())
+    if eisax_validate(g0_img) != 0 { fails = fails + 1 }
+    var g0 = evm_load(g0_img)
+    if evm_run(&!g0) != 0 { fails = fails + 1 }
+    if evm_version(&g0) != 0 { fails = fails + 1 }
+    if evm_stop_kind(&g0) != 0 { fails = fails + 1 }
+    if evm_frail_count(&g0) != 0 { fails = fails + 1 }
+    if evm_gate_count(&g0) != 1 { fails = fails + 1 }
+    if !wv2_bits_eq(evm_mem_val(&g0, 0), 3.625) { fails = fails + 1 }
+
+    // v1 pin (U1 pattern): fuel 22 left, reg e3 = 3.0, 1 gate, 0 frail.
+    let g1_img = eisax_encode(wv2_build_u1_twin(eisax_version_v1()))
+    if eisax_validate(g1_img) != 0 { fails = fails + 1 }
+    var g1 = evm_load(g1_img)
+    if evm_run(&!g1) != 0 { fails = fails + 1 }
+    if evm_version(&g1) != 1 { fails = fails + 1 }
+    if evm_stop_kind(&g1) != 0 { fails = fails + 1 }
+    if evm_frail_count(&g1) != 0 { fails = fails + 1 }
+    if evm_gate_count(&g1) != 1 { fails = fails + 1 }
+    if !wv2_bits_eq(evm_reg_val(&g1, 3), 3.0) { fails = fails + 1 }
+    if evm_fuel_left(&g1) != 22 { fails = fails + 1 }
+
+    // v2 twin of the same program: identical val/err/u lanes (this loop is
+    // exact integer arithmetic: err = 0 in both depth regimes), identical
+    // fuel/gate/frail accounting, different EISA-hash (version word mixed).
+    let g2_img = eisax_encode(wv2_build_u1_twin(eisax_version_v2()))
+    if eisax_validate(g2_img) != 0 { fails = fails + 1 }
+    if eisax_prog_hash(g2_img) == eisax_prog_hash(g1_img) { fails = fails + 1 }
+    var g2 = evm_load(g2_img)
+    if evm_run(&!g2) != 0 { fails = fails + 1 }
+    if evm_version(&g2) != 2 { fails = fails + 1 }
+    if evm_stop_kind(&g2) != 0 { fails = fails + 1 }
+    if evm_frail_count(&g2) != 0 { fails = fails + 1 }
+    if evm_gate_count(&g2) != 1 { fails = fails + 1 }
+    if evm_fuel_left(&g2) != 22 { fails = fails + 1 }
+    var gr = 0
+    while gr < 16 {
+        if !wv2_bits_eq(evm_reg_val(&g2, gr), evm_reg_val(&g1, gr)) { fails = fails + 1 }
+        if !wv2_bits_eq(evm_reg_ehi(&g2, gr), evm_reg_ehi(&g1, gr)) { fails = fails + 1 }
+        if !wv2_bits_eq(evm_reg_elo(&g2, gr), evm_reg_elo(&g1, gr)) { fails = fails + 1 }
+        if !wv2_bits_eq(evm_reg_u(&g2, gr), evm_reg_u(&g1, gr)) { fails = fails + 1 }
+        if evm_reg_poison(&g2, gr) != evm_reg_poison(&g1, gr) { fails = fails + 1 }
+        gr = gr + 1
+    }
+
+    // ---- W-H: Rump 1988 on the v2 EVM — the flagship witness. ----
+    let wh_img = eisax_encode(wv2_build_wh_rump())
+    if eisax_validate(wh_img) != 0 { fails = fails + 1 }
+    var wh = evm_load(wh_img)
+    if evm_run(&!wh) != 0 { fails = fails + 1 }
+    if evm_error(&wh) != 0 { fails = fails + 1 }
+    if evm_stop_kind(&wh) != 0 { fails = fails + 1 }
+    if evm_gate_count(&wh) != 3 { fails = fails + 1 }
+    if evm_fuel_left(&wh) != 34 { fails = fails + 1 }
+    if evm_frail_count(&wh) != 0 { fails = fails + 1 }
+    if evm_reg_poison(&wh, 12) != 0 { fails = fails + 1 }
+    if evm_reg_poison(&wh, 13) != 0 { fails = fails + 1 }
+    if evm_reg_poison(&wh, 14) != 0 { fails = fails + 1 }
+
+    // Truth computed in the test from the exact rational: -54767/66192.
+    let truth = qd_div(qd_from_f64(0.0 - 54767.0), qd_from_f64(66192.0))
+
+    // H1: the val lane is the f64 debris, not the correct value.
+    // Measured (host fl64, this op order): -2^70 = s1e1093m0; the correctly
+    // rounded f64 of truth is s1e1022m2948921547158147 (test_qd128_rump R2).
+    let val_r = evm_reg_val(&wh, 14)
+    let vp = f64_parts(val_r)
+    if vp.sign != 1 || vp.exp != 1093 || vp.mant != 0 { fails = fails + 1 }
+
+    // H2: the err lane is EXACTLY round_qd(truth - val) — derived bits.
+    let err_r = wv2_err_qd(&wh, 14)
+    let expected_err_r = qd_sub(truth, qd_from_f64(val_r))
+    if !qd_eq(err_r, expected_err_r) { fails = fails + 1 }
+
+    // H3: single-register reconstruction val+err reaches truth on x0..x2;
+    // x3 is unreachable from THIS register (span > 212 bits, see header).
+    let recon_r = qd_add(qd_from_f64(val_r), err_r)
+    if !wv2_bits_eq(recon_r.x0, truth.x0) { fails = fails + 1 }
+    if !wv2_bits_eq(recon_r.x1, truth.x1) { fails = fails + 1 }
+    if !wv2_bits_eq(recon_r.x2, truth.x2) { fails = fails + 1 }
+    if !wv2_bits_eq(recon_r.x3, 0.0) { fails = fails + 1 }
+    // Collapsed to f64 the reconstruction IS the correctly rounded truth
+    // (pinned by IEEE fields, same pin as test_qd128_rump R2).
+    let rf = f64_parts(qd_to_f64(recon_r))
+    if rf.sign != 1 || rf.exp != 1022 || rf.mant != 2948921547158147 { fails = fails + 1 }
+
+    // H4 (flagship): the two gated source registers carry the exact value.
+    // s2 (e13): true = -2 exactly; t4 (e12): true = round_qd(77617/66192).
+    // Their val+err reconstructions sum in qd to -54767/66192 BIT-IDENTICALLY.
+    let val_s2 = evm_reg_val(&wh, 13)
+    let sp = f64_parts(val_s2)
+    if sp.sign != 1 || sp.exp != 1093 || sp.mant != 0 { fails = fails + 1 }
+    let recon_s2 = qd_add(qd_from_f64(val_s2), wv2_err_qd(&wh, 13))
+    // true(s2) is the polynomial part = -2 EXACTLY (integer, so the err
+    // lane absorbs the debris without any rounding loss).
+    if !qd_eq(recon_s2, qd_from_f64(0.0 - 2.0)) { fails = fails + 1 }
+
+    let val_t4 = evm_reg_val(&wh, 12)
+    let recon_t4 = qd_add(qd_from_f64(val_t4), wv2_err_qd(&wh, 12))
+    if !qd_eq(recon_t4, qd_div(qd_from_f64(77617.0), qd_from_f64(66192.0))) { fails = fails + 1 }
+
+    let flagship = qd_add(recon_s2, recon_t4)
+    if !qd_eq(flagship, truth) { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: eisa evm v2 W-A ... W-H")
+    0
+}

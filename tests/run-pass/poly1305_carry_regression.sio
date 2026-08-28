@@ -1,0 +1,57 @@
+//@ run-pass
+//@ requires: madaros
+use crypto::poly1305::*
+use net::socket::*
+
+fn main() -> i64 with IO {
+    // Regression for the missing-carry-propagation bug found in the
+    // final whole-plan review (docs/superpowers/plans/
+    // 2026-08-25-madaros-aead-ciphers-plan.md, Finding 1): poly1305_mac
+    // did not fully propagate carries out of h1 before the final
+    // reduction/packing step, so the OR-based limb merge in the packing
+    // step could silently swallow a carry bit. This single 16-byte
+    // block is a proven case that flips one output byte under the bug.
+    //
+    // Key is RFC 8439 section 2.5.2's key, copied verbatim from
+    // tests/run-pass/poly1305_mac.sio (not retyped, to avoid a
+    // transcription error).
+    let key: [u8;32] = [
+        0x85,0xd6,0xbe,0x78,0x57,0x55,0x6d,0x33,0x7f,0x44,0x52,0xfe,0x42,0xd5,0x06,0xa8,
+        0x01,0x03,0x80,0x8a,0xfb,0x0d,0xb2,0xfd,0x4a,0xbf,0xf6,0xaf,0x41,0x49,0xf5,0x1b
+    ]
+
+    // Single 16-byte block message that triggers the h1 overflow.
+    let msg: [u8;16] = [
+        0x3e,0x51,0xc2,0x06,0x8b,0xbb,0x9e,0x2f,0xa0,0xbd,0x7c,0x43,0xd8,0xda,0xda,0x30
+    ]
+
+    // Correct tag (verified against a reference poly1305-donna-style
+    // implementation with full carry propagation). Byte index 6 is the
+    // one the missing-carry bug corrupts: buggy output is 0x22, correct
+    // is 0x32.
+    let expected_tag: [u8;16] = [
+        0x82,0x56,0x75,0x96,0xfb,0x0d,0x32,0x13,0x70,0x3a,0xa4,0xb5,0x67,0x79,0x0d,0xf6
+    ]
+
+    let msg_buf = rawbuf_new(16 + 8)
+    var i: i64 = 0
+    while i < 16 {
+        rawbuf_set(&msg_buf, i, msg[i as usize] as i64)
+        i = i + 1
+    }
+
+    let tag = poly1305_mac(&key, &msg_buf, 16)
+    var j: i64 = 0
+    while j < 16 {
+        if tag[j as usize] != expected_tag[j as usize] {
+            print_int(1)
+            print_int(j)
+            print_int(tag[j as usize] as i64)
+            return 1
+        }
+        j = j + 1
+    }
+
+    println("poly1305_carry_regression: full carry propagation before packing is correct")
+    return 0
+}

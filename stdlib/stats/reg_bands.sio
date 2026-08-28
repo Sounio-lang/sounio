@@ -1,0 +1,235 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/reg_bands.sio — simple linear regression with confidence &
+// prediction bands
+//
+// A full OLS fit already lives in stats::regression::linear, but the t-based
+// bands — the confidence band for the mean response and the prediction band for
+// a new observation at each x — are missing, and they are exactly what a
+// calibration / dose-response figure needs. This module provides a minimal fit
+// that carries the quantities the bands require (residual sigma, x-bar, Sxx),
+// plus the bands themselves, using the Student-t multiplier at n-2 df
+// (stats::student_t):
+//
+//   reg_fit(x, y, n)          -> RegFit
+//   reg_predict(fit, x)       -> fitted y-hat at x
+//   reg_conf_band(fit, x, c)  -> (lo, hi) for the MEAN response at x
+//   reg_pred_band(fit, x, c)  -> (lo, hi) for a NEW observation at x
+//   reg_slope_ci(fit, c)      -> (lo, hi) confidence interval for the slope
+//
+// Band half-widths (Draper & Smith 1998 §1.4, §3.1), with t = t_{(1+c)/2, n-2}:
+//   confidence:  t·sigma·sqrt( 1/n + (x-x̄)²/Sxx )
+//   prediction:  t·sigma·sqrt( 1 + 1/n + (x-x̄)²/Sxx )
+//   slope CI:    slope ± t·sigma/sqrt(Sxx)
+// where sigma = sqrt(SSE/(n-2)) is the residual standard error.
+//
+// Pure Sounio; the only dependency is the t-quantile (stats::student_t).
+//
+// References:
+//   Draper & Smith (1998) "Applied Regression Analysis" 3rd ed., Ch. 1, 3
+//   Montgomery, Peck & Vining (2012) "Introduction to Linear Regression Analysis"
+
+module stats::reg_bands
+
+use stats::student_t::{t_quantile}
+
+// ============================================================================
+// INTERNAL HELPERS
+// ============================================================================
+
+fn rb_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    return y / scale_back
+}
+
+// ============================================================================
+// FIT TYPE
+// ============================================================================
+
+pub struct RegFit {
+    pub n: i64,          // number of points
+    pub slope: f64,      // OLS slope
+    pub intercept: f64,  // OLS intercept
+    pub sigma: f64,      // residual standard error sqrt(SSE/(n-2))
+    pub r2: f64,         // coefficient of determination
+    pub xbar: f64,       // mean of x
+    pub sxx: f64,        // Σ (x - x̄)²
+    pub df: f64,         // n - 2
+}
+
+// ============================================================================
+// FIT
+// ============================================================================
+
+/// Ordinary least-squares fit of y on x, carrying the band quantities.
+///
+/// Parâmetros: x, y — the data; n — number of points (3 <= n <= 256).
+/// Retorno: RegFit (slope, intercept, residual sigma, r², x̄, Sxx, df).
+/// Complexidade: O(n).
+/// Referências: Draper & Smith (1998) Ch. 1.
+pub fn reg_fit(x: &[f64; 256], y: &[f64; 256], n: i32) -> RegFit with Mut, Div, Panic {
+    if n < 3 {
+        return RegFit { n: n as i64, slope: 0.0, intercept: 0.0, sigma: 0.0,
+                        r2: 0.0, xbar: 0.0, sxx: 0.0, df: 0.0 }
+    }
+    let nf = n as f64
+
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n {
+        sx = sx + x[i as usize]
+        sy = sy + y[i as usize]
+        i = i + 1
+    }
+    let xbar = sx / nf
+    let ybar = sy / nf
+
+    var sxx = 0.0
+    var sxy = 0.0
+    var syy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - xbar
+        let dy = y[j as usize] - ybar
+        sxx = sxx + dx * dx
+        sxy = sxy + dx * dy
+        syy = syy + dy * dy
+        j = j + 1
+    }
+
+    var slope = 0.0
+    if sxx > 1.0e-300 { slope = sxy / sxx }
+    let intercept = ybar - slope * xbar
+
+    // SSE = Syy - slope·Sxy ; residual sigma = sqrt(SSE/(n-2))
+    var sse = syy - slope * sxy
+    if sse < 0.0 { sse = 0.0 }
+    let df = nf - 2.0
+    var sigma = 0.0
+    if df > 0.0 { sigma = rb_sqrt(sse / df) }
+
+    var r2 = 0.0
+    if syy > 1.0e-300 { r2 = 1.0 - sse / syy }
+
+    return RegFit { n: n as i64, slope: slope, intercept: intercept, sigma: sigma,
+                    r2: r2, xbar: xbar, sxx: sxx, df: df }
+}
+
+// ============================================================================
+// PREDICTIONS & BANDS
+// ============================================================================
+
+/// Fitted mean response ŷ at x.
+pub fn reg_predict(fit: &RegFit, x: f64) -> f64 {
+    return fit.intercept + fit.slope * x
+}
+
+/// Confidence band for the MEAN response at x, at confidence level `conf`.
+/// Returns (lo, hi) = ŷ ± t·sigma·sqrt(1/n + (x-x̄)²/Sxx).
+pub fn reg_conf_band(fit: &RegFit, x: f64, conf: f64) -> (f64, f64) with Mut, Div, Panic {
+    let yhat = fit.intercept + fit.slope * x
+    if fit.n < 3 || fit.sxx <= 0.0 { return (yhat, yhat) }
+    let tmult = t_quantile(0.5 + conf / 2.0, fit.df)
+    let dx = x - fit.xbar
+    let se = fit.sigma * rb_sqrt(1.0 / (fit.n as f64) + dx * dx / fit.sxx)
+    let half = tmult * se
+    return (yhat - half, yhat + half)
+}
+
+/// Prediction band for a NEW observation at x, at confidence level `conf`.
+/// Returns (lo, hi) = ŷ ± t·sigma·sqrt(1 + 1/n + (x-x̄)²/Sxx).
+pub fn reg_pred_band(fit: &RegFit, x: f64, conf: f64) -> (f64, f64) with Mut, Div, Panic {
+    let yhat = fit.intercept + fit.slope * x
+    if fit.n < 3 || fit.sxx <= 0.0 { return (yhat, yhat) }
+    let tmult = t_quantile(0.5 + conf / 2.0, fit.df)
+    let dx = x - fit.xbar
+    let se = fit.sigma * rb_sqrt(1.0 + 1.0 / (fit.n as f64) + dx * dx / fit.sxx)
+    let half = tmult * se
+    return (yhat - half, yhat + half)
+}
+
+/// Confidence interval for the slope at confidence level `conf`.
+/// Returns (lo, hi) = slope ± t·sigma/sqrt(Sxx).
+pub fn reg_slope_ci(fit: &RegFit, conf: f64) -> (f64, f64) with Mut, Div, Panic {
+    if fit.n < 3 || fit.sxx <= 0.0 { return (fit.slope, fit.slope) }
+    let tmult = t_quantile(0.5 + conf / 2.0, fit.df)
+    let se = fit.sigma / rb_sqrt(fit.sxx)
+    let half = tmult * se
+    return (fit.slope - half, fit.slope + half)
+}
+
+// ============================================================================
+// INLINE TESTS — validated against a hand-computed worked example
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x = 1..5, y = 2,4,5,4,5.  x̄=3, ȳ=4, Sxx=10, Sxy=6 -> slope=0.6, intercept=2.2.
+// SSE=2.4, sigma=sqrt(0.8)=0.894427, r²=0.6, df=3, t_0.975(3)=3.182446.
+// slope CI: 0.6 ± 3.182446·(0.894427/√10=0.282843) = 0.6 ± 0.900 = [-0.300, 1.500].
+// conf half at x=3 (=x̄): 3.182446·0.894427·√(1/5) = 1.272792.
+// pred half at x=3:        3.182446·0.894427·√(1+1/5) = 3.117691.
+fn test_worked() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=2.0; y[1]=4.0; y[2]=5.0; y[3]=4.0; y[4]=5.0
+    let f = reg_fit(&x, &y, 5)
+    var ok = true
+    ok = check(1, approx(f.slope, 0.6, 1.0e-9)) && ok
+    ok = check(2, approx(f.intercept, 2.2, 1.0e-9)) && ok
+    ok = check(3, approx(f.sigma, 0.8944272, 1.0e-6)) && ok
+    ok = check(4, approx(f.r2, 0.6, 1.0e-9)) && ok
+    ok = check(5, approx(f.sxx, 10.0, 1.0e-9)) && ok
+    ok = check(6, approx(reg_predict(&f, 3.0), 4.0, 1.0e-9)) && ok
+
+    let (slo, shi) = reg_slope_ci(&f, 0.95)
+    ok = check(7, approx(slo, 0.0 - 0.300228, 1.0e-4)) && ok
+    ok = check(8, approx(shi, 1.500228, 1.0e-4)) && ok
+
+    let (clo, chi) = reg_conf_band(&f, 3.0, 0.95)
+    ok = check(9, approx(chi - 4.0, 1.272979, 1.0e-4)) && ok
+    ok = check(10, approx(4.0 - clo, 1.272979, 1.0e-4)) && ok
+
+    let (plo, phi) = reg_pred_band(&f, 3.0, 0.95)
+    ok = check(11, approx(phi - 4.0, 3.117691, 1.0e-3)) && ok
+
+    // prediction band is always wider than the confidence band
+    ok = check(12, (phi - plo) > (chi - clo)) && ok
+    // band is narrowest at x̄ and wider away from it
+    let (_a, chi5) = reg_conf_band(&f, 5.0, 0.95)
+    ok = check(13, (chi5 - reg_predict(&f, 5.0)) > 1.272792) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_worked() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

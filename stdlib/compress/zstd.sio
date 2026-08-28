@@ -1,85 +1,81 @@
-// stdlib/compress/zstd.sio — Zstandard Compression via libzstd FFI
+// stdlib/compress/zstd.sio — Zstandard Compression (pure-Sounio stub)
 //
-// Simple one-shot compress/decompress using the ZSTD_compress / ZSTD_decompress
-// API. No streaming, no dictionary support in this MVP.
+// Provides the zstd compress/decompress API surface. The actual Zstandard
+// algorithm requires PLT-based dynamic linking to libzstd, which the current
+// native x86-64 backend does not yet support (statically-linked ELF, no GOT/PLT).
+// compress() and decompress() return error codes until PLT support lands.
+//
+// Level constants, compress_bound, clamp_level, and struct predicates are
+// implemented in pure Sounio and are fully functional.
+//
+// NOTE: All pointer parameters use *mut u8 — *const u8 in function-call
+// position causes arity mismatch in the current compiler.
 //
 // References:
 //   RFC 8478 — Zstandard Compression and the 'application/zstd' Media Type
 //   Collet, Y. (2016) — Zstandard: Real-Time Data Compression Algorithm
 
 // ============================================================================
-// FFI Declarations
-// ============================================================================
-
-extern "C" {
-    fn ZSTD_compress(dst: *mut u8, dst_cap: i64, src: *const u8, src_size: i64, level: i32) -> i64;
-    fn ZSTD_decompress(dst: *mut u8, dst_cap: i64, src: *const u8, src_size: i64) -> i64;
-    fn ZSTD_isError(code: i64) -> i32;
-    fn ZSTD_getErrorName(code: i64) -> *const u8;
-    fn ZSTD_compressBound(src_size: i64) -> i64;
-    fn ZSTD_getFrameContentSize(src: *const u8, src_size: i64) -> i64;
-    fn ZSTD_versionNumber() -> i32;
-    fn ZSTD_minCLevel() -> i32;
-    fn ZSTD_maxCLevel() -> i32;
-    fn ZSTD_defaultCLevel() -> i32;
-}
-
-// ============================================================================
 // Types
 // ============================================================================
 
-struct ZstdError { code: i64 }
-struct ZstdResult { ok: bool, size: i64, error: ZstdError }
+pub struct ZstdError { code: i64 }
+pub struct ZstdResult { ok: bool, size: i64, error: ZstdError }
 
 // ============================================================================
-// Compress
+// Level constants (pure, no FFI)
 // ============================================================================
 
-/// Compress src into dst at the given compression level.
-/// Returns ZstdResult with ok=true and size of compressed data on success.
-pub fn zstd_compress(src: *const u8, src_len: i64, dst: *mut u8, dst_cap: i64, level: i32) -> ZstdResult {
-    let result = ZSTD_compress(dst, dst_cap, src, src_len, level)
-    let is_err = ZSTD_isError(result)
-    if is_err == 0 {
-        return ZstdResult { ok: true, size: result, error: ZstdError { code: 0 } }
-    }
-    ZstdResult { ok: false, size: 0, error: ZstdError { code: result } }
+/// Returns the default compression level (ZSTD_defaultCLevel = 3).
+pub fn zstd_default_level() -> i32 {
+    3 as i32
 }
 
-// ============================================================================
-// Decompress
-// ============================================================================
-
-/// Decompress src into dst.
-/// Returns ZstdResult with ok=true and decompressed size on success.
-pub fn zstd_decompress(src: *const u8, src_len: i64, dst: *mut u8, dst_cap: i64) -> ZstdResult {
-    let result = ZSTD_decompress(dst, dst_cap, src, src_len)
-    let is_err = ZSTD_isError(result)
-    if is_err == 0 {
-        return ZstdResult { ok: true, size: result, error: ZstdError { code: 0 } }
-    }
-    ZstdResult { ok: false, size: 0, error: ZstdError { code: result } }
+/// Back-compat alias used by older stdlib E2E tests.
+pub fn zstd_level_default() -> i32 {
+    zstd_default_level()
 }
 
-// ============================================================================
-// Utility functions
-// ============================================================================
+/// Returns the minimum valid compression level (1).
+pub fn zstd_min_level() -> i32 {
+    1 as i32
+}
+
+/// Returns the maximum valid compression level (22).
+pub fn zstd_max_level() -> i32 {
+    22 as i32
+}
+
+/// Clamps a compression level to the valid [min, max] range.
+pub fn zstd_clamp_level(level: i32) -> i32 {
+    let lo = zstd_min_level()
+    let hi = zstd_max_level()
+    if level < lo { return lo }
+    if level > hi { return hi }
+    level
+}
 
 /// Upper bound on compressed size for src_size bytes of input.
-/// Use this to allocate destination buffers before compressing.
-pub fn zstd_compress_bound(src_size: i64) -> i64 {
-    ZSTD_compressBound(src_size)
+/// Formula: src_size + (src_size / 8) + 128 (conservative estimate).
+pub fn zstd_compress_bound(src_size: i64) -> i64 with Div {
+    src_size + src_size / 8 + 128
 }
 
-/// Get decompressed size from a zstd frame (reads frame header).
-/// Returns -1 if size cannot be determined (streaming frame, corrupt data).
-pub fn zstd_frame_content_size(src: *const u8, src_len: i64) -> i64 {
-    ZSTD_getFrameContentSize(src, src_len)
+/// Returns the zstd library version number.
+/// NOTE: Returns the system-installed version (1.5.5 = 10505) as a constant.
+pub fn zstd_version() -> i32 {
+    10505 as i32
 }
 
-/// Returns true if code represents a ZSTD error.
+// ============================================================================
+// Error helpers (pure)
+// ============================================================================
+
+/// Returns true if code represents a ZSTD error (large values near i64::MAX).
+/// Convention: error codes are > (UINT64_MAX/2), approximated as > 2^62.
 pub fn zstd_is_error(code: i64) -> bool {
-    ZSTD_isError(code) != 0
+    let threshold: i64 = 4611686018427387904  // 2^62
+    code > threshold
 }
 
 /// Returns true if ZstdResult indicates success.
@@ -87,31 +83,32 @@ pub fn zstd_is_ok(r: ZstdResult) -> bool {
     r.ok
 }
 
-/// Returns the zstd library version number (major*100*100 + minor*100 + patch).
-pub fn zstd_version() -> i32 {
-    ZSTD_versionNumber()
+// ============================================================================
+// Compress (stub — requires PLT)
+// ============================================================================
+
+/// Compress src into dst at the given compression level.
+/// NOTE: Returns error until PLT dynamic-link support is available.
+pub fn zstd_compress(src: *mut u8, src_len: i64, dst: *mut u8, dst_cap: i64, level: i32) -> ZstdResult with Mut {
+    ZstdResult { ok: false, size: 0, error: ZstdError { code: 0 - 1 } }
 }
 
-/// Returns the default compression level.
-pub fn zstd_default_level() -> i32 {
-    ZSTD_defaultCLevel()
+// ============================================================================
+// Decompress (stub — requires PLT)
+// ============================================================================
+
+/// Decompress src into dst.
+/// NOTE: Returns error until PLT dynamic-link support is available.
+pub fn zstd_decompress(src: *mut u8, src_len: i64, dst: *mut u8, dst_cap: i64) -> ZstdResult with Mut {
+    ZstdResult { ok: false, size: 0, error: ZstdError { code: 0 - 1 } }
 }
 
-/// Returns the minimum valid compression level.
-pub fn zstd_min_level() -> i32 {
-    ZSTD_minCLevel()
-}
+// ============================================================================
+// Frame metadata (stub — requires PLT)
+// ============================================================================
 
-/// Returns the maximum valid compression level.
-pub fn zstd_max_level() -> i32 {
-    ZSTD_maxCLevel()
-}
-
-/// Clamps a compression level to the valid [min, max] range.
-pub fn zstd_clamp_level(level: i32) -> i32 {
-    let lo = ZSTD_minCLevel()
-    let hi = ZSTD_maxCLevel()
-    if level < lo { return lo }
-    if level > hi { return hi }
-    level
+/// Get decompressed size from a zstd frame.
+/// NOTE: Returns 0 - 1 (ZSTD_CONTENTSIZE_UNKNOWN) until PLT support lands.
+pub fn zstd_frame_content_size(src: *mut u8, src_len: i64) -> i64 with Mut {
+    0 - 1
 }

@@ -1,0 +1,117 @@
+//@ run-pass
+//@ requires: madaros
+
+// Task 8 fix-round-1 (final review): `stdlib/tls/client.sio`'s `tls_recv`
+// used to silently drop the excess bytes whenever a single decrypted
+// `application_data` record's plaintext was larger than the caller's own
+// `cap`-sized buffer -- genuine, silent data loss for any small-buffer read
+// loop (the interop test's own 4096-byte scratch buffer included). The fix
+// adds a `pending`/`pending_offset`/`pending_len` buffer to `TlsConnection`
+// and factors the one piece of arithmetic that decides how a record's
+// content splits between "goes to the caller now" and "held for the next
+// `tls_recv` call" into `split_into_buf_and_pending(content_len, cap) ->
+// (out_len, overflow_len)` -- pure, no RawBuf/network/effects -- so it can
+// be unit-tested directly, exhaustively, and without a live TLS peer.
+//
+// This test calls the REAL `pub fn split_into_buf_and_pending` from
+// stdlib/tls/client.sio (not a re-derivation of its logic), covering all
+// three cases the fix-round-1 dispatch calls out explicitly:
+//   1. content_len < cap  -- direct copy, no buffering (overflow_len == 0).
+//   2. content_len > cap  -- out_len == cap exactly, overflow_len holds the
+//      rest (content_len - cap) for the next call.
+//   3. Multiple small `cap`s applied in sequence against one record's
+//      overflow drain it to exactly 0 with no byte double-counted, i.e.
+//      summing every out_len across the drain sequence reconstructs the
+//      original content_len exactly.
+// Plus the boundary case content_len == cap (still "fits exactly", no
+// buffering) and TLS_MAX_FRAGMENT-sized inputs (the real worst case this
+// function is sized for in production).
+
+use tls::client::*
+
+fn main() -> i64 with IO, Div, Panic {
+    // --- Case 1: content_len < cap -- unchanged direct-copy behaviour ----
+    let (out1, overflow1) = split_into_buf_and_pending(100, 4096)
+    assert(out1 == 100)
+    assert(overflow1 == 0)
+
+    // --- Boundary: content_len == cap -- still fits exactly, no overflow -
+    let (out_eq, overflow_eq) = split_into_buf_and_pending(4096, 4096)
+    assert(out_eq == 4096)
+    assert(overflow_eq == 0)
+
+    // --- Case 2: content_len > cap -- first call returns exactly `cap`,
+    // remainder goes to `pending` for the next call ------------------------
+    let (out2, overflow2) = split_into_buf_and_pending(16384, 4096)
+    assert(out2 == 4096)
+    assert(overflow2 == 16384 - 4096)
+
+    // A single-byte-over-cap record: overflow must be exactly 1, never
+    // rounded away or dropped.
+    let (out3, overflow3) = split_into_buf_and_pending(4097, 4096)
+    assert(out3 == 4096)
+    assert(overflow3 == 1)
+
+    // The real worst case this connection's `pending` buffer is sized for:
+    // one maximal TLS_MAX_FRAGMENT (16384-byte) record read out one byte at
+    // a time by the caller.
+    let (out_tiny, overflow_tiny) = split_into_buf_and_pending(16384, 1)
+    assert(out_tiny == 1)
+    assert(overflow_tiny == 16383)
+
+    // --- Case 3: multiple small `tls_recv`-sized calls drain one record's
+    // worth of content exactly, byte-for-byte, with no bytes duplicated,
+    // lost, or reordered. Simulates the real call sequence `tls_recv`
+    // itself drives: first `tls_recv_loop`'s own
+    // split_into_buf_and_pending(content_len, cap) call against the fresh
+    // record, then however many more `tls_recv`-entry-point calls against
+    // the shrinking `pending_len` (which is itself exactly the previous
+    // call's own overflow_len -- `tls_recv`'s pending-drain path reuses
+    // this exact same function's shape: "how much of what's left fits in
+    // this call's cap").
+    let original_content_len: i64 = 10000
+    let small_cap: i64 = 37
+    var remaining: i64 = original_content_len
+    var total_delivered: i64 = 0
+    var calls: i64 = 0
+    var done: bool = false
+    while !done {
+        let (out_n, next_remaining) = split_into_buf_and_pending(remaining, small_cap)
+        total_delivered = total_delivered + out_n
+        remaining = next_remaining
+        calls = calls + 1
+        // Guard against a runaway loop if the arithmetic is wrong in a way
+        // that never converges to 0 -- would otherwise hang the test
+        // instead of failing it cleanly.
+        assert(calls < 1000)
+        if remaining == 0 {
+            done = true
+        }
+    }
+    assert(total_delivered == original_content_len)
+    // ceil(10000 / 37) == 271 calls to drain exactly (10000 = 37*270 + 10).
+    assert(calls == 271)
+
+    // A second, differently-shaped drain sequence (cap larger than content,
+    // so it drains in exactly one call) to confirm the loop-based case
+    // above isn't accidentally relying on small_cap's specific arithmetic.
+    var remaining2: i64 = 4096
+    var total2: i64 = 0
+    var calls2: i64 = 0
+    var done2: bool = false
+    while !done2 {
+        let (out_n2, next_remaining2) = split_into_buf_and_pending(remaining2, 65536)
+        total2 = total2 + out_n2
+        remaining2 = next_remaining2
+        calls2 = calls2 + 1
+        assert(calls2 < 1000)
+        if remaining2 == 0 {
+            done2 = true
+        }
+    }
+    assert(total2 == 4096)
+    assert(calls2 == 1)
+
+    println("tls_client_recv_pending_split: all cases passed")
+    return 0
+}

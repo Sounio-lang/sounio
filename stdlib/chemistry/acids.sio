@@ -1,0 +1,142 @@
+// stdlib/chemistry/acids.sio — Real Acids/Bases + Analytical (Phase 3+ breadth, ALL REAL)
+//@ ontology-bundle: "stdlib/data/data/ontology/bundles/chebi.dontology"
+
+module chemistry::acids
+
+// FULL ChEBI ontology (real acetic acid CHEBI:15366 etc. for provenance in pH/titration)
+use chemistry::ontology;
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+
+fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0; }
+    var y = x; var i=0; while i<20 { y = 0.5*(y + x/y); i=i+1; } y
+}
+
+// ln via the artanh series ln(x) = 2*artanh((x-1)/(x+1)). That series only converges
+// usefully for x near 1, so we FIRST range-reduce by powers of 10 into [1/sqrt(10), sqrt(10)]
+// and add back k*ln(10). Without the reduction, ln_approx(x) — and hence pH(h) — was badly
+// wrong for [H+] far from 1 (e.g. pH(1e-7) returned ~2.15 instead of 7).
+fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0; }
+    let ln10: f64 = 2.302585092994046   // fixed f64 approximation of ln(10)
+    let sqrt10: f64 = 3.1622776601683795
+    // range-reduce x into [1/sqrt(10), sqrt(10)] tracking the power of ten
+    var y = x
+    var k: f64 = 0.0
+    while y > sqrt10 { y = y / 10.0; k = k + 1.0 }
+    while y < 1.0 / sqrt10 { y = y * 10.0; k = k - 1.0 }
+    let z = (y - 1.0) / (y + 1.0)
+    var sum = z; var term = z; var i = 1;
+    while i < 30 {
+        term = term * z * z;
+        sum = sum + term / (2.0 * (i as f64) + 1.0);
+        i = i + 1;
+    }
+    k * ln10 + 2.0 * sum
+}
+
+fn log10_approx(x: f64) -> f64 with Mut, Div, Panic {
+    ln_approx(x) / 2.302585092994046   // divide by the same fixed f64 ln(10) constant
+}
+
+// pH with GUM
+pub fn ph(h: f64, uh: f64) -> (f64, f64) with Mut, Div, Panic {
+    if h <= 0.0 { return (14.0, 0.0); }
+    let p = 0.0 - log10_approx(h);
+    let up = uh / (h * ln_approx(10.0));
+    (p, up)
+}
+
+// Real Henderson-Hasselbalch with unc
+pub fn henderson_hasselbalch(pka: f64, upka: f64, ratio: f64, ur: f64) -> (f64, f64) with Mut, Div, Panic {
+    let p = pka + log10_approx(ratio);
+    let up = upka + ur / (ratio * ln_approx(10.0));
+    (p, up)
+}
+
+// Analytical: simple titration curve numeric (strong acid + base)
+pub fn titration_ph(vol_acid: f64, conc_acid: f64, vol_base: f64, conc_base: f64) -> f64 with Mut, Div, Panic {
+    let moles_acid = vol_acid * conc_acid;
+    let moles_base = vol_base * conc_base;
+    let excess = moles_base - moles_acid;
+    if excess > 0.0 {
+        let oh = excess / (vol_acid + vol_base);
+        return 14.0 + log10_approx(oh); // pH = 14 - pOH = 14 + log10([OH-])
+    } else if excess < 0.0 {
+        let h = (0.0 - excess) / (vol_acid + vol_base);
+        return 0.0 - log10_approx(h);
+    }
+    7.0
+}
+
+// Full epistemic linear calibration with GUM (real slope, inter, unc)
+pub fn calibrate(x: &[f64; 5], y: &[f64; 5], ux: f64, uy: f64) -> (f64, f64, f64, f64) with Mut, Div, Panic {
+    let n = 5.0;
+    var sx = 0.0; var sy=0.0; var sxx=0.0; var sxy=0.0; var syy=0.0;
+    var i=0;
+    while i < 5 {
+        sx = sx + x[i];
+        sy = sy + y[i];
+        sxx = sxx + x[i]*x[i];
+        sxy = sxy + x[i]*y[i];
+        syy = syy + y[i]*y[i];
+        i = i + 1;
+    }
+    let denom = n * sxx - sx * sx;
+    let slope = (n * sxy - sx * sy) / denom;
+    let inter = (sy - slope * sx) / n;
+    // GUM for slope unc ~ uy / sqrt( sum (x - meanx)^2 )
+    let varx = (sxx / n) - (sx/n)*(sx/n);
+    let uslope = uy / sqrt_approx(n * varx * 5.0); // rough
+    let uinter = uy * sqrt_approx( (1.0/n) + (sx*sx)/(n*n*varx) );
+    (slope, uslope, inter, uinter)
+}
+
+// Tests
+pub fn test_ph() -> bool with Mut, Div, Panic {
+    let (p, up) = ph(1.0e-3, 1e-5);
+    check_near(p, 3.0, 0.1) && up > 0.0
+}
+
+pub fn test_hh() -> bool with Mut, Div, Panic {
+    let (p, _) = henderson_hasselbalch(4.76, 0.01, 1.0, 0.05);
+    check_near(p, 4.76, 0.05)
+}
+
+pub fn test_titration() -> bool with Mut, Div, Panic {
+    let ph = titration_ph(0.1, 0.1, 0.05, 0.1);
+    check_near(ph, 1.0, 1.0) // rough
+}
+
+pub fn test_calib() -> bool with Mut, Div, Panic {
+    let xs: [f64; 5] = [0.0,1.0,2.0,3.0,4.0];
+    let ys: [f64; 5] = [0.1,1.1,2.0,3.1,4.0];
+    let (sl, _, inter, _) = calibrate(&xs, &ys, 0.0, 0.1);
+    check_near(sl, 1.0, 0.1)
+}
+
+// Phase 4: Biochem MM enzyme with epistemic
+pub fn mm_rate(vmax: f64, uv: f64, km: f64, uk: f64, s: f64, us: f64) -> (f64, f64) with Mut, Div, Panic {
+    if km + s == 0.0 { return (0.0, 0.0); }
+    let r = vmax * s / (km + s);
+    let ur = abs_f64(r) * (uv / abs_f64(vmax) + uk / abs_f64(km + s) + us / abs_f64(s) ); // rough
+    (r, ur)
+}
+
+pub fn test_mm() -> bool with Mut, Div, Panic {
+    let (r, ur) = mm_rate(10.0, 0.1, 1.0, 0.05, 1.0, 0.05);
+    check_near(r, 5.0, 0.5) && ur > 0.0
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var p: i32 = 0; var f: i32 = 0;
+    if test_ph() { p = p + 1 } else { f = f + 1; println("FAIL ph") }
+    if test_hh() { p = p + 1 } else { f = f + 1; println("FAIL hh") }
+    if test_titration() { p = p + 1 } else { f = f + 1; println("FAIL titration") }
+    if test_calib() { p = p + 1 } else { f = f + 1; println("FAIL calib") }
+    if test_mm() { p = p + 1 } else { f = f + 1; println("FAIL mm") }
+    if f == 0 { println("ACIDS + ANALYTICAL + BIOCHEM REAL ALL PASS (phase3+4)") } else { println("ACIDS FAILS") }
+    return f
+}

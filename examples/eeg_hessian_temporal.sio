@@ -1,0 +1,537 @@
+// EEG O-SSM Hessian: Temporal Non-Associativity in Motor Imagery
+//
+// Uses EEGMMIDB data: 8 fronto-central channels, 8-timestep windows
+//   label 0 = rest (R01, eyes open baseline)
+//   label 1 = task (R03, motor imagery)
+//
+// Hypothesis: motor imagery recruits path-dependent cortical propagation
+// more than rest. The O-SSM Hessian off-diagonal should be larger for
+// task windows because the signal routing is more non-associative.
+//
+// This is a proxy for the epilepsy case: if task vs rest separates,
+// then ictal vs interictal (much stronger path-dependence) should
+// separate even more.
+
+var FEATURES: [f64; 262144] = [0.0; 262144] // 4096 * 64
+var LABELS: [i64; 4096] = [0; 4096]
+var SITE_KEYS: [i64; 4096] = [0; 4096]
+var UNIQUE_SITES: [i64; 64] = [0; 64]
+var UNIQUE_SITE_COUNT: i64 = 0
+var SUBJECT_COUNT: i64 = 0
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+var W: [i64; 16] = [0; 16]
+var MOM: [i64; 16] = [0; 16]
+var H: [i64; 8] = [0; 8]
+var A: [f64; 8] = [0.0; 8]
+var SAVED_A: [f64; 8] = [0.0; 8]
+var ASSOC_ACC: i64 = 0
+var LOGIT: f64 = 0.0
+var TMP_OCT: [f64; 8] = [0.0; 8]
+
+var HESS: [i64; 64] = [0; 64]
+var TASK_OD_SUM: i64 = 0
+var TASK_DG_SUM: i64 = 0
+var TASK_COUNT: i64 = 0
+var REST_OD_SUM: i64 = 0
+var REST_DG_SUM: i64 = 0
+var REST_COUNT: i64 = 0
+
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn exp_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 15.0 { return exp_q(7.5) * exp_q(x - 7.5) }
+    if x < 0.0 - 15.0 { return 0.0 }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 20 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    sum
+}
+
+fn sqrt_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x != x { return 0.0 }
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    var i = 0
+    while i < 16 { g = 0.5 * (g + x / g); i = i + 1 }
+    if g != g { return 0.0 }
+    g
+}
+
+fn sigmoid_q(x: f64) -> f64 with Mut, Div, Panic {
+    if x >= 0.0 { 1.0 / (1.0 + exp_q(0.0 - x)) }
+    else { let ex = exp_q(x); ex / (1.0 + ex) }
+}
+
+fn rng_seed(a: i64, b: i64) with Mut { RNG_A = a; RNG_B = b }
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23); x = x ^ (x >> 17); x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+fn randf() -> f64 with Mut, Div { ((rng_next() % 20000) as f64 - 10000.0) / 10000.0 }
+
+fn print_int(v: i64) with IO, Mut {
+    if v < 0 { print("-"); print_int(0 - v); return }
+    if v >= 10 { print_int(v / 10) }
+    let d = v % 10
+    if d==0{print("0")}if d==1{print("1")}if d==2{print("2")}if d==3{print("3")}
+    if d==4{print("4")}if d==5{print("5")}if d==6{print("6")}if d==7{print("7")}
+    if d==8{print("8")}if d==9{print("9")}
+}
+
+// ─── Manifest loading ───
+
+fn load_manifest(path: string) -> i64 with IO, Mut, Div, Panic {
+    SUBJECT_COUNT = 0
+    UNIQUE_SITE_COUNT = 0
+    let n = file_size(path)
+    if n <= 0 { return 0 }
+    let raw = read_file(path)
+    let bytes = raw.as_bytes()
+    if n < 24 { return -1 }
+
+    // Skip comment lines
+    var header_start: i64 = 0
+    var seeking = true
+    while seeking && header_start < n {
+        while header_start < n && (bytes[header_start as usize] == 10 || bytes[header_start as usize] == 13) {
+            header_start = header_start + 1
+        }
+        if header_start >= n { seeking = false }
+        else if bytes[header_start as usize] == 35 {
+            while header_start < n && bytes[header_start as usize] != 10 { header_start = header_start + 1 }
+            if header_start < n { header_start = header_start + 1 }
+        } else { seeking = false }
+    }
+
+    // Validate "subject_id\tlabel\tsite\tf0" header
+    if header_start + 24 >= n ||
+       bytes[header_start as usize] != 115 || bytes[(header_start+1) as usize] != 117 ||
+       bytes[(header_start+2) as usize] != 98 || bytes[(header_start+3) as usize] != 106 {
+        return -1
+    }
+
+    // Skip header line
+    var pos: i64 = header_start
+    while pos < n && bytes[pos as usize] != 10 { pos = pos + 1 }
+    if pos < n { pos = pos + 1 }
+
+    // Parse data rows
+    while pos < n && SUBJECT_COUNT < 4096 {
+        if bytes[pos as usize] == 10 { pos = pos + 1 }
+        else if bytes[pos as usize] == 35 {
+            while pos < n && bytes[pos as usize] != 10 { pos = pos + 1 }
+            if pos < n { pos = pos + 1 }
+        } else {
+        var line_end = pos
+        while line_end < n && bytes[line_end as usize] != 10 { line_end = line_end + 1 }
+        var field_idx: i64 = 0
+        var field_start = pos
+        var label: i64 = -1
+        var site_hash: i64 = 5381
+        var feature_idx: i64 = 0
+        var i = pos
+        while i <= line_end {
+            let is_end = i == line_end
+            let is_tab = if is_end { false } else { bytes[i as usize] == 9 }
+            if is_end || is_tab {
+                if field_idx == 1 {
+                    if i > field_start {
+                        let b = bytes[field_start as usize]
+                        if b == 49 { label = 1 } else if b == 48 { label = 0 }
+                    }
+                } else if field_idx == 2 {
+                    var si = field_start
+                    while si < i { site_hash = site_hash * 33 + (bytes[si as usize] as i64); si = si + 1 }
+                } else if field_idx >= 3 && feature_idx < 64 {
+                    var val: f64 = 0.0
+                    var neg = false
+                    var seen_dot = false
+                    var frac_scale = 1.0
+                    var si = field_start
+                    if si < i && bytes[si as usize] == 45 { neg = true; si = si + 1 }
+                    while si < i {
+                        let b = bytes[si as usize]
+                        if b == 46 { seen_dot = true }
+                        else if b >= 48 && b <= 57 {
+                            if !seen_dot { val = val * 10.0 + ((b - 48) as f64) }
+                            else { frac_scale = frac_scale * 0.1; val = val + frac_scale * ((b - 48) as f64) }
+                        }
+                        si = si + 1
+                    }
+                    if neg { val = 0.0 - val }
+                    FEATURES[(SUBJECT_COUNT * 64 + feature_idx) as usize] = val
+                    feature_idx = feature_idx + 1
+                }
+                field_idx = field_idx + 1
+                field_start = i + 1
+            }
+            i = i + 1
+        }
+        if label >= 0 && feature_idx >= 8 {
+            LABELS[SUBJECT_COUNT as usize] = label
+            SITE_KEYS[SUBJECT_COUNT as usize] = site_hash
+            SUBJECT_COUNT = SUBJECT_COUNT + 1
+        }
+        pos = line_end + 1
+        }
+    }
+    SUBJECT_COUNT
+}
+
+fn discover_sites() -> i64 with Mut {
+    UNIQUE_SITE_COUNT = 0
+    var subj: i64 = 0
+    while subj < SUBJECT_COUNT {
+        let key = SITE_KEYS[subj as usize]
+        var exists: i64 = 0
+        var i: i64 = 0
+        while i < UNIQUE_SITE_COUNT { if UNIQUE_SITES[i as usize] == key { exists = 1; break }; i = i + 1 }
+        if exists == 0 && UNIQUE_SITE_COUNT < 64 {
+            UNIQUE_SITES[UNIQUE_SITE_COUNT as usize] = key
+            UNIQUE_SITE_COUNT = UNIQUE_SITE_COUNT + 1
+        }
+        subj = subj + 1
+    }
+    UNIQUE_SITE_COUNT
+}
+
+// ─── Model ───
+
+fn ws(i: i64, v: f64) with Mut { W[i as usize] = (v * 100000000.0) as i64 }
+fn wg(i: i64) -> f64 with Div { (W[i as usize] as f64) / 100000000.0 }
+fn hs(i: i64, v: f64) with Mut { H[i as usize] = (v * 100000000.0) as i64 }
+fn hg(i: i64) -> f64 with Div { (H[i as usize] as f64) / 100000000.0 }
+fn assoc_s(v: f64) with Mut { ASSOC_ACC = (v * 100000000.0) as i64 }
+fn assoc_g() -> f64 with Div { (ASSOC_ACC as f64) / 100000000.0 }
+
+fn init_model() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < 10 { ws(i, randf() / 6.0); MOM[i as usize] = 0; i = i + 1 }
+    var nsq = 0.0
+    i = 0
+    while i < 8 { A[i as usize] = randf(); nsq = nsq + A[i as usize] * A[i as usize]; i = i + 1 }
+    let n = sqrt_q(nsq)
+    i = 0
+    while i < 8 {
+        if n > 0.000000001 { A[i as usize] = A[i as usize] / n }
+        else if i == 0 { A[i as usize] = 1.0 } else { A[i as usize] = 0.0 }
+        i = i + 1
+    }
+}
+
+fn reset_state() with Mut {
+    var i: i64 = 0
+    while i < 8 { H[i as usize] = 0; i = i + 1 }
+    hs(0, 1.0)
+    ASSOC_ACC = 0
+    LOGIT = 0.0
+}
+
+fn do_oct_mul(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64
+) with Mut {
+    TMP_OCT[0] = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    TMP_OCT[1] = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    TMP_OCT[2] = a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5
+    TMP_OCT[3] = a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5
+    TMP_OCT[4] = a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3
+    TMP_OCT[5] = a0*b5 + a5*b0 + a1*b4 - a4*b1 - a2*b7 + a7*b2 + a3*b6 - a6*b3
+    TMP_OCT[6] = a0*b6 + a6*b0 + a1*b7 - a7*b1 + a2*b4 - a4*b2 - a3*b5 + a5*b3
+    TMP_OCT[7] = a0*b7 + a7*b0 - a1*b6 + a6*b1 + a2*b5 - a5*b2 + a3*b4 - a4*b3
+}
+
+fn oct_step(x0: f64, x1: f64, x2: f64, x3: f64, x4: f64, x5: f64, x6: f64, x7: f64) with Mut, Div, Panic {
+    do_oct_mul(A[0],A[1],A[2],A[3],A[4],A[5],A[6],A[7], hg(0),hg(1),hg(2),hg(3),hg(4),hg(5),hg(6),hg(7))
+    let t0=TMP_OCT[0]; let t1=TMP_OCT[1]; let t2=TMP_OCT[2]; let t3=TMP_OCT[3]
+    let t4=TMP_OCT[4]; let t5=TMP_OCT[5]; let t6=TMP_OCT[6]; let t7=TMP_OCT[7]
+    do_oct_mul(t0,t1,t2,t3,t4,t5,t6,t7, x0,x1,x2,x3,x4,x5,x6,x7)
+    var left: [f64; 8] = [0.0; 8]
+    var d: i64 = 0
+    while d < 8 { left[d as usize] = TMP_OCT[d as usize]; d = d + 1 }
+    do_oct_mul(hg(0),hg(1),hg(2),hg(3),hg(4),hg(5),hg(6),hg(7), x0,x1,x2,x3,x4,x5,x6,x7)
+    let hx0=TMP_OCT[0]; let hx1=TMP_OCT[1]; let hx2=TMP_OCT[2]; let hx3=TMP_OCT[3]
+    let hx4=TMP_OCT[4]; let hx5=TMP_OCT[5]; let hx6=TMP_OCT[6]; let hx7=TMP_OCT[7]
+    do_oct_mul(A[0],A[1],A[2],A[3],A[4],A[5],A[6],A[7], hx0,hx1,hx2,hx3,hx4,hx5,hx6,hx7)
+    var asq = 0.0
+    d = 0
+    while d < 8 { let diff = left[d as usize] - TMP_OCT[d as usize]; asq = asq + diff*diff; d = d + 1 }
+    var assoc_step = sqrt_q(asq)
+    if assoc_step != assoc_step { assoc_step = 0.0 }
+    if assoc_step > 1000.0 { assoc_step = 1000.0 }
+    assoc_s(assoc_g() + assoc_step)
+    d = 0
+    while d < 8 {
+        var v = left[d as usize] + 0.2 * TMP_OCT[d as usize]
+        if v != v { v = 0.0 }
+        if v > 5.0 { v = 5.0 } if v < 0.0 - 5.0 { v = 0.0 - 5.0 }
+        hs(d, v)
+        d = d + 1
+    }
+}
+
+fn forward_subject(subj: i64) with Mut, Div, Panic {
+    reset_state()
+    let base = subj * 64
+    var step: i64 = 0
+    while step < 8 {
+        let off = base + step * 8
+        oct_step(
+            FEATURES[off as usize], FEATURES[(off+1) as usize],
+            FEATURES[(off+2) as usize], FEATURES[(off+3) as usize],
+            FEATURES[(off+4) as usize], FEATURES[(off+5) as usize],
+            FEATURES[(off+6) as usize], FEATURES[(off+7) as usize]
+        )
+        step = step + 1
+    }
+    var af = assoc_g() / 8.0
+    if af != af { af = 0.0 }
+    assoc_s(af)
+    var s = wg(9)
+    var d: i64 = 0
+    while d < 8 {
+        var proj = hg(d) * wg(d)
+        if proj != proj { proj = 0.0 }
+        s = s + proj
+        d = d + 1
+    }
+    var ap = af * wg(8)
+    if ap != ap { ap = 0.0 }
+    LOGIT = s + ap
+}
+
+fn update_binary(target: i64, lr: f64) with Mut, Div, Panic {
+    let prob = sigmoid_q(LOGIT)
+    var grad = prob - (target as f64)
+    if grad > 0.5 { grad = 0.5 } if grad < 0.0 - 0.5 { grad = 0.0 - 0.5 }
+    var d: i64 = 0
+    while d < 8 {
+        let g = hg(d) * grad
+        let m = (MOM[d as usize] as f64) / 100000000.0 * 0.9 + g
+        MOM[d as usize] = (m * 100000000.0) as i64
+        ws(d, wg(d) - lr * m)
+        d = d + 1
+    }
+    let ag = assoc_g() * grad
+    let am = (MOM[8] as f64) / 100000000.0 * 0.9 + ag
+    MOM[8] = (am * 100000000.0) as i64
+    ws(8, wg(8) - lr * am)
+    let bm = (MOM[9] as f64) / 100000000.0 * 0.9 + grad
+    MOM[9] = (bm * 100000000.0) as i64
+    ws(9, wg(9) - lr * bm)
+}
+
+// ─── Hessian per window ───
+
+fn compute_loss_subj(subj: i64) -> f64 with Mut, Div, Panic {
+    forward_subject(subj)
+    let prob = sigmoid_q(LOGIT)
+    let target = LABELS[subj as usize] as f64
+    0.0 - (target * prob + (1.0 - target) * (1.0 - prob))
+}
+
+fn compute_subject_hessian(subj: i64) with Mut, Div, Panic {
+    let eps = 0.001
+    let eps2 = eps * eps
+    let f0 = compute_loss_subj(subj)
+    var i: i64 = 0
+    while i < 8 {
+        let orig_i = A[i as usize]
+        A[i as usize] = orig_i + eps
+        let fip = compute_loss_subj(subj)
+        A[i as usize] = orig_i - eps
+        let fim = compute_loss_subj(subj)
+        A[i as usize] = orig_i
+        HESS[i * 8 + i] = ((fip - 2.0 * f0 + fim) / eps2 * 1000000.0) as i64
+        var j = i + 1
+        while j < 8 {
+            let orig_j = A[j as usize]
+            A[i as usize] = orig_i + eps
+            A[j as usize] = orig_j + eps
+            let fpp = compute_loss_subj(subj)
+            A[j as usize] = orig_j - eps
+            let fpm = compute_loss_subj(subj)
+            A[i as usize] = orig_i - eps
+            let fmm = compute_loss_subj(subj)
+            A[j as usize] = orig_j + eps
+            let fmp = compute_loss_subj(subj)
+            A[i as usize] = orig_i
+            A[j as usize] = orig_j
+            let hij = ((fpp - fpm - fmp + fmm) / (4.0 * eps2) * 1000000.0) as i64
+            HESS[i * 8 + j] = hij
+            HESS[j * 8 + i] = hij
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+fn subject_offdiag_norm() -> i64 with Mut, Div, Panic {
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        var j: i64 = 0
+        while j < 8 {
+            if i != j { let v = HESS[i*8+j]; if v < 0 { s = s + (0-v) } else { s = s + v } }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    s
+}
+
+fn subject_diag_norm() -> i64 with Mut, Div, Panic {
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < 8 {
+        let v = HESS[i*8+i]
+        if v < 0 { s = s + (0-v) } else { s = s + v }
+        i = i + 1
+    }
+    s
+}
+
+// ─── Main ───
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var loaded = load_manifest("eeg_temporal_manifest.tsv")
+    if loaded <= 0 {
+        loaded = load_manifest("/workspace/sounio/eeg_temporal_manifest.tsv")
+    }
+    if loaded <= 0 { println("No EEG manifest found"); return 1 }
+    discover_sites()
+
+    var task_n: i64 = 0
+    var rest_n: i64 = 0
+    var subj: i64 = 0
+    while subj < SUBJECT_COUNT {
+        if LABELS[subj as usize] == 1 { task_n = task_n + 1 } else { rest_n = rest_n + 1 }
+        subj = subj + 1
+    }
+
+    println("═══════════════════════════════════════════════════════════════")
+    println("  EEG O-SSM: Temporal Hessian Non-Associativity")
+    println("  Rest (baseline) vs Task (motor imagery)")
+    println("═══════════════════════════════════════════════════════════════")
+    print("  Windows: "); print_int(SUBJECT_COUNT)
+    print(" (task="); print_int(task_n); print(" rest="); print_int(rest_n); print(")\n")
+    print("  Subjects: "); print_int(UNIQUE_SITE_COUNT); print("\n")
+    println("  Method: leave-one-subject-out, 8×8 Hessian per test window")
+    println("")
+
+    TASK_OD_SUM = 0; TASK_DG_SUM = 0; TASK_COUNT = 0
+    REST_OD_SUM = 0; REST_DG_SUM = 0; REST_COUNT = 0
+
+    // Use first 10 subjects as holdouts (enough for statistics)
+    var max_folds = UNIQUE_SITE_COUNT
+    if max_folds > 10 { max_folds = 10 }
+
+    var fold: i64 = 0
+    while fold < max_folds {
+        let holdout_key = UNIQUE_SITES[fold as usize]
+        print("  Fold "); print_int(fold); print("/"); print_int(max_folds); print("...\n")
+
+        // Train on non-holdout
+        rng_seed(55555 + holdout_key, 77777 + holdout_key * 17)
+        init_model()
+        var ep: i64 = 0
+        while ep < 40 {
+            var seen: i64 = 0
+            while seen < 200 {
+                subj = (rng_next() / 100) % SUBJECT_COUNT
+                if SITE_KEYS[subj as usize] != holdout_key {
+                    forward_subject(subj)
+                    update_binary(LABELS[subj as usize], 0.03)
+                }
+                seen = seen + 1
+            }
+            ep = ep + 1
+        }
+
+        // Save trained A
+        var ai: i64 = 0
+        while ai < 8 { SAVED_A[ai as usize] = A[ai as usize]; ai = ai + 1 }
+
+        // Hessian on holdout windows
+        subj = 0
+        while subj < SUBJECT_COUNT {
+            if SITE_KEYS[subj as usize] == holdout_key {
+                ai = 0
+                while ai < 8 { A[ai as usize] = SAVED_A[ai as usize]; ai = ai + 1 }
+                compute_subject_hessian(subj)
+                let od = subject_offdiag_norm()
+                let dg = subject_diag_norm()
+                if LABELS[subj as usize] == 1 {
+                    TASK_OD_SUM = TASK_OD_SUM + od
+                    TASK_DG_SUM = TASK_DG_SUM + dg
+                    TASK_COUNT = TASK_COUNT + 1
+                } else {
+                    REST_OD_SUM = REST_OD_SUM + od
+                    REST_DG_SUM = REST_DG_SUM + dg
+                    REST_COUNT = REST_COUNT + 1
+                }
+            }
+            subj = subj + 1
+        }
+        fold = fold + 1
+    }
+
+    // Results
+    println("")
+    println("═══════════════════════════════════════════════════════════════")
+    println("  RESULTS: EEG Hessian Non-Associativity")
+    println("═══════════════════════════════════════════════════════════════")
+    print("  Task windows: "); print_int(TASK_COUNT); print("\n")
+    print("  Rest windows: "); print_int(REST_COUNT); print("\n")
+
+    if TASK_COUNT > 0 && REST_COUNT > 0 {
+        let task_od = (TASK_OD_SUM as f64) / (TASK_COUNT as f64)
+        let rest_od = (REST_OD_SUM as f64) / (REST_COUNT as f64)
+        let task_dg = (TASK_DG_SUM as f64) / (TASK_COUNT as f64)
+        let rest_dg = (REST_DG_SUM as f64) / (REST_COUNT as f64)
+
+        println("")
+        print("  Mean ||H_offdiag|| (×1e6):\n")
+        print("    Task:  "); print(task_od); print("\n")
+        print("    Rest:  "); print(rest_od); print("\n")
+        let ratio = task_od / rest_od
+        print("    Ratio Task/Rest: "); print(ratio); print("\n")
+
+        println("")
+        print("  Mean ||H_diag|| (×1e6):\n")
+        print("    Task:  "); print(task_dg); print("\n")
+        print("    Rest:  "); print(rest_dg); print("\n")
+
+        println("")
+        print("  Off-diag / diag ratio:\n")
+        var task_frac = 0.0
+        if task_dg > 0.0 { task_frac = task_od / task_dg }
+        var rest_frac = 0.0
+        if rest_dg > 0.0 { rest_frac = rest_od / rest_dg }
+        print("    Task:  "); print(task_frac); print("\n")
+        print("    Rest:  "); print(rest_frac); print("\n")
+
+        println("")
+        if ratio > 1.1 {
+            println("  -> Task has MORE non-associative curvature than rest")
+            println("  -> Motor imagery engages path-dependent propagation")
+        } else if ratio < 0.9 {
+            println("  -> Rest has MORE non-associative curvature")
+        } else {
+            println("  -> No significant difference")
+        }
+    }
+
+    println("")
+    println("DONE")
+    0
+}

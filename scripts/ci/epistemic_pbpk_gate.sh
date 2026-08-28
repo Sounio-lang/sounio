@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Epistemic PBPK Gate — validates native ELF epistemic computing demo
+# Epistemic PBPK Gate -- validates native ELF epistemic computing demo
 # Sprint 228-230: Operation Epistemic Dawn
 set -eo pipefail
 

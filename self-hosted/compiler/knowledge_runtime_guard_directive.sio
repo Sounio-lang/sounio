@@ -1,0 +1,151 @@
+// self-hosted::compiler::knowledge_runtime_guard_directive
+//
+// Raw-source scanner for `//@ knowledge-runtime-guards`. This is a compiler-side
+// intent classifier for the pre-native Knowledge<T> runtime guard expansion
+// path. It deliberately does not lower checker-visible proof obligations into
+// native guards yet.
+
+pub struct KnowledgeRuntimeGuardDirectiveScanResult {
+    found: bool,
+    count: i64,
+    malformed: bool,
+    malformed_count: i64,
+    first_offset: i64,
+}
+
+pub struct KnowledgeRuntimeGuardDirectiveIntent {
+    found: bool,
+    count: i64,
+    malformed: bool,
+    malformed_count: i64,
+    first_offset: i64,
+    enable_pre_native_guard_expansion: bool,
+    native_lowering_ready: bool,
+}
+
+var KNOWLEDGE_RUNTIME_GUARD_DIRECTIVE_FILE_DATA: [i8; 1048576] = [0; 1048576]
+
+pub fn knowledge_runtime_guard_directive_empty_scan_result() -> KnowledgeRuntimeGuardDirectiveScanResult {
+    KnowledgeRuntimeGuardDirectiveScanResult {
+        found: false,
+        count: 0,
+        malformed: false,
+        malformed_count: 0,
+        first_offset: 0 - 1,
+    }
+}
+
+pub fn knowledge_runtime_guard_directive_empty_intent() -> KnowledgeRuntimeGuardDirectiveIntent {
+    KnowledgeRuntimeGuardDirectiveIntent {
+        found: false,
+        count: 0,
+        malformed: false,
+        malformed_count: 0,
+        first_offset: 0 - 1,
+        enable_pre_native_guard_expansion: false,
+        native_lowering_ready: false,
+    }
+}
+
+fn knowledge_runtime_guard_directive_load_file(path: string) -> i64 with IO, Mut, Panic, Div {
+    let size = file_size(path)
+    if size <= 0 {
+        return 0
+    }
+    let n = if size > 1048576 { 1048576 } else { size }
+    let raw = read_file(path)
+    var i: i64 = 0
+    while i < n {
+        KNOWLEDGE_RUNTIME_GUARD_DIRECTIVE_FILE_DATA[i as usize] = raw[i as usize]
+        i = i + 1
+    }
+    n
+}
+
+fn knowledge_runtime_guard_directive_loaded_matches_at(pos: i64, size: i64, pattern: string) -> bool with Mut, Panic, Div {
+    let plen = str_len(pattern)
+    if pos < 0 || pos + plen > size {
+        return false
+    }
+    var i: i64 = 0
+    while i < plen {
+        if KNOWLEDGE_RUNTIME_GUARD_DIRECTIVE_FILE_DATA[(pos + i) as usize] != (str_char_at(pattern, i) as i8) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn knowledge_runtime_guard_directive_loaded_line_end(pos: i64, size: i64) -> i64 {
+    var i = pos
+    while i < size {
+        if KNOWLEDGE_RUNTIME_GUARD_DIRECTIVE_FILE_DATA[i as usize] == (10 as i8) {
+            return i
+        }
+        i = i + 1
+    }
+    size
+}
+
+fn knowledge_runtime_guard_directive_is_space_byte(ch: i8) -> bool {
+    ch == (9 as i8) || ch == (13 as i8) || ch == (32 as i8)
+}
+
+fn knowledge_runtime_guard_directive_only_space_to_line_end(start: i64, line_end: i64) -> bool {
+    var i = start
+    while i < line_end {
+        if !knowledge_runtime_guard_directive_is_space_byte(KNOWLEDGE_RUNTIME_GUARD_DIRECTIVE_FILE_DATA[i as usize]) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn knowledge_runtime_guard_directive_scan_loaded(size: i64) -> KnowledgeRuntimeGuardDirectiveScanResult with Mut, Panic, Div {
+    var result = knowledge_runtime_guard_directive_empty_scan_result()
+    let pattern = "//@ knowledge-runtime-guards"
+    let plen = str_len(pattern)
+    var i: i64 = 0
+    while i + plen <= size {
+        if knowledge_runtime_guard_directive_loaded_matches_at(i, size, pattern) {
+            let line_end = knowledge_runtime_guard_directive_loaded_line_end(i, size)
+            let after = i + plen
+            if after >= line_end || knowledge_runtime_guard_directive_only_space_to_line_end(after, line_end) {
+                result.found = true
+                result.count = result.count + 1
+                if result.first_offset < 0 {
+                    result.first_offset = i
+                }
+            } else {
+                result.malformed = true
+                result.malformed_count = result.malformed_count + 1
+            }
+            i = line_end
+        }
+        i = i + 1
+    }
+    result
+}
+
+pub fn knowledge_runtime_guard_directive_scan_file(path: string) -> KnowledgeRuntimeGuardDirectiveScanResult with IO, Mut, Panic, Div {
+    let size = knowledge_runtime_guard_directive_load_file(path)
+    if size <= 0 {
+        return knowledge_runtime_guard_directive_empty_scan_result()
+    }
+    knowledge_runtime_guard_directive_scan_loaded(size)
+}
+
+pub fn knowledge_runtime_guard_directive_build_intent(source_path: string) -> KnowledgeRuntimeGuardDirectiveIntent with IO, Mut, Panic, Div {
+    let scan = knowledge_runtime_guard_directive_scan_file(source_path)
+    var intent = knowledge_runtime_guard_directive_empty_intent()
+    intent.found = scan.found
+    intent.count = scan.count
+    intent.malformed = scan.malformed
+    intent.malformed_count = scan.malformed_count
+    intent.first_offset = scan.first_offset
+    intent.enable_pre_native_guard_expansion = scan.found && scan.count > 0 && !scan.malformed
+    intent.native_lowering_ready = false
+    intent
+}

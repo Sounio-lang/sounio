@@ -13,16 +13,56 @@ source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.gpu"
 
 # GPU Programming
 
-Sounio now has two checked compiler profiles in this repo snapshot:
+Sounio has two GPU compiler paths in this repo snapshot:
 
-- `souc-linux-x86_64-jit`: the default JIT-facing artifact
-- `souc-linux-x86_64-gpu`: the GPU-facing artifact
+- `souc-linux-x86_64` (the default self-hosted artifact): compiles GPU syntax, runs serial CPU fallback, and lets `kretikos` build predefined PTX/CUBIN artifact templates.
+- `souc-linux-x86_64-gpu` (the GPU-facing artifact): separate binary with broader PTX emission via `build --backend gpu`.
 
-The GPU page should talk about the second one, not the first one.
+## Self-hosted GPU path (CPU fallback + artifact templates)
 
-## Verified today
+The default compiler (`bin/souc` or `bin/souc-linux-x86_64`) accepts GPU kernel syntax and runs a deterministic serial CPU fallback. The Kretikos CLI uses that compiler to build tiny in-tree emitter drivers, then writes predefined GPU artifact templates:
 
-Use the checked GPU artifact directly:
+```bash
+# Emit predefined PTX templates (self-hosted, no GPU required)
+kretikos emit-ptx vec_add     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_sub     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_mul     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_div     -o /tmp/kernel.ptx
+kretikos emit-ptx vec_add_f64 -o /tmp/kernel.ptx
+kretikos emit-ptx fma         -o /tmp/kernel.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kernel.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kernel.ptx
+
+# Emit predefined Metal/MSL templates (self-hosted, no macOS required)
+kretikos emit-metal vec_add          -o /tmp/kernel.metal
+kretikos emit-metal ossm_oct_step    -o /tmp/kernel.metal
+kretikos emit-metal sedenion_cd_step -o /tmp/kernel.metal
+
+# Emit predefined CUBIN templates
+kretikos emit-cubin exit_only -o /tmp/kernel.cubin
+kretikos emit-cubin store_u32_const -o /tmp/kernel.cubin
+kretikos emit-cubin vec_add_f32 -o /tmp/kernel.cubin
+kretikos emit-cubin epistemic_dual_f32 -o /tmp/kernel.cubin
+
+# Emit a structural artifact bundle: PTX, CUBIN, hashes, boundaries
+kretikos bundle -o /tmp/kretikos-bundle
+
+# Optionally record assembler/disassembler and CUDA Driver API evidence
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
+```
+
+What that proves today:
+
+- The self-hosted compiler compiles `kernel fn`, `with GPU`, `GPU.launch`, and `GPU.sync`.
+- The CPU fallback runs kernels serially with deterministic thread/block IDs.
+- The `kretikos` CLI wrapper emits predefined PTX text and NVIDIA CUDA ELF/CUBIN byte templates from in-tree Sounio code.
+- The `kretikos bundle` command writes a machine-readable `sounio.kretikos.bundle.v1` manifest with artifact hashes, structural checks, optional `ptxas`/`nvdisasm` and CUDA Driver API validation, and explicit non-claims.
+- This path does not yet lower arbitrary user kernel source into PTX/CUBIN.
+- Toolchain and runtime validation apply only to the predefined PTX/CUBIN templates selected by `kretikos`; they do not validate arbitrary user-written kernels.
+
+## GPU artifact path (broader PTX emission)
+
+The checked GPU artifact is a separate binary with broader pattern support:
 
 ```bash
 export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
@@ -34,12 +74,6 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 "$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
 
-What that proves today:
-
-- GPU codegen is enabled in the checked GPU artifact.
-- The public PTX-emission path is `build --backend gpu`.
-- `kernel fn`, `with GPU`, `GPU.launch`, and `GPU.sync` are accepted by the checked GPU profile.
-
 ## Public surface versus source-tree surface
 
 The checked public GPU artifact currently accepts:
@@ -49,6 +83,12 @@ The checked public GPU artifact currently accepts:
 - `perform GPU.launch(...)`
 - `perform GPU.sync()`
 - PTX emission through `build --backend gpu`
+
+The self-hosted compiler (`bin/souc`) also accepts the same syntax and additionally routes:
+- predefined PTX templates through `kretikos emit-ptx`
+- predefined CUBIN templates through `kretikos emit-cubin`
+- structural PTX/CUBIN artifact bundles through `kretikos bundle`
+- optional fail-closed toolchain/runtime checks through `kretikos bundle --require-toolchain` and `kretikos bundle --require-runtime`
 
 The checked public GPU artifact does not yet resolve the older `gpu.*`
 intrinsic namespace from historical sketches:

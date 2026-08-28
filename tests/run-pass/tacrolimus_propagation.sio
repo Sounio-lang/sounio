@@ -1,0 +1,56 @@
+//@ run-pass
+//@ expect-stdout: TAC PROPAGATION PASS
+
+// Tacrolimus oral SS trough propagation under Knightian uncertainty.
+//
+// Mirrors tests/run-pass/vancomycin_propagation_v2.sio for the tacrolimus
+// clinical pathway. Three scenarios:
+//
+//   1. Pre-TDM (no samples) — wide Knightian band on F, Vc, CL. The 5 mg
+//      q12h regimen for a 70 kg kidney-transplant maintenance patient
+//      yields a C12h trough PBox of approximately [2.8, 17.6] ng/mL,
+//      which straddles the 5–15 ng/mL therapeutic window → REFUSE.
+//
+//   2. Post-TDM (3 trough samples + CYP3A5 genotype) — narrow Knightian
+//      band: PBox ≈ [5.2, 11.7] ng/mL ⊂ [5, 15] → PRESCRIBE.
+//
+//   3. Contract violation (weight 15 kg below [30, 200]) — vacuous PBox
+//      with confidence 0 (CONTRACT_BLOCK).
+//
+// This is the operational unit-test for stdlib/clinical/tacrolimus_oral_safety.sio
+// and the runtime witness for formal/lean4/SounioTacrolimusDosingSafety.lean.
+
+use clinical::tacrolimus_oral_safety::*
+use epistemic::knightian::*
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let weight = 70.0
+    let crcl = 80.0
+    let dose_mg = 5.0
+    let tau_h = 12.0
+
+    // Pre-TDM (n=0): wide band, refuse 5 mg q12h on Knightian grounds.
+    let pre = predict_c_trough_knightian(weight, crcl, dose_mg, tau_h, 0)
+    let safe_pre = is_safe_tac_dose(&pre, 5.0, 15.0, 700)
+
+    // Post-TDM (n=3): narrow band, in-target → prescribe.
+    let post = predict_c_trough_knightian(weight, crcl, dose_mg, tau_h, 3)
+    let safe_post = is_safe_tac_dose(&post, 5.0, 15.0, 700)
+
+    // Contract violation: weight 15 kg below allowed [30, 200].
+    let bad = predict_c_trough_knightian(15.0, crcl, dose_mg, tau_h, 0)
+    let bad_blocked = pb_confidence(&bad) == 0
+
+    if !safe_pre && safe_post && bad_blocked {
+        println("TAC PROPAGATION PASS")
+    } else {
+        if safe_pre {
+            println("TAC PROPAGATION FAIL: pre-TDM not refused")
+        } else if !safe_post {
+            println("TAC PROPAGATION FAIL: post-TDM not safe")
+        } else {
+            println("TAC PROPAGATION FAIL: contract not enforced")
+        }
+    }
+    0
+}

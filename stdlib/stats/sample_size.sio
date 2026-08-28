@@ -1,0 +1,159 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/sample_size.sio — sample size for proportions and correlation
+//
+// Extends stats::power (which covers t-tests) to the other common designs, using
+// the standard normal-approximation formulas. All scalar (no data arrays).
+//
+//   n_two_props(p1, p2, alpha, power)    -> n per group
+//   n_one_prop(p0, p1, alpha, power)     -> n
+//   n_correlation(r, alpha, power)       -> n
+//
+//   two proportions (two-sided):
+//     n = ( z_{α/2}·sqrt(2·p̄·q̄) + z_β·sqrt(p1·q1 + p2·q2) )² / (p1 − p2)²
+//   one proportion:
+//     n = ( z_{α/2}·sqrt(p0·q0) + z_β·sqrt(p1·q1) )² / (p1 − p0)²
+//   correlation (Fisher z):  n = ( (z_{α/2} + z_β) / atanh(r) )² + 3
+//
+// Pure Sounio; the only dependency is the normal quantile (special::erf).
+//
+// References:
+//   Fleiss, Levin & Paik (2003) "Statistical Methods for Rates and Proportions";
+//   Cohen (1988) — correlation sample size
+
+module stats::sample_size
+
+use special::erf::{normal_quantile}
+
+fn ss_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn ss_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 20 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn ss_ceil_pos(x: f64) -> i64 {
+    let t = x as i64
+    if (t as f64) < x { return t + 1 }
+    return t
+}
+
+/// Sample size PER GROUP for a two-sided two-proportion z-test.
+///
+/// Parâmetros: p1, p2 — the two proportions; alpha — level; power — desired power.
+/// Retorno: n per group (>= 2).
+/// Referências: Fleiss et al. (2003).
+pub fn n_two_props(p1: f64, p2: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {
+    let za = normal_quantile(1.0 - alpha / 2.0)
+    let zb = normal_quantile(power)
+    let pbar = (p1 + p2) / 2.0
+    let qbar = 1.0 - pbar
+    let term = za * ss_sqrt(2.0 * pbar * qbar) + zb * ss_sqrt(p1 * (1.0 - p1) + p2 * (1.0 - p2))
+    let diff = p1 - p2
+    if diff * diff < 1.0e-30 { return 1000000 }
+    let n = term * term / (diff * diff)
+    let ni = ss_ceil_pos(n)
+    if ni < 2 { return 2 }
+    return ni
+}
+
+/// Sample size for a one-sample proportion test (H0: p = p0, H1: p = p1).
+pub fn n_one_prop(p0: f64, p1: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {
+    let za = normal_quantile(1.0 - alpha / 2.0)
+    let zb = normal_quantile(power)
+    let term = za * ss_sqrt(p0 * (1.0 - p0)) + zb * ss_sqrt(p1 * (1.0 - p1))
+    let diff = p1 - p0
+    if diff * diff < 1.0e-30 { return 1000000 }
+    let n = term * term / (diff * diff)
+    let ni = ss_ceil_pos(n)
+    if ni < 2 { return 2 }
+    return ni
+}
+
+/// Sample size to detect a correlation r (two-sided), via the Fisher z-transform.
+pub fn n_correlation(r: f64, alpha: f64, power: f64) -> i64 with Mut, Div, Panic {
+    let za = normal_quantile(1.0 - alpha / 2.0)
+    let zb = normal_quantile(power)
+    let ar = if r < 0.0 { 0.0 - r } else { r }
+    if ar < 1.0e-9 { return 1000000 }
+    let zr = 0.5 * ss_ln((1.0 + ar) / (1.0 - ar))    // atanh(r)
+    let base = (za + zb) / zr
+    let n = base * base + 3.0
+    let ni = ss_ceil_pos(n)
+    if ni < 4 { return 4 }
+    return ni
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// n_two_props(0.5,0.3,0.05,0.80) ~ 93 per group (Fleiss, uncorrected).
+// n_one_prop(0.5,0.7,0.05,0.80)  ~ 47.
+// n_correlation(0.3,0.05,0.80)   ~ 85.
+fn test_sizes() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    let n1 = n_two_props(0.5, 0.3, 0.05, 0.80)
+    ok = check(1, n1 >= 91 && n1 <= 95) && ok
+    let n2 = n_one_prop(0.5, 0.7, 0.05, 0.80)
+    ok = check(2, n2 >= 45 && n2 <= 49) && ok
+    let n3 = n_correlation(0.3, 0.05, 0.80)
+    ok = check(3, n3 >= 82 && n3 <= 87) && ok
+    return ok
+}
+
+// monotonicity: a smaller effect needs a larger n.
+fn test_monotone() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    let big = n_two_props(0.5, 0.2, 0.05, 0.80)    // large gap
+    let small = n_two_props(0.5, 0.4, 0.05, 0.80)  // small gap
+    ok = check(10, small > big) && ok
+    // higher power needs more
+    let p80 = n_correlation(0.3, 0.05, 0.80)
+    let p90 = n_correlation(0.3, 0.05, 0.90)
+    ok = check(11, p90 > p80) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_sizes() && ok
+    ok = test_monotone() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

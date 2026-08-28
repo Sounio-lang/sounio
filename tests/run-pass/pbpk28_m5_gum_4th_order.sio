@@ -1,0 +1,114 @@
+//@ run-pass
+// Focused M5 validation: cumulants, inverse-AUC derivatives, and PBPK28
+// fourth-order budget emission.
+
+use darwin_pbpk::cumulants::*
+
+fn t_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn rel_err(a: f64, b: f64) -> f64 with Div {
+    let d = t_abs(a - b)
+    let den = if t_abs(b) > 1.0e-12 { t_abs(b) } else { 1.0 }
+    d / den
+}
+
+fn check_close(tag: string, got: f64, expected: f64, tol: f64) -> bool with IO, Div {
+    let r = rel_err(got, expected)
+    print(tag); print(" got="); print_f64(got)
+    print(" expected="); print_f64(expected)
+    print(" rel_err="); print_f64(r); println("")
+    return r <= tol
+}
+
+fn gaussian_fixture_cumulant() -> CumulantSummary with Mut, Div {
+    // Three-point Gaussian-moment fixture: P(0)=2/3, P(+/-sqrt(3))=1/6.
+    // The first four central moments are mean=0, variance=1, kappa3=0,
+    // kappa4=0, so it is a deterministic check of the Pébay update.
+    var s = cumulant_init()
+    s = cumulant_update(s, 0.0 - 1.7320508075688772)
+    s = cumulant_update(s, 1.7320508075688772)
+    s = cumulant_update(s, 0.0)
+    s = cumulant_update(s, 0.0)
+    s = cumulant_update(s, 0.0)
+    s = cumulant_update(s, 0.0)
+    cumulant_finalize(s)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var failed = 0
+
+    println("======================================================================")
+    println("  M5 PBPK28 GUM Fourth-Order Cumulant Budget")
+    println("======================================================================")
+
+    let g = gaussian_fixture_cumulant()
+    print("Gaussian fixture kappa3: "); print_f64(g.kappa3); println("")
+    print("Gaussian fixture kappa4: "); print_f64(g.kappa4); println("")
+    if t_abs(g.kappa3) < 1.0e-9 && t_abs(g.kappa4) < 1.0e-9 {
+        println("Gaussian cumulant fixture: PASS")
+    } else {
+        println("Gaussian cumulant fixture: FAIL")
+        failed = failed + 1
+    }
+
+    let lc = lognormal_cumulants_from_mean_variance(12.4, 22.202944)
+    print("Lognormal CL sigma2_log: "); print_f64(lc.sigma2_log); println("")
+    print("Lognormal CL kappa3:     "); print_f64(lc.kappa3); println("")
+    print("Lognormal CL kappa4:     "); print_f64(lc.kappa4); println("")
+    if lc.kappa3 > 0.0 && lc.kappa4 > 0.0 && lc.central4 > 0.0 {
+        println("Lognormal cumulants positive: PASS")
+    } else {
+        println("Lognormal cumulants positive: FAIL")
+        failed = failed + 1
+    }
+
+    let dose = 5.0
+    let cl = 12.4
+    let v = 1.0
+    let h = 0.001
+    let der_inv = extract_auc_inverse_derivatives(dose, cl, v, h)
+    let d1_expected = 0.0 - dose / (cl * cl * v)
+    let d2_expected = 2.0 * dose / (cl * cl * cl * v)
+    let d3_expected = 0.0 - 6.0 * dose / (cl * cl * cl * cl * v)
+    if !check_close("dAUC/dCL", der_inv.d1[0], d1_expected, 1.0e-6) { failed = failed + 1 }
+    if !check_close("d2AUC/dCL2", der_inv.d2[0], d2_expected, 1.0e-4) { failed = failed + 1 }
+    if !check_close("d3AUC/dCL3", der_inv.d3[0], d3_expected, 1.0e-3) { failed = failed + 1 }
+
+    println("")
+    println("Running PBPK28 M6 fourth-order convergence budget ...")
+    let bud = m5_pbpk28_convergence_budget()
+    print("u_MC canonical:          "); print_f64(0.357945); println("")
+    print("u_1st direct:            "); print_f64(bud.u_1st); println("")
+    print("u_2nd full Hessian:      "); print_f64(bud.u_2nd_hessian); println("")
+    print("u_total fourth-order:    "); print_f64(bud.u_total); println("")
+    print("rel_hess_residual:       "); print_f64(bud.rel_hess_residual); println("")
+    print("rel_fourth_residual:     "); print_f64(bud.rel_fourth_residual); println("")
+    print("dominant_correction_idx: "); print_f64(bud.dominant_index as f64); println("")
+    print("var_1st:                 "); print_f64(bud.var_1st); println("")
+    print("var_skewness:            "); print_f64(bud.var_skewness); println("")
+    print("var_kurtosis:            "); print_f64(bud.var_kurtosis); println("")
+    print("var_cubic:               "); print_f64(bud.var_cubic); println("")
+    print("var_total:               "); print_f64(bud.var_total); println("")
+
+    if !bud.success || bud.u_1st <= 0.0 {
+        println("PBPK28 budget failed")
+        failed = failed + 1
+    }
+    if bud.rel_fourth_residual < bud.rel_hess_residual {
+        println("Fourth-order improves over full second-order Hessian: PASS")
+    } else {
+        println("Fourth-order improves over full second-order Hessian: FAIL")
+        failed = failed + 1
+    }
+
+    if failed == 0 {
+        println("M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS")
+    } else {
+        println("M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_OUTPUT")
+    }
+    println("PASS")
+    return 0
+}

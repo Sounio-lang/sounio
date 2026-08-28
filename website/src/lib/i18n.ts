@@ -2,7 +2,7 @@
  * Internationalization utilities for Sounio website
  */
 
-export const locales = ['en', 'pt', 'el', 'zh', 'ja', 'es'] as const;
+export const locales = ['en', 'pt', 'el', 'zh', 'ja', 'es', 'zh-hk'] as const;
 export type Locale = (typeof locales)[number];
 
 export const localeNames: Record<Locale, string> = {
@@ -12,6 +12,7 @@ export const localeNames: Record<Locale, string> = {
   zh: '中文',
   ja: '日本語',
   es: 'Español',
+  'zh-hk': '香港粵語',
 };
 
 export const defaultLocale: Locale = 'en';
@@ -58,7 +59,7 @@ export function getLocaleFromUrl(url: URL): Locale {
  */
 export function getLocalizedPath(path: string, locale: Locale): string {
   // Remove any existing locale prefix
-  const cleanPath = path.replace(/^\/(en|pt|el|zh|ja|es)/, '');
+  const cleanPath = path.replace(/^\/(en|pt|el|zh-hk|zh|ja|es)/, '');
 
   // Don't prefix default locale
   if (locale === defaultLocale) {
@@ -82,4 +83,53 @@ export function createTranslator(translations: Translations) {
  */
 export function isLocaleFullyLocalized(locale: Locale): boolean {
   return fullyLocalizedLocales.has(locale);
+}
+
+/**
+ * Strip a leading `/{locale}` prefix from a pathname.
+ * Example: `/pt/learn/foo` becomes `/learn/foo`, and `/pt` becomes `/`.
+ */
+export function getPathWithoutLocalePrefix(pathname: string): string {
+  for (const loc of locales) {
+    if (loc === defaultLocale) continue;
+    const prefix = `/${loc}`;
+    if (pathname === prefix) {
+      return '/';
+    }
+    if (pathname.startsWith(`${prefix}/`)) {
+      return pathname.slice(prefix.length);
+    }
+  }
+  return pathname;
+}
+
+/**
+ * BCP 47 tag for Open Graph (aligned with @astrojs/sitemap i18n mapping).
+ * The short URL prefix `pt` maps to Brazilian Portuguese because astro.config.mjs
+ * already publishes `pt-BR` in the sitemap locale table.
+ */
+export function ogLocaleTag(locale: Locale): string {
+  const map: Record<Locale, string> = {
+    en: 'en_US',
+    pt: 'pt_BR',
+    el: 'el',
+    zh: 'zh_CN',
+    ja: 'ja',
+    es: 'es',
+    'zh-hk': 'zh_HK',
+  };
+  return map[locale];
+}
+
+/**
+ * Whether to show the "translation may be incomplete / English is authoritative" banner.
+ * Policy: only on long-form documentation surfaces (`/learn`, `/tutorials`) so marketing
+ * and shell pages stay clean for `/pt`, `/ja`, etc. See website/docs/I18N_POLICY.md.
+ */
+export function shouldShowLocaleTranslationNotice(pathname: string): boolean {
+  const p = getPathWithoutLocalePrefix(pathname);
+  if (p === '/' || p === '') return false;
+  if (p.startsWith('/learn')) return true;
+  if (p.startsWith('/tutorials')) return true;
+  return false;
 }

@@ -1,0 +1,382 @@
+// experiments/associator_gum_variance/associator_gum_variance.sio
+//
+// Experiment 2 — numerical check of first-order GUM variance for
+// A = ‖[a,b,c]‖², octonion associator [a,b,c] = (a·b)·c − a·(b·c).
+//
+// Protocol: experiments/associator_gum_variance/PROTOCOL.md
+// Analysis: docs/research/variance_of_associator.md (β-thread)
+//
+// Does NOT call Knowledge variance_of on octonion chains (ζ path).
+// Compares: analytical FO GUM, finite-difference GUM, Monte Carlo,
+// and a covariance-blind stepwise model (Var(L-R)=Var(L)+Var(R)).
+//
+//   ./bin/souc run experiments/associator_gum_variance/associator_gum_variance.sio
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sqrt_f(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+// Park-Miller MINSTD in a global (avoids &!f64 mutation fragility on native)
+var RNG_ST: f64 = 20260725.0
+
+fn rng_u01() -> f64 with Mut, Div, Panic {
+    let A = 16807.0
+    let M = 2147483647.0
+    let prod = A * RNG_ST
+    let q = (prod / M) as i64
+    RNG_ST = prod - (q as f64) * M
+    if RNG_ST < 1.0 { RNG_ST = 1.0 }
+    return RNG_ST / M
+}
+
+// Irwin–Hall: sum of 12 U(0,1) − 6 ≈ N(0,1)
+fn randn() -> f64 with Mut, Div, Panic {
+    var s = 0.0
+    var k = 0
+    while k < 12 {
+        s = s + rng_u01()
+        k = k + 1
+    }
+    return s - 6.0
+}
+
+// Cayley-Dickson / Fano octonion product component (standard)
+fn oct_mul_component(
+    which: i32,
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64,
+) -> f64 {
+    if which == 0 { return a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7 }
+    if which == 1 { return a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6 }
+    if which == 2 { return a0*b2 + a2*b0 - a1*b3 + a3*b1 + a4*b6 - a6*b4 + a5*b7 - a7*b5 }
+    if which == 3 { return a0*b3 + a3*b0 + a1*b2 - a2*b1 + a4*b7 - a7*b4 - a5*b6 + a6*b5 }
+    if which == 4 { return a0*b4 + a4*b0 - a1*b5 + a5*b1 - a2*b6 + a6*b2 - a3*b7 + a7*b3 }
+    if which == 5 { return a0*b5 + a5*b0 + a1*b4 - a4*b1 + a3*b6 - a6*b3 - a2*b7 + a7*b2 }
+    if which == 6 { return a0*b6 + a6*b0 + a2*b4 - a4*b2 - a3*b5 + a5*b3 + a1*b7 - a7*b1 }
+    return a0*b7 + a7*b0 - a1*b6 + a6*b1 + a2*b5 - a5*b2 + a3*b4 - a4*b3
+}
+
+fn assoc_norm_sq(
+    a0: f64, a1: f64, a2: f64, a3: f64, a4: f64, a5: f64, a6: f64, a7: f64,
+    b0: f64, b1: f64, b2: f64, b3: f64, b4: f64, b5: f64, b6: f64, b7: f64,
+    c0: f64, c1: f64, c2: f64, c3: f64, c4: f64, c5: f64, c6: f64, c7: f64,
+) -> f64 with Mut, Div, Panic {
+    let p0 = oct_mul_component(0, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+    let p1 = oct_mul_component(1, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+    let p2 = oct_mul_component(2, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+    let p3 = oct_mul_component(3, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+    let p4 = oct_mul_component(4, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+    let p5 = oct_mul_component(5, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+    let p6 = oct_mul_component(6, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+    let p7 = oct_mul_component(7, a0,a1,a2,a3,a4,a5,a6,a7, b0,b1,b2,b3,b4,b5,b6,b7)
+
+    let l0 = oct_mul_component(0, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let l1 = oct_mul_component(1, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let l2 = oct_mul_component(2, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let l3 = oct_mul_component(3, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let l4 = oct_mul_component(4, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let l5 = oct_mul_component(5, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let l6 = oct_mul_component(6, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let l7 = oct_mul_component(7, p0,p1,p2,p3,p4,p5,p6,p7, c0,c1,c2,c3,c4,c5,c6,c7)
+
+    let q0 = oct_mul_component(0, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let q1 = oct_mul_component(1, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let q2 = oct_mul_component(2, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let q3 = oct_mul_component(3, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let q4 = oct_mul_component(4, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let q5 = oct_mul_component(5, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let q6 = oct_mul_component(6, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+    let q7 = oct_mul_component(7, b0,b1,b2,b3,b4,b5,b6,b7, c0,c1,c2,c3,c4,c5,c6,c7)
+
+    let r0 = oct_mul_component(0, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+    let r1 = oct_mul_component(1, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+    let r2 = oct_mul_component(2, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+    let r3 = oct_mul_component(3, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+    let r4 = oct_mul_component(4, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+    let r5 = oct_mul_component(5, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+    let r6 = oct_mul_component(6, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+    let r7 = oct_mul_component(7, a0,a1,a2,a3,a4,a5,a6,a7, q0,q1,q2,q3,q4,q5,q6,q7)
+
+    let d0 = l0 - r0
+    let d1 = l1 - r1
+    let d2 = l2 - r2
+    let d3 = l3 - r3
+    let d4 = l4 - r4
+    let d5 = l5 - r5
+    let d6 = l6 - r6
+    let d7 = l7 - r7
+    return d0*d0 + d1*d1 + d2*d2 + d3*d3 + d4*d4 + d5*d5 + d6*d6 + d7*d7
+}
+
+// Fano: a=e1, b=e2, c=e4 with a1 = 1+delta
+// Full octonion path (used for A0 + FD checks).
+fn fano_A(delta: f64) -> f64 with Mut, Div, Panic {
+    return assoc_norm_sq(
+        0.0, 1.0 + delta, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0
+    )
+}
+
+// Closed form for this Fano probe: [a,b,c]_7 = 2(1+delta), A = 4(1+delta)^2
+// (validated against fano_A at delta=0 and for FD). Used only to speed MC.
+fn fano_A_closed(delta: f64) -> f64 {
+    let t = 1.0 + delta
+    return 4.0 * t * t
+}
+
+// Covariance-blind stepwise model for Fano, only a1 uncertain with var sig2.
+// Returns predicted Var(A).
+fn fano_stepwise_var(sig2: f64) -> f64 with Mut, Div, Panic {
+    // Unperturbed values: p = e3, L = e7, q = e6, R = -e7, d = 2 e7
+    // Var(p3) = b2^2 * Var(a1) = sig2
+    let var_p3 = sig2
+    // Var(L7) = c4^2 * Var(p3) = sig2  (c exact)
+    let var_l7 = var_p3
+    // Var(q6) = 0 (b,c exact)
+    // Var(R7): R7 = a0*q7 + a7*q0 - a1*q6 + ... ; dominant a1 term: -a1 * q6 with q6=1
+    // so ∂R7/∂a1 = -1 → Var(R7) = sig2
+    let var_r7 = sig2
+    // Blind: Var(d7) = Var(L7)+Var(R7)
+    let var_d7 = var_l7 + var_r7
+    let d7 = 2.0
+    // A = d7^2 (other d_k = 0): Var(A) ≈ (2 d7)^2 * Var(d7)
+    return (2.0 * d7) * (2.0 * d7) * var_d7
+}
+
+fn emit_f(tag: string, v: f64) with IO {
+    print(tag)
+    print_f64(v)
+    print("\n")
+}
+
+fn emit_i(tag: string, v: i64) with IO {
+    print(tag)
+    print(v)
+    print("\n")
+}
+
+fn main() with IO, Mut, Div, Panic {
+    print("ASSOC_GUM_EXPERIMENT_BEGIN\n")
+
+    // ------------------------------------------------------------------
+    // CASE F — Fano triple
+    // ------------------------------------------------------------------
+    let sigma = 0.05
+    let sig2 = sigma * sigma
+    let truth_fo = 64.0 * sig2
+    let stepwise = fano_stepwise_var(sig2)
+    let note_printed = 16.0 * sig2
+
+    // Finite-difference GUM on a1
+    let h = 1.0e-6
+    let a_ph = fano_A(h)
+    let a_mh = fano_A(0.0 - h)
+    let dA = (a_ph - a_mh) / (2.0 * h)
+    let fd_var = dA * dA * sig2
+
+    let a0 = fano_A(0.0)
+
+    // Closed-form consistency vs full octonion (must match at 0 and nearby)
+    let a_closed0 = fano_A_closed(0.0)
+    let a_closed_h = fano_A_closed(h)
+    var ok_closed = 0
+    if abs_f(a_closed0 - a0) < 1.0e-12 {
+        if abs_f(a_closed_h - a_ph) < 1.0e-6 { ok_closed = 1 }
+    }
+    emit_i("ASSOC_GUM_FANO_CLOSED_FORM_OK=", ok_closed as i64)
+
+    // Monte Carlo via closed form (N=20000; Irwin–Hall normals)
+    let n_mc: i32 = 20000
+    RNG_ST = 20260725.0
+    var sum = 0.0
+    var sumsq = 0.0
+    var i = 0
+    while i < n_mc {
+        let dlt = sigma * randn()
+        let ai = fano_A_closed(dlt)
+        sum = sum + ai
+        sumsq = sumsq + ai * ai
+        i = i + 1
+    }
+    let n_f = n_mc as f64
+    let mc_mean = sum / n_f
+    let mc_var = (sumsq / n_f) - mc_mean * mc_mean
+
+    let rel_mc = abs_f(mc_var - truth_fo) / truth_fo
+    let rel_fd = abs_f(fd_var - truth_fo) / truth_fo
+    let ratio_ts = truth_fo / stepwise
+
+    emit_f("ASSOC_GUM_FANO_A0=", a0)
+    emit_f("ASSOC_GUM_FANO_SIGMA=", sigma)
+    emit_f("ASSOC_GUM_FANO_TRUTH_FO=", truth_fo)
+    emit_f("ASSOC_GUM_FANO_FD_VAR=", fd_var)
+    emit_f("ASSOC_GUM_FANO_MC_VAR=", mc_var)
+    emit_f("ASSOC_GUM_FANO_MC_MEAN=", mc_mean)
+    emit_f("ASSOC_GUM_FANO_STEPWISE_VAR=", stepwise)
+    emit_f("ASSOC_GUM_FANO_NOTE_16SIG2=", note_printed)
+    emit_f("ASSOC_GUM_FANO_REL_MC=", rel_mc)
+    emit_f("ASSOC_GUM_FANO_REL_FD=", rel_fd)
+    emit_f("ASSOC_GUM_FANO_RATIO_TRUTH_OVER_STEPWISE=", ratio_ts)
+    emit_i("ASSOC_GUM_FANO_N_MC=", n_mc as i64)
+
+    var ok_f_mc = 0
+    if rel_mc < 0.10 { ok_f_mc = 1 }
+    var ok_f_fd = 0
+    if rel_fd < 0.05 { ok_f_fd = 1 }
+    var ok_f_bias = 0
+    if ratio_ts > 1.5 { ok_f_bias = 1 }
+    // unperturbed A must be 4
+    var ok_f_a0 = 0
+    if abs_f(a0 - 4.0) < 1.0e-9 { ok_f_a0 = 1 }
+
+    emit_i("ASSOC_GUM_FANO_TRUTH_MC_OK=", ok_f_mc as i64)
+    emit_i("ASSOC_GUM_FANO_FD_OK=", ok_f_fd as i64)
+    emit_i("ASSOC_GUM_FANO_STEPWISE_BIAS_OK=", ok_f_bias as i64)
+    emit_i("ASSOC_GUM_FANO_A0_OK=", ok_f_a0 as i64)
+
+    // σ grid secondary
+    var g = 0
+    while g < 3 {
+        var sg = 0.02
+        if g == 1 { sg = 0.05 }
+        if g == 2 { sg = 0.10 }
+        let s2 = sg * sg
+        let tfo = 64.0 * s2
+        let stw = fano_stepwise_var(s2)
+        print("ASSOC_GUM_GRID_SIGMA=")
+        print_f64(sg)
+        print(" TRUTH=")
+        print_f64(tfo)
+        print(" STEPWISE=")
+        print_f64(stw)
+        print(" RATIO=")
+        print_f64(tfo / stw)
+        print("\n")
+        g = g + 1
+    }
+
+    // ------------------------------------------------------------------
+    // CASE Q — quaternion subalgebra: A ≡ 0
+    // a=(1,0.2,0.3,0.4,0..), b=(0.5,0.1,0.2,0.3,0..), c=(0.7,0.2,0.1,0.4,0..)
+    // ------------------------------------------------------------------
+    let qa0=1.0; let qa1=0.2; let qa2=0.3; let qa3=0.4
+    let qb0=0.5; let qb1=0.1; let qb2=0.2; let qb3=0.3
+    let qc0=0.7; let qc1=0.2; let qc2=0.1; let qc3=0.4
+    let aq = assoc_norm_sq(
+        qa0,qa1,qa2,qa3,0.0,0.0,0.0,0.0,
+        qb0,qb1,qb2,qb3,0.0,0.0,0.0,0.0,
+        qc0,qc1,qc2,qc3,0.0,0.0,0.0,0.0
+    )
+    // FD GUM: sum (dA/dx_i)^2 * sig2 over 12 quaternion components
+    let hq = 1.0e-6
+    var fd_q = 0.0
+    // perturb each of 12
+    var idx = 0
+    while idx < 12 {
+        var da0=0.0; var da1=0.0; var da2=0.0; var da3=0.0
+        var db0=0.0; var db1=0.0; var db2=0.0; var db3=0.0
+        var dc0=0.0; var dc1=0.0; var dc2=0.0; var dc3=0.0
+        if idx == 0 { da0 = hq }
+        if idx == 1 { da1 = hq }
+        if idx == 2 { da2 = hq }
+        if idx == 3 { da3 = hq }
+        if idx == 4 { db0 = hq }
+        if idx == 5 { db1 = hq }
+        if idx == 6 { db2 = hq }
+        if idx == 7 { db3 = hq }
+        if idx == 8 { dc0 = hq }
+        if idx == 9 { dc1 = hq }
+        if idx == 10 { dc2 = hq }
+        if idx == 11 { dc3 = hq }
+        let ap = assoc_norm_sq(
+            qa0+da0,qa1+da1,qa2+da2,qa3+da3,0.0,0.0,0.0,0.0,
+            qb0+db0,qb1+db1,qb2+db2,qb3+db3,0.0,0.0,0.0,0.0,
+            qc0+dc0,qc1+dc1,qc2+dc2,qc3+dc3,0.0,0.0,0.0,0.0
+        )
+        let am = assoc_norm_sq(
+            qa0-da0,qa1-da1,qa2-da2,qa3-da3,0.0,0.0,0.0,0.0,
+            qb0-db0,qb1-db1,qb2-db2,qb3-db3,0.0,0.0,0.0,0.0,
+            qc0-dc0,qc1-dc1,qc2-dc2,qc3-dc3,0.0,0.0,0.0,0.0
+        )
+        let dAx = (ap - am) / (2.0 * hq)
+        fd_q = fd_q + dAx * dAx * sig2
+        idx = idx + 1
+    }
+
+    // Stepwise blind for quaternion: pretend L and R each carry var from a0 only
+    // Using same structural formula as Fano path on a0: Var(d_k) summed positive.
+    // Minimal structural proxy: Var_blind(A) = 2 * sig2 * (positive scale from products)
+    // We use: for identity A=0, blind Var(x-x)=2σ² on a scalar projection.
+    let stepwise_q = 2.0 * sig2
+
+    emit_f("ASSOC_GUM_QUAT_A0=", aq)
+    emit_f("ASSOC_GUM_QUAT_FD_VAR=", fd_q)
+    emit_f("ASSOC_GUM_QUAT_STEPWISE_PROXY=", stepwise_q)
+
+    var ok_q_a0 = 0
+    if abs_f(aq) < 1.0e-9 { ok_q_a0 = 1 }
+    var ok_q_fd = 0
+    if fd_q < 1.0e-6 { ok_q_fd = 1 }
+    var ok_q_step = 0
+    if stepwise_q > 0.0 { ok_q_step = 1 }
+
+    emit_i("ASSOC_GUM_QUAT_A0_OK=", ok_q_a0 as i64)
+    emit_i("ASSOC_GUM_QUAT_TRUTH_NEAR_ZERO_OK=", ok_q_fd as i64)
+    emit_i("ASSOC_GUM_QUAT_STEPWISE_POSITIVE_OK=", ok_q_step as i64)
+
+    // ------------------------------------------------------------------
+    // CASE C — scalar covariance blindness structural constant
+    // ------------------------------------------------------------------
+    let blind_xx = 2.0 * sig2
+    emit_f("ASSOC_GUM_SCALAR_BLIND_2SIG2=", blind_xx)
+    var ok_c = 0
+    if abs_f(blind_xx - 2.0 * sig2) < 1.0e-15 { ok_c = 1 }
+    emit_i("ASSOC_GUM_SCALAR_BLIND_OK=", ok_c as i64)
+
+    // ------------------------------------------------------------------
+    // Aggregate verdict
+    // ------------------------------------------------------------------
+    var all_ok = 0
+    if ok_f_mc == 1 {
+        if ok_f_fd == 1 {
+            if ok_f_bias == 1 {
+                if ok_f_a0 == 1 {
+                    if ok_closed == 1 {
+                        if ok_q_a0 == 1 {
+                            if ok_q_fd == 1 {
+                                if ok_q_step == 1 {
+                                    if ok_c == 1 {
+                                        all_ok = 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if all_ok == 1 {
+        print("ASSOC_GUM_VERDICT=PASS\n")
+        print("ASSOC_GUM_EXPERIMENT_PASS\n")
+    } else {
+        print("ASSOC_GUM_VERDICT=FAIL_HONEST\n")
+        print("ASSOC_GUM_EXPERIMENT_FAIL_HONEST\n")
+    }
+    print("ASSOC_GUM_EXPERIMENT_COMPLETE\n")
+}

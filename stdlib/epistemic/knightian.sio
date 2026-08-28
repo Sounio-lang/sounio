@@ -1,0 +1,423 @@
+// stdlib/epistemic/knightian.sio
+//
+// Knightian uncertainty as a Ferson probability-box (p-box).
+//
+// A p-box is a pair of CDFs (lo, hi) with lo(x) <= hi(x) for all x.
+// The "true" CDF F is asserted to lie pointwise between them. Every
+// operation on p-boxes preserves this containment relation.
+//
+// The choice of Ferson p-box (over Walley credal sets or Klibanoff
+// smooth ambiguity) is justified in
+// docs/research/knightian_operator_choice.md — locked in M0.
+//
+// Operational specialisation: this module uses *Gaussian* p-boxes,
+// represented compactly by a band on the mean (`lo_mean`, `hi_mean`)
+// and a shared variance. This recovers exactly the GUM
+// `Knowledge<f64>` representation when `lo_mean == hi_mean`, so the
+// module composes seamlessly with stdlib/epistemic/knowledge.sio.
+//
+// Lean soundness: formal/lean4/SounioKnightian.lean.
+//
+// Connection to HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md:
+// the Walley-equivalent of associativity-aware parenthesization
+// in sedenions corresponds in the p-box specialisation to a
+// directional (q^T) projection of the band. We expose this via
+// `pb_project_band` for users who want to pick an operationally
+// meaningful direction.
+
+// ============================================================================
+// SCALAR HELPERS
+// ============================================================================
+
+fn pb_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn pb_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn pb_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+fn pb_min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+
+fn pb_clamp_conf(c: i64) -> i64 {
+    if c < 0 { return 0 }
+    if c > 1000 { return 1000 }
+    c
+}
+
+fn pb_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 12 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// PBOX — Knightian wrapper over a scalar
+// ============================================================================
+//
+// Invariant (well-formed): lo_mean <= hi_mean, variance >= 0.
+// Width (lo_mean, hi_mean) is the Knightian "ambiguity gap";
+// the variance is the (shared) aleatoric/epistemic uncertainty.
+//
+// Recovers Knowledge<f64>(value, variance, conf) when
+// lo_mean = hi_mean = value.
+
+pub struct PBox {
+    lo_mean: f64,
+    hi_mean: f64,
+    variance: f64,
+    confidence: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+pub fn pb_new(lo_mean: f64, hi_mean: f64, variance: f64, confidence: i64) -> PBox {
+    let lo = pb_min(lo_mean, hi_mean)
+    let hi = pb_max(lo_mean, hi_mean)
+    let v = if variance < 0.0 { 0.0 } else { variance }
+    PBox { lo_mean: lo, hi_mean: hi, variance: v, confidence: pb_clamp_conf(confidence) }
+}
+
+// Lift a Knowledge<f64> triple (no Knightian gap).
+pub fn pb_from_knowledge(value: f64, variance: f64, confidence: i64) -> PBox {
+    pb_new(value, value, variance, confidence)
+}
+
+// Vacuous p-box: maximum ambiguity (-inf, +inf), no confidence.
+pub fn pb_vacuous() -> PBox {
+    PBox { lo_mean: 0.0 - 1.0e18, hi_mean: 1.0e18, variance: 1.0e18, confidence: 0 }
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+pub fn pb_lo_mean(p: &PBox) -> f64 { p.lo_mean }
+pub fn pb_hi_mean(p: &PBox) -> f64 { p.hi_mean }
+pub fn pb_variance(p: &PBox) -> f64 { p.variance }
+pub fn pb_confidence(p: &PBox) -> i64 { p.confidence }
+
+pub fn pb_midpoint(p: &PBox) -> f64 { 0.5 * (p.lo_mean + p.hi_mean) }
+pub fn pb_gap(p: &PBox) -> f64 { p.hi_mean - p.lo_mean }
+
+// Total dispersion: combined Knightian gap + aleatoric standard deviation.
+// Conservative scalar summary for downstream gating.
+pub fn pb_dispersion(p: &PBox) -> f64 with Mut, Div, Panic {
+    pb_gap(p) + 2.0 * pb_sqrt(p.variance)
+}
+
+// ============================================================================
+// CONTAINMENT — the soundness invariant of every p-box operation.
+// p contains the true (unknown) CDF; q dominates p iff q's band is
+// at least as wide pointwise.
+// ============================================================================
+
+pub fn pb_contains(p: &PBox, point: f64) -> bool {
+    point >= p.lo_mean && point <= p.hi_mean
+}
+
+pub fn pb_dominates(q: &PBox, p: &PBox) -> bool {
+    q.lo_mean <= p.lo_mean && q.hi_mean >= p.hi_mean
+}
+
+// ============================================================================
+// ARITHMETIC — interval extension on means + GUM on variance.
+//
+// For monotone f, the p-box image (f(lo), f(hi)) preserves
+// containment. For ops that may flip sign (mul by negative),
+// we take min/max of all four corners.
+// ============================================================================
+
+fn pb_decay(c: i64) -> i64 {
+    pb_clamp_conf(c * 99 / 100)
+}
+
+pub fn pb_add(a: &PBox, b: &PBox) -> PBox {
+    PBox {
+        lo_mean: a.lo_mean + b.lo_mean,
+        hi_mean: a.hi_mean + b.hi_mean,
+        variance: a.variance + b.variance,
+        confidence: pb_decay(pb_min_i64(a.confidence, b.confidence)),
+    }
+}
+
+pub fn pb_sub(a: &PBox, b: &PBox) -> PBox {
+    // Subtraction: lo - hi, hi - lo (interval semantics).
+    PBox {
+        lo_mean: a.lo_mean - b.hi_mean,
+        hi_mean: a.hi_mean - b.lo_mean,
+        variance: a.variance + b.variance,
+        confidence: pb_decay(pb_min_i64(a.confidence, b.confidence)),
+    }
+}
+
+// Multiplication: take min and max of all four product corners
+// to get the correct interval extension across sign changes.
+fn pb_mul_corners_lo(a_lo: f64, a_hi: f64, b_lo: f64, b_hi: f64) -> f64 {
+    let p1 = a_lo * b_lo
+    let p2 = a_lo * b_hi
+    let p3 = a_hi * b_lo
+    let p4 = a_hi * b_hi
+    pb_min(pb_min(p1, p2), pb_min(p3, p4))
+}
+
+fn pb_mul_corners_hi(a_lo: f64, a_hi: f64, b_lo: f64, b_hi: f64) -> f64 {
+    let p1 = a_lo * b_lo
+    let p2 = a_lo * b_hi
+    let p3 = a_hi * b_lo
+    let p4 = a_hi * b_hi
+    pb_max(pb_max(p1, p2), pb_max(p3, p4))
+}
+
+// GUM-mul variance using midpoint linearisation.
+//
+// Honesty note (per math-review 2026-04-30): this is the first-order
+// delta-method approximation `Var(XY) ≈ E[Y]²Var(X) + E[X]²Var(Y)`,
+// which OMITS the `Var(X)·Var(Y)` cross-term that appears in the exact
+// Gaussian-product variance. The omission is a standard GUM convention
+// (small when both CV ≪ 1) but does NOT make the result an unconditional
+// upper bound — that claim was overreach. Downstream gates apply the
+// Knightian band on means; the variance is used only for the Bayesian
+// payoff in `pb_is_credible` style summaries, where the 1% underestimate
+// is not safety-critical.
+fn pb_mul_variance(a: &PBox, b: &PBox) -> f64 {
+    let am = 0.5 * (a.lo_mean + a.hi_mean)
+    let bm = 0.5 * (b.lo_mean + b.hi_mean)
+    bm * bm * a.variance + am * am * b.variance + a.variance * b.variance
+}
+
+pub fn pb_mul(a: &PBox, b: &PBox) -> PBox {
+    PBox {
+        lo_mean: pb_mul_corners_lo(a.lo_mean, a.hi_mean, b.lo_mean, b.hi_mean),
+        hi_mean: pb_mul_corners_hi(a.lo_mean, a.hi_mean, b.lo_mean, b.hi_mean),
+        variance: pb_mul_variance(a, b),
+        confidence: pb_decay(pb_min_i64(a.confidence, b.confidence)),
+    }
+}
+
+// Division: undefined if denominator p-box straddles zero. Conservative
+// fallback: return vacuous, dropping confidence to zero. This is the
+// Knightian analogue of the M1 ck_div behavior.
+pub fn pb_div(a: &PBox, b: &PBox) -> PBox with Mut, Div, Panic {
+    if b.lo_mean <= 0.0 && b.hi_mean >= 0.0 {
+        return pb_vacuous()
+    }
+    // Reciprocal of a positive-or-negative p-box is monotone-decreasing
+    // in magnitude; the safe extension is to bound by 1/lo and 1/hi
+    // (with sign flip if both negative).
+    let r_lo = 1.0 / b.hi_mean
+    let r_hi = 1.0 / b.lo_mean
+    let recip = PBox {
+        lo_mean: pb_min(r_lo, r_hi),
+        hi_mean: pb_max(r_lo, r_hi),
+        variance: b.variance / (b.lo_mean * b.lo_mean * b.hi_mean * b.hi_mean),
+        confidence: b.confidence,
+    }
+    pb_mul(a, &recip)
+}
+
+// ============================================================================
+// PARENTHESIZATION INVARIANCE — connects to
+// HYPER_UNCERTAINTY_PARENTHESIZATION_REPORT.md
+//
+// For the *trace* (total) of the variance, octonion multiplication is
+// parenthesization-invariant. The Sounio specialisation: under p-box
+// addition (which is associative), the total dispersion is bracket-
+// invariant; under p-box multiplication, dispersion is bracket-
+// dependent for asymmetric p-boxes (consistent with the sedenion case
+// in the report).
+//
+// `pb_project_band(p, q)` returns a directional projection of the
+// p-box onto a unit-direction-like scalar `q`, providing the same
+// "directional readout" lever the report identifies.
+// ============================================================================
+
+pub fn pb_project_band(p: &PBox, q: f64) -> PBox {
+    if q >= 0.0 {
+        PBox {
+            lo_mean: q * p.lo_mean,
+            hi_mean: q * p.hi_mean,
+            variance: q * q * p.variance,
+            confidence: p.confidence,
+        }
+    } else {
+        PBox {
+            lo_mean: q * p.hi_mean,
+            hi_mean: q * p.lo_mean,
+            variance: q * q * p.variance,
+            confidence: p.confidence,
+        }
+    }
+}
+
+// ============================================================================
+// FRÉCHET ENCLOSURE for monotone-in-each-arg functions
+// ============================================================================
+//
+// Theorem (M2.5 — math-review-validated 2026-04-30):
+//
+//   Let f : ℝ × ℝ → ℝ be C¹ on a closed rectangle R = [a, b] × [c, d]
+//   with strict monotonicity:  ∂f/∂x > 0,  ∂f/∂y < 0  on R.
+//   Then for every (x, y) ∈ R:
+//       f(a, d) ≤ f(x, y) ≤ f(b, c).
+//   Hence for any random variables (X, Y) supported on R with ANY
+//   joint distribution (any copula, any correlation, even unknown
+//   Knightian), the deterministic interval [f(a, d), f(b, c)]
+//   contains f(X, Y) almost surely.
+//
+//   This is the Fréchet (point-mass) outer enclosure for f over the
+//   rectangle and is sharp over the Fréchet class — achieved by the
+//   counter-monotonic copula (X = a, Y = d for the lower corner;
+//   X = b, Y = c for the upper).
+//
+// Refs:
+//   - Moore (1966) *Interval Analysis*, §3 — interval extension
+//   - Williamson & Downs (1990) — p-box arithmetic under unknown copula
+//   - Ferson, Joslyn, Helton (2003) "Constructing Probability Boxes
+//     and Dempster-Shafer Structures", Sandia SAND2002-4015, §3.2
+//   - Walley (1991) — natural extension for monotone functions
+//
+// Applicability: vancomycin Cmin satisfies the hypotheses for all
+// physiological (Vc, CL, D, τ) > 0, so the corner enumeration in
+// stdlib/clinical/vancomycin_pbpk.sio's `predict_cmin_knightian`
+// is *already* Fréchet-sound for the joint (Vc, CL) distribution
+// regardless of correlation. The `pb_apply2_monotone_inc_dec`
+// wrapper below makes the soundness mechanism explicit and reusable
+// for other monotone-in-each-arg PBPK / engineering computations.
+
+// Apply f(x, y) over two PBoxes when f is INCREASING in x and
+// DECREASING in y. Returns a PBox enclosing f(X, Y) for every joint
+// distribution of (X, Y) with marginals lying in the input boxes.
+//
+// The enclosure is the Fréchet (point-mass) outer enclosure, sharp
+// for the counter-monotonic copula. For positive correlation between
+// X and Y (which would tighten the actual support of f(X, Y)) the
+// enclosure remains sound but strictly conservative; the conservatism
+// factor is typically ~2× to ~3× the true 95%-CI width for r ≈ +0.7
+// (per math-review 2026-04-30 Q4).
+pub fn pb_apply2_monotone_inc_dec(
+        f: fn(f64, f64) -> f64,
+        x: &PBox, y: &PBox) -> PBox with Mut, Div, Panic {
+    let lo = f(x.lo_mean, y.hi_mean)
+    let hi = f(x.hi_mean, y.lo_mean)
+    let lo_final = pb_min(lo, hi)
+    let hi_final = pb_max(lo, hi)
+    let var = pb_max(x.variance, y.variance)
+    let conf = pb_decay(pb_min_i64(x.confidence, y.confidence))
+    PBox { lo_mean: lo_final, hi_mean: hi_final, variance: var, confidence: conf }
+}
+
+// Symmetric variant: f INCREASING in x AND y. Sharp under co-monotonic
+// copula. Useful for sums-of-uncertain-positives.
+pub fn pb_apply2_monotone_inc_inc(
+        f: fn(f64, f64) -> f64,
+        x: &PBox, y: &PBox) -> PBox with Mut, Div, Panic {
+    let lo = f(x.lo_mean, y.lo_mean)
+    let hi = f(x.hi_mean, y.hi_mean)
+    let var = pb_max(x.variance, y.variance)
+    let conf = pb_decay(pb_min_i64(x.confidence, y.confidence))
+    PBox { lo_mean: lo, hi_mean: hi, variance: var, confidence: conf }
+}
+
+// Symmetric variant: f DECREASING in x AND y. Sharp under co-monotonic
+// copula on the reversed orientation.
+pub fn pb_apply2_monotone_dec_dec(
+        f: fn(f64, f64) -> f64,
+        x: &PBox, y: &PBox) -> PBox with Mut, Div, Panic {
+    let lo = f(x.hi_mean, y.hi_mean)
+    let hi = f(x.lo_mean, y.lo_mean)
+    let var = pb_max(x.variance, y.variance)
+    let conf = pb_decay(pb_min_i64(x.confidence, y.confidence))
+    PBox { lo_mean: lo, hi_mean: hi, variance: var, confidence: conf }
+}
+
+// ============================================================================
+// GATES — Knightian decision predicates
+// ============================================================================
+
+// True iff the entire p-box lies above `threshold`. Conservative:
+// a p-box that *might* dip below threshold is not safe.
+pub fn pb_strictly_above(p: &PBox, threshold: f64) -> bool {
+    p.lo_mean > threshold
+}
+
+// True iff the entire p-box lies below `threshold`.
+pub fn pb_strictly_below(p: &PBox, threshold: f64) -> bool {
+    p.hi_mean < threshold
+}
+
+// True iff the p-box lies entirely within [lo, hi]. Used for the
+// vancomycin Cmin gate: trough must be in [10, 20] mg/L AND
+// the Knightian band must not cross either boundary.
+pub fn pb_within(p: &PBox, lo: f64, hi: f64) -> bool {
+    p.lo_mean >= lo && p.hi_mean <= hi
+}
+
+pub fn pb_is_credible(p: &PBox, min_conf: i64) -> bool {
+    // Direct field compare restored after #1511 (confidence float-pollution fixed).
+    p.confidence >= min_conf
+}
+
+// ============================================================================
+// SELF-TEST main()
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    // Lift Knowledge<f64>: GUM-only equivalence
+    let g = pb_from_knowledge(15.0, 0.25, 920)
+    if pb_gap(&g) != 0.0 {
+        println("LIFT FAIL")
+        return 1
+    }
+
+    // Knightian band: vancomycin trough between 13.5 and 14.9 mg/L,
+    // assay variance 0.04, confidence 920
+    let trough = pb_new(13.5, 14.9, 0.04, 920)
+
+    // Therapeutic window check: 10..20 mg/L
+    if pb_within(&trough, 10.0, 20.0) {
+        println("THERAPEUTIC")
+    } else {
+        println("OUT_OF_RANGE")
+    }
+
+    // Add a small bias correction
+    let bias = pb_new(0.0 - 0.1, 0.1, 0.001, 950)
+    let corrected = pb_add(&trough, &bias)
+    println(pb_lo_mean(&corrected))
+    println(pb_hi_mean(&corrected))
+
+    // Scaling by half-life adjustment
+    let halflife_factor = pb_new(0.95, 1.05, 0.0001, 850)
+    let projected = pb_mul(&corrected, &halflife_factor)
+    println(pb_lo_mean(&projected))
+    println(pb_hi_mean(&projected))
+
+    // Final gate
+    let safe = pb_within(&projected, 10.0, 20.0) && pb_is_credible(&projected, 800)
+    if safe {
+        println("PRESCRIBE_SAFE")
+    } else {
+        println("REFUSE_KNIGHTIAN")
+    }
+
+    // M2.5 — Fréchet enclosure smoke (monotone-in-each-arg).
+    // f(x, y) = x - y is increasing in x, decreasing in y.
+    // For X ∈ [1, 3], Y ∈ [10, 20]: corner enclosure = [1-20, 3-10] = [-19, -7].
+    let xa = pb_new(1.0, 3.0, 0.1, 900)
+    let yb = pb_new(10.0, 20.0, 0.5, 900)
+    let z = pb_apply2_monotone_inc_dec(pb_smoke_inc_dec, &xa, &yb)
+    if pb_lo_mean(&z) == 0.0 - 19.0 && pb_hi_mean(&z) == 0.0 - 7.0 {
+        println("FRECHET_OK")
+    } else {
+        println("FRECHET_FAIL")
+    }
+    0
+}
+
+// Smoke helper for the Fréchet enclosure self-test (above).
+fn pb_smoke_inc_dec(x: f64, y: f64) -> f64 {
+    x - y
+}

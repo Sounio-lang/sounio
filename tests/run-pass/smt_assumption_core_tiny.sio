@@ -1,0 +1,178 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: Tiny assumption-core checker smoke for SAT/UNSAT assumption APIs
+
+// Self-contained semantic mirror for the theorem::smt assumption-core API.
+// Base formula: x OR y. Assumptions {-x, -y} are a sufficient UNSAT core,
+// while either assumption alone is not.
+
+fn lit_ok(lit: i64, x: i64, y: i64) -> i64 {
+    if lit == 1 { return x }
+    if lit == 0 - 1 {
+        if x == 0 { return 1 }
+        return 0
+    }
+    if lit == 2 { return y }
+    if lit == 0 - 2 {
+        if y == 0 { return 1 }
+        return 0
+    }
+    return 0
+}
+
+fn sat_with_assumptions(a0: i64, a1: i64, a2: i64, n: i64) -> i64 {
+    var x: i64 = 0
+    while x <= 1 {
+        var y: i64 = 0
+        while y <= 1 {
+            var ok: i64 = 1
+            if x == 0 && y == 0 { ok = 0 }
+            if n >= 1 {
+                if lit_ok(a0, x, y) == 0 { ok = 0 }
+            }
+            if n >= 2 {
+                if lit_ok(a1, x, y) == 0 { ok = 0 }
+            }
+            if n >= 3 {
+                if lit_ok(a2, x, y) == 0 { ok = 0 }
+            }
+            if ok == 1 { return 1 }
+            y = y + 1
+        }
+        x = x + 1
+    }
+    return 0
+}
+
+fn assumption_at(idx: i64) -> i64 {
+    if idx == 0 { return 0 - 1 }
+    if idx == 1 { return 0 - 2 }
+    return 0
+}
+
+fn check_core(c0: i64, c1: i64, c2: i64, n_core: i64) -> i64 {
+    if n_core < 0 { return 0 }
+    if n_core > 3 { return 0 }
+    if n_core >= 1 {
+        if c0 < 0 || c0 > 1 { return 0 }
+    }
+    if n_core >= 2 {
+        if c1 < 0 || c1 > 1 { return 0 }
+        if c1 == c0 { return 0 }
+    }
+    if n_core >= 3 {
+        if c2 < 0 || c2 > 1 { return 0 }
+        if c2 == c0 || c2 == c1 { return 0 }
+    }
+
+    let a0 = assumption_at(c0)
+    let a1 = assumption_at(c1)
+    let a2 = assumption_at(c2)
+    if sat_with_assumptions(a0, a1, a2, n_core) == 0 { return 1 }
+    return 0
+}
+
+fn lit_abs(lit: i64) -> i64 {
+    if lit < 0 { return 0 - lit }
+    return lit
+}
+
+fn encode_lit(lit: i64) -> i64 {
+    if lit == 0 { return 0 }
+    if lit > 0 { return 2 * lit }
+    return 2 * lit_abs(lit) + 1
+}
+
+fn smt_core_mix(acc: i64, value: i64, salt: i64) -> i64 {
+    return ((acc * 16777619) + value + salt) % 1000000007
+}
+
+fn base_formula_fingerprint() -> i64 {
+    var acc: i64 = 37
+    acc = smt_core_mix(acc, 2, 503) // var count
+    acc = smt_core_mix(acc, 1, 503) // clause count
+    acc = smt_core_mix(acc, 1, 503) // clause id
+    acc = smt_core_mix(acc, 2, 503) // clause length
+    acc = smt_core_mix(acc, encode_lit(1), 503)
+    acc = smt_core_mix(acc, encode_lit(2), 503)
+    return acc
+}
+
+fn assumptions_fingerprint(formula_fp: i64, a0: i64, a1: i64, a2: i64, n_assumptions: i64) -> i64 {
+    if formula_fp < 0 { return 0 - 1 }
+    if n_assumptions < 0 { return 0 - 1 }
+    if n_assumptions > 3 { return 0 - 1 }
+
+    var acc: i64 = 43
+    acc = smt_core_mix(acc, formula_fp, 557)
+    acc = smt_core_mix(acc, n_assumptions, 557)
+    if n_assumptions >= 1 { acc = smt_core_mix(acc, encode_lit(a0), 557) }
+    if n_assumptions >= 2 { acc = smt_core_mix(acc, encode_lit(a1), 557) }
+    if n_assumptions >= 3 { acc = smt_core_mix(acc, encode_lit(a2), 557) }
+    return acc
+}
+
+fn core_fingerprint(assumptions_fp: i64, c0: i64, c1: i64, c2: i64, n_core: i64) -> i64 {
+    if assumptions_fp < 0 { return 0 - 1 }
+    if check_core(c0, c1, c2, n_core) == 0 { return 0 - 1 }
+
+    var acc: i64 = 47
+    acc = smt_core_mix(acc, assumptions_fp, 601)
+    acc = smt_core_mix(acc, n_core, 601)
+    if n_core >= 1 { acc = smt_core_mix(acc, c0, 601) }
+    if n_core >= 2 { acc = smt_core_mix(acc, c1, 601) }
+    if n_core >= 3 { acc = smt_core_mix(acc, c2, 601) }
+    return acc
+}
+
+fn unsat_core_bundle_valid(formula_fp: i64, assumptions_fp: i64, core_fp: i64,
+                           solver_result: i64, core_ok: i64) -> i64 {
+    if formula_fp != base_formula_fingerprint() { return 0 }
+    if assumptions_fp != assumptions_fingerprint(formula_fp, 0 - 1, 0 - 2, 0, 2) { return 0 }
+    if core_fp != core_fingerprint(assumptions_fp, 0, 1, 0, 2) { return 0 }
+    if solver_result != 0 { return 0 }
+    if core_ok != 1 { return 0 }
+    return 1
+}
+
+fn unsat_core_bundle_fingerprint(formula_fp: i64, assumptions_fp: i64, core_fp: i64,
+                                 solver_result: i64, core_size: i64, core_ok: i64) -> i64 {
+    if core_size != 2 { return 0 - 1 }
+    if unsat_core_bundle_valid(formula_fp, assumptions_fp, core_fp, solver_result, core_ok) == 0 { return 0 - 1 }
+
+    var acc: i64 = 53
+    acc = smt_core_mix(acc, formula_fp, 647)
+    acc = smt_core_mix(acc, assumptions_fp, 647)
+    acc = smt_core_mix(acc, core_fp, 647)
+    acc = smt_core_mix(acc, solver_result, 647)
+    acc = smt_core_mix(acc, core_size, 647)
+    acc = smt_core_mix(acc, core_ok, 647)
+    return acc
+}
+
+fn main() -> i64 {
+    let formula_fp: i64 = base_formula_fingerprint()
+    let assumptions_fp: i64 = assumptions_fingerprint(formula_fp, 0 - 1, 0 - 2, 0, 2)
+    let core_fp: i64 = core_fingerprint(assumptions_fp, 0, 1, 0, 2)
+
+    if sat_with_assumptions(0, 0, 0, 0) != 1 { return 1 }
+    if sat_with_assumptions(0 - 1, 0, 0, 1) != 1 { return 2 }
+    if sat_with_assumptions(0 - 2, 0, 0, 1) != 1 { return 3 }
+    if sat_with_assumptions(0 - 1, 0 - 2, 0, 2) != 0 { return 4 }
+
+    if check_core(0, 1, 0, 2) != 1 { return 5 }
+    if check_core(0, 0, 0, 1) != 0 { return 6 }
+    if check_core(1, 0, 0, 1) != 0 { return 7 }
+    if check_core(0, 0, 0, 2) != 0 { return 8 }
+    if check_core(2, 0, 0, 1) != 0 { return 9 }
+    if formula_fp != 796206516 { return 10 }
+    if assumptions_fp != 106325289 { return 11 }
+    if core_fp != 666359709 { return 12 }
+    if unsat_core_bundle_valid(formula_fp, assumptions_fp, core_fp, 0, 1) != 1 { return 13 }
+    if unsat_core_bundle_fingerprint(formula_fp, assumptions_fp, core_fp, 0, 2, 1) != 923659833 { return 14 }
+    if assumptions_fingerprint(formula_fp, 0 - 1, 0, 0, 1) == assumptions_fp { return 15 }
+    if core_fingerprint(assumptions_fp, 0, 0, 0, 2) != (0 - 1) { return 16 }
+    if unsat_core_bundle_valid(formula_fp, assumptions_fp, core_fp, 1, 1) != 0 { return 17 }
+    if unsat_core_bundle_fingerprint(formula_fp, assumptions_fp, core_fp, 0, 1, 1) != (0 - 1) { return 18 }
+    return 0
+}

@@ -1,0 +1,386 @@
+// ============================================================================
+// PARTON SHOWER & HADRONIZATION
+// ============================================================================
+//
+// LO DGLAP splitting kernels, Sudakov form factors, parton shower evolution
+// via the veto algorithm, Lund string fragmentation, and cluster hadronization.
+//
+// References:
+// - Ellis, Stirling, Webber, "QCD and Collider Physics" (1996)
+// - Sjöstrand et al., "An Introduction to PYTHIA 8.2" (2015)
+// - Andersson, "The Lund Model" (1998)
+
+module particle_physics::parton_shower
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_add, lorentz_sub, lorentz_scale, lorentz_dot}
+use particle_physics::sm_params::{mass_pion_charged, mass_pion_neutral, mass_kaon_charged, mass_proton}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+fn sqrt_f64(x: f64) -> f64 { sqrt(x) }
+fn exp_f64(x: f64) -> f64 { exp(x) }
+fn ln_f64(x: f64) -> f64 { log(x) }
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// QCD color factors
+pub fn cf() -> f64 { 4.0 / 3.0 }
+pub fn ca() -> f64 { 3.0 }
+pub fn tf() -> f64 { 0.5 }
+
+// ============================================================================
+// DGLAP LO SPLITTING KERNELS (regular parts)
+// ============================================================================
+
+/// Quark → quark + gluon splitting kernel (regular part, no + prescription).
+/// P_qq(x) = C_F * (1 + x^2) / (1 - x)
+pub fn p_qq_regular(x: f64) -> f64 with Div {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    cf() * (1.0 + x * x) / (1.0 - x)
+}
+
+/// Gluon → quark + anti-quark splitting kernel.
+/// P_qg(x) = T_F * (x^2 + (1-x)^2)
+pub fn p_qg(x: f64) -> f64 {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    let tf = tf()
+    tf * (x * x + (1.0 - x) * (1.0 - x))
+}
+
+/// Quark → gluon + quark splitting kernel (from gluon parent).
+/// P_gq(x) = C_F * (1 + (1-x)^2) / x
+pub fn p_gq(x: f64) -> f64 with Div {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    cf() * (1.0 + (1.0 - x) * (1.0 - x)) / x
+}
+
+/// Gluon → gluon + gluon splitting kernel (regular part).
+/// P_gg(x) = 2 C_A * (x/(1-x) + (1-x)/x + x(1-x))
+pub fn p_gg_regular(x: f64) -> f64 with Div {
+    if x <= 0.0 || x >= 1.0 { return 0.0 }
+    let ca_val = ca()
+    2.0 * ca_val * (x / (1.0 - x) + (1.0 - x) / x + x * (1.0 - x))
+}
+
+/// Sum of splitting kernels weighted by flavor multiplicities.
+/// For a quark: P_q = P_qq + P_qg
+/// For a gluon: P_g = P_gq * n_f + P_gg
+pub fn p_sum_quark(x: f64) -> f64 with Div {
+    p_qq_regular(x) + p_qg(x)
+}
+
+pub fn p_sum_gluon(x: f64, n_f: i64) -> f64 with Div {
+    p_gg_regular(x) + (n_f as f64) * p_gq(x)
+}
+
+// ============================================================================
+// SUDAKOV FORM FACTOR
+// ============================================================================
+
+/// Sudakov form factor for no-emission probability.
+///
+/// Δ(t) = exp( -∫_{t0}^{t} dt' ∫ dz (α_s / (2π)) P(z) )
+///
+/// # Parameters
+/// - `alpha_s`: Strong coupling at the shower scale.
+/// - `t`: Shower evolution variable (e.g., pT² or angular variable).
+/// - `t0`: Cutoff scale.
+/// - `is_gluon`: Whether the splitting parton is a gluon.
+/// - `n_f`: Number of active flavors.
+///
+/// # Returns
+/// No-emission probability Δ(t).
+pub fn sudakov_form_factor(alpha_s: f64, t: f64, t0: f64, is_gluon: bool, n_f: i64) -> f64 with Div {
+    if t <= t0 || alpha_s <= 0.0 { return 1.0 }
+    // Approximate: Δ ≈ exp( - (α_s / (2π)) * C * log(t/t0) )
+    // where C = C_F for quarks, C_A for gluons
+    let c = if is_gluon { ca() } else { cf() }
+    let log_ratio = ln_f64(t / t0)
+    let exponent = 0.0 - (alpha_s / (2.0 * 3.141592653589793)) * c * log_ratio
+    exp_f64(exponent)
+}
+
+/// Overestimate of the splitting kernel for the veto algorithm.
+/// Uses the soft/collinear limit: P(z) < C / (z(1-z))
+pub fn splitting_overestimate(z: f64, is_gluon: bool) -> f64 with Div {
+    if z <= 1e-8 || z >= 1.0 - 1e-8 { return 1e12 }
+    let c = if is_gluon { ca() } else { cf() }
+    c / (z * (1.0 - z))
+}
+
+// ============================================================================
+// PARTON SHOWER EVOLUTION (Veto Algorithm)
+// ============================================================================
+
+/// Parton shower emission record.
+pub struct ShowerEmission {
+    pub z: f64,
+    pub t: f64,
+    pub is_gluon_emission: bool,
+}
+
+/// Generate a single shower emission using the veto algorithm.
+///
+/// # Parameters
+/// - `t_max`: Maximum evolution scale.
+/// - `t_cut`: Infrared cutoff.
+/// - `alpha_s`: Strong coupling.
+/// - `is_gluon`: Whether the emitter is a gluon.
+/// - `rng_seed`: Seed for RNG.
+///
+/// # Returns
+/// Emission record. z = 0 and t = 0 if no emission occurred.
+pub fn generate_emission(t_max: f64, t_cut: f64, alpha_s: f64, is_gluon: bool, rng_seed: i64) -> ShowerEmission with Mut, Div {
+    seed_shower_rng(rng_seed)
+    generate_emission_internal(t_max, t_cut, alpha_s, is_gluon)
+}
+
+fn generate_emission_internal(t_max: f64, t_cut: f64, alpha_s: f64, is_gluon: bool) -> ShowerEmission with Mut, Div {
+    if t_max <= t_cut || alpha_s <= 0.0 {
+        return ShowerEmission { z: 0.0, t: 0.0, is_gluon_emission: false }
+    }
+
+    let pi = 3.141592653589793
+    let c = if is_gluon { ca() } else { cf() }
+    let alpha_factor = alpha_s / (2.0 * pi)
+
+    // Overestimate integral: ∫ dz C/(z(1-z)) ≈ 2C * ln((1-z_cut)/z_cut)
+    let z_cut = 1e-6
+    let p_over_int = 2.0 * c * ln_f64((1.0 - z_cut) / z_cut)
+
+    // Generate t using the overestimate
+    // P(no emission between t and t+dt) = exp(-alpha_factor * p_over_int * dt/t)
+    // t = t_cut * (t_max/t_cut)^u
+    let u = rand_shower_uniform()
+    let t = t_cut * exp_f64(u * ln_f64(t_max / t_cut))
+
+    if t >= t_max {
+        return ShowerEmission { z: 0.0, t: 0.0, is_gluon_emission: false }
+    }
+
+    // Generate z using the overestimate distribution
+    // z = z_cut * ((1-z_cut)/z_cut)^v
+    let v = rand_shower_uniform()
+    let z = z_cut * exp_f64(v * ln_f64((1.0 - z_cut) / z_cut))
+
+    // Veto: accept with probability P_actual(z) / P_over(z)
+    let p_actual = if is_gluon {
+        p_sum_gluon(z, 5)
+    } else {
+        p_sum_quark(z)
+    }
+    let p_over = splitting_overestimate(z, is_gluon)
+
+    let accept_prob = if p_over > 0.0 { p_actual / p_over } else { 0.0 }
+    if rand_shower_uniform() < accept_prob && accept_prob <= 1.0 {
+        ShowerEmission { z: z, t: t, is_gluon_emission: is_gluon }
+    } else {
+        // Vetoed — try again from t
+        generate_emission_internal(t, t_cut, alpha_s, is_gluon)
+    }
+}
+
+// ============================================================================
+// LUND STRING FRAGMENTATION
+// ============================================================================
+
+/// Lund fragmentation parameters.
+pub struct LundParams {
+    pub a: f64,   // fragmentation function parameter
+    pub b: f64,   // fragmentation function parameter (GeV^-2)
+    pub kappa: f64, // string tension (GeV^2)
+}
+
+pub fn lund_params_default() -> LundParams {
+    LundParams { a: 0.68, b: 0.98, kappa: 0.18 }
+}
+
+/// Fragmentation function f(z) for Lund string model.
+/// f(z) ∝ z^{-1} (1-z)^a exp(-b m_perp^2 / z)
+pub fn lund_fragmentation_function(z: f64, m_perp: f64, params: LundParams) -> f64 with Div {
+    if z <= 0.0 || z >= 1.0 || m_perp <= 0.0 { return 0.0 }
+    let a = params.a
+    let b = params.b
+    let m2 = m_perp * m_perp
+    let pi = 3.141592653589793
+    // Normalized approximately by the peak
+    let peak_z = sqrt_f64(b * m2)
+    if peak_z > 0.9 { return 0.0 }
+    let norm = peak_z * exp_f64(0.0 - a * ln_f64(1.0 - peak_z) + b * m2 / peak_z)
+    if norm <= 0.0 { return 0.0 }
+    (1.0 / z) * exp_f64(a * ln_f64(1.0 - z) - b * m2 / z) / norm
+}
+
+/// Generate a hadron from a string segment using the Lund model.
+/// Simplified: samples z from the Lund fragmentation function.
+pub fn lund_generate_fragment(z: f64, m_hadron: f64, px: f64, py: f64) -> LorentzVector with Div {
+    let pz = 0.0 // Simplified: longitudinal momentum from string
+    let e = sqrt_f64(m_hadron * m_hadron + px * px + py * py + pz * pz)
+    lorentz_new(e, px, py, pz)
+}
+
+// ============================================================================
+// CLUSTER HADRONIZATION
+// ============================================================================
+
+/// Cluster hadronization: decay a colorless cluster into two hadrons.
+///
+/// # Parameters
+/// - `m_cluster`: Cluster mass (GeV).
+/// - `m1`, `m2`: Hadron masses (GeV).
+/// - `px`, `py`, `pz`: Cluster momentum (GeV).
+/// - `h1_out`, `h2_out`: Output 4-momenta.
+pub fn cluster_decay_two_body(m_cluster: f64, m1: f64, m2: f64, px: f64, py: f64, pz: f64, h1_out: &!LorentzVector, h2_out: &!LorentzVector) with Mut, Div {
+    if m_cluster <= m1 + m2 {
+        h1_out.t = m1; h1_out.x = 0.0; h1_out.y = 0.0; h1_out.z = 0.0
+        h2_out.t = m2; h2_out.x = 0.0; h2_out.y = 0.0; h2_out.z = 0.0
+        return
+    }
+    let e_total = sqrt_f64(m_cluster * m_cluster + px * px + py * py + pz * pz)
+    let p_cm = sqrt_f64((m_cluster * m_cluster - (m1 + m2) * (m1 + m2)) * (m_cluster * m_cluster - (m1 - m2) * (m1 - m2))) / (2.0 * m_cluster)
+
+    // Isotropic decay in cluster rest frame
+    let costheta = 2.0 * rand_shower_uniform() - 1.0
+    let sintheta = sqrt_f64(1.0 - costheta * costheta)
+    let phi = 2.0 * 3.141592653589793 * rand_shower_uniform()
+
+    let px1_rf = p_cm * sintheta * cos_f64(phi)
+    let py1_rf = p_cm * sintheta * sin_f64(phi)
+    let pz1_rf = p_cm * costheta
+    let e1_rf = sqrt_f64(p_cm * p_cm + m1 * m1)
+
+    let px2_rf = 0.0 - px1_rf
+    let py2_rf = 0.0 - py1_rf
+    let pz2_rf = 0.0 - pz1_rf
+    let e2_rf = sqrt_f64(p_cm * p_cm + m2 * m2)
+
+    // Boost back to lab frame (simplified: assume cluster is at rest if px=py=pz=0)
+    if px == 0.0 && py == 0.0 && pz == 0.0 {
+        h1_out.t = e1_rf; h1_out.x = px1_rf; h1_out.y = py1_rf; h1_out.z = pz1_rf
+        h2_out.t = e2_rf; h2_out.x = px2_rf; h2_out.y = py2_rf; h2_out.z = pz2_rf
+        return
+    }
+
+    // General boost
+    let beta_x = px / e_total
+    let beta_y = py / e_total
+    let beta_z = pz / e_total
+    let beta2 = beta_x * beta_x + beta_y * beta_y + beta_z * beta_z
+    let gamma = 1.0 / sqrt_f64(1.0 - beta2)
+
+    let beta_dot_p1 = beta_x * px1_rf + beta_y * py1_rf + beta_z * pz1_rf
+    let factor1 = gamma * (gamma * beta_dot_p1 / (1.0 + gamma) - e1_rf)
+    let h1 = lorentz_new(
+        gamma * (e1_rf - beta_dot_p1),
+        px1_rf + factor1 * beta_x,
+        py1_rf + factor1 * beta_y,
+        pz1_rf + factor1 * beta_z,
+    )
+
+    let beta_dot_p2 = beta_x * px2_rf + beta_y * py2_rf + beta_z * pz2_rf
+    let factor2 = gamma * (gamma * beta_dot_p2 / (1.0 + gamma) - e2_rf)
+    h2_out.t = gamma * (e2_rf - beta_dot_p2)
+    h2_out.x = px2_rf + factor2 * beta_x
+    h2_out.y = py2_rf + factor2 * beta_y
+    h2_out.z = pz2_rf + factor2 * beta_z
+}
+
+// ============================================================================
+// HADRON TABLE
+// ============================================================================
+
+/// Simple hadron record.
+pub struct Hadron {
+    pub pdg_code: i64,
+    pub mass: f64,
+    pub width: f64,
+    pub charge: i64,
+    pub spin: i64,
+}
+
+pub fn hadron_pion_plus() -> Hadron {
+    Hadron { pdg_code: 211, mass: 0.13957, width: 0.0, charge: 1, spin: 0 }
+}
+pub fn hadron_pion_minus() -> Hadron {
+    Hadron { pdg_code: -211, mass: 0.13957, width: 0.0, charge: -1, spin: 0 }
+}
+pub fn hadron_pion_0() -> Hadron {
+    Hadron { pdg_code: 111, mass: 0.13498, width: 0.0, charge: 0, spin: 0 }
+}
+pub fn hadron_kaon_plus() -> Hadron {
+    Hadron { pdg_code: 321, mass: 0.49368, width: 0.0, charge: 1, spin: 0 }
+}
+pub fn hadron_proton() -> Hadron {
+    Hadron { pdg_code: 2212, mass: 0.93827, width: 0.0, charge: 1, spin: 1 }
+}
+pub fn hadron_neutron() -> Hadron {
+    Hadron { pdg_code: 2112, mass: 0.93957, width: 0.0, charge: 0, spin: 1 }
+}
+
+// ============================================================================
+// ALPHA_S FOR SHOWER
+// ============================================================================
+
+/// One-loop α_s for shower evolution.
+pub fn alpha_s_shower(t: f64, lambda_qcd: f64, n_f: i64) -> f64 with Div {
+    if t <= lambda_qcd * lambda_qcd { return 1.0 }
+    let b0 = (11.0 * ca() - 2.0 * (n_f as f64) * tf()) / (12.0 * 3.141592653589793)
+    1.0 / (b0 * ln_f64(t / (lambda_qcd * lambda_qcd)))
+}
+
+// ============================================================================
+// SHOWER RNG (separate seed from monte_carlo)
+// ============================================================================
+
+var SHOWER_RNG_SEED: i64 = 987654321
+
+pub fn seed_shower_rng(seed: i64) with Mut { SHOWER_RNG_SEED = seed }
+
+pub fn rand_shower_uniform() -> f64 with Mut {
+    SHOWER_RNG_SEED = (1103515245 * SHOWER_RNG_SEED + 12345) % 2147483648
+    (SHOWER_RNG_SEED as f64) / 2147483648.0
+}
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x4 = x2 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0 - x2 * x4 / 720.0
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    y - y * x2 / 6.0 + y * x4 / 120.0 - y * x6 / 5040.0
+}
+
+// ============================================================================
+// MULTIPLICITY PREDICTIONS
+// ============================================================================
+
+/// Mean charged multiplicity from a parton shower.
+/// Simplified: ⟨n_ch⟩ ≈ a + b * exp(c * sqrt(log(s/Λ²)))
+/// where a, b, c are phenomenological parameters.
+pub fn mean_charged_multiplicity(sqrt_s: f64, a: f64, b: f64, c: f64, lambda: f64) -> f64 with Div {
+    if sqrt_s <= lambda { return 0.0 }
+    let y = ln_f64(sqrt_s * sqrt_s / (lambda * lambda))
+    a + b * exp_f64(c * sqrt_f64(y))
+}
+
+/// Energy evolution of mean multiplicity at LEP energies.
+/// PDG parameterization: ⟨n_ch⟩ ≈ 2.2 + 0.4 * exp(1.2 * sqrt(ln(s/Λ²)))
+pub fn mean_charged_multiplicity_lep(sqrt_s: f64) -> f64 with Div {
+    mean_charged_multiplicity(sqrt_s, 2.2, 0.4, 1.2, 0.2)
+}

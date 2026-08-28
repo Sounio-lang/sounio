@@ -1,0 +1,359 @@
+// Graphics Filter — Image processing kernels (blur, sharpen, edge detection)
+//
+// Convolution-based filters for Surface and TiledSurface.
+// All filters use direct array writes for performance.
+
+use graphics::drawing::{Color}
+use graphics::surface::{Surface, surface_new}
+use graphics::tile::{TiledSurface, tiled_surface_new, tiled_clear}
+
+// ============================================================================
+// BOX BLUR
+// ============================================================================
+
+// 3×3 box blur kernel (all ones, divide by 9).
+pub fn blur_box_raster(s: Surface, radius: i64) -> Surface with Mut, Panic, Div {
+    var out = s
+    if radius <= 0 { return out }
+    let w = out.width
+    let h = out.height
+    if w <= 0 || h <= 0 { return out }
+
+    // Temporary output surface
+    var tmp = surface_new(w, h)
+
+    var y: i64 = 0
+    while y < h {
+        var x: i64 = 0
+        while x < w {
+            var sum_r: i64 = 0
+            var sum_g: i64 = 0
+            var sum_b: i64 = 0
+            var count: i64 = 0
+
+            var dy = 0 - radius
+            while dy <= radius {
+                var dx = 0 - radius
+                while dx <= radius {
+                    let sx = x + dx
+                    let sy = y + dy
+                    if sx >= 0 && sx < w && sy >= 0 && sy < h {
+                        let idx = sy * w + sx
+                        sum_r = sum_r + out.r[idx]
+                        sum_g = sum_g + out.g[idx]
+                        sum_b = sum_b + out.b[idx]
+                        count = count + 1
+                    }
+                    dx = dx + 1
+                }
+                dy = dy + 1
+            }
+
+            let idx = y * w + x
+            if count > 0 {
+                tmp.r[idx] = sum_r / count
+                tmp.g[idx] = sum_g / count
+                tmp.b[idx] = sum_b / count
+            } else {
+                tmp.r[idx] = out.r[idx]
+                tmp.g[idx] = out.g[idx]
+                tmp.b[idx] = out.b[idx]
+            }
+            tmp.a[idx] = out.a[idx]
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // Copy tmp back to out
+    var cy: i64 = 0
+    while cy < h {
+        var cx: i64 = 0
+        while cx < w {
+            let idx = cy * w + cx
+            out.r[idx] = tmp.r[idx]
+            out.g[idx] = tmp.g[idx]
+            out.b[idx] = tmp.b[idx]
+            out.a[idx] = tmp.a[idx]
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    out
+}
+
+// ============================================================================
+// GAUSSIAN BLUR (3×3)
+// ============================================================================
+
+// 3×3 Gaussian kernel: [1,2,1; 2,4,2; 1,2,1] / 16
+pub fn blur_gaussian3_raster(s: Surface) -> Surface with Mut, Panic, Div {
+    var out = s
+    let w = out.width
+    let h = out.height
+    if w <= 0 || h <= 0 { return out }
+
+    var tmp = surface_new(w, h)
+
+    var y: i64 = 1
+    while y < h - 1 {
+        var x: i64 = 1
+        while x < w - 1 {
+            var sum_r: i64 = 0
+            var sum_g: i64 = 0
+            var sum_b: i64 = 0
+
+            // Row -1
+            let idx1 = (y - 1) * w + (x - 1)
+            let idx2 = (y - 1) * w + x
+            let idx3 = (y - 1) * w + (x + 1)
+            sum_r = sum_r + out.r[idx1] + 2 * out.r[idx2] + out.r[idx3]
+            sum_g = sum_g + out.g[idx1] + 2 * out.g[idx2] + out.g[idx3]
+            sum_b = sum_b + out.b[idx1] + 2 * out.b[idx2] + out.b[idx3]
+
+            // Row 0
+            let idx4 = y * w + (x - 1)
+            let idx5 = y * w + x
+            let idx6 = y * w + (x + 1)
+            sum_r = sum_r + 2 * out.r[idx4] + 4 * out.r[idx5] + 2 * out.r[idx6]
+            sum_g = sum_g + 2 * out.g[idx4] + 4 * out.g[idx5] + 2 * out.g[idx6]
+            sum_b = sum_b + 2 * out.b[idx4] + 4 * out.b[idx5] + 2 * out.b[idx6]
+
+            // Row +1
+            let idx7 = (y + 1) * w + (x - 1)
+            let idx8 = (y + 1) * w + x
+            let idx9 = (y + 1) * w + (x + 1)
+            sum_r = sum_r + out.r[idx7] + 2 * out.r[idx8] + out.r[idx9]
+            sum_g = sum_g + out.g[idx7] + 2 * out.g[idx8] + out.g[idx9]
+            sum_b = sum_b + out.b[idx7] + 2 * out.b[idx8] + out.b[idx9]
+
+            let idx = y * w + x
+            tmp.r[idx] = sum_r / 16
+            tmp.g[idx] = sum_g / 16
+            tmp.b[idx] = sum_b / 16
+            tmp.a[idx] = out.a[idx]
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // Copy tmp back
+    var cy: i64 = 0
+    while cy < h {
+        var cx: i64 = 0
+        while cx < w {
+            let idx = cy * w + cx
+            out.r[idx] = tmp.r[idx]
+            out.g[idx] = tmp.g[idx]
+            out.b[idx] = tmp.b[idx]
+            out.a[idx] = tmp.a[idx]
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    out
+}
+
+// ============================================================================
+// SHARPEN
+// ============================================================================
+
+// 3×3 sharpen kernel: [0,-1,0; -1,5,-1; 0,-1,0]
+pub fn sharpen_raster(s: Surface) -> Surface with Mut, Panic, Div {
+    var out = s
+    let w = out.width
+    let h = out.height
+    if w <= 0 || h <= 0 { return out }
+
+    var tmp = surface_new(w, h)
+
+    var y: i64 = 1
+    while y < h - 1 {
+        var x: i64 = 1
+        while x < w - 1 {
+            let idx = y * w + x
+            let idx_n = (y - 1) * w + x
+            let idx_s = (y + 1) * w + x
+            let idx_w = y * w + (x - 1)
+            let idx_e = y * w + (x + 1)
+
+            var r = 5 * out.r[idx] - out.r[idx_n] - out.r[idx_s] - out.r[idx_w] - out.r[idx_e]
+            var g = 5 * out.g[idx] - out.g[idx_n] - out.g[idx_s] - out.g[idx_w] - out.g[idx_e]
+            var b = 5 * out.b[idx] - out.b[idx_n] - out.b[idx_s] - out.b[idx_w] - out.b[idx_e]
+
+            if r < 0 { r = 0 } else if r > 255 { r = 255 }
+            if g < 0 { g = 0 } else if g > 255 { g = 255 }
+            if b < 0 { b = 0 } else if b > 255 { b = 255 }
+
+            tmp.r[idx] = r
+            tmp.g[idx] = g
+            tmp.b[idx] = b
+            tmp.a[idx] = out.a[idx]
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // Copy tmp back
+    var cy: i64 = 0
+    while cy < h {
+        var cx: i64 = 0
+        while cx < w {
+            let idx = cy * w + cx
+            out.r[idx] = tmp.r[idx]
+            out.g[idx] = tmp.g[idx]
+            out.b[idx] = tmp.b[idx]
+            out.a[idx] = tmp.a[idx]
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    out
+}
+
+// ============================================================================
+// SOBEL EDGE DETECTION
+// ============================================================================
+
+// Sobel X kernel: [-1,0,1; -2,0,2; -1,0,1]
+// Sobel Y kernel: [-1,-2,-1; 0,0,0; 1,2,1]
+// Output: grayscale magnitude clamped to 0..255
+pub fn edge_sobel_raster(s: Surface) -> Surface with Mut, Panic, Div {
+    var out = s
+    let w = out.width
+    let h = out.height
+    if w <= 0 || h <= 0 { return out }
+
+    var tmp = surface_new(w, h)
+
+    var y: i64 = 1
+    while y < h - 1 {
+        var x: i64 = 1
+        while x < w - 1 {
+            // Sobel X
+            let idx_nw = (y - 1) * w + (x - 1)
+            let idx_n = (y - 1) * w + x
+            let idx_ne = (y - 1) * w + (x + 1)
+            let idx_w = y * w + (x - 1)
+            let idx_e = y * w + (x + 1)
+            let idx_sw = (y + 1) * w + (x - 1)
+            let idx_s = (y + 1) * w + x
+            let idx_se = (y + 1) * w + (x + 1)
+
+            // Compute grayscale values for neighbors
+            let nw = out.r[idx_nw] + out.g[idx_nw] + out.b[idx_nw]
+            let n = out.r[idx_n] + out.g[idx_n] + out.b[idx_n]
+            let ne = out.r[idx_ne] + out.g[idx_ne] + out.b[idx_ne]
+            let ww = out.r[idx_w] + out.g[idx_w] + out.b[idx_w]
+            let ee = out.r[idx_e] + out.g[idx_e] + out.b[idx_e]
+            let sw = out.r[idx_sw] + out.g[idx_sw] + out.b[idx_sw]
+            let s = out.r[idx_s] + out.g[idx_s] + out.b[idx_s]
+            let se = out.r[idx_se] + out.g[idx_se] + out.b[idx_se]
+
+            let gx = (ne + 2 * ee + se) - (nw + 2 * ww + sw)
+            let gy = (sw + 2 * s + se) - (nw + 2 * n + ne)
+
+            var mag = gx
+            if gx < 0 { mag = 0 - gx }
+            var magy = gy
+            if gy < 0 { magy = 0 - gy }
+            mag = mag + magy
+            mag = mag / 3  // scale down since we summed 3 channels
+            if mag > 255 { mag = 255 }
+
+            let idx = y * w + x
+            tmp.r[idx] = mag
+            tmp.g[idx] = mag
+            tmp.b[idx] = mag
+            tmp.a[idx] = 255
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // Copy tmp back
+    var cy: i64 = 0
+    while cy < h {
+        var cx: i64 = 0
+        while cx < w {
+            let idx = cy * w + cx
+            out.r[idx] = tmp.r[idx]
+            out.g[idx] = tmp.g[idx]
+            out.b[idx] = tmp.b[idx]
+            out.a[idx] = tmp.a[idx]
+            cx = cx + 1
+        }
+        cy = cy + 1
+    }
+    out
+}
+
+// ============================================================================
+// TILED SURFACE VERSIONS
+// ============================================================================
+
+// Apply a filter to each tile independently.
+// For box blur, radius is clamped to tile dimensions.
+pub fn tiled_blur_box_raster(ts: TiledSurface, radius: i64) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    if radius <= 0 { return out }
+
+    let n = out.tiles_wide * out.tiles_high
+    if n > 0 { out.tile0 = blur_box_raster(out.tile0, radius) }
+    if n > 1 { out.tile1 = blur_box_raster(out.tile1, radius) }
+    if n > 2 { out.tile2 = blur_box_raster(out.tile2, radius) }
+    if n > 3 { out.tile3 = blur_box_raster(out.tile3, radius) }
+    if n > 4 { out.tile4 = blur_box_raster(out.tile4, radius) }
+    if n > 5 { out.tile5 = blur_box_raster(out.tile5, radius) }
+    if n > 6 { out.tile6 = blur_box_raster(out.tile6, radius) }
+    if n > 7 { out.tile7 = blur_box_raster(out.tile7, radius) }
+    if n > 8 { out.tile8 = blur_box_raster(out.tile8, radius) }
+    out
+}
+
+pub fn tiled_blur_gaussian3_raster(ts: TiledSurface) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    let n = out.tiles_wide * out.tiles_high
+    if n > 0 { out.tile0 = blur_gaussian3_raster(out.tile0) }
+    if n > 1 { out.tile1 = blur_gaussian3_raster(out.tile1) }
+    if n > 2 { out.tile2 = blur_gaussian3_raster(out.tile2) }
+    if n > 3 { out.tile3 = blur_gaussian3_raster(out.tile3) }
+    if n > 4 { out.tile4 = blur_gaussian3_raster(out.tile4) }
+    if n > 5 { out.tile5 = blur_gaussian3_raster(out.tile5) }
+    if n > 6 { out.tile6 = blur_gaussian3_raster(out.tile6) }
+    if n > 7 { out.tile7 = blur_gaussian3_raster(out.tile7) }
+    if n > 8 { out.tile8 = blur_gaussian3_raster(out.tile8) }
+    out
+}
+
+pub fn tiled_sharpen_raster(ts: TiledSurface) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    let n = out.tiles_wide * out.tiles_high
+    if n > 0 { out.tile0 = sharpen_raster(out.tile0) }
+    if n > 1 { out.tile1 = sharpen_raster(out.tile1) }
+    if n > 2 { out.tile2 = sharpen_raster(out.tile2) }
+    if n > 3 { out.tile3 = sharpen_raster(out.tile3) }
+    if n > 4 { out.tile4 = sharpen_raster(out.tile4) }
+    if n > 5 { out.tile5 = sharpen_raster(out.tile5) }
+    if n > 6 { out.tile6 = sharpen_raster(out.tile6) }
+    if n > 7 { out.tile7 = sharpen_raster(out.tile7) }
+    if n > 8 { out.tile8 = sharpen_raster(out.tile8) }
+    out
+}
+
+pub fn tiled_edge_sobel_raster(ts: TiledSurface) -> TiledSurface with Mut, Panic, Div {
+    var out = ts
+    let n = out.tiles_wide * out.tiles_high
+    if n > 0 { out.tile0 = edge_sobel_raster(out.tile0) }
+    if n > 1 { out.tile1 = edge_sobel_raster(out.tile1) }
+    if n > 2 { out.tile2 = edge_sobel_raster(out.tile2) }
+    if n > 3 { out.tile3 = edge_sobel_raster(out.tile3) }
+    if n > 4 { out.tile4 = edge_sobel_raster(out.tile4) }
+    if n > 5 { out.tile5 = edge_sobel_raster(out.tile5) }
+    if n > 6 { out.tile6 = edge_sobel_raster(out.tile6) }
+    if n > 7 { out.tile7 = edge_sobel_raster(out.tile7) }
+    if n > 8 { out.tile8 = edge_sobel_raster(out.tile8) }
+    out
+}
+
+fn main() -> i32 with IO { 0 }

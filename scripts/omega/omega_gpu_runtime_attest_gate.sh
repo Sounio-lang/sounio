@@ -198,6 +198,20 @@ try:
 except Exception:
     tests = []
 
+# CUDA toolchain provenance (ptxas/nvcc/driver). Captured on the remote GPU host
+# by omega_capture_toolchain.sh and threaded in via OMEGA_GPU_TOOLCHAIN_JSON.
+# Empty/not_captured when the host was unreachable — keeps the artifact comparable
+# across toolkit upgrades (ptxas codegen + cuBLAS baselines change across versions).
+import os
+try:
+    toolchain = json.loads(os.environ.get("OMEGA_GPU_TOOLCHAIN_JSON", "") or "{}")
+    if not isinstance(toolchain, dict):
+        toolchain = {}
+except Exception:
+    toolchain = {}
+if not toolchain:
+    toolchain = {"capture_status": "not_captured"}
+
 parity_obj = {}
 if parity_artifact_path is not None and parity_artifact_path.exists():
     try:
@@ -255,6 +269,7 @@ obj = {
     },
     "signature_valid": signature_valid,
     "gpu_info": gpu_info,
+    "toolchain": toolchain,
     "target_profiles": target_profiles,
     "native_lanes": native_lanes,
     "binary_provenance": {
@@ -345,6 +360,14 @@ if ! ssh "${SSH_OPTS[@]}" "${GPU_USER}@${GPU_HOST}" "echo ok" >/dev/null 2>&1; t
   emit_status_json "not_run" "ssh_unreachable" "false" "" "" "{}" "[\"ssh_unreachable\"]" "[]" "" "$NONCE"
   echo "omega_gpu_runtime_attest_gate: status=not_run reason=ssh_unreachable report=$OUT_JSON"
   exit 0
+fi
+
+# Host is reachable → capture CUDA toolchain provenance (ptxas/nvcc/driver) on the
+# GPU host so the attestation records WHICH toolchain produced/ran the artifacts.
+# Best-effort: failure leaves OMEGA_GPU_TOOLCHAIN_JSON unset (→ capture_status=not_captured).
+TOOLCHAIN_CAPTURE_OUT="$(SSH_OPTS='-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no' "$ROOT_DIR/scripts/omega/omega_capture_toolchain.sh" "${GPU_USER}@${GPU_HOST}" 2>/dev/null || true)"
+if [[ -n "$TOOLCHAIN_CAPTURE_OUT" ]]; then
+  export OMEGA_GPU_TOOLCHAIN_JSON="$TOOLCHAIN_CAPTURE_OUT"
 fi
 
 if [[ "$REMOTE_BOOTSTRAP" == "1" ]]; then

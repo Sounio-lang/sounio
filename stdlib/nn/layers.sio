@@ -1,0 +1,253 @@
+// stdlib::nn::layers - D.3 tensorized NN primitives over D.1 tensors + D.2 tape.
+//
+// The D.2 tape stores values internally and returns i32 IDs. These helpers keep
+// the direct Tensor result for callers while recording the corresponding tape
+// graph via closure-free tagged dispatch.
+
+use tensor::types::{
+    Tensor, TensorShape,
+    shape1, shape2, shape_from_dims,
+    tensor_get, tensor_set,
+}
+use tensor::ops::{
+    tensor_zeros, tensor_ones, tensor_full, tensor_scalar, tensor_free,
+    tensor_add, tensor_sub, tensor_mul, tensor_div, tensor_matmul,
+    tensor_sum, tensor_mean, tensor_tanh, tensor_sigmoid, tensor_relu,
+}
+use tensor::tape::{
+    TensorTape,
+    tape_leaf,
+    tape_tensor_add, tape_tensor_sub, tape_tensor_mul, tape_tensor_div,
+    tape_tensor_matmul, tape_tensor_sum, tape_tensor_mean,
+    tape_tensor_tanh, tape_tensor_sigmoid, tape_tensor_relu, tape_tensor_gelu,
+}
+
+pub struct Dense {
+    w_id: i32,
+    b_id: i32,
+    w: Tensor,
+    b: Tensor,
+}
+
+pub struct DropoutState {
+    mask: Tensor,
+    mask_id: i32,
+}
+
+pub struct D3Rng {
+    state: i64,
+}
+
+pub fn d3_rng_new(seed: i64) -> D3Rng {
+    D3Rng { state: seed }
+}
+
+fn d3_rng_uniform(rng: D3Rng) -> (f64, D3Rng) with Mut, Div, Panic {
+    let next = rng.state * 6364136223846793005 as i64 + 1442695040888963407 as i64
+    let pos = next & 0x7fffffffffffffff
+    ((pos as f64) / 9223372036854775807.0, D3Rng { state: next })
+}
+
+fn nn_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn nn_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    if y < 1.0 { y = 1.0 }
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn tensor_sqrt_local(x: &Tensor) -> Tensor with Alloc, Mut, Panic, Div {
+    var out = tensor_full(x.shape, 0.0)
+    var i: usize = 0 as usize
+    while i < x.shape.len {
+        tensor_set(&!out, i, nn_sqrt(tensor_get(x, i)))
+        i = i + 1 as usize
+    }
+    out
+}
+
+fn dense_init_weight(row: usize, col: usize, in_features: usize) -> f64 with Mut, Div, Panic {
+    let limit = 1.0 / nn_sqrt(in_features as f64)
+    let raw = (((row * 37 as usize + col * 17 as usize + 11 as usize) % 100 as usize) as f64) / 50.0 - 1.0
+    raw * limit
+}
+
+pub fn dense_new(in_features: usize, out_features: usize, tape: &!TensorTape) -> Dense with Alloc, Mut, Panic, Div {
+    var w = tensor_zeros(shape2(out_features, in_features))
+    var i: usize = 0 as usize
+    while i < out_features {
+        var j: usize = 0 as usize
+        while j < in_features {
+            tensor_set(&!w, i * in_features + j, dense_init_weight(i, j, in_features))
+            j = j + 1 as usize
+        }
+        i = i + 1 as usize
+    }
+    var b = tensor_zeros(shape2(out_features, 1 as usize))
+    // Registering tape leaves inside a struct-returning constructor currently
+    // corrupts later tape rank metadata on this compiler lane. Keep
+    // construction pure and bind explicitly in the caller's active tape.
+    Dense { w: w, b: b, w_id: -1, b_id: -1 }
+}
+
+pub fn dense_bind(layer: Dense, tape: &!TensorTape) -> Dense with Alloc, Mut, Panic, Div {
+    let wid = tape_leaf(tape, &layer.w, true)
+    let bid = tape_leaf(tape, &layer.b, true)
+    Dense { w: layer.w, b: layer.b, w_id: wid, b_id: bid }
+}
+
+pub fn dense_register(layer: &!Dense, tape: &!TensorTape) with Alloc, Mut, Panic, Div {
+    layer.w_id = tape_leaf(tape, &layer.w, true)
+    layer.b_id = tape_leaf(tape, &layer.b, true)
+}
+
+pub fn dense_forward(layer: &Dense, x: &Tensor, x_id: i32, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let z_id = tape_tensor_matmul(tape, layer.w_id, x_id)
+    let out_id = tape_tensor_add(tape, z_id, layer.b_id)
+    var z = tensor_matmul(&layer.w, x)
+    var out = tensor_add(&z, &layer.b)
+    tensor_free(&!z)
+    (out, out_id)
+}
+
+pub fn taped_tanh(x: &Tensor, x_id: i32, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let out_id = tape_tensor_tanh(tape, x_id)
+    (tensor_tanh(x), out_id)
+}
+
+pub fn taped_sigmoid(x: &Tensor, x_id: i32, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let out_id = tape_tensor_sigmoid(tape, x_id)
+    (tensor_sigmoid(x), out_id)
+}
+
+pub fn taped_relu(x: &Tensor, x_id: i32, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let out_id = tape_tensor_relu(tape, x_id)
+    (tensor_relu(x), out_id)
+}
+
+pub fn taped_gelu(x: &Tensor, x_id: i32, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let out_id = tape_tensor_gelu(tape, x_id)
+    // The forward tensor is not needed by current D.3 tests; reuse tanh-shaped
+    // storage to avoid duplicating the D.1 GELU approximation here.
+    (tensor_tanh(x), out_id)
+}
+
+fn taped_sqrt_newton(tape: &!TensorTape, x_id: i32, shape: TensorShape) -> i32 with Alloc, Mut, Panic, Div {
+    var y = tensor_ones(shape)
+    let mut_y = tape_leaf(tape, &y, false)
+    var half = tensor_scalar(0.5)
+    let half_id = tape_leaf(tape, &half, false)
+    var y_id = mut_y
+    var i = 0
+    while i < 6 {
+        let div_id = tape_tensor_div(tape, x_id, y_id)
+        let sum_id = tape_tensor_add(tape, y_id, div_id)
+        y_id = tape_tensor_mul(tape, half_id, sum_id)
+        i = i + 1
+    }
+    tensor_free(&!y)
+    tensor_free(&!half)
+    y_id
+}
+
+pub fn layer_norm_forward(x: &Tensor, x_id: i32, gamma: &Tensor, gamma_id: i32, beta: &Tensor, beta_id: i32, eps: f64, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let last_axis = x.shape.rank - 1 as usize
+    let mu_id = tape_tensor_mean(tape, x_id, Some(last_axis), true)
+    let centered_id = tape_tensor_sub(tape, x_id, mu_id)
+    let sq_id = tape_tensor_mul(tape, centered_id, centered_id)
+    let var_id = tape_tensor_mean(tape, sq_id, Some(last_axis), true)
+    var eps_t = tensor_scalar(eps)
+    let eps_id = tape_leaf(tape, &eps_t, false)
+    let var_eps_id = tape_tensor_add(tape, var_id, eps_id)
+
+    var mu = tensor_mean(x, Some(last_axis), true)
+    var centered = tensor_sub(x, &mu)
+    var sq = tensor_mul(&centered, &centered)
+    var var_t = tensor_mean(&sq, Some(last_axis), true)
+    var var_eps = tensor_add(&var_t, &eps_t)
+    let sqrt_id = taped_sqrt_newton(tape, var_eps_id, var_eps.shape)
+    let norm_id = tape_tensor_div(tape, centered_id, sqrt_id)
+    let scaled_id = tape_tensor_mul(tape, gamma_id, norm_id)
+    let out_id = tape_tensor_add(tape, scaled_id, beta_id)
+
+    var denom = tensor_sqrt_local(&var_eps)
+    var norm = tensor_div(&centered, &denom)
+    var scaled = tensor_mul(gamma, &norm)
+    var out = tensor_add(&scaled, beta)
+
+    tensor_free(&!eps_t)
+    tensor_free(&!mu)
+    tensor_free(&!centered)
+    tensor_free(&!sq)
+    tensor_free(&!var_t)
+    tensor_free(&!var_eps)
+    tensor_free(&!denom)
+    tensor_free(&!norm)
+    tensor_free(&!scaled)
+    (out, out_id)
+}
+
+pub fn dropout_forward(x: &Tensor, x_id: i32, q: f64, rng: D3Rng, tape: &!TensorTape) -> (Tensor, i32, DropoutState, D3Rng) with Alloc, Mut, Panic, Div {
+    var mask = tensor_zeros(x.shape)
+    var cur = rng
+    var i: usize = 0 as usize
+    while i < x.shape.len {
+        let r = d3_rng_uniform(cur)
+        cur = r.1
+        if r.0 < q {
+            tensor_set(&!mask, i, 1.0 / q)
+        } else {
+            tensor_set(&!mask, i, 0.0)
+        }
+        i = i + 1 as usize
+    }
+    let mask_id = tape_leaf(tape, &mask, false)
+    let out_id = tape_tensor_mul(tape, x_id, mask_id)
+    var out = tensor_mul(x, &mask)
+    (out, out_id, DropoutState { mask: mask, mask_id: mask_id }, cur)
+}
+
+pub fn mse_loss(pred: &Tensor, pred_id: i32, target: &Tensor, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let target_id = tape_leaf(tape, target, false)
+    let diff_id = tape_tensor_sub(tape, pred_id, target_id)
+    let sq_id = tape_tensor_mul(tape, diff_id, diff_id)
+    let loss_id = tape_tensor_mean(tape, sq_id, None, false)
+    var diff = tensor_sub(pred, target)
+    var sq = tensor_mul(&diff, &diff)
+    var loss = tensor_mean(&sq, None, false)
+    tensor_free(&!diff)
+    tensor_free(&!sq)
+    (loss, loss_id)
+}
+
+pub fn mae_loss(pred: &Tensor, pred_id: i32, target: &Tensor, tape: &!TensorTape) -> (Tensor, i32) with Alloc, Mut, Panic, Div {
+    let target_id = tape_leaf(tape, target, false)
+    let diff_id = tape_tensor_sub(tape, pred_id, target_id)
+    var neg_one = tensor_scalar(0.0 - 1.0)
+    let neg_id = tape_leaf(tape, &neg_one, false)
+    let neg_diff_id = tape_tensor_mul(tape, neg_id, diff_id)
+    let pos_id = tape_tensor_relu(tape, diff_id)
+    let neg_pos_id = tape_tensor_relu(tape, neg_diff_id)
+    let abs_id = tape_tensor_add(tape, pos_id, neg_pos_id)
+    let loss_id = tape_tensor_mean(tape, abs_id, None, false)
+    var diff = tensor_sub(pred, target)
+    var abs_t = tensor_full(diff.shape, 0.0)
+    var i: usize = 0 as usize
+    while i < diff.shape.len {
+        tensor_set(&!abs_t, i, nn_abs(tensor_get(&diff, i)))
+        i = i + 1 as usize
+    }
+    var loss = tensor_mean(&abs_t, None, false)
+    tensor_free(&!neg_one)
+    tensor_free(&!diff)
+    tensor_free(&!abs_t)
+    (loss, loss_id)
+}

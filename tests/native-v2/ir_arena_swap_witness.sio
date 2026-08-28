@@ -1,0 +1,116 @@
+// #1649: ir_arena_swap_slots must exchange the WHOLE slot, arguments included.
+//
+// This primitive exists because a swap written as two stores cannot carry call
+// arguments: the first store overwrites the very slot the second must read its
+// arguments from. It was written from scratch and, until this witness, nothing
+// in the evidence demonstrably executed it -- its two call sites are ocp_licm's
+// hoist and the sink-loads swap, which need specific IR shapes.
+//
+// Every lane is given a DISTINCT value on each side, so a swap that forgets one
+// lane fails on that lane rather than passing by coincidence. The name and the
+// argument binding are the two that a naive field-by-field swap would miss, and
+// they are exactly the ones the primitive was created for.
+
+use ir::ir::*
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if ir_instr_arena_init() != IR_ARENA_OK { print("INIT_FAIL\n")  return 10 }
+
+    var f = ir_empty_function()
+    if ir_function_alloc_region(&! f) != IR_ARENA_OK { print("ALLOC_FAIL\n")  return 11 }
+
+    // The name and argument bindings are set through the arena API rather than
+    // through IrInstr fields. Building a real Option<Box<IrRegList>> here does
+    // not survive -- the list arrives empty and ir_arena_store_args latches
+    // INVALID, correctly, since a positive arg_count with no list is exactly the
+    // shape it refuses. Box is unreliable in a composed witness anyway; the seal
+    // witness SIGSEGVs on Box::new of a large value. What the swap must carry is
+    // the BINDING (ARG_BASE / ARG_COUNT / NAME_OFF / NAME_LEN), and that is what
+    // this sets up and checks.
+    var a = ir_instr_new(IrOpcode::IrCall)
+    a.dst = 1
+    a.src1 = 2
+    a.src2 = 3
+    a.imm_i64 = 44
+    a.imm_f64 = 0.5
+    a.label_id = 5
+    a.fn_id = 6
+    a.field_idx = 7
+    a.imm_flags = 8
+
+    var b = ir_instr_new(IrOpcode::IrBinOp)
+    b.dst = 21
+    b.src1 = 22
+    b.src2 = 23
+    b.imm_i64 = 64
+    b.imm_f64 = 1.5
+    b.label_id = 25
+    b.fn_id = 26
+    b.field_idx = 27
+    b.imm_flags = 28
+
+    let at0 = ir_region_slot_w(f.region, (0))
+    let at1 = ir_region_slot_w(f.region, (1))
+    ir_arena_store(at0, a)
+    ir_arena_store(at1, b)
+
+    let empty: Option<Box<IrRegList>> = None
+    ir_arena_put_name(at0, ir_name_from_bytes(97, 97, 0, 0, 2))
+    ir_arena_put_args(at0, empty, 2)
+    IR_A_ARG_COUNT[at0 as usize] = 2
+    IR_ARG_POOL[(IR_A_ARG_BASE[at0 as usize] + 0) as usize] = 10
+    IR_ARG_POOL[(IR_A_ARG_BASE[at0 as usize] + 1) as usize] = 11
+
+    ir_arena_put_name(at1, ir_name_from_bytes(98, 98, 0, 0, 2))
+    ir_arena_put_args(at1, empty, 1)
+    IR_A_ARG_COUNT[at1 as usize] = 1
+    IR_ARG_POOL[(IR_A_ARG_BASE[at1 as usize] + 0) as usize] = 30
+
+    if ir_instr_arena_violation() { print("SETUP_VIOLATED\n")  return 12 }
+
+    // Arguments must be resolvable BEFORE the swap, or the test proves nothing.
+    if ir_arena_arg_at(at0, 0) != 10 { print("PRE_A_ARG0\n")  return 13 }
+    if ir_arena_arg_at(at0, 1) != 11 { print("PRE_A_ARG1\n")  return 14 }
+    if ir_arena_arg_at(at1, 0) != 30 { print("PRE_B_ARG0\n")  return 15 }
+
+    ir_arena_swap_slots(at0, at1)
+    if ir_instr_arena_violation() { print("SWAP_VIOLATED\n")  return 16 }
+
+    // ---- slot 0 must now hold what slot 1 held ------------------------------
+    let g0 = ir_arena_load(at0)
+    if g0.dst != 21 { print("DST_NOT_SWAPPED\n")  return 20 }
+    if g0.src1 != 22 { print("SRC1_NOT_SWAPPED\n")  return 21 }
+    if g0.src2 != 23 { print("SRC2_NOT_SWAPPED\n")  return 22 }
+    if g0.imm_i64 != 64 { print("IMM_I64_NOT_SWAPPED\n")  return 23 }
+    if g0.label_id != 25 { print("LABEL_NOT_SWAPPED\n")  return 24 }
+    if g0.fn_id != 26 { print("FN_ID_NOT_SWAPPED\n")  return 25 }
+    if g0.field_idx != 27 { print("FIELD_IDX_NOT_SWAPPED\n")  return 26 }
+    if g0.imm_flags != 28 { print("IMM_FLAGS_NOT_SWAPPED\n")  return 27 }
+    if g0.op != IrOpcode::IrBinOp { print("OP_NOT_SWAPPED\n")  return 28 }
+    if g0.arg_count != 1 { print("ARG_COUNT_NOT_SWAPPED\n")  return 29 }
+
+    // ---- slot 1 must now hold what slot 0 held ------------------------------
+    let g1 = ir_arena_load(at1)
+    if g1.dst != 1 { print("REVERSE_DST\n")  return 30 }
+    if g1.imm_i64 != 44 { print("REVERSE_IMM\n")  return 31 }
+    if g1.op != IrOpcode::IrCall { print("REVERSE_OP\n")  return 32 }
+    if g1.arg_count != 2 { print("REVERSE_ARG_COUNT\n")  return 33 }
+
+    // ---- the two a two-store swap would lose: name and arguments -----------
+    let n0 = ir_arena_name(at0)
+    let n1 = ir_arena_name(at1)
+    if n0.len != 2 || n0.buf[0] != 98 { print("NAME_NOT_SWAPPED\n")  return 40 }
+    if n1.len != 2 || n1.buf[0] != 97 { print("REVERSE_NAME\n")  return 41 }
+
+    if ir_arena_arg_at(at0, 0) != 30 { print("ARGS_NOT_SWAPPED\n")  return 42 }
+    if ir_arena_arg_at(at1, 0) != 10 { print("REVERSE_ARG0\n")  return 43 }
+    if ir_arena_arg_at(at1, 1) != 11 { print("REVERSE_ARG1\n")  return 44 }
+
+    // A swap with itself must be a no-op, not a self-clobber.
+    ir_arena_swap_slots(at0, at0)
+    let same = ir_arena_load(at0)
+    if same.dst != 21 || ir_arena_arg_at(at0, 0) != 30 { print("SELF_SWAP_CLOBBERED\n")  return 45 }
+
+    print("IR_ARENA_SWAP_WITNESS_PASS\n")
+    0
+}

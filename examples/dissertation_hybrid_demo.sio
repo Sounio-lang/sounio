@@ -1,0 +1,296 @@
+//@ run-pass
+//@ expect-stdout: DEMO OK
+
+// examples/dissertation_hybrid_demo.sio
+// Rapamycin Hybrid PBPK — ISO 6σ Uncertainty Budget
+//
+// Integrates the four dissertation modules into a single GUM budget for
+// blood concentration of rapamycin at t=24h after a 6 mg IV bolus:
+//
+//   Module 1 — Mechanistic PBPK  (stdlib/darwin_pbpk/ml/hybrid_ode.sio)
+//   Module 2 — GNN inference     (stdlib/darwin_pbpk/ml/gnn_inference.sio)
+//   Module 3 — Rodgers-Rowland   (stdlib/darwin_pbpk/core/rodgers_rowland.sio)
+//   Module 4 — Hybrid ODE GUM    (hybrid_ode sigma_W neural correction)
+//
+// GUM budget shows contributions of each uncertainty source to σ(C_blood(24h)).
+// All computations are analytical (monoexponential PBPK approximation) to keep
+// the demo self-contained.
+//
+// Model: C(t) = C0 · exp(−k·t), k = CL·fu / Vd_eff
+//   Vd_eff = V_b + V_periph/kp_periph + V_brain/kp_brain + V_liver/kp_liver
+//   (14-tissue Vd_eff using literature Kp from rodgers_rowland.sio)
+//
+// Literature: Ferron 1997 (CL); Schreiber 1991 (fu); Lampen 1998 (kp_brain);
+//             Kahan 2001 (Vd); Vaidyanathan 2001 (logP); R-R 2006 (Kp model)
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn hd_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return hd_exp(x - 10.0) * hd_exp(10.0) }
+    if x < 0.0 - 20.0 { return 0.0 }
+    var s = 1.0
+    var t = 1.0
+    var i = 1
+    while i <= 20 {
+        t = t * x / (i as f64)
+        s = s + t
+        i = i + 1
+    }
+    s
+}
+
+fn hd_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 15 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn hd_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+// ============================================================================
+// RAPAMYCIN PHARMACOKINETIC PARAMETERS
+// ============================================================================
+
+fn pk_cl() -> f64  { 12.4 }    // L/h clearance (Ferron 1997)
+fn pk_fu() -> f64  { 0.08 }    // unbound fraction (Schreiber 1991)
+fn pk_dose() -> f64 { 6.0e6 }  // ng (6 mg IV bolus)
+fn pk_vb() -> f64  { 5.0 }     // L blood volume
+fn pk_vp() -> f64  { 50.0 }    // L peripheral (distribution cap)
+fn pk_vbr() -> f64 { 1.5 }     // L brain
+fn pk_vl() -> f64  { 1.5 }     // L liver (physiological)
+
+fn pk_kp_periph() -> f64 { 0.5 }    // peripheral:plasma
+fn pk_kp_brain() -> f64  { 0.08 }   // brain:plasma (Lampen 1998, P-gp efflux)
+fn pk_kp_liver() -> f64  { 8.0 }    // liver:plasma (Ferron 1997 implied, CYP3A4 site)
+
+// GUM parameter uncertainties
+fn u_cl() -> f64   { 7.4 }     // SD of CL (CV=60%, Ferron 1997)
+fn u_fu() -> f64   { 0.02 }    // SD of fu (Schreiber 1991)
+fn u_logP() -> f64 { 1.05 }    // SD of logP (CV=15%, Vaidyanathan 2001)
+
+// ============================================================================
+// MONOEXPONENTIAL PBPK MODEL
+// ============================================================================
+// C(t) = C0 · exp(−k·t)
+// k    = CL · fu / Vd_eff
+// Vd_eff = Vb + Vp/kp_p + Vbr/kp_br + Vl/kp_l  (representative 4-compartment)
+
+// 14-tissue Vd_eff (70 kg adult, literature Kp for rapamycin).
+// Dominant contributors: brain (1.45/0.08=18.1 L, P-gp BBB) and
+// adipose (15.0/0.3=50.0 L, capped distribution model).
+fn vd_eff() -> f64 {
+    5.0        // blood
+    + 0.1875   // liver   1.5/8.0
+    + 0.0775   // kidney  0.31/4.0
+    + 18.125   // brain   1.45/0.08  (BBB-limited)
+    + 0.08857  // heart   0.31/3.5
+    + 0.05     // lung    0.5/10.0
+    + 8.0      // muscle  28.0/3.5
+    + 50.0     // adipose 15.0/0.3   (capped)
+    + 0.28     // gut     1.4/5.0
+    + 1.85     // skin    3.7/2.0
+    + 5.2      // bone    7.8/1.5
+    + 0.03167  // spleen  0.19/6.0
+    + 0.0175   // pancreas 0.07/4.0
+    + 9.0      // other   4.5/0.5
+}
+
+// Σ V_i/Kp_i for non-blood tissues — used for coherent R-R logP GUM sum
+fn sum_v_over_kp() -> f64 {
+    0.1875 + 0.0775 + 18.125 + 0.08857 + 0.05
+    + 8.0 + 50.0 + 0.28 + 1.85 + 5.2
+    + 0.03167 + 0.0175 + 9.0
+}
+
+fn c24(cl: f64, fu: f64, vd: f64) -> f64 with Mut, Div, Panic {
+    let c0 = pk_dose() / (pk_vb() * 1000.0)   // ng/mL: 6e6 ng / 5000 mL
+    let k  = cl * fu / vd
+    c0 * hd_exp(0.0 - k * 24.0)
+}
+
+// ============================================================================
+// GUM SENSITIVITIES AT t=24h (analytical, first-order)
+// ============================================================================
+// All sensitivities computed at the nominal operating point (population mean PK).
+//
+// ∂C(t)/∂CL   = −(t·fu/Vd) · C(t)
+// ∂C(t)/∂fu   = −(t·CL/Vd) · C(t)
+// ∂C(t)/∂kp_i = +(t·CL·fu·V_i/kp_i²/Vd²) · C(t)  [Vd increases → k decreases]
+// ∂kp_i/∂logP = kp_i · ln(10)                       [R-R log-linear regime]
+// So: ∂C/∂logP via kp_i = +(t·CL·fu·V_i/kp_i²/Vd²)·(kp_i·ln10)·C(t)
+//                        = +(t·CL·fu·V_i·ln10/(kp_i·Vd²))·C(t)
+//
+// GNN contributions:
+//   fu_GNN_unc  = σ_fu from GNN forward pass  (= 0.000736 from module output)
+//   cl_GNN_unc  = σ_CL from GNN forward pass  (= 0.000009 L/h)
+//
+// Neural correction σ_W:
+//   From hybrid_ode: accumulated σ_blood(24h) ≈ σ_blood(48h) / sqrt(2) ≈ 16.9 ng/mL
+//   (σ_blood(48h) = 23.8 ng/mL from hybrid_ode run; σ scales as sqrt(t))
+
+fn gum_budget() with IO, Mut, Div, Panic {
+    let cl  = pk_cl()
+    let fu  = pk_fu()
+    let vd  = vd_eff()
+    let t   = 24.0          // h
+    let ln10 = 2.302585092994046
+
+    let c_ref = c24(cl, fu, vd)
+
+    // Sensitivity coefficients (∂C/∂param, in ng/mL per unit param)
+    let sens_cl  = (0.0 - t * fu / vd) * c_ref            // per L/h
+    let sens_fu  = (0.0 - t * cl / vd) * c_ref            // per dimensionless
+
+    // R-R 14-tissue aggregate — all Kp_i correlated via logP → coherent sum.
+    // u_C_rr = u_logP · ln10 · t · C · CL · fu · Σ(V_i/Kp_i) / Vd²
+    // (JCGM 100:2008 Eq 13 with ∂Kp_i/∂logP = Kp_i·ln10 for R-R log-linear regime)
+    let sv_kp = sum_v_over_kp()
+    let u_c_rr = u_logP() * ln10 * t * c_ref * cl * fu * sv_kp / (vd * vd)
+
+    // kp_brain contribution (independent: Lampen 1998 direct P-gp assay, SD=0.025,
+    // NOT logP-correlated — accounts for receptor-level uncertainty beyond R-R)
+    let kp_br = pk_kp_brain()
+    let v_brain = 1.45     // L brain, 70 kg adult
+    let sens_kp_brain = cl * fu * t * v_brain / (kp_br * kp_br * vd * vd) * c_ref
+    let u_kp_brain = 0.025
+    let u_c_kp_brain = hd_abs(sens_kp_brain) * u_kp_brain
+
+    // GNN fu uncertainty: from gnn_inference.sio module output (fu_unc=0.000736)
+    let fu_gnn_unc = 0.000736
+    let u_c_gnn_fu = hd_abs(sens_fu) * fu_gnn_unc
+
+    // GNN CL uncertainty: from gnn_inference.sio module output (cl_unc=0.000009)
+    let cl_gnn_unc = 0.000009
+    let u_c_gnn_cl = hd_abs(sens_cl) * cl_gnn_unc
+
+    // Neural correction σ_W: from hybrid_ode.sio (σ_blood at 24h ≈ 16.9 ng/mL)
+    // hybrid_ode accumulates σ_blood(48h)=23.8; scale by sqrt(24/48)=0.707
+    let u_c_neural = 23.8 * 0.707
+
+    // Mechanistic parameter contributions
+    let u_c_cl  = hd_abs(sens_cl) * u_cl()
+    let u_c_fu  = hd_abs(sens_fu) * u_fu()
+
+    // Combined GUM uncertainty (RSS of all independent components)
+    let combined_sq = u_c_cl * u_c_cl
+        + u_c_fu * u_c_fu
+        + u_c_rr * u_c_rr
+        + u_c_kp_brain * u_c_kp_brain
+        + u_c_gnn_fu * u_c_gnn_fu
+        + u_c_gnn_cl * u_c_gnn_cl
+        + u_c_neural * u_c_neural
+    let u_combined = hd_sqrt(combined_sq)
+
+    // Evidence-weighted confidence (weighted by variance fractions)
+    // Confidence scores from literature calibrations:
+    //   CL: 0.65 (Ferron 1997 n=24), fu: 0.72 (Schreiber 1991), R-R Kp: 0.70,
+    //   kp_brain: 0.63 (Lampen 1998+QTAP), GNN fu: 0.60, GNN CL: 0.60, neural: 0.60
+    let conf = if u_combined > 1.0e-12 {
+        let wt_cl   = u_c_cl * u_c_cl / combined_sq
+        let wt_fu   = u_c_fu * u_c_fu / combined_sq
+        let wt_rr   = u_c_rr * u_c_rr / combined_sq
+        let wt_kpbr = u_c_kp_brain * u_c_kp_brain / combined_sq
+        let wt_gnfu = u_c_gnn_fu * u_c_gnn_fu / combined_sq
+        let wt_gncl = u_c_gnn_cl * u_c_gnn_cl / combined_sq
+        let wt_neur = u_c_neural * u_c_neural / combined_sq
+        wt_cl*0.65 + wt_fu*0.72 + wt_rr*0.70 + wt_kpbr*0.63
+            + wt_gnfu*0.60 + wt_gncl*0.60 + wt_neur*0.60
+    } else {
+        0.0
+    }
+
+    println("=== Rapamycin Hybrid PBPK — ISO 6 Uncertainty Budget ===")
+    println("  Drug: Rapamycin (sirolimus) | Dose: 6 mg IV bolus | Output: C_blood(24h)")
+    println("")
+    print("  C_blood(24h) nominal = ")
+    print(c_ref)
+    println(" ng/mL  (monoexp, Vd_eff 14-comp)")
+    print("  Vd_eff = ")
+    print(vd)
+    println(" L")
+    println("")
+    println("  --- ISO Uncertainty Budget (GUM JCGM 100:2008) ---")
+
+    print("  Clearance CL (Ferron 1997)     : ")
+    print(u_c_cl)
+    print(" ng/mL  (")
+    print(u_c_cl * u_c_cl / combined_sq * 100.0)
+    println("%)")
+
+    print("  Plasma binding fu (Schreiber)  : ")
+    print(u_c_fu)
+    print(" ng/mL  (")
+    print(u_c_fu * u_c_fu / combined_sq * 100.0)
+    println("%)")
+
+    print("  Kp-tissues R-R logP (14 organs): ")
+    print(u_c_rr)
+    print(" ng/mL  (")
+    print(u_c_rr * u_c_rr / combined_sq * 100.0)
+    println("%)")
+
+    print("  Kp_brain (Lampen 1998, P-gp)   : ")
+    print(u_c_kp_brain)
+    print(" ng/mL  (")
+    print(u_c_kp_brain * u_c_kp_brain / combined_sq * 100.0)
+    println("%)")
+
+    print("  fu (GNN inference, σ_W=0.01)   : ")
+    print(u_c_gnn_fu)
+    print(" ng/mL  (")
+    print(u_c_gnn_fu * u_c_gnn_fu / combined_sq * 100.0)
+    println("%)")
+
+    print("  CL (GNN inference, σ_W=0.01)   : ")
+    print(u_c_gnn_cl)
+    print(" ng/mL  (")
+    print(u_c_gnn_cl * u_c_gnn_cl / combined_sq * 100.0)
+    println("%)")
+
+    print("  Neural correction (sigma_W=0.3) : ")
+    print(u_c_neural)
+    print(" ng/mL  (")
+    print(u_c_neural * u_c_neural / combined_sq * 100.0)
+    println("%)")
+
+    println("  --------------------------------------------------")
+    print("  Combined u(C_blood(24h))       : ")
+    print(u_combined)
+    println(" ng/mL")
+
+    print("  Evidence-weighted confidence   : ")
+    print(conf)
+    println("")
+
+    print("  Confidence gate (>0.50)        : ")
+    if conf > 0.5 {
+        println("PASS")
+    } else {
+        println("WARN (below 0.50)")
+    }
+
+    println("")
+    println("  --- Module provenance ---")
+    println("  CL, fu          : mechanistic PBPK priors (Ferron/Schreiber)")
+    println("  Kp (14 tissues) : Rodgers-Rowland (2006) logP coherent GUM, 14-comp Vd")
+    println("  Kp_brain        : Lampen (1998) in vitro P-gp assay")
+    println("  fu, CL GNN      : 3-layer dense GNN (25 RDKit features → {fu,CL,Vd})")
+    println("  Neural sigma_W  : Hybrid ODE (3-comp + 3->8->3 tanh correction, α=0.3)")
+}
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    gum_budget()
+    println("")
+    println("DEMO OK")
+    0
+}

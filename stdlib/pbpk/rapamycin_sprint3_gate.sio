@@ -1,0 +1,211 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// Dissertation Sprint 3 gate — ISO §E.2 uncertainty budget decomposition
+//
+// Validates:
+//   1. simulate_budget runs without error on 720h stent-only scenario
+//   2. AUC is positive and has positive std (uncertainty propagated)
+//   3. Cmax is positive; peak occurs after t=0
+//   4. Budget fractions are all in [0, 1]
+//   5. Budget fractions sum to 1.0 ± 0.05 (complete budget, GUM §E.2)
+//   6. Stent sources (krel + a0) dominate for stent-only delivery
+//   7. budget_dominant returns a valid index (0-4)
+//   8. budget_sum_ok gate fires correctly
+//   9. AUC relative uncertainty is reasonable (std/val < 1.0)
+//  10. Cmax std is non-negative; Cmax >= all recorded out_c values
+
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, rap2_params}
+use pbpk::rapamycin_budget::{simulate_budget, budget_dominant, budget_sum_ok}
+
+var SPR3_PASS: [i64; 2] = [0; 2]
+
+fn s3_chk(pass: bool, id: i64) with IO, Mut, Panic {
+    if pass {
+        SPR3_PASS[0] = SPR3_PASS[0] + 1
+    } else {
+        print("FAIL sprint3 #")
+        print_int(id)
+        print("\n")
+        SPR3_PASS[1] = SPR3_PASS[1] + 1
+    }
+}
+
+fn s3_near(a: f64, b: f64, tol: f64) -> bool {
+    let diff = a - b
+    let absd = if diff < 0.0 { 0.0 - diff } else { diff }
+    absd < tol
+}
+
+pub fn run_sprint3_gate() with IO, Mut, Div, Panic {
+    let p = rap2_params()
+
+    // ── Section 1: simulate_budget — stent-only 720h ─────────────────────────
+
+    var out_t   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_c   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_std = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                   0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_frac = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var auc      = [0.0, 0.0]
+    var cmax     = [0.0, 0.0, 0.0]
+
+    // Stent-only: no bolus dose, drug enters only via J_stent(t)
+    simulate_budget(720.0, 1.0, 0.0, 0.0, &p, 48,
+                    &!out_t, &!out_c, &!out_std,
+                    &!out_frac, &!auc, &!cmax)
+
+    // ── Section 2: AUC assertions ─────────────────────────────────────────────
+
+    // AUC > 0 (drug enters, so C_plasma integrates to positive)
+    s3_chk(auc[0] > 0.0, 1)
+
+    // AUC std > 0 (elution uncertainty propagates to AUC)
+    s3_chk(auc[1] > 0.0, 2)
+
+    // AUC std < AUC value (relative uncertainty < 100%)
+    s3_chk(auc[1] < auc[0], 3)
+
+    // AUC is bounded (stent delivers ≤ 0.4 mg total × 30h ~ 0.4·f_sys/Vc ~ 0.0001 mg·h/L)
+    // Very small: local delivery, f_sys=0.02, Vc=75L
+    s3_chk(auc[0] < 1.0, 4)
+
+    // ── Section 3: Cmax assertions ────────────────────────────────────────────
+
+    // Cmax > 0 (peak concentration reached)
+    s3_chk(cmax[0] > 0.0, 5)
+
+    // Cmax std >= 0
+    s3_chk(cmax[1] >= 0.0, 6)
+
+    // Cmax time > 0 (peak is not at t=0; stent delivers over time)
+    s3_chk(cmax[2] > 0.0, 7)
+
+    // Cmax time < 720h (peak occurs within simulation window)
+    s3_chk(cmax[2] < 720.0, 8)
+
+    // Cmax >= any recorded out_c value (Cmax is the true max)
+    s3_chk(cmax[0] >= out_c[10], 9)
+    s3_chk(cmax[0] >= out_c[24], 10)
+    s3_chk(cmax[0] >= out_c[47], 11)
+
+    // ── Section 4: budget fraction domain ────────────────────────────────────
+
+    // All fractions are non-negative
+    s3_chk(out_frac[0] >= 0.0, 12)    // ke
+    s3_chk(out_frac[1] >= 0.0, 13)    // k12
+    s3_chk(out_frac[2] >= 0.0, 14)    // k21
+    s3_chk(out_frac[3] >= 0.0, 15)    // krel
+    s3_chk(out_frac[4] >= 0.0, 16)    // a0
+
+    // All fractions are at most 1.0
+    s3_chk(out_frac[0] <= 1.0, 17)
+    s3_chk(out_frac[1] <= 1.0, 18)
+    s3_chk(out_frac[2] <= 1.0, 19)
+    s3_chk(out_frac[3] <= 1.0, 20)
+    s3_chk(out_frac[4] <= 1.0, 21)
+
+    // ── Section 5: budget completeness (GUM §E.2) ─────────────────────────────
+
+    // Fractions sum to 1.0 ± 0.05
+    // (Small deviation allowed: cross-compartment variance term g12²·V2 not in channels)
+    s3_chk(budget_sum_ok(&out_frac, 0.05), 22)
+
+    // Explicit sum check
+    let fsum = out_frac[0] + out_frac[1] + out_frac[2] + out_frac[3] + out_frac[4]
+    s3_chk(fsum > 0.95, 23)
+    s3_chk(fsum < 1.05, 24)
+
+    // ── Section 6: budget_sum_ok boundary behaviour ───────────────────────────
+
+    var tight_frac = [0.25, 0.25, 0.25, 0.25, 0.0]
+    // sum = 1.00, tol = 0.05 → should pass
+    s3_chk(budget_sum_ok(&tight_frac, 0.05), 25)
+
+    var bad_frac = [0.5, 0.5, 0.5, 0.0, 0.0]
+    // sum = 1.50, tol = 0.05 → should fail
+    s3_chk(budget_sum_ok(&bad_frac, 0.05) == false, 26)
+
+    // ── Section 7: budget composition — both stent and PK contribute ─────────
+
+    // At t=720h steady-state, systemic PK uncertainty (k12, ke) may exceed stent
+    // uncertainty because A1 has accumulated and k12 has ~40% relative uncertainty.
+    // Both source classes must contribute non-zero fractions.
+    let stent_share = out_frac[3] + out_frac[4]
+    let pk_share    = out_frac[0] + out_frac[1] + out_frac[2]
+    s3_chk(stent_share > 0.0, 27)
+    s3_chk(pk_share > 0.0, 28)
+
+    // Dominant source contributes at least 10% (non-trivial decomposition)
+    let dom = budget_dominant(&out_frac)
+    s3_chk(out_frac[dom] > 0.10, 29)
+
+    // ── Section 8: short simulation — stent dominates before drug accumulates ──
+
+    // Run 10h simulation: A1 is still near 0, so ke/k12/k21 terms (∝ A1²) are
+    // negligible. Stent elution uncertainty (krel, a0) must dominate early.
+    var out_t2   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_c2   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var out_std2 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var frac2 = [0.0, 0.0, 0.0, 0.0, 0.0]
+    var auc2  = [0.0, 0.0]
+    var cmax2 = [0.0, 0.0, 0.0]
+
+    simulate_budget(10.0, 1.0, 0.0, 0.0, &p, 10,
+                    &!out_t2, &!out_c2, &!out_std2,
+                    &!frac2, &!auc2, &!cmax2)
+
+    let stent_share2 = frac2[3] + frac2[4]
+    let pk_share2    = frac2[0] + frac2[1] + frac2[2]
+    // Early (10h): stent elution uncertainty dominates systemic PK uncertainty
+    s3_chk(stent_share2 > pk_share2, 30)
+
+    // ── Section 9: time-series sanity ─────────────────────────────────────────
+
+    // out_t[0] = 0 (initial recorded)
+    s3_chk(s3_near(out_t[0], 0.0, 0.001), 31)
+
+    // out_t is monotonically increasing
+    s3_chk(out_t[1] > out_t[0], 32)
+    s3_chk(out_t[24] > out_t[12], 33)
+
+    // std non-negative throughout recorded trajectory
+    s3_chk(out_std[0] >= 0.0, 34)
+    s3_chk(out_std[24] >= 0.0, 35)
+    s3_chk(out_std[47] >= 0.0, 36)
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    SPR3_PASS[0] = 0
+    SPR3_PASS[1] = 0
+    run_sprint3_gate()
+    if SPR3_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+        return 0
+    }
+    print("GATE FAIL\n")
+    1
+}

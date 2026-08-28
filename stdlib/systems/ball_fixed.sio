@@ -1,0 +1,1757 @@
+//! stdlib/systems/ball_fixed.sio
+//!
+//! ABI-safe fixed-point ball helpers for validated dynamical-system gates.
+//!
+//! Scope:
+//! - helper signatures stay in i64 so they do not cross the current source-level
+//!   i128 user-function ABI boundary;
+//! - centers may still be carried inline as i128/i256 by callers;
+//! - every radius operation uses an explicit outward rounding unit or status
+//!   check instead of relying on ambient floating-point behaviour.
+//!
+//! This is a staging layer for Lorenz-style validated integration, not yet a
+//! long-time shadowing theorem or a Taylor-model engine.
+
+use theorem::portfolio::*
+
+pub fn ball_fixed_abs64(x: i64) -> i64 {
+    if x < 0 { return 0 - x }
+    return x
+}
+
+pub fn ball_fixed_status_ok(radius: i64, scale: i64, limit: i64) -> i64 {
+    if radius < 0 { return 0 }
+    if scale <= 0 { return 0 }
+    if limit < 0 { return 0 }
+    if radius > limit { return 0 }
+    return 1
+}
+
+pub fn ball_fixed_floor_div_nonneg(n: i64, d: i64) -> i64 with Div {
+    if n < 0 { return 0 - 1 }
+    if d <= 0 { return 0 - 1 }
+    return n / d
+}
+
+pub fn ball_fixed_ceil_div_nonneg(n: i64, d: i64) -> i64 with Div {
+    if n < 0 { return 0 - 1 }
+    if d <= 0 { return 0 - 1 }
+    return (n + d - 1) / d
+}
+
+pub fn ball_fixed_mul_radius_guarded(abs_x: i64, rx: i64, abs_y: i64, ry: i64, scale: i64) -> i64 with Div {
+    if abs_x < 0 { return 0 - 1 }
+    if abs_y < 0 { return 0 - 1 }
+    if ball_fixed_status_ok(rx, scale, 1000000000) == 0 { return 0 - 1 }
+    if ball_fixed_status_ok(ry, scale, 1000000000) == 0 { return 0 - 1 }
+
+    let total: i64 = (abs_x * ry) + (abs_y * rx) + (rx * ry)
+    return ball_fixed_floor_div_nonneg(total, scale) + 1
+}
+
+pub fn ball_fixed_beta_radius_tight(zr: i64) -> i64 with Div {
+    if zr < 0 { return 0 - 1 }
+    return ball_fixed_ceil_div_nonneg(8 * zr, 3)
+}
+
+pub fn ball_fixed_beta_radius_guarded(zr: i64) -> i64 with Div {
+    if zr < 0 { return 0 - 1 }
+    return ball_fixed_beta_radius_tight(zr) + 1
+}
+
+pub fn ball_fixed_euler_radius_guarded(radius: i64, derivative_radius: i64, dt: i64, scale: i64) -> i64 with Div {
+    if ball_fixed_status_ok(radius, scale, 1000000000) == 0 { return 0 - 1 }
+    if derivative_radius < 0 { return 0 - 1 }
+    if dt < 0 { return 0 - 1 }
+
+    return radius + ball_fixed_floor_div_nonneg(dt * derivative_radius, scale) + 1
+}
+
+pub fn ball_fixed_dt_square(dt: i64) -> i64 {
+    if dt < 0 { return 0 - 1 }
+    if dt > 1000000000 { return 0 - 1 }
+    return dt * dt
+}
+
+pub fn ball_fixed_lte_den(scale: i64) -> i64 {
+    if scale <= 0 { return 0 - 1 }
+    if scale > 1000000000 { return 0 - 1 }
+    return 2 * scale * scale
+}
+
+pub fn ball_fixed_lte_radius_from_h2(dd_abs: i64, h2: i64, lte_den: i64) -> i64 with Div {
+    if dd_abs < 0 { return 0 - 1 }
+    if dd_abs > 4000000000 { return 0 - 1 }
+    if h2 < 0 { return 0 - 1 }
+    if h2 > 1000000000 { return 0 - 1 }
+    if lte_den <= 0 { return 0 - 1 }
+    return ball_fixed_ceil_div_nonneg(h2 * dd_abs, lte_den)
+}
+
+pub fn ball_fixed_lte_radius(dd_abs: i64, dt: i64, scale: i64) -> i64 with Div {
+    let h2: i64 = ball_fixed_dt_square(dt)
+    if h2 < 0 { return 0 - 1 }
+    let den: i64 = ball_fixed_lte_den(scale)
+    if den < 0 { return 0 - 1 }
+    return ball_fixed_lte_radius_from_h2(dd_abs, h2, den)
+}
+
+pub fn ball_fixed_add_lte_radius(euler_radius: i64, lte_radius: i64) -> i64 {
+    if euler_radius < 0 { return 0 - 1 }
+    if lte_radius < 0 { return 0 - 1 }
+    return euler_radius + lte_radius
+}
+
+pub fn ball_fixed_bound_lo(center: i64, radius: i64) -> i64 {
+    return center - radius
+}
+
+pub fn ball_fixed_bound_hi(center: i64, radius: i64) -> i64 {
+    return center + radius
+}
+
+pub fn ball_fixed_bounds_match(center: i64, radius: i64, lo: i64, hi: i64) -> i64 {
+    if radius < 0 { return 0 }
+    if lo != ball_fixed_bound_lo(center, radius) { return 0 }
+    if hi != ball_fixed_bound_hi(center, radius) { return 0 }
+    return 1
+}
+
+pub fn ball_fixed_contains_value(center: i64, radius: i64, value: i64) -> i64 {
+    if radius < 0 { return 0 }
+    if value < ball_fixed_bound_lo(center, radius) { return 0 }
+    if value > ball_fixed_bound_hi(center, radius) { return 0 }
+    return 1
+}
+
+pub fn ball_fixed_contains_ball(outer_center: i64, outer_radius: i64, inner_center: i64, inner_radius: i64) -> i64 {
+    if outer_radius < 0 { return 0 }
+    if inner_radius < 0 { return 0 }
+    let center_delta: i64 = ball_fixed_abs64(inner_center - outer_center)
+    if center_delta + inner_radius > outer_radius { return 0 }
+    return 1
+}
+
+pub struct BallFixedEnclosure1 {
+    pub scale: i64,
+    pub center: i64,
+    pub radius: i64,
+    pub lo: i64,
+    pub hi: i64,
+    pub status_mask: i64,
+    pub fingerprint: i64,
+}
+
+pub struct BallFixedEnclosure3 {
+    pub scale: i64,
+    pub center_x: i64,
+    pub center_y: i64,
+    pub center_z: i64,
+    pub radius_x: i64,
+    pub radius_y: i64,
+    pub radius_z: i64,
+    pub x_lo: i64,
+    pub x_hi: i64,
+    pub y_lo: i64,
+    pub y_hi: i64,
+    pub z_lo: i64,
+    pub z_hi: i64,
+    pub axis_mask: i64,
+    pub fingerprint: i64,
+}
+
+fn ball_fixed_enclosure_mix(acc: i64, value: i64) -> i64 {
+    return ((acc * 16777619) + value + 353) % 1000000007
+}
+
+pub fn ball_fixed_enclosure1_status_mask(scale: i64, center: i64, radius: i64,
+                                         lo: i64, hi: i64) -> i64 {
+    var mask: i64 = 0
+    if scale > 0 { mask = mask + 1 }
+    if radius >= 0 { mask = mask + 2 }
+    if ball_fixed_bounds_match(center, radius, lo, hi) == 1 { mask = mask + 4 }
+    return mask
+}
+
+pub fn ball_fixed_enclosure1_fingerprint(scale: i64, center: i64, radius: i64,
+                                         lo: i64, hi: i64,
+                                         expected_mask: i64) -> i64 {
+    let mask = ball_fixed_enclosure1_status_mask(scale, center, radius, lo, hi)
+    if mask != expected_mask { return 0 - 1 }
+    if mask != 7 { return 0 - 1 }
+
+    var acc: i64 = 31
+    acc = ball_fixed_enclosure_mix(acc, scale)
+    acc = ball_fixed_enclosure_mix(acc, center)
+    acc = ball_fixed_enclosure_mix(acc, radius)
+    acc = ball_fixed_enclosure_mix(acc, lo)
+    acc = ball_fixed_enclosure_mix(acc, hi)
+    acc = ball_fixed_enclosure_mix(acc, mask)
+    return acc
+}
+
+pub fn ball_fixed_enclosure3_axis_mask(scale: i64,
+                                       center_x: i64, center_y: i64, center_z: i64,
+                                       radius_x: i64, radius_y: i64, radius_z: i64,
+                                       x_lo: i64, x_hi: i64,
+                                       y_lo: i64, y_hi: i64,
+                                       z_lo: i64, z_hi: i64) -> i64 {
+    var mask: i64 = 0
+    if ball_fixed_enclosure1_status_mask(scale, center_x, radius_x, x_lo, x_hi) == 7 {
+        mask = mask + 1
+    }
+    if ball_fixed_enclosure1_status_mask(scale, center_y, radius_y, y_lo, y_hi) == 7 {
+        mask = mask + 2
+    }
+    if ball_fixed_enclosure1_status_mask(scale, center_z, radius_z, z_lo, z_hi) == 7 {
+        mask = mask + 4
+    }
+    return mask
+}
+
+pub fn ball_fixed_enclosure3_fingerprint(scale: i64,
+                                         center_x: i64, center_y: i64, center_z: i64,
+                                         radius_x: i64, radius_y: i64, radius_z: i64,
+                                         x_lo: i64, x_hi: i64,
+                                         y_lo: i64, y_hi: i64,
+                                         z_lo: i64, z_hi: i64,
+                                         expected_axis_mask: i64) -> i64 {
+    let axis_mask = ball_fixed_enclosure3_axis_mask(
+        scale, center_x, center_y, center_z,
+        radius_x, radius_y, radius_z,
+        x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+    if axis_mask != expected_axis_mask { return 0 - 1 }
+    if axis_mask != 7 { return 0 - 1 }
+
+    let x_fp = ball_fixed_enclosure1_fingerprint(scale, center_x, radius_x, x_lo, x_hi, 7)
+    let y_fp = ball_fixed_enclosure1_fingerprint(scale, center_y, radius_y, y_lo, y_hi, 7)
+    let z_fp = ball_fixed_enclosure1_fingerprint(scale, center_z, radius_z, z_lo, z_hi, 7)
+    if x_fp < 0 { return 0 - 1 }
+    if y_fp < 0 { return 0 - 1 }
+    if z_fp < 0 { return 0 - 1 }
+
+    var acc: i64 = 47
+    acc = ball_fixed_enclosure_mix(acc, scale)
+    acc = ball_fixed_enclosure_mix(acc, axis_mask)
+    acc = ball_fixed_enclosure_mix(acc, x_fp)
+    acc = ball_fixed_enclosure_mix(acc, y_fp)
+    acc = ball_fixed_enclosure_mix(acc, z_fp)
+    return acc
+}
+
+pub fn ball_fixed_enclosure_from_euler_lte(center: i64, euler_radius: i64, lte_radius: i64, lo: i64, hi: i64) -> i64 {
+    let final_radius: i64 = ball_fixed_add_lte_radius(euler_radius, lte_radius)
+    if final_radius < 0 { return 0 }
+    return ball_fixed_bounds_match(center, final_radius, lo, hi)
+}
+
+pub fn ball_fixed_validated_step3(center_x: i64, center_y: i64, center_z: i64,
+                                  euler_xr: i64, euler_yr: i64, euler_zr: i64,
+                                  lte_xr: i64, lte_yr: i64, lte_zr: i64,
+                                  x_lo: i64, x_hi: i64,
+                                  y_lo: i64, y_hi: i64,
+                                  z_lo: i64, z_hi: i64) -> i64 {
+    let final_xr: i64 = ball_fixed_add_lte_radius(euler_xr, lte_xr)
+    let final_yr: i64 = ball_fixed_add_lte_radius(euler_yr, lte_yr)
+    let final_zr: i64 = ball_fixed_add_lte_radius(euler_zr, lte_zr)
+    if final_xr < 0 { return 0 }
+    if final_yr < 0 { return 0 }
+    if final_zr < 0 { return 0 }
+
+    if ball_fixed_bounds_match(center_x, final_xr, x_lo, x_hi) == 0 { return 0 }
+    if ball_fixed_bounds_match(center_y, final_yr, y_lo, y_hi) == 0 { return 0 }
+    if ball_fixed_bounds_match(center_z, final_zr, z_lo, z_hi) == 0 { return 0 }
+
+    if ball_fixed_contains_ball(center_x, final_xr, center_x, euler_xr) == 0 { return 0 }
+    if ball_fixed_contains_ball(center_y, final_yr, center_y, euler_yr) == 0 { return 0 }
+    if ball_fixed_contains_ball(center_z, final_zr, center_z, euler_zr) == 0 { return 0 }
+    return 1
+}
+
+fn ball_fixed_step3_fingerprint_mix(acc: i64, value: i64) -> i64 {
+    return ((acc * 16777619) + value + 193) % 1000000007
+}
+
+pub fn ball_fixed_validated_step3_fingerprint(center_x: i64, center_y: i64, center_z: i64,
+                                              euler_xr: i64, euler_yr: i64, euler_zr: i64,
+                                              lte_xr: i64, lte_yr: i64, lte_zr: i64,
+                                              x_lo: i64, x_hi: i64,
+                                              y_lo: i64, y_hi: i64,
+                                              z_lo: i64, z_hi: i64) -> i64 {
+    if ball_fixed_validated_step3(center_x, center_y, center_z,
+                                  euler_xr, euler_yr, euler_zr,
+                                  lte_xr, lte_yr, lte_zr,
+                                  x_lo, x_hi, y_lo, y_hi, z_lo, z_hi) == 0 { return 0 - 1 }
+
+    let final_xr: i64 = ball_fixed_add_lte_radius(euler_xr, lte_xr)
+    let final_yr: i64 = ball_fixed_add_lte_radius(euler_yr, lte_yr)
+    let final_zr: i64 = ball_fixed_add_lte_radius(euler_zr, lte_zr)
+    var acc: i64 = 23
+    acc = ball_fixed_step3_fingerprint_mix(acc, center_x)
+    acc = ball_fixed_step3_fingerprint_mix(acc, center_y)
+    acc = ball_fixed_step3_fingerprint_mix(acc, center_z)
+    acc = ball_fixed_step3_fingerprint_mix(acc, euler_xr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, euler_yr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, euler_zr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, lte_xr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, lte_yr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, lte_zr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, x_lo)
+    acc = ball_fixed_step3_fingerprint_mix(acc, x_hi)
+    acc = ball_fixed_step3_fingerprint_mix(acc, y_lo)
+    acc = ball_fixed_step3_fingerprint_mix(acc, y_hi)
+    acc = ball_fixed_step3_fingerprint_mix(acc, z_lo)
+    acc = ball_fixed_step3_fingerprint_mix(acc, z_hi)
+    acc = ball_fixed_step3_fingerprint_mix(acc, final_xr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, final_yr)
+    acc = ball_fixed_step3_fingerprint_mix(acc, final_zr)
+    return acc
+}
+
+fn ball_fixed_step3_chain_mix(acc: i64, value: i64) -> i64 {
+    return ((acc * 16777619) + value + 241) % 1000000007
+}
+
+pub fn ball_fixed_validated_step3_chain_fingerprint(previous_anchor: i64, step_index: i64,
+                                                    scale: i64, dt: i64, step_fingerprint: i64) -> i64 {
+    if previous_anchor < 0 { return 0 - 1 }
+    if step_index <= 0 { return 0 - 1 }
+    if scale <= 0 { return 0 - 1 }
+    if dt < 0 { return 0 - 1 }
+    if step_fingerprint < 0 { return 0 - 1 }
+
+    var acc: i64 = 41
+    acc = ball_fixed_step3_chain_mix(acc, previous_anchor)
+    acc = ball_fixed_step3_chain_mix(acc, step_index)
+    acc = ball_fixed_step3_chain_mix(acc, scale)
+    acc = ball_fixed_step3_chain_mix(acc, dt)
+    acc = ball_fixed_step3_chain_mix(acc, step_fingerprint)
+    return acc
+}
+
+fn ball_fixed_trajectory_manifest_mix(acc: i64, value: i64) -> i64 {
+    return ((acc * 16777619) + value + 701) % 1000000007
+}
+
+fn ball_fixed_trajectory_quality_mix(acc: i64, value: i64) -> i64 {
+    return ((acc * 16777619) + value + 811) % 1000000007
+}
+
+pub fn ball_fixed_max3_i64(a: i64, b: i64, c: i64) -> i64 {
+    if a >= b {
+        if a >= c { return a }
+        return c
+    }
+    if b >= c { return b }
+    return c
+}
+
+pub fn ball_fixed_min3_i64(a: i64, b: i64, c: i64) -> i64 {
+    if a <= b {
+        if a <= c { return a }
+        return c
+    }
+    if b <= c { return b }
+    return c
+}
+
+pub fn ball_fixed_lorenz_trajectory5_radius_budget_fingerprint(
+    scale: i64, steps: i64,
+    final_xr: i64, final_yr: i64, final_zr: i64,
+    x_radius_cap: i64, y_radius_cap: i64, z_radius_cap: i64) -> i64 {
+    if scale != 1000000 { return 0 - 1 }
+    if steps != 5 { return 0 - 1 }
+    if final_xr < 0 { return 0 - 1 }
+    if final_yr < 0 { return 0 - 1 }
+    if final_zr < 0 { return 0 - 1 }
+    if x_radius_cap < final_xr { return 0 - 1 }
+    if y_radius_cap < final_yr { return 0 - 1 }
+    if z_radius_cap < final_zr { return 0 - 1 }
+
+    let x_slack = x_radius_cap - final_xr
+    let y_slack = y_radius_cap - final_yr
+    let z_slack = z_radius_cap - final_zr
+    let total_slack = x_slack + y_slack + z_slack
+
+    var acc: i64 = 79
+    acc = ball_fixed_trajectory_quality_mix(acc, scale)
+    acc = ball_fixed_trajectory_quality_mix(acc, steps)
+    acc = ball_fixed_trajectory_quality_mix(acc, final_xr)
+    acc = ball_fixed_trajectory_quality_mix(acc, final_yr)
+    acc = ball_fixed_trajectory_quality_mix(acc, final_zr)
+    acc = ball_fixed_trajectory_quality_mix(acc, x_radius_cap)
+    acc = ball_fixed_trajectory_quality_mix(acc, y_radius_cap)
+    acc = ball_fixed_trajectory_quality_mix(acc, z_radius_cap)
+    acc = ball_fixed_trajectory_quality_mix(acc, x_slack)
+    acc = ball_fixed_trajectory_quality_mix(acc, y_slack)
+    acc = ball_fixed_trajectory_quality_mix(acc, z_slack)
+    acc = ball_fixed_trajectory_quality_mix(acc, total_slack)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_quality_profile_fingerprint(
+    scale: i64, steps: i64,
+    trajectory_manifest_fp: i64,
+    radius_budget_fp: i64,
+    final_xr: i64, final_yr: i64, final_zr: i64,
+    x_radius_cap: i64, y_radius_cap: i64, z_radius_cap: i64,
+    x_lo: i64, x_hi: i64,
+    y_lo: i64, y_hi: i64,
+    z_lo: i64, z_hi: i64) -> i64 with Div {
+    if scale != 1000000 { return 0 - 1 }
+    if steps != 5 { return 0 - 1 }
+    if trajectory_manifest_fp != 508132668 { return 0 - 1 }
+    if radius_budget_fp != 565673886 { return 0 - 1 }
+    if final_xr < 0 { return 0 - 1 }
+    if final_yr < 0 { return 0 - 1 }
+    if final_zr < 0 { return 0 - 1 }
+    if x_radius_cap < final_xr { return 0 - 1 }
+    if y_radius_cap < final_yr { return 0 - 1 }
+    if z_radius_cap < final_zr { return 0 - 1 }
+    if x_hi < x_lo { return 0 - 1 }
+    if y_hi < y_lo { return 0 - 1 }
+    if z_hi < z_lo { return 0 - 1 }
+
+    let x_slack = x_radius_cap - final_xr
+    let y_slack = y_radius_cap - final_yr
+    let z_slack = z_radius_cap - final_zr
+    let total_slack = x_slack + y_slack + z_slack
+    let radius_sum = final_xr + final_yr + final_zr
+    let cap_sum = x_radius_cap + y_radius_cap + z_radius_cap
+    if cap_sum <= 0 { return 0 - 1 }
+
+    let max_radius = ball_fixed_max3_i64(final_xr, final_yr, final_zr)
+    let min_radius = ball_fixed_min3_i64(final_xr, final_yr, final_zr)
+    if min_radius <= 0 { return 0 - 1 }
+
+    let aspect_q = max_radius / min_radius
+    let aspect_r = max_radius - (aspect_q * min_radius)
+    let radius_fill_ppm = (radius_sum * 1000000) / cap_sum
+    let slack_ppm = (total_slack * 1000000) / cap_sum
+    let x_width = x_hi - x_lo
+    let y_width = y_hi - y_lo
+    let z_width = z_hi - z_lo
+    let box_volume = x_width * y_width * z_width
+
+    if x_slack != 6634 { return 0 - 1 }
+    if y_slack != 5360 { return 0 - 1 }
+    if z_slack != 7552 { return 0 - 1 }
+    if total_slack != 19546 { return 0 - 1 }
+    if radius_sum != 605454 { return 0 - 1 }
+    if max_radius != 319640 { return 0 - 1 }
+    if min_radius != 42448 { return 0 - 1 }
+    if aspect_q != 7 { return 0 - 1 }
+    if aspect_r != 22504 { return 0 - 1 }
+    if radius_fill_ppm != 968726 { return 0 - 1 }
+    if slack_ppm != 31273 { return 0 - 1 }
+    if x_width != 486732 { return 0 - 1 }
+    if y_width != 639280 { return 0 - 1 }
+    if z_width != 84896 { return 0 - 1 }
+    if box_volume != 26416072366172160 { return 0 - 1 }
+
+    var acc: i64 = 89
+    acc = ball_fixed_trajectory_quality_mix(acc, scale)
+    acc = ball_fixed_trajectory_quality_mix(acc, steps)
+    acc = ball_fixed_trajectory_quality_mix(acc, trajectory_manifest_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, radius_budget_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, final_xr)
+    acc = ball_fixed_trajectory_quality_mix(acc, final_yr)
+    acc = ball_fixed_trajectory_quality_mix(acc, final_zr)
+    acc = ball_fixed_trajectory_quality_mix(acc, x_radius_cap)
+    acc = ball_fixed_trajectory_quality_mix(acc, y_radius_cap)
+    acc = ball_fixed_trajectory_quality_mix(acc, z_radius_cap)
+    acc = ball_fixed_trajectory_quality_mix(acc, x_slack)
+    acc = ball_fixed_trajectory_quality_mix(acc, y_slack)
+    acc = ball_fixed_trajectory_quality_mix(acc, z_slack)
+    acc = ball_fixed_trajectory_quality_mix(acc, total_slack)
+    acc = ball_fixed_trajectory_quality_mix(acc, radius_sum)
+    acc = ball_fixed_trajectory_quality_mix(acc, max_radius)
+    acc = ball_fixed_trajectory_quality_mix(acc, min_radius)
+    acc = ball_fixed_trajectory_quality_mix(acc, aspect_q)
+    acc = ball_fixed_trajectory_quality_mix(acc, aspect_r)
+    acc = ball_fixed_trajectory_quality_mix(acc, radius_fill_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, slack_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, x_width)
+    acc = ball_fixed_trajectory_quality_mix(acc, y_width)
+    acc = ball_fixed_trajectory_quality_mix(acc, z_width)
+    acc = ball_fixed_trajectory_quality_mix(acc, box_volume)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_final_enclosure_fingerprint(
+    trajectory_manifest_fp: i64,
+    quality_profile_fp: i64,
+    radius_budget_fp: i64,
+    scale: i64,
+    final_x: i64, final_y: i64, final_z: i64,
+    final_xr: i64, final_yr: i64, final_zr: i64,
+    x_lo: i64, x_hi: i64,
+    y_lo: i64, y_hi: i64,
+    z_lo: i64, z_hi: i64,
+    expected_axis_mask: i64) -> i64 {
+    if trajectory_manifest_fp != 508132668 { return 0 - 1 }
+    if quality_profile_fp != 70877465 { return 0 - 1 }
+    if radius_budget_fp != 565673886 { return 0 - 1 }
+
+    let enclosure_fp = ball_fixed_enclosure3_fingerprint(
+        scale, final_x, final_y, final_z,
+        final_xr, final_yr, final_zr,
+        x_lo, x_hi, y_lo, y_hi, z_lo, z_hi,
+        expected_axis_mask)
+    if enclosure_fp != 166945519 { return 0 - 1 }
+
+    var acc: i64 = 181
+    acc = ball_fixed_enclosure_mix(acc, trajectory_manifest_fp)
+    acc = ball_fixed_enclosure_mix(acc, quality_profile_fp)
+    acc = ball_fixed_enclosure_mix(acc, radius_budget_fp)
+    acc = ball_fixed_enclosure_mix(acc, enclosure_fp)
+    acc = ball_fixed_enclosure_mix(acc, expected_axis_mask)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_step_policy_fingerprint(
+    quality_profile_fp: i64,
+    radius_fill_limit_ppm: i64,
+    min_slack_ppm: i64,
+    max_aspect_q: i64,
+    max_box_volume: i64) -> i64 {
+    if quality_profile_fp != 70877465 { return 0 - 1 }
+    if radius_fill_limit_ppm != 970000 { return 0 - 1 }
+    if min_slack_ppm != 30000 { return 0 - 1 }
+    if max_aspect_q != 8 { return 0 - 1 }
+    if max_box_volume != 27000000000000000 { return 0 - 1 }
+
+    let radius_fill_ppm = 968726
+    let slack_ppm = 31273
+    let aspect_q = 7
+    let aspect_r = 22504
+    let box_volume = 26416072366172160
+
+    var policy_mask: i64 = 0
+    if radius_fill_ppm <= radius_fill_limit_ppm { policy_mask = policy_mask + 1 }
+    if slack_ppm >= min_slack_ppm { policy_mask = policy_mask + 2 }
+    if aspect_q <= max_aspect_q { policy_mask = policy_mask + 4 }
+    if box_volume <= max_box_volume { policy_mask = policy_mask + 8 }
+    if policy_mask != 15 { return 0 - 1 }
+
+    let action_accept_same_dt: i64 = 1
+    let next_dt_num: i64 = 1
+    let next_dt_den: i64 = 1
+
+    var acc: i64 = 97
+    acc = ball_fixed_trajectory_quality_mix(acc, quality_profile_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, radius_fill_limit_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, min_slack_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, max_aspect_q)
+    acc = ball_fixed_trajectory_quality_mix(acc, max_box_volume)
+    acc = ball_fixed_trajectory_quality_mix(acc, radius_fill_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, slack_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, aspect_q)
+    acc = ball_fixed_trajectory_quality_mix(acc, aspect_r)
+    acc = ball_fixed_trajectory_quality_mix(acc, box_volume)
+    acc = ball_fixed_trajectory_quality_mix(acc, policy_mask)
+    acc = ball_fixed_trajectory_quality_mix(acc, action_accept_same_dt)
+    acc = ball_fixed_trajectory_quality_mix(acc, next_dt_num)
+    acc = ball_fixed_trajectory_quality_mix(acc, next_dt_den)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_step_policy_margin_fingerprint(
+    step_policy_fp: i64,
+    radius_fill_limit_ppm: i64,
+    min_slack_ppm: i64,
+    max_aspect_q: i64,
+    max_box_volume: i64) -> i64 {
+    if step_policy_fp != 231786611 { return 0 - 1 }
+    if radius_fill_limit_ppm != 970000 { return 0 - 1 }
+    if min_slack_ppm != 30000 { return 0 - 1 }
+    if max_aspect_q != 8 { return 0 - 1 }
+    if max_box_volume != 27000000000000000 { return 0 - 1 }
+
+    let radius_fill_ppm = 968726
+    let slack_ppm = 31273
+    let aspect_q = 7
+    let box_volume = 26416072366172160
+
+    let fill_margin_ppm = radius_fill_limit_ppm - radius_fill_ppm
+    let slack_margin_ppm = slack_ppm - min_slack_ppm
+    let aspect_margin_q = max_aspect_q - aspect_q
+    let volume_margin = max_box_volume - box_volume
+    if fill_margin_ppm != 1274 { return 0 - 1 }
+    if slack_margin_ppm != 1273 { return 0 - 1 }
+    if aspect_margin_q != 1 { return 0 - 1 }
+    if volume_margin != 583927633827840 { return 0 - 1 }
+
+    var margin_mask: i64 = 0
+    if fill_margin_ppm > 0 { margin_mask = margin_mask + 1 }
+    if slack_margin_ppm > 0 { margin_mask = margin_mask + 2 }
+    if aspect_margin_q > 0 { margin_mask = margin_mask + 4 }
+    if volume_margin > 0 { margin_mask = margin_mask + 8 }
+    if margin_mask != 15 { return 0 - 1 }
+
+    let min_ppm_margin = 1273
+    let margin_action_accept_same_dt: i64 = 1
+
+    var acc: i64 = 103
+    acc = ball_fixed_trajectory_quality_mix(acc, step_policy_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, radius_fill_limit_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, min_slack_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, max_aspect_q)
+    acc = ball_fixed_trajectory_quality_mix(acc, max_box_volume)
+    acc = ball_fixed_trajectory_quality_mix(acc, radius_fill_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, slack_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, aspect_q)
+    acc = ball_fixed_trajectory_quality_mix(acc, box_volume)
+    acc = ball_fixed_trajectory_quality_mix(acc, fill_margin_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, slack_margin_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, aspect_margin_q)
+    acc = ball_fixed_trajectory_quality_mix(acc, volume_margin)
+    acc = ball_fixed_trajectory_quality_mix(acc, min_ppm_margin)
+    acc = ball_fixed_trajectory_quality_mix(acc, margin_mask)
+    acc = ball_fixed_trajectory_quality_mix(acc, margin_action_accept_same_dt)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_step_policy_guard_decision_fingerprint(
+    margin_fp: i64,
+    min_ppm_margin: i64,
+    hold_threshold_ppm: i64,
+    grow_threshold_ppm: i64) -> i64 {
+    if margin_fp != 494960746 { return 0 - 1 }
+    if min_ppm_margin != 1273 { return 0 - 1 }
+    if hold_threshold_ppm != 2000 { return 0 - 1 }
+    if grow_threshold_ppm != 5000 { return 0 - 1 }
+
+    let shrink_threshold_ppm: i64 = 0
+    let margin_mask: i64 = 15
+    let action_hold_same_dt: i64 = 1
+    let guard_band_hold_thin: i64 = 1
+    let next_dt_num: i64 = 1
+    let next_dt_den: i64 = 1
+    if min_ppm_margin <= shrink_threshold_ppm { return 0 - 1 }
+    if min_ppm_margin >= hold_threshold_ppm { return 0 - 1 }
+    if min_ppm_margin >= grow_threshold_ppm { return 0 - 1 }
+
+    var acc: i64 = 109
+    acc = ball_fixed_trajectory_quality_mix(acc, margin_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, min_ppm_margin)
+    acc = ball_fixed_trajectory_quality_mix(acc, shrink_threshold_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, hold_threshold_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, grow_threshold_ppm)
+    acc = ball_fixed_trajectory_quality_mix(acc, margin_mask)
+    acc = ball_fixed_trajectory_quality_mix(acc, action_hold_same_dt)
+    acc = ball_fixed_trajectory_quality_mix(acc, guard_band_hold_thin)
+    acc = ball_fixed_trajectory_quality_mix(acc, next_dt_num)
+    acc = ball_fixed_trajectory_quality_mix(acc, next_dt_den)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_policy_chain_fingerprint(
+    quality_profile_fp: i64,
+    step_policy_fp: i64,
+    margin_fp: i64,
+    guard_decision_fp: i64) -> i64 {
+    if quality_profile_fp != 70877465 { return 0 - 1 }
+    if step_policy_fp != 231786611 { return 0 - 1 }
+    if margin_fp != 494960746 { return 0 - 1 }
+    if guard_decision_fp != 833881722 { return 0 - 1 }
+
+    let stage_count: i64 = 4
+    let policy_mask: i64 = 15
+    let margin_mask: i64 = 15
+    let action_hold_same_dt: i64 = 1
+    let guard_band_hold_thin: i64 = 1
+    let next_dt_num: i64 = 1
+    let next_dt_den: i64 = 1
+
+    var acc: i64 = 127
+    acc = ball_fixed_trajectory_quality_mix(acc, quality_profile_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, step_policy_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, margin_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, guard_decision_fp)
+    acc = ball_fixed_trajectory_quality_mix(acc, stage_count)
+    acc = ball_fixed_trajectory_quality_mix(acc, policy_mask)
+    acc = ball_fixed_trajectory_quality_mix(acc, margin_mask)
+    acc = ball_fixed_trajectory_quality_mix(acc, action_hold_same_dt)
+    acc = ball_fixed_trajectory_quality_mix(acc, guard_band_hold_thin)
+    acc = ball_fixed_trajectory_quality_mix(acc, next_dt_num)
+    acc = ball_fixed_trajectory_quality_mix(acc, next_dt_den)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_manifest_fingerprint(
+    scale: i64, dt: i64, steps: i64,
+    initial_x: i64, initial_y: i64, initial_z: i64,
+    chain_anchor: i64, final_step_fingerprint: i64,
+    final_x: i64, final_y: i64, final_z: i64,
+    final_xr: i64, final_yr: i64, final_zr: i64,
+    x_lo: i64, x_hi: i64,
+    y_lo: i64, y_hi: i64,
+    z_lo: i64, z_hi: i64) -> i64 {
+    if scale <= 0 { return 0 - 1 }
+    if dt < 0 { return 0 - 1 }
+    if steps <= 0 { return 0 - 1 }
+    if chain_anchor < 0 { return 0 - 1 }
+    if final_step_fingerprint < 0 { return 0 - 1 }
+    if ball_fixed_bounds_match(final_x, final_xr, x_lo, x_hi) == 0 { return 0 - 1 }
+    if ball_fixed_bounds_match(final_y, final_yr, y_lo, y_hi) == 0 { return 0 - 1 }
+    if ball_fixed_bounds_match(final_z, final_zr, z_lo, z_hi) == 0 { return 0 - 1 }
+
+    var acc: i64 = 61
+    acc = ball_fixed_trajectory_manifest_mix(acc, scale)
+    acc = ball_fixed_trajectory_manifest_mix(acc, dt)
+    acc = ball_fixed_trajectory_manifest_mix(acc, steps)
+    acc = ball_fixed_trajectory_manifest_mix(acc, initial_x)
+    acc = ball_fixed_trajectory_manifest_mix(acc, initial_y)
+    acc = ball_fixed_trajectory_manifest_mix(acc, initial_z)
+    acc = ball_fixed_trajectory_manifest_mix(acc, chain_anchor)
+    acc = ball_fixed_trajectory_manifest_mix(acc, final_step_fingerprint)
+    acc = ball_fixed_trajectory_manifest_mix(acc, final_x)
+    acc = ball_fixed_trajectory_manifest_mix(acc, final_y)
+    acc = ball_fixed_trajectory_manifest_mix(acc, final_z)
+    acc = ball_fixed_trajectory_manifest_mix(acc, final_xr)
+    acc = ball_fixed_trajectory_manifest_mix(acc, final_yr)
+    acc = ball_fixed_trajectory_manifest_mix(acc, final_zr)
+    acc = ball_fixed_trajectory_manifest_mix(acc, x_lo)
+    acc = ball_fixed_trajectory_manifest_mix(acc, x_hi)
+    acc = ball_fixed_trajectory_manifest_mix(acc, y_lo)
+    acc = ball_fixed_trajectory_manifest_mix(acc, y_hi)
+    acc = ball_fixed_trajectory_manifest_mix(acc, z_lo)
+    acc = ball_fixed_trajectory_manifest_mix(acc, z_hi)
+    return acc
+}
+
+pub fn ball_fixed_lorenz_trajectory5_manifest_valid(
+    scale: i64, dt: i64, steps: i64,
+    chain_anchor: i64, final_step_fingerprint: i64,
+    manifest_fingerprint: i64) -> i64 {
+    if scale != 1000000 { return 0 }
+    if dt != 10000 { return 0 }
+    if steps != 5 { return 0 }
+    if chain_anchor != 484010018 { return 0 }
+    if final_step_fingerprint != 236665224 { return 0 }
+    if manifest_fingerprint != 508132668 { return 0 }
+    return 1
+}
+
+pub fn ball_fixed_lorenz_portfolio_v17_readiness_check(
+    scale: i64, dt: i64, steps: i64,
+    initial_x: i64, initial_y: i64, initial_z: i64,
+    chain_anchor: i64, final_step_fingerprint: i64,
+    final_x: i64, final_y: i64, final_z: i64,
+    final_xr: i64, final_yr: i64, final_zr: i64,
+    x_lo: i64, x_hi: i64,
+    y_lo: i64, y_hi: i64,
+    z_lo: i64, z_hi: i64) -> i64 with Mod {
+    let trajectory_manifest_fp = ball_fixed_lorenz_trajectory5_manifest_fingerprint(
+        scale, dt, steps,
+        initial_x, initial_y, initial_z,
+        chain_anchor, final_step_fingerprint,
+        final_x, final_y, final_z,
+        final_xr, final_yr, final_zr,
+        x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+    if trajectory_manifest_fp != 508132668 { return 0 - 1 }
+
+    if ball_fixed_lorenz_trajectory5_manifest_valid(
+        scale, dt, steps, chain_anchor, final_step_fingerprint,
+        trajectory_manifest_fp) != 1 { return 0 - 1 }
+
+    let portfolio_fp = solver_portfolio_v17_ball_fixed_trajectory_bundle_fingerprint(
+        final_step_fingerprint, trajectory_manifest_fp)
+    if portfolio_fp != 247161833 { return 0 - 1 }
+
+    let result_coverage_fp = solver_portfolio_v17_result_coverage_fingerprint(
+        17, 21, 7, 12, 1, 1, portfolio_fp)
+    if result_coverage_fp != 575168545 { return 0 - 1 }
+
+    let family_coverage_fp = solver_portfolio_v17_checker_family_coverage_fingerprint(
+        17, 21, 4, 2, 2, 1, 12, portfolio_fp)
+    if family_coverage_fp != 805421150 { return 0 - 1 }
+
+    let acceptance_receipt_fp = solver_portfolio_v17_acceptance_receipt_fingerprint(
+        17, portfolio_fp, result_coverage_fp)
+    if acceptance_receipt_fp != 154169825 { return 0 - 1 }
+
+    let audit_receipt_fp = solver_portfolio_v17_audit_receipt_fingerprint(
+        17, portfolio_fp, result_coverage_fp, family_coverage_fp,
+        acceptance_receipt_fp)
+    if audit_receipt_fp != 426158721 { return 0 - 1 }
+
+    return solver_portfolio_v17_readiness_fingerprint(
+        17, portfolio_fp, result_coverage_fp, family_coverage_fp,
+        acceptance_receipt_fp, audit_receipt_fp)
+}
+
+pub fn ball_fixed_lorenz_portfolio_v20_precision_ladder_readiness_check(
+    scale: i64, dt: i64, steps: i64,
+    initial_x: i64, initial_y: i64, initial_z: i64,
+    chain_anchor: i64, final_step_fingerprint: i64,
+    final_x: i64, final_y: i64, final_z: i64,
+    final_xr: i64, final_yr: i64, final_zr: i64,
+    x_lo: i64, x_hi: i64,
+    y_lo: i64, y_hi: i64,
+    z_lo: i64, z_hi: i64,
+    x_radius_cap: i64, y_radius_cap: i64, z_radius_cap: i64,
+    i256_trajectory5_entry_fp: i64) -> i64 with Mod {
+    let trajectory_manifest_fp = ball_fixed_lorenz_trajectory5_manifest_fingerprint(
+        scale, dt, steps,
+        initial_x, initial_y, initial_z,
+        chain_anchor, final_step_fingerprint,
+        final_x, final_y, final_z,
+        final_xr, final_yr, final_zr,
+        x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+    if trajectory_manifest_fp != 508132668 { return 0 - 1 }
+
+    if ball_fixed_lorenz_trajectory5_manifest_valid(
+        scale, dt, steps, chain_anchor, final_step_fingerprint,
+        trajectory_manifest_fp) != 1 { return 0 - 1 }
+
+    let radius_budget_fp = ball_fixed_lorenz_trajectory5_radius_budget_fingerprint(
+        scale, steps, final_xr, final_yr, final_zr,
+        x_radius_cap, y_radius_cap, z_radius_cap)
+    if radius_budget_fp != 565673886 { return 0 - 1 }
+
+    let radius_budget_entry_fp = portfolio_entry_fingerprint(
+        portfolio_kind_lorenz_ball_fixed_radius_budget(),
+        trajectory_manifest_fp,
+        radius_budget_fp,
+        portfolio_result_validated(),
+        portfolio_checker_lorenz_ball_fixed_radius_budget())
+    if radius_budget_entry_fp != 295040814 { return 0 - 1 }
+
+    let i128_enclosure_fp = solver_portfolio_v20_i128_enclosure_receipt_fingerprint(
+        128, scale, steps,
+        final_x, final_y, final_z,
+        final_xr, final_yr, final_zr,
+        x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+    if i128_enclosure_fp != 302145212 { return 0 - 1 }
+
+    if i256_trajectory5_entry_fp != 626160047 { return 0 - 1 }
+
+    let portfolio_fp = solver_portfolio_v20_lorenz_wide_precision_ladder_bundle_fingerprint(
+        i128_enclosure_fp,
+        i256_trajectory5_entry_fp,
+        radius_budget_entry_fp,
+        trajectory_manifest_fp)
+    if portfolio_fp != 158082390 { return 0 - 1 }
+
+    let result_coverage_fp = solver_portfolio_v20_result_coverage_fingerprint(
+        20, 24, 8, 14, 1, 1, portfolio_fp)
+    if result_coverage_fp != 2761010 { return 0 - 1 }
+
+    let family_coverage_fp = solver_portfolio_v20_checker_family_coverage_fingerprint(
+        20, 24, 4, 3, 2, 1, 14, portfolio_fp)
+    if family_coverage_fp != 251415300 { return 0 - 1 }
+
+    let acceptance_receipt_fp = solver_portfolio_v20_acceptance_receipt_fingerprint(
+        20, portfolio_fp, result_coverage_fp)
+    if acceptance_receipt_fp != 128854088 { return 0 - 1 }
+
+    let audit_receipt_fp = solver_portfolio_v20_audit_receipt_fingerprint(
+        20, portfolio_fp, result_coverage_fp, family_coverage_fp,
+        acceptance_receipt_fp)
+    if audit_receipt_fp != 610639541 { return 0 - 1 }
+
+    return solver_portfolio_v20_readiness_fingerprint(
+        20, portfolio_fp, result_coverage_fp, family_coverage_fp,
+        acceptance_receipt_fp, audit_receipt_fp)
+}
+
+pub fn ball_fixed_lorenz_portfolio_v21_step_policy_readiness_check(
+    scale: i64, dt: i64, steps: i64,
+    initial_x: i64, initial_y: i64, initial_z: i64,
+    chain_anchor: i64, final_step_fingerprint: i64,
+    final_x: i64, final_y: i64, final_z: i64,
+    final_xr: i64, final_yr: i64, final_zr: i64,
+    x_lo: i64, x_hi: i64,
+    y_lo: i64, y_hi: i64,
+    z_lo: i64, z_hi: i64,
+    x_radius_cap: i64, y_radius_cap: i64, z_radius_cap: i64,
+    radius_fill_limit_ppm: i64,
+    min_slack_ppm: i64,
+    max_aspect_q: i64,
+    max_box_volume: i64) -> i64 with Div, Mod {
+    let trajectory_manifest_fp = ball_fixed_lorenz_trajectory5_manifest_fingerprint(
+        scale, dt, steps,
+        initial_x, initial_y, initial_z,
+        chain_anchor, final_step_fingerprint,
+        final_x, final_y, final_z,
+        final_xr, final_yr, final_zr,
+        x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+    if trajectory_manifest_fp != 508132668 { return 0 - 1 }
+
+    let radius_budget_fp = ball_fixed_lorenz_trajectory5_radius_budget_fingerprint(
+        scale, steps, final_xr, final_yr, final_zr,
+        x_radius_cap, y_radius_cap, z_radius_cap)
+    if radius_budget_fp != 565673886 { return 0 - 1 }
+
+    let quality_profile_fp = ball_fixed_lorenz_trajectory5_quality_profile_fingerprint(
+        scale, steps,
+        trajectory_manifest_fp,
+        radius_budget_fp,
+        final_xr, final_yr, final_zr,
+        x_radius_cap, y_radius_cap, z_radius_cap,
+        x_lo, x_hi, y_lo, y_hi, z_lo, z_hi)
+    if quality_profile_fp != 70877465 { return 0 - 1 }
+
+    let step_policy_fp = ball_fixed_lorenz_trajectory5_step_policy_fingerprint(
+        quality_profile_fp,
+        radius_fill_limit_ppm,
+        min_slack_ppm,
+        max_aspect_q,
+        max_box_volume)
+    if step_policy_fp != 231786611 { return 0 - 1 }
+
+    let portfolio_fp = solver_portfolio_v21_lorenz_ball_fixed_step_policy_bundle_fingerprint(
+        quality_profile_fp, step_policy_fp)
+    if portfolio_fp != 999686282 { return 0 - 1 }
+
+    let result_coverage_fp = solver_portfolio_v21_result_coverage_fingerprint(
+        21, 25, 8, 15, 1, 1, portfolio_fp)
+    if result_coverage_fp != 807383802 { return 0 - 1 }
+
+    let family_coverage_fp = solver_portfolio_v21_checker_family_coverage_fingerprint(
+        21, 25, 4, 3, 2, 1, 15, portfolio_fp)
+    if family_coverage_fp != 761384846 { return 0 - 1 }
+
+    let acceptance_receipt_fp = solver_portfolio_v21_acceptance_receipt_fingerprint(
+        21, portfolio_fp, result_coverage_fp)
+    if acceptance_receipt_fp != 780868003 { return 0 - 1 }
+
+    let audit_receipt_fp = solver_portfolio_v21_audit_receipt_fingerprint(
+        21, portfolio_fp, result_coverage_fp, family_coverage_fp,
+        acceptance_receipt_fp)
+    if audit_receipt_fp != 885886120 { return 0 - 1 }
+
+    return solver_portfolio_v21_readiness_fingerprint(
+        21, portfolio_fp, result_coverage_fp, family_coverage_fp,
+        acceptance_receipt_fp, audit_receipt_fp)
+}
+
+pub fn ball_fixed_max_abs_pair(lo: i64, hi: i64) -> i64 {
+    let a: i64 = ball_fixed_abs64(lo)
+    let b: i64 = ball_fixed_abs64(hi)
+    if b > a { return b }
+    return a
+}
+
+pub fn ball_fixed_lorenz_dx_radius(sigma_abs: i64, xr: i64, yr: i64) -> i64 {
+    if sigma_abs < 0 { return 0 - 1 }
+    if xr < 0 { return 0 - 1 }
+    if yr < 0 { return 0 - 1 }
+    return sigma_abs * (xr + yr)
+}
+
+pub fn ball_fixed_lorenz_dy_radius(abs_x: i64, xr: i64, abs_rhoz: i64, rhoz_radius: i64, yr: i64, scale: i64) -> i64 with Div {
+    if yr < 0 { return 0 - 1 }
+    let prod_radius = ball_fixed_mul_radius_guarded(abs_x, xr, abs_rhoz, rhoz_radius, scale)
+    if prod_radius < 0 { return 0 - 1 }
+    return prod_radius + yr
+}
+
+pub fn ball_fixed_lorenz_dz_radius(abs_x: i64, xr: i64, abs_y: i64, yr: i64, zr: i64, scale: i64) -> i64 with Div {
+    let xy_radius = ball_fixed_mul_radius_guarded(abs_x, xr, abs_y, yr, scale)
+    if xy_radius < 0 { return 0 - 1 }
+    let beta_radius = ball_fixed_beta_radius_guarded(zr)
+    if beta_radius < 0 { return 0 - 1 }
+    return xy_radius + beta_radius
+}
+
+pub fn ball_fixed_lorenz_dx_abs_bound(x_abs: i64, y_abs: i64, sigma_abs: i64) -> i64 {
+    if x_abs < 0 { return 0 - 1 }
+    if y_abs < 0 { return 0 - 1 }
+    if sigma_abs < 0 { return 0 - 1 }
+    return sigma_abs * (x_abs + y_abs)
+}
+
+pub fn ball_fixed_lorenz_dy_abs_bound(x_abs: i64, rhoz_abs: i64, y_abs: i64, scale: i64) -> i64 with Div {
+    if x_abs < 0 { return 0 - 1 }
+    if rhoz_abs < 0 { return 0 - 1 }
+    if y_abs < 0 { return 0 - 1 }
+    if scale <= 0 { return 0 - 1 }
+    return ball_fixed_ceil_div_nonneg(x_abs * rhoz_abs, scale) + y_abs
+}
+
+pub fn ball_fixed_lorenz_dz_abs_bound(x_abs: i64, y_abs: i64, z_abs: i64, scale: i64) -> i64 with Div {
+    if x_abs < 0 { return 0 - 1 }
+    if y_abs < 0 { return 0 - 1 }
+    if z_abs < 0 { return 0 - 1 }
+    if scale <= 0 { return 0 - 1 }
+    let xy_abs: i64 = ball_fixed_ceil_div_nonneg(x_abs * y_abs, scale)
+    let beta_abs: i64 = ball_fixed_ceil_div_nonneg(8 * z_abs, 3)
+    return xy_abs + beta_abs
+}
+
+pub fn ball_fixed_lorenz_ddx_abs_bound(dx_abs: i64, dy_abs: i64, sigma_abs: i64) -> i64 {
+    if dx_abs < 0 { return 0 - 1 }
+    if dy_abs < 0 { return 0 - 1 }
+    if sigma_abs < 0 { return 0 - 1 }
+    return sigma_abs * (dy_abs + dx_abs)
+}
+
+pub fn ball_fixed_lorenz_ddy_abs_bound(dx_abs: i64, rhoz_abs: i64, x_abs: i64, dz_abs: i64, dy_abs: i64, scale: i64) -> i64 with Div {
+    if dx_abs < 0 { return 0 - 1 }
+    if rhoz_abs < 0 { return 0 - 1 }
+    if x_abs < 0 { return 0 - 1 }
+    if dz_abs < 0 { return 0 - 1 }
+    if dy_abs < 0 { return 0 - 1 }
+    if scale <= 0 { return 0 - 1 }
+    let dx_rhoz_abs: i64 = ball_fixed_ceil_div_nonneg(dx_abs * rhoz_abs, scale)
+    let x_dz_abs: i64 = ball_fixed_ceil_div_nonneg(x_abs * dz_abs, scale)
+    return dx_rhoz_abs + x_dz_abs + dy_abs
+}
+
+pub fn ball_fixed_lorenz_ddz_abs_bound(dx_abs: i64, y_abs: i64, x_abs: i64, dy_abs: i64, dz_abs: i64, scale: i64) -> i64 with Div {
+    if dx_abs < 0 { return 0 - 1 }
+    if y_abs < 0 { return 0 - 1 }
+    if x_abs < 0 { return 0 - 1 }
+    if dy_abs < 0 { return 0 - 1 }
+    if dz_abs < 0 { return 0 - 1 }
+    if scale <= 0 { return 0 - 1 }
+    let dx_y_abs: i64 = ball_fixed_ceil_div_nonneg(dx_abs * y_abs, scale)
+    let x_dy_abs: i64 = ball_fixed_ceil_div_nonneg(x_abs * dy_abs, scale)
+    let beta_dz_abs: i64 = ball_fixed_ceil_div_nonneg(8 * dz_abs, 3)
+    return dx_y_abs + x_dy_abs + beta_dz_abs
+}
+
+pub fn ball_fixed_taylor2_remainder_den(step_den: i64) -> i64 {
+    if step_den <= 0 { return 0 - 1 }
+    if step_den > 10000 { return 0 - 1 }
+    return 6 * step_den * step_den * step_den
+}
+
+pub fn ball_fixed_taylor2_remainder_radius_from_ratio(third_abs: i64, step_den: i64) -> i64 with Div {
+    if third_abs < 0 { return 0 - 1 }
+    if third_abs > 4000000000 { return 0 - 1 }
+    let den: i64 = ball_fixed_taylor2_remainder_den(step_den)
+    if den <= 0 { return 0 - 1 }
+    return ball_fixed_ceil_div_nonneg(third_abs, den)
+}
+
+pub fn ball_fixed_lorenz_taylor2_remainder_fingerprint(
+    taylor_ball_bridge_fp: i64,
+    scale: i64,
+    step_count: i64,
+    taylor_order: i64,
+    step_den: i64,
+    third_x_abs: i64,
+    third_y_abs: i64,
+    third_z_abs: i64,
+    expected_rx: i64,
+    expected_ry: i64,
+    expected_rz: i64,
+    final_xr: i64,
+    final_yr: i64,
+    final_zr: i64,
+    x_radius_cap: i64,
+    y_radius_cap: i64,
+    z_radius_cap: i64,
+    expected_validation_mask: i64) -> i64 with Div, Mod {
+    if taylor_ball_bridge_fp != 979362768 { return 0 - 1 }
+    if scale != 1000000 { return 0 - 1 }
+    if step_count != 5 { return 0 - 1 }
+    if taylor_order != 2 { return 0 - 1 }
+    if step_den != 100 { return 0 - 1 }
+    if third_x_abs != 607000000 { return 0 - 1 }
+    if third_y_abs != 809000000 { return 0 - 1 }
+    if third_z_abs != 119000000 { return 0 - 1 }
+    if final_xr != 243366 { return 0 - 1 }
+    if final_yr != 319640 { return 0 - 1 }
+    if final_zr != 42448 { return 0 - 1 }
+    if x_radius_cap != 250000 { return 0 - 1 }
+    if y_radius_cap != 325000 { return 0 - 1 }
+    if z_radius_cap != 50000 { return 0 - 1 }
+    if expected_validation_mask != 127 { return 0 - 1 }
+
+    let rx: i64 = ball_fixed_taylor2_remainder_radius_from_ratio(third_x_abs, step_den)
+    let ry: i64 = ball_fixed_taylor2_remainder_radius_from_ratio(third_y_abs, step_den)
+    let rz: i64 = ball_fixed_taylor2_remainder_radius_from_ratio(third_z_abs, step_den)
+    if rx != expected_rx { return 0 - 1 }
+    if ry != expected_ry { return 0 - 1 }
+    if rz != expected_rz { return 0 - 1 }
+    if rx != 102 { return 0 - 1 }
+    if ry != 135 { return 0 - 1 }
+    if rz != 20 { return 0 - 1 }
+
+    let x_slack: i64 = x_radius_cap - final_xr
+    let y_slack: i64 = y_radius_cap - final_yr
+    let z_slack: i64 = z_radius_cap - final_zr
+    if x_slack != 6634 { return 0 - 1 }
+    if y_slack != 5360 { return 0 - 1 }
+    if z_slack != 7552 { return 0 - 1 }
+
+    let x_after_remainder: i64 = x_slack - rx
+    let y_after_remainder: i64 = y_slack - ry
+    let z_after_remainder: i64 = z_slack - rz
+    if x_after_remainder != 6532 { return 0 - 1 }
+    if y_after_remainder != 5225 { return 0 - 1 }
+    if z_after_remainder != 7532 { return 0 - 1 }
+
+    var validation_mask: i64 = 0
+    if rx == 102 { validation_mask = validation_mask + 1 }
+    if ry == 135 { validation_mask = validation_mask + 2 }
+    if rz == 20 { validation_mask = validation_mask + 4 }
+    if x_after_remainder >= 0 { validation_mask = validation_mask + 8 }
+    if y_after_remainder >= 0 { validation_mask = validation_mask + 16 }
+    if z_after_remainder >= 0 { validation_mask = validation_mask + 32 }
+    if taylor_ball_bridge_fp == 979362768 { validation_mask = validation_mask + 64 }
+    if validation_mask != expected_validation_mask { return 0 - 1 }
+
+    var fp: i64 = 503
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor_ball_bridge_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, scale)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_count)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor_order)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, third_x_abs)
+    fp = ball_fixed_trajectory_quality_mix(fp, third_y_abs)
+    fp = ball_fixed_trajectory_quality_mix(fp, third_z_abs)
+    fp = ball_fixed_trajectory_quality_mix(fp, rx)
+    fp = ball_fixed_trajectory_quality_mix(fp, ry)
+    fp = ball_fixed_trajectory_quality_mix(fp, rz)
+    fp = ball_fixed_trajectory_quality_mix(fp, final_xr)
+    fp = ball_fixed_trajectory_quality_mix(fp, final_yr)
+    fp = ball_fixed_trajectory_quality_mix(fp, final_zr)
+    fp = ball_fixed_trajectory_quality_mix(fp, x_radius_cap)
+    fp = ball_fixed_trajectory_quality_mix(fp, y_radius_cap)
+    fp = ball_fixed_trajectory_quality_mix(fp, z_radius_cap)
+    fp = ball_fixed_trajectory_quality_mix(fp, x_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, y_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, z_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, x_after_remainder)
+    fp = ball_fixed_trajectory_quality_mix(fp, y_after_remainder)
+    fp = ball_fixed_trajectory_quality_mix(fp, z_after_remainder)
+    fp = ball_fixed_trajectory_quality_mix(fp, validation_mask)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_remainder_audit_fingerprint(
+    taylor2_remainder_fp: i64,
+    taylor_ball_bridge_fp: i64,
+    quality_profile_fp: i64,
+    radius_budget_fp: i64,
+    final_enclosure_receipt_fp: i64,
+    validation_mask: i64) -> i64 with Mod {
+    if taylor2_remainder_fp != 320985955 { return 0 - 1 }
+    if taylor_ball_bridge_fp != 979362768 { return 0 - 1 }
+    if quality_profile_fp != 70877465 { return 0 - 1 }
+    if radius_budget_fp != 565673886 { return 0 - 1 }
+    if final_enclosure_receipt_fp != 114244647 { return 0 - 1 }
+    if validation_mask != 127 { return 0 - 1 }
+
+    var fp: i64 = 509
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_remainder_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor_ball_bridge_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, quality_profile_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, radius_budget_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, final_enclosure_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, validation_mask)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_step_policy_fingerprint(
+    taylor2_remainder_fp: i64,
+    taylor2_remainder_audit_fp: i64,
+    taylor_ball_bridge_fp: i64,
+    validation_mask: i64,
+    remainder_fill_limit_ppm: i64,
+    min_after_slack_limit: i64,
+    total_after_slack_limit: i64) -> i64 with Div, Mod {
+    if taylor2_remainder_fp != 320985955 { return 0 - 1 }
+    if taylor2_remainder_audit_fp != 980184978 { return 0 - 1 }
+    if taylor_ball_bridge_fp != 979362768 { return 0 - 1 }
+    if validation_mask != 127 { return 0 - 1 }
+    if remainder_fill_limit_ppm != 15000 { return 0 - 1 }
+    if min_after_slack_limit != 5000 { return 0 - 1 }
+    if total_after_slack_limit != 19000 { return 0 - 1 }
+
+    let x_slack: i64 = 6634
+    let y_slack: i64 = 5360
+    let z_slack: i64 = 7552
+    let rx: i64 = 102
+    let ry: i64 = 135
+    let rz: i64 = 20
+    let x_after_remainder: i64 = 6532
+    let y_after_remainder: i64 = 5225
+    let z_after_remainder: i64 = 7532
+
+    let total_slack: i64 = x_slack + y_slack + z_slack
+    let total_remainder: i64 = rx + ry + rz
+    let total_after_slack: i64 = x_after_remainder + y_after_remainder + z_after_remainder
+    if total_slack != 19546 { return 0 - 1 }
+    if total_remainder != 257 { return 0 - 1 }
+    if total_after_slack != 19289 { return 0 - 1 }
+
+    let min_after_slack: i64 = y_after_remainder
+    let max_axis_remainder: i64 = ry
+    if min_after_slack != 5225 { return 0 - 1 }
+    if max_axis_remainder != 135 { return 0 - 1 }
+
+    let remainder_fill_ppm: i64 = ball_fixed_ceil_div_nonneg(
+        total_remainder * 1000000, total_slack)
+    let after_slack_ppm: i64 = (total_after_slack * 1000000) / total_slack
+    if remainder_fill_ppm != 13149 { return 0 - 1 }
+    if after_slack_ppm != 986851 { return 0 - 1 }
+
+    var policy_mask: i64 = 0
+    if remainder_fill_ppm <= remainder_fill_limit_ppm { policy_mask = policy_mask + 1 }
+    if min_after_slack >= min_after_slack_limit { policy_mask = policy_mask + 2 }
+    if total_after_slack >= total_after_slack_limit { policy_mask = policy_mask + 4 }
+    if validation_mask == 127 { policy_mask = policy_mask + 8 }
+    if taylor2_remainder_fp == 320985955 { policy_mask = policy_mask + 16 }
+    if taylor2_remainder_audit_fp == 980184978 { policy_mask = policy_mask + 32 }
+    if policy_mask != 63 { return 0 - 1 }
+
+    let action_accept_same_dt: i64 = 1
+    let action_grow_dt: i64 = 0
+    let next_dt_num: i64 = 1
+    let next_dt_den: i64 = 1
+
+    var fp: i64 = 557
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_remainder_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_remainder_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor_ball_bridge_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, validation_mask)
+    fp = ball_fixed_trajectory_quality_mix(fp, total_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, total_remainder)
+    fp = ball_fixed_trajectory_quality_mix(fp, total_after_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, min_after_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, max_axis_remainder)
+    fp = ball_fixed_trajectory_quality_mix(fp, remainder_fill_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, after_slack_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, remainder_fill_limit_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, min_after_slack_limit)
+    fp = ball_fixed_trajectory_quality_mix(fp, total_after_slack_limit)
+    fp = ball_fixed_trajectory_quality_mix(fp, policy_mask)
+    fp = ball_fixed_trajectory_quality_mix(fp, action_accept_same_dt)
+    fp = ball_fixed_trajectory_quality_mix(fp, action_grow_dt)
+    fp = ball_fixed_trajectory_quality_mix(fp, next_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, next_dt_den)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_step_policy_audit_fingerprint(
+    taylor2_step_policy_fp: i64,
+    taylor2_remainder_fp: i64,
+    taylor2_remainder_audit_fp: i64,
+    v44_remainder_receipt_fp: i64,
+    v44_remainder_portfolio_audit_fp: i64,
+    v44_readiness_fp: i64,
+    remainder_fill_ppm: i64,
+    policy_mask: i64) -> i64 with Mod {
+    if taylor2_step_policy_fp != 403306384 { return 0 - 1 }
+    if taylor2_remainder_fp != 320985955 { return 0 - 1 }
+    if taylor2_remainder_audit_fp != 980184978 { return 0 - 1 }
+    if v44_remainder_receipt_fp != 873855189 { return 0 - 1 }
+    if v44_remainder_portfolio_audit_fp != 311965616 { return 0 - 1 }
+    if v44_readiness_fp != 101774289 { return 0 - 1 }
+    if remainder_fill_ppm != 13149 { return 0 - 1 }
+    if policy_mask != 63 { return 0 - 1 }
+
+    var fp: i64 = 563
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_step_policy_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_remainder_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_remainder_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v44_remainder_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v44_remainder_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v44_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, remainder_fill_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, policy_mask)
+    return fp
+}
+
+pub fn ball_fixed_adaptive_step_action_code(
+    remainder_fill_ppm: i64,
+    shrink_limit_ppm: i64,
+    grow_limit_ppm: i64,
+    min_after_slack: i64,
+    min_after_slack_limit: i64,
+    grow_min_after_slack: i64,
+    total_after_slack: i64,
+    total_after_slack_limit: i64,
+    grow_total_after_slack: i64,
+    validation_mask: i64) -> i64 {
+    if validation_mask != 127 { return 0 }
+    if min_after_slack < 0 { return 0 }
+    if total_after_slack < 0 { return 0 }
+    if remainder_fill_ppm > shrink_limit_ppm { return 1 }
+    if min_after_slack < min_after_slack_limit { return 1 }
+    if total_after_slack < total_after_slack_limit { return 1 }
+    if remainder_fill_ppm <= grow_limit_ppm {
+        if min_after_slack >= grow_min_after_slack {
+            if total_after_slack >= grow_total_after_slack {
+                return 3
+            }
+        }
+    }
+    return 2
+}
+
+pub fn ball_fixed_lorenz_taylor2_adaptive_step_decision_fingerprint(
+    taylor2_step_policy_fp: i64,
+    taylor2_step_policy_audit_fp: i64,
+    v45_step_policy_receipt_fp: i64,
+    v45_step_policy_portfolio_audit_fp: i64,
+    v45_readiness_fp: i64,
+    expected_action_code: i64,
+    expected_policy_mask: i64) -> i64 with Mod {
+    if taylor2_step_policy_fp != 403306384 { return 0 - 1 }
+    if taylor2_step_policy_audit_fp != 635367450 { return 0 - 1 }
+    if v45_step_policy_receipt_fp != 486061656 { return 0 - 1 }
+    if v45_step_policy_portfolio_audit_fp != 85088711 { return 0 - 1 }
+    if v45_readiness_fp != 498384393 { return 0 - 1 }
+    if expected_action_code != 2 { return 0 - 1 }
+    if expected_policy_mask != 63 { return 0 - 1 }
+
+    let remainder_fill_ppm: i64 = 13149
+    let after_slack_ppm: i64 = 986851
+    let policy_mask: i64 = 63
+    let shrink_limit_ppm: i64 = 20000
+    let grow_limit_ppm: i64 = 5000
+    let min_after_slack: i64 = 5225
+    let min_after_slack_limit: i64 = 5000
+    let grow_min_after_slack: i64 = 7000
+    let total_after_slack: i64 = 19289
+    let total_after_slack_limit: i64 = 19000
+    let grow_total_after_slack: i64 = 25000
+
+    let action_code: i64 = ball_fixed_adaptive_step_action_code(
+        remainder_fill_ppm, shrink_limit_ppm, grow_limit_ppm,
+        min_after_slack, min_after_slack_limit, grow_min_after_slack,
+        total_after_slack, total_after_slack_limit, grow_total_after_slack,
+        127)
+    if action_code != expected_action_code { return 0 - 1 }
+    if action_code != 2 { return 0 - 1 }
+
+    let next_dt_num: i64 = 1
+    let next_dt_den: i64 = 1
+    let shrink_dt_num: i64 = 1
+    let shrink_dt_den: i64 = 2
+    let grow_dt_num: i64 = 3
+    let grow_dt_den: i64 = 2
+
+    var fp: i64 = 569
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_step_policy_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_step_policy_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v45_step_policy_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v45_step_policy_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v45_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, remainder_fill_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, after_slack_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, policy_mask)
+    fp = ball_fixed_trajectory_quality_mix(fp, shrink_limit_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, grow_limit_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, min_after_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, min_after_slack_limit)
+    fp = ball_fixed_trajectory_quality_mix(fp, grow_min_after_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, total_after_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, total_after_slack_limit)
+    fp = ball_fixed_trajectory_quality_mix(fp, grow_total_after_slack)
+    fp = ball_fixed_trajectory_quality_mix(fp, action_code)
+    fp = ball_fixed_trajectory_quality_mix(fp, next_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, next_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, shrink_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, shrink_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, grow_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, grow_dt_den)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_adaptive_step_decision_audit_fingerprint(
+    adaptive_step_decision_fp: i64,
+    taylor2_step_policy_fp: i64,
+    taylor2_step_policy_audit_fp: i64,
+    v45_step_policy_receipt_fp: i64,
+    v45_step_policy_portfolio_audit_fp: i64,
+    v45_readiness_fp: i64,
+    action_code: i64,
+    policy_mask: i64) -> i64 with Mod {
+    if adaptive_step_decision_fp != 120259197 { return 0 - 1 }
+    if taylor2_step_policy_fp != 403306384 { return 0 - 1 }
+    if taylor2_step_policy_audit_fp != 635367450 { return 0 - 1 }
+    if v45_step_policy_receipt_fp != 486061656 { return 0 - 1 }
+    if v45_step_policy_portfolio_audit_fp != 85088711 { return 0 - 1 }
+    if v45_readiness_fp != 498384393 { return 0 - 1 }
+    if action_code != 2 { return 0 - 1 }
+    if policy_mask != 63 { return 0 - 1 }
+
+    var fp: i64 = 571
+    fp = ball_fixed_trajectory_quality_mix(fp, adaptive_step_decision_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_step_policy_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor2_step_policy_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v45_step_policy_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v45_step_policy_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v45_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, action_code)
+    fp = ball_fixed_trajectory_quality_mix(fp, policy_mask)
+    return fp
+}
+
+pub fn ball_fixed_rational_leq_nonneg(
+    left_num: i64,
+    left_den: i64,
+    right_num: i64,
+    right_den: i64) -> i64 {
+    if left_num < 0 { return 0 }
+    if right_num < 0 { return 0 }
+    if left_den <= 0 { return 0 }
+    if right_den <= 0 { return 0 }
+    if left_num * right_den <= right_num * left_den { return 1 }
+    return 0
+}
+
+pub fn ball_fixed_lorenz_taylor2_step_schedule_fingerprint(
+    adaptive_step_decision_fp: i64,
+    adaptive_step_decision_audit_fp: i64,
+    v46_decision_receipt_fp: i64,
+    v46_decision_portfolio_audit_fp: i64,
+    v46_readiness_fp: i64,
+    expected_action_code: i64,
+    expected_schedule_mask: i64) -> i64 with Mod {
+    if adaptive_step_decision_fp != 120259197 { return 0 - 1 }
+    if adaptive_step_decision_audit_fp != 471466754 { return 0 - 1 }
+    if v46_decision_receipt_fp != 279109641 { return 0 - 1 }
+    if v46_decision_portfolio_audit_fp != 207228249 { return 0 - 1 }
+    if v46_readiness_fp != 984799877 { return 0 - 1 }
+    if expected_action_code != 2 { return 0 - 1 }
+    if expected_schedule_mask != 127 { return 0 - 1 }
+
+    let action_code: i64 = 2
+    let base_dt_num: i64 = 1
+    let base_dt_den: i64 = 100
+    let min_dt_num: i64 = 1
+    let min_dt_den: i64 = 200
+    let selected_dt_num: i64 = 1
+    let selected_dt_den: i64 = 100
+    let max_dt_num: i64 = 3
+    let max_dt_den: i64 = 200
+    let shrink_dt_num: i64 = 1
+    let shrink_dt_den: i64 = 200
+    let hold_dt_num: i64 = 1
+    let hold_dt_den: i64 = 100
+    let grow_dt_num: i64 = 3
+    let grow_dt_den: i64 = 200
+    let max_dt_den_cap: i64 = 200
+
+    var schedule_mask: i64 = 0
+    if ball_fixed_rational_leq_nonneg(min_dt_num, min_dt_den, selected_dt_num, selected_dt_den) == 1 {
+        schedule_mask = schedule_mask + 1
+    }
+    if ball_fixed_rational_leq_nonneg(selected_dt_num, selected_dt_den, max_dt_num, max_dt_den) == 1 {
+        schedule_mask = schedule_mask + 2
+    }
+    if action_code == expected_action_code { schedule_mask = schedule_mask + 4 }
+    if selected_dt_num == hold_dt_num {
+        if selected_dt_den == hold_dt_den {
+            schedule_mask = schedule_mask + 8
+        }
+    }
+    if ball_fixed_rational_leq_nonneg(shrink_dt_num, shrink_dt_den, hold_dt_num, hold_dt_den) == 1 {
+        if ball_fixed_rational_leq_nonneg(hold_dt_num, hold_dt_den, grow_dt_num, grow_dt_den) == 1 {
+            schedule_mask = schedule_mask + 16
+        }
+    }
+    if adaptive_step_decision_fp == 120259197 { schedule_mask = schedule_mask + 32 }
+    if selected_dt_den <= max_dt_den_cap { schedule_mask = schedule_mask + 64 }
+    if schedule_mask != expected_schedule_mask { return 0 - 1 }
+    if schedule_mask != 127 { return 0 - 1 }
+
+    var fp: i64 = 577
+    fp = ball_fixed_trajectory_quality_mix(fp, adaptive_step_decision_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, adaptive_step_decision_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v46_decision_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v46_decision_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v46_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, action_code)
+    fp = ball_fixed_trajectory_quality_mix(fp, base_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, base_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, min_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, min_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, selected_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, selected_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, max_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, max_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, shrink_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, shrink_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, hold_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, hold_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, grow_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, grow_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, schedule_mask)
+    fp = ball_fixed_trajectory_quality_mix(fp, max_dt_den_cap)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_step_schedule_audit_fingerprint(
+    step_schedule_fp: i64,
+    adaptive_step_decision_fp: i64,
+    adaptive_step_decision_audit_fp: i64,
+    v46_decision_receipt_fp: i64,
+    v46_decision_portfolio_audit_fp: i64,
+    v46_readiness_fp: i64,
+    action_code: i64,
+    schedule_mask: i64) -> i64 with Mod {
+    if step_schedule_fp != 353612555 { return 0 - 1 }
+    if adaptive_step_decision_fp != 120259197 { return 0 - 1 }
+    if adaptive_step_decision_audit_fp != 471466754 { return 0 - 1 }
+    if v46_decision_receipt_fp != 279109641 { return 0 - 1 }
+    if v46_decision_portfolio_audit_fp != 207228249 { return 0 - 1 }
+    if v46_readiness_fp != 984799877 { return 0 - 1 }
+    if action_code != 2 { return 0 - 1 }
+    if schedule_mask != 127 { return 0 - 1 }
+
+    var fp: i64 = 587
+    fp = ball_fixed_trajectory_quality_mix(fp, step_schedule_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, adaptive_step_decision_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, adaptive_step_decision_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v46_decision_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v46_decision_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v46_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, action_code)
+    fp = ball_fixed_trajectory_quality_mix(fp, schedule_mask)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_step_request_fingerprint(
+    step_schedule_fp: i64,
+    step_schedule_audit_fp: i64,
+    v47_step_schedule_receipt_fp: i64,
+    v47_step_schedule_portfolio_audit_fp: i64,
+    v47_readiness_fp: i64,
+    expected_step_index: i64,
+    expected_request_mask: i64) -> i64 with Mod {
+    if step_schedule_fp != 353612555 { return 0 - 1 }
+    if step_schedule_audit_fp != 335541872 { return 0 - 1 }
+    if v47_step_schedule_receipt_fp != 842631931 { return 0 - 1 }
+    if v47_step_schedule_portfolio_audit_fp != 13881891 { return 0 - 1 }
+    if v47_readiness_fp != 224324310 { return 0 - 1 }
+    if expected_step_index != 6 { return 0 - 1 }
+    if expected_request_mask != 127 { return 0 - 1 }
+
+    let trajectory_manifest_fp: i64 = 214180161
+    let final_enclosure_receipt_fp: i64 = 114244647
+    let dependency_dag_fp: i64 = 713010204
+    let step_index: i64 = 6
+    let taylor_order: i64 = 2
+    let selected_dt_num: i64 = 1
+    let selected_dt_den: i64 = 100
+    let scale_log2: i64 = 32
+    let source_width_bits: i64 = 256
+    let bit_headroom: i64 = 184
+    let min_bit_headroom: i64 = 180
+    let target_remainder_ppm: i64 = 15000
+    let max_dt_den_cap: i64 = 200
+    let schedule_mask: i64 = 127
+    let request_status_pending: i64 = 1
+
+    var request_mask: i64 = 0
+    if step_index == expected_step_index { request_mask = request_mask + 1 }
+    if taylor_order == 2 { request_mask = request_mask + 2 }
+    if selected_dt_num == 1 {
+        if selected_dt_den == 100 {
+            request_mask = request_mask + 4
+        }
+    }
+    if source_width_bits == 256 {
+        if scale_log2 == 32 {
+            request_mask = request_mask + 8
+        }
+    }
+    if bit_headroom >= min_bit_headroom { request_mask = request_mask + 16 }
+    if target_remainder_ppm <= 15000 { request_mask = request_mask + 32 }
+    if schedule_mask == 127 {
+        if selected_dt_den <= max_dt_den_cap {
+            request_mask = request_mask + 64
+        }
+    }
+    if request_mask != expected_request_mask { return 0 - 1 }
+    if request_mask != 127 { return 0 - 1 }
+
+    var fp: i64 = 593
+    fp = ball_fixed_trajectory_quality_mix(fp, step_schedule_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_schedule_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v47_step_schedule_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v47_step_schedule_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v47_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, trajectory_manifest_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, final_enclosure_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, dependency_dag_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_index)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor_order)
+    fp = ball_fixed_trajectory_quality_mix(fp, selected_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, selected_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, scale_log2)
+    fp = ball_fixed_trajectory_quality_mix(fp, source_width_bits)
+    fp = ball_fixed_trajectory_quality_mix(fp, bit_headroom)
+    fp = ball_fixed_trajectory_quality_mix(fp, min_bit_headroom)
+    fp = ball_fixed_trajectory_quality_mix(fp, target_remainder_ppm)
+    fp = ball_fixed_trajectory_quality_mix(fp, max_dt_den_cap)
+    fp = ball_fixed_trajectory_quality_mix(fp, request_mask)
+    fp = ball_fixed_trajectory_quality_mix(fp, request_status_pending)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_step_request_audit_fingerprint(
+    step_request_fp: i64,
+    step_schedule_fp: i64,
+    step_schedule_audit_fp: i64,
+    v47_step_schedule_receipt_fp: i64,
+    v47_step_schedule_portfolio_audit_fp: i64,
+    v47_readiness_fp: i64,
+    step_index: i64,
+    request_mask: i64) -> i64 with Mod {
+    if step_request_fp != 510353327 { return 0 - 1 }
+    if step_schedule_fp != 353612555 { return 0 - 1 }
+    if step_schedule_audit_fp != 335541872 { return 0 - 1 }
+    if v47_step_schedule_receipt_fp != 842631931 { return 0 - 1 }
+    if v47_step_schedule_portfolio_audit_fp != 13881891 { return 0 - 1 }
+    if v47_readiness_fp != 224324310 { return 0 - 1 }
+    if step_index != 6 { return 0 - 1 }
+    if request_mask != 127 { return 0 - 1 }
+
+    var fp: i64 = 599
+    fp = ball_fixed_trajectory_quality_mix(fp, step_request_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_schedule_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_schedule_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v47_step_schedule_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v47_step_schedule_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v47_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_index)
+    fp = ball_fixed_trajectory_quality_mix(fp, request_mask)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_response_envelope_fingerprint(
+    step_request_fp: i64,
+    step_request_audit_fp: i64,
+    v48_step_request_receipt_fp: i64,
+    v48_step_request_portfolio_audit_fp: i64,
+    v48_readiness_fp: i64,
+    expected_response_status: i64,
+    expected_response_mask: i64) -> i64 with Mod {
+    if step_request_fp != 510353327 { return 0 - 1 }
+    if step_request_audit_fp != 465022480 { return 0 - 1 }
+    if v48_step_request_receipt_fp != 185755530 { return 0 - 1 }
+    if v48_step_request_portfolio_audit_fp != 167433392 { return 0 - 1 }
+    if v48_readiness_fp != 38526066 { return 0 - 1 }
+    if expected_response_status != 2 { return 0 - 1 }
+    if expected_response_mask != 127 { return 0 - 1 }
+
+    let trajectory_manifest_fp: i64 = 214180161
+    let dependency_dag_fp: i64 = 713010204
+    let step_index: i64 = 6
+    let taylor_order: i64 = 2
+    let selected_dt_num: i64 = 1
+    let selected_dt_den: i64 = 100
+    let scale_log2: i64 = 32
+    let source_width_bits: i64 = 256
+    let request_mask: i64 = 127
+    let response_status_candidate_required: i64 = 2
+    let candidate_kind_ball_enclosure: i64 = 1
+    let required_artifact_count: i64 = 4
+    let required_center_artifact: i64 = 1
+    let required_radius_artifact: i64 = 1
+    let required_remainder_artifact: i64 = 1
+    let required_proof_trace_artifact: i64 = 1
+
+    var response_mask: i64 = 0
+    if step_request_fp == 510353327 {
+        if step_request_audit_fp == 465022480 {
+            response_mask = response_mask + 1
+        }
+    }
+    if v48_step_request_receipt_fp == 185755530 {
+        if v48_readiness_fp == 38526066 {
+            response_mask = response_mask + 2
+        }
+    }
+    if step_index == 6 {
+        if taylor_order == 2 {
+            response_mask = response_mask + 4
+        }
+    }
+    if selected_dt_num == 1 {
+        if selected_dt_den == 100 {
+            response_mask = response_mask + 8
+        }
+    }
+    if source_width_bits == 256 {
+        if scale_log2 == 32 {
+            response_mask = response_mask + 16
+        }
+    }
+    if candidate_kind_ball_enclosure == 1 {
+        if required_artifact_count == 4 {
+            response_mask = response_mask + 32
+        }
+    }
+    if response_status_candidate_required == expected_response_status {
+        if request_mask == 127 {
+            response_mask = response_mask + 64
+        }
+    }
+    if response_mask != expected_response_mask { return 0 - 1 }
+    if response_mask != 127 { return 0 - 1 }
+
+    var fp: i64 = 607
+    fp = ball_fixed_trajectory_quality_mix(fp, step_request_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_request_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v48_step_request_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v48_step_request_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v48_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, trajectory_manifest_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, dependency_dag_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_index)
+    fp = ball_fixed_trajectory_quality_mix(fp, taylor_order)
+    fp = ball_fixed_trajectory_quality_mix(fp, selected_dt_num)
+    fp = ball_fixed_trajectory_quality_mix(fp, selected_dt_den)
+    fp = ball_fixed_trajectory_quality_mix(fp, scale_log2)
+    fp = ball_fixed_trajectory_quality_mix(fp, source_width_bits)
+    fp = ball_fixed_trajectory_quality_mix(fp, request_mask)
+    fp = ball_fixed_trajectory_quality_mix(fp, response_status_candidate_required)
+    fp = ball_fixed_trajectory_quality_mix(fp, candidate_kind_ball_enclosure)
+    fp = ball_fixed_trajectory_quality_mix(fp, required_artifact_count)
+    fp = ball_fixed_trajectory_quality_mix(fp, required_center_artifact)
+    fp = ball_fixed_trajectory_quality_mix(fp, required_radius_artifact)
+    fp = ball_fixed_trajectory_quality_mix(fp, required_remainder_artifact)
+    fp = ball_fixed_trajectory_quality_mix(fp, required_proof_trace_artifact)
+    fp = ball_fixed_trajectory_quality_mix(fp, response_mask)
+    return fp
+}
+
+pub fn ball_fixed_lorenz_taylor2_response_envelope_audit_fingerprint(
+    response_envelope_fp: i64,
+    step_request_fp: i64,
+    step_request_audit_fp: i64,
+    v48_step_request_receipt_fp: i64,
+    v48_step_request_portfolio_audit_fp: i64,
+    v48_readiness_fp: i64,
+    step_index: i64,
+    response_mask: i64,
+    response_status: i64) -> i64 with Mod {
+    if response_envelope_fp != 506104143 { return 0 - 1 }
+    if step_request_fp != 510353327 { return 0 - 1 }
+    if step_request_audit_fp != 465022480 { return 0 - 1 }
+    if v48_step_request_receipt_fp != 185755530 { return 0 - 1 }
+    if v48_step_request_portfolio_audit_fp != 167433392 { return 0 - 1 }
+    if v48_readiness_fp != 38526066 { return 0 - 1 }
+    if step_index != 6 { return 0 - 1 }
+    if response_mask != 127 { return 0 - 1 }
+    if response_status != 2 { return 0 - 1 }
+
+    var fp: i64 = 613
+    fp = ball_fixed_trajectory_quality_mix(fp, response_envelope_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_request_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_request_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v48_step_request_receipt_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v48_step_request_portfolio_audit_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, v48_readiness_fp)
+    fp = ball_fixed_trajectory_quality_mix(fp, step_index)
+    fp = ball_fixed_trajectory_quality_mix(fp, response_mask)
+    fp = ball_fixed_trajectory_quality_mix(fp, response_status)
+    return fp
+}
+
+pub fn ball_fixed_module_ready() -> i64 {
+    return 1
+}

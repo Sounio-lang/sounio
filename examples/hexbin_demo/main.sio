@@ -1,0 +1,187 @@
+// examples/hexbin_demo/main.sio — Hex-bin density + ridgeline distribution demo
+//
+// Top panel  (y: 10-230): hexagonal binning of bivariate Gaussian mixture.
+//   Three clusters: drug A (low toxicity, high efficacy), drug B (balanced),
+//   drug C (high toxicity). viridis colormap by local density.
+//
+// Bottom panel (y: 250-460): ridgeline (joy) plot showing AUC distributions
+//   for 5 patient cohorts. Epanechnikov KDE, stacked with 50% overlap.
+//
+// Press ESC or close to exit.
+
+use display::window::{Window, window_open, window_set_title, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear, canvas_fill_rect}
+use display::event::{EV_CLOSE, EV_KEY_PRESS}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_fxaa, canvas_bloom}
+use viz::epiviz::{epiviz_hexbin, epiviz_ridgeline}
+
+fn hb_sin(t: f64) -> f64 with Div {
+    let t2 = t * t
+    t * (1.0 - t2 * (1.0 / 6.0 - t2 * (1.0 / 120.0 - t2 / 5040.0)))
+}
+
+fn hb_cos(t: f64) -> f64 with Div {
+    let t2 = t * t
+    1.0 - t2 * (0.5 - t2 * (1.0 / 24.0 - t2 / 720.0))
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 640
+    let H: i64 = 480
+    let scratch = heap_alloc(W * H * 8) as *mut i64
+
+    var win = window_open(W, H)
+
+    // --------------------------------------------------------
+    // Hex-bin data: 3 clusters (Efficacy vs Toxicity, 0-10 scale)
+    // Generate using deterministic elliptic point sets
+    // --------------------------------------------------------
+    var hbx: [f64; 1024] = [0.0; 1024]
+    var hby: [f64; 1024] = [0.0; 1024]
+    var n_hb: i64 = 0
+
+    // Cluster A: Efficacy 7-9, Toxicity 1-3 (ideal, n=120)
+    var ci: i64 = 0
+    while ci < 120 {
+        let t = 6.28318530718 * (ci as f64) / 120.0
+        let r = 1.0 + 0.6 * hb_sin(t * 3.7)
+        hbx[n_hb as usize] = 8.0 + r * hb_cos(t)
+        hby[n_hb as usize] = 2.0 + r * 0.5 * hb_sin(t)
+        n_hb = n_hb + 1
+        ci = ci + 1
+    }
+
+    // Cluster B: Efficacy 5-7, Toxicity 4-6 (balanced, n=100)
+    var cj: i64 = 0
+    while cj < 100 {
+        let t = 6.28318530718 * (cj as f64) / 100.0
+        let r = 0.8 + 0.5 * hb_cos(t * 2.3 + 1.1)
+        hbx[n_hb as usize] = 6.0 + r * hb_cos(t)
+        hby[n_hb as usize] = 5.0 + r * 0.7 * hb_sin(t)
+        n_hb = n_hb + 1
+        cj = cj + 1
+    }
+
+    // Cluster C: Efficacy 2-5, Toxicity 7-9 (high-tox, n=80)
+    var ck: i64 = 0
+    while ck < 80 {
+        let t = 6.28318530718 * (ck as f64) / 80.0
+        let r = 0.9 + 0.4 * hb_sin(t * 5.1)
+        hbx[n_hb as usize] = 3.5 + r * hb_cos(t)
+        hby[n_hb as usize] = 8.0 + r * 0.6 * hb_sin(t)
+        n_hb = n_hb + 1
+        ck = ck + 1
+    }
+
+    // --------------------------------------------------------
+    // Ridgeline data: 5 patient cohorts, AUC (h·mg/L), 30 pts each
+    // Cohort 0: elderly (low AUC), ..., Cohort 4: young healthy (high AUC)
+    // --------------------------------------------------------
+    var rl_data: [f64; 2048] = [0.0; 2048]
+    // Cohort 0 (elderly): AUC ≈ 30-50
+    rl_data[0]=32.0; rl_data[1]=34.5; rl_data[2]=36.0; rl_data[3]=37.2; rl_data[4]=38.1
+    rl_data[5]=39.0; rl_data[6]=40.3; rl_data[7]=41.0; rl_data[8]=41.8; rl_data[9]=42.5
+    rl_data[10]=43.0; rl_data[11]=43.7; rl_data[12]=44.2; rl_data[13]=44.8; rl_data[14]=45.0
+    rl_data[15]=45.3; rl_data[16]=45.9; rl_data[17]=46.4; rl_data[18]=46.9; rl_data[19]=47.2
+    rl_data[20]=47.8; rl_data[21]=48.0; rl_data[22]=48.5; rl_data[23]=49.0; rl_data[24]=49.4
+    rl_data[25]=33.0; rl_data[26]=35.5; rl_data[27]=40.0; rl_data[28]=44.0; rl_data[29]=48.8
+    // Cohort 1 (renally impaired): AUC ≈ 45-65
+    rl_data[30]=46.0; rl_data[31]=48.5; rl_data[32]=50.0; rl_data[33]=51.5; rl_data[34]=53.0
+    rl_data[35]=54.2; rl_data[36]=55.0; rl_data[37]=55.8; rl_data[38]=56.5; rl_data[39]=57.1
+    rl_data[40]=57.8; rl_data[41]=58.2; rl_data[42]=58.9; rl_data[43]=59.4; rl_data[44]=60.0
+    rl_data[45]=60.5; rl_data[46]=61.0; rl_data[47]=61.7; rl_data[48]=62.2; rl_data[49]=62.8
+    rl_data[50]=63.0; rl_data[51]=63.5; rl_data[52]=64.0; rl_data[53]=64.4; rl_data[54]=64.8
+    rl_data[55]=47.0; rl_data[56]=52.0; rl_data[57]=56.0; rl_data[58]=60.0; rl_data[59]=63.0
+    // Cohort 2 (hepatic impaired): AUC ≈ 55-80
+    rl_data[60]=57.0; rl_data[61]=60.0; rl_data[62]=63.0; rl_data[63]=65.5; rl_data[64]=67.0
+    rl_data[65]=68.5; rl_data[66]=70.0; rl_data[67]=71.0; rl_data[68]=71.8; rl_data[69]=72.5
+    rl_data[70]=73.0; rl_data[71]=73.8; rl_data[72]=74.5; rl_data[73]=75.0; rl_data[74]=75.6
+    rl_data[75]=76.0; rl_data[76]=76.5; rl_data[77]=77.0; rl_data[78]=77.8; rl_data[79]=78.2
+    rl_data[80]=78.8; rl_data[81]=79.0; rl_data[82]=79.4; rl_data[83]=79.8; rl_data[84]=80.0
+    rl_data[85]=58.0; rl_data[86]=64.0; rl_data[87]=70.0; rl_data[88]=75.0; rl_data[89]=79.5
+    // Cohort 3 (adult typical): AUC ≈ 65-90
+    rl_data[90]=67.0; rl_data[91]=70.0; rl_data[92]=73.0; rl_data[93]=75.0; rl_data[94]=77.0
+    rl_data[95]=78.5; rl_data[96]=80.0; rl_data[97]=81.0; rl_data[98]=82.0; rl_data[99]=82.8
+    rl_data[100]=83.5; rl_data[101]=84.0; rl_data[102]=84.8; rl_data[103]=85.3; rl_data[104]=86.0
+    rl_data[105]=86.5; rl_data[106]=87.0; rl_data[107]=87.5; rl_data[108]=88.0; rl_data[109]=88.5
+    rl_data[110]=89.0; rl_data[111]=89.3; rl_data[112]=89.7; rl_data[113]=90.0; rl_data[114]=90.2
+    rl_data[115]=68.0; rl_data[116]=74.0; rl_data[117]=80.0; rl_data[118]=86.0; rl_data[119]=89.0
+    // Cohort 4 (young healthy): AUC ≈ 80-105
+    rl_data[120]=82.0; rl_data[121]=85.0; rl_data[122]=88.0; rl_data[123]=90.5; rl_data[124]=92.0
+    rl_data[125]=93.5; rl_data[126]=95.0; rl_data[127]=96.0; rl_data[128]=96.8; rl_data[129]=97.5
+    rl_data[130]=98.0; rl_data[131]=98.8; rl_data[132]=99.5; rl_data[133]=100.0; rl_data[134]=100.5
+    rl_data[135]=101.0; rl_data[136]=101.5; rl_data[137]=102.0; rl_data[138]=102.5; rl_data[139]=103.0
+    rl_data[140]=103.3; rl_data[141]=103.7; rl_data[142]=104.0; rl_data[143]=104.4; rl_data[144]=104.8
+    rl_data[145]=83.0; rl_data[146]=89.0; rl_data[147]=95.0; rl_data[148]=101.0; rl_data[149]=104.5
+
+    // Per-group colors (viridis-inspired progression)
+    var rl_r: [i64; 16] = [0; 16]
+    var rl_g: [i64; 16] = [0; 16]
+    var rl_b: [i64; 16] = [0; 16]
+    rl_r[0]=68;  rl_g[0]=1;   rl_b[0]=84    // dark violet
+    rl_r[1]=59;  rl_g[1]=82;  rl_b[1]=139   // blue
+    rl_r[2]=33;  rl_g[2]=145; rl_b[2]=140   // teal
+    rl_r[3]=94;  rl_g[3]=201; rl_b[3]=98    // green
+    rl_r[4]=253; rl_g[4]=231; rl_b[4]=37    // yellow
+
+    var title: [i8; 128] = [0; 128]
+    title[0] = 72  // H
+    title[1] = 101 // e
+    title[2] = 120 // x
+    title[3] = 66  // B
+    title[4] = 105 // i
+    title[5] = 110 // n
+    title[6] = 32  //
+    title[7] = 68  // D
+    title[8] = 101 // e
+    title[9] = 109 // m
+    title[10] = 111 // o
+    let title_len: i64 = 11
+    window_set_title(&!win, &title, title_len)
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == 27 { running = false }
+        }
+
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 12, 13, 22)
+
+        // Horizontal divider
+        canvas_fill_rect(&!c, 0, 236, W, 2, 35, 38, 55)
+
+        // Top panel: hex-bin (Efficacy 0-10 vs Toxicity 0-10)
+        canvas_fill_rect(&!c, 8, 8, 624, 222, 15, 16, 28)
+        epiviz_hexbin(&hbx, &hby, n_hb,
+                      0.0, 10.0,
+                      0.0, 10.0,
+                      14,         // hex circumradius px
+                      &!c,
+                      10, 10, 620, 220)
+
+        // Axis reference lines (Efficacy=5, Toxicity=5 reference)
+        canvas_draw_line_aa(&!c, 320, 10, 320, 230, 40, 44, 60)   // x=5 mid
+        canvas_draw_line_aa(&!c, 10, 120, 630, 120, 40, 44, 60)   // y=5 mid
+
+        // Bottom panel: ridgeline (AUC distribution by cohort)
+        canvas_fill_rect(&!c, 8, 240, 624, 232, 15, 16, 28)
+        epiviz_ridgeline(&rl_data, 5, 30,
+                         20.0, 115.0,   // x-range (AUC h·mg/L)
+                         6.5,           // KDE bandwidth
+                         &!c,
+                         10, 242, 620, 230,
+                         &rl_r, &rl_g, &rl_b)
+
+        canvas_bloom(&!c, scratch, 185, 130)
+        canvas_fxaa(&!c, scratch)
+
+        window_present(&!win)
+    }
+
+    heap_free(scratch as *mut i8)
+    window_close(&!win)
+}

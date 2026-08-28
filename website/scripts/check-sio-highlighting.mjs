@@ -82,15 +82,23 @@ async function validateSourceSet({ sourceDir, mapToDist }) {
 
     const renderedRustCount = countRenderedByLang(html, 'rust');
     const renderedSioCount = countRenderedByLang(html, 'sio');
-    const requiredRustCount = sourceRustCount + sourceSioCount;
 
-    if (renderedSioCount > 0) {
-      errors.push(`Rendered sio language token found (expected remapped to rust): ${toPosix(distRel)}`);
+    // sio fences must render under their own language id (real grammar,
+    // website/src/shiki/sounio.tmLanguage.json) — never remapped to rust.
+    // Remapping to rust was the defect this check used to require: it
+    // tokenized every &!, ++, var, and with-clause using Rust's keywords,
+    // on a language whose own CLAUDE.md lists those as compile errors.
+    if (renderedSioCount < sourceSioCount) {
+      errors.push(
+        `Missing real sio-highlighted blocks: ${toPosix(path.relative(root, abs))} -> ${toPosix(distRel)} (expected >= ${sourceSioCount} data-language="sio" blocks, got ${renderedSioCount})`
+      );
     }
 
-    if (renderedRustCount < requiredRustCount) {
+    // Native rust fences (unrelated to any sio content) still owe their own
+    // rendered blocks — sio fences must not silently satisfy this count.
+    if (renderedRustCount < sourceRustCount) {
       errors.push(
-        `Insufficient rust-highlighted blocks for sio fences: ${toPosix(path.relative(root, abs))} (expected >= ${requiredRustCount}, got ${renderedRustCount})`
+        `Insufficient rust-highlighted blocks for native rust fences: ${toPosix(path.relative(root, abs))} (expected >= ${sourceRustCount}, got ${renderedRustCount})`
       );
     }
 
@@ -115,7 +123,15 @@ async function run() {
   const blogResult = await validateSourceSet({
     sourceDir: 'src/content/blog',
     mapToDist: (rel) => {
-      const slug = stripExtAndIndex(rel);
+      const relPosix = toPosix(rel);
+      const parts = relPosix.split('/');
+      const locales = ['el', 'es', 'ja', 'pt', 'zh', 'zh-hk'];
+      if (parts.length > 1 && locales.includes(parts[0])) {
+        const locale = parts[0];
+        const slug = stripExtAndIndex(parts.slice(1).join('/'));
+        return slug.length > 0 ? `dist/${locale}/insights/${slug}/index.html` : `dist/${locale}/insights/index.html`;
+      }
+      const slug = stripExtAndIndex(relPosix);
       return slug.length > 0 ? `dist/insights/${slug}/index.html` : 'dist/insights/index.html';
     },
   });
@@ -123,7 +139,16 @@ async function run() {
   const showcaseResult = await validateSourceSet({
     sourceDir: 'src/content/showcases',
     mapToDist: (rel) => {
-      const slug = stripExtAndIndex(rel);
+      const relPosix = toPosix(rel);
+      const parts = relPosix.split('/');
+      const locales = ['el', 'es', 'ja', 'pt', 'zh', 'zh-hk'];
+      if (parts.length > 1 && locales.includes(parts[0])) {
+        // Locale-prefixed showcase: e.g. pt/causal.mdx -> dist/pt/science/causal/index.html
+        const locale = parts[0];
+        const slug = stripExtAndIndex(parts.slice(1).join('/'));
+        return slug.length > 0 ? `dist/${locale}/science/${slug}/index.html` : `dist/${locale}/science/index.html`;
+      }
+      const slug = stripExtAndIndex(relPosix);
       return slug.length > 0 ? `dist/science/${slug}/index.html` : 'dist/science/index.html';
     },
   });

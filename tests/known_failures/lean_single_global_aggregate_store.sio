@@ -1,0 +1,47 @@
+//@ ignore
+// REPRODUCTION for the lean_single defect that blocks #1649.
+//
+// Under bin/souc-lean-single-x86_64 this prints BROKEN; under Madaros it prints
+// OK. It is not run by the suite (`//@ ignore`) because the suite's stage2 IS
+// lean_single, so it would be a permanent red.
+//
+//   ./bin/souc-lean-single-x86_64 tests/known_failures/lean_single_global_aggregate_store.sio /tmp/x.elf && chmod +x /tmp/x.elf && /tmp/x.elf
+//   ./bin/madaros-linux-x86_64 --native-v2-compile tests/known_failures/lean_single_global_aggregate_store.sio -o /tmp/y.elf && chmod +x /tmp/y.elf && /tmp/y.elf
+//
+// Storing a STRUCT into a GLOBAL ARRAY is a silent no-op in the bootstrap seed.
+// The store appears to succeed, the address arithmetic is correct, and the slot
+// reads back as never-written. Verified independent of:
+//   - index form (constant, variable, or a function call)
+//   - struct contents (2 scalars; +enum; +[i8;128]; +nested struct; +Option<Box<_>>)
+//   - array size (16 .. 1048576)
+//
+// Global arrays of SCALARS are fine -- this file's `I` and any [i64; N] global
+// round-trip correctly. It is specifically aggregate element stores.
+//
+// Why it matters: it is why the compiler cannot hold IR instructions in a global
+// arena (#1649). Every existing aggregate array in the tree is a STRUCT FIELD
+// reached through a Box, which is the shape that works, and that is very likely
+// not a coincidence.
+
+struct Rec { tag: i64, val: i64 }
+
+var G: [Rec; 64] = [Rec { tag: 0, val: 0 }; 64]
+var I: i64 = 0
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    I = 3
+    G[I as usize] = Rec { tag: 7, val: 42 }
+    let b = G[I as usize]
+    G[5] = Rec { tag: 9, val: 99 }
+    let c = G[5]
+    if b.tag == 7 && b.val == 42 && c.tag == 9 && c.val == 99 {
+        print("GLOBAL_AGGREGATE_STORE_OK\n")
+        return 0
+    }
+    print("GLOBAL_AGGREGATE_STORE_BROKEN tag=")
+    print_int(b.tag)
+    print(" val=")
+    print_int(b.val)
+    print("\n")
+    1
+}

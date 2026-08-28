@@ -1,0 +1,265 @@
+//! KEC-alpha COMPUTE + native cross-subject stats (Sounio does ALL the math).
+//! Concatenated after a generated dct_kec_wave{N}_data.sio (which defines fx_* and load_*).
+//! Caps must match the generator: MAXE=6144, MAXW=512, MAXS=1024, MAXFIELD=8192.
+//!
+//! Per subject: C = 4*(cut weight)/N over the embedding graph (primary), C_vad over the VAD graph
+//! (control), proximal fraction, and valence_bias = Pearson(s, valence) over words.
+//! Across subjects: Spearman rho(C, PHQ9), partial Spearman controlling {prox_frac, valence_bias}
+//! via the inverse rank-correlation matrix, an LCG permutation null on the partial statistic, and
+//! C-as-classifier AUC vs PHQ9_class. All sized for S up to 1024 (stdlib caps at 256, too small).
+
+fn kc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn kc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x; var i: i64 = 0
+    while i < 40 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+// ---- bitfield helpers (subject s occupies field[base .. base+stride)) ----
+fn field_bit(field: &[i64; 8192], base: i64, v: i64) -> i64 {
+    (field[base + (v >> 6)] >> (v & 63)) & 1
+}
+fn popcount_distal(field: &[i64; 8192], base: i64, stride: i64) -> i64 with Mut {
+    var c: i64 = 0; var k: i64 = 0
+    while k < stride {
+        var w = field[base + k]
+        while w != 0 { w = w & (w - 1); c = c + 1 }
+        k = k + 1
+    }
+    c
+}
+
+// ---- C = 4 * cut_weight / n_words over an edge list ----
+fn compute_C(ei: &[i64; 6144], ej: &[i64; 6144], ew: &[f64; 6144], n_edges: i64,
+             field: &[i64; 8192], base: i64, n_words: i64) -> f64 with Mut, Div, Panic {
+    var cut = 0.0; var e: i64 = 0
+    while e < n_edges {
+        if field_bit(field, base, ei[e]) != field_bit(field, base, ej[e]) { cut = cut + ew[e] }
+        e = e + 1
+    }
+    (4.0 * cut) / (n_words as f64)
+}
+
+// ---- valence_bias = Pearson(s_word, valence_word) over words with valence != 999 ----
+fn valence_bias(field: &[i64; 8192], base: i64, valence: &[f64; 512], n_words: i64) -> f64 with Mut, Div, Panic {
+    var n = 0.0; var sx = 0.0; var sy = 0.0; var sxx = 0.0; var syy = 0.0; var sxy = 0.0
+    var w: i64 = 0
+    while w < n_words {
+        let val = valence[w]
+        if val < 900.0 {
+            let s = if field_bit(field, base, w) == 1 { 1.0 } else { -1.0 }  // distal=+1, proximal=-1
+            n = n + 1.0; sx = sx + s; sy = sy + val
+            sxx = sxx + s * s; syy = syy + val * val; sxy = sxy + s * val
+        }
+        w = w + 1
+    }
+    let cov = n * sxy - sx * sy
+    let dx = kc_sqrt(n * sxx - sx * sx); let dy = kc_sqrt(n * syy - sy * sy)
+    if dx <= 0.0 || dy <= 0.0 { return 0.0 }
+    cov / (dx * dy)
+}
+
+// ---- tie-averaged ranks of x[0..n) into r[0..n) ----
+fn rank_into(x: &[f64; 1024], n: i64, r: &![f64; 1024]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < n {
+        var less = 0.0; var eq = 0.0; var j: i64 = 0
+        while j < n {
+            if x[j] < x[i] { less = less + 1.0 }
+            else { if x[j] == x[i] { eq = eq + 1.0 } }
+            j = j + 1
+        }
+        r[i] = less + (eq + 1.0) / 2.0   // average rank (1-based)
+        i = i + 1
+    }
+}
+
+fn pearson(a: &[f64; 1024], b: &[f64; 1024], n: i64) -> f64 with Mut, Div, Panic {
+    var sx = 0.0; var sy = 0.0; var sxx = 0.0; var syy = 0.0; var sxy = 0.0
+    var i: i64 = 0
+    while i < n {
+        sx = sx + a[i]; sy = sy + b[i]; sxx = sxx + a[i]*a[i]; syy = syy + b[i]*b[i]; sxy = sxy + a[i]*b[i]
+        i = i + 1
+    }
+    let nf = n as f64
+    let cov = nf * sxy - sx * sy
+    let dx = kc_sqrt(nf * sxx - sx * sx); let dy = kc_sqrt(nf * syy - sy * sy)
+    if dx <= 0.0 || dy <= 0.0 { return 0.0 }
+    cov / (dx * dy)
+}
+
+// Spearman = Pearson of ranks.
+fn spearman(x: &[f64; 1024], y: &[f64; 1024], n: i64, rx: &![f64; 1024], ry: &![f64; 1024]) -> f64 with Mut, Div, Panic {
+    rank_into(x, n, rx); rank_into(y, n, ry); pearson(rx, ry, n)
+}
+
+// Partial Spearman r(0,1 | 2,3) from the inverse of the 4x4 rank-correlation matrix:
+//   r_partial = -Pinv[0][1] / sqrt(Pinv[0][0]*Pinv[1][1]).
+// rcols: 4 rank-vectors already ranked, stored as flat [f64; 4096] (col c at offset c*1024).
+fn partial_spearman4(rc: &[f64; 4096], n: i64) -> f64 with Mut, Div, Panic {
+    // build 4x4 correlation matrix M
+    var M: [f64; 16] = [0.0; 16]
+    var a: [f64; 1024] = [0.0; 1024]
+    var b: [f64; 1024] = [0.0; 1024]
+    var ci: i64 = 0
+    while ci < 4 {
+        var cj: i64 = 0
+        while cj < 4 {
+            var t: i64 = 0
+            while t < n { a[t] = rc[ci*1024 + t]; b[t] = rc[cj*1024 + t]; t = t + 1 }
+            M[ci*4 + cj] = pearson(&a, &b, n)
+            cj = cj + 1
+        }
+        ci = ci + 1
+    }
+    // invert 4x4 via Gauss-Jordan into Inv
+    var A: [f64; 16] = [0.0; 16]
+    var Inv: [f64; 16] = [0.0; 16]
+    var p: i64 = 0
+    while p < 16 { A[p] = M[p]; p = p + 1 }
+    p = 0
+    while p < 4 { var q: i64 = 0; while q < 4 { Inv[p*4+q] = if p==q {1.0} else {0.0}; q=q+1 }; p=p+1 }
+    var col: i64 = 0
+    while col < 4 {
+        // pivot
+        let piv = A[col*4 + col]
+        let ipv = if kc_abs(piv) > 1e-12 { 1.0 / piv } else { 0.0 }
+        var q: i64 = 0
+        while q < 4 { A[col*4+q] = A[col*4+q]*ipv; Inv[col*4+q] = Inv[col*4+q]*ipv; q=q+1 }
+        var row: i64 = 0
+        while row < 4 {
+            if row != col {
+                let f = A[row*4 + col]
+                var qq: i64 = 0
+                while qq < 4 {
+                    A[row*4+qq] = A[row*4+qq] - f*A[col*4+qq]
+                    Inv[row*4+qq] = Inv[row*4+qq] - f*Inv[col*4+qq]
+                    qq = qq + 1
+                }
+            }
+            row = row + 1
+        }
+        col = col + 1
+    }
+    let num = 0.0 - Inv[0*4 + 1]
+    let den = kc_sqrt(Inv[0]*Inv[5])
+    if den <= 0.0 { return 0.0 }
+    num / den
+}
+
+// AUC of score C (higher = more likely class1) via rank statistic.
+fn auc_from(score: &[f64; 1024], cls: &[i64; 1024], n: i64, rscore: &![f64; 1024]) -> f64 with Mut, Div, Panic {
+    rank_into(score, n, rscore)
+    var sum_pos = 0.0; var npos = 0.0; var nneg = 0.0
+    var i: i64 = 0
+    while i < n {
+        if cls[i] == 1 { sum_pos = sum_pos + rscore[i]; npos = npos + 1.0 } else { nneg = nneg + 1.0 }
+        i = i + 1
+    }
+    if npos <= 0.0 || nneg <= 0.0 { return 0.5 }
+    (sum_pos - npos*(npos+1.0)/2.0) / (npos*nneg)
+}
+
+fn mean_of(x: &[f64; 1024], n: i64) -> f64 with Mut, Div {
+    var s = 0.0; var i: i64 = 0; while i < n { s = s + x[i]; i = i + 1 }; s / (n as f64)
+}
+
+fn print_kv(k: string, v: f64) with IO { print(k); print("="); print(v); println("") }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let n_words = fx_n_words()
+    let stride = fx_stride()
+    let S = fx_n_subj()
+    let nE = fx_n_edges()
+    let nEv = fx_n_edges_vad()
+
+    var ei: [i64; 6144] = [0; 6144]; var ej: [i64; 6144] = [0; 6144]; var ew: [f64; 6144] = [0.0; 6144]
+    var vi: [i64; 6144] = [0; 6144]; var vj: [i64; 6144] = [0; 6144]; var vw: [f64; 6144] = [0.0; 6144]
+    var valence: [f64; 512] = [0.0; 512]
+    var field: [i64; 8192] = [0; 8192]
+    var phq: [f64; 1024] = [0.0; 1024]
+    var cls: [i64; 1024] = [0; 1024]
+    load_ei(&!ei); load_ej(&!ej); load_ew(&!ew)
+    load_vi(&!vi); load_vj(&!vj); load_vw(&!vw)
+    load_valence(&!valence); load_field(&!field)
+    load_phq(&!phq); load_phqclass(&!cls)
+
+    // per-subject metrics
+    var C: [f64; 1024] = [0.0; 1024]
+    var Cvad: [f64; 1024] = [0.0; 1024]
+    var prox: [f64; 1024] = [0.0; 1024]
+    var vbias: [f64; 1024] = [0.0; 1024]
+    var s: i64 = 0
+    while s < S {
+        let base = s * stride
+        C[s] = compute_C(&ei, &ej, &ew, nE, &field, base, n_words)
+        Cvad[s] = compute_C(&vi, &vj, &vw, nEv, &field, base, n_words)
+        let ndist = popcount_distal(&field, base, stride)
+        prox[s] = ((n_words - ndist) as f64) / (n_words as f64)
+        vbias[s] = valence_bias(&field, base, &valence, n_words)
+        s = s + 1
+    }
+
+    println("=== KEC-alpha per-subject summary ===")
+    print_kv("n_subjects", S as f64)
+    print_kv("C_mean", mean_of(&C, S))
+    print_kv("Cvad_mean", mean_of(&Cvad, S))
+    print_kv("prox_frac_mean", mean_of(&prox, S))
+    print_kv("vbias_mean", mean_of(&vbias, S))
+    print_kv("phq_mean", mean_of(&phq, S))
+
+    // scratch rank buffers
+    var rx: [f64; 1024] = [0.0; 1024]; var ry: [f64; 1024] = [0.0; 1024]
+
+    // primary (uncontrolled) Spearman C vs PHQ9
+    let rho = spearman(&C, &phq, S, &!rx, &!ry)
+    println("=== primary correlations ===")
+    print_kv("spearman_C_phq", rho)
+    print_kv("spearman_Cvad_phq", spearman(&Cvad, &phq, S, &!rx, &!ry))
+    print_kv("spearman_prox_phq", spearman(&prox, &phq, S, &!rx, &!ry))
+    print_kv("spearman_vbias_phq", spearman(&vbias, &phq, S, &!rx, &!ry))
+    print_kv("spearman_C_vbias", spearman(&C, &vbias, S, &!rx, &!ry))
+
+    // partial Spearman: r(C, phq | prox, vbias). Rank all 4 into rc flat buffer.
+    var rc: [f64; 4096] = [0.0; 4096]
+    rank_into(&C, S, &!rx);    var t: i64 = 0; while t < S { rc[0*1024+t]=rx[t]; t=t+1 }
+    rank_into(&phq, S, &!rx);  t = 0; while t < S { rc[1*1024+t]=rx[t]; t=t+1 }
+    rank_into(&prox, S, &!rx); t = 0; while t < S { rc[2*1024+t]=rx[t]; t=t+1 }
+    rank_into(&vbias, S, &!rx);t = 0; while t < S { rc[3*1024+t]=rx[t]; t=t+1 }
+    let rpart = partial_spearman4(&rc, S)
+    print_kv("partial_spearman_C_phq_given_prox_vbias", rpart)
+
+    // permutation null on the partial statistic: shuffle PHQ labels, recompute |rpart|.
+    var seed: i64 = 1234567
+    let B: i64 = 500
+    var ge: i64 = 0
+    var phqp: [f64; 1024] = [0.0; 1024]
+    var bi: i64 = 0
+    while bi < B {
+        // copy then Fisher-Yates shuffle phq into phqp using LCG
+        t = 0; while t < S { phqp[t] = phq[t]; t = t + 1 }
+        var k: i64 = S - 1
+        while k > 0 {
+            seed = (seed * 1103515245 + 12345) & 2147483647
+            let j = seed % (k + 1)
+            let tmp = phqp[k]; phqp[k] = phqp[j]; phqp[j] = tmp
+            k = k - 1
+        }
+        rank_into(&phqp, S, &!rx); t = 0; while t < S { rc[1*1024+t]=rx[t]; t=t+1 }
+        let rp = partial_spearman4(&rc, S)
+        if kc_abs(rp) >= kc_abs(rpart) { ge = ge + 1 }
+        bi = bi + 1
+    }
+    // restore phq ranks not needed further
+    let pval = ((ge + 1) as f64) / ((B + 1) as f64)
+    print_kv("perm_p_two_sided", pval)
+    print_kv("perm_B", B as f64)
+
+    // C as classifier of PHQ9_class
+    let auc = auc_from(&C, &cls, S, &!rx)
+    print_kv("auc_C_phqclass", auc)
+
+    println("KEC_ALPHA_DONE")
+    0
+}

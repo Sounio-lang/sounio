@@ -1,0 +1,157 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint7_gate.sio — Sprint 7 precision-threshold gate
+//
+// 56 assertions proving that the compile-time confidence gate changes the
+// clinical recommendation when measurement precision is insufficient.
+//
+// Clinical scenario:
+//   IV bolus rapamycin: ke = 0.05 h⁻¹, Vc = 70 L, D = 2 mg.
+//   Assessed at t = 24 h: C ≈ 0.00834 mg/L — inside therapeutic window.
+//
+// The gate flip (what a naive point-estimate TDM tool cannot do):
+//   ke_var ≤ 0.002  → THERAPEUTIC  (conf ≥ 820, CI inside [0.004, 0.020])
+//   ke_var ≥ 0.0025 → UNCERTAIN    (conf = 700 < 800, gate fires)
+//
+// Assertion map:
+//   A (1–8):   iv_bolus_params field correctness
+//   B (9–14):  Tight precision → THERAPEUTIC
+//   C (15–19): Loose precision → UNCERTAIN
+//   D (20–27): Confidence score values
+//   E (28–32): gate_fires returns true
+//   F (33–38): Confidence monotonicity (tighter → ≥ conf)
+//   G (39–42): Decision code and conf_clinical_min sentinel values
+//   H (43–49): Gate fires across different pharmacokinetic parameters
+//   I (50–56): Precision boundary — gate flip at exact threshold
+
+use pbpk::rapamycin_precision::{
+    iv_bolus_params, classify_standard_iv, conf_standard_iv,
+    classify_iv_trough, conf_iv_trough, gate_fires
+}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, decision_sub,
+    conf_clinical_min
+}
+
+var SPR7_PASS: [i64; 2] = [0; 2]
+
+fn s7_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR7_PASS[0] = SPR7_PASS[0] + 1
+    } else {
+        SPR7_PASS[1] = SPR7_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint7_gate() with IO, Epistemic, Mut, Div, Panic {
+
+    // ── Section A: iv_bolus_params field correctness (8 assertions) ───────────
+
+    let a_p = iv_bolus_params(0.05, 0.001, 70.0)
+    s7_chk(a_p.ke_val == 0.05)                       // 1
+    s7_chk(a_p.ke_var == 0.001)                      // 2
+    s7_chk(a_p.k12_val == 0.0)                       // 3
+    s7_chk(a_p.k12_var == 0.0)                       // 4
+    s7_chk(a_p.k21_val == 0.0)                       // 5
+    s7_chk(a_p.vc_val == 70.0)                       // 6
+    s7_chk(a_p.krel_val == 0.0)                      // 7
+    s7_chk(a_p.a_poly0 == 0.0)                       // 8
+
+    // ── Section B: Tight precision → THERAPEUTIC (6 assertions) ─────────────
+    // ke_var ≤ 0.002: relative std < 25% → conf ≥ 820, CI inside window.
+
+    s7_chk(classify_standard_iv(0.0001) == decision_therapeutic())  // 9
+    s7_chk(classify_standard_iv(0.001)  == decision_therapeutic())  // 10
+    s7_chk(classify_standard_iv(0.002)  == decision_therapeutic())  // 11
+    s7_chk(classify_iv_trough(0.05, 0.0001, 70.0, 2.0, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 12
+    s7_chk(classify_iv_trough(0.05, 0.001,  70.0, 2.0, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 13
+    s7_chk(classify_iv_trough(0.05, 0.002,  70.0, 2.0, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 14
+
+    // ── Section C: Loose precision → UNCERTAIN (5 assertions) ────────────────
+    // ke_var ≥ 0.0025: relative std > 25% → conf = 700 < 800 → gate fires.
+
+    s7_chk(classify_standard_iv(0.0025) == decision_uncertain())    // 15
+    s7_chk(classify_standard_iv(0.003)  == decision_uncertain())    // 16
+    s7_chk(classify_standard_iv(0.01)   == decision_uncertain())    // 17
+    s7_chk(classify_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24) == decision_uncertain())  // 18
+    s7_chk(classify_iv_trough(0.05, 0.01,   70.0, 2.0, 24.0, 1.0, 25, 24) == decision_uncertain())  // 19
+
+    // ── Section D: Confidence score values (8 assertions) ────────────────────
+
+    s7_chk(conf_standard_iv(0.0001) == 900)          // 20  (< 10% relative → 900)
+    s7_chk(conf_standard_iv(0.001)  == 820)          // 21  (< 25% relative → 820)
+    s7_chk(conf_standard_iv(0.002)  == 820)          // 22  (< 25% relative → 820)
+    s7_chk(conf_standard_iv(0.0025) == 700)          // 23  (> 25% relative → 700)
+    s7_chk(conf_standard_iv(0.01)   == 700)          // 24  (> 25% relative → 700)
+    s7_chk(conf_standard_iv(0.0001) >= conf_clinical_min())  // 25  (900 ≥ 800)
+    s7_chk(conf_standard_iv(0.001)  >= conf_clinical_min())  // 26  (820 ≥ 800)
+    s7_chk(conf_standard_iv(0.01)   < conf_clinical_min())   // 27  (700 < 800)
+
+    // ── Section E: gate_fires returns true (5 assertions) ────────────────────
+
+    s7_chk(gate_fires(0.05, 0.0001, 0.01,   70.0, 2.0, 24.0, 1.0, 25, 24))  // 28
+    s7_chk(gate_fires(0.05, 0.001,  0.01,   70.0, 2.0, 24.0, 1.0, 25, 24))  // 29
+    s7_chk(gate_fires(0.05, 0.002,  0.01,   70.0, 2.0, 24.0, 1.0, 25, 24))  // 30
+    s7_chk(gate_fires(0.05, 0.0001, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24))  // 31
+    s7_chk(gate_fires(0.05, 0.0001, 0.003,  70.0, 2.0, 24.0, 1.0, 25, 24))  // 32
+
+    // ── Section F: Confidence monotonicity — tighter ke_var → ≥ conf (6) ─────
+
+    s7_chk(conf_standard_iv(0.0001) >= conf_standard_iv(0.001))    // 33  (900 ≥ 820)
+    s7_chk(conf_standard_iv(0.001)  >= conf_standard_iv(0.01))     // 34  (820 ≥ 700)
+    s7_chk(conf_standard_iv(0.0001) >= conf_standard_iv(0.01))     // 35  (900 ≥ 700)
+    s7_chk(conf_iv_trough(0.05, 0.0001, 70.0, 2.0, 24.0, 1.0, 25, 24) >=
+           conf_iv_trough(0.05, 0.001,  70.0, 2.0, 24.0, 1.0, 25, 24))  // 36
+    s7_chk(conf_iv_trough(0.05, 0.001,  70.0, 2.0, 24.0, 1.0, 25, 24) >=
+           conf_iv_trough(0.05, 0.01,   70.0, 2.0, 24.0, 1.0, 25, 24))  // 37
+    s7_chk(conf_iv_trough(0.05, 0.0001, 70.0, 2.0, 24.0, 1.0, 25, 24) >=
+           conf_iv_trough(0.05, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24))  // 38
+
+    // ── Section G: Decision code sentinels (4 assertions) ────────────────────
+
+    s7_chk(decision_therapeutic() == 1)              // 39
+    s7_chk(decision_uncertain()   == 3)              // 40
+    s7_chk(decision_sub()         == 0)              // 41
+    s7_chk(conf_clinical_min()    == 800)            // 42
+
+    // ── Section H: Gate fires for different PK parameters (7 assertions) ──────
+    // ke = 0.03, Vc = 60, D = 1.8: C(24h) ≈ 0.01439 mg/L (therapeutic)
+
+    s7_chk(classify_iv_trough(0.03, 0.0001, 60.0, 1.8, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 43
+    s7_chk(classify_iv_trough(0.03, 0.01,   60.0, 1.8, 24.0, 1.0, 25, 24) == decision_uncertain())    // 44
+    s7_chk(gate_fires(0.03, 0.0001, 0.01, 60.0, 1.8, 24.0, 1.0, 25, 24))  // 45
+
+    // ke = 0.07, Vc = 80, D = 2.5: C(24h) ≈ 0.00548 mg/L (therapeutic)
+
+    s7_chk(classify_iv_trough(0.07, 0.0001, 80.0, 2.5, 24.0, 1.0, 25, 24) == decision_therapeutic())  // 46
+    s7_chk(classify_iv_trough(0.07, 0.01,   80.0, 2.5, 24.0, 1.0, 25, 24) == decision_uncertain())    // 47
+    s7_chk(gate_fires(0.07, 0.0001, 0.01, 80.0, 2.5, 24.0, 1.0, 25, 24))  // 48
+
+    // Conf monotonicity holds for the alternative scenario too
+    s7_chk(conf_iv_trough(0.03, 0.0001, 60.0, 1.8, 24.0, 1.0, 25, 24) >=
+           conf_iv_trough(0.03, 0.01,   60.0, 1.8, 24.0, 1.0, 25, 24))    // 49
+
+    // ── Section I: Precision boundary — gate flip at exact threshold (8) ──────
+    // These assertions are the dissertation headline: the decision is different
+    // at ke_var=0.002 (last THERAPEUTIC) vs ke_var=0.0025 (first UNCERTAIN).
+
+    s7_chk(classify_standard_iv(0.002)  == decision_therapeutic())          // 50
+    s7_chk(classify_standard_iv(0.0025) == decision_uncertain())             // 51
+    s7_chk(classify_standard_iv(0.002) != classify_standard_iv(0.0025))     // 52 (gate flip)
+    s7_chk(conf_standard_iv(0.002)  >= conf_clinical_min())                  // 53 (820 ≥ 800)
+    s7_chk(conf_standard_iv(0.0025) < conf_clinical_min())                   // 54 (700 < 800)
+    s7_chk(conf_standard_iv(0.002)  > conf_standard_iv(0.0025))              // 55 (820 > 700)
+    s7_chk(gate_fires(0.05, 0.002, 0.0025, 70.0, 2.0, 24.0, 1.0, 25, 24))  // 56 (at threshold)
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint7_gate()
+    if SPR7_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

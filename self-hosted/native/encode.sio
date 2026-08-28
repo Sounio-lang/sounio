@@ -5,9 +5,66 @@
 
 module native::encode
 
+// Lane B residual (2026-08-13): `.bytes` is vestigial on the Linux native_v2 path.
+// Real machine code lives in NC_BIG_CODE; `.len` is the only live field threaded
+// through by-value emit_* and by-ref nc_emit_*. Keeping a multi-256 KiB array here
+// forced every `var out = buf` / `nc: NativeCompiler` copy to pay ~256 KiB per
+// stack frame (and nested emit_u64 → emit_u32 → emit_byte chains stacked several).
+// The 64-byte stub preserves a non-empty array type for the few macho/pe readers
+// that still mention `.bytes`; those paths must read NC_BIG_CODE for payload.
 pub struct CodeBuffer {
-    pub bytes: [i8; 65536],
+    pub bytes: [i8; 64],
     pub len: i64,
+}
+
+// Off-stack machine-code buffer for the native_v2 x86 Linux path. The .text bytes
+// used to live inline in CodeBuffer.bytes (embedded by value in NativeCompiler on
+// the 8MB stack); growing that past ~640KB miscompiles (large stack frame). This
+// module-global BSS array holds the emitted code so NativeCompiler stays small on
+// the stack, while `.len` (a scalar, threaded through BOTH the by-ref nc_emit_byte
+// path and the by-value emit_byte path) stays the authoritative length. Both emit
+// paths write NC_BIG_CODE[.len]; the struct .bytes field is now a 64-byte stub (see
+// struct comment). Because .len is threaded consistently, the by-value builtin
+// emitters (which emit into a copy of nc) append to the same global at the shared
+// offset, so no persist/call-site changes are needed. Accessed INLINE only —
+// never via a returning helper (miscompiles under the seed).
+pub var NC_BIG_CODE: [i8; 8388608] = [0; 8388608]
+
+// Single source of truth for the NC_BIG_CODE bound. The DECLARATION above must
+// stay a literal (Sounio array sizes are not expressions), but every bound CHECK
+// across the backend calls this accessor, so the next capacity bump is one edit
+// here plus the declaration. Companions: nc_flat_reloc_capacity() in
+// native::frame, nc_elf_capacity_bytes() in native::codegen_x86_linux.
+// Declaration/accessor coherence is pinned by
+// scripts/ci/native_capacity_tiers_gate.sh.
+pub fn nc_code_capacity_bytes() -> i64 { 8388608 }
+
+// Materialise NC_BIG_CODE into fixed arrays expected by legacy macho/pe assemblers
+// that still take by-value `[i8; N]`. Linux ELF writers read NC_BIG_CODE directly.
+pub fn nc_code_copy_to_262144(code_len: i64) -> [i8; 262144] with Mut, Panic, Div {
+    var out: [i8; 262144] = [0; 262144]
+    var i: i64 = 0
+    let n = if code_len < 262144 { code_len } else { 262144 }
+    let cap = nc_code_capacity_bytes()
+    let lim = if n < cap { n } else { cap }
+    while i < lim {
+        out[i as usize] = NC_BIG_CODE[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+pub fn nc_code_copy_to_65536(code_len: i64) -> [i8; 65536] with Mut, Panic, Div {
+    var out: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    let n = if code_len < 65536 { code_len } else { 65536 }
+    let cap = nc_code_capacity_bytes()
+    let lim = if n < cap { n } else { cap }
+    while i < lim {
+        out[i as usize] = NC_BIG_CODE[i as usize]
+        i = i + 1
+    }
+    out
 }
 
 pub fn code_buffer_new() -> CodeBuffer {
@@ -45,10 +102,11 @@ pub fn wide_emit_byte(buf: WideCodeBuffer, b: i64) -> WideCodeBuffer with Mut, P
 }
 
 pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideCodeBuffer with Mut, Panic, Div {
+    // Payload is in NC_BIG_CODE keyed by src.len — not the vestigial src.bytes stub.
     var out = dst
     var i: i64 = 0
-    while i < src.len && out.len < 262144 {
-        out.bytes[out.len as usize] = src.bytes[i as usize]
+    while i < src.len && out.len < 262144 && i < nc_code_capacity_bytes() {
+        out.bytes[out.len as usize] = NC_BIG_CODE[i as usize]
         out.len = out.len + 1
         i = i + 1
     }
@@ -58,8 +116,8 @@ pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideC
 pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
     var out = buf
     if out.len >= 0 {
-        if out.len < 65536 {
-            out.bytes[out.len as usize] = low8(b) as i8
+        if out.len < nc_code_capacity_bytes() {
+            NC_BIG_CODE[out.len as usize] = low8(b) as i8
             out.len = out.len + 1
         }
     }
@@ -68,8 +126,8 @@ pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
 
 pub fn emit_byte_mut(buf: &! CodeBuffer, b: i64) with Mut, Panic, Div {
     if (*buf).len >= 0 {
-        if (*buf).len < 65536 {
-            (*buf).bytes[(*buf).len as usize] = low8(b) as i8
+        if (*buf).len < nc_code_capacity_bytes() {
+            NC_BIG_CODE[(*buf).len as usize] = low8(b) as i8
             (*buf).len = (*buf).len + 1
         }
     }
@@ -197,6 +255,43 @@ pub fn emit_imul_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with
     b
 }
 
+// Wide-int carry-arithmetic emitters (N-limb integers).
+pub fn emit_adc_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 11 /r — adc r/m64, r64  (dst += src + CF)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x11)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+pub fn emit_sbb_reg_reg(buf: CodeBuffer, dst: i64, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 19 /r — sbb r/m64, r64  (dst -= src + CF)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x19)
+    b = emit_byte(b, modrm_rr(dst, src))
+    b
+}
+
+pub fn emit_mul_reg(buf: CodeBuffer, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 f7 /4 — mul r/m64  (rdx:rax = rax * src)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xe0 + src)
+    b
+}
+
+pub fn emit_div_reg(buf: CodeBuffer, src: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 f7 /6 — div r/m64  (rax = rdx:rax / src, rdx = rem)
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xf7)
+    b = emit_byte(b, 0xf0 + src)
+    b
+}
+
 pub fn emit_syscall(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     b = emit_byte(b, 0x0f)
@@ -254,13 +349,62 @@ pub fn emit_mov_rsp_rbp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b
 }
 
-pub fn emit_sub_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
-    // 48 81 ec <imm32> — sub rsp, imm32
+// Touch [rsp] so the current page is faulted in (stack growth frontier).
+pub fn emit_touch_rsp(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // or qword ptr [rsp], 0  — 48 83 0c 24 00
     var b = buf
     b = emit_byte(b, 0x48)
-    b = emit_byte(b, 0x81)
-    b = emit_byte(b, 0xec)
+    b = emit_byte(b, 0x83)
+    b = emit_byte(b, 0x0c)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, 0x00)
+    b
+}
+
+// Post-sub page walk: mov rax,rbp; loop sub rax,0x1000 / cmp rax,rsp / jbe / or [rax],0.
+// No-op when (rbp-rsp) < 4 KiB. Matches lean_single emit_stack_probe_x86.
+pub fn emit_stack_probe(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x89); b = emit_byte(b, 0xe8)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x2d); b = emit_u32_le(b, 0x1000)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x39); b = emit_byte(b, 0xe0)
+    b = emit_byte(b, 0x76); b = emit_byte(b, 0x05)
+    b = emit_byte(b, 0x80); b = emit_byte(b, 0x08); b = emit_byte(b, 0x00)
+    b = emit_byte(b, 0xeb); b = emit_byte(b, 0xf0)
+    b
+}
+
+pub fn emit_sub_rsp_imm32(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 48 81 ec <imm32> — sub rsp, imm32, with stack growth probes for large frames.
+    // See nc_emit_sub_rsp_imm32 (codegen_x86_linux.sio) for the live Madaros path.
+    var b = buf
+    if val <= 0 {
+        return b
+    }
+    if val < 4096 {
+        b = emit_byte(b, 0x48)
+        b = emit_byte(b, 0x81)
+        b = emit_byte(b, 0xec)
+        b = emit_u32_le(b, val)
+        b = emit_stack_probe(b)
+        return b
+    }
+    // Page-by-page sub+touch (clobbers r11). Encoding mirrors nc_emit_sub_rsp_imm32.
+    b = emit_byte(b, 0x49); b = emit_byte(b, 0xc7); b = emit_byte(b, 0xc3)
     b = emit_u32_le(b, val)
+    b = emit_byte(b, 0x49); b = emit_byte(b, 0x81); b = emit_byte(b, 0xfb)
+    b = emit_u32_le(b, 0x1000)
+    b = emit_byte(b, 0x72); b = emit_byte(b, 0x15)
+    b = emit_byte(b, 0x48); b = emit_byte(b, 0x81); b = emit_byte(b, 0xec)
+    b = emit_u32_le(b, 0x1000)
+    b = emit_touch_rsp(b)
+    b = emit_byte(b, 0x49); b = emit_byte(b, 0x81); b = emit_byte(b, 0xeb)
+    b = emit_u32_le(b, 0x1000)
+    b = emit_byte(b, 0xeb); b = emit_byte(b, 0xe2)
+    b = emit_byte(b, 0x4c); b = emit_byte(b, 0x29); b = emit_byte(b, 0xdc)
+    b = emit_byte(b, 0x4d); b = emit_byte(b, 0x85); b = emit_byte(b, 0xdb)
+    b = emit_byte(b, 0x74); b = emit_byte(b, 0x05)
+    b = emit_touch_rsp(b)
     b
 }
 
@@ -747,6 +891,17 @@ pub fn emit_movzx_rax_byte_rdi(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, D
     b = emit_byte(b, 0x0f)
     b = emit_byte(b, 0xb6)
     b = emit_byte(b, 0x07)
+    b
+}
+
+pub fn emit_movzx_rax_byte_rdi_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 0f b6 04 1f — movzx rax, byte [rdi + rbx]
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0xb6)
+    b = emit_byte(b, 0x04)
+    b = emit_byte(b, 0x1f)
     b
 }
 
@@ -1404,27 +1559,27 @@ pub fn emit_not_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
 pub fn emit_and_bool_rax_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     // test rbx, rbx; setne cl
-    b = emit_byte(b, 0x48)   // test rbx, rbx
-    b = emit_byte(b, 0x85)
-    b = emit_byte(b, 0xdb)
-    b = emit_byte(b, 0x0f)   // setne cl
-    b = emit_byte(b, 0x95)
-    b = emit_byte(b, 0xc1)
+    emit_byte_mut(&!b, 0x48)   // test rbx, rbx
+    emit_byte_mut(&!b, 0x85)
+    emit_byte_mut(&!b, 0xdb)
+    emit_byte_mut(&!b, 0x0f)   // setne cl
+    emit_byte_mut(&!b, 0x95)
+    emit_byte_mut(&!b, 0xc1)
     // test rax, rax; setne al
-    b = emit_byte(b, 0x48)   // test rax, rax
-    b = emit_byte(b, 0x85)
-    b = emit_byte(b, 0xc0)
-    b = emit_byte(b, 0x0f)   // setne al
-    b = emit_byte(b, 0x95)
-    b = emit_byte(b, 0xc0)
+    emit_byte_mut(&!b, 0x48)   // test rax, rax
+    emit_byte_mut(&!b, 0x85)
+    emit_byte_mut(&!b, 0xc0)
+    emit_byte_mut(&!b, 0x0f)   // setne al
+    emit_byte_mut(&!b, 0x95)
+    emit_byte_mut(&!b, 0xc0)
     // and al, cl
-    b = emit_byte(b, 0x20)
-    b = emit_byte(b, 0xc8)
+    emit_byte_mut(&!b, 0x20)
+    emit_byte_mut(&!b, 0xc8)
     // movzx rax, al
-    b = emit_byte(b, 0x48)
-    b = emit_byte(b, 0x0f)
-    b = emit_byte(b, 0xb6)
-    b = emit_byte(b, 0xc0)
+    emit_byte_mut(&!b, 0x48)
+    emit_byte_mut(&!b, 0x0f)
+    emit_byte_mut(&!b, 0xb6)
+    emit_byte_mut(&!b, 0xc0)
     b
 }
 
@@ -1432,27 +1587,27 @@ pub fn emit_and_bool_rax_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div
 pub fn emit_or_bool_rax_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     // test rbx, rbx; setne cl
-    b = emit_byte(b, 0x48)
-    b = emit_byte(b, 0x85)
-    b = emit_byte(b, 0xdb)
-    b = emit_byte(b, 0x0f)
-    b = emit_byte(b, 0x95)
-    b = emit_byte(b, 0xc1)
+    emit_byte_mut(&!b, 0x48)
+    emit_byte_mut(&!b, 0x85)
+    emit_byte_mut(&!b, 0xdb)
+    emit_byte_mut(&!b, 0x0f)
+    emit_byte_mut(&!b, 0x95)
+    emit_byte_mut(&!b, 0xc1)
     // test rax, rax; setne al
-    b = emit_byte(b, 0x48)
-    b = emit_byte(b, 0x85)
-    b = emit_byte(b, 0xc0)
-    b = emit_byte(b, 0x0f)
-    b = emit_byte(b, 0x95)
-    b = emit_byte(b, 0xc0)
+    emit_byte_mut(&!b, 0x48)
+    emit_byte_mut(&!b, 0x85)
+    emit_byte_mut(&!b, 0xc0)
+    emit_byte_mut(&!b, 0x0f)
+    emit_byte_mut(&!b, 0x95)
+    emit_byte_mut(&!b, 0xc0)
     // or al, cl
-    b = emit_byte(b, 0x08)
-    b = emit_byte(b, 0xc8)
+    emit_byte_mut(&!b, 0x08)
+    emit_byte_mut(&!b, 0xc8)
     // movzx rax, al
-    b = emit_byte(b, 0x48)
-    b = emit_byte(b, 0x0f)
-    b = emit_byte(b, 0xb6)
-    b = emit_byte(b, 0xc0)
+    emit_byte_mut(&!b, 0x48)
+    emit_byte_mut(&!b, 0x0f)
+    emit_byte_mut(&!b, 0xb6)
+    emit_byte_mut(&!b, 0xc0)
     b
 }
 
@@ -1572,6 +1727,17 @@ pub fn emit_lea_r9_rsp_disp8(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut,
     b = emit_byte(b, 0x4C)
     b = emit_byte(b, 0x8D)
     b = emit_byte(b, 0x4C)
+    b = emit_byte(b, 0x24)
+    b = emit_byte(b, disp & 0xFF)
+    b
+}
+
+pub fn emit_lea_r8_rsp_disp8(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 4C 8D 44 24 <disp8> — lea r8, [rsp+disp8]
+    var b = buf
+    b = emit_byte(b, 0x4C)
+    b = emit_byte(b, 0x8D)
+    b = emit_byte(b, 0x44)
     b = emit_byte(b, 0x24)
     b = emit_byte(b, disp & 0xFF)
     b
@@ -1849,6 +2015,15 @@ pub fn emit_cvtsi2sd_xmm0_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Di
 }
 
 // CVTTSD2SI rax, xmm0 — truncate f64 to i64 (Sprint 87: float-to-int)
+pub fn emit_sub_rax_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 29 D8 — sub rax, rbx
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, 0xD8)
+    b
+}
+
 pub fn emit_cvttsd2si_rax_xmm0(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     // F2 REX.W 0F 2C C0
     var b = buf

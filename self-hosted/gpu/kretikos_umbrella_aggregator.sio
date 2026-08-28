@@ -1,0 +1,855 @@
+// self-hosted/gpu/kretikos_umbrella_aggregator.sio
+//
+// Phase 4 (python-extermination): pure-Sounio CPU umbrella gate aggregator.
+// Replaces the 128-line python heredoc in emit_summary_json()
+// (scripts/ci/native_v2_cpu_compiler_umbrella_gate.sh lines 144-273).
+//
+// Argv:  driver.elf <results_tsv> <souc_bin> <out_dir> <generated_at_utc>
+// Output: umbrella JSON on stdout (caller redirects to summary_path)
+// Exit:   0 if status=pass, 1 if status=fail
+//
+// Uses global flat arrays throughout to avoid large-struct SRET stack overflow.
+
+use gpu::kaxi_backend::*
+
+const CAP: i64 = 262144
+const FAIL_CAP: i64 = 65536
+const PATH_CAP: i64 = 1024
+const MISSING: i64 = 0 - 9999
+
+// ── Global flat buffers ──────────────────────────────────────────────────────
+// All large state lives in globals to avoid large-struct SRET stack overflow.
+
+var TSV_DATA: [i8; 262144] = [0; 262144]   // results TSV content
+var TSV_LEN: i64 = 0
+var G_DATA: [i8; 262144] = [0; 262144]    // current gate JSON or log content
+var G_DATA_LEN: i64 = 0
+var G_PATH: [i8; 1024] = [0; 1024]        // scratch: current path being loaded
+var G_PATH_LEN: i64 = 0
+
+var GATES_DATA: [i8; 262144] = [0; 262144]  // accumulated gates JSON
+var GATES_LEN: i64 = 0
+var FAIL_DATA: [i8; 65536] = [0; 65536]    // accumulated fail reasons
+var FAIL_LEN: i64 = 0
+var OUT_DATA: [i8; 262144] = [0; 262144]   // final umbrella JSON output
+var OUT_LEN: i64 = 0
+
+var GATE_COUNT: i64 = 0
+var PASS_COUNT: i64 = 0
+var FAIL_COUNT: i64 = 0
+var TOTAL_CASES: i64 = 0
+var FIRST_GATE: bool = true
+var FIRST_FAIL: bool = true
+var OVERALL_FAIL: bool = false
+
+// ── StrBuf: small 1KB string buffer ──────────────────────────────────────────
+
+struct StrBuf {
+    data: [i8; 1024],
+    len: i64,
+}
+
+fn sb_new() -> StrBuf {
+    StrBuf { data: [0; 1024], len: 0 }
+}
+
+fn sb_eq(sb: &StrBuf, s: string) -> bool with Mut, Panic, Div {
+    let slen = str_len(s)
+    if sb.len != slen { return false }
+    var i: i64 = 0
+    while i < slen {
+        if sb.data[i as usize] != str_char_at(s, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn is_digit(c: i64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_ws(c: i64) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13
+}
+
+// ── Path buffer helpers ───────────────────────────────────────────────────────
+
+fn g_path_set_sb(sb: &StrBuf) with Mut, Panic, Div {
+    G_PATH_LEN = 0
+    var i: i64 = 0
+    while i < sb.len && i < PATH_CAP - 1 {
+        G_PATH[i as usize] = sb.data[i as usize]
+        i = i + 1
+    }
+    G_PATH_LEN = i
+}
+
+fn g_path_set_str(s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n && i < PATH_CAP - 1 {
+        G_PATH[i as usize] = str_char_at(s, i) as i8
+        i = i + 1
+    }
+    G_PATH_LEN = i
+}
+
+// Convert G_PATH to a Sounio string. Builds the KaxiAsmBuf via in-place
+// mutation rather than chained `kaxi_asm_push_byte` SRET returns: in the
+// native compiler, passing a 262KB struct by value through SRET corrupts
+// memory under repeated calls (see memory: "Native compiler limits --
+// SRET broken for large structs"). Multiple gate rows in the umbrella TSV
+// trigger this if we use the chained form; the in-place form sidesteps it.
+fn g_path_to_string() -> string with Mut, Panic, Div, Alloc {
+    var kb = kaxi_asm_new()
+    var i: i64 = 0
+    while i < G_PATH_LEN && i < 262144 {
+        kb.data[i as usize] = G_PATH[i as usize]
+        i = i + 1
+    }
+    kb.len = i
+    kaxi_asm_to_string(kb)
+}
+
+// ── File loading ──────────────────────────────────────────────────────────────
+
+fn tsv_load(path: string) with IO, Mut, Panic, Div, Alloc {
+    TSV_LEN = 0
+    let size = file_size(path)
+    if size <= 0 { return }
+    let bytes = read_file(path)
+    let cap: i64 = if size > CAP { CAP } else { size }
+    var i: i64 = 0
+    while i < cap {
+        TSV_DATA[i as usize] = bytes[i as usize] as i8
+        i = i + 1
+    }
+    TSV_LEN = cap
+}
+
+// Load G_PATH contents into G_DATA. Converts G_PATH to string internally.
+fn g_data_load() with IO, Mut, Panic, Div, Alloc {
+    G_DATA_LEN = 0
+    let path = g_path_to_string()
+    let size = file_size(path)
+    if size <= 0 { return }
+    let bytes = read_file(path)
+    let cap: i64 = if size > CAP { CAP } else { size }
+    var i: i64 = 0
+    while i < cap {
+        G_DATA[i as usize] = bytes[i as usize] as i8
+        i = i + 1
+    }
+    G_DATA_LEN = cap
+}
+
+// ── TSV field extraction ──────────────────────────────────────────────────────
+
+fn tsv_byte(pos: i64) -> i64 {
+    if pos < 0 || pos >= TSV_LEN { return 0 }
+    TSV_DATA[pos as usize] as i64
+}
+
+fn tsv_skip_ws(pos: i64) -> i64 with Mut, Panic, Div {
+    var p: i64 = pos
+    while p < TSV_LEN {
+        let c = tsv_byte(p)
+        if c != 32 && c != 9 { break }
+        p = p + 1
+    }
+    p
+}
+
+// Returns Nth (0-indexed) tab-delimited field from TSV line at line_start.
+fn tsv_field(line_start: i64, field_idx: i64) -> StrBuf with Mut, Panic, Div {
+    var sb = sb_new()
+    var pos: i64 = line_start
+    var field: i64 = 0
+    while field < field_idx && pos < TSV_LEN {
+        let c = tsv_byte(pos)
+        if c == 10 || c == 0 { return sb }
+        if c == 9 { field = field + 1 }
+        pos = pos + 1
+    }
+    while pos < TSV_LEN {
+        let c = tsv_byte(pos)
+        if c == 9 || c == 10 || c == 13 || c == 0 { break }
+        if sb.len < 1023 {
+            sb.data[sb.len as usize] = c as i8
+            sb.len = sb.len + 1
+        }
+        pos = pos + 1
+    }
+    sb
+}
+
+// Returns start position of next TSV line after pos.
+fn tsv_next_line(pos: i64) -> i64 with Mut, Panic, Div {
+    var p: i64 = pos
+    while p < TSV_LEN {
+        if tsv_byte(p) == 10 { return p + 1 }
+        p = p + 1
+    }
+    TSV_LEN
+}
+
+// Parse integer from StrBuf. Returns MISSING if empty or non-numeric.
+fn sb_to_i64(sb: &StrBuf) -> i64 with Mut, Panic, Div {
+    if sb.len == 0 { return MISSING }
+    var neg: bool = false
+    var i: i64 = 0
+    if sb.data[0] as i64 == 45 { neg = true; i = 1 }
+    var n: i64 = 0
+    var any: bool = false
+    while i < sb.len {
+        let d = sb.data[i as usize] as i64
+        if !is_digit(d) { break }
+        n = n * 10 + (d - 48)
+        any = true
+        i = i + 1
+    }
+    if !any { return MISSING }
+    if neg { 0 - n } else { n }
+}
+
+// ── G_DATA JSON extraction ────────────────────────────────────────────────────
+
+fn g_byte(pos: i64) -> i64 {
+    if pos < 0 || pos >= G_DATA_LEN { return 0 }
+    G_DATA[pos as usize] as i64
+}
+
+fn g_skip_ws(p: i64) -> i64 with Mut, Panic, Div {
+    var pos: i64 = p
+    while pos < G_DATA_LEN && is_ws(g_byte(pos)) { pos = pos + 1 }
+    pos
+}
+
+// Find needle in G_DATA starting at start. Returns -1 if not found.
+fn g_find(start: i64, needle: string) -> i64 with Mut, Panic, Div {
+    let nlen = str_len(needle)
+    if nlen == 0 { return start }
+    var i: i64 = start
+    while i + nlen <= G_DATA_LEN {
+        var j: i64 = 0
+        var ok: bool = true
+        while j < nlen {
+            if G_DATA[(i + j) as usize] != str_char_at(needle, j) {
+                ok = false
+                j = nlen
+            } else {
+                j = j + 1
+            }
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Find the start of the JSON value for "key": VALUE in G_DATA.
+fn g_json_value_pos(key: string) -> i64 with Mut, Panic, Div {
+    let klen = str_len(key)
+    var pos: i64 = 0
+    while pos < G_DATA_LEN {
+        let p = g_find(pos, key)
+        if p < 0 { return 0 - 1 }
+        // Require: char before key is '"', char after key is '"'
+        // AND the key is at top-level indentation: preceded by \n  " (newline + 2 spaces + quote)
+        // This avoids matching "status" inside nested arrays/objects (which have 4+ space indent)
+        if p > 0 && (G_DATA[(p - 1) as usize] as i64) == 34 &&
+           (p + klen < G_DATA_LEN) && (G_DATA[(p + klen) as usize] as i64) == 34 {
+            // Top-level 2-space indent: \n  "key" → p-4=\n(10), p-3=space(32)
+            let is_top = p >= 4 &&
+                (G_DATA[(p - 4) as usize] as i64) == 10 &&
+                (G_DATA[(p - 3) as usize] as i64) == 32
+            if is_top {
+                var after: i64 = p + klen + 1
+                after = g_skip_ws(after)
+                if g_byte(after) == 58 {
+                    after = after + 1
+                    after = g_skip_ws(after)
+                    return after
+                }
+            }
+        }
+        pos = p + 1
+    }
+    0 - 1
+}
+
+// Extract a JSON string value from G_DATA. Returns empty StrBuf if missing/non-string.
+fn g_json_str(key: string) -> StrBuf with Mut, Panic, Div {
+    var sb = sb_new()
+    let vstart = g_json_value_pos(key)
+    if vstart < 0 { return sb }
+    if g_byte(vstart) != 34 { return sb }
+    var p: i64 = vstart + 1
+    while p < G_DATA_LEN {
+        let b = g_byte(p)
+        if b == 34 { break }
+        if b == 92 {
+            p = p + 1
+            if p < G_DATA_LEN && sb.len < 1023 {
+                sb.data[sb.len as usize] = g_byte(p) as i8
+                sb.len = sb.len + 1
+            }
+        } else {
+            if sb.len < 1023 {
+                sb.data[sb.len as usize] = b as i8
+                sb.len = sb.len + 1
+            }
+        }
+        p = p + 1
+    }
+    sb
+}
+
+// Extract a JSON integer value from G_DATA. Returns MISSING if absent or null.
+fn g_json_int(key: string) -> i64 with Mut, Panic, Div {
+    let vstart = g_json_value_pos(key)
+    if vstart < 0 { return MISSING }
+    let c = g_byte(vstart)
+    if c == 110 { return MISSING }
+    var neg: bool = false
+    var p: i64 = vstart
+    if c == 45 { neg = true; p = p + 1 }
+    var n: i64 = 0
+    var any: bool = false
+    while p < G_DATA_LEN {
+        let d = g_byte(p)
+        if !is_digit(d) { break }
+        n = n * 10 + (d - 48)
+        any = true
+        p = p + 1
+    }
+    if !any { return MISSING }
+    if neg { 0 - n } else { n }
+}
+
+// Returns -1=missing, 0=false, 1=true for a boolean JSON field.
+fn g_json_bool(key: string) -> i64 with Mut, Panic, Div {
+    let vstart = g_json_value_pos(key)
+    if vstart < 0 { return 0 - 1 }
+    let c = g_byte(vstart)
+    if c == 116 { return 1 }
+    if c == 102 { return 0 }
+    0 - 1
+}
+
+// Returns true if the JSON value for key is null or missing.
+fn g_json_is_null(key: string) -> bool with Mut, Panic, Div {
+    let vstart = g_json_value_pos(key)
+    if vstart < 0 { return true }
+    g_byte(vstart) == 110
+}
+
+// ── Log scanners operating on G_DATA ─────────────────────────────────────────
+
+// Find "fixed-point md5=HEXWORD" in G_DATA and return the hex word.
+fn g_find_md5() -> StrBuf with Mut, Panic, Div {
+    var sb = sb_new()
+    let marker = "fixed-point md5="
+    let p = g_find(0, marker)
+    if p < 0 { return sb }
+    var pos: i64 = p + str_len(marker)
+    while pos < G_DATA_LEN {
+        let c = g_byte(pos)
+        let is_hex = is_digit(c) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70)
+        if !is_hex { break }
+        if sb.len < 1023 {
+            sb.data[sb.len as usize] = c as i8
+            sb.len = sb.len + 1
+        }
+        pos = pos + 1
+    }
+    sb
+}
+
+// Read a non-ws token from G_DATA at pos. Returns StrBuf + next pos.
+struct StrPos {
+    sb: StrBuf,
+    pos: i64,
+}
+
+fn g_read_token(start: i64) -> StrPos with Mut, Panic, Div {
+    var sb = sb_new()
+    var p: i64 = start
+    while p < G_DATA_LEN {
+        let c = g_byte(p)
+        if c != 32 && c != 9 { break }
+        p = p + 1
+    }
+    while p < G_DATA_LEN {
+        let c = g_byte(p)
+        if is_ws(c) || c == 0 { break }
+        if sb.len < 1023 {
+            sb.data[sb.len as usize] = c as i8
+            sb.len = sb.len + 1
+        }
+        p = p + 1
+    }
+    StrPos { sb: sb, pos: p }
+}
+
+struct EpStages {
+    s1: StrBuf,
+    s2: StrBuf,
+    s3: StrBuf,
+}
+
+// Find "epistemic stage1=S stage2=S stage3=S" in G_DATA.
+fn g_find_ep_stages() -> EpStages with Mut, Panic, Div {
+    let empty = sb_new()
+    var st = EpStages { s1: empty, s2: empty, s3: empty }
+    let marker = "epistemic stage1="
+    let p = g_find(0, marker)
+    if p < 0 { return st }
+    let r1 = g_read_token(p + str_len(marker))
+    st.s1 = r1.sb
+    let p2 = g_find(r1.pos, "stage2=")
+    if p2 < 0 { return st }
+    let r2 = g_read_token(p2 + 7)
+    st.s2 = r2.sb
+    let p3 = g_find(r2.pos, "stage3=")
+    if p3 < 0 { return st }
+    let r3 = g_read_token(p3 + 7)
+    st.s3 = r3.sb
+    st
+}
+
+// ── Output buffer push helpers ────────────────────────────────────────────────
+
+fn gates_push_byte(c: i8) with Mut {
+    if GATES_LEN < CAP - 1 {
+        GATES_DATA[GATES_LEN as usize] = c
+        GATES_LEN = GATES_LEN + 1
+    }
+}
+
+fn gates_push_str(s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        gates_push_byte(str_char_at(s, i) as i8)
+        i = i + 1
+    }
+}
+
+fn gates_push_i64(n: i64) with Mut, Panic, Div, Alloc {
+    gates_push_str(kaxi_i64_to_string(n))
+}
+
+fn gates_push_sb(sb: &StrBuf) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < sb.len {
+        gates_push_byte(sb.data[i as usize])
+        i = i + 1
+    }
+}
+
+fn gates_push_sb_json(sb: &StrBuf) with Mut, Panic, Div {
+    gates_push_byte(34 as i8)
+    var i: i64 = 0
+    while i < sb.len {
+        let c = sb.data[i as usize]
+        if c == 92 as i8 || c == 34 as i8 { gates_push_byte(92 as i8) }
+        gates_push_byte(c)
+        i = i + 1
+    }
+    gates_push_byte(34 as i8)
+}
+
+fn gates_push_sb_or_null(sb: &StrBuf) with Mut, Panic, Div {
+    if sb.len == 0 { gates_push_str("null") } else { gates_push_sb_json(sb) }
+}
+
+fn fail_push_byte(c: i8) with Mut {
+    if FAIL_LEN < FAIL_CAP - 1 {
+        FAIL_DATA[FAIL_LEN as usize] = c
+        FAIL_LEN = FAIL_LEN + 1
+    }
+}
+
+fn fail_push_str(s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        fail_push_byte(str_char_at(s, i) as i8)
+        i = i + 1
+    }
+}
+
+fn fail_push_sb(sb: &StrBuf) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < sb.len {
+        fail_push_byte(sb.data[i as usize])
+        i = i + 1
+    }
+}
+
+fn add_fail_reason(reason: string) with Mut, Panic, Div {
+    if !FIRST_FAIL { fail_push_str(",\n") }
+    fail_push_str("    \"")
+    fail_push_str(reason)
+    fail_push_byte(34 as i8)
+    FIRST_FAIL = false
+    OVERALL_FAIL = true
+}
+
+fn add_fail_reason_sfx(prefix: string, sfx: string) with Mut, Panic, Div {
+    if !FIRST_FAIL { fail_push_str(",\n") }
+    fail_push_str("    \"")
+    fail_push_str(prefix)
+    fail_push_str(sfx)
+    fail_push_byte(34 as i8)
+    FIRST_FAIL = false
+    OVERALL_FAIL = true
+}
+
+fn add_fail_reason_sb_sfx(prefix: string, sb: &StrBuf, sfx: string) with Mut, Panic, Div {
+    if !FIRST_FAIL { fail_push_str(",\n") }
+    fail_push_str("    \"")
+    fail_push_str(prefix)
+    fail_push_sb(sb)
+    fail_push_str(sfx)
+    fail_push_byte(34 as i8)
+    FIRST_FAIL = false
+    OVERALL_FAIL = true
+}
+
+// ── Gate JSON building helpers ────────────────────────────────────────────────
+
+fn gate_open() with Mut, Panic, Div {
+    if !FIRST_GATE { gates_push_str(",\n") }
+    gates_push_str("    {\n")
+    FIRST_GATE = false
+    GATE_COUNT = GATE_COUNT + 1
+}
+
+fn gate_close() with Mut, Panic, Div {
+    gates_push_str("    }")
+}
+
+fn gkv_s(key: string, val: string) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key)
+    gates_push_str("\": \""); gates_push_str(val)
+    gates_push_str("\",\n")
+}
+
+fn gkv_sb(key: string, sb: &StrBuf) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key)
+    gates_push_str("\": "); gates_push_sb_json(sb)
+    gates_push_str(",\n")
+}
+
+fn gkv_sb_or_null(key: string, sb: &StrBuf) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key)
+    gates_push_str("\": "); gates_push_sb_or_null(sb)
+    gates_push_str(",\n")
+}
+
+fn gkv_i(key: string, n: i64) with Mut, Panic, Div, Alloc {
+    gates_push_str("      \""); gates_push_str(key)
+    gates_push_str("\": "); gates_push_i64(n)
+    gates_push_str(",\n")
+}
+
+fn gkv_i_or_null(key: string, n: i64) with Mut, Panic, Div, Alloc {
+    gates_push_str("      \""); gates_push_str(key); gates_push_str("\": ")
+    if n == MISSING { gates_push_str("null") } else { gates_push_i64(n) }
+    gates_push_str(",\n")
+}
+
+fn gkv_bool(key: string, b: bool) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key); gates_push_str("\": ")
+    if b { gates_push_str("true") } else { gates_push_str("false") }
+    gates_push_str(",\n")
+}
+
+fn gkv_boolopt(key: string, b: i64) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key); gates_push_str("\": ")
+    if b < 0 { gates_push_str("null") } else if b == 1 { gates_push_str("true") } else { gates_push_str("false") }
+    gates_push_str(",\n")
+}
+
+fn gkv_null(key: string) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key)
+    gates_push_str("\": null,\n")
+}
+
+fn gkv_last_s(key: string, val: string) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key)
+    gates_push_str("\": \""); gates_push_str(val)
+    gates_push_str("\"\n")
+}
+
+fn gkv_last_bool(key: string, b: bool) with Mut, Panic, Div {
+    gates_push_str("      \""); gates_push_str(key); gates_push_str("\": ")
+    if b { gates_push_str("true\n") } else { gates_push_str("false\n") }
+}
+
+// ── Gate processors ───────────────────────────────────────────────────────────
+// All accept StrBufs by ref and avoid large local variables.
+// Gate JSON/log content is pre-loaded into G_DATA before calling.
+
+fn process_summary_gate(gate_sb: &StrBuf, rc: i64, out_dir_sb: &StrBuf, sum_path_sb: &StrBuf, log_path_sb: &StrBuf) with IO, Mut, Panic, Div, Alloc {
+    // Load sum_path into G_DATA
+    g_path_set_sb(sum_path_sb)
+    g_data_load()
+
+    let schema_sb = g_json_str("schema")
+    let sum_status_sb = g_json_str("status")
+    let case_count = g_json_int("case_count")
+    let pass_count_g = g_json_int("pass_count")
+    let fail_count_g = g_json_int("fail_count")
+    let fallback_sb = g_json_str("fallback_path")
+    let callback_sb = g_json_str("host_callback")
+    let sha256_sb = g_json_str("stage1_driver_sha256")
+    let det_b = g_json_bool("stage1_driver_deterministic")
+    let gum_b = g_json_bool("gum_sse2_verified")
+    let artifact_sb = g_json_str("artifact_dir")
+    let res_tsv_sb = g_json_str("results_tsv")
+
+    let sum_status_pass = sb_eq(&sum_status_sb, "pass")
+
+    var gate_fail: bool = false
+    if rc != 0 {
+        add_fail_reason_sb_sfx("", gate_sb, ":rc_nonzero")
+        gate_fail = true
+    }
+    if !sum_status_pass {
+        add_fail_reason_sb_sfx("", gate_sb, ":summary_status_not_pass")
+        gate_fail = true
+    }
+    if det_b == 0 {
+        add_fail_reason_sb_sfx("", gate_sb, ":stage1_driver_not_deterministic")
+        gate_fail = true
+    }
+    let fallback_is_null = g_json_is_null("fallback_path")
+    let fallback_is_none = sb_eq(&fallback_sb, "none")
+    if !fallback_is_null && !fallback_is_none {
+        add_fail_reason_sb_sfx("", gate_sb, ":fallback_path_set")
+        gate_fail = true
+    }
+    let callback_is_null = g_json_is_null("host_callback")
+    let callback_is_none = sb_eq(&callback_sb, "none")
+    if !callback_is_null && !callback_is_none {
+        add_fail_reason_sb_sfx("", gate_sb, ":host_callback_set")
+        gate_fail = true
+    }
+
+    if gate_fail { FAIL_COUNT = FAIL_COUNT + 1 } else { PASS_COUNT = PASS_COUNT + 1 }
+    if case_count != MISSING { TOTAL_CASES = TOTAL_CASES + case_count }
+
+    let status_str: string = if gate_fail { "fail" } else { "pass" }
+    gate_open()
+    gkv_sb("gate", gate_sb)
+    gkv_s("status", status_str)
+    gkv_i("rc", rc)
+    gkv_sb("out_dir", out_dir_sb)
+    gkv_sb("summary_json", sum_path_sb)
+    gkv_sb("log_path", log_path_sb)
+    gkv_sb_or_null("schema", &schema_sb)
+    gkv_sb_or_null("summary_status", &sum_status_sb)
+    gkv_i_or_null("case_count", case_count)
+    gkv_i_or_null("pass_count", pass_count_g)
+    gkv_i_or_null("fail_count", fail_count_g)
+    gkv_sb_or_null("fallback_path", &fallback_sb)
+    gkv_sb_or_null("host_callback", &callback_sb)
+    gkv_sb_or_null("stage1_driver_sha256", &sha256_sb)
+    gkv_boolopt("stage1_driver_deterministic", det_b)
+    gkv_boolopt("gum_sse2_verified", gum_b)
+    gkv_sb_or_null("artifact_dir", &artifact_sb)
+    gkv_last_s("results_tsv_path", "")
+    gate_close()
+}
+
+fn sb_bytes_eq(a: &StrBuf, b: &StrBuf) -> bool with Mut, Panic, Div {
+    if a.len != b.len { return false }
+    var i: i64 = 0
+    while i < a.len {
+        if a.data[i as usize] != b.data[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn process_log_gate(gate_sb: &StrBuf, rc: i64, out_dir_sb: &StrBuf, log_path_sb: &StrBuf) with IO, Mut, Panic, Div, Alloc {
+    g_path_set_sb(log_path_sb)
+    g_data_load()
+
+    let md5_sb = g_find_md5()
+    let ep = g_find_ep_stages()
+
+    let ep_s2_nonempty = ep.s2.len > 0
+    let ep_s3_nonempty = ep.s3.len > 0
+    let s2_ne_absent = !sb_eq(&ep.s2, "absent")
+    let s2_eq_s3 = ep_s2_nonempty && ep_s3_nonempty && sb_bytes_eq(&ep.s2, &ep.s3)
+    let ep_fixed = rc == 0 && s2_eq_s3 && s2_ne_absent
+
+    var gate_fail: bool = false
+    if rc != 0 {
+        add_fail_reason_sb_sfx("", gate_sb, ":rc_nonzero")
+        gate_fail = true
+    }
+    if rc == 0 && !ep_fixed {
+        add_fail_reason_sb_sfx("", gate_sb, ":epistemic_fixed_point_unparsed")
+        gate_fail = true
+    }
+
+    if gate_fail { FAIL_COUNT = FAIL_COUNT + 1 } else { PASS_COUNT = PASS_COUNT + 1 }
+
+    let status_str: string = if gate_fail { "fail" } else { "pass" }
+    gate_open()
+    gkv_sb("gate", gate_sb)
+    gkv_s("status", status_str)
+    gkv_i("rc", rc)
+    gkv_sb("out_dir", out_dir_sb)
+    gkv_null("summary_json")
+    gkv_sb("log_path", log_path_sb)
+    gkv_sb_or_null("fixed_point_md5", &md5_sb)
+    gkv_sb_or_null("stage1_epistemic", &ep.s1)
+    gkv_sb_or_null("stage2_epistemic", &ep.s2)
+    gkv_sb_or_null("stage3_epistemic", &ep.s3)
+    gkv_bool("epistemic_fixed_point", ep_fixed)
+    gkv_s("fallback_path", "none")
+    gkv_s("host_callback", "none")
+    gkv_last_s("policy_source", "native_v2_driver_self_compile_gate")
+    gate_close()
+}
+
+// ── Output buffer helpers ─────────────────────────────────────────────────────
+
+fn out_push_byte(c: i8) with Mut {
+    if OUT_LEN < 262143 {
+        OUT_DATA[OUT_LEN as usize] = c
+        OUT_LEN = OUT_LEN + 1
+    }
+}
+
+fn out_push_str(s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        out_push_byte(str_char_at(s, i) as i8)
+        i = i + 1
+    }
+}
+
+fn out_push_sb(sb: &StrBuf) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < sb.len {
+        out_push_byte(sb.data[i as usize])
+        i = i + 1
+    }
+}
+
+fn out_push_i64(n: i64) with Mut, Panic, Div, Alloc {
+    out_push_str(kaxi_i64_to_string(n))
+}
+
+fn print_out() with IO, Mut, Panic, Div, Alloc {
+    var kb = kaxi_asm_new()
+    var i: i64 = 0
+    while i < OUT_LEN {
+        kb = kaxi_asm_push_byte(kb, OUT_DATA[i as usize])
+        i = i + 1
+    }
+    print(kaxi_asm_to_string(kb))
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    let argc = arg_count()
+    if argc < 4 {
+        println("usage: kretikos umbrella-aggregate <results_tsv> <souc_bin> <out_dir> <generated_at_utc>")
+        return 2
+    }
+    let results_tsv_path = get_arg(0)
+    let souc_bin = get_arg(1)
+    let out_dir = get_arg(2)
+    let generated_at = get_arg(3)
+
+    tsv_load(results_tsv_path)
+    if TSV_LEN <= 0 {
+        print("umbrella-aggregate: cannot read TSV: ")
+        println(results_tsv_path)
+        return 1
+    }
+
+    // Skip header line
+    var line_start: i64 = tsv_next_line(0)
+
+    while line_start < TSV_LEN {
+        if tsv_byte(line_start) == 0 { break }
+
+        let gate_sb = tsv_field(line_start, 0)
+        if gate_sb.len == 0 {
+            line_start = tsv_next_line(line_start)
+            continue
+        }
+        let rc_sb = tsv_field(line_start, 1)
+        let out_dir_sb = tsv_field(line_start, 2)
+        let sum_json_sb = tsv_field(line_start, 3)
+        let log_path_sb = tsv_field(line_start, 4)
+
+        let rc = sb_to_i64(&rc_sb)
+        let is_log_only = sb_eq(&sum_json_sb, "-")
+
+        if is_log_only {
+            process_log_gate(&gate_sb, rc, &out_dir_sb, &log_path_sb)
+        } else {
+            process_summary_gate(&gate_sb, rc, &out_dir_sb, &sum_json_sb, &log_path_sb)
+        }
+
+        line_start = tsv_next_line(line_start)
+    }
+
+    let overall_status: string = if OVERALL_FAIL { "fail" } else { "pass" }
+
+    // Build final umbrella JSON into OUT_DATA global buffer
+    out_push_str("{\n  \"schema\": \"sounio.native_v2_cpu_compiler_umbrella.v1\",\n")
+    out_push_str("  \"generated_at_utc\": \"")
+    out_push_str(generated_at)
+    out_push_str("\",\n  \"status\": \"")
+    out_push_str(overall_status)
+    out_push_str("\",\n  \"compiler_resolved\": \"")
+    out_push_str(souc_bin)
+    out_push_str("\",\n  \"target\": \"x86_64-linux\",\n")
+    out_push_str("  \"fallback_path\": \"none\",\n  \"host_callback\": \"none\",\n")
+    out_push_str("  \"gate_count\": ")
+    out_push_i64(GATE_COUNT)
+    out_push_str(",\n  \"pass_count\": ")
+    out_push_i64(PASS_COUNT)
+    out_push_str(",\n  \"fail_count\": ")
+    out_push_i64(FAIL_COUNT)
+    out_push_str(",\n  \"case_count\": ")
+    out_push_i64(TOTAL_CASES)
+    out_push_str(",\n  \"out_dir\": \"")
+    out_push_str(out_dir)
+    out_push_str("\",\n  \"results_tsv\": \"")
+    out_push_str(results_tsv_path)
+    out_push_str("\",\n  \"gates\": [\n")
+    var gi: i64 = 0
+    while gi < GATES_LEN {
+        out_push_byte(GATES_DATA[gi as usize])
+        gi = gi + 1
+    }
+    out_push_str("\n  ],\n  \"fail_reasons\": [\n")
+    var fi: i64 = 0
+    while fi < FAIL_LEN {
+        out_push_byte(FAIL_DATA[fi as usize])
+        fi = fi + 1
+    }
+    out_push_str("\n  ],\n  \"remaining_boundaries\": [\n")
+    out_push_str("    \"CPU umbrella gate does not prove CUDA runtime execution\",\n")
+    out_push_str("    \"CPU umbrella gate does not change compiler semantics or public support claims\"\n")
+    out_push_str("  ]\n}\n")
+
+    print_out()
+
+    if OVERALL_FAIL { return 1 }
+    0
+}

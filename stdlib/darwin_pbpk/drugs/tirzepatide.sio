@@ -1,0 +1,190 @@
+// darwin_pbpk/drugs/tirzepatide.sio — Tirzepatide (LY3298176) PBPK Parameters
+//
+// Tirzepatide is a dual GIP receptor / GLP-1 receptor agonist peptide (MW 4813 Da),
+// approved for T2DM (Mounjaro, Eli Lilly, 2022) and obesity (Zepbound, 2023).
+//
+// PK class: large peptide, SC injection, vascular-dominant distribution
+//
+// IMPORTANT FRAMEWORK BOUNDARIES:
+//   - Rodgers-Rowland Eq.6 NOT applicable (MW 4813 Da, peptide class; model
+//     validated only for MW < ~700 Da neutral/monoprotic small molecules)
+//   - GNN weights calibrated to rapamycin (MW 914, logP 7.0) — NOT transferable
+//     to peptides with hydrophilic surfaces (TPSA ~600 Å², logP << 0)
+//   - Distribution is vascular-dominant: Kp_tissue ≈ 1.0 assumed for all tissues
+//     (low membrane permeability, high plasma protein binding 99%)
+//
+// Primary literature:
+//   - Urva S et al. (2022) Clin Pharmacokinet 61:861-872    [popPK SC 2-comp]
+//     Vc=3.34L, Vp=6.92L, CL=0.061L/h, Q=0.058L/h, Ka=0.0164h⁻¹, F=0.80
+//   - Thomas MK et al. (2021) J Clin Endocrinol Metab 106:324-338  [Phase 1 PK]
+//   - Frias JP et al. (2021) NEJM 385:503-515  [SURPASS-2, dose-response]
+//   - Min T & Bain SC (2021) Drugs 81:897-906  [review, binding Ki values]
+//     EC50_GLP1R ≈ 0.5 nM ≈ 2.41e-3 ng/mL (MW 4813)
+//     EC50_GIPR  ≈ 0.2 nM ≈ 0.963e-3 ng/mL
+//   - FDA label (2022): t½ ≈ 120h (5 days); SC bioavailability ~80%
+
+// ============================================================================
+// MATH HELPERS (local)
+// ============================================================================
+
+fn tirz_sqrt(x: f64) -> f64 {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 {
+        y = (y + x / y) * 0.5
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// 2-COMPARTMENT SC PHARMACOKINETIC PARAMETERS
+// ============================================================================
+// Model: SC depot → central (Vc) ↔ peripheral (Vp), linear elimination from central
+//
+//   dA_depot/dt = -Ka * A_depot
+//   dC_c/dt     = (Ka*F*A_depot - CL*C_c - Q*(C_c - C_p)) / Vc
+//   dC_p/dt     = Q*(C_c - C_p) / Vp
+//
+// State vector: [A_depot_ng, C_c_ngml, C_p_ngml]
+// Units: dose in ng, concentrations in ng/mL, volumes in mL, time in h
+
+pub struct Tirz2CompParams {
+    dose_ng:   f64,    // SC dose (ng); 5 mg standard dose = 5e6 ng
+    ka_per_h:  f64,    // absorption rate constant (h⁻¹)
+    f_sc:      f64,    // SC bioavailability fraction (dimensionless)
+    cl_lh:     f64,    // clearance (L/h)  — proteolytic + renal
+    vc_l:      f64,    // central volume (L)
+    vp_l:      f64,    // peripheral volume (L)
+    q_lh:      f64,    // inter-compartmental clearance (L/h)
+    fu_plasma: f64,    // unbound fraction (1 - albumin/fatty acid binding ~0.99 bound)
+}
+
+pub fn tirzepatide_5mg_params() -> Tirz2CompParams {
+    Tirz2CompParams {
+        dose_ng:   5.0e6,
+        ka_per_h:  0.0164,
+        f_sc:      0.80,
+        cl_lh:     0.061,
+        vc_l:      3.34,
+        vp_l:      6.92,
+        q_lh:      0.058,
+        fu_plasma: 0.01,
+    }
+}
+
+pub fn tirzepatide_15mg_params() -> Tirz2CompParams {
+    Tirz2CompParams {
+        dose_ng:   15.0e6,
+        ka_per_h:  0.0164,
+        f_sc:      0.80,
+        cl_lh:     0.061,
+        vc_l:      3.34,
+        vp_l:      6.92,
+        q_lh:      0.058,
+        fu_plasma: 0.01,
+    }
+}
+
+// ============================================================================
+// GUM EPISTEMIC PRIORS (JCGM 100:2008)
+// ============================================================================
+
+pub struct TirzEpParam {
+    mean:       f64,
+    variance:   f64,
+    confidence: f64,
+}
+
+pub struct TirzepatidePriors {
+    cl:   TirzEpParam,    // clearance L/h, CV=25% (Urva 2022 popPK)
+    ka:   TirzEpParam,    // absorption rate h⁻¹, CV=35% (Thomas 2021)
+    fu:   TirzEpParam,    // unbound fraction, CV=20% (label + Min 2021)
+    vc:   TirzEpParam,    // central volume L, CV=20% (Urva 2022)
+    f_sc: TirzEpParam,    // bioavailability, CV=10% (FDA label)
+    // Receptor binding uncertainty (PD bridge)
+    ec50_glp1r: TirzEpParam,   // ng/mL, CV=30% (Min 2021 IC50 assay)
+    ec50_gipr:  TirzEpParam,   // ng/mL, CV=30%
+}
+
+// Urva 2022 population PK variability:
+//   CL: IIV 25% CV (omega²=0.0625)
+//   Ka: IIV 35% CV (omega²=0.1225) — high absorption site variability
+//   Vc: IIV 20% CV — body weight correlation partially explains variance
+//   F:  IIV 10% CV (residual after covariate model)
+//   fu: 20% CV (Min 2021 binding assay n=6, single method)
+//   EC50_GLP1R: 0.5 nM ± 30% (Min 2021 in vitro cAMP assay)
+//   EC50_GIPR:  0.2 nM ± 30%
+//     MW = 4813 Da → 1 nM = 4813e-6 mg/mL = 4813 ng/mL/nM_to_ngml_factor
+//     Actually: 1 nM × 4813 g/mol × 1e-6 = 4.813e-3 mg/L = 4.813 ng/mL/nM? No:
+//     1 nM = 1e-9 mol/L × 4813 g/mol × 1e9 ng/g = 4813 ng/L = 4.813 ng/mL
+//     EC50_GLP1R = 0.5 nM = 2.407 ng/mL
+//     EC50_GIPR  = 0.2 nM = 0.963 ng/mL
+pub fn tirzepatide_priors() -> TirzepatidePriors with Mut {
+    // CL: mean=0.061 L/h, SD = 0.25 × 0.061 = 0.01525 L/h
+    let cl_sd = 0.25 * 0.061
+    let cl = TirzEpParam {
+        mean:       0.061,
+        variance:   cl_sd * cl_sd,
+        confidence: 0.72,    // Urva 2022 popPK n=536 patients
+    }
+
+    // Ka: mean=0.0164 h⁻¹, SD = 0.35 × 0.0164 = 0.00574 h⁻¹
+    let ka_sd = 0.35 * 0.0164
+    let ka = TirzEpParam {
+        mean:       0.0164,
+        variance:   ka_sd * ka_sd,
+        confidence: 0.65,    // Thomas 2021 Phase 1 n=86; SC depot heterogeneity
+    }
+
+    // fu: mean=0.01, SD = 0.20 × 0.01 = 0.002
+    let fu_sd = 0.20 * 0.01
+    let fu = TirzEpParam {
+        mean:       0.01,
+        variance:   fu_sd * fu_sd,
+        confidence: 0.60,    // single in vitro binding study (Min 2021)
+    }
+
+    // Vc: mean=3.34 L, SD = 0.20 × 3.34 = 0.668 L
+    let vc_sd = 0.20 * 3.34
+    let vc = TirzEpParam {
+        mean:       3.34,
+        variance:   vc_sd * vc_sd,
+        confidence: 0.72,    // Urva 2022
+    }
+
+    // F_SC: mean=0.80, SD = 0.10 × 0.80 = 0.08
+    let f_sd = 0.10 * 0.80
+    let f_sc = TirzEpParam {
+        mean:       0.80,
+        variance:   f_sd * f_sd,
+        confidence: 0.78,    // FDA label; multiple doses confirmed
+    }
+
+    // EC50_GLP1R: 2.407 ng/mL, SD = 0.30 × 2.407 = 0.722 ng/mL
+    let ec50_g1_sd = 0.30 * 2.407
+    let ec50_glp1r = TirzEpParam {
+        mean:       2.407,
+        variance:   ec50_g1_sd * ec50_g1_sd,
+        confidence: 0.60,    // in vitro cAMP assay (Min 2021); species uncertainty
+    }
+
+    // EC50_GIPR: 0.963 ng/mL, SD = 0.30 × 0.963 = 0.289 ng/mL
+    let ec50_gi_sd = 0.30 * 0.963
+    let ec50_gipr = TirzEpParam {
+        mean:       0.963,
+        variance:   ec50_gi_sd * ec50_gi_sd,
+        confidence: 0.60,
+    }
+
+    TirzepatidePriors {
+        cl:         cl,
+        ka:         ka,
+        fu:         fu,
+        vc:         vc,
+        f_sc:       f_sc,
+        ec50_glp1r: ec50_glp1r,
+        ec50_gipr:  ec50_gipr,
+    }
+}

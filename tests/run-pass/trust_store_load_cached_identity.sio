@@ -1,0 +1,72 @@
+// trust_store_load() is memoised per process (D16). This test pins the two
+// properties that memo has to have:
+//
+//   1. IDENTITY -- the cached store is field-for-field the same store an
+//      uncached load produces. This is not a formality on this compiler:
+//      whole-struct assignment of a value containing `[Certificate; 512]`
+//      into module-level state is exactly the shape that stdlib/x509/cert.sio
+//      documents as miscompiling in other positions, and the trust store is
+//      security-critical -- a silently truncated or garbled cached root set
+//      is a chain-validation bypass, not a performance bug.
+//
+//   2. REPEATABILITY -- repeated trust_store_load() calls keep returning the
+//      full store. Before the memo each call re-parsed ~150 roots at ~8.8 MB
+//      of never-reclaimed arena apiece, so the SEVENTH call in a process died
+//      with `madaros: arena full`. Fifty calls here would have been fatal.
+
+use bignum::bigint::*
+use x509::cert::*
+use x509::trust_store::*
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let (fresh, ferr) = trust_store_load_uncached()
+    assert(ferr == 0)
+    assert(fresh.count > 0)
+
+    let (cached, cerr) = trust_store_load()
+    assert(cerr == 0)
+    assert(cached.count == fresh.count)
+
+    // Field-for-field over every root actually loaded.
+    var i: i64 = 0
+    while i < (fresh.count as i64) {
+        let a = fresh.certs[i as usize]
+        let b = cached.certs[i as usize]
+        assert(x509_name_eq(&a.subject, &b.subject))
+        assert(x509_name_eq(&a.issuer, &b.issuer))
+        assert(bigint_cmp(&a.modulus, &b.modulus) == 0)
+        assert(bigint_cmp(&a.public_exponent, &b.public_exponent) == 0)
+        assert(a.public_key_algorithm == b.public_key_algorithm)
+        assert(a.is_ca == b.is_ca)
+        assert(a.key_usage_bits == b.key_usage_bits)
+        assert(a.not_before_unix == b.not_before_unix)
+        assert(a.not_after_unix == b.not_after_unix)
+        assert(a.subject_key_id_len == b.subject_key_id_len)
+        var k: i32 = 0
+        while k < a.subject_key_id_len {
+            assert(a.subject_key_id[k as usize] == b.subject_key_id[k as usize])
+            k = k + 1
+        }
+        i = i + 1
+    }
+
+    // The cached store still answers real trust-store queries.
+    let probe_subject = fresh.certs[0].subject
+    assert(trust_store_find_by_subject(&cached, &probe_subject) >= 0)
+    // D17: this helper now takes the whole candidate certificate, so the
+    // key comparison can be algorithm-aware (an EC root's key lives in
+    // `ec_public_key`, not in `modulus`/`public_exponent`).
+    assert(trust_store_has_matching_key_for_subject(&cached, &fresh.certs[0]))
+
+    // Fifty loads in one process: fatal before the memo, free after it.
+    var n: i64 = 0
+    while n < 50 {
+        let (again, aerr) = trust_store_load()
+        assert(aerr == 0)
+        assert(again.count == fresh.count)
+        n = n + 1
+    }
+
+    println("trust_store_load_cached_identity: OK")
+    0
+}

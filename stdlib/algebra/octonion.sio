@@ -50,12 +50,12 @@ fn cd_sigma_r(a: i64, b: i64, bits: i64) -> i64 with Mut, Div {
 }
 
 // Octonion sign: σ(a,b) for basis elements a,b ∈ {0..7}
-fn cd_sigma(a: i64, b: i64) -> i64 with Mut, Div {
+pub fn cd_sigma(a: i64, b: i64) -> i64 with Mut, Div {
     cd_sigma_r(a, b, 3)
 }
 
 // Sedenion sign: σ(a,b) for basis elements a,b ∈ {0..15}
-fn cd_sigma_sedenion(a: i64, b: i64) -> i64 with Mut, Div {
+pub fn cd_sigma_sedenion(a: i64, b: i64) -> i64 with Mut, Div {
     cd_sigma_r(a, b, 4)
 }
 
@@ -76,13 +76,20 @@ fn basis_product_index(i: i64, j: i64) -> i64 {
 // === Core multiplication ===
 // Full octonion product: component-by-component using sign table.
 // c = a * b where a,b,c are [f64; 8]
+//
+// Madaros large-body note (2026-07-20):
+// - #1274: lo/hi split keeps each helper ≤ ~0x1200 frame / well under IR caps.
+// - #1292: vreg tables 512→2048 (silent high-vreg drop).
+// - Unsplit full 8-component exclusive-ref body lowers to ~2180 IR ops; under
+//   IR_MAX_INSTRS=2048 the body filled the array, IrReturn was dropped, and
+//   core_ir fallthrough re-entered main (ENTER/BEFORE_MUL). Fixed by raising
+//   IR_MAX_INSTRS to 4096 + synthetic epilogue defense. Gate:
+//   scripts/madaros_unsplit_oct_mul_gate.sh
+// Keep the lo/hi split as defense-in-depth for older Madaros binaries and
+// multi-module import paths; public API/math unchanged.
 
-fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
-    // out[k] = sum over all (i,j) where basis_product(i,j) has index k
-    //        = sum_i sum_j  a[i] * b[j] * sigma(i,j)  where (i XOR j) == k
-    //
-    // Direct 8x8 expansion (no loops over basis — fully unrolled for clarity):
-    // e0 component (real part):
+fn oct_mul_lo(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    // e0..e3
     var r0 = a[0] * b[0]
     r0 = r0 - a[1] * b[1]
     r0 = r0 - a[2] * b[2]
@@ -93,49 +100,45 @@ fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc 
     r0 = r0 - a[7] * b[7]
     out[0] = r0
 
-    // e1 component:
     var r1 = a[0] * b[1] + a[1] * b[0]
     r1 = r1 + a[2] * b[3] - a[3] * b[2]
     r1 = r1 + a[4] * b[5] - a[5] * b[4]
     r1 = r1 - a[6] * b[7] + a[7] * b[6]
     out[1] = r1
 
-    // e2 component:
     var r2 = a[0] * b[2] + a[2] * b[0]
     r2 = r2 - a[1] * b[3] + a[3] * b[1]
     r2 = r2 + a[4] * b[6] - a[6] * b[4]
     r2 = r2 + a[5] * b[7] - a[7] * b[5]
     out[2] = r2
 
-    // e3 component:
     var r3 = a[0] * b[3] + a[3] * b[0]
     r3 = r3 + a[1] * b[2] - a[2] * b[1]
     r3 = r3 + a[4] * b[7] - a[7] * b[4]
     r3 = r3 - a[5] * b[6] + a[6] * b[5]
     out[3] = r3
+}
 
-    // e4 component:
+fn oct_mul_hi(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    // e4..e7
     var r4 = a[0] * b[4] + a[4] * b[0]
     r4 = r4 - a[1] * b[5] + a[5] * b[1]
     r4 = r4 - a[2] * b[6] + a[6] * b[2]
     r4 = r4 - a[3] * b[7] + a[7] * b[3]
     out[4] = r4
 
-    // e5 component:
     var r5 = a[0] * b[5] + a[5] * b[0]
     r5 = r5 + a[1] * b[4] - a[4] * b[1]
     r5 = r5 - a[2] * b[7] + a[7] * b[2]
     r5 = r5 + a[3] * b[6] - a[6] * b[3]
     out[5] = r5
 
-    // e6 component:
     var r6 = a[0] * b[6] + a[6] * b[0]
     r6 = r6 + a[1] * b[7] - a[7] * b[1]
     r6 = r6 + a[2] * b[4] - a[4] * b[2]
     r6 = r6 - a[3] * b[5] + a[5] * b[3]
     out[6] = r6
 
-    // e7 component:
     var r7 = a[0] * b[7] + a[7] * b[0]
     r7 = r7 - a[1] * b[6] + a[6] * b[1]
     r7 = r7 + a[2] * b[5] - a[5] * b[2]
@@ -143,11 +146,19 @@ fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc 
     out[7] = r7
 }
 
+pub fn oct_mul(a: &[f64; 8], b: &[f64; 8], out: &![f64; 8]) with Mut, Div, NonAssoc {
+    // out[k] = sum over all (i,j) where basis_product(i,j) has index k
+    //        = sum_i sum_j  a[i] * b[j] * sigma(i,j)  where (i XOR j) == k
+    // Direct 8x8 expansion, split for Madaros native frame size (see above).
+    oct_mul_lo(a, b, out)
+    oct_mul_hi(a, b, out)
+}
+
 // === Associator ===
 // [a,b,c] = (a*b)*c - a*(b*c)
 // Returns the associator as an octonion (8 components).
 
-fn oct_associator(
+pub fn oct_associator(
     a: &[f64; 8], b: &[f64; 8], c: &[f64; 8],
     out: &![f64; 8]
 ) with Mut, Div, NonAssoc {
@@ -173,7 +184,7 @@ fn oct_associator(
 
 // === Norm ===
 // |a|² = a0² + a1² + ... + a7²
-fn oct_norm_sq(a: &[f64; 8]) -> f64 with Mut {
+pub fn oct_norm_sq(a: &[f64; 8]) -> f64 with Mut {
     var sum: f64 = 0.0
     var i: i64 = 0
     while i < 8 { sum = sum + a[i] * a[i]; i = i + 1 }
@@ -181,13 +192,13 @@ fn oct_norm_sq(a: &[f64; 8]) -> f64 with Mut {
 }
 
 // === Basis element constructors ===
-fn oct_basis(idx: i64) -> [f64; 8] with Mut {
+pub fn oct_basis(idx: i64) -> [f64; 8] with Mut {
     var o: [f64; 8] = [0.0; 8]
     o[idx] = 1.0
     o
 }
 
-fn oct_real(x: f64) -> [f64; 8] with Mut {
+pub fn oct_real(x: f64) -> [f64; 8] with Mut {
     var o: [f64; 8] = [0.0; 8]
     o[0] = x
     o
@@ -195,7 +206,7 @@ fn oct_real(x: f64) -> [f64; 8] with Mut {
 
 // === Fano predicate (mirrors ir_can_reassociate_triple) ===
 // Returns true if (ei, ej, ek) lie on a Fano line (associative triple).
-fn is_fano_triple(i: i64, j: i64, k: i64) -> bool with Mut, Div {
+pub fn is_fano_triple(i: i64, j: i64, k: i64) -> bool with Mut, Div {
     if i == 0 || j == 0 || k == 0 { return true }
     if i == j || j == k || i == k { return true }
     let alpha_1 = cd_sigma(i, j)
@@ -210,7 +221,7 @@ fn is_fano_triple(i: i64, j: i64, k: i64) -> bool with Mut, Div {
 }
 
 // Integer XOR for basis indices 0..7
-fn oct_xor(a: i64, b: i64) -> i64 {
+pub fn oct_xor(a: i64, b: i64) -> i64 {
     // Bit-by-bit XOR for 3-bit integers
     let a0 = a - (a / 2) * 2
     let b0 = b - (b / 2) * 2

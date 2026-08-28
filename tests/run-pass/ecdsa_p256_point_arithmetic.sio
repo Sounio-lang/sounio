@@ -1,0 +1,59 @@
+//@ run-pass
+//@ requires: madaros
+// Sanity check: G doubled, then added to G three more times, equals 4*G
+// via ec_scalar_mul -- an internal consistency check on the point
+// arithmetic before trusting it against a real signature vector.
+use crypto::ecdsa_p256::*
+use bignum::bigint::*
+
+fn main() -> i64 with IO {
+    let g = p256_base_point()
+    let p = p256_field_prime()
+    let a = p256_curve_a()
+    let two_g = ec_point_double(&g, &a, &p)
+    let three_g = ec_point_add(&two_g, &g, &p)
+    let four_g_by_addition = ec_point_add(&three_g, &g, &p)
+    let four = bigint_from_u32(4)
+    let four_g_by_scalar_mul = ec_scalar_mul(&four, &g, &a, &p)
+    if bigint_cmp(&four_g_by_addition.x, &four_g_by_scalar_mul.x) != 0 {
+        println("ecdsa_p256_point_arithmetic: x mismatch between repeated addition and scalar mul")
+        return 1
+    }
+    if bigint_cmp(&four_g_by_addition.y, &four_g_by_scalar_mul.y) != 0 {
+        println("ecdsa_p256_point_arithmetic: y mismatch between repeated addition and scalar mul")
+        return 1
+    }
+
+    // Extra internal consistency: 4G must actually lie on the curve
+    // (y^2 == x^3 + a*x + b mod p), catching any bug that happens to
+    // preserve the repeated-addition/scalar-mul agreement above but
+    // produces a wrong point neither method would independently satisfy
+    // (e.g. a shared sign error in ec_mod_sub used by both code paths).
+    let b = p256_curve_b()
+    let y_sq = bigint_mod(&bigint_mul(&four_g_by_scalar_mul.y, &four_g_by_scalar_mul.y), &p)
+    let x_sq = bigint_mod(&bigint_mul(&four_g_by_scalar_mul.x, &four_g_by_scalar_mul.x), &p)
+    let x_cubed = bigint_mod(&bigint_mul(&x_sq, &four_g_by_scalar_mul.x), &p)
+    let ax = bigint_mod(&bigint_mul(&a, &four_g_by_scalar_mul.x), &p)
+    let rhs_partial = bigint_mod(&bigint_add(&x_cubed, &ax), &p)
+    let rhs = bigint_mod(&bigint_add(&rhs_partial, &b), &p)
+    if bigint_cmp(&y_sq, &rhs) != 0 {
+        println("ecdsa_p256_point_arithmetic: 4G is not on the curve")
+        return 1
+    }
+
+    // G itself must also lie on the curve, as a check on the hardcoded
+    // constants independent of any point-arithmetic function at all.
+    let gy_sq = bigint_mod(&bigint_mul(&g.y, &g.y), &p)
+    let gx_sq = bigint_mod(&bigint_mul(&g.x, &g.x), &p)
+    let gx_cubed = bigint_mod(&bigint_mul(&gx_sq, &g.x), &p)
+    let gax = bigint_mod(&bigint_mul(&a, &g.x), &p)
+    let grhs_partial = bigint_mod(&bigint_add(&gx_cubed, &gax), &p)
+    let grhs = bigint_mod(&bigint_add(&grhs_partial, &b), &p)
+    if bigint_cmp(&gy_sq, &grhs) != 0 {
+        println("ecdsa_p256_point_arithmetic: G is not on the curve")
+        return 1
+    }
+
+    println("ecdsa_p256_point_arithmetic: 4G by repeated addition matches 4G by scalar multiplication, both on-curve")
+    return 0
+}

@@ -1,0 +1,328 @@
+use ir::soir_v6_writer::*
+use ir::soir_v6_reader::*
+
+fn receipt_matches_v6_bss(
+    receipt: &[i64; 7],
+    module_bss_total_size: i64,
+    range_count: i64,
+    range_offset: i64,
+    range_size: i64,
+) -> bool with Panic, Div {
+    // Raw slots prove the physical contract independently of the accessors.
+    if (*receipt)[0 as usize] != SOIR_V6_READER_OK { return false }
+    if (*receipt)[1 as usize] != 0 { return false }
+    if (*receipt)[2 as usize] != 0 { return false }
+    if (*receipt)[3 as usize] != module_bss_total_size { return false }
+    if (*receipt)[4 as usize] != range_count { return false }
+    if (*receipt)[5 as usize] != range_offset { return false }
+    if (*receipt)[6 as usize] != range_size { return false }
+
+    if soir_v6_bss_read_status_code(receipt) != SOIR_V6_READER_OK { return false }
+    if soir_v6_bss_read_status_byte_offset(receipt) != 0 { return false }
+    if soir_v6_bss_read_status_detail(receipt) != 0 { return false }
+    if soir_v6_bss_decoded_module_total(receipt) != module_bss_total_size { return false }
+    if soir_v6_bss_decoded_range_count(receipt) != range_count { return false }
+    if soir_v6_bss_decoded_range_offset(receipt) != range_offset { return false }
+    if soir_v6_bss_decoded_range_size(receipt) != range_size { return false }
+    true
+}
+
+fn receipts_match(left: &[i64; 7], right: &[i64; 7]) -> bool with Panic, Div {
+    var index: i64 = 0
+    while index < SOIR_V6_READER_RECEIPT_WORDS {
+        if (*left)[index as usize] != (*right)[index as usize] { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn wire_is_filled(wire: &[i8; 131072], expected: i8) -> bool with Panic, Div {
+    var index: i64 = 0
+    while index < SOIR_V6_WRITER_MAX_SIZE {
+        if (*wire)[index as usize] != expected { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if SOIR_V6_WRITER_MAX_SIZE != SOIR_V6_READER_MAX_SIZE ||
+       SOIR_V6_WRITER_VERSION as i64 != SOIR_V6_READER_VERSION ||
+       SOIR_V6_WRITER_HEADER_SIZE != SOIR_V6_READER_HEADER_SIZE ||
+       SOIR_V6_WRITER_DIRECTORY_OFFSET != SOIR_V6_READER_DIRECTORY_OFFSET ||
+       SOIR_V6_WRITER_DIRECTORY_ENTRY_SIZE != SOIR_V6_READER_DIRECTORY_ENTRY_SIZE ||
+       SOIR_V6_WRITER_DIRECTORY_SIZE != SOIR_V6_READER_DIRECTORY_SIZE ||
+       SOIR_V6_WRITER_SECTION_COUNT != SOIR_V6_READER_SECTION_COUNT ||
+       SOIR_V6_WRITER_BSS_PAYLOAD_OFFSET != SOIR_V6_READER_BSS_PAYLOAD_OFFSET ||
+       SOIR_V6_WRITER_BSS_PAYLOAD_SIZE != SOIR_V6_READER_BSS_PAYLOAD_SIZE ||
+       SOIR_V6_WRITER_BSS_FRAME_SIZE != SOIR_V6_READER_BSS_FRAME_SIZE ||
+       SOIR_V6_WRITER_SCHEMA_FINGERPRINT != SOIR_V6_READER_SCHEMA_FINGERPRINT ||
+       SOIR_V6_WRITER_SECTION_KIND_BSS_LAYOUT != SOIR_V6_READER_SECTION_KIND_BSS_LAYOUT ||
+       SOIR_V6_WRITER_SECTION_SCHEMA_BSS_LAYOUT != SOIR_V6_READER_SECTION_SCHEMA_BSS_LAYOUT ||
+       SOIR_V6_WRITER_SECTION_FLAGS_BSS_LAYOUT != SOIR_V6_READER_SECTION_FLAGS_BSS_LAYOUT {
+        return 9
+    }
+
+    let short_plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE - 1,
+        8,
+        0,
+        8,
+    )
+    if soir_v6_bss_write_plan_status(&short_plan) != SOIR_V6_WRITER_ERR_VIEW_BOUNDS {
+        return 10
+    }
+    let range_plan = soir_v6_writer_preflight_bss_layout(
+        SOIR_V6_WRITER_MAX_SIZE - SOIR_V6_WRITER_BSS_FRAME_SIZE + 1,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    if soir_v6_bss_write_plan_status(&range_plan) != SOIR_V6_WRITER_ERR_VIEW_BOUNDS {
+        return 11
+    }
+    let negative_module_plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        0 - 1,
+        0,
+        0,
+    )
+    let negative_offset_plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0 - 1,
+        1,
+    )
+    let negative_size_plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        0 - 1,
+    )
+    let mismatch_plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        16,
+    )
+    if soir_v6_bss_write_plan_status(&negative_module_plan) != SOIR_V6_WRITER_ERR_LAYOUT ||
+       soir_v6_bss_write_plan_status(&negative_offset_plan) != SOIR_V6_WRITER_ERR_LAYOUT ||
+       soir_v6_bss_write_plan_status(&negative_size_plan) != SOIR_V6_WRITER_ERR_LAYOUT ||
+       soir_v6_bss_write_plan_status(&mismatch_plan) != SOIR_V6_WRITER_ERR_LAYOUT {
+        return 12
+    }
+
+    var wire: [i8; 131072] = [85; 131072]
+    let failed_emit = soir_v6_writer_emit_bss_layout(&mismatch_plan, &! wire)
+    if failed_emit != SOIR_V6_WRITER_ERR_LAYOUT { return 13 }
+    if !wire_is_filled(&wire, 85 as i8) { return 13 }
+
+    let plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    if soir_v6_bss_write_plan_status(&plan) != SOIR_V6_WRITER_OK ||
+       soir_v6_bss_write_plan_start(&plan) != 0 ||
+       soir_v6_bss_write_plan_required(&plan) != SOIR_V6_WRITER_BSS_FRAME_SIZE ||
+       soir_v6_bss_write_plan_end(&plan) != SOIR_V6_WRITER_BSS_FRAME_SIZE ||
+       soir_v6_bss_write_plan_version(&plan) as i64 != SOIR_V6_READER_VERSION ||
+       soir_v6_bss_write_plan_module_total(&plan) != 8 ||
+       soir_v6_bss_write_plan_range_offset(&plan) != 0 ||
+       soir_v6_bss_write_plan_range_size(&plan) != 8 {
+        return 20
+    }
+
+    // Revalidation, not struct privacy, authorizes emission. Forged plans must
+    // fail before the first byte is written.
+    var stale_required = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    stale_required.required = stale_required.required + 1
+    var stale_end = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    stale_end.end = stale_end.end + 1
+    var stale_version = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    stale_version.version = 7 as i8
+    var stale_source = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    stale_source.range_offset = 4
+    var stale_wire: [i8; 131072] = [85; 131072]
+    let stale_required_code = soir_v6_writer_emit_bss_layout(&stale_required, &! stale_wire)
+    if stale_required_code != SOIR_V6_WRITER_ERR_STALE_PLAN { return 21 }
+    if !wire_is_filled(&stale_wire, 85 as i8) { return 21 }
+    let stale_end_code = soir_v6_writer_emit_bss_layout(&stale_end, &! stale_wire)
+    if stale_end_code != SOIR_V6_WRITER_ERR_STALE_PLAN { return 21 }
+    if !wire_is_filled(&stale_wire, 85 as i8) { return 21 }
+    let stale_version_code = soir_v6_writer_emit_bss_layout(&stale_version, &! stale_wire)
+    if stale_version_code != SOIR_V6_WRITER_ERR_STALE_PLAN { return 21 }
+    if !wire_is_filled(&stale_wire, 85 as i8) { return 21 }
+    let stale_source_code = soir_v6_writer_emit_bss_layout(&stale_source, &! stale_wire)
+    if stale_source_code != SOIR_V6_WRITER_ERR_STALE_PLAN { return 21 }
+    if !wire_is_filled(&stale_wire, 85 as i8) { return 21 }
+    let emitted_end = soir_v6_writer_emit_bss_layout(&plan, &! wire)
+    if emitted_end != SOIR_V6_WRITER_BSS_FRAME_SIZE ||
+       wire[0] != 83 as i8 ||
+       wire[1] != 79 as i8 ||
+       wire[2] != 73 as i8 ||
+       wire[3] != 82 as i8 ||
+       wire[4] != SOIR_V6_WRITER_VERSION ||
+       wire[SOIR_V6_WRITER_BSS_FRAME_SIZE as usize] != 85 as i8 {
+        return 22
+    }
+
+    var duplicate_wire: [i8; 131072] = [85; 131072]
+    let duplicate_plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    let duplicate_end = soir_v6_writer_emit_bss_layout(
+        &duplicate_plan,
+        &! duplicate_wire,
+    )
+    var wire_index: i64 = 0
+    while wire_index < SOIR_V6_WRITER_BSS_FRAME_SIZE {
+        if wire[wire_index as usize] != duplicate_wire[wire_index as usize] {
+            return 23
+        }
+        wire_index = wire_index + 1
+    }
+    if duplicate_end != emitted_end { return 23 }
+
+    var receipt: [i64; 7] = [0 - 91; 7]
+    let read_code = soir_v6_reader_decode_bss_layout(
+        &wire,
+        0,
+        emitted_end,
+        &! receipt,
+    )
+    var canonical_receipt_ok = true
+    if read_code != SOIR_V6_READER_OK { canonical_receipt_ok = false }
+    if !receipt_matches_v6_bss(&receipt, 8, 1, 0, 8) { canonical_receipt_ok = false }
+    if !canonical_receipt_ok {
+        print("SOIR_V6_BSS_LAYOUT_CANONICAL_FAIL code=")
+        print_int(read_code)
+        print(" offset=")
+        print_int(soir_v6_bss_read_status_byte_offset(&receipt))
+        print(" detail=")
+        print_int(soir_v6_bss_read_status_detail(&receipt))
+        print(" module_total=")
+        print_int(soir_v6_bss_decoded_module_total(&receipt))
+        print(" range_count=")
+        print_int(soir_v6_bss_decoded_range_count(&receipt))
+        print(" range_offset=")
+        print_int(soir_v6_bss_decoded_range_offset(&receipt))
+        print(" range_size=")
+        print_int(soir_v6_bss_decoded_range_size(&receipt))
+        print("\n")
+        return 24
+    }
+
+    var repeated: [i64; 7] = [0 - 77; 7]
+    let repeated_code = soir_v6_reader_decode_bss_layout(
+        &wire,
+        0,
+        emitted_end,
+        &! repeated,
+    )
+    var repeated_receipt_ok = true
+    if repeated_code != SOIR_V6_READER_OK { repeated_receipt_ok = false }
+    if !receipts_match(&receipt, &repeated) { repeated_receipt_ok = false }
+    if !repeated_receipt_ok {
+        print("SOIR_V6_BSS_LAYOUT_REPEAT_FAIL code=")
+        print_int(repeated_code)
+        var mismatch_index: i64 = 0
+        while mismatch_index < SOIR_V6_READER_RECEIPT_WORDS {
+            if receipt[mismatch_index as usize] != repeated[mismatch_index as usize] {
+                print(" index=")
+                print_int(mismatch_index)
+                print(" first=")
+                print_int(receipt[mismatch_index as usize])
+                print(" second=")
+                print_int(repeated[mismatch_index as usize])
+            }
+            mismatch_index = mismatch_index + 1
+        }
+        print("\n")
+        return 25
+    }
+
+    var offset_wire: [i8; 131072] = [85; 131072]
+    let offset_start: i64 = 17
+    let offset_plan = soir_v6_writer_preflight_bss_layout(
+        offset_start,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    let offset_end = soir_v6_writer_emit_bss_layout(&offset_plan, &! offset_wire)
+    var offset_receipt: [i64; 7] = [0 - 66; 7]
+    let offset_code = soir_v6_reader_decode_bss_layout(
+        &offset_wire,
+        offset_start,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        &! offset_receipt,
+    )
+    if offset_end != offset_start + SOIR_V6_WRITER_BSS_FRAME_SIZE { return 26 }
+    if offset_code != SOIR_V6_READER_OK { return 26 }
+    if offset_wire[(offset_start - 1) as usize] != 85 as i8 { return 26 }
+    if offset_wire[offset_end as usize] != 85 as i8 { return 26 }
+    if !receipt_matches_v6_bss(&offset_receipt, 8, 1, 0, 8) { return 26 }
+
+    var terminal_wire: [i8; 131072] = [85; 131072]
+    let terminal_start = SOIR_V6_WRITER_MAX_SIZE - SOIR_V6_WRITER_BSS_FRAME_SIZE
+    let terminal_plan = soir_v6_writer_preflight_bss_layout(
+        terminal_start,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        4096,
+        2048,
+        128,
+    )
+    let terminal_end = soir_v6_writer_emit_bss_layout(&terminal_plan, &! terminal_wire)
+    var terminal_receipt: [i64; 7] = [0 - 55; 7]
+    let terminal_code = soir_v6_reader_decode_bss_layout(
+        &terminal_wire,
+        terminal_start,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        &! terminal_receipt,
+    )
+    if terminal_end != SOIR_V6_WRITER_MAX_SIZE { return 27 }
+    if terminal_code != SOIR_V6_READER_OK { return 27 }
+    if terminal_wire[(terminal_start - 1) as usize] != 85 as i8 { return 27 }
+    if !receipt_matches_v6_bss(&terminal_receipt, 4096, 1, 2048, 128) { return 27 }
+
+    print("SOIR_V6_BSS_LAYOUT_CANONICAL_PASS\n")
+    0
+}

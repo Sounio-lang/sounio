@@ -1,0 +1,180 @@
+// stdlib/pbpk/rapamycin_expanded_u.sio — Sprint 25: ISO GUM Expanded Uncertainty
+//
+// Novel dissertation contribution: certifies 95% coverage intervals for every
+// clinical stratum; distinguishes THERAPEUTIC classification (point estimate)
+// from FULL CI CERTIFICATION (both bounds within [floor, ceil]).
+//
+// ── ISO GUM §E.5 Expanded Uncertainty ────────────────────────────────────────
+//
+//   u_c(C) = sqrt(V_pred_conc)          (combined standard uncertainty)
+//   U_95   = k * u_c,  k = 2            (coverage factor, ~95% normal)
+//   CI_95  = [C - U_95, C + U_95]
+//
+//   A stratum is FULLY CERTIFIED iff:
+//     C - 2*u_c > floor  AND  C + 2*u_c < ceil
+//
+// ── Key Sprint 25 findings (all certified by gate) ────────────────────────────
+//
+//   Standard SS (N=14, D=5mg):
+//     u_c = 0.000901 mg/L, U_95 = 1.80 ng/mL
+//     CI = [7.99, 11.59] ng/mL → FULLY CERTIFIED
+//
+//   Standard onset (N=3):
+//     u_c = 0.000836, CI = [2.56, 5.90] ng/mL → straddles floor
+//
+//   Standard N=7 (critical N):
+//     u_c = 0.000855, CI = [4.70, 8.12] ng/mL → FULLY CERTIFIED (margin=0.70 ng/mL)
+//
+//   Slow genotype SS (N=14, D=5mg):
+//     u_c = 0.001038, U_95 = 2.08 ng/mL, CI = [12.41, 16.56] ng/mL → FULLY CERTIFIED
+//
+//   Fast genotype SS (N=14, D=5mg) — KEY FINDING:
+//     u_c = 0.000745, CI = [3.88, 6.87] ng/mL → straddles floor
+//     Point estimate (5.37 ng/mL) says THERAPEUTIC; expanded-U says NOT CERTIFIED.
+//     Compile-time-detectable gap between classification and certification.
+//
+//   Strong CYP3A4 inhibitor SS (N=14, D=1.5mg) — NARROWEST CI:
+//     u_c = 0.000440, U_95 = 0.88 ng/mL, CI = [7.45, 9.21] ng/mL → FULLY CERTIFIED
+//     Paradox: CYP inhibition slows ke → high SS concentration, low variability.
+//
+//   Strong CYP3A4 inducer (N=26, D=20mg) — INHERENTLY WIDE:
+//     u_c = 0.001168, U_95 = 2.34 ng/mL, CI = [2.37, 7.04] ng/mL → straddles floor
+//     N_min=26 certifies THERAPEUTIC point estimate; cannot certify full CI.
+//
+//   Width ordering (U_95, narrowest to widest):
+//     inh (0.88) < fast (1.49) < std (1.80) < slow (2.08) < ind (2.34) ng/mL
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   All pub fns: with Mut, Div, Panic
+
+module pbpk::rapamycin_expanded_u
+
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_assay::{as_trough_mg_l, as_v_pred_conc}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std, ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn eu_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { 0.0001 } else {
+        var r = x
+        var i = 0
+        while i < 50 { r = (r + x / r) / 2.0; i = i + 1 }
+        r
+    }
+}
+
+// Combined standard uncertainty u_c = sqrt(V_pred_conc)  [ISO GUM §5.1.2]
+pub fn eu_u_c(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+              ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    eu_sqrt(as_v_pred_conc(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var))
+}
+
+// Expanded uncertainty U_95 = 2 * u_c  (coverage factor k=2, ~95%)
+pub fn eu_U95(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+              ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    2.0 * eu_u_c(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+}
+
+// Lower bound of 95% coverage interval: C - 2*u_c
+pub fn eu_lo(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+             ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d_oral, n_doses, ke_val, f_val)
+    let uc = eu_u_c(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    c - 2.0 * uc
+}
+
+// Upper bound of 95% coverage interval: C + 2*u_c
+pub fn eu_hi(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+             ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d_oral, n_doses, ke_val, f_val)
+    let uc = eu_u_c(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    c + 2.0 * uc
+}
+
+// True iff 95% CI lies fully within [floor, ceil]  — the CI certification gate
+pub fn eu_fully_in_range(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                         ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> bool
+    with Mut, Div, Panic {
+    let lo = eu_lo(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    let hi = eu_hi(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    lo > trough_floor_mg_l() && hi < trough_ceil_mg_l()
+}
+
+// True iff CI lower bound is below floor (CI straddles floor)
+pub fn eu_lo_below_floor(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                          ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> bool
+    with Mut, Div, Panic {
+    eu_lo(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var) < trough_floor_mg_l()
+}
+
+// True iff CI upper bound exceeds ceiling (CI straddles ceiling)
+pub fn eu_hi_above_ceil(d_oral: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                         ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> bool
+    with Mut, Div, Panic {
+    eu_hi(d_oral, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var) > trough_ceil_mg_l()
+}
+
+// ── Named scenario functions ──────────────────────────────────────────────────
+
+// Standard SS (N=14, D=5mg): CI=[7.99, 11.59] ng/mL → FULLY CERTIFIED
+pub fn eu_std_ss_fully_in_range() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_fully_in_range(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+// Standard N=7 (critical N): CI=[4.70, 8.12] ng/mL → FULLY CERTIFIED (margin=0.70 ng/mL)
+pub fn eu_std_n7_fully_in_range() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_fully_in_range(5.0, 7, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+// Standard onset (N=3): CI straddles floor — [2.56, 5.90] ng/mL
+pub fn eu_std_n3_lo_below_floor() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_lo_below_floor(5.0, 3, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+// Slow genotype SS (N=14, D=5mg): CI=[12.41, 16.56] ng/mL → FULLY CERTIFIED
+pub fn eu_slow_ss_fully_in_range() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_fully_in_range(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+
+// Fast genotype SS (N=14, D=5mg): CI straddles floor — [3.88, 6.87] ng/mL
+// POINT ESTIMATE IS THERAPEUTIC; EXPANDED-U IS NOT CERTIFIED.
+pub fn eu_fast_ss_lo_below_floor() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_lo_below_floor(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+
+// Inhibitor SS (N=14, D=1.5mg): CI=[7.45, 9.21] ng/mL → FULLY CERTIFIED; narrowest U_95
+pub fn eu_inh_ss_fully_in_range() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_inh = ob_ke_var_inh(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_fully_in_range(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+
+// Inhibitor onset (N=5, D=1.5mg): CI straddles floor — [3.55, 4.93] ng/mL
+pub fn eu_inh_n5_lo_below_floor() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_inh = ob_ke_var_inh(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_lo_below_floor(1.5, 5, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+
+// Inducer N=26 (D=20mg): CI straddles floor — N_min=26 certifies point estimate only
+pub fn eu_ind_n26_lo_below_floor() -> bool with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_ind = ob_ke_var_ind(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    eu_lo_below_floor(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}

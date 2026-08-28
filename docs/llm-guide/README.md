@@ -24,7 +24,7 @@ How to teach an LLM to write correct Sounio code. Start here.
 ## What an LLM needs to know
 
 1. **Syntax differs from Rust** — same look, different rules. `llms.txt` covers this.
-2. **Effects are not optional** — every function that divides, mutates, or prints must declare it. The compiler rejects missing effects.
+2. **Effects are a design discipline, not a hard gate (today)** — every function that divides, mutates, or prints *should* declare it (`with Div`/`Mut`/`IO`), and style/lint expects it. But note: as of Madaros v0.80.0 the default `souc check` does **not** reject a missing IO/Div/Observe effect (E035 is not wired under `check`). Write effects correctly for readability and forward-compat; do not rely on the compiler to catch a missing one.
 3. **No dynamic features** — no generics, no closures, no traits, no dynamic dispatch.
 4. **stdlib is extensive** — 95 modules. `stdlib-index.md` maps what's usable.
 

@@ -1,0 +1,557 @@
+// Shadow-only bounded SOIR v6 reader for the first BSS/layout profile.
+//
+// This reader accepts exactly one 144-byte frame with one critical singleton
+// BSS/layout section. Unknown critical sections reject; unknown noncritical
+// sections reject explicitly because opaque preservation is not implemented by
+// this vertical. Decoded fields are published only after the complete frame,
+// section checksum, and anonymous-range layout relation validate.
+
+module ir::soir_v6_reader
+
+pub let SOIR_V6_READER_MAX_SIZE: i64 = 131072
+pub let SOIR_V6_READER_VERSION: i64 = 6
+pub let SOIR_V6_READER_HEADER_SIZE: i64 = 64
+pub let SOIR_V6_READER_DIRECTORY_OFFSET: i64 = 64
+pub let SOIR_V6_READER_DIRECTORY_ENTRY_SIZE: i64 = 48
+pub let SOIR_V6_READER_DIRECTORY_SIZE: i64 = 48
+pub let SOIR_V6_READER_SECTION_COUNT: i64 = 1
+pub let SOIR_V6_READER_BSS_PAYLOAD_OFFSET: i64 = 112
+pub let SOIR_V6_READER_BSS_PAYLOAD_SIZE: i64 = 32
+pub let SOIR_V6_READER_BSS_FRAME_SIZE: i64 = 144
+// Adler-32 of the exact ASCII descriptor (without a terminal NUL):
+// SOIRv6:bss-range-v1:le64:header64:dir48:kind5:critical+singleton:payload(module_total,range_count,range_offset,range_size):adler32
+pub let SOIR_V6_READER_SCHEMA_FINGERPRINT: i64 = 3946524625
+
+pub let SOIR_V6_READER_SECTION_KIND_BSS_LAYOUT: i64 = 5
+pub let SOIR_V6_READER_SECTION_SCHEMA_BSS_LAYOUT: i64 = 1
+pub let SOIR_V6_READER_SECTION_FLAG_CRITICAL: i64 = 1
+pub let SOIR_V6_READER_SECTION_FLAG_SINGLETON: i64 = 2
+pub let SOIR_V6_READER_SECTION_FLAGS_BSS_LAYOUT: i64 = 3
+pub let SOIR_V6_READER_BSS_RANGE_COUNT: i64 = 1
+
+pub let SOIR_V6_READER_OK: i64 = 0
+pub let SOIR_V6_READER_ERR_VIEW_BOUNDS: i64 = 1
+pub let SOIR_V6_READER_ERR_TRUNCATED: i64 = 2
+pub let SOIR_V6_READER_ERR_TRAILING_BYTES: i64 = 3
+pub let SOIR_V6_READER_ERR_BAD_MAGIC: i64 = 4
+pub let SOIR_V6_READER_ERR_BAD_VERSION: i64 = 5
+pub let SOIR_V6_READER_ERR_BAD_FEATURES: i64 = 6
+pub let SOIR_V6_READER_ERR_BAD_RESERVED: i64 = 7
+pub let SOIR_V6_READER_ERR_TOTAL_LENGTH: i64 = 8
+pub let SOIR_V6_READER_ERR_DIRECTORY: i64 = 9
+pub let SOIR_V6_READER_ERR_SCHEMA_FINGERPRINT: i64 = 10
+pub let SOIR_V6_READER_ERR_UNKNOWN_CRITICAL_SECTION: i64 = 11
+pub let SOIR_V6_READER_ERR_UNKNOWN_OPTIONAL_SECTION: i64 = 12
+pub let SOIR_V6_READER_ERR_SECTION_SCHEMA: i64 = 13
+pub let SOIR_V6_READER_ERR_SECTION_FLAGS: i64 = 14
+pub let SOIR_V6_READER_ERR_SECTION_BOUNDS: i64 = 15
+pub let SOIR_V6_READER_ERR_SECTION_DIGEST: i64 = 16
+pub let SOIR_V6_READER_ERR_BSS_LAYOUT: i64 = 17
+pub let SOIR_V6_READER_ERR_INTERNAL_BOUNDS: i64 = 18
+
+// The fixed seven-word receipt keeps diagnostic status and decoded BSS data
+// disjoint. Failure writes only {code, byte_offset, detail}; success clears
+// that prefix and publishes all four decoded scalars after full validation.
+pub let SOIR_V6_READER_RECEIPT_WORDS: i64 = 7
+pub let SOIR_V6_READER_RECEIPT_PHYSICAL_WORDS: i64 = 7
+pub let SOIR_V6_READER_RECEIPT_CODE: i64 = 0
+pub let SOIR_V6_READER_RECEIPT_BYTE_OFFSET: i64 = 1
+pub let SOIR_V6_READER_RECEIPT_DETAIL: i64 = 2
+pub let SOIR_V6_READER_RECEIPT_BSS_MODULE_TOTAL: i64 = 3
+pub let SOIR_V6_READER_RECEIPT_BSS_RANGE_COUNT: i64 = 4
+pub let SOIR_V6_READER_RECEIPT_BSS_RANGE_OFFSET: i64 = 5
+pub let SOIR_V6_READER_RECEIPT_BSS_RANGE_SIZE: i64 = 6
+
+struct SoirV6ReaderCursor {
+    pos: i64,
+    end: i64,
+}
+
+fn soir_v6_reader_status_set(
+    out: &![i64; 7],
+    code: i64,
+    byte_offset: i64,
+    detail: i64,
+) -> i64 with Mut {
+    out[SOIR_V6_READER_RECEIPT_CODE as usize] = code
+    out[SOIR_V6_READER_RECEIPT_BYTE_OFFSET as usize] = byte_offset
+    out[SOIR_V6_READER_RECEIPT_DETAIL as usize] = detail
+    code
+}
+
+fn soir_v6_reader_publish_bss_layout(
+    out: &![i64; 7],
+    module_bss_total_size: i64,
+    range_count: i64,
+    range_offset: i64,
+    range_size: i64,
+) with Mut {
+    out[SOIR_V6_READER_RECEIPT_BSS_MODULE_TOTAL as usize] = module_bss_total_size
+    out[SOIR_V6_READER_RECEIPT_BSS_RANGE_COUNT as usize] = range_count
+    out[SOIR_V6_READER_RECEIPT_BSS_RANGE_OFFSET as usize] = range_offset
+    out[SOIR_V6_READER_RECEIPT_BSS_RANGE_SIZE as usize] = range_size
+}
+
+pub fn soir_v6_bss_read_status_code(status: &[i64; 7]) -> i64 with Panic, Div {
+    (*status)[SOIR_V6_READER_RECEIPT_CODE as usize]
+}
+
+pub fn soir_v6_bss_read_status_byte_offset(status: &[i64; 7]) -> i64 with Panic, Div {
+    (*status)[SOIR_V6_READER_RECEIPT_BYTE_OFFSET as usize]
+}
+
+pub fn soir_v6_bss_read_status_detail(status: &[i64; 7]) -> i64 with Panic, Div {
+    (*status)[SOIR_V6_READER_RECEIPT_DETAIL as usize]
+}
+
+pub fn soir_v6_bss_decoded_module_total(status: &[i64; 7]) -> i64 with Panic, Div {
+    (*status)[SOIR_V6_READER_RECEIPT_BSS_MODULE_TOTAL as usize]
+}
+
+pub fn soir_v6_bss_decoded_range_count(status: &[i64; 7]) -> i64 with Panic, Div {
+    (*status)[SOIR_V6_READER_RECEIPT_BSS_RANGE_COUNT as usize]
+}
+
+pub fn soir_v6_bss_decoded_range_offset(status: &[i64; 7]) -> i64 with Panic, Div {
+    (*status)[SOIR_V6_READER_RECEIPT_BSS_RANGE_OFFSET as usize]
+}
+
+pub fn soir_v6_bss_decoded_range_size(status: &[i64; 7]) -> i64 with Panic, Div {
+    (*status)[SOIR_V6_READER_RECEIPT_BSS_RANGE_SIZE as usize]
+}
+
+// Adler-32 is a non-cryptographic integrity checksum, not authentication.
+fn soir_v6_reader_bss_payload_checksum(
+    module_bss_total_size: i64,
+    range_count: i64,
+    range_offset: i64,
+    range_size: i64,
+) -> i64 with Div {
+    var a: i64 = 1
+    var b: i64 = 0
+    var word_index: i64 = 0
+    while word_index < 4 {
+        var value = module_bss_total_size
+        if word_index == 1 { value = range_count }
+        else if word_index == 2 { value = range_offset }
+        else if word_index == 3 { value = range_size }
+        var byte_index: i64 = 0
+        while byte_index < 8 {
+            let octet = (value >> (byte_index * 8)) & 255
+            a = (a + octet) % 65521
+            b = (b + a) % 65521
+            byte_index = byte_index + 1
+        }
+        word_index = word_index + 1
+    }
+    (b << 16) | a
+}
+
+pub fn soir_v6_reader_decode_bss_layout(
+    buf: &[i8; 131072],
+    start: i64,
+    len: i64,
+    status_out: &![i64; 7],
+) -> i64 with Mut, Panic, Div {
+    if start < 0 ||
+       len < 0 ||
+       start > SOIR_V6_READER_MAX_SIZE ||
+       len > SOIR_V6_READER_MAX_SIZE - start {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_VIEW_BOUNDS,
+            start,
+            len,
+        )
+    }
+    if len < SOIR_V6_READER_BSS_FRAME_SIZE {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_TRUNCATED,
+            start + len,
+            SOIR_V6_READER_BSS_FRAME_SIZE,
+        )
+    }
+    if len > SOIR_V6_READER_BSS_FRAME_SIZE {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_TRAILING_BYTES,
+            start + SOIR_V6_READER_BSS_FRAME_SIZE,
+            len - SOIR_V6_READER_BSS_FRAME_SIZE,
+        )
+    }
+
+    var cursor = SoirV6ReaderCursor {
+        pos: start,
+        end: start + len,
+    }
+
+    var magic_index: i64 = 0
+    while magic_index < 4 {
+        if cursor.pos < 0 || cursor.pos >= cursor.end {
+            return soir_v6_reader_status_set(
+                status_out,
+                SOIR_V6_READER_ERR_INTERNAL_BOUNDS,
+                cursor.pos,
+                1,
+            )
+        }
+        let magic_offset = cursor.pos
+        let magic = ((*buf)[cursor.pos as usize] as i64) & 255
+        cursor.pos = cursor.pos + 1
+        var expected_magic: i64 = 83
+        if magic_index == 1 { expected_magic = 79 }
+        else if magic_index == 2 { expected_magic = 73 }
+        else if magic_index == 3 { expected_magic = 82 }
+        if magic != expected_magic {
+            return soir_v6_reader_status_set(
+                status_out,
+                SOIR_V6_READER_ERR_BAD_MAGIC,
+                magic_offset,
+                magic,
+            )
+        }
+        magic_index = magic_index + 1
+    }
+
+    let version_offset = cursor.pos
+    let version = ((*buf)[cursor.pos as usize] as i64) & 255
+    cursor.pos = cursor.pos + 1
+    if version != SOIR_V6_READER_VERSION {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_BAD_VERSION,
+            version_offset,
+            version,
+        )
+    }
+
+    let feature_offset = cursor.pos
+    let feature_flags = ((*buf)[cursor.pos as usize] as i64) & 255
+    cursor.pos = cursor.pos + 1
+    if feature_flags != 0 {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_BAD_FEATURES,
+            feature_offset,
+            feature_flags,
+        )
+    }
+
+    var reserved_byte_index: i64 = 0
+    while reserved_byte_index < 2 {
+        let reserved_offset = cursor.pos
+        let reserved = ((*buf)[cursor.pos as usize] as i64) & 255
+        cursor.pos = cursor.pos + 1
+        if reserved != 0 {
+            return soir_v6_reader_status_set(
+                status_out,
+                SOIR_V6_READER_ERR_BAD_RESERVED,
+                reserved_offset,
+                reserved,
+            )
+        }
+        reserved_byte_index = reserved_byte_index + 1
+    }
+
+    var header_fields: [i64; 7] = [0; 7]
+    var header_field_index: i64 = 0
+    while header_field_index < 7 {
+        if cursor.pos < 0 ||
+           cursor.pos > cursor.end ||
+           8 > cursor.end - cursor.pos {
+            return soir_v6_reader_status_set(
+                status_out,
+                SOIR_V6_READER_ERR_INTERNAL_BOUNDS,
+                cursor.pos,
+                8,
+            )
+        }
+        var field_value: i64 = 0
+        var shift: i64 = 0
+        while shift < 64 {
+            let octet = ((*buf)[cursor.pos as usize] as i64) & 255
+            field_value = field_value | (octet << shift)
+            cursor.pos = cursor.pos + 1
+            shift = shift + 8
+        }
+        header_fields[header_field_index as usize] = field_value
+        header_field_index = header_field_index + 1
+    }
+
+    let total_length = header_fields[0]
+    let directory_offset = header_fields[1]
+    let directory_length = header_fields[2]
+    let section_count = header_fields[3]
+    let schema_fingerprint = header_fields[4]
+    let header_size = header_fields[5]
+    let reserved_word = header_fields[6]
+
+    if total_length != SOIR_V6_READER_BSS_FRAME_SIZE || total_length != len {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_TOTAL_LENGTH,
+            start + 8,
+            total_length,
+        )
+    }
+    if directory_offset != SOIR_V6_READER_DIRECTORY_OFFSET ||
+       directory_length != SOIR_V6_READER_DIRECTORY_SIZE ||
+       section_count != SOIR_V6_READER_SECTION_COUNT ||
+       header_size != SOIR_V6_READER_HEADER_SIZE {
+        var directory_error_offset = start + 16
+        var directory_error_detail = directory_offset
+        if directory_offset == SOIR_V6_READER_DIRECTORY_OFFSET &&
+           directory_length != SOIR_V6_READER_DIRECTORY_SIZE {
+            directory_error_offset = start + 24
+            directory_error_detail = directory_length
+        } else if directory_offset == SOIR_V6_READER_DIRECTORY_OFFSET &&
+                  directory_length == SOIR_V6_READER_DIRECTORY_SIZE &&
+                  section_count != SOIR_V6_READER_SECTION_COUNT {
+            directory_error_offset = start + 32
+            directory_error_detail = section_count
+        } else if directory_offset == SOIR_V6_READER_DIRECTORY_OFFSET &&
+                  directory_length == SOIR_V6_READER_DIRECTORY_SIZE &&
+                  section_count == SOIR_V6_READER_SECTION_COUNT &&
+                  header_size != SOIR_V6_READER_HEADER_SIZE {
+            directory_error_offset = start + 48
+            directory_error_detail = header_size
+        }
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_DIRECTORY,
+            directory_error_offset,
+            directory_error_detail,
+        )
+    }
+    if schema_fingerprint != SOIR_V6_READER_SCHEMA_FINGERPRINT {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_SCHEMA_FINGERPRINT,
+            start + 40,
+            schema_fingerprint,
+        )
+    }
+    if reserved_word != 0 {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_BAD_RESERVED,
+            start + 56,
+            reserved_word,
+        )
+    }
+    if cursor.pos != start + directory_offset {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_INTERNAL_BOUNDS,
+            cursor.pos,
+            start + directory_offset,
+        )
+    }
+
+    var directory_fields: [i64; 6] = [0; 6]
+    var directory_field_index: i64 = 0
+    while directory_field_index < 6 {
+        if cursor.pos < 0 ||
+           cursor.pos > cursor.end ||
+           8 > cursor.end - cursor.pos {
+            return soir_v6_reader_status_set(
+                status_out,
+                SOIR_V6_READER_ERR_INTERNAL_BOUNDS,
+                cursor.pos,
+                8,
+            )
+        }
+        var field_value: i64 = 0
+        var shift: i64 = 0
+        while shift < 64 {
+            let octet = ((*buf)[cursor.pos as usize] as i64) & 255
+            field_value = field_value | (octet << shift)
+            cursor.pos = cursor.pos + 1
+            shift = shift + 8
+        }
+        directory_fields[directory_field_index as usize] = field_value
+        directory_field_index = directory_field_index + 1
+    }
+
+    let section_kind = directory_fields[0]
+    let section_schema = directory_fields[1]
+    let section_flags = directory_fields[2]
+    let section_offset = directory_fields[3]
+    let section_length = directory_fields[4]
+    let section_digest = directory_fields[5]
+
+    if section_flags < 0 || section_flags > SOIR_V6_READER_SECTION_FLAGS_BSS_LAYOUT {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_SECTION_FLAGS,
+            start + SOIR_V6_READER_DIRECTORY_OFFSET + 16,
+            section_flags,
+        )
+    }
+    if section_kind != SOIR_V6_READER_SECTION_KIND_BSS_LAYOUT {
+        var unknown_code = SOIR_V6_READER_ERR_UNKNOWN_OPTIONAL_SECTION
+        if (section_flags & SOIR_V6_READER_SECTION_FLAG_CRITICAL) != 0 {
+            unknown_code = SOIR_V6_READER_ERR_UNKNOWN_CRITICAL_SECTION
+        }
+        return soir_v6_reader_status_set(
+            status_out,
+            unknown_code,
+            start + SOIR_V6_READER_DIRECTORY_OFFSET,
+            section_kind,
+        )
+    }
+    if section_schema != SOIR_V6_READER_SECTION_SCHEMA_BSS_LAYOUT {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_SECTION_SCHEMA,
+            start + SOIR_V6_READER_DIRECTORY_OFFSET + 8,
+            section_schema,
+        )
+    }
+    if section_flags != SOIR_V6_READER_SECTION_FLAGS_BSS_LAYOUT {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_SECTION_FLAGS,
+            start + SOIR_V6_READER_DIRECTORY_OFFSET + 16,
+            section_flags,
+        )
+    }
+    if section_offset < 0 ||
+       section_length < 0 ||
+       section_offset > len ||
+       section_length > len - section_offset ||
+       section_offset != SOIR_V6_READER_BSS_PAYLOAD_OFFSET ||
+       section_length != SOIR_V6_READER_BSS_PAYLOAD_SIZE {
+        var section_error_offset = start + SOIR_V6_READER_DIRECTORY_OFFSET + 24
+        var section_error_detail = section_offset
+        if section_offset == SOIR_V6_READER_BSS_PAYLOAD_OFFSET &&
+           section_length != SOIR_V6_READER_BSS_PAYLOAD_SIZE {
+            section_error_offset = start + SOIR_V6_READER_DIRECTORY_OFFSET + 32
+            section_error_detail = section_length
+        }
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_SECTION_BOUNDS,
+            section_error_offset,
+            section_error_detail,
+        )
+    }
+    if cursor.pos != start + section_offset {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_INTERNAL_BOUNDS,
+            cursor.pos,
+            start + section_offset,
+        )
+    }
+
+    // Every section owns a request-local cursor bounded to its directory view.
+    // The additions are safe because section_offset/length were proven above
+    // using subtraction against the already-bounded frame length.
+    var section_cursor = SoirV6ReaderCursor {
+        pos: start + section_offset,
+        end: start + section_offset + section_length,
+    }
+    var payload_fields: [i64; 4] = [0; 4]
+    var payload_field_index: i64 = 0
+    while payload_field_index < 4 {
+        if section_cursor.pos < 0 ||
+           section_cursor.pos > section_cursor.end ||
+           8 > section_cursor.end - section_cursor.pos {
+            return soir_v6_reader_status_set(
+                status_out,
+                SOIR_V6_READER_ERR_INTERNAL_BOUNDS,
+                section_cursor.pos,
+                8,
+            )
+        }
+        var field_value: i64 = 0
+        var shift: i64 = 0
+        while shift < 64 {
+            let octet = ((*buf)[section_cursor.pos as usize] as i64) & 255
+            field_value = field_value | (octet << shift)
+            section_cursor.pos = section_cursor.pos + 1
+            shift = shift + 8
+        }
+        payload_fields[payload_field_index as usize] = field_value
+        payload_field_index = payload_field_index + 1
+    }
+    if section_cursor.pos != section_cursor.end || section_cursor.end != cursor.end {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_INTERNAL_BOUNDS,
+            section_cursor.pos,
+            section_cursor.end,
+        )
+    }
+
+    let module_bss_total_size = payload_fields[0]
+    let range_count = payload_fields[1]
+    let range_offset = payload_fields[2]
+    let range_size = payload_fields[3]
+    let computed_digest = soir_v6_reader_bss_payload_checksum(
+        module_bss_total_size,
+        range_count,
+        range_offset,
+        range_size,
+    )
+    if computed_digest != section_digest {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_SECTION_DIGEST,
+            start + SOIR_V6_READER_DIRECTORY_OFFSET + 40,
+            section_digest,
+        )
+    }
+    if module_bss_total_size < 0 {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_BSS_LAYOUT,
+            start + SOIR_V6_READER_BSS_PAYLOAD_OFFSET,
+            module_bss_total_size,
+        )
+    }
+    if range_count != SOIR_V6_READER_BSS_RANGE_COUNT {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_BSS_LAYOUT,
+            start + SOIR_V6_READER_BSS_PAYLOAD_OFFSET + 8,
+            range_count,
+        )
+    }
+    if range_offset < 0 || range_offset > module_bss_total_size {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_BSS_LAYOUT,
+            start + SOIR_V6_READER_BSS_PAYLOAD_OFFSET + 16,
+            range_offset,
+        )
+    }
+    if range_size < 0 ||
+       range_offset > module_bss_total_size ||
+       range_size > module_bss_total_size - range_offset {
+        return soir_v6_reader_status_set(
+            status_out,
+            SOIR_V6_READER_ERR_BSS_LAYOUT,
+            start + SOIR_V6_READER_BSS_PAYLOAD_OFFSET + 24,
+            range_size,
+        )
+    }
+
+    // The full frame is now valid; publish the complete decoded receipt.
+    soir_v6_reader_status_set(
+        status_out,
+        SOIR_V6_READER_OK,
+        0,
+        0,
+    )
+    soir_v6_reader_publish_bss_layout(
+        status_out,
+        module_bss_total_size,
+        range_count,
+        range_offset,
+        range_size,
+    )
+    SOIR_V6_READER_OK
+}

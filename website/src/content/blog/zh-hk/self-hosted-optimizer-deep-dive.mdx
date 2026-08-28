@@ -1,0 +1,87 @@
+---
+title: "60 Sprints of Optimization: 自編寫 Sounio 本地化編譯器"
+description: "如何在 Sounio 自編寫的本地化編譯器中建立 20 多項優化傳遞 — 從常數折疊到 e-graph 飽和 — 完全使用 .sio 源文件。"
+author: "The Sounio Team"
+publishedAt: "2026-03-13"
+tags: ["engineering", "compiler", "optimization"]
+topic_id: "website.blog.zh-hk.self-hosted-optimizer-deep-dive"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.blog.zh-hk.self-hosted-optimizer-deep-dive"
+---
+# 60 Sprints of Optimization
+
+在過去的 60 個 Sprint 中，我們為 Sounio 建立了完整的優化本地化後端 — 完全在 Sounio 自身中編寫。本文將帶領您走過架構、關鍵優化傳遞以及我們在整個過程中學到的知識。
+
+## 起點
+
+Sprint 50 交付了第一個以性能為導向的函數佈局傳遞。在那時，自托管的編譯器可以解析 Sounio 源碼、將其降低為自定義 IR (`IrModule`/`IrFunction`/`IrInstr`)，並將 x86-64 機器碼編入 ELF 二進位文件中。但生成的代碼是直觀的：每個值都存放在堆棧上，每個常數都重新加載，並且死代碼隨處可見。
+
+## 優化堆棧
+
+我們逐增量地建立傳遞，每個都由一個報告 PASS/FAIL/NOT_RUN 計數的閘腳本驗證。以下是進展：
+
+### 階段 1：古典數據流（Sprint 51-54）
+
+**常數折疊** (`ocp_const_fold`)：通過 `def_at[256]` 和 `val_at[256]` 數組追蹤哪些虛擬寄存器持有已知常數。當 `IrBinOp` 的兩個運算數都是已知的，折疊為 `IrLoadImm`。這解鎖了所有下游。
+
+**死代碼消除** (`ocp_dce`)：遍歷指令數組。標記所有被任何指令讀取到的寄存器，然後掃描：任何沒有使用目的地的指數且沒有副作用的指數成為 `IrNop`。
+
+**拷貝傳播**：追蹤 `IrCopy` 鏈，以便 `IrCopy(r5, r3)` 其中 `r3 = IrLoadImm(42)` 允許 `r5` 參與常數折疊。
+
+**微觀優化**：`IrCopy(r, r)` → `IrNop`。消除重複的 `IrLoadImm`。這些傳遞在寄存器分配清潔 IR 後發揮作用。
+
+### 階段 2：強度減小（Sprint 62-68）
+
+**2 的冪次方算術**：`x * 2^n` → `x << n`、`x / 2^n` → `x >> n`、`x % 2^n` → `x & (2^n - 1)`。常數折疊中的 `def_at` 追蹤告訴我們除數/乘數是已知的 2 的冪次方。
+
+**非 2 的冪次方乘法**：`x * 3` → `(x + x) + x`。小常數乘法變成移位加法序列。
+
+**身份/湮滅**：`x * 1` → `IrCopy`、`x * 0` → `IrLoadImm(0)`、`x + 0` → `IrCopy`、`x - 0` → `IrCopy`、`x / 1` → `IrCopy`。
+
+### 階段 3：代數推理（Sprint 71-77）
+
+**同寄存器折疊**：`x - x` → `IrLoadImm(0)`、`x ^ x` → `IrLoadImm(0)`。如果兩個來源寄存器都是相同的虛擬寄存器，則結果永遠是零。
+
+**結合鏈折疊**：`(x + 3) + 5` → `x + 8`。當一個運算數是另一個運算數加上已知常數時，合併常數。
+
+**e-graph 飽和**：我們實現了一個小 e-graph 引擎 (`EgNode`/`EgClass`/`EgUnionFind`)，通過重寫規則和聯集找出等價關係，例如 `x * 0 = 0`。e-graph 在小型函數（≤ 8 指數）上啟用，以保持編譯時間有界。
+
+**可交换 CSE**：通過排序運算數 `src1 ≤ src2` 標準化可交換運算（加、乘、或、與、異或）。這使 CSE 哈希表的命中率翻倍。
+
+### 階段 4：控制流（Sprint 75-76, 101-106）
+
+**條件分支折疊**：`IrBranchTrue(known_const)` 其中常數為 1 → `IrJump`。當常數為 0 → `IrNop`。這在常數傳播證明條件後清潔分支。
+
+**跳轉返回**：`IrJump(L)` 其中 `L+1 = IrReturn` 直接折疊為 `IrReturn`。
+
+**布爾簡化**：`(x == 0) == 0` → `IrCopy(x)`、`bool != 0` → `IrCopy(bool)`。
+
+**LICM**：將循環不變的 `IrLoadImm` 指數指令提升到後邊邊緣。
+
+**GVN**：通過 128 項哈希表和值數字指派進行全局值數字化。
+
+## 寄存器分配
+
+線性掃描分配器針對四個調用者存儲的寄存器 (`r12`-`r15`) 使用適應性 `disp8`/`disp32` 編碼，並在堆棧溢出時進行堆棧溢出。緊湊的框架大小確保函數使用 ≤ 4 個活值時不使用任何堆棧框架。
+
+## 性能指導優化
+
+完整的 PGO 管道：
+1. 在儀器化函數入口處注入 `INC [RIP+disp32]` 計數器。
+2. `__prof_dump` 在退出時將執行計數寫入 `.sprof` 文件。
+3. 使用 `--use-profile profile.sprof` 重新編譯以促進熱函數。
+4. 性能指導內聯對調用者進行策略補償 (+80 為 AGGRESSIVE、+40 為 PRECISION)。
+5. 佈局傳遞對熱函數進行排序，以提高指數緩存局部性。
+
+## 驗證
+
+每個優化傳遞都有閘腳本。當前的測試矩陣在所有傳遞中達到了 **347 個自測試**，其中 FAIL=0 且 NOT_RUN=1（JIT OOM 在完整自測試中）。每個閘腳本在 60 秒內運行。
+
+## 下一步
+
+基礎堅固。本地化後端為算術、控制流、函數調用和性能指導儀器化生成正確的 ELF 二進位文件。下一個前沿是縮小自托管的完整編譯循環的差距 — 其中自托管的編譯器編譯自己到本地二進位。
+
+代碼都在 `self-hosted/` 在庫中。每個傳遞、每個測試、每個閘腳本 — 在 Sounio 中編寫。

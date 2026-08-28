@@ -1,0 +1,279 @@
+//@ run-pass
+// tests/run-pass/mercyful_clinical_sequencing.sio
+//
+// Mercyful Learning x clinical PK twins — treatment-sequencing scheduler.
+//
+// Suffering fields are computed at runtime from the Knightian PK bands of
+// stdlib/clinical/vancomycin_pbpk.sio and stdlib/clinical/tacrolimus_oral_safety.sio
+// (Cmin window violations, per-interval AUC window violations, and a sound
+// loose Cmax proxy via Cmax_ss = Cmin_ss + D/Vc). Drug-drug interaction
+// gates (nephrotoxin overlap, CYP3A4 inhibition) act as Goodhart
+// constraints on edge admission: gated transitions into the TARGET state
+// exist only if the corresponding twin safety gate passes on the
+// recomputed band.
+//
+// Spec: docs/research/mercyful_clinical_integration_spec_2026-07-25.md
+// Gate: scripts/ci/mercyful_clinical_sequencing_gate.sh
+//
+// Clinical warning: synthetic patients, synthetic doses, synthetic DDI
+// flags, synthetic AUC/Cmax windows. This is not medical guidance and
+// carries no clinical claim.
+
+use clinical::mercyful::*
+use clinical::vancomycin_pbpk::*
+use clinical::tacrolimus_oral_safety::*
+use epistemic::knightian::*
+
+// Suffering of a contract-violating regimen (vacuous PBox).
+let S_MAX: f64 = 100.0
+
+// Synthetic windows (no clinical target claim — see spec section 2).
+let VANCO_CMIN_LO: f64 = 10.0
+let VANCO_CMIN_HI: f64 = 20.0
+let VANCO_AUC_LO: f64 = 250.0
+let VANCO_AUC_HI: f64 = 350.0
+let VANCO_CMAX_CEIL: f64 = 40.0
+let TAC_CMIN_LO: f64 = 5.0
+let TAC_CMIN_HI: f64 = 15.0
+let TAC_AUC_LO: f64 = 80.0
+let TAC_AUC_HI: f64 = 200.0
+let TAC_CMAX_CEIL: f64 = 25.0
+
+// Normalized worst-case band violation against a window [a, b].
+// Zero is admissible by design: a band fully inside the window contributes
+// nothing. C1 still sees positive integral suffering because every feasible
+// path must traverse a pre-TDM state, whose band always crosses a window.
+fn s_window(lo: f64, hi: f64, a: f64, b: f64) -> f64 with Mut, Div {
+    var s = 0.0
+    if lo < a { s = s + (a - lo) / a }
+    if hi > b { s = s + (hi - b) / b }
+    s
+}
+
+// Normalized exceedance of a peak ceiling.
+fn s_peak(cmax_hi: f64, ceil: f64) -> f64 with Div {
+    if cmax_hi > ceil { return (cmax_hi - ceil) / ceil }
+    0.0
+}
+
+// Vancomycin suffering field for one regimen state.
+// AUC_ss = D/CL per interval (decreasing in CL) -> corners [D/CL_hi, D/CL_lo].
+// Cmax proxy: Cmax_hi <= Cmin_hi + D/Vc_lo (subadditivity of max; spec 2.3).
+fn vanco_suffering(weight: f64, crcl: f64, dose: f64, tau: f64, tdm: i64) -> f64 with Mut, Div, Panic {
+    let cmin = predict_cmin_knightian(weight, crcl, dose, tau, tdm)
+    if pb_confidence(&cmin) == 0 { return S_MAX }
+    let p = vp_default(weight, crcl)
+    let cl = vp_cl_to_pbox(&p, tdm)
+    let vc = vp_vc_to_pbox(&p, tdm)
+    let auc_lo = dose / pb_hi_mean(&cl)
+    let auc_hi = dose / pb_lo_mean(&cl)
+    let cmax_hi = pb_hi_mean(&cmin) + dose / pb_lo_mean(&vc)
+    let s_c = s_window(pb_lo_mean(&cmin), pb_hi_mean(&cmin), VANCO_CMIN_LO, VANCO_CMIN_HI)
+    let s_a = s_window(auc_lo, auc_hi, VANCO_AUC_LO, VANCO_AUC_HI)
+    let s_p = s_peak(cmax_hi, VANCO_CMAX_CEIL)
+    s_c + s_a + 0.5 * s_p
+}
+
+// Tacrolimus per-interval AUC band in ng·h/mL: AUC = F·D/CL,
+// increasing in F, decreasing in CL -> corners (F_lo, CL_hi), (F_hi, CL_lo).
+// cl_scale models a synthetic DDI: 1.0 normal, 0.5 under CYP3A4 inhibition.
+fn tac_auc_ng_h_ml(weight: f64, crcl: f64, dose: f64, tdm: i64, cl_scale: f64) -> (f64, f64) with Mut, Div {
+    var p = tp_default(weight, crcl)
+    p.cl_l_per_h = p.cl_l_per_h * cl_scale
+    let cl = tp_cl_to_pbox(&p, tdm)
+    let f = tp_f_to_pbox(&p, tdm)
+    let lo = pb_lo_mean(&f) * dose / pb_hi_mean(&cl)
+    let hi = pb_hi_mean(&f) * dose / pb_lo_mean(&cl)
+    (1000.0 * lo, 1000.0 * hi)
+}
+
+// Tacrolimus suffering field for one regimen state (trough in ng/mL).
+// Note: suffering always uses the UNSCALED band (cl_scale = 1.0) — it
+// describes the regimen alone. The CYP3A4 DDI gate is a co-medication
+// change and therefore recomputes the band with cl_scale = 0.5 at edge
+// admission time (build_cyp_graph); the two bands are different on purpose.
+fn tac_suffering(weight: f64, crcl: f64, dose: f64, tau: f64, tdm: i64) -> f64 with Mut, Div, Panic {
+    let ct = predict_c_trough_knightian(weight, crcl, dose, tau, tdm)
+    if pb_confidence(&ct) == 0 { return S_MAX }
+    let p = tp_default(weight, crcl)
+    let vc = tp_vc_to_pbox(&p, tdm)
+    let f = tp_f_to_pbox(&p, tdm)
+    let (auc_lo, auc_hi) = tac_auc_ng_h_ml(weight, crcl, dose, tdm, 1.0)
+    // Cmax proxy: Cmax_hi <= Cmin_hi + F_hi·D/Vc_lo (ng/mL; spec 2.3).
+    let cmax_hi = pb_hi_mean(&ct) + 1000.0 * pb_hi_mean(&f) * dose / pb_lo_mean(&vc)
+    let s_c = s_window(pb_lo_mean(&ct), pb_hi_mean(&ct), TAC_CMIN_LO, TAC_CMIN_HI)
+    let s_a = s_window(auc_lo, auc_hi, TAC_AUC_LO, TAC_AUC_HI)
+    let s_p = s_peak(cmax_hi, TAC_CMAX_CEIL)
+    s_c + s_a + 0.5 * s_p
+}
+
+// Main scenario graph (spec section 3).
+// States: 0 START, 1 VANCO_PRE, 2 VANCO_POST, 3 TAC_PRE, 4 TAC_POST,
+//         5 BAD_DOSE (contract violation), 6 TARGET (dual therapy verified).
+// G_VERIFY: edges into TARGET only from post-TDM states whose twin safety
+// gate passes on the recomputed band. No edge 0->6 exists (anti-Goodhart).
+fn build_main_graph() -> MercyGraph with Mut, Div, Panic {
+    var g = mercy_graph_new()
+    g = mercy_add_state(g, 0.0)
+    g = mercy_add_state(g, vanco_suffering(78.5, 65.0, 1000.0, 12.0, 0))
+    g = mercy_add_state(g, vanco_suffering(78.5, 65.0, 1000.0, 12.0, 3))
+    g = mercy_add_state(g, tac_suffering(70.0, 80.0, 5.0, 12.0, 0))
+    g = mercy_add_state(g, tac_suffering(70.0, 80.0, 5.0, 12.0, 3))
+    g = mercy_add_state(g, vanco_suffering(78.5, 65.0, 5000.0, 12.0, 3))
+    g = mercy_add_state(g, 0.1)
+    g = mercy_add_edge(g, 0, 0, 1.0)  // untreated self-loop (Goodhart trap)
+    g = mercy_add_edge(g, 0, 1, 1.0)
+    g = mercy_add_edge(g, 0, 3, 1.0)
+    g = mercy_add_edge(g, 0, 5, 1.0)
+    g = mercy_add_edge(g, 1, 2, 1.0)
+    g = mercy_add_edge(g, 3, 4, 1.0)
+    g = mercy_add_edge(g, 5, 6, 1.0)  // reachable but S_MAX-penalized
+    let vanco_post = predict_cmin_knightian(78.5, 65.0, 1000.0, 12.0, 3)
+    if is_safe_dose(&vanco_post, VANCO_CMIN_LO, VANCO_CMIN_HI, 800) {
+        g = mercy_add_edge(g, 2, 6, 1.0)
+    }
+    let tac_post = predict_c_trough_knightian(70.0, 80.0, 5.0, 12.0, 3)
+    let (auc_lo, auc_hi) = tac_auc_ng_h_ml(70.0, 80.0, 5.0, 3, 1.0)
+    if is_safe_tac_dose(&tac_post, TAC_CMIN_LO, TAC_CMIN_HI, 700) && auc_hi <= TAC_AUC_HI {
+        g = mercy_add_edge(g, 4, 6, 1.0)
+    }
+    g
+}
+
+// C2 variant: the only conceivable target route is an unverified shortcut;
+// G_VERIFY refuses admission, so no edge into the target exists.
+fn build_shortcut_graph() -> MercyGraph with Mut, Panic {
+    var g = mercy_graph_new()
+    g = mercy_add_state(g, 0.0)  // 0 START
+    g = mercy_add_state(g, 0.1)  // 1 TARGET
+    g = mercy_add_edge(g, 0, 0, 1.0)
+    g
+}
+
+// C5 variant: vanco-only route; the nephrotoxin DDI flag removes all edges
+// into vanco-active states.
+fn build_nephrotoxin_graph(nephrotoxin_on: bool) -> MercyGraph with Mut, Div, Panic {
+    var g = mercy_graph_new()
+    g = mercy_add_state(g, 0.0)
+    g = mercy_add_state(g, vanco_suffering(78.5, 65.0, 1000.0, 12.0, 0))
+    g = mercy_add_state(g, vanco_suffering(78.5, 65.0, 1000.0, 12.0, 3))
+    g = mercy_add_state(g, 0.1)  // 3 TARGET
+    g = mercy_add_edge(g, 0, 0, 1.0)
+    if !nephrotoxin_on {
+        g = mercy_add_edge(g, 0, 1, 1.0)
+    }
+    g = mercy_add_edge(g, 1, 2, 1.0)
+    let vanco_post = predict_cmin_knightian(78.5, 65.0, 1000.0, 12.0, 3)
+    if is_safe_dose(&vanco_post, VANCO_CMIN_LO, VANCO_CMIN_HI, 800) {
+        g = mercy_add_edge(g, 2, 3, 1.0)
+    }
+    g
+}
+
+// C6 variant: tac-only route; CYP3A4 inhibition (CL x0.5) doubles the AUC
+// band, which crosses the synthetic AUC ceiling, so the gate blocks 2->3.
+fn build_cyp_graph() -> MercyGraph with Mut, Div, Panic {
+    var g = mercy_graph_new()
+    g = mercy_add_state(g, 0.0)
+    g = mercy_add_state(g, tac_suffering(70.0, 80.0, 5.0, 12.0, 0))
+    g = mercy_add_state(g, tac_suffering(70.0, 80.0, 5.0, 12.0, 3))
+    g = mercy_add_state(g, 0.1)  // 3 TARGET
+    g = mercy_add_edge(g, 0, 1, 1.0)
+    g = mercy_add_edge(g, 1, 2, 1.0)
+    let (auc_lo, auc_hi) = tac_auc_ng_h_ml(70.0, 80.0, 5.0, 3, 0.5)
+    if auc_hi <= TAC_AUC_HI {
+        g = mercy_add_edge(g, 2, 3, 1.0)
+    }
+    g
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var failures = 0
+
+    // C3: TDM band narrowing strictly reduces the suffering field.
+    let s_van_pre = vanco_suffering(78.5, 65.0, 1000.0, 12.0, 0)
+    let s_van_post = vanco_suffering(78.5, 65.0, 1000.0, 12.0, 3)
+    let s_tac_pre = tac_suffering(70.0, 80.0, 5.0, 12.0, 0)
+    let s_tac_post = tac_suffering(70.0, 80.0, 5.0, 12.0, 3)
+    println(s_van_pre)
+    println(s_van_post)
+    println(s_tac_pre)
+    println(s_tac_post)
+    if s_van_pre > s_van_post && s_tac_pre > s_tac_post {
+        println("C3_TDM_REDUCES_SUFFERING PASS")
+    } else {
+        println("C3_TDM_REDUCES_SUFFERING FAIL")
+        failures = failures + 1
+    }
+
+    // C4: contract-violating regimen (5000 mg > 4000 mg cap) -> S_MAX.
+    let s_bad = vanco_suffering(78.5, 65.0, 5000.0, 12.0, 3)
+    if s_bad == S_MAX {
+        println("C4_CONTRACT_VIOLATION_PENALTY PASS")
+    } else {
+        println("C4_CONTRACT_VIOLATION_PENALTY FAIL")
+        failures = failures + 1
+    }
+
+    // C1: healthy scenario — scheduler reaches TARGET with positive
+    // integral suffering and total cost far below the S_MAX route.
+    let g = build_main_graph()
+    // NOTE: bools destructured from heterogeneous tuples are mistyped by
+    // the lean_single compiler, so found-ness is read off the cost tuple:
+    // mercyful_schedule returns (false, 0.0, 0.0, 0.0, 0.0) when infeasible,
+    // and every feasible path here has integral > 0 and total > 0.
+    let (found, length, integral, peak, total) = mercyful_schedule(&g, 0, 6, 1.0, 10.0)
+    println(length)
+    println(integral)
+    println(peak)
+    println(total)
+    if integral > 0.0 && total > 0.0 && total < S_MAX {
+        println("C1_PATH_FOUND PASS")
+    } else {
+        println("C1_PATH_FOUND FAIL")
+        failures = failures + 1
+    }
+
+    // C2: unverified shortcut refused -> INFEASIBLE.
+    let g2 = build_shortcut_graph()
+    let (f2, l2, i2, p2, t2) = mercyful_schedule(&g2, 0, 1, 1.0, 10.0)
+    if t2 == 0.0 {
+        println("C2_GOODHART_SHORTCUT_BLOCKED PASS")
+    } else {
+        println("C2_GOODHART_SHORTCUT_BLOCKED FAIL")
+        failures = failures + 1
+    }
+
+    // C5: nephrotoxin gate active -> vanco-only route INFEASIBLE;
+    // without the flag the same graph is feasible (gate is causal).
+    let g5 = build_nephrotoxin_graph(true)
+    let (f5, l5, i5, p5, t5) = mercyful_schedule(&g5, 0, 3, 1.0, 10.0)
+    let g5b = build_nephrotoxin_graph(false)
+    let (f5b, l5b, i5b, p5b, t5b) = mercyful_schedule(&g5b, 0, 3, 1.0, 10.0)
+    if t5 == 0.0 && t5b > 0.0 {
+        println("C5_DDI_NEPHROTOXIN_INFEASIBLE PASS")
+    } else {
+        println("C5_DDI_NEPHROTOXIN_INFEASIBLE FAIL")
+        failures = failures + 1
+    }
+
+    // C6: CYP3A4 inhibition doubles tac AUC across the ceiling -> gate
+    // blocks the tac-only route -> INFEASIBLE.
+    let (auc_cyp_lo, auc_cyp_hi) = tac_auc_ng_h_ml(70.0, 80.0, 5.0, 3, 0.5)
+    println(auc_cyp_hi)
+    let g6 = build_cyp_graph()
+    let (f6, l6, i6, p6, t6) = mercyful_schedule(&g6, 0, 3, 1.0, 10.0)
+    if t6 == 0.0 && auc_cyp_hi > TAC_AUC_HI {
+        println("C6_DDI_CYP_GATE_BLOCKS PASS")
+    } else {
+        println("C6_DDI_CYP_GATE_BLOCKS FAIL")
+        failures = failures + 1
+    }
+
+    if failures == 0 {
+        println("MERCYFUL_CLINICAL_SEQ_PASS")
+        return 0
+    }
+    println("MERCYFUL_CLINICAL_SEQ_FAIL")
+    1
+}

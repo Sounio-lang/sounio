@@ -4,21 +4,127 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import sys
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 
 from sounio.ontology import OntologyResolver
 
+# We build fake ontology bundles locally instead of relying on external data files.
+def create_mock_bundles(home: Path):
+    home.mkdir(parents=True, exist_ok=True)
+    
+    # helper
+    def write_dontology(name: str, ontology: str, terms: list):
+        payload = json.dumps({"ontology": ontology, "terms": terms}).encode("utf-8")
+        header = b"DONT" + struct.pack("<II", 1, len(payload))
+        (home / f"{name}.dontology").write_bytes(header + payload)
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-BUNDLE_HOME = REPO_ROOT / "data" / "ontology" / "bundles"
+    write_dontology("snomed", "SNOMED", [
+        {
+            "curie": "SNOMED:44054006",
+            "label": "Type 2 diabetes mellitus",
+            "definition": "",
+            "parents": ["SNOMED:73211009", "SNOMED:138875005"],
+            "synonyms": [],
+            "iri": ""
+        },
+        {
+            "curie": "SNOMED:73211009",
+            "label": "Diabetes mellitus",
+            "definition": "",
+            "parents": [],
+            "synonyms": [],
+            "iri": ""
+        },
+        {
+            "curie": "SNOMED:138875005",
+            "label": "SNOMED CT Concept",
+            "definition": "",
+            "parents": [],
+            "synonyms": [],
+            "iri": ""
+        }
+    ])
+
+    write_dontology("loinc", "LOINC", [
+        {
+            "curie": "LOINC:4548-4",
+            "label": "Hemoglobin A1c/Hemoglobin.total in Blood",
+            "definition": "",
+            "parents": [],
+            "synonyms": [],
+            "iri": ""
+        },
+        {
+            "curie": "LOINC:1558-6",
+            "label": "Fasting glucose",
+            "definition": "",
+            "parents": [],
+            "synonyms": ["glucose"],
+            "iri": ""
+        }
+    ])
+
+    write_dontology("hpo", "HPO", [
+        {
+            "curie": "HPO:0005978",
+            "label": "Type II diabetes mellitus",
+            "definition": "",
+            "parents": [],
+            "synonyms": ["glucose intolerance"],
+            "iri": ""
+        },
+        {
+            "curie": "HPO:0003074",
+            "label": "Hyperglycemia",
+            "definition": "",
+            "parents": [],
+            "synonyms": [],
+            "iri": ""
+        }
+    ])
+
+    write_dontology("chebi", "CHEBI", [
+        {
+            "curie": "CHEBI:17234",
+            "label": "glucose",
+            "definition": "",
+            "parents": [],
+            "synonyms": [],
+            "iri": ""
+        }
+    ])
+
+    mappings_dir = home / "mappings"
+    mappings_dir.mkdir(exist_ok=True)
+    mappings_file = mappings_dir / "test.sssom.json"
+    mappings_file.write_text(json.dumps({
+        "mappings": [
+            {
+                "subject_id": "HPO:0003074",
+                "predicate": "skos:exactMatch",
+                "object_id": "GO:0042593",
+                "confidence": 0.91,
+                "justification": "semapv:LexicalMatching"
+            },
+            {
+                "subject_id": "HPO:0003074",
+                "predicate": "skos:broadMatch",
+                "object_id": "CHEBI:6801",
+                "confidence": 0.85,
+                "justification": ""
+            }
+        ]
+    }))
 
 
 def make_resolver(tmp_path: Path, mode: str = "local") -> OntologyResolver:
+    bundle_home = tmp_path / "bundles"
+    create_mock_bundles(bundle_home)
     cache_dir = tmp_path / "cache"
-    return OntologyResolver(ontology_home=BUNDLE_HOME, cache_dir=cache_dir, mode=mode)
+    return OntologyResolver(ontology_home=bundle_home, cache_dir=cache_dir, mode=mode)
 
 
 def test_resolve_local_term(tmp_path):

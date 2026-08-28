@@ -1,0 +1,268 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/densities.sio — direct probability density / mass functions
+//
+// A consistent, public "value" API for the common distributions: the plain
+// density (not log-density) and CDF, for direct use in likelihoods, plotting and
+// teaching. Complements prob::distributions (which exposes log-densities for
+// MCMC) and adds the binomial, log-normal and geometric that were missing.
+//
+//   continuous pdf / cdf:  normal, exponential, gamma, beta, lognormal, uniform
+//   discrete   pmf / cdf:  poisson, binomial, geometric
+//
+// Built on the special-function core (erf, gamma, igamma, beta) with robust
+// reflect-first exp/ln helpers.
+//
+// References:
+//   Johnson, Kotz & Balakrishnan (1994/1995) "Continuous/Discrete Univariate
+//     Distributions"; Abramowitz & Stegun (1964) Ch. 6, 26.
+
+module stats::densities
+
+use special::erf::{normal_cdf}
+use special::gamma::{lgamma}
+use special::igamma::{igamma_lower, igamma_upper}
+use special::beta::{ibeta}
+
+// ============================================================================
+// INTERNAL (robust reflect-first)
+// ============================================================================
+
+fn de_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / de_exp(0.0 - x) }
+    if x > 709.0 { return 1.0e300 }
+    if x > 2.0 { return de_exp(x / 2.0) * de_exp(x / 2.0) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 28 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    return sum
+}
+
+fn de_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+fn de_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+let DE_LN_SQRT_2PI: f64 = 0.9189385332046727   // 0.5·ln(2π)
+
+// ============================================================================
+// CONTINUOUS
+// ============================================================================
+
+/// Normal density N(mu, sigma²).
+pub fn normal_pdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    if sigma <= 0.0 { return 0.0 }
+    let z = (x - mu) / sigma
+    return de_exp(0.0 - 0.5 * z * z) / (sigma * 2.5066282746310002)
+}
+
+/// Normal CDF (wraps special::erf).
+pub fn normal_cdf_at(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    if sigma <= 0.0 { return 0.0 }
+    return normal_cdf((x - mu) / sigma)
+}
+
+/// Exponential density with rate lambda (mean 1/lambda).
+pub fn exponential_pdf(x: f64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 || lambda <= 0.0 { return 0.0 }
+    return lambda * de_exp(0.0 - lambda * x)
+}
+
+/// Exponential CDF.
+pub fn exponential_cdf(x: f64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    return 1.0 - de_exp(0.0 - lambda * x)
+}
+
+/// Gamma density with shape k and rate beta: f = β^k x^{k-1} e^{-βx} / Γ(k).
+pub fn gamma_pdf(x: f64, shape: f64, rate: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 || shape <= 0.0 || rate <= 0.0 { return 0.0 }
+    if x == 0.0 { if shape < 1.0 { return 1.0e300 } else { if shape == 1.0 { return rate } else { return 0.0 } } }
+    let logf = shape * de_ln(rate) + (shape - 1.0) * de_ln(x) - rate * x - lgamma(shape)
+    return de_exp(logf)
+}
+
+/// Gamma CDF via the regularized lower incomplete gamma: P(shape, rate·x).
+pub fn gamma_cdf(x: f64, shape: f64, rate: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    return igamma_lower(shape, rate * x)
+}
+
+/// Beta density on (0,1) with shape a, b.
+pub fn beta_pdf(x: f64, a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || x >= 1.0 || a <= 0.0 || b <= 0.0 { return 0.0 }
+    let lbeta_ab = lgamma(a) + lgamma(b) - lgamma(a + b)
+    let logf = (a - 1.0) * de_ln(x) + (b - 1.0) * de_ln(1.0 - x) - lbeta_ab
+    return de_exp(logf)
+}
+
+/// Beta CDF (regularized incomplete beta).
+pub fn beta_cdf(x: f64, a: f64, b: f64) -> f64 with Mut, Div, Panic {
+    return ibeta(a, b, x)
+}
+
+/// Log-normal density: X>0 with ln X ~ N(mu, sigma²).
+pub fn lognormal_pdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || sigma <= 0.0 { return 0.0 }
+    let z = (de_ln(x) - mu) / sigma
+    let logf = 0.0 - de_ln(x) - de_ln(sigma) - DE_LN_SQRT_2PI - 0.5 * z * z
+    return de_exp(logf)
+}
+
+/// Log-normal CDF = Phi((ln x − mu)/sigma).
+pub fn lognormal_cdf(x: f64, mu: f64, sigma: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 || sigma <= 0.0 { return 0.0 }
+    return normal_cdf((de_ln(x) - mu) / sigma)
+}
+
+/// Uniform density on [a, b].
+pub fn uniform_pdf(x: f64, a: f64, b: f64) -> f64 {
+    if x < a || x > b || b <= a { return 0.0 }
+    return 1.0 / (b - a)
+}
+
+/// Uniform CDF.
+pub fn uniform_cdf(x: f64, a: f64, b: f64) -> f64 {
+    if b <= a { return 0.0 }
+    if x <= a { return 0.0 }
+    if x >= b { return 1.0 }
+    return (x - a) / (b - a)
+}
+
+// ============================================================================
+// DISCRETE
+// ============================================================================
+
+/// Poisson pmf P(X=k) = λ^k e^{−λ}/k!.
+pub fn poisson_pmf(k: i64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if k < 0 || lambda < 0.0 { return 0.0 }
+    let logf = (k as f64) * de_ln(lambda) - lambda - lgamma((k as f64) + 1.0)
+    return de_exp(logf)
+}
+
+/// Poisson CDF P(X ≤ k) = Q(k+1, λ) (regularized upper incomplete gamma).
+pub fn poisson_cdf(k: i64, lambda: f64) -> f64 with Mut, Div, Panic {
+    if k < 0 { return 0.0 }
+    return igamma_upper((k as f64) + 1.0, lambda)
+}
+
+/// Binomial pmf P(X=k) = C(n,k) p^k (1−p)^{n−k}.
+pub fn binomial_pmf(k: i64, n: i64, p: f64) -> f64 with Mut, Div, Panic {
+    if k < 0 || k > n || p < 0.0 || p > 1.0 { return 0.0 }
+    let kf = k as f64
+    let nf = n as f64
+    let lchoose = lgamma(nf + 1.0) - lgamma(kf + 1.0) - lgamma(nf - kf + 1.0)
+    var logf = lchoose
+    if p > 0.0 { logf = logf + kf * de_ln(p) } else { if k > 0 { return 0.0 } }
+    if p < 1.0 { logf = logf + (nf - kf) * de_ln(1.0 - p) } else { if k < n { return 0.0 } }
+    return de_exp(logf)
+}
+
+/// Binomial CDF P(X ≤ k) = I_{1−p}(n−k, k+1).
+pub fn binomial_cdf(k: i64, n: i64, p: f64) -> f64 with Mut, Div, Panic {
+    if k < 0 { return 0.0 }
+    if k >= n { return 1.0 }
+    return ibeta((n - k) as f64, (k + 1) as f64, 1.0 - p)
+}
+
+/// Geometric pmf: number of failures k before the first success, P = (1−p)^k p.
+pub fn geometric_pmf(k: i64, p: f64) -> f64 with Mut, Div, Panic {
+    if k < 0 || p <= 0.0 || p > 1.0 { return 0.0 }
+    return de_exp((k as f64) * de_ln(1.0 - p)) * p
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+fn test_continuous() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = check(1, approx(normal_pdf(0.0, 0.0, 1.0), 0.3989423, 1.0e-6)) && ok
+    ok = check(2, approx(normal_cdf_at(1.0, 0.0, 1.0), 0.8413447, 1.0e-5)) && ok
+    ok = check(3, approx(exponential_pdf(1.0, 1.0), 0.3678794, 1.0e-6)) && ok
+    ok = check(4, approx(exponential_cdf(1.0, 1.0), 0.6321206, 1.0e-6)) && ok
+    // gamma(shape2,rate1) at x=2 -> 2·e^-2 = 0.2706706
+    ok = check(5, approx(gamma_pdf(2.0, 2.0, 1.0), 0.2706706, 1.0e-6)) && ok
+    // gamma_cdf(shape1,rate1) = exponential cdf -> 1-e^-2 = 0.8646647
+    ok = check(6, approx(gamma_cdf(2.0, 1.0, 1.0), 0.8646647, 1.0e-5)) && ok
+    // beta(2,2) at 0.5 -> 1.5 ; cdf -> 0.5
+    ok = check(7, approx(beta_pdf(0.5, 2.0, 2.0), 1.5, 1.0e-6)) && ok
+    ok = check(8, approx(beta_cdf(0.5, 2.0, 2.0), 0.5, 1.0e-6)) && ok
+    // lognormal(mu0,sigma1) at x=1 -> 1/sqrt(2π) = 0.3989423
+    ok = check(9, approx(lognormal_pdf(1.0, 0.0, 1.0), 0.3989423, 1.0e-6)) && ok
+    ok = check(10, approx(lognormal_cdf(1.0, 0.0, 1.0), 0.5, 1.0e-6)) && ok
+    ok = check(11, approx(uniform_pdf(0.5, 0.0, 2.0), 0.5, 1.0e-12)) && ok
+    ok = check(12, approx(uniform_cdf(1.5, 0.0, 2.0), 0.75, 1.0e-12)) && ok
+    return ok
+}
+
+fn test_discrete() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // poisson(3) at k=2 -> 9·e^-3/2 = 0.2240418
+    ok = check(20, approx(poisson_pmf(2, 3.0), 0.2240418, 1.0e-6)) && ok
+    // poisson cdf at k=2, λ=3 -> 0.4231901
+    ok = check(21, approx(poisson_cdf(2, 3.0), 0.4231901, 1.0e-5)) && ok
+    // binomial(5,0.5) at k=2 -> C(5,2)·0.03125 = 0.3125
+    ok = check(22, approx(binomial_pmf(2, 5, 0.5), 0.3125, 1.0e-9)) && ok
+    // binomial cdf(5,0.5) at k=2 -> 16/32 = 0.5
+    ok = check(23, approx(binomial_cdf(2, 5, 0.5), 0.5, 1.0e-6)) && ok
+    // geometric(0.5) at k=2 -> 0.5³ = 0.125
+    ok = check(24, approx(geometric_pmf(2, 0.5), 0.125, 1.0e-9)) && ok
+    // pmf sums: binomial(5,0.3) over k=0..5 = 1
+    var s = 0.0
+    var kk = 0
+    while kk <= 5 { s = s + binomial_pmf(kk, 5, 0.3); kk = kk + 1 }
+    ok = check(25, approx(s, 1.0, 1.0e-9)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_continuous() && ok
+    ok = test_discrete() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

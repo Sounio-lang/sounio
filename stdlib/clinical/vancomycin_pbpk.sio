@@ -1,0 +1,317 @@
+// stdlib/clinical/vancomycin_pbpk.sio
+//
+// Vancomycin trough-screening approximation with Knightian-uncertainty inputs.
+//
+// Pipeline:
+//   PK params (Vc, CL)  --lift-->  Knightian PBoxes
+//   --1-compartment steady-state Cmin approximation--> Knightian Cmin PBox
+//   --within(10, 20) support gate-->      {WITHIN_BAND, REFUSE}
+//
+// References:
+//   Rybak MJ et al. Am J Health-Syst Pharm 2020;77:835. (ASHP guideline.)
+//   Roberts JA et al. Antimicrob Agents Chemother 2011;55:2855.
+//   Marsot et al. Clin Pharmacokinet 2012;51:1-13. (popPK review.)
+//
+// Clinical warning: this is a conservative compiler/stdlib example of
+// Knightian interval propagation for trough screening. It is not an AUC-guided
+// clinical dosing engine and must not be used as medical guidance.
+//
+// Refinement-type-style contracts (currently enforced at runtime):
+//   dose_mg     in (0, 4000]
+//   interval_h  in [4, 48]
+//   weight_kg   in [30, 200]
+//   crcl_ml_min in (0, 200]
+//   tdm_samples >= 0
+// Each violation produces a vacuous PBox with confidence 0 (REFUSE). The
+// confidence field is compiler metadata for propagated inputs, not a calibrated
+// clinical probability.
+//
+// Lean export: formal/proof_obligations/vancomycin_dosing_safety.lean
+
+use epistemic::knightian::*
+
+// ============================================================================
+// PK PARAMETERS — simplified population values for trough-screening examples
+// ============================================================================
+
+pub struct VancoPKParams {
+    vc_l: f64,          // central volume (L)
+    cl_l_per_h: f64,    // total clearance (L/h)
+    vp_l: f64,          // peripheral volume (L)
+    q_l_per_h: f64,     // intercompartmental clearance (L/h)
+}
+
+pub fn vp_default(weight_kg: f64, crcl_ml_min: f64) -> VancoPKParams {
+    // Vc ≈ 0.5 L/kg
+    let vc = 0.5 * weight_kg
+    // CL (L/h) ≈ 0.05 * CrCl (mL/min) — Cockcroft-Gault scaled
+    let cl = 0.05 * crcl_ml_min
+    // Retained for future two-compartment/AUC extension; not used by the
+    // current trough-screening approximation.
+    let vp = 0.5 * weight_kg
+    // Retained for future two-compartment/AUC extension.
+    let q = 7.0
+    VancoPKParams { vc_l: vc, cl_l_per_h: cl, vp_l: vp, q_l_per_h: q }
+}
+
+// ============================================================================
+// LIFT params -> PBox with Knightian bands.
+// The bands reflect literature uncertainty in popPK estimates.
+// ============================================================================
+
+// Band widths parametric on number of TDM samples observed.
+// 0 samples (pre-TDM):    Vc ±15%, CL ±25% (literature popPK)
+// 1+ samples:             Vc ±10%, CL ±10% (Bayesian narrowing)
+// 3+ samples:             Vc ±7%,  CL ±7%  (post-TDM convergence)
+fn vp_band_vc(tdm_samples: i64) -> f64 {
+    if tdm_samples >= 3 { return 0.07 }
+    if tdm_samples >= 1 { return 0.10 }
+    0.15
+}
+
+fn vp_band_cl(tdm_samples: i64) -> f64 {
+    if tdm_samples >= 3 { return 0.07 }
+    if tdm_samples >= 1 { return 0.10 }
+    0.25
+}
+
+pub fn vp_vc_to_pbox(p: &VancoPKParams, tdm_samples: i64) -> PBox {
+    let frac = vp_band_vc(tdm_samples)
+    let lo = (1.0 - frac) * p.vc_l
+    let hi = (1.0 + frac) * p.vc_l
+    let v = 0.0025 * p.vc_l * p.vc_l
+    pb_new(lo, hi, v, 920)
+}
+
+pub fn vp_cl_to_pbox(p: &VancoPKParams, tdm_samples: i64) -> PBox {
+    let frac = vp_band_cl(tdm_samples)
+    let lo = (1.0 - frac) * p.cl_l_per_h
+    let hi = (1.0 + frac) * p.cl_l_per_h
+    let v = 0.01 * p.cl_l_per_h * p.cl_l_per_h
+    pb_new(lo, hi, v, 880)
+}
+
+// ============================================================================
+// EXPONENTIAL — range-reduced Taylor approximation for steady-state formula.
+// The Fréchet Cmin enclosure depends on corner ordering, so this must stay
+// stable across the full physiological positive `ke·tau` range instead of relying on
+// a low-order Maclaurin approximation around zero.
+// ============================================================================
+
+fn vp_exp_approx(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { panic("negative exp domain") }
+    if x > 64.0 { panic("exp domain outside trough-screening contract") }
+    let ln2 = 0.6931471805599453
+    var kf = x / ln2
+    var k: i32 = 0
+    if kf >= 0.0 { k = kf as i32 } else { k = (kf as i32) - 1 }
+    let r = x - (k as f64) * ln2
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var n: i32 = 1
+    while n < 28 {
+        term = term * r / (n as f64)
+        sum = sum + term
+        n = n + 1
+    }
+    var result = sum
+    if k >= 0 {
+        var i: i32 = 0
+        while i < k {
+            result = result * 2.0
+            i = i + 1
+        }
+    } else {
+        var j: i32 = 0
+        while j < (0 - k) {
+            result = result / 2.0
+            j = j + 1
+        }
+    }
+    result
+}
+
+fn vp_expm1_pos(theta: f64) -> f64 with Mut, Div, Panic {
+    if theta <= 0.0 { panic("invalid theta") }
+    if theta < 0.001 {
+        let t2 = theta * theta
+        let t3 = t2 * theta
+        let t4 = t3 * theta
+        let t5 = t4 * theta
+        return theta + t2 / 2.0 + t3 / 6.0 + t4 / 24.0 + t5 / 120.0
+    }
+    vp_exp_approx(theta) - 1.0
+}
+
+// ============================================================================
+// STEADY-STATE Cmin (1-compartment approximation of slow phase).
+//
+// ke    = CL / Vc
+// tau   = dosing interval (h)
+// dose  = mg per interval
+//
+// Cmin_ss = (dose / Vc) * exp(-ke*tau) / (1 - exp(-ke*tau))
+//
+// We compute this on Knightian PBoxes by interval extension on the
+// monotone subterms.
+//
+// Hand-derived monotonicity:
+//
+//   Let θ = ke·τ = (CL·τ)/Vc. Cmin = (D/Vc) / (e^θ - 1).
+//
+//   d Cmin / d CL = -(D·τ) e^θ / [Vc² (e^θ - 1)²]                  < 0
+//   d Cmin / d Vc =  D · [e^θ (θ - 1) + 1] / [Vc² (e^θ - 1)²]      > 0  ∀ θ > 0
+//
+//   (h(θ) := e^θ(θ-1) + 1 has h(0)=0, h'(θ) = θ·e^θ > 0 ⇒ h(θ) > 0 ∀ θ > 0.)
+//
+// Therefore Cmin is INCREASING in Vc and DECREASING in CL.
+// PBox image corners:
+//   Cmin_min: (Vc_lo, CL_hi)
+//   Cmin_max: (Vc_hi, CL_lo)
+//
+// Fréchet soundness statement:
+//
+//   Because Cmin is C¹ on the closed rectangle [Vc_lo, Vc_hi] × [CL_lo, CL_hi]
+//   and strictly monotone in each argument with the signs above, the
+//   Theorem in stdlib/epistemic/knightian.sio (`pb_apply2_monotone_inc_dec`)
+//   gives an OUTER ENCLOSURE that holds for ANY joint distribution of
+//   (Vc, CL), including arbitrary or unknown copula. Concretely:
+//
+//     [Cmin(Vc_lo, CL_hi), Cmin(Vc_hi, CL_lo)] ⊇ Cmin(Vc, CL)
+//                                                      almost surely,
+//
+//   for any joint distribution of (Vc, CL) with marginal supports in
+//   the rectangle. This addresses the consensus pushback recorded in
+//   docs/research/knightian_operator_consensus_2026-04-30.md.
+//
+//   Refs: Moore (1966); Williamson & Downs (1990); Ferson et al. (2003).
+//
+// Implementation note: Sounio currently lacks closure literals, so we
+// cannot pass `vp_cmin_point` curried with (dose, τ) to
+// `pb_apply2_monotone_inc_dec`. The body below evaluates the same
+// corner enumeration *inline*; the result is provably equal to what
+// the wrapper would produce. The wrapper itself exists for other
+// 2-arg monotone PBPK / engineering computations.
+// ============================================================================
+
+fn vp_cmin_point(vc: f64, cl: f64, dose: f64, tau: f64) -> f64 with Mut, Div, Panic {
+    if vc <= 0.0 { panic("invalid vc") }
+    if cl <= 0.0 { panic("invalid cl") }
+    if dose <= 0.0 { panic("invalid dose") }
+    if tau <= 0.0 { panic("invalid tau") }
+    let theta = (cl * tau) / vc
+    let denom = vp_expm1_pos(theta)
+    if denom <= 0.0 { panic("invalid cmin denominator") }
+    (dose / vc) / denom
+}
+
+// ============================================================================
+// CONTRACT GATES (refinement-style runtime enforcement).
+// Each returns a vacuous PBox if any precondition fails.
+// ============================================================================
+
+fn vp_dose_valid(dose: f64) -> bool { dose > 0.0 && dose <= 4000.0 }
+fn vp_tau_valid(tau: f64) -> bool { tau >= 4.0 && tau <= 48.0 }
+fn vp_weight_valid(w: f64) -> bool { w >= 30.0 && w <= 200.0 }
+fn vp_crcl_valid(c: f64) -> bool { c > 0.0 && c <= 200.0 }
+fn vp_tdm_valid(t: i64) -> bool { t >= 0 }
+
+// ============================================================================
+// PUBLIC API — predict_cmin_knightian
+// ============================================================================
+
+pub fn predict_cmin_knightian(
+    weight_kg: f64,
+    crcl_ml_min: f64,
+    dose_mg: f64,
+    interval_h: f64,
+    tdm_samples: i64,
+) -> PBox with Mut, Div, Panic {
+    if !vp_dose_valid(dose_mg) { return pb_vacuous() }
+    if !vp_tau_valid(interval_h) { return pb_vacuous() }
+    if !vp_weight_valid(weight_kg) { return pb_vacuous() }
+    if !vp_crcl_valid(crcl_ml_min) { return pb_vacuous() }
+    if !vp_tdm_valid(tdm_samples) { return pb_vacuous() }
+
+    let params = vp_default(weight_kg, crcl_ml_min)
+    let vc = vp_vc_to_pbox(&params, tdm_samples)
+    let cl = vp_cl_to_pbox(&params, tdm_samples)
+    if pb_lo_mean(&vc) <= 0.0 { return pb_vacuous() }
+    if pb_hi_mean(&vc) <= 0.0 { return pb_vacuous() }
+    if pb_lo_mean(&cl) <= 0.0 { return pb_vacuous() }
+    if pb_hi_mean(&cl) <= 0.0 { return pb_vacuous() }
+    if pb_lo_mean(&vc) > pb_hi_mean(&vc) { return pb_vacuous() }
+    if pb_lo_mean(&cl) > pb_hi_mean(&cl) { return pb_vacuous() }
+
+    // Fréchet outer enclosure (see header comment for full statement
+    // and `pb_apply2_monotone_inc_dec` for the general theorem).
+    // Cmin is INCREASING in Vc and DECREASING in CL ⇒
+    //   Cmin_min at (Vc_lo, CL_hi); Cmin_max at (Vc_hi, CL_lo).
+    // Independent of correlation between Vc and CL.
+    let cmin_low = vp_cmin_point(pb_lo_mean(&vc), pb_hi_mean(&cl), dose_mg, interval_h)
+    let cmin_high = vp_cmin_point(pb_hi_mean(&vc), pb_lo_mean(&cl), dose_mg, interval_h)
+
+    let gap = cmin_high - cmin_low
+    if gap < 0.0 { return pb_vacuous() }
+    // Support-only enclosure: the meaningful output is [cmin_low, cmin_high].
+    // Leave variance uncalibrated instead of inventing pseudo-statistics from
+    // an unknown joint distribution.
+    let v = 0.0
+
+    // Structural metadata only: preserve the weaker input confidence. The
+    // support-band gate below is what carries the conservative safety decision.
+    let vc_conf = pb_confidence(&vc)
+    let cl_conf = pb_confidence(&cl)
+    let conf = if vc_conf < cl_conf { vc_conf } else { cl_conf }
+
+    pb_new(cmin_low, cmin_high, v, conf)
+}
+
+// ============================================================================
+// SAFETY GATE — conservative support-band therapeutic-window screen.
+// Refuses if the *band* crosses either boundary. `min_conf` is retained for
+// compatibility, but it is only a structural provenance threshold.
+// ============================================================================
+
+pub fn is_safe_dose(predicted_cmin: &PBox, target_lo: f64, target_hi: f64,
+                    min_conf: i64) -> bool {
+    if pb_confidence(predicted_cmin) <= 0 { return false }
+    if !pb_is_credible(predicted_cmin, min_conf) { return false }
+    pb_within(predicted_cmin, target_lo, target_hi)
+}
+
+// ============================================================================
+// SELF-TEST main()
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    // Standard adult ICU patient: 78.5 kg, CrCl 65 mL/min,
+    // dose 1000 mg q12h. Pre-TDM (0 samples) -> wide band -> REFUSE.
+    let pre = predict_cmin_knightian(78.5, 65.0, 1000.0, 12.0, 0)
+    println(pb_lo_mean(&pre))
+    println(pb_hi_mean(&pre))
+    if is_safe_dose(&pre, 10.0, 20.0, 800) {
+        println("PRE_PRESCRIBE")
+    } else {
+        println("PRE_REFUSE")
+    }
+
+    // Same patient, post-TDM (3 samples) -> narrow band -> safe to prescribe
+    let post = predict_cmin_knightian(78.5, 65.0, 1000.0, 12.0, 3)
+    println(pb_lo_mean(&post))
+    println(pb_hi_mean(&post))
+    if is_safe_dose(&post, 10.0, 20.0, 800) {
+        println("POST_PRESCRIBE")
+    } else {
+        println("POST_REFUSE")
+    }
+
+    // Contract violation: weight 15 kg out of [30, 200]
+    let bad = predict_cmin_knightian(15.0, 65.0, 1000.0, 12.0, 0)
+    if pb_confidence(&bad) == 0 {
+        println("CONTRACT_BLOCK")
+    } else {
+        println("CONTRACT_LEAK")
+    }
+    0
+}

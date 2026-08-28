@@ -1,0 +1,75 @@
+//! Reshape a DataFrame: transpose (swap rows and columns) and one-hot encode a column (get_dummies).
+//!
+//! Functional: the input is unchanged. Self-contained: uses only the public data::dataframe
+//! accessors. Bounded by the DataFrame capacity (64 columns, 1024 rows).
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_set_col_name}
+
+/// Transpose the frame: the result has `nrows` columns and `ncols` rows, with out(i, j) = in(j, i).
+/// Column names are not carried (the new columns correspond to old rows); result columns are named by
+/// their index. Bounded to 64 output columns (i.e. up to 64 input rows).
+pub fn df_transpose(df: &DataFrame) -> DataFrame with Mut, Div, Panic {
+    let nr = df_nrows(df)
+    let nc = df_ncols(df)
+    var ocols = nr
+    if ocols > 64 { ocols = 64 }
+    var out = df_new(ocols)
+    var j: i64 = 0
+    while j < ocols { df_set_col_name(&!out, j, j); j = j + 1 }
+    // one output row per input column
+    var c: i64 = 0
+    while c < nc {
+        var row: [f64; 64] = [0.0; 64]
+        var i: i64 = 0
+        while i < ocols && i < 64 { row[i as usize] = df_get(df, i, c); i = i + 1 }
+        df_add_row(&!out, &row)
+        c = c + 1
+    }
+    out
+}
+
+// Ascending-sorted distinct values of column `col` into cats; returns the count (cap 64).
+fn distinct_cats(df: &DataFrame, col: i64, cats: &![f64; 64]) -> i64 with Mut, Div, Panic {
+    var m: i64 = 0
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        let v = df_get(df, r, col)
+        var i: i64 = 0
+        var found = false
+        while i < m && !found { if cats[i as usize] == v { found = true } i = i + 1 }
+        if !found && m < 64 {
+            var p: i64 = 0
+            while p < m && cats[p as usize] < v { p = p + 1 }
+            var q = m
+            while q > p { cats[q as usize] = cats[(q - 1) as usize]; q = q - 1 }
+            cats[p as usize] = v
+            m = m + 1
+        }
+        r = r + 1
+    }
+    m
+}
+
+/// One-hot encode column `col` (pandas get_dummies): returns a frame with one indicator column per
+/// distinct value of `col` (columns sorted ascending by that value, named by the value). Cell is 1.0
+/// if the row's `col` equals that category, else 0.0. Bounded to 64 categories.
+pub fn df_get_dummies(df: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {
+    var cats: [f64; 64] = [0.0; 64]
+    let k = distinct_cats(df, col, &!cats)
+    var out = df_new(k)
+    var j: i64 = 0
+    while j < k { df_set_col_name(&!out, j, cats[j as usize] as i64); j = j + 1 }
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        var row: [f64; 64] = [0.0; 64]
+        let v = df_get(df, r, col)
+        var c: i64 = 0
+        while c < k && c < 64 {
+            if cats[c as usize] == v { row[c as usize] = 1.0 } else { row[c as usize] = 0.0 }
+            c = c + 1
+        }
+        df_add_row(&!out, &row)
+        r = r + 1
+    }
+    out
+}

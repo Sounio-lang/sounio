@@ -1,0 +1,175 @@
+//@ run-pass
+//@ requires: madaros
+use asn1::der::*
+use bignum::bigint::*
+use net::socket::*
+
+fn read_one_tlv(buf: &RawBuf, len: i64) -> (DerReader, DerTag, i64) with IO {
+    let r = der_reader_new(buf, 0, len)
+    der_read_tlv(&r)
+}
+
+fn main() with IO {
+    // BOOLEAN true: 01 01 FF
+    let b_true = rawbuf_new(3)
+    rawbuf_set(&b_true, 0, 0x01)
+    rawbuf_set(&b_true, 1, 0x01)
+    rawbuf_set(&b_true, 2, 0xFF)
+    let (r1, t1, s1) = read_one_tlv(&b_true, 3)
+    assert(s1 == DER_OK)
+    let (v1, vs1) = der_read_boolean(&r1, &t1)
+    assert(vs1 == DER_OK)
+    assert(v1 == true)
+
+    // BOOLEAN false: 01 01 00
+    let b_false = rawbuf_new(3)
+    rawbuf_set(&b_false, 0, 0x01)
+    rawbuf_set(&b_false, 1, 0x01)
+    rawbuf_set(&b_false, 2, 0x00)
+    let (r2, t2, s2) = read_one_tlv(&b_false, 3)
+    assert(s2 == DER_OK)
+    let (v2, vs2) = der_read_boolean(&r2, &t2)
+    assert(vs2 == DER_OK)
+    assert(v2 == false)
+
+    // BOOLEAN invalid content byte: 01 01 7F -- DER forbids any byte for
+    // true other than 0xFF.
+    let b_bad = rawbuf_new(3)
+    rawbuf_set(&b_bad, 0, 0x01)
+    rawbuf_set(&b_bad, 1, 0x01)
+    rawbuf_set(&b_bad, 2, 0x7F)
+    let (r3, t3, s3) = read_one_tlv(&b_bad, 3)
+    assert(s3 == DER_OK)
+    let (_, vs3) = der_read_boolean(&r3, &t3)
+    assert(vs3 == DER_ERR_BAD_LENGTH_FORM)
+
+    // BOOLEAN with constructed bit set (DER forbids constructed encoding
+    // for BOOLEAN): 21 01 FF -- same length/content as b_true, but tag
+    // byte 0x01 becomes 0x21 (bit 5 set).
+    let b_constructed = rawbuf_new(3)
+    rawbuf_set(&b_constructed, 0, 0x21)
+    rawbuf_set(&b_constructed, 1, 0x01)
+    rawbuf_set(&b_constructed, 2, 0xFF)
+    let (r1c, t1c, s1c) = read_one_tlv(&b_constructed, 3)
+    assert(s1c == DER_OK)
+    let (_, vs1c) = der_read_boolean(&r1c, &t1c)
+    assert(vs1c == DER_ERR_BAD_LENGTH_FORM)
+
+    // NULL valid: 05 00
+    let n_ok = rawbuf_new(2)
+    rawbuf_set(&n_ok, 0, 0x05)
+    rawbuf_set(&n_ok, 1, 0x00)
+    let (r4, t4, s4) = read_one_tlv(&n_ok, 2)
+    assert(s4 == DER_OK)
+    assert(der_read_null(&r4, &t4) == DER_OK)
+
+    // NULL invalid (nonzero length): 05 01 00
+    let n_bad = rawbuf_new(3)
+    rawbuf_set(&n_bad, 0, 0x05)
+    rawbuf_set(&n_bad, 1, 0x01)
+    rawbuf_set(&n_bad, 2, 0x00)
+    let (r5, t5, s5) = read_one_tlv(&n_bad, 3)
+    assert(s5 == DER_OK)
+    assert(der_read_null(&r5, &t5) == DER_ERR_BAD_LENGTH_FORM)
+
+    // NULL with constructed bit set (DER forbids constructed NULL):
+    // 25 00 -- same length/content as n_ok, tag byte 0x05 becomes 0x25.
+    let n_constructed = rawbuf_new(2)
+    rawbuf_set(&n_constructed, 0, 0x25)
+    rawbuf_set(&n_constructed, 1, 0x00)
+    let (r4c, t4c, s4c) = read_one_tlv(&n_constructed, 2)
+    assert(s4c == DER_OK)
+    assert(der_read_null(&r4c, &t4c) == DER_ERR_BAD_LENGTH_FORM)
+
+    // INTEGER small: 02 01 05 -> 5
+    let i_small = rawbuf_new(3)
+    rawbuf_set(&i_small, 0, 0x02)
+    rawbuf_set(&i_small, 1, 0x01)
+    rawbuf_set(&i_small, 2, 0x05)
+    let (r6, t6, s6) = read_one_tlv(&i_small, 3)
+    assert(s6 == DER_OK)
+    let (v6, vs6) = der_read_integer(&r6, &t6)
+    assert(vs6 == DER_OK)
+    assert(bigint_cmp(&v6, &bigint_from_u32(5)) == 0)
+
+    // INTEGER with constructed bit set (DER forbids constructed INTEGER):
+    // 22 01 05 -- same length/content as i_small, tag byte 0x02 becomes
+    // 0x22.
+    let i_constructed = rawbuf_new(3)
+    rawbuf_set(&i_constructed, 0, 0x22)
+    rawbuf_set(&i_constructed, 1, 0x01)
+    rawbuf_set(&i_constructed, 2, 0x05)
+    let (r6c, t6c, s6c) = read_one_tlv(&i_constructed, 3)
+    assert(s6c == DER_OK)
+    let (_, vs6c) = der_read_integer(&r6c, &t6c)
+    assert(vs6c == DER_ERR_BAD_LENGTH_FORM)
+
+    // INTEGER negative-appearing: 02 01 FF -- a single byte with the high
+    // bit set and no leading 0x00 pad represents a NEGATIVE value in
+    // two's-complement. This module only supports non-negative INTEGERs
+    // and must reject this rather than silently reinterpreting it as the
+    // unsigned magnitude 255.
+    let i_negative = rawbuf_new(3)
+    rawbuf_set(&i_negative, 0, 0x02)
+    rawbuf_set(&i_negative, 1, 0x01)
+    rawbuf_set(&i_negative, 2, 0xFF)
+    let (r11, t11, s11) = read_one_tlv(&i_negative, 3)
+    assert(s11 == DER_OK)
+    let (_, vs11) = der_read_integer(&r11, &t11)
+    assert(vs11 == DER_ERR_BAD_LENGTH_FORM)
+
+    // INTEGER with required 0x00 padding: 02 02 00 80 -> 128
+    // (0x80 alone would look negative in two's-complement, so DER pads it).
+    let i_pad = rawbuf_new(4)
+    rawbuf_set(&i_pad, 0, 0x02)
+    rawbuf_set(&i_pad, 1, 0x02)
+    rawbuf_set(&i_pad, 2, 0x00)
+    rawbuf_set(&i_pad, 3, 0x80)
+    let (r7, t7, s7) = read_one_tlv(&i_pad, 4)
+    assert(s7 == DER_OK)
+    let (v7, vs7) = der_read_integer(&r7, &t7)
+    assert(vs7 == DER_OK)
+    assert(bigint_cmp(&v7, &bigint_from_u32(128)) == 0)
+
+    // INTEGER malformed: unnecessary leading zero-padding byte,
+    // 02 02 00 01 -- 0x01's high bit is already clear, so no padding was
+    // needed; the leading 0x00 makes this non-minimal DER.
+    let i_unneeded_pad = rawbuf_new(4)
+    rawbuf_set(&i_unneeded_pad, 0, 0x02)
+    rawbuf_set(&i_unneeded_pad, 1, 0x02)
+    rawbuf_set(&i_unneeded_pad, 2, 0x00)
+    rawbuf_set(&i_unneeded_pad, 3, 0x01)
+    let (r10, t10, s10) = read_one_tlv(&i_unneeded_pad, 4)
+    assert(s10 == DER_OK)
+    let (_, vs10) = der_read_integer(&r10, &t10)
+    assert(vs10 == DER_ERR_BAD_LENGTH_FORM)
+
+    // INTEGER malformed: two leading zero bytes, 02 03 00 00 01.
+    let i_bad = rawbuf_new(5)
+    rawbuf_set(&i_bad, 0, 0x02)
+    rawbuf_set(&i_bad, 1, 0x03)
+    rawbuf_set(&i_bad, 2, 0x00)
+    rawbuf_set(&i_bad, 3, 0x00)
+    rawbuf_set(&i_bad, 4, 0x01)
+    let (r8, t8, s8) = read_one_tlv(&i_bad, 5)
+    assert(s8 == DER_OK)
+    let (_, vs8) = der_read_integer(&r8, &t8)
+    assert(vs8 == DER_ERR_BAD_LENGTH_FORM)
+
+    // INTEGER multi-byte, no padding needed: 02 03 01 00 01 -> 65537.
+    let i_multi = rawbuf_new(5)
+    rawbuf_set(&i_multi, 0, 0x02)
+    rawbuf_set(&i_multi, 1, 0x03)
+    rawbuf_set(&i_multi, 2, 0x01)
+    rawbuf_set(&i_multi, 3, 0x00)
+    rawbuf_set(&i_multi, 4, 0x01)
+    let (r9, t9, s9) = read_one_tlv(&i_multi, 5)
+    assert(s9 == DER_OK)
+    let (v9, vs9) = der_read_integer(&r9, &t9)
+    assert(vs9 == DER_OK)
+    var expected65537 = bigint_mul(&bigint_from_u32(65536), &bigint_from_u32(1))
+    expected65537 = bigint_add(&expected65537, &bigint_from_u32(1))
+    assert(bigint_cmp(&v9, &expected65537) == 0)
+
+    println("asn1_primitives: all cases passed")
+}

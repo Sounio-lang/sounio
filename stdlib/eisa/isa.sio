@@ -1,0 +1,415 @@
+module eisa::isa
+
+use math::dd64::*
+use eisa::core::*
+use str::lib::*
+
+pub fn op_econst() -> i64 { 0 }
+pub fn op_eload() -> i64 { 1 }
+pub fn op_eadd() -> i64 { 2 }
+pub fn op_esub() -> i64 { 3 }
+pub fn op_emul() -> i64 { 4 }
+pub fn op_ediv() -> i64 { 5 }
+pub fn op_esqrt() -> i64 { 6 }
+pub fn op_egate() -> i64 { 7 }
+pub fn op_estore() -> i64 { 8 }
+
+pub struct EInstr {
+    pub op: i64,
+    pub dst: i64,
+    pub a: i64,
+    pub b: i64,
+    pub imm: f64,
+}
+
+pub struct EMachine {
+    pub reg_val: [f64; 16],
+    pub reg_ehi: [f64; 16],
+    pub reg_elo: [f64; 16],
+    pub reg_u: [f64; 16],
+    pub reg_poison: [i64; 16],
+    pub mem_val: [f64; 8],
+    pub mem_ehi: [f64; 8],
+    pub mem_elo: [f64; 8],
+    pub mem_u: [f64; 8],
+    pub last_gate: i64,
+    pub last_poisoned: i64,
+    pub gate_count: i64,
+}
+
+pub struct F64Bits {
+    pub sign: i64,
+    pub exp: i64,
+    pub mant: i64,
+}
+
+// Dual-semantics finiteness detector (see eisa::format and
+// docs/audit/LEAN_SINGLE_NAN_SEMANTICS_2026-07-05.md): on the measured
+// lean_single engine NaN compares EQUAL to any operand, so `x != x` is
+// inert there and the `x == 0.0 && x == 1.0` clause catches NaN instead.
+// Under real IEEE the first clause fires and the second is unreachable.
+pub fn is_finite_f64(x: f64) -> bool {
+    if x != x { return false }
+    if x == 0.0 && x == 1.0 { return false }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    ax <= 1.7976931348623157e308
+}
+
+pub fn is_nan_f64(x: f64) -> bool {
+    if x != x { return true }
+    x == 0.0 && x == 1.0
+}
+
+pub fn make_inf() -> f64 {
+    1.0e308 * 10.0
+}
+
+pub fn make_nan() -> f64 {
+    make_inf() - make_inf()
+}
+
+pub fn f64_decompose(x: f64) -> F64Bits with Mut, Div {
+    if !is_finite_f64(x) {
+        // NaN canonicalises to sign 0: ordered comparisons on NaN are
+        // unreliable on the measured engine, so its sign is unobservable.
+        if is_nan_f64(x) {
+            return F64Bits { sign: 0, exp: 2047, mant: 1 }
+        }
+        let sign = if x < 0.0 { 1 } else { 0 }
+        return F64Bits { sign: sign, exp: 2047, mant: 0 }
+    }
+
+    if x == 0.0 {
+        return F64Bits { sign: 0, exp: 0, mant: 0 }
+    }
+
+    let sign = if x < 0.0 { 1 } else { 0 }
+    var ax = if x < 0.0 { 0.0 - x } else { x }
+    var e = 0
+
+    while ax >= 2.0 {
+        ax = ax * 0.5
+        e = e + 1
+    }
+    while ax < 1.0 {
+        ax = ax * 2.0
+        e = e - 1
+    }
+
+    var be = e + 1023
+    if be <= 0 {
+        be = 0
+        return F64Bits { sign: sign, exp: be, mant: 0 }
+    }
+
+    var frac = ax - 1.0
+    var m = 0
+    var i = 0
+    while i < 52 {
+        m = m * 2
+        frac = frac * 2.0
+        if frac >= 1.0 {
+            m = m + 1
+            frac = frac - 1.0
+        }
+        i = i + 1
+    }
+
+    F64Bits { sign: sign, exp: be, mant: m }
+}
+
+pub fn f64_recompose(b: F64Bits) -> f64 with Mut, Div {
+    if b.exp == 2047 {
+        if b.mant == 0 {
+            if b.sign == 1 { 0.0 - make_inf() } else { make_inf() }
+        } else {
+            make_nan()
+        }
+    } else {
+        if b.exp == 0 {
+            if b.sign == 1 { 0.0 - 0.0 } else { 0.0 }
+        } else {
+            var two_pow_52 = 1.0
+            var p = 0
+            while p < 52 {
+                two_pow_52 = two_pow_52 * 2.0
+                p = p + 1
+            }
+
+            var frac = 0.0
+            var m = b.mant
+            var i = 0
+            while i < 52 {
+                let bit = m % 2
+                if bit == 1 {
+                    frac = frac + 1.0 / two_pow_52
+                }
+                m = m / 2
+                two_pow_52 = two_pow_52 * 0.5
+                i = i + 1
+            }
+
+            var y = 1.0 + frac
+            var e = b.exp - 1023
+            if e > 0 {
+                var up = 0
+                while up < e {
+                    y = y * 2.0
+                    up = up + 1
+                }
+            } else {
+                if e < 0 {
+                    let down = 0 - e
+                    var dn = 0
+                    while dn < down {
+                        y = y * 0.5
+                        dn = dn + 1
+                    }
+                }
+            }
+
+            if b.sign == 1 { 0.0 - y } else { y }
+        }
+    }
+}
+
+pub fn emachine_new() -> EMachine {
+    EMachine {
+        reg_val: [0.0; 16],
+        reg_ehi: [0.0; 16],
+        reg_elo: [0.0; 16],
+        reg_u: [0.0; 16],
+        reg_poison: [0; 16],
+        mem_val: [0.0; 8],
+        mem_ehi: [0.0; 8],
+        mem_elo: [0.0; 8],
+        mem_u: [0.0; 8],
+        last_gate: 99,
+        last_poisoned: 0,
+        gate_count: 0,
+    }
+}
+
+fn idx_reg_ok(i: i64) -> bool {
+    i >= 0 && i < 16
+}
+
+fn idx_mem_ok(i: i64) -> bool {
+    i >= 0 && i < 8
+}
+
+fn reg_lane_all_finite(m: &EMachine, r: i64) -> bool with Panic {
+    is_finite_f64(m.reg_val[r as usize]) &&
+    is_finite_f64(m.reg_ehi[r as usize]) &&
+    is_finite_f64(m.reg_elo[r as usize]) &&
+    is_finite_f64(m.reg_u[r as usize])
+}
+
+fn set_reg_poison(m: &!EMachine, r: i64) with Mut, Panic {
+    m.reg_val[r as usize] = make_nan()
+    m.reg_ehi[r as usize] = 0.0
+    m.reg_elo[r as usize] = 0.0
+    m.reg_u[r as usize] = make_inf()
+    m.reg_poison[r as usize] = 1
+}
+
+fn write_reg_clean(m: &!EMachine, r: i64, reg: EReg) with Mut, Panic {
+    m.reg_val[r as usize] = reg.val
+    m.reg_ehi[r as usize] = reg.err.hi
+    m.reg_elo[r as usize] = reg.err.lo
+    m.reg_u[r as usize] = reg.u
+    m.reg_poison[r as usize] = 0
+}
+
+fn reg_to_ereg(m: &EMachine, r: i64) -> EReg with Panic {
+    // Residual: the machine register file has no origin lane. Reconstituted
+    // EReg values are origin 0 (unknown) — ISA-level x+x still uses RSS.
+    // Core ops on EReg (this lane) are the surface that corrects the number.
+    EReg {
+        val: m.reg_val[r as usize],
+        err: Dd64 { hi: m.reg_ehi[r as usize], lo: m.reg_elo[r as usize] },
+        u: m.reg_u[r as usize],
+        origin: 0,
+    }
+}
+
+fn f64bits_to_str(b: F64Bits) -> Str with Mut, Div, Panic {
+    let s = str_from_literal("s")
+    let sv = str_from_i64(b.sign)
+    let p0 = str_cat(&s, &sv)
+    let e = str_from_literal("e")
+    let p1 = str_cat(&p0, &e)
+    let ev = str_from_i64(b.exp)
+    let p2 = str_cat(&p1, &ev)
+    let m = str_from_literal("m")
+    let p3 = str_cat(&p2, &m)
+    let mv = str_from_i64(b.mant)
+    str_cat(&p3, &mv)
+}
+
+fn emit_receipt(m: &EMachine, r: i64) -> i64 with IO, Mut, Div, Panic {
+    let err = Dd64 { hi: m.reg_ehi[r as usize], lo: m.reg_elo[r as usize] }
+    let roundoff = dd_to_f64(dd_abs(err))
+    let rb = f64_decompose(roundoff)
+    let ub = f64_decompose(m.reg_u[r as usize])
+    let rs = f64bits_to_str(rb)
+    let us = f64bits_to_str(ub)
+
+    let p0 = str_from_literal("eisa-receipt: v=0 gate=")
+    let p1n = str_from_i64(m.last_gate)
+    let p1 = str_cat(&p0, &p1n)
+    let lit_round = str_from_literal(" roundoff=")
+    let p2 = str_cat(&p1, &lit_round)
+    let p3 = str_cat(&p2, &rs)
+    let lit_u = str_from_literal(" u=")
+    let p4 = str_cat(&p3, &lit_u)
+    let p5 = str_cat(&p4, &us)
+    let lit_site = str_from_literal(" site=#")
+    let p6 = str_cat(&p5, &lit_site)
+    let gate_n = str_from_i64(m.gate_count)
+    let p7 = str_cat(&p6, &gate_n)
+    let lit_policy = str_from_literal(" policy=10/100 cov=assumed-zero poisoned=")
+    let p8 = str_cat(&p7, &lit_policy)
+    let poisoned_n = str_from_i64(m.last_poisoned)
+    let p9 = str_cat(&p8, &poisoned_n)
+    println(str_to_string(p9))
+    0
+}
+
+pub fn eisa_step(m: &!EMachine, ins: EInstr) -> i64 with IO, Mut, Div, Panic {
+    if ins.op == op_econst() {
+        if !idx_reg_ok(ins.dst) { return 1 }
+        if !is_finite_f64(ins.imm) { return 1 }
+        m.reg_val[ins.dst as usize] = ins.imm
+        m.reg_ehi[ins.dst as usize] = 0.0
+        m.reg_elo[ins.dst as usize] = 0.0
+        m.reg_u[ins.dst as usize] = 0.0
+        m.reg_poison[ins.dst as usize] = 0
+        return 0
+    }
+
+    if ins.op == op_eload() {
+        if !idx_reg_ok(ins.dst) { return 1 }
+        if !idx_mem_ok(ins.a) { return 1 }
+        if m.mem_u[ins.a as usize] < 0.0 { return 1 }
+        if !is_finite_f64(m.mem_val[ins.a as usize]) ||
+           !is_finite_f64(m.mem_ehi[ins.a as usize]) ||
+           !is_finite_f64(m.mem_elo[ins.a as usize]) ||
+           !is_finite_f64(m.mem_u[ins.a as usize]) {
+            set_reg_poison(m, ins.dst)
+        } else {
+            m.reg_val[ins.dst as usize] = m.mem_val[ins.a as usize]
+            m.reg_ehi[ins.dst as usize] = m.mem_ehi[ins.a as usize]
+            m.reg_elo[ins.dst as usize] = m.mem_elo[ins.a as usize]
+            m.reg_u[ins.dst as usize] = m.mem_u[ins.a as usize]
+            m.reg_poison[ins.dst as usize] = 0
+        }
+        return 0
+    }
+
+    if ins.op == op_eadd() || ins.op == op_esub() || ins.op == op_emul() || ins.op == op_ediv() {
+        if !idx_reg_ok(ins.dst) { return 1 }
+        if !idx_reg_ok(ins.a) { return 1 }
+        if !idx_reg_ok(ins.b) { return 1 }
+        if m.reg_poison[ins.a as usize] == 1 || m.reg_poison[ins.b as usize] == 1 {
+            set_reg_poison(m, ins.dst)
+            return 0
+        }
+        if !reg_lane_all_finite(m, ins.a) || !reg_lane_all_finite(m, ins.b) {
+            set_reg_poison(m, ins.dst)
+            return 0
+        }
+        let ra = reg_to_ereg(m, ins.a)
+        let rb = reg_to_ereg(m, ins.b)
+        if ins.op == op_ediv() && rb.val == 0.0 {
+            set_reg_poison(m, ins.dst)
+            return 0
+        }
+        let rz = if ins.op == op_eadd() {
+            eadd(ra, rb)
+        } else {
+            if ins.op == op_esub() {
+                esub(ra, rb)
+            } else {
+                if ins.op == op_emul() {
+                    emul(ra, rb)
+                } else {
+                    ediv(ra, rb)
+                }
+            }
+        }
+        if !is_finite_f64(rz.val) || !is_finite_f64(rz.err.hi) || !is_finite_f64(rz.err.lo) || !is_finite_f64(rz.u) {
+            set_reg_poison(m, ins.dst)
+        } else {
+            write_reg_clean(m, ins.dst, rz)
+        }
+        return 0
+    }
+
+    if ins.op == op_esqrt() {
+        if !idx_reg_ok(ins.dst) { return 1 }
+        if !idx_reg_ok(ins.a) { return 1 }
+        if m.reg_poison[ins.a as usize] == 1 {
+            set_reg_poison(m, ins.dst)
+            return 0
+        }
+        if !reg_lane_all_finite(m, ins.a) {
+            set_reg_poison(m, ins.dst)
+            return 0
+        }
+        let ra = reg_to_ereg(m, ins.a)
+        let rz = esqrt(ra)
+        if !is_finite_f64(rz.val) || !is_finite_f64(rz.err.hi) || !is_finite_f64(rz.err.lo) || !is_finite_f64(rz.u) {
+            set_reg_poison(m, ins.dst)
+        } else {
+            write_reg_clean(m, ins.dst, rz)
+        }
+        return 0
+    }
+
+    if ins.op == op_egate() {
+        if !idx_reg_ok(ins.dst) { return 1 }
+        m.gate_count = m.gate_count + 1
+        if m.reg_poison[ins.dst as usize] == 1 {
+            m.last_gate = 2
+            m.last_poisoned = 1
+        } else {
+            let r = reg_to_ereg(m, ins.dst)
+            m.last_gate = egate(r, 2)
+            m.last_poisoned = 0
+        }
+        let _x = emit_receipt(m, ins.dst)
+        return 0
+    }
+
+    if ins.op == op_estore() {
+        if !idx_reg_ok(ins.dst) { return 1 }
+        if !idx_mem_ok(ins.a) { return 1 }
+        m.mem_val[ins.a as usize] = m.reg_val[ins.dst as usize]
+        m.mem_ehi[ins.a as usize] = m.reg_ehi[ins.dst as usize]
+        m.mem_elo[ins.a as usize] = m.reg_elo[ins.dst as usize]
+        m.mem_u[ins.a as usize] = m.reg_u[ins.dst as usize]
+        return 0
+    }
+
+    1
+}
+
+pub fn eisa_run(m: &!EMachine, prog: &[EInstr; 32], n: i64) -> i64 with IO, Mut, Div, Panic {
+    if n < 0 || n > 32 { return 1 }
+    var pc = 0
+    while pc < n {
+        let rc = eisa_step(m, prog[pc as usize])
+        if rc != 0 { return 1 }
+        pc = pc + 1
+    }
+    0
+}
+
+pub fn emachine_last_gate(m: &EMachine) -> i64 {
+    m.last_gate
+}
+
+pub fn emachine_last_poisoned(m: &EMachine) -> i64 {
+    m.last_poisoned
+}

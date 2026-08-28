@@ -1,0 +1,241 @@
+// Graphics Boxplot — Raster box plot rendering
+//
+// Box plots with median, Q1, Q3, whiskers.
+
+use graphics::drawing::{Color, color_white, color_blue, color_red, color_black}
+use graphics::surface::{Surface, surface_new, surface_clear, surface_draw_rect, surface_draw_line}
+use graphics::tile::{TiledSurface, tiled_surface_new, tiled_clear, tiled_draw_rect, tiled_draw_line, tiled_export_png}
+use graphics::png::{png_encode_surface}
+
+pub struct BoxPlotConfig {
+    pub margin: i64,
+    pub box_color: Color,
+    pub median_color: Color,
+    pub whisker_color: Color,
+    pub bg_color: Color,
+    pub axis_color: Color,
+    pub box_width: i64,
+}
+
+pub fn boxplot_config_default() -> BoxPlotConfig {
+    BoxPlotConfig {
+        margin: 20,
+        box_color: color_blue(),
+        median_color: color_red(),
+        whisker_color: color_black(),
+        bg_color: color_white(),
+        axis_color: color_black(),
+        box_width: 20,
+    }
+}
+
+fn min_f64(arr: &[f64; 256], n: i64) -> f64 with Mut, Panic {
+    if n <= 0 { return 0.0 }
+    var m = arr[0]
+    var i: i64 = 1
+    while i < n {
+        if arr[i] < m { m = arr[i] }
+        i = i + 1
+    }
+    m
+}
+
+fn max_f64(arr: &[f64; 256], n: i64) -> f64 with Mut, Panic {
+    if n <= 0 { return 0.0 }
+    var m = arr[0]
+    var i: i64 = 1
+    while i < n {
+        if arr[i] > m { m = arr[i] }
+        i = i + 1
+    }
+    m
+}
+
+fn bubble_sort_f64(arr: [f64; 256], n: i64) -> [f64; 256] with Mut, Panic {
+    var out = arr
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = 0
+        while j < n - i - 1 {
+            if out[j] > out[j + 1] {
+                let t = out[j]
+                out[j] = out[j + 1]
+                out[j + 1] = t
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+fn median_f64(arr: &[f64; 256], n: i64) -> f64 with Mut, Panic {
+    if n <= 0 { return 0.0 }
+    var tmp: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < n {
+        tmp[i] = arr[i]
+        i = i + 1
+    }
+    let sorted = bubble_sort_f64(tmp, n)
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) * 0.5
+    }
+}
+
+fn q1_f64(arr: &[f64; 256], n: i64) -> f64 with Mut, Panic {
+    if n <= 0 { return 0.0 }
+    var tmp: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < n {
+        tmp[i] = arr[i]
+        i = i + 1
+    }
+    let sorted = bubble_sort_f64(tmp, n)
+    let half = n / 2
+    if half == 0 { return sorted[0] }
+    if half % 2 == 1 {
+        sorted[half / 2]
+    } else {
+        (sorted[half / 2 - 1] + sorted[half / 2]) * 0.5
+    }
+}
+
+fn q3_f64(arr: &[f64; 256], n: i64) -> f64 with Mut, Panic {
+    if n <= 0 { return 0.0 }
+    var tmp: [f64; 256] = [0.0; 256]
+    var i: i64 = 0
+    while i < n {
+        tmp[i] = arr[i]
+        i = i + 1
+    }
+    let sorted = bubble_sort_f64(tmp, n)
+    let half = n / 2
+    let start = if n % 2 == 0 { half } else { half + 1 }
+    let len = n - start
+    if len <= 0 { return sorted[start] }
+    if len % 2 == 1 {
+        sorted[start + len / 2]
+    } else {
+        (sorted[start + len / 2 - 1] + sorted[start + len / 2]) * 0.5
+    }
+}
+
+fn scale_y_to_pixel(v: f64, vmin: f64, vmax: f64, plot_h: i64, margin: i64, height: i64) -> i64 with Div, Panic {
+    let vrange = vmax - vmin
+    let vnorm = if vrange == 0.0 { 0.0 } else { (v - vmin) / vrange }
+    height - margin - 1 - (vnorm * (plot_h as f64)) as i64
+}
+
+pub fn draw_boxplot_raster(s: Surface, data: &[f64; 256], n: i64, cx: i64, config: BoxPlotConfig) -> Surface with Mut, Panic, Div {
+    if n <= 0 { return s }
+    var out = s
+
+    let plot_h = out.height - config.margin * 2
+    let vmin = min_f64(data, n)
+    let vmax = max_f64(data, n)
+
+    let q1 = q1_f64(data, n)
+    let med = median_f64(data, n)
+    let q3 = q3_f64(data, n)
+
+    let y_min = scale_y_to_pixel(vmin, vmin, vmax, plot_h, config.margin, out.height)
+    let y_max = scale_y_to_pixel(vmax, vmin, vmax, plot_h, config.margin, out.height)
+    let y_q1 = scale_y_to_pixel(q1, vmin, vmax, plot_h, config.margin, out.height)
+    let y_q3 = scale_y_to_pixel(q3, vmin, vmax, plot_h, config.margin, out.height)
+    let y_med = scale_y_to_pixel(med, vmin, vmax, plot_h, config.margin, out.height)
+
+    let half_w = config.box_width / 2
+    let left = cx - half_w
+    let right = cx + half_w
+
+    // Vertical whisker from min to max
+    out = surface_draw_line(out, cx, y_min, cx, y_max, config.whisker_color)
+
+    // Box from Q1 to Q3 (filled rect)
+    let box_top = if y_q3 < y_q1 { y_q3 } else { y_q1 }
+    let box_bottom = if y_q3 > y_q1 { y_q3 } else { y_q1 }
+    let box_h = box_bottom - box_top + 1
+    if box_h < 1 {
+        out = surface_draw_rect(out, left, box_top, config.box_width, 1, config.box_color)
+    } else {
+        out = surface_draw_rect(out, left, box_top, config.box_width, box_h, config.box_color)
+    }
+
+    // Median line across the box
+    out = surface_draw_line(out, left, y_med, right, y_med, config.median_color)
+
+    out
+}
+
+pub fn tiled_draw_boxplot_raster(ts: TiledSurface, data: &[f64; 256], n: i64, cx: i64, config: BoxPlotConfig) -> TiledSurface with Mut, Panic, Div {
+    if n <= 0 { return ts }
+    var out = ts
+
+    let plot_h = out.height - config.margin * 2
+    let vmin = min_f64(data, n)
+    let vmax = max_f64(data, n)
+
+    let q1 = q1_f64(data, n)
+    let med = median_f64(data, n)
+    let q3 = q3_f64(data, n)
+
+    let y_min = scale_y_to_pixel(vmin, vmin, vmax, plot_h, config.margin, out.height)
+    let y_max = scale_y_to_pixel(vmax, vmin, vmax, plot_h, config.margin, out.height)
+    let y_q1 = scale_y_to_pixel(q1, vmin, vmax, plot_h, config.margin, out.height)
+    let y_q3 = scale_y_to_pixel(q3, vmin, vmax, plot_h, config.margin, out.height)
+    let y_med = scale_y_to_pixel(med, vmin, vmax, plot_h, config.margin, out.height)
+
+    let half_w = config.box_width / 2
+    let left = cx - half_w
+    let right = cx + half_w
+
+    out = tiled_draw_line(out, cx, y_min, cx, y_max, config.whisker_color)
+
+    let box_top = if y_q3 < y_q1 { y_q3 } else { y_q1 }
+    let box_bottom = if y_q3 > y_q1 { y_q3 } else { y_q1 }
+    let box_h = box_bottom - box_top + 1
+    if box_h < 1 {
+        out = tiled_draw_rect(out, left, box_top, config.box_width, 1, config.box_color)
+    } else {
+        out = tiled_draw_rect(out, left, box_top, config.box_width, box_h, config.box_color)
+    }
+
+    out = tiled_draw_line(out, left, y_med, right, y_med, config.median_color)
+
+    out
+}
+
+pub fn plot_boxplot_png(data: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {
+    var s = surface_new(width, height)
+    s = surface_clear(s, color_white())
+    let config = boxplot_config_default()
+    let cx = width / 2
+    s = draw_boxplot_raster(s, data, n, cx, config)
+
+    let plot_w = width - config.margin * 2
+    let plot_h = height - config.margin * 2
+    s = surface_draw_rect(s, config.margin, config.margin, 1, plot_h, config.axis_color)
+    s = surface_draw_rect(s, config.margin, height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    png_encode_surface(&s, filename)
+}
+
+pub fn tiled_plot_boxplot_png(data: &[f64; 256], n: i64, width: i64, height: i64, filename: string) -> bool with IO, Mut, Panic, Div {
+    var ts = tiled_surface_new(width, height, 256, 256)
+    ts = tiled_clear(ts, color_white())
+    let config = boxplot_config_default()
+    let cx = width / 2
+    ts = tiled_draw_boxplot_raster(ts, data, n, cx, config)
+
+    let plot_w = width - config.margin * 2
+    let plot_h = height - config.margin * 2
+    ts = tiled_draw_rect(ts, config.margin, config.margin, 1, plot_h, config.axis_color)
+    ts = tiled_draw_rect(ts, config.margin, height - config.margin - 1, plot_w, 1, config.axis_color)
+
+    tiled_export_png(&ts, filename)
+}
+
+fn main() -> i32 with IO { 0 }

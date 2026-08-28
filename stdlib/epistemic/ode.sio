@@ -83,7 +83,7 @@ fn estate_new(n: i64) -> EState {
     }
 }
 
-fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) {
+fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) with Mut {
     if idx >= 0 && idx < 64 {
         s.values[idx] = val
         s.variances[idx] = var_
@@ -147,7 +147,7 @@ fn ode_params_new() -> ODEParams {
     }
 }
 
-fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) {
+fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
     if idx >= 0 && idx < 64 {
         p.params[idx] = val
         p.param_variances[idx] = var_
@@ -202,6 +202,10 @@ fn ode_system_linear_3() -> ODESystem {
     ODESystem { system_id: 4, n_dims: 3 }
 }
 
+fn ode_system_chem_simple() -> ODESystem {
+    ODESystem { system_id: 5, n_dims: 4 }
+}
+
 // ============================================================================
 // Solver options
 // ============================================================================
@@ -249,13 +253,13 @@ fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -
 // Max 1024 time points, max 64 state dimensions
 // ============================================================================
 
-struct ODESolution {
+pub struct ODESolution {
     times: [f64; 1024],
     // State values at each time: values[step * 64 + dim]
     values: [f64; 4096],
     // Variances at each time: variances[step * 64 + dim]
     variances: [f64; 4096],
-    n_steps: i64,
+    pub n_steps: i64,
     n_dims: i64,
     total_error: f64,
     n_rhs_evals: i64,
@@ -819,7 +823,23 @@ fn propagate_variance_gum(
 // General-Purpose RK4 Step
 // ============================================================================
 
-fn rk4_step(
+// `*n = *n + 1` written inline after an earlier function-call statement in the
+// same function corrupts lean_single's type inference for that dereference
+// assignment ("arithmetic operands must have matching numeric types", even for
+// a pure literal write with no arithmetic at all — isolated with a minimal
+// repro outside stdlib). Extracting the read-modify-write into its own
+// function sidesteps it: the bump happens as that function's first and only
+// statement, which is unaffected.
+fn bump_n_evals(n: &!i64) with Mut {
+    *n = *n + 1
+}
+
+// Renamed from `rk4_step` to avoid a bundle-level name collision with the public
+// `ode::rk4::rk4_step` (a different arity). Both are pulled in together by
+// `chemistry::kinetics`; name-only call resolution would otherwise mis-resolve
+// this module's internal call and silently miscompile. Private helper, so the
+// rename is local to this file.
+fn eode_rk4_step(
     sys: &ODESystem,
     t: f64,
     state: &!EState,
@@ -836,22 +856,22 @@ fn rk4_step(
 
     // k1 = f(t, y)
     ode_rhs_dispatch(sys, t, state, p, &!k1)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // k2 = f(t + dt/2, y + dt/2 * k1)
     estate_axpy(&!tmp, state, 0.5 * dt, &k1)
     ode_rhs_dispatch(sys, t + 0.5 * dt, &tmp, p, &!k2)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // k3 = f(t + dt/2, y + dt/2 * k2)
     estate_axpy(&!tmp, state, 0.5 * dt, &k2)
     ode_rhs_dispatch(sys, t + 0.5 * dt, &tmp, p, &!k3)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // k4 = f(t + dt, y + dt * k3)
     estate_axpy(&!tmp, state, dt, &k3)
     ode_rhs_dispatch(sys, t + dt, &tmp, p, &!k4)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // y_{n+1} = y_n + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
     var i = 0
@@ -898,12 +918,12 @@ fn rk45_step(
 
     // Stage 1
     ode_rhs_dispatch(sys, t, state, p, &!k1)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // Stage 2: t + dt/5, y + dt*(1/5)*k1
     estate_axpy(&!tmp, state, dt * 0.2, &k1)
     ode_rhs_dispatch(sys, t + 0.2 * dt, &tmp, p, &!k2)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // Stage 3: t + 3dt/10, y + dt*(3/40*k1 + 9/40*k2)
     var i = 0
@@ -914,7 +934,7 @@ fn rk45_step(
         i = i + 1
     }
     ode_rhs_dispatch(sys, t + 0.3 * dt, &tmp, p, &!k3)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // Stage 4: t + 4dt/5, y + dt*(44/45*k1 - 56/15*k2 + 32/9*k3)
     i = 0
@@ -927,7 +947,7 @@ fn rk45_step(
         i = i + 1
     }
     ode_rhs_dispatch(sys, t + 0.8 * dt, &tmp, p, &!k4)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // Stage 5: t + 8dt/9
     i = 0
@@ -941,7 +961,7 @@ fn rk45_step(
         i = i + 1
     }
     ode_rhs_dispatch(sys, t + 0.888888888888889 * dt, &tmp, p, &!k5)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // Stage 6: t + dt
     i = 0
@@ -956,7 +976,7 @@ fn rk45_step(
         i = i + 1
     }
     ode_rhs_dispatch(sys, t + dt, &tmp, p, &!k6)
-    *n_evals = *n_evals + 1
+    bump_n_evals(n_evals)
 
     // 5th-order solution (used as the step)
     // b5 = [142/1105, 0, 6570212/46116585, 22482/69174, 8028/28325, -8192/34125]
@@ -1022,7 +1042,7 @@ fn solve_ode(
         let dt = ode_min(opts.dt, t_end - t)
         if dt <= 0.0 { t = t_end }
         else {
-            rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
+            eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
             t = t + dt
             step = step + 1
             solution_record(&!sol, t, &state)
@@ -1382,7 +1402,7 @@ fn gate_bpr(conf: f64, min_conf: f64) -> EpistemicGate {
 //   ISO 17025:2017 §7.8.2 — "Calibration certificate content"
 // ============================================================================
 
-fn print_uncertainty_budget(budget: &UncertaintyBudget) with IO {
+fn print_uncertainty_budget(budget: &UncertaintyBudget) with IO, Mut {
     println("  === ISO GUM Uncertainty Budget (JCGM 100:2008 §8) ===")
     println("  Dimension | σ_initial | σ_final   | Growth ratio")
     println("  ---------------------------------------------------------")

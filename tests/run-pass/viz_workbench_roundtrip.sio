@@ -1,0 +1,97 @@
+// tests/run-pass/viz_workbench_roundtrip.sio - Workbench Visual IR roundtrip proof
+//
+// Expected output includes:
+//   data-viz-tag="9101"
+//   VIZ_WORKBENCH_ROUNDTRIP_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use display::event::{Event}
+use viz::audit::{viz_audit_hash, viz_audit_node_hash}
+use viz::editor::{viz_editor_resize_selected, viz_editor_set_selected_tag}
+use viz::inspector::{viz_inspector_draw, viz_inspector_select, viz_inspector_draw_node_highlights}
+use viz::ir::{viz_scene_new}
+use viz::viz_app::{viz_app_new, viz_app_frame_hash}
+use viz::viz_canvas::{viz_canvas_render_scene}
+use viz::viz_html::{viz_html_emit_scene}
+use viz::viz_replay::{viz_replay_trace_events}
+use viz::workbench::{viz_workbench_build_scene, viz_workbench_default_events}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pix = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pix, width: w, height: h }
+}
+
+fn read_px(c: &Canvas, x: i64, y: i64) -> i64 {
+    read_i64(c.pixels, y * c.width + x)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    var scene = viz_scene_new()
+    let ids = viz_workbench_build_scene(&!scene)
+    var app = viz_app_new(10, 13, 18)
+    var c = make_canvas(480, 320)
+
+    canvas_clear(&!c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!c)
+    app.frame = app.frame + 1
+    app.dirty = false
+    let initial_hash = viz_app_frame_hash(&app, &scene, &c)
+    let initial_audit = viz_audit_hash(&scene)
+
+    assert(scene.node_count == 16)
+    assert(scene.series_count == 2)
+    assert(scene.heatmap_count == 2)
+    assert(scene.molecule_count == 1)
+    assert(scene.field_count == 1)
+    assert(scene.vector_field_count == 1)
+    assert(scene.trajectory_count == 1)
+    assert(scene.spectrum_count == 1)
+    assert(scene.mesh_count == 1)
+    assert(scene.nodes[ids.slider as usize].tag == 8101)
+    assert(scene.nodes[ids.plot as usize].tag == 8201)
+    assert(ids.molecule == 0)
+    assert(scene.nodes[ids.vector_field as usize].tag == 8401)
+    assert(scene.nodes[ids.mesh as usize].tag == 8501)
+    assert(scene.nodes[ids.viewport as usize].tag == 8603)
+    assert(initial_hash != 0)
+    assert(initial_audit != 0)
+    assert(read_px(&c, 30, 60) != 0)
+    assert(read_px(&c, 42, 150) != 0)
+    assert(read_px(&c, 370, 160) != 0)
+
+    var events: [Event; 32] = [Event { kind: 0, key: 0, x: 0, y: 0, mods: 0 }; 32]
+    let event_count = viz_workbench_default_events(&!events)
+    let replay = viz_replay_trace_events(&!app, &!scene, &!c, &events, event_count)
+    assert(replay.count == event_count + 1)
+    assert(replay.frames[1].changed)
+    assert(replay.frames[2].changed)
+    assert(replay.frames[3].active_tab == 3)
+    assert(replay.frames[5].selected_node == ids.toggle)
+    assert(scene.active_tab == 3)
+    assert(scene.time == 5.0)
+    assert(scene.nodes[ids.slider as usize].value == 5.0)
+    assert(scene.nodes[ids.toggle as usize].value == 1.0)
+    assert(viz_app_frame_hash(&app, &scene, &c) != initial_hash)
+
+    viz_inspector_draw(&scene, &!c, 306, 16, 156, 146)
+    let selected = viz_inspector_select(&!scene, 306, 16, 156, 146, 318, 101)
+    assert(selected == ids.slider)
+    let before_node = viz_audit_node_hash(&scene, ids.slider)
+    assert(viz_editor_set_selected_tag(&!scene, 9101))
+    assert(viz_editor_resize_selected(&!scene, 12, 0, 24, 8))
+    assert(scene.nodes[ids.slider as usize].tag == 9101)
+    assert(scene.nodes[ids.slider as usize].layout.w == 182)
+    assert(viz_audit_node_hash(&scene, ids.slider) != before_node)
+
+    canvas_clear(&!c, app.bg_r, app.bg_g, app.bg_b)
+    viz_canvas_render_scene(&scene, &!c)
+    viz_inspector_draw_node_highlights(&scene, &!c)
+    viz_inspector_draw(&scene, &!c, 306, 16, 156, 146)
+    assert(read_px(&c, 14, 226) != 0)
+    assert(read_px(&c, 318, 101) != 0)
+
+    viz_html_emit_scene(&scene, 480, 320)
+
+    heap_free(c.pixels as *mut i8)
+    println("VIZ_WORKBENCH_ROUNDTRIP_PASS")
+}

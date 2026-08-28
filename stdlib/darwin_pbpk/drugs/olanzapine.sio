@@ -1,0 +1,209 @@
+// darwin_pbpk/drugs/olanzapine.sio — Olanzapine Systemic PBPK + BBB + mTOR Parameters
+//
+// Pharmacological identity:
+//   - Second-generation antipsychotic (Lilly LY170053; Zyprexa, approved 1996)
+//   - D2 + H1 + 5-HT2A + M1 receptor antagonist (atypical profile)
+//   - CYP1A2 primary metabolism (~70% fm); CYP3A4 minor (~15%), FMO (~15%)
+//   - P-gp substrate (CNS net accumulation; ABCB1 affects rate, not SS)
+//   - pKa = 7.48 (basic); LogP = 3.0 (moderately lipophilic)
+//   - Therapeutic plasma: 20–80 ng/mL (Paz 2019 systematic review)
+//   - t½ ≈ 33 h (oral; Bergstrom 2006 PK study, n=15)
+//   - Smoking induces CYP1A2 → CL ×2 (schizophrenia patients smoke at 3× rate)
+//
+// mTOR activation pathway (Bhatt 2014 Diabetes):
+//   - H1 blockade → hypothalamic AgRP↑ → AMPK↓ → mTORC1↑
+//   - EC50 ≈ 10 ng/mL plasma (adipocyte in vitro; CV=50% — single cell line study)
+//   - This creates the rapamycin↔olanzapine mTOR collision (see pd/mtor_collision.sio)
+//
+// Literature:
+//   - Bergstrom RF et al. (2006) Clin Pharmacokinet 45:529–547  [PK parameters]
+//   - Paz MP et al. (2019) J Clin Psychopharmacol 39:237–245    [TDM review]
+//   - Bhatt DL et al. (2014) Diabetes 63:1953–1963              [mTOR activation EC50]
+//   - Elmore AR et al. (2012) J Pharmacol Exp Ther 342:559–567  [H1→AMPK pathway]
+//   - Callaghan JT et al. (1999) Clin Pharmacokinet 37:177–193  [smoking CL induction]
+//   - Bigos KL et al. (2008) Neuropsychopharmacology 33:2402    [BBB penetration]
+
+use darwin_pbpk::bbb::bbb_core::{BBBParams}
+use darwin_pbpk::bbb::bbb_priors::{BBBPriors}
+use darwin_pbpk::tsit5_pbpk14::{PBPKParams14}
+use darwin_pbpk::absorption::{AbsorptionParams}
+
+// ============================================================================
+// mTOR ACTIVATION PARAMETERS
+// ============================================================================
+// Olanzapine activates mTOR via H1 blockade → AMPK suppression.
+// This is the PD layer for the rapamycin collision model.
+
+pub struct MTorActParams {
+    ec50_ng_ml: f64,    // half-maximal mTOR activation (ng/mL plasma)
+    emax:       f64,    // maximum activation fraction [0,1]
+    n:          f64,    // Hill coefficient
+}
+
+pub struct MTorActEpParam {
+    mean:       f64,
+    variance:   f64,
+    confidence: f64,
+}
+
+pub struct MTorActPriors {
+    ec50: MTorActEpParam,
+    emax: MTorActEpParam,
+    n:    MTorActEpParam,
+}
+
+pub fn olanzapine_mtor_act_params() -> MTorActParams {
+    MTorActParams { ec50_ng_ml: 10.0, emax: 1.0, n: 1.0 }
+}
+
+pub fn olanzapine_mtor_act_priors() -> MTorActPriors {
+    // EC50: single adipocyte cell-line study (Bhatt 2014). High uncertainty.
+    //   mean=10 ng/mL; CV=50% → var=(10*0.5)²=25; confidence=0.40
+    let ec50 = MTorActEpParam { mean: 10.0, variance: 25.0,  confidence: 0.40 }
+    // Emax: full AMPK suppression achievable at saturating concentrations.
+    //   mean=1.0; CV=20% → var=0.04; confidence=0.55
+    let emax = MTorActEpParam { mean: 1.0,  variance: 0.04,  confidence: 0.55 }
+    // n: single-site saturation (H1 receptor occupancy → AMPK cascade).
+    //   mean=1.0; CV=30% → var=0.09; confidence=0.65
+    let hn   = MTorActEpParam { mean: 1.0,  variance: 0.09,  confidence: 0.65 }
+    MTorActPriors { ec50: ec50, emax: emax, n: hn }
+}
+
+// ============================================================================
+// BBB PARAMETERS (BBBParams)
+// ============================================================================
+// Olanzapine is a basic lipophilic drug (pKa=7.48, LogP=3.0).
+// Net CNS accumulation: Kpuu_brain ≈ 2.0 (Bigos 2008; less than haloperidol's 3.0
+// because olanzapine pKa is lower → less lysosomal trapping).
+// P-gp substrate: ps_bbb reduced vs non-substrate but not as dramatically as rapamycin.
+
+pub fn olanzapine_bbb_params() -> BBBParams {
+    BBBParams {
+        v_vasc:     0.013,
+        v_isf:      0.270,
+        v_icf:      1.080,
+        q_brain:    50.0,
+        ps_bbb:     1.5,      // L/h — lower than haloperidol (less lysosomal enhancement)
+        ps_mem:     5.0,      // L/h — moderate; less ICF trapping than haloperidol
+        fu_plasma:  0.07,
+        fu_isf:     0.040,    // slightly higher than halo (lower pKa, less ECF binding)
+        fu_icf:     0.015,
+        kpuu_brain: 2.0,      // Bigos 2008: ~2× accumulation (less than haloperidol 3.0)
+        kpuu_cell:  0.6,
+    }
+}
+
+pub fn olanzapine_bbb_priors() -> BBBPriors with Mut, Div, Panic {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+
+    // 0: ps_bbb — class estimate, basic lipophilic CNS drug. CV=50%.
+    m[0] = 1.5;   v[0] = 0.5625;    c[0] = 0.40
+    // 1: ps_mem — class estimate. CV=60%.
+    m[1] = 5.0;   v[1] = 9.0;       c[1] = 0.30
+    // 2: kpuu_brain — Bigos 2008 PET-derived; CV=30%.
+    m[2] = 2.0;   v[2] = 0.36;      c[2] = 0.55
+    // 3: kpuu_cell — assumption (no direct subcellular data). CV=50%.
+    m[3] = 0.6;   v[3] = 0.09;      c[3] = 0.25
+    // 4: fu_plasma — Callaghan 1999: 93% protein-bound. CV=15%.
+    m[4] = 0.07;  v[4] = 0.0001102; c[4] = 0.80
+    // 5: fu_isf — class estimate. CV=40%.
+    m[5] = 0.040; v[5] = 0.000256;  c[5] = 0.35
+    // 6: fu_icf — assumption. CV=50%.
+    m[6] = 0.015; v[6] = 0.0000563; c[6] = 0.20
+
+    BBBPriors { n: 7, mean: m, variance: v, confidence: c }
+}
+
+// ============================================================================
+// SYSTEMIC PBPK PARAMETERS (PBPKParams14)
+// ============================================================================
+// Olanzapine mean PK for a 70 kg adult (Bergstrom 2006, n=15):
+//   MW: 312.43 g/mol
+//   Vd: ~10 L/kg = 700 L (muscle and adipose accumulation)
+//   CL: 25 L/h (~417 mL/min; CYP1A2 primary, hepatic extraction ~0.35)
+//   t½: ~33h (oral; beta phase)
+//
+// Tissue Kp by Rodgers-Rowland (basic, pKa=7.48, LogP=3.0):
+//   Less accumulation than haloperidol due to lower LogP and pKa.
+//   sum(V_tissue × kp) ≈ 700 L → Vd ~700 L/70kg (10 L/kg, Bergstrom 2006)
+
+pub fn olanzapine_pbpk_params() -> PBPKParams14 with Mut {
+    var prm: PBPKParams14 = PBPKParams14 {
+        v_blood: 5.2, v_liver: 1.69, v_kidney: 0.31, v_brain: 1.37,
+        v_heart: 0.31, v_lung: 1.17, v_muscle: 29.0, v_adipose: 18.2,
+        v_gut: 1.65, v_skin: 7.8, v_bone: 10.5, v_spleen: 0.19,
+        v_pancreas: 0.14, v_other: 4.5,
+        q_liver: 87.0, q_kidney: 72.0, q_brain: 44.0, q_heart: 14.4,
+        q_lung: 0.0, q_muscle: 73.8, q_adipose: 18.0, q_gut: 57.6,
+        q_skin: 18.0, q_bone: 21.6, q_spleen: 10.8, q_pancreas: 4.5,
+        q_other: 18.0,
+        // Tissue Kp: less accumulation than haloperidol (lower LogP/pKa).
+        // Vd target ~700 L: muscle (kp=15) and adipose (kp=8) are main drivers.
+        kp_liver: 12.0, kp_kidney: 5.0, kp_brain: 10.0, kp_heart: 4.0,
+        kp_lung: 8.0, kp_muscle: 15.0, kp_adipose: 8.0, kp_gut: 5.0,
+        kp_skin: 5.0, kp_bone: 4.0, kp_spleen: 5.0, kp_pancreas: 3.5,
+        kp_other: 3.5,
+        // CL: 25 L/h (CYP1A2 primary; Bergstrom 2006)
+        cl_hepatic: 25.0,
+        cl_renal: 0.2,      // <1% renal excretion
+        fu_plasma: 0.07,
+        rb_ratio: 0.96,     // blood:plasma ~1 (Callaghan 1999)
+    }
+    return prm
+}
+
+// Smoker variant: CYP1A2 induced ×2 (Callaghan 1999; Haslemo 2006).
+// Schizophrenia patients smoke at 3× the general population rate — clinically critical.
+//
+// cl_hepatic is set to the induced value (50.0 = 25.0×2) as a CONSTANT in a full
+// struct literal, NOT by copy-then-reassign (`var p = ...(); p.cl_hepatic *= 2`):
+// that field-reassignment on this 14-field struct miscompiles to 0.0 in the current
+// compiler (a large-struct value-move bug — passing the CL via a fn parameter into the
+// literal hits the same bug). Constant literals are unaffected, so the full literal
+// below is the reliable form. All non-CL fields mirror olanzapine_pbpk_params().
+pub fn olanzapine_pbpk_params_smoker() -> PBPKParams14 with Mut {
+    var prm: PBPKParams14 = PBPKParams14 {
+        v_blood: 5.2, v_liver: 1.69, v_kidney: 0.31, v_brain: 1.37,
+        v_heart: 0.31, v_lung: 1.17, v_muscle: 29.0, v_adipose: 18.2,
+        v_gut: 1.65, v_skin: 7.8, v_bone: 10.5, v_spleen: 0.19,
+        v_pancreas: 0.14, v_other: 4.5,
+        q_liver: 87.0, q_kidney: 72.0, q_brain: 44.0, q_heart: 14.4,
+        q_lung: 0.0, q_muscle: 73.8, q_adipose: 18.0, q_gut: 57.6,
+        q_skin: 18.0, q_bone: 21.6, q_spleen: 10.8, q_pancreas: 4.5,
+        q_other: 18.0,
+        kp_liver: 12.0, kp_kidney: 5.0, kp_brain: 10.0, kp_heart: 4.0,
+        kp_lung: 8.0, kp_muscle: 15.0, kp_adipose: 8.0, kp_gut: 5.0,
+        kp_skin: 5.0, kp_bone: 4.0, kp_spleen: 5.0, kp_pancreas: 3.5,
+        kp_other: 3.5,
+        cl_hepatic: 50.0,   // CYP1A2-induced: 25.0 × 2 (smoking)
+        cl_renal: 0.2,
+        fu_plasma: 0.07,
+        rb_ratio: 0.96,
+    }
+    return prm
+}
+
+// ============================================================================
+// ORAL ABSORPTION PARAMETERS
+// ============================================================================
+// Bergstrom 2006: Tmax ~5-8h for oral tablet → Ka ≈ 0.6/h
+// F_oral = 0.60 (60%; first-pass CYP1A2 ~35% + gut wall ~5%)
+// t_lag = 0.25h (15 min standard tablet dissolution)
+
+pub fn olanzapine_absorption_params() -> AbsorptionParams {
+    AbsorptionParams { ka: 0.6, f_bio: 0.60, tlag: 0.25 }
+}
+
+fn main() with IO, Mut, Div, Panic {
+    println("olanzapine: drug parameters")
+    let p = olanzapine_pbpk_params()
+    print("  CL_hepatic = "); print_f64(p.cl_hepatic); println(" L/h")
+    print("  fu_plasma  = "); print_f64(p.fu_plasma); println("")
+    let ps = olanzapine_pbpk_params_smoker()
+    print("  CL_smoker  = "); print_f64(ps.cl_hepatic); println(" L/h")
+    let ma = olanzapine_mtor_act_params()
+    print("  mTOR EC50  = "); print_f64(ma.ec50_ng_ml); println(" ng/mL")
+    println("PASS")
+}

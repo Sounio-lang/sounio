@@ -1,0 +1,253 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/chi_square.sio — chi-squared distribution as a first-class object
+//
+// Completes the distribution family alongside stats::student_t: normal, t and
+// beta already expose pdf/cdf/quantile; chi-squared had only an exact CDF
+// (special::igamma::chi2_cdf) and a private 2-DOF-only quantile lookup buried in
+// epistemic::multivariate. This module adds the density, survival, and a general
+// quantile (any p, any k), plus the classic variance confidence interval:
+//
+//   chi2_pdf(x, k)          — probability density
+//   chi2_cdf(x, k)          — cumulative distribution (re-exported exact form)
+//   chi2_sf(x, k)           — survival 1 - cdf
+//   chi2_quantile(p, k)     — inverse CDF (NEW: general k, general p)
+//   chi2_variance_ci(...)   — CI for a population variance from a sample
+//
+// The quantile has no closed form; it uses the Wilson-Hilferty cube-root normal
+// approximation as an initial guess, then Newton-Raphson on the exact CDF/pdf.
+// The forward CDF is special::igamma::chi2_cdf = P(k/2, x/2) (regularized lower
+// incomplete gamma), so accuracy tracks that routine.
+//
+// Pure Sounio; dependencies: special::igamma (CDF), special::gamma (lgamma),
+// special::erf (normal quantile for the WH guess).
+//
+// References:
+//   Wilson & Hilferty (1931) "The distribution of chi-square", PNAS 17(12)
+//   Abramowitz & Stegun (1964) §26.4 — chi-squared distribution
+//   Johnson, Kotz & Balakrishnan (1994) "Continuous Univariate Distributions"
+//     Vol.1, Ch.18
+
+module stats::chi_square
+
+use special::igamma::{chi2_cdf}
+use special::gamma::{lgamma}
+use special::erf::{normal_quantile}
+
+// ============================================================================
+// INTERNAL HELPERS (self-contained, bootstrap-safe)
+// ============================================================================
+
+fn cs_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn cs_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var scaled = x
+    var scale_back = 1.0
+    while scaled < 1.0 { scaled = scaled * 4.0; scale_back = scale_back * 2.0 }
+    while scaled > 4.0 { scaled = scaled * 0.25; scale_back = scale_back * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 16 { y = 0.5 * (y + scaled / y); i = i + 1 }
+    return y / scale_back
+}
+
+fn cs_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e300 }
+    if x == 1.0 { return 0.0 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 32 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    return 2.0 * sum + (e as f64) * 0.6931471805599453
+}
+
+// Reflect negatives first (Taylor of exp(x) for x in ~[-20,-10] cancels
+// catastrophically), then reduce positive x to [0,2] where the series is exact.
+fn cs_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / cs_exp(0.0 - x) }
+    if x > 709.0 { return 1.0e300 }
+    if x > 2.0 { return cs_exp(x / 2.0) * cs_exp(x / 2.0) }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i <= 28 { term = term * x / (i as f64); sum = sum + term; i = i + 1 }
+    return sum
+}
+
+let CS_LN2: f64 = 0.6931471805599453
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+/// Chi-squared probability density at `x` with `k` degrees of freedom.
+///
+/// Parâmetros: x — abscissa (>= 0); k — degrees of freedom (> 0).
+/// Retorno: f(x) = x^(k/2-1)·e^(-x/2) / (2^(k/2)·Γ(k/2)).
+/// Referências: A&S §26.4.1.
+pub fn chi2_pdf(x: f64, k: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 || k <= 0.0 { return 0.0 }
+    if x == 0.0 {
+        if k < 2.0 { return 1.0e300 }
+        if k == 2.0 { return 0.5 }
+        return 0.0
+    }
+    let half = k / 2.0
+    let log_pdf = (half - 1.0) * cs_ln(x) - x / 2.0 - half * CS_LN2 - lgamma(half)
+    return cs_exp(log_pdf)
+}
+
+/// Survival function S(x) = 1 - F(x) = P(X > x).
+pub fn chi2_sf(x: f64, k: f64) -> f64 with Mut, Div, Panic {
+    return 1.0 - chi2_cdf(x, k)
+}
+
+/// Inverse CDF: the value x with F(x) = p, for p in (0, 1).
+///
+/// Parâmetros: p — probability in (0,1); k — degrees of freedom (> 0).
+/// Retorno: the p-quantile of chi-squared_k.
+/// Complexidade: Wilson-Hilferty initial guess + up to 60 Newton steps.
+/// Referências: Wilson & Hilferty (1931); Newton refinement on the exact CDF.
+pub fn chi2_quantile(p: f64, k: f64) -> f64 with Mut, Div, Panic {
+    if p <= 0.0 { return 0.0 }
+    if p >= 1.0 { return 1.0e300 }
+    if k <= 0.0 { return 0.0 }
+
+    // Wilson-Hilferty cube-root normal approximation for the initial guess.
+    let z = normal_quantile(p)
+    let h = 2.0 / (9.0 * k)
+    var base = 1.0 - h + z * cs_sqrt(h)
+    if base < 0.0 { base = 0.0 }
+    var x = k * base * base * base
+    if x <= 0.0 { x = 1.0e-6 }
+
+    // Newton-Raphson on the exact CDF.
+    var iter = 0
+    while iter < 60 {
+        let fx = chi2_cdf(x, k) - p
+        let fpx = chi2_pdf(x, k)
+        if fpx < 1.0e-300 {
+            iter = 60
+        } else {
+            var step = fx / fpx
+            // damp overshoot past zero
+            if step >= x { step = 0.5 * x }
+            let nx = x - step
+            x = if nx > 0.0 { nx } else { 0.5 * x }
+            if cs_abs(step) < 1.0e-12 * (x + 1.0e-12) {
+                iter = 60
+            } else {
+                iter = iter + 1
+            }
+        }
+    }
+    return x
+}
+
+pub struct VarCI {
+    pub s2: f64,    // sample variance (point estimate)
+    pub lo: f64,    // lower confidence bound on the population variance
+    pub hi: f64,    // upper confidence bound
+    pub df: f64,    // degrees of freedom (n - 1)
+}
+
+/// Confidence interval for a population variance from a sample variance.
+///
+/// Parâmetros: s2 — sample variance; n — sample size (>= 2); conf — level in (0,1).
+/// Retorno: VarCI with [ (n-1)s²/χ²_{(1+conf)/2}, (n-1)s²/χ²_{(1-conf)/2} ].
+/// Referências: A&S §26.4; standard chi-squared variance interval.
+pub fn chi2_variance_ci(s2: f64, n: i64, conf: f64) -> VarCI with Mut, Div, Panic {
+    if n < 2 {
+        return VarCI { s2: s2, lo: s2, hi: s2, df: 0.0 }
+    }
+    let df = (n - 1) as f64
+    let a = df * s2
+    let q_hi = chi2_quantile(0.5 + conf / 2.0, df)   // upper chi2 -> lower var bound
+    let q_lo = chi2_quantile(0.5 - conf / 2.0, df)   // lower chi2 -> upper var bound
+    return VarCI { s2: s2, lo: a / q_hi, hi: a / q_lo, df: df }
+}
+
+// ============================================================================
+// INLINE TESTS — validated against published chi-squared tables
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+fn test_pdf() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // chi2_pdf(x, 2) = 0.5 e^{-x/2}: at x=2 -> 0.5 e^{-1} = 0.1839397
+    ok = check(1, approx(chi2_pdf(2.0, 2.0), 0.1839397206, 1.0e-6)) && ok
+    // chi2_pdf(0, 2) = 0.5
+    ok = check(2, approx(chi2_pdf(0.0, 2.0), 0.5, 1.0e-9)) && ok
+    return ok
+}
+
+fn test_quantile_table() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    // upper 0.95 critical values
+    ok = check(10, approx(chi2_quantile(0.95, 1.0),   3.8414588, 1.0e-4)) && ok
+    ok = check(11, approx(chi2_quantile(0.95, 2.0),   5.9914645, 1.0e-4)) && ok
+    ok = check(12, approx(chi2_quantile(0.95, 5.0),  11.0704977, 1.0e-3)) && ok
+    ok = check(13, approx(chi2_quantile(0.95, 10.0), 18.3070381, 1.0e-3)) && ok
+    // lower 0.05 critical value
+    ok = check(14, approx(chi2_quantile(0.05, 10.0),  3.9402991, 1.0e-3)) && ok
+    // median-ish
+    ok = check(15, approx(chi2_quantile(0.50, 4.0),   3.3566939, 1.0e-3)) && ok
+    return ok
+}
+
+fn test_cdf_roundtrip() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    let q = chi2_quantile(0.95, 7.0)
+    ok = check(20, approx(chi2_cdf(q, 7.0), 0.95, 1.0e-6)) && ok
+    let q2 = chi2_quantile(0.30, 12.0)
+    ok = check(21, approx(chi2_cdf(q2, 12.0), 0.30, 1.0e-6)) && ok
+    return ok
+}
+
+fn test_variance_ci() -> bool with IO, Mut, Div, Panic {
+    // s2=4, n=20 -> df=19; chi2_0.975(19)=32.8523, chi2_0.025(19)=8.9065
+    // lo = 19*4/32.8523 = 2.31337 ; hi = 19*4/8.9065 = 8.53311
+    var ok = true
+    let ci = chi2_variance_ci(4.0, 20, 0.95)
+    ok = check(30, approx(ci.lo, 2.313373, 1.0e-3)) && ok
+    ok = check(31, approx(ci.hi, 8.533105, 1.0e-3)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_pdf() && ok
+    ok = test_quantile_table() && ok
+    ok = test_cdf_roundtrip() && ok
+    ok = test_variance_ci() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

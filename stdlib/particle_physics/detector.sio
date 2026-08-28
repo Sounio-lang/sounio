@@ -1,0 +1,614 @@
+// ============================================================================
+// DETECTOR SIMULATION
+// ============================================================================
+//
+// Reference implementations of core detector physics for HEP:
+// - Bethe-Bloch energy loss (dE/dx)
+// - Landau-Vavilov fluctuations
+// - Multiple Coulomb scattering (Highland formula)
+// - Calorimeter sampling and resolution
+// - Helix tracking in magnetic field
+// - Basic vertex reconstruction
+//
+// References:
+// - PDG Review of Particle Physics, "Passage of Particles Through Matter"
+// - Leo, "Techniques for Nuclear and Particle Physics Experiments"
+// - Grupen & Shwartz, "Particle Detectors" (2nd ed.)
+
+module particle_physics::detector
+
+use math::libm::{libm_pow}
+
+use particle_physics::lorentz::{LorentzVector, lorentz_new, lorentz_add, lorentz_sub, lorentz_scale}
+use epistemic::knowledge::{Epistemic}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+fn sqrt_f64(x: f64) -> f64 { sqrt(x) }
+fn exp_f64(x: f64) -> f64 { exp(x) }
+fn ln_f64(x: f64) -> f64 { log(x) }
+fn pow_f64(x: f64, y: f64) -> f64 { libm_pow(x, y) }
+fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Physical constants
+pub fn electron_mass_mev() -> f64 { 0.51099895 }
+pub fn classical_electron_radius_cm() -> f64 { 2.8179403227e-13 }
+pub fn avogadro() -> f64 { 6.02214076e23 }
+
+// ============================================================================
+// MATERIAL PROPERTIES
+// ============================================================================
+
+/// Material properties for energy loss calculations.
+pub struct Material {
+    pub z: f64,           // atomic number
+    pub a: f64,           // atomic mass (g/mol)
+    pub density: f64,     // density (g/cm^3)
+    pub i_potential_ev: f64, // mean excitation potential (eV)
+    pub x0: f64,          // radiation length (cm)
+}
+
+/// Silicon (Si) — standard tracking detector material.
+pub fn material_silicon() -> Material {
+    Material {
+        z: 14.0,
+        a: 28.0855,
+        density: 2.329,
+        i_potential_ev: 173.0,
+        x0: 9.37,
+    }
+}
+
+/// Iron (Fe) — magnet yoke, some calorimeter structures.
+pub fn material_iron() -> Material {
+    Material {
+        z: 26.0,
+        a: 55.845,
+        density: 7.874,
+        i_potential_ev: 286.0,
+        x0: 1.76,
+    }
+}
+
+/// Lead (Pb) — EM calorimeter absorber.
+pub fn material_lead() -> Material {
+    Material {
+        z: 82.0,
+        a: 207.2,
+        density: 11.35,
+        i_potential_ev: 823.0,
+        x0: 0.56,
+    }
+}
+
+/// Liquid argon (LAr) — sampling calorimeter active medium.
+pub fn material_lar() -> Material {
+    Material {
+        z: 18.0,
+        a: 39.948,
+        density: 1.396,
+        i_potential_ev: 188.0,
+        x0: 14.0,
+    }
+}
+
+// ============================================================================
+// BETHE-BLOCH ENERGY LOSS (dE/dx)
+// ============================================================================
+
+/// Bethe-Bloch stopping power dE/dx in MeV/(g/cm²).
+///
+/// # Parameters
+/// - `beta`: v/c of incident particle.
+/// - `charge`: |z| of incident particle (in units of e).
+/// - `mat`: Target material.
+///
+/// # Returns
+/// -dE/dx in MeV cm² / g.
+pub fn bethe_bloch(beta: f64, charge: f64, mat: Material) -> f64 with Div {
+    if beta <= 0.0 || beta >= 1.0 || charge <= 0.0 { return 0.0 }
+    let gamma = 1.0 / sqrt_f64(1.0 - beta * beta)
+    let beta2 = beta * beta
+    let gamma2 = gamma * gamma
+
+    let me = electron_mass_mev()
+    let re = classical_electron_radius_cm()
+    let k = 4.0 * 3.141592653589793 * avogadro() * re * re * me
+
+    let w_max = 2.0 * me * beta2 * gamma2 / (1.0 + 2.0 * gamma * me / mat.a + (me / mat.a) * (me / mat.a))
+
+    let i_ev = mat.i_potential_ev
+    let i_mev = i_ev * 1e-6
+    let density_corr = density_effect(beta, gamma, mat)
+
+    let term1 = 0.5 * ln_f64(2.0 * me * beta2 * gamma2 * w_max / (i_mev * i_mev))
+    let term2 = beta2
+    let term3 = density_corr
+
+    let dedx = k * mat.z / mat.a * charge * charge / beta2 * (term1 - term2 - term3)
+    dedx
+}
+
+/// Density effect correction δ(βγ).
+/// Sternheimer-style parameterization using material-dependent fit constants.
+/// Returns δ for the given βγ.
+pub fn density_effect(beta: f64, gamma: f64, mat: Material) -> f64 {
+    if beta * gamma <= 0.0 { return 0.0 }
+    let x = ln_f64(beta * gamma) / ln_f64(10.0) // log10(βγ)
+
+    // Fit constants for common materials (approximate)
+    var x0: f64 = 0.20
+    var x1: f64 = 2.80
+    var c_bar: f64 = 4.40
+    var a_fit: f64 = 0.15
+    var m_fit: f64 = 3.20
+    if mat.z == 14.0 {
+        // Silicon
+        x0 = 0.2014
+        x1 = 2.8716
+        c_bar = 4.4351
+        a_fit = 0.1492
+        m_fit = 3.25
+    } else if mat.z == 26.0 {
+        // Iron
+        x0 = 0.1468
+        x1 = 3.1533
+        c_bar = 4.2911
+        a_fit = 0.1490
+        m_fit = 3.18
+    } else if mat.z == 82.0 {
+        // Lead
+        x0 = 0.0937
+        x1 = 3.5458
+        c_bar = 5.5979
+        a_fit = 0.1453
+        m_fit = 3.04
+    } else if mat.z == 18.0 {
+        // Argon
+        x0 = 0.2000
+        x1 = 2.5000
+        c_bar = 4.2000
+        a_fit = 0.1500
+        m_fit = 3.20
+    }
+
+    if x < x0 {
+        0.0
+    } else if x >= x0 && x < x1 {
+        let two_ln10 = 2.0 * ln_f64(10.0)
+        two_ln10 * x - c_bar + a_fit * pow_f64(x1 - x, m_fit)
+    } else {
+        2.0 * ln_f64(10.0) * x - c_bar
+    }
+}
+
+/// dE/dx for a relativistic particle given momentum and mass.
+pub fn dedx_from_momentum(p: f64, m: f64, charge: f64, mat: Material) -> f64 with Div {
+    if p <= 0.0 || m <= 0.0 { return 0.0 }
+    let e = sqrt_f64(p * p + m * m)
+    let beta = p / e
+    bethe_bloch(beta, charge, mat)
+}
+
+/// Minimum ionizing particle (MIP) dE/dx for a material.
+/// Returns approximate dE/dx at βγ ≈ 3.5–3.6 (minimum of Bethe-Bloch curve).
+pub fn dedx_mip(mat: Material) -> f64 with Div {
+    let beta = 0.96
+    bethe_bloch(beta, 1.0, mat)
+}
+
+// ============================================================================
+// LANDAU-VAVILOV FLUCTUATIONS
+// ============================================================================
+
+/// Most probable energy loss (Landau peak) in a thin absorber.
+///
+/// # Parameters
+/// - `beta`: v/c of incident particle.
+/// - `charge`: |z| of incident particle.
+/// - `mat`: Material.
+/// - `thickness`: Thickness in g/cm².
+///
+/// # Returns
+/// Most probable energy loss Δ_p in MeV.
+pub fn landau_most_probable(beta: f64, charge: f64, mat: Material, thickness: f64) -> f64 with Div {
+    if beta <= 0.0 || thickness <= 0.0 { return 0.0 }
+    let me = electron_mass_mev()
+    let re = classical_electron_radius_cm()
+    let k = 4.0 * 3.141592653589793 * avogadro() * re * re * me
+    let beta2 = beta * beta
+    let gamma = 1.0 / sqrt_f64(1.0 - beta2)
+
+    let xi = k * mat.z / mat.a * charge * charge / beta2 * thickness
+    let i_mev = mat.i_potential_ev * 1e-6
+    let density_corr = density_effect(beta, gamma, mat)
+
+    xi * (ln_f64(2.0 * me * beta2 * gamma * gamma * xi / (i_mev * i_mev)) - beta2 - density_corr + 0.2)
+}
+
+/// Width (FWHM) of the Landau distribution.
+pub fn landau_width(beta: f64, charge: f64, mat: Material, thickness: f64) -> f64 with Div {
+    if beta <= 0.0 || thickness <= 0.0 { return 0.0 }
+    let me = electron_mass_mev()
+    let re = classical_electron_radius_cm()
+    let k = 4.0 * 3.141592653589793 * avogadro() * re * re * me
+    let beta2 = beta * beta
+    4.0 * k * mat.z / mat.a * charge * charge / beta2 * thickness
+}
+
+// ============================================================================
+// MULTIPLE COULOMB SCATTERING
+// ============================================================================
+
+/// Highland formula for multiple Coulomb scattering angle.
+///
+/// θ_0 = (13.6 MeV / (β p c)) * |q| * sqrt(x/X_0) * (1 + 0.038 ln(x/X_0))
+///
+/// # Parameters
+/// - `momentum`: Particle momentum in MeV/c.
+/// - `mass`: Particle mass in MeV/c².
+/// - `charge`: |z| of particle.
+/// - `x_over_x0`: Thickness in radiation lengths (x/X_0).
+///
+/// # Returns
+/// Scattering angle θ_0 in radians.
+pub fn highland_scattering_angle(momentum: f64, mass: f64, charge: f64, x_over_x0: f64) -> f64 with Div {
+    if momentum <= 0.0 || mass < 0.0 || x_over_x0 <= 0.0 || charge <= 0.0 { return 0.0 }
+    let e = sqrt_f64(momentum * momentum + mass * mass)
+    let beta_pc = momentum * momentum / e
+    if beta_pc <= 0.0 { return 0.0 }
+    let base = 13.6e-3 / beta_pc // in GeV units; momentum expected in GeV
+    let log_term = if x_over_x0 > 1e-10 { 1.0 + 0.038 * ln_f64(x_over_x0) } else { 1.0 }
+    charge * sqrt_f64(x_over_x0) * log_term * base
+}
+
+/// Projected rms displacement due to multiple scattering.
+/// y_rms = (x / sqrt(3)) * θ_0 for a scatterer of thickness x.
+pub fn scattering_displacement(x_cm: f64, theta_0: f64) -> f64 {
+    x_cm * theta_0 / sqrt_f64(3.0)
+}
+
+// ============================================================================
+// CALORIMETRY
+// ============================================================================
+
+/// Sampling calorimeter energy resolution.
+///
+/// σ_E / E = a / sqrt(E) ⊕ b ⊕ c / E
+/// where ⊕ denotes quadratic sum.
+///
+/// # Parameters
+/// - `e`: Incident energy in GeV.
+/// - `a`: Stochastic term (e.g., 0.1 for 10%/sqrt(E)).
+/// - `b`: Constant term (e.g., 0.01 for 1%).
+/// - `c`: Noise term in GeV (e.g., 0.5 GeV).
+///
+/// # Returns
+/// Relative energy resolution σ_E / E.
+pub fn calorimeter_resolution(e: f64, a: f64, b: f64, c: f64) -> f64 with Div {
+    if e <= 0.0 { return 1e6 }
+    let term1 = a / sqrt_f64(e)
+    let term2 = b
+    let term3 = c / e
+    sqrt_f64(term1 * term1 + term2 * term2 + term3 * term3)
+}
+
+/// EM calorimeter resolution (typical CMS ECAL-like).
+pub fn em_calorimeter_resolution(e_gev: f64) -> f64 with Div {
+    calorimeter_resolution(e_gev, 0.028, 0.0012, 0.15)
+}
+
+/// Hadronic calorimeter resolution (typical CMS HCAL-like).
+pub fn hadron_calorimeter_resolution(e_gev: f64) -> f64 with Div {
+    calorimeter_resolution(e_gev, 0.65, 0.05, 1.5)
+}
+
+/// Sampling fraction for a sampling calorimeter.
+pub fn sampling_fraction(e_visible: f64, e_incident: f64) -> f64 with Div {
+    if e_incident <= 0.0 { return 0.0 }
+    e_visible / e_incident
+}
+
+/// Compensated calorimeter (e/h ≈ 1).
+pub fn is_compensated(eh_ratio: f64, tolerance: f64) -> bool {
+    abs_f64(eh_ratio - 1.0) < tolerance
+}
+
+// ============================================================================
+// TRACKING IN MAGNETIC FIELD
+// ============================================================================
+
+/// Track curvature (1/R) in a uniform B field.
+///
+/// κ = 0.3 * B * q / p_T  [units: cm^-1 if B in Tesla, p_T in GeV/c]
+///
+/// # Parameters
+/// - `b_field`: Magnetic field in Tesla.
+/// - `charge`: Particle charge in units of e.
+/// - `pt`: Transverse momentum in GeV/c.
+///
+/// # Returns
+/// Curvature in cm^-1.
+pub fn track_curvature(b_field: f64, charge: f64, pt: f64) -> f64 with Div {
+    if pt <= 0.0 { return 0.0 }
+    0.3 * b_field * charge / pt
+}
+
+/// Transverse momentum from curvature.
+pub fn pt_from_curvature(b_field: f64, charge: f64, curvature: f64) -> f64 with Div {
+    if curvature == 0.0 { return 1e9 }
+    0.3 * b_field * charge / curvature
+}
+
+/// Sagitta of a track arc in a B field.
+/// s = L² / (8 R) for a chord of length L.
+pub fn track_sagitta(chord_length_cm: f64, radius_cm: f64) -> f64 with Div {
+    if radius_cm <= 0.0 { return 0.0 }
+    chord_length_cm * chord_length_cm / (8.0 * radius_cm)
+}
+
+/// Momentum resolution from sagitta measurement.
+/// δp/p ≈ δs / s
+pub fn momentum_resolution_from_sagitta(sagitta: f64, sagitta_error: f64) -> f64 with Div {
+    if sagitta <= 0.0 { return 1e6 }
+    sagitta_error / sagitta
+}
+
+/// 3D spatial position.
+pub struct Position3 {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+}
+
+/// Helix parameterization: position at parameter t.
+/// Assumes B field along z axis.
+///
+/// # Parameters
+/// - `t`: Helix parameter (angle).
+/// - `r`: Radius of curvature (cm).
+/// - `phi0`: Initial azimuthal angle.
+/// - `x0`, `y0`, `z0`: Starting position (cm).
+/// - `tan_lambda`: tan(λ) = pz / pT.
+///
+/// # Returns
+/// Position3 { x, y, z } in cm.
+pub fn helix_position(t: f64, r: f64, phi0: f64, x0: f64, y0: f64, z0: f64, tan_lambda: f64) -> Position3 {
+    let c1 = cos_f64(phi0)
+    let c2 = cos_f64(phi0 + t)
+    let s1 = sin_f64(phi0 + t)
+    let s2 = sin_f64(phi0)
+    let x = x0 + r * (c1 - c2)
+    let y = y0 + r * (s1 - s2)
+    let z = z0 + r * tan_lambda * t
+    Position3 { x: x, y: y, z: z }
+}
+
+/// Distance of closest approach (DCA) to origin in the transverse plane.
+/// For a helix: dca = |r - sqrt(x0² + y0²)|
+pub fn dca_transverse(r: f64, x0: f64, y0: f64) -> f64 {
+    let d = sqrt_f64(x0 * x0 + y0 * y0)
+    abs_f64(r - d)
+}
+
+// ============================================================================
+// VERTEX RECONSTRUCTION
+// ============================================================================
+
+/// Impact parameter in the transverse plane.
+///
+/// # Parameters
+/// - `x_vtx`, `y_vtx`: Vertex position.
+/// - `px`, `py`: Track momentum direction.
+/// - `x0`, `y0`: Track reference point.
+///
+/// # Returns
+/// Signed impact parameter (cm).
+pub fn impact_parameter_2d(x_vtx: f64, y_vtx: f64, px: f64, py: f64, x0: f64, y0: f64) -> f64 with Div {
+    let pt = sqrt_f64(px * px + py * py)
+    if pt <= 0.0 { return 0.0 }
+    let dx = x0 - x_vtx
+    let dy = y0 - y_vtx
+    (dy * px - dx * py) / pt
+}
+
+/// Simple vertex position estimate from two tracks.
+/// Intersection of two straight-line approximations in the transverse plane.
+pub fn vertex_from_two_tracks(
+    x1: f64, y1: f64, px1: f64, py1: f64,
+    x2: f64, y2: f64, px2: f64, py2: f64,
+) -> (f64, f64) with Div {
+    let det = px1 * py2 - py1 * px2
+    if abs_f64(det) < 1e-12 { return (0.0, 0.0) }
+
+    let dx = x2 - x1
+    let dy = y2 - y1
+
+    let t1 = (dx * py2 - dy * px2) / det
+
+    let x_vtx = x1 + px1 * t1
+    let y_vtx = y1 + py1 * t1
+    (x_vtx, y_vtx)
+}
+
+// ============================================================================
+// TIME OF FLIGHT
+// ============================================================================
+
+/// Time of flight over a path length L.
+/// t = L / (β c) where c = 1 in natural units, so t = L / β in GeV^-1.
+/// For practical units: t [ns] = L [m] / (β * 0.299792458)
+pub fn time_of_flight_ns(beta: f64, path_length_m: f64) -> f64 with Div {
+    if beta <= 0.0 { return 1e9 }
+    path_length_m / (beta * 0.299792458)
+}
+
+/// βγ from time-of-flight and known path length.
+pub fn beta_from_tof(tof_ns: f64, path_length_m: f64) -> f64 with Div {
+    if tof_ns <= 0.0 { return 0.0 }
+    let beta = path_length_m / (tof_ns * 0.299792458)
+    if beta > 1.0 { 1.0 } else { beta }
+}
+
+// ============================================================================
+// CHERENKOV RADIATION
+// ============================================================================
+
+/// Cherenkov angle: cos(θ_C) = 1 / (n β)
+///
+/// # Parameters
+/// - `n`: Refractive index.
+/// - `beta`: v/c.
+///
+/// # Returns
+/// Cherenkov angle in radians. Returns 0 if below threshold.
+pub fn cherenkov_angle(n: f64, beta: f64) -> f64 with Div {
+    if n <= 1.0 || beta <= 0.0 || beta * n <= 1.0 { return 0.0 }
+    let cos_theta = 1.0 / (n * beta)
+    if cos_theta >= 1.0 { return 0.0 }
+    acos_approx(cos_theta)
+}
+
+/// Number of Cherenkov photons per unit path length and wavelength.
+/// d²N / (dx dλ) = 2π α z² / λ² * (1 - 1/(n²β²))
+pub fn cherenkov_photon_yield(n: f64, beta: f64, charge: f64, lambda_min_m: f64, lambda_max_m: f64) -> f64 with Div {
+    if lambda_min_m <= 0.0 || lambda_max_m <= lambda_min_m { return 0.0 }
+    let alpha = 1.0 / 137.035999084
+    let sin2_theta = 1.0 - 1.0 / (n * n * beta * beta)
+    if sin2_theta <= 0.0 { return 0.0 }
+    2.0 * 3.141592653589793 * alpha * charge * charge * sin2_theta * (1.0 / lambda_min_m - 1.0 / lambda_max_m)
+}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn cos_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x4 = x2 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0 - x2 * x4 / 720.0
+}
+
+fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    y - y * x2 / 6.0 + y * x4 / 120.0 - y * x6 / 5040.0
+}
+
+fn acos_approx(x: f64) -> f64 {
+    // arccos(x) ≈ π/2 - x - x³/6 - 3x⁵/40 for |x| < 1
+    if x >= 1.0 { return 0.0 }
+    if x <= -1.0 { return 3.141592653589793 }
+    let pi = 3.141592653589793
+    let x3 = x * x * x
+    let x5 = x3 * x * x
+    pi / 2.0 - x - x3 / 6.0 - 3.0 * x5 / 40.0
+}
+
+// ============================================================================
+// EPISTEMIC DETECTOR UNCERTAINTIES
+// ============================================================================
+
+/// Radiation length X₀ with PDG parametrization uncertainty (~1.5% from nuclear screening).
+pub fn x0_epistemic(mat: Material) -> Epistemic with Div {
+    let x0_val = mat.x0
+    let sigma = x0_val * 0.015
+    Epistemic::measured(x0_val, sigma)
+}
+
+/// Bethe-Bloch dE/dx with parametrization uncertainty (~2% from density effect + shell corrections).
+pub fn bethe_bloch_ep(beta: f64, charge: f64, mat: Material) -> Epistemic with Div {
+    let central = bethe_bloch(beta, charge, mat)
+    let sigma = central * 0.02
+    Epistemic::measured(central, sigma)
+}
+
+/// Calorimeter resolution with calibration uncertainty (~10% on constant term).
+pub fn calorimeter_resolution_ep(e: f64, a: f64, b: f64, c: f64) -> Epistemic with Div {
+    let central = calorimeter_resolution(e, a, b, c)
+    let sigma = central * 0.10
+    Epistemic::measured(central, sigma)
+}
+
+/// Highland multiple scattering angle with material budget uncertainty (~1% from X₀ uncertainty).
+pub fn highland_scattering_ep(momentum: f64, mass: f64, charge: f64, x_over_x0: f64) -> Epistemic with Div {
+    let central = highland_scattering_angle(momentum, mass, charge, x_over_x0)
+    let sigma = central * 0.01
+    Epistemic::measured(central, sigma)
+}
+
+// ============================================================================
+// EPISTEMIC DETECTOR TESTS
+// ============================================================================
+
+var DET_EP_PASS: [i64; 2] = [0; 2]
+
+fn det_chk(pass: bool, id: i64) with Mut, Panic {
+    if pass {
+        DET_EP_PASS[0] = DET_EP_PASS[0] + 1
+    } else {
+        print("FAIL detector_ep #")
+        print_int(id)
+        print("\n")
+        DET_EP_PASS[1] = DET_EP_PASS[1] + 1
+    }
+}
+
+pub fn run_detector_ep_tests() with Div, Panic, Mut {
+    print("=== Detector Uncertainty Tests ===\n")
+
+    let si = material_silicon()
+    let fe = material_iron()
+    let pb = material_lead()
+
+    // T1: X₀ silicon — positive central, positive variance
+    let x0_si = x0_epistemic(si)
+    det_chk(x0_si.val() > 0.0, 1)
+    det_chk(x0_si.variance() > 0.0, 2)
+
+    // T2: X₀ lead — shorter than silicon (lead is denser radiator)
+    let x0_pb = x0_epistemic(pb)
+    det_chk(x0_pb.val() < x0_si.val(), 3)
+    det_chk(x0_pb.variance() > 0.0, 4)
+
+    // T3: dE/dx silicon for relativistic particle (beta=0.96, charge=1)
+    let dedx_si = bethe_bloch_ep(0.96, 1.0, si)
+    det_chk(dedx_si.val() > 0.0, 5)
+    det_chk(dedx_si.variance() > 0.0, 6)
+
+    // T4: dE/dx iron — different from silicon (Z-dependent)
+    let dedx_fe = bethe_bloch_ep(0.96, 1.0, fe)
+    det_chk(dedx_fe.val() > 0.0, 7)
+
+    // T5: calorimeter resolution — positive, has uncertainty
+    // ECAL: a=0.12/√E, b=0.003/E, c=0.007 (CMS-like)
+    let res = calorimeter_resolution_ep(100.0, 0.12, 0.003, 0.007)
+    det_chk(res.val() > 0.0, 8)
+    det_chk(res.variance() > 0.0, 9)
+
+    // T6: Highland scattering in silicon (momentum=1000 MeV, mass=139 MeV, charge=1, x/X₀=0.1)
+    let theta = highland_scattering_ep(1000.0, 139.0, 1.0, 0.1)
+    det_chk(theta.val() > 0.0, 10)
+    det_chk(theta.variance() > 0.0, 11)
+
+    let total = DET_EP_PASS[0] + DET_EP_PASS[1]
+    print("Detector: ")
+    print_int(DET_EP_PASS[0])
+    print("/")
+    print_int(total)
+    print(" PASS\n")
+}

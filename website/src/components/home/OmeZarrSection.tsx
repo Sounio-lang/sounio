@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useRef } from 'react';
 
 // Public CORS-enabled OME-ZARR: Planarian embryo from EMBL i2k-2020
 // https://s3.embl.de/i2k-2020/platy-raw.ome.zarr

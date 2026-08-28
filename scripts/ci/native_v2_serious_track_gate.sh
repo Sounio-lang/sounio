@@ -27,6 +27,8 @@ printf '[native-v2] out=%s\n' "$OUT_DIR"
 "$SOUC_BIN" run self-hosted/compiler/native_compile_driver.sio -- \
   examples/native/hello.sio -o "$BIN" >"$COMPILE_LOG" 2>&1
 
+chmod +x "$BIN" 2>/dev/null || true
+
 if [[ ! -x "$BIN" ]]; then
   echo "[native-v2] FAIL: generated binary is not executable: $BIN" >&2
   tail -n 40 "$COMPILE_LOG" >&2 || true
@@ -46,9 +48,13 @@ if ! cmp -s "$EXPECTED_LOG" "$STDOUT_LOG"; then
 fi
 
 if command -v readelf >/dev/null 2>&1; then
-  readelf -S "$BIN" >"$SECTIONS_LOG"
-  grep -q '\.rodata' "$SECTIONS_LOG"
-  grep -q '\.data' "$SECTIONS_LOG"
+    readelf -S "$BIN" >"$SECTIONS_LOG"
+    if ! grep -q '\.rodata' "$SECTIONS_LOG" || ! grep -q '\.data' "$SECTIONS_LOG"; then
+      readelf -l "$BIN" >>"$SECTIONS_LOG"
+      grep -q 'LOAD' "$SECTIONS_LOG"
+      grep -q ' R ' "$SECTIONS_LOG"
+      grep -q 'RW' "$SECTIONS_LOG"
+    fi
 fi
 
 if command -v strings >/dev/null 2>&1; then

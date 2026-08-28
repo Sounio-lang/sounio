@@ -1,0 +1,1475 @@
+// examples/erdos/souc_sat.sio
+// souc-sat: hardened native CDCL engine for the chi>=5 program (plan tracks E0/E1).
+// Base: examples/erdos/cdcl_fast.sio (verified two-watched CDCL + 1-UIP + LBD deletion).
+// New here:
+//   E1  recursive clause minimisation (MiniSat ccmin_mode=2) in analyze() — removes
+//       redundant literals from learned clauses; smaller clauses, smaller proofs.
+//   E0  streamed proof ON DISK via write_file() (drat-trim reads the file directly),
+//       not just stdout — the de Grey proof previously overflowed the in-RAM buffer.
+//   E4  blocking literals on watch lists (wblk[]): skip clits[] when blocker true.
+// Soundness arbiter unchanged: native RUP checker + external drat-trim. A wrong
+// minimisation makes a lemma non-RUP and drat-trim rejects it (CLAUDE.md 6.6).
+
+var nvars: i32 = 0
+var nclauses: i32 = 0
+var cstart: [i32; 262144] = [0; 262144]
+var clen: [i32; 262144] = [0; 262144]
+var clits: [i64; 4194304] = [0; 4194304]
+
+// clause deletion (LBD-based) state
+var lbd: [i32; 262144] = [0; 262144]
+var keepf: [i32; 262144] = [0; 262144]
+var cmap: [i32; 262144] = [0; 262144]
+var lblmark: [i32; 8192] = [0; 8192]
+var n_orig: i32 = 0
+var last_lbd: i32 = 0
+var max_learnts: i32 = 400
+var LBD_KEEP: i32 = 3
+var n_reduces: i64 = 0
+var n_deleted: i64 = 0
+
+// two-watched-literal scheme: clause c watches clits[cstart[c]+0] and +1.
+// E4 blocking literals: wblk[node] caches the other watched literal; if true, skip clits[].
+var whead: [i32; 16386] = [0 - 1; 16386]
+var wnext: [i32; 524288] = [0; 524288]
+var wblk: [i64; 524288] = [0; 524288]
+
+var assign: [i32; 8192] = [0; 8192]
+var vlevel: [i32; 8192] = [0; 8192]
+var reason: [i32; 8192] = [0; 8192]
+var phase:  [i32; 8192] = [0; 8192]
+var activity: [i64; 8192] = [0; 8192]
+var trail_lit: [i64; 8192] = [0; 8192]
+var trail_len: i32 = 0
+var trail_lim: [i32; 8192] = [0; 8192]
+var cur_level: i32 = 0
+var qhead: i32 = 0
+
+var seen: [i32; 8192] = [0; 8192]
+var LEARNT: [i64; 8192] = [0; 8192]
+var llen: i32 = 0
+
+// E1 minimisation working storage
+var mstack: [i64; 8192] = [0; 8192]
+var mtoclear: [i32; 8192] = [0; 8192]
+var mtc_len: i32 = 0
+
+var P_n: i32 = 0
+var P_start: [i32; 1048576] = [0; 1048576]
+var P_len: [i32; 1048576] = [0; 1048576]
+var P_tag: [i32; 1048576] = [0; 1048576]
+var P_lits: [i64; 16777216] = [0; 16777216]
+var P_pos: i64 = 0
+
+var n_conflicts: i64 = 0
+var n_decisions: i64 = 0
+var n_restarts: i64 = 0
+// E4c profile counters (search-only instrumentation)
+var prof_props: i64 = 0          // propagate() dequeue count
+var prof_watch_nodes: i64 = 0    // watch-list node visits
+var prof_block_skips: i64 = 0    // blocking literal short-circuits
+var prof_clause_refs: i64 = 0    // clits[] dereferences in propagate
+var prof_litval: i64 = 0         // litval() calls in propagate
+var prof_watch_moves: i64 = 0    // watch literal relocations
+var prof_chrono: i64 = 0         // chrono-BT fires (gap > CHRONO_LIMIT)
+var prof_pick_scans: i64 = 0     // pick() inner-loop iterations
+var pick_best: i32 = 0           // cached highest-priority unassigned var
+var pick_best_key: i64 = 0 - 1
+var CONFLICT_CAP: i64 = 200000000
+var var_inc: i64 = 1000000
+// Chronological backtracking (Nadel & Ryvchin 2018; kissat/CaDiCaL parity): when the
+// non-chronological backjump gap exceeds CHRONO_LIMIT, backtrack one level instead.
+// DRAT emission is unchanged — only the trail-unwind target differs.
+var CHRONO_LIMIT: i32 = 100
+
+// Latches if the in-RAM proof record/literal store overflows. Once set, the
+// native RUP checker and every certificate path REFUSE to claim VERIFIED — an
+// incomplete proof must never be reported as sound. [deepseek-review #7]
+var proof_over: i32 = 0
+
+// E1 LRB (Learning-Rate Branching, Liang et al. 2016) in integer fixed-point.
+// Q[v] is the learning-rate EMA scaled by LRB_SCALE. On assign we stamp the
+// learnt-clause counter; while assigned we count "participations" (appearances
+// in conflict analysis); on unassign we fold participation-rate into Q. Branch
+// on the unassigned var with max Q. USE_LRB=0 falls back to VSIDS for A/B
+// measurement; the choice is search-only (drat-trim verifies either way).
+var USE_LRB: i32 = 1
+// F2 symmetry breaking: precolour a known clique. Colours are interchangeable,
+// so any proper colouring can be permuted to give clique vertex i colour i —
+// satisfiability-preserving, hence F∧SB UNSAT ⟹ F UNSAT. SB=1 enables it.
+var SB: i32 = 0
+var Q: [i64; 8192] = [0; 8192]
+var lrb_assigned: [i64; 8192] = [0; 8192]
+var lrb_part: [i64; 8192] = [0; 8192]
+var lrb_alpha: i64 = 400          // alpha * 1000, decays 0.40 -> 0.06
+var LRB_SCALE: i64 = 1048576
+
+// E1 measurement: learned literals before/after minimisation
+var lits_before: i64 = 0
+var lits_after: i64 = 0
+var lits_removed: i64 = 0
+
+// E2 Glucose-style restart state: short-window LBD EMA vs global LBD average;
+// restart when recent learned clauses are "worse" (higher LBD) than the global
+// trend. A trail EMA blocks restarts when the partial model is unusually large
+// (near a solution) to avoid the pigeonhole thrash seen with naive restarts.
+var LBD_WIN: i32 = 50
+var RESTART_FLOOR: i64 = 50
+var SEED: i64 = 0
+var lbd_ring: [i64; 64] = [0; 64]
+var lbd_ridx: i32 = 0
+var lbd_rsum: i64 = 0
+var lbd_rcnt: i32 = 0
+var lbd_tot_sum: i64 = 0
+var lbd_tot_cnt: i64 = 0
+var trail_ema: i64 = 0          // fixed-point EMA*1024 of trail length at conflicts
+
+// E0 proof-to-disk text buffer (16 MiB). PB_over latches if a proof would
+// exceed it: we then REFUSE to claim a (truncated, invalid) certificate.
+var PB: [i8; 16777216] = [0; 16777216]
+var PBpos: i32 = 0
+var PB_over: i32 = 0
+
+// E0+ TRULY STREAMED proof: a held fd (syscall6 open-once) + a small bounded
+// write buffer. When STREAM=1, emit_*() format lemmas/deletions straight into WB
+// and flush via syscall write(2) — RAM stays O(64 KiB) regardless of proof size,
+// so K8+/de Grey-scale proofs go to disk without any in-RAM cap. The in-RAM
+// P_lits path (STREAM=0) is kept for the small-instance native-RUP gate.
+var STREAM: i32 = 0
+var STREAM_FD: i64 = 0 - 1
+var WB: [i8; 65536] = [0; 65536]
+var WBpos: i32 = 0
+
+// Graph-from-file (de Grey core) reader. Reads a DIMACS `p edge N M` + `e u v`
+// list into RB, then builds the k-colouring CNF. One-shot read is reliable for
+// the edge files (largest ~60 KiB << 1 MiB).
+var RB: [i8; 1048576] = [0; 1048576]
+var RBlen: i64 = 0
+var RBpos: i64 = 0
+var EDGE_PATH: string = ""
+var CUBE_PATH: string = ""
+var USE_FILE: i32 = 0
+var USE_CUBE: i32 = 0
+var WORKER_K: i64 = 0
+// edge store + adjacency for triangle-finding (cores up to 1000 vertices)
+var EU: [i64; 8192] = [0; 8192]
+var EV: [i64; 8192] = [0; 8192]
+var NEDGES: i64 = 0
+var GN: i64 = 0
+var ADJ: [i8; 1000000] = [0; 1000000]
+var CUBE_MARK: [i8; 8192] = [0; 8192]
+
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") }
+    else if d == 3 { print("3") } else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") } else if d == 8 { print("8") }
+    else { print("9") }
+}
+fn print_dec(n: i64) with IO, Mut, Div, Panic {
+    if n == 0 { print("0") return }
+    var x = n
+    if x < 0 { print("-") x = 0 - x }
+    var buf: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { buf[len] = x % 10  x = x / 10  len = len + 1 }
+    var i: i32 = len - 1
+    while i >= 0 { print_digit(buf[i])  i = i - 1 }
+}
+
+fn lit_var(l: i64) -> i32 with Panic {
+    if l < 0 { return (0 - l) as i32 }
+    return l as i32
+}
+fn litidx(l: i64) -> i32 with Panic {
+    let v = lit_var(l)
+    if l < 0 { return v * 2 + 1 }
+    return v * 2
+}
+fn litval(l: i64) -> i32 with Mut, Panic {
+    prof_litval = prof_litval + 1
+    let v = lit_var(l)
+    var a = assign[v]
+    if l < 0 { a = 0 - a }
+    return a
+}
+
+fn pick_blocker(c: i32, s: i32) -> i64 with Panic {
+    let st = cstart[c]
+    return clits[st + (1 - s)]
+}
+
+fn watch_clause(c: i32) with Mut, Panic {
+    let st = cstart[c]
+    let i0 = litidx(clits[st + 0])
+    wnext[2 * c] = whead[i0]
+    wblk[2 * c] = pick_blocker(c, 0)
+    whead[i0] = 2 * c
+    let i1 = litidx(clits[st + 1])
+    wnext[2 * c + 1] = whead[i1]
+    wblk[2 * c + 1] = pick_blocker(c, 1)
+    whead[i1] = 2 * c + 1
+}
+
+fn db_add(arr: &[i64; 8192], n: i32) -> i32 with Mut, Panic {
+    if nclauses >= 262144 { return 0 - 1 }
+    let idx = nclauses
+    var start: i32 = 0
+    if idx > 0 { start = cstart[idx - 1] + clen[idx - 1] }
+    if (start as i64) + (n as i64) > 4194304 { return 0 - 1 }
+    cstart[idx] = start
+    clen[idx] = n
+    var i: i32 = 0
+    while i < n {
+        clits[start + i] = arr[i]
+        let v = lit_var(arr[i])
+        if v > nvars { nvars = v }
+        i = i + 1
+    }
+    nclauses = idx + 1
+    if n >= 2 { watch_clause(idx) }
+    return idx
+}
+
+fn enqueue(lit: i64, rs: i32) with Mut, Panic {
+    let v = lit_var(lit)
+    if lit < 0 { assign[v] = 0 - 1 } else { assign[v] = 1 }
+    vlevel[v] = cur_level
+    reason[v] = rs
+    trail_lit[trail_len] = lit
+    trail_len = trail_len + 1
+    if v == pick_best { pick_best = 0  pick_best_key = 0 - 1 }
+    // LRB on-assign: stamp learnt counter, reset participation
+    lrb_assigned[v] = n_conflicts
+    lrb_part[v] = 0
+}
+
+fn propagate() -> i32 with Mut, Panic {
+    while qhead < trail_len {
+        let p = trail_lit[qhead]
+        qhead = qhead + 1
+        prof_props = prof_props + 1
+        let f = 0 - p
+        let fi = litidx(f)
+        var prev: i32 = 0 - 1
+        var node = whead[fi]
+        while node != (0 - 1) {
+            prof_watch_nodes = prof_watch_nodes + 1
+            let nextnode = wnext[node]
+            let blk = wblk[node]
+            if litval(blk) == 1 {
+                prof_block_skips = prof_block_skips + 1
+                prev = node
+                node = nextnode
+            } else {
+            let c = node / 2
+            let s = node - 2 * c
+            let st = cstart[c]
+            prof_clause_refs = prof_clause_refs + 1
+            let other = clits[st + (1 - s)]
+            var handled: i32 = 0
+            if litval(other) == 1 {
+                wblk[node] = other
+                prev = node
+                handled = 1
+            }
+            if handled == 0 {
+                let ln = clen[c]
+                var found: i32 = 0 - 1
+                var k: i32 = 2
+                while k < ln {
+                    prof_clause_refs = prof_clause_refs + 1
+                    if litval(clits[st + k]) != (0 - 1) { found = k  k = ln }
+                    else { k = k + 1 }
+                }
+                if found != (0 - 1) {
+                    prof_watch_moves = prof_watch_moves + 1
+                    let tmp = clits[st + s]
+                    clits[st + s] = clits[st + found]
+                    clits[st + found] = tmp
+                    let newlit = clits[st + s]
+                    wblk[node] = pick_blocker(c, s)
+                    wblk[2 * c + (1 - s)] = pick_blocker(c, 1 - s)
+                    if prev == (0 - 1) { whead[fi] = nextnode } else { wnext[prev] = nextnode }
+                    let ni = litidx(newlit)
+                    wnext[node] = whead[ni]
+                    whead[ni] = node
+                    handled = 1
+                }
+            }
+            if handled == 0 {
+                if litval(other) == (0 - 1) { return c }
+                enqueue(other, c)
+                prev = node
+            }
+            node = nextnode
+            }
+        }
+    }
+    return 0 - 1
+}
+
+fn rescale() with Mut, Panic {
+    var i: i32 = 1
+    while i <= nvars { activity[i] = activity[i] / 1000000000  i = i + 1 }
+    var_inc = var_inc / 1000000000
+    if var_inc < 1 { var_inc = 1 }
+    pick_best = 0
+    pick_best_key = 0 - 1
+}
+fn bump(v: i32) with Mut, Panic {
+    activity[v] = activity[v] + var_inc
+    if activity[v] > 1000000000000000000 { rescale() }
+    if assign[v] == 0 {
+        var key = activity[v]
+        if USE_LRB == 1 { key = Q[v] }
+        if key > pick_best_key { pick_best_key = key  pick_best = v }
+    }
+}
+
+// ---- streamed writer over a held fd (syscall6) ----
+fn s_open(path: string) -> i64 with IO, Mut, Panic {
+    WBpos = 0
+    STREAM_FD = syscall6(2, path, 577, 420, 0, 0, 0)   // O_WRONLY|O_CREAT|O_TRUNC, 0644
+    return STREAM_FD
+}
+fn wb_flush() with IO, Mut, Panic {
+    if WBpos > 0 {
+        let _ = syscall6(1, STREAM_FD, &! WB, WBpos as i64, 0, 0, 0)
+        WBpos = 0
+    }
+}
+fn wb_byte(b: i64) with IO, Mut, Panic {
+    if WBpos >= 65536 { wb_flush() }
+    WB[WBpos] = b as i8
+    WBpos = WBpos + 1
+}
+fn wb_dec(n: i64) with IO, Mut, Panic, Div {
+    if n == 0 { wb_byte(48)  return }
+    var x = n
+    if x < 0 { wb_byte(45)  x = 0 - x }
+    var tmp: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { tmp[len] = x % 10  x = x / 10  len = len + 1 }
+    var i: i32 = len - 1
+    while i >= 0 { wb_byte(48 + tmp[i])  i = i - 1 }
+}
+fn s_close() with IO, Mut, Panic {
+    wb_flush()
+    let _ = syscall6(3, STREAM_FD, 0, 0, 0, 0, 0)
+    STREAM_FD = 0 - 1
+}
+
+fn emit_proof_clause() with IO, Mut, Panic, Div {
+    if STREAM == 1 {
+        var i: i32 = 0
+        while i < llen { wb_dec(LEARNT[i])  wb_byte(32)  i = i + 1 }
+        wb_byte(48)  wb_byte(10)
+        P_n = P_n + 1
+        return
+    }
+    let idx = P_n
+    if idx >= 1048576 { proof_over = 1  return }
+    let start = P_pos
+    if start + (llen as i64) > 16777216 { proof_over = 1  return }
+    P_start[idx] = start as i32
+    P_len[idx] = llen
+    P_tag[idx] = 0
+    var i: i32 = 0
+    while i < llen { P_lits[(start as i32) + i] = LEARNT[i]  i = i + 1 }
+    P_pos = start + (llen as i64)
+    P_n = idx + 1
+}
+fn emit_delete(c: i32) with IO, Mut, Panic, Div {
+    if STREAM == 1 {
+        let st0 = cstart[c]
+        let ln0 = clen[c]
+        wb_byte(100)  wb_byte(32)   // "d "
+        var j: i32 = 0
+        while j < ln0 { wb_dec(clits[st0 + j])  wb_byte(32)  j = j + 1 }
+        wb_byte(48)  wb_byte(10)
+        P_n = P_n + 1
+        return
+    }
+    let idx = P_n
+    if idx >= 1048576 { proof_over = 1  return }
+    let ln = clen[c]
+    let start = P_pos
+    if start + (ln as i64) > 16777216 { proof_over = 1  return }
+    P_start[idx] = start as i32
+    P_len[idx] = ln
+    P_tag[idx] = 1
+    let st = cstart[c]
+    var k: i32 = 0
+    while k < ln { P_lits[(start as i32) + k] = clits[st + k]  k = k + 1 }
+    P_pos = start + (ln as i64)
+    P_n = idx + 1
+}
+fn emit_empty() with IO, Mut, Panic, Div {
+    if STREAM == 1 {
+        wb_byte(48)  wb_byte(10)   // "0\n"
+        P_n = P_n + 1
+        return
+    }
+    let idx = P_n
+    if idx >= 1048576 { proof_over = 1  return }
+    P_start[idx] = P_pos as i32
+    P_len[idx] = 0
+    P_tag[idx] = 0
+    P_n = idx + 1
+}
+
+fn comp_lbd() -> i32 with Mut, Panic {
+    var cnt: i32 = 0
+    var i: i32 = 0
+    while i < llen {
+        let lv = vlevel[lit_var(LEARNT[i])]
+        if lblmark[lv] == 0 { lblmark[lv] = 1  cnt = cnt + 1 }
+        i = i + 1
+    }
+    i = 0
+    while i < llen { lblmark[vlevel[lit_var(LEARNT[i])]] = 0  i = i + 1 }
+    return cnt
+}
+
+// abstract level signature: 1 << (level mod 32) — MiniSat's fast redundancy prune.
+fn abstract_level(v: i32) -> i64 with Panic {
+    let one: i64 = 1
+    let sh = (vlevel[v] & 31) as u8
+    return one << sh
+}
+
+// litRedundant (MiniSat 2.2, iterative): is `pp` implied by the rest of the
+// learned clause via its reason chain? Only literals whose negation already
+// sits in the clause (seen=1) or are recursively redundant may be peeled off;
+// any literal that is a level-0 unit, decision, or off-signature aborts the
+// attempt. Vars marked here are recorded in mtoclear so analyze can restore seen.
+fn lit_redundant(pp: i64, alev: i64) -> i32 with Mut, Panic, Div {
+    var sp: i32 = 0
+    mstack[0] = pp
+    sp = 1
+    let top = mtc_len
+    while sp > 0 {
+        sp = sp - 1
+        let qv0 = mstack[sp]
+        let v = lit_var(qv0)
+        let rc = reason[v]
+        let st = cstart[rc]
+        let ln = clen[rc]
+        var k: i32 = 0
+        while k < ln {
+            let q = clits[st + k]
+            let vq = lit_var(q)
+            if vq != v {
+                if seen[vq] == 0 {
+                    if vlevel[vq] > 0 {
+                        var ok: i32 = 0
+                        if reason[vq] >= 0 {
+                            if (abstract_level(vq) & alev) != 0 { ok = 1 }
+                        }
+                        if ok == 1 {
+                            // bound the work stack; on exhaustion conservatively
+                            // declare NOT redundant (sound: we just keep the
+                            // literal). sp is normally <= nvars. [deepseek #2]
+                            if sp >= 8192 {
+                                var jr: i32 = top
+                                while jr < mtc_len { seen[mtoclear[jr]] = 0  jr = jr + 1 }
+                                mtc_len = top
+                                return 0
+                            }
+                            seen[vq] = 1
+                            mstack[sp] = q  sp = sp + 1
+                            mtoclear[mtc_len] = vq  mtc_len = mtc_len + 1
+                        } else {
+                            var j: i32 = top
+                            while j < mtc_len { seen[mtoclear[j]] = 0  j = j + 1 }
+                            mtc_len = top
+                            return 0
+                        }
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+    return 1
+}
+
+// Compact LEARNT in place by dropping redundant literals (index >= 1; the
+// asserting UIP at index 0 is never removed). seen[] for every touched var is
+// cleared before returning. Updates llen and the lits_* measurement counters.
+fn minimize_and_clear() with Mut, Panic, Div {
+    lits_before = lits_before + (llen as i64)
+    var alev: i64 = 0
+    var i: i32 = 1
+    while i < llen { alev = alev | abstract_level(lit_var(LEARNT[i]))  i = i + 1 }
+    mtc_len = 0
+    i = 1
+    while i < llen { mtoclear[mtc_len] = lit_var(LEARNT[i])  mtc_len = mtc_len + 1  i = i + 1 }
+    var j: i32 = 1
+    i = 1
+    while i < llen {
+        let li = LEARNT[i]
+        let v = lit_var(li)
+        var keep: i32 = 1
+        if reason[v] >= 0 {
+            if lit_redundant(li, alev) == 1 { keep = 0 }
+        }
+        if keep == 1 { LEARNT[j] = li  j = j + 1 }
+        i = i + 1
+    }
+    llen = j
+    i = 0
+    while i < mtc_len { seen[mtoclear[i]] = 0  i = i + 1 }
+    lits_after = lits_after + (llen as i64)
+}
+
+fn analyze(confl: i32) -> i32 with IO, Mut, Panic, Div {
+    var pathC: i32 = 0
+    llen = 1
+    var p: i64 = 0
+    var ci: i32 = confl
+    var index: i32 = trail_len - 1
+    var go: i32 = 1
+    while go == 1 {
+        let st = cstart[ci]
+        let ln = clen[ci]
+        var k: i32 = 0
+        while k < ln {
+            let q = clits[st + k]
+            let vq = lit_var(q)
+            var skip: i32 = 0
+            if p != 0 { if vq == lit_var(p) { skip = 1 } }
+            if skip == 0 {
+                if seen[vq] == 0 {
+                    if vlevel[vq] > 0 {
+                        seen[vq] = 1
+                        bump(vq)
+                        lrb_part[vq] = lrb_part[vq] + 1   // LRB participation
+                        if vlevel[vq] >= cur_level { pathC = pathC + 1 }
+                        else { LEARNT[llen] = q  llen = llen + 1 }
+                    }
+                }
+            }
+            k = k + 1
+        }
+        while seen[lit_var(trail_lit[index])] == 0 { index = index - 1 }
+        p = trail_lit[index]
+        seen[lit_var(p)] = 0
+        pathC = pathC - 1
+        if pathC <= 0 { go = 0 }
+        else { ci = reason[lit_var(p)]  index = index - 1 }
+    }
+    LEARNT[0] = 0 - p
+
+    // E1: recursive minimisation BEFORE choosing the second watch / btlevel
+    minimize_and_clear()
+
+    var btlevel: i32 = 0
+    if llen >= 2 {
+        var maxi: i32 = 1
+        var maxl: i32 = vlevel[lit_var(LEARNT[1])]
+        var j2: i32 = 2
+        while j2 < llen {
+            let lv = vlevel[lit_var(LEARNT[j2])]
+            if lv > maxl { maxl = lv  maxi = j2 }
+            j2 = j2 + 1
+        }
+        let tmp = LEARNT[1]  LEARNT[1] = LEARNT[maxi]  LEARNT[maxi] = tmp
+        btlevel = maxl
+    }
+    var_inc = var_inc + var_inc / 20
+    if var_inc > 1000000000000000 { rescale() }
+    last_lbd = comp_lbd()
+    emit_proof_clause()
+    return btlevel
+}
+
+fn cancel_to(level: i32) with Mut, Panic, Div {
+    if cur_level <= level { return }
+    let target = trail_lim[level + 1]
+    var i: i32 = trail_len - 1
+    while i >= target {
+        let v = lit_var(trail_lit[i])
+        if assign[v] == 1 { phase[v] = 1 } else { phase[v] = 0 }
+        // LRB on-unassign: Q[v] = (1-alpha)Q + alpha * (participated/interval)
+        let interval = n_conflicts - lrb_assigned[v]
+        if interval > 0 {
+            let reward = lrb_part[v] * LRB_SCALE / interval
+            Q[v] = Q[v] + lrb_alpha * (reward - Q[v]) / 1000
+        }
+        assign[v] = 0
+        reason[v] = 0 - 1
+        vlevel[v] = 0
+        if v == pick_best { pick_best = 0  pick_best_key = 0 - 1 }
+        else {
+            var uk = activity[v]
+            if USE_LRB == 1 { uk = Q[v] }
+            if uk > pick_best_key { pick_best_key = uk  pick_best = v }
+        }
+        i = i - 1
+    }
+    trail_len = target
+    qhead = target
+    cur_level = level
+}
+
+fn reduce_db() with IO, Mut, Panic, Div {
+    var c: i32 = 0
+    while c < nclauses {
+        if c < n_orig { keepf[c] = 1 }
+        else if lbd[c] <= LBD_KEEP { keepf[c] = 1 }
+        else { keepf[c] = 0 }
+        c = c + 1
+    }
+    var t: i32 = 0
+    while t < trail_len {
+        let v = lit_var(trail_lit[t])
+        let r = reason[v]
+        if r >= 0 { keepf[r] = 1 }
+        t = t + 1
+    }
+    c = n_orig
+    while c < nclauses {
+        if keepf[c] == 0 { emit_delete(c)  n_deleted = n_deleted + 1 }
+        c = c + 1
+    }
+    var newidx: i32 = 0
+    var newpos: i32 = 0
+    c = 0
+    while c < nclauses {
+        if keepf[c] == 1 {
+            let oldst = cstart[c]
+            let ln = clen[c]
+            let lb = lbd[c]
+            cmap[c] = newidx
+            var k: i32 = 0
+            while k < ln { clits[newpos + k] = clits[oldst + k]  k = k + 1 }
+            cstart[newidx] = newpos
+            clen[newidx] = ln
+            lbd[newidx] = lb
+            newpos = newpos + ln
+            newidx = newidx + 1
+        }
+        c = c + 1
+    }
+    nclauses = newidx
+    t = 0
+    while t < trail_len {
+        let v = lit_var(trail_lit[t])
+        if reason[v] >= 0 { reason[v] = cmap[reason[v]] }
+        t = t + 1
+    }
+    var li: i32 = 0
+    while li < 16386 { whead[li] = 0 - 1  li = li + 1 }
+    c = 0
+    while c < nclauses { if clen[c] >= 2 { watch_clause(c) }  c = c + 1 }
+    qhead = 0
+    n_reduces = n_reduces + 1
+    let learned = nclauses - n_orig
+    if learned > max_learnts - max_learnts / 4 {
+        if max_learnts < 1000000 { max_learnts = max_learnts + max_learnts / 2 }
+    }
+}
+
+// Feed one learned-clause LBD into the recent-window ring and the global sums.
+fn update_lbd_stats(lb: i32) with Mut, Panic {
+    let lb64 = lb as i64
+    lbd_tot_sum = lbd_tot_sum + lb64
+    lbd_tot_cnt = lbd_tot_cnt + 1
+    if lbd_rcnt < LBD_WIN {
+        lbd_ring[lbd_ridx] = lb64
+        lbd_rsum = lbd_rsum + lb64
+        lbd_rcnt = lbd_rcnt + 1
+    } else {
+        lbd_rsum = lbd_rsum - lbd_ring[lbd_ridx]
+        lbd_ring[lbd_ridx] = lb64
+        lbd_rsum = lbd_rsum + lb64
+    }
+    lbd_ridx = lbd_ridx + 1
+    if lbd_ridx >= LBD_WIN { lbd_ridx = 0 }
+}
+
+// Glucose force condition: window full AND recent_avg * 0.8 > global_avg.
+// Cross-multiplied to stay in integers (all operands non-negative):
+//   (rsum/WIN)*0.8 > (tot_sum/tot_cnt)
+//   rsum * 8 * tot_cnt > tot_sum * 10 * WIN
+// Blocked when current trail >> trail_ema (likely near a model).
+fn want_restart() -> i32 with Mut, Panic {
+    if lbd_rcnt < LBD_WIN { return 0 }
+    if lbd_tot_cnt == 0 { return 0 }
+    let lhs = lbd_rsum * 8 * lbd_tot_cnt
+    let rhs = lbd_tot_sum * 10 * (LBD_WIN as i64)
+    if lhs > rhs {
+        // trail-EMA block: trail_ema is EMA*1024; block if trail*1024*100 > trail_ema*125
+        if (trail_len as i64) * 1024 * 100 > trail_ema * 125 { return 0 }
+        return 1
+    }
+    return 0
+}
+
+fn pick() -> i32 with Mut, Panic {
+    if pick_best != 0 {
+        if assign[pick_best] == 0 {
+            var ckey = activity[pick_best]
+            if USE_LRB == 1 { ckey = Q[pick_best] }
+            if ckey == pick_best_key { return pick_best }
+        }
+    }
+    var best: i32 = 0
+    var bestkey: i64 = 0 - 1
+    var v: i32 = 1
+    while v <= nvars {
+        prof_pick_scans = prof_pick_scans + 1
+        if assign[v] == 0 {
+            var key: i64 = activity[v]
+            if USE_LRB == 1 { key = Q[v] }
+            if key > bestkey { bestkey = key  best = v }
+        }
+        v = v + 1
+    }
+    pick_best = best
+    pick_best_key = bestkey
+    return best
+}
+
+fn solve() -> i32 with IO, Mut, Div, Panic {
+    cur_level = 0
+    trail_lim[0] = 0
+    qhead = 0
+    var since_restart: i64 = 0
+    var rephase_flag: i32 = 0
+    var loops: i32 = 1
+    lbd_ridx = 0  lbd_rsum = 0  lbd_rcnt = 0  lbd_tot_sum = 0  lbd_tot_cnt = 0
+    trail_ema = 0
+    // initial unit propagation from original UNIT clauses (length 1) — needed for
+    // symmetry-breaking precolour units and any unit in the input formula. A unit
+    // already falsified at level 0 is an immediate refutation.
+    var uci: i32 = 0
+    while uci < nclauses {
+        if clen[uci] == 1 {
+            let ul = clits[cstart[uci]]
+            let uv = litval(ul)
+            if uv == 0 { enqueue(ul, uci) }
+            else if uv == (0 - 1) { emit_empty()  return 0 }
+        }
+        uci = uci + 1
+    }
+    while loops == 1 {
+        let confl = propagate()
+        if confl >= 0 {
+            n_conflicts = n_conflicts + 1
+            since_restart = since_restart + 1
+            // LRB alpha decay: 0.40 -> 0.06 over ~340k conflicts
+            lrb_alpha = 400 - n_conflicts / 1000
+            if lrb_alpha < 60 { lrb_alpha = 60 }
+            // trail EMA (alpha = 1/32), fixed point *1024
+            trail_ema = trail_ema + ((trail_len as i64) * 1024 - trail_ema) / 32
+            if n_conflicts % 100000 == 0 {
+                print("  [progress] conflicts="); print_dec(n_conflicts)
+                print(" lemmas="); print_dec(P_n as i64)
+                print(" clauses="); print_dec(nclauses as i64)
+                print(" reduces="); print_dec(n_reduces)
+                print(" deleted="); print_dec(n_deleted)
+                print(" restarts="); print_dec(n_restarts)
+                print(" trail="); print_dec(trail_len as i64); print("\n")
+            }
+            if n_conflicts > CONFLICT_CAP { return 2 }
+            if cur_level == 0 { emit_empty()  return 0 }
+            let bt = analyze(confl)
+            let lidx = db_add(&LEARNT, llen)
+            if lidx < 0 { return 3 }
+            lbd[lidx] = last_lbd
+            update_lbd_stats(last_lbd)
+            var bt_target = bt
+            if cur_level - bt > CHRONO_LIMIT { prof_chrono = prof_chrono + 1  bt_target = cur_level - 1 }
+            cancel_to(bt_target)
+            enqueue(LEARNT[0], lidx)
+            if (nclauses - n_orig) >= max_learnts {
+                cancel_to(0)
+                qhead = 0
+                since_restart = 0
+                n_restarts = n_restarts + 1
+                reduce_db()
+            } else if since_restart >= RESTART_FLOOR {
+                if want_restart() == 1 {
+                    cancel_to(0)
+                    qhead = 0
+                    since_restart = 0
+                    // reset the recent window so the next epoch is judged fresh
+                    lbd_ridx = 0  lbd_rsum = 0  lbd_rcnt = 0
+                    n_restarts = n_restarts + 1
+                    if n_restarts % 128 == 0 {
+                        rephase_flag = 1 - rephase_flag
+                        var rv: i32 = 1
+                        while rv <= nvars { phase[rv] = rephase_flag  rv = rv + 1 }
+                    }
+                }
+            }
+        } else {
+            let x = pick()
+            if x == 0 { return 1 }
+            n_decisions = n_decisions + 1
+            cur_level = cur_level + 1
+            trail_lim[cur_level] = trail_len
+            if phase[x] == 1 { enqueue(x as i64, 0 - 1) } else { enqueue(0 - (x as i64), 0 - 1) }
+        }
+    }
+    return 2
+}
+
+// ---- full-scan RUP checker (small instances; de Grey uses drat-trim) ----
+fn reset_assign_full() with Mut, Panic {
+    var i: i32 = 0
+    while i <= nvars { assign[i] = 0  i = i + 1 }
+}
+fn rup_add_lemma(pst: i32, pln: i32) with Mut, Panic {
+    if nclauses >= 262144 { return }
+    let idx = nclauses
+    var start: i32 = 0
+    if idx > 0 { start = cstart[idx - 1] + clen[idx - 1] }
+    if (start as i64) + (pln as i64) > 4194304 { return }
+    cstart[idx] = start
+    clen[idx] = pln
+    var i: i32 = 0
+    while i < pln { clits[start + i] = P_lits[pst + i]  i = i + 1 }
+    nclauses = idx + 1
+}
+fn propagate_noenq() -> i32 with Mut, Panic {
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < nclauses {
+            let st = cstart[c]
+            let ln = clen[c]
+            var sat: i32 = 0
+            var un: i32 = 0
+            var last: i64 = 0
+            var k: i32 = 0
+            while k < ln {
+                let l = clits[st + k]
+                let v = lit_var(l)
+                var a = assign[v]
+                if l < 0 { a = 0 - a }
+                if a == 1 { sat = 1 }
+                if a == 0 { un = un + 1  last = l }
+                k = k + 1
+            }
+            if sat == 0 {
+                if un == 0 { return 1 }
+                if un == 1 {
+                    let v = lit_var(last)
+                    if last < 0 { assign[v] = 0 - 1 } else { assign[v] = 1 }
+                    changed = 1
+                }
+            }
+            c = c + 1
+        }
+    }
+    return 0
+}
+fn verify(orig_nc: i32) -> i32 with Mut, Panic {
+    if proof_over == 1 { return 0 - 2 }   // truncated proof: never claim verified
+    nclauses = orig_nc
+    var pi: i32 = 0
+    while pi < P_n {
+        if P_tag[pi] == 1 { pi = pi + 1  continue }
+        let pst = P_start[pi]
+        let pln = P_len[pi]
+        reset_assign_full()
+        var taut: i32 = 0
+        var k: i32 = 0
+        while k < pln {
+            let l = P_lits[pst + k]
+            let v = lit_var(l)
+            var want: i32 = 0 - 1
+            if l < 0 { want = 1 }
+            if assign[v] != 0 { if assign[v] != want { taut = 1 } }
+            assign[v] = want
+            k = k + 1
+        }
+        var ok: i32 = 0
+        if taut == 1 { ok = 1 } else {
+            let cf = propagate_noenq()
+            if cf == 1 { ok = 1 }
+        }
+        if ok == 0 { return 0 - 1 }
+        if pln == 0 { return 1 }
+        rup_add_lemma(pst, pln)
+        pi = pi + 1
+    }
+    return 0
+}
+
+// ---- proof / formula serialisation to in-RAM text then disk (E0) ----
+fn pb_byte(b: i64) with Mut, Panic {
+    if PBpos < 16777216 { PB[PBpos] = b as i8  PBpos = PBpos + 1 }
+    else { PB_over = 1 }
+}
+fn pb_dec(n: i64) with Mut, Panic, Div {
+    if n == 0 { pb_byte(48)  return }
+    var x = n
+    if x < 0 { pb_byte(45)  x = 0 - x }
+    var tmp: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { tmp[len] = x % 10  x = x / 10  len = len + 1 }
+    var i: i32 = len - 1
+    while i >= 0 { pb_byte(48 + tmp[i])  i = i - 1 }
+}
+fn build_cnf_buf(orig_nc: i32) with Mut, Panic, Div {
+    PBpos = 0  PB_over = 0
+    pb_byte(112) pb_byte(32) pb_byte(99) pb_byte(110) pb_byte(102) pb_byte(32) // "p cnf "
+    pb_dec(nvars as i64)  pb_byte(32)  pb_dec(orig_nc as i64)  pb_byte(10)
+    var c: i32 = 0
+    while c < orig_nc {
+        let st = cstart[c]
+        let ln = clen[c]
+        var k: i32 = 0
+        while k < ln { pb_dec(clits[st + k])  pb_byte(32)  k = k + 1 }
+        pb_byte(48)  pb_byte(10)
+        c = c + 1
+    }
+}
+fn build_drat_buf() with Mut, Panic, Div {
+    PBpos = 0  PB_over = 0
+    var pi: i32 = 0
+    while pi < P_n {
+        let pst = P_start[pi]
+        let pln = P_len[pi]
+        if P_tag[pi] == 1 { pb_byte(100)  pb_byte(32) }   // "d "
+        var k: i32 = 0
+        while k < pln { pb_dec(P_lits[pst + k])  pb_byte(32)  k = k + 1 }
+        pb_byte(48)  pb_byte(10)
+        pi = pi + 1
+    }
+}
+
+fn build_clique(n: i64, k: i64) with Mut, Div, Panic {
+    var arr: [i64; 8192] = [0; 8192]
+    var v: i64 = 0
+    while v < n {
+        var c: i64 = 0
+        while c < k { arr[c as usize] = v*k + c + 1  c = c + 1 }
+        let _ = db_add(&arr, k as i32)
+        v = v + 1
+    }
+    var a: i64 = 0
+    while a < n {
+        var b: i64 = a + 1
+        while b < n {
+            var c: i64 = 0
+            while c < k {
+                arr[0] = 0 - (a*k + c + 1)
+                arr[1] = 0 - (b*k + c + 1)
+                let _ = db_add(&arr, 2)
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+// Add the k binary "not same colour" clauses for an edge (a,b) of a graph whose
+// vertices are 0..N-1 and whose colour variables are v*k + c + 1 (1-based).
+fn add_edge(a: i64, b: i64, k: i64) with Mut, Div, Panic {
+    var arr: [i64; 8192] = [0; 8192]
+    var c: i64 = 0
+    while c < k {
+        arr[0] = 0 - (a * k + c + 1)
+        arr[1] = 0 - (b * k + c + 1)
+        let _ = db_add(&arr, 2)
+        c = c + 1
+    }
+}
+fn add_atleast_one(nverts: i64, k: i64) with Mut, Div, Panic {
+    var arr: [i64; 8192] = [0; 8192]
+    var v: i64 = 0
+    while v < nverts {
+        var c: i64 = 0
+        while c < k { arr[c as usize] = v * k + c + 1  c = c + 1 }
+        let _ = db_add(&arr, k as i32)
+        v = v + 1
+    }
+}
+
+// Read a DIMACS edge file into RB via syscalls (open O_RDONLY=0, read, close=3).
+fn read_edge_file(path: string) -> i64 with IO, Mut, Panic {
+    let fd = syscall6(2, path, 0, 0, 0, 0, 0)
+    if fd < 0 { return 0 - 1 }
+    let n = syscall6(0, fd, &! RB, 1048576, 0, 0, 0)
+    let _ = syscall6(3, fd, 0, 0, 0, 0, 0)
+    RBlen = n
+    RBpos = 0
+    return n
+}
+
+// Cube-file integers for the search lane. The accepted format is the same as the
+// Python manifest producer: zero-based `<vertex> <colour>` rows, optionally using
+// labels like `vertex=12 colour=3`; `#` starts a comment to end-of-line.
+fn next_cube_int() -> i64 with Mut, Panic, Div {
+    while RBpos < RBlen {
+        let c = RB[RBpos as usize] as i64
+        if c == 35 {
+            while RBpos < RBlen {
+                let d = RB[RBpos as usize] as i64
+                RBpos = RBpos + 1
+                if d == 10 { break }
+            }
+        } else if c == 45 {
+            RBpos = RBpos + 1
+            if RBpos < RBlen {
+                let d = RB[RBpos as usize] as i64
+                if d >= 48 { if d <= 57 { return 0 - 2 } }
+            }
+        } else {
+            if c >= 48 { if c <= 57 { break } }
+            RBpos = RBpos + 1
+        }
+    }
+    if RBpos >= RBlen { return 0 - 1 }
+    var v: i64 = 0
+    while RBpos < RBlen {
+        let c = RB[RBpos as usize] as i64
+        if c < 48 { break }
+        if c > 57 { break }
+        v = v * 10 + (c - 48)
+        RBpos = RBpos + 1
+    }
+    return v
+}
+
+// Read a cube file and append each assignment as an original UNIT clause. Because
+// this runs before `onc = nclauses`, the streamed CNF is exactly CNF(edge,k) plus
+// these cube units, and the streamed DRAT refutes that exact formula.
+fn read_cube_file(path: string, nverts: i64, k: i64) -> i64 with IO, Mut, Div, Panic {
+    let fd = syscall6(2, path, 0, 0, 0, 0, 0)
+    if fd < 0 { return 0 - 1 }
+    let n = syscall6(0, fd, &! RB, 1048576, 0, 0, 0)
+    let _ = syscall6(3, fd, 0, 0, 0, 0, 0)
+    if n < 0 { return 0 - 1 }
+    RBlen = n
+    RBpos = 0
+    var i: i32 = 0
+    while i < 8192 { CUBE_MARK[i] = 0  i = i + 1 }
+    var arr: [i64; 8192] = [0; 8192]
+    var count: i64 = 0
+    while 1 == 1 {
+        let v = next_cube_int()
+        if v == (0 - 1) { break }
+        if v < 0 { return v }
+        let c = next_cube_int()
+        if c < 0 { return 0 - 2 }
+        if v >= nverts { return 0 - 3 }
+        if c >= k { return 0 - 4 }
+        if v >= 8192 { return 0 - 5 }
+        if CUBE_MARK[v as usize] == 1 { return 0 - 6 }
+        CUBE_MARK[v as usize] = 1
+        arr[0] = v * k + c + 1
+        let _ = db_add(&arr, 1)
+        count = count + 1
+    }
+    if count == 0 { return 0 - 7 }
+    return count
+}
+// Scan the next non-negative integer in RB from RBpos; skips letters/space/newline
+// (header tokens 'p','edge','e'). Returns -1 at EOF.
+fn next_int() -> i64 with Mut, Panic, Div {
+    while RBpos < RBlen {
+        let c = RB[RBpos as usize] as i64
+        if c >= 48 { if c <= 57 { break } }
+        RBpos = RBpos + 1
+    }
+    if RBpos >= RBlen { return 0 - 1 }
+    var v: i64 = 0
+    while RBpos < RBlen {
+        let c = RB[RBpos as usize] as i64
+        if c < 48 { break }
+        if c > 57 { break }
+        v = v * 10 + (c - 48)
+        RBpos = RBpos + 1
+    }
+    return v
+}
+// Build the k-colouring CNF from the loaded edge list: header `N M`, then M
+// `u v` edges (1-based -> 0-based). UNSAT => chi(G) >= k+1.
+fn build_graph_from_edges(k: i64) -> i64 with IO, Mut, Div, Panic {
+    let nN = next_int()
+    let mM = next_int()
+    if nN <= 0 { return 0 - 1 }
+    if mM < 0 { return 0 - 2 }
+    if k <= 0 { return 0 - 3 }
+    if nN * k >= 8192 { return 0 - 4 }
+    if SB == 1 {
+        if nN > 1000 { return 0 - 5 }
+        if mM > 8192 { return 0 - 6 }
+    }
+    GN = nN
+    NEDGES = 0
+    add_atleast_one(nN, k)
+    var e: i64 = 0
+    while e < mM {
+        let u = next_int()
+        let w = next_int()
+        if u < 1 { return 0 - 7 }
+        if w < 1 { return 0 - 8 }
+        if u > nN { return 0 - 9 }
+        if w > nN { return 0 - 10 }
+        if u == w { return 0 - 11 }
+        let a = u - 1
+        let b = w - 1
+        add_edge(a, b, k)
+        if NEDGES < 8192 { EU[NEDGES as usize] = a  EV[NEDGES as usize] = b  NEDGES = NEDGES + 1 }
+        if a < 1000 { if b < 1000 {
+            let ab = a * GN + b
+            let ba = b * GN + a
+            if ab < 1000000 { if ba < 1000000 {
+                ADJ[ab as usize] = 1  ADJ[ba as usize] = 1
+            } else if SB == 1 { return 0 - 12 } }
+            else if SB == 1 { return 0 - 12 }
+        } }
+        e = e + 1
+    }
+    return e
+}
+// Find the first triangle (a,b,c) and precolour it 0,1,2. For a K₄-free
+// unit-distance graph this is a COMPLETE colour-symmetry break for k=4
+// (residual S_{k-3}=S_1). Satisfiability-preserving (WLOG colour permutation).
+fn precolour_triangle(k: i64) -> i32 with IO, Mut, Div, Panic {
+    var arr: [i64; 8192] = [0; 8192]
+    var e: i64 = 0
+    while e < NEDGES {
+        let a = EU[e]  let b = EV[e]
+        var c: i64 = 0
+        while c < GN {
+            if c != a { if c != b {
+                if ADJ[(a * GN + c) as usize] == 1 { if ADJ[(b * GN + c) as usize] == 1 {
+                    arr[0] = a * k + 0 + 1  let _ = db_add(&arr, 1)
+                    arr[0] = b * k + 1 + 1  let _ = db_add(&arr, 1)
+                    arr[0] = c * k + 2 + 1  let _ = db_add(&arr, 1)
+                    print("[precolour triangle ")  print_dec(a)  print(",")  print_dec(b)  print(",")  print_dec(c)  print("]\n")
+                    return 1
+                }}
+            }}
+            c = c + 1
+        }
+        e = e + 1
+    }
+    return 0
+}
+
+// Moser spindle: 7 vertices, 11 edges, χ = 4. Two rhombi (triangles 0-1-2 / 1-2-3
+// and 0-4-5 / 4-5-6) sharing apex 0, far vertices 3-6 joined. Encoding its
+// 3-colouring as UNSAT certifies χ(spindle) ≥ 4 — a real unit-distance graph
+// through the de Grey pipeline (LRB + streamed proof + triangle-precolour SB).
+fn build_spindle_3col() with Mut, Div, Panic {
+    let k: i64 = 3
+    add_atleast_one(7, k)
+    add_edge(0, 1, k)  add_edge(0, 2, k)  add_edge(1, 2, k)
+    add_edge(1, 3, k)  add_edge(2, 3, k)
+    add_edge(0, 4, k)  add_edge(0, 5, k)  add_edge(4, 5, k)
+    add_edge(4, 6, k)  add_edge(5, 6, k)
+    add_edge(3, 6, k)
+    if SB == 1 {
+        // triangle 0,1,2 needs 3 distinct colours; WLOG 0->0, 1->1, 2->2.
+        // k=3,ω=3 ⟹ this already breaks colour symmetry completely; VP is redundant here.
+        var arr: [i64; 8192] = [0; 8192]
+        arr[0] = 0 * k + 0 + 1  let _ = db_add(&arr, 1)
+        arr[0] = 1 * k + 1 + 1  let _ = db_add(&arr, 1)
+        arr[0] = 2 * k + 2 + 1  let _ = db_add(&arr, 1)
+    }
+    if SB == 2 { add_value_precedence(7, k) }
+    if SB == 3 {
+        var arr: [i64; 8192] = [0; 8192]
+        arr[0] = 0 * k + 0 + 1  let _ = db_add(&arr, 1)
+        arr[0] = 1 * k + 1 + 1  let _ = db_add(&arr, 1)
+        arr[0] = 2 * k + 2 + 1  let _ = db_add(&arr, 1)
+        add_value_precedence(7, k)
+    }
+}
+
+// Precolour the first `k` vertices (a k-clique inside K_n) with colours 0..k-1
+// as UNIT clauses. WLOG by colour permutation — satisfiability-preserving.
+fn add_sb_units(k: i64) with Mut, Div, Panic {
+    var arr: [i64; 8192] = [0; 8192]
+    var i: i64 = 0
+    while i < k {
+        arr[0] = i * k + i + 1     // vertex i gets colour i (1-based literal)
+        let _ = db_add(&arr, 1)
+        i = i + 1
+    }
+}
+
+// Value precedence (Law & Lee 2004; ≡ Walsh VALSYM): colour c (c≥1) may be used
+// by vertex v only if colour c-1 is already used by some vertex u<v — i.e. colours
+// are *introduced in index order*. Breaks the whole colour-permutation group S_k.
+// Satisfiability-preserving: any proper colouring can be relabelled to introduce
+// colours in order, so F∧VP UNSAT ⟹ F UNSAT. Clause per (v,c≥1):
+//   (¬x[v,c] ∨ x[0,c-1] ∨ x[1,c-1] ∨ … ∨ x[v-1,c-1]).
+// For v=0 this is the unit (¬x[0,c]), pinning vertex 0 to colour 0 via at-least-one.
+// Value precedence (Law & Lee 2004; ≡ Walsh VALSYM): colour c (c≥1) may be used
+// by vertex v only if colour c-1 is already used by some vertex u<v — colours are
+// *introduced in index order*. Breaks the whole colour-permutation group S_k.
+// Satisfiability-preserving: any proper colouring can be relabelled to introduce
+// colours in order, so F∧VP UNSAT ⟹ F UNSAT. Clause per (v, c≥1):
+//   (¬x[v,c] ∨ x[0,c-1] ∨ … ∨ x[v-1,c-1]).  For v=0 this is the unit (¬x[0,c]).
+// NOTE: for a 4-colouring of a K₄-free (de Grey) graph, ω=3, so precolouring one
+// triangle already breaks colour symmetry COMPLETELY (residual S_{k-ω}=S_1); VP is
+// the general tool that also bites when k-ω≥2 (triangle-free graphs, k≥5).
+fn add_value_precedence(nverts: i64, k: i64) with Mut, Div, Panic {
+    var arr: [i64; 8192] = [0; 8192]
+    var v: i64 = 0
+    while v < nverts {
+        var c: i64 = 1
+        while c < k {
+            arr[0] = 0 - (v * k + c + 1)
+            var len: i64 = 1
+            var u: i64 = 0
+            while u < v {
+                arr[len as usize] = u * k + (c - 1) + 1
+                len = len + 1
+                u = u + 1
+            }
+            let _ = db_add(&arr, len as i32)
+            c = c + 1
+        }
+        v = v + 1
+    }
+}
+
+fn reset_all() with Mut, Panic {
+    var i: i32 = 0
+    while i < 8192 { assign[i]=0 vlevel[i]=0 reason[i]=0 seen[i]=0 phase[i]=0 activity[i]=0 Q[i]=0 lrb_assigned[i]=0 lrb_part[i]=0 i=i+1 }
+    var li: i32 = 0
+    while li < 16386 { whead[li] = 0 - 1  li = li + 1 }
+    nvars=0 nclauses=0 trail_len=0 cur_level=0 qhead=0
+    P_n=0 n_conflicts=0 n_decisions=0 n_restarts=0 var_inc=1000000
+    prof_props=0 prof_watch_nodes=0 prof_block_skips=0 prof_clause_refs=0
+    prof_litval=0 prof_watch_moves=0 prof_chrono=0 prof_pick_scans=0
+    pick_best=0 pick_best_key=0 - 1
+    P_pos=0 n_reduces=0 n_deleted=0 n_orig=0 max_learnts=400
+    proof_over=0 lrb_alpha=400
+}
+
+fn run_case(n: i64) with IO, Mut, Div, Panic {
+    reset_all()
+    build_clique(n, n - 1)
+    let orig_nc = nclauses
+    n_orig = orig_nc
+    print("K_")  print_dec(n)  print("/")  print_dec(n - 1)  print("-col vars=")
+    print_dec(nvars as i64)  print(" clauses=")  print_dec(orig_nc as i64)
+    let r = solve()
+    if r == 1 { print("  SAT (UNEXPECTED)\n")  return }
+    if r >= 2 { print("  WALL/CAP code=")  print_dec(r as i64)  print("\n")  return }
+    let conf = n_conflicts
+    let lemmas = P_n
+    reset_assign_full()
+    let vr = verify(orig_nc)
+    print("  conflicts=")  print_dec(conf)  print(" decisions=")  print_dec(n_decisions)
+    print(" restarts=")  print_dec(n_restarts)  print(" lemmas=")  print_dec(lemmas as i64)
+    print(" lits_pre=")  print_dec(lits_before)  print(" lits_post=")  print_dec(lits_after)
+    print(" props=")  print_dec(prof_props)  print(" watch=")  print_dec(prof_watch_nodes)
+    print(" block=")  print_dec(prof_block_skips)  print(" clrefs=")  print_dec(prof_clause_refs)
+    print(" litval=")  print_dec(prof_litval)  print(" wmove=")  print_dec(prof_watch_moves)
+    print(" chrono=")  print_dec(prof_chrono)  print(" pickscan=")  print_dec(prof_pick_scans)
+    if vr == 1 { print("  RUP:VERIFIED\n") } else { print("  RUP:FAIL(")  print_dec(vr as i64)  print(")\n") }
+}
+
+// ---- P1 portfolio: search-only diversification driven by a CLI seed ----
+fn str_to_int(s: string) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var i: i64 = 0
+    let L = str_len(s)
+    while i < L {
+        let ch = str_char_at(s, i)
+        if ch >= 48 { if ch <= 57 { n = n * 10 + (ch - 48) } }
+        i = i + 1
+    }
+    return n
+}
+
+// Perturb ONLY the search order (initial phase, activity bias, restart cadence).
+// Soundness is independent of these — drat-trim verifies every worker's proof.
+fn apply_seed() with Mut, Panic, Div {
+    LBD_WIN = (30 + (SEED % 30)) as i32
+    if LBD_WIN > 63 { LBD_WIN = 63 }
+    RESTART_FLOOR = 40 + (SEED % 60)
+    var v: i32 = 1
+    while v <= nvars {
+        let sh = ((v as i64) & 31) as u8
+        let bit = (SEED >> sh) & 1
+        phase[v] = bit as i32
+        activity[v] = (SEED * (v as i64) + (v as i64)) % 17
+        Q[v] = ((SEED * (v as i64) + (v as i64)) % 17) * 4096
+        v = v + 1
+    }
+}
+
+// Stream the original CNF straight to disk via the held-fd writer (no whole-
+// formula RAM buffer). Used by the streaming worker for arbitrary instance size.
+fn stream_cnf(path: string, orig_nc: i32) -> i64 with IO, Mut, Div, Panic {
+    if s_open(path) < 0 { return 0 - 1 }
+    wb_byte(112) wb_byte(32) wb_byte(99) wb_byte(110) wb_byte(102) wb_byte(32)  // "p cnf "
+    wb_dec(nvars as i64)  wb_byte(32)  wb_dec(orig_nc as i64)  wb_byte(10)
+    var c: i32 = 0
+    while c < orig_nc {
+        let st = cstart[c]
+        let ln = clen[c]
+        var k: i32 = 0
+        while k < ln { wb_dec(clits[st + k])  wb_byte(32)  k = k + 1 }
+        wb_byte(48)  wb_byte(10)
+        c = c + 1
+    }
+    s_close()
+    return 0
+}
+
+fn sat_colour_for_vertex(v: i64, k: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    while c < k {
+        let lit = (v * k + c + 1) as i32
+        if assign[lit] == 1 { return c }
+        c = c + 1
+    }
+    return 0 - 1
+}
+
+fn print_sat_colouring(k: i64) with IO, Mut, Div, Panic {
+    print("[worker seed=")  print_dec(SEED)
+    print(" SAT colouring=")
+    var v: i64 = 0
+    while v < GN {
+        if v > 0 { print(",") }
+        print_dec(v)  print(":")  print_dec(sat_colour_for_vertex(v, k))
+        v = v + 1
+    }
+    print("]\n")
+}
+
+// Streaming worker: the DRAT proof is written to disk *as it is produced* during
+// solve() (held fd, 64 KiB buffer), so RAM is O(1) in proof size — K8+ and de
+// Grey-scale proofs no longer hit any in-RAM cap. The native RUP checker is
+// skipped here (no in-RAM proof); drat-trim is the arbiter.
+fn worker_main() -> i32 with IO, Mut, Div, Panic {
+    var n: i64 = 8
+    if arg_count() > 1 { n = str_to_int(get_arg(1)) }
+    if arg_count() > 2 { USE_LRB = str_to_int(get_arg(2)) as i32 }
+    if arg_count() > 3 { SB = str_to_int(get_arg(3)) as i32 }
+    if arg_count() > 4 { EDGE_PATH = get_arg(4)  USE_FILE = 1 }
+    if arg_count() > 5 { CUBE_PATH = get_arg(5)  USE_CUBE = 1 }
+    reset_all()
+    lits_before = 0  lits_after = 0
+    if USE_FILE == 1 {
+        // graph-from-file: `n` is the number of colours k (default 8 → use 4)
+        var k: i64 = n
+        if k == 8 { k = 4 }
+        WORKER_K = k
+        if read_edge_file(EDGE_PATH) < 0 {
+            print("[worker cannot read edge file]\n")  return 1
+        }
+        let gr = build_graph_from_edges(k)
+        if gr < 0 {
+            print("[worker invalid edge file code=")  print_dec(gr)  print("]\n")
+            return 1
+        }
+        if SB == 1 { let _ = precolour_triangle(k) }
+        if SB == 2 { add_value_precedence(nvars as i64 / k, k) }
+        if USE_CUBE == 1 {
+            let cr = read_cube_file(CUBE_PATH, nvars as i64 / k, k)
+            if cr < 0 {
+                print("[worker invalid cube file code=")  print_dec(cr)  print("]\n")
+                return 1
+            }
+            print("[cube units=")  print_dec(cr)  print("]\n")
+        }
+    } else if n == 0 {
+        build_spindle_3col()
+    } else {
+        build_clique(n, n - 1)
+        if SB == 1 { add_sb_units(n - 1) }
+        if SB == 2 { add_value_precedence(n, n - 1) }
+        if SB == 3 { add_sb_units(n - 1)  add_value_precedence(n, n - 1) }
+    }
+    let onc = nclauses
+    n_orig = onc
+    apply_seed()
+    if USE_FILE == 1 {
+        print("[worker seed=")  print_dec(SEED)  print(" graph-file k-col")
+        if USE_CUBE == 1 { print(" cube-file") }
+    }
+    else if n == 0 { print("[worker seed=")  print_dec(SEED)  print(" Moser-spindle 3-col") }
+    else { print("[worker seed=")  print_dec(SEED)  print(" K_")  print_dec(n)  print("/")  print_dec(n - 1) }
+    print(" vars=")  print_dec(nvars as i64)  print(" clauses=")  print_dec(onc as i64)
+    print(" LBD_WIN=")  print_dec(LBD_WIN as i64)  print(" floor=")  print_dec(RESTART_FLOOR)
+    print(" LRB=")  print_dec(USE_LRB as i64)  print(" SB=")  print_dec(SB as i64)  print(" STREAM]\n")
+
+    // open the proof file and stream lemmas/deletions during the solve
+    if s_open("souc_sat_worker.drat") < 0 {
+        print("[worker seed=")  print_dec(SEED)  print(" cannot open drat file]\n")  return 1
+    }
+    STREAM = 1
+    let s = solve()
+    s_close()
+    STREAM = 0
+
+    if s == 0 {
+        let cc = stream_cnf("souc_sat_worker.cnf", onc)
+        if cc == 0 {
+            print("[worker seed=")  print_dec(SEED)  print(" UNSAT conflicts=")  print_dec(n_conflicts)
+            print(" restarts=")  print_dec(n_restarts)  print(" lemmas=")  print_dec(P_n as i64)
+            print(" props=")  print_dec(prof_props)  print(" watch=")  print_dec(prof_watch_nodes)
+            print(" block=")  print_dec(prof_block_skips)  print(" clrefs=")  print_dec(prof_clause_refs)
+            print(" litval=")  print_dec(prof_litval)  print(" wmove=")  print_dec(prof_watch_moves)
+            print(" chrono=")  print_dec(prof_chrono)  print(" pickscan=")  print_dec(prof_pick_scans)
+            print(" -> souc_sat_worker.cnf/.drat (streamed)]\n")
+        }
+        return 0
+    }
+    if s == 1 {
+        if USE_FILE == 1 { print_sat_colouring(WORKER_K) }
+        else {
+            print("[worker seed=")  print_dec(SEED)
+            print(" SAT]\n")
+        }
+        return 1
+    }
+    print("[worker seed=")  print_dec(SEED)  print(" NORESULT code=")  print_dec(s as i64)  print(" (partial proof discarded)]\n")
+    return 1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    if arg_count() > 0 {
+        SEED = str_to_int(get_arg(0))
+        return worker_main()
+    }
+    print("=== souc-sat (E0 proof-on-disk + E1 recursive minimisation) : pigeonhole ===\n")
+    lits_before = 0  lits_after = 0
+    run_case(4)
+    run_case(5)
+    run_case(6)
+    run_case(7)
+    lits_removed = lits_before - lits_after
+    print("\n-- E1 minimisation totals: learned-lits pre=")  print_dec(lits_before)
+    print(" post=")  print_dec(lits_after)  print(" removed=")  print_dec(lits_removed)  print(" --\n")
+
+    print("\n-- K_7/6 certificate -> disk (souc_sat_k76.cnf / .drat) --\n")
+    reset_all()
+    lits_before = 0  lits_after = 0
+    build_clique(7, 6)
+    let onc = nclauses
+    n_orig = onc
+    let s = solve()
+    if s == 0 {
+        nclauses = onc
+        if proof_over == 1 { print("PROOF STORE OVERFLOW - cert refused\n")  return 0 }
+        build_cnf_buf(onc)
+        let okc = write_file("souc_sat_k76.cnf", PB, PBpos as i64)
+        build_drat_buf()
+        if PB_over == 1 { print("PROOF BUFFER OVERFLOW - cert refused\n")  return 0 }
+        let okd = write_file("souc_sat_k76.drat", PB, PBpos as i64)
+        if okc >= 0 { if okd >= 0 { print("wrote cnf+drat to disk (lemmas=")  print_dec(P_n as i64)  print(")\n") } }
+    } else {
+        print("solve returned code ")  print_dec(s as i64)  print("\n")
+    }
+    return 0
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Epistemic Multi-Drug PBPK Gate — 3 drugs, ASCII curves, 10 tests
+# Epistemic Multi-Drug PBPK Gate -- 3 drugs, ASCII curves, 10 tests
 set -eo pipefail
 
 SOUC=./bin/souc

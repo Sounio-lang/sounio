@@ -1,0 +1,336 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// Dissertation Sprint 4 gate — compile-time confidence gates for clinical PK
+//
+// Validates:
+//   1.  Threshold constants have correct ordering (floor < ceil)
+//   2.  conf_clinical_min() is a clinically defensible value (≥ 700)
+//   3.  Decision codes are distinct integers in [0, 3]
+//   4.  ep_credible() returns true for confidence ≥ 800 (gate passes)
+//   5.  ep_credible() returns false for confidence < 800 (gate blocks)
+//   6.  assess_trough: sub-therapeutic classification (CI below floor)
+//   7.  assess_trough: therapeutic classification (point estimate in window)
+//   8.  assess_trough: toxic classification (CI above ceiling)
+//   9.  assess_trough: uncertain — low confidence gate fires
+//  10.  assess_trough: uncertain — CI straddles floor threshold
+//  11.  assess_trough: uncertain — CI straddles ceiling threshold
+//  12.  assess_auc: therapeutic AUC classified correctly
+//  13.  assess_auc: sub-therapeutic AUC classified correctly
+//  14.  assess_auc: low-confidence AUC → uncertain
+//  15.  assess_auc: large AUC with wide CI → classified correctly
+//  16.  conf_from_rel: certain value (std=0) → highest confidence
+//  17.  conf_from_rel: small relative uncertainty → high confidence
+//  18.  conf_from_rel: large relative uncertainty → lower confidence
+//  19.  conf_from_rel: zero val → 500 (fallback)
+//  20.  Full clinical pipeline: runs without error
+//  21.  Full pipeline: trough decision in valid range
+//  22.  Full pipeline: trough confidence in valid range [0, 1000]
+//  23.  Full pipeline: AUC decision in valid range
+//  24.  Full pipeline: stent-only → sub-therapeutic or uncertain at systemic level
+//  25.  Full pipeline: out_c[0] = 0 (stent-only starts at zero plasma conc.)
+//  26.  Full pipeline: out_c[47] >= 0 (non-negative concentration)
+//  27.  Full pipeline: out_std[47] >= 0 (non-negative GUM std)
+//  28.  Full pipeline: trough conf derived from actual simulation output
+//  29.  assess_trough invariant: result is always in {0,1,2,3}
+//  30.  assess_auc invariant: result is always in {0,1,2,3}
+//  31.  Boundary: exactly at trough floor → therapeutic
+//  32.  Boundary: exactly at trough ceiling → therapeutic
+//  33.  Boundary: AUC exactly at floor → therapeutic
+//  34.  Boundary: AUC exactly at ceiling → therapeutic
+//  35.  Decision codes: all four codes are distinct
+//  36.  conf_from_rel monotonicity: higher rel uncertainty → lower or equal conf
+//  37.  ep_credible boundary: conf = 799 → false (just below threshold)
+//  38.  ep_credible boundary: conf = 800 → true (exactly at threshold)
+//  39.  ep_credible boundary: conf = 1000 → true (maximum confidence)
+//  40.  ep_credible boundary: conf = 0 → false (zero confidence)
+//  41.  Full pipeline run with dt=0.5 (finer step): pipeline completes
+//  42.  Uncertainty ordering: sub/toxic calls use Epistemic::new correctly
+//
+// COMPILE-TIME ENFORCEMENT DEMONSTRATION:
+//   The run_sprint4_gate() function must declare 'with Epistemic' because it
+//   calls ep_credible(), assess_trough(), assess_auc(), and rap_clinical_classify()
+//   — all of which declare 'with Epistemic'. Removing 'Epistemic' from this
+//   function's effect list causes E035 at every call site. This is the
+//   dissertation's compile-time contribution: uncertainty-awareness is a
+//   type-level property that the compiler enforces throughout the call stack.
+
+use epistemic::knowledge::{Epistemic}
+use pbpk::rapamycin_2cmt::{Rap2CmtParams, rap2_params}
+use pbpk::rapamycin_clinical::{
+    trough_floor_mg_l, trough_ceil_mg_l, auc_floor_mg_h_l, auc_ceil_mg_h_l,
+    conf_clinical_min,
+    decision_sub, decision_therapeutic, decision_toxic, decision_uncertain,
+    ep_credible, assess_trough, assess_auc, conf_from_rel, rap_clinical_classify
+}
+
+var SPR4_PASS: [i64; 2] = [0; 2]
+
+fn s4_chk(pass: bool, id: i64) with IO, Mut, Panic {
+    if pass {
+        SPR4_PASS[0] = SPR4_PASS[0] + 1
+    } else {
+        print("FAIL sprint4 #")
+        print_int(id)
+        print("\n")
+        SPR4_PASS[1] = SPR4_PASS[1] + 1
+    }
+}
+
+fn s4_near(a: f64, b: f64, tol: f64) -> bool {
+    let diff = a - b
+    let absd = if diff < 0.0 { 0.0 - diff } else { diff }
+    absd < tol
+}
+
+// Gate runner — MUST declare 'with Epistemic' because it calls ep_credible,
+// assess_trough, assess_auc, and rap_clinical_classify (all 'with Epistemic').
+// The compiler enforces this: removing Epistemic from the effect list causes
+// E035 at lines 97, 103, 116, 126 etc. (each call to an Epistemic function).
+pub fn run_sprint4_gate() with IO, Mut, Div, Panic, Epistemic {
+
+    let p = rap2_params()
+
+    // ── Section 1: Threshold constants ───────────────────────────────────────
+
+    // 1. floor and ceil have correct ordering
+    s4_chk(trough_floor_mg_l() < trough_ceil_mg_l(), 1)
+    s4_chk(auc_floor_mg_h_l()  < auc_ceil_mg_h_l(),  2)
+
+    // 2. clinical confidence minimum is defensible (too low < 700 is dangerous)
+    s4_chk(conf_clinical_min() >= 700, 3)
+    s4_chk(conf_clinical_min() <= 1000, 4)
+
+    // 3. decision codes are in [0,3]
+    s4_chk(decision_sub()         == 0, 5)
+    s4_chk(decision_therapeutic() == 1, 6)
+    s4_chk(decision_toxic()       == 2, 7)
+    s4_chk(decision_uncertain()   == 3, 8)
+
+    // ── Section 2: ep_credible confidence gate ────────────────────────────────
+
+    // 4. high confidence passes
+    let ep_high = Epistemic::new(1.0, 0.01, 900)
+    s4_chk(ep_credible(&ep_high), 9)
+
+    // 5. low confidence fails
+    let ep_low = Epistemic::new(1.0, 0.01, 500)
+    s4_chk(!ep_credible(&ep_low), 10)
+
+    // 37. boundary: conf = 799 → false
+    let ep_799 = Epistemic::new(1.0, 0.01, 799)
+    s4_chk(!ep_credible(&ep_799), 11)
+
+    // 38. boundary: conf = 800 → true
+    let ep_800 = Epistemic::new(1.0, 0.01, 800)
+    s4_chk(ep_credible(&ep_800), 12)
+
+    // 39. conf = 1000 → true
+    let ep_max = Epistemic::new(1.0, 0.0, 1000)
+    s4_chk(ep_credible(&ep_max), 13)
+
+    // 40. conf = 0 → false
+    let ep_zero = Epistemic::new(1.0, 0.01, 0)
+    s4_chk(!ep_credible(&ep_zero), 14)
+
+    // ── Section 3: assess_trough ──────────────────────────────────────────────
+
+    // 6. sub-therapeutic: val=0.001 mg/L, std=0.00001, conf=900
+    //    hi = 0.001 + 1.96×0.00001 = 0.0010196 < 0.004 floor → SUB
+    let ep_sub = Epistemic::new(0.001, 0.00001 * 0.00001, 900)
+    s4_chk(assess_trough(&ep_sub) == decision_sub(), 15)
+
+    // 7. therapeutic: val=0.010, std=0.0002, conf=900
+    //    lo = 0.010 - 0.000392 = 0.009608; hi = 0.010392
+    //    both within [0.004, 0.020] → THERAPEUTIC
+    let ep_ther = Epistemic::new(0.010, 0.0002 * 0.0002, 900)
+    s4_chk(assess_trough(&ep_ther) == decision_therapeutic(), 16)
+
+    // 8. toxic: val=0.050, std=0.001, conf=900
+    //    lo = 0.050 - 0.00196 = 0.04804 > 0.020 → TOXIC
+    let ep_tox = Epistemic::new(0.050, 0.001 * 0.001, 900)
+    s4_chk(assess_trough(&ep_tox) == decision_toxic(), 17)
+
+    // 9. uncertain — low confidence gate fires before classification
+    let ep_unc_conf = Epistemic::new(0.010, 0.0002 * 0.0002, 500)
+    s4_chk(assess_trough(&ep_unc_conf) == decision_uncertain(), 18)
+
+    // 10. uncertain — CI straddles floor: val=0.002, std=0.002, conf=900
+    //     hi = 0.002 + 0.00392 = 0.00592 > 0.004 (not SUB)
+    //     c = 0.002 < 0.004 (not THER); lo = -0.00192 (not TOXIC) → UNCERTAIN
+    let ep_unc_lo = Epistemic::new(0.002, 0.002 * 0.002, 900)
+    s4_chk(assess_trough(&ep_unc_lo) == decision_uncertain(), 19)
+
+    // 11. uncertain — CI straddles ceiling: val=0.022, std=0.005, conf=900
+    //     lo = 0.022 - 0.0098 = 0.0122 (not TOXIC since lo < 0.020)
+    //     c = 0.022 > 0.020 (not THER); hi = 0.0318 (not SUB) → UNCERTAIN
+    let ep_unc_hi = Epistemic::new(0.022, 0.005 * 0.005, 900)
+    s4_chk(assess_trough(&ep_unc_hi) == decision_uncertain(), 20)
+
+    // ── Section 4: assess_auc ────────────────────────────────────────────────
+
+    // 12. therapeutic AUC
+    //     auc_val=1.0, auc_std=0.05, conf=900
+    //     k = 0.098; lo=0.902, hi=1.098; in [0.001, 200] → THERAPEUTIC
+    s4_chk(assess_auc(1.0, 0.05, 900) == decision_therapeutic(), 21)
+
+    // 13. sub-therapeutic AUC (very small)
+    //     auc_val=0.0001, auc_std=0.000005, conf=900
+    //     hi = 0.0001 + 0.0000098 = 0.0001098 < 0.001 → SUB
+    s4_chk(assess_auc(0.0001, 0.000005, 900) == decision_sub(), 22)
+
+    // 14. low-confidence AUC → uncertain
+    s4_chk(assess_auc(1.0, 0.05, 400) == decision_uncertain(), 23)
+
+    // 15. large AUC within ceiling
+    //     auc_val=150.0, auc_std=5.0, conf=900
+    //     lo=140.2, hi=159.8; in [0.001, 200] → THERAPEUTIC
+    s4_chk(assess_auc(150.0, 5.0, 900) == decision_therapeutic(), 24)
+
+    // ── Section 5: conf_from_rel ─────────────────────────────────────────────
+
+    // 16. zero std (val > 0) → conf = 950 (std < val/20 = 0 is impossible but 0 < anything > 0)
+    s4_chk(conf_from_rel(1.0, 0.0) == 950, 25)
+
+    // 17. small relative uncertainty: val=1.0, std=0.04 → rel=4% < 5% → 950
+    s4_chk(conf_from_rel(1.0, 0.04) == 950, 26)
+
+    // std=0.08 → rel=8% < 10% → 900
+    s4_chk(conf_from_rel(1.0, 0.08) == 900, 27)
+
+    // 18. std=0.20 → rel=20% < 25% → 820
+    s4_chk(conf_from_rel(1.0, 0.20) == 820, 28)
+
+    // std=0.50 → rel=50% > 25% → 700
+    s4_chk(conf_from_rel(1.0, 0.50) == 700, 29)
+
+    // 19. val=0 → 500 fallback
+    s4_chk(conf_from_rel(0.0, 0.1) == 500, 30)
+
+    // 36. monotonicity: increasing std with same val gives ≤ confidence
+    let c_a = conf_from_rel(1.0, 0.03)   // small → 950
+    let c_b = conf_from_rel(1.0, 0.30)   // medium → 820
+    let c_c = conf_from_rel(1.0, 0.80)   // large → 700
+    s4_chk(c_a >= c_b, 31)
+    s4_chk(c_b >= c_c, 32)
+
+    // ── Section 6: Decision code distinctness ─────────────────────────────────
+
+    // 35. all four decision codes are distinct
+    s4_chk(decision_sub() != decision_therapeutic(), 33)
+    s4_chk(decision_sub() != decision_toxic(),       34)
+    s4_chk(decision_sub() != decision_uncertain(),   35)
+    s4_chk(decision_therapeutic() != decision_toxic(), 36)
+    s4_chk(decision_therapeutic() != decision_uncertain(), 37)
+    s4_chk(decision_toxic() != decision_uncertain(), 38)
+
+    // ── Section 7: Boundary conditions ──────────────────────────────────────
+
+    // 31. exactly at trough floor: val=0.004, small std → therapeutic
+    //     c = 0.004 >= 0.004 && 0.004 <= 0.020 → THERAPEUTIC
+    let ep_at_floor = Epistemic::new(0.004, 0.00001 * 0.00001, 900)
+    s4_chk(assess_trough(&ep_at_floor) == decision_therapeutic(), 39)
+
+    // 32. exactly at trough ceiling: val=0.020, small std → therapeutic
+    let ep_at_ceil = Epistemic::new(0.020, 0.00001 * 0.00001, 900)
+    s4_chk(assess_trough(&ep_at_ceil) == decision_therapeutic(), 40)
+
+    // 33. AUC exactly at floor: auc_val=0.001, small std → therapeutic
+    s4_chk(assess_auc(0.001, 0.000001, 900) == decision_therapeutic(), 41)
+
+    // 34. AUC exactly at ceiling
+    s4_chk(assess_auc(200.0, 0.001, 900) == decision_therapeutic(), 42)
+
+    // ── Section 8: Full clinical pipeline ────────────────────────────────────
+
+    var p4_out_t   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var p4_out_c   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var p4_out_std = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                      0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var p4_tdec  = [0]
+    var p4_tconf = [0]
+    var p4_adec  = [0]
+
+    // 20. Full pipeline runs without error (stent-only scenario, 720h)
+    rap_clinical_classify(720.0, 1.0, &p,
+                          &!p4_out_t, &!p4_out_c, &!p4_out_std,
+                          &!p4_tdec, &!p4_tconf, &!p4_adec)
+
+    // 21. trough decision is in valid range {0,1,2,3}
+    s4_chk(p4_tdec[0] >= 0 && p4_tdec[0] <= 3, 43)
+
+    // 22. trough confidence in valid range
+    s4_chk(p4_tconf[0] >= 0 && p4_tconf[0] <= 1000, 44)
+
+    // 23. AUC decision in valid range
+    s4_chk(p4_adec[0] >= 0 && p4_adec[0] <= 3, 45)
+
+    // 24. stent-only delivery → sub-therapeutic or uncertain at systemic level
+    //     Cypher® delivers locally; plasma concentration is expected < 4 ng/mL
+    //     Decision 0 (sub) or 3 (uncertain) are both correct clinical outcomes
+    s4_chk(p4_tdec[0] == 0 || p4_tdec[0] == 3, 46)
+
+    // 25. stent-only: initial concentration is zero
+    s4_chk(s4_near(p4_out_c[0], 0.0, 0.0000001), 47)
+
+    // 26–27. final concentration and std are non-negative
+    s4_chk(p4_out_c[47]   >= 0.0, 48)
+    s4_chk(p4_out_std[47] >= 0.0, 49)
+
+    // 41. finer dt=0.5h also completes (numerical stability)
+    var p4b_out_t   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var p4b_out_c   = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var p4b_out_std = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                       0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var p4b_tdec  = [0]
+    var p4b_tconf = [0]
+    var p4b_adec  = [0]
+
+    rap_clinical_classify(720.0, 0.5, &p,
+                          &!p4b_out_t, &!p4b_out_c, &!p4b_out_std,
+                          &!p4b_tdec, &!p4b_tconf, &!p4b_adec)
+
+    s4_chk(p4b_tdec[0] >= 0 && p4b_tdec[0] <= 3, 50)
+
+    // 42. Epistemic::new correctly sets variance = std²
+    let ep_check = Epistemic::new(5.0, 0.09, 900)   // variance = 0.09 = 0.3²
+    s4_chk(s4_near(ep_check.variance(), 0.09, 0.000001), 51)
+    s4_chk(s4_near(ep_check.val(), 5.0, 0.000001), 52)
+
+    // ── Final gate ───────────────────────────────────────────────────────────
+
+    if SPR4_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL: ")
+        print_int(SPR4_PASS[1])
+        print(" assertions failed\n")
+    }
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    run_sprint4_gate()
+    0
+}

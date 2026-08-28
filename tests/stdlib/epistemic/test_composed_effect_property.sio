@@ -1,0 +1,180 @@
+//@ run-pass
+//@ expect-stdout: PROPERTY PASS
+
+// M1 — property test for stdlib/epistemic/composed_effects.sio.
+//
+// Runs N=64 deterministic random seeds through a battery of 7
+// algebraic properties that the Lean discharge in
+// formal/lean4/SounioApproxCausalKnowledge.lean asserts:
+//
+//   P1 ck_mul commutes on value/variance/approx/causal_alpha/causal_beta
+//   P2 ck_add commutes on the same five channels (value, variance,
+//      approx, causal_alpha, causal_beta)
+//   P3 ck_mul preserves variance >= 0 (variance inputs are sampled
+//      from [0, 25), value inputs may be negative)
+//   P4 ck_mul preserves approx_bound >= 0 (approx_bound inputs are
+//      sampled from [0, 5), value inputs may be negative)
+//   P5 ck_mul variance dominates the delta-method approximation
+//      (cross-term `a.variance * b.variance >= 0` ⇒
+//       full Gaussian-product var >= delta-method var)
+//   P6 ck_mul approx_bound dominates the no-cross-term triangle
+//      (cross-term `da * db >= 0` ⇒
+//       full triangle bound >= no-cross-term triangle)
+//   P7 ck_mul causal_alpha equals a.causal_alpha + b.causal_alpha,
+//      and same for causal_beta (independent-evidence pooling)
+//
+// Determinism: glibc-style LCG (a=1103515245, c=12345, m=2^31)
+// seeded at 1. State carried in a `LcgState` struct because Sounio's
+// JIT has a known limitation with `&!i64` bare-scalar mutation; see
+// `cursorrules` "&![T; N] bare array mutation broken in JIT — use
+// struct wrapper". The same workaround applies here.
+
+use epistemic::composed_effects::*
+
+struct LcgState {
+    seed: i64,
+}
+
+fn lcg_next(st: &!LcgState) -> i64 with Mut, Div, Panic {
+    let s = st.seed
+    let n = (1103515245 * s + 12345) % 2147483648
+    st.seed = n
+    n
+}
+
+fn lcg_f64_range(st: &!LcgState, lo: f64, hi: f64) -> f64 with Mut, Div, Panic {
+    let n = lcg_next(st)
+    let r = (n as f64) / 2147483648.0
+    lo + r * (hi - lo)
+}
+
+fn lcg_f64_pos(st: &!LcgState, hi: f64) -> f64 with Mut, Div, Panic {
+    let n = lcg_next(st)
+    let r = (n as f64) / 2147483648.0
+    r * hi
+}
+
+fn lcg_i64_range(st: &!LcgState, lo: i64, hi: i64) -> i64 with Mut, Div, Panic {
+    let n = lcg_next(st)
+    let span = hi - lo
+    lo + n % span
+}
+
+fn ce_abs2(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn approx_eq(x: f64, y: f64) -> f64 {
+    let d = ce_abs2(x - y)
+    d
+}
+
+fn random_ck(st: &!LcgState) -> ComposedKnowledge with Mut, Div, Panic {
+    let v = lcg_f64_range(st, 0.0 - 100.0, 100.0)
+    let var = lcg_f64_pos(st, 25.0)
+    let ap = lcg_f64_pos(st, 5.0)
+    let alpha = lcg_f64_pos(st, 50.0) + 0.5
+    let beta = lcg_f64_pos(st, 50.0) + 0.5
+    let conf = lcg_i64_range(st, 100, 1000)
+    let prov = lcg_i64_range(st, 0, 10)
+    ck_new(v, var, ap, alpha, beta, conf, prov)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Approx, Causal {
+    var st = LcgState { seed: 1 }
+    var pass: i64 = 1
+
+    var i: i64 = 0
+    while i < 64 {
+        let a = random_ck(&!st)
+        let b = random_ck(&!st)
+
+        let mul_ab = ck_mul(&a, &b)
+        let mul_ba = ck_mul(&b, &a)
+        let add_ab = ck_add(&a, &b)
+        let add_ba = ck_add(&b, &a)
+
+        // P1: ck_mul commutes on five f64 channels (within float noise).
+        if approx_eq(ck_value(&mul_ab), ck_value(&mul_ba)) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(ck_variance(&mul_ab), ck_variance(&mul_ba)) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(ck_approx_bound(&mul_ab), ck_approx_bound(&mul_ba)) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(mul_ab.causal_alpha, mul_ba.causal_alpha) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(mul_ab.causal_beta, mul_ba.causal_beta) > 1.0e-9 {
+            pass = 0
+        }
+
+        // P2: ck_add commutes on the same five channels.
+        if approx_eq(ck_value(&add_ab), ck_value(&add_ba)) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(ck_variance(&add_ab), ck_variance(&add_ba)) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(ck_approx_bound(&add_ab), ck_approx_bound(&add_ba)) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(add_ab.causal_alpha, add_ba.causal_alpha) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(add_ab.causal_beta, add_ba.causal_beta) > 1.0e-9 {
+            pass = 0
+        }
+
+        // P3: variance >= 0 preserved.
+        if ck_variance(&mul_ab) < 0.0 {
+            pass = 0
+        }
+
+        // P4: approx_bound >= 0 preserved.
+        if ck_approx_bound(&mul_ab) < 0.0 {
+            pass = 0
+        }
+
+        // P5: full Gaussian-product variance >= delta-method.
+        let av = ck_value(&a)
+        let bv = ck_value(&b)
+        let avar = ck_variance(&a)
+        let bvar = ck_variance(&b)
+        let delta = bv * bv * avar + av * av * bvar
+        let full = ck_variance(&mul_ab)
+        if full < delta {
+            pass = 0
+        }
+
+        // P6: triangle with cross-term >= triangle without cross-term.
+        let da = ck_approx_bound(&a)
+        let db = ck_approx_bound(&b)
+        let no_cross = ce_abs2(bv) * da + ce_abs2(av) * db
+        let with_cross = ck_approx_bound(&mul_ab)
+        if with_cross < no_cross {
+            pass = 0
+        }
+
+        // P7: causal_alpha and causal_beta sum (Beta independent-evidence pooling).
+        let alpha_expected = a.causal_alpha + b.causal_alpha
+        let beta_expected = a.causal_beta + b.causal_beta
+        if approx_eq(mul_ab.causal_alpha, alpha_expected) > 1.0e-9 {
+            pass = 0
+        }
+        if approx_eq(mul_ab.causal_beta, beta_expected) > 1.0e-9 {
+            pass = 0
+        }
+
+        i = i + 1
+    }
+
+    if pass == 1 {
+        println("PROPERTY PASS")
+    } else {
+        println("PROPERTY FAIL")
+    }
+    0
+}

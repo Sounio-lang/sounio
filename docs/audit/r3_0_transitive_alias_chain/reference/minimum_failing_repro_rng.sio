@@ -1,0 +1,138 @@
+// random::rng — Random Number Generators
+//
+// Fast, high-quality PRNGs for scientific computing.
+// PCG64: Default, excellent statistical quality
+// RngXoshiro256++: Fast for simulations
+// SplitMix64: For seeding other generators
+//
+// References:
+// - O'Neill (2014): "PCG: A Family of Simple Fast Space-Efficient PRNGs"
+// - Blackman & Vigna (2018): "Scrambled Linear Pseudorandom Number Generators"
+
+// ============================================================================
+// SPLITMIX64 — FOR SEEDING
+// ============================================================================
+
+struct SplitMix64 {
+    state: i64,
+}
+
+fn splitmix64_new(seed: i64) -> SplitMix64 {
+    SplitMix64 { state: seed }
+}
+
+fn splitmix64_next(rng: SplitMix64) -> (SplitMix64, i64) {
+    // state += 0x9e3779b97f4a7c15
+    let new_state = rng.state + 0x9e3779b97f4a7c15 as i64
+    var z = new_state
+
+    // z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = z ^ (z >> 30)
+    // Simplified multiplication for interpreter
+    z = z * 0xbf58476d as i64
+
+    // z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+    z = z ^ (z >> 27)
+    z = z * 0x94d049bb as i64
+
+    z = z ^ (z >> 31)
+
+    (SplitMix64 { state: new_state }, z)
+}
+
+// ============================================================================
+// PCG64 — DEFAULT GENERATOR
+// ============================================================================
+
+use stdlib::random::pcg64_core::{
+    PcgState, pcg_u_lt, pcg_umod, pcg_step, pcg_next_f64, pcg_next_f64_nonzero,
+}
+
+type Pcg64 = PcgState
+
+fn pcg64_new(seed: i64) -> Pcg64 {
+    var sm = splitmix64_new(seed)
+    let r1 = splitmix64_next(sm)
+    sm = r1.0
+    let r2 = splitmix64_next(sm)
+    sm = r2.0
+    let r3 = splitmix64_next(sm)
+    sm = r3.0
+    let r4 = splitmix64_next(sm)
+    PcgState { state_hi: r1.1, state_lo: r2.1, inc_hi: r3.1 | 1, inc_lo: r4.1 | 1 }
+}
+
+fn pcg64_next_i64(rng: Pcg64) -> (Pcg64, i64) { return pcg_step(rng) }
+fn pcg64_next_f64(rng: Pcg64) -> (Pcg64, f64) { return pcg_next_f64(rng) }
+fn pcg64_next_f64_nonzero(rng: Pcg64) -> (Pcg64, f64) { return pcg_next_f64_nonzero(rng) }
+fn pcg64_next_bool(rng: Pcg64, p: f64) -> (Pcg64, bool) {
+    let result = pcg_next_f64(rng)
+    (result.0, result.1 < p)
+}
+fn pcg64_bounded(rng: Pcg64, n: i64) -> (Pcg64, i64) {
+    if n <= 0 { return (rng, 0) }
+    let neg_n = 0 - n
+    let threshold = pcg_umod(neg_n, n)
+    var current = rng
+    var attempts: i64 = 0
+    while attempts < 100 {
+        let r = pcg_step(current)
+        current = r.0
+        if !pcg_u_lt(r.1, threshold) {
+            return (current, pcg_umod(r.1, n))
+        }
+        attempts = attempts + 1
+    }
+    (current, 0)
+}
+
+// ============================================================================
+// XOSHIRO256++ — FAST SIMULATION RNG
+// ============================================================================
+
+struct RngXoshiro256 {
+    s0: i64,
+    s1: i64,
+    s2: i64,
+    s3: i64,
+}
+
+fn xoshiro256_new(seed: i64) -> RngXoshiro256 {
+    var sm = splitmix64_new(seed)
+
+    let r1 = splitmix64_next(sm)
+    sm = r1.0
+    let r2 = splitmix64_next(sm)
+    sm = r2.0
+    let r3 = splitmix64_next(sm)
+    sm = r3.0
+    let r4 = splitmix64_next(sm)
+
+    RngXoshiro256 {
+        s0: r1.1,
+        s1: r2.1,
+        s2: r3.1,
+        s3: r4.1,
+    }
+}
+
+fn rng_rotl(x: i64, k: i64) -> i64 {
+    (x << k) | (x >> (64 - k))
+}
+
+fn xoshiro256_next_i64(rng: RngXoshiro256) -> (RngXoshiro256, i64) {
+    // result = rng_rotl(s0 + s3, 23) + s0
+    let result = rng_rotl(rng.s0 + rng.s3, 23) + rng.s0
+
+    let t = rng.s1 << 17
+
+    var s2 = rng.s2 ^ rng.s0
+    var s3 = rng.s3 ^ rng.s1
+    var s1 = rng.s1 ^ s2
+    var s0 = rng.s0 ^ s3
+
+    s2 = s2 ^ t
+    s3 = rng_rotl(s3, 45)
+
+    (RngXoshiro256 { s0: s0, s1: s1, s2: s2, s3: s3 }, result)
+}

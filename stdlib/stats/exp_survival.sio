@@ -1,0 +1,159 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/exp_survival.sio — parametric exponential survival fit
+//
+// The maximum-likelihood exponential (constant-hazard) survival model from
+// right-censored follow-up data — the parametric companion to the Kaplan-Meier
+// estimator:
+//
+//   exp_survival(time, event, n, t_query) -> ExpSurvResult
+//
+// With D deaths over total exposure T = Σtᵢ (censored times included), the MLE
+// hazard is  λ̂ = D / T,  Var(λ̂) = λ̂²/D  ⇒  a log-scale 95% CI
+//   λ̂·exp(±1.96/√D).  From λ̂:
+//   S(t) = e^{−λ̂ t},  median = ln2/λ̂,  mean = 1/λ̂,  hazard = λ̂ (constant).
+//
+// Pure Sounio: inline exp/ln/sqrt; single pass over the data; no external
+// dependency, no nested data-array calls.
+//
+// References:
+//   Lawless, "Statistical Models and Methods for Lifetime Data" 2e, §3.
+
+module stats::exp_survival
+
+fn es_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 24 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn es_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / es_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+pub struct ExpSurvResult {
+    pub rate: f64,        // MLE hazard λ̂ = D / T
+    pub rate_lo: f64,     // 95% lower bound on λ
+    pub rate_hi: f64,     // 95% upper bound on λ
+    pub median: f64,      // ln2 / λ̂
+    pub mean: f64,        // 1 / λ̂
+    pub s_at_query: f64,  // Ŝ(t_query) = exp(-λ̂ t_query)
+}
+
+/// Maximum-likelihood exponential survival fit from censored follow-up data.
+///
+/// Parâmetros: time — follow-up times; event — 1 death / 0 censored; n — size;
+///             t_query — time at which to report Ŝ.
+/// Retorno: ExpSurvResult (rate, rate_lo, rate_hi, median, mean, s_at_query).
+/// Referências: Lawless §3.
+pub fn exp_survival(time: &[f64; 256], event: &[i64; 256], n: i32, t_query: f64) -> ExpSurvResult with Mut, Div, Panic {
+    if n < 1 {
+        return ExpSurvResult { rate: 0.0, rate_lo: 0.0, rate_hi: 0.0, median: 0.0, mean: 0.0, s_at_query: 1.0 }
+    }
+    var total_time = 0.0
+    var deaths = 0
+    var i = 0
+    while i < n {
+        total_time = total_time + time[i as usize]
+        if event[i as usize] == 1 { deaths = deaths + 1 }
+        i = i + 1
+    }
+    if total_time <= 0.0 || deaths <= 0 {
+        return ExpSurvResult { rate: 0.0, rate_lo: 0.0, rate_hi: 0.0, median: 0.0, mean: 0.0, s_at_query: 1.0 }
+    }
+    let df = deaths as f64
+    let rate = df / total_time
+    let z = 1.959963984540054
+    let f = es_exp(z / es_sqrt(df))       // log-scale multiplier
+    let rate_lo = rate / f
+    let rate_hi = rate * f
+    let LN2 = 0.6931471805599453
+    let median = LN2 / rate
+    let mean = 1.0 / rate
+    let s_at_query = es_exp(0.0 - rate * t_query)
+    return ExpSurvResult {
+        rate: rate, rate_lo: rate_lo, rate_hi: rate_hi,
+        median: median, mean: mean, s_at_query: s_at_query
+    }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// times {2,3,5,6,7}, events {1,1,0,1,1}. D=4, T=23. rate=4/23=0.173913.
+// median=ln2/rate=3.985597; mean=5.75; S(4)=exp(-0.695652)=0.498782.
+// CI: rate·exp(±1.959964/2): f=exp(0.979982)=2.664403.
+// lo=0.173913/2.664403=0.065272; hi=0.173913·2.664403=0.463378.
+fn test_exp_surv() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=2.0; t[1]=3.0; t[2]=5.0; t[3]=6.0; t[4]=7.0
+    e[0]=1; e[1]=1; e[2]=0; e[3]=1; e[4]=1
+    let r = exp_survival(&t, &e, 5, 4.0)
+    var ok = true
+    ok = check(1, approx(r.rate, 0.173913, 1.0e-5)) && ok
+    ok = check(2, approx(r.median, 3.985597, 1.0e-4)) && ok
+    ok = check(3, approx(r.mean, 5.75, 1.0e-4)) && ok
+    ok = check(4, approx(r.s_at_query, 0.498782, 1.0e-4)) && ok
+    ok = check(5, approx(r.rate_lo, 0.065272, 1.0e-4)) && ok
+    ok = check(6, approx(r.rate_hi, 0.463378, 1.0e-4)) && ok
+    return ok
+}
+
+// all events, unit times: D=4, T=4, rate=1. median=ln2=0.693147; S(1)=exp(-1)=0.367879.
+fn test_unit() -> bool with IO, Mut, Div, Panic {
+    var t: [f64; 256] = [0.0; 256]
+    var e: [i64; 256] = [0; 256]
+    t[0]=1.0; t[1]=1.0; t[2]=1.0; t[3]=1.0
+    e[0]=1; e[1]=1; e[2]=1; e[3]=1
+    let r = exp_survival(&t, &e, 4, 1.0)
+    var ok = true
+    ok = check(10, approx(r.rate, 1.0, 1.0e-9)) && ok
+    ok = check(11, approx(r.median, 0.693147, 1.0e-5)) && ok
+    ok = check(12, approx(r.s_at_query, 0.367879, 1.0e-5)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_exp_surv() && ok
+    ok = test_unit() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

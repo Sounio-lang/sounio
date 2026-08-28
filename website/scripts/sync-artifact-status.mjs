@@ -2,10 +2,9 @@
 /**
  * sync-artifact-status.mjs
  *
- * Reads Sounio artifact gate JSONs from the repo root and generates
- * a typed data module for the website. This makes the website
- * epistemically grounded: feature claims are backed by committed
- * test artifacts, not hand-written marketing copy.
+ * Reads Sounio artifact gate JSONs + README/CHANGELOG/bin/souc and generates
+ * a typed data module for the website. Feature claims are backed by committed
+ * artifacts and repo front-door docs — not hand-written marketing copy.
  *
  * Run from the website/ directory:
  *   node scripts/sync-artifact-status.mjs
@@ -32,6 +31,12 @@ function loadJson(relPath) {
   }
 }
 
+function readText(relPath) {
+  const full = join(REPO_ROOT, relPath);
+  if (!existsSync(full)) return null;
+  return readFileSync(full, "utf-8");
+}
+
 function artifactToLevel(summary) {
   if (!summary) return "unknown";
   const s = String(summary).toLowerCase();
@@ -48,8 +53,38 @@ function pick(obj, ...keys) {
   return undefined;
 }
 
+function parseReadmeVersion(readme) {
+  const m = readme?.match(/version-1\.0\.0--beta\.(\d+)/);
+  return m ? `1.0.0-beta.${m[1]}` : null;
+}
+
+function parseReadmeFullSuite(readme) {
+  const m = readme?.match(/(\d+)\s*\/\s*(\d+)\s*tests pass/i);
+  return m ? { pass: Number(m[1]), total: Number(m[2]) } : null;
+}
+
+function parseWrapperVersion(soucScript) {
+  const m = soucScript?.match(/WRAPPER_VERSION="\$\{SOUNIO_SOUC_VERSION:-([^"]+)\}"/);
+  return m?.[1] ?? null;
+}
+
+function parseBootstrapFromChangelog(changelog) {
+  const hashMatch = changelog?.match(/gen2==gen3 hash:\s*([a-f0-9]+)/i);
+  const sizeMatch = changelog?.match(/Binary:\s*(\d+)\s*KB/i);
+  return {
+    sha256: hashMatch?.[1] ?? null,
+    sizeKb: sizeMatch ? Number(sizeMatch[1]) : null,
+  };
+}
+
+function countStage0Lines() {
+  const stage0 = readText("bootstrap/stage0.c");
+  if (!stage0) return null;
+  return stage0.split("\n").length;
+}
+
 // ---------------------------------------------------------------------------
-// Load artifacts
+// Load artifacts + repo truth
 // ---------------------------------------------------------------------------
 
 const reliability = loadJson("artifacts/stdlib/stdlib_reliability_status.v1.json");
@@ -60,17 +95,190 @@ const selfhost = loadJson("artifacts/omega/selfhost_verification_report.v1.json"
 const lsp = loadJson("artifacts/omega/lsp_smoke_status.v1.json");
 const gpu = loadJson("artifacts/omega/gpu_runtime_attest_gate.v1.json");
 const bootstrap = loadJson("artifacts/omega/bootstrap_full_gate_status.v1.json");
-const nativeLaneMatrix = loadJson("artifacts/stdlib/native_lane_matrix.v1.json");
+
+const readme = readText("README.md");
+const changelog = readText("CHANGELOG.md");
+const soucScript = readText("bin/souc");
+
+const readmeVersion = parseReadmeVersion(readme);
+const wrapperVersion =
+  reliability?.science_pipeline?.runtime_souc_version ??
+  parseWrapperVersion(soucScript) ??
+  "unknown";
+const fullSuite = parseReadmeFullSuite(readme);
+const bootstrapRecorded = parseBootstrapFromChangelog(changelog);
+const stage0Lines = countStage0Lines();
+
+const stdlibGatePass = reliability?.totals?.pass ?? 0;
+const stdlibGateTotal = reliability?.totals?.total ?? 0;
+const stdlibGateSkip = reliability?.totals?.skip ?? 0;
+const stdlibInventoryFiles = reliability?.inventory?.sio_files ?? null;
+const selfHostedFiles = selfhost?.self_hosted_source?.total_files ?? null;
+const selfHostedLines = selfhost?.self_hosted_source?.total_lines ?? null;
+const cycleParity = selfhost?.cycle_gate?.parity ?? null;
+
+const generatedAt = new Date().toISOString();
 
 // ---------------------------------------------------------------------------
 // Build normalized status object
 // ---------------------------------------------------------------------------
 
-const generatedAt = new Date().toISOString();
+const reliabilityReason = reliability
+  ? `${stdlibGatePass}/${stdlibGateTotal} stdlib reliability tests pass, ${stdlibGateSkip} skipped`
+  : "artifact missing";
 
 const status = {
   generatedAt,
   repoPath: "artifacts/",
+
+  publicContract: {
+    sources: {
+      readme: "README.md#honest-status",
+      limitations: "docs/compiler/KNOWN_LIMITATIONS.md",
+      minimumViable: "docs/guide/MINIMUM_VIABLE_SOUNIO.md",
+    },
+    versions: {
+      checkedArtifact: wrapperVersion,
+      readmeBadge: readmeVersion,
+      lspRelease: "sounio-lsp-v0.3.0-r1",
+    },
+    defaultWorkflow: {
+      launcher: "bin/souc",
+      backend: "self-hosted native ELF/Mach-O",
+      summary:
+        "The public onboarding path is the checked self-hosted launcher. It type-checks and compiles to host binaries — no Rust/Cargo build step required for the default workflow.",
+    },
+    bootstrap: {
+      stage0Lines,
+      stage0Path: "bootstrap/stage0.c",
+      fixedPointChain:
+        "checked bin/souc-linux-x86_64 → gen1 → gen2 → gen3 (gen2 == gen3)",
+      historicalNote:
+        "stage0.c is the original C bootstrap; the reproducible fixed-point ceremony uses the checked self-hosted binary.",
+      recordedSha256: bootstrapRecorded.sha256,
+      recordedSizeKb: bootstrapRecorded.sizeKb,
+      cycleParity,
+      artifact: "CHANGELOG.md + artifacts/omega/selfhost_verification_report.v1.json",
+    },
+    metrics: {
+      stdlibReliabilityGate: {
+        pass: stdlibGatePass,
+        fail: reliability?.totals?.fail ?? 0,
+        skip: stdlibGateSkip,
+        total: stdlibGateTotal,
+        label: "Stdlib reliability gate",
+        artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
+      },
+      fullTestSuite: fullSuite
+        ? {
+            pass: fullSuite.pass,
+            total: fullSuite.total,
+            label: "Full test suite (README snapshot)",
+            artifact: "README.md#honest-status",
+          }
+        : null,
+      stdlibInventoryFiles,
+      selfHostedSourceFiles: selfHostedFiles,
+      selfHostedSourceLines: selfHostedLines,
+      scienceLanes: Object.keys(science?.lanes ?? {}).length,
+      hyperLanes: (hyper?.lane_statuses ?? []).length,
+    },
+    honestStatus: {
+      works: [
+        {
+          title: "Epistemic core",
+          detail:
+            "Knowledge[T] with GUM propagation, provenance tracking, and compile-time confidence gates (vancomycin fixtures)",
+        },
+        {
+          title: "Self-hosted compiler",
+          detail: cycleParity
+            ? `Fixed-point verified (cycle parity=${cycleParity}); ${selfHostedFiles ?? "?"} self-hosted source files`
+            : "Lexer, parser, checker, and native codegen in self-hosted/",
+        },
+        {
+          title: "Algebra",
+          detail: "Clifford, Cayley-Dickson, octonions — 168 theorem verified computationally",
+        },
+        {
+          title: "Native codegen",
+          detail:
+            "Linux x86-64 ELF plus checked macOS artifact lanes via bin/souc; PE/COFF backend exists for cross-compile",
+        },
+        {
+          title: "Core stdlib gate",
+          detail: `${stdlibGatePass} / ${stdlibGateTotal} stdlib reliability tests pass (${reliability?.generated_at_utc?.slice(0, 10) ?? "artifact date unknown"})`,
+        },
+        {
+          title: "Optimizer",
+          detail: "1,000+ e-graph rewrite rules with FAIL=0 in optimizer tests",
+        },
+        {
+          title: "Language server",
+          detail: lsp?.status === "pass"
+            ? "LSP smoke gate pass; hover, defs, refs, rename, formatting, semantic tokens"
+            : "LSP implementation in tools/lsp/ (verify artifact before claiming production)",
+        },
+        {
+          title: "Closure literals",
+          detail: "Named function refs and closure tests in tests/run-pass/ (see README resolved list)",
+        },
+      ],
+      scaffolding: [
+        {
+          title: "Theorem prover",
+          detail: "Large arena and data structures; full inference logic not complete",
+        },
+        {
+          title: "Epistemic modules",
+          detail: "Many modules are signatures with minimal bodies (~70% scaffolding)",
+        },
+        {
+          title: "Neural networks",
+          detail: "Quaternion/octonion NN lanes exist but are not all end-to-end stable",
+        },
+        {
+          title: "Genomics",
+          detail: "Several files are stubs disabled on parser limitations",
+        },
+        {
+          title: "Async runtime",
+          detail:
+            "Self-hosted async tests pass per KNOWN_LIMITATIONS.md; broader runtime integration still partial",
+        },
+        {
+          title: "Geometry engine",
+          detail: "Extended geometry paths disabled; core engine partial",
+        },
+      ],
+      missing: [
+        {
+          title: "Epistemic ODE solver (general RHS)",
+          detail: "Exponential decay works; general RHS needed for full PBPK epistemic integration",
+        },
+        {
+          title: "Ontology federation",
+          detail: "Local ontology work exists; 15M-term federated query not implemented",
+        },
+        {
+          title: "GPU CLI entry point",
+          detail: "PTX/GPU codegen exists in-tree; no complete default CLI path (gpu/lib.sio stub)",
+        },
+        {
+          title: "Windows pre-built binary",
+          detail: "PE/COFF backend is production-grade; no checked .exe shipped in this checkout",
+        },
+        {
+          title: "AArch64 native-v2 parity",
+          detail: "Apple Silicon support uses checked Mach-O artifact lane; native-v2 aarch64 still preview-grade",
+        },
+        {
+          title: "Checked launcher REPL",
+          detail: "README Known Limitations: bin/souc does not expose repl; separate REPL beta exists outside default lane",
+        },
+      ],
+    },
+  },
 
   compiler: {
     core: {
@@ -87,10 +295,18 @@ const status = {
         : "artifact missing",
       artifact: "artifacts/omega/native_backend_v2_gate.v1.json",
     },
+    selfHosted: {
+      label: "Self-Hosted Compiler (default path)",
+      level: pick(selfhost, "cycle_gate", "parity") ? "verified" : "beta",
+      reason: selfhost
+        ? `${selfHostedFiles ?? "?"} files, ${selfHostedLines ?? "?"} lines, cycle parity=${selfhost.cycle_gate?.parity}`
+        : "artifact missing",
+      artifact: "artifacts/omega/selfhost_verification_report.v1.json",
+    },
     cranelift: {
-      label: "Cranelift JIT",
-      level: "verified",
-      reason: "Enabled in checked artifact; 81/86 stdlib reliability tests pass",
+      label: "Cranelift JIT (optional profile)",
+      level: "beta",
+      reason: `Optional omega/JIT profile — not the default bin/souc onboarding path. Stdlib gate: ${reliabilityReason}`,
       artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
     },
     llvm: {
@@ -98,14 +314,6 @@ const status = {
       level: "verified",
       reason: "Production per KNOWN_LIMITATIONS.md; wired via `--backend llvm`",
       artifact: "docs/compiler/KNOWN_LIMITATIONS.md",
-    },
-    selfHosted: {
-      label: "Self-Hosted Compiler",
-      level: pick(selfhost, "cycle_gate", "parity") ? "verified" : "beta",
-      reason: selfhost
-        ? `${selfhost.self_hosted_source?.total_files ?? "?"} files, ${selfhost.self_hosted_source?.total_lines ?? "?"} lines, cycle parity=${selfhost.cycle_gate?.parity}`
-        : "artifact missing",
-      artifact: "artifacts/omega/selfhost_verification_report.v1.json",
     },
     lsp: {
       label: "LSP Server",
@@ -138,14 +346,15 @@ const status = {
       label: "Core Standard Library",
       level: artifactToLevel(pick(reliability, "status_summary")),
       totals: pick(reliability, "totals") ?? {},
-      reason: reliability
-        ? `${reliability.totals?.pass ?? 0}/${reliability.totals?.total ?? 0} tests pass, ${reliability.totals?.skip ?? 0} skipped`
-        : "artifact missing",
+      reason: reliabilityReason,
       artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
     },
     scienceLanes: {
       label: "Scientific Pipelines",
       level: artifactToLevel(pick(science, "status_summary")),
+      reason: science
+        ? `lanes=${Object.keys(science?.lanes ?? {}).length}, status_summary=${pick(science, "status_summary") ?? "n/a"}`
+        : "artifact missing",
       lanes: Object.entries(science?.lanes ?? {}).map(([key, lane]) => ({
         id: key,
         label: key,
@@ -158,6 +367,9 @@ const status = {
     hyperLanes: {
       label: "Hyper-Execution Neural Lanes",
       level: artifactToLevel(pick(hyper, "status_summary")),
+      reason: hyper
+        ? `lanes=${(hyper?.lane_statuses ?? []).length}, status_summary=${pick(hyper, "status_summary") ?? "n/a"}`
+        : "artifact missing",
       lanes: (hyper?.lane_statuses ?? []).map((lane) => ({
         id: lane.lane,
         label: lane.lane,
@@ -196,14 +408,72 @@ export interface LaneEntry {
   blockers?: string[];
 }
 
+export interface HonestStatusItem {
+  title: string;
+  detail: string;
+}
+
+export interface PublicContract {
+  sources: Record<string, string>;
+  versions: {
+    checkedArtifact: string;
+    readmeBadge: string | null;
+    lspRelease: string;
+  };
+  defaultWorkflow: {
+    launcher: string;
+    backend: string;
+    summary: string;
+  };
+  bootstrap: {
+    stage0Lines: number | null;
+    stage0Path: string;
+    fixedPointChain: string;
+    historicalNote: string;
+    recordedSha256: string | null;
+    recordedSizeKb: number | null;
+    cycleParity: boolean | null;
+    artifact: string;
+  };
+  metrics: {
+    stdlibReliabilityGate: {
+      pass: number;
+      fail: number;
+      skip: number;
+      total: number;
+      label: string;
+      artifact: string;
+    };
+    fullTestSuite: {
+      pass: number;
+      total: number;
+      label: string;
+      artifact: string;
+    } | null;
+    stdlibInventoryFiles: number | null;
+    selfHostedSourceFiles: number | null;
+    selfHostedSourceLines: number | null;
+    scienceLanes: number;
+    hyperLanes: number;
+  };
+  honestStatus: {
+    works: HonestStatusItem[];
+    scaffolding: HonestStatusItem[];
+    missing: HonestStatusItem[];
+  };
+}
+
 export interface ArtifactStatus {
   generatedAt: string;
   repoPath: string;
+  publicContract: PublicContract;
   compiler: Record<string, ArtifactStatusEntry & { lanes?: LaneEntry[]; totals?: Record<string, number> }>;
   stdlib: Record<string, ArtifactStatusEntry & { lanes?: LaneEntry[]; totals?: Record<string, number> }>;
 }
 
 export const artifactStatus: ArtifactStatus = ${JSON.stringify(status, null, 2)};
+
+export const publicContract = artifactStatus.publicContract;
 
 export function levelColor(level: EpistemicLevel): string {
   switch (level) {
@@ -244,4 +514,7 @@ console.log(`[sync-artifacts] wrote ${OUT_FILE}`);
 console.log(`[sync-artifacts] summary:`);
 console.log(`  - compiler entries: ${Object.keys(status.compiler).length}`);
 console.log(`  - stdlib entries: ${Object.keys(status.stdlib).length}`);
+console.log(`  - checked artifact: ${wrapperVersion}`);
+console.log(`  - readme badge: ${readmeVersion ?? "n/a"}`);
+console.log(`  - stdlib gate: ${stdlibGatePass}/${stdlibGateTotal}`);
 console.log(`  - generatedAt: ${generatedAt}`);

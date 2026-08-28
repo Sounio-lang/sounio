@@ -1,0 +1,561 @@
+// stdlib/particle_physics/monte_carlo.sio
+//
+// Monte Carlo event generation and phase-space sampling.
+//
+// Algorithms:
+//   - RAMBO: uniform n-body phase-space sampling (Kleiss, Stirling, Ellis, CPC 40 (1986) 359)
+//   - VEGAS: adaptive stratified sampling (Lepage, JCP 27 (1978) 192)
+//   - Acceptance-rejection: 1D PDF sampling
+//
+// References:
+//   - Kleiss, Stirling, Ellis, Comput. Phys. Commun. 40 (1986) 359
+//   - Lepage, J. Comput. Phys. 27 (1978) 192
+//   - PDG 2024, Monte Carlo Techniques
+
+module particle_physics::monte_carlo
+
+use particle_physics::lorentz::*;
+use particle_physics::amplitude::*;
+use particle_physics::sm_params::*;
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// RANDOM NUMBER GENERATION (LCG)
+// ============================================================================
+
+/// Linear congruential generator state.
+var RNG_SEED: i64 = 123456789
+
+/// Seed the RNG.
+pub fn seed_rng(seed: i64) with Mut {
+    RNG_SEED = seed
+}
+
+/// Uniform random number in [0, 1).
+fn rand_uniform() -> f64 with Mut {
+    RNG_SEED = (1103515245 * RNG_SEED + 12345) % 2147483648
+    (RNG_SEED as f64) / 2147483648.0
+}
+
+/// Gaussian random number (Box-Muller).
+fn rand_gaussian() -> f64 with Mut, Panic, Div {
+    let u1 = rand_uniform()
+    let u2 = rand_uniform()
+    if u1 <= 0.0 { return 0.0 }
+    sqrt_f64(-2.0 * ln_f64(u1)) * cos_f64(2.0 * 3.141592653589793 * u2)
+}
+
+// ============================================================================
+// RAMBO: UNIFORM N-BODY PHASE-SPACE SAMPLING
+// ============================================================================
+
+/// Generate a random unit 3-vector.
+fn random_direction() -> (f64, f64, f64) with Mut, Panic, Div {
+    let cos_theta = 2.0 * rand_uniform() - 1.0
+    let sin_theta = sqrt_f64(1.0 - cos_theta * cos_theta)
+    let phi = 2.0 * 3.141592653589793 * rand_uniform()
+    (sin_theta * cos_f64(phi), sin_theta * sin_f64(phi), cos_theta)
+}
+
+/// RAMBO algorithm for massless n-body phase space.
+///
+/// Generates n massless 4-momenta uniformly in phase space at fixed total energy.
+/// Algorithm: generate isotropic massless momenta, then boost+scale to CM frame.
+///
+/// # Parameters
+/// - `n_final`: Number of final-state particles.
+/// - `sqrt_s`: Center-of-mass energy.
+/// - `momenta_out`: Output buffer for n_final LorentzVectors.
+///
+/// # Returns
+/// Phase-space weight (Jacobian factor for uniform sampling).
+pub fn rambo_generator_massless(n_final: i64, sqrt_s: f64, momenta_out: &![LorentzVector; 64]) -> f64 with Mut, Div, Panic {
+    if n_final <= 0 || n_final > 64 || sqrt_s <= 0.0 { return 0.0 }
+
+    // Step 1: Generate n random massless 4-momenta with isotropic directions
+    var e_sum: f64 = 0.0
+    var px_sum: f64 = 0.0
+    var py_sum: f64 = 0.0
+    var pz_sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n_final {
+        let e_i = -ln_f64(rand_uniform())
+        let (nx, ny, nz) = random_direction()
+        momenta_out[i as usize] = lorentz_new(e_i, e_i * nx, e_i * ny, e_i * nz)
+        e_sum = e_sum + e_i
+        px_sum = px_sum + e_i * nx
+        py_sum = py_sum + e_i * ny
+        pz_sum = pz_sum + e_i * nz
+        i = i + 1
+    }
+
+    // Step 2: Compute boost vector β = -P_vec / E_total
+    let beta_x = px_sum / e_sum
+    let beta_y = py_sum / e_sum
+    let beta_z = pz_sum / e_sum
+    let beta2 = beta_x*beta_x + beta_y*beta_y + beta_z*beta_z
+    if beta2 >= 1.0 {
+        // Fallback: just scale energies
+        let scale = sqrt_s / e_sum
+        i = 0
+        while i < n_final {
+            let qi = momenta_out[i as usize]
+            momenta_out[i as usize] = lorentz_new(qi.t * scale, qi.x * scale, qi.y * scale, qi.z * scale)
+            i = i + 1
+        }
+    } else {
+        let gamma = 1.0 / sqrt_f64(1.0 - beta2)
+        // Step 3: Apply inverse boost to each particle
+        i = 0
+        while i < n_final {
+            let qi = momenta_out[i as usize]
+            let beta_dot_p = beta_x * qi.x + beta_y * qi.y + beta_z * qi.z
+            let factor = gamma * (gamma * beta_dot_p / (1.0 + gamma) - qi.t)
+            let px_b = qi.x + factor * beta_x
+            let py_b = qi.y + factor * beta_y
+            let pz_b = qi.z + factor * beta_z
+            let e_b = gamma * (qi.t - beta_dot_p)
+            momenta_out[i as usize] = lorentz_new(e_b, px_b, py_b, pz_b)
+            i = i + 1
+        }
+        // Step 4: Scale to match sqrt_s
+        let e_total_after = e_sum * gamma * (1.0 - beta2)
+        let scale = sqrt_s / e_total_after
+        i = 0
+        while i < n_final {
+            let qi = momenta_out[i as usize]
+            momenta_out[i as usize] = lorentz_new(qi.t * scale, qi.x * scale, qi.y * scale, qi.z * scale)
+            i = i + 1
+        }
+    }
+
+    // Phase-space weight for massless n-body: (2π)^(4-3n) × s^(n-2) / Γ(n)Γ(n-1)
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var weight: f64 = 1.0
+    i = 0
+    while i < n_final - 2 {
+        weight = weight * sqrt_s / two_pi
+        i = i + 1
+    }
+    weight
+}
+
+/// RAMBO with massive particles (simplified rejection method).
+///
+/// Generates n massive 4-momenta. Uses massless RAMBO + rejection.
+///
+/// # Parameters
+/// - `n_final`: Number of final-state particles.
+/// - `sqrt_s`: CM energy.
+/// - `masses`: Array of particle masses.
+/// - `momenta_out`: Output buffer.
+///
+/// # Returns
+/// Phase-space weight (including acceptance factor).
+pub fn rambo_generator(
+    n_final: i64,
+    sqrt_s: f64,
+    masses: &[f64; 64],
+    momenta_out: &![LorentzVector; 64],
+) -> f64 with Mut, Div, Panic {
+    if n_final <= 0 || n_final > 64 || sqrt_s <= 0.0 { return 0.0 }
+
+    // Check kinematic threshold
+    var m_sum: f64 = 0.0
+    var i: i64 = 0
+    while i < n_final {
+        m_sum = m_sum + masses[i as usize]
+        i = i + 1
+    }
+    if m_sum >= sqrt_s { return 0.0 }
+
+    // Generate massless momenta in CM frame (sum E = sqrt_s, sum p_vec = 0)
+    let weight_massless = rambo_generator_massless(n_final, sqrt_s, momenta_out)
+
+    // Now we need to make particles massive while preserving 4-momentum conservation.
+    // Strategy: find a common scaling factor xi for all 3-momenta such that
+    //   sum_i sqrt((xi * |p_i|)^2 + m_i^2) = sqrt_s
+    // This preserves sum p_vec = 0 since all momenta scale by the same xi.
+    //
+    // We solve for xi using Newton-Raphson.
+    // f(xi) = sum_i sqrt((xi*p_i)^2 + m_i^2) - sqrt_s = 0
+    // f'(xi) = sum_i (xi * p_i^2) / sqrt((xi*p_i)^2 + m_i^2)
+
+    // Precompute |p_i|^2 for each particle
+    var p2_arr: [f64; 64] = [0.0; 64]
+    i = 0
+    while i < n_final {
+        let pi = momenta_out[i as usize]
+        p2_arr[i as usize] = pi.x*pi.x + pi.y*pi.y + pi.z*pi.z
+        i = i + 1
+    }
+
+    // Newton-Raphson to find xi
+    var xi: f64 = 1.0
+    var iter: i64 = 0
+    while iter < 50 {
+        var f_val: f64 = 0.0
+        var df_val: f64 = 0.0
+        i = 0
+        while i < n_final {
+            let mi = masses[i as usize]
+            let p2 = p2_arr[i as usize]
+            let e_i = sqrt_f64(xi*xi * p2 + mi*mi)
+            f_val = f_val + e_i
+            if e_i > 0.0 {
+                df_val = df_val + xi * p2 / e_i
+            }
+            i = i + 1
+        }
+        f_val = f_val - sqrt_s
+        if abs_f64(f_val) < 1e-10 * sqrt_s { break }
+        if df_val > 0.0 {
+            xi = xi - f_val / df_val
+        } else {
+            break
+        }
+        if xi < 0.0 { xi = 0.01 }
+        iter = iter + 1
+    }
+
+    // Apply the scaling
+    i = 0
+    while i < n_final {
+        let pi = momenta_out[i as usize]
+        let mi = masses[i as usize]
+        let p2 = p2_arr[i as usize]
+        let p3_new = xi * sqrt_f64(p2)
+        let e_new = sqrt_f64(p3_new*p3_new + mi*mi)
+        if p2 > 0.0 {
+            let scale_p = p3_new / sqrt_f64(p2)
+            momenta_out[i as usize] = lorentz_new(e_new, pi.x*scale_p, pi.y*scale_p, pi.z*scale_p)
+        } else {
+            momenta_out[i as usize] = lorentz_new(e_new, 0.0, 0.0, 0.0)
+        }
+        i = i + 1
+    }
+
+    weight_massless
+}
+
+/// Check 4-momentum conservation for RAMBO output.
+pub fn check_momentum_conservation(momenta: &[LorentzVector; 64], n: i64, sqrt_s: f64) -> bool with Mut, Div, Panic {
+    var p_sum = lorentz_zero()
+    var i: i64 = 0
+    while i < n {
+        p_sum = lorentz_add(p_sum, momenta[i as usize])
+        i = i + 1
+    }
+    let tol = 1e-6 * sqrt_s
+    abs_f64(p_sum.t - sqrt_s) < tol
+    && abs_f64(p_sum.x) < tol
+    && abs_f64(p_sum.y) < tol
+    && abs_f64(p_sum.z) < tol
+}
+
+// ============================================================================
+// VEGAS: ADAPTIVE MONTE CARLO INTEGRATION
+// ============================================================================
+
+/// 1D VEGAS integration with adaptive binning.
+///
+/// # Parameters
+/// - `f`: Function to integrate (takes x, returns f(x)).
+/// - `a`: Lower bound.
+/// - `b`: Upper bound.
+/// - `n_iterations`: Number of adaptive iterations.
+/// - `n_points_per_iter`: Points per iteration.
+///
+/// # Returns
+/// (integral_estimate, standard_error).
+pub fn vegas_integrate_1d(
+    f: fn(f64) -> f64,
+    a: f64,
+    b: f64,
+    n_iterations: i64,
+    n_points_per_iter: i64,
+) -> (f64, f64) with Mut, Div, Panic {
+    if a >= b || n_iterations <= 0 || n_points_per_iter <= 0 {
+        return (0.0, 0.0)
+    }
+
+    let n_bins = 50
+    var grid: [f64; 51] = [0.0; 51]
+    var i: i64 = 0
+    while i <= n_bins {
+        grid[i as usize] = a + (b - a) * (i as f64) / (n_bins as f64)
+        i = i + 1
+    }
+
+    var integral_sum: f64 = 0.0
+    var integral_sq_sum: f64 = 0.0
+    var iter: i64 = 0
+
+    while iter < n_iterations {
+        var bin_sums: [f64; 50] = [0.0; 50]
+        var bin_counts: [i64; 50] = [0; 50]
+        var iter_sum: f64 = 0.0
+        var iter_sum_sq: f64 = 0.0
+
+        i = 0
+        while i < n_points_per_iter {
+            let u = rand_uniform()
+            var bin = (u * (n_bins as f64)) as i64
+            if bin < 0 { bin = 0 }
+            if bin >= n_bins { bin = n_bins - 1 }
+            let x_left = grid[bin as usize]
+            let x_right = grid[(bin + 1) as usize]
+            let x = x_left + (x_right - x_left) * rand_uniform()
+            let fx = f(x)
+            let bin_width = x_right - x_left
+            let weight = fx * bin_width * (n_bins as f64)
+
+            iter_sum = iter_sum + weight
+            iter_sum_sq = iter_sum_sq + weight * weight
+            bin_sums[bin as usize] = bin_sums[bin as usize] + abs_f64(fx) * bin_width
+            bin_counts[bin as usize] = bin_counts[bin as usize] + 1
+            i = i + 1
+        }
+
+        let iter_avg = iter_sum / (n_points_per_iter as f64)
+        let iter_var = (iter_sum_sq / (n_points_per_iter as f64) - iter_avg * iter_avg) / (n_points_per_iter as f64)
+        integral_sum = integral_sum + iter_avg
+        integral_sq_sum = integral_sq_sum + iter_var
+
+        // Regrid: concentrate bins where |f| is large
+        var total_bin_sum: f64 = 0.0
+        i = 0
+        while i < n_bins {
+            total_bin_sum = total_bin_sum + bin_sums[i as usize]
+            i = i + 1
+        }
+
+        if total_bin_sum > 0.0 && iter < n_iterations - 1 {
+            var new_grid: [f64; 51] = [0.0; 51]
+            new_grid[0] = a
+            new_grid[n_bins as usize] = b
+            var target_per_bin = total_bin_sum / (n_bins as f64)
+            var current_sum: f64 = 0.0
+            var old_bin: i64 = 0
+            var new_bin: i64 = 1
+            while new_bin < n_bins && old_bin < n_bins {
+                current_sum = current_sum + bin_sums[old_bin as usize]
+                if current_sum >= target_per_bin {
+                    new_grid[new_bin as usize] = grid[old_bin as usize]
+                        + (grid[(old_bin + 1) as usize] - grid[old_bin as usize])
+                        * (target_per_bin - (current_sum - bin_sums[old_bin as usize]))
+                        / bin_sums[old_bin as usize]
+                    if new_grid[new_bin as usize] <= new_grid[(new_bin - 1) as usize] {
+                        new_grid[new_bin as usize] = new_grid[(new_bin - 1) as usize] + 1e-10
+                    }
+                    current_sum = current_sum - target_per_bin
+                    new_bin = new_bin + 1
+                }
+                old_bin = old_bin + 1
+            }
+            while new_bin < n_bins {
+                new_grid[new_bin as usize] = a + (b - a) * (new_bin as f64) / (n_bins as f64)
+                new_bin = new_bin + 1
+            }
+            i = 0
+            while i <= n_bins {
+                grid[i as usize] = new_grid[i as usize]
+                i = i + 1
+            }
+        }
+
+        iter = iter + 1
+    }
+
+    let integral = integral_sum / (n_iterations as f64)
+    let variance = integral_sq_sum / (n_iterations as f64 * n_iterations as f64)
+    let error = sqrt_f64(variance)
+    (integral, error)
+}
+
+// ============================================================================
+// ACCEPTANCE-REJECTION SAMPLING
+// ============================================================================
+
+/// Generate n_samples from a 1D PDF using acceptance-rejection.
+///
+/// # Parameters
+/// - `pdf`: Probability density function.
+/// - `x_min`, `x_max`: Domain.
+/// - `pdf_max`: Upper bound on pdf(x) in [x_min, x_max].
+/// - `samples_out`: Output buffer.
+/// - `n_samples`: Number of samples to generate.
+///
+/// # Returns
+/// Number of samples actually generated (may be < n_samples if buffer fills).
+pub fn acceptance_rejection_sampling(
+    pdf: fn(f64) -> f64,
+    x_min: f64,
+    x_max: f64,
+    pdf_max: f64,
+    samples_out: &![f64; 1024],
+    n_samples: i64,
+) -> i64 with Mut, Div, Panic {
+    if x_min >= x_max || pdf_max <= 0.0 || n_samples <= 0 { return 0 }
+    var generated: i64 = 0
+    var attempts: i64 = 0
+    let max_attempts = 100 * n_samples
+    while generated < n_samples && generated < 1024 && attempts < max_attempts {
+        let x = x_min + (x_max - x_min) * rand_uniform()
+        let y = pdf_max * rand_uniform()
+        if y <= pdf(x) {
+            samples_out[generated as usize] = x
+            generated = generated + 1
+        }
+        attempts = attempts + 1
+    }
+    generated
+}
+
+// ============================================================================
+// EVENT GENERATION: e+e- -> mu+mu-
+// ============================================================================
+
+/// Generate n_events for e+e- -> mu+mu- in the CM frame.
+///
+/// Returns flat arrays of p3 (mu-) and p4 (mu+) LorentzVectors.
+/// Events are weighted by |M|² = e⁴ (1 + cos²θ).
+///
+/// # Parameters
+/// - `n_events`: Number of events.
+/// - `sqrt_s`: CM energy.
+/// - `p3_out`: Muon 4-momenta.
+/// - `p4_out`: Anti-muon 4-momenta.
+/// - `weights_out`: Event weights (|M|² / max|M|²).
+pub fn generate_eemm_events(
+    n_events: i64,
+    sqrt_s: f64,
+    p3_out: &![LorentzVector; 1024],
+    p4_out: &![LorentzVector; 1024],
+    weights_out: &![f64; 1024],
+) -> i64 with Mut, Div, Panic {
+    if n_events <= 0 || sqrt_s <= 0.0 { return 0 }
+    let s = sqrt_s * sqrt_s
+    let alpha = alpha_em().val()
+    let e = 2.0 * sqrt_f64(pi_f64() * alpha)
+    let max_weight = e * e * e * e * 2.0  // max of (1 + cos²θ) = 2
+
+    var i: i64 = 0
+    while i < n_events && i < 1024 {
+        let cos_theta = 2.0 * rand_uniform() - 1.0
+        let sin_theta = sqrt_f64(1.0 - cos_theta * cos_theta)
+        let phi = 2.0 * pi_f64() * rand_uniform()
+
+        let e_mu = sqrt_s / 2.0
+        let p_mag = e_mu
+
+        let px = p_mag * sin_theta * cos_f64(phi)
+        let py = p_mag * sin_theta * sin_f64(phi)
+        let pz = p_mag * cos_theta
+
+        p3_out[i as usize] = lorentz_new(e_mu, px, py, pz)
+        p4_out[i as usize] = lorentz_new(e_mu, 0.0 - px, 0.0 - py, 0.0 - pz)
+
+        let msq = e * e * e * e * (1.0 + cos_theta * cos_theta)
+        weights_out[i as usize] = msq / max_weight
+        i = i + 1
+    }
+    i
+}
+
+/// Monte Carlo cross-section for e+e- -> mu+mu-.
+///
+/// Integrates |M|² over solid angle using n_events samples.
+pub fn cross_section_eemm_mc(n_events: i64, sqrt_s: f64) -> f64 with Mut, Div, Panic {
+    if n_events <= 0 || sqrt_s <= 0.0 { return 0.0 }
+    var p3: [LorentzVector; 1024] = [lorentz_zero(); 1024]
+    var p4: [LorentzVector; 1024] = [lorentz_zero(); 1024]
+    var weights: [f64; 1024] = [0.0; 1024]
+    let n = generate_eemm_events(n_events, sqrt_s, &!p3, &!p4, &!weights)
+
+    var sum_w: f64 = 0.0
+    var sum_w2: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        sum_w = sum_w + weights[i as usize]
+        sum_w2 = sum_w2 + weights[i as usize] * weights[i as usize]
+        i = i + 1
+    }
+
+    let alpha = alpha_em().val()
+    let sigma_max = 4.0 * pi_f64() * alpha * alpha / (3.0 * sqrt_s * sqrt_s)
+    let avg_w = sum_w / (n as f64)
+    sigma_max * avg_w
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn sqrt_f64(x: f64) -> f64 with Mut, Panic, Div {
+    if x <= 0.0 { return 0.0 }
+    var guess = x
+    if x > 1.0 { guess = x * 0.5 }
+    var i: i64 = 0
+    while i < 60 {
+        guess = 0.5 * (guess + x / guess)
+        i = i + 1
+    }
+    guess
+}
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    let ln2 = 0.6931471805599453
+    (e as f64) * ln2 + 2.0 * sum
+}
+
+fn cos_f64(x: f64) -> f64 with Mut {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x4 = x2 * x2
+    let x6 = x4 * x2
+    let x8 = x6 * x2
+    1.0 - x2 / 2.0 + x4 / 24.0 - x6 / 720.0 + x8 / 40320.0
+}
+
+pub fn sin_f64(x: f64) -> f64 {
+    let pi = 3.141592653589793
+    let two_pi = 2.0 * pi
+    var y = x
+    while y > pi { y = y - two_pi }
+    while y < 0.0 - pi { y = y + two_pi }
+    let x2 = y * y
+    let x3 = y * x2
+    let x5 = x3 * x2
+    let x7 = x5 * x2
+    let x9 = x7 * x2
+    y - x3 / 6.0 + x5 / 120.0 - x7 / 5040.0 + x9 / 362880.0
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pi_f64() -> f64 {
+    3.141592653589793
+}

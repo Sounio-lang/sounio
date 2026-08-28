@@ -1,0 +1,2048 @@
+// stdlib/viz/epiviz.sio — Epistemic uncertainty visualization
+//
+// Renders Epistemic data (val ± σ, confidence) directly from
+// stdlib/epistemic/knowledge.sio types into a Canvas.
+
+use display::canvas::{Canvas, canvas_fill_rect}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_blend_pixel, canvas_fill_triangle,
+                           canvas_blend_pixel_bayer}
+use display::font::{font_draw_string}
+use viz::coord::{CoordSystem, coord_map_x, coord_map_y}
+use viz::colormap::{viridis_r, viridis_g, viridis_b}
+use epistemic::knowledge::{Epistemic}
+
+// ============================================================
+// Internal
+// ============================================================
+
+fn epiviz_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn epiviz_clamp(v: i64, lo: i64, hi: i64) -> i64 {
+    if v < lo { lo } else if v > hi { hi } else { v }
+}
+
+// Draw a semi-transparent filled band between two y-screen coordinates.
+// Simulated via a 50%-dimmed fill using alternating rows.
+fn epiviz_draw_band_row(c: &!Canvas, x: i64, y: i64, w: i64, r: i64, g: i64, b: i64) with Mut {
+    // Checkerboard at 50% density — every other pixel
+    var px = x
+    while px < x + w {
+        if (px + y) % 2 == 0 {
+            canvas_fill_rect(c, px, y, 1, 1, r, g, b)
+        }
+        px = px + 1
+    }
+}
+
+// ============================================================
+// Uncertainty band — center line + ±1σ shaded region
+// ============================================================
+//
+// xs[i], vals[i], vars[i]: data-space X, mean, and variance (σ²).
+// Band is rendered as a translucent region between val-σ and val+σ.
+
+pub fn epiviz_band(
+    cs: &CoordSystem,
+    xs: &[f64; 1024],
+    vals: &[f64; 1024],
+    vars: &[f64; 1024],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n == 0 { return }
+    // First pass: draw the ±1σ band
+    var i: i64 = 0
+    while i < n {
+        let sx   = coord_map_x(cs, xs[i as usize])
+        let sigma = epiviz_sqrt(vars[i as usize])
+        let y_lo = coord_map_y(cs, vals[i as usize] - sigma)
+        let y_hi = coord_map_y(cs, vals[i as usize] + sigma)
+        let band_top    = if y_hi < y_lo { y_hi } else { y_lo }
+        let band_bottom = if y_hi > y_lo { y_hi } else { y_lo }
+        var py = band_top
+        while py <= band_bottom {
+            epiviz_draw_band_row(c, sx - 1, py, 3, r / 2, g / 2, b)
+            py = py + 1
+        }
+        i = i + 1
+    }
+    // Second pass: center line (solid, antialiased)
+    var j: i64 = 0
+    while j < n - 1 {
+        let sx0 = coord_map_x(cs, xs[j as usize])
+        let sy0 = coord_map_y(cs, vals[j as usize])
+        let sx1 = coord_map_x(cs, xs[(j + 1) as usize])
+        let sy1 = coord_map_y(cs, vals[(j + 1) as usize])
+        canvas_draw_line_aa(c, sx0, sy0, sx1, sy1, r, g, b)
+        j = j + 1
+    }
+}
+
+// ============================================================
+// Epistemic series — convenience wrapper for Epistemic arrays
+// ============================================================
+
+pub fn epiviz_knowledge_series(
+    cs: &CoordSystem,
+    xs: &[f64; 1024],
+    ks: &[Epistemic; 1024],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    // Unpack vals + vars into local arrays
+    var vals: [f64; 1024] = [0.0; 1024]
+    var vars: [f64; 1024] = [0.0; 1024]
+    var i: i64 = 0
+    while i < n {
+        vals[i as usize] = ks[i as usize].val
+        vars[i as usize] = ks[i as usize].variance
+        i = i + 1
+    }
+    epiviz_band(cs, xs, &vals, &vars, n, c, r, g, b)
+}
+
+// ============================================================
+// Confidence waterfall — bar per operation showing decay
+// ============================================================
+//
+// confidences[i] in [0, 1000]; labels[i][0..8] is an 8-char tag.
+// Draws horizontal bars ranked by index, colored by confidence:
+//   high (≥900) → green, mid (≥600) → yellow, low → red.
+
+fn epiviz_conf_color_r(conf: i64) -> i64 {
+    if conf >= 900 { 80 }
+    else if conf >= 600 { 255 }
+    else { 220 }
+}
+
+fn epiviz_conf_color_g(conf: i64) -> i64 {
+    if conf >= 900 { 220 }
+    else if conf >= 600 { 200 }
+    else { 60 }
+}
+
+fn epiviz_conf_color_b(conf: i64) -> i64 {
+    if conf >= 900 { 80 } else { 40 }
+}
+
+pub fn epiviz_waterfall(
+    cs: &CoordSystem,
+    confidences: &[i64; 64],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n == 0 { return }
+    let bar_h = epiviz_clamp(cs.screen_h / n - 2, 4, 30)
+    var i: i64 = 0
+    while i < n {
+        let conf = confidences[i as usize]
+        let bar_w = epiviz_clamp((conf * cs.screen_w) / 1000, 2, cs.screen_w)
+        let py = cs.screen_y + i * (bar_h + 2)
+        let cr = epiviz_conf_color_r(conf)
+        let cg = epiviz_conf_color_g(conf)
+        let cb = epiviz_conf_color_b(conf)
+        canvas_fill_rect(c, cs.screen_x, py, bar_w, bar_h, cr, cg, cb)
+        // dim border
+        canvas_fill_rect(c, cs.screen_x + bar_w, py, cs.screen_w - bar_w, bar_h, 40, 40, 50)
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Forest plot — per-study estimates + pooled result
+// ============================================================
+//
+// studies: array of Epistemic (val ± σ per study)
+// pooled:  the meta-analysis pooled Epistemic
+// Draws horizontal error bars and a diamond for the pooled result.
+
+pub fn epiviz_forest(
+    cs: &CoordSystem,
+    studies: &[Epistemic; 64],
+    n: i64,
+    pooled: Epistemic,
+    c: &!Canvas,
+) with Mut, Div {
+    if n == 0 { return }
+    let row_h = epiviz_clamp(cs.screen_h / (n + 2), 6, 20)
+
+    // Center of X axis = pooled.val, so scale by max sigma across studies
+    var max_sigma: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let s = epiviz_sqrt(studies[i as usize].variance)
+        if s > max_sigma { max_sigma = s }
+        i = i + 1
+    }
+    let x_span = if max_sigma > 0.0 { max_sigma * 4.0 } else { 1.0 }
+    let x_lo = pooled.val - x_span * 0.5
+    let x_hi = pooled.val + x_span * 0.5
+
+    // Per-study rows
+    var j: i64 = 0
+    while j < n {
+        let est = studies[j as usize].val
+        let sigma = epiviz_sqrt(studies[j as usize].variance)
+        let conf  = studies[j as usize].confidence
+
+        let row_y = cs.screen_y + j * (row_h + 2) + row_h / 2
+        let sx_est = cs.screen_x + (((est - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+        let sx_lo  = cs.screen_x + ((((est - sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+        let sx_hi  = cs.screen_x + ((((est + sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+
+        // Error bar line
+        canvas_fill_rect(c, sx_lo, row_y, sx_hi - sx_lo + 1, 1, 180, 180, 220)
+        // Cap lines
+        canvas_fill_rect(c, sx_lo, row_y - 2, 1, 5, 180, 180, 220)
+        canvas_fill_rect(c, sx_hi, row_y - 2, 1, 5, 180, 180, 220)
+        // Center marker (confidence-colored)
+        let mr = if conf >= 900 { 80 } else if conf >= 600 { 200 } else { 220 }
+        let mg = if conf >= 900 { 200 } else if conf >= 600 { 180 } else { 80 }
+        let mb = if conf >= 900 { 80 } else { 40 }
+        canvas_fill_rect(c, sx_est - 3, row_y - 3, 7, 7, mr, mg, mb)
+
+        j = j + 1
+    }
+
+    // Pooled diamond
+    let pooled_y  = cs.screen_y + n * (row_h + 2) + row_h + row_h / 2
+    let pooled_sigma = epiviz_sqrt(pooled.variance)
+    let sx_p  = cs.screen_x + (((pooled.val - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+    let sx_pl = cs.screen_x + ((((pooled.val - pooled_sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+    let sx_pr = cs.screen_x + ((((pooled.val + pooled_sigma) - x_lo) / (x_hi - x_lo)) * (cs.screen_w as f64)) as i64
+    // Draw diamond as 4 lines
+    canvas_draw_line_aa(c, sx_pl, pooled_y, sx_p, pooled_y - 6, 255, 220, 80)
+    canvas_draw_line_aa(c, sx_p, pooled_y - 6, sx_pr, pooled_y, 255, 220, 80)
+    canvas_draw_line_aa(c, sx_pr, pooled_y, sx_p, pooled_y + 6, 255, 220, 80)
+    canvas_draw_line_aa(c, sx_p, pooled_y + 6, sx_pl, pooled_y, 255, 220, 80)
+}
+
+// ============================================================
+// Violin / KDE plot — posterior distribution as half-violin
+// ============================================================
+//
+// Renders a half-violin (right-side only) at a given data-space Y centre.
+// Uses Gaussian KDE with Silverman bandwidth: h = 0.9 * σ * n^(-1/5).
+// 64 evaluation points; max half-width = 35 px.
+// n ≤ 256 data points.
+
+fn epiviz_exp_neg(x: f64) -> f64 with Mut, Div {
+    // exp(-x) for x >= 0 via Taylor series on fractional part × e^(-1)^ipart
+    if x <= 0.0 { return 1.0 }
+    if x > 10.0 { return 0.0 }
+    let e1: f64 = 0.36787944117
+    let ipart = x as i64
+    let frac = x - (ipart as f64)
+    var r: f64 = 1.0
+    var term: f64 = 1.0
+    var k: i64 = 1
+    while k <= 12 {
+        term = 0.0 - term * frac / (k as f64)
+        r = r + term
+        k = k + 1
+    }
+    if r < 0.0 { r = 0.0 }
+    var em: i64 = 0
+    while em < ipart {
+        r = r * e1
+        em = em + 1
+    }
+    r
+}
+
+fn epiviz_fifth_root(n: i64) -> f64 with Mut, Div {
+    // Compute n^(1/5) via Newton: y ← (4y + n/y^4) / 5
+    if n <= 1 { return 1.0 }
+    var y: f64 = 2.0
+    var i: i64 = 0
+    while i < 20 {
+        let y4 = y * y * y * y
+        y = (4.0 * y + (n as f64) / y4) / 5.0
+        i = i + 1
+    }
+    y
+}
+
+pub fn epiviz_violin(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    label_y: f64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 3 { return }
+
+    // Mean and σ for Silverman bandwidth
+    var dsum: f64 = 0.0
+    var vi: i64 = 0
+    while vi < n {
+        dsum = dsum + data[vi as usize]
+        vi = vi + 1
+    }
+    let dmean = dsum / (n as f64)
+    var var_acc: f64 = 0.0
+    var vj: i64 = 0
+    while vj < n {
+        let d = data[vj as usize] - dmean
+        var_acc = var_acc + d * d
+        vj = vj + 1
+    }
+    let sigma = epiviz_sqrt(var_acc / (n as f64))
+    if sigma <= 0.0 { return }
+
+    // Silverman h = 0.9 * σ * n^(-1/5)
+    let h = 0.9 * sigma / epiviz_fifth_root(n)
+    if h <= 0.0 { return }
+
+    // Display range: mean ± 3.5σ
+    let x_lo = dmean - 3.5 * sigma
+    let x_hi = dmean + 3.5 * sigma
+    if x_hi <= x_lo { return }
+
+    // Evaluate KDE at 64 points; Gaussian kernel K(u) = exp(-u²/2)
+    let n_eval: i64 = 64
+    var densities: [f64; 64] = [0.0; 64]
+    var max_dens: f64 = 0.001
+    var ei: i64 = 0
+    while ei < n_eval {
+        let x = x_lo + (x_hi - x_lo) * (ei as f64) / ((n_eval - 1) as f64)
+        var kde_sum: f64 = 0.0
+        var ki: i64 = 0
+        while ki < n {
+            let u = (x - data[ki as usize]) / h
+            let u2 = u * u
+            if u2 < 9.0 {
+                kde_sum = kde_sum + epiviz_exp_neg(u2 * 0.5)
+            }
+            ki = ki + 1
+        }
+        densities[ei as usize] = kde_sum
+        if kde_sum > max_dens { max_dens = kde_sum }
+        ei = ei + 1
+    }
+
+    let center_sy = coord_map_y(cs, label_y)
+    let max_hw: i64 = 35
+
+    // Fill half-violin (spans from center_sy outward in screen-Y)
+    var pi: i64 = 0
+    while pi < n_eval - 1 {
+        let t0 = (pi as f64) / ((n_eval - 1) as f64)
+        let t1 = ((pi + 1) as f64) / ((n_eval - 1) as f64)
+        let sx0 = coord_map_x(cs, x_lo + (x_hi - x_lo) * t0)
+        let sx1 = coord_map_x(cs, x_lo + (x_hi - x_lo) * t1)
+        if sx1 <= sx0 {
+            pi = pi + 1
+            continue
+        }
+        let hw0 = (densities[pi as usize] / max_dens * (max_hw as f64)) as i64
+        let hw1 = (densities[(pi + 1) as usize] / max_dens * (max_hw as f64)) as i64
+        let span = sx1 - sx0
+        var px = sx0
+        while px <= sx1 {
+            let t = if span > 0 { ((px - sx0) as f64) / (span as f64) } else { 0.0 }
+            let hw = (hw0 as f64 * (1.0 - t) + hw1 as f64 * t) as i64
+            var dy: i64 = 0
+            while dy <= hw {
+                canvas_blend_pixel(c, px, center_sy - dy, r, g, b, 120)
+                canvas_blend_pixel(c, px, center_sy + dy, r, g, b, 120)
+                dy = dy + 1
+            }
+            px = px + 1
+        }
+        pi = pi + 1
+    }
+    // Baseline at label_y
+    let sx_lo = coord_map_x(cs, x_lo)
+    let sx_hi = coord_map_x(cs, x_hi)
+    canvas_draw_line_aa(c, sx_lo, center_sy, sx_hi, center_sy, r, g, b)
+}
+
+// ============================================================
+// Sensitivity tornado chart (E3)
+// ============================================================
+//
+// Horizontal bar chart of sensitivity indices (Sobol/Morris or any
+// ∈ [0,1]) ranked largest-at-top. Bars are centred at the panel
+// midpoint and coloured green (low) → yellow → red (high).
+//
+// panel_x/y: top-left pixel of the bounding rect.
+// panel_w/h: pixel dimensions.
+// sensitivities[i] ∈ [0,1]: total-order sensitivity of parameter i.
+// n ≤ 32.
+
+pub fn epiviz_tornado(
+    panel_x: i64, panel_y: i64, panel_w: i64, panel_h: i64,
+    sensitivities: &[f64; 32],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n <= 0 { return }
+    // Insertion sort: order[0..n] = indices into sensitivities[], descending.
+    var order: [i64; 32] = [0; 32]
+    var si: i64 = 0
+    while si < n {
+        order[si as usize] = si
+        si = si + 1
+    }
+    var sj: i64 = 1
+    while sj < n {
+        let ki = order[sj as usize]
+        let kv = sensitivities[ki as usize]
+        var sk = sj - 1
+        while sk >= 0 && sensitivities[order[sk as usize] as usize] < kv {
+            order[(sk + 1) as usize] = order[sk as usize]
+            sk = sk - 1
+        }
+        order[(sk + 1) as usize] = ki
+        sj = sj + 1
+    }
+
+    let bar_h = if n > 0 { (panel_h - 4) / n } else { 16 }
+    let bar_h_safe = if bar_h < 4 { 4 } else { bar_h }
+    let cx = panel_x + panel_w / 2   // centre x (Si=0 line)
+    let max_half = panel_w / 2 - 4   // max bar half-width in px
+
+    // Vertical reference line at centre
+    var rl: i64 = 0
+    while rl < panel_h {
+        canvas_blend_pixel(c, cx, panel_y + rl, 120, 120, 120, 80)
+        rl = rl + 1
+    }
+
+    var ri: i64 = 0
+    while ri < n {
+        let idx = order[ri as usize]
+        let sv = sensitivities[idx as usize]
+        let half_w = (sv * (max_half as f64)) as i64
+        let by = panel_y + ri * bar_h_safe + 1
+
+        // Color ramp: green (0) → yellow (0.5) → red (1.0)
+        let tr = if sv >= 0.5 {
+            let t = (sv - 0.5) * 2.0
+            200 + (55.0 * t) as i64
+        } else { 200 }
+        let tg = if sv <= 0.5 {
+            180 + (75.0 * sv * 2.0) as i64
+        } else {
+            let t = (sv - 0.5) * 2.0
+            (255.0 * (1.0 - t)) as i64
+        }
+        let tb: i64 = 30
+
+        // Bar fill: cx-half_w..cx+half_w
+        var bx = cx - half_w
+        while bx <= cx + half_w {
+            var bdy: i64 = 0
+            while bdy < bar_h_safe - 1 {
+                canvas_blend_pixel(c, bx, by + bdy, tr, tg, tb, 180)
+                bdy = bdy + 1
+            }
+            bx = bx + 1
+        }
+        // Outline top/bottom
+        canvas_draw_line_aa(c, cx - half_w, by, cx + half_w, by, tr, tg, tb)
+        canvas_draw_line_aa(c, cx - half_w, by + bar_h_safe - 2,
+                               cx + half_w, by + bar_h_safe - 2, tr, tg, tb)
+        ri = ri + 1
+    }
+}
+
+// ============================================================
+// Raincloud plot (E4) — half-violin + box + jittered dots
+// ============================================================
+//
+// Three-component display (Allen 2019 / van Langen 2020) for showing
+// both the full distribution and individual data points:
+//   Left of centre:  box-and-whisker (IQR + median + ±1.5×IQR whiskers)
+//   Right of centre: KDE half-violin (reuses Silverman bandwidth)
+//   Dots: jittered horizontally, stacked using deterministic LCG jitter
+//
+// cs: coord system — y-axis is the data axis, x=label_y is the row centre.
+// data[0..n]: raw observations ≤ 256 values.
+// label_y: data-space y position of this row's centre.
+// height: data-space height of the rain cloud strip.
+
+fn epiviz_median(data: &[f64; 256], order: &[i64; 256], n: i64) -> f64 with Div {
+    if n == 0 { return 0.0 }
+    let mid = n / 2
+    if (n & 1) == 1 {
+        data[order[mid as usize] as usize]
+    } else {
+        (data[order[mid as usize] as usize] +
+         data[order[(mid - 1) as usize] as usize]) * 0.5
+    }
+}
+
+fn epiviz_isort(data: &[f64; 256], n: i64, order: &![i64; 256]) with Mut {
+    var ii: i64 = 0
+    while ii < n {
+        (*order)[ii as usize] = ii
+        ii = ii + 1
+    }
+    var jj: i64 = 1
+    while jj < n {
+        let ki = (*order)[jj as usize]
+        let kv = data[ki as usize]
+        var kk = jj - 1
+        while kk >= 0 && data[(*order)[kk as usize] as usize] > kv {
+            (*order)[(kk + 1) as usize] = (*order)[kk as usize]
+            kk = kk - 1
+        }
+        (*order)[(kk + 1) as usize] = ki
+        jj = jj + 1
+    }
+}
+
+pub fn epiviz_raincloud(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    label_y: f64,
+    half_height: f64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 2 { return }
+
+    var order: [i64; 256] = [0; 256]
+    epiviz_isort(data, n, &!order)
+
+    // ── Compute summary stats ──────────────────────────────────
+    let q1_idx = n / 4
+    let q3_idx = 3 * n / 4
+    let q1 = data[order[q1_idx as usize] as usize]
+    let q3 = data[order[q3_idx as usize] as usize]
+    let med = epiviz_median(data, &order, n)
+    let iqr = q3 - q1
+    // Whiskers: Tukey 1.5×IQR
+    let w_lo = q1 - 1.5 * iqr
+    let w_hi = q3 + 1.5 * iqr
+
+    // ── Screen coordinates ─────────────────────────────────────
+    let centre_x = coord_map_x(cs, 0.5)   // centre of coord range
+    let strip_px = (half_height * (cs.screen_w as f64) /
+                    (cs.data_x_max - cs.data_x_min)) as i64
+    let strip_px_safe = if strip_px < 6 { 6 } else if strip_px > 60 { 60 } else { strip_px }
+    let box_w = strip_px_safe / 3
+
+    // ── Box-and-whisker (left of centre) ──────────────────────
+    let sy_q1  = coord_map_y(cs, q1)
+    let sy_q3  = coord_map_y(cs, q3)
+    let sy_med = coord_map_y(cs, med)
+    let sy_wlo = coord_map_y(cs, w_lo)
+    let sy_whi = coord_map_y(cs, w_hi)
+    let box_x0 = centre_x - box_w - 2
+    let box_x1 = centre_x - 2
+    // IQR rectangle
+    let ry_top = if sy_q1 < sy_q3 { sy_q1 } else { sy_q3 }
+    let ry_bot = if sy_q1 > sy_q3 { sy_q1 } else { sy_q3 }
+    var bry = ry_top
+    while bry <= ry_bot {
+        canvas_blend_pixel(c, box_x0, bry, r, g, b, 80)
+        canvas_blend_pixel(c, box_x1, bry, r, g, b, 80)
+        var brx = box_x0 + 1
+        while brx < box_x1 {
+            canvas_blend_pixel(c, brx, bry, r, g, b, 40)
+            brx = brx + 1
+        }
+        bry = bry + 1
+    }
+    // Median line
+    canvas_draw_line_aa(c, box_x0, sy_med, box_x1, sy_med, 255, 255, 255)
+    // Whisker stems
+    let wx_mid = (box_x0 + box_x1) / 2
+    canvas_draw_line_aa(c, wx_mid, ry_top, wx_mid, sy_whi, r, g, b)
+    canvas_draw_line_aa(c, wx_mid, ry_bot, wx_mid, sy_wlo, r, g, b)
+    // Whisker caps
+    canvas_draw_line_aa(c, box_x0, sy_whi, box_x1, sy_whi, r, g, b)
+    canvas_draw_line_aa(c, box_x0, sy_wlo, box_x1, sy_wlo, r, g, b)
+
+    // ── KDE half-violin (right of centre) ──────────────────────
+    // Silverman bandwidth
+    var mean_v: f64 = 0.0
+    var vi: i64 = 0
+    while vi < n {
+        mean_v = mean_v + data[vi as usize]
+        vi = vi + 1
+    }
+    mean_v = mean_v / (n as f64)
+    var var_v: f64 = 0.0
+    var vi2: i64 = 0
+    while vi2 < n {
+        let dv = data[vi2 as usize] - mean_v
+        var_v = var_v + dv * dv
+        vi2 = vi2 + 1
+    }
+    let sigma_v = epiviz_sqrt(var_v / (n as f64))
+    let bw = if sigma_v > 0.0 {
+        0.9 * sigma_v * epiviz_fifth_root(n)
+    } else { 0.01 }
+
+    // Evaluate KDE on 48 points spanning data range
+    let dlo = data[order[0] as usize]
+    let dhi = data[order[(n - 1) as usize] as usize]
+    let drange = dhi - dlo
+    let drange_s = if drange < 0.0001 { 0.0001 } else { drange }
+    let n_eval: i64 = 48
+    var max_kde: f64 = 0.0
+    var kvals: [f64; 64] = [0.0; 64]
+    var ei: i64 = 0
+    while ei < n_eval {
+        let xv = dlo + drange_s * (ei as f64) / ((n_eval - 1) as f64)
+        var kde: f64 = 0.0
+        var ki: i64 = 0
+        while ki < n {
+            let u = (xv - data[ki as usize]) / bw
+            if u > 0.0 - 3.0 && u < 3.0 {
+                kde = kde + epiviz_exp_neg(u * u * 0.5)
+            }
+            ki = ki + 1
+        }
+        kvals[ei as usize] = kde
+        if kde > max_kde { max_kde = kde }
+        ei = ei + 1
+    }
+    let max_kde_s = if max_kde < 0.0001 { 0.0001 } else { max_kde }
+    let violin_w = strip_px_safe - 2
+
+    var ei2: i64 = 0
+    while ei2 < n_eval - 1 {
+        let xv0 = dlo + drange_s * (ei2 as f64) / ((n_eval - 1) as f64)
+        let xv1 = dlo + drange_s * ((ei2 + 1) as f64) / ((n_eval - 1) as f64)
+        let sy0 = coord_map_y(cs, xv0)
+        let sy1 = coord_map_y(cs, xv1)
+        let hw0 = (kvals[ei2 as usize] / max_kde_s * (violin_w as f64)) as i64
+        let hw1 = (kvals[(ei2 + 1) as usize] / max_kde_s * (violin_w as f64)) as i64
+        // Fill between centre+2 and centre+hw at each scanline
+        let sy_min = if sy0 < sy1 { sy0 } else { sy1 }
+        let sy_max = if sy0 > sy1 { sy0 } else { sy1 }
+        var sy = sy_min
+        while sy <= sy_max {
+            let t = if sy_max > sy_min {
+                ((sy - sy_min) as f64) / ((sy_max - sy_min) as f64)
+            } else { 0.0 }
+            let hw = ((1.0 - t) * (hw0 as f64) + t * (hw1 as f64)) as i64
+            var dx: i64 = 2
+            while dx <= hw {
+                canvas_blend_pixel(c, centre_x + dx, sy, r, g, b, 120)
+                dx = dx + 1
+            }
+            canvas_blend_pixel(c, centre_x + hw + 1, sy, r, g, b, 60)
+            sy = sy + 1
+        }
+        ei2 = ei2 + 1
+    }
+
+    // ── Jittered dots (centred on centre line) ─────────────────
+    // Deterministic LCG jitter: seed from index, jitter in ±dot_spread px.
+    let dot_spread: i64 = strip_px_safe / 4
+    var di: i64 = 0
+    while di < n {
+        let sy = coord_map_y(cs, data[di as usize])
+        // LCG: next = (1664525 * seed + 1013904223) & 0x7FFFFFFF
+        let seed = (1664525 * di + 1013904223) & 2147483647
+        let jitter = (seed & 255) * dot_spread / 128 - dot_spread / 2
+        let dx = centre_x + jitter
+        canvas_blend_pixel(c, dx, sy, r, g, b, 200)
+        canvas_blend_pixel(c, dx - 1, sy, r, g, b, 100)
+        canvas_blend_pixel(c, dx + 1, sy, r, g, b, 100)
+        canvas_blend_pixel(c, dx, sy - 1, r, g, b, 100)
+        canvas_blend_pixel(c, dx, sy + 1, r, g, b, 100)
+        di = di + 1
+    }
+}
+
+// ============================================================
+// ECDF with DKW 95% confidence band (F2)
+// ============================================================
+//
+// Natural log via (x-1)/(x+1) Padé series — private.
+fn epiviz_ln(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 - 999.0 }
+    if x == 1.0 { return 0.0 }
+    let y = (x - 1.0) / (x + 1.0)
+    var res: f64 = 0.0
+    var term = y
+    var i: i64 = 1
+    while i < 30 {
+        res = res + term / (i as f64)
+        term = term * y * y
+        i = i + 2
+    }
+    2.0 * res
+}
+
+// exp(x) via Taylor series — private; clamp |x| <= 20.
+fn epiviz_exp(x: f64) -> f64 with Mut, Div {
+    if x < 0.0 - 20.0 { return 0.0 }
+    if x > 20.0 { return 485165195.0 }
+    var r: f64 = 1.0
+    var term: f64 = 1.0
+    var k: i64 = 1
+    while k <= 20 {
+        term = term * x / (k as f64)
+        r = r + term
+        k = k + 1
+    }
+    r
+}
+
+// C^n for integer n via binary exponentiation — private.
+fn epiviz_powi(c: f64, n: i64) -> f64 with Div {
+    if n == 0 { return 1.0 }
+    var acc: f64 = 1.0
+    var base = c
+    var k = n
+    while k > 0 {
+        if k % 2 == 1 { acc = acc * base }
+        base = base * base
+        k = k / 2
+    }
+    acc
+}
+
+// ============================================================
+// Kaplan-Meier survival curve
+// ============================================================
+//
+// times[0..n]: event times (any order); events[0..n]: 1=event, 0=censored.
+// Plots S(t) step function with log-log 95% CI band.
+// Censored observations shown as vertical tick marks.
+//
+// Algorithm: Kaplan & Meier 1958; CI: Kalbfleisch & Prentice 1980 log-log.
+// Greenwood Var[S] = S² × Σ dⱼ/(nⱼ(nⱼ-dⱼ)).
+
+pub fn epiviz_kaplan_meier(
+    cs: &CoordSystem,
+    times: &[f64; 256],
+    events: &[i64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 2 { return }
+
+    // Sort indices by time ascending
+    var ord: [i64; 256] = [0; 256]
+    var oi: i64 = 0
+    while oi < n { ord[oi as usize] = oi; oi = oi + 1 }
+    // Insertion sort by times
+    var si: i64 = 1
+    while si < n {
+        let key = ord[si as usize]
+        let kt = times[key as usize]
+        var sj = si - 1
+        while sj >= 0 && times[ord[sj as usize] as usize] > kt {
+            ord[(sj + 1) as usize] = ord[sj as usize]
+            sj = sj - 1
+        }
+        ord[(sj + 1) as usize] = key
+        si = si + 1
+    }
+
+    var surv: f64 = 1.0
+    var greenwood: f64 = 0.0
+    var prev_sx: i64 = coord_map_x(cs, times[ord[0] as usize])
+    var prev_sy: i64 = coord_map_y(cs, 1.0)
+    var ni: i64 = n   // at-risk
+
+    var ki: i64 = 0
+    while ki < n {
+        let idx = ord[ki as usize] as usize
+        let t = times[idx]
+
+        if events[idx] == 0 {
+            // Censored: draw tick mark at current S(t)
+            let sx = coord_map_x(cs, t)
+            let sy = coord_map_y(cs, surv)
+            canvas_fill_rect(c, sx, sy - 4, 1, 8, r, g, b)
+            ni = ni - 1
+            ki = ki + 1
+            continue
+        }
+
+        // Count ties at this time
+        var di: i64 = 0
+        var di2 = ki
+        while di2 < n && times[ord[di2 as usize] as usize] == t {
+            if events[ord[di2 as usize] as usize] == 1 { di = di + 1 }
+            di2 = di2 + 1
+        }
+
+        // Horizontal segment at current S to this event time
+        let sx = coord_map_x(cs, t)
+        canvas_draw_line_aa(c, prev_sx, prev_sy, sx, prev_sy, r, g, b)
+
+        // Update S and Greenwood
+        surv = surv * (1.0 - (di as f64) / (ni as f64))
+        let denom = (ni as f64) * ((ni - di) as f64)
+        if denom > 0.0 { greenwood = greenwood + (di as f64) / denom }
+
+        let sy = coord_map_y(cs, surv)
+
+        // Vertical drop
+        canvas_draw_line_aa(c, sx, prev_sy, sx, sy, r, g, b)
+
+        // CI via log-log transform
+        if surv > 0.0001 && surv < 0.9999 {
+            let log_s = epiviz_ln(surv)
+            if log_s < 0.0 - 0.0001 {
+                let se_theta = epiviz_sqrt(greenwood) / (0.0 - log_s)
+                let lo_s = epiviz_exp(log_s * epiviz_exp(1.96 * se_theta))
+                let hi_s = epiviz_exp(log_s * epiviz_exp(0.0 - 1.96 * se_theta))
+                let ci_lo_y = coord_map_y(cs, lo_s)
+                let ci_hi_y = coord_map_y(cs, hi_s)
+                var px = prev_sx
+                while px <= sx {
+                    canvas_blend_pixel(c, px, ci_lo_y, r, g, b, 55)
+                    canvas_blend_pixel(c, px, ci_hi_y, r, g, b, 55)
+                    // Fill band sparsely
+                    if ci_hi_y < ci_lo_y {
+                        var py = ci_hi_y
+                        while py <= ci_lo_y {
+                            if (px + py) % 3 == 0 {
+                                canvas_blend_pixel(c, px, py, r, g, b, 35)
+                            }
+                            py = py + 1
+                        }
+                    }
+                    px = px + 1
+                }
+            }
+        }
+
+        prev_sx = sx
+        prev_sy = sy
+        ni = ni - di
+        ki = ki + di
+    }
+    // Final horizontal segment to right edge
+    let x_end = coord_map_x(cs, cs.data_x_max)
+    canvas_draw_line_aa(c, prev_sx, prev_sy, x_end, prev_sy, r, g, b)
+}
+
+// ============================================================
+// Bland-Altman method-agreement plot
+// ============================================================
+//
+// Altman & Bland 1983 (Lancet 1:307-310).
+// X = (a+b)/2 (mean), Y = a-b (difference).
+// Bias line (solid), LoA = mean_diff ± 1.96·SD (dashed).
+
+pub fn epiviz_bland_altman(
+    cs: &CoordSystem,
+    a: &[f64; 256],
+    b: &[f64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b_col: i64,
+) with Mut, Div {
+    if n < 3 { return }
+
+    // Compute mean_diff and SD_diff
+    var sum_d: f64 = 0.0
+    var bi: i64 = 0
+    while bi < n {
+        sum_d = sum_d + a[bi as usize] - b[bi as usize]
+        bi = bi + 1
+    }
+    let mean_d = sum_d / (n as f64)
+
+    var sum_sq: f64 = 0.0
+    var ci: i64 = 0
+    while ci < n {
+        let d = a[ci as usize] - b[ci as usize] - mean_d
+        sum_sq = sum_sq + d * d
+        ci = ci + 1
+    }
+    let sd_d = epiviz_sqrt(sum_sq / ((n - 1) as f64))
+    let loa_hi = mean_d + 1.96 * sd_d
+    let loa_lo = mean_d - 1.96 * sd_d
+
+    // Scatter dots
+    var di: i64 = 0
+    while di < n {
+        let xv = (a[di as usize] + b[di as usize]) * 0.5
+        let yv = a[di as usize] - b[di as usize]
+        let sx = coord_map_x(cs, xv)
+        let sy = coord_map_y(cs, yv)
+        canvas_blend_pixel(c, sx, sy, r, g, b_col, 200)
+        canvas_blend_pixel(c, sx - 1, sy, r, g, b_col, 120)
+        canvas_blend_pixel(c, sx + 1, sy, r, g, b_col, 120)
+        canvas_blend_pixel(c, sx, sy - 1, r, g, b_col, 120)
+        canvas_blend_pixel(c, sx, sy + 1, r, g, b_col, 120)
+        di = di + 1
+    }
+
+    // Bias line (solid green)
+    let x0 = coord_map_x(cs, cs.data_x_min)
+    let x1 = coord_map_x(cs, cs.data_x_max)
+    canvas_draw_line_aa(c, x0, coord_map_y(cs, mean_d), x1, coord_map_y(cs, mean_d), 60, 200, 80)
+
+    // LoA dashed lines
+    let lh = coord_map_y(cs, loa_hi)
+    let ll = coord_map_y(cs, loa_lo)
+    var px: i64 = x0
+    while px <= x1 {
+        if (px - x0) % 8 < 4 {
+            canvas_fill_rect(c, px, lh, 1, 1, 220, 140, 40)
+            canvas_fill_rect(c, px, ll, 1, 1, 220, 140, 40)
+        }
+        px = px + 1
+    }
+
+    // Shaded LoA band
+    var bpy: i64 = lh
+    while bpy <= ll {
+        var bpx: i64 = x0
+        while bpx <= x1 {
+            if (bpx + bpy) % 4 == 0 {
+                canvas_blend_pixel(c, bpx, bpy, 220, 140, 40, 30)
+            }
+            bpx = bpx + 1
+        }
+        bpy = bpy + 1
+    }
+}
+
+// ============================================================
+// Beeswarm dot plot
+// ============================================================
+//
+// Deterministic x-offset placement: for each dot sorted by value,
+// candidate offsets are computed from all already-placed dots at
+// x ± sqrt(4r²-(yi-yj)²) when |yi-yj|<2r (Wilkinson 1999).
+// Picks minimum |x| candidate with no collision.
+//
+// data[0..n]: values mapped to Y axis; all dots at same x=center_data_x.
+
+pub fn epiviz_beeswarm(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    center_x: f64,
+    dot_r: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 1 { return }
+
+    // Sort by value
+    var ord: [i64; 256] = [0; 256]
+    var oi: i64 = 0
+    while oi < n { ord[oi as usize] = oi; oi = oi + 1 }
+    var si: i64 = 1
+    while si < n {
+        let key = ord[si as usize]
+        let kv = data[key as usize]
+        var sj = si - 1
+        while sj >= 0 && data[ord[sj as usize] as usize] > kv {
+            ord[(sj + 1) as usize] = ord[sj as usize]
+            sj = sj - 1
+        }
+        ord[(sj + 1) as usize] = key
+        si = si + 1
+    }
+
+    // Placed dot screen positions
+    var placed_sx: [i64; 256] = [0; 256]
+    var placed_sy: [i64; 256] = [0; 256]
+    var placed_n: i64 = 0
+
+    let dr2 = (2 * dot_r) * (2 * dot_r)
+    let cx_screen = coord_map_x(cs, center_x)
+
+    var pi: i64 = 0
+    while pi < n {
+        let idx = ord[pi as usize]
+        let sy = coord_map_y(cs, data[idx as usize])
+
+        // Build candidate x-offsets
+        var cands: [i64; 256] = [0; 256]
+        var nc: i64 = 1   // cands[0] = 0 (center)
+        var qi: i64 = 0
+        while qi < placed_n {
+            let dy = sy - placed_sy[qi as usize]
+            let dy2 = dy * dy
+            if dy2 < dr2 {
+                let dx_sq = dr2 - dy2
+                // Integer sqrt of dx_sq
+                var dxi: i64 = 0
+                var tmp = dxi
+                while (dxi + 1) * (dxi + 1) <= dx_sq { dxi = dxi + 1 }
+                let off_hi = placed_sx[qi as usize] - cx_screen + dxi + 1
+                let off_lo = placed_sx[qi as usize] - cx_screen - dxi - 1
+                if nc < 250 { cands[nc as usize] = off_hi; nc = nc + 1 }
+                if nc < 250 { cands[nc as usize] = off_lo; nc = nc + 1 }
+            }
+            qi = qi + 1
+        }
+
+        // Pick candidate with smallest |x| that doesn't collide
+        var best_off: i64 = 0
+        var best_abs: i64 = 999999
+        var ci2: i64 = 0
+        while ci2 < nc {
+            let off = cands[ci2 as usize]
+            let abs_off = if off < 0 { 0 - off } else { off }
+            if abs_off < best_abs {
+                // Check no collision
+                let px_try = cx_screen + off
+                var ok = true
+                var qi2: i64 = 0
+                while qi2 < placed_n {
+                    let ddx = px_try - placed_sx[qi2 as usize]
+                    let ddy = sy - placed_sy[qi2 as usize]
+                    if ddx * ddx + ddy * ddy < dr2 { ok = false }
+                    qi2 = qi2 + 1
+                }
+                if ok {
+                    best_off = off
+                    best_abs = abs_off
+                }
+            }
+            ci2 = ci2 + 1
+        }
+
+        let final_sx = cx_screen + best_off
+        placed_sx[placed_n as usize] = final_sx
+        placed_sy[placed_n as usize] = sy
+        placed_n = placed_n + 1
+
+        // Draw dot
+        canvas_blend_pixel(c, final_sx, sy, r, g, b, 220)
+        canvas_blend_pixel(c, final_sx - 1, sy, r, g, b, 140)
+        canvas_blend_pixel(c, final_sx + 1, sy, r, g, b, 140)
+        canvas_blend_pixel(c, final_sx, sy - 1, r, g, b, 140)
+        canvas_blend_pixel(c, final_sx, sy + 1, r, g, b, 140)
+        if dot_r >= 2 {
+            canvas_blend_pixel(c, final_sx - 1, sy - 1, r, g, b, 80)
+            canvas_blend_pixel(c, final_sx + 1, sy - 1, r, g, b, 80)
+            canvas_blend_pixel(c, final_sx - 1, sy + 1, r, g, b, 80)
+            canvas_blend_pixel(c, final_sx + 1, sy + 1, r, g, b, 80)
+        }
+
+        pi = pi + 1
+    }
+}
+
+// ============================================================
+// Hill sigmoid dose-response
+// ============================================================
+//
+// Hill 1910 / Goutelle 2008: E(C) = Emax × Cⁿ / (EC50ⁿ + Cⁿ)
+// X axis: log-scale (c_min → c_max, 3 decades typical).
+// Integer n: binary exponentiation.  n=1.5: C × sqrt(C).
+//
+// ec50_marker: draw vertical dashed line at EC50 + horizontal at Emax/2.
+
+pub fn epiviz_dose_response(
+    cs: &CoordSystem,
+    emax: f64,
+    ec50: f64,
+    hill_n: f64,
+    c_min: f64,
+    c_max: f64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if c_min <= 0.0 { return }
+    if ec50 <= 0.0 { return }
+
+    let steps: i64 = 200
+    let log_min = epiviz_ln(c_min)
+    let log_max = epiviz_ln(c_max)
+    let log_ec50 = epiviz_ln(ec50)
+    let n_int = hill_n as i64
+    let n_frac = hill_n - (n_int as f64)
+    let half_n = if n_frac > 0.49 && n_frac < 0.51 { true } else { false }
+
+    var prev_sx: i64 = 0
+    var prev_sy: i64 = 0
+    var first = true
+
+    var ki: i64 = 0
+    while ki <= steps {
+        let log_c = log_min + (log_max - log_min) * (ki as f64) / (steps as f64)
+        let cc = epiviz_exp(log_c)
+
+        // Cⁿ
+        let c_int = epiviz_powi(cc, n_int)
+        let cn = if half_n {
+            c_int * epiviz_sqrt(cc)
+        } else {
+            c_int
+        }
+
+        // EC50ⁿ
+        let ec50_int = epiviz_powi(ec50, n_int)
+        let ec50n = if half_n {
+            ec50_int * epiviz_sqrt(ec50)
+        } else {
+            ec50_int
+        }
+
+        let denom = ec50n + cn
+        let effect = if denom > 0.0 { emax * cn / denom } else { 0.0 }
+
+        // Map to screen: X = linear in log(C)
+        let t = (log_c - log_min) / (log_max - log_min)
+        let sx = cs.screen_x + (t * (cs.screen_w as f64)) as i64
+        let sy = coord_map_y(cs, effect)
+
+        if first {
+            prev_sx = sx; prev_sy = sy; first = false
+        } else {
+            canvas_draw_line_aa(c, prev_sx, prev_sy, sx, sy, r, g, b)
+            prev_sx = sx; prev_sy = sy
+        }
+        ki = ki + 1
+    }
+
+    // EC50 marker: vertical dashed at EC50, horizontal at Emax/2
+    let ec50_t = (log_ec50 - log_min) / (log_max - log_min)
+    let ec50_sx = cs.screen_x + (ec50_t * (cs.screen_w as f64)) as i64
+    let half_sy = coord_map_y(cs, emax * 0.5)
+    let y_bot = coord_map_y(cs, cs.data_y_min)
+    var mk: i64 = half_sy
+    while mk <= y_bot {
+        if (mk - half_sy) % 8 < 4 {
+            canvas_fill_rect(c, ec50_sx, mk, 1, 1, 160, 160, 180)
+        }
+        mk = mk + 1
+    }
+    let x0 = coord_map_x(cs, c_min)
+    var mh: i64 = x0
+    while mh <= ec50_sx {
+        if (mh - x0) % 8 < 4 {
+            canvas_fill_rect(c, mh, half_sy, 1, 1, 160, 160, 180)
+        }
+        mh = mh + 1
+    }
+
+    // Emax asymptote
+    let emax_sy = coord_map_y(cs, emax)
+    let x1 = coord_map_x(cs, c_max)
+    var ah: i64 = x0
+    while ah <= x1 {
+        if (ah - x0) % 6 < 3 {
+            canvas_blend_pixel(c, ah, emax_sy, r, g, b, 80)
+        }
+        ah = ah + 1
+    }
+}
+
+// Empirical CDF rendered as a step function.
+// DKW inequality (Massart 1990): band half-width ε = sqrt(ln(40)/(2n)).
+// For n=50: ε ≈ 0.192; for n=20: ε ≈ 0.303.
+//
+// cs: x-axis = data domain, y-axis = [0,1] (probability).
+// data[0..n]: observations.
+// r/g/b: step-function colour; band shown at 40% opacity.
+
+pub fn epiviz_ecdf(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 2 { return }
+
+    var ord: [i64; 256] = [0; 256]
+    epiviz_isort(data, n, &!ord)
+
+    // DKW epsilon: sqrt(ln(40) / (2n)) = sqrt(1.844439 / n)
+    let eps = epiviz_sqrt(1.844439 / (n as f64))
+
+    // Draw DKW confidence band (fill between lower and upper bound) in blended colour
+    var bi: i64 = 0
+    while bi < n {
+        let xv = data[ord[bi as usize] as usize]
+        let yv = ((bi + 1) as f64) / (n as f64)
+        let y_lo = if yv - eps < 0.0 { 0.0 } else { yv - eps }
+        let y_hi = if yv + eps > 1.0 { 1.0 } else { yv + eps }
+        let sx = coord_map_x(cs, xv)
+        let sy_lo = coord_map_y(cs, y_lo)
+        let sy_hi = coord_map_y(cs, y_hi)
+        let top = if sy_lo < sy_hi { sy_lo } else { sy_hi }
+        let bot = if sy_lo > sy_hi { sy_lo } else { sy_hi }
+        var sy = top
+        while sy <= bot {
+            canvas_blend_pixel(c, sx - 1, sy, r, g, b, 35)
+            canvas_blend_pixel(c, sx,     sy, r, g, b, 35)
+            canvas_blend_pixel(c, sx + 1, sy, r, g, b, 35)
+            sy = sy + 1
+        }
+        bi = bi + 1
+    }
+
+    // Draw ECDF step function
+    var si: i64 = 0
+    while si < n {
+        let xv0 = data[ord[si as usize] as usize]
+        let yv0 = ((si + 1) as f64) / (n as f64)
+        let xv1 = if si < n - 1 { data[ord[(si + 1) as usize] as usize] } else { xv0 }
+        let sx0 = coord_map_x(cs, xv0)
+        let sx1 = if si < n - 1 { coord_map_x(cs, xv1) } else { sx0 }
+        let sy  = coord_map_y(cs, yv0)
+        // Horizontal step segment
+        canvas_draw_line_aa(c, sx0, sy, sx1, sy, r, g, b)
+        // Vertical riser (from previous height to current)
+        if si > 0 {
+            let sy_prev = coord_map_y(cs, (si as f64) / (n as f64))
+            canvas_draw_line_aa(c, sx0, sy_prev, sx0, sy, r, g, b)
+        }
+        si = si + 1
+    }
+    // First riser from 0 to 1/n
+    let sx_first = coord_map_x(cs, data[ord[0] as usize])
+    let sy_zero  = coord_map_y(cs, 0.0)
+    let sy_first = coord_map_y(cs, 1.0 / (n as f64))
+    canvas_draw_line_aa(c, sx_first, sy_zero, sx_first, sy_first, r, g, b)
+}
+
+// ============================================================
+// Correlation heatmap — RdBu diverging colormap (F3)
+// ============================================================
+//
+// Renders an n×n symmetric correlation matrix as a colour grid.
+// RdBu anchors (ColorBrewer): red=(215,48,39) white=(247,247,247) blue=(33,102,172).
+// Negative r → blue tones; positive r → red tones; r≈0 → near-white.
+//
+// corr: flat row-major n×n array (n ≤ 8, so 64 entries max).
+// panel_x/y/w/h: pixel bounding rect for the heatmap.
+
+fn rdbu_r(rv: f64) -> i64 with Div {
+    let s = if rv < 0.0 { 0.0 - rv } else { rv }
+    let sc = if s > 1.0 { 1.0 } else { s }
+    if rv >= 0.0 {
+        let v = (247.0 - 32.0 * sc) as i64
+        if v < 0 { 0 } else { v }
+    } else {
+        let v = (247.0 - 214.0 * sc) as i64
+        if v < 0 { 0 } else { v }
+    }
+}
+
+fn rdbu_g(rv: f64) -> i64 with Div {
+    let s = if rv < 0.0 { 0.0 - rv } else { rv }
+    let sc = if s > 1.0 { 1.0 } else { s }
+    let v = (247.0 - 199.0 * sc) as i64
+    if v < 0 { 0 } else if v > 247 { 247 } else { v }
+}
+
+fn rdbu_b(rv: f64) -> i64 with Div {
+    let s = if rv < 0.0 { 0.0 - rv } else { rv }
+    let sc = if s > 1.0 { 1.0 } else { s }
+    if rv <= 0.0 {
+        let v = (247.0 - 75.0 * sc) as i64
+        if v < 0 { 0 } else if v > 247 { 247 } else { v }
+    } else {
+        let v = (247.0 - 208.0 * sc) as i64
+        if v < 0 { 0 } else { v }
+    }
+}
+
+pub fn epiviz_corrmap(
+    panel_x: i64, panel_y: i64, panel_w: i64, panel_h: i64,
+    corr: &[f64; 64],
+    n: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n <= 0 { return }
+    let cell_w = panel_w / n
+    let cell_h = panel_h / n
+    let cell_w_s = if cell_w < 1 { 1 } else { cell_w }
+    let cell_h_s = if cell_h < 1 { 1 } else { cell_h }
+
+    var row: i64 = 0
+    while row < n {
+        var col: i64 = 0
+        while col < n {
+            let rv = corr[(row * n + col) as usize]
+            let cr = rdbu_r(rv)
+            let cg = rdbu_g(rv)
+            let cb = rdbu_b(rv)
+            let x0 = panel_x + col * cell_w_s
+            let y0 = panel_y + row * cell_h_s
+
+            // Fill cell
+            var cy = y0
+            while cy < y0 + cell_h_s {
+                var cx = x0
+                while cx < x0 + cell_w_s {
+                    if cx >= 0 && cx < c.width && cy >= 0 && cy < c.height {
+                        write_i64(c.pixels, cy * c.width + cx,
+                                  cb | (cg << 8) | (cr << 16))
+                    }
+                    cx = cx + 1
+                }
+                cy = cy + 1
+            }
+            // Thin grid line on right and bottom edges (dark)
+            var gl: i64 = y0
+            while gl < y0 + cell_h_s {
+                if x0 + cell_w_s < c.width {
+                    canvas_blend_pixel(c, x0 + cell_w_s - 1, gl, 50, 50, 60, 120)
+                }
+                gl = gl + 1
+            }
+            var gl2: i64 = x0
+            while gl2 < x0 + cell_w_s {
+                if y0 + cell_h_s < c.height {
+                    canvas_blend_pixel(c, gl2, y0 + cell_h_s - 1, 50, 50, 60, 120)
+                }
+                gl2 = gl2 + 1
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+}
+
+// ============================================================
+// Volcano plot (pharmacogenomics / differential expression)
+// ============================================================
+//
+// X axis: log₂(fold-change) = ln(fc)/ln(2) = ln(fc)/0.693147.
+// Y axis: -log₁₀(p) = -ln(p)/ln(10) = -ln(p)/2.302585.
+//
+// Colour: |log2fc|>fc_thresh AND -log10p>sig_thresh → up(red)/down(blue),
+// otherwise grey (non-significant).
+// Reference lines dashed at ±fc_thresh and sig_thresh.
+
+pub fn epiviz_volcano(
+    cs: &CoordSystem,
+    fc: &[f64; 256],
+    pval: &[f64; 256],
+    n: i64,
+    fc_thresh: f64,
+    sig_thresh: f64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n < 1 { return }
+
+    let ln2  = 0.693147180559945
+    let ln10 = 2.302585092994046
+
+    // Reference lines (dashed)
+    let x0 = coord_map_x(cs, cs.data_x_min)
+    let x1 = coord_map_x(cs, cs.data_x_max)
+    let sig_sy = coord_map_y(cs, sig_thresh)
+    var px = x0
+    while px <= x1 {
+        if (px - x0) % 8 < 4 { canvas_fill_rect(c, px, sig_sy, 1, 1, 140, 140, 140) }
+        px = px + 1
+    }
+    let fc_sx_pos = coord_map_x(cs, fc_thresh)
+    let fc_sx_neg = coord_map_x(cs, 0.0 - fc_thresh)
+    let y0 = coord_map_y(cs, cs.data_y_min)
+    let y1 = coord_map_y(cs, cs.data_y_max)
+    var py = y1
+    while py <= y0 {
+        if (py - y1) % 8 < 4 {
+            canvas_fill_rect(c, fc_sx_pos, py, 1, 1, 140, 140, 140)
+            canvas_fill_rect(c, fc_sx_neg, py, 1, 1, 140, 140, 140)
+        }
+        py = py + 1
+    }
+
+    // Points
+    var i: i64 = 0
+    while i < n {
+        let fci = fc[i as usize]
+        let pi  = pval[i as usize]
+        if pi <= 0.0 { i = i + 1; continue }
+        let log2fc  = epiviz_ln(fci) / ln2
+        let neglog10p = 0.0 - epiviz_ln(pi) / ln10
+        let sx = coord_map_x(cs, log2fc)
+        let sy = coord_map_y(cs, neglog10p)
+
+        let sig = neglog10p > sig_thresh
+        let up  = log2fc > fc_thresh
+        let dn  = log2fc < 0.0 - fc_thresh
+
+        let pr = if sig && up { 220 } else if sig && dn { 80 } else { 130 }
+        let pg = if sig && (up || dn) { 60 } else { 130 }
+        let pb = if sig && dn { 220 } else if sig && up { 60 } else { 130 }
+        let cov = if sig && (up || dn) { 220 } else { 120 }
+
+        canvas_blend_pixel(c, sx, sy, pr, pg, pb, cov)
+        canvas_blend_pixel(c, sx - 1, sy, pr, pg, pb, cov / 2)
+        canvas_blend_pixel(c, sx + 1, sy, pr, pg, pb, cov / 2)
+        canvas_blend_pixel(c, sx, sy - 1, pr, pg, pb, cov / 2)
+        canvas_blend_pixel(c, sx, sy + 1, pr, pg, pb, cov / 2)
+        i = i + 1
+    }
+}
+
+// ============================================================
+// Q-Q plot (normal quantile-quantile)
+// ============================================================
+//
+// Beasley-Springer-Moro inverse normal Φ⁻¹ (Moro 1995, Int. J. Theor.
+// Applied Finance 8:177); quartile-fit reference line; ±1.96·SE envelope.
+// Blom plotting position: p_i = i/(n+1).
+
+fn bsm_inv_normal(p: f64) -> f64 with Div {
+    if p <= 0.0 { return 0.0 - 7.0 }
+    if p >= 1.0 { return 7.0 }
+    let y = p - 0.5
+    let ya = if y < 0.0 { 0.0 - y } else { y }
+    if ya < 0.42 {
+        let r = y * y
+        let a = ((0.0 - 25.44106049637 * r + 41.39119773534) * r - 18.61500062529) * r + 2.50662823884
+        let b = (((3.13082909833 * r - 21.06224101826) * r + 23.08336743743) * r - 8.47351093090)
+        if b == 0.0 { return 0.0 }
+        y * a / b
+    } else {
+        let rr = if p < 0.5 { p } else { 1.0 - p }
+        let s = epiviz_sqrt(0.0 - epiviz_ln(rr))
+        let cs2 = 0.3374754822726147 + s * (0.9761690190917186 + s * (0.1607979714918209
+                  + s * (0.0276438810333863 + s * (0.0038405729373609 + s * (0.0003951896511919
+                  + s * (0.0000321767881768 + s * (0.0000002888167364 + s * 0.0000003960315187)))))))
+        if p < 0.5 { 0.0 - cs2 } else { cs2 }
+    }
+}
+
+pub fn epiviz_qqplot(
+    cs: &CoordSystem,
+    data: &[f64; 256],
+    n: i64,
+    c: &!Canvas,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    if n < 4 { return }
+
+    var ord: [i64; 256] = [0; 256]
+    epiviz_isort(data, n, &!ord)
+
+    // Mean and sigma for envelope
+    var dsum: f64 = 0.0
+    var di: i64 = 0
+    while di < n { dsum = dsum + data[ord[di as usize] as usize]; di = di + 1 }
+    let dmean = dsum / (n as f64)
+    var dss: f64 = 0.0
+    var di2: i64 = 0
+    while di2 < n {
+        let d = data[ord[di2 as usize] as usize] - dmean
+        dss = dss + d * d
+        di2 = di2 + 1
+    }
+    let dsig = epiviz_sqrt(dss / ((n - 1) as f64))
+
+    // Quartile-fit reference line
+    let q1_idx = (n as f64 * 0.25) as i64
+    let q3_idx = (n as f64 * 0.75) as i64
+    let q1_d = data[ord[q1_idx as usize] as usize]
+    let q3_d = data[ord[q3_idx as usize] as usize]
+    let q1_z: f64 = 0.0 - 0.6745
+    let q3_z: f64 = 0.6745
+    let slope = if q3_d != q1_d { (q3_d - q1_d) / (q3_z - q1_z) } else { 1.0 }
+    let intercept = q1_d - slope * q1_z
+
+    // Draw reference line
+    let z_lo = cs.data_x_min
+    let z_hi = cs.data_x_max
+    let ref_y0 = coord_map_y(cs, slope * z_lo + intercept)
+    let ref_y1 = coord_map_y(cs, slope * z_hi + intercept)
+    canvas_draw_line_aa(c, coord_map_x(cs, z_lo), ref_y0,
+                           coord_map_x(cs, z_hi), ref_y1, 100, 100, 100)
+
+    // Draw confidence envelope and data points
+    var ki: i64 = 0
+    while ki < n {
+        let p_i = ((ki + 1) as f64) / ((n + 1) as f64)
+        let z_i = bsm_inv_normal(p_i)
+        let x_i = data[ord[ki as usize] as usize]
+        let sx = coord_map_x(cs, z_i)
+        let sy = coord_map_y(cs, x_i)
+
+        // ±1.96 SE envelope
+        let phi_z = 0.39894 * epiviz_exp(0.0 - 0.5 * z_i * z_i)
+        let se = if phi_z > 0.001 {
+            dsig / phi_z * epiviz_sqrt(p_i * (1.0 - p_i) / (n as f64))
+        } else { 0.0 }
+        let env_lo = coord_map_y(cs, slope * z_i + intercept + 1.96 * se)
+        let env_hi = coord_map_y(cs, slope * z_i + intercept - 1.96 * se)
+        canvas_blend_pixel(c, sx, env_lo, r, g, b, 60)
+        canvas_blend_pixel(c, sx, env_hi, r, g, b, 60)
+
+        // Data point
+        canvas_blend_pixel(c, sx, sy, r, g, b, 210)
+        canvas_blend_pixel(c, sx - 1, sy, r, g, b, 120)
+        canvas_blend_pixel(c, sx + 1, sy, r, g, b, 120)
+        canvas_blend_pixel(c, sx, sy - 1, r, g, b, 120)
+        canvas_blend_pixel(c, sx, sy + 1, r, g, b, 120)
+        ki = ki + 1
+    }
+}
+
+// ============================================================
+// Parallel coordinates plot
+// ============================================================
+//
+// N_axes vertical axes evenly spaced; each independently normalised.
+// Overplot alpha: cov = max(1, 200 / n_obs).
+// Color: viridis on first axis value.
+//
+// data_flat: row-major [n_obs * n_axes]; data_flat[i*n_axes + k].
+
+pub fn epiviz_parallel_coords(
+    data_flat: &[f64; 2048],
+    n_obs: i64,
+    n_axes: i64,
+    screen_x: i64,
+    screen_y: i64,
+    screen_w: i64,
+    screen_h: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if n_obs < 1 { return }
+    if n_axes < 2 { return }
+
+    // Per-axis min/max
+    var ax_lo: [f64; 16] = [0.0; 16]
+    var ax_hi: [f64; 16] = [0.0; 16]
+    var ki: i64 = 0
+    while ki < n_axes {
+        var lo = data_flat[ki as usize]
+        var hi = lo
+        var ii: i64 = 0
+        while ii < n_obs {
+            let v = data_flat[(ii * n_axes + ki) as usize]
+            if v < lo { lo = v }
+            if v > hi { hi = v }
+            ii = ii + 1
+        }
+        if hi == lo { hi = lo + 1.0 }
+        ax_lo[ki as usize] = lo
+        ax_hi[ki as usize] = hi
+        ki = ki + 1
+    }
+
+    let step = screen_w / (n_axes - 1)
+    let cov  = if 200 / n_obs > 1 { 200 / n_obs } else { 1 }
+
+    // Draw axes
+    var ai: i64 = 0
+    while ai < n_axes {
+        let ax = screen_x + ai * step
+        canvas_draw_line_aa(c, ax, screen_y, ax, screen_y + screen_h, 140, 140, 155)
+        ai = ai + 1
+    }
+
+    // Draw observation polylines
+    var oi: i64 = 0
+    while oi < n_obs {
+        let v0 = data_flat[(oi * n_axes) as usize]
+        let t0 = (v0 - ax_lo[0]) / (ax_hi[0] - ax_lo[0])
+        let lr = viridis_r(t0)
+        let lg = viridis_g(t0)
+        let lb = viridis_b(t0)
+
+        var ki2: i64 = 0
+        while ki2 < n_axes - 1 {
+            let vA = data_flat[(oi * n_axes + ki2) as usize]
+            let vB = data_flat[(oi * n_axes + ki2 + 1) as usize]
+            let tA = (vA - ax_lo[ki2 as usize]) / (ax_hi[ki2 as usize] - ax_lo[ki2 as usize])
+            let tB = (vB - ax_lo[(ki2 + 1) as usize]) / (ax_hi[(ki2 + 1) as usize] - ax_lo[(ki2 + 1) as usize])
+            let x0a = screen_x + ki2 * step
+            let y0a = screen_y + screen_h - (tA * (screen_h as f64)) as i64
+            let x1a = screen_x + (ki2 + 1) * step
+            let y1a = screen_y + screen_h - (tB * (screen_h as f64)) as i64
+
+            // Bresenham-trace the segment and blend at cov
+            let ddx = x1a - x0a; let ddy = y1a - y0a
+            let adx = if ddx < 0 { 0 - ddx } else { ddx }
+            let ady = if ddy < 0 { 0 - ddy } else { ddy }
+            let nst = if adx > ady { adx } else { ady }
+            if nst > 0 {
+                var si: i64 = 0
+                while si <= nst {
+                    let t = (si as f64) / (nst as f64)
+                    let bx = x0a + (ddx as f64 * t) as i64
+                    let by = y0a + (ddy as f64 * t) as i64
+                    canvas_blend_pixel_bayer(c, bx, by, lr, lg, lb, cov)
+                    si = si + 1
+                }
+            }
+            ki2 = ki2 + 1
+        }
+        oi = oi + 1
+    }
+}
+
+// ============================================================
+// Radar / spider chart
+// ============================================================
+//
+// K spokes at angles -π/2 + k·2π/K (first spoke up).
+// Quarter-wave sin table (9 entries): error < 0.6%.
+// Multiple datasets overlaid with different colors + Bayer alpha fill.
+// Concentric rings at 0.25, 0.5, 0.75, 1.0.
+
+fn radar_sin_q(a: f64) -> f64 with Div {
+    // Quarter-wave table: SIN_Q[i] for i=0..8 covering [0, π/2]
+    var sq: [f64; 9] = [0.0, 0.19509, 0.38268, 0.55557,
+                        0.70711, 0.83147, 0.92388, 0.98079, 1.0]
+    let pi2: f64 = 1.5707963268
+    let two_pi: f64 = 6.2831853072
+    // Reduce to [0, 2π)
+    var aa = a
+    var rr: i64 = 0
+    while aa < 0.0 { aa = aa + two_pi }
+    while aa >= two_pi { aa = aa - two_pi }
+    // Quadrant reflections
+    if aa > 3.14159265 { return 0.0 - radar_sin_q(aa - 3.14159265) }
+    if aa > pi2 { return radar_sin_q(3.14159265 - aa) }
+    // Table interp in [0, π/2]
+    let t = aa / pi2 * 8.0
+    let ii = t as i64
+    let ff = t - (ii as f64)
+    let i2 = if ii >= 8 { 8 } else { ii }
+    let i3 = if ii + 1 >= 9 { 8 } else { ii + 1 }
+    sq[i2 as usize] * (1.0 - ff) + sq[i3 as usize] * ff
+}
+
+fn radar_cos_q(a: f64) -> f64 with Div {
+    radar_sin_q(1.5707963268 - a)
+}
+
+fn radar_spoke_x(k: i64, K: i64, v: f64, cx: i64, rr: i64) -> i64 with Div {
+    let angle = 0.0 - 1.5707963268 + (k as f64) * 6.2831853072 / (K as f64)
+    cx + (v * (rr as f64) * radar_cos_q(angle)) as i64
+}
+
+fn radar_spoke_y(k: i64, K: i64, v: f64, cy: i64, rr: i64) -> i64 with Div {
+    let angle = 0.0 - 1.5707963268 + (k as f64) * 6.2831853072 / (K as f64)
+    cy + (v * (rr as f64) * radar_sin_q(angle)) as i64
+}
+
+pub fn epiviz_radar(
+    data_flat: &[f64; 64],
+    n_datasets: i64,
+    K: i64,
+    cx: i64, cy: i64, rr: i64,
+    colors_r: &[i64; 8], colors_g: &[i64; 8], colors_b: &[i64; 8],
+    alpha: i64,
+    c: &!Canvas,
+) with Mut, Div {
+    if K < 3 { return }
+
+    // Concentric reference rings
+    var ri: i64 = 1
+    while ri <= 4 {
+        let rv = (ri as f64) * 0.25
+        var ki: i64 = 0
+        while ki < K {
+            let kn = (ki + 1) % K
+            let x0 = radar_spoke_x(ki, K, rv, cx, rr)
+            let y0 = radar_spoke_y(ki, K, rv, cy, rr)
+            let x1 = radar_spoke_x(kn, K, rv, cx, rr)
+            let y1 = radar_spoke_y(kn, K, rv, cy, rr)
+            canvas_blend_pixel(c, x0, y0, 70, 70, 80, 160)
+            canvas_draw_line_aa(c, x0, y0, x1, y1, 70, 70, 80)
+            ki = ki + 1
+        }
+        ri = ri + 1
+    }
+
+    // Spoke lines
+    var si: i64 = 0
+    while si < K {
+        let sx = radar_spoke_x(si, K, 1.0, cx, rr)
+        let sy = radar_spoke_y(si, K, 1.0, cy, rr)
+        canvas_draw_line_aa(c, cx, cy, sx, sy, 70, 70, 80)
+        si = si + 1
+    }
+
+    // Fill polygons per dataset (fan triangulation from center)
+    var di: i64 = 0
+    while di < n_datasets {
+        let dr = colors_r[di as usize]
+        let dg = colors_g[di as usize]
+        let db = colors_b[di as usize]
+        var ki2: i64 = 0
+        while ki2 < K {
+            let vA = data_flat[(di * K + ki2) as usize]
+            let vB = data_flat[(di * K + (ki2 + 1) % K) as usize]
+            let ax = radar_spoke_x(ki2, K, vA, cx, rr)
+            let ay = radar_spoke_y(ki2, K, vA, cy, rr)
+            let bx = radar_spoke_x((ki2 + 1) % K, K, vB, cx, rr)
+            let by = radar_spoke_y((ki2 + 1) % K, K, vB, cy, rr)
+            // Fill triangle with Bayer-dithered alpha
+            // Compute bounding box and test each pixel
+            let min_x = if cx < ax { if cx < bx { cx } else { bx } } else { if ax < bx { ax } else { bx } }
+            let max_x = if cx > ax { if cx > bx { cx } else { bx } } else { if ax > bx { ax } else { bx } }
+            let min_y = if cy < ay { if cy < by { cy } else { by } } else { if ay < by { ay } else { by } }
+            let max_y = if cy > ay { if cy > by { cy } else { by } } else { if ay > by { ay } else { by } }
+            var ty = min_y
+            while ty <= max_y {
+                var tx = min_x
+                while tx <= max_x {
+                    // Barycentric test
+                    let e0 = (ax - cx) * (ty - cy) - (ay - cy) * (tx - cx)
+                    let e1 = (bx - ax) * (ty - ay) - (by - ay) * (tx - ax)
+                    let e2 = (cx - bx) * (ty - by) - (cy - by) * (tx - bx)
+                    if (e0 >= 0 && e1 >= 0 && e2 >= 0) || (e0 <= 0 && e1 <= 0 && e2 <= 0) {
+                        canvas_blend_pixel_bayer(c, tx, ty, dr, dg, db, alpha)
+                    }
+                    tx = tx + 1
+                }
+                ty = ty + 1
+            }
+            ki2 = ki2 + 1
+        }
+        // Outline
+        var ki3: i64 = 0
+        while ki3 < K {
+            let vA2 = data_flat[(di * K + ki3) as usize]
+            let vB2 = data_flat[(di * K + (ki3 + 1) % K) as usize]
+            canvas_draw_line_aa(c,
+                radar_spoke_x(ki3, K, vA2, cx, rr),
+                radar_spoke_y(ki3, K, vA2, cy, rr),
+                radar_spoke_x((ki3 + 1) % K, K, vB2, cx, rr),
+                radar_spoke_y((ki3 + 1) % K, K, vB2, cy, rr),
+                dr, dg, db)
+            ki3 = ki3 + 1
+        }
+        di = di + 1
+    }
+}
+
+// ============================================================
+// Hex-bin density plot — true scatter-to-grid binning
+// ============================================================
+//
+// Maps n scatter points (xs[i], ys[i]) in data space [x_min,x_max]×[y_min,y_max]
+// to pointy-top hexagonal cells of circumradius hex_r pixels.
+// Cells colored by count density using viridis (viridis_r/g/b from colormap.sio).
+// Screen area: x0,y0 top-left corner, w×h pixels.
+
+pub fn epiviz_hexbin(
+    xs: &[f64; 1024],
+    ys: &[f64; 1024],
+    n: i64,
+    x_min: f64, x_max: f64,
+    y_min: f64, y_max: f64,
+    hex_r: i64,
+    c: &!Canvas,
+    x0: i64, y0: i64, w: i64, h: i64,
+) with Mut, Div {
+    if n == 0 || hex_r <= 0 { return }
+    let x_range = x_max - x_min
+    let y_range = y_max - y_min
+    if x_range <= 0.0 || y_range <= 0.0 { return }
+
+    let r_f = hex_r as f64
+    // Bin accumulator: 32×32 axial grid, offset by (16,16)
+    var bins: [i64; 1024] = [0; 1024]
+    let BCOLS: i64 = 32
+    let BOFF: i64 = 16
+    var max_count: i64 = 0
+
+    // Accumulate scatter points
+    var ii: i64 = 0
+    while ii < n {
+        // Data → screen (y flipped: data y-up, screen y-down)
+        let spx = (xs[ii as usize] - x_min) / x_range * (w as f64)
+        let spy = (1.0 - (ys[ii as usize] - y_min) / y_range) * (h as f64)
+
+        // Screen → pointy-top axial (q,r): 2/3=0.66667, sqrt(3)/3=0.57735
+        let q_f = spx * 0.66667 / r_f
+        let r_f2 = spx * (0.0 - 0.33333) / r_f + spy * 0.57735 / r_f
+
+        // Cube round: round q, r, s = -q-r; fix largest delta
+        let qr_i = if q_f >= 0.0 { (q_f + 0.5) as i64 } else { (q_f - 0.5) as i64 }
+        let rr_i = if r_f2 >= 0.0 { (r_f2 + 0.5) as i64 } else { (r_f2 - 0.5) as i64 }
+        let sr_i = 0 - qr_i - rr_i
+        let dq = if q_f > qr_i as f64 { q_f - qr_i as f64 } else { qr_i as f64 - q_f }
+        let dr2 = if r_f2 > rr_i as f64 { r_f2 - rr_i as f64 } else { rr_i as f64 - r_f2 }
+        let ds2 = if (0.0 - q_f - r_f2) > sr_i as f64 { (0.0 - q_f - r_f2) - sr_i as f64 } else { sr_i as f64 - (0.0 - q_f - r_f2) }
+        let qf = if dq > dr2 && dq > ds2 { 0 - rr_i - sr_i } else { qr_i }
+        let rf = if dr2 > ds2 { 0 - qf - sr_i } else { rr_i }
+
+        let qi = qf + BOFF
+        let ri = rf + BOFF
+        if qi >= 0 && qi < BCOLS && ri >= 0 && ri < BCOLS {
+            let bidx = (qi * BCOLS + ri) as usize
+            bins[bidx] = bins[bidx] + 1
+            if bins[bidx] > max_count { max_count = bins[bidx] }
+        }
+        ii = ii + 1
+    }
+
+    if max_count == 0 { return }
+
+    // Render hex cells
+    var qi: i64 = 0
+    while qi < BCOLS {
+        var ri: i64 = 0
+        while ri < BCOLS {
+            let cnt = bins[(qi * BCOLS + ri) as usize]
+            if cnt > 0 {
+                let q = qi - BOFF
+                let r = ri - BOFF
+                // Axial → screen (pointy-top center)
+                let cx_f = (r_f * 1.73205 * (q as f64 + (r as f64) * 0.5)) as i64 + x0
+                let cy_f = (r_f * 1.5 * (r as f64)) as i64 + y0
+                // Viridis color by density
+                let t_i = cnt * 1000 / max_count
+                let t_f = (t_i as f64) * 0.001
+                let vr = viridis_r(t_f)
+                let vg = viridis_g(t_f)
+                let vb = viridis_b(t_f)
+                // Pointy-top hex: 6 vertices at angles 30°,90°,150°,210°,270°,330°
+                // cos/sin table (multiples of 60°, offset 30°):
+                // 0.866, 0.5 / 0, 1 / -0.866, 0.5 / -0.866, -0.5 / 0, -1 / 0.866, -0.5
+                let hx0 = cx_f + (r_f * 0.866) as i64
+                let hy0 = cy_f + (r_f * 0.5)   as i64
+                let hx1 = cx_f
+                let hy1 = cy_f + hex_r
+                let hx2 = cx_f - (r_f * 0.866) as i64
+                let hy2 = cy_f + (r_f * 0.5)   as i64
+                let hx3 = cx_f - (r_f * 0.866) as i64
+                let hy3 = cy_f - (r_f * 0.5)   as i64
+                let hx4 = cx_f
+                let hy4 = cy_f - hex_r
+                let hx5 = cx_f + (r_f * 0.866) as i64
+                let hy5 = cy_f - (r_f * 0.5)   as i64
+                canvas_fill_triangle(c, cx_f, cy_f, hx0, hy0, hx1, hy1, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx1, hy1, hx2, hy2, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx2, hy2, hx3, hy3, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx3, hy3, hx4, hy4, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx4, hy4, hx5, hy5, vr, vg, vb)
+                canvas_fill_triangle(c, cx_f, cy_f, hx5, hy5, hx0, hy0, vr, vg, vb)
+            }
+            ri = ri + 1
+        }
+        qi = qi + 1
+    }
+}
+
+// ============================================================
+// Ridgeline (joy) plot — stacked KDE distribution panels
+// ============================================================
+//
+// Renders n_groups KDE panels stacked vertically, each showing the
+// distribution of n_per_group data points. Panels overlap for the
+// Joy Division aesthetic.
+//
+// data_flat: row-major [n_groups × n_per_group], n_per_group ≤ 128.
+// bw: KDE bandwidth in data units (Epanechnikov kernel, no exp needed).
+// x_min/x_max: data-space range for the shared x-axis.
+// r/g/b arrays: per-group colors (length ≥ n_groups).
+// x0,y0,w,h: bounding box of the whole ridgeline plot area.
+
+pub fn epiviz_ridgeline(
+    data_flat: &[f64; 2048],
+    n_groups: i64,
+    n_per_group: i64,
+    x_min: f64, x_max: f64,
+    bw: f64,
+    c: &!Canvas,
+    x0: i64, y0: i64, w: i64, h: i64,
+    r_arr: &[i64; 16], g_arr: &[i64; 16], b_arr: &[i64; 16],
+) with Mut, Div {
+    if n_groups <= 0 || n_per_group <= 0 || w <= 0 || h <= 0 { return }
+    let x_range = x_max - x_min
+    if x_range <= 0.0 { return }
+    let step = h / n_groups
+    let band_h = step + step / 2   // 1.5× step for 50% overlap
+    if step <= 0 { return }
+
+    // Render groups back-to-front so foreground panels paint over background
+    var k: i64 = n_groups - 1
+    while k >= 0 {
+        let base_y = y0 + h - k * step
+        let gr = r_arr[k as usize]
+        let gg = g_arr[k as usize]
+        let gb = b_arr[k as usize]
+        let koff = k * n_per_group
+
+        // First pass: find max density for scaling
+        var max_dens: f64 = 0.0
+        var col: i64 = 0
+        while col < w {
+            let x_eval = x_min + x_range * (col as f64) / ((w - 1) as f64)
+            var dens: f64 = 0.0
+            var si: i64 = 0
+            while si < n_per_group {
+                let xi = data_flat[(koff + si) as usize]
+                let u = (x_eval - xi) / bw
+                let u2 = u * u
+                if u2 < 1.0 { dens = dens + 0.75 * (1.0 - u2) }
+                si = si + 1
+            }
+            let dn = dens / (n_per_group as f64 * bw)
+            if dn > max_dens { max_dens = dn }
+            col = col + 1
+        }
+        if max_dens <= 0.0 { k = k - 1; continue }
+
+        // Second pass: render fill + outline
+        var prev_sy: i64 = base_y
+        var col2: i64 = 0
+        while col2 < w {
+            let x_eval = x_min + x_range * (col2 as f64) / ((w - 1) as f64)
+            var dens: f64 = 0.0
+            var si2: i64 = 0
+            while si2 < n_per_group {
+                let xi = data_flat[(koff + si2) as usize]
+                let u = (x_eval - xi) / bw
+                let u2 = u * u
+                if u2 < 1.0 { dens = dens + 0.75 * (1.0 - u2) }
+                si2 = si2 + 1
+            }
+            let dn = dens / (n_per_group as f64 * bw)
+            let density_h = (dn / max_dens * (band_h as f64) * 0.82) as i64
+            let sy = base_y - density_h
+
+            // Fill: gradient alpha bottom→top
+            var fy = sy
+            while fy < base_y {
+                let fa_raw = 55 + (base_y - fy) * 130 / (band_h + 1)
+                let fa = if fa_raw > 200 { 200 } else { fa_raw }
+                canvas_blend_pixel(c, x0 + col2, fy, gr, gg, gb, fa)
+                fy = fy + 1
+            }
+            // Density outline
+            if col2 > 0 {
+                canvas_draw_line_aa(c, x0 + col2 - 1, prev_sy, x0 + col2, sy, gr / 3, gg / 3, gb / 3)
+            }
+            prev_sy = sy
+            col2 = col2 + 1
+        }
+        // Baseline
+        canvas_draw_line_aa(c, x0, base_y, x0 + w - 1, base_y, 45, 50, 65)
+        k = k - 1
+    }
+}
+
+// ============================================================
+// Streamlines — Euler integration of a 2D vector field
+// ============================================================
+//
+// vx_flat/vy_flat: row-major [rows × cols] velocity field (any units —
+//   normalized to unit length internally, then scaled by step_px).
+// n_seeds_x × n_seeds_y: uniform seed grid.
+// max_steps: maximum integration steps per streamline.
+// step_px: arc-length step in screen pixels.
+// Color: viridis by speed magnitude (relative to field max).
+// Screen area: x0,y0 top-left, w×h pixels.
+
+fn sl_bilinear(field: &[f64; 4096], rows: i64, cols: i64, gx: f64, gy: f64) -> f64 with Div {
+    let gx_cl = if gx < 0.0 { 0.0 } else if gx >= cols as f64 - 1.001 { cols as f64 - 1.001 } else { gx }
+    let gy_cl = if gy < 0.0 { 0.0 } else if gy >= rows as f64 - 1.001 { rows as f64 - 1.001 } else { gy }
+    let gi = gx_cl as i64
+    let gj = gy_cl as i64
+    let tx = gx_cl - gi as f64
+    let ty = gy_cl - gj as f64
+    let v00 = field[(gj * cols + gi)       as usize]
+    let v10 = field[(gj * cols + gi + 1)   as usize]
+    let v01 = field[((gj + 1) * cols + gi) as usize]
+    let v11 = field[((gj + 1) * cols + gi + 1) as usize]
+    (1.0 - tx) * (1.0 - ty) * v00 + tx * (1.0 - ty) * v10
+    + (1.0 - tx) * ty * v01 + tx * ty * v11
+}
+
+fn sl_sqrt(x: f64) -> f64 with Div {
+    if x <= 0.00001 { return 0.001 }
+    var g = x * 0.5 + 0.5
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g = 0.5 * (g + x / g)
+    g
+}
+
+pub fn epiviz_streamlines(
+    vx_flat: &[f64; 4096],
+    vy_flat: &[f64; 4096],
+    rows: i64, cols: i64,
+    n_seeds_x: i64, n_seeds_y: i64,
+    max_steps: i64,
+    step_px: f64,
+    c: &!Canvas,
+    x0: i64, y0: i64, w: i64, h: i64,
+) with Mut, Div {
+    if rows <= 1 || cols <= 1 || n_seeds_x <= 0 || n_seeds_y <= 0 { return }
+    let w_f = w as f64
+    let h_f = h as f64
+    let x0_f = x0 as f64
+    let y0_f = y0 as f64
+    let cols_f = cols as f64
+    let rows_f = rows as f64
+
+    var sj: i64 = 0
+    while sj < n_seeds_y {
+        var si2: i64 = 0
+        while si2 < n_seeds_x {
+            // Seed in pixel space (interior of plot)
+            var px6 = x0_f + w_f * (si2 as f64 + 0.5) / (n_seeds_x as f64)
+            var py6 = y0_f + h_f * (sj as f64 + 0.5) / (n_seeds_y as f64)
+
+            // Color by average speed at seed
+            let gx0 = (px6 - x0_f) * (cols_f - 1.0) / w_f
+            let gy0 = (py6 - y0_f) * (rows_f - 1.0) / h_f
+            let vx0 = sl_bilinear(vx_flat, rows, cols, gx0, gy0)
+            let vy0 = sl_bilinear(vy_flat, rows, cols, gx0, gy0)
+            let mag0 = sl_sqrt(vx0*vx0 + vy0*vy0)
+            // Normalize mag to [0,1] using field maximum estimate (use 2.0 as approx)
+            let t_color = if mag0 / 2.0 > 1.0 { 1.0 } else { mag0 / 2.0 }
+            let sr = viridis_r(t_color)
+            let sg = viridis_g(t_color)
+            let sb = viridis_b(t_color)
+
+            var step: i64 = 0
+            while step < max_steps {
+                if px6 < x0_f || px6 >= x0_f + w_f - 1.0 || py6 < y0_f || py6 >= y0_f + h_f - 1.0 {
+                    step = max_steps
+                    step = step + 1
+                    continue
+                }
+                // Map pixel → field grid
+                let gx = (px6 - x0_f) * (cols_f - 1.0) / w_f
+                let gy = (py6 - y0_f) * (rows_f - 1.0) / h_f
+
+                // Bilinear velocity
+                let vx = sl_bilinear(vx_flat, rows, cols, gx, gy)
+                let vy = sl_bilinear(vy_flat, rows, cols, gx, gy)
+                let mag = sl_sqrt(vx*vx + vy*vy)
+                if mag < 0.0001 {
+                    step = max_steps
+                    step = step + 1
+                    continue
+                }
+                // Normalized step
+                let scale = step_px / mag
+                let dpx = vx * scale
+                let dpy = vy * scale
+                let nx = px6 + dpx
+                let ny = py6 + dpy
+                // Draw segment
+                canvas_draw_line_aa(c, px6 as i64, py6 as i64, nx as i64, ny as i64, sr, sg, sb)
+                px6 = nx
+                py6 = ny
+                step = step + 1
+            }
+            si2 = si2 + 1
+        }
+        sj = sj + 1
+    }
+}

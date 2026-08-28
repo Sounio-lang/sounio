@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.final-integration-guide
 -->
 
-
 # Guia Final de Integração - Sistema de Otimização MIR Sounio
 
 ## Resumo do Trabalho Implementado

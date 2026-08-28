@@ -1,0 +1,108 @@
+//@ run-pass
+//@ expect-stdout: BBB_MASS_BALANCE_OK
+//
+// BBB coupled brain-compartment mass-conservation validation.
+//
+// Checks that the total drug mass in brain (ISF + ICF) obeys basic
+// physical constraints under the coupled systemic/BBB solver:
+//
+//   1. Mass is non-negative at every checkpoint.
+//   2. Mass at t = 0 is effectively zero (empty compartments pre-dose).
+//   3. Mass never exceeds the total administered dose (5.0 mg).
+//   4. Mass rises from t = 0 to t = 0.25 h (early influx).
+//   5. Late-time mass (168 h) is less than the peak mass (washout).
+
+use darwin_pbpk::bbb::bbb_coupled::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::epistemic_pbpk14::{ep14_rapamycin_params}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = ep14_rapamycin_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let dose_mg = 5.0
+
+    // 16 checkpoints: 0, 0.25, 0.5, 1, 2, 4, 6, 8, 12, 18, 24, 36, 48, 72, 120, 168 h
+    var checkpoints: [f64; 32] = [0.0; 32]
+    checkpoints[0]  = 0.0
+    checkpoints[1]  = 0.25
+    checkpoints[2]  = 0.5
+    checkpoints[3]  = 1.0
+    checkpoints[4]  = 2.0
+    checkpoints[5]  = 4.0
+    checkpoints[6]  = 6.0
+    checkpoints[7]  = 8.0
+    checkpoints[8]  = 12.0
+    checkpoints[9]  = 18.0
+    checkpoints[10] = 24.0
+    checkpoints[11] = 36.0
+    checkpoints[12] = 48.0
+    checkpoints[13] = 72.0
+    checkpoints[14] = 120.0
+    checkpoints[15] = 168.0
+    let n_points = 16
+    let bbb_dt = 0.01
+
+    let trace = bbb_coupled_run(sys_prm, bbb_prm, dose_mg, checkpoints, n_points, bbb_dt)
+
+    // If the coupled run returned early (e.g. nreject overflow), n_points
+    // may be smaller than requested.  Guard against that.
+    if trace.n_points != n_points {
+        return 1
+    }
+
+    var peak_mass = 0.0
+    var mass_at_0 = 0.0
+    var mass_at_025 = 0.0
+    var mass_at_168 = 0.0
+
+    var i: i32 = 0
+    while i < n_points {
+        let idx = i as usize
+        let mass = trace.isf[idx] * bbb_prm.v_isf + trace.icf[idx] * bbb_prm.v_icf
+
+        // (1) Non-negative at all checkpoints
+        if mass < 0.0 {
+            return 2
+        }
+
+        // (2) t = 0 mass must be ~0
+        if i == 0 {
+            mass_at_0 = mass
+            if mass > 1.0e-9 {
+                return 3
+            }
+        }
+
+        // (3) Never exceeds total dose
+        if mass > dose_mg {
+            return 4
+        }
+
+        if mass > peak_mass {
+            peak_mass = mass
+        }
+
+        if i == 1 {
+            mass_at_025 = mass
+        }
+
+        if i == 15 {
+            mass_at_168 = mass
+        }
+
+        i = i + 1
+    }
+
+    // (4) Early influx: mass at 0.25 h must be strictly greater than at t = 0
+    if mass_at_025 <= mass_at_0 {
+        return 5
+    }
+
+    // (5) Late-time washout: mass at 168 h must be less than peak mass
+    if mass_at_168 >= peak_mass {
+        return 6
+    }
+
+    println("BBB_MASS_BALANCE_OK")
+    0
+}

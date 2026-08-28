@@ -1,0 +1,162 @@
+// stdlib/pbpk/rapamycin_sprint27_gate.sio — Sprint 27: Dose Certification Gate
+//
+// 56-assertion certification for the dose certification boundary [D_min, D_max]
+// per stratum. Combines proportionality theorem (Sprint 24) with expanded
+// uncertainty (Sprint 25) to derive compile-time-verified certifiable dose ranges.
+
+module pbpk::rapamycin_sprint27_gate
+
+use pbpk::rapamycin_dose_cert::{
+    dc_d_min, dc_d_max, dc_window_width,
+    dc_std_n14_d_min, dc_std_n14_d_max,
+    dc_slow_n14_d_min, dc_slow_n14_d_max,
+    dc_fast_n14_d_min, dc_fast_n14_d_max,
+    dc_inh_n14_d_min, dc_inh_n14_d_max,
+    dc_ind_n26_d_min, dc_ind_n26_d_max
+}
+use pbpk::rapamycin_expanded_u::{eu_fully_in_range}
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std, ob_ke_var_inh, ob_ke_var_ind
+}
+
+fn s27_chk(b: bool) -> i64 with Mut, Div, Panic {
+    if b { 1 } else { 0 }
+}
+
+pub fn rapamycin_sprint27_gate() -> i64 with Mut, Div, Panic {
+    let ka   = ob_ka_var_std()
+    let fv   = ob_f_var_std()
+    let kev  = ob_ke_var_std()
+    let k12v = ob_k12_var_std()
+    let k21v = ob_k21_var_std()
+    let ke_inh = ob_ke_var_inh()
+    let ke_ind = ob_ke_var_ind()
+
+    var ok = 0
+
+    // ── Section A: D_min bounds (probe-certified) ─────────────────────────────
+    // A1-A2: standard N=14 D_min ≈ 2.503 mg
+    ok = ok + s27_chk(dc_std_n14_d_min() > 2.4)
+    ok = ok + s27_chk(dc_std_n14_d_min() < 2.6)
+    // A3-A4: slow N=14 D_min ≈ 1.612 mg
+    ok = ok + s27_chk(dc_slow_n14_d_min() > 1.5)
+    ok = ok + s27_chk(dc_slow_n14_d_min() < 1.7)
+    // A5-A6: fast N=14 D_min ≈ 5.149 mg (above standard dose 5.0!)
+    ok = ok + s27_chk(dc_fast_n14_d_min() > 5.0)
+    ok = ok + s27_chk(dc_fast_n14_d_min() < 5.3)
+    // A7-A8: inhibitor N=14 D_min ≈ 0.805 mg
+    ok = ok + s27_chk(dc_inh_n14_d_min() > 0.7)
+    ok = ok + s27_chk(dc_inh_n14_d_min() < 0.9)
+    // A9-A10: inducer N=26 D_min ≈ 33.74 mg (far above standard 20mg!)
+    ok = ok + s27_chk(dc_ind_n26_d_min() > 30.0)
+    ok = ok + s27_chk(dc_ind_n26_d_min() < 36.0)
+
+    // ── Section B: D_max bounds (probe-certified) ─────────────────────────────
+    // B11-B12: standard N=14 D_max ≈ 8.625 mg
+    ok = ok + s27_chk(dc_std_n14_d_max() > 8.5)
+    ok = ok + s27_chk(dc_std_n14_d_max() < 8.8)
+    // B13-B14: slow N=14 D_max ≈ 6.038 mg
+    ok = ok + s27_chk(dc_slow_n14_d_max() > 5.9)
+    ok = ok + s27_chk(dc_slow_n14_d_max() < 6.2)
+    // B15-B16: fast N=14 D_max ≈ 14.567 mg
+    ok = ok + s27_chk(dc_fast_n14_d_max() > 14.0)
+    ok = ok + s27_chk(dc_fast_n14_d_max() < 15.0)
+    // B17-B18: inhibitor N=14 D_max ≈ 3.256 mg
+    ok = ok + s27_chk(dc_inh_n14_d_max() > 3.1)
+    ok = ok + s27_chk(dc_inh_n14_d_max() < 3.4)
+    // B19-B20: inducer N=26 D_max ≈ 56.80 mg
+    ok = ok + s27_chk(dc_ind_n26_d_max() > 55.0)
+    ok = ok + s27_chk(dc_ind_n26_d_max() < 59.0)
+
+    // ── Section C: Current dose within [D_min, D_max] for certified strata ────
+    // C21: standard D=5mg is within certified window
+    ok = ok + s27_chk(5.0 > dc_std_n14_d_min() && 5.0 < dc_std_n14_d_max())
+    // C22: slow D=5mg is within certified window
+    ok = ok + s27_chk(5.0 > dc_slow_n14_d_min() && 5.0 < dc_slow_n14_d_max())
+    // C23: inhibitor D=1.5mg is within certified window
+    ok = ok + s27_chk(1.5 > dc_inh_n14_d_min() && 1.5 < dc_inh_n14_d_max())
+    // C24: D=3mg standard is within certified window
+    ok = ok + s27_chk(3.0 > dc_std_n14_d_min() && 3.0 < dc_std_n14_d_max())
+    // C25: D=2mg standard is BELOW D_min (not certified even at N=14)
+    ok = ok + s27_chk(2.0 < dc_std_n14_d_min())
+    // C26: D=10mg standard is ABOVE D_max (not certified: therapeutic but CI straddles ceiling)
+    ok = ok + s27_chk(10.0 > dc_std_n14_d_max())
+    // C27: fast D=5mg is BELOW D_min at N=14 (standard dose insufficient)
+    ok = ok + s27_chk(5.0 < dc_fast_n14_d_min())
+    // C28: inducer D=20mg is FAR BELOW D_min at N=26
+    ok = ok + s27_chk(20.0 < dc_ind_n26_d_min())
+
+    // ── Section D: Dose adjustment certification via eu_fully_in_range ────────
+    // D29: D=34mg inducer N=26: certifies (lo=4.03 > floor)
+    ok = ok + s27_chk(eu_fully_in_range(34.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v))
+    // D30: D=20mg inducer N=26: does NOT certify
+    ok = ok + s27_chk(eu_fully_in_range(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v) == false)
+    // D31: D=5.5mg fast N=14: certifies (5.5 > D_min=5.15)
+    ok = ok + s27_chk(eu_fully_in_range(5.5, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v))
+    // D32: D=5.0mg fast N=14: does NOT certify
+    ok = ok + s27_chk(eu_fully_in_range(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v) == false)
+    // D33: D=10mg standard N=14: does NOT certify (above D_max=8.63 — CI straddles ceiling)
+    ok = ok + s27_chk(eu_fully_in_range(10.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v) == false)
+    // D34: D=3mg standard N=14: certifies
+    ok = ok + s27_chk(eu_fully_in_range(3.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v))
+    // D35: D=2mg standard N=14: does NOT certify (below D_min=2.50)
+    ok = ok + s27_chk(eu_fully_in_range(2.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v) == false)
+    // D36: D=34mg is above inducer D_min
+    ok = ok + s27_chk(34.0 > dc_ind_n26_d_min())
+
+    // ── Section E: Window width ordering ─────────────────────────────────────
+    let w_std  = dc_window_width(5.0, 14, 0.01118, 0.141, ka, fv, kev, k12v, k21v)
+    let w_slow = dc_window_width(5.0, 14, 0.00838, 0.188, ka, fv, kev, k12v, k21v)
+    let w_fast = dc_window_width(5.0, 14, 0.01677, 0.094, ka, fv, kev, k12v, k21v)
+    let w_inh  = dc_window_width(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12v, k21v)
+    let w_ind  = dc_window_width(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12v, k21v)
+    // E37: inh < slow (2.45 < 4.43)
+    ok = ok + s27_chk(w_inh < w_slow)
+    // E38: slow < std (4.43 < 6.12)
+    ok = ok + s27_chk(w_slow < w_std)
+    // E39: std < fast (6.12 < 9.42)
+    ok = ok + s27_chk(w_std < w_fast)
+    // E40: fast < ind (9.42 < 23.05)
+    ok = ok + s27_chk(w_fast < w_ind)
+    // E41: inh window < 3.0 mg (narrowest — tight constraint on inhibitor dosing)
+    ok = ok + s27_chk(w_inh < 3.0)
+    // E42: ind window > 20.0 mg (widest in absolute mg but at high dose)
+    ok = ok + s27_chk(w_ind > 20.0)
+    // E43: std window > 2 × inh window
+    ok = ok + s27_chk(w_std > 2.0 * w_inh)
+    // E44: fast window > std window
+    ok = ok + s27_chk(w_fast > w_std)
+
+    // ── Section F: D_min and D_max cross-stratum ordering ─────────────────────
+    // F45: D_min ordering: inh < slow < std < fast
+    ok = ok + s27_chk(dc_inh_n14_d_min() < dc_slow_n14_d_min())
+    ok = ok + s27_chk(dc_slow_n14_d_min() < dc_std_n14_d_min())
+    ok = ok + s27_chk(dc_std_n14_d_min() < dc_fast_n14_d_min())
+    // F48: D_max ordering: inh < slow < std < fast
+    ok = ok + s27_chk(dc_inh_n14_d_max() < dc_slow_n14_d_max())
+    ok = ok + s27_chk(dc_slow_n14_d_max() < dc_std_n14_d_max())
+    ok = ok + s27_chk(dc_std_n14_d_max() < dc_fast_n14_d_max())
+    // F51: inducer D_min > fast D_max (no overlap between ind and fast windows)
+    ok = ok + s27_chk(dc_ind_n26_d_min() > dc_fast_n14_d_max())
+    // F52: standard D_max < 10.0 (D=10mg standard is NOT in certified window — key Sprint 24 contrast)
+    ok = ok + s27_chk(dc_std_n14_d_max() < 10.0)
+
+    // ── Section G: Analytical consistency ────────────────────────────────────
+    let floor = trough_floor_mg_l()
+    let ceil  = trough_ceil_mg_l()
+    let c_std = as_trough_mg_l(5.0, 14, 0.01118, 0.141)
+    let c_ind = as_trough_mg_l(20.0, 26, 0.05590, 0.047)
+    // G53: D_min_std > floor * 5 / C_std (GUM tightens: D_min_cert > D_min_naive)
+    ok = ok + s27_chk(dc_std_n14_d_min() > floor * 5.0 / c_std)
+    // G54: D_max_std < ceil * 5 / C_std (GUM tightens: D_max_cert < D_max_naive)
+    ok = ok + s27_chk(dc_std_n14_d_max() < ceil * 5.0 / c_std)
+    // G55: Inducer D_min > 20 AND D_max < 60 (window at clinically reasonable doses)
+    ok = ok + s27_chk(dc_ind_n26_d_min() > 20.0 && dc_ind_n26_d_max() < 60.0)
+    // G56: Fast D_min < 6.0 (dose adjustment small: 5.15mg, well below 6mg)
+    ok = ok + s27_chk(dc_fast_n14_d_min() < 6.0)
+
+    ok
+}

@@ -28,11 +28,14 @@ def canonical_json(data: Any) -> bytes:
 
 def build_bundle_payload(source_doc: dict[str, Any]) -> dict[str, Any]:
     terms = source_doc.get("terms", [])
+    disjoints = source_doc.get("disjoints", [])
     return {
         "ontology": source_doc["ontology"],
         "version": source_doc.get("version", "unknown"),
         "term_count": len(terms),
+        "disjoint_count": len(disjoints),
         "terms": terms,
+        "disjoints": disjoints,
     }
 
 

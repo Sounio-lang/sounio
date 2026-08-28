@@ -1,0 +1,1556 @@
+// hypercomplex_graph/erdos_unit_distance — Sounio attack on Erdős #508 and #704
+//
+// Objective: Use the verified 168 Theorem / ZD bridge structure to generate
+// algebraic unit-distance graphs and measure whether zero-divisor "surgery"
+// (right-multiplication by a primitive ZD element) can change their chromatic
+// number — the first computable, reproducible step toward:
+//
+//   #508: Chromatic number of the plane (Hadwiger–Nelson)
+//   #704: Chromatic number of unit-distance graphs in R^d
+//
+// HONEST MATHEMATICAL FRAME (verified, not assumed):
+// - A point set with integer coordinates whose edges are pairs at squared
+//   Euclidean distance == 1 is ALWAYS bipartite (chromatic number <= 2): it is
+//   a subgraph of the integer lattice Z^16, 2-colored by parity of coord sum.
+// - So the real, non-trivial question is: can a ZD surgery break that
+//   bipartite structure (force chromatic number >= 3)?
+//
+// MECHANISM (confirmed = "ZD surgery / 4D annihilator", not the associator
+// route): right-multiply each point by a primitive ZD element v = e_lo ± e_hi.
+// This is a linear map on the sedenions with a non-trivial kernel (sedenions
+// are NOT norm-multiplicative — the whole point of zero-divisors). Some unit
+// edges survive, some are lost (kernel), and some new pairs become "unit".
+//
+// SOURCE OF TRUTH for the algebra (mirrored exactly, no invented mappings):
+//   formal/lean4/SounioZeroDivisorBridge.lean   — PrimSed / validPrims (84) /
+//                                                   168 unordered ZD pairs
+//   formal/lean4/SounioCayleyDickson.lean        — cdSigma (sign function)
+//   self-hosted/check/cayley_dickson.sio         — cd_sigma_ct (same function)
+//
+// Self-contained (no imports — matches the oct_graph.sio pattern; the run-pass
+// harness cannot resolve imports).
+
+module hypercomplex_graph::erdos_unit_distance
+
+// ============================================================================
+// Cayley–Dickson sign function  (e_a · e_b = cd_sigma_ct(a,b,4) · e_{a^b} in S)
+// Verbatim from self-hosted/check/cayley_dickson.sio (== Lean cdSigma a b 4).
+// ============================================================================
+
+fn cd_sigma_ct(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let a_hi = if a >= half { 1 } else { 0 }
+    let b_hi = if b >= half { 1 } else { 0 }
+    let a_lo = a & (half - 1)
+    let b_lo = b & (half - 1)
+    if a_hi == 0 && b_hi == 0 { return cd_sigma_ct(a_lo, b_lo, bits - 1) }
+    if a_hi == 0 && b_hi == 1 { return cd_sigma_ct(b_lo, a_lo, bits - 1) }
+    if a_hi == 1 && b_hi == 0 {
+        if b_lo == 0 { return cd_sigma_ct(a_lo, b_lo, bits - 1) }
+        else { return 0 - cd_sigma_ct(a_lo, b_lo, bits - 1) }
+    }
+    // both hi
+    if b_lo == 0 { return 0 - cd_sigma_ct(b_lo, a_lo, bits - 1) }
+    return cd_sigma_ct(b_lo, a_lo, bits - 1)
+}
+
+fn sed_sigma(a: i64, b: i64) -> i64 { return cd_sigma_ct(a, b, 4) }
+
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
+}
+
+// ============================================================================
+// State (fixed-size flat buffers — native compiler has no dynamic arrays)
+// ============================================================================
+
+// 84 valid primitive imaginary sedenions  v = e_lo ± e_hi
+var PRIM_LO:  [i64; 84] = [0; 84]
+var PRIM_HI:  [i64; 84] = [0; 84]
+var PRIM_NEG: [i64; 84] = [0; 84]   // 1 => sign of e_hi is -1
+var NPRIM:    i64 = 0
+
+// Probe: NPTS points × 16 coords, flat
+var PROBE: [f64; 112] = [0.0; 112]   // 7 * 16
+var NPTS:  i64 = 7
+
+// Scratch
+var DIFF: [f64; 16] = [0.0; 16]
+var TW:   [f64; 16] = [0.0; 16]
+var TMP:  [f64; 16] = [0.0; 16]   // intermediate (p·u) for associator surgery
+var TW2:  [f64; 16] = [0.0; 16]   // ((p·u)·v) for associator surgery
+
+// 168 unordered ZD pairs (u·v == 0, u lex-before v); headroom 200
+var PAIR_U: [i64; 200] = [0; 200]
+var PAIR_V: [i64; 200] = [0; 200]
+var NPAIR:  i64 = 0
+
+// Conflict-graph adjacency (NPTS x NPTS), 1 = edge
+var ADJ: [i64; 49] = [0; 49]   // 7 * 7
+var CLASSIC: [i64; 49] = [0; 49]   // saved classical adjacency for edge diffing
+
+// Coloring odometer
+var COLORS: [i64; 7] = [0; 7]
+
+// ============================================================================
+// §1. Enumerate the 84 valid primitives  (mirror validPrims from the bridge)
+//     lo in 1..7, hi in 9..15, exclude (lo ^ hi) == 8.  7*7*2 - 14 = 84.
+// ============================================================================
+
+pub fn build_prims() with Mut {
+    NPRIM = 0
+    var lo = 1
+    while lo <= 7 {
+        var hi = 9
+        while hi <= 15 {
+            if (lo ^ hi) != 8 {
+                // +1 variant
+                PRIM_LO[NPRIM as usize] = lo
+                PRIM_HI[NPRIM as usize] = hi
+                PRIM_NEG[NPRIM as usize] = 0
+                NPRIM = NPRIM + 1
+                // -1 variant
+                PRIM_LO[NPRIM as usize] = lo
+                PRIM_HI[NPRIM as usize] = hi
+                PRIM_NEG[NPRIM as usize] = 1
+                NPRIM = NPRIM + 1
+            }
+            hi = hi + 1
+        }
+        lo = lo + 1
+    }
+}
+
+// ============================================================================
+// §2. Probe configuration (7 vertices in 16D, integer coords).
+//     Mirrors moser7_probe in SounioErdosUnitDistance.lean for Sounio<->Lean
+//     parity.  Classical (untwisted) graph is necessarily bipartite.
+// ============================================================================
+
+fn set_coord(pt: i64, k: i64, v: f64) with Mut {
+    PROBE[(pt * 16 + k) as usize] = v
+}
+
+pub fn init_probe() with Mut {
+    var i = 0
+    while i < 112 { PROBE[i as usize] = 0.0; i = i + 1 }
+    NPTS = 7
+    // Enriched probe: spans BOTH sedenion halves so pairwise xors hit the
+    // active ZD fiber labels {9..15}. (A probe using only indices 0..7 makes
+    // every surgery act trivially — cross terms vanish, twisted ≡ classical.)
+    set_coord(0, 0, 1.0)                        // v0 = e0
+    set_coord(1, 1, 1.0)                        // v1 = e1
+    set_coord(2, 0, 1.0); set_coord(2, 1, 1.0)  // v2 = e0 + e1
+    set_coord(3, 9, 1.0)                        // v3 = e9
+    set_coord(4, 10, 1.0)                       // v4 = e10
+    set_coord(5, 9, 1.0); set_coord(5, 10, 1.0) // v5 = e9 + e10
+    set_coord(6, 1, 1.0); set_coord(6, 9, 1.0)  // v6 = e1 + e9 (cross-half bridge)
+}
+
+// DIFF <- PROBE[i] - PROBE[j]
+fn point_diff(i: i64, j: i64) with Mut {
+    var k = 0
+    while k < 16 {
+        DIFF[k as usize] = PROBE[(i*16 + k) as usize] - PROBE[(j*16 + k) as usize]
+        k = k + 1
+    }
+}
+
+fn norm_sq(buf: &[f64; 16]) -> f64 {
+    var s = 0.0
+    var k = 0
+    while k < 16 { s = s + (*buf)[k as usize] * (*buf)[k as usize]; k = k + 1 }
+    return s
+}
+
+// ============================================================================
+// §3. ZD surgery: TW <- DIFF · v_idx   (right-multiplication by primitive)
+//     (x · e_j)_k = x_{k^j} · sigma(k^j, j);  v = e_lo ± e_hi  => sum of two.
+// ============================================================================
+
+fn rmul_prim(idx: i64) with Mut, Panic {
+    let lo = PRIM_LO[idx as usize]
+    let hi = PRIM_HI[idx as usize]
+    let s = if PRIM_NEG[idx as usize] == 1 { 0.0 - 1.0 } else { 1.0 }
+    var k = 0
+    while k < 16 {
+        let klo = k ^ lo
+        let khi = k ^ hi
+        let t1 = DIFF[klo as usize] * (cd_sigma_ct(klo, lo, 4) as f64)
+        let t2 = DIFF[khi as usize] * (cd_sigma_ct(khi, hi, 4) as f64)
+        TW[k as usize] = t1 + s * t2
+        k = k + 1
+    }
+}
+
+// ||v||^2 = 2 for every primitive (two unit components). Twisted "unit" target.
+fn prim_norm_sq() -> f64 { return 2.0 }
+
+// Generic right-multiplication by primitive idx: out <- inp · v_idx.
+fn rmul_into(inp: &[f64; 16], idx: i64, out: &![f64; 16]) with Mut, Panic {
+    let lo = PRIM_LO[idx as usize]
+    let hi = PRIM_HI[idx as usize]
+    let s = if PRIM_NEG[idx as usize] == 1 { 0.0 - 1.0 } else { 1.0 }
+    var k = 0
+    while k < 16 {
+        let klo = k ^ lo
+        let khi = k ^ hi
+        let t1 = (*inp)[klo as usize] * (cd_sigma_ct(klo, lo, 4) as f64)
+        let t2 = (*inp)[khi as usize] * (cd_sigma_ct(khi, hi, 4) as f64)
+        (*out)[k as usize] = t1 + s * t2
+        k = k + 1
+    }
+}
+
+// Generic LEFT-multiplication by primitive idx: out <- v_idx · inp.
+// (v·x)_k = x_{k^lo}·sigma(lo, k^lo) + s·x_{k^hi}·sigma(hi, k^hi).
+// Differs from rmul by sigma argument order: distinct imaginary units
+// anticommute (sigma(a,b) = -sigma(b,a)), but terms touching index 0 do not
+// flip — so left-mult can break the total-parity invariant that forces
+// right-mult bipartiteness.
+fn lmul_into(inp: &[f64; 16], idx: i64, out: &![f64; 16]) with Mut, Panic {
+    let lo = PRIM_LO[idx as usize]
+    let hi = PRIM_HI[idx as usize]
+    let s = if PRIM_NEG[idx as usize] == 1 { 0.0 - 1.0 } else { 1.0 }
+    var k = 0
+    while k < 16 {
+        let klo = k ^ lo
+        let khi = k ^ hi
+        let t1 = (*inp)[klo as usize] * (cd_sigma_ct(lo, klo, 4) as f64)
+        let t2 = (*inp)[khi as usize] * (cd_sigma_ct(hi, khi, 4) as f64)
+        (*out)[k as usize] = t1 + s * t2
+        k = k + 1
+    }
+}
+
+// ============================================================================
+// §3b. ZD pairs + ASSOCIATOR surgery (the non-associative lever → 168 classes)
+//
+//   A ZD class is an unordered pair (u, v) of primitives with u·v == 0.
+//   Since u·v = 0, the associator assoc(p,u,v) = (p·u)·v − p·(u·v) = (p·u)·v.
+//   So the associator-twisted point is exactly the double right-multiplication
+//   (p·u)·v — computed by applying rmul_into twice. This is GENUINE
+//   non-associativity, indexed by the full 168 ZD classes (not 84 linear maps).
+//   Twisted "unit" target = ||u||²·||v||² = 2·2 = 4.
+// ============================================================================
+
+// Coefficient k of the primitive product (e_lou ± e_hiu)·(e_lov ± e_hiv).
+// Mirrors `primProd` in SounioZeroDivisorBridge.lean (four cross terms).
+fn prim_prod_coeff(iu: i64, iv: i64, k: i64) -> i64 {
+    let lou = PRIM_LO[iu as usize]; let hiu = PRIM_HI[iu as usize]
+    let lov = PRIM_LO[iv as usize]; let hiv = PRIM_HI[iv as usize]
+    let su = if PRIM_NEG[iu as usize] == 1 { 0 - 1 } else { 1 }
+    let sv = if PRIM_NEG[iv as usize] == 1 { 0 - 1 } else { 1 }
+    var acc = 0
+    if (lou ^ lov) == k { acc = acc + cd_sigma_ct(lou, lov, 4) }
+    if (lou ^ hiv) == k { acc = acc + sv * cd_sigma_ct(lou, hiv, 4) }
+    if (hiu ^ lov) == k { acc = acc + su * cd_sigma_ct(hiu, lov, 4) }
+    if (hiu ^ hiv) == k { acc = acc + su * sv * cd_sigma_ct(hiu, hiv, 4) }
+    return acc
+}
+
+fn is_zero_pair(iu: i64, iv: i64) -> i64 {
+    var k = 0
+    while k < 16 { if prim_prod_coeff(iu, iv, k) != 0 { return 0 }; k = k + 1 }
+    return 1
+}
+
+// Enumerate the 168 unordered ZD pairs (i < j in primitive order = lexicographic,
+// and u·v == 0; the ZD relation is symmetric since 336 ordered = 2·168).
+pub fn build_zd_pairs() with Mut, Panic {
+    NPAIR = 0
+    var i = 0
+    while i < NPRIM {
+        var j = i + 1
+        while j < NPRIM {
+            if is_zero_pair(i, j) == 1 {
+                PAIR_U[NPAIR as usize] = i
+                PAIR_V[NPAIR as usize] = j
+                NPAIR = NPAIR + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// ||u||²·||v||² = 4 for ZD-pair primitives; associator twisted "unit" target.
+fn assoc_norm_sq() -> f64 { return 4.0 }
+
+// ============================================================================
+// §4. Conflict graphs + exact chromatic number (brute force; n <= 7)
+// ============================================================================
+
+fn clear_adj() with Mut {
+    var i = 0
+    while i < 49 { ADJ[i as usize] = 0; i = i + 1 }
+}
+
+// Classical: edge iff squared Euclidean distance == 1.
+fn build_classical_adj() with Mut, Panic {
+    clear_adj()
+    var i = 0
+    while i < NPTS {
+        var j = i + 1
+        while j < NPTS {
+            point_diff(i, j)
+            let d = norm_sq(&DIFF)
+            if near(d, 1.0, 1.0e-9) == 1 {
+                ADJ[(i*7 + j) as usize] = 1
+                ADJ[(j*7 + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Twisted by primitive idx: edge iff ||(p_i - p_j)·v||^2 == ||v||^2 (== 2).
+fn build_twisted_adj(idx: i64) with Mut, Panic {
+    clear_adj()
+    let target = prim_norm_sq()
+    var i = 0
+    while i < NPTS {
+        var j = i + 1
+        while j < NPTS {
+            point_diff(i, j)
+            rmul_prim(idx)
+            let d = norm_sq(&TW)
+            if near(d, target, 1.0e-9) == 1 {
+                ADJ[(i*7 + j) as usize] = 1
+                ADJ[(j*7 + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Associator-twisted by ZD pair `pair_idx`: edge iff ||((p_i-p_j)·u)·v||^2 == 4.
+fn build_assoc_adj(pair_idx: i64) with Mut, Panic {
+    clear_adj()
+    let u = PAIR_U[pair_idx as usize]
+    let v = PAIR_V[pair_idx as usize]
+    let target = assoc_norm_sq()
+    var i = 0
+    while i < NPTS {
+        var j = i + 1
+        while j < NPTS {
+            point_diff(i, j)
+            rmul_into(&DIFF, u, &!TMP)   // (p_i - p_j) · u
+            rmul_into(&TMP, v, &!TW2)    // ((p_i - p_j) · u) · v   = assoc(diff, u, v)
+            let d = norm_sq(&TW2)
+            if near(d, target, 1.0e-9) == 1 {
+                ADJ[(i*7 + j) as usize] = 1
+                ADJ[(j*7 + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Is the current ADJ graph (n vertices) properly k-colorable? Brute force.
+fn colorable(n: i64, k: i64) -> i64 with Mut, Panic {
+    var i = 0
+    while i < n { COLORS[i as usize] = 0; i = i + 1 }
+    var done = 0
+    while done == 0 {
+        // check current assignment
+        var ok = 1
+        var a = 0
+        while a < n {
+            var b = a + 1
+            while b < n {
+                if ADJ[(a*7 + b) as usize] == 1 {
+                    if COLORS[a as usize] == COLORS[b as usize] { ok = 0 }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        if ok == 1 { return 1 }
+        // odometer increment (base k, n digits)
+        var pos = 0
+        var carry = 1
+        while pos < n && carry == 1 {
+            COLORS[pos as usize] = COLORS[pos as usize] + 1
+            if COLORS[pos as usize] >= k {
+                COLORS[pos as usize] = 0
+                pos = pos + 1
+            } else {
+                carry = 0
+            }
+        }
+        if carry == 1 { done = 1 }
+    }
+    return 0
+}
+
+pub fn chromatic_number(n: i64) -> i64 with Mut, Panic {
+    var k = 1
+    while k <= n {
+        if colorable(n, k) == 1 { return k }
+        k = k + 1
+    }
+    return n
+}
+
+// Count current-ADJ edges (upper triangle).
+fn count_edges() -> i64 {
+    var c = 0
+    var i = 0
+    while i < NPTS {
+        var j = i + 1
+        while j < NPTS {
+            if ADJ[(i*7 + j) as usize] == 1 { c = c + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return c
+}
+
+// ============================================================================
+// §5. Spot-check: known ZD pair (e3+e10)·(e6-e15) == 0  (sed_zd_z * sed_zd_w)
+// ============================================================================
+
+pub fn zd_pair_self_check() -> i64 with Mut, Panic {
+    // u = e3 + e10 ; w = e6 - e15.  (u·w)_k summed over the four cross terms.
+    var ok = 1
+    var k = 0
+    while k < 16 {
+        var acc = 0
+        if (3 ^ 6) == k  { acc = acc + cd_sigma_ct(3, 6, 4) }    // e3 · e6
+        if (3 ^ 15) == k { acc = acc - cd_sigma_ct(3, 15, 4) }   // e3 · (-e15)
+        if (10 ^ 6) == k { acc = acc + cd_sigma_ct(10, 6, 4) }   // e10 · e6
+        if (10 ^ 15) == k { acc = acc - cd_sigma_ct(10, 15, 4) } // e10 · (-e15)
+        if acc != 0 { ok = 0 }
+        k = k + 1
+    }
+    return ok
+}
+
+// ============================================================================
+// §6. The 84-surgery chromatic spectrum + honest report
+// ============================================================================
+
+// Full demo: classical chi, then chi spectrum over all 84 ZD surgeries.
+// Prints reproducible integers. Returns number of surgeries that raise chi
+// above the classical (bipartite-breaking) value.
+pub fn erdos_run_demo() -> i64 with IO, Mut, Panic, Div {
+    build_prims()
+    init_probe()
+
+    print("=== Erdos #508/#704 — ZD-surgery chromatic probe (7 vertices, 16D) ===\n")
+    print("valid primitives (validPrims, must be 84): "); print_int(NPRIM); print("\n")
+    print("known ZD pair (e3+e10)(e6-e15)==0 self-check: "); print_int(zd_pair_self_check()); print("\n")
+
+    build_classical_adj()
+    let classical_edges = count_edges()
+    // save classical adjacency for per-surgery edge diffing
+    var ci = 0
+    while ci < 49 { CLASSIC[ci as usize] = ADJ[ci as usize]; ci = ci + 1 }
+    let chi0 = chromatic_number(NPTS)
+    print("classical: edges="); print_int(classical_edges)
+    print("  chromatic_number="); print_int(chi0)
+    print("  (integer dist^2==1 => bipartite, expect <= 2)\n")
+
+    var chi_min = NPTS + 1
+    var chi_max = 0
+    var n_raise = 0       // surgeries with chi > classical
+    var n_change = 0      // surgeries with chi != classical
+    var edges_min = 99
+    var edges_max = 0
+    var n_edge_change = 0 // surgeries whose edge set differs from classical
+    var idx = 0
+    while idx < NPRIM {
+        build_twisted_adj(idx)
+        let chi = chromatic_number(NPTS)
+        let e = count_edges()
+        // edge diff vs classical (upper triangle)
+        var lost = 0; var gained = 0
+        var a = 0
+        while a < NPTS {
+            var b = a + 1
+            while b < NPTS {
+                let cl = CLASSIC[(a*7 + b) as usize]
+                let tw = ADJ[(a*7 + b) as usize]
+                if cl == 1 && tw == 0 { lost = lost + 1 }
+                if cl == 0 && tw == 1 { gained = gained + 1 }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        if e < edges_min { edges_min = e }
+        if e > edges_max { edges_max = e }
+        if lost > 0 || gained > 0 { n_edge_change = n_edge_change + 1 }
+        if chi < chi_min { chi_min = chi }
+        if chi > chi_max { chi_max = chi }
+        if chi != chi0 { n_change = n_change + 1 }
+        if chi > chi0 { n_raise = n_raise + 1 }
+        idx = idx + 1
+    }
+
+    print("twisted spectrum over "); print_int(NPRIM); print(" ZD surgeries:\n")
+    print("  edges_min="); print_int(edges_min)
+    print("  edges_max="); print_int(edges_max)
+    print("  surgeries changing edge set: "); print_int(n_edge_change); print("\n")
+    print("  chi_min="); print_int(chi_min)
+    print("  chi_max="); print_int(chi_max); print("\n")
+    print("  surgeries changing chi: "); print_int(n_change); print("\n")
+    print("  surgeries raising chi (breaking bipartite): "); print_int(n_raise); print("\n")
+    print("algebraic invariant from bridge: 84 surgery maps acting through ")
+    print("168 unordered ZD-pair classes (7 fibers x 24)\n")
+    return n_raise
+}
+
+// ============================================================================
+// §7. ASSOCIATOR surgery spectrum over the 168 ZD classes + honest report.
+// ============================================================================
+
+// Returns number of associator surgeries that raise chi above the classical χ.
+pub fn erdos_run_assoc_demo() -> i64 with IO, Mut, Panic, Div {
+    build_prims()
+    build_zd_pairs()
+    init_probe()
+
+    print("=== Erdos #508/#704 — ASSOCIATOR surgery (p.u).v over 168 ZD classes ===\n")
+    print("ZD pairs enumerated (unorderedZDPairs, must be 168): "); print_int(NPAIR); print("\n")
+
+    build_classical_adj()
+    let classical_edges = count_edges()
+    var ci = 0
+    while ci < 49 { CLASSIC[ci as usize] = ADJ[ci as usize]; ci = ci + 1 }
+    let chi0 = chromatic_number(NPTS)
+    print("classical: edges="); print_int(classical_edges)
+    print("  chromatic_number="); print_int(chi0); print("\n")
+
+    var chi_min = NPTS + 1
+    var chi_max = 0
+    var n_raise = 0
+    var n_change = 0
+    var edges_min = 99
+    var edges_max = 0
+    var n_edge_change = 0
+    var p = 0
+    while p < NPAIR {
+        build_assoc_adj(p)
+        let chi = chromatic_number(NPTS)
+        let e = count_edges()
+        var lost = 0; var gained = 0
+        var a = 0
+        while a < NPTS {
+            var b = a + 1
+            while b < NPTS {
+                let cl = CLASSIC[(a*7 + b) as usize]
+                let tw = ADJ[(a*7 + b) as usize]
+                if cl == 1 && tw == 0 { lost = lost + 1 }
+                if cl == 0 && tw == 1 { gained = gained + 1 }
+                b = b + 1
+            }
+            a = a + 1
+        }
+        if e < edges_min { edges_min = e }
+        if e > edges_max { edges_max = e }
+        if lost > 0 || gained > 0 { n_edge_change = n_edge_change + 1 }
+        if chi < chi_min { chi_min = chi }
+        if chi > chi_max { chi_max = chi }
+        if chi != chi0 { n_change = n_change + 1 }
+        if chi > chi0 { n_raise = n_raise + 1 }
+        p = p + 1
+    }
+
+    print("associator spectrum over "); print_int(NPAIR); print(" ZD-pair classes:\n")
+    print("  edges_min="); print_int(edges_min)
+    print("  edges_max="); print_int(edges_max)
+    print("  classes changing edge set: "); print_int(n_edge_change); print("\n")
+    print("  chi_min="); print_int(chi_min)
+    print("  chi_max="); print_int(chi_max); print("\n")
+    print("  classes changing chi: "); print_int(n_change); print("\n")
+    print("  classes raising chi (breaking bipartite): "); print_int(n_raise); print("\n")
+    return n_raise
+}
+
+// Note: empirical value distribution of ||((e_m)·u)·v||^2 over the 16 unit
+// basis directions (first ZD pair) is {0: 6, 4: 8, 8: 2} — clean clusters at
+// 0 (kernel), 4 (twisted-unit target used above), 8 (amplified). No value-2
+// cluster, so the == 4 target is well-defined and captures the surviving
+// unit-distance directions.
+
+// ============================================================================
+// §8. SCALE (slice 3): does ANY surgery produce a NON-bipartite twisted graph
+//     (χ ≥ 3) on a larger integer probe? Verified empirically that the assoc
+//     value histogram {0:6, 4:8, 8:2} is identical across all 168 pairs (the
+//     classes are PSL(2,7)-symmetric), so the ==4 target is universal.
+//
+//     Probe = the COMPLETE set of weight-≤2 binary 16D vectors (1 + 16 + 120 =
+//     137 points) — exhaustive over a natural bounded family, not cherry-picked.
+//     Twisted graph built directly (no lifting), bipartiteness via BFS (O(V+E),
+//     scales; the k^n brute force does not). χ≥3 ⟺ an odd cycle exists.
+// ============================================================================
+
+// Sized for both probes: binary weight-≤2 (137 pts) and signed weight-≤2
+// ({0} ∪ {±e_i} ∪ {e_i+e_j} ∪ {e_i−e_j} = 1+32+120+120 = 273 pts).
+var BIGPROBE: [f64; 4800] = [0.0; 4800]   // up to 300 * 16
+var BIGN:     i64 = 0
+var BADJ:     [i64; 90000] = [0; 90000]   // up to 300 * 300 adjacency
+var BCOLOR:   [i64; 300] = [0; 300]       // 2 = unvisited, else 0/1
+var BQUEUE:   [i64; 300] = [0; 300]
+
+pub fn build_big_probe() with Mut {
+    var i = 0
+    while i < 2192 { BIGPROBE[i as usize] = 0.0; i = i + 1 }
+    BIGN = 1                                  // point 0 = zero vector
+    var a = 0
+    while a < 16 {                            // weight-1
+        BIGPROBE[(BIGN*16 + a) as usize] = 1.0
+        BIGN = BIGN + 1
+        a = a + 1
+    }
+    a = 0
+    while a < 16 {                            // weight-2
+        var b = a + 1
+        while b < 16 {
+            BIGPROBE[(BIGN*16 + a) as usize] = 1.0
+            BIGPROBE[(BIGN*16 + b) as usize] = 1.0
+            BIGN = BIGN + 1
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+// Signed weight-≤2 family: {0} ∪ {±e_i} ∪ {e_i+e_j} ∪ {e_i−e_j} = 273 points.
+pub fn build_big_probe_signed() with Mut {
+    var i = 0
+    while i < 4800 { BIGPROBE[i as usize] = 0.0; i = i + 1 }
+    BIGN = 1                                  // point 0 = zero vector
+    var a = 0
+    while a < 16 {                            // ±e_i
+        BIGPROBE[(BIGN*16 + a) as usize] = 1.0;  BIGN = BIGN + 1
+        BIGPROBE[(BIGN*16 + a) as usize] = 0.0 - 1.0;  BIGN = BIGN + 1
+        a = a + 1
+    }
+    a = 0
+    while a < 16 {                            // e_i + e_j and e_i − e_j
+        var b = a + 1
+        while b < 16 {
+            BIGPROBE[(BIGN*16 + a) as usize] = 1.0; BIGPROBE[(BIGN*16 + b) as usize] = 1.0
+            BIGN = BIGN + 1
+            BIGPROBE[(BIGN*16 + a) as usize] = 1.0; BIGPROBE[(BIGN*16 + b) as usize] = 0.0 - 1.0
+            BIGN = BIGN + 1
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+fn big_point_diff(i: i64, j: i64) with Mut {
+    var k = 0
+    while k < 16 {
+        DIFF[k as usize] = BIGPROBE[(i*16 + k) as usize] - BIGPROBE[(j*16 + k) as usize]
+        k = k + 1
+    }
+}
+
+fn clear_badj() with Mut {
+    var i = 0
+    let n2 = BIGN * BIGN
+    while i < n2 { BADJ[i as usize] = 0; i = i + 1 }
+}
+
+// Linear twisted graph on the big probe for primitive idx: edge iff ||d·v||²==2.
+fn build_big_linear_adj(idx: i64) with Mut, Panic {
+    clear_badj()
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            big_point_diff(i, j)
+            rmul_into(&DIFF, idx, &!TW)
+            if near(norm_sq(&TW), 2.0, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// LEFT-multiplication twisted graph on the big probe: edge iff ||v·d||²==2.
+fn build_big_left_adj(idx: i64) with Mut, Panic {
+    clear_badj()
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            big_point_diff(i, j)
+            lmul_into(&DIFF, idx, &!TW)
+            if near(norm_sq(&TW), 2.0, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Associator twisted graph on the big probe for ZD pair p: edge iff ||(d·u)·v||²==4.
+fn build_big_assoc_adj(pair_idx: i64) with Mut, Panic {
+    clear_badj()
+    let u = PAIR_U[pair_idx as usize]
+    let v = PAIR_V[pair_idx as usize]
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            big_point_diff(i, j)
+            rmul_into(&DIFF, u, &!TMP)
+            rmul_into(&TMP, v, &!TW2)
+            if near(norm_sq(&TW2), 4.0, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// BFS 2-coloring of BADJ. Returns 1 if bipartite (χ ≤ 2), 0 if an odd cycle
+// exists (χ ≥ 3). O(V + E), scales to the full 137-vertex graph.
+fn bfs_bipartite() -> i64 with Mut, Panic {
+    var i = 0
+    while i < BIGN { BCOLOR[i as usize] = 2; i = i + 1 }
+    var comp = 0
+    while comp < BIGN {
+        if BCOLOR[comp as usize] == 2 {
+            BCOLOR[comp as usize] = 0
+            var head = 0
+            var tail = 0
+            BQUEUE[tail as usize] = comp; tail = tail + 1
+            while head < tail {
+                let cur = BQUEUE[head as usize]; head = head + 1
+                var w = 0
+                while w < BIGN {
+                    if BADJ[(cur*BIGN + w) as usize] == 1 {
+                        if BCOLOR[w as usize] == 2 {
+                            BCOLOR[w as usize] = 1 - BCOLOR[cur as usize]
+                            BQUEUE[tail as usize] = w; tail = tail + 1
+                        } else {
+                            if BCOLOR[w as usize] == BCOLOR[cur as usize] { return 0 }
+                        }
+                    }
+                    w = w + 1
+                }
+            }
+        }
+        comp = comp + 1
+    }
+    return 1
+}
+
+// Count edges in current BADJ (upper triangle).
+fn badj_edges() -> i64 {
+    var c = 0
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN { if BADJ[(i*BIGN + j) as usize] == 1 { c = c + 1 }; j = j + 1 }
+        i = i + 1
+    }
+    return c
+}
+
+// Scan all 84 linear + 168 associator surgeries on the 137-point probe.
+// Returns total number of surgeries whose twisted graph is NON-bipartite (χ≥3).
+pub fn erdos_run_scale_search() -> i64 with IO, Mut, Panic, Div {
+    build_prims()
+    build_zd_pairs()
+
+    print("=== Erdos #508/#704 — SCALE search for chi>=3 (odd cycle, BFS) ===\n")
+    print("[binary weight-<=2 family, complete (expect 137)]\n")
+    build_big_probe()
+    let nb_bin = scan_current_probe()
+    print("[signed weight-<=2 family, complete (expect 273)]\n")
+    build_big_probe_signed()
+    let nb_sgn = scan_current_probe()
+
+    let total = nb_bin + nb_sgn
+    print("TOTAL surgeries producing chi>=3 (non-bipartite) across both probes: ")
+    print_int(total); print("\n")
+    return total
+}
+
+// Parity of nonzero coords of probe point `pt` in index range [a,b).
+fn range_parity(pt: i64, a: i64, b: i64) -> i64 {
+    var s = 0; var k = a
+    while k < b { if BIGPROBE[(pt*16 + k) as usize] != 0.0 { s = s + 1 }; k = k + 1 }
+    return s - (s / 2) * 2
+}
+
+// Does coloring-by-(total coord-count parity) properly 2-color current BADJ?
+fn total_parity_2colors() -> i64 {
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            if BADJ[(i*BIGN + j) as usize] == 1 {
+                if range_parity(i,0,16) == range_parity(j,0,16) { return 0 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// Scan both surgery families on the CURRENT big probe; returns # non-bipartite.
+// Also reports how many LINEAR graphs are 2-colored by total coord-sum parity.
+fn scan_current_probe() -> i64 with IO, Mut, Panic, Div {
+    print("  BIGN="); print_int(BIGN); print(":\n")
+    var lin_nb = 0; var lin_totalpar = 0; var le_min = 1000000; var le_max = 0
+    var idx = 0
+    while idx < NPRIM {
+        build_big_linear_adj(idx)
+        let e = badj_edges()
+        if e < le_min { le_min = e }
+        if e > le_max { le_max = e }
+        if bfs_bipartite() == 0 { lin_nb = lin_nb + 1 }
+        if total_parity_2colors() == 1 { lin_totalpar = lin_totalpar + 1 }
+        idx = idx + 1
+    }
+    print("  linear(84):  edges["); print_int(le_min); print(".."); print_int(le_max)
+    print("] non-bip="); print_int(lin_nb)
+    print(" total-parity-2colors="); print_int(lin_totalpar); print("/84\n")
+    var as_nb = 0; var ae_min = 1000000; var ae_max = 0
+    var p = 0
+    while p < NPAIR {
+        build_big_assoc_adj(p)
+        let e = badj_edges()
+        if e < ae_min { ae_min = e }
+        if e > ae_max { ae_max = e }
+        if bfs_bipartite() == 0 { as_nb = as_nb + 1 }
+        p = p + 1
+    }
+    print("  assoc(168):  edges["); print_int(ae_min); print(".."); print_int(ae_max)
+    print("] non-bip="); print_int(as_nb); print("\n")
+    return lin_nb + as_nb
+}
+
+// ============================================================================
+// §9. LEFT-multiplication search (slice 4): does v·d break the total-parity
+//     invariant and produce a NON-bipartite twisted graph (χ ≥ 3)?
+// ============================================================================
+
+// Scan the 84 LEFT-mult surgeries on the current big probe.
+// Reports non-bipartite count + how many are still 2-colored by total parity.
+fn scan_left_current() -> i64 with IO, Mut, Panic, Div {
+    print("  BIGN="); print_int(BIGN); print(":\n")
+    var nb = 0; var tp = 0; var emin = 1000000; var emax = 0
+    var idx = 0
+    while idx < NPRIM {
+        build_big_left_adj(idx)
+        let e = badj_edges()
+        if e < emin { emin = e }
+        if e > emax { emax = e }
+        if bfs_bipartite() == 0 { nb = nb + 1 }
+        if total_parity_2colors() == 1 { tp = tp + 1 }
+        idx = idx + 1
+    }
+    print("  left-mul(84): edges["); print_int(emin); print(".."); print_int(emax)
+    print("] non-bip="); print_int(nb)
+    print(" total-parity-2colors="); print_int(tp); print("/84\n")
+    return nb
+}
+
+pub fn erdos_run_left_search() -> i64 with IO, Mut, Panic, Div {
+    build_prims()
+    print("=== Erdos #508/#704 — LEFT-multiplication search (slice 4) ===\n")
+    print("[binary weight-<=2 family (137)]\n")
+    build_big_probe()
+    let nb_bin = scan_left_current()
+    print("[signed weight-<=2 family (273)]\n")
+    build_big_probe_signed()
+    let nb_sgn = scan_left_current()
+    let total = nb_bin + nb_sgn
+    print("LEFT-mul surgeries producing chi>=3 (non-bipartite): "); print_int(total); print("\n")
+    return total
+}
+
+// ============================================================================
+// §10. NON-DISTANCE construction (slice 4b): associator conflict graph.
+//
+//   Distance-based surgery hit a two-sided total-parity ceiling. The associator
+//   assoc(x,y,c) = (x·y)·c − x·(y·c) is BILINEAR in (x,y) — NOT a function of
+//   x−y — so the associator conflict graph is not translation-invariant and
+//   need not inherit the parity bipartition. Edge (i,j) ⟺ ‖assoc(p_i,p_j,c)‖²==T.
+//   This is the genuinely non-associative, non-distance lever for χ ≥ 3.
+// ============================================================================
+
+var PX: [f64; 16] = [0.0; 16]
+var PY: [f64; 16] = [0.0; 16]
+var AP1: [f64; 16] = [0.0; 16]
+var AP2: [f64; 16] = [0.0; 16]
+var AA1: [f64; 16] = [0.0; 16]
+var AA2: [f64; 16] = [0.0; 16]
+
+// General sedenion product: out = x · y  (out_k = Σ_{a^b=k} x_a y_b σ(a,b)).
+fn sed_prod_full(x: &[f64; 16], y: &[f64; 16], out: &![f64; 16]) with Mut, Panic {
+    var k = 0
+    while k < 16 { (*out)[k as usize] = 0.0; k = k + 1 }
+    var a = 0
+    while a < 16 {
+        if (*x)[a as usize] != 0.0 {
+            var b = 0
+            while b < 16 {
+                if (*y)[b as usize] != 0.0 {
+                    let kk = a ^ b
+                    (*out)[kk as usize] = (*out)[kk as usize]
+                        + (*x)[a as usize] * (*y)[b as usize] * (cd_sigma_ct(a, b, 4) as f64)
+                }
+                b = b + 1
+            }
+        }
+        a = a + 1
+    }
+}
+
+fn load_point(idx: i64, out: &![f64; 16]) with Mut {
+    var k = 0
+    while k < 16 { (*out)[k as usize] = BIGPROBE[(idx*16 + k) as usize]; k = k + 1 }
+}
+
+// ‖assoc(p_i, p_j, c)‖²  where c is primitive cidx.
+fn assoc_normsq(i: i64, j: i64, cidx: i64) -> f64 with Mut, Panic {
+    load_point(i, &!PX)
+    load_point(j, &!PY)
+    sed_prod_full(&PX, &PY, &!AP1)        // x·y
+    rmul_into(&AP1, cidx, &!AA1)          // (x·y)·c
+    rmul_into(&PY, cidx, &!AP2)           // y·c
+    sed_prod_full(&PX, &AP2, &!AA2)       // x·(y·c)
+    var s = 0.0
+    var k = 0
+    while k < 16 { let d = AA1[k as usize] - AA2[k as usize]; s = s + d * d; k = k + 1 }
+    return s
+}
+
+// Value distribution of ‖assoc(p_i,p_j,c)‖² over the 137-probe pairs (verified,
+// stable across c): {0:~800, 4:~1240, 8:~1700, 16:~1500, larger:~4000} — NO
+// value 2. Smallest nonzero is 4, giving a sparse (~13%) conflict graph; used as
+// the twisted-unit target T=4 below.
+
+// Associator conflict graph for primitive c: edge (i,j) iff
+// ‖[p_i,p_j,c]‖²==4 OR ‖[p_j,p_i,c]‖²==4 (symmetrized; T=4 = smallest nonzero).
+fn build_assoc_conflict_adj(cidx: i64) with Mut, Panic {
+    clear_badj()
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            let d1 = assoc_normsq(i, j, cidx)
+            let d2 = assoc_normsq(j, i, cidx)
+            if near(d1, 4.0, 1.0e-9) == 1 || near(d2, 4.0, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Scan the associator conflict graph over all 84 primitives c on the binary
+// weight-≤2 probe. Returns # of c giving a NON-bipartite graph (χ ≥ 3).
+pub fn erdos_run_assoc_conflict_search() -> i64 with IO, Mut, Panic, Div {
+    build_prims()
+    build_big_probe()
+    print("=== Erdos #508/#704 — ASSOCIATOR CONFLICT graph (non-distance) ===\n")
+    print("edge iff ||[p_i,p_j,c]||^2 == 4; probe = binary weight-<=2 (137)\n")
+    var nonbip = 0
+    var first = 0 - 1
+    var emin = 1000000; var emax = 0
+    var tp = 0
+    var c = 0
+    while c < NPRIM {
+        build_assoc_conflict_adj(c)
+        let e = badj_edges()
+        if e < emin { emin = e }
+        if e > emax { emax = e }
+        if total_parity_2colors() == 1 { tp = tp + 1 }
+        if bfs_bipartite() == 0 { nonbip = nonbip + 1; if first < 0 { first = c } }
+        c = c + 1
+    }
+    print("  edges["); print_int(emin); print(".."); print_int(emax); print("]")
+    print("  total-parity-2colors="); print_int(tp); print("/84\n")
+    print("  NON-bipartite (chi>=3) graphs: "); print_int(nonbip); print(" / 84")
+    if first >= 0 { print("  (first at c="); print_int(first); print(")") }
+    print("\n")
+    return nonbip
+}
+
+// Report a concrete χ≥3 certificate: a triangle in the associator conflict
+// graph at c=cidx, plus a greedy chromatic upper bound. For c=0 this finds the
+// triangle {e_1,e_2,e_3} (probe indices 2,3,4) and greedy χ ≈ 10 (so χ ∈ [3,10]).
+var GCOLOR: [i64; 300] = [0; 300]
+pub fn assoc_conflict_witness(cidx: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    build_assoc_conflict_adj(cidx)
+    // find one triangle (i<j<k mutually adjacent)
+    var ti = 0 - 1; var tj = 0 - 1; var tk = 0 - 1
+    var i = 0
+    while i < BIGN && ti < 0 {
+        var j = i + 1
+        while j < BIGN && ti < 0 {
+            if BADJ[(i*BIGN + j) as usize] == 1 {
+                var k = j + 1
+                while k < BIGN && ti < 0 {
+                    if BADJ[(i*BIGN + k) as usize] == 1 && BADJ[(j*BIGN + k) as usize] == 1 {
+                        ti = i; tj = j; tk = k
+                    }
+                    k = k + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if ti >= 0 { print("triangle witness (chi>=3): "); print_int(ti); print(","); print_int(tj); print(","); print_int(tk); print("\n") }
+    else { print("no triangle found (odd cycle longer)\n") }
+    // greedy chromatic upper bound (natural vertex order)
+    var v = 0
+    while v < BIGN { GCOLOR[v as usize] = 0 - 1; v = v + 1 }
+    var maxc = 0
+    v = 0
+    while v < BIGN {
+        // smallest color not used by colored neighbors
+        var col = 0
+        var found = 0
+        while found == 0 {
+            var clash = 0
+            var w = 0
+            while w < BIGN {
+                if BADJ[(v*BIGN + w) as usize] == 1 && GCOLOR[w as usize] == col { clash = 1 }
+                w = w + 1
+            }
+            if clash == 0 { found = 1 } else { col = col + 1 }
+        }
+        GCOLOR[v as usize] = col
+        if col + 1 > maxc { maxc = col + 1 }
+        v = v + 1
+    }
+    print("greedy chromatic upper bound: "); print_int(maxc); print("\n")
+    return maxc
+}
+
+// Exploratory (geometric-bridge gating): chromatic window of the associator
+// conflict graph via greedy max-clique (lower bound on χ) + DSATUR (upper
+// bound). HEURISTIC bounds only. Finding: at T=4 the graph is clique-driven —
+// χ ∈ [8, ~11] with a large clique (ω≥8), i.e. high χ the trivial (near-simplex)
+// way, NOT a route to a new Erdős bound. Motivated the sparse hunt + §11.
+var SAT: [i64; 300] = [0; 300]
+var CLQ: [i64; 300] = [0; 300]
+var BESTCLQ: [i64; 300] = [0; 300]
+var BESTCLEN: i64 = 0
+fn adj(a: i64, b: i64) -> i64 { return BADJ[(a*BIGN + b) as usize] }
+
+fn greedy_clique_size() -> i64 with Mut, Panic {
+    var best = 0
+    BESTCLEN = 0
+    var s = 0
+    while s < BIGN {
+        // build a clique greedily seeded at s
+        var clen = 0
+        CLQ[clen as usize] = s; clen = clen + 1
+        var v = 0
+        while v < BIGN {
+            if v != s {
+                // v adjacent to all current clique members?
+                var ok = 1
+                var t = 0
+                while t < clen { if adj(v, CLQ[t as usize]) == 0 { ok = 0 }; t = t + 1 }
+                if ok == 1 { CLQ[clen as usize] = v; clen = clen + 1 }
+            }
+            v = v + 1
+        }
+        if clen > best {
+            best = clen
+            BESTCLEN = clen
+            var q = 0
+            while q < clen { BESTCLQ[q as usize] = CLQ[q as usize]; q = q + 1 }
+        }
+        s = s + 1
+    }
+    return best
+}
+
+fn dsatur_chi() -> i64 with Mut, Panic {
+    var v = 0
+    while v < BIGN { GCOLOR[v as usize] = 0 - 1; SAT[v as usize] = 0; v = v + 1 }
+    var maxc = 0
+    var done = 0
+    while done < BIGN {
+        // pick uncolored vertex with max saturation, tie -> max degree-ish (first)
+        var pick = 0 - 1; var bestsat = 0 - 1
+        var i = 0
+        while i < BIGN {
+            if GCOLOR[i as usize] < 0 {
+                if SAT[i as usize] > bestsat { bestsat = SAT[i as usize]; pick = i }
+            }
+            i = i + 1
+        }
+        // smallest color not used by neighbors of pick
+        var col = 0; var found = 0
+        while found == 0 {
+            var clash = 0; var w = 0
+            while w < BIGN {
+                if adj(pick, w) == 1 && GCOLOR[w as usize] == col { clash = 1 }
+                w = w + 1
+            }
+            if clash == 0 { found = 1 } else { col = col + 1 }
+        }
+        GCOLOR[pick as usize] = col
+        if col + 1 > maxc { maxc = col + 1 }
+        // update saturation of neighbors (recompute distinct neighbor-colors)
+        var n = 0
+        while n < BIGN {
+            if adj(pick, n) == 1 && GCOLOR[n as usize] < 0 {
+                // count distinct colors among n's neighbors
+                var cnt = 0; var col2 = 0
+                while col2 <= maxc {
+                    var used = 0; var m = 0
+                    while m < BIGN { if adj(n, m) == 1 && GCOLOR[m as usize] == col2 { used = 1 }; m = m + 1 }
+                    if used == 1 { cnt = cnt + 1 }
+                    col2 = col2 + 1
+                }
+                SAT[n as usize] = cnt
+            }
+            n = n + 1
+        }
+        done = done + 1
+    }
+    return maxc
+}
+
+pub fn assoc_chi_window(cidx: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    build_assoc_conflict_adj(cidx)
+    let lo = greedy_clique_size()
+    let hi = dsatur_chi()
+    print("c="); print_int(cidx); print(": chi in ["); print_int(lo)
+    print(" (clique), "); print_int(hi); print(" (DSATUR)]  edges="); print_int(badj_edges()); print("\n")
+    print("  clique vertices: ")
+    var q = 0
+    while q < BESTCLEN { print_int(BESTCLQ[q as usize]); print(" "); q = q + 1 }
+    print("\n")
+    return hi
+}
+
+// Exploratory: per-target (T, edges, clique, DSATUR) scan looking for χ ≫ ω.
+// Builds the symmetrized conflict graph at each T. (Heuristic bounds; the
+// rigorous sparse gap is §11.)
+fn build_assoc_conflict_adj_T(cidx: i64, T: f64) with Mut, Panic {
+    clear_badj()
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            let d1 = assoc_normsq(i, j, cidx)
+            let d2 = assoc_normsq(j, i, cidx)
+            if near(d1, T, 1.0e-9) == 1 || near(d2, T, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+pub fn assoc_sparse_hunt(cidx: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    print("=== sparse-regime hunt (c="); print_int(cidx); print("): chi vs clique per target T ===\n")
+    // candidate targets (exact integer ‖assoc‖² values; scan a fixed honest set)
+    let targets: [i64; 10] = [2, 4, 6, 8, 12, 16, 24, 32, 48, 64]
+    var bestgap = 0
+    var ti = 0
+    while ti < 10 {
+        let T = targets[ti as usize]
+        build_assoc_conflict_adj_T(cidx, T as f64)
+        let e = badj_edges()
+        if e > 0 {
+            let w = greedy_clique_size()
+            let chi = dsatur_chi()
+            let gap = chi - w
+            if gap > bestgap { bestgap = gap }
+            print("  T="); print_int(T); print(": edges="); print_int(e)
+            print(" clique="); print_int(w); print(" chi<="); print_int(chi)
+            print(" gap(chi-clique)="); print_int(gap); print("\n")
+        }
+        ti = ti + 1
+    }
+    print("best (DSATUR-upper - clique-lower) over targets: "); print_int(bestgap)
+    print("  NOTE: heuristic BOUNDS only — NOT a proven chi>omega gap (DSATUR is an\n")
+    print("  upper bound, greedy clique a lower bound). For a RIGOROUS sparse gap see\n")
+    print("  erdos_run_sparse_gap (triangle-free induced subgraph, exact).\n")
+    return bestgap
+}
+
+// Exact max-clique via backtracking (feasible: bounded clique size on these
+// graphs). Gives a rigorous ω; combined with bfs_bipartite (exact χ≥3 test) it
+// pins the χ≥3 part. NOTE: exact χ itself is NOT computed — proving
+// non-k-colorability by backtracking is exponential and infeasible at 137
+// vertices (empirically times out), so χ>ω cannot be certified at this scale;
+// the per-target scan above reports only heuristic (clique, DSATUR) BOUNDS.
+var MAXCLQ: i64 = 0
+fn clique_extend(depth: i64, last: i64) with Mut, Panic {
+    var v = last + 1
+    while v < BIGN {
+        var ok = 1; var t = 0
+        while t < depth { if adj(v, CLQ[t as usize]) == 0 { ok = 0 }; t = t + 1 }
+        if ok == 1 {
+            CLQ[depth as usize] = v
+            if depth + 1 > MAXCLQ { MAXCLQ = depth + 1 }
+            clique_extend(depth + 1, v)
+        }
+        v = v + 1
+    }
+}
+fn exact_max_clique() -> i64 with Mut, Panic { MAXCLQ = 0; clique_extend(0, 0 - 1); return MAXCLQ }
+
+// ============================================================================
+// §11. SPARSE rigorous gap (slice 5): a TRIANGLE-FREE induced subgraph (ω=2)
+//      that is NON-bipartite (χ≥3) is a rigorous χ>ω witness in the sparse
+//      regime — both checks exact (triangle-free by construction; bipartite by
+//      BFS). This is the χ≫ω territory the clique-driven χ≥8 was NOT.
+// ============================================================================
+var SUBV: [i64; 137] = [0; 137]
+var NSUB: i64 = 0
+var SADJ: [i64; 18769] = [0; 18769]   // NSUB×NSUB induced sub-adjacency
+var SCOLOR: [i64; 137] = [0; 137]
+var SQUEUE: [i64; 137] = [0; 137]
+
+fn sadj(a: i64, b: i64) -> i64 { return SADJ[(a*NSUB + b) as usize] }
+
+// Greedily extract a maximal triangle-free induced subgraph from BADJ.
+fn extract_triangle_free() with Mut, Panic {
+    NSUB = 0
+    var v = 0
+    while v < BIGN {
+        var okv = 1
+        var a = 0
+        while a < NSUB {
+            if adj(v, SUBV[a as usize]) == 1 {
+                var b = a + 1
+                while b < NSUB {
+                    if adj(v, SUBV[b as usize]) == 1 && adj(SUBV[a as usize], SUBV[b as usize]) == 1 { okv = 0 }
+                    b = b + 1
+                }
+            }
+            a = a + 1
+        }
+        if okv == 1 { SUBV[NSUB as usize] = v; NSUB = NSUB + 1 }
+        v = v + 1
+    }
+    var i = 0
+    while i < NSUB {
+        var j = 0
+        while j < NSUB { SADJ[(i*NSUB + j) as usize] = adj(SUBV[i as usize], SUBV[j as usize]); j = j + 1 }
+        i = i + 1
+    }
+}
+
+fn sub_edges() -> i64 {
+    var c = 0; var i = 0
+    while i < NSUB { var j = i + 1; while j < NSUB { if sadj(i, j) == 1 { c = c + 1 }; j = j + 1 } i = i + 1 }
+    return c
+}
+
+// Verify the subgraph is triangle-free (ω ≤ 2). Returns 1 if triangle-free.
+fn sub_triangle_free() -> i64 {
+    var i = 0
+    while i < NSUB {
+        var j = i + 1
+        while j < NSUB {
+            if sadj(i, j) == 1 {
+                var k = j + 1
+                while k < NSUB { if sadj(i, k) == 1 && sadj(j, k) == 1 { return 0 }; k = k + 1 }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// BFS bipartiteness on SADJ. 1 = bipartite, 0 = non-bipartite (χ≥3).
+fn sub_bipartite() -> i64 with Mut, Panic {
+    var i = 0
+    while i < NSUB { SCOLOR[i as usize] = 2; i = i + 1 }
+    var comp = 0
+    while comp < NSUB {
+        if SCOLOR[comp as usize] == 2 {
+            SCOLOR[comp as usize] = 0
+            var head = 0; var tail = 0
+            SQUEUE[tail as usize] = comp; tail = tail + 1
+            while head < tail {
+                let cur = SQUEUE[head as usize]; head = head + 1
+                var w = 0
+                while w < NSUB {
+                    if sadj(cur, w) == 1 {
+                        if SCOLOR[w as usize] == 2 { SCOLOR[w as usize] = 1 - SCOLOR[cur as usize]; SQUEUE[tail as usize] = w; tail = tail + 1 }
+                        else { if SCOLOR[w as usize] == SCOLOR[cur as usize] { return 0 } }
+                    }
+                    w = w + 1
+                }
+            }
+        }
+        comp = comp + 1
+    }
+    return 1
+}
+
+var SDIST: [i64; 137] = [0; 137]
+var SPAR:  [i64; 137] = [0; 137]
+var CYC:   [i64; 137] = [0; 137]
+var CYCLEN: i64 = 0
+var P1: [i64; 137] = [0; 137]
+var P2: [i64; 137] = [0; 137]
+
+// Find a shortest odd cycle in the triangle-free subgraph SADJ (chordless ⇒
+// induced). Fills CYC[0..CYCLEN) with sub-indices; returns length (0 if none).
+fn shortest_odd_cycle() -> i64 with Mut, Panic {
+    var best = 1000000; var bu = 0 - 1; var bw = 0 - 1; var bs = 0 - 1
+    var s = 0
+    while s < NSUB {
+        var i = 0
+        while i < NSUB { SDIST[i as usize] = 0 - 1; i = i + 1 }
+        SDIST[s as usize] = 0
+        var head = 0; var tail = 0; SQUEUE[0 as usize] = s; tail = 1
+        while head < tail {
+            let cur = SQUEUE[head as usize]; head = head + 1
+            var w = 0
+            while w < NSUB {
+                if sadj(cur, w) == 1 && SDIST[w as usize] < 0 {
+                    SDIST[w as usize] = SDIST[cur as usize] + 1; SQUEUE[tail as usize] = w; tail = tail + 1
+                }
+                w = w + 1
+            }
+        }
+        var u = 0
+        while u < NSUB {
+            var w = u + 1
+            while w < NSUB {
+                if sadj(u, w) == 1 && SDIST[u as usize] >= 0 && SDIST[u as usize] == SDIST[w as usize] {
+                    let len = 2 * SDIST[u as usize] + 1
+                    if len < best { best = len; bu = u; bw = w; bs = s }
+                }
+                w = w + 1
+            }
+            u = u + 1
+        }
+        s = s + 1
+    }
+    if bu < 0 { CYCLEN = 0; return 0 }
+    // rebuild BFS tree from bs with parents
+    var i2 = 0
+    while i2 < NSUB { SDIST[i2 as usize] = 0 - 1; SPAR[i2 as usize] = 0 - 1; i2 = i2 + 1 }
+    SDIST[bs as usize] = 0
+    var h2 = 0; var t2 = 0; SQUEUE[0 as usize] = bs; t2 = 1
+    while h2 < t2 {
+        let cur = SQUEUE[h2 as usize]; h2 = h2 + 1
+        var w = 0
+        while w < NSUB {
+            if sadj(cur, w) == 1 && SDIST[w as usize] < 0 {
+                SDIST[w as usize] = SDIST[cur as usize] + 1; SPAR[w as usize] = cur; SQUEUE[t2 as usize] = w; t2 = t2 + 1
+            }
+            w = w + 1
+        }
+    }
+    // P1 = bu..bs, P2 = bw..bs
+    var l1 = 0; var x = bu
+    while x >= 0 { P1[l1 as usize] = x; l1 = l1 + 1; x = SPAR[x as usize] }
+    var l2 = 0; var y = bw
+    while y >= 0 { P2[l2 as usize] = y; l2 = l2 + 1; y = SPAR[y as usize] }
+    // cycle = P1 (bu..bs) then P2 reversed excluding bs (i.e., from index l2-2 down to 0)
+    CYCLEN = 0
+    var a = 0
+    while a < l1 { CYC[CYCLEN as usize] = P1[a as usize]; CYCLEN = CYCLEN + 1; a = a + 1 }
+    var b = l2 - 2
+    while b >= 0 { CYC[CYCLEN as usize] = P2[b as usize]; CYCLEN = CYCLEN + 1; b = b - 1 }
+    return CYCLEN
+}
+
+// 1 if CYC is an induced (chordless) cycle in SADJ, else 0.
+fn cycle_is_induced() -> i64 {
+    var i = 0
+    while i < CYCLEN {
+        var j = i + 1
+        while j < CYCLEN {
+            let adjacent = sadj(CYC[i as usize], CYC[j as usize])
+            // consecutive (incl wrap) must be edges; non-consecutive must be non-edges
+            let consec = if (j == i + 1) || (i == 0 && j == CYCLEN - 1) { 1 } else { 0 }
+            if consec == 1 && adjacent == 0 { return 0 }
+            if consec == 0 && adjacent == 1 { return 0 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+pub fn erdos_run_sparse_gap(cidx: i64, T: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    build_assoc_conflict_adj_T(cidx, T as f64)
+    extract_triangle_free()
+    let tf = sub_triangle_free()
+    let bip = sub_bipartite()
+    print("=== sparse rigorous gap (c="); print_int(cidx); print(" T="); print_int(T); print(") ===\n")
+    print("triangle-free induced subgraph: NSUB="); print_int(NSUB)
+    print(" sub-edges="); print_int(sub_edges())
+    print(" triangle_free="); print_int(tf); print(" bipartite="); print_int(bip); print("\n")
+    if tf == 1 && bip == 0 {
+        print("=> RIGOROUS sparse gap: triangle-free (omega=2) AND non-bipartite (chi>=3). chi>omega.\n")
+        let L = shortest_odd_cycle()
+        let ind = cycle_is_induced()
+        print("   shortest odd cycle length="); print_int(L); print(" induced="); print_int(ind); print("\n")
+        print("   cycle probe-vertex indices: ")
+        var q = 0
+        while q < CYCLEN { print_int(SUBV[CYC[q as usize] as usize]); print(" "); q = q + 1 }
+        print("\n")
+        return 1
+    }
+    print("=> no proven sparse gap from this (c,T).\n")
+    return 0
+}
+
+// ============================================================================
+// §12. REALIZABLE unit-distance graph (slice 6): a Euclidean distance graph on
+//      the 84 ZD primitives (integer points e_lo±e_hi in ℝ¹⁶). Edge (i,j) iff
+//      ‖p_i−p_j‖² == T. Scaling by 1/√T makes edges exactly distance 1, so this
+//      IS a unit-distance graph in ℝ¹⁶ (an induced UD subgraph) — REALIZABLE and
+//      integer-exact, unlike the (non-distance) associator conflict graph. A
+//      χ>ω witness here is a genuine #704-flavored object (foothold in χ(ℝ¹⁶)),
+//      tied to the 168/ZD structure via the primitive point set. Honest scope:
+//      a small exact realizable witness, NOT a competitive bound on χ(ℝ¹⁶).
+// ============================================================================
+
+// Load the 84 valid primitives as integer points in BIGPROBE (BIGN=84).
+pub fn build_prim_points() with Mut {
+    build_prims()                            // PRIM_LO/HI/NEG, NPRIM=84
+    var i = 0
+    while i < 1344 { BIGPROBE[i as usize] = 0.0; i = i + 1 }
+    BIGN = NPRIM
+    var p = 0
+    while p < NPRIM {
+        BIGPROBE[(p*16 + PRIM_LO[p as usize]) as usize] = 1.0
+        let s = if PRIM_NEG[p as usize] == 1 { 0.0 - 1.0 } else { 1.0 }
+        BIGPROBE[(p*16 + PRIM_HI[p as usize]) as usize] = s
+        p = p + 1
+    }
+}
+
+// Euclidean unit-distance graph at squared-distance target T (realizable).
+fn build_euclid_adj(T: f64) with Mut, Panic {
+    clear_badj()
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            big_point_diff(i, j)
+            if near(norm_sq(&DIFF), T, 1.0e-9) == 1 {
+                BADJ[(i*BIGN + j) as usize] = 1
+                BADJ[(j*BIGN + i) as usize] = 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+// Histogram of pairwise squared Euclidean distances among the 84 primitives.
+pub fn euclid_dist_hist() -> i64 with IO, Mut, Panic, Div {
+    build_prim_points()
+    var c0=0; var c2=0; var c4=0; var c6=0; var c8=0; var co=0
+    var i = 0
+    while i < BIGN {
+        var j = i + 1
+        while j < BIGN {
+            big_point_diff(i, j)
+            let d = norm_sq(&DIFF)
+            if near(d,0.0,1.0e-9)==1 { c0=c0+1 }
+            else { if near(d,2.0,1.0e-9)==1 { c2=c2+1 }
+            else { if near(d,4.0,1.0e-9)==1 { c4=c4+1 }
+            else { if near(d,6.0,1.0e-9)==1 { c6=c6+1 }
+            else { if near(d,8.0,1.0e-9)==1 { c8=c8+1 } else { co=co+1 } } } } }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    print("84-primitive pairwise ||diff||^2: 0="); print_int(c0); print(" 2="); print_int(c2)
+    print(" 4="); print_int(c4); print(" 6="); print_int(c6); print(" 8="); print_int(c8)
+    print(" other="); print_int(co); print("\n")
+    return 0
+}
+
+// Hunt a rigorous χ>ω in the REALIZABLE (Euclidean, ℝ¹⁶) unit-distance graph on
+// the 84 primitives at target T: triangle-free induced subgraph (ω=2) that is
+// non-bipartite (χ≥3) ⇒ realizable χ>ω. Reports the induced odd-cycle witness
+// as primitive descriptors (lo,hi,neg) for Lean certification.
+pub fn erdos_run_realizable_gap(T: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prim_points()
+    build_euclid_adj(T as f64)
+    let fe = badj_edges()
+    extract_triangle_free()
+    let tf = sub_triangle_free()
+    let bip = sub_bipartite()
+    print("=== REALIZABLE gap (84 primitives, ||diff||^2=="); print_int(T); print(") ===\n")
+    print("full-graph edges="); print_int(fe)
+    print("  triangle-free subgraph NSUB="); print_int(NSUB)
+    print(" sub-edges="); print_int(sub_edges())
+    print(" tf="); print_int(tf); print(" bip="); print_int(bip); print("\n")
+    if tf == 1 && bip == 0 {
+        let L = shortest_odd_cycle()
+        let ind = cycle_is_induced()
+        print("=> RIGOROUS realizable chi>omega: induced odd cycle length="); print_int(L)
+        print(" induced="); print_int(ind); print(" (omega=2, chi>=3) — a unit-distance graph in R^16\n")
+        print("   cycle primitives (lo,hi,neg):\n")
+        var q = 0
+        while q < CYCLEN {
+            let pidx = SUBV[CYC[q as usize] as usize]
+            print("     e"); print_int(PRIM_LO[pidx as usize])
+            if PRIM_NEG[pidx as usize] == 1 { print(" - e") } else { print(" + e") }
+            print_int(PRIM_HI[pidx as usize]); print("\n")
+            q = q + 1
+        }
+        return 1
+    }
+    print("=> no proven realizable gap from T="); print_int(T); print("\n")
+    return 0
+}
+
+// Contrast: same realizable Euclidean UD construction on the GENERIC 137-point
+// weight-≤2 binary set (not sedenion-specific). Returns 1 if a rigorous sparse
+// χ>ω (triangle-free non-bipartite) is found.
+pub fn erdos_run_realizable_gap_binary(T: i64) -> i64 with IO, Mut, Panic, Div {
+    build_prims(); build_big_probe()
+    build_euclid_adj(T as f64)
+    let fe = badj_edges()
+    extract_triangle_free()
+    let tf = sub_triangle_free()
+    let bip = sub_bipartite()
+    print("REALIZABLE (137 binary, ||diff||^2=="); print_int(T); print("): edges="); print_int(fe)
+    print(" tf-subgraph NSUB="); print_int(NSUB); print(" tf="); print_int(tf); print(" bip="); print_int(bip)
+    if tf == 1 && bip == 0 { print("  => sparse chi>omega (generic)\n"); return 1 }
+    print("  => bipartite/clique-driven\n")
+    return 0
+}
+
+pub fn erdos_unit_distance_module_ready() -> i32 { 1 }

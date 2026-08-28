@@ -1,0 +1,296 @@
+// MANUAL SETUP REQUIRED -- not part of the default run-pass suite.
+//
+// Task 8 fix-round-1 (final review): confirms `tls_recv`'s pending-buffer
+// fix end-to-end against a REAL openssl s_server, exercising cases the pure
+// unit test (tests/run-pass/tls_client_recv_pending_split.sio) cannot,
+// since that one never touches TLS record decryption or the network:
+//
+//   1. A `cap` (4096, same as tls_client_application_data_loopback.sio)
+//      that turns out to be LARGER than this client's own actual response
+//      (~3929 bytes -- see next paragraph on why it's smaller than a stock
+//      openssl client's own ~4643-byte response against the same server):
+//      the "content smaller than cap, unchanged" case, delivered in one
+//      `tls_recv` call with no buffering. The exact "content_len > cap"
+//      arithmetic itself is unit-tested directly and exhaustively in
+//      tests/run-pass/tls_client_recv_pending_split.sio.
+//   2. A tiny `cap` (37 bytes, far smaller than one TLS record's decrypted
+//      content) driving MANY small `tls_recv` calls against the SAME
+//      connection -- all but the first of which must be served entirely
+//      from `conn.pending` with zero new network activity.
+//   3. Draining a record's pending overflow across that many small calls
+//      reconstructs the exact original bytes, in the exact original order,
+//      with nothing duplicated or lost.
+//
+// IMPORTANT -- measured 2026-08-26, corrects an earlier draft of this test
+// that assumed two separate connections to the same `openssl s_server -www`
+// would receive byte-identical application data: they do NOT, for TWO
+// independent reasons found while building this file.
+//
+// First, `openssl s_server -www`'s own response embeds real per-connection
+// state (`Session-ID`, `Resumption PSK`, `Start Time`, the running "N
+// server accepts" counter) that changes every single connection --
+// confirmed by running two back-to-back `openssl s_client` requests against
+// one `s_server` process and diffing the output.
+//
+// Second, and much larger in byte count: this repository's own TLS client
+// (`stdlib/tls/client_hello.sio`) advertises a narrower set of groups/
+// signature-algorithms/ciphers (x25519 only; AES-128-GCM preferred over
+// AES-256-GCM) than a stock `openssl s_client` does (which offers
+// ML-KEM/ML-DSA/brainpool/etc. by default on this OpenSSL 3.5.6 build) --
+// `-www` echoes the negotiated connection's own supported/shared lists back
+// in its response body, so THIS client's own response is genuinely ~714
+// bytes shorter (~3929 vs ~4643) even on a freshly-started server, verified
+// byte-for-byte identical to a stock `s_client`'s response apart from
+// exactly those algorithm-list/cipher lines -- not a sign of any dropped
+// application data.
+//
+// Comparing two SEPARATE connections' accumulated bytes for exact equality,
+// as an earlier version of this file did, is therefore not a reliable test
+// of the fix. This file instead validates EACH connection against openssl
+// s_server -www's known-STATIC response framing (both ends of the response
+// are unconditional literal text `-www` always emits, independent of
+// session state or negotiated algorithms):
+//   prefix (bytes 0..N):
+//     "HTTP/1.0 200 ok\r\nContent-type: text/html\r\n\r\n<HTML><BODY
+//      BGCOLOR=\"#ffffff\">\n<pre>\n\n"
+//   suffix (the response's own final bytes):
+//     "no client certificate available\n</pre></BODY></HTML>\r\n\r\n"
+// A tiny `cap` reaching that exact suffix, at the exact final offset, with
+// no other copy of the response's own leading "HTTP/1.0 200 ok" literal
+// appearing anywhere else in the accumulated buffer (which would indicate
+// duplication/looping), is a direct, non-flaky demonstration that nothing
+// was dropped, duplicated, or reordered while draining `conn.pending`
+// across roughly 3929/37 =~ 107 small `tls_recv` calls.
+//
+// Same fixture/server/request shape as tls_client_application_data_
+// loopback.sio (see that file's own header for the full rationale on PEM
+// loading and the `-args` choice), just a distinct port (44333 -- not
+// 44330/44331/44332, all already claimed by the sibling interop tests) so
+// this test's own openssl s_server instance never collides with theirs.
+//
+// To run:
+//   1. Start the server against the COMMITTED fixture key+cert, with -www:
+//        openssl s_server \
+//          -key tests/interop/fixtures/tls/rsa_key.pem \
+//          -cert tests/interop/fixtures/tls/rsa_cert.pem \
+//          -accept 44333 -tls1_3 -www
+//   2. SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run tests/interop/tls_client_recv_small_buffer_loopback.sio
+
+use tls::client::*
+use x509::trust_store::*
+use x509::cert::*
+use x509::pem::*
+use net::socket::*
+
+fn now_unix() -> i64 with IO {
+    syscall6(201, 0, 0, 0, 0, 0, 0)
+}
+
+fn string_to_rawbuf(s: string) -> (RawBuf, i64) with IO {
+    let n = str_len(s)
+    let out = rawbuf_new(n + 8)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(&out, i, str_char_at(s, i))
+        i = i + 1
+    }
+    (out, n)
+}
+
+// True iff `acc[offset .. offset + literal_len)` byte-for-byte matches
+// `literal`. `offset < 0` (e.g. a suffix check against a too-short buffer)
+// always fails rather than reading out of bounds.
+fn bytes_match_at(acc: &RawBuf, offset: i64, literal: &RawBuf, literal_len: i64) -> bool with IO {
+    if offset < 0 {
+        false
+    } else {
+        var i: i64 = 0
+        var all_match: bool = true
+        while i < literal_len {
+            if rawbuf_get(acc, offset + i) != rawbuf_get(literal, i) {
+                all_match = false
+            }
+            i = i + 1
+        }
+        all_match
+    }
+}
+
+// Counts non-overlapping-start occurrences of `literal` anywhere in
+// `acc[0..acc_len)`. Used to rule out duplication/looping: the response's
+// own leading "HTTP/1.0 200 ok" line must appear exactly once.
+fn count_occurrences(acc: &RawBuf, acc_len: i64, literal: &RawBuf, literal_len: i64) -> i64 with IO {
+    var pos: i64 = 0
+    var count: i64 = 0
+    let last_start = acc_len - literal_len
+    while pos <= last_start {
+        if bytes_match_at(acc, pos, literal, literal_len) {
+            count = count + 1
+        }
+        pos = pos + 1
+    }
+    count
+}
+
+// Recursive accumulate-until-EOF loop, parameterized by the per-call
+// `chunk_cap` -- see stdlib/tls/client.sio's own "control-flow-shape" note
+// above `tcp_recv_exact` (re-cited in tls_client_application_data_
+// loopback.sio's own header) for why this is recursion rather than a
+// `while` loop re-threading a linear `TlsConnection`.
+fn recv_all(conn: TlsConnection, acc: &RawBuf, acc_len: i64, acc_cap: i64, chunk_cap: i64) -> (TlsConnection, i64, i64) with IO, Mut {
+    let tmp = rawbuf_new(chunk_cap + 8)
+    let (conn2, n) = tls_recv(conn, &tmp, chunk_cap)
+    if n < 0 {
+        (conn2, acc_len, n)
+    } else if n == 0 {
+        (conn2, acc_len, 0)
+    } else {
+        let room = acc_cap - acc_len
+        let copy_len = if n > room { room } else { n }
+        var i: i64 = 0
+        while i < copy_len {
+            rawbuf_set(acc, acc_len + i, rawbuf_get(&tmp, i))
+            i = i + 1
+        }
+        recv_all(conn2, acc, acc_len + copy_len, acc_cap, chunk_cap)
+    }
+}
+
+fn load_trust_store() -> (TrustStore, bool) with IO, Mut, Div, Panic {
+    let cert_pem = read_file("tests/interop/fixtures/tls/rsa_cert.pem")
+    let cert_pem_len = str_len(cert_pem)
+    let cert_pem_buf = rawbuf_new(cert_pem_len + 8)
+    var pi: i64 = 0
+    while pi < cert_pem_len {
+        rawbuf_set(&cert_pem_buf, pi, str_char_at(cert_pem, pi))
+        pi = pi + 1
+    }
+    let (der_buf, der_len, _next_offset, pem_err) = pem_decode_next(&cert_pem_buf, cert_pem_len, 0)
+    if pem_err != 0 || der_len == 0 {
+        (TrustStore { certs: [certificate_zero(); 512], bufs: [rawbuf_new(1); 512], count: 0 }, false)
+    } else {
+        let (cert, perr) = x509_parse_certificate(&der_buf, der_len)
+        if perr != 0 {
+            (TrustStore { certs: [certificate_zero(); 512], bufs: [rawbuf_new(1); 512], count: 0 }, false)
+        } else {
+            var store = TrustStore { certs: [certificate_zero(); 512], bufs: [rawbuf_new(1); 512], count: 1 }
+            store.certs[0] = cert
+            store.bufs[0] = der_buf
+            (store, true)
+        }
+    }
+}
+
+// Runs one full request/response cycle against 127.0.0.1:44333, reading the
+// response with `tls_recv(cap: chunk_cap)` throughout. Returns (total_len,
+// acc, status) -- status < 0 is an error, 0 is a clean close_notify EOF.
+fn run_one(store: &TrustStore, chunk_cap: i64) -> (i64, RawBuf, i64) with IO, Mut, Panic {
+    let (host, host_len) = string_to_rawbuf("127.0.0.1")
+    let (conn0, connect_result) = tls_connect(&host, host_len, 44333 as u16, store, now_unix())
+    if connect_result != 0 {
+        (0 - 1, rawbuf_new(1), 0 - 1000 - connect_result)
+    } else {
+        let (request, request_len) = string_to_rawbuf("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+        let (conn1, sent) = tls_send(conn0, &request, request_len)
+        if sent != request_len {
+            (0 - 1, rawbuf_new(1), 0 - 2000)
+        } else {
+            let acc_cap: i64 = 65536
+            let acc = rawbuf_new(acc_cap + 8)
+            let (conn2, total_len, recv_status) = recv_all(conn1, &acc, 0, acc_cap, chunk_cap)
+            if recv_status < 0 {
+                (total_len, acc, recv_status)
+            } else {
+                tls_close(conn2)
+                (total_len, acc, 0)
+            }
+        }
+    }
+}
+
+// Runs one connection at `chunk_cap` and checks it against openssl
+// s_server -www's known-static response framing. Returns true iff every
+// check passes; prints a specific diagnostic on the first failure.
+fn check_one(store: &TrustStore, chunk_cap: i64) -> bool with IO, Mut, Panic {
+    let (total_len, acc, status) = run_one(store, chunk_cap)
+    if status < 0 {
+        println("tls_client_recv_small_buffer_loopback: connection failed, chunk_cap/status")
+        print_int(chunk_cap)
+        print_int(status)
+        println("(is openssl s_server running on 127.0.0.1:44333? see this file's header)")
+        false
+    } else if total_len < 3800 {
+        // Measured 2026-08-26: this client's own -www response is smaller
+        // (~3929 bytes) than a stock `openssl s_client`'s against the same
+        // server (~4643 bytes) -- confirmed byte-for-byte identical apart
+        // from the "Signature Algorithms"/"Supported groups"/negotiated-
+        // cipher lines, which are shorter here purely because this file's
+        // own TLS client (`tls_client::client_hello`) advertises fewer
+        // groups/sig-algs/ciphers (x25519 only, AES-128-GCM preferred over
+        // AES-256-GCM) than a stock openssl client does -- NOT because any
+        // bytes were dropped. 3800 is comfortably below that ~3929 while
+        // still ruling out a connection that failed after only the HTTP
+        // status line or died mid-response.
+        println("tls_client_recv_small_buffer_loopback: response shorter than expected, chunk_cap/total_len")
+        print_int(chunk_cap)
+        print_int(total_len)
+        false
+    } else {
+        let (prefix, prefix_len) = string_to_rawbuf("HTTP/1.0 200 ok\r\nContent-type: text/html\r\n\r\n<HTML><BODY BGCOLOR=\"#ffffff\">\n<pre>\n\n")
+        let (suffix, suffix_len) = string_to_rawbuf("no client certificate available\n</pre></BODY></HTML>\r\n\r\n")
+        let prefix_ok = bytes_match_at(&acc, 0, &prefix, prefix_len)
+        let suffix_ok = bytes_match_at(&acc, total_len - suffix_len, &suffix, suffix_len)
+        if !prefix_ok {
+            println("tls_client_recv_small_buffer_loopback: static prefix mismatch, chunk_cap")
+            print_int(chunk_cap)
+            false
+        } else if !suffix_ok {
+            println("tls_client_recv_small_buffer_loopback: static suffix mismatch (truncation/corruption at the tail), chunk_cap")
+            print_int(chunk_cap)
+            false
+        } else {
+            let (header_line, header_line_len) = string_to_rawbuf("HTTP/1.0 200 ok")
+            let occurrences = count_occurrences(&acc, total_len, &header_line, header_line_len)
+            if occurrences != 1 {
+                println("tls_client_recv_small_buffer_loopback: status line occurred != 1 time (dup/loop check), chunk_cap/occurrences")
+                print_int(chunk_cap)
+                print_int(occurrences)
+                false
+            } else {
+                println("tls_client_recv_small_buffer_loopback: chunk_cap ok, total_len")
+                print_int(chunk_cap)
+                print_int(total_len)
+                true
+            }
+        }
+    }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let (store, store_ok) = load_trust_store()
+    if !store_ok {
+        println("tls_client_recv_small_buffer_loopback: failed to load the fixture trust store")
+        return 1
+    }
+
+    // Case 1 (baseline, 4096 -- the exact buffer size the original bug
+    // report was found against): the real response is already bigger than
+    // this, so this run exercises the overflow/pending path too, just with
+    // far fewer pending-drain calls than the tiny cap below.
+    let ok_4096 = check_one(&store, 4096)
+
+    // Case 2 + 3: tiny cap (37 bytes) forces ~125 `tls_recv` calls against
+    // one connection, nearly all served from `conn.pending` alone.
+    let ok_37 = check_one(&store, 37)
+
+    // A third, differently-shaped cap (200) for extra confidence the fix
+    // isn't accidentally tuned to 37's specific arithmetic.
+    let ok_200 = check_one(&store, 200)
+
+    if ok_4096 && ok_37 && ok_200 {
+        println("tls_client_recv_small_buffer_loopback: all chunk_cap sizes reconstructed the response correctly")
+        return 0
+    } else {
+        return 1
+    }
+}

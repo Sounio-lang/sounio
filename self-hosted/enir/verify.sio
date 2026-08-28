@@ -1,0 +1,752 @@
+// Semantic and structural verifier for canonical E1 ENIR modules.
+
+use enir::ir::*
+
+fn enir_profile_valid(profile: i64) -> bool {
+    profile >= enir_profile_eisa_v0() && profile <= enir_profile_general()
+}
+
+fn enir_type_valid(ty: EnirType) -> bool {
+    if ty.value_kind != enir_value_f64() { return false }
+    if ty.error_kind < enir_error_exact() || ty.error_kind > enir_error_static_bound() { return false }
+    if ty.uncertainty_kind < enir_uncertainty_exact() || ty.uncertainty_kind > enir_uncertainty_unknown() { return false }
+    if ty.status_tracked != 1 || ty.provenance_tracked != 1 { return false }
+    enir_profile_valid(ty.profile)
+}
+
+pub fn enir_f64_class_from_bits(bits: i64) -> i64 {
+    let sign = (bits >> 63) & 1
+    let exponent = (bits >> 52) & 2047
+    let fraction = bits & 4503599627370495
+    if exponent == 0 {
+        if fraction == 0 {
+            return if sign == 0 { enir_fp_positive_zero() } else { enir_fp_negative_zero() }
+        }
+        return enir_fp_subnormal()
+    }
+    if exponent == 2047 {
+        if fraction == 0 {
+            return if sign == 0 { enir_fp_positive_infinity() } else { enir_fp_negative_infinity() }
+        }
+        if (fraction & 2251799813685248) != 0 { return enir_fp_quiet_nan() }
+        return enir_fp_signaling_nan()
+    }
+    enir_fp_normal()
+}
+
+fn enir_type_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.type_count {
+        if module.types[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_policy_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.policy_count {
+        if module.policies[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_module_value_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.value_count {
+        if module.values[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_provenance_index(module: EnirModule, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < module.provenance_count {
+        if module.provenance[i as usize].id == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_value_index(ids: [i64; 128], count: i64, id: i64) -> i64 {
+    var i: i64 = 0
+    while i < count {
+        if ids[i as usize] == id { return i }
+        i = i + 1
+    }
+    -1
+}
+
+fn enir_value_defined(ids: [i64; 128], types: [i64; 128], count: i64, id: i64) -> bool {
+    let _keep_types = types
+    enir_value_index(ids, count, id) >= 0
+}
+
+fn enir_value_branchable(module: EnirModule, ids: [i64; 128], types: [i64; 128], count: i64, id: i64) -> bool {
+    let value_idx = enir_value_index(ids, count, id)
+    if value_idx < 0 { return false }
+    let type_idx = enir_type_index(module, types[value_idx as usize])
+    if type_idx < 0 { return false }
+    let uncertainty = module.types[type_idx as usize].uncertainty_kind
+    uncertainty == enir_uncertainty_exact() || uncertainty == enir_uncertainty_gum1()
+}
+
+fn enir_cfg_edge_arg(edge: EnirEdge, ordinal: i64) -> i64 {
+    if ordinal == 0 { return edge.arg0 }
+    if ordinal == 1 { return edge.arg1 }
+    if ordinal == 2 { return edge.arg2 }
+    if ordinal == 3 { return edge.arg3 }
+    -1
+}
+
+fn enir_cfg_value_available(
+    value_id: i64,
+    use_block: i64,
+    use_position: i64,
+    def_blocks: [i64; 128],
+    def_positions: [i64; 128],
+    dominators: [i64; 16]
+) -> bool {
+    if value_id < 0 || value_id >= ENIR_MAX_VALUES { return false }
+    let def_block = def_blocks[value_id as usize]
+    if def_block < 0 { return false }
+    if def_block == use_block { return def_positions[value_id as usize] < use_position }
+    (dominators[use_block as usize] & (1 << def_block)) != 0
+}
+
+fn enir_verify_cfg(module: EnirModule) -> i64 with Mut, Panic, Div {
+    if !enir_schema_has_cfg(module.schema_version) || module.stage != ENIR_STAGE_LOWERED ||
+       (module.profile != enir_profile_eisa_v1() && module.profile != enir_profile_eisa_v2()) { return 2001 }
+    if module.name.len <= 0 || module.fuel_limit <= 0 || module.fuel_limit > 1000000 { return 2002 }
+    if module.type_count <= 0 || module.type_count > ENIR_MAX_TYPES ||
+       module.value_count <= 0 || module.value_count > ENIR_MAX_VALUES ||
+       module.provenance_count <= 0 || module.provenance_count > ENIR_MAX_PROVENANCE ||
+       module.policy_count <= 0 || module.policy_count > ENIR_MAX_POLICIES ||
+       module.op_count < 0 || module.op_count > ENIR_MAX_OPS ||
+       module.block_count <= 0 || module.block_count > ENIR_MAX_BLOCKS ||
+       module.block_arg_count < 0 || module.block_arg_count > ENIR_MAX_BLOCK_ARGS ||
+       module.edge_count < 0 || module.edge_count > ENIR_MAX_EDGES ||
+       module.observation_count <= 0 || module.observation_count > ENIR_MAX_OBSERVATIONS ||
+       module.program_count != 1 { return 2003 }
+    if module.declared_type_count != module.type_count || module.declared_value_count != module.value_count ||
+       module.declared_provenance_count != module.provenance_count || module.declared_policy_count != module.policy_count ||
+       module.declared_op_count != module.op_count || module.declared_observation_count != module.observation_count ||
+       module.declared_block_count != module.block_count || module.declared_block_arg_count != module.block_arg_count ||
+       module.declared_edge_count != module.edge_count || module.declared_program_count != module.program_count { return 2004 }
+
+    var i: i64 = 0
+    while i < module.type_count {
+        let ty = module.types[i as usize]
+        if ty.id != i || !enir_type_valid(ty) || ty.profile != module.profile { return 2020 + i }
+        if module.profile == enir_profile_eisa_v1() && ty.error_kind != enir_error_dd64() { return 2030 + i }
+        if module.profile == enir_profile_eisa_v2() && ty.error_kind != enir_error_qd128() { return 2035 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < module.policy_count {
+        let policy = module.policies[i as usize]
+        if policy.id != i || policy.name.len <= 0 || policy.branch_kind != enir_branch_policy_count_only() || policy.gate_kind != enir_gate_policy_10_100() { return 2040 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < module.provenance_count {
+        let provenance = module.provenance[i as usize]
+        if provenance.id != i || provenance.source_span_id <= 0 || provenance.transform_id < 0 ||
+           provenance.input_origin_id < -1 || provenance.assumption_id < -1 || provenance.policy_id < -1 { return 2060 + i }
+        if provenance.policy_id >= 0 && enir_policy_index(module, provenance.policy_id) < 0 { return 2080 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < module.value_count {
+        let value = module.values[i as usize]
+        if value.id != i || enir_type_index(module, value.type_id) < 0 || value.provenance_id != i || enir_provenance_index(module, value.provenance_id) < 0 { return 2100 + i }
+        if value.known_bits != 0 && value.known_bits != 1 { return 2120 + i }
+        if value.status_kind != enir_status_clean() || value.status_reason != -1 { return 2140 + i }
+        if value.known_bits == 1 {
+            if value.fp_class != enir_f64_class_from_bits(value.value_bits) { return 2160 + i }
+            if value.error0_bits != 0 || value.error1_bits != 0 || value.error2_bits != 0 ||
+               value.error3_bits != 0 || value.uncertainty_bits != 0 { return 2170 + i }
+        } else if value.value_bits != 0 || value.fp_class != -1 || value.error0_bits != 0 || value.error1_bits != 0 ||
+                  value.error2_bits != 0 || value.error3_bits != 0 || value.uncertainty_bits != 0 { return 2180 + i }
+        i = i + 1
+    }
+
+    var op_blocks: [i64; 128] = [-1; 128]
+    var expected_first: i64 = 0
+    var expected_arg_start: i64 = 0
+    i = 0
+    while i < module.block_count {
+        let block = module.blocks[i as usize]
+        if block.id != i || block.first_op != expected_first || block.op_count < 0 || block.first_op + block.op_count > module.op_count { return 2200 + i }
+        if block.arg_start != expected_arg_start || block.arg_count < 0 || block.arg_start + block.arg_count > module.block_arg_count { return 2220 + i }
+        if block.terminator_kind < enir_term_halt() || block.terminator_kind > enir_term_branch_negative() { return 2240 + i }
+        if block.terminator_fuel_cost != 0 && block.terminator_fuel_cost != 1 { return 2260 + i }
+        var p = block.first_op
+        while p < block.first_op + block.op_count {
+            if op_blocks[p as usize] != -1 { return 2280 + p }
+            op_blocks[p as usize] = i
+            p = p + 1
+        }
+        expected_first = block.first_op + block.op_count
+        expected_arg_start = block.arg_start + block.arg_count
+        i = i + 1
+    }
+    if expected_first != module.op_count { return 2299 }
+    if expected_arg_start != module.block_arg_count { return 2298 }
+
+    var def_blocks: [i64; 128] = [-1; 128]
+    var def_positions: [i64; 128] = [-1; 128]
+    i = 0
+    while i < module.block_arg_count {
+        let arg = module.block_args[i as usize]
+        if arg.id != i || arg.block_id < 0 || arg.block_id >= module.block_count || arg.type_id < 0 || enir_type_index(module, arg.type_id) < 0 ||
+           arg.value_id < 0 || arg.value_id >= module.value_count || arg.provenance_id != module.values[arg.value_id as usize].provenance_id { return 2300 + i }
+        let block = module.blocks[arg.block_id as usize]
+        if arg.id < block.arg_start || arg.id >= block.arg_start + block.arg_count || arg.ordinal != arg.id - block.arg_start { return 2320 + i }
+        if module.values[arg.value_id as usize].type_id != arg.type_id || module.provenance[arg.provenance_id as usize].transform_id != enir_transform_block_arg() { return 2340 + i }
+        if def_blocks[arg.value_id as usize] != -1 { return 2360 + i }
+        def_blocks[arg.value_id as usize] = arg.block_id
+        def_positions[arg.value_id as usize] = -1
+        i = i + 1
+    }
+
+    var predecessor_count: [i64; 16] = [0; 16]
+    i = 0
+    while i < module.edge_count {
+        let edge = module.edges[i as usize]
+        if edge.id != i || edge.from_block < 0 || edge.from_block >= module.block_count || edge.to_block < 0 || edge.to_block >= module.block_count ||
+           edge.arg_count < 0 || edge.arg_count > ENIR_MAX_EDGE_ARGS { return 2400 + i }
+        let target = module.blocks[edge.to_block as usize]
+        if edge.arg_count != target.arg_count { return 2420 + i }
+        var a: i64 = 0
+        while a < ENIR_MAX_EDGE_ARGS {
+            let value_id = enir_cfg_edge_arg(edge, a)
+            if a < edge.arg_count {
+                if value_id < 0 || value_id >= module.value_count { return 2440 + i }
+                let target_arg = module.block_args[(target.arg_start + a) as usize]
+                if module.values[value_id as usize].type_id != target_arg.type_id { return 2460 + i }
+            } else if value_id != -1 { return 2480 + i }
+            a = a + 1
+        }
+        predecessor_count[edge.to_block as usize] = predecessor_count[edge.to_block as usize] + 1
+        i = i + 1
+    }
+    if predecessor_count[0] != 0 { return 2490 }
+    i = 1
+    while i < module.block_count {
+        if predecessor_count[i as usize] <= 0 { return 2491 + i }
+        i = i + 1
+    }
+    if module.block_count == 1 {
+        let only = module.blocks[0]
+        if module.block_arg_count != 0 || module.edge_count != 0 || only.terminator_kind != enir_term_halt() ||
+           only.terminator_fuel_cost != 1 || module.fuel_limit < module.op_count + 1 { return 2498 }
+    }
+    if module.schema_version == ENIR_SCHEMA_CFG_VERSION && module.profile == enir_profile_eisa_v2() && module.block_count > 1 {
+        if module.block_count != 4 || module.edge_count != 4 { return 2499 }
+        let entry = module.blocks[0]
+        let header = module.blocks[1]
+        let body = module.blocks[2]
+        let exit = module.blocks[3]
+        let entry_edge = module.edges[0]
+        let exit_edge = module.edges[1]
+        let body_edge = module.edges[2]
+        let back_edge = module.edges[3]
+        if entry.terminator_kind != enir_term_jump() || entry.terminator_fuel_cost != 0 || entry.edge0 != 0 ||
+           header.terminator_kind != enir_term_branch_zero() || header.terminator_fuel_cost != 1 ||
+           header.edge0 != 1 || header.edge1 != 2 ||
+           body.terminator_kind != enir_term_jump() || body.terminator_fuel_cost != 1 || body.edge0 != 3 ||
+           exit.terminator_kind != enir_term_halt() || exit.terminator_fuel_cost != 1 {
+            return 2497
+        }
+        if entry_edge.from_block != 0 || entry_edge.to_block != 1 ||
+           exit_edge.from_block != 1 || exit_edge.to_block != 3 ||
+           body_edge.from_block != 1 || body_edge.to_block != 2 ||
+           back_edge.from_block != 2 || back_edge.to_block != 1 {
+            return 2496
+        }
+    } else if module.schema_version == ENIR_SCHEMA_JOIN_VERSION {
+        if module.profile != enir_profile_eisa_v2() || module.block_count != 4 || module.edge_count != 4 || module.block_arg_count != 1 { return 2495 }
+        let entry = module.blocks[0]
+        let then_block = module.blocks[1]
+        let else_block = module.blocks[2]
+        let join = module.blocks[3]
+        if entry.arg_count != 0 || entry.terminator_kind != enir_term_branch_zero() || entry.terminator_fuel_cost != 1 || entry.edge0 != 0 || entry.edge1 != 1 ||
+           then_block.arg_count != 0 || then_block.terminator_kind != enir_term_jump() || then_block.terminator_fuel_cost != 1 || then_block.edge0 != 2 ||
+           else_block.arg_count != 0 || else_block.terminator_kind != enir_term_jump() || else_block.terminator_fuel_cost != 1 || else_block.edge0 != 3 ||
+           join.arg_start != 0 || join.arg_count != 1 || join.terminator_kind != enir_term_halt() || join.terminator_fuel_cost != 1 {
+            return 2494
+        }
+        if module.edges[0].from_block != 0 || module.edges[0].to_block != 1 || module.edges[0].arg_count != 0 ||
+           module.edges[1].from_block != 0 || module.edges[1].to_block != 2 || module.edges[1].arg_count != 0 ||
+           module.edges[2].from_block != 1 || module.edges[2].to_block != 3 || module.edges[2].arg_count != 1 ||
+           module.edges[3].from_block != 2 || module.edges[3].to_block != 3 || module.edges[3].arg_count != 1 {
+            return 2493
+        }
+    }
+
+    i = 0
+    while i < module.block_count {
+        let block = module.blocks[i as usize]
+        if block.terminator_kind == enir_term_halt() {
+            if block.condition_value != -1 || block.edge0 != -1 || block.edge1 != -1 { return 2500 + i }
+        } else if block.terminator_kind == enir_term_jump() {
+            if block.condition_value != -1 || block.edge0 < 0 || block.edge0 >= module.edge_count || block.edge1 != -1 || module.edges[block.edge0 as usize].from_block != i { return 2520 + i }
+        } else {
+            if block.condition_value < 0 || block.condition_value >= module.value_count || block.edge0 < 0 || block.edge0 >= module.edge_count ||
+               block.edge1 < 0 || block.edge1 >= module.edge_count || block.edge0 == block.edge1 ||
+               module.edges[block.edge0 as usize].from_block != i || module.edges[block.edge1 as usize].from_block != i || block.terminator_fuel_cost != 1 { return 2540 + i }
+            let ty = module.types[module.values[block.condition_value as usize].type_id as usize]
+            if ty.uncertainty_kind != enir_uncertainty_exact() && ty.uncertainty_kind != enir_uncertainty_gum1() { return 2560 + i }
+        }
+        i = i + 1
+    }
+
+    var reachable: [i64; 16] = [0; 16]
+    reachable[0] = 1
+    var round: i64 = 0
+    while round < module.block_count {
+        i = 0
+        while i < module.edge_count {
+            let edge = module.edges[i as usize]
+            if reachable[edge.from_block as usize] == 1 { reachable[edge.to_block as usize] = 1 }
+            i = i + 1
+        }
+        round = round + 1
+    }
+    var all_bits: i64 = 0
+    i = 0
+    while i < module.block_count {
+        if reachable[i as usize] != 1 { return 2580 + i }
+        all_bits = all_bits | (1 << i)
+        i = i + 1
+    }
+    var dominators: [i64; 16] = [0; 16]
+    dominators[0] = 1
+    i = 1
+    while i < module.block_count { dominators[i as usize] = all_bits; i = i + 1 }
+    round = 0
+    while round < module.block_count {
+        var changed = false
+        var block_id: i64 = 1
+        while block_id < module.block_count {
+            var intersection = all_bits
+            var saw_pred = false
+            i = 0
+            while i < module.edge_count {
+                let edge = module.edges[i as usize]
+                if edge.to_block == block_id {
+                    intersection = intersection & dominators[edge.from_block as usize]
+                    saw_pred = true
+                }
+                i = i + 1
+            }
+            if !saw_pred { return 2600 + block_id }
+            let updated = intersection | (1 << block_id)
+            if updated != dominators[block_id as usize] { dominators[block_id as usize] = updated; changed = true }
+            block_id = block_id + 1
+        }
+        if !changed { round = module.block_count } else { round = round + 1 }
+    }
+
+    // Definite memory initialization is a forward must-analysis. Non-entry
+    // blocks start at top and predecessor intersection converges through loops.
+    let all_memory_slots: i64 = (1 << 16) - 1
+    var memory_in: [i64; 16] = [65535; 16]
+    var memory_out: [i64; 16] = [65535; 16]
+    memory_in[0] = 0
+    memory_out[0] = 0
+    round = 0
+    var memory_changed = true
+    // At most block_count rounds can change a descending must fact; the extra
+    // round is the explicit fixed-point witness.
+    while round <= module.block_count && memory_changed {
+        memory_changed = false
+        var block_id: i64 = 0
+        while block_id < module.block_count {
+            var incoming: i64 = 0
+            if block_id > 0 {
+                incoming = all_memory_slots
+                i = 0
+                while i < module.edge_count {
+                    let edge = module.edges[i as usize]
+                    if edge.to_block == block_id { incoming = incoming & memory_out[edge.from_block as usize] }
+                    i = i + 1
+                }
+            }
+            var outgoing = incoming
+            let block = module.blocks[block_id as usize]
+            var p = block.first_op
+            while p < block.first_op + block.op_count {
+                let op = module.ops[p as usize]
+                if op.opcode == enir_op_estore() && op.memory_slot >= 0 && op.memory_slot < 16 {
+                    outgoing = outgoing | (1 << op.memory_slot)
+                }
+                p = p + 1
+            }
+            if memory_in[block_id as usize] != incoming || memory_out[block_id as usize] != outgoing { memory_changed = true }
+            memory_in[block_id as usize] = incoming; memory_out[block_id as usize] = outgoing
+            block_id = block_id + 1
+        }
+        round = round + 1
+    }
+    if memory_changed { return 2619 }
+
+    var gate_count: i64 = 0
+    var block_memory: [i64; 16] = [0; 16]
+    var linear_memory_sites: [i64; 16] = [-1; 16]
+    i = 0
+    while i < module.block_count { block_memory[i as usize] = memory_in[i as usize]; i = i + 1 }
+    i = 0
+    while i < module.op_count {
+        let op = module.ops[i as usize]
+        let block_id = op_blocks[i as usize]
+        if op.id != i || block_id < 0 || !enir_cfg_op_allowed(op.opcode) || op.fuel_cost != 1 { return 2620 + i }
+        var produces = false
+        if op.opcode == enir_op_econst() {
+            produces = true
+            if op.a != -1 || op.b != -1 || op.type_id < 0 { return 2640 + i }
+        } else if op.opcode == enir_op_eload() {
+            produces = true
+            if op.a != -1 || op.b != -1 || op.memory_slot < 0 || op.memory_slot >= 16 ||
+               (block_memory[block_id as usize] & (1 << op.memory_slot)) == 0 { return 2660 + i }
+        } else if op.opcode >= enir_op_eadd() && op.opcode <= enir_op_ediv() {
+            produces = true
+            if !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || !enir_cfg_value_available(op.b, block_id, i, def_blocks, def_positions, dominators) { return 2680 + i }
+        } else if op.opcode == enir_op_esqrt() || op.opcode == enir_op_emov() {
+            produces = true
+            if !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) { return 2700 + i }
+        } else if op.opcode == enir_op_egate() {
+            if op.result_id != -1 || op.type_id != -1 || enir_policy_index(module, op.policy_id) < 0 || !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) { return 2720 + i }
+            gate_count = gate_count + 1
+        } else if op.opcode == enir_op_estore() {
+            if op.result_id != -1 || op.type_id != -1 || op.b != -1 ||
+               op.memory_slot < 0 || op.memory_slot >= 16 ||
+               !enir_cfg_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) { return 2740 + i }
+            block_memory[block_id as usize] = block_memory[block_id as usize] | (1 << op.memory_slot)
+        }
+        if produces {
+            if op.result_id < 0 || op.result_id >= module.value_count || op.type_id < 0 || module.values[op.result_id as usize].type_id != op.type_id || def_blocks[op.result_id as usize] != -1 { return 2760 + i }
+            let provenance = module.provenance[module.values[op.result_id as usize].provenance_id as usize]
+            if provenance.transform_id != op.opcode { return 2780 + i }
+            if op.opcode == enir_op_eload() {
+                if module.block_count == 1 {
+                    if provenance.input_origin_id != linear_memory_sites[op.memory_slot as usize] { return 2790 + i }
+                } else if provenance.input_origin_id != -1 { return 2790 + i }
+            }
+            def_blocks[op.result_id as usize] = block_id
+            def_positions[op.result_id as usize] = i
+        } else if op.type_id != -1 { return 2800 + i }
+        if op.opcode == enir_op_estore() { linear_memory_sites[op.memory_slot as usize] = i }
+        i = i + 1
+    }
+    i = 0
+    while i < module.value_count {
+        if def_blocks[i as usize] < 0 { return 2820 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < module.block_count {
+        let block = module.blocks[i as usize]
+        let use_position = block.first_op + block.op_count
+        if block.condition_value >= 0 && !enir_cfg_value_available(block.condition_value, i, use_position, def_blocks, def_positions, dominators) { return 2840 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < module.edge_count {
+        let edge = module.edges[i as usize]
+        let source = module.blocks[edge.from_block as usize]
+        var a: i64 = 0
+        while a < edge.arg_count {
+            if !enir_cfg_value_available(enir_cfg_edge_arg(edge, a), edge.from_block, source.first_op + source.op_count, def_blocks, def_positions, dominators) { return 2860 + i }
+            a = a + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < module.observation_count {
+        let obs = module.observations[i as usize]
+        if obs.id != i || !enir_name_eq(obs.program_name, module.name) || obs.ordinal != i { return 2880 + i }
+        i = i + 1
+    }
+    if gate_count > 0 {
+        if gate_count != module.observation_count { return 2881 }
+        i = 0
+        while i < module.observation_count {
+            if module.observations[i as usize].kind != enir_observation_gate() { return 2884 + i }
+            i = i + 1
+        }
+        if module.schema_version == ENIR_SCHEMA_JOIN_VERSION {
+            var then_stores: [i64; 2] = [0; 2]
+            var else_stores: [i64; 2] = [0; 2]
+            var join_loads: [i64; 2] = [0; 2]
+            i = 0
+            while i < module.op_count {
+                let op = module.ops[i as usize]
+                let block_id = op_blocks[i as usize]
+                if op.opcode == enir_op_estore() {
+                    if op.memory_slot < 0 || op.memory_slot > 1 { return 2885 + i }
+                    if block_id == 1 { then_stores[op.memory_slot as usize] = then_stores[op.memory_slot as usize] + 1 }
+                    else if block_id == 2 { else_stores[op.memory_slot as usize] = else_stores[op.memory_slot as usize] + 1 }
+                    else { return 2886 + i }
+                } else if op.opcode == enir_op_eload() {
+                    if op.memory_slot < 0 || op.memory_slot > 1 || block_id != 3 { return 2887 + i }
+                    join_loads[op.memory_slot as usize] = join_loads[op.memory_slot as usize] + 1
+                }
+                i = i + 1
+            }
+            if then_stores[0] != 1 || then_stores[1] != 1 || else_stores[0] != 1 || else_stores[1] != 1 || join_loads[0] != 1 || join_loads[1] != 1 { return 2888 }
+        }
+    } else {
+        if module.observation_count != 1 || module.observations[0].kind != enir_observation_fuel() { return 2882 }
+        // A fuel-only module must prove that its single empty loop cannot
+        // terminate normally: known non-zero entry condition, unchanged on
+        // the backedge, and no body operations.
+        var header_id: i64 = -1
+        var branch_count: i64 = 0
+        i = 0
+        while i < module.block_count {
+            if module.blocks[i as usize].terminator_kind == enir_term_branch_zero() {
+                header_id = i
+                branch_count = branch_count + 1
+            }
+            i = i + 1
+        }
+        if branch_count != 1 || header_id <= 0 { return 2890 }
+        let header = module.blocks[header_id as usize]
+        var condition_ordinal: i64 = -1
+        i = 0
+        while i < header.arg_count {
+            if module.block_args[(header.arg_start + i) as usize].value_id == header.condition_value { condition_ordinal = i }
+            i = i + 1
+        }
+        if condition_ordinal < 0 { return 2891 }
+        let body_edge = module.edges[header.edge1 as usize]
+        let body = module.blocks[body_edge.to_block as usize]
+        if body.op_count != 0 || body.terminator_kind != enir_term_jump() { return 2892 }
+        let back_edge = module.edges[body.edge0 as usize]
+        if back_edge.to_block != header_id || enir_cfg_edge_arg(back_edge, condition_ordinal) != header.condition_value { return 2893 }
+        var entry_edges: i64 = 0
+        var initial_value: i64 = -1
+        i = 0
+        while i < module.edge_count {
+            let edge = module.edges[i as usize]
+            if edge.to_block == header_id && edge.id != back_edge.id {
+                entry_edges = entry_edges + 1
+                initial_value = enir_cfg_edge_arg(edge, condition_ordinal)
+            }
+            i = i + 1
+        }
+        if entry_edges != 1 || initial_value < 0 { return 2894 }
+        let initial = module.values[initial_value as usize]
+        if initial.known_bits != 1 || (initial.value_bits & 9223372036854775807) == 0 { return 2895 }
+    }
+    0
+}
+
+pub fn enir_verify(module: EnirModule) -> i64 with Mut, Panic, Div {
+    if enir_schema_has_cfg(module.schema_version) { return enir_verify_cfg(module) }
+    if module.schema_version != ENIR_SCHEMA_VERSION { return 101 }
+    if module.stage != ENIR_STAGE_SHADOW && module.stage != ENIR_STAGE_LOWERED { return 102 }
+    if module.name.len <= 0 { return 103 }
+    if !enir_profile_valid(module.profile) { return 104 }
+    if module.type_count <= 0 || module.type_count > ENIR_MAX_TYPES { return 105 }
+    if module.value_count <= 0 || module.value_count > ENIR_MAX_VALUES { return 106 }
+    if module.provenance_count <= 0 || module.provenance_count > ENIR_MAX_PROVENANCE { return 107 }
+    if module.policy_count <= 0 || module.policy_count > ENIR_MAX_POLICIES { return 108 }
+    if module.op_count <= 0 || module.op_count > ENIR_MAX_OPS { return 109 }
+    if module.observation_count <= 0 || module.observation_count > ENIR_MAX_OBSERVATIONS { return 110 }
+    if module.program_count <= 0 || module.program_count > module.observation_count { return 111 }
+    if module.declared_type_count != module.type_count { return 118 }
+    if module.declared_value_count != module.value_count { return 112 }
+    if module.declared_provenance_count != module.provenance_count { return 113 }
+    if module.declared_policy_count != module.policy_count { return 114 }
+    if module.declared_op_count != module.op_count { return 115 }
+    if module.declared_observation_count != module.observation_count { return 116 }
+    if module.declared_program_count != module.program_count { return 117 }
+
+    var i: i64 = 0
+    while i < module.type_count {
+        let ty = module.types[i as usize]
+        if ty.id != i || !enir_type_valid(ty) { return 200 + i }
+        if module.stage == ENIR_STAGE_LOWERED && ty.profile != module.profile { return 220 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.provenance_count {
+        let provenance = module.provenance[i as usize]
+        if provenance.id != i || provenance.source_span_id < 0 || provenance.transform_id < 0 { return 250 + i }
+        if module.stage == ENIR_STAGE_LOWERED && provenance.source_span_id <= 0 { return 260 + i }
+        if provenance.input_origin_id < -1 || provenance.assumption_id < -1 || provenance.policy_id < -1 { return 270 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.value_count {
+        let value = module.values[i as usize]
+        if value.id != i || enir_type_index(module, value.type_id) < 0 || enir_provenance_index(module, value.provenance_id) < 0 { return 280 + i }
+        if value.known_bits != 0 && value.known_bits != 1 { return 290 + i }
+        if value.status_kind < enir_status_clean() || value.status_kind > enir_status_unsupported() { return 300 + i }
+        if value.status_kind == enir_status_clean() && value.status_reason != -1 { return 310 + i }
+        if value.status_kind != enir_status_clean() && value.status_reason < 0 { return 320 + i }
+        let ty = module.types[value.type_id as usize]
+        if value.known_bits == 1 {
+            if value.fp_class < enir_fp_positive_zero() || value.fp_class > enir_fp_signaling_nan() { return 330 + i }
+            if value.fp_class != enir_f64_class_from_bits(value.value_bits) { return 335 + i }
+        } else {
+            if value.value_bits != 0 || value.fp_class != -1 || value.error0_bits != 0 || value.error1_bits != 0 || value.error2_bits != 0 || value.error3_bits != 0 || value.uncertainty_bits != 0 { return 340 + i }
+        }
+        if ty.error_kind == enir_error_exact() && (value.error0_bits != 0 || value.error1_bits != 0 || value.error2_bits != 0 || value.error3_bits != 0) { return 350 + i }
+        if ty.error_kind == enir_error_dd64() && (value.error2_bits != 0 || value.error3_bits != 0) { return 360 + i }
+        if ty.uncertainty_kind == enir_uncertainty_exact() && value.uncertainty_bits != 0 { return 370 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.policy_count {
+        let policy = module.policies[i as usize]
+        if policy.id != i || policy.name.len <= 0 { return 380 + i }
+        if policy.branch_kind != enir_branch_policy_count_only() { return 390 + i }
+        if policy.gate_kind != enir_gate_policy_10_100() { return 395 + i }
+        i = i + 1
+    }
+
+    i = 0
+    while i < module.provenance_count {
+        let policy_id = module.provenance[i as usize].policy_id
+        if policy_id >= 0 && enir_policy_index(module, policy_id) < 0 { return 399 + i }
+        i = i + 1
+    }
+
+    var value_ids: [i64; 128] = [-1; 128]
+    var value_types: [i64; 128] = [-1; 128]
+    var value_count: i64 = 0
+    var gate_count: i64 = 0
+    i = 0
+    while i < module.op_count {
+        let op = module.ops[i as usize]
+        if op.id != i { return 400 + i }
+        if op.opcode < enir_op_econst() || op.opcode > enir_op_ehalt() { return 500 + i }
+        if op.fuel_cost != 1 { return 600 + i }
+        if op.type_id >= 0 && enir_type_index(module, op.type_id) < 0 { return 700 + i }
+
+        var produces = false
+        if op.opcode == enir_op_econst() {
+            produces = true
+            if op.a != -1 || op.b != -1 { return 800 + i }
+        } else if op.opcode == enir_op_eload() {
+            produces = true
+            if op.memory_slot < 0 { return 820 + i }
+        } else if op.opcode >= enir_op_eadd() && op.opcode <= enir_op_ediv() {
+            produces = true
+            if !enir_value_defined(value_ids, value_types, value_count, op.a) || !enir_value_defined(value_ids, value_types, value_count, op.b) { return 840 + i }
+        } else if op.opcode == enir_op_esqrt() {
+            produces = true
+            if !enir_value_defined(value_ids, value_types, value_count, op.a) { return 860 + i }
+        } else if op.opcode == enir_op_egate() {
+            if op.result_id != -1 || !enir_value_defined(value_ids, value_types, value_count, op.a) || enir_policy_index(module, op.policy_id) < 0 { return 880 + i }
+            gate_count = gate_count + 1
+        } else if op.opcode == enir_op_estore() {
+            if op.result_id != -1 || !enir_value_defined(value_ids, value_types, value_count, op.a) || op.memory_slot < 0 { return 900 + i }
+        } else if op.opcode == enir_op_emov() {
+            produces = true
+            if !enir_value_defined(value_ids, value_types, value_count, op.a) { return 920 + i }
+        } else if op.opcode == enir_op_ebr() {
+            if op.result_id != -1 || op.a != -1 || op.b != -1 || op.target < 0 || op.target >= module.op_count || op.policy_id != -1 || op.memory_slot != -1 { return 940 + i }
+        } else if op.opcode == enir_op_ebrz() || op.opcode == enir_op_ebrn() {
+            if op.result_id != -1 || op.b != -1 || op.target < 0 || op.target >= module.op_count || enir_policy_index(module, op.policy_id) < 0 || op.memory_slot != -1 { return 960 + i }
+            if !enir_value_branchable(module, value_ids, value_types, value_count, op.a) { return 980 + i }
+        } else if op.opcode == enir_op_ehalt() {
+            if op.result_id != -1 || op.a != -1 || op.b != -1 || op.target != -1 || op.policy_id != -1 || op.memory_slot != -1 { return 1000 + i }
+        }
+
+        if produces {
+            if op.result_id < 0 || op.type_id < 0 { return 1020 + i }
+            let declared_value_idx = enir_module_value_index(module, op.result_id)
+            if declared_value_idx < 0 || module.values[declared_value_idx as usize].type_id != op.type_id { return 1030 + i }
+            if module.stage == ENIR_STAGE_LOWERED {
+                let provenance_id = module.values[declared_value_idx as usize].provenance_id
+                let provenance_idx = enir_provenance_index(module, provenance_id)
+                if provenance_idx < 0 || module.provenance[provenance_idx as usize].transform_id != op.opcode { return 1035 + i }
+            }
+            if enir_value_defined(value_ids, value_types, value_count, op.result_id) { return 1040 + i }
+            if op.opcode == enir_op_econst() && module.values[declared_value_idx as usize].known_bits != 1 { return 1050 + i }
+            if value_count >= 128 { return 1060 + i }
+            value_ids[value_count as usize] = op.result_id
+            value_types[value_count as usize] = op.type_id
+            value_count = value_count + 1
+        } else if op.type_id != -1 {
+            return 1080 + i
+        }
+        i = i + 1
+    }
+    if value_count != module.value_count { return 1199 }
+    if module.stage == ENIR_STAGE_LOWERED && gate_count != module.observation_count { return 1198 }
+
+    if module.stage == ENIR_STAGE_LOWERED && module.profile == enir_profile_eisa_v1() {
+        if module.ops[(module.op_count - 1) as usize].opcode != enir_op_ehalt() { return 1701 }
+        i = 0
+        while i < module.op_count {
+            let op = module.ops[i as usize]
+            if op.opcode == enir_op_ebrz() {
+                // target=i+2 plus the backedge at i+1 proves the loop body is
+                // structurally empty. Loop-carried values remain an E2C job.
+                if op.target != i + 2 { return 1710 + i }
+                let back = module.ops[(i + 1) as usize]
+                if back.opcode != enir_op_ebr() || back.target != i { return 1720 + i }
+            } else if op.opcode == enir_op_ebrn() {
+                if op.target != i + 2 || i + 1 >= module.op_count { return 1730 + i }
+                let skip = module.ops[(i + 1) as usize]
+                if skip.opcode != enir_op_ebr() || skip.target <= i + 1 || skip.target >= module.op_count { return 1740 + i }
+                var body = i + 2
+                while body < skip.target {
+                    let body_opcode = module.ops[body as usize].opcode
+                    if body_opcode == enir_op_econst() || body_opcode == enir_op_eload() || body_opcode == enir_op_egate() ||
+                       (body_opcode >= enir_op_eadd() && body_opcode <= enir_op_esqrt()) ||
+                       body_opcode == enir_op_emov() {
+                        return 1750 + body
+                    }
+                    body = body + 1
+                }
+            } else if op.opcode == enir_op_ebr() {
+                var owned = false
+                if i > 0 && module.ops[(i - 1) as usize].opcode == enir_op_ebrn() { owned = true }
+                if op.target < i && module.ops[op.target as usize].opcode == enir_op_ebrz() && module.ops[op.target as usize].target == i + 1 { owned = true }
+                if !owned { return 1760 + i }
+            } else if op.opcode == enir_op_ehalt() && i != module.op_count - 1 {
+                return 1770 + i
+            }
+            i = i + 1
+        }
+    }
+
+    var programs: i64 = 0
+    var previous_name = enir_name_empty()
+    var expected_ordinal: i64 = 0
+    i = 0
+    while i < module.observation_count {
+        let obs = module.observations[i as usize]
+        if obs.id != i || obs.program_name.len <= 0 { return 1200 + i }
+        if obs.kind != enir_observation_gate() && obs.kind != enir_observation_fuel() { return 1300 + i }
+        if i == 0 || !enir_name_eq(obs.program_name, previous_name) {
+            programs = programs + 1
+            expected_ordinal = 0
+            // A program name may occupy only one contiguous observation group.
+            var prior: i64 = 0
+            while prior < i {
+                if enir_name_eq(module.observations[prior as usize].program_name, obs.program_name) { return 1400 + i }
+                prior = prior + 1
+            }
+        }
+        if obs.ordinal != expected_ordinal { return 1500 + i }
+        expected_ordinal = expected_ordinal + 1
+        previous_name = obs.program_name
+        i = i + 1
+    }
+    if programs != module.program_count { return 1601 }
+    if module.stage == ENIR_STAGE_LOWERED && module.program_count != 1 { return 1602 }
+    0
+}

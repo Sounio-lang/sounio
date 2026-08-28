@@ -35,10 +35,11 @@ Why this is the default:
 
 On the current snapshot, that artifact reports:
 
-- `souc 1.0.0-beta.4`
+- `Madaros v0.80.0`
 - Cranelift JIT enabled
 - LLVM and GPU codegen disabled
-- LSP, SMT, ontology, distributed, and package-manager features disabled
+- LSP, SMT, distributed, and package-manager features disabled
+- ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
 
 For GPU-specific verification, use the separate checked GPU artifact:
 

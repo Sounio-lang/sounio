@@ -1,0 +1,436 @@
+// stdlib/bignum/bigint.sio
+//
+// Fixed-width big integer (max 8192 bits = 512 limbs of 16 bits each), for
+// RSA public-key operations only (no private-key/constant-time requirement
+// -- see docs/superpowers/specs/2026-08-23-madaros-bignum-design.md).
+//
+// LIMB WIDTH IS 16 BITS, NOT 32, BY DESIGN: see
+// docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md Finding 11 --
+// u64 right-shift/divide/modulo silently produce wrong results whenever the
+// operand's bit 63 is set. Every arithmetic step in this file keeps its
+// largest intermediate value far below that boundary (documented inline at
+// each step) specifically to never trigger that bug.
+//
+// Zero representation: a BigInt representing zero has len == 0. Every
+// operation normalizes its result to len == 0 if the value is entirely
+// zero -- never leave len > 0 with all-zero limbs.
+
+pub const BIGINT_MAX_LIMBS: i32 = 512
+
+// The REAL usable ceiling for multiplication OPERANDS. BIGINT_MAX_LIMBS (512)
+// is the storage width of a BigInt, but bigint_mul's result must also fit in
+// 512 limbs, so each of its two operands may be at most 256 limbs (4096 bits)
+// for the full product to be representable. Multiplying two operands wider
+// than this (e.g. two 400-limb values) SILENTLY TRUNCATES the high half of the
+// true product. 256 limbs is exactly RSA-4096, this module's largest intended
+// use case.
+pub const BIGINT_MUL_SAFE_OPERAND_LIMBS: i32 = 256
+
+pub struct BigInt {
+    limbs: [u16; 512],   // little-endian: limbs[0] is least significant
+    len: i32,             // number of significant limbs; 0 means the value is zero
+}
+
+pub fn bigint_zero() -> BigInt {
+    BigInt { limbs: [0; 512], len: 0 }
+}
+
+pub fn bigint_from_u32(v: u32) -> BigInt {
+    var result = bigint_zero()
+    let lo = (v & 65535) as u16       // v is a 32-bit input, & 65535 is safe, far from bit 63
+    let hi = (v >> 16) as u16          // v is a 32-bit input; >>16 on a value that fits in u32
+                                        // never approaches bit 63 -- this shift operates on the
+                                        // caller's 32-bit input value, not a wide product
+    result.limbs[0] = lo
+    if hi != 0 {
+        result.limbs[1] = hi
+        result.len = 2
+    } else if lo != 0 {
+        result.len = 1
+    } else {
+        result.len = 0
+    }
+    result
+}
+
+// Compares a and b as unsigned magnitudes. Returns -1 if a<b, 0 if a==b, 1 if a>b.
+// All comparisons here are between plain i32 (len) and u16 (limb) values --
+// never between raw u64 values, so Finding 11's ordering-comparison caveat
+// (only confirmed broken for u64) does not apply anywhere in this function.
+pub fn bigint_cmp(a: &BigInt, b: &BigInt) -> i32 {
+    if a.len < b.len {
+        return 0 - 1
+    }
+    if a.len > b.len {
+        return 1
+    }
+    // Same length: compare from the most significant limb down.
+    var i = a.len - 1
+    while i >= 0 {
+        let ai = a.limbs[i as usize]
+        let bi = b.limbs[i as usize]
+        if ai < bi {
+            return 0 - 1
+        }
+        if ai > bi {
+            return 1
+        }
+        i = i - 1
+    }
+    0
+}
+
+// Adds a and b. Every intermediate `sum` value below is at most
+// 65535 + 65535 + 1 = 131071, computed as u32 -- nowhere near bit 63,
+// so the `>> 16` used to extract the carry is safe per Finding 11
+// (the boundary is bit 63 of a u64; 131071 doesn't even fill 32 bits).
+pub fn bigint_add(a: &BigInt, b: &BigInt) -> BigInt {
+    var result = bigint_zero()
+    var carry: u32 = 0
+    var max_len = a.len
+    if b.len > max_len {
+        max_len = b.len
+    }
+    var i = 0
+    while i < max_len {
+        var ai: u32 = 0
+        if i < a.len {
+            ai = a.limbs[i as usize] as u32
+        }
+        var bi: u32 = 0
+        if i < b.len {
+            bi = b.limbs[i as usize] as u32
+        }
+        let sum: u32 = ai + bi + carry   // max 131071, far below any u64 bit-63 concern
+        result.limbs[i as usize] = (sum & 65535) as u16
+        carry = sum >> 16                 // safe: sum is tiny, nowhere near bit 63
+        i = i + 1
+    }
+    if carry != 0 {
+        // OVERFLOW BEHAVIOR (defined, documented): growing into a new limb is
+        // only possible while there is room. If max_len is already
+        // BIGINT_MAX_LIMBS (512) and a carry remains, the true mathematical
+        // sum needs 513 limbs, which this fixed-width type cannot represent.
+        // In that case the carry is DROPPED -- the result wraps modulo
+        // 2^(512*16) = 2^8192 -- rather than writing past the end of
+        // `result.limbs` (an out-of-bounds write that this compiler does NOT
+        // trap: it silently corrupts memory and yields len == 513).
+        // A documented wraparound is acceptable here; a memory-corrupting
+        // out-of-bounds write is not. Inputs whose sum exceeds 2^8192 are far
+        // outside this module's RSA-2048/RSA-4096 use case.
+        if max_len < 512 {
+            result.limbs[max_len as usize] = carry as u16
+            max_len = max_len + 1
+        }
+    }
+    result.len = max_len
+    // Normalize: trim trailing zero limbs (can only happen if max_len was
+    // computed from operands whose top limb summed to exactly 0, which
+    // cannot happen from addition of two non-negative values unless both
+    // were zero -- but trim defensively anyway to keep the invariant airtight).
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
+
+// Subtracts b from a. REQUIRES bigint_cmp(a, b) >= 0 -- caller's responsibility,
+// per this plan's Global Constraints; an unchecked call with a < b produces a
+// garbage result (not a crash, not a checked error), matching this module's
+// stated error convention.
+pub fn bigint_sub(a: &BigInt, b: &BigInt) -> BigInt {
+    var result = bigint_zero()
+    var borrow: i32 = 0
+    var i = 0
+    while i < a.len {
+        var ai: i32 = a.limbs[i as usize] as i32
+        var bi: i32 = 0
+        if i < b.len {
+            bi = b.limbs[i as usize] as i32
+        }
+        var diff: i32 = ai - bi - borrow   // range roughly -65536..65535, tiny, safe
+        if diff < 0 {
+            diff = diff + 65536
+            borrow = 1
+        } else {
+            borrow = 0
+        }
+        result.limbs[i as usize] = diff as u16
+        i = i + 1
+    }
+    result.len = a.len
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
+
+// Schoolbook O(n^2) multiplication. Accumulates partial products into a
+// u64 array twice the max limb count, then does one final carry-propagation
+// pass. Bound analysis (this is THE reason 16-bit limbs were chosen):
+//   - each partial product a.limbs[i] * b.limbs[j] is at most
+//     65535 * 65535 = 4294836225, comfortably under 2^32, let alone bit 63.
+//   - each accumulator slot can receive at most BIGINT_MAX_LIMBS (512)
+//     partial-product contributions in the worst case (a maximally-sized
+//     a and b), giving a worst-case accumulator value of
+//     512 * 4294836225 ~= 2^41 -- still enormously far below 2^63.
+//   - the final carry-propagation pass's `>> 16` and `& 65535` operate on
+//     values bounded by that same ~2^41 ceiling, safe per Finding 11
+//     (which only breaks values with bit 63 set).
+//
+// Result width ceiling: the true worst-case product of two BIGINT_MAX_LIMBS
+// (512) limb operands needs 2 * BIGINT_MAX_LIMBS = 1024 limbs, which is
+// exactly what `acc` below provides -- no truncation happens during
+// accumulation. But the RESULT `BigInt.limbs` array is only BIGINT_MAX_LIMBS
+// (512) wide, so it can hold at most 512 significant limbs. Two operands
+// each up to BIGINT_MAX_LIMBS/2 = 256 limbs (4096 bits) multiply together
+// safely without truncation -- this is exactly RSA-4096's real usage
+// pattern: modpow only ever squares values already reduced to at most the
+// modulus's width (256 limbs for a 4096-bit modulus), and 256+256=512 fits.
+// Multiplying two full 512-limb (8192-bit) operands together WOULD still
+// truncate the result to 512 limbs, but nothing in this module's intended
+// RSA-2048/RSA-4096 use ever does that.
+//
+// SAFETY PRECONDITION: both operands must have
+// `len <= BIGINT_MUL_SAFE_OPERAND_LIMBS` (256) or the result SILENTLY
+// TRUNCATES. This module's real usable ceiling is therefore RSA-4096 (a
+// 256-limb modulus), consistent with bigint_modpow's squaring pattern, where
+// the accumulator is always kept reduced mod the modulus before each multiply.
+pub fn bigint_mul(a: &BigInt, b: &BigInt) -> BigInt {
+    var acc: [u64; 1024] = [0; 1024]   // BIGINT_MAX_LIMBS * 2
+
+    var i = 0
+    while i < a.len {
+        var j = 0
+        while j < b.len {
+            let ai: u64 = a.limbs[i as usize] as u64
+            let bj: u64 = b.limbs[j as usize] as u64
+            let partial: u64 = ai * bj   // max ~4.29e9, tiny
+            acc[(i + j) as usize] = acc[(i + j) as usize] + partial   // max ~2^41, tiny
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    var result = bigint_zero()
+    var carry: u64 = 0
+    var k = 0
+    while k < 1024 {
+        let total: u64 = acc[k as usize] + carry   // still far below bit 63
+        if k < 512 {
+            result.limbs[k as usize] = (total & 65535) as u16
+        }
+        carry = total >> 16   // safe: total is bounded far below bit 63
+        k = k + 1
+    }
+
+    result.len = 1024
+    if result.len > 512 {
+        result.len = 512   // see the result-width-ceiling comment above this
+                             // function: this clamp only ever discards real
+                             // significant limbs if both operands together
+                             // needed more than BIGINT_MAX_LIMBS (512) limbs,
+                             // which does not happen for this module's
+                             // RSA-2048/RSA-4096 use case
+    }
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
+
+// Binary long division: processes a's bits from most significant to least
+// significant, maintaining a running remainder shifted left by 1 bit and
+// OR'd with the next input bit at each step, subtracting n whenever the
+// remainder is >= n. O(bits^2) but correctness-first; RSA's ~4096-bit
+// modulus makes this a small absolute cost for a once-per-handshake op.
+//
+// Divisor-is-zero: returns a copy of a unchanged (a defined, safe fallback
+// per this module's error convention -- no Result/Option, no crash).
+//
+// ALLOCATION NOTE (this is why the shift and subtract are inlined by hand
+// below instead of calling bigint_shl1_or_bit / bigint_sub): every Sounio
+// function returning a `BigInt` by value allocates a fresh 512-limb array in
+// the Madaros runtime arena, and that arena is NEVER reclaimed within a
+// process. Calling those two helpers once per bit of `a` cost up to
+// 2 * 8192 = 16384 arena allocations per bigint_mod call, which capped a
+// process at a handful of RSA modpows before a hard `madaros: arena full`
+// abort. Mutating a single `remainder` binding's fields in place across the
+// loop is genuinely allocation-free on this runtime (measured), so this
+// function now costs exactly ONE allocation (the initial bigint_zero())
+// regardless of operand width. The arithmetic and all Finding 11 bounds are
+// unchanged -- every intermediate below is still a u32 of at most 131071 or a
+// small i32, nowhere near u64 bit 63.
+//
+// Invariant maintained throughout the loop: every limb at index >= rem_len is
+// zero (rem_len only ever shrinks by trimming limbs that are already zero, and
+// only indices < rem_len, or rem_len itself when growing, are ever written).
+pub fn bigint_mod(a: &BigInt, n: &BigInt) -> BigInt {
+    if n.len == 0 {
+        return *a
+    }
+
+    var remainder = bigint_zero()
+    var rem_len: i32 = 0
+    var bit_index = a.len * 16 - 1   // highest possible bit position in a;
+                                       // a.len <= BIGINT_MAX_LIMBS (512), so
+                                       // bit_index maxes out at 512*16-1 =
+                                       // 8191 -- a tiny i32 value, nowhere
+                                       // near bit 63
+
+    while bit_index >= 0 {
+        let limb_index = bit_index / 16   // bit_index <= 8191, so this
+                                            // division is on tiny i32 values,
+                                            // not a u64 -- Finding 11 doesn't
+                                            // apply to i32 arithmetic at all
+        let bit_offset = bit_index % 16     // same: tiny i32 values only
+        let this_limb: u16 = a.limbs[limb_index as usize]
+        let bit: u16 = (this_limb >> bit_offset) & 1   // this_limb is a 16-bit
+                                                          // value; shifting it
+                                                          // (as u16, promoted
+                                                          // for the op) never
+                                                          // approaches bit 63
+
+        // remainder = (remainder << 1) | bit, in place.
+        // Same bounds as bigint_shl1_or_bit: `shifted` is at most
+        // (65535 << 1) | 1 = 131071 as a u32 -- far below u64 bit 63, so the
+        // `>> 16` carry extraction is safe per Finding 11.
+        var carry: u32 = bit as u32
+        var i = 0
+        while i < rem_len {
+            let limb: u32 = remainder.limbs[i as usize] as u32
+            let shifted: u32 = (limb << 1) | carry   // max 131071, tiny
+            remainder.limbs[i as usize] = (shifted & 65535) as u16
+            carry = shifted >> 16                       // safe: shifted is tiny
+            i = i + 1
+        }
+        if carry != 0 {
+            // Same defined-overflow rule as bigint_add / bigint_shl1_or_bit:
+            // only grow into a new limb if there is room, never write past the
+            // end of the array (this compiler does not trap such a write).
+            if rem_len < 512 {
+                remainder.limbs[rem_len as usize] = carry as u16
+                rem_len = rem_len + 1
+            }
+        }
+        while rem_len > 0 && remainder.limbs[(rem_len - 1) as usize] == 0 {
+            rem_len = rem_len - 1
+        }
+        remainder.len = rem_len
+
+        if bigint_cmp(&remainder, n) >= 0 {
+            // remainder = remainder - n, in place. Identical arithmetic to
+            // bigint_sub, whose precondition (remainder >= n) the comparison
+            // above has just established. `diff` ranges over roughly
+            // -65536..65535 as an i32 -- tiny, and not u64 arithmetic at all.
+            var borrow: i32 = 0
+            var j = 0
+            while j < rem_len {
+                var aj: i32 = remainder.limbs[j as usize] as i32
+                var bj: i32 = 0
+                if j < n.len {
+                    bj = n.limbs[j as usize] as i32
+                }
+                var diff: i32 = aj - bj - borrow
+                if diff < 0 {
+                    diff = diff + 65536
+                    borrow = 1
+                } else {
+                    borrow = 0
+                }
+                remainder.limbs[j as usize] = diff as u16
+                j = j + 1
+            }
+            while rem_len > 0 && remainder.limbs[(rem_len - 1) as usize] == 0 {
+                rem_len = rem_len - 1
+            }
+            remainder.len = rem_len
+        }
+
+        bit_index = bit_index - 1
+    }
+
+    remainder
+}
+
+// Helper: shifts a BigInt left by exactly 1 bit and ORs in a single bit at
+// position 0. Every limb's intermediate value here is at most
+// (65535 << 1) | 1 = 131071, computed as u32 -- tiny, safe.
+fn bigint_shl1_or_bit(a: &BigInt, bit: u16) -> BigInt {
+    var result = bigint_zero()
+    var carry: u32 = bit as u32
+    var i = 0
+    while i < a.len {
+        let limb: u32 = a.limbs[i as usize] as u32
+        let shifted: u32 = (limb << 1) | carry   // max 131071, tiny
+        result.limbs[i as usize] = (shifted & 65535) as u16
+        carry = shifted >> 16                       // safe: shifted is tiny
+        i = i + 1
+    }
+    var len = a.len
+    if carry != 0 {
+        // Same defined-overflow rule as bigint_add: only grow into a new limb
+        // if there is room. With a full-width (512-limb) input the shifted-out
+        // top bit is DROPPED (result wraps mod 2^8192) rather than performing
+        // an out-of-bounds write past `result.limbs`, which this compiler does
+        // not trap. This function is called from bigint_mod's inner loop, so
+        // this bound check is what protects the public bigint_mod/bigint_modpow
+        // path when handed a full-width modulus.
+        if len < 512 {
+            result.limbs[len as usize] = carry as u16
+            len = len + 1
+        }
+    }
+    result.len = len
+    while result.len > 0 && result.limbs[(result.len - 1) as usize] == 0 {
+        result.len = result.len - 1
+    }
+    result
+}
+
+// Square-and-multiply modular exponentiation. Iterates over the exponent's
+// bits from most significant to least significant, squaring an accumulator
+// (mod n) at every step, and additionally multiplying by base (mod n)
+// whenever the current exponent bit is 1. For this module's intended use
+// (a small public RSA exponent, typically 65537 = 17 bits with exactly two
+// set bits), this loop runs a small, bounded number of iterations regardless
+// of how large base/modulus are (up to 4096 bits) -- cheap despite being
+// schoolbook-everything underneath.
+//
+// SAFETY PRECONDITION (inherited from bigint_mul): `modulus` must have
+// `len <= BIGINT_MUL_SAFE_OPERAND_LIMBS` (256). The accumulator is always
+// reduced mod the modulus before each multiply, so both multiply operands stay
+// within the modulus's width; a wider modulus would make those products exceed
+// 512 limbs and silently truncate. 256 limbs is RSA-4096, this module's
+// largest intended use case.
+//
+// KNOWN, ACCEPTED EDGE-CASE GAP: for exponent == 0 AND modulus == 1 this
+// returns 1 instead of the mathematically correct 0, because the
+// bigint_from_u32(1) initializer is returned without ever being reduced mod n
+// when the loop body never executes. Unreachable in real RSA usage (n is a
+// large semiprime, never 1), so left as-is rather than paying a check on every
+// call.
+pub fn bigint_modpow(base: &BigInt, exponent: &BigInt, modulus: &BigInt) -> BigInt {
+    var result = bigint_from_u32(1)
+    var base_mod = bigint_mod(base, modulus)
+
+    var bit_index = exponent.len * 16 - 1
+    while bit_index >= 0 {
+        let limb_index = bit_index / 16   // tiny i32 arithmetic, not u64 -- safe
+        let bit_offset = bit_index % 16
+        let this_limb: u16 = exponent.limbs[limb_index as usize]
+        let bit: u16 = (this_limb >> bit_offset) & 1
+
+        let squared = bigint_mul(&result, &result)
+        result = bigint_mod(&squared, modulus)
+
+        if bit == 1 {
+            let multiplied = bigint_mul(&result, &base_mod)
+            result = bigint_mod(&multiplied, modulus)
+        }
+
+        bit_index = bit_index - 1
+    }
+
+    result
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Dissertation rapamycin DES gate — native-v2 epistemic PBPK.
+# Dissertation rapamycin DES gate -- native-v2 epistemic PBPK.
 # Requires: native_v2_gum_primitives_gate.sh must pass first.
 # Compiles tests/native-v2/science_spine/rapamycin_des_gum.sio through the
 # generated stage1 driver. Verifies: ELF kind, stdout parity with fixture,
@@ -78,7 +78,7 @@ echo "[dissertation-rapa] building stage1 (pass 1)..."
 chmod +x "$STAGE1_DRIVER" 2>/dev/null || true
 assert_elf_x86_64 "$STAGE1_DRIVER" "stage1"
 
-# Build stage1 driver (pass 2 — deterministic replay)
+# Build stage1 driver (pass 2 -- deterministic replay)
 echo "[dissertation-rapa] building stage1 (pass 2 replay)..."
 "$SOUC_BIN" run "$DRIVER_SRC" -- "$DRIVER_SRC" -o "$STAGE1_DRIVER_2" >"$STAGE1_REPLAY_LOG" 2>&1
 chmod +x "$STAGE1_DRIVER_2" 2>/dev/null || true
@@ -133,41 +133,28 @@ rapa_sha="$(portable_sha256 "$RAPA_BIN_1")"
 rapa_bytes="$(portable_size "$RAPA_BIN_1")"
 stage1_sha="$(portable_sha256 "$STAGE1_DRIVER")"
 
-python3 - "$SUMMARY_JSON" "$rapa_sha" "$rapa_bytes" "$stage1_sha" "$sqrts_verified" "$SOUC_BIN" <<'PY'
-import json, sys, pathlib
-summary_path = pathlib.Path(sys.argv[1])
-rapa_sha = sys.argv[2]
-rapa_bytes = int(sys.argv[3])
-stage1_sha = sys.argv[4]
-sqrts_verified = sys.argv[5] == "true"
-souc_bin = sys.argv[6]
-
-payload = {
-    "schema": "sounio.native_v2_dissertation_rapamycin.v1",
-    "dissertation_gate": "pass",
-    "status": "pass",
-    "compiler_resolved": souc_bin,
-    "target": "x86_64-linux",
-    "fallback_path": "none",
-    "host_callback": "none",
-    "driver_source": "self-hosted/compiler/native_compile_driver.sio",
-    "test_source": "tests/native-v2/science_spine/rapamycin_des_gum.sio",
-    "test_fixture": "tests/native-v2/science_spine/rapamycin_des_gum.stdout",
-    "stage1_driver_sha256": stage1_sha,
-    "rapa_bin_sha256": rapa_sha,
-    "rapa_bin_bytes": rapa_bytes,
-    "stage1_deterministic": True,
-    "rapa_deterministic": True,
-    "gum_sse2_verified": sqrts_verified,
-    "claims": [
-        "gum_through_ode",
-        "iso_uncertainty_budget",
-        "compile_time_confidence_gate",
-        "rapamycin_3comp_native_elf",
-    ],
-}
-summary_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-PY
+# Emit summary JSON via pure-Sounio kretikos json-emit (replaces python json.dump heredoc).
+# Schema sounio.native_v2_dissertation_rapamycin.v1. Args ordered alphabetically by key
+# to preserve byte-identity with prior python `sort_keys=True` output.
+"$ROOT_DIR/bin/kretikos" json-emit \
+  --array-strings "claims=gum_through_ode|iso_uncertainty_budget|compile_time_confidence_gate|rapamycin_3comp_native_elf" \
+  --string "compiler_resolved=$SOUC_BIN" \
+  --string "dissertation_gate=pass" \
+  --string "driver_source=self-hosted/compiler/native_compile_driver.sio" \
+  --string "fallback_path=none" \
+  --bool "gum_sse2_verified=$sqrts_verified" \
+  --string "host_callback=none" \
+  --int "rapa_bin_bytes=$rapa_bytes" \
+  --string "rapa_bin_sha256=$rapa_sha" \
+  --bool "rapa_deterministic=true" \
+  --string "schema=sounio.native_v2_dissertation_rapamycin.v1" \
+  --bool "stage1_deterministic=true" \
+  --string "stage1_driver_sha256=$stage1_sha" \
+  --string "status=pass" \
+  --string "target=x86_64-linux" \
+  --string "test_fixture=tests/native-v2/science_spine/rapamycin_des_gum.stdout" \
+  --string "test_source=tests/native-v2/science_spine/rapamycin_des_gum.sio" \
+  > "$SUMMARY_JSON"
 
 echo "[dissertation-rapa] PASS"
 echo "[dissertation-rapa] dissertation_gate=pass, sqrtsd_verified=$sqrts_verified"

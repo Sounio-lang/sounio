@@ -1,0 +1,290 @@
+//@ run-pass
+//@ timeout: 90
+// ============================================================================
+// DISSERTATION PARITY REFERENCE — HALOPERIDOL (CASO II)
+//
+// Fourth canonical drug. Unlike rapamycin/semaglutide/venlafaxine (PBPK28
+// permeability-limited), haloperidol's validated science is **PBPK14 well-stirred
+// + detailed BBB (ISF/ICF) + D2 occupancy** — the dissertation's CASO II surface.
+// There is no citable PBPK28 perm-limited model for it (empirical-first), so the
+// canonical parity surface is the real CASO II endpoints:
+//     plasma PK · BBB Kpuu (ISF_free/ICF_free) · D2 occupancy.
+//
+// The production scenario (scenarios/oral_haloperidol_bbb.sio) integrates the
+// systemic PBPK14 with adaptive Tsit5; bit-for-bit Sounio↔Node parity on an
+// adaptive controller is intractable, so BOTH this ref and the JS engine
+// (pbpk28_core.mjs runHaloperidolScenario) use a **fixed-step RK4** systemic
+// integrator at the same dt. Parity therefore validates exactly what the 3D
+// viewer runs; the fixed-step-vs-Tsit5 fidelity gap is quantified and disclosed
+// separately (see the gate's haloperidol fidelity note / the gist).
+//
+// Self-contained (no imports — lean_single blocks cross-module private fields).
+// All constants verbatim from drugs/haloperidol.sio, bbb/bbb_core.sio,
+// pd/d2_occupancy.sio, absorption.sio.
+//
+// Sources: Loryan 2014 (Kpuu_brain=3), Midha 1989 (oral PK), Davies&Morris 1993
+// (flows), Kapur 2000 / Nyberg 1999 (D2 Kd ~1.5 nM), Gaohua 2016 (BBB PS).
+// ============================================================================
+
+// Systemic well-stirred state: index 0=blood,1=liver,2=kidney,3=brain,4=heart,
+// 5=lung,6=muscle,7=adipose,8=gut,9=skin,10=bone,11=spleen,12=pancreas,13=other.
+struct Sys14 { c: [f64; 14] }
+struct Bbb   { isf: f64, icf: f64 }
+
+fn sys_zero() -> Sys14 { Sys14 { c: [0.0; 14] } }
+
+// ─── PBPK14 well-stirred parameters (haloperidol_pbpk_params) ────────────────
+fn v_at(i: i64) -> f64 {
+    if i ==  0 { return 5.2 }
+    if i ==  1 { return 1.69 }
+    if i ==  2 { return 0.31 }
+    if i ==  3 { return 1.37 }
+    if i ==  4 { return 0.31 }
+    if i ==  5 { return 1.17 }
+    if i ==  6 { return 29.0 }
+    if i ==  7 { return 18.2 }
+    if i ==  8 { return 1.65 }
+    if i ==  9 { return 7.8 }
+    if i == 10 { return 10.5 }
+    if i == 11 { return 0.19 }
+    if i == 12 { return 0.14 }
+    return 4.5
+}
+fn q_at(i: i64) -> f64 {
+    if i ==  1 { return 87.0 }
+    if i ==  2 { return 72.0 }
+    if i ==  3 { return 44.0 }
+    if i ==  4 { return 14.4 }
+    if i ==  5 { return 0.0 }
+    if i ==  6 { return 73.8 }
+    if i ==  7 { return 18.0 }
+    if i ==  8 { return 57.6 }
+    if i ==  9 { return 18.0 }
+    if i == 10 { return 21.6 }
+    if i == 11 { return 10.8 }
+    if i == 12 { return 4.5 }
+    if i == 13 { return 18.0 }
+    return 0.0
+}
+fn kp_at(i: i64) -> f64 {
+    if i ==  1 { return 18.0 }
+    if i ==  2 { return 8.0 }
+    if i ==  3 { return 15.0 }
+    if i ==  4 { return 6.0 }
+    if i ==  5 { return 12.0 }
+    if i ==  6 { return 35.0 }
+    if i ==  7 { return 12.0 }
+    if i ==  8 { return 6.0 }
+    if i ==  9 { return 8.0 }
+    if i == 10 { return 6.0 }
+    if i == 11 { return 8.0 }
+    if i == 12 { return 5.0 }
+    if i == 13 { return 5.0 }
+    return 1.0
+}
+fn cl_hepatic() -> f64 { return 40.0 }
+fn cl_renal() -> f64 { return 0.5 }
+fn fu_plasma() -> f64 { return 0.08 }
+fn rb_ratio() -> f64 { return 1.0 }
+
+// BBB params (haloperidol_bbb_params)
+fn bbb_v_isf() -> f64 { return 0.270 }
+fn bbb_v_icf() -> f64 { return 1.080 }
+fn bbb_ps_bbb() -> f64 { return 2.0 }
+fn bbb_ps_mem() -> f64 { return 8.0 }
+fn bbb_fu_isf() -> f64 { return 0.035 }
+fn bbb_fu_icf() -> f64 { return 0.010 }
+fn bbb_kpuu_brain() -> f64 { return 3.0 }
+fn bbb_kpuu_cell() -> f64 { return 0.5 }
+
+// D2 occupancy (haloperidol_d2_params)
+fn d2_kd() -> f64 { return 0.000564 }
+
+// Absorption (haloperidol_absorption_params)
+fn abs_ka() -> f64 { return 0.9 }
+fn abs_f() -> f64 { return 0.65 }
+fn abs_tlag() -> f64 { return 0.25 }
+
+// ─── Absorption exp(-x) — verbatim port of absorption.sio abs_exp_neg ────────
+fn abs_exp_neg(x: f64) -> f64 with Div, Mut {
+    if x <= 0.0 { return 1.0 }
+    if x > 0.5 {
+        let half = abs_exp_neg(x * 0.5)
+        return half * half
+    }
+    var term = 1.0
+    var sum = 1.0
+    var k: i32 = 1
+    while k < 16 {
+        term = term * (0.0 - x) / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    return sum
+}
+
+// ─── PBPK14 well-stirred RHS (pbpk_ode), array form ──────────────────────────
+fn sys_ode(st: Sys14) -> Sys14 with Mut, Div {
+    let c_blood = st.c[0]
+    let c_plasma = c_blood / rb_ratio()
+    let c_unbound = c_plasma * fu_plasma()
+    var d = Sys14 { c: [0.0; 14] }
+    var d_blood = 0.0
+    var i = 1
+    while i < 14 {
+        let flux = (q_at(i) / v_at(i)) * (c_plasma - st.c[i] / kp_at(i))
+        d.c[i] = flux
+        d_blood = d_blood - (q_at(i) / v_at(0)) * rb_ratio() * (c_plasma - st.c[i] / kp_at(i))
+        i = i + 1
+    }
+    d_blood = d_blood - (cl_hepatic() / v_at(0)) * c_unbound * rb_ratio()
+    d_blood = d_blood - (cl_renal() / v_at(0)) * c_unbound * rb_ratio()
+    d.c[0] = d_blood
+    return d
+}
+
+fn sys_axpy(y: Sys14, k: Sys14, a: f64) -> Sys14 with Mut {
+    var r = Sys14 { c: [0.0; 14] }
+    var i = 0
+    while i < 14 { r.c[i] = y.c[i] + a * k.c[i]; i = i + 1 }
+    return r
+}
+
+fn sys_rk4(st: Sys14, dt: f64) -> Sys14 with Mut, Div {
+    let k1 = sys_ode(st)
+    let k2 = sys_ode(sys_axpy(st, k1, 0.5 * dt))
+    let k3 = sys_ode(sys_axpy(st, k2, 0.5 * dt))
+    let k4 = sys_ode(sys_axpy(st, k3, dt))
+    var r = Sys14 { c: [0.0; 14] }
+    let sixth = dt / 6.0
+    let third = dt / 3.0
+    var i = 0
+    while i < 14 {
+        r.c[i] = st.c[i] + sixth * k1.c[i] + third * k2.c[i] + third * k3.c[i] + sixth * k4.c[i]
+        i = i + 1
+    }
+    return r
+}
+
+// ─── BBB RHS + RK4 (bbb_ode / bbb_rk4_step), c_plasma held constant ──────────
+fn bbb_ode(st: Bbb, c_plasma: f64) -> Bbb with Div {
+    let c_plasma_u = fu_plasma() * c_plasma
+    let c_isf_u = bbb_fu_isf() * st.isf
+    let c_icf_u = bbb_fu_icf() * st.icf
+    let bbb_flux = bbb_ps_bbb() * (c_plasma_u - c_isf_u / bbb_kpuu_brain())
+    let mem_flux = bbb_ps_mem() * (c_isf_u - c_icf_u / bbb_kpuu_cell())
+    let d_isf = (bbb_flux - mem_flux) / bbb_v_isf()
+    let d_icf = mem_flux / bbb_v_icf()
+    return Bbb { isf: d_isf, icf: d_icf }
+}
+fn bbb_axpy(y: Bbb, k: Bbb, a: f64) -> Bbb { Bbb { isf: y.isf + a * k.isf, icf: y.icf + a * k.icf } }
+fn bbb_rk4(st: Bbb, c_plasma: f64, dt: f64) -> Bbb with Div {
+    let k1 = bbb_ode(st, c_plasma)
+    let k2 = bbb_ode(bbb_axpy(st, k1, 0.5 * dt), c_plasma)
+    let k3 = bbb_ode(bbb_axpy(st, k2, 0.5 * dt), c_plasma)
+    let k4 = bbb_ode(bbb_axpy(st, k3, dt), c_plasma)
+    let sixth = dt / 6.0
+    let third = dt / 3.0
+    Bbb {
+        isf: st.isf + sixth * k1.isf + third * k2.isf + third * k3.isf + sixth * k4.isf,
+        icf: st.icf + sixth * k1.icf + third * k2.icf + third * k3.icf + sixth * k4.icf
+    }
+}
+
+fn d2_occ(c_isf_free: f64) -> f64 with Div {
+    if c_isf_free <= 0.0 { return 0.0 }
+    return c_isf_free / (c_isf_free + d2_kd())
+}
+
+// ─── Coupled state + one fixed-step (absorption → systemic RK4 → BBB RK4) ─────
+struct HaloState { sys: Sys14, bbb: Bbb, a_gut: f64 }
+
+fn halo_step(hs: HaloState, t: f64, dt: f64) -> HaloState with Mut, Div {
+    var a_gut = hs.a_gut
+    // Operator-split first-order absorption with lag (absorption_step).
+    if t + dt > abs_tlag() {
+        let t_active_start = if t < abs_tlag() { abs_tlag() } else { t }
+        let dt_active = (t + dt) - t_active_start
+        if dt_active > 0.0 {
+            let decay = abs_exp_neg(abs_ka() * dt_active)
+            let a_after = a_gut * decay
+            let to_blood = abs_f() * (a_gut - a_after)
+            a_gut = a_after
+            var s0 = hs.sys
+            s0.c[0] = s0.c[0] + to_blood / v_at(0)
+            let b0 = s0.c[0]
+            let s1 = sys_rk4(s0, dt)
+            let c_mid = 0.5 * (b0 + s1.c[0])
+            let b1 = bbb_rk4(hs.bbb, c_mid, dt)
+            return HaloState { sys: s1, bbb: b1, a_gut: a_gut }
+        }
+    }
+    // Pre-lag (or inactive): systemic + BBB still advance on current blood.
+    let b0 = hs.sys.c[0]
+    let s1 = sys_rk4(hs.sys, dt)
+    let c_mid = 0.5 * (b0 + s1.c[0])
+    let b1 = bbb_rk4(hs.bbb, c_mid, dt)
+    return HaloState { sys: s1, bbb: b1, a_gut: a_gut }
+}
+
+fn integrate_to(hs: HaloState, t_start: f64, t_end: f64, dt: f64) -> HaloState with Mut, Div {
+    var s = hs
+    var t = t_start
+    while t + 0.5 * dt < t_end {
+        s = halo_step(s, t, dt)
+        t = t + dt
+    }
+    return s
+}
+
+fn emit_at(hs: &HaloState, t: f64) with IO, Mut, Div {
+    let plasma = hs.sys.c[0] / rb_ratio()
+    let isf_free = bbb_fu_isf() * hs.bbb.isf
+    let icf_free = bbb_fu_icf() * hs.bbb.icf
+    let plasma_free = fu_plasma() * plasma
+    let kpuu = if plasma_free > 1.0e-12 { isf_free / plasma_free } else { 0.0 }
+    let occ = d2_occ(isf_free)
+    print("HALO|t=");        println(t);        println("")
+    print("HALO|plasma=");   println(plasma);   println("")
+    print("HALO|brain=");    println(hs.sys.c[3]); println("")
+    print("HALO|isf_free="); println(isf_free); println("")
+    print("HALO|icf_free="); println(icf_free); println("")
+    print("HALO|kpuu=");     println(kpuu);     println("")
+    print("HALO|d2occ=");    println(occ);      println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PBPK28_HALOPERIDOL_PARITY_REF v1")
+    println("model=pbpk14_wellstirred+bbb_isf_icf+d2_occupancy")
+    println("integrator=fixed_step_rk4")
+    println("dt=0.002")
+    println("dose_mg=5.0")
+    println("ka=0.9")
+    println("F=0.65")
+    println("tlag=0.25")
+    println("kpuu_brain=3.0")
+    println("d2_kd_mg_per_L=0.000564")
+    println("drug=haloperidol")
+    println("samples=12")
+
+    let dt = 0.002
+    // Single 5 mg oral dose into the gut depot.
+    var hs = HaloState { sys: sys_zero(), bbb: Bbb { isf: 0.0, icf: 0.0 }, a_gut: 5.0 }
+    var t = 0.0
+
+    hs = integrate_to(hs, t,  0.5, dt); t =  0.5; emit_at(&hs, t)
+    hs = integrate_to(hs, t,  1.0, dt); t =  1.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t,  2.0, dt); t =  2.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t,  4.0, dt); t =  4.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t,  6.0, dt); t =  6.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t,  8.0, dt); t =  8.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t, 12.0, dt); t = 12.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t, 18.0, dt); t = 18.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t, 24.0, dt); t = 24.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t, 36.0, dt); t = 36.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t, 48.0, dt); t = 48.0; emit_at(&hs, t)
+    hs = integrate_to(hs, t, 72.0, dt); t = 72.0; emit_at(&hs, t)
+
+    println("DISSERTATION_PBPK28_HALOPERIDOL_PARITY_DONE")
+    return 0
+}

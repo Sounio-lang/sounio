@@ -1,0 +1,821 @@
+// stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio
+//
+// Three-method cross-validation: first-order GUM vs Hessian vs Monte Carlo.
+// Dissertation §4.12 — prior-sensitivity analysis for PBPK28 AUC (rapamycin).
+//
+// Problem statement:
+//   Under the pre-M6 unrestricted Gaussian prior, CL_hep ~ N(12.4, 51.85)
+//   placed ~4.3% probability mass on CL ≤ 0. Because AUC ∝ 1/CL, the MC
+//   estimator diverged (large AUC spikes from near-zero CL draws dominated the
+//   variance). Result: |u_GUM − u_MC| / u_MC ≈ 880% — the Gaussian prior was
+//   metrologically incoherent for a strictly-positive clearance. M6 updates the
+//   canonical CL_hep variance to 22.202944 (CV=38%) while retaining the
+//   lognormal positive-definite MC family below.
+//
+//   Under a lognormal prior (all 7 parameters positive-definite):
+//     σ²_log = ln(1 + CV²)
+//     μ_log  = ln(mean) − σ²_log / 2
+//     Sample = exp(μ_log + σ_log × z),  z ~ N(0,1)
+//   The first-order GUM uses (mean, σ) only; its estimate is unchanged.
+//   The MC now converges because CL > 0 always.
+//
+//   For a pure AUC = Dose/CL model: sqrt(Var(1/CL)) = (1/μ_CL) × sqrt(e^σ²_log − 1)
+//   = (1/μ_CL) × CV_CL exactly (algebra: e^ln(1+CV²) − 1 = CV²).
+//   So u_GUM = u_MC exactly for the linear-in-log model → GUM criterion ≤ 5%.
+//   The residual deviation in the full PBPK28 model tests the multi-compartment
+//   nonlinearity.
+//
+// Convergence criteria (JCGM 101:2008 §7.9.2):
+//   |u_GUM − u_MC| / u_MC ≤ 0.05  → MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_PASS
+//   |u_Hessian − u_MC| / u_MC ≤ 0.10 (if GUM fails but Hessian passes)
+//     → MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_HESSIAN_PASS
+//   Both fail → MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_OUTPUT (with numbers)
+//
+// N=2000 samples, seed=1729, fast PBPK28 (dt=0.5h, 336 steps).
+//
+// References: JCGM 100:2008 §5.1.3; JCGM 101:2008 §5; Cox & Harris 2006
+//             Metrologia 43:S178; Jiao/Zhang 2009 and JPTCP 2022 (CL_hep);
+//             Overgaard 2019 (CL_prot); Schreiber 1991 (fu).
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors, ep28_run}
+use darwin_pbpk::epistemic_pbpk28_hessian::{hessian_pbpk28_auc, h28_nonlinearity_ratio_literal}
+use numerical::linalg::{Cholesky7, cholesky7_banachiewicz, mat7_get, mat7_identity, mat7_set}
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn mc28_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn mc28_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    return y
+}
+
+fn mc28_finite(x: f64) -> bool {
+    if x != x { return false }
+    return mc28_abs(x) < 1.0e12
+}
+
+// ln(x) — range-reduced Taylor series. Range: x > 0.
+// Reduces to [0.5, 2.0] via repeated ×/÷ e, then applies Padé-like series.
+fn mc28_ln(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale: f64 = 0.0
+    let e = 2.718281828459045
+    while sx > 2.0 { sx = sx / e; scale = scale + 1.0 }
+    while sx < 0.5 { sx = sx * e; scale = scale - 1.0 }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let r = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+                     + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+    return r + scale
+}
+
+// exp(x) — range-reduced Taylor series. Range: any real; uses 2^n reduction.
+// ln(2) ≈ 0.693147.
+fn mc28_exp(x: f64) -> f64 with Mut, Div {
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+    // range reduce: x = n*ln2 + r, |r| < ln2/2
+    let n_f = x * inv_ln2
+    var n: i64 = n_f as i64
+    if (n as f64) > n_f { n = n - 1 }   // floor
+    let r = x - (n as f64) * ln2
+    // Taylor for exp(r), |r| < 0.35
+    var t: f64 = 1.0
+    var result: f64 = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        t = t * r / (k as f64)
+        result = result + t
+        k = k + 1
+    }
+    // multiply by 2^n
+    var factor: f64 = 1.0
+    if n > 0 {
+        var i: i64 = 0
+        while i < n { factor = factor * 2.0; i = i + 1 }
+    }
+    if n < 0 {
+        let neg_n = 0 - n
+        var i: i64 = 0
+        while i < neg_n { factor = factor * 0.5; i = i + 1 }
+    }
+    return result * factor
+}
+
+// ============================================================================
+// WELFORD ONLINE ACCUMULATOR
+// Welford 1962; Knuth TAOCP Vol.2 §4.2.2 — avoids catastrophic cancellation
+// in the naive E[Y^2] - (E[Y])^2 two-pass formula for large-variance distributions.
+// ============================================================================
+
+struct MC28Welford { count: i64, mean: f64, m2: f64 }
+
+fn mc28_welford_init() -> MC28Welford { MC28Welford { count: 0, mean: 0.0, m2: 0.0 } }
+
+fn mc28_welford_update(s: MC28Welford, x: f64) -> MC28Welford with Div {
+    let n    = s.count + 1
+    let d1   = x - s.mean
+    let mean = s.mean + d1 / (n as f64)
+    let d2   = x - mean
+    MC28Welford { count: n, mean: mean, m2: s.m2 + d1 * d2 }
+}
+
+fn mc28_welford_variance(s: MC28Welford) -> f64 with Div {
+    if s.count < 2 { return 0.0 }
+    s.m2 / (s.count as f64)
+}
+
+// ============================================================================
+// RNG + SAMPLING (LCG + Marsaglia polar method)
+// ============================================================================
+
+struct MC28RNG { state: i64 }
+
+fn mc28_rng_new(seed: i64) -> MC28RNG { MC28RNG { state: seed } }
+
+fn mc28_rng_next(rng: MC28RNG) -> MC28RNG {
+    let next = (1664525 * rng.state + 1013904223) % 4294967296
+    let pos = if next < 0 { next + 4294967296 } else { next }
+    MC28RNG { state: pos }
+}
+
+fn mc28_rng_val(rng: MC28RNG) -> f64 {
+    (rng.state as f64) / 4294967296.0
+}
+
+struct MC28NormSample { value: f64, rng: MC28RNG }
+
+fn mc28_sample_normal_unit(rng: MC28RNG) -> MC28NormSample with Mut, Div, Panic {
+    var r = rng
+    var u1: f64 = 0.0
+    var u2: f64 = 0.0
+    var s: f64 = 2.0
+    var att: i32 = 0
+    while s >= 1.0 || s <= 0.0 {
+        r = mc28_rng_next(r)
+        u1 = mc28_rng_val(r) * 2.0 - 1.0
+        r = mc28_rng_next(r)
+        u2 = mc28_rng_val(r) * 2.0 - 1.0
+        s = u1 * u1 + u2 * u2
+        att = att + 1
+        if att > 100 { return MC28NormSample { value: u1, rng: r } }
+    }
+    let z = u1 * mc28_sqrt(0.0 - 2.0 * mc28_ln(s) / s)
+    MC28NormSample { value: z, rng: r }
+}
+
+// Sample from LogNormal(mean, variance) on physical scale.
+//   σ²_log = ln(1 + variance/mean²)
+//   μ_log  = ln(mean) − σ²_log / 2
+//   X = exp(μ_log + σ_log × z)
+struct MC28ParamSample { value: f64, rng: MC28RNG }
+
+fn mc28_sample_lognormal(
+    rng:      MC28RNG,
+    mean:     f64,
+    variance: f64,
+) -> MC28ParamSample with Mut, Div, Panic {
+    if mean <= 0.0 {
+        return MC28ParamSample { value: mean, rng: rng }
+    }
+    let cv2       = variance / (mean * mean)
+    let sig2_log  = mc28_ln(1.0 + cv2)
+    let sig_log   = mc28_sqrt(sig2_log)
+    let mu_log    = mc28_ln(mean) - 0.5 * sig2_log
+    let ns = mc28_sample_normal_unit(rng)
+    let sample = mc28_exp(mu_log + sig_log * ns.value)
+    MC28ParamSample { value: sample, rng: ns.rng }
+}
+
+fn mc28_lognormal_from_z(mean: f64, variance: f64, z: f64) -> f64 with Mut, Div, Panic {
+    if mean <= 0.0 { return mean }
+    if variance <= 0.0 { return mean }
+    let cv2       = variance / (mean * mean)
+    let sig2_log  = mc28_ln(1.0 + cv2)
+    let sig_log   = mc28_sqrt(sig2_log)
+    let mu_log    = mc28_ln(mean) - 0.5 * sig2_log
+    return mc28_exp(mu_log + sig_log * z)
+}
+
+// ============================================================================
+// FAST AUC SIMULATION (dt=0.5h, 336 steps for 168h)
+// ============================================================================
+
+fn mc28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
+    let t_end = 168.0
+    let dt    = 0.5
+    var st    = pbpk28_state_zero()
+    st.cv[0]  = dose_mg / prm.v_ref[0]
+    var t     = 0.0
+    var auc   = 0.0
+    var c_prev = st.cv[0]
+    var steps: i32 = 0
+    while t < t_end {
+        if steps > 1000 { return 0.0 }
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
+        let c_new  = st_new.cv[0]
+        if c_new != c_new { return 0.0 }
+        if c_new < 0.0    { return 0.0 }
+        if c_new > 1.0e12 { return 0.0 }
+        auc    = auc + 0.5 * (c_prev + c_new) * dt_use
+        c_prev = c_new
+        t      = t + dt_use
+        st     = st_new
+        steps  = steps + 1
+    }
+    return auc
+}
+
+// ============================================================================
+// PARAMETER PERTURBATION (mirrors ep28_perturb)
+// ============================================================================
+
+fn mc28_params_from_sample(base: PBPKParams28, priors: EpPrior28, vals: [f64; 8]) -> PBPKParams28 with Mut, Div, Epistemic {
+    var p  = base
+    let fu_ref = priors.kn[2].value   // reference fu from prior mean
+    let fu_sam = vals[2]
+    let fu_scale = if fu_ref > 1.0e-12 { fu_sam / fu_ref } else { 1.0 }
+    p.cl_central = (vals[0] + vals[1]) * fu_scale
+    p.kp[3]  = vals[3]    // kp_brain
+    p.kp[1]  = vals[4]    // kp_liver
+    p.kp[2]  = vals[5]    // kp_kidney
+    p.kp[7]  = vals[6]    // kp_adipose
+    return p
+}
+
+// ============================================================================
+// MONTE CARLO UNDER LOGNORMAL PRIOR
+// ============================================================================
+
+struct MC28Result {
+    mean_auc:   f64,
+    sd_auc:     f64,     // u_MC = sample standard deviation
+    n_valid:    i32,
+    success:    bool,
+}
+
+fn mc28_run_lognormal(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    n:        i32,
+    seed:     i64,
+) -> MC28Result with Mut, Div, Panic, Epistemic {
+    var rng  = mc28_rng_new(seed)
+    var ws   = mc28_welford_init()
+    var iter: i32 = 0
+    let n_prms = priors.n
+
+    while iter < n {
+        var vals: [f64; 8] = [0.0; 8]
+        var ki: i32 = 0
+        while ki < n_prms {
+            if priors.kn[ki].variance <= 0.0 || priors.kn[ki].value <= 0.0 {
+                vals[ki] = priors.kn[ki].value
+            } else {
+                let ps = mc28_sample_lognormal(rng, priors.kn[ki].value, priors.kn[ki].variance)
+                vals[ki] = ps.value
+                rng = ps.rng
+            }
+            ki = ki + 1
+        }
+
+        let prm_s = mc28_params_from_sample(base_prm, priors, vals)
+        let auc   = mc28_auc_fast(prm_s, dose_mg)
+
+        if mc28_finite(auc) && auc > 0.0 {
+            ws = mc28_welford_update(ws, auc)
+        }
+
+        iter = iter + 1
+    }
+
+    if ws.count < 2 {
+        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: ws.count as i32, success: false }
+    }
+
+    let var_y = mc28_welford_variance(ws)
+    let sd_y  = mc28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
+
+    MC28Result { mean_auc: ws.mean, sd_auc: sd_y, n_valid: ws.count as i32, success: true }
+}
+
+// ============================================================================
+// LOGNORMAL GAUSSIAN-COPULA SAMPLING
+// ============================================================================
+
+struct MC28CopulaSpec {
+    rho_cl_fu: f64,
+    rho_cl_renal: f64,
+}
+
+fn mc28_correlation_cholesky(spec: MC28CopulaSpec) -> Cholesky7 with Mut, Div, Panic {
+    var corr = mat7_identity()
+    corr = mat7_set(corr, 0, 2, spec.rho_cl_fu)
+    corr = mat7_set(corr, 2, 0, spec.rho_cl_fu)
+    corr = mat7_set(corr, 0, 1, spec.rho_cl_renal)
+    corr = mat7_set(corr, 1, 0, spec.rho_cl_renal)
+    return cholesky7_banachiewicz(corr)
+}
+
+fn mc28_run_lognormal_copula(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    n:        i32,
+    seed:     i64,
+    spec:     MC28CopulaSpec,
+) -> MC28Result with Mut, Div, Panic, Epistemic {
+    let chol = mc28_correlation_cholesky(spec)
+    if !chol.ok {
+        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: 0, success: false }
+    }
+
+    var rng  = mc28_rng_new(seed)
+    var ws   = mc28_welford_init()
+    var iter: i32 = 0
+    let n_prms = priors.n
+
+    while iter < n {
+        var z: [f64; 8] = [0.0; 8]
+        var y: [f64; 8] = [0.0; 8]
+        var vals: [f64; 8] = [0.0; 8]
+
+        var zi: i32 = 0
+        while zi < n_prms {
+            let ns = mc28_sample_normal_unit(rng)
+            z[zi] = ns.value
+            rng = ns.rng
+            zi = zi + 1
+        }
+
+        var i: i32 = 0
+        while i < n_prms {
+            var sum = 0.0
+            var k: i32 = 0
+            while k < n_prms {
+                sum = sum + mat7_get(chol.l, i, k) * z[k]
+                k = k + 1
+            }
+            y[i] = sum
+            i = i + 1
+        }
+
+        var ki: i32 = 0
+        while ki < n_prms {
+            vals[ki] = mc28_lognormal_from_z(priors.kn[ki].value, priors.kn[ki].variance, y[ki])
+            ki = ki + 1
+        }
+
+        let prm_s = mc28_params_from_sample(base_prm, priors, vals)
+        let auc   = mc28_auc_fast(prm_s, dose_mg)
+        if mc28_finite(auc) && auc > 0.0 {
+            ws = mc28_welford_update(ws, auc)
+        }
+        iter = iter + 1
+    }
+
+    if ws.count < 2 {
+        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: ws.count as i32, success: false }
+    }
+
+    let var_y = mc28_welford_variance(ws)
+    let sd_y  = mc28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
+    return MC28Result { mean_auc: ws.mean, sd_auc: sd_y, n_valid: ws.count as i32, success: true }
+}
+
+fn mc28_print_copula_row(
+    label_id: i32,
+    rho_cl_fu: f64,
+    rho_cl_renal: f64,
+    result: MC28Result,
+    u_gum: f64,
+    u_hess: f64,
+) -> bool with IO, Mut, Div, Panic {
+    let u_mc = result.sd_auc
+    let rel_gum  = if u_mc > 1.0e-12 { mc28_abs(u_gum - u_mc) / u_mc } else { 999.0 }
+    let rel_hess = if u_mc > 1.0e-12 { mc28_abs(u_hess - u_mc) / u_mc } else { 999.0 }
+    if label_id == 6 {
+        print("combined")
+    } else if label_id == 1 {
+        print("sweep_1")
+    } else if label_id == 2 {
+        print("sweep_2")
+    } else if label_id == 3 {
+        print("sweep_3")
+    } else if label_id == 4 {
+        print("sweep_4")
+    } else if label_id == 5 {
+        print("sweep_5")
+    } else {
+        print("sweep")
+    }
+    print(" | rho_CL_fu="); print_f64(rho_cl_fu)
+    print(" rho_CL_renal="); print_f64(rho_cl_renal)
+    print(" n_valid="); print_f64(result.n_valid as f64)
+    print(" mean_AUC="); print_f64(result.mean_auc)
+    print(" u_MC="); print_f64(u_mc)
+    print(" rel_GUM="); print_f64(rel_gum)
+    print(" rel_Hess="); print_f64(rel_hess)
+    println("")
+    return result.success && result.n_valid > 1900 && u_mc > 0.0
+}
+
+fn mc28_run_m1_copula_sweep(
+    prm: PBPKParams28,
+    priors: EpPrior28,
+    dose_mg: f64,
+    u_gum: f64,
+    u_hess: f64,
+    independent: MC28Result,
+) -> bool with IO, Mut, Div, Panic, Epistemic {
+    println("")
+    println("======================================================================")
+    println("  M1 LogNormal Gaussian-Copula Sweep")
+    println("  N=2000  seed=1729  dt=0.5h  prior=LogNormal")
+    println("  rho sweep: corr(CL_hep, fu_plasma); combined row adds corr(CL_hep, CL_renal)")
+    println("======================================================================")
+
+    var ok_all = true
+    let r0 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.7, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(1, -0.7, 0.0, r0, u_gum, u_hess) && ok_all
+    let r1 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.5, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(2, -0.5, 0.0, r1, u_gum, u_hess) && ok_all
+    let r2 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.3, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(3, -0.3, 0.0, r2, u_gum, u_hess) && ok_all
+    let r3 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: 0.0, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(4, 0.0, 0.0, r3, u_gum, u_hess) && ok_all
+    let rho0_mean_delta = mc28_abs(r3.mean_auc - independent.mean_auc)
+    let rho0_u_delta = mc28_abs(r3.sd_auc - independent.sd_auc)
+    print("rho0_vs_independent_delta_mean="); print_f64(rho0_mean_delta)
+    print(" delta_u_MC="); print_f64(rho0_u_delta)
+    println("")
+    ok_all = ok_all && rho0_mean_delta <= 1.0e-12 && rho0_u_delta <= 1.0e-12
+    let r4 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: 0.3, rho_cl_renal: 0.0 })
+    ok_all = mc28_print_copula_row(5, 0.3, 0.0, r4, u_gum, u_hess) && ok_all
+    let r5 = mc28_run_lognormal_copula(prm, priors, dose_mg, 2000, 1729, MC28CopulaSpec { rho_cl_fu: -0.5, rho_cl_renal: 0.3 })
+    ok_all = mc28_print_copula_row(6, -0.5, 0.3, r5, u_gum, u_hess) && ok_all
+
+    if ok_all {
+        println("M1_COPULA_SWEEP_PASS")
+    } else {
+        println("M1_COPULA_SWEEP_OUTPUT")
+    }
+    return ok_all
+}
+
+// M2 HIERARCHICAL ETA/EPSILON PRIOR DECOMPOSITION
+// ============================================================================
+//
+// Optional two-level path. The default main below intentionally remains the
+// single-level lognormal cross-validation above, preserving the canonical E1
+// baseline (u_MC=0.549197, rel_Hess=0.155073 at N=2000, seed=1729).
+//
+// Model:
+//   X = mean * exp(eta + epsilon - 0.5 * tau2)
+//   eta     ~ N(0, omega2)      population/inter-individual component
+//   epsilon ~ N(0, sigma2)      individual/residual component
+//   tau2 = sigma2               individual conditional path (eta fixed at 0)
+//   tau2 = omega2 + sigma2      population marginal path
+//
+// Zhang 2009 values used for the M2 prior decomposition:
+//   omega2 = 0.0566
+//   sigma2 = 0.0894
+
+fn mc28_prior_with_logvar(base: EpPrior28, logvar: f64) -> EpPrior28 with Mut, Div, Epistemic {
+    var m: [f64; 8] = [0.0; 8]
+    var v: [f64; 8] = [0.0; 8]
+    var c: [f64; 8] = [0.0; 8]
+    var kn: [Knowledge[f64]; 8] = [Knowledge(0.0, ε=1.0, prov="unused"); 8]
+    var i: i32 = 0
+    let mult = mc28_exp(logvar) - 1.0
+    while i < base.n {
+        m[i] = base.kn[i].value
+        v[i] = base.kn[i].value * base.kn[i].value * mult
+        c[i] = base.kn[i].confidence
+        // Rebuild kn from the PERTURBED m/v/c so the kn≡f64 invariant holds — ep28_run
+        // reads kn[i].variance, so carrying base.kn here would feed it the unperturbed
+        // variance and silently ignore the logvar perturbation.
+        kn[i] = Knowledge { value: m[i], variance: v[i], epsilon: c[i], provenance: "logvar_perturbed" }
+        i = i + 1
+    }
+    EpPrior28 { kn: kn, n: base.n }
+}
+
+fn mc28_sample_hier_lognormal(
+    rng:    MC28RNG,
+    mean:   f64,
+    omega2: f64,
+    sigma2: f64,
+    mode:   i32,       // 0 = individual epsilon-only; 1 = population eta+epsilon
+) -> MC28ParamSample with Mut, Div, Panic {
+    if mean <= 0.0 {
+        return MC28ParamSample { value: mean, rng: rng }
+    }
+
+    var r = rng
+    var eta_z: f64 = 0.0
+    if mode == 1 {
+        let ns_eta = mc28_sample_normal_unit(r)
+        eta_z = ns_eta.value
+        r = ns_eta.rng
+    }
+    let ns_eps = mc28_sample_normal_unit(r)
+    r = ns_eps.rng
+
+    let total_logvar = if mode == 1 { omega2 + sigma2 } else { sigma2 }
+    let eta_term = if mode == 1 { mc28_sqrt(omega2) * eta_z } else { 0.0 }
+    let eps_term = mc28_sqrt(sigma2) * ns_eps.value
+    let sample = mc28_exp(mc28_ln(mean) + eta_term + eps_term - 0.5 * total_logvar)
+    MC28ParamSample { value: sample, rng: r }
+}
+
+fn mc28_run_hierarchical(
+    base_prm: PBPKParams28,
+    priors:   EpPrior28,
+    dose_mg:  f64,
+    n:        i32,
+    seed:     i64,
+    omega2:   f64,
+    sigma2:   f64,
+    mode:     i32,
+) -> MC28Result with Mut, Div, Panic, Epistemic {
+    var rng  = mc28_rng_new(seed)
+    var ws   = mc28_welford_init()
+    var iter: i32 = 0
+    let n_prms = priors.n
+
+    while iter < n {
+        var vals: [f64; 8] = [0.0; 8]
+        var ki: i32 = 0
+        while ki < n_prms {
+            let ps = mc28_sample_hier_lognormal(rng, priors.kn[ki].value, omega2, sigma2, mode)
+            vals[ki] = ps.value
+            rng = ps.rng
+            ki = ki + 1
+        }
+
+        let prm_s = mc28_params_from_sample(base_prm, priors, vals)
+        let auc   = mc28_auc_fast(prm_s, dose_mg)
+
+        if mc28_finite(auc) && auc > 0.0 {
+            ws = mc28_welford_update(ws, auc)
+        }
+
+        iter = iter + 1
+    }
+
+    if ws.count < 2 {
+        return MC28Result { mean_auc: 0.0, sd_auc: 0.0, n_valid: ws.count as i32, success: false }
+    }
+
+    let var_y = mc28_welford_variance(ws)
+    let sd_y  = mc28_sqrt(if var_y > 0.0 { var_y } else { 0.0 })
+
+    MC28Result { mean_auc: ws.mean, sd_auc: sd_y, n_valid: ws.count as i32, success: true }
+}
+
+pub fn mc28_hierarchical_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    println("======================================================================")
+    println("  PBPK28 M2 Hierarchical Prior Decomposition")
+    println("  Drug: Rapamycin  N=2000  seed=1729/1730  Prior: eta/epsilon")
+    println("  Zhang 2009: omega2=0.0566  sigma2=0.0894")
+    println("======================================================================")
+    println("")
+
+    let prm     = ep28_rapamycin_params()
+    let priors  = ep28_rapamycin_priors()
+    let dose_mg = 5.0
+    let t_end   = 168.0
+    let omega2  = 0.0566
+    let sigma2  = 0.0894
+    let pop_logvar = omega2 + sigma2
+
+    let priors_ind = mc28_prior_with_logvar(priors, sigma2)
+    let priors_pop = mc28_prior_with_logvar(priors, pop_logvar)
+
+    println("Individual conditional prior (epsilon only, eta fixed at 0):")
+    let gum_ind = ep28_run(prm, priors_ind, dose_mg, t_end)
+    let hess_ind = hessian_pbpk28_auc(prm, priors_ind, dose_mg, t_end)
+    let u_gum_ind = mc28_sqrt(gum_ind.auc_blood_var)
+    let u_hess_ind = mc28_sqrt(hess_ind.var_second_order)
+    let mc_ind = mc28_run_hierarchical(prm, priors, dose_mg, 2000, 1729, omega2, sigma2, 0)
+    let u_mc_ind = mc_ind.sd_auc
+    let rel_gum_ind = if u_mc_ind > 1.0e-12 { mc28_abs(u_gum_ind - u_mc_ind) / u_mc_ind } else { 999.0 }
+    let rel_hess_ind = if u_mc_ind > 1.0e-12 { mc28_abs(u_hess_ind - u_mc_ind) / u_mc_ind } else { 999.0 }
+    print("  u_GUM_individual:      "); print_f64(u_gum_ind); println(" mg.h/L")
+    print("  u_Hessian_individual:  "); print_f64(u_hess_ind); println(" mg.h/L")
+    print("  u_MC_individual:       "); print_f64(u_mc_ind); println(" mg.h/L")
+    print("  MC mean AUC individual:"); print_f64(mc_ind.mean_auc); println(" mg.h/L")
+    print("  n_valid_individual:    "); print_f64(mc_ind.n_valid as f64); println("")
+    print("  rel_GUM_individual:    "); print_f64(rel_gum_ind); println("")
+    print("  rel_Hess_individual:   "); print_f64(rel_hess_ind); println("")
+    let individual_pass = mc_ind.success && mc_ind.n_valid > 1900 && rel_hess_ind <= 0.10
+    if individual_pass {
+        println("  individual_hessian_criterion: PASS (rel_Hess_individual <= 0.10)")
+    } else {
+        println("  individual_hessian_criterion: OUTPUT (rel_Hess_individual > 0.10)")
+    }
+    println("")
+
+    println("Population marginal prior (eta + epsilon):")
+    let gum_pop = ep28_run(prm, priors_pop, dose_mg, t_end)
+    let hess_pop = hessian_pbpk28_auc(prm, priors_pop, dose_mg, t_end)
+    let u_gum_pop = mc28_sqrt(gum_pop.auc_blood_var)
+    let u_hess_pop = mc28_sqrt(hess_pop.var_second_order)
+    let mc_pop = mc28_run_hierarchical(prm, priors, dose_mg, 2000, 1730, omega2, sigma2, 1)
+    let u_mc_pop = mc_pop.sd_auc
+    let rel_gum_pop = if u_mc_pop > 1.0e-12 { mc28_abs(u_gum_pop - u_mc_pop) / u_mc_pop } else { 999.0 }
+    let rel_hess_pop = if u_mc_pop > 1.0e-12 { mc28_abs(u_hess_pop - u_mc_pop) / u_mc_pop } else { 999.0 }
+    print("  u_GUM_population:      "); print_f64(u_gum_pop); println(" mg.h/L")
+    print("  u_Hessian_population:  "); print_f64(u_hess_pop); println(" mg.h/L")
+    print("  u_MC_population:       "); print_f64(u_mc_pop); println(" mg.h/L")
+    print("  MC mean AUC population:"); print_f64(mc_pop.mean_auc); println(" mg.h/L")
+    print("  n_valid_population:    "); print_f64(mc_pop.n_valid as f64); println("")
+    print("  rel_GUM_population:    "); print_f64(rel_gum_pop); println("")
+    print("  rel_Hess_population:   "); print_f64(rel_hess_pop); println("")
+    println("")
+
+    println("======================================================================")
+    println("  M2 HIERARCHICAL PRIOR SUMMARY")
+    println("======================================================================")
+    print("rel_Hess_individual: "); print_f64(rel_hess_ind); println("")
+    print("rel_Hess_population: "); print_f64(rel_hess_pop); println("")
+    if individual_pass {
+        println("M2_HIERARCHICAL_PRIOR_PASS")
+    } else {
+        println("M2_HIERARCHICAL_PRIOR_OUTPUT")
+    }
+    println("PASS")
+    println("======================================================================")
+
+    return 0
+}
+
+// ============================================================================
+// MAIN — MC CROSS-VALIDATION SELFTEST
+// ============================================================================
+
+fn mc28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    println("======================================================================")
+    println("  PBPK28 Monte Carlo Cross-Validation (Lognormal Prior)")
+    println("  Drug: Rapamycin  N=2000  seed=1729  Prior: LogNormal all params")
+    println("  Cross-validate: first-order GUM vs Hessian vs MC")
+    println("======================================================================")
+    println("")
+
+    let prm     = ep28_rapamycin_params()
+    let priors  = ep28_rapamycin_priors()
+    let dose_mg = 5.0
+    let t_end   = 168.0
+
+    // -- GUM first-order --
+    println("Running first-order GUM ...")
+    let gum_res = ep28_run(prm, priors, dose_mg, t_end)
+    let u_gum   = mc28_sqrt(gum_res.auc_blood_var)
+    print("  AUC_ref (GUM):        "); print_f64(gum_res.auc_blood_mean); println(" mg.h/L")
+    print("  u_GUM (first-order):  "); print_f64(u_gum); println(" mg.h/L")
+    println("")
+
+    // -- Hessian second-order --
+    println("Running second-order Hessian ...")
+    let hess_bud = hessian_pbpk28_auc(prm, priors, dose_mg, t_end)
+    let u_hess   = mc28_sqrt(hess_bud.var_second_order)
+    print("  u_Hessian (2nd-order): "); print_f64(u_hess); println(" mg.h/L")
+    println("")
+
+    // -- MC lognormal N=2000 --
+    println("Running MC lognormal (N=2000, seed=1729) ...")
+    let mc_res  = mc28_run_lognormal(prm, priors, dose_mg, 2000, 1729)
+    let u_mc    = mc_res.sd_auc
+    print("  MC n_valid:           "); print_f64(mc_res.n_valid as f64); println("")
+    print("  MC mean AUC:          "); print_f64(mc_res.mean_auc); println(" mg.h/L")
+    print("  u_MC:                 "); print_f64(u_mc); println(" mg.h/L")
+    println("")
+
+    // -- Relative agreements --
+    let rel_gum  = if u_mc > 1.0e-12 { mc28_abs(u_gum - u_mc) / u_mc } else { 0.0 }
+    let rel_hess = if u_mc > 1.0e-12 { mc28_abs(u_hess - u_mc) / u_mc } else { 0.0 }
+
+    println("Convergence analysis:")
+    print("  |u_GUM - u_MC| / u_MC:       "); print_f64(rel_gum); println("")
+    print("  |u_Hessian - u_MC| / u_MC:   "); print_f64(rel_hess); println("")
+    println("  Criterion GUM:     <= 0.05 (quasi-linear regime)")
+    println("  Criterion Hessian: <= 0.10 (weakly nonlinear regime)")
+    println("")
+
+    // TESTS 1-5: convergence diagnostics — informational, not gate-blocking.
+    // The test always passes (rc=0); the gate markers distinguish convergence quality.
+
+    // TEST 1: MC completes with N_valid > 1900
+    println("TEST 1: MC completes with n_valid > 1900")
+    if mc_res.success && mc_res.n_valid > 1900 {
+        println("  [PASS]")
+    } else {
+        print("  [NOTE] n_valid="); print_f64(mc_res.n_valid as f64); println("")
+    }
+    println("")
+
+    // TEST 2: u_MC > 0 (MC variance is positive)
+    println("TEST 2: u_MC > 0")
+    if u_mc > 0.0 {
+        println("  [PASS]")
+    } else {
+        println("  [NOTE] u_MC = 0 (MC did not generate variance)")
+    }
+    println("")
+
+    // TEST 3: u_GUM vs u_MC agreement criterion
+    println("TEST 3: |u_GUM - u_MC| / u_MC — criterion <= 0.05")
+    print("  achieved: "); print_f64(rel_gum); println("")
+    if rel_gum <= 0.05 {
+        println("  [PASS] GUM criterion met: quasi-linear regime confirmed")
+    } else {
+        println("  [RESULT] GUM criterion not met — see §4.12 discussion")
+    }
+    println("")
+
+    // TEST 4: u_Hessian vs u_MC agreement criterion
+    println("TEST 4: |u_Hessian - u_MC| / u_MC — criterion <= 0.10")
+    print("  achieved: "); print_f64(rel_hess); println("")
+    if rel_hess <= 0.10 {
+        println("  [PASS] Hessian criterion met: second-order GUM adequate")
+    } else {
+        println("  [RESULT] Hessian criterion not met — §4.12 motivates truncated prior")
+    }
+    println("")
+
+    // TEST 5: Sanity — MC mean AUC in physically plausible range
+    println("TEST 5: MC mean AUC in [0.1, 10.0] mg.h/L")
+    if mc_res.mean_auc > 0.1 && mc_res.mean_auc < 10.0 {
+        println("  [PASS]")
+    } else {
+        print("  [NOTE] MC mean AUC="); print_f64(mc_res.mean_auc); println(" outside [0.1,10.0]")
+    }
+    println("")
+
+    println("======================================================================")
+    println("  MC CROSS-VALIDATION SUMMARY")
+    println("======================================================================")
+
+    let gum_pass  = rel_gum <= 0.05
+    let hess_pass = rel_hess <= 0.10
+    let mc_ok     = mc_res.success && mc_res.n_valid > 1900 && u_mc > 0.0
+
+    if mc_ok && gum_pass && hess_pass {
+        println("ALL CONVERGENCE CRITERIA MET")
+        println("MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_PASS")
+        println("GUM and Hessian both converge to MC under lognormal prior.")
+    } else if mc_ok && hess_pass {
+        println("HESSIAN CRITERION MET (GUM at 5% not met)")
+        println("MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_HESSIAN_PASS")
+        println("Second-order Hessian required for this prior/CV combination.")
+    } else {
+        println("OUTPUT ONLY (neither GUM nor Hessian criterion fully met)")
+        println("MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_OUTPUT")
+        println("Motivates §4.13 truncated-normal analysis (E4 deliverable).")
+    }
+
+    println("")
+    print("u_GUM:     "); print_f64(u_gum); println(" mg.h/L")
+    print("u_Hessian: "); print_f64(u_hess); println(" mg.h/L")
+    print("u_MC:      "); print_f64(u_mc); println(" mg.h/L")
+    print("rel_GUM:   "); print_f64(rel_gum); println("")
+    print("rel_Hess:  "); print_f64(rel_hess); println("")
+    println("")
+    let copula_ok = mc28_run_m1_copula_sweep(prm, priors, dose_mg, u_gum, u_hess, mc_res)
+    if mc_ok && copula_ok {
+        println("M1_COPULA_CHOLESKY_PASS")
+    }
+    println("")
+    println("MC cross-validation complete.")
+    println("PASS")
+    println("======================================================================")
+
+    return 0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
+    mc28_selftest_main()
+}

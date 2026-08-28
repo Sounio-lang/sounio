@@ -1,0 +1,406 @@
+//@ run-pass
+// validated_lane: lean_single
+
+use eisa::backend::*
+use eisa::format::*
+use eisa::evm::*
+use str::lib::*
+
+fn f64_bits_eq(a: f64, b: f64) -> bool with Mut, Div, Panic {
+    let pa = f64_parts(a)
+    let pb = f64_parts(b)
+    pa.sign == pb.sign && pa.exp == pb.exp && pa.mant == pb.mant
+}
+
+fn nl_str() -> Str with Mut, Div, Panic {
+    var buf: [i8; 256] = [0; 256]
+    buf[0] = 10 as i8
+    str_from_bytes_buf(&buf, 1)
+}
+
+fn append_lit(dst: &Str, s: string, nl: &Str) -> Str with Mut, Div, Panic {
+    let line = str_from_literal(s)
+    let t = str_cat(dst, &line)
+    str_cat(&t, nl)
+}
+
+fn assert_src_fits(src: &Str) with Panic {
+    // stdlib/str::Str is fixed-width 256 bytes.
+    assert(src.len < 256)
+}
+
+fn src_c1() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn c1() {", &nl)
+    src = append_lit(&src, "let c = 3.0", &nl)
+    src = append_lit(&src, "let one = 1.0", &nl)
+    src = append_lit(&src, "let acc = 0.0", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "set acc = acc + one", &nl)
+    src = append_lit(&src, "set c = c - one", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "gate acc", &nl)
+    src = append_lit(&src, "store [out] <- acc", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn src_if(x_neg: bool) -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn c2() {", &nl)
+    if x_neg {
+        src = append_lit(&src, "let x = 0 - 1.0", &nl)
+    } else {
+        src = append_lit(&src, "let x = 1.0", &nl)
+    }
+    src = append_lit(&src, "let y = 0.0", &nl)
+    src = append_lit(&src, "if x < 0.0 {", &nl)
+    src = append_lit(&src, "set y = 1.0", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "gate y", &nl)
+    src = append_lit(&src, "store [out] <- y", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn src_c3_scope() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn c3() {", &nl)
+    src = append_lit(&src, "let one = 1.0", &nl)
+    src = append_lit(&src, "let c1 = 1.0", &nl)
+    src = append_lit(&src, "let c2 = 1.0", &nl)
+    src = append_lit(&src, "let acc = 0.0", &nl)
+    src = append_lit(&src, "while c1 != 0.0 {", &nl)
+    src = append_lit(&src, "if c1 < 0.0 {", &nl)
+    src = append_lit(&src, "let z = 123.0", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "set acc = acc + one", &nl)
+    src = append_lit(&src, "set c1 = c1 - one", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "while c2 != 0.0 {", &nl)
+    src = append_lit(&src, "set acc = acc + one", &nl)
+    src = append_lit(&src, "set c2 = c2 - one", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "gate acc", &nl)
+    src = append_lit(&src, "store [out] <- acc", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+// Compact leak witness (fits Str cap=256): two sequential if-blocks with
+// 5 block-local lets each, followed by a root-scope let + gate. This shape
+// catches block pop/free-list regressions while staying representable in Str.
+// A budget-overflow leak witness (>64 regs) is unrepresentable under the
+// 256-byte Str cap, so C3b instead asserts allocator-state restoration
+// directly: the 1-block and 2-block variants must use the same maximum
+// register index — a leaked block would push the second block onto fresh,
+// higher registers.
+fn src_c3_one_block() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn c3b() {", &nl)
+    src = append_lit(&src, "let g=0.0-1.0", &nl)
+    src = append_lit(&src, "if g<0.0{", &nl)
+    src = append_lit(&src, "let a=1.0", &nl)
+    src = append_lit(&src, "let b=a+1.0", &nl)
+    src = append_lit(&src, "let c=b+1.0", &nl)
+    src = append_lit(&src, "let d=c+1.0", &nl)
+    src = append_lit(&src, "let e=d+1.0", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "let z=1.0", &nl)
+    src = append_lit(&src, "gate g", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn max_dst_reg(build: &EisaxBuild) -> i64 with Mut, Panic {
+    var mx = 0
+    var i = 0
+    while i < build.n_code {
+        let op = build.ops[i as usize]
+        // Branch targets live in a/b fields; dst is a register for every
+        // opcode except ebr/ebrz/ebrn where dst is unused (0).
+        if op != op_ebr() && op != op_ebrz() && op != op_ebrn() {
+            if build.dsts[i as usize] > mx { mx = build.dsts[i as usize] }
+        }
+        i = i + 1
+    }
+    mx
+}
+
+fn src_c3_leak_witness() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn c3b() {", &nl)
+    src = append_lit(&src, "let g=0.0-1.0", &nl)
+    src = append_lit(&src, "if g<0.0{", &nl)
+    src = append_lit(&src, "let a=1.0", &nl)
+    src = append_lit(&src, "let b=a+1.0", &nl)
+    src = append_lit(&src, "let c=b+1.0", &nl)
+    src = append_lit(&src, "let d=c+1.0", &nl)
+    src = append_lit(&src, "let e=d+1.0", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "if g<0.0{", &nl)
+    src = append_lit(&src, "let a=1.0", &nl)
+    src = append_lit(&src, "let b=a+1.0", &nl)
+    src = append_lit(&src, "let c=b+1.0", &nl)
+    src = append_lit(&src, "let d=c+1.0", &nl)
+    src = append_lit(&src, "let e=d+1.0", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "let z=1.0", &nl)
+    src = append_lit(&src, "gate g", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn src_bad_depth9() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn d9() {", &nl)
+    src = append_lit(&src, "let c = 1.0", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "set c = c - 1.0", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn src_fuel7_short() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn f7() {", &nl)
+    src = append_lit(&src, "fuel 7", &nl)
+    src = append_lit(&src, "let c = 0.0", &nl)
+    src = append_lit(&src, "while c != 0.0 {", &nl)
+    src = append_lit(&src, "set c = c - 1.0", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "gate c", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn src_fuel_exhaust() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn inf() {", &nl)
+    src = append_lit(&src, "fuel 7", &nl)
+    src = append_lit(&src, "let one = 1.0", &nl)
+    src = append_lit(&src, "while one != 0.0 {", &nl)
+    src = append_lit(&src, "}", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn src_golden_mul() -> Str with Mut, Div, Panic {
+    let nl = nl_str()
+    var src = str_new()
+    src = append_lit(&src, "epistemic fn golden_mul() {", &nl)
+    src = append_lit(&src, "let a = 0.5", &nl)
+    src = append_lit(&src, "let b = 7.25", &nl)
+    src = append_lit(&src, "let c = a * b", &nl)
+    src = append_lit(&src, "gate c", &nl)
+    src = append_lit(&src, "store [dose] <- c", &nl)
+    src = append_lit(&src, "}", &nl)
+    src
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    // C1
+    let b1 = eisa_compile(src_c1())
+    if b1.status != 0 { fails = fails + 1 }
+    let img1 = eisax_encode(b1.build)
+    if img1.w[1] != eisax_version_v1() { fails = fails + 1 }
+    if eisax_validate(img1) != 0 { fails = fails + 1 }
+    var m1 = evm_load(img1)
+    if evm_run(&!m1) != 0 { fails = fails + 1 }
+    if evm_stop_kind(&m1) != 0 { fails = fails + 1 }
+    if evm_version(&m1) != 1 { fails = fails + 1 }
+    if evm_frail_count(&m1) != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&m1, 0), 3.0) { fails = fails + 1 }
+    if !f64_bits_eq(evm_reg_val(&m1, 2), 3.0) { fails = fails + 1 }
+    assert(fails == 0)
+
+    // C2
+    let c2n = eisa_compile(src_if(true))
+    let c2p = eisa_compile(src_if(false))
+    if c2n.status != 0 || c2p.status != 0 { fails = fails + 1 }
+    let i2n = eisax_encode(c2n.build)
+    let i2p = eisax_encode(c2p.build)
+    if i2n.w[1] != eisax_version_v1() || i2p.w[1] != eisax_version_v1() { fails = fails + 1 }
+    var m2n = evm_load(i2n)
+    var m2p = evm_load(i2p)
+    if evm_run(&!m2n) != 0 || evm_run(&!m2p) != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&m2n, 0), 1.0) { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&m2p, 0), 0.0) { fails = fails + 1 }
+    assert(fails == 0)
+
+    // C3: nesting compiles AND computes — while{if}+while, acc must end at 2.0.
+    let c3 = eisa_compile(src_c3_scope())
+    if c3.status != 0 { fails = fails + 1 }
+    let i3 = eisax_encode(c3.build)
+    if i3.w[1] != eisax_version_v1() { fails = fails + 1 }
+    if eisax_validate(i3) != 0 { fails = fails + 1 }
+    var m3 = evm_load(i3)
+    if evm_run(&!m3) != 0 { fails = fails + 1 }
+    if evm_stop_kind(&m3) != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&m3, 0), 2.0) { fails = fails + 1 }
+
+    // C3b: sequential blocks + root statement after blocks must compile/run.
+    let c3b_src = src_c3_leak_witness()
+    assert_src_fits(&c3b_src)
+    let c3b = eisa_compile(c3b_src)
+    if c3b.status != 0 { fails = fails + 1 }
+    let i3b = eisax_encode(c3b.build)
+    if eisax_validate(i3b) != 0 { fails = fails + 1 }
+    var m3b = evm_load(i3b)
+    if evm_run(&!m3b) != 0 { fails = fails + 1 }
+
+    // C3b register-release witness: the 2-block program must peak at the
+    // same register index as the 1-block program — leaked block locals
+    // would force the second block onto fresh, higher registers.
+    let c3b1_src = src_c3_one_block()
+    assert_src_fits(&c3b1_src)
+    let c3b1 = eisa_compile(c3b1_src)
+    if c3b1.status != 0 { fails = fails + 1 }
+    if max_dst_reg(&c3b.build) != max_dst_reg(&c3b1.build) { fails = fails + 1 }
+    assert(fails == 0)
+
+    // C4
+    let nl = nl_str()
+    var bad_cond = str_new()
+    bad_cond = append_lit(&bad_cond, "epistemic fn b1() {", &nl)
+    bad_cond = append_lit(&bad_cond, "let c = 1.0", &nl)
+    bad_cond = append_lit(&bad_cond, "while c > 0.0 {", &nl)
+    bad_cond = append_lit(&bad_cond, "set c = c - 1.0", &nl)
+    bad_cond = append_lit(&bad_cond, "}", &nl)
+    bad_cond = append_lit(&bad_cond, "}", &nl)
+    if eisa_compile(bad_cond).status != (0 - 10) { fails = fails + 1 }
+
+    var bad_cond_undef = str_new()
+    bad_cond_undef = append_lit(&bad_cond_undef, "epistemic fn b2() {", &nl)
+    bad_cond_undef = append_lit(&bad_cond_undef, "while z != 0.0 {", &nl)
+    bad_cond_undef = append_lit(&bad_cond_undef, "}", &nl)
+    bad_cond_undef = append_lit(&bad_cond_undef, "}", &nl)
+    if eisa_compile(bad_cond_undef).status != (0 - 12) { fails = fails + 1 }
+
+    var bad_set = str_new()
+    bad_set = append_lit(&bad_set, "epistemic fn b3() {", &nl)
+    bad_set = append_lit(&bad_set, "let c = 1.0", &nl)
+    bad_set = append_lit(&bad_set, "while c != 0.0 {", &nl)
+    bad_set = append_lit(&bad_set, "set x = 1.0", &nl)
+    bad_set = append_lit(&bad_set, "set c = c - 1.0", &nl)
+    bad_set = append_lit(&bad_set, "}", &nl)
+    bad_set = append_lit(&bad_set, "}", &nl)
+    if eisa_compile(bad_set).status != (0 - 13) { fails = fails + 1 }
+
+    if eisa_compile(src_bad_depth9()).status != (0 - 14) { fails = fails + 1 }
+
+    var fuel0 = str_new()
+    fuel0 = append_lit(&fuel0, "epistemic fn b4() {", &nl)
+    fuel0 = append_lit(&fuel0, "fuel 0", &nl)
+    fuel0 = append_lit(&fuel0, "let c = 1.0", &nl)
+    fuel0 = append_lit(&fuel0, "while c != 0.0 {", &nl)
+    fuel0 = append_lit(&fuel0, "set c = c - 1.0", &nl)
+    fuel0 = append_lit(&fuel0, "}", &nl)
+    fuel0 = append_lit(&fuel0, "}", &nl)
+    if eisa_compile(fuel0).status != (0 - 16) { fails = fails + 1 }
+
+    var fuel_hi = str_new()
+    fuel_hi = append_lit(&fuel_hi, "epistemic fn b5() {", &nl)
+    fuel_hi = append_lit(&fuel_hi, "fuel 16777217", &nl)
+    fuel_hi = append_lit(&fuel_hi, "let c = 1.0", &nl)
+    fuel_hi = append_lit(&fuel_hi, "while c != 0.0 {", &nl)
+    fuel_hi = append_lit(&fuel_hi, "set c = c - 1.0", &nl)
+    fuel_hi = append_lit(&fuel_hi, "}", &nl)
+    fuel_hi = append_lit(&fuel_hi, "}", &nl)
+    if eisa_compile(fuel_hi).status != (0 - 17) { fails = fails + 1 }
+    assert(fails == 0)
+
+    // C5
+    let f_def = eisa_compile(src_c1())
+    let i_def = eisax_encode(f_def.build)
+    let expected_fuel = if (64 + i_def.w[2] * 64) > 16777216 { 16777216 } else { 64 + i_def.w[2] * 64 }
+    if eisax_fuel(i_def) != expected_fuel { fails = fails + 1 }
+
+    let f7 = eisa_compile(src_fuel7_short())
+    if f7.status != 0 { fails = fails + 1 }
+    let i7 = eisax_encode(f7.build)
+    if eisax_fuel(i7) != 7 { fails = fails + 1 }
+    var m7 = evm_load(i7)
+    if evm_run(&!m7) != 0 { fails = fails + 1 }
+    if evm_fuel_left(&m7) != 4 { fails = fails + 1 }
+
+    let fe = eisa_compile(src_fuel_exhaust())
+    let ie = eisax_encode(fe.build)
+    var me = evm_load(ie)
+    if evm_run(&!me) != 0 { fails = fails + 1 }
+    if evm_stop_kind(&me) != 1 { fails = fails + 1 }
+    assert(fails == 0)
+
+    // C6
+    let gsrc = src_golden_mul()
+    let g0 = eisa_compile(gsrc)
+    if g0.status != 0 { fails = fails + 1 }
+    let ig0 = eisax_encode(g0.build)
+    if ig0.w[1] != 0 { fails = fails + 1 }
+    if eisax_prog_hash(ig0) != 4492008095971298662 { fails = fails + 1 }
+    assert(fails == 0)
+
+    // C7
+    let g1 = eisa_compile_v1(src_golden_mul())
+    if g1.status != 0 { fails = fails + 1 }
+    let ig1 = eisax_encode(g1.build)
+    if ig1.w[1] != 1 { fails = fails + 1 }
+    if eisax_n_code(ig0) != eisax_n_code(ig1) { fails = fails + 1 }
+    var i = 0
+    while i < eisax_n_code(ig0) {
+        if eisax_code_op(ig0, i) != eisax_code_op(ig1, i) { fails = fails + 1 }
+        if eisax_code_dst(ig0, i) != eisax_code_dst(ig1, i) { fails = fails + 1 }
+        if eisax_code_a(ig0, i) != eisax_code_a(ig1, i) { fails = fails + 1 }
+        if eisax_code_b(ig0, i) != eisax_code_b(ig1, i) { fails = fails + 1 }
+        i = i + 1
+    }
+    var m70 = evm_load(ig0)
+    var m71 = evm_load(ig1)
+    if evm_run(&!m70) != 0 || evm_run(&!m71) != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&m70, 0), evm_mem_val(&m71, 0)) { fails = fails + 1 }
+    assert(fails == 0)
+
+    // C8
+    let d1 = eisa_compile(src_c1())
+    let d2 = eisa_compile(src_c1())
+    let i81 = eisax_encode(d1.build)
+    let i82 = eisax_encode(d2.build)
+    if eisax_prog_hash(i81) != eisax_prog_hash(i82) { fails = fails + 1 }
+    var m81 = evm_load(i81)
+    var m82 = evm_load(i82)
+    if evm_run(&!m81) != 0 || evm_run(&!m82) != 0 { fails = fails + 1 }
+    if !f64_bits_eq(evm_mem_val(&m81, 0), evm_mem_val(&m82, 0)) { fails = fails + 1 }
+    if evm_frail_count(&m81) != evm_frail_count(&m82) { fails = fails + 1 }
+    if evm_stop_kind(&m81) != evm_stop_kind(&m82) { fails = fails + 1 }
+
+    assert(fails == 0)
+    println("ALL PASS: eisa backend v1 C1 ... C8")
+    0
+}

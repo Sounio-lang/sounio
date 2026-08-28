@@ -1,0 +1,249 @@
+//@ run-pass
+//@ timeout: 600
+//@ expect-stdout: D6_FULL_INTEGRATION_PASS
+
+use tensor::types::{Tensor, shape1, shape2, tensor_get, tensor_set}
+use tensor::ops::{tensor_zeros, tensor_sum, tensor_free, tensor_scalar}
+use tensor::tape::{
+    tape_begin, tape_drop, tape_leaf, tape_backward,
+    tape_tensor_sum, tape_tensor_index,
+    tape_tensor_matmul, tape_tensor_add, tape_tensor_sub, tape_tensor_mul,
+    tape_tensor_tanh,
+    tape_grad_at,
+}
+use nn::layers::{
+    dense_new, dense_forward, taped_tanh,
+    layer_norm_forward, mse_loss,
+}
+use nn::optimizer::{
+    param_store_new, param_store_register, param_store_sync_grads,
+    param_store_set_grad_value, param_store_grad_value, param_store_free,
+}
+use nn::pinn::{
+    pinn_full_fractional_mlp_train,
+}
+
+fn d6f_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn d6f_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    if y < 1.0 { y = 1.0 }
+    var i = 0
+    while i < 24 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+fn layer_norm_sum_direct(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> f64 with Mut, Div, Panic {
+    var total = 0.0
+    var row: usize = 0 as usize
+    while row < 2 as usize {
+        let x0 = tensor_get(x, row * 2 as usize)
+        let x1 = tensor_get(x, row * 2 as usize + 1 as usize)
+        let mu = 0.5 * (x0 + x1)
+        let c0 = x0 - mu
+        let c1 = x1 - mu
+        let var = 0.5 * (c0 * c0 + c1 * c1) + eps
+        let den = d6f_sqrt(var)
+        total = total + tensor_get(gamma, 0 as usize) * c0 / den + tensor_get(beta, 0 as usize)
+        total = total + tensor_get(gamma, 1 as usize) * c1 / den + tensor_get(beta, 1 as usize)
+        row = row + 1 as usize
+    }
+    total
+}
+
+fn test_layernorm_full_fd() with Alloc, Mut, Panic, Div {
+    var x = tensor_zeros(shape2(2 as usize, 2 as usize))
+    tensor_set(&!x, 0 as usize, 1.0)
+    tensor_set(&!x, 1 as usize, 2.0)
+    tensor_set(&!x, 2 as usize, 4.0)
+    tensor_set(&!x, 3 as usize, 7.0)
+    var gamma = tensor_zeros(shape2(1 as usize, 2 as usize))
+    var beta = tensor_zeros(shape2(1 as usize, 2 as usize))
+    tensor_set(&!gamma, 0 as usize, 0.8)
+    tensor_set(&!gamma, 1 as usize, 1.2)
+    tensor_set(&!beta, 0 as usize, -0.1)
+    tensor_set(&!beta, 1 as usize, 0.2)
+
+    var tape = tape_begin()
+    let xid = tape_leaf(&!tape, &x, true)
+    let gid = tape_leaf(&!tape, &gamma, true)
+    let bid = tape_leaf(&!tape, &beta, true)
+    var out = layer_norm_forward(&x, xid, &gamma, gid, &beta, bid, 1.0e-5, &!tape)
+    let loss_id = tape_tensor_sum(&!tape, out.1, None, false)
+    tape_backward(&!tape, loss_id)
+
+    let eps = 1.0e-6
+    var max_x = 0.0
+    var i: usize = 0 as usize
+    while i < 4 as usize {
+        let saved = tensor_get(&x, i)
+        tensor_set(&!x, i, saved + eps)
+        let plus = layer_norm_sum_direct(&x, &gamma, &beta, 1.0e-5)
+        tensor_set(&!x, i, saved - eps)
+        let minus = layer_norm_sum_direct(&x, &gamma, &beta, 1.0e-5)
+        tensor_set(&!x, i, saved)
+        let fd = (plus - minus) / (2.0 * eps)
+        let err = d6f_abs(fd - tape_grad_at(&tape, xid, i))
+        if err > max_x { max_x = err }
+        i = i + 1 as usize
+    }
+    var max_g = 0.0
+    i = 0 as usize
+    while i < 2 as usize {
+        let saved_g = tensor_get(&gamma, i)
+        tensor_set(&!gamma, i, saved_g + eps)
+        let plus_g = layer_norm_sum_direct(&x, &gamma, &beta, 1.0e-5)
+        tensor_set(&!gamma, i, saved_g - eps)
+        let minus_g = layer_norm_sum_direct(&x, &gamma, &beta, 1.0e-5)
+        tensor_set(&!gamma, i, saved_g)
+        let fd_g = (plus_g - minus_g) / (2.0 * eps)
+        let err_g = d6f_abs(fd_g - tape_grad_at(&tape, gid, i))
+        if err_g > max_g { max_g = err_g }
+        i = i + 1 as usize
+    }
+    var max_b = 0.0
+    i = 0 as usize
+    while i < 2 as usize {
+        let saved_b = tensor_get(&beta, i)
+        tensor_set(&!beta, i, saved_b + eps)
+        let plus_b = layer_norm_sum_direct(&x, &gamma, &beta, 1.0e-5)
+        tensor_set(&!beta, i, saved_b - eps)
+        let minus_b = layer_norm_sum_direct(&x, &gamma, &beta, 1.0e-5)
+        tensor_set(&!beta, i, saved_b)
+        let fd_b = (plus_b - minus_b) / (2.0 * eps)
+        let err_b = d6f_abs(fd_b - tape_grad_at(&tape, bid, i))
+        if err_b > max_b { max_b = err_b }
+        i = i + 1 as usize
+    }
+    assert(max_x < 1.0e-5)
+    assert(max_g < 1.0e-5)
+    assert(max_b < 1.0e-5)
+    tape_drop(&!tape)
+}
+
+fn test_taped_index_fd() with Alloc, Mut, Panic, Div {
+    var t = tensor_zeros(shape1(6 as usize))
+    var i: usize = 0 as usize
+    while i < 6 as usize {
+        tensor_set(&!t, i, (i as f64) * 0.25 - 0.5)
+        i = i + 1 as usize
+    }
+    var tape = tape_begin()
+    let tid = tape_leaf(&!tape, &t, true)
+    let out_id = tape_tensor_index(&!tape, tid, 3 as usize)
+    tape_backward(&!tape, out_id)
+    i = 0 as usize
+    while i < 6 as usize {
+        let expected = if i == 3 as usize { 1.0 } else { 0.0 }
+        assert(d6f_abs(tape_grad_at(&tape, tid, i) - expected) < 1.0e-10)
+        i = i + 1 as usize
+    }
+    tape_drop(&!tape)
+}
+
+fn test_param_store_multilayer_sync() with Alloc, IO, Mut, Panic, Div {
+    var w1 = tensor_zeros(shape2(4 as usize, 2 as usize))
+    var b1 = tensor_zeros(shape2(4 as usize, 1 as usize))
+    var w2 = tensor_zeros(shape2(1 as usize, 4 as usize))
+    var x = tensor_zeros(shape2(2 as usize, 1 as usize))
+    var y = tensor_scalar(1.0)
+    tensor_set(&!x, 0 as usize, 0.5)
+    tensor_set(&!x, 1 as usize, 0.0 - 0.3)
+    var i: usize = 0 as usize
+    while i < 8 as usize {
+        tensor_set(&!w1, i, 0.1 + (i as f64) * 0.03)
+        i = i + 1 as usize
+    }
+    i = 0 as usize
+    while i < 4 as usize {
+        tensor_set(&!b1, i, 0.02 * (i as f64))
+        tensor_set(&!w2, i, 0.15 + (i as f64) * 0.04)
+        i = i + 1 as usize
+    }
+
+    var tape = tape_begin()
+    let w1id = tape_leaf(&!tape, &w1, true)
+    let b1id = tape_leaf(&!tape, &b1, true)
+    let w2id = tape_leaf(&!tape, &w2, true)
+    let xid = tape_leaf(&!tape, &x, false)
+    let yid = tape_leaf(&!tape, &y, false)
+    let z1raw = tape_tensor_matmul(&!tape, w1id, xid)
+    let z1 = tape_tensor_add(&!tape, z1raw, b1id)
+    let h1 = tape_tensor_tanh(&!tape, z1)
+    let pred = tape_tensor_matmul(&!tape, w2id, h1)
+    let diff = tape_tensor_sub(&!tape, pred, yid)
+    let sq = tape_tensor_mul(&!tape, diff, diff)
+    let loss = tape_tensor_sum(&!tape, sq, None, false)
+    tape_backward(&!tape, loss)
+
+    var store = param_store_new()
+    let p_w1 = param_store_register(&!store, &!w1, w1id)
+    let p_b1 = param_store_register(&!store, &!b1, b1id)
+    let p_w2 = param_store_register(&!store, &!w2, w2id)
+    param_store_sync_grads(&!store, &tape)
+
+    var max_w1 = 0.0
+    i = 0 as usize
+    while i < 8 as usize {
+        let g = d6f_abs(param_store_grad_value(&store, p_w1, i))
+        if g > max_w1 { max_w1 = g }
+        i = i + 1 as usize
+    }
+    var max_b1 = 0.0
+    i = 0 as usize
+    while i < 4 as usize {
+        let g = d6f_abs(param_store_grad_value(&store, p_b1, i))
+        if g > max_b1 { max_b1 = g }
+        i = i + 1 as usize
+    }
+    var max_w2 = 0.0
+    i = 0 as usize
+    while i < 4 as usize {
+        let g = d6f_abs(param_store_grad_value(&store, p_w2, i))
+        if g > max_w2 { max_w2 = g }
+        i = i + 1 as usize
+    }
+    assert(max_w1 > 0.0)
+    assert(max_b1 > 0.0)
+    assert(max_w2 > 0.0)
+    param_store_free(&!store)
+    tape_drop(&!tape)
+    tensor_free(&!w1); tensor_free(&!b1); tensor_free(&!w2); tensor_free(&!x); tensor_free(&!y)
+}
+
+fn test_full_fractional_pinn() with Alloc, IO, Mut, Panic, Div {
+    let r = pinn_full_fractional_mlp_train()
+    assert(r.epochs == 5000 as usize)
+    assert(r.loss_0 > r.loss_500)
+    assert(r.loss_500 > r.loss_1000)
+    assert(r.loss_1000 > r.loss_2000)
+    assert(r.loss_2000 > r.loss_3000)
+    assert(r.loss_3000 > r.loss_4000)
+    assert(r.loss_4000 > r.loss_5000)
+    assert(r.heldout_l2 < 0.05)
+    assert(r.phys_residual_mean < 0.01)
+    assert(r.ic_residual < 0.01)
+    assert(r.layer1_grad_max > 0.0)
+    assert(r.layer2_grad_max > 0.0)
+    assert(r.layer3_grad_max > 0.0)
+}
+
+fn main() -> i32 with Alloc, IO, Mut, Panic, Div {
+    println("d6full:layernorm")
+    test_layernorm_full_fd()
+    println("d6full:index")
+    test_taped_index_fd()
+    println("d6full:sync")
+    test_param_store_multilayer_sync()
+    println("d6full:train")
+    test_full_fractional_pinn()
+    println("D6_FULL_INTEGRATION_PASS")
+    return 0
+}

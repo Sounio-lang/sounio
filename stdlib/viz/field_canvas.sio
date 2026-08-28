@@ -1,0 +1,141 @@
+// Dual-channel Canvas renderer for ScalarField2D.
+//
+// The left panel renders field values with viridis. The right panel renders
+// standard uncertainty sqrt(variance) with magma. Separate scales prevent
+// numerical value and epistemic uncertainty from being silently conflated.
+
+use display::canvas::{Canvas, canvas_set_pixel, canvas_draw_rect, canvas_fill_rect}
+use epistemic::knowledge::{Epistemic}
+use epistemic::knightian::{PBox, pb_new, pb_lo_mean, pb_hi_mean}
+use viz::colormap::{viridis_r, viridis_g, viridis_b, magma_r, magma_g, magma_b}
+use viz::physchem::{ScalarField2D}
+
+fn fc_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var g = x * 0.5 + 0.5
+    var i: i64 = 0
+    while i < 12 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+fn fc_clamp01(x: f64) -> f64 {
+    if x < 0.0 { 0.0 } else if x > 1.0 { 1.0 } else { x }
+}
+
+pub fn field_epistemic_at(field: &ScalarField2D, idx: i64, confidence: i64) -> Epistemic {
+    Epistemic::new(field.values[idx as usize], field.variances[idx as usize], confidence)
+}
+
+// Mean-band decision only. This is not a confidence interval classification.
+pub fn field_pbox_threshold_class(p: &PBox, threshold: f64) -> i64 {
+    if pb_lo_mean(p) > threshold { 1 }
+    else if pb_hi_mean(p) < threshold { 0 - 1 }
+    else { 0 }
+}
+
+pub fn field_render_value_uncertainty(
+    field: &ScalarField2D,
+    c: &!Canvas,
+    left_x: i64,
+    top: i64,
+    panel_w: i64,
+    panel_h: i64,
+    gap: i64,
+) with Mut, Div {
+    if field.rows <= 0 || field.cols <= 0 || panel_w <= 0 || panel_h <= 0 { return }
+    let n = field.rows * field.cols
+    var value_min = field.values[0]
+    var value_max = field.values[0]
+    var sigma_min = fc_sqrt(field.variances[0])
+    var sigma_max = sigma_min
+    var i: i64 = 1
+    while i < n {
+        let value = field.values[i as usize]
+        let sigma = fc_sqrt(field.variances[i as usize])
+        if value < value_min { value_min = value }
+        if value > value_max { value_max = value }
+        if sigma < sigma_min { sigma_min = sigma }
+        if sigma > sigma_max { sigma_max = sigma }
+        i = i + 1
+    }
+    let value_range = if value_max == value_min { 1.0 } else { value_max - value_min }
+    let sigma_range = if sigma_max == sigma_min { 1.0 } else { sigma_max - sigma_min }
+    let right_x = left_x + panel_w + gap
+
+    var py: i64 = 0
+    while py < panel_h {
+        let row = (py * field.rows) / panel_h
+        var px: i64 = 0
+        while px < panel_w {
+            let col = (px * field.cols) / panel_w
+            let idx = row * field.cols + col
+            let epistemic = field_epistemic_at(field, idx, 900)
+            let value_t = fc_clamp01((epistemic.val() - value_min) / value_range)
+            let sigma = fc_sqrt(epistemic.variance())
+            let sigma_t = fc_clamp01((sigma - sigma_min) / sigma_range)
+            canvas_set_pixel(c, left_x + px, top + py,
+                viridis_r(value_t), viridis_g(value_t), viridis_b(value_t))
+            canvas_set_pixel(c, right_x + px, top + py,
+                magma_r(sigma_t), magma_g(sigma_t), magma_b(sigma_t))
+            px = px + 1
+        }
+        py = py + 1
+    }
+
+    canvas_draw_rect(c, left_x - 1, top - 1, panel_w + 2, panel_h + 2, 76, 94, 118)
+    canvas_draw_rect(c, right_x - 1, top - 1, panel_w + 2, panel_h + 2, 100, 78, 108)
+    canvas_fill_rect(c, left_x, top - 12, 42, 3, 111, 205, 180)
+    canvas_fill_rect(c, right_x, top - 12, 76, 3, 224, 112, 151)
+
+    var bx: i64 = 0
+    while bx < panel_w {
+        let t = (bx as f64) / (panel_w as f64)
+        canvas_fill_rect(c, left_x + bx, top + panel_h + 8, 1, 7,
+            viridis_r(t), viridis_g(t), viridis_b(t))
+        canvas_fill_rect(c, right_x + bx, top + panel_h + 8, 1, 7,
+            magma_r(t), magma_g(t), magma_b(t))
+        bx = bx + 1
+    }
+}
+
+pub fn field_render_epistemic_frontier(
+    field: &ScalarField2D,
+    c: &!Canvas,
+    left_x: i64,
+    top: i64,
+    panel_w: i64,
+    panel_h: i64,
+    gap: i64,
+    threshold: f64,
+    mean_ambiguity_half_width: f64,
+) with Mut, Div {
+    field_render_value_uncertainty(field, c, left_x, top, panel_w, panel_h, gap)
+    let strip_y = top + panel_h + 22
+    let strip_w = panel_w * 2 + gap
+    let row = field.rows / 2
+    var x: i64 = 0
+    while x < strip_w {
+        let col = (x * field.cols) / strip_w
+        let idx = row * field.cols + col
+        let epistemic = field_epistemic_at(field, idx, 860)
+        let pbox = pb_new(
+            epistemic.val() - mean_ambiguity_half_width,
+            epistemic.val() + mean_ambiguity_half_width,
+            epistemic.variance(),
+            epistemic.confidence(),
+        )
+        let class = field_pbox_threshold_class(&pbox, threshold)
+        if class > 0 {
+            canvas_fill_rect(c, left_x + x, strip_y, 1, 12, 86, 211, 224)
+        } else if class < 0 {
+            canvas_fill_rect(c, left_x + x, strip_y, 1, 12, 220, 231, 238)
+        } else {
+            canvas_fill_rect(c, left_x + x, strip_y, 1, 12, 238, 178, 62)
+        }
+        x = x + 1
+    }
+    canvas_draw_rect(c, left_x - 1, strip_y - 1, strip_w + 2, 14, 80, 91, 108)
+}

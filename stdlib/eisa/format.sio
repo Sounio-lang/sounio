@@ -1,0 +1,747 @@
+module eisa::format
+
+pub struct EisaxImage {
+    pub w: [i64; 1200],
+    pub w_len: i64,
+    pub c: [f64; 64],
+    pub c_len: i64,
+}
+
+pub struct EisaxBuild {
+    pub version: i64,
+    pub fuel: i64,
+    pub ops: [i64; 256],
+    pub dsts: [i64; 256],
+    pub as_: [i64; 256],
+    pub bs_: [i64; 256],
+    pub n_code: i64,
+    pub consts: [f64; 64],
+    pub n_const: i64,
+    pub prov_source: i64,
+    pub prov_flags: i64,
+}
+
+pub struct F64Parts {
+    pub sign: i64,
+    pub exp: i64,
+    pub mant: i64,
+}
+
+struct HashState {
+    pub a: i64,
+    pub b: i64,
+}
+
+pub fn eisax_magic() -> i64 { 1162626369 }
+
+pub fn eisax_version() -> i64 { 0 }
+pub fn eisax_version_v1() -> i64 { 1 }
+// v2 (arch doc 2026-07-05 §2): same layout, opcodes, fuel word and caps as
+// v1; the version word alone selects the qd128 err-lane semantics.
+pub fn eisax_version_v2() -> i64 { 2 }
+
+pub fn op_econst() -> i64 { 0 }
+pub fn op_eload() -> i64 { 1 }
+pub fn op_eadd() -> i64 { 2 }
+pub fn op_esub() -> i64 { 3 }
+pub fn op_emul() -> i64 { 4 }
+pub fn op_ediv() -> i64 { 5 }
+pub fn op_esqrt() -> i64 { 6 }
+pub fn op_egate() -> i64 { 7 }
+pub fn op_estore() -> i64 { 8 }
+pub fn op_emov() -> i64 { 9 }
+pub fn op_ebr() -> i64 { 10 }
+// v1 branch field convention follows 2-operand layout: a = register, b = target, dst = 0.
+pub fn op_ebrz() -> i64 { 11 }
+pub fn op_ebrn() -> i64 { 12 }
+pub fn op_ehalt() -> i64 { 13 }
+
+fn eisax_w_cap() -> i64 { 1200 }
+fn eisax_v0_reg_cap() -> i64 { 16 }
+fn eisax_v0_mem_cap() -> i64 { 8 }
+fn eisax_v0_code_cap() -> i64 { 32 }
+fn eisax_v0_const_cap() -> i64 { 16 }
+fn eisax_v1_reg_cap() -> i64 { 64 }
+fn eisax_v1_mem_cap() -> i64 { 32 }
+fn eisax_v1_code_cap() -> i64 { 256 }
+fn eisax_v1_const_cap() -> i64 { 64 }
+fn eisax_v1_fuel_max() -> i64 { 16777216 }
+
+fn eisax_version_err() -> i64 { 13 }
+fn eisax_fuel_err() -> i64 { 14 }
+
+fn eisax_code_start(version: i64) -> i64 {
+    if version == eisax_version_v1() || version == eisax_version_v2() { 7 } else { 6 }
+}
+
+fn eisax_expected_w_len(version: i64, n_code: i64, n_prov: i64) -> i64 {
+    eisax_code_start(version) + 4 * n_code + n_prov
+}
+
+fn eisax_prov_start(version: i64, n_code: i64) -> i64 {
+    eisax_code_start(version) + 4 * n_code
+}
+
+fn hash_modulus() -> i64 { 2147483647 }
+
+fn hash_state_new() -> HashState {
+    HashState { a: 1, b: 0 }
+}
+
+fn hash_mix(st: HashState, x: i64) -> HashState with Div {
+    let m = hash_modulus()
+    let xm = x % m
+    let a1 = (st.a + xm) % m
+    let b1 = (st.b + a1) % m
+    HashState { a: a1, b: b1 }
+}
+
+fn hash_finish(st: HashState) -> i64 {
+    st.b * 2147483648 + st.a
+}
+
+// Finiteness predicate robust under BOTH IEEE-754 semantics and the
+// measured lean_single runtime deviation (2026-07-05 probes): the engine
+// lowers f64 == so that NaN compares EQUAL to any operand (unordered sets
+// the equal flag), which makes `x != x` constant-false and defeats the
+// classic idioms `(x - x) == 0.0` and `x != x`.
+//
+// Detector, sound under either semantics:
+//   1. `x != x`             — catches NaN under real IEEE; inert on lean_single.
+//   2. `x == 0.0 && x == 1.0` — no real number equals both, so this is
+//      true iff NaN under the measured semantics; both-false under IEEE.
+//   3. magnitude vs DBL_MAX  — catches +/-Inf under both (ordered
+//      comparisons with Inf were measured correct).
+// See docs/audit/LEAN_SINGLE_NAN_SEMANTICS_2026-07-05.md.
+pub fn is_finite_f64(x: f64) -> bool {
+    if x != x { return false }
+    if x == 0.0 && x == 1.0 { return false }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    ax <= 1.7976931348623157e308
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn pow2_i64(p: i64) -> i64 with Mut, Div {
+    var r = 1
+    var i = 0
+    while i < p {
+        r = r * 2
+        i = i + 1
+    }
+    r
+}
+
+// NaN detector matching the dual-semantics rationale in is_finite_f64.
+fn f64_is_nan(x: f64) -> bool {
+    if x != x { return true }
+    x == 0.0 && x == 1.0
+}
+
+fn f64_is_inf(x: f64) -> bool {
+    if is_finite_f64(x) { return false }
+    !f64_is_nan(x)
+}
+
+pub fn f64_parts(x: f64) -> F64Parts with Mut, Div {
+    if !is_finite_f64(x) {
+        // NaN canonicalises to sign 0 (ordered comparisons on NaN are
+        // unreliable on the measured engine, so its sign is not observable).
+        if f64_is_nan(x) {
+            return F64Parts { sign: 0, exp: 2047, mant: 1 }
+        }
+        let s = if x < 0.0 { 1 } else { 0 }
+        return F64Parts { sign: s, exp: 2047, mant: 0 }
+    }
+
+    if x == 0.0 {
+        return F64Parts { sign: 0, exp: 0, mant: 0 }
+    }
+
+    let sign = if x < 0.0 { 1 } else { 0 }
+    var ax = abs_f64(x)
+    var e = 0
+
+    while ax >= 2.0 {
+        ax = ax / 2.0
+        e = e + 1
+    }
+    while ax < 1.0 {
+        ax = ax * 2.0
+        e = e - 1
+    }
+
+    let biased = e + 1023
+    if biased <= 0 {
+        // Subnormal caveat: v0 exact decomposition guarantees normals + zero.
+        return F64Parts { sign: sign, exp: 0, mant: 0 }
+    }
+
+    var frac = ax - 1.0
+    var mant = 0
+    var i = 0
+    while i < 52 {
+        frac = frac * 2.0
+        mant = mant * 2
+        if frac >= 1.0 {
+            mant = mant + 1
+            frac = frac - 1.0
+        }
+        i = i + 1
+    }
+
+    F64Parts { sign: sign, exp: biased, mant: mant }
+}
+
+pub fn f64_unparts(p: F64Parts) -> f64 with Mut, Div {
+    if p.exp == 0 && p.mant == 0 { return 0.0 }
+
+    if p.exp == 2047 {
+        if p.mant == 0 {
+            if p.sign == 1 { return 0.0 - (1.0 / 0.0) }
+            return 1.0 / 0.0
+        }
+        return 0.0 / 0.0
+    }
+
+    if p.exp == 0 {
+        // Subnormal caveat: not used by v0 witnesses.
+        return 0.0
+    }
+
+    var frac = 0.0
+    var bit_pow = pow2_i64(51)
+    var den = 2.0
+    var i = 0
+    while i < 52 {
+        let bit = (p.mant / bit_pow) % 2
+        if bit == 1 { frac = frac + (1.0 / den) }
+        bit_pow = bit_pow / 2
+        den = den * 2.0
+        i = i + 1
+    }
+
+    var x = 1.0 + frac
+    let e = p.exp - 1023
+    if e > 0 {
+        var j = 0
+        while j < e {
+            x = x * 2.0
+            j = j + 1
+        }
+    } else {
+        var j = 0
+        while j < (0 - e) {
+            x = x / 2.0
+            j = j + 1
+        }
+    }
+
+    if p.sign == 1 { 0.0 - x } else { x }
+}
+
+pub fn eisax_new() -> EisaxImage {
+    EisaxImage { w: [0; 1200], w_len: 0, c: [0.0; 64], c_len: 0 }
+}
+
+pub fn eisax_add_const(img: EisaxImage, v: f64) -> EisaxImage with Mut {
+    var out = img
+    if out.c_len < 64 && is_finite_f64(v) {
+        out.c[out.c_len as usize] = v
+        out.c_len = out.c_len + 1
+    }
+    out
+}
+
+pub fn eisax_build_new() -> EisaxBuild {
+    EisaxBuild {
+        version: eisax_version(),
+        fuel: 1,
+        ops: [0; 256],
+        dsts: [0; 256],
+        as_: [0; 256],
+        bs_: [0; 256],
+        n_code: 0,
+        consts: [0.0; 64],
+        n_const: 0,
+        prov_source: 0,
+        prov_flags: 0,
+    }
+}
+
+pub fn eisax_build_set_version(b: EisaxBuild, version: i64) -> EisaxBuild with Mut {
+    var out = b
+    out.version = version
+    out
+}
+
+pub fn eisax_build_set_fuel(b: EisaxBuild, fuel: i64) -> EisaxBuild with Mut {
+    var out = b
+    out.fuel = fuel
+    out
+}
+
+fn eisax_build_push_raw(b: EisaxBuild, op: i64, dst: i64, a: i64, c: i64) -> EisaxBuild with Mut, Panic {
+    var out = b
+    if out.n_code < 256 {
+        out.ops[out.n_code as usize] = op
+        out.dsts[out.n_code as usize] = dst
+        out.as_[out.n_code as usize] = a
+        out.bs_[out.n_code as usize] = c
+        out.n_code = out.n_code + 1
+    }
+    out
+}
+
+pub fn eisax_emit_emov(b: EisaxBuild, dst: i64, src: i64) -> EisaxBuild with Mut, Panic {
+    eisax_build_push_raw(b, op_emov(), dst, src, 0)
+}
+
+pub fn eisax_emit_ebr(b: EisaxBuild, target: i64) -> EisaxBuild with Mut, Panic {
+    eisax_build_push_raw(b, op_ebr(), 0, target, 0)
+}
+
+pub fn eisax_emit_ebrz(b: EisaxBuild, reg: i64, target: i64) -> EisaxBuild with Mut, Panic {
+    eisax_build_push_raw(b, op_ebrz(), 0, reg, target)
+}
+
+pub fn eisax_emit_ebrn(b: EisaxBuild, reg: i64, target: i64) -> EisaxBuild with Mut, Panic {
+    eisax_build_push_raw(b, op_ebrn(), 0, reg, target)
+}
+
+pub fn eisax_emit_ehalt(b: EisaxBuild) -> EisaxBuild with Mut, Panic {
+    eisax_build_push_raw(b, op_ehalt(), 0, 0, 0)
+}
+
+fn hash_mix_const(st: HashState, v: f64) -> HashState with Mut, Div {
+    let p = f64_parts(v)
+    let lo = p.mant % 67108864
+    let hi = p.mant / 67108864
+    var s1 = hash_mix(st, p.sign)
+    s1 = hash_mix(s1, p.exp)
+    s1 = hash_mix(s1, lo)
+    hash_mix(s1, hi)
+}
+
+fn eisax_hash_parts_v0(
+    w: &[i64; 1200],
+    n_code: i64,
+    n_prov: i64,
+    c: &[f64; 64],
+    c_len: i64
+) -> i64 with Mut, Div, Panic {
+    var st = hash_state_new()
+
+    var i = 0
+    while i < 5 {
+        st = hash_mix(st, w[i as usize])
+        i = i + 1
+    }
+
+    let code_words = 4 * n_code
+    i = 0
+    while i < code_words {
+        st = hash_mix(st, w[(6 + i) as usize])
+        i = i + 1
+    }
+
+    let prov_start = 6 + code_words
+    i = 0
+    while i < n_prov {
+        st = hash_mix(st, w[(prov_start + i) as usize])
+        i = i + 1
+    }
+
+    i = 0
+    while i < c_len {
+        st = hash_mix_const(st, c[i as usize])
+        i = i + 1
+    }
+
+    hash_finish(st)
+}
+
+fn eisax_hash_parts_v1(
+    w: &[i64; 1200],
+    n_code: i64,
+    n_prov: i64,
+    c: &[f64; 64],
+    c_len: i64
+) -> i64 with Mut, Div, Panic {
+    var st = hash_state_new()
+
+    var i = 0
+    while i < 5 {
+        st = hash_mix(st, w[i as usize])
+        i = i + 1
+    }
+
+    st = hash_mix(st, w[6])
+
+    let code_words = 4 * n_code
+    i = 0
+    while i < code_words {
+        st = hash_mix(st, w[(7 + i) as usize])
+        i = i + 1
+    }
+
+    let prov_start = 7 + code_words
+    i = 0
+    while i < n_prov {
+        st = hash_mix(st, w[(prov_start + i) as usize])
+        i = i + 1
+    }
+
+    i = 0
+    while i < c_len {
+        st = hash_mix_const(st, c[i as usize])
+        i = i + 1
+    }
+
+    hash_finish(st)
+}
+
+fn eisax_hash_parts(
+    version: i64,
+    w: &[i64; 1200],
+    n_code: i64,
+    n_prov: i64,
+    c: &[f64; 64],
+    c_len: i64
+) -> i64 with Mut, Div, Panic {
+    // v2 reuses the v1 mixing unchanged: the version word (w[1]) is already
+    // mixed in the header pass, so a v1 image and its v2 twin hash
+    // differently without any algorithm change.
+    if version == eisax_version_v1() || version == eisax_version_v2() {
+        eisax_hash_parts_v1(w, n_code, n_prov, c, c_len)
+    } else {
+        eisax_hash_parts_v0(w, n_code, n_prov, c, c_len)
+    }
+}
+
+pub fn eisax_encode(b: EisaxBuild) -> EisaxImage with Mut, Div, Panic {
+    var img = eisax_new()
+    let version = b.version
+
+    img.w[0] = eisax_magic()
+    img.w[1] = version
+    img.w[2] = b.n_code
+    img.w[3] = b.n_const
+    img.w[4] = 2
+    img.w[5] = 0
+    if version == eisax_version_v1() || version == eisax_version_v2() {
+        img.w[6] = b.fuel
+    }
+
+    let code_start = eisax_code_start(version)
+    var i = 0
+    while i < b.n_code {
+        let base = code_start + 4 * i
+        img.w[base as usize] = b.ops[i as usize]
+        img.w[(base + 1) as usize] = b.dsts[i as usize]
+        img.w[(base + 2) as usize] = b.as_[i as usize]
+        img.w[(base + 3) as usize] = b.bs_[i as usize]
+        i = i + 1
+    }
+
+    let prov_base = eisax_prov_start(version, b.n_code)
+    img.w[prov_base as usize] = b.prov_source
+    img.w[(prov_base + 1) as usize] = b.prov_flags
+
+    img.w_len = prov_base + 2
+
+    i = 0
+    while i < b.n_const {
+        img.c[i as usize] = b.consts[i as usize]
+        i = i + 1
+    }
+    img.c_len = b.n_const
+
+    img.w[5] = eisax_hash_parts(version, &img.w, b.n_code, 2, &img.c, b.n_const)
+    img
+}
+
+pub fn eisax_hash(img: EisaxImage) -> i64 with Mut, Div, Panic {
+    let version = img.w[1]
+    let n_code = img.w[2]
+    let n_prov = img.w[4]
+    eisax_hash_parts(version, &img.w, n_code, n_prov, &img.c, img.c_len)
+}
+
+fn op_uses_mem_a(op: i64) -> bool {
+    op == op_eload() || op == op_estore()
+}
+
+fn op_uses_reg_b(op: i64) -> bool {
+    op == op_eadd() || op == op_esub() || op == op_emul() || op == op_ediv()
+}
+
+fn op_uses_reg_a(op: i64) -> bool {
+    op == op_eadd() || op == op_esub() || op == op_emul() || op == op_ediv() || op == op_esqrt()
+}
+
+fn op_uses_const_a(op: i64) -> bool {
+    op == op_econst()
+}
+
+fn eisax_validate_v0(img: EisaxImage) -> i64 with Mut, Div, Panic {
+    if img.w[0] != eisax_magic() { return 1 }
+    if img.w[1] != eisax_version() { return 2 }
+
+    let n_code = img.w[2]
+    let n_const = img.w[3]
+    let n_prov = img.w[4]
+    if n_code < 0 || n_const < 0 || n_prov < 0 || img.w_len < 0 || img.c_len < 0 {
+        return 3
+    }
+    if n_code > 32 || n_const > 16 || n_prov > 8 { return 3 }
+    if img.c_len != n_const { return 3 }
+    if img.w_len > 160 { return 3 }
+
+    let expected_w_len = 6 + 4 * n_code + n_prov
+    if img.w_len != expected_w_len { return 4 }
+
+    if n_prov != 2 { return 12 }
+
+    var i = 0
+    while i < img.w_len {
+        if img.w[i as usize] < 0 { return 12 }
+        i = i + 1
+    }
+
+    i = 0
+    while i < n_const {
+        if !is_finite_f64(img.c[i as usize]) { return 10 }
+        i = i + 1
+    }
+
+    i = 0
+    while i < n_code {
+        let base = 6 + 4 * i
+        let op = img.w[base as usize]
+        let dst = img.w[(base + 1) as usize]
+        let a = img.w[(base + 2) as usize]
+        let b = img.w[(base + 3) as usize]
+
+        if op < 0 || op > 8 { return 5 }
+
+        if dst < 0 || dst >= 16 { return 6 }
+
+        if op_uses_const_a(op) {
+            if a < 0 || a >= n_const { return 8 }
+        } else {
+            if op_uses_mem_a(op) {
+                if a < 0 || a >= 8 { return 7 }
+            } else {
+                if op_uses_reg_a(op) {
+                    if a < 0 || a >= 16 { return 6 }
+                } else {
+                    if a != 0 { return 9 }
+                }
+            }
+        }
+
+        if op_uses_reg_b(op) {
+            if b < 0 || b >= 16 { return 6 }
+        } else {
+            if b != 0 { return 9 }
+        }
+
+        i = i + 1
+    }
+
+    let h = eisax_hash_parts_v0(&img.w, n_code, n_prov, &img.c, n_const)
+    if h != img.w[5] { return 11 }
+
+    0
+}
+
+fn v1_branch_target_ok(t: i64, n_code: i64) -> bool {
+    t >= 0 && t <= n_code
+}
+
+// Shared v1/v2 structural validator: v2 adds NO opcodes and keeps every v1
+// structural rule, cap and fuel bound; only the expected version word differs.
+fn eisax_validate_v1v2(img: EisaxImage, want_version: i64) -> i64 with Mut, Div, Panic {
+    if img.w[0] != eisax_magic() { return 1 }
+    if img.w[1] != want_version { return 2 }
+
+    let n_code = img.w[2]
+    let n_const = img.w[3]
+    let n_prov = img.w[4]
+    if n_code < 0 || n_const < 0 || n_prov < 0 || img.w_len < 0 || img.c_len < 0 {
+        return 3
+    }
+    if n_code > eisax_v1_code_cap() || n_const > eisax_v1_const_cap() || n_prov > 8 { return 3 }
+    if img.c_len != n_const { return 3 }
+    if img.w_len > eisax_w_cap() { return 3 }
+
+    let expected_w_len = eisax_expected_w_len(want_version, n_code, n_prov)
+    if img.w_len != expected_w_len { return 4 }
+
+    if n_prov != 2 { return 12 }
+
+    var i = 0
+    while i < img.w_len {
+        if img.w[i as usize] < 0 { return 12 }
+        i = i + 1
+    }
+
+    let fuel = img.w[6]
+    if fuel <= 0 || fuel > eisax_v1_fuel_max() { return eisax_fuel_err() }
+
+    i = 0
+    while i < n_const {
+        if !is_finite_f64(img.c[i as usize]) { return 10 }
+        i = i + 1
+    }
+
+    i = 0
+    while i < n_code {
+        let base = 7 + 4 * i
+        let op = img.w[base as usize]
+        let dst = img.w[(base + 1) as usize]
+        let a = img.w[(base + 2) as usize]
+        let b = img.w[(base + 3) as usize]
+
+        if op < 0 || op > op_ehalt() { return 5 }
+
+        if op == op_ebr() {
+            if dst != 0 || b != 0 { return 9 }
+            if !v1_branch_target_ok(a, n_code) { return 9 }
+            i = i + 1
+            continue
+        }
+
+        if op == op_ebrz() || op == op_ebrn() {
+            if dst != 0 { return 9 }
+            if a < 0 || a >= eisax_v1_reg_cap() { return 6 }
+            if !v1_branch_target_ok(b, n_code) { return 9 }
+            i = i + 1
+            continue
+        }
+
+        if op == op_ehalt() {
+            if dst != 0 || a != 0 || b != 0 { return 9 }
+            i = i + 1
+            continue
+        }
+
+        if dst < 0 || dst >= eisax_v1_reg_cap() { return 6 }
+
+        if op_uses_const_a(op) {
+            if a < 0 || a >= n_const { return 8 }
+        } else {
+            if op_uses_mem_a(op) {
+                if a < 0 || a >= eisax_v1_mem_cap() { return 7 }
+            } else {
+                if op == op_emov() || op_uses_reg_a(op) {
+                    if a < 0 || a >= eisax_v1_reg_cap() { return 6 }
+                } else {
+                    if a != 0 { return 9 }
+                }
+            }
+        }
+
+        if op == op_emov() {
+            if b != 0 { return 9 }
+        } else {
+            if op_uses_reg_b(op) {
+                if b < 0 || b >= eisax_v1_reg_cap() { return 6 }
+            } else {
+                if b != 0 { return 9 }
+            }
+        }
+
+        i = i + 1
+    }
+
+    let h = eisax_hash_parts_v1(&img.w, n_code, n_prov, &img.c, n_const)
+    if h != img.w[5] { return 11 }
+
+    0
+}
+
+fn eisax_validate_v1(img: EisaxImage) -> i64 with Mut, Div, Panic {
+    eisax_validate_v1v2(img, eisax_version_v1())
+}
+
+fn eisax_validate_v2(img: EisaxImage) -> i64 with Mut, Div, Panic {
+    eisax_validate_v1v2(img, eisax_version_v2())
+}
+
+pub fn eisax_validate(img: EisaxImage) -> i64 with Mut, Div, Panic {
+    if img.w[0] != eisax_magic() { return 1 }
+
+    let version = img.w[1]
+    if version == eisax_version() {
+        return eisax_validate_v0(img)
+    }
+    if version == eisax_version_v1() || version == eisax_version_v2() {
+        // Preserve v0 witness behavior: v0-shaped payload tagged as v1/v2 is a version mismatch.
+        let n_code = img.w[2]
+        let n_const = img.w[3]
+        let n_prov = img.w[4]
+        if n_code >= 0 && n_const >= 0 && n_prov >= 0 {
+            let v0_len = eisax_expected_w_len(eisax_version(), n_code, n_prov)
+            if img.w_len == v0_len { return 2 }
+        }
+        if version == eisax_version_v1() {
+            return eisax_validate_v1(img)
+        }
+        return eisax_validate_v2(img)
+    }
+    eisax_version_err()
+}
+
+pub fn eisax_n_code(img: EisaxImage) -> i64 {
+    img.w[2]
+}
+
+pub fn eisax_code_op(img: EisaxImage, i: i64) -> i64 with Panic {
+    let base = eisax_code_start(img.w[1])
+    img.w[(base + 4 * i) as usize]
+}
+
+pub fn eisax_code_dst(img: EisaxImage, i: i64) -> i64 with Panic {
+    let base = eisax_code_start(img.w[1])
+    img.w[(base + 4 * i + 1) as usize]
+}
+
+pub fn eisax_code_a(img: EisaxImage, i: i64) -> i64 with Panic {
+    let base = eisax_code_start(img.w[1])
+    img.w[(base + 4 * i + 2) as usize]
+}
+
+pub fn eisax_code_b(img: EisaxImage, i: i64) -> i64 with Panic {
+    let base = eisax_code_start(img.w[1])
+    img.w[(base + 4 * i + 3) as usize]
+}
+
+pub fn eisax_const(img: EisaxImage, i: i64) -> f64 with Panic {
+    img.c[i as usize]
+}
+
+pub fn eisax_prog_hash(img: EisaxImage) -> i64 {
+    img.w[5]
+}
+
+pub fn eisax_fuel(img: EisaxImage) -> i64 {
+    if img.w[1] == eisax_version_v1() || img.w[1] == eisax_version_v2() {
+        img.w[6]
+    } else {
+        0
+    }
+}
+
+pub fn eisax_prov_source(img: EisaxImage) -> i64 {
+    let p = eisax_prov_start(img.w[1], img.w[2])
+    img.w[p as usize]
+}
+
+pub fn eisax_prov_flags(img: EisaxImage) -> i64 {
+    let p = eisax_prov_start(img.w[1], img.w[2])
+    img.w[(p + 1) as usize]
+}

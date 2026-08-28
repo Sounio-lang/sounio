@@ -1,0 +1,430 @@
+//@ run-pass
+//@ requires: madaros
+
+// TLS 1.3 handshake message wire codec (stdlib/tls/handshake.sio)
+// against RFC 8448 ("Example Handshake Traces for TLS 1.3", "Simple
+// 1-RTT Handshake", Section 3), fetched fresh from
+// https://www.rfc-editor.org/rfc/rfc8448.txt on 2026-08-25 for this
+// task -- independently re-extracted rather than assumed to carry over
+// unchanged from Tasks 4/5's own fetches of the same document.
+//
+// Every hex vector below was copied verbatim from that fetch's
+// "{server} construct a ... handshake message" sections (Section 3),
+// each of which prints the FULL handshake-layer message (4-byte
+// msg_type||uint24-length header + body) as it exists BEFORE record-layer
+// encryption -- exactly this file's decode functions' own input shape.
+// signature_scheme (0x0804) was cross-checked against RFC 8446 SS4.2.3's
+// own "rsa_pss_rsae_sha256(0x0804)" table entry, independently re-fetched
+// from https://www.rfc-editor.org/rfc/rfc8446.txt for this task.
+//
+// The ServerHello's Certificate message (RFC 8448 Section 3, "{server}
+// construct a Certificate handshake message") is illustrative test
+// material self-signed with CN=rsa (RFC 8448 SS3 note: "these
+// certificates ... are for illustration only and are not real"), so this
+// test verifies only structural decoding (list shape, leaf Subject bytes,
+// serial number) against `openssl x509 -noout -subject -serial` run on
+// the same DER bytes -- never chain-of-trust, per this task's brief.
+
+use tls::handshake::*
+use net::socket::*
+use bignum::bigint::*
+
+fn write_bytes(buf: &RawBuf, values: [i64; 512], n: i64) with IO {
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, values[i as usize])
+        i = i + 1
+    }
+}
+
+// RFC 8448 SS3, "{server} construct a ServerHello handshake message"
+// (90 octets total: 4-byte header + 86-byte body).
+fn rfc_server_hello_msg() -> RawBuf with IO {
+    let buf = rawbuf_new(90)
+    let vals: [i64; 512] = [
+        2, 0, 0, 86, 3, 3, 166, 175, 6, 164, 18, 24, 96, 220, 94, 110,
+        96, 36, 156, 211, 76, 149, 147, 12, 138, 197, 203, 20, 52, 218, 193, 85,
+        119, 46, 211, 226, 105, 40, 0, 19, 1, 0, 0, 46, 0, 51, 0, 36,
+        0, 29, 0, 32, 201, 130, 136, 118, 17, 32, 149, 254, 102, 118, 43, 219,
+        247, 198, 114, 225, 86, 214, 204, 37, 59, 131, 61, 241, 221, 105, 177, 176,
+        78, 117, 31, 15, 0, 43, 0, 2, 3, 4, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 90)
+    buf
+}
+
+// RFC 8448 SS3, "{server} construct a Certificate handshake message"
+// (445 octets total: 4-byte header + 441-byte body).
+fn rfc_certificate_msg() -> RawBuf with IO {
+    let buf = rawbuf_new(445)
+    let vals: [i64; 512] = [
+        11, 0, 1, 185, 0, 0, 1, 181, 0, 1, 176, 48, 130, 1, 172, 48,
+        130, 1, 21, 160, 3, 2, 1, 2, 2, 1, 2, 48, 13, 6, 9, 42,
+        134, 72, 134, 247, 13, 1, 1, 11, 5, 0, 48, 14, 49, 12, 48, 10,
+        6, 3, 85, 4, 3, 19, 3, 114, 115, 97, 48, 30, 23, 13, 49, 54,
+        48, 55, 51, 48, 48, 49, 50, 51, 53, 57, 90, 23, 13, 50, 54, 48,
+        55, 51, 48, 48, 49, 50, 51, 53, 57, 90, 48, 14, 49, 12, 48, 10,
+        6, 3, 85, 4, 3, 19, 3, 114, 115, 97, 48, 129, 159, 48, 13, 6,
+        9, 42, 134, 72, 134, 247, 13, 1, 1, 1, 5, 0, 3, 129, 141, 0,
+        48, 129, 137, 2, 129, 129, 0, 180, 187, 73, 143, 130, 121, 48, 61, 152,
+        8, 54, 57, 155, 54, 198, 152, 140, 12, 104, 222, 85, 225, 189, 184, 38,
+        211, 144, 26, 36, 97, 234, 253, 45, 228, 154, 145, 208, 21, 171, 188, 154,
+        149, 19, 122, 206, 108, 26, 241, 158, 170, 106, 249, 140, 124, 237, 67, 18,
+        9, 152, 225, 135, 168, 14, 224, 204, 176, 82, 75, 27, 1, 140, 62, 11,
+        99, 38, 77, 68, 154, 109, 56, 226, 42, 95, 218, 67, 8, 70, 116, 128,
+        48, 83, 14, 240, 70, 28, 140, 169, 217, 239, 191, 174, 142, 166, 209, 208,
+        62, 43, 209, 147, 239, 240, 171, 154, 128, 2, 196, 116, 40, 166, 211, 90,
+        141, 136, 215, 159, 127, 30, 63, 2, 3, 1, 0, 1, 163, 26, 48, 24,
+        48, 9, 6, 3, 85, 29, 19, 4, 2, 48, 0, 48, 11, 6, 3, 85,
+        29, 15, 4, 4, 3, 2, 5, 160, 48, 13, 6, 9, 42, 134, 72, 134,
+        247, 13, 1, 1, 11, 5, 0, 3, 129, 129, 0, 133, 170, 210, 160, 229,
+        185, 39, 107, 144, 140, 101, 247, 58, 114, 103, 23, 6, 24, 165, 76, 95,
+        138, 123, 51, 125, 45, 247, 165, 148, 54, 84, 23, 242, 234, 232, 248, 165,
+        140, 143, 129, 114, 249, 49, 156, 243, 107, 127, 214, 197, 91, 128, 242, 26,
+        3, 1, 81, 86, 114, 96, 150, 253, 51, 94, 94, 103, 242, 219, 241, 2,
+        112, 46, 96, 140, 202, 230, 190, 193, 252, 99, 164, 42, 153, 190, 92, 62,
+        183, 16, 124, 60, 84, 233, 185, 235, 43, 213, 32, 59, 28, 59, 132, 224,
+        168, 178, 247, 89, 64, 155, 163, 234, 201, 217, 29, 64, 45, 204, 12, 200,
+        248, 150, 18, 41, 172, 145, 135, 180, 43, 77, 225, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 445)
+    buf
+}
+
+// RFC 8448 SS3, "{server} construct a CertificateVerify handshake
+// message" (136 octets total: 4-byte header + 132-byte body).
+fn rfc_certificate_verify_msg() -> RawBuf with IO {
+    let buf = rawbuf_new(136)
+    let vals: [i64; 512] = [
+        15, 0, 0, 132, 8, 4, 0, 128, 90, 116, 124, 93, 136, 250, 155, 210,
+        229, 90, 176, 133, 166, 16, 21, 183, 33, 31, 130, 76, 212, 132, 20, 90,
+        179, 255, 82, 241, 253, 168, 71, 123, 11, 122, 188, 144, 219, 120, 226, 211,
+        58, 92, 20, 26, 7, 134, 83, 250, 107, 239, 120, 12, 94, 162, 72, 238,
+        170, 167, 133, 196, 243, 148, 202, 182, 211, 11, 190, 141, 72, 89, 238, 81,
+        31, 96, 41, 87, 177, 84, 17, 172, 2, 118, 113, 69, 158, 70, 68, 92,
+        158, 165, 140, 24, 30, 129, 142, 149, 184, 195, 251, 11, 243, 39, 132, 9,
+        211, 190, 21, 42, 61, 165, 4, 62, 6, 61, 218, 101, 205, 245, 174, 162,
+        13, 83, 223, 172, 212, 47, 116, 243, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 136)
+    buf
+}
+
+// RFC 8448 SS3, "{server} construct a Finished handshake message" (36
+// octets total: 4-byte header + 32-byte verify_data).
+fn rfc_server_finished_msg() -> RawBuf with IO {
+    let buf = rawbuf_new(36)
+    let vals: [i64; 512] = [
+        20, 0, 0, 32, 155, 155, 20, 29, 144, 99, 55, 251, 210, 203, 220, 231,
+        29, 244, 222, 218, 74, 180, 44, 48, 149, 114, 203, 127, 255, 238, 84, 84,
+        183, 143, 7, 24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&buf, vals, 36)
+    buf
+}
+
+fn main() -> i64 with IO {
+    // --- ServerHello ---
+    let sh_msg = rfc_server_hello_msg()
+    let (sh_info, sh_ok) = decode_server_hello(&sh_msg, 90)
+    if sh_ok == false {
+        println("tls_handshake_codec_rfc8448: decode_server_hello failed")
+        return 1
+    }
+    if sh_info.is_hello_retry_request == true {
+        println("tls_handshake_codec_rfc8448: real ServerHello misidentified as HelloRetryRequest")
+        return 1
+    }
+    if (sh_info.cipher_suite as i64) != 0x1301 {
+        println("tls_handshake_codec_rfc8448: wrong cipher_suite")
+        return 1
+    }
+    if sh_info.has_key_share == false {
+        println("tls_handshake_codec_rfc8448: missing key_share")
+        return 1
+    }
+    // Expected x25519 key_share.key_exchange (32 octets), RFC 8448
+    // SS3's own published ServerHello.
+    let expected_pub: [u8; 32] = [
+        0xc9, 0x82, 0x88, 0x76, 0x11, 0x20, 0x95, 0xfe, 0x66, 0x76, 0x2b, 0xdb, 0xf7, 0xc6, 0x72, 0xe1,
+        0x56, 0xd6, 0xcc, 0x25, 0x3b, 0x83, 0x3d, 0xf1, 0xdd, 0x69, 0xb1, 0xb0, 0x4e, 0x75, 0x1f, 0x0f,
+    ]
+    var pi: i64 = 0
+    while pi < 32 {
+        if sh_info.x25519_public[pi as usize] != expected_pub[pi as usize] {
+            print_int(pi)
+            print_int(sh_info.x25519_public[pi as usize] as i64)
+            print_int(expected_pub[pi as usize] as i64)
+            println("tls_handshake_codec_rfc8448: x25519_public mismatch")
+            return 1
+        }
+        pi = pi + 1
+    }
+
+    // --- ClientHello round trip (self-consistency, not RFC-conformance:
+    // built from values this test controls, not the RFC's own trace) ---
+    let ch_random: [u8; 32] = [
+        1 as u8, 2 as u8, 3 as u8, 4 as u8, 5 as u8, 6 as u8, 7 as u8, 8 as u8,
+        9 as u8, 10 as u8, 11 as u8, 12 as u8, 13 as u8, 14 as u8, 15 as u8, 16 as u8,
+        17 as u8, 18 as u8, 19 as u8, 20 as u8, 21 as u8, 22 as u8, 23 as u8, 24 as u8,
+        25 as u8, 26 as u8, 27 as u8, 28 as u8, 29 as u8, 30 as u8, 31 as u8, 32 as u8,
+    ]
+    let ch_pub: [u8; 32] = [
+        200 as u8, 201 as u8, 202 as u8, 203 as u8, 204 as u8, 205 as u8, 206 as u8, 207 as u8,
+        208 as u8, 209 as u8, 210 as u8, 211 as u8, 212 as u8, 213 as u8, 214 as u8, 215 as u8,
+        216 as u8, 217 as u8, 218 as u8, 219 as u8, 220 as u8, 221 as u8, 222 as u8, 223 as u8,
+        224 as u8, 225 as u8, 226 as u8, 227 as u8, 228 as u8, 229 as u8, 230 as u8, 231 as u8,
+    ]
+    let host = rawbuf_new(16)
+    let host_bytes: [i64; 512] = [
+        101, 120, 97, 109, 112, 108, 101, 46, 116, 101, 115, 116, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]
+    write_bytes(&host, host_bytes, 16)
+
+    let empty_cookie = rawbuf_new(1)
+    let params = ClientHelloParams {
+        random: ch_random,
+        x25519_public: ch_pub,
+        server_name: host,
+        server_name_len: 12,
+        cookie: empty_cookie,
+        cookie_len: 0,
+    }
+    let (ch_msg, ch_len) = encode_client_hello(&params)
+
+    if (rawbuf_get(&ch_msg, 0) as u8) != HS_CLIENT_HELLO {
+        println("tls_handshake_codec_rfc8448: encoded ClientHello has wrong msg_type")
+        return 1
+    }
+    let ch_body_len = (rawbuf_get(&ch_msg, 1) << 16) | (rawbuf_get(&ch_msg, 2) << 8) | rawbuf_get(&ch_msg, 3)
+    if ch_body_len + 4 != ch_len {
+        println("tls_handshake_codec_rfc8448: encoded ClientHello length header mismatch")
+        return 1
+    }
+    // random must round-trip verbatim at its known fixed offset
+    // (legacy_version 2 bytes, then random at [6..38)).
+    var chi: i64 = 0
+    while chi < 32 {
+        if rawbuf_get(&ch_msg, 6 + chi) != (ch_random[chi as usize] as i64) {
+            println("tls_handshake_codec_rfc8448: encoded ClientHello random mismatch")
+            return 1
+        }
+        chi = chi + 1
+    }
+
+    // --- Certificate ---
+    let cert_msg = rfc_certificate_msg()
+    let (leaf, leaf_buf, intermediates, intermediate_bufs, intermediate_count, cert_ok) = decode_certificate_message(&cert_msg, 445)
+    if cert_ok == false {
+        println("tls_handshake_codec_rfc8448: decode_certificate_message failed")
+        return 1
+    }
+    if intermediate_count != 0 {
+        println("tls_handshake_codec_rfc8448: unexpected intermediates in single-cert message")
+        return 1
+    }
+    // openssl x509 -in leaf.der -inform DER -noout -subject -serial
+    // (independently run on these exact DER bytes for this task):
+    // subject=CN=rsa, serial=02.
+    if leaf.subject.count != 1 {
+        println("tls_handshake_codec_rfc8448: leaf subject RDN count mismatch")
+        return 1
+    }
+    if leaf.subject.entries[0].value_len != 3 {
+        println("tls_handshake_codec_rfc8448: leaf subject CN length mismatch")
+        return 1
+    }
+    if leaf.subject.entries[0].value[0] != (114 as u8) {
+        println("tls_handshake_codec_rfc8448: leaf subject CN byte 0 mismatch")
+        return 1
+    }
+    if leaf.subject.entries[0].value[1] != (115 as u8) {
+        println("tls_handshake_codec_rfc8448: leaf subject CN byte 1 mismatch")
+        return 1
+    }
+    if leaf.subject.entries[0].value[2] != (97 as u8) {
+        println("tls_handshake_codec_rfc8448: leaf subject CN byte 2 mismatch")
+        return 1
+    }
+    let expected_serial = bigint_from_u32(2 as u32)
+    if bigint_cmp(&leaf.serial_number, &expected_serial) != 0 {
+        println("tls_handshake_codec_rfc8448: leaf serial_number mismatch")
+        return 1
+    }
+
+    // --- CertificateVerify ---
+    let cv_msg = rfc_certificate_verify_msg()
+    let (cv_info, cv_ok) = decode_certificate_verify(&cv_msg, 136)
+    if cv_ok == false {
+        println("tls_handshake_codec_rfc8448: decode_certificate_verify failed")
+        return 1
+    }
+    if (cv_info.signature_scheme as i64) != (SIG_SCHEME_RSA_PSS_RSAE_SHA256 as i64) {
+        println("tls_handshake_codec_rfc8448: wrong signature_scheme")
+        return 1
+    }
+    if cv_info.cv_signature_len != 128 {
+        println("tls_handshake_codec_rfc8448: wrong signature length")
+        return 1
+    }
+
+    // --- Finished ---
+    let fin_msg = rfc_server_finished_msg()
+    let (verify_data, verify_data_len) = decode_finished(&fin_msg, 36)
+    if verify_data_len != 32 {
+        println("tls_handshake_codec_rfc8448: wrong verify_data length")
+        return 1
+    }
+    let expected_verify_data: [u8; 32] = [
+        0x9b, 0x9b, 0x14, 0x1d, 0x90, 0x63, 0x37, 0xfb, 0xd2, 0xcb, 0xdc, 0xe7, 0x1d, 0xf4, 0xde, 0xda,
+        0x4a, 0xb4, 0x2c, 0x30, 0x95, 0x72, 0xcb, 0x7f, 0xff, 0xee, 0x54, 0x54, 0xb7, 0x8f, 0x07, 0x18,
+    ]
+    var fvi: i64 = 0
+    while fvi < 32 {
+        if rawbuf_get(&verify_data, fvi) != (expected_verify_data[fvi as usize] as i64) {
+            println("tls_handshake_codec_rfc8448: verify_data mismatch")
+            return 1
+        }
+        fvi = fvi + 1
+    }
+
+    // decode_finished should reject a non-Finished message type.
+    let (_unused_buf, bad_len) = decode_finished(&sh_msg, 90)
+    if bad_len != 0 {
+        println("tls_handshake_codec_rfc8448: decode_finished accepted wrong msg_type")
+        return 1
+    }
+
+    if is_new_session_ticket(HS_NEW_SESSION_TICKET) == false {
+        println("tls_handshake_codec_rfc8448: is_new_session_ticket false negative")
+        return 1
+    }
+    if is_new_session_ticket(HS_FINISHED) == true {
+        println("tls_handshake_codec_rfc8448: is_new_session_ticket false positive")
+        return 1
+    }
+    if is_key_update(HS_KEY_UPDATE) == false {
+        println("tls_handshake_codec_rfc8448: is_key_update false negative")
+        return 1
+    }
+    if is_key_update(HS_FINISHED) == true {
+        println("tls_handshake_codec_rfc8448: is_key_update false positive")
+        return 1
+    }
+
+    println("tls_handshake_codec_rfc8448: decoded fields match RFC 8448")
+    return 0
+}

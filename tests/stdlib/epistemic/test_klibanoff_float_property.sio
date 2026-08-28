@@ -1,0 +1,174 @@
+//@ run-pass
+//@ expect-stdout: KLIBANOFF FLOAT PROPERTY PASS
+
+// M3.5+ — Klibanoff CARA-CE Float-runtime property test.
+//
+// Claim (math-review-validated 2026-05-01): on Float arithmetic,
+// for any CredalSet `c` with (s_lo ≤ μ_0 ≤ s_hi), 0 ≤ ε ≤ 1, and
+// any α ≥ 0, λ ∈ [0, 1], the smooth-ambiguity certainty-
+// equivalent operator satisfies the sandwich
+//
+//   kl_walley_ce(c, λ)  ≤  kl_smooth_ce(c, α, λ)
+//                       ≤  kl_precise_ce(c, λ) + ε_machine
+//
+// This is the analogue of the Stage 0 / Stage 1 sandwich theorem
+// for the actual Float runtime, sampled empirically by LCG.
+//
+// Operationally this is the runtime witness for the boundary-
+// theorem family in `formal/lean4/SounioKlibanoff.lean`, exercised
+// across 500 deterministic random `(α, λ, c)` triples.
+//
+// PASS criterion: all 500 samples satisfy the sandwich within
+// 1e-5 absolute tolerance (loose to absorb Float rounding in
+// kl_exp/kl_log Taylor truncations).
+
+use epistemic::knightian::*
+use epistemic::walley::*
+use epistemic::klibanoff::*
+
+// ---- LCG plumbing (same pattern as M2.5/aminoglycoside tests) ----
+
+struct LcgState { seed: i64 }
+
+fn lcg_next(st: &!LcgState) -> i64 with Mut, Div, Panic {
+    let s = st.seed
+    let n = (1103515245 * s + 12345) % 2147483648
+    st.seed = n
+    n
+}
+
+fn lcg_unif(st: &!LcgState) -> f64 with Mut, Div, Panic {
+    let n = lcg_next(st)
+    (n as f64) / 2147483648.0
+}
+
+fn ks_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ---- Sample one (alpha, lambda, c) triple ----
+
+struct KlSample {
+    alpha: f64,
+    lambda: f64,
+    mu_0: f64,
+    sigma2: f64,
+    epsilon: f64,
+    s_lo: f64,
+    s_hi: f64,
+}
+
+fn kl_sample(st: &!LcgState) -> KlSample with Mut, Div, Panic {
+    // alpha in [0, 5] (validated CARA regime)
+    let u_a = lcg_unif(st)
+    let alpha = u_a * 5.0
+    // lambda in [0, 1]
+    let lambda = lcg_unif(st)
+    // mu_0 in [10, 30] (PK Cmin scale)
+    let u_mu = lcg_unif(st)
+    let mu_0 = 10.0 + u_mu * 20.0
+    // sigma^2 in [0.5, 5.0]
+    let u_s2 = lcg_unif(st)
+    let sigma2 = 0.5 + u_s2 * 4.5
+    // epsilon in [0, 0.5] (clinical-realistic Knightian fraction)
+    let u_eps = lcg_unif(st)
+    let epsilon = u_eps * 0.5
+    // support width: s_hi - mu_0 in [2, 10], mu_0 - s_lo in [2, 10]
+    let u_lo = lcg_unif(st)
+    let u_hi = lcg_unif(st)
+    let s_lo = mu_0 - (2.0 + u_lo * 8.0)
+    let s_hi = mu_0 + (2.0 + u_hi * 8.0)
+    KlSample {
+        alpha: alpha,
+        lambda: lambda,
+        mu_0: mu_0,
+        sigma2: sigma2,
+        epsilon: epsilon,
+        s_lo: s_lo,
+        s_hi: s_hi,
+    }
+}
+
+// ---- Sandwich check on one sample ----
+
+struct CheckResult {
+    sandwich_ok: bool,
+    walley_v: f64,
+    smooth_v: f64,
+    precise_v: f64,
+}
+
+fn check_one(s: &KlSample, conf_threshold: i64) -> CheckResult with Mut, Div, Panic {
+    // Build the CredalSet from the sample.
+    let c = cs_neighborhood(s.mu_0, s.sigma2, s.epsilon,
+                            s.s_lo, s.s_hi, conf_threshold)
+
+    let walley_v = kl_walley_ce(&c, s.lambda)
+    let smooth_v = kl_smooth_ce(&c, s.alpha, s.lambda)
+    let precise_v = kl_precise_ce(&c, s.lambda)
+
+    let tol: f64 = 1.0e-5
+    let lower_ok = walley_v - tol <= smooth_v
+    let upper_ok = smooth_v <= precise_v + tol
+
+    CheckResult {
+        sandwich_ok: lower_ok && upper_ok,
+        walley_v: walley_v,
+        smooth_v: smooth_v,
+        precise_v: precise_v,
+    }
+}
+
+// ---- Driver ----
+
+struct CounterPair { passed: i64, failed: i64 }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var st = LcgState { seed: 1 }
+    var counters = CounterPair { passed: 0, failed: 0 }
+
+    // Track worst-case slack at each end for diagnostic output.
+    var worst_lower_slack: f64 = 1.0e9
+    var worst_upper_slack: f64 = 1.0e9
+
+    var i: i64 = 0
+    while i < 500 {
+        let sample = kl_sample(&!st)
+        let result = check_one(&sample, 900)
+
+        if result.sandwich_ok {
+            counters.passed = counters.passed + 1
+        } else {
+            counters.failed = counters.failed + 1
+        }
+
+        // Slack diagnostics (positive = within bounds; negative = violation).
+        let lower_slack = result.smooth_v - result.walley_v
+        let upper_slack = result.precise_v - result.smooth_v
+        if lower_slack < worst_lower_slack {
+            worst_lower_slack = lower_slack
+        }
+        if upper_slack < worst_upper_slack {
+            worst_upper_slack = upper_slack
+        }
+
+        i = i + 1
+    }
+
+    println("Total:")
+    println(counters.passed + counters.failed)
+    println("Passed:")
+    println(counters.passed)
+    println("Failed:")
+    println(counters.failed)
+
+    if counters.failed == 0 {
+        println("KLIBANOFF FLOAT PROPERTY PASS")
+        0
+    } else {
+        println("KLIBANOFF FLOAT PROPERTY FAIL")
+        println("Worst lower slack:")
+        println(worst_lower_slack)
+        println("Worst upper slack:")
+        println(worst_upper_slack)
+        1
+    }
+}

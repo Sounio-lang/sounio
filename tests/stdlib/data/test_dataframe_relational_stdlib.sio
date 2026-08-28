@@ -1,0 +1,52 @@
+// Run-proof for stdlib data::dataframe_relational — group-by aggregation (sum/mean/count) and inner
+// join, verified against hand-computed values. lean_single engine.
+use data::dataframe::*
+use data::dataframe_relational::*
+fn ae(a: f64, b: f64) -> f64 { if a > b { a - b } else { b - a } }
+fn add3(df: &!DataFrame, a: f64, b: f64, c: f64) with Mut, Div, Panic {
+    var r: [f64; 64] = [0.0; 64]; r[0]=a; r[1]=b; r[2]=c; df_add_row(df, &r)
+}
+fn add2(df: &!DataFrame, a: f64, b: f64) with Mut, Div, Panic {
+    var r: [f64; 64] = [0.0; 64]; r[0]=a; r[1]=b; df_add_row(df, &r)
+}
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // [dept, x, amount], dept in {1,2}
+    var df = df_new(3)
+    add3(&!df, 1.0, 10.0, 100.0)
+    add3(&!df, 2.0, 20.0, 200.0)
+    add3(&!df, 1.0, 30.0, 300.0)
+    add3(&!df, 2.0, 40.0, 400.0)
+    add3(&!df, 1.0, 50.0, 500.0)
+    // group by dept, sum amount: dept1 -> 100+300+500 = 900, dept2 -> 200+400 = 600
+    let gs = df_groupby_sum(&df, 0, 2)
+    if df_nrows(&gs) != 2 || df_ncols(&gs) != 2 { print("FAIL gs_shape\n"); return 1 }
+    if ae(df_get(&gs, 0, 0), 1.0) >= 1.0e-9 { print("FAIL gs_key0\n"); return 2 }
+    if ae(df_get(&gs, 0, 1), 900.0) >= 1.0e-9 { print("FAIL gs_sum1\n"); return 3 }
+    if ae(df_get(&gs, 1, 1), 600.0) >= 1.0e-9 { print("FAIL gs_sum2\n"); return 4 }
+    // group by dept, mean amount: both 300
+    let gm = df_groupby_mean(&df, 0, 2)
+    if ae(df_get(&gm, 0, 1), 300.0) >= 1.0e-9 { print("FAIL gm1\n"); return 5 }
+    if ae(df_get(&gm, 1, 1), 300.0) >= 1.0e-9 { print("FAIL gm2\n"); return 6 }
+    // group by dept, count: dept1 -> 3, dept2 -> 2
+    let gc = df_groupby_count(&df, 0)
+    if ae(df_get(&gc, 0, 1), 3.0) >= 1.0e-9 { print("FAIL gc1\n"); return 7 }
+    if ae(df_get(&gc, 1, 1), 2.0) >= 1.0e-9 { print("FAIL gc2\n"); return 8 }
+    // inner join with a dept -> budget table
+    var d = df_new(2)
+    add2(&!d, 1.0, 1000.0)
+    add2(&!d, 2.0, 2000.0)
+    let j = df_join_inner(&df, &d, 0, 0)   // all 5 left rows match a dept
+    if df_nrows(&j) != 5 { print("FAIL j_rows\n"); return 9 }
+    if df_ncols(&j) != 4 { print("FAIL j_cols\n"); return 10 }   // 3 + 2 - 1
+    // left cols preserved (dept, x, amount) + right budget appended (col 3)
+    if ae(df_get(&j, 0, 0), 1.0) >= 1.0e-9 || ae(df_get(&j, 0, 2), 100.0) >= 1.0e-9 { print("FAIL j_left\n"); return 11 }
+    if ae(df_get(&j, 0, 3), 1000.0) >= 1.0e-9 { print("FAIL j_r0_budget\n"); return 12 }
+    if ae(df_get(&j, 1, 3), 2000.0) >= 1.0e-9 { print("FAIL j_r1_budget\n"); return 13 }
+    // a key present only on one side produces no join rows
+    var d2 = df_new(2)
+    add2(&!d2, 9.0, 999.0)   // dept 9 not in df
+    let j0 = df_join_inner(&df, &d2, 0, 0)
+    if df_nrows(&j0) != 0 { print("FAIL j_empty\n"); return 14 }
+    print("DATAFRAME_RELATIONAL_STDLIB_OK\n")
+    return 0
+}

@@ -1,0 +1,101 @@
+//@ run-pass
+// Midazolam CYP3A DDI E2E (lean_single multi-module).
+//
+// Structural claim: well-stirred gut+hepatic first-pass + competitive inhibition
+// reproduces clinical literature endpoints without hand-waved AUCR factors.
+//
+// Literature anchors:
+//   Heizmann 1984  — oral F ~ 0.3–0.44
+//   Olkkola 1994   — oral midazolam + ketoconazole AUCR ~15× (band 12–18)
+//   Thummel 1996   — gut-wall CYP3A required for full AUCR magnitude
+//   Shih 2013 / Kuehl 2001 — CYP3A5 expresser clears faster
+//   Wang 2011      — CYP3A4*22 clears slower
+//
+// Engine: SOUNIO_SOUC_ENGINE=lean_single
+// Gate:   bash scripts/clinical_midazolam_ddi_e2e_gate.sh
+//
+// claims_not_made: full PBPK28 C(t) vs digital figure; bedside DDI product;
+//                  Madaros multi-module native path; NONMEM FOCE
+
+use darwin_pbpk::drugs::midazolam::{
+    midazolam_cyp3a_substrate,
+    ketoconazole_inhibitor,
+    midazolam_pbpk_params_pgx
+}
+use darwin_pbpk::ddi::cyp3a_competitive::{
+    cyp3a_factor_of,
+    cyp3a_aucr,
+    cyp3a_f_oral,
+    cyp3a_clh,
+    cyp3a_fg,
+    cyp3a_fh,
+    cyp3a_inhibition_factor
+}
+
+fn fail(code: i32) -> i32 with IO {
+    print("FAIL code ")
+    print(code)
+    print("\n")
+    return code
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sub = midazolam_cyp3a_substrate()
+    let keto = ketoconazole_inhibitor()
+    let factor = cyp3a_factor_of(keto)
+
+    // T1: oral F (Heizmann 1984)
+    let f_solo = cyp3a_f_oral(sub, 1.0)
+    if f_solo <= 0.30 || f_solo >= 0.45 { return fail(1) }
+
+    // T2: ketoconazole AUCR ~15× (Olkkola 1994)
+    let aucr = cyp3a_aucr(sub, factor)
+    if aucr <= 12.0 || aucr >= 18.0 { return fail(2) }
+
+    // T3: monotonicity vs I/Ki
+    let aucr_weak = cyp3a_aucr(sub, cyp3a_inhibition_factor(0.008, 0.008))
+    let aucr_mid = cyp3a_aucr(sub, cyp3a_inhibition_factor(0.032, 0.008))
+    if !(aucr > aucr_mid && aucr_mid > aucr_weak && aucr_weak > 1.0) { return fail(3) }
+
+    // T4: gut essential (Thummel 1996)
+    let f0 = cyp3a_f_oral(sub, 1.0)
+    let clh0 = cyp3a_clh(sub, 1.0)
+    let f_hep_only = sub.fa * cyp3a_fg(sub, 1.0) * cyp3a_fh(sub, factor)
+    let aucr_hep_only = (f_hep_only / f0) * (clh0 / cyp3a_clh(sub, factor))
+    if !(aucr > aucr_hep_only && aucr_hep_only > 1.0) { return fail(4) }
+
+    // T5: CYP3A5 expresser faster
+    let p_exp = midazolam_pbpk_params_pgx(1, 0)
+    let p_non = midazolam_pbpk_params_pgx(0, 0)
+    let clh_exp = p_exp.cl_hepatic * p_exp.fu_plasma
+    let clh_non = p_non.cl_hepatic * p_non.fu_plasma
+    if clh_exp <= clh_non { return fail(5) }
+
+    // T6: CYP3A4*22 slower
+    let p_22 = midazolam_pbpk_params_pgx(0, 1)
+    let clh_22 = p_22.cl_hepatic * p_22.fu_plasma
+    if clh_22 >= clh_non { return fail(6) }
+
+    print("MDZ_DDI_E2E f_oral=")
+    print(f_solo)
+    print(" aucr_keto=")
+    print(aucr)
+    print(" aucr_weak=")
+    print(aucr_weak)
+    print(" aucr_mid=")
+    print(aucr_mid)
+    print(" aucr_hep_only=")
+    print(aucr_hep_only)
+    print("\n")
+
+    print("MDZ_DDI_E2E clh_expr=")
+    print(clh_exp)
+    print(" clh_non=")
+    print(clh_non)
+    print(" clh_22=")
+    print(clh_22)
+    print("\n")
+
+    print("CLINICAL_MIDAZOLAM_DDI_E2E_OK\n")
+    return 0
+}

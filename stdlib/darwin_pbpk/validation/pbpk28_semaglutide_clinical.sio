@@ -1,0 +1,276 @@
+// stdlib/darwin_pbpk/validation/pbpk28_semaglutide_clinical.sio
+//
+// PBPK28 CLINICAL VALIDATION — SEMAGLUTIDE (predicted-vs-observed plasma profile)
+//
+// Simulates the 28-state permeability-limited kernel with a first-order
+// SUBCUTANEOUS depot (semaglutide's native route), samples PLASMA concentration
+// at the observed study timepoints, and compares point-by-point against a
+// published clinical profile via GMFE / % within 2-fold (FDA/EMA metric).
+//
+// ============================================================================
+// OBSERVED DATA IS PENDING — DO NOT FABRICATE.
+// The observed concentration-time series must be supplied by a literature-MCP
+// session reading the source paper. Until obs_n() > 0 this file runs the model
+// and prints an ILLUSTRATIVE predicted profile, then emits
+//   PBPK28_SEMAGLUTIDE_CLINICAL_PENDING_OBSERVED
+// (NOT a PASS). When the observed arrays + study design are filled in, it computes
+// GMFE and emits PBPK28_SEMAGLUTIDE_CLINICAL_PASS / _FAIL_HONEST.
+//
+// Provenance to fill (lit session):
+//   source     : <Overgaard 2019 Clin Pharmacokinet / phase-1, Fig/Table, n=>
+//   dose/route : <e.g. 1 mg subcutaneous single dose>
+//   matrix     : PLASMA
+//   ka_sc, F_sc: SC absorption rate-constant (1/h) and bioavailability (~0.89)
+//   OBS_T/OBS_C: digitized (time h, conc) points (units to match source, e.g. nmol/L)
+//
+// Method: per-step CN (pbpk28_full_cn_step); SC depot driven through the release
+// term rel = F_sc * ka_sc * A_depot; A_depot depletes at ka_sc * A_depot.
+// Acceptance: GMFE <= 2.0 OR >= 80% of points within 2-fold.
+//
+// Author: Demetrios Chiuratto Agourakis
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+// ============================================================================
+// MATH HELPERS (native compiler has no stdlib transcendentals here)
+// ============================================================================
+
+fn sv_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn sv_finite(x: f64) -> bool {
+    if x != x { return false }
+    return sv_abs(x) < 1.0e12
+}
+
+fn sv_exp(x: f64) -> f64 with Mut {
+    var r = 1.0 + x / 1024.0
+    var i = 0
+    while i < 10 {
+        r = r * r
+        i = i + 1
+    }
+    return r
+}
+
+fn sv_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale = 0
+    while sx > 2.0 {
+        sx = sx / 2.718281828459045
+        scale = scale + 1
+    }
+    while sx < 0.5 {
+        sx = sx * 2.718281828459045
+        scale = scale - 1
+    }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+    var sf = 0.0
+    var si = 0
+    if scale > 0 {
+        while si < scale { sf = sf + 1.0; si = si + 1 }
+    } else {
+        while si < (0 - scale) { sf = sf - 1.0; si = si + 1 }
+    }
+    return result + sf
+}
+
+fn sv_fold_error(pred: f64, obs: f64) -> f64 {
+    if obs <= 0.0 || pred <= 0.0 { return 999.0 }
+    let r = pred / obs
+    let ri = obs / pred
+    if r > ri { return r }
+    return ri
+}
+
+// ============================================================================
+// OBSERVED DATA — PENDING (supplied by literature-MCP session)
+// ============================================================================
+
+fn obs_n() -> i32 { return 0 }
+
+fn obs_t_at(i: i32) -> f64 {
+    // hours post-dose; fill from the source figure/table
+    return 0.0
+}
+
+fn obs_c_at(i: i32) -> f64 {
+    // observed PLASMA semaglutide concentration (units to match source)
+    return 0.0
+}
+
+// Study design (fill with the observed study's regimen)
+fn study_dose_mg() -> f64 { return 1.0 }     // PLACEHOLDER (illustrative)
+fn sc_ka()        -> f64 { return 0.01155 }  // PLACEHOLDER 1/h (ln2/60h, Overgaard 2019)
+fn sc_f()         -> f64 { return 0.89 }      // PLACEHOLDER SC bioavailability
+
+// ============================================================================
+// SIMULATE-AND-SAMPLE — 28-state CN with first-order SC depot
+// ============================================================================
+
+fn pbpk28_sc_blood_at(prm: PBPKParams28, dose: f64, ka: f64, f_bio: f64,
+                      t_target: f64) -> f64 with Mut, Div, Panic {
+    let dt = 0.05
+    var st = pbpk28_state_zero()
+    var a_depot = dose          // mg in SC depot at t=0
+    var t = 0.0
+    var out = 0.0
+    var captured = false
+    while t < t_target {
+        let dt_use = if t + dt > t_target { t_target - t } else { dt }
+        let rel = f_bio * ka * a_depot         // mg/h reaching systemic blood
+        let st_new = pbpk28_full_cn_step(st, prm, rel, dt_use)
+        a_depot = a_depot - ka * a_depot * dt_use
+        if a_depot < 0.0 { a_depot = 0.0 }
+        t = t + dt_use
+        st = st_new
+        if !sv_finite(st.cv[0]) { return 0.0 }
+        out = st.cv[0]
+        captured = true
+    }
+    if captured == false { return st.cv[0] }
+    return out
+}
+
+// ============================================================================
+// MAIN — predicted-vs-observed, or PENDING
+// ============================================================================
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("========================================================")
+    println("  PBPK28 CLINICAL VALIDATION — Semaglutide (plasma)")
+    println("  Predicted-vs-observed concentration-time profile")
+    println("========================================================")
+
+    let prm = pbpk28_params_semaglutide()
+    let dose = study_dose_mg()
+    let ka = sc_ka()
+    let f_bio = sc_f()
+    let n = obs_n()
+
+    if n <= 0 {
+        println("  OBSERVED DATA PENDING — illustrative predicted profile only")
+        println("  (placeholder SC dose mg / ka / F shown; not a validation)")
+        println(dose)
+        println(ka)
+        println(f_bio)
+        var k = 0
+        // weekly SC: sample out to ~504 h (3 weeks); t1/2 ~ 165 h. The 240/336/
+        // 504 h tail gives the terminal-slope fit three post-peak points.
+        let grid: [f64; 9] = [6.0, 24.0, 48.0, 72.0, 120.0, 168.0, 240.0, 336.0, 504.0]
+        var cn: [f64; 9] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        while k < 9 {
+            let tt = grid[k]
+            let cpred = pbpk28_sc_blood_at(prm, dose, ka, f_bio, tt)
+            cn[k] = cpred
+            println(tt)
+            println(cpred)
+            k = k + 1
+        }
+
+        // ----------------------------------------------------------------
+        // TERMINAL HALF-LIFE FIT (computed, not eyeballed)
+        // ----------------------------------------------------------------
+        // Log-linear regression of ln(C) vs t over the post-peak declining
+        // tail gives lambda_z; t_half = ln(2)/lambda_z. Lets the illustrative
+        // profile be checked against semaglutide's real terminal t_half
+        // (~165 h, weekly kinetics). Still illustrative (placeholder SC
+        // regimen) and emits NO pass/fail — diagnostic only.
+        var pk = 0
+        var pkv = cn[0]
+        var jj = 1
+        while jj < 9 {
+            if cn[jj] > pkv { pkv = cn[jj]; pk = jj }
+            jj = jj + 1
+        }
+        var sx = 0.0
+        var sy = 0.0
+        var sxx = 0.0
+        var sxy = 0.0
+        var npt = 0.0
+        // start one point AFTER Cmax: excluding the peak (where dC/dt ~ 0) is
+        // standard NCA practice and avoids biasing lambda_z shallow.
+        var m = pk + 1
+        while m < 9 {
+            let cm = cn[m]
+            if cm > 1.0e-9 && sv_finite(cm) {
+                let xx = grid[m]
+                let yy = sv_ln(cm)
+                sx = sx + xx
+                sy = sy + yy
+                sxx = sxx + xx * xx
+                sxy = sxy + xx * yy
+                npt = npt + 1.0
+            }
+            m = m + 1
+        }
+        println("  terminal half-life fit (illustrative diagnostic):")
+        if npt >= 2.0 {
+            let denom = npt * sxx - sx * sx
+            if sv_abs(denom) > 1.0e-12 {
+                let slope = (npt * sxy - sx * sy) / denom
+                let lambda_z = 0.0 - slope
+                if lambda_z > 0.0 {
+                    println("  lambda_z (1/h) =")
+                    println(lambda_z)
+                    println("  t_half (h) =")
+                    println(0.6931471805599453 / lambda_z)
+                } else {
+                    println("  t_half: non-eliminating tail (lambda_z <= 0)")
+                }
+            } else {
+                println("  t_half: degenerate fit (no time spread)")
+            }
+        } else {
+            println("  t_half: insufficient finite tail points")
+        }
+
+        println("PBPK28_SEMAGLUTIDE_CLINICAL_PENDING_OBSERVED")
+        return 0
+    }
+
+    var sum_ln_fe = 0.0
+    var within2 = 0
+    var nf = 0.0
+    var i = 0
+    while i < n {
+        let tt = obs_t_at(i)
+        let cobs = obs_c_at(i)
+        let cpred = pbpk28_sc_blood_at(prm, dose, ka, f_bio, tt)
+        let fe = sv_fold_error(cpred, cobs)
+        println(tt)
+        println(cobs)
+        println(cpred)
+        println(fe)
+        sum_ln_fe = sum_ln_fe + sv_ln(fe)
+        if fe <= 2.0 { within2 = within2 + 1 }
+        nf = nf + 1.0
+        i = i + 1
+    }
+
+    let gmfe = sv_exp(sum_ln_fe / nf)
+    var pct2 = 0.0
+    var w = 0
+    var wf = 0.0
+    while w < within2 { wf = wf + 1.0; w = w + 1 }
+    pct2 = 100.0 * wf / nf
+
+    println("  GMFE =")
+    println(gmfe)
+    println("  % within 2-fold =")
+    println(pct2)
+
+    if gmfe <= 2.0 || pct2 >= 80.0 {
+        println("PBPK28_SEMAGLUTIDE_CLINICAL_PASS")
+        return 0
+    }
+    println("PBPK28_SEMAGLUTIDE_CLINICAL_FAIL_HONEST")
+    return 1
+}

@@ -1,0 +1,96 @@
+---
+title: "Kretikos GPU Compiler"
+description: "GPU compiler lane with checked thread builtins, serial CPU fallback, in-tree PTX/CUBIN templates, and artifact bundles."
+domain: "gpu"
+icon: "🏛️"
+topic_id: "website.showcases.pt.gpu"
+authority: "website_only"
+audience: "researchers"
+last_validated: "2026-03-07"
+validated_by: "A6"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.showcases.pt.gpu"
+---
+# Kretikos GPU Compiler
+
+> **Nota de alcance:** Kretikos é uma linha de pesquisa ativa. A farmacologia clínica (pontos de passagem de vancomicina, demonstração de dissertação PBPK) é a superfície pública principal de demonstração neste site — não as funcionalidades de loja de GPU.
+
+**Kretikos** (Κρητικός) = Cretense. Semelhante à fio de Ariadne pelo Labirinto de Knossos, este é o caminho nomeado para o trabalho de compilador GPU de Sounio: builtins de threads ao nível de fonte, fallback de CPU sequencial, modelos de PTX/CUBIN em árvore e pacotes de artefatos.
+
+## Leitura executiva
+
+A maioria dos idiomas agitam frente à ambição GPU e esconde a fronteira atual.
+Kretikos faz o contrário: expõe uma superfície limitada de GPU como uma funcionalidade de primeira classe da linguagem, e então vincula cada afirmação a um artefato ou comando inspecionável.- Verificou que os builtins do eixo x compilam hoje: `gpu_thread_id_x()`, `gpu_block_id_x()`, `gpu_block_dim_x()`, `gpu_sync_threads()`
+- As variações de spellings para y/z são reconhecidas; o fallback nativo do CPU retorna estubos determinísticos
+- Os modelos de PTX prédefinidos estão ativos via `kretikos emit-ptx` usando o emissor `self-hosted/gpu/ptx.sio` interna
+- Os modelos de CUBIN prédefinidos estão ativos via `kretikos emit-cubin` usando o emissor `self-hosted/gpu/nvidia_bare.sio` interna
+- Os pacotes de artefatos estruturais estão ativos via `kretikos bundle`, com hashes de PTX/CUBIN e afirmações explícitas
+- O Kretikos depende do compilador ativo `bin/souc`/`souc-linux-x86_64` para construir seus pequenos drivers de emissão
+- O caminho de fallback do CPU é determinístico e serial; não é um simulador paralelo de GPU
+- A fonte de backend — emissor de PTX, baixa de SPIR-V, gerador de ELF do CUDA — está interna em `self-hosted/gpu/`
+
+## O que o Kretikos prova
+
+Uma linguagem séria sobre software científico não deve delegar a integridade do GPU para um runtime de caixa preta. O Kretikos demonstra que o Sounio pode:
+
+- exporar a indexação de threads como sintaxe de nível de fonte, não de nível de driver
+- emitir modelos de artefatos PTX e CUBIN pré-definidos a partir de código self-hosted
+- executar kernels em um fallback de CPU sequencial determinístico para fumaça de sintaxe / tempo de execução
+- manter alinhada a compilador, tempo de execução e narrativa sob pressão real
+
+## Sintaxe de hardware bare-metal
+
+```sio
+kernel fn vec_add(n: i64) com GPU {
+    let tid = gpu_thread_id_x()
+    let bid = gpu_block_id_x()
+    let bdim = gpu_block_dim_x()
+    let i = bid * bdim + tid
+    se i >= n { retorne }
+    // Essa thread possui o elemento i.
+}
+
+fn main() com GPU, IO {
+    let grid = (16, 1, 1)
+    let block = (64, 1, 1)
+    perform GPU.launch(vec_add, grid, block)(1024)
+    perform GPU.sync()
+}
+```
+
+Essa é a forma pública verificada hoje: indexação de 1D mais fallback de CPU determinístico. A indexação de y/z e superfícies de memória mais ricas são linhas separadas de promoção.
+
+```bash
+# Construir PTX com o artefato GPU verificado (suporte a padrões mais amplas)
+export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
+"$SOUC_GPU_BIN" build examples/kernel_source_level.sio --backend gpu -o /tmp/kretikos.ptx
+```
+
+## Por que isso importa
+
+O trabalho com GPU é onde a marketing linguística vem morrer. É fácil desenhar intrínicos ou prometer suporte a cores tensoriais. É muito mais difícil manter um compilador auto-hosted, uma superfície GPU limitada e uma narrativa pública alinhada enquanto os erros reais surgirem na alinhamento do stack, os parâmetros de lançamento e a carga dos módulos PTX.
+
+Kretikos é valioso não apenas porque ele acelera o cálculo, mas porque ele força a linguagem a revelar se sua honidade sobeitando o contato com os artefatos de backend.
+
+## Nível de suporte
+
+- Verificou builtins: `gpu_thread_id_x`, `gpu_block_id_x`, `gpu_block_dim_x`, `gpu_sync_threads` — compilador auto-hospedado
+- Reconheceu stubs de fallback CPU: y/z IDs de threads/blocks retornam `0`; y/z dimensões de blocos retornam `1`
+- Modelos PTX: `kretikos emit-ptx` com 6 padrões (vec_add, vec_sub, vec_mul, vec_div, vec_add_f64, fma); emissão mais ampla de PTX por meio de `build --backend gpu` (verificado artefato GPU)
+- Modelos MSL: `kretikos emit-metal` com 3 padrões (vec_add, ossm_oct_step, sedenion_cd_step) a partir do emissor auto-hospedado em árvore
+- Modelos CUBIN: `kretikos emit-cubin` (emissor auto-hospedado em árvore)
+- Pacote de artefatos: `kretikos bundle` emite PTX+CUBIN além de `sounio.kretikos.bundle.v1`
+- Verificações opcionais de promoção: `--validate-toolchain` registra evidência `ptxas`/`nvdisasm`, e `--validate-runtime` tenta a API do CUDA Driver rung com exatos `not_run` nas hostes não-GPU
+- fonte backend: `self-hosted/gpu/ptx.sio`, `self-hosted/gpu/ptx_advanced.sio`, `self-hosted/gpu/nvidia_bare.sio`, `self-hosted/gpu/spirv_lower.sio`
+- Alvos atestados: CUDA `sm_80`, ROCm `gfx942`
+
+## A fronteira
+
+Kretikos não afirma:
+
+- que cada backend do GPU está completamente pronto para produção
+- que os núcleos multidimensionais emitam PTX para todos os padrões (atualmente padrões correspondentes)
+- que `gpu.alloc<T>()` ou abstractions de memória compartilhada são verificadas como superfície pública
+- que o fallback do CPU simula uma grade paralela de GPU
+
+A afirmação honesta é mais restrita e, por isso, mais forte: há um compilador de GPU aqui e o pacote de artefatos do CLI Kretikos é uma superfície de modelo prédefinido, não uma baixa arbitrária do kernel do usuário.
+A validação da cadeia de ferramentas e tempo de execução se aplicam apenas a esses modelos selecionados; elas não validam kernels de GPU escritos pelo usuário arbitrariamente.

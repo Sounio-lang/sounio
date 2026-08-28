@@ -1,0 +1,166 @@
+// examples/flow_viz/main.sio — 2D vector field streamlines demo
+//
+// Left panel  (x: 10-305): vortex+source flow — Euler-integrated streamlines
+//   colored by seed speed magnitude via viridis.
+// Right panel (x: 330-630): same field shown as quiver arrows + hex-bin
+//   of streamline density (particle dwell-time visualization).
+//
+// Flow field: vortex (rotation) + source (radial outflow)
+//   vx = (-y + 0.3*x) / (x² + y² + 0.05)
+//   vy = ( x + 0.3*y) / (x² + y² + 0.05)
+// defined on 24×18 grid, x∈[-2.5,2.5], y∈[-1.875,1.875]
+//
+// Press ESC or close to exit.
+
+use display::window::{Window, window_open, window_set_title, window_present, window_pending,
+                       window_next_event, window_close}
+use display::canvas::{Canvas, canvas_from_window, canvas_clear, canvas_fill_rect}
+use display::event::{EV_CLOSE, EV_KEY_PRESS}
+use display::canvas_ext::{canvas_draw_line_aa, canvas_bloom, canvas_fxaa}
+use viz::epiviz::{epiviz_streamlines, epiviz_hexbin}
+use display::font::{font_draw_string}
+
+fn fv_sin(t: f64) -> f64 with Div {
+    let t2 = t * t
+    t * (1.0 - t2 * (1.0 / 6.0 - t2 * (1.0 / 120.0 - t2 / 5040.0)))
+}
+
+fn fv_cos(t: f64) -> f64 with Div {
+    let t2 = t * t
+    1.0 - t2 * (0.5 - t2 * (1.0 / 24.0 - t2 / 720.0))
+}
+
+fn fv_sqrt(x: f64) -> f64 with Div {
+    if x <= 0.0 { return 0.0 }
+    let g0 = x * 0.5 + 0.5
+    let g1 = 0.5 * (g0 + x / g0)
+    let g2 = 0.5 * (g1 + x / g1)
+    let g3 = 0.5 * (g2 + x / g2)
+    0.5 * (g3 + x / g3)
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let W: i64 = 640
+    let H: i64 = 480
+    let scratch = heap_alloc(W * H * 8) as *mut i64
+
+    var win = window_open(W, H)
+
+    // --------------------------------------------------------
+    // Build vortex+source vector field: 24×18 grid
+    // --------------------------------------------------------
+    let ROWS: i64 = 18
+    let COLS: i64 = 24
+    var vx_f: [f64; 4096] = [0.0; 4096]
+    var vy_f: [f64; 4096] = [0.0; 4096]
+
+    var fj: i64 = 0
+    while fj < ROWS {
+        var fi: i64 = 0
+        while fi < COLS {
+            // Map grid cell → data coords x∈[-2.5,2.5], y∈[-1.875,1.875]
+            let x = (fi as f64 - (COLS as f64 - 1.0) * 0.5) * 5.0 / (COLS as f64 - 1.0)
+            let y = (fj as f64 - (ROWS as f64 - 1.0) * 0.5) * 3.75 / (ROWS as f64 - 1.0)
+            let r2 = x*x + y*y + 0.05
+            vx_f[(fj * COLS + fi) as usize] = (0.0 - y + 0.3 * x) / r2
+            vy_f[(fj * COLS + fi) as usize] = (x + 0.3 * y) / r2
+            fi = fi + 1
+        }
+        fj = fj + 1
+    }
+
+    // --------------------------------------------------------
+    // Pre-generate hex-bin scatter: 400 points from 4 particle
+    // trajectories traced in data space (Euler, 100 steps each)
+    // --------------------------------------------------------
+    var hx_pts: [f64; 1024] = [0.0; 1024]
+    var hy_pts: [f64; 1024] = [0.0; 1024]
+    let N_TRAJ: i64 = 8
+    let TRAJ_STEPS: i64 = 49
+    // Seed positions (evenly spaced ring)
+    var traj_idx: i64 = 0
+    var ti: i64 = 0
+    while ti < N_TRAJ {
+        let angle = 6.28318530718 * (ti as f64) / (N_TRAJ as f64)
+        var px = fv_cos(angle) * 1.8
+        var py = fv_sin(angle) * 1.8
+        var ts: i64 = 0
+        while ts < TRAJ_STEPS {
+            if traj_idx < 1024 {
+                hx_pts[traj_idx as usize] = px
+                hy_pts[traj_idx as usize] = py
+                traj_idx = traj_idx + 1
+            }
+            // Euler step in data space (step 0.06)
+            let r2 = px*px + py*py + 0.05
+            let dvx = (0.0 - py + 0.3 * px) / r2
+            let dvy = (px + 0.3 * py) / r2
+            let mag = fv_sqrt(dvx*dvx + dvy*dvy)
+            let sc = 0.06 / (mag + 0.01)
+            px = px + dvx * sc
+            py = py + dvy * sc
+            ts = ts + 1
+        }
+        ti = ti + 1
+    }
+    let N_HEX: i64 = traj_idx
+
+    // --------------------------------------------------------
+    // Title bytes
+    // --------------------------------------------------------
+    var title: [i8; 128] = [0; 128]
+    title[0] = 70  // F
+    title[1] = 108 // l
+    title[2] = 111 // o
+    title[3] = 119 // w
+    title[4] = 32  //
+    title[5] = 86  // V
+    title[6] = 105 // i
+    title[7] = 122 // z
+    let title_len: i64 = 8
+    window_set_title(&!win, &title, title_len)
+
+    var running = true
+    while running {
+        while window_pending(&!win) > 0 {
+            let ev = window_next_event(&!win)
+            if ev.kind == EV_CLOSE { running = false }
+            if ev.kind == EV_KEY_PRESS && ev.key == 27 { running = false }
+        }
+
+        var c = canvas_from_window(&!win)
+        canvas_clear(&!c, 12, 13, 22)
+
+        // Vertical divider
+        canvas_fill_rect(&!c, 316, 0, 2, H, 35, 38, 55)
+
+        // ---- Left panel: streamlines (8×6 seed grid) ----
+        epiviz_streamlines(&vx_f, &vy_f, ROWS, COLS,
+                           8, 6,        // 8×6 = 48 seeds
+                           120,         // max steps per streamline
+                           3.5,         // step_px
+                           &!c,
+                           10, 10, 296, 460)
+
+        // ---- Right panel: hex-bin particle density ----
+        canvas_fill_rect(&!c, 320, 10, 308, 460, 15, 16, 28)
+        epiviz_hexbin(&hx_pts, &hy_pts, N_HEX,
+                      0.0 - 2.5, 2.5, 0.0 - 2.0, 2.0,
+                      11,   // hex circumradius px
+                      &!c,
+                      322, 12, 304, 456)
+
+        // Panel labels (small dots at corners as decorative markers)
+        canvas_fill_rect(&!c, 12, 12, 4, 4, 60, 100, 180)
+        canvas_fill_rect(&!c, 322, 12, 4, 4, 60, 180, 120)
+
+        // Bloom + FXAA
+        canvas_bloom(&!c, scratch, 180, 140)
+        canvas_fxaa(&!c, scratch)
+
+        window_present(&!win)
+    }
+
+    heap_free(scratch as *mut i8)
+    window_close(&!win)
+}

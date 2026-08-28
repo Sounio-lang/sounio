@@ -1,0 +1,270 @@
+// data::csv_reader — cap-free, row-iterator, header-aware, typed CSV reader.
+// Complements the byte-exact writer data::csv. Reads a string (a read_file result
+// or a literal) accessed ONLY via str_char_at/str_len — never s[i], which SIGSEGVs
+// on a read_file result. No offset arrays: columns are found by re-scanning the
+// current row's byte range, so there is no column cap. RFC 4180 quoting; delimiter
+// ',', terminators '\n' and '\r\n'.
+//
+// Cap-free field reads: there is no field-LENGTH cap either. csv_str_into copies a field
+// (with un-escaping) into a caller [i8; 64] buffer and is bounded at 64 bytes — a
+// convenience for short fields, because Madaros v0.80.0 lacks size-generic array params.
+// For arbitrarily long fields, use csv_field_range + csv_byte to read the raw bytes with
+// no cap (raw path does not un-escape). See those functions below.
+
+pub struct CsvReader {
+    text: string,
+    text_len: i64,
+    hdr_start: i64,
+    hdr_end: i64,
+    row_start: i64,
+    row_end: i64,
+    pos: i64,
+    ok: i64,
+}
+
+// End byte index (exclusive) of the line beginning at `from`, and the index where the
+// NEXT line begins. Returns line_end (before the terminator). A '\r' before '\n' is
+// part of the terminator. Caller reads text via str_char_at.
+fn csv_line_end(text: string, len: i64, from: i64) -> i64 with Mut, Panic, Div {
+    var i = from
+    var in_q = 0
+    while i < len {
+        let c = str_char_at(text, i) as i64
+        if c == 34 { if in_q == 0 { in_q = 1 } else { in_q = 0 } }
+        if c == 10 && in_q == 0 {
+            var e = i
+            if e > from { if (str_char_at(text, e - 1) as i64) == 13 { e = e - 1 } }
+            return e
+        }
+        i = i + 1
+    }
+    return len
+}
+
+// Index where the line after the one ending at `line_end` starts (skips the LF).
+fn csv_next_line_start(text: string, len: i64, line_end: i64) -> i64 with Mut, Panic, Div {
+    var i = line_end
+    while i < len {
+        if (str_char_at(text, i) as i64) == 10 { return i + 1 }
+        i = i + 1
+    }
+    return len
+}
+
+// Count the comma-separated fields in the byte range [start, end), respecting quotes.
+fn csv_count_fields(text: string, start: i64, end: i64) -> i64 with Mut, Panic, Div {
+    if end <= start { return 0 }
+    var i = start
+    var n = 1
+    var in_q = 0
+    while i < end {
+        let c = str_char_at(text, i) as i64
+        if c == 34 { if in_q == 0 { in_q = 1 } else { in_q = 0 } }
+        if c == 44 && in_q == 0 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+pub fn csv_open(text: string) -> CsvReader with Mut, Panic, Div {
+    let len = str_len(text)
+    let he = csv_line_end(text, len, 0)
+    // row_start/row_end are initialized to the header range so csv_cols reports the
+    // table's column count before the first csv_next_row; csv_next_row overwrites them.
+    return CsvReader {
+        text: text, text_len: len,
+        hdr_start: 0, hdr_end: he,
+        row_start: 0, row_end: he,
+        pos: csv_next_line_start(text, len, he),
+        ok: 1,
+    }
+}
+
+pub fn csv_cols(r: &CsvReader) -> i64 with Mut, Panic, Div {
+    return csv_count_fields((*r).text, (*r).row_start, (*r).row_end)
+}
+
+pub fn csv_next_row(r: &! CsvReader) -> bool with Mut, Panic, Div {
+    let len = (*r).text_len
+    if (*r).pos >= len { return false }
+    let s = (*r).pos
+    let e = csv_line_end((*r).text, len, s)
+    (*r).row_start = s
+    (*r).row_end = e
+    (*r).pos = csv_next_line_start((*r).text, len, e)
+    // Guard against a trailing empty line (file ends with '\n'): if this "row" is empty
+    // AND there is nothing after it, treat as EOF.
+    if e <= s { if (*r).pos >= len { return false } }
+    return true
+}
+
+// Byte range [start, start+len) of a field within a row. Returned by csv_nth_field_range.
+pub struct CsvRange { start: i64, len: i64 }
+
+// Byte range of the `col`-th field within [start,end), respecting quotes. When `col` is
+// out of range, len is -1.
+fn csv_nth_field_range(text: string, start: i64, end: i64, col: i64) -> CsvRange with Mut, Panic, Div {
+    var i = start
+    var cur = 0
+    var fstart = start
+    var in_q = 0
+    while i <= end {
+        var at_end = 0
+        if i == end { at_end = 1 }
+        var c = 0
+        if at_end == 0 { c = str_char_at(text, i) as i64 }
+        if c == 34 && at_end == 0 { if in_q == 0 { in_q = 1 } else { in_q = 0 } }
+        if at_end == 1 || (c == 44 && in_q == 0) {
+            if cur == col { return CsvRange { start: fstart, len: i - fstart } }
+            cur = cur + 1
+            fstart = i + 1
+        }
+        i = i + 1
+    }
+    return CsvRange { start: start, len: 0 - 1 }   // col out of range -> len -1
+}
+
+// Compare the field bytes [rng.start, rng.start+rng.len) to `name` byte-for-byte.
+fn csv_range_eq(text: string, rng: CsvRange, name: string) -> bool with Mut, Panic, Div {
+    let nl = str_len(name)
+    if rng.len != nl { return false }
+    var i = 0
+    while i < nl {
+        if (str_char_at(text, rng.start + i) as i64) != (str_char_at(name, i) as i64) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+pub fn csv_col(r: &CsvReader, name: string) -> i64 with Mut, Panic, Div {
+    let ncol = csv_count_fields((*r).text, (*r).hdr_start, (*r).hdr_end)
+    var c = 0
+    while c < ncol {
+        let rng = csv_nth_field_range((*r).text, (*r).hdr_start, (*r).hdr_end, c)
+        if csv_range_eq((*r).text, rng, name) { return c }
+        c = c + 1
+    }
+    return 0 - 1
+}
+
+pub fn csv_ok(r: &CsvReader) -> bool with Mut, Panic, Div {
+    return (*r).ok == 1
+}
+
+pub fn csv_int(r: &! CsvReader, col: i64) -> i64 with Mut, Panic, Div {
+    let rng = csv_nth_field_range((*r).text, (*r).row_start, (*r).row_end, col)
+    if rng.len < 0 { (*r).ok = 0; return 0 }
+    var i = rng.start
+    let stop = rng.start + rng.len
+    var neg = 0
+    if i < stop { if (str_char_at((*r).text, i) as i64) == 45 { neg = 1; i = i + 1 } }
+    if i >= stop { (*r).ok = 0; return 0 }     // empty / just "-"
+    var acc = 0
+    while i < stop {
+        let d = (str_char_at((*r).text, i) as i64) - 48
+        if d < 0 || d > 9 { (*r).ok = 0; return 0 }
+        acc = acc * 10 + d
+        i = i + 1
+    }
+    (*r).ok = 1
+    if neg == 1 { return 0 - acc } else { return acc }
+}
+
+fn ipow10(n: i64) -> i64 with Mut, Panic, Div {
+    var p = 1
+    var i = 0
+    while i < n { p = p * 10; i = i + 1 }
+    return p
+}
+
+pub fn csv_f64_scaled(r: &! CsvReader, col: i64, decimals: i64) -> i64 with Mut, Panic, Div {
+    let rng = csv_nth_field_range((*r).text, (*r).row_start, (*r).row_end, col)
+    if rng.len < 0 { (*r).ok = 0; return 0 }
+    var i = rng.start
+    let stop = rng.start + rng.len
+    var neg = 0
+    if i < stop { if (str_char_at((*r).text, i) as i64) == 45 { neg = 1; i = i + 1 } }
+    var whole = 0
+    while i < stop {
+        let c = str_char_at((*r).text, i) as i64
+        if c == 46 { i = i + 1; break }
+        let d = c - 48
+        if d < 0 || d > 9 { (*r).ok = 0; return 0 }
+        whole = whole * 10 + d
+        i = i + 1
+    }
+    var frac = 0
+    var fdigits = 0
+    while i < stop {
+        let d = (str_char_at((*r).text, i) as i64) - 48
+        if d < 0 || d > 9 { (*r).ok = 0; return 0 }
+        if fdigits < decimals { frac = frac * 10 + d; fdigits = fdigits + 1 }
+        i = i + 1
+    }
+    while fdigits < decimals { frac = frac * 10; fdigits = fdigits + 1 }
+    (*r).ok = 1
+    let mag = whole * ipow10(decimals) + frac
+    if neg == 1 { return 0 - mag } else { return mag }
+}
+
+pub fn csv_f64(r: &! CsvReader, col: i64) -> f64 with Mut, Panic, Div {
+    let scaled = csv_f64_scaled(r, col, 9)     // 9 dp of precision
+    return (scaled as f64) / 1000000000.0
+}
+
+// Copy the `col`-th field's bytes into `out`, stripping surrounding double quotes and
+// collapsing "" -> ". Returns the number of bytes written (<= cap). Caller sizes the
+// buffer; fields longer than cap are truncated (no cap on the file, only this copy).
+pub fn csv_str_into(r: &CsvReader, col: i64, out: &![i8; 64], cap: i64) -> i64 with Mut, Panic, Div {
+    let rng = csv_nth_field_range((*r).text, (*r).row_start, (*r).row_end, col)
+    if rng.len < 0 { return 0 }
+    var i = rng.start
+    let stop = rng.start + rng.len
+    var quoted = 0
+    if rng.len >= 2 { if (str_char_at((*r).text, i) as i64) == 34 { quoted = 1; i = i + 1 } }
+    var w = 0
+    while i < stop {
+        if w >= cap { break }
+        let c = str_char_at((*r).text, i) as i64
+        if quoted == 1 && c == 34 {
+            // closing quote, or "" escape
+            if i + 1 < stop { if (str_char_at((*r).text, i + 1) as i64) == 34 {
+                (*out)[w as usize] = 34 as i8; w = w + 1; i = i + 2; continue
+            } }
+            i = i + 1
+            break
+        }
+        (*out)[w as usize] = c as i8
+        w = w + 1
+        i = i + 1
+    }
+    return w
+}
+
+// --- Cap-free raw field access -------------------------------------------------
+// csv_str_into above is bounded by its caller buffer (fixed [i8; 64]) because Madaros
+// v0.80.0 does not support size-generic array params (`fn f<const N: usize>(&![i8; N])`
+// type-checks N as 0). To read a field of ANY length with NO cap, use the pair below:
+// csv_field_range gives the current row's `col`-th field byte range, and csv_byte reads
+// one byte at an absolute index. Iterate [rng.start, rng.start+rng.len) with csv_byte.
+// NOTE: this raw path does NOT un-escape RFC-4180 quoting ("" -> " or surrounding
+// quotes) — csv_str_into is the un-escaping (but length-bounded) path; csv_field_range
+// + csv_byte are the raw, uncapped path.
+
+// Byte range [start, start+len) of the `col`-th field in the current row. len is -1 if
+// col is out of range. Callers read the bytes with csv_byte — no field-length cap.
+pub fn csv_field_range(r: &CsvReader, col: i64) -> CsvRange with Mut, Panic, Div {
+    return csv_nth_field_range((*r).text, (*r).row_start, (*r).row_end, col)
+}
+
+// Read the byte at absolute index `i` in the reader's text (0..text_len). Lets callers
+// read raw field bytes over a csv_field_range without touching the private `text` field.
+pub fn csv_byte(r: &CsvReader, i: i64) -> i64 with Mut, Panic, Div {
+    return str_char_at((*r).text, i) as i64
+}
+
+// Open a CSV file by path. Reads the whole file via read_file (dynamically sized mmap,
+// #1078 — no fixed cap) and hands the text to csv_open. Needs the #1078-fixed Madaros.
+pub fn csv_open_file(path: string) -> CsvReader with IO, Mut, Panic, Div {
+    return csv_open(read_file(path))
+}

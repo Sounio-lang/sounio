@@ -1,0 +1,192 @@
+//@ run-pass
+//@ expect-stdout: D5_CAPUTO_TENSOR_PASS
+
+use tensor::types::{
+    Tensor,
+    shape1,
+    tensor_get,
+    tensor_set,
+}
+use tensor::ops::{
+    tensor_zeros,
+    tensor_free,
+    tensor_scalar,
+}
+use tensor::tape::{
+    tape_begin,
+    tape_drop,
+    tape_leaf,
+    tape_backward,
+    tape_tensor_add,
+    tape_tensor_mul,
+    tape_tensor_caputo_l1,
+    tape_grad_at,
+    tape_value_at,
+}
+use special::caputo::{
+    caputo_l1_derivative,
+    caputo_pow,
+    fractional_decay_ml,
+}
+
+fn cpt_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn assert_abs_close(a: f64, b: f64, tol: f64) with Panic {
+    assert(cpt_abs(a - b) <= tol)
+}
+
+fn assert_rel_close(a: f64, b: f64, rtol: f64, atol: f64) with Mut, Div, Panic {
+    let diff = cpt_abs(a - b)
+    var scale = cpt_abs(b)
+    if scale < 1.0 { scale = 1.0 }
+    assert(diff <= atol || diff / scale <= rtol)
+}
+
+fn fill_constant(t: &!Tensor, value: f64) with Mut, Panic {
+    var i: usize = 0 as usize
+    while i < t.shape.len {
+        tensor_set(t, i, value)
+        i = i + 1 as usize
+    }
+}
+
+fn fill_fractional_decay(t: &!Tensor, alpha: f64, lambda: f64, dt: f64) with Mut, Div, Panic {
+    var i: usize = 0 as usize
+    while i < t.shape.len {
+        let time = (i as f64) * dt
+        tensor_set(t, i, fractional_decay_ml(1.0, lambda, time, alpha))
+        i = i + 1 as usize
+    }
+}
+
+fn caputo_direct(u: &Tensor, dt: f64, alpha: f64) -> f64 with Mut, Div, Panic {
+    var samples: [f64; 512] = [0.0; 512]
+    var i: usize = 0 as usize
+    while i < u.shape.len {
+        samples[i] = tensor_get(u, i)
+        i = i + 1 as usize
+    }
+    return caputo_l1_derivative(samples, (u.shape.len - 1 as usize) as i32, dt, alpha)
+}
+
+fn fd_caputo(u: &!Tensor, idx: usize, dt: f64, alpha: f64, eps: f64) -> f64 with Mut, Div, Panic {
+    let saved = tensor_get(u, idx)
+    tensor_set(u, idx, saved + eps)
+    let plus = caputo_direct(u, dt, alpha)
+    tensor_set(u, idx, saved - eps)
+    let minus = caputo_direct(u, dt, alpha)
+    tensor_set(u, idx, saved)
+    return (plus - minus) / (2.0 * eps)
+}
+
+fn squared_caputo_direct(u: &Tensor, dt: f64, alpha: f64) -> f64 with Mut, Div, Panic {
+    let d = caputo_direct(u, dt, alpha)
+    return d * d
+}
+
+fn fd_squared_caputo(u: &!Tensor, idx: usize, dt: f64, alpha: f64, eps: f64) -> f64 with Mut, Div, Panic {
+    let saved = tensor_get(u, idx)
+    tensor_set(u, idx, saved + eps)
+    let plus = squared_caputo_direct(u, dt, alpha)
+    tensor_set(u, idx, saved - eps)
+    let minus = squared_caputo_direct(u, dt, alpha)
+    tensor_set(u, idx, saved)
+    return (plus - minus) / (2.0 * eps)
+}
+
+fn test_constant_zero_gradient() with Alloc, Mut, Div, Panic {
+    let alpha = 0.8
+    let dt = 0.1
+    var u = tensor_zeros(shape1(20 as usize))
+    fill_constant(&!u, 3.25)
+
+    var tape = tape_begin()
+    let uid = tape_leaf(&!tape, &u, true)
+    let did = tape_tensor_caputo_l1(&!tape, uid, dt, alpha)
+    let loss = tape_tensor_mul(&!tape, did, did)
+    tape_backward(&!tape, loss)
+    assert_abs_close(tape_value_at(&tape, did, 0 as usize), 0.0, 1.0e-10)
+
+    var i: usize = 0 as usize
+    while i < u.shape.len {
+        assert_abs_close(tape_grad_at(&tape, uid, i), 0.0, 1.0e-8)
+        assert_abs_close(fd_squared_caputo(&!u, i, dt, alpha, 1.0e-6), 0.0, 1.0e-8)
+        i = i + 1 as usize
+    }
+
+    tape_drop(&!tape)
+    tensor_free(&!u)
+}
+
+fn test_fd_gradient() with Alloc, Mut, Div, Panic {
+    let alpha = 0.8
+    let dt = 0.1
+    let lambda = 0.1
+    var u = tensor_zeros(shape1(20 as usize))
+    fill_fractional_decay(&!u, alpha, lambda, dt)
+
+    var tape = tape_begin()
+    let uid = tape_leaf(&!tape, &u, true)
+    let did = tape_tensor_caputo_l1(&!tape, uid, dt, alpha)
+    tape_backward(&!tape, did)
+
+    let eps = 1.0e-6
+    var i: usize = 0 as usize
+    while i < u.shape.len {
+        let tape_g = tape_grad_at(&tape, uid, i)
+        let fd_g = fd_caputo(&!u, i, dt, alpha, eps)
+        assert_rel_close(tape_g, fd_g, 1.0e-6, 1.0e-6)
+        i = i + 1 as usize
+    }
+
+    tape_drop(&!tape)
+    tensor_free(&!u)
+}
+
+fn test_pinn_residual_mini() with Alloc, Mut, Div, Panic {
+    let alpha = 0.8
+    let dt = 0.1
+    let k = 0.1
+    var u = tensor_zeros(shape1(20 as usize))
+    var i: usize = 0 as usize
+    while i < u.shape.len {
+        let t = (i as f64) * dt
+        tensor_set(&!u, i, 1.0 + 0.05 * t + 0.01 * caputo_pow(t + 1.0, 2.0))
+        i = i + 1 as usize
+    }
+
+    var tape = tape_begin()
+    let uid = tape_leaf(&!tape, &u, true)
+    let did = tape_tensor_caputo_l1(&!tape, uid, dt, alpha)
+    let last_idx = u.shape.len - 1 as usize
+    let last_value = tensor_get(&u, last_idx)
+    var kc = tensor_scalar(k * last_value)
+    let kid = tape_leaf(&!tape, &kc, false)
+    let resid = tape_tensor_add(&!tape, did, kid)
+    tape_backward(&!tape, resid)
+
+    assert(cpt_abs(tape_value_at(&tape, resid, 0 as usize)) > 1.0e-8)
+    var grad_norm = 0.0
+    i = 0 as usize
+    while i < u.shape.len {
+        let g = tape_grad_at(&tape, uid, i)
+        grad_norm = grad_norm + g * g
+        i = i + 1 as usize
+    }
+    assert(grad_norm > 1.0e-12)
+
+    tape_drop(&!tape)
+    tensor_free(&!kc)
+    tensor_free(&!u)
+}
+
+fn main() -> i32 with Alloc, IO, Mut, Panic, Div {
+    test_constant_zero_gradient()
+    test_fd_gradient()
+    test_pinn_residual_mini()
+    println("D5_CAPUTO_TENSOR_PASS")
+    return 0
+}

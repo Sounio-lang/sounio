@@ -1,0 +1,113 @@
+//@ run-pass
+//@ requires: madaros
+
+// Wide-scale (RSA-2048) exercise of bigint_mod / bigint_mul / bigint_modpow.
+//
+// Every other test in this module works on 1-4 limb values, which proves
+// nothing about the widths the module actually targets. These two tests
+// operate at 128-limb (2048-bit) modulus scale with genuinely unreduced
+// intermediate products (~328 limbs), i.e. the real RSA regime.
+//
+// BigInt is a plain (non-linear) struct, so the wide operands are built by
+// writing .limbs[]/.len directly -- bigint_from_u32 cannot express more than
+// 32 bits of magnitude.
+
+use bignum::bigint::*
+
+fn main() -> i64 with IO {
+    // ---- Test (a): division identity at RSA-2048 scale -------------------
+    // n: 128 limbs (2048 bits). r: 120 limbs, hence r < n by limb count.
+    // q: 200 limbs. a = q*n + r is ~328 limbs -- a genuinely unreduced
+    // product-scale value. Then (q*n + r) mod n must be exactly r.
+    var n = bigint_zero()
+    var i = 0
+    while i < 128 {
+        n.limbs[i as usize] = ((i * 7919 + 12345) % 65536) as u16
+        i = i + 1
+    }
+    n.limbs[0] = 60013          // keep n odd and definitely nonzero
+    n.limbs[127] = 65533        // top limb nonzero so len == 128 is exact
+    n.len = 128
+
+    var r = bigint_zero()
+    var j = 0
+    while j < 120 {
+        r.limbs[j as usize] = ((j * 4093 + 777) % 65536) as u16
+        j = j + 1
+    }
+    r.limbs[0] = 31337
+    r.limbs[119] = 54321        // top limb nonzero so len == 120 is exact
+    r.len = 120
+
+    var q = bigint_zero()
+    var k = 0
+    while k < 200 {
+        q.limbs[k as usize] = ((k * 65521 + 9001) % 65536) as u16
+        k = k + 1
+    }
+    q.limbs[0] = 40009
+    q.limbs[199] = 12289        // top limb nonzero so len == 200 is exact
+    q.len = 200
+
+    // Sanity: r really is smaller than n (otherwise the identity below would
+    // not pin down r as THE remainder).
+    if bigint_cmp(&r, &n) >= 0 {
+        print_int(1)
+        return 1
+    }
+
+    let qn = bigint_mul(&q, &n)
+    // Both operands are <= BIGINT_MUL_SAFE_OPERAND_LIMBS (256), so no
+    // truncation: the product spans 327 or 328 limbs.
+    if qn.len < 327 {
+        print_int(2)
+        return 1
+    }
+
+    let a = bigint_add(&qn, &r)
+    if a.len < 327 {
+        print_int(3)
+        return 1
+    }
+
+    let rem = bigint_mod(&a, &n)
+    if bigint_cmp(&rem, &r) != 0 {
+        print_int(4)
+        return 1
+    }
+
+    // ---- Test (b): modular-exponentiation identity at the same scale -----
+    // (x^3)^5 mod n  ==  x^15 mod n, by the laws of modular exponentiation.
+    var x = bigint_zero()
+    var m = 0
+    while m < 128 {
+        x.limbs[m as usize] = ((m * 5077 + 2027) % 65536) as u16
+        m = m + 1
+    }
+    x.limbs[0] = 27644
+    x.limbs[127] = 33223
+    x.len = 128
+
+    let three = bigint_from_u32(3)
+    let five = bigint_from_u32(5)
+    let fifteen = bigint_from_u32(15)
+
+    let x3 = bigint_modpow(&x, &three, &n)
+    let x3_5 = bigint_modpow(&x3, &five, &n)
+    let x15 = bigint_modpow(&x, &fifteen, &n)
+
+    // Guard against a vacuous pass: if both sides were zero (or one limb),
+    // the comparison would be trivially satisfiable by a broken implementation.
+    if x15.len < 100 {
+        print_int(5)
+        return 1
+    }
+
+    if bigint_cmp(&x3_5, &x15) != 0 {
+        print_int(6)
+        return 1
+    }
+
+    print_int(0)
+    return 0
+}

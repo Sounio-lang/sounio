@@ -1,0 +1,50 @@
+//@ run-pass
+//@ requires: madaros
+
+// Direct, isolated proof of the algorithm-confusion guard in
+// x509_verify_signature (stdlib/x509/cert.sio): a certificate whose OWN
+// outer_sig_alg_oid claims ecdsa-with-SHA384 (OID 1.2.840.10045.4.3.3)
+// must be rejected when its alleged issuer's public_key_algorithm is
+// PUBKEY_ALG_RSA, before any curve or hash arithmetic runs.
+//
+// This does not parse a real DER certificate -- it hand-constructs the
+// two Certificate structs from certificate_zero() and sets only the
+// fields the guard actually reads (cert.outer_sig_alg_oid/_len and
+// issuer.public_key_algorithm), per this codebase's own established
+// pattern for exercising guard logic in isolation (see e.g.
+// tests/run-pass/x509_parse_tbs_core.sio's use of certificate_zero()).
+// The guard returns `false` strictly before touching cert.tbs_start,
+// cert.outer_signature, or the `buf` argument, so an empty RawBuf and
+// zeroed TBS/signature fields are sufficient here -- this test would
+// fail (return true, or panic while reading garbage TBS bytes) if the
+// guard did not short-circuit exactly where stdlib/x509/cert.sio's
+// x509_verify_signature claims it does.
+
+use x509::cert::*
+use net::socket::*
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var cert = certificate_zero()
+    // ecdsa-with-SHA384 OID = 1.2.840.10045.4.3.3 (8 bytes), the same
+    // encoding oid_ecdsa_with_sha384() in stdlib/x509/oid.sio produces.
+    cert.outer_sig_alg_oid[0] = 0x2A
+    cert.outer_sig_alg_oid[1] = 0x86
+    cert.outer_sig_alg_oid[2] = 0x48
+    cert.outer_sig_alg_oid[3] = 0xCE
+    cert.outer_sig_alg_oid[4] = 0x3D
+    cert.outer_sig_alg_oid[5] = 0x04
+    cert.outer_sig_alg_oid[6] = 0x03
+    cert.outer_sig_alg_oid[7] = 0x03
+    cert.outer_sig_alg_oid_len = 8
+
+    var issuer = certificate_zero()
+    issuer.public_key_algorithm = PUBKEY_ALG_RSA
+
+    let buf = rawbuf_new(8)
+
+    let accepted = x509_verify_signature(&buf, &cert, &issuer)
+    assert(accepted == false)
+
+    println("x509_signature_rsa_issuer_ecdsa_sha384_rejected: OK (RSA issuer rejected for ecdsa-with-SHA384 cert)")
+    0
+}

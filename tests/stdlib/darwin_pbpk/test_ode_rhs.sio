@@ -1,0 +1,143 @@
+//@ run-pass
+//@ expect-stdout: ODE_RHS_OK
+// Direct unit tests for the PBPK ODE right-hand side (pbpk_ode).
+
+use darwin_pbpk::tsit5_pbpk14::*
+
+fn local_abs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let prm = default_pbpk_params()
+
+    // ------------------------------------------------------------------
+    // Test 1: Zero state → all influx
+    // State: blood = 1.0, all tissues = 0.0
+    // Blood is the only source, so every tissue derivative must be > 0.
+    // Blood derivative must be < 0 (outflow to all tissues + clearance).
+    // ------------------------------------------------------------------
+    var st1 = pbpk_state_zero()
+    st1.blood = 1.0
+    let d1 = pbpk_ode(st1, 0.0, prm)
+
+    if d1.liver    <= 0.0 { return 1 }
+    if d1.kidney   <= 0.0 { return 2 }
+    if d1.brain    <= 0.0 { return 3 }
+    if d1.heart    <= 0.0 { return 4 }
+    if d1.lung     <= 0.0 { return 5 }
+    if d1.muscle   <= 0.0 { return 6 }
+    if d1.adipose  <= 0.0 { return 7 }
+    if d1.gut      <= 0.0 { return 8 }
+    if d1.skin     <= 0.0 { return 9 }
+    if d1.bone     <= 0.0 { return 10 }
+    if d1.spleen   <= 0.0 { return 11 }
+    if d1.pancreas <= 0.0 { return 12 }
+    if d1.other    <= 0.0 { return 13 }
+    if d1.blood    >= 0.0 { return 14 }
+
+    // ------------------------------------------------------------------
+    // Test 2: Pseudo-equilibrium → near-zero derivatives
+    // State: each tissue = blood * kp_tissue (blood = 1.0).
+    // With rb_ratio = 1.0, net flux into each tissue is exactly zero.
+    // Blood derivative is negative due to clearance only.
+    // ------------------------------------------------------------------
+    var st2 = pbpk_state_zero()
+    st2.blood   = 1.0
+    st2.liver   = 1.0 * prm.kp_liver
+    st2.kidney  = 1.0 * prm.kp_kidney
+    st2.brain   = 1.0 * prm.kp_brain
+    st2.heart   = 1.0 * prm.kp_heart
+    st2.lung    = 1.0 * prm.kp_lung
+    st2.muscle  = 1.0 * prm.kp_muscle
+    st2.adipose = 1.0 * prm.kp_adipose
+    st2.gut     = 1.0 * prm.kp_gut
+    st2.skin    = 1.0 * prm.kp_skin
+    st2.bone    = 1.0 * prm.kp_bone
+    st2.spleen  = 1.0 * prm.kp_spleen
+    st2.pancreas = 1.0 * prm.kp_pancreas
+    st2.other   = 1.0 * prm.kp_other
+    let d2 = pbpk_ode(st2, 0.0, prm)
+
+    if local_abs(d2.liver)    >= 1.0e-9 { return 20 }
+    if local_abs(d2.kidney)   >= 1.0e-9 { return 21 }
+    if local_abs(d2.brain)    >= 1.0e-9 { return 22 }
+    if local_abs(d2.heart)    >= 1.0e-9 { return 23 }
+    if local_abs(d2.lung)     >= 1.0e-9 { return 24 }
+    if local_abs(d2.muscle)   >= 1.0e-9 { return 25 }
+    if local_abs(d2.adipose)  >= 1.0e-9 { return 26 }
+    if local_abs(d2.gut)      >= 1.0e-9 { return 27 }
+    if local_abs(d2.skin)     >= 1.0e-9 { return 28 }
+    if local_abs(d2.bone)     >= 1.0e-9 { return 29 }
+    if local_abs(d2.spleen)   >= 1.0e-9 { return 30 }
+    if local_abs(d2.pancreas) >= 1.0e-9 { return 31 }
+    if local_abs(d2.other)    >= 1.0e-9 { return 32 }
+    if d2.blood               >= 0.0    { return 33 }
+
+    // ------------------------------------------------------------------
+    // Test 3: Mass balance
+    // For any state, Σ(dC_i/dt * v_i) = -(cl_hepatic + cl_renal) * c_unbound
+    // when rb_ratio = 1.0 (default params).
+    // ------------------------------------------------------------------
+    var st3 = pbpk_state_zero()
+    st3.blood    = 2.0
+    st3.liver    = 1.0
+    st3.kidney   = 0.5
+    st3.brain    = 0.3
+    st3.heart    = 0.2
+    st3.lung     = 0.4
+    st3.muscle   = 0.1
+    st3.adipose  = 0.05
+    st3.gut      = 0.6
+    st3.skin     = 0.15
+    st3.bone     = 0.08
+    st3.spleen   = 0.12
+    st3.pancreas = 0.07
+    st3.other    = 0.25
+    let d3 = pbpk_ode(st3, 0.0, prm)
+
+    let total_mass_rate = d3.blood * prm.v_blood
+                        + d3.liver * prm.v_liver
+                        + d3.kidney * prm.v_kidney
+                        + d3.brain * prm.v_brain
+                        + d3.heart * prm.v_heart
+                        + d3.lung * prm.v_lung
+                        + d3.muscle * prm.v_muscle
+                        + d3.adipose * prm.v_adipose
+                        + d3.gut * prm.v_gut
+                        + d3.skin * prm.v_skin
+                        + d3.bone * prm.v_bone
+                        + d3.spleen * prm.v_spleen
+                        + d3.pancreas * prm.v_pancreas
+                        + d3.other * prm.v_other
+
+    let c_plasma = st3.blood / prm.rb_ratio
+    let c_unbound = c_plasma * prm.fu_plasma
+    let clearance_rate = (prm.cl_hepatic + prm.cl_renal) * c_unbound
+
+    if local_abs(total_mass_rate + clearance_rate) >= 1.0e-9 { return 40 }
+
+    // ------------------------------------------------------------------
+    // Test 4: Monotonicity with respect to concentration
+    // Higher tissue concentration → lower (or more negative) derivative.
+    // Compare d_liver at st.liver = 0 vs st.liver = 2 * blood * kp_liver.
+    // ------------------------------------------------------------------
+    let blood_conc = 1.0
+
+    var st_low = pbpk_state_zero()
+    st_low.blood = blood_conc
+    let d_low = pbpk_ode(st_low, 0.0, prm)
+
+    var st_high = pbpk_state_zero()
+    st_high.blood = blood_conc
+    st_high.liver = 2.0 * blood_conc * prm.kp_liver
+    let d_high = pbpk_ode(st_high, 0.0, prm)
+
+    if d_low.liver  <= 0.0        { return 50 }
+    if d_high.liver >= 0.0        { return 51 }
+    if d_high.liver >= d_low.liver { return 52 }
+
+    println("ODE_RHS_OK")
+    0
+}

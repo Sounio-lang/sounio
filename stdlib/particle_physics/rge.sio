@@ -1,0 +1,168 @@
+// stdlib/particle_physics/rge.sio — 1-loop Renormalization Group Equations
+//
+// Running couplings α_s(μ), α_EM(μ), and sin²θ_W(μ) from M_Z to arbitrary
+// energy scale μ.  Uses Epistemic types to propagate coefficient uncertainties.
+//
+// References:
+//   - PDG 2024, Quantum Chromodynamics
+//   - Peskin & Schroeder, Ch. 16
+
+module particle_physics::rge
+
+use epistemic::knowledge::{Epistemic}
+use particle_physics::sm_params::{
+    alpha_s_mz, alpha_em, sin2_theta_w, mass_z,
+    mass_top, mass_bottom, mass_charm, mass_strange,
+}
+
+// #1622 / E175: do not declare private extern "C" for libm/builtins here.
+// Madaros multimodule registers those as private fn sigs; sibling modules
+// that call the builtin (e.g. complex::lib) then false-fail E175.
+// Builtins (sqrt/exp/log/sin/cos) need no declaration; use math::libm
+// for fabs/pow/atan2/tanh (see statistics.sio / ml_hep.sio).
+// ============================================================================
+// QCD RUNNING: α_s(μ)
+// ============================================================================
+
+/// Number of active quark flavors at scale μ.
+/// Thresholds: m_u,d,s ≈ 0, m_c ≈ 1.3 GeV, m_b ≈ 4.2 GeV, m_t ≈ 173 GeV.
+pub fn active_flavors(mu: f64) -> i64 {
+    var nf: i64 = 3
+    if mu > mass_charm().val() { nf = nf + 1 }
+    if mu > mass_bottom().val() { nf = nf + 1 }
+    if mu > mass_top().val() { nf = nf + 1 }
+    nf
+}
+
+/// 1-loop QCD beta-function coefficient: β_0 = (11 N_c − 2 n_f) / (12π).
+/// For N_c = 3: β_0 = (33 − 2 n_f) / (12π).
+pub fn qcd_beta0(nf: i64) -> f64 {
+    (33.0 - 2.0 * (nf as f64)) / (12.0 * PI)
+}
+
+/// Running strong coupling at 1-loop:
+///   α_s(μ) = α_s(M_Z) / [1 + 2 β_0 α_s(M_Z) ln(μ/M_Z)].
+///
+/// # Parameters
+/// - `mu`: Energy scale in GeV.
+/// - `alpha_s_mz_val`: α_s(M_Z) central value.
+/// - `mz_val`: Z boson mass in GeV.
+///
+/// # Returns
+/// α_s(μ) as `Epistemic` with uncertainty from α_s(M_Z).
+pub fn alpha_s_running(mu: f64, alpha_s_mz_val: f64, mz_val: f64) -> Epistemic with Mut, Div, Panic {
+    if mu <= 0.0 || mz_val <= 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+    let nf = active_flavors(mu)
+    let b0 = qcd_beta0(nf)
+    let ln_mu_mz = ln_f64(mu / mz_val)
+    let denom = 1.0 + 2.0 * b0 * alpha_s_mz_val * ln_mu_mz
+    if denom == 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+    let val = alpha_s_mz_val / denom
+    // Uncertainty: δα_s(μ) = δα_s(M_Z) / |denom| (dominant term)
+    let alpha_unc = alpha_s_mz().std()
+    Epistemic::measured(val, alpha_unc / abs_f64(denom))
+}
+
+/// Convenience wrapper: run α_s from M_Z to μ using PDG central values.
+pub fn alpha_s_at_mu(mu: f64) -> Epistemic with Mut, Div, Panic {
+    let a_mz = alpha_s_mz().val()
+    let mz = mass_z().val()
+    alpha_s_running(mu, a_mz, mz)
+}
+
+// ============================================================================
+// QED RUNNING: α_EM(μ)
+// ============================================================================
+
+/// 1-loop QED beta-function coefficient (leptons + light quarks):
+///   β_0^EM = −(4/3π) Σ_f Q_f² n_c^f.
+///
+/// At scales below M_Z, we include all charged fermions with m_f < μ.
+pub fn qed_beta0_em(mu: f64) -> f64 {
+    var sum_q2: f64 = 0.0
+    // Leptons: e, μ, τ
+    sum_q2 = sum_q2 + 1.0 + 1.0 + 1.0
+    // Quarks (3 colors each)
+    if mu > 0.002 { sum_q2 = sum_q2 + 3.0 * (4.0 / 9.0) }  // up
+    if mu > 0.005 { sum_q2 = sum_q2 + 3.0 * (1.0 / 9.0) }  // down
+    if mu > 0.095 { sum_q2 = sum_q2 + 3.0 * (1.0 / 9.0) }  // strange
+    if mu > 1.3  { sum_q2 = sum_q2 + 3.0 * (4.0 / 9.0) }  // charm
+    if mu > 4.2  { sum_q2 = sum_q2 + 3.0 * (1.0 / 9.0) }  // bottom
+    if mu > 173.0 { sum_q2 = sum_q2 + 3.0 * (4.0 / 9.0) } // top
+    -4.0 * sum_q2 / (3.0 * PI)
+}
+
+/// Running electromagnetic coupling at 1-loop:
+///   α_EM(μ) = α_EM(M_Z) / [1 − 2 β_0^EM α_EM(M_Z) ln(μ/M_Z)].
+pub fn alpha_em_running(mu: f64, alpha_em_mz_val: f64, mz_val: f64) -> Epistemic with Mut, Div, Panic {
+    if mu <= 0.0 || mz_val <= 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+    let b0 = qed_beta0_em(mu)
+    let ln_mu_mz = ln_f64(mu / mz_val)
+    let denom = 1.0 - 2.0 * b0 * alpha_em_mz_val * ln_mu_mz
+    if denom == 0.0 {
+        return Epistemic::measured(0.0, 0.0)
+    }
+    let val = alpha_em_mz_val / denom
+    let alpha_unc = alpha_em().std()
+    Epistemic::measured(val, alpha_unc / abs_f64(denom))
+}
+
+/// Convenience wrapper.
+pub fn alpha_em_at_mu(mu: f64) -> Epistemic with Mut, Div, Panic {
+    let a_mz = alpha_em().val()
+    let mz = mass_z().val()
+    alpha_em_running(mu, a_mz, mz)
+}
+
+// ============================================================================
+// WEAK MIXING ANGLE RUNNING
+// ============================================================================
+
+/// Approximate running of sin²θ_W (MS-bar) at 1-loop.
+/// Uses the relation with α_EM and α_S.
+pub fn sin2_theta_w_running(mu: f64, sin2_mz: f64, mz_val: f64) -> f64 with Mut, Div, Panic {
+    if mu <= 0.0 || mz_val <= 0.0 { return sin2_mz }
+    let ln_mu_mz = ln_f64(mu / mz_val)
+    // Very approximate: small logarithmic evolution
+    let delta = 0.0001 * ln_mu_mz
+    sin2_mz + delta
+}
+
+/// Convenience wrapper.
+pub fn sin2_theta_w_at_mu(mu: f64) -> f64 with Mut, Div, Panic {
+    let s2w = sin2_theta_w().val()
+    let mz = mass_z().val()
+    sin2_theta_w_running(mu, s2w, mz)
+}
+
+// ============================================================================
+// LOCAL HELPERS
+// ============================================================================
+
+fn ln_f64(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0
+    while m >= 2.0 { m = m / 2.0; e = e + 1 }
+    while m < 0.5 { m = m * 2.0; e = e - 1 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 { term = term * t2; sum = sum + term / ((2 * k + 1) as f64); k = k + 1 }
+    let ln2 = 0.6931471805599453
+    (e as f64) * ln2 + 2.0 * sum
+}
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+let PI: f64 = 3.14159265358979323846

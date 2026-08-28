@@ -16,7 +16,7 @@ This comprehensive guide enables LLMs to correctly generate Sounio code. Sounio 
 > **WARNING**: This document mixes **implemented** and **aspirational** features.
 > Sections marked with ⚠️ are NOT YET IMPLEMENTED.
 
-### What Actually Works (v1.0)
+### What Actually Works (Madaros v0.80.0)
 
 | Feature | Status |
 |---------|--------|
@@ -1764,87 +1764,46 @@ For comprehensive benchmarks and performance analysis, see [docs/research/ONN_BE
 
 ## Package Manager
 
-> ⚠️ **ASPIRATIONAL**: Package manager exists as feature flag stub. Not functional.
+> Current release contract: local package support only. There is no launched
+> public package registry and no supported publish/login/search workflow.
 
-Sounio includes a built-in package manager (`sou pkg`) for dependency management.
+Local package support is available through the checked `tools/sounio-pkg/sounio-pkg` wrapper and the compiler's local package-import resolver. The supported surface is:
+
+- create a local package scaffold
+- type-check package source files
+- run local package tests
+- import checked local packages from `packages/*`
 
 ### Project Setup
 
-Create a new project with a `Sounio.toml` manifest:
+Create a new project with a `sounio.toml` manifest:
 
 ```toml
 [package]
 name = "my-project"
 version = "0.1.0"
-authors = ["Your Name <you@example.com>"]
 description = "A Sounio project"
 
 [dependencies]
-serde = "1.0"
-tokio = { version = "1.0", features = ["full"] }
 local-lib = { path = "../local-lib" }
-git-dep = { git = "https://github.com/user/repo" }
 ```
 
 ### CLI Commands
 
 ```bash
-# Initialize a new project
-sou pkg init my-project
+# Create a local package
+tools/sounio-pkg/sounio-pkg new my-project
 
-# Add a dependency
-sou pkg add serde
-sou pkg add tokio --features full
-sou pkg add ./local-lib --path
-
-# Remove a dependency
-sou pkg remove serde
-
-# Install all dependencies
-sou pkg install
-
-# Update dependencies
-sou pkg update
-sou pkg update serde  # Update specific package
-
-# Search the registry
-sou pkg search json
-
-# Show package info
-sou pkg info serde
-
-# Build the project
-sou pkg build
-sou pkg build --release
-
-# Run the project
-sou pkg run
-sou pkg run --release
-
-# Run tests
-sou pkg test
-
-# Publish to registry
-sou pkg publish
-```
-
-### Authentication
-
-```bash
-# Login to registry
-sou pkg login
-# Prompts for API token
-
-# Logout
-sou pkg logout
-
-# Check login status
-sou pkg whoami
+# Build/check/test the local package
+cd my-project
+../tools/sounio-pkg/sounio-pkg build
+../tools/sounio-pkg/sounio-pkg check
+../tools/sounio-pkg/sounio-pkg test
 ```
 
 ### Workspaces
 
-For multi-package projects, use a workspace:
+Workspace metadata is draft-only. Keep multi-package projects as explicit local packages until a workspace gate is added:
 
 ```toml
 # Root Sounio.toml

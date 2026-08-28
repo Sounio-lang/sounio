@@ -1,0 +1,331 @@
+// stdlib/epistemic/composed_effects.sio
+//
+// Composition of three algebraic effects: Approx, Causal, Knowledge.
+//
+// This module defines a single composed value type `ComposedKnowledge` that
+// carries simultaneously:
+//   - the Knowledge<T> GUM data (value, variance, confidence)
+//   - the Causal edge probability (Beta(alpha, beta) for "X causes Y" exists)
+//   - the Approx numerical bound (worst-case error introduced by approximation)
+//
+// The motivating use case is verified clinical decision support: a predicted
+// drug concentration depends on (a) measurement-uncertainty-with-bias (Knowledge),
+// (b) causal-graph-uncertainty about which covariates affect clearance (Causal),
+// (c) ODE-integrator approximation error (Approx). These three uncertainties
+// must compose without information loss.
+//
+// References:
+//   - JCGM 100:2008 — GUM (variance propagation)
+//   - Pearl 2009, Hernán & Robins 2020 — causal inference
+//   - Higham 2002 *Accuracy and Stability of Numerical Algorithms* — Approx bounds
+//
+// Soundness theorem (Lean: formal/lean4/SounioApproxCausalKnowledge.lean):
+//   For monotone f and well-formed inputs c1, c2, the composed operation
+//   `compose_apply(f, c1, c2)` produces a `ComposedKnowledge` whose
+//   bounds dominate the true joint uncertainty.
+
+// ============================================================================
+// SCALAR HELPERS (pure)
+// ============================================================================
+
+fn ce_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ce_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn ce_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+fn ce_min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+
+fn ce_clamp_conf(c: i64) -> i64 {
+    if c < 0 { return 0 }
+    if c > 1000 { return 1000 }
+    c
+}
+
+fn ce_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 12 {
+        y = 0.5 * (y + x / y)
+        i = i + 1
+    }
+    y
+}
+
+// ============================================================================
+// COMPOSED VALUE
+// ============================================================================
+//
+// Layout chosen to minimise BSS pressure (per known PR #53 BSS-shift class):
+// 6 scalar f64 + 2 i64 + 2 i64 = 64 bytes flat.
+//
+// Fields:
+//   value          — point estimate of the underlying scalar (e.g., Cmin in mg/L)
+//   variance       — GUM σ² (from Knowledge effect)
+//   approx_bound   — worst-case absolute error from numerical approximation
+//   causal_alpha   — Beta α (causal edge "input → output" exists)
+//   causal_beta    — Beta β (the same)
+//   confidence     — 0..1000 evidence quality (lower bound of all three sources)
+//   provenance_tag — i64 hashed provenance source (e.g., RCT=1, Cohort=2)
+//   epoch          — i64 monotonic version counter (immutable arithmetic)
+
+pub struct ComposedKnowledge {
+    value: f64,
+    variance: f64,
+    approx_bound: f64,
+    causal_alpha: f64,
+    causal_beta: f64,
+    confidence: i64,
+    provenance_tag: i64,
+    epoch: i64,
+}
+
+// ============================================================================
+// CONSTRUCTORS
+// ============================================================================
+
+pub fn ck_new(value: f64, variance: f64, approx_bound: f64,
+              alpha: f64, beta: f64, confidence: i64,
+              provenance_tag: i64) -> ComposedKnowledge {
+    ComposedKnowledge {
+        value: value,
+        variance: variance,
+        approx_bound: approx_bound,
+        causal_alpha: alpha,
+        causal_beta: beta,
+        confidence: ce_clamp_conf(confidence),
+        provenance_tag: provenance_tag,
+        epoch: 0,
+    }
+}
+
+// Lift a Knowledge<f64>-style triple into ComposedKnowledge with
+// vacuous Causal and zero Approx bound. This is the canonical lift
+// from existing Sounio Epistemic values.
+pub fn ck_from_knowledge(value: f64, variance: f64, confidence: i64) -> ComposedKnowledge {
+    ck_new(value, variance, 0.0, 1.0, 1.0, confidence, 0)
+}
+
+// Vacuous knowledge: maximum uncertainty, undeclared provenance.
+pub fn ck_vacuous(value: f64) -> ComposedKnowledge {
+    ck_new(value, 1.0e9, 1.0e9, 1.0, 1.0, 0, 0)
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+pub fn ck_value(c: &ComposedKnowledge) -> f64 { c.value }
+pub fn ck_variance(c: &ComposedKnowledge) -> f64 { c.variance }
+pub fn ck_approx_bound(c: &ComposedKnowledge) -> f64 { c.approx_bound }
+pub fn ck_confidence(c: &ComposedKnowledge) -> i64 { c.confidence }
+
+pub fn ck_std_dev(c: &ComposedKnowledge) -> f64 with Mut, Div, Panic {
+    ce_sqrt(c.variance)
+}
+
+// Causal edge mean (Beta(α, β) mean): probability that the causal
+// dependence asserted by this value's derivation is real.
+pub fn ck_causal_mean(c: &ComposedKnowledge) -> f64 with Div {
+    let denom = c.causal_alpha + c.causal_beta
+    if denom == 0.0 { return 0.5 }
+    c.causal_alpha / denom
+}
+
+// Total uncertainty as a single scalar: GUM σ + approx + causal-doubt
+// (worst-case linear combination, conservative).
+pub fn ck_total_uncertainty(c: &ComposedKnowledge) -> f64 with Mut, Div, Panic {
+    let gum = ce_sqrt(c.variance)
+    let causal_doubt = 1.0 - ck_causal_mean(c)
+    let causal_term = ce_abs(c.value) * causal_doubt
+    gum + c.approx_bound + causal_term
+}
+
+// ============================================================================
+// PREDICATES (refinement-style)
+// ============================================================================
+
+pub fn ck_is_credible(c: &ComposedKnowledge, min_conf: i64) -> bool {
+    // Direct field compare restored after #1511 (confidence float-pollution fixed).
+    c.confidence >= min_conf
+}
+
+pub fn ck_is_causally_confirmed(c: &ComposedKnowledge, min_alpha_share: f64) -> bool with Div {
+    ck_causal_mean(c) >= min_alpha_share
+}
+
+pub fn ck_is_approx_safe(c: &ComposedKnowledge, max_approx: f64) -> bool {
+    c.approx_bound <= max_approx
+}
+
+// Composite gate: all three must pass. Returns true iff the value is
+// safe for downstream clinical use given the supplied bounds.
+pub fn ck_passes_gate(c: &ComposedKnowledge,
+                      min_conf: i64, min_alpha_share: f64,
+                      max_approx: f64) -> bool with Div {
+    if !ck_is_credible(c, min_conf) { return false }
+    if !ck_is_causally_confirmed(c, min_alpha_share) { return false }
+    if !ck_is_approx_safe(c, max_approx) { return false }
+    true
+}
+
+// ============================================================================
+// ARITHMETIC — variance propagates by GUM, approx by triangle inequality,
+// causal Beta combines independence (alpha+alpha, beta+beta), confidence
+// by min with multiplicative decay.
+// ============================================================================
+
+fn ce_decay(c: i64) -> i64 {
+    ce_clamp_conf(c * 99 / 100)
+}
+
+pub fn ck_add(a: &ComposedKnowledge, b: &ComposedKnowledge) -> ComposedKnowledge {
+    ComposedKnowledge {
+        value: a.value + b.value,
+        variance: a.variance + b.variance,
+        approx_bound: a.approx_bound + b.approx_bound,
+        causal_alpha: a.causal_alpha + b.causal_alpha,
+        causal_beta: a.causal_beta + b.causal_beta,
+        confidence: ce_decay(ce_min_i64(a.confidence, b.confidence)),
+        provenance_tag: ce_min_i64(a.provenance_tag, b.provenance_tag),
+        epoch: ce_min_i64(a.epoch, b.epoch) + 1,
+    }
+}
+
+pub fn ck_sub(a: &ComposedKnowledge, b: &ComposedKnowledge) -> ComposedKnowledge {
+    ComposedKnowledge {
+        value: a.value - b.value,
+        variance: a.variance + b.variance,
+        approx_bound: a.approx_bound + b.approx_bound,
+        causal_alpha: a.causal_alpha + b.causal_alpha,
+        causal_beta: a.causal_beta + b.causal_beta,
+        confidence: ce_decay(ce_min_i64(a.confidence, b.confidence)),
+        provenance_tag: ce_min_i64(a.provenance_tag, b.provenance_tag),
+        epoch: ce_min_i64(a.epoch, b.epoch) + 1,
+    }
+}
+
+// GUM mul (delta method): Var(XY) ≈ y² Var(X) + x² Var(Y) + Var(X)·Var(Y)
+//   (the σx²σy² term is added for full Gaussian-product variance; Sounio
+//    keeps it for honesty even though it is small when CV ≪ 1.)
+// Approx (triangle inequality, all three terms kept):
+//   |xy_approx - xy_true| ≤ |y|·δx + |x|·δy + δx·δy
+//   The δx·δy cross-term is required: at x=y=0 with δx=δy=1, the
+//   first two terms vanish but the true error can be up to 1.
+// Causal: independent-evidence pooling — alphas SUM, betas SUM
+//   (Beta(α₁,β₁) ∗ Beta(α₂,β₂) under conjugate Bernoulli pooling →
+//    Beta(α₁+α₂, β₁+β₂); not multiplication).
+pub fn ck_mul(a: &ComposedKnowledge, b: &ComposedKnowledge) -> ComposedKnowledge {
+    let av = a.value
+    let bv = b.value
+    let var_term = bv * bv * a.variance + av * av * b.variance + a.variance * b.variance
+    let approx_term = ce_abs(bv) * a.approx_bound + ce_abs(av) * b.approx_bound + a.approx_bound * b.approx_bound
+    ComposedKnowledge {
+        value: av * bv,
+        variance: var_term,
+        approx_bound: approx_term,
+        causal_alpha: a.causal_alpha + b.causal_alpha,
+        causal_beta: a.causal_beta + b.causal_beta,
+        confidence: ce_decay(ce_min_i64(a.confidence, b.confidence)),
+        provenance_tag: ce_min_i64(a.provenance_tag, b.provenance_tag),
+        epoch: ce_min_i64(a.epoch, b.epoch) + 1,
+    }
+}
+
+// GUM div: Var(X/Y) ≈ Var(X)/y² + x²·Var(Y)/y⁴ + Var(X)·Var(Y)/y⁴ (cross)
+// Approx: |x/y_approx - x/y_true| ≤ δx/|y| + |x|·δy/y² + δx·δy/y²
+//         (cross-term required by triangle inequality on the quotient).
+pub fn ck_div(a: &ComposedKnowledge, b: &ComposedKnowledge) -> ComposedKnowledge with Div, Mut, Panic {
+    let av = a.value
+    let bv = b.value
+    if bv == 0.0 { return ck_vacuous(0.0) }
+    let bv2 = bv * bv
+    let bv4 = bv2 * bv2
+    let var_term = a.variance / bv2 + (av * av) * b.variance / bv4 + a.variance * b.variance / bv4
+    let approx_term = a.approx_bound / ce_abs(bv) + ce_abs(av) * b.approx_bound / bv2 + a.approx_bound * b.approx_bound / bv2
+    ComposedKnowledge {
+        value: av / bv,
+        variance: var_term,
+        approx_bound: approx_term,
+        causal_alpha: a.causal_alpha + b.causal_alpha,
+        causal_beta: a.causal_beta + b.causal_beta,
+        confidence: ce_decay(ce_min_i64(a.confidence, b.confidence)),
+        provenance_tag: ce_min_i64(a.provenance_tag, b.provenance_tag),
+        epoch: ce_min_i64(a.epoch, b.epoch) + 1,
+    }
+}
+
+// ============================================================================
+// COMPOSITION HANDLERS — discharge effects in commuting order.
+//
+// The PL-paper claim (M1): the three handlers Approx, Causal, Knowledge
+// commute under the ck_* arithmetic, i.e. discharging in any order produces
+// the same ComposedKnowledge up to confidence-decay equivalence.
+//
+// Operationally these are no-ops on the data (the data already carries
+// all three channels), but they exist as semantic anchors for the
+// effect-row inference.
+// ============================================================================
+
+pub fn handle_approx(c: ComposedKnowledge) -> ComposedKnowledge with Approx {
+    c
+}
+
+pub fn handle_causal(c: ComposedKnowledge) -> ComposedKnowledge with Causal {
+    c
+}
+
+pub fn handle_knowledge(c: ComposedKnowledge) -> ComposedKnowledge {
+    c
+}
+
+// All three discharged in canonical order: Approx -> Causal -> Knowledge.
+// Lean theorem (target): canonical_discharge ≡ any_other_order.
+pub fn canonical_discharge(c: ComposedKnowledge) -> ComposedKnowledge with Approx, Causal {
+    let after_approx = handle_approx(c)
+    let after_causal = handle_causal(after_approx)
+    handle_knowledge(after_causal)
+}
+
+// ============================================================================
+// CLINICAL PROVENANCE TAG CONSTANTS
+// (used by stdlib/clinical/* in M3)
+// ============================================================================
+
+pub fn provenance_unknown() -> i64 { 0 }
+pub fn provenance_rct() -> i64 { 1 }
+pub fn provenance_cohort() -> i64 { 2 }
+pub fn provenance_case_series() -> i64 { 3 }
+pub fn provenance_expert() -> i64 { 4 }
+pub fn provenance_simulation() -> i64 { 5 }
+
+// ============================================================================
+// SELF-TEST main() — invoked by `souc check`/`souc run` of this file.
+// Validates round-trip of constructors, arithmetic identities, and gate.
+// ============================================================================
+
+pub fn main() -> i32 with IO, Mut, Div, Panic, Approx, Causal {
+    let a = ck_new(10.0, 0.04, 0.001, 9.0, 1.0, 950, 1)
+    let b = ck_new(2.0, 0.01, 0.0005, 8.0, 2.0, 920, 1)
+
+    let sum = ck_add(&a, &b)
+    let prod = ck_mul(&a, &b)
+    let quot = ck_div(&a, &b)
+
+    println(ck_value(&sum))
+    println(ck_value(&prod))
+    println(ck_value(&quot))
+
+    let gate_pass = ck_passes_gate(&prod, 800, 0.5, 1.0)
+    if gate_pass {
+        println("composed_effects gate: PASS")
+    } else {
+        println("composed_effects gate: FAIL")
+    }
+
+    let discharged = canonical_discharge(prod)
+    println(ck_value(&discharged))
+    0
+}

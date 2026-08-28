@@ -1,0 +1,301 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/yuen.sio — Yuen's trimmed-means t-test
+//
+// A robust two-sample test comparing trimmed means with Winsorized variances —
+// far less sensitive to outliers and non-normal tails than Welch's t-test:
+//
+//   yuen(x, nx, y, ny, gamma) -> YuenResult
+//
+// Trim γ from each tail (h = n − 2⌊γn⌋ kept), with the Winsorized variance s²_w,
+//   dⱼ = (nⱼ−1)·s²_wⱼ / (hⱼ(hⱼ−1)),
+//   t_y = (x̄_t1 − x̄_t2)/√(d₁+d₂),   df = (d₁+d₂)²/(d₁²/(h₁−1)+d₂²/(h₂−1)).
+//
+// Pure Sounio: inline sort per group; incomplete beta for the t tail. No nested
+// data-array calls.
+//
+// References:
+//   Yuen (1974) Biometrika 61:165.
+
+module stats::yuen
+
+fn yn_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / yn_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn yn_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var m = x
+    var e = 0.0
+    let LN2 = 0.6931471805599453
+    while m >= 2.0 { m = m * 0.5; e = e + LN2 }
+    while m < 1.0 { m = m * 2.0; e = e - LN2 }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var term = t
+    var sum = 0.0
+    var n = 0
+    while n < 40 { sum = sum + term / ((2 * n + 1) as f64); term = term * t2; n = n + 1 }
+    return e + 2.0 * sum
+}
+
+fn yn_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn yn_lgamma(x: f64) -> f64 with Mut, Div, Panic {
+    let g = 7.0
+    var c0 = 0.99999999999980993
+    var c1 = 676.5203681218851
+    var c2 = 0.0 - 1259.1392167224028
+    var c3 = 771.32342877765313
+    var c4 = 0.0 - 176.61502916214059
+    var c5 = 12.507343278686905
+    var c6 = 0.0 - 0.13857109526572012
+    var c7 = 0.0000099843695780195716
+    var c8 = 0.00000015056327351493116
+    let xm = x - 1.0
+    var a = c0
+    a = a + c1 / (xm + 1.0)
+    a = a + c2 / (xm + 2.0)
+    a = a + c3 / (xm + 3.0)
+    a = a + c4 / (xm + 4.0)
+    a = a + c5 / (xm + 5.0)
+    a = a + c6 / (xm + 6.0)
+    a = a + c7 / (xm + 7.0)
+    a = a + c8 / (xm + 8.0)
+    let tt = xm + g + 0.5
+    let HALF_LN_2PI = 0.9189385332046727
+    return HALF_LN_2PI + (xm + 0.5) * yn_ln(tt) - tt + yn_ln(a)
+}
+
+fn yn_betacf(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let qab = a + b
+    let qap = a + 1.0
+    let qam = a - 1.0
+    var c = 1.0
+    var d = 1.0 - qab * x / qap
+    if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+    d = 1.0 / d
+    var h = d
+    var m = 1
+    while m <= 200 {
+        let mf = m as f64
+        let m2 = 2.0 * mf
+        var aa = mf * (b - mf) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        h = h * d * c
+        aa = 0.0 - (a + mf) * (qab + mf) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if d < 1.0e-300 && d > 0.0 - 1.0e-300 { d = 1.0e-300 }
+        c = 1.0 + aa / c
+        if c < 1.0e-300 && c > 0.0 - 1.0e-300 { c = 1.0e-300 }
+        d = 1.0 / d
+        let del = d * c
+        h = h * del
+        let dd = if del - 1.0 < 0.0 { 1.0 - del } else { del - 1.0 }
+        if dd < 1.0e-14 { m = 201 } else { m = m + 1 }
+    }
+    return h
+}
+
+fn yn_ibeta(a: f64, b: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    if x >= 1.0 { return 1.0 }
+    let lbeta = yn_lgamma(a) + yn_lgamma(b) - yn_lgamma(a + b)
+    let front = yn_exp(a * yn_ln(x) + b * yn_ln(1.0 - x) - lbeta)
+    if x < (a + 1.0) / (a + b + 2.0) { return front * yn_betacf(a, b, x) / a }
+    return 1.0 - front * yn_betacf(b, a, 1.0 - x) / b
+}
+
+fn yn_t_two_tail(t: f64, df: f64) -> f64 with Mut, Div, Panic {
+    if df <= 0.0 { return 1.0 }
+    let at = if t < 0.0 { 0.0 - t } else { t }
+    let x = df / (df + at * at)
+    return yn_ibeta(df * 0.5, 0.5, x)
+}
+
+pub struct YuenResult {
+    pub trimmed_mean_x: f64,
+    pub trimmed_mean_y: f64,
+    pub t: f64,
+    pub df: f64,
+    pub p: f64,
+}
+
+/// Yuen's trimmed-means t-test.
+///
+/// Parâmetros: x, y — the two samples; nx, ny — sizes; gamma — trim fraction (e.g. 0.2).
+/// Retorno: YuenResult (trimmed means, t, df, p).
+/// Referências: Yuen (1974).
+pub fn yuen(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32, gamma: f64) -> YuenResult with Mut, Div, Panic {
+    if nx < 4 || ny < 4 { return YuenResult { trimmed_mean_x: 0.0, trimmed_mean_y: 0.0, t: 0.0, df: 0.0, p: 1.0 } }
+    // group X
+    var sx: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < nx { sx[i as usize] = x[i as usize]; i = i + 1 }
+    var p1 = 1
+    while p1 < nx {
+        let key = sx[p1 as usize]
+        var q = p1 - 1
+        while q >= 0 && sx[q as usize] > key { sx[(q + 1) as usize] = sx[q as usize]; q = q - 1 }
+        sx[(q + 1) as usize] = key
+        p1 = p1 + 1
+    }
+    var kx = 0
+    while ((kx + 1) as f64) <= gamma * (nx as f64) { kx = kx + 1 }
+    let hx = nx - 2 * kx
+    if hx < 2 { return YuenResult { trimmed_mean_x: 0.0, trimmed_mean_y: 0.0, t: 0.0, df: 0.0, p: 1.0 } }
+    // trimmed mean X
+    var tmx = 0.0
+    var a1 = kx
+    while a1 < nx - kx { tmx = tmx + sx[a1 as usize]; a1 = a1 + 1 }
+    tmx = tmx / (hx as f64)
+    // Winsorized mean & variance X
+    let lox = sx[kx as usize]
+    let hix = sx[(nx - kx - 1) as usize]
+    var wsx = 0.0
+    var b1 = 0
+    while b1 < nx {
+        var v = sx[b1 as usize]
+        if v < lox { v = lox }
+        if v > hix { v = hix }
+        wsx = wsx + v
+        b1 = b1 + 1
+    }
+    let wmx = wsx / (nx as f64)
+    var swx = 0.0
+    var c1 = 0
+    while c1 < nx {
+        var v = sx[c1 as usize]
+        if v < lox { v = lox }
+        if v > hix { v = hix }
+        let d = v - wmx
+        swx = swx + d * d
+        c1 = c1 + 1
+    }
+    let sw2x = swx / ((nx - 1) as f64)
+    let dx = ((nx - 1) as f64) * sw2x / ((hx as f64) * ((hx - 1) as f64))
+    // group Y
+    var sy: [f64; 256] = [0.0; 256]
+    var j = 0
+    while j < ny { sy[j as usize] = y[j as usize]; j = j + 1 }
+    var p2 = 1
+    while p2 < ny {
+        let key = sy[p2 as usize]
+        var q = p2 - 1
+        while q >= 0 && sy[q as usize] > key { sy[(q + 1) as usize] = sy[q as usize]; q = q - 1 }
+        sy[(q + 1) as usize] = key
+        p2 = p2 + 1
+    }
+    var ky = 0
+    while ((ky + 1) as f64) <= gamma * (ny as f64) { ky = ky + 1 }
+    let hy = ny - 2 * ky
+    if hy < 2 { return YuenResult { trimmed_mean_x: tmx, trimmed_mean_y: 0.0, t: 0.0, df: 0.0, p: 1.0 } }
+    var tmy = 0.0
+    var a2 = ky
+    while a2 < ny - ky { tmy = tmy + sy[a2 as usize]; a2 = a2 + 1 }
+    tmy = tmy / (hy as f64)
+    let loy = sy[ky as usize]
+    let hiy = sy[(ny - ky - 1) as usize]
+    var wsy = 0.0
+    var b2 = 0
+    while b2 < ny {
+        var v = sy[b2 as usize]
+        if v < loy { v = loy }
+        if v > hiy { v = hiy }
+        wsy = wsy + v
+        b2 = b2 + 1
+    }
+    let wmy = wsy / (ny as f64)
+    var swy = 0.0
+    var c2 = 0
+    while c2 < ny {
+        var v = sy[c2 as usize]
+        if v < loy { v = loy }
+        if v > hiy { v = hiy }
+        let d = v - wmy
+        swy = swy + d * d
+        c2 = c2 + 1
+    }
+    let sw2y = swy / ((ny - 1) as f64)
+    let dy = ((ny - 1) as f64) * sw2y / ((hy as f64) * ((hy - 1) as f64))
+    // Yuen statistic
+    let se = yn_sqrt(dx + dy)
+    var t = 0.0
+    if se > 0.0 { t = (tmx - tmy) / se }
+    var df = 0.0
+    let ddf = dx * dx / ((hx - 1) as f64) + dy * dy / ((hy - 1) as f64)
+    if ddf > 0.0 { df = (dx + dy) * (dx + dy) / ddf }
+    let p = yn_t_two_tail(t, df)
+    return YuenResult { trimmed_mean_x: tmx, trimmed_mean_y: tmy, t: t, df: df, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x={1..10}, y={3..11,50}, gamma=0.2 (Python-verified):
+// trimmed means 5.5 / 7.5; t=-1.188182; df=10.
+fn test_yuen() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 10 { x[i as usize] = (i + 1) as f64; i = i + 1 }
+    y[0]=3.0; y[1]=4.0; y[2]=5.0; y[3]=6.0; y[4]=7.0; y[5]=8.0; y[6]=9.0; y[7]=10.0; y[8]=11.0; y[9]=50.0
+    let r = yuen(&x, 10, &y, 10, 0.2)
+    var ok = true
+    ok = check(1, approx(r.trimmed_mean_x, 5.5, 1.0e-9)) && ok
+    ok = check(2, approx(r.trimmed_mean_y, 7.5, 1.0e-9)) && ok
+    ok = check(3, approx(r.t, 0.0 - 1.188182, 1.0e-4)) && ok
+    ok = check(4, approx(r.df, 10.0, 1.0e-3)) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_yuen() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

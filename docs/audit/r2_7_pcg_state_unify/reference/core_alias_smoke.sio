@@ -1,0 +1,53 @@
+// R.2.7 Phase A — alias round-trip smoke.
+//
+// HALT EVIDENCE (2026-05-17): This probe DOES NOT COMPILE under souc
+// HEAD. It triggers DISPATCH §5 halt: "Alias round-trip fails in the
+// actual stdlib import path." The Path A design (`type DstPcg64 =
+// PcgState`) does not unify across the stdlib import boundary when the
+// alias appears in a tuple return type.
+//
+// Specifically: `dst_pcg64_next_i64` below has signature
+// `-> (DstPcg64, i64)` but its body calls `pcg_step(rng)` which returns
+// `(PcgState, i64)`. Despite `type DstPcg64 = PcgState`, souc rejects
+// with "return type does not match function signature".
+//
+// All four variants attempted (verbose `return …`, tail expr, destructure-
+// and-reconstruct, explicit type ascription on the destructured field)
+// trigger the same error. The same pattern compiles cleanly when both
+// modules live in /tmp/ and are imported by short name — so the issue
+// is stdlib-specific (typechecker treats stdlib-imported struct identity
+// differently than ad-hoc same-dir imports).
+//
+// File preserved for forensics. See ../SYNTHESIS.md for halt rationale
+// and Path A vs Path B decision.
+
+use stdlib::random::pcg64_core::{
+    PcgState, pcg_u128_add, pcg_step,
+}
+
+type DstPcg64 = PcgState
+
+fn dst_pcg64_new(seed: i64) -> DstPcg64 with Mut, Div, Panic {
+    let inc_hi: i64 = 6364136223846793005
+    let inc_lo: i64 = 1442695040888963407
+    let s0 = PcgState { state_hi: 0, state_lo: 0, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r1 = pcg_step(s0)
+    let mid = r1.0
+    let add = pcg_u128_add(mid.state_hi, mid.state_lo, 0, seed)
+    let s2 = PcgState { state_hi: add.hi, state_lo: add.lo, inc_hi: inc_hi, inc_lo: inc_lo }
+    let r2 = pcg_step(s2)
+    return r2.0
+}
+
+// ↓ This wrapper triggers the halt: `pcg_step` returns (PcgState, i64);
+// signature says (DstPcg64, i64); souc rejects despite the alias.
+fn dst_pcg64_next_i64(rng: DstPcg64) -> (DstPcg64, i64) with Mut, Div, Panic {
+    return pcg_step(rng)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let rng = dst_pcg64_new(31415)
+    let r = dst_pcg64_next_i64(rng)
+    println(r.1)             // would have been -2825318976064776997
+    return 0
+}

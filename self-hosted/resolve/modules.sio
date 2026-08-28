@@ -24,6 +24,17 @@ let MOD_MAX_EXPORTS: i64 = 4096
 let MOD_MAX_DEPS: i64 = 2048
 
 // ============================================================================
+// STRUCT: ModSplitResult
+// ============================================================================
+
+pub struct ModSplitResult {
+    first: [i8; 64],
+    first_len: i64,
+    rest: [i8; 64],
+    rest_len: i64,
+}
+
+// ============================================================================
 // HELPER: byte-by-byte name comparison for [i8; 64]
 // ============================================================================
 
@@ -96,13 +107,13 @@ fn mod_make_path(a: i8, b: i8, c: i8, len: i64) -> [i8; 256] with Mut, Panic, Di
 
 // ============================================================================
 // HELPER: split a qualified name "foo::bar" into segments
-// Returns (first_name, first_len, rest_name, rest_len)
+// Returns ModSplitResult with (first, first_len, rest, rest_len)
 // The split is at the first "::" (bytes 58, 58)
 // ============================================================================
 
 fn mod_split_qualified(
     name: [i8; 64], name_len: i64
-) -> ([i8; 64], i64, [i8; 64], i64) with Mut, Panic, Div {
+) -> ModSplitResult with Mut, Panic, Div {
     // Search for "::" (58, 58) in name
     var split_pos: i64 = 0 - 1
     var i: i64 = 0
@@ -119,7 +130,12 @@ fn mod_split_qualified(
     if split_pos < 0 {
         // No "::" found — entire name is the first segment, rest is empty
         let empty: [i8; 64] = [0; 64]
-        return (name, name_len, empty, 0)
+        return ModSplitResult {
+            first: name,
+            first_len: name_len,
+            rest: empty,
+            rest_len: 0,
+        }
     }
 
     // Copy first segment [0, split_pos)
@@ -139,7 +155,12 @@ fn mod_split_qualified(
         k = k + 1
     }
 
-    (first, split_pos, rest, k)
+    ModSplitResult {
+        first: first,
+        first_len: split_pos,
+        rest: rest,
+        rest_len: k,
+    }
 }
 
 // ============================================================================
@@ -380,10 +401,10 @@ fn mod_graph_resolve_import(
 ) -> (i64, i64) with Mut, Panic, Div {
     // Split qualified name into module part and symbol part
     let parts = mod_split_qualified(qualified_name, qualified_len)
-    let mod_name = parts.0
-    let mod_name_len = parts.1
-    let sym_name = parts.2
-    let sym_name_len = parts.3
+    let mod_name = parts.first
+    let mod_name_len = parts.first_len
+    let sym_name = parts.rest
+    let sym_name_len = parts.rest_len
 
     // If no "::" found, this is an unqualified name — search all exports
     if sym_name_len == 0 {
@@ -401,10 +422,10 @@ fn mod_graph_resolve_import(
     // in the found module. If sym_name still contains "::", recurse into
     // a submodule.
     let sub_parts = mod_split_qualified(sym_name, sym_name_len)
-    let sub_mod_name = sub_parts.0
-    let sub_mod_len = sub_parts.1
-    let sub_sym_name = sub_parts.2
-    let sub_sym_len = sub_parts.3
+    let sub_mod_name = sub_parts.first
+    let sub_mod_len = sub_parts.first_len
+    let sub_sym_name = sub_parts.rest
+    let sub_sym_len = sub_parts.rest_len
 
     if sub_sym_len == 0 {
         // Single symbol in the module — look up the export
@@ -475,7 +496,7 @@ fn mod_graph_check_cycles(g: ModuleGraph) -> bool with Mut, Panic, Div {
     while start < g.module_count {
         if color[start] == 0 {
             let found = mod_graph_dfs_cycle(g, start, color)
-            if found.0 {
+            if found.0 != 0 {
                 return true
             }
             color = found.1
@@ -1391,11 +1412,11 @@ fn test_mod_split_qualified_basic() -> i64 with IO, Mut, Panic, Div {
     qname[7] = 114  // r
 
     let parts = mod_split_qualified(qname, 8)
-    let first_len = parts.1
-    let rest_len = parts.3
+    let first_len = parts.first_len
+    let rest_len = parts.rest_len
 
-    let first = parts.0
-    let rest = parts.2
+    let first = parts.first
+    let rest = parts.rest
 
     let ok = first_len == 3 && rest_len == 3
         && first[0] == 102 && first[1] == 111 && first[2] == 111
@@ -1411,8 +1432,8 @@ fn test_mod_split_unqualified() -> i64 with IO, Mut, Panic, Div {
     qname[2] = 111  // o
 
     let parts = mod_split_qualified(qname, 3)
-    let first_len = parts.1
-    let rest_len = parts.3
+    let first_len = parts.first_len
+    let rest_len = parts.rest_len
 
     let ok = first_len == 3 && rest_len == 0
     mod_assert_true(ok, 27)

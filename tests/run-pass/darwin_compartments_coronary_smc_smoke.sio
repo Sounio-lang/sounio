@@ -1,0 +1,149 @@
+//@ run-pass
+//@ expect-stdout-contains: CORONARY_SMC_SMOKE_PASS
+//@ timeout: 30
+
+// Smoke test for stdlib/darwin_pbpk/compartments/coronary_smc.sio (Stage G-ε-17).
+//
+// Exercises the 5%-of-heart sub-compartment carve-out under three regimes
+// (f_local = 0.30 cypher default, 0.00 systemic-only, 1.00 local-only) and
+// asserts two distinct invariants:
+//
+//   (a) Mass-balance across the routing fork (load-bearing): the deposited
+//       mass into coronary_smc plus the systemic mass routed through blood
+//       equals the rate-based release integral exactly — the splitter must
+//       not leak. Checked at 1e-9 relative tolerance against the same
+//       rectangle-rule integral both sides consume.
+//   (b) Split ratio matches f_local exactly: deposited / total_via_rate
+//       within 1e-9 of f_local. Confirms routing semantics.
+//
+// The analytical Higuchi cumulative K_H · √t is a third reference point;
+// the rectangle-rule integral drifts ~0.5 % below it because the rate
+// formula caps the t→0 singularity. Smoke asserts the two integrals agree
+// to within 1 % (an integration-method drift, not a routing issue).
+//
+// The dissertation §4.5.3 footnote points at this test as the routing-
+// integrity gate for the 5%-mass carve-out and the Cypher f_local = 0.30
+// claim.
+
+use darwin_pbpk::compartments::coronary_smc::*
+use darwin_pbpk::release::biomaterial_release::*
+
+fn fmt_6(x: f64) -> i64 { return (x * 1000000.0) as i64 }
+fn fabs(x: f64) -> f64 { if x < 0.0 { return 0.0 - x } else { return x } }
+
+struct ScenarioResult {
+    deposited:       f64,
+    systemic:        f64,
+    total_via_rate:  f64,
+    total_via_cum:   f64,
+    c_blood_end:     f64,
+}
+
+fn run_scenario(f_local: f64) -> ScenarioResult with Mut, Div, IO, Panic {
+    let pd = coronary_smc_default_params()
+    let p = coronary_smc_params(pd.v_csmc, pd.q_csmc, pd.kp_csmc, f_local)
+    let rel = release_higuchi(0.14, 0.00417)   // Cypher sirolimus DES, Reza 2003
+
+    var s = coronary_smc_state_zero()
+    var c_blood = 0.0
+    var systemic_mass = 0.0
+    var rate_integral = 0.0
+    let v_blood = 5.0
+    let cl_hep  = 12.4
+
+    let dt = 0.01
+    var t = 0.0
+    let t_end = 24.0
+    while t < t_end {
+        let rr = release_rate(rel, t)
+        rate_integral = rate_integral + dt * rr
+        s = coronary_smc_step(s, p, c_blood, rr, dt)
+        let sys_flux = coronary_smc_systemic_flux(p, rr)
+        let dcb = sys_flux / v_blood - cl_hep * c_blood / v_blood
+        c_blood = c_blood + dt * dcb
+        if c_blood < 0.0 { c_blood = 0.0 }
+        systemic_mass = systemic_mass + dt * sys_flux
+        t = t + dt
+    }
+
+    let cum = release_cumulative(rel, t_end)
+    ScenarioResult {
+        deposited:      s.deposited_mass,
+        systemic:       systemic_mass,
+        total_via_rate: rate_integral,
+        total_via_cum:  cum,
+        c_blood_end:    c_blood,
+    }
+}
+
+fn check_scenario(r: ScenarioResult, f_local: f64) -> bool with Mut, Div, IO {
+    print(" f_local*1e6=")
+    print(fmt_6(f_local))
+    print(" deposited*1e6=")
+    print(fmt_6(r.deposited))
+    print(" systemic*1e6=")
+    print(fmt_6(r.systemic))
+    print(" total_rate*1e6=")
+    print(fmt_6(r.total_via_rate))
+    print(" total_cum*1e6=")
+    println(fmt_6(r.total_via_cum))
+
+    // (a) routing mass-balance — exact under f64
+    let bal = (r.deposited + r.systemic) - r.total_via_rate
+    let bal_rel = fabs(bal) / r.total_via_rate
+    if bal_rel > 1.0e-9 {
+        print("FAIL: routing mass-balance drift ")
+        print(fmt_6(bal_rel * 1.0e9))
+        println(" parts-per-billion")
+        return false
+    }
+
+    // (b) split ratio matches f_local within 1e-9
+    let split = r.deposited / r.total_via_rate
+    let split_diff = fabs(split - f_local)
+    if split_diff > 1.0e-9 {
+        print("FAIL: split ratio diff*1e9=")
+        println(fmt_6(split_diff * 1.0e9))
+        return false
+    }
+
+    // (c) rectangle-rule integral within 1 % of analytical Higuchi cumulative
+    let int_diff = fabs(r.total_via_rate - r.total_via_cum) / r.total_via_cum
+    if int_diff > 0.01 {
+        print("FAIL: rate-integral vs cumulative drift ")
+        print(fmt_6(int_diff * 100.0))
+        println(" %")
+        return false
+    }
+
+    return true
+}
+
+fn main() with Mut, Div, IO, Panic {
+    println("coronary_smc smoke — 24 h Higuchi DES, 3 f_local regimes")
+
+    print("scenario=cypher_default ")
+    let r1 = run_scenario(0.30)
+    if !check_scenario(r1, 0.30) { return }
+
+    print("scenario=zero_local     ")
+    let r2 = run_scenario(0.0)
+    if !check_scenario(r2, 0.0)  { return }
+
+    print("scenario=all_local      ")
+    let r3 = run_scenario(1.0)
+    if !check_scenario(r3, 1.0)  { return }
+
+    // Sanity: zero-local must produce some systemic blood concentration;
+    // all-local must produce zero blood concentration (no systemic input).
+    if r2.c_blood_end < 1.0e-9 {
+        println("FAIL: zero-local scenario produced no blood concentration")
+        return
+    }
+    if r3.c_blood_end > 1.0e-9 {
+        println("FAIL: all-local scenario produced nonzero blood concentration")
+        return
+    }
+
+    println("CORONARY_SMC_SMOKE_PASS")
+}

@@ -1,0 +1,79 @@
+---
+title: "精化类型"
+description: "为类型附加逻辑谓词，以便在编译时证明约束。"
+weight: 15
+category: "语言"
+topic_id: "website.docs.language.refinement-types"
+authority: "website_only"
+audience: "用户"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.refinement-types"
+---
+
+# 精化类型
+
+精化类型通过逻辑谓词来缩小基本类型。编译器使用 SMT 求解器（Z3）在编译时检查值是否满足谓词，在程序运行前捕获超出范围的错误。
+
+## 语法
+
+```sio
+type Positive = { x: i32 | x > 0 }
+type Percentage = { p: f64 | p >= 0.0 && p <= 100.0 }
+type NonEmpty<T> = { arr: [T] | len(arr) > 0 }
+```
+
+谓词后的 `|` 必须是一个纯布尔表达式，它基于绑定变量和常量。编译器将此委托给 Z3 进行可满足性检查。
+
+## 使用精化类型
+
+```sio
+fn safe_divide(a: f64, b: { b: f64 | b != 0.0 }) -> f64 {
+    a / b
+}
+
+fn main() with IO {
+    let result = safe_divide(10.0, 3.0)   // OK: 3.0 != 0.0 已证明
+    println(result)
+
+    // safe_divide(10.0, 0.0)  // 编译错误：无法证明 0.0 != 0.0
+}
+```
+
+当传递字面量时，求解器可以立即验证约束。当传递变量时，求解器使用变量声明处的已知精化。
+
+## 示例
+
+精化类型在科学领域特别强大，其中物理约束很重要：
+
+```sio
+type ValidDose = { dose: mg | dose > 0.0 && dose <= 2000.0 }
+
+fn administer(patient_id: i64, dose: ValidDose) with IO {
+    println("Administering dose")
+}
+
+fn main() with IO {
+    let dose: mg = 500.0
+    administer(1, dose)     // OK: 500.0 在范围内
+
+    // let bad: mg = 5000.0
+    // administer(1, bad)   // 编译错误：5000.0 > 2000.0
+}
+```
+
+## 与知识类型交互
+
+精化谓词与 `Knowledge<T>` 组合：`Knowledge<ValidDose>` 同时携带不确定性信封和精化约束。编译器独立地检查两者 — 精化在名义值上成立，而信心传播跟踪测量不确定性。
+
+## 精化检查的位置
+
+- 精化类型检查：`self-hosted/check/refinements.sio`
+- SMT 集成：`compiler/src/smt/`（Z3 绑定，需要 `smt` 特性标志）
+- 已检查的本地构建产物（`souc-linux-x86_64`）禁用了 SMT；当使用 `--features smt` 构建时，精化检查可用。
+
+## 当前限制
+
+- Z3 集成需要在构建时启用 `smt` 特性标志。
+- 不是所有谓词形式都受支持 — 求解器处理算术比较、布尔连接和数组长度约束。自定义谓词中的函数调用尚未支持。
+- 对于无法静态验证的谓词，运行时断言回退是可用的。

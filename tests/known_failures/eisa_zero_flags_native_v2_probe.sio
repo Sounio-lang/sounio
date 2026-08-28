@@ -1,0 +1,74 @@
+//@ known-failure: the qd128/EISA graph lowers without crashing but native emission fails closed; lean_single verifies the flags
+
+use eisa::core_v2::{
+    ereg2_exact, eadd2, esub2, ereg2_zero_flags,
+    eisa_zero_flag_observed, eisa_zero_flag_correction_nonzero
+}
+use eisa::format::*
+use eisa::evm::{evm_load, evm_run, evm_reg_val, evm_reg_ehi, evm_reg_zero_flags}
+
+fn build_zero_flag_image() -> EisaxBuild with Mut, Panic {
+    var b = eisax_build_new()
+    b = eisax_build_set_version(b, eisax_version_v2())
+    b = eisax_build_set_fuel(b, 16)
+    b.consts[0] = 18014398509481984.0
+    b.consts[1] = 1.0
+    b.n_const = 2
+
+    b.ops[0] = op_econst()
+    b.dsts[0] = 0
+    b.as_[0] = 0
+
+    b.ops[1] = op_econst()
+    b.dsts[1] = 1
+    b.as_[1] = 1
+
+    b.ops[2] = op_eadd()
+    b.dsts[2] = 2
+    b.as_[2] = 0
+    b.bs_[2] = 1
+
+    b.ops[3] = op_esub()
+    b.dsts[3] = 3
+    b.as_[3] = 2
+    b.bs_[3] = 0
+
+    b.ops[4] = op_ehalt()
+    b.n_code = 5
+    b
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let exact_zero = ereg2_exact(0.0)
+    let ordinary = ereg2_exact(2.0)
+
+    let big = ereg2_exact(18014398509481984.0)
+    let one = ereg2_exact(1.0)
+    let rounded_sum = eadd2(big, one)
+    let recovered = esub2(rounded_sum, big)
+
+    let exact_flags = ereg2_zero_flags(exact_zero)
+    let ordinary_flags = ereg2_zero_flags(ordinary)
+    let recovered_flags = ereg2_zero_flags(recovered)
+
+    let expected_recovered =
+        eisa_zero_flag_observed() + eisa_zero_flag_correction_nonzero()
+
+    let image = eisax_encode(build_zero_flag_image())
+    var machine = evm_load(image)
+    let evm_status = evm_run(&!machine)
+    let evm_flags = evm_reg_zero_flags(&machine, 3)
+
+    if exact_flags == eisa_zero_flag_observed() &&
+       ordinary_flags == 0 &&
+       recovered.val == 0.0 && recovered.err.x0 != 0.0 &&
+       recovered_flags == expected_recovered &&
+       evm_status == 0 && evm_reg_val(&machine, 3) == 0.0 &&
+       evm_reg_ehi(&machine, 3) != 0.0 && evm_flags == expected_recovered {
+        println("EISA_ZERO_FLAGS PASS")
+        return 0
+    }
+
+    println("EISA_ZERO_FLAGS FAIL")
+    1
+}

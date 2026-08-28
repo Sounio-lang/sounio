@@ -1,0 +1,134 @@
+//! Known native-v2 failure (waived-E3 2026-08-05): default Madaros completes
+//! imported-module lowering (~5 modules / ~111 fn) without crashing, then fails
+//! closed during native emission (thin-link rc=12). Semantic oracle is lean_single.
+//! Gate: scripts/ci/madaros_zero_provenance_failclosed_gate.sh
+//! BLK: docs/handoff/BLK-20260805-p0b-zero-provenance.md
+//!
+//! Five computations with the same surface value and different provenance.
+//!
+//! This is an inert algebraic/metrological witness. It makes no clinical claim
+//! and does not propose a general language-level ZeroEvent representation.
+
+use algebra::sedenion::{
+    sed_canonical_zd_z, sed_canonical_zd_w, sed_mul, sed_norm_sq
+}
+use eisa::core_v2::{ereg2_exact, eadd2, esub2}
+
+struct ZeroWitness {
+    kind: i64,
+    value: f64,
+    residual: f64,
+    left_nonzero: bool,
+    right_nonzero: bool,
+}
+
+fn abs_local(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn below_resolution(value: f64, resolution: f64) -> f64 {
+    if abs_local(value) < resolution { 0.0 } else { value }
+}
+
+fn absent_zero() -> ZeroWitness {
+    ZeroWitness {
+        kind: 0,
+        value: 0.0,
+        residual: 0.0,
+        left_nonzero: false,
+        right_nonzero: false,
+    }
+}
+
+fn cancelled_zero() -> ZeroWitness {
+    let left = 3.25
+    let right = 0.0 - 3.25
+    ZeroWitness {
+        kind: 1,
+        value: left + right,
+        residual: 0.0,
+        left_nonzero: left != 0.0,
+        right_nonzero: right != 0.0,
+    }
+}
+
+fn annihilated_zero() -> ZeroWitness with Mut {
+    var left: [f64; 16] = [0.0; 16]
+    var right: [f64; 16] = [0.0; 16]
+    var product: [f64; 16] = [0.0; 16]
+    sed_canonical_zd_z(&!left)
+    sed_canonical_zd_w(&!right)
+    sed_mul(&left, &right, &!product)
+    ZeroWitness {
+        kind: 2,
+        value: sed_norm_sq(&product),
+        residual: 0.0,
+        left_nonzero: sed_norm_sq(&left) > 0.0,
+        right_nonzero: sed_norm_sq(&right) > 0.0,
+    }
+}
+
+fn resolution_zero() -> ZeroWitness {
+    let latent = 0.0004
+    let resolution = 0.001
+    ZeroWitness {
+        kind: 3,
+        value: below_resolution(latent, resolution),
+        residual: latent,
+        left_nonzero: latent != 0.0,
+        right_nonzero: resolution != 0.0,
+    }
+}
+
+fn rounded_zero() -> ZeroWitness with Mut, Div, Panic {
+    let one = ereg2_exact(1.0)
+    let tiny = ereg2_exact(1.0e-30)
+    let rounded_sum = eadd2(one, tiny)
+    let recovered = esub2(rounded_sum, one)
+    ZeroWitness {
+        kind: 4,
+        value: recovered.val,
+        residual: recovered.err.x0,
+        left_nonzero: tiny.val != 0.0,
+        right_nonzero: recovered.err.x0 != 0.0,
+    }
+}
+
+fn surface_is_zero(w: &ZeroWitness) -> bool {
+    w.value == 0.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let absent = absent_zero()
+    let cancelled = cancelled_zero()
+    let annihilated = annihilated_zero()
+    let resolution = resolution_zero()
+    let rounded = rounded_zero()
+
+    let all_surface_zero =
+        surface_is_zero(&absent) &&
+        surface_is_zero(&cancelled) &&
+        surface_is_zero(&annihilated) &&
+        surface_is_zero(&resolution) &&
+        surface_is_zero(&rounded)
+
+    let kinds_distinct =
+        absent.kind == 0 && cancelled.kind == 1 && annihilated.kind == 2 &&
+        resolution.kind == 3 && rounded.kind == 4
+
+    let provenance_present =
+        !absent.left_nonzero && !absent.right_nonzero &&
+        cancelled.left_nonzero && cancelled.right_nonzero &&
+        annihilated.left_nonzero && annihilated.right_nonzero &&
+        resolution.left_nonzero && resolution.right_nonzero &&
+        rounded.left_nonzero && rounded.right_nonzero &&
+        resolution.residual != 0.0 && rounded.residual != 0.0
+
+    if all_surface_zero && kinds_distinct && provenance_present {
+        println("ZERO_PROVENANCE PASS")
+        return 0
+    }
+
+    println("ZERO_PROVENANCE FAIL")
+    1
+}

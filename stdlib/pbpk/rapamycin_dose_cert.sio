@@ -1,0 +1,166 @@
+// stdlib/pbpk/rapamycin_dose_cert.sio — Sprint 27: Dose Certification Boundary
+//
+// Novel dissertation contribution: applies the GUM dose-proportionality theorem
+// (Sprint 24: C ∝ D, u_c ∝ D) to derive the CERTIFIABLE DOSE RANGE [D_min, D_max]
+// — the dose interval within which the 95% CI lies fully in [floor, ceil].
+//
+// This is distinct from the THERAPEUTIC DOSE RANGE (point estimate only).
+// The certified range is strictly narrower on both sides.
+//
+// ── Theory ───────────────────────────────────────────────────────────────────
+//
+//   Since C(D) = D · (C_ref/D_ref) and u_c(D) = D · (u_c_ref/D_ref):
+//     lo(D) = D · (C_ref − 2·u_c_ref) / D_ref
+//     hi(D) = D · (C_ref + 2·u_c_ref) / D_ref
+//
+//   CI fully in [floor, ceil] iff lo > floor AND hi < ceil:
+//     D_min = floor · D_ref / (C_ref − 2·u_c_ref)
+//     D_max = ceil  · D_ref / (C_ref + 2·u_c_ref)
+//
+//   Both D_min and D_max are wider apart than naive floor/C_SS and ceil/C_SS
+//   ONLY IF the two constraints don't overlap, which requires:
+//     C_ref > 2·u_c_ref  (CI width < point estimate)
+//
+// ── Key Sprint 27 findings (all certified by gate) ────────────────────────────
+//
+//   Standard genotype N=14:
+//     D_min = 2.50 mg, D_max = 8.63 mg  (width = 6.12 mg)
+//     D=3mg certified; D=5mg certified; D=10mg NOT certified (above D_max!)
+//
+//   Slow genotype N=14:
+//     D_min = 1.61 mg, D_max = 6.04 mg  (width = 4.43 mg)
+//     D=2mg certified; D=5mg certified; D=10mg NOT certified
+//
+//   Fast genotype N=14 — KEY FINDING:
+//     D_min = 5.15 mg, D_max = 14.57 mg  (width = 9.42 mg)
+//     Standard D=5mg is BELOW D_min by 0.15 mg → NOT certified at N=14
+//     D=5.5mg certifies; D=10mg certifies
+//
+//   CYP3A4 inhibitor N=14:
+//     D_min = 0.80 mg, D_max = 3.26 mg  (width = 2.45 mg — narrowest)
+//     Current D=1.5mg is within certified range ✓
+//
+//   CYP3A4 inducer N=26 — KEY FINDING:
+//     D_min = 33.74 mg, D_max = 56.80 mg  (width = 23.05 mg)
+//     Standard D=20mg is FAR below D_min (by 13.74 mg)
+//     D=34mg certifies at N=26; D=20mg NEVER certifies regardless of N
+//
+//   Width ordering (narrowest → widest):
+//     inh (2.45) < slow (4.43) < std (6.12) < fast (9.42) < ind (23.05) mg
+//
+//   Notable: D=10mg standard — therapeutic by point estimate (Sprint 24),
+//            but NOT CI-certified (above D_max_std=8.63mg). Compile-time-detectable.
+//
+// ── Effect annotations ────────────────────────────────────────────────────────
+//   All pub fns: with Mut, Div, Panic
+
+module pbpk::rapamycin_dose_cert
+
+use pbpk::rapamycin_expanded_u::{eu_u_c}
+use pbpk::rapamycin_assay::{as_trough_mg_l}
+use pbpk::rapamycin_clinical::{trough_floor_mg_l, trough_ceil_mg_l}
+use pbpk::rapamycin_oral_budget::{
+    ob_ka_var_std, ob_f_var_std, ob_ke_var_std,
+    ob_k12_var_std, ob_k21_var_std, ob_ke_var_inh, ob_ke_var_ind
+}
+
+// Minimum certifiable dose D_min = floor * d_ref / (C_ref - 2*u_c_ref)
+// Returns 999.0 if C_ref <= 2*u_c_ref (uncertifiable at any dose at this N)
+pub fn dc_d_min(d_ref: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d_ref, n_doses, ke_val, f_val)
+    let uc = eu_u_c(d_ref, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    let lo_coeff = c - 2.0 * uc
+    if lo_coeff <= 0.0 { 999.0 }
+    else { trough_floor_mg_l() * d_ref / lo_coeff }
+}
+
+// Maximum certifiable dose D_max = ceil * d_ref / (C_ref + 2*u_c_ref)
+pub fn dc_d_max(d_ref: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    let c  = as_trough_mg_l(d_ref, n_doses, ke_val, f_val)
+    let uc = eu_u_c(d_ref, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+    trough_ceil_mg_l() * d_ref / (c + 2.0 * uc)
+}
+
+// Width of certified dose window: D_max - D_min
+pub fn dc_window_width(d_ref: f64, n_doses: i64, ke_val: f64, f_val: f64,
+                       ka_var: f64, f_var: f64, ke_var: f64, k12_var: f64, k21_var: f64) -> f64
+    with Mut, Div, Panic {
+    dc_d_max(d_ref, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var) -
+    dc_d_min(d_ref, n_doses, ke_val, f_val, ka_var, f_var, ke_var, k12_var, k21_var)
+}
+
+// ── Named scenario functions ──────────────────────────────────────────────────
+
+// Standard genotype N=14: D_min = 2.50 mg
+pub fn dc_std_n14_d_min() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_min(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+// Standard genotype N=14: D_max = 8.63 mg
+pub fn dc_std_n14_d_max() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_max(5.0, 14, 0.01118, 0.141, ka, fv, ke, k12, k21)
+}
+
+// Slow genotype N=14: D_min = 1.61 mg
+pub fn dc_slow_n14_d_min() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_min(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+
+// Slow genotype N=14: D_max = 6.04 mg
+pub fn dc_slow_n14_d_max() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_max(5.0, 14, 0.00838, 0.188, ka, fv, ke, k12, k21)
+}
+
+// Fast genotype N=14: D_min = 5.15 mg  — standard 5mg is BELOW D_min
+pub fn dc_fast_n14_d_min() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_min(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+
+// Fast genotype N=14: D_max = 14.57 mg
+pub fn dc_fast_n14_d_max() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke = ob_ke_var_std(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_max(5.0, 14, 0.01677, 0.094, ka, fv, ke, k12, k21)
+}
+
+// Inhibitor N=14: D_min = 0.80 mg
+pub fn dc_inh_n14_d_min() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_inh = ob_ke_var_inh(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_min(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+
+// Inhibitor N=14: D_max = 3.26 mg
+pub fn dc_inh_n14_d_max() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_inh = ob_ke_var_inh(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_max(1.5, 14, 0.002236, 0.282, ka, fv, ke_inh, k12, k21)
+}
+
+// Inducer N=26: D_min = 33.74 mg  — standard 20mg is FAR below D_min
+pub fn dc_ind_n26_d_min() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_ind = ob_ke_var_ind(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_min(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}
+
+// Inducer N=26: D_max = 56.80 mg
+pub fn dc_ind_n26_d_max() -> f64 with Mut, Div, Panic {
+    let ka = ob_ka_var_std(); let fv = ob_f_var_std()
+    let ke_ind = ob_ke_var_ind(); let k12 = ob_k12_var_std(); let k21 = ob_k21_var_std()
+    dc_d_max(20.0, 26, 0.05590, 0.047, ka, fv, ke_ind, k12, k21)
+}

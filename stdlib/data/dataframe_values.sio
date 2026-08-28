@@ -1,0 +1,98 @@
+//! Value analysis of a single DataFrame column: distinct values, distinct count, value counts, and
+//! the mode.
+//!
+//! df_unique and df_value_counts return small DataFrames (sorted ascending by value); df_nunique and
+//! df_mode return scalars. Read-only apart from building the result frame. Self-contained: uses only
+//! the public data::dataframe accessors. Caps at 1024 distinct values.
+
+use data::dataframe::{DataFrame, df_new, df_get, df_add_row, df_nrows, df_ncols, df_set_col_name}
+
+// Collect the ascending-sorted distinct values of column `col` into `out` with their counts into
+// `cnt`; returns the number of distinct values (cap 1024). Insertion into a sorted array.
+fn distinct_sorted(df: &DataFrame, col: i64, out: &![f64; 1024], cnt: &![i64; 1024]) -> i64 with Mut, Div, Panic {
+    var m: i64 = 0
+    var r: i64 = 0
+    while r < df_nrows(df) {
+        let v = df_get(df, r, col)
+        // linear scan for an existing entry
+        var i: i64 = 0
+        var found = false
+        while i < m && !found {
+            if out[i as usize] == v { cnt[i as usize] = cnt[i as usize] + 1; found = true }
+            i = i + 1
+        }
+        if !found && m < 1024 {
+            // sorted insert position (ascending)
+            var p: i64 = 0
+            while p < m && out[p as usize] < v { p = p + 1 }
+            var q = m
+            while q > p { out[q as usize] = out[(q - 1) as usize]; cnt[q as usize] = cnt[(q - 1) as usize]; q = q - 1 }
+            out[p as usize] = v
+            cnt[p as usize] = 1
+            m = m + 1
+        }
+        r = r + 1
+    }
+    m
+}
+
+/// A one-column DataFrame of the distinct values of column `col`, sorted ascending.
+pub fn df_unique(df: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {
+    var vals: [f64; 1024] = [0.0; 1024]
+    var cnt: [i64; 1024] = [0; 1024]
+    let m = distinct_sorted(df, col, &!vals, &!cnt)
+    var out = df_new(1)
+    df_set_col_name(&!out, 0, 0)
+    var i: i64 = 0
+    while i < m {
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = vals[i as usize]
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    out
+}
+
+/// The number of distinct values in column `col`.
+pub fn df_nunique(df: &DataFrame, col: i64) -> i64 with Mut, Div, Panic {
+    var vals: [f64; 1024] = [0.0; 1024]
+    var cnt: [i64; 1024] = [0; 1024]
+    distinct_sorted(df, col, &!vals, &!cnt)
+}
+
+/// A two-column DataFrame [value, count] of the distinct values of column `col` and how many times
+/// each occurs, sorted ascending by value.
+pub fn df_value_counts(df: &DataFrame, col: i64) -> DataFrame with Mut, Div, Panic {
+    var vals: [f64; 1024] = [0.0; 1024]
+    var cnt: [i64; 1024] = [0; 1024]
+    let m = distinct_sorted(df, col, &!vals, &!cnt)
+    var out = df_new(2)
+    df_set_col_name(&!out, 0, 0)
+    df_set_col_name(&!out, 1, 1)
+    var i: i64 = 0
+    while i < m {
+        var row: [f64; 64] = [0.0; 64]
+        row[0] = vals[i as usize]
+        row[1] = cnt[i as usize] as f64
+        df_add_row(&!out, &row)
+        i = i + 1
+    }
+    out
+}
+
+/// The mode of column `col`: the most frequent value (smallest value on a tie). Returns 0.0 for an
+/// empty frame.
+pub fn df_mode(df: &DataFrame, col: i64) -> f64 with Mut, Div, Panic {
+    var vals: [f64; 1024] = [0.0; 1024]
+    var cnt: [i64; 1024] = [0; 1024]
+    let m = distinct_sorted(df, col, &!vals, &!cnt)
+    if m <= 0 { return 0.0 }
+    var best = vals[0]
+    var bestc = cnt[0]
+    var i: i64 = 1
+    while i < m {
+        if cnt[i as usize] > bestc { bestc = cnt[i as usize]; best = vals[i as usize] }  // values ascending -> ties keep the smaller
+        i = i + 1
+    }
+    best
+}

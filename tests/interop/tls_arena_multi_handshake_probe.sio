@@ -1,0 +1,68 @@
+// MANUAL / NETWORK-DEPENDENT -- not part of the default run-pass suite.
+//
+// Arena-exhaustion probe for the "madaros: arena full" (exit 181) ceiling
+// documented as Finding 12 in
+// docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md and measured
+// specifically for real-CA TLS handshakes in
+// docs/audit/ARENA_EXHAUSTION_TLS_HANDSHAKE_CHAIN_VERIFICATION_DISPATCH_2026-08-26.md.
+//
+// It performs N sequential real, CA-verified TLS 1.3 handshakes against a
+// real public HTTPS host in ONE process, printing the 1-based iteration
+// number BEFORE each attempt. The last number printed before the process
+// dies with exit 181 is the per-process handshake ceiling.
+//
+// To run:
+//   SOUNIO_STDLIB_PATH=$(pwd)/stdlib ./bin/souc run \
+//     tests/interop/tls_arena_multi_handshake_probe.sio
+//
+// The host is given as dotted-decimal text because stdlib/tls/client.sio's
+// `tls_connect` has no DNS resolver (it parses `host` with
+// `parse_ipv4_dotted`). The same text is used for SNI and for
+// x509_verify_hostname, so the final chain verdict is expected to be a
+// hostname mismatch -- that is IRRELEVANT to this probe, which measures
+// arena spend during chain building/verification, all of which happens
+// before the hostname check.
+
+use tls::client::*
+use x509::trust_store::*
+use x509::cert::*
+use net::socket::*
+
+fn now_unix() -> i64 with IO {
+    syscall6(201, 0, 0, 0, 0, 0, 0)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let (store, terr) = trust_store_load()
+    if terr != 0 {
+        println("arena_probe: trust_store_load failed")
+        print_int(terr)
+        return 1
+    }
+    println("arena_probe: trust store loaded, cert count:")
+    print_int(store.count as i64)
+
+    let host_text = "8.8.8.8"
+    let host_len = str_len(host_text)
+    let host = rawbuf_new(host_len + 8)
+    var hi: i64 = 0
+    while hi < host_len {
+        rawbuf_set(&host, hi, str_char_at(host_text, hi))
+        hi = hi + 1
+    }
+
+    let attempts: i64 = 300
+    var n: i64 = 0
+    while n < attempts {
+        println("arena_probe: handshake attempt")
+        print_int(n + 1)
+        let (conn, result_code) = tls_connect(&host, host_len, 443 as u16, &store, now_unix())
+        println("arena_probe: result code")
+        print_int(result_code)
+        tls_close(conn)
+        n = n + 1
+    }
+
+    println("arena_probe: completed all attempts without arena exhaustion")
+    return 0
+}

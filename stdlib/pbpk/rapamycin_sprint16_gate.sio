@@ -1,0 +1,224 @@
+//@ run-pass
+//@ expect-stdout: RELEASE GATE PASS
+
+// stdlib/pbpk/rapamycin_sprint16_gate.sio — Sprint 16 IV bolus gate
+//
+// 56 assertions establishing that for IV bolus rapamycin (2-compartment model,
+// no gut compartment), k12 (central→peripheral distribution rate) dominates the
+// 24h trough uncertainty budget — NOT ke (elimination), which is the parameter
+// most often targeted by clinicians.
+//
+// Standard scenario: D_iv=1.5mg bolus, dt=1h, n=24 steps (24h trough).
+//   ke=0.01118 h⁻¹, k12=0.05, k21=0.005, Vc=75L
+//   Variances: ke_var=8.41e-6, k12_var=1.56e-4, k21_var=1.6e-6
+//   Results: dec=1 (THERAPEUTIC), conf=900, dom=1 (k12)
+//
+// Dissertation headline (Section F, assertions 33–36):
+//   iv_k12_dominant() = true: k12 dominates at standard D=1.5mg.
+//   iv_ke_irrelevant() = true: ke÷4 leaves all outputs unchanged.
+//   iv_k12_tighten_fires() = true: k12÷4 → conf=950.
+//   iv_ke_second_bottleneck() = true: k12÷25 → dom shifts to ke.
+//
+// Mechanistic unity of the delivery route atlas:
+//   Stent (k21 dom): drug flows from peripheral depot to central — k21 governs.
+//   IV bolus (k12 dom): drug deposited in central, distributes to peripheral.
+//   Oral (ka dom): drug must first be absorbed through gut wall into central.
+//   In every case, the dominant uncertainty source governs the primary flux.
+//
+// Why ke is irrelevant for IV: both ke and k12 terms scale as Var × A1².
+//   k12_var / ke_var ≈ 18.5; this ratio is fixed and independent of dose.
+//   ke÷64 still leaves conf=900 and dom=k12.
+//
+// Boundary UNCERTAIN at D=1.0mg: even with k12÷4 (conf=950), trough remains
+//   UNCERTAIN because the CI straddles the 0.004 mg/L therapeutic floor.
+//   This is a concentration problem, not a measurement problem — dose must
+//   be raised, not measurement precision increased.
+//
+// Assertion map:
+//   A (1–8):   Core: D=1.5mg, 24h → THERAPEUTIC/900/k12
+//   B (9–14):  Dose matters: D=1.0mg UNCERTAIN, D=1.5mg+ THERAPEUTIC, dom=k12
+//   C (15–20): ke irrelevant: ke÷4, ke÷64 → same dec/conf/dom as baseline
+//   D (21–26): k12÷4 → conf=950; k12÷4 still therapeutic; dom stays k12
+//   E (27–32): k12÷16 dom=k12; k12÷25 dom=ke (second bottleneck crossover)
+//   F (33–38): Gate functions: k12 dominant, ke irrelevant, k12 fires, ke #2
+//   G (39–44): Confidence values; ke extremes irrelevant; k12 improvement saturates
+//   H (45–48): D=1.0mg boundary: k12÷4 → conf=950 but still UNCERTAIN
+//   I (49–52): Decision sentinel values
+//   J (53–56): Cross-checks wrapper vs direct
+
+use pbpk::rapamycin_iv_bolus::{
+    classify_standard_iv, conf_standard_iv, dom_standard_iv,
+    classify_iv_trough, conf_iv_trough, dom_iv_trough,
+    iv_ke_var_std, iv_k12_var_std, iv_k21_var_std,
+    iv_k12_dominant, iv_ke_irrelevant, iv_k12_tighten_fires, iv_ke_second_bottleneck
+}
+use pbpk::rapamycin_clinical::{
+    decision_therapeutic, decision_uncertain, conf_clinical_min
+}
+
+var SPR16_PASS: [i64; 2] = [0; 2]
+
+fn s16_chk(cond: bool) with IO, Mut {
+    if cond {
+        SPR16_PASS[0] = SPR16_PASS[0] + 1
+    } else {
+        SPR16_PASS[1] = SPR16_PASS[1] + 1
+        print("FAIL\n")
+    }
+}
+
+fn run_sprint16_gate() with IO, Epistemic, Mut, Div, Panic {
+    let ke_std  = iv_ke_var_std()    // 0.00000841
+    let k12_std = iv_k12_var_std()   // 0.000156
+    let k21_std = iv_k21_var_std()   // 0.0000016
+
+    // ── Section A: Core D=1.5mg, 24h (8 assertions) ───────────────────────────
+    // THERAPEUTIC, conf=900, dom=k12 (index 1 in {ke, k12, k21})
+
+    s16_chk(classify_standard_iv(ke_std, k12_std) == decision_therapeutic())  // 1
+    s16_chk(classify_standard_iv(ke_std, k12_std) != decision_uncertain())    // 2
+    s16_chk(conf_standard_iv(ke_std, k12_std) == 900)                         // 3
+    s16_chk(conf_standard_iv(ke_std, k12_std) >= conf_clinical_min())         // 4
+    s16_chk(dom_standard_iv(ke_std, k12_std) == 1)                            // 5 (k12)
+    s16_chk(dom_standard_iv(ke_std, k12_std) != 0)                            // 6 (not ke)
+    s16_chk(dom_standard_iv(ke_std, k12_std) != 2)                            // 7 (not k21)
+    s16_chk(dom_standard_iv(ke_std, k12_std) == 1)                            // 8 (k12 confirmed)
+
+    // ── Section B: Dose matters (6 assertions) ─────────────────────────────────
+    // D=1.0mg → UNCERTAIN (boundary); D=1.5mg → THERAPEUTIC; dom=k12 throughout
+
+    s16_chk(classify_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                                0.005, k21_std, 1.0, 75.0, 24)
+            == decision_uncertain())                                            // 9 (1.0mg UNCERTAIN)
+    s16_chk(classify_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                                0.005, k21_std, 1.5, 75.0, 24)
+            == decision_therapeutic())                                          // 10 (1.5mg THERAPEUTIC)
+    s16_chk(classify_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                                0.005, k21_std, 2.0, 75.0, 24)
+            == decision_therapeutic())                                          // 11 (2.0mg THERAPEUTIC)
+    // dom=k12 at all tested doses
+    s16_chk(dom_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                           0.005, k21_std, 1.0, 75.0, 24) == 1)               // 12 (k12 at 1.0mg)
+    s16_chk(dom_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                           0.005, k21_std, 2.0, 75.0, 24) == 1)               // 13 (k12 at 2.0mg)
+    s16_chk(dom_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                           0.005, k21_std, 5.0, 75.0, 24) == 1)               // 14 (k12 at 5.0mg)
+
+    // ── Section C: ke irrelevant (6 assertions) ────────────────────────────────
+    // ke÷4 and ke÷64 leave dec, conf, dom unchanged
+
+    s16_chk(classify_standard_iv(ke_std / 4.0, k12_std) ==
+            classify_standard_iv(ke_std, k12_std))                             // 15 (ke÷4 same dec)
+    s16_chk(conf_standard_iv(ke_std / 4.0, k12_std) ==
+            conf_standard_iv(ke_std, k12_std))                                 // 16 (ke÷4 same conf)
+    s16_chk(dom_standard_iv(ke_std / 4.0, k12_std) ==
+            dom_standard_iv(ke_std, k12_std))                                  // 17 (ke÷4 dom=k12)
+    // Even extreme ke÷64: still irrelevant
+    s16_chk(conf_standard_iv(ke_std / 64.0, k12_std) ==
+            conf_standard_iv(ke_std, k12_std))                                 // 18 (ke÷64 same conf)
+    s16_chk(dom_standard_iv(ke_std / 64.0, k12_std) ==
+            dom_standard_iv(ke_std, k12_std))                                  // 19 (ke÷64 dom=k12)
+    s16_chk(classify_standard_iv(ke_std / 64.0, k12_std) ==
+            classify_standard_iv(ke_std, k12_std))                             // 20 (ke÷64 same dec)
+
+    // ── Section D: k12÷4 → conf=950 (6 assertions) ────────────────────────────
+    // Distributional rate improvement crosses the confidence ceiling.
+
+    s16_chk(conf_standard_iv(ke_std, k12_std / 4.0) == 950)                   // 21 (conf jumps)
+    s16_chk(conf_standard_iv(ke_std, k12_std / 4.0) >
+            conf_standard_iv(ke_std, k12_std))                                 // 22 (950 > 900)
+    s16_chk(classify_standard_iv(ke_std, k12_std / 4.0) == decision_therapeutic()) // 23 (still THERAPEUTIC)
+    s16_chk(dom_standard_iv(ke_std, k12_std / 4.0) == 1)                      // 24 (k12 still dom at ÷4)
+    // k12÷4 better than ke÷4 (ke÷4 gives 900, k12÷4 gives 950)
+    s16_chk(conf_standard_iv(ke_std, k12_std / 4.0) >
+            conf_standard_iv(ke_std / 4.0, k12_std))                          // 25 (950 > 900)
+    // k12÷16 also gives conf=950 (saturates at ÷4)
+    s16_chk(conf_standard_iv(ke_std, k12_std / 16.0) == 950)                  // 26
+
+    // ── Section E: k12÷16 dom=k12, k12÷25 dom=ke (6 assertions) ─────────────
+    // The crossover: k12_var/25 ≈ 6.24e-6 < ke_var ≈ 8.41e-6.
+
+    s16_chk(dom_standard_iv(ke_std, k12_std / 16.0) == 1)                     // 27 (k12÷16: k12 still dom)
+    s16_chk(dom_standard_iv(ke_std, k12_std / 16.0) != 0)                     // 28 (not ke yet)
+    s16_chk(dom_standard_iv(ke_std, k12_std / 25.0) == 0)                     // 29 (k12÷25: ke surfaces!)
+    s16_chk(dom_standard_iv(ke_std, k12_std / 25.0) != 1)                     // 30 (k12 no longer #1)
+    // Dom shifts monotonically: 1→0 as k12_var shrinks
+    s16_chk(dom_standard_iv(ke_std, k12_std / 25.0) !=
+            dom_standard_iv(ke_std, k12_std / 16.0))                          // 31 (0 ≠ 1)
+    // At ÷4 k12 still dominant (crossover not yet reached)
+    s16_chk(dom_standard_iv(ke_std, k12_std / 4.0) == 1)                      // 32 (k12÷4: k12 still dom)
+
+    // ── Section F: Gate functions (6 assertions) ──────────────────────────────
+
+    s16_chk(iv_k12_dominant())          // 33 (k12 dom at std D=1.5mg)
+    s16_chk(iv_ke_irrelevant())         // 34 (ke÷4 changes nothing)
+    s16_chk(iv_k12_tighten_fires())     // 35 (k12÷4 → conf=950)
+    s16_chk(iv_ke_second_bottleneck())  // 36 (k12÷25 → ke surfaces)
+    // Baseline THERAPEUTIC, not UNCERTAIN
+    s16_chk(classify_standard_iv(ke_std, k12_std) == decision_therapeutic())  // 37
+    // k12 dominance confirmed at ÷4 (dom unchanged by improvement)
+    s16_chk(dom_standard_iv(ke_std, k12_std / 4.0) == dom_standard_iv(ke_std, k12_std)) // 38
+
+    // ── Section G: Confidence values (6 assertions) ────────────────────────────
+
+    s16_chk(conf_standard_iv(ke_std, k12_std) == 900)                         // 39
+    s16_chk(conf_standard_iv(ke_std, k12_std / 4.0) == 950)                   // 40
+    // ke÷4: no conf change
+    s16_chk(conf_standard_iv(ke_std / 4.0, k12_std) ==
+            conf_standard_iv(ke_std, k12_std))                                 // 41 (900==900)
+    // k12÷4 strictly better than baseline
+    s16_chk(conf_standard_iv(ke_std, k12_std / 4.0) >
+            conf_standard_iv(ke_std, k12_std))                                 // 42 (950 > 900)
+    // k12÷4 and k12÷16 give same conf (saturates at 950)
+    s16_chk(conf_standard_iv(ke_std, k12_std / 4.0) ==
+            conf_standard_iv(ke_std, k12_std / 16.0))                         // 43 (950==950)
+    // ke improvement adds nothing even on top of k12 improvement
+    s16_chk(conf_standard_iv(ke_std / 4.0, k12_std / 4.0) ==
+            conf_standard_iv(ke_std, k12_std / 4.0))                          // 44 (950==950)
+
+    // ── Section H: D=1.0mg boundary (4 assertions) ────────────────────────────
+    // Trough straddles 0.004 mg/L; even conf=950 cannot save UNCERTAIN classification.
+
+    s16_chk(classify_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                                0.005, k21_std, 1.0, 75.0, 24)
+            == decision_uncertain())                                            // 45 (1.0mg UNCERTAIN)
+    s16_chk(conf_iv_trough(0.01118, ke_std, 0.05, k12_std / 4.0,
+                            0.005, k21_std, 1.0, 75.0, 24) == 950)            // 46 (k12÷4 gives conf=950)
+    s16_chk(classify_iv_trough(0.01118, ke_std, 0.05, k12_std / 4.0,
+                                0.005, k21_std, 1.0, 75.0, 24)
+            == decision_uncertain())                                            // 47 (still UNCERTAIN at conf=950!)
+    s16_chk(dom_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                           0.005, k21_std, 1.0, 75.0, 24) == 1)               // 48 (k12 dom at 1.0mg)
+
+    // ── Section I: Decision sentinel values (4 assertions) ────────────────────
+
+    s16_chk(decision_therapeutic() == 1)                       // 49
+    s16_chk(decision_uncertain()   == 3)                       // 50
+    s16_chk(conf_clinical_min()    == 800)                     // 51
+    s16_chk(decision_uncertain() != decision_therapeutic())    // 52
+
+    // ── Section J: Cross-checks wrapper vs direct (4 assertions) ─────────────
+
+    s16_chk(classify_standard_iv(ke_std, k12_std) ==
+            classify_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                                0.005, k21_std, 1.5, 75.0, 24))               // 53
+    s16_chk(classify_standard_iv(ke_std, k12_std / 4.0) ==
+            classify_iv_trough(0.01118, ke_std, 0.05, k12_std / 4.0,
+                                0.005, k21_std, 1.5, 75.0, 24))               // 54
+    s16_chk(conf_standard_iv(ke_std, k12_std) ==
+            conf_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                            0.005, k21_std, 1.5, 75.0, 24))                   // 55
+    s16_chk(dom_standard_iv(ke_std, k12_std) ==
+            dom_iv_trough(0.01118, ke_std, 0.05, k12_std,
+                           0.005, k21_std, 1.5, 75.0, 24))                    // 56
+}
+
+pub fn main() -> i32 with IO, Epistemic, Mut, Div, Panic {
+    run_sprint16_gate()
+    if SPR16_PASS[1] == 0 {
+        print("RELEASE GATE PASS\n")
+    } else {
+        print("GATE FAIL\n")
+    }
+    0
+}

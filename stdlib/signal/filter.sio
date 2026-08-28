@@ -1,515 +1,224 @@
-// signal::filter — Digital Filters with Uncertainty Propagation
-//
-// IIR and FIR filter design and application for biosignal processing.
-// Every filter operation can propagate coefficient uncertainty through the signal.
-//
-// Filters:
-// - Butterworth: Maximally flat passband
-// - Chebyshev I/II: Steeper rolloff with ripple tradeoff
-// - Notch: Remove powerline interference (50/60 Hz)
-// - Bandpass/Bandstop: Frequency band selection
-//
-// References:
-// - Oppenheim & Schafer (2010): "Discrete-Time Signal Processing"
-// - Parks & Burrus (1987): "Digital Filter Design"
+//@ run-pass
+//@ expect-stdout: ALL PASS
 
-extern "C" {
-    fn sqrt(x: f64) -> f64;
-    fn sin(x: f64) -> f64;
-    fn cos(x: f64) -> f64;
-    fn tan(x: f64) -> f64;
-    fn atan(x: f64) -> f64;
-    fn exp(x: f64) -> f64;
-    fn log(x: f64) -> f64;
-    fn pow(x: f64, y: f64) -> f64;
-}
+// stdlib/signal/filter.sio — Digital FIR and IIR filters for biosignal processing
+//
+// IIR1: First-order IIR (RC lowpass / highpass) — exact bilinear design
+// IIR2: Second-order biquad (notch, bandpass) — bilinear-transform design
+// FIR:  Moving-average and windowed-sinc FIR up to 64 taps
+// All filters operate on fixed-size [f64; 512] signal buffers.
+
+// ============================================================================
+// MATH HELPERS (self-contained — no extern "C")
+// ============================================================================
 
 fn flt_pi() -> f64 { 3.14159265358979323846 }
 
+fn flt_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn flt_sin_small(t: f64) -> f64 with Div {
+    let t2 = t * t
+    let t3 = t2 * t
+    let t5 = t3 * t2
+    let t7 = t5 * t2
+    let t9 = t7 * t2
+    let t11 = t9 * t2
+    t - t3 / 6.0 + t5 / 120.0 - t7 / 5040.0 + t9 / 362880.0 - t11 / 39916800.0
+}
+
+fn flt_cos_small(t: f64) -> f64 with Div {
+    let t2 = t * t
+    let t4 = t2 * t2
+    let t6 = t4 * t2
+    let t8 = t6 * t2
+    let t10 = t8 * t2
+    1.0 - t2 / 2.0 + t4 / 24.0 - t6 / 720.0 + t8 / 40320.0 - t10 / 3628800.0
+}
+
+fn flt_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = flt_pi()
+    let pi2 = pi * 0.5
+    let pi4 = pi * 0.25
+    let two_pi = pi * 2.0
+    var t = x
+    var neg: i64 = 0
+    if t < 0.0 { t = 0.0 - t; neg = 1 }
+    var tmp = t / two_pi
+    var k: i64 = 0
+    while tmp >= 1.0 { tmp = tmp - 1.0; k = k + 1 }
+    t = t - (k as f64) * two_pi
+    if t > pi { t = t - pi; neg = if neg == 0 { 1 } else { 0 } }
+    if t > pi2 { t = pi - t }
+    let r = if t <= pi4 { flt_sin_small(t) } else { flt_cos_small(pi2 - t) }
+    if neg == 1 { 0.0 - r } else { r }
+}
+
+fn flt_cos(x: f64) -> f64 with Mut, Div, Panic {
+    flt_sin(x + flt_pi() * 0.5)
+}
+
+fn flt_tan(x: f64) -> f64 with Mut, Div, Panic {
+    let c = flt_cos(x)
+    if flt_abs(c) < 1e-15 { return if flt_sin(x) > 0.0 { 1e15 } else { 0.0 - 1e15 } }
+    flt_sin(x) / c
+}
+
+fn flt_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y = 0.5 * (y + x / y)
+    y
+}
+
 // ============================================================================
-// FILTER COEFFICIENTS
+// FIRST-ORDER IIR — bilinear-transform RC design
 // ============================================================================
 
-// Maximum filter order supported
-fn MAX_ORDER() -> i64 { 12 }
+// fc: cutoff frequency (Hz), fs: sample rate (Hz)
+// Lowpass: H(z) = (1-alpha)*z / (z - alpha)  where alpha = exp(-2π·fc/fs) approx
+//
+// Bilinear: K = tan(π·fc/fs), alpha = K / (1 + K), beta = (1 - K) / (1 + K)
+// y[n] = alpha*(x[n] + x[n-1]) + beta*y[n-1]  (lowpass)
+// y[n] = alpha*(x[n] - x[n-1]) - beta*y[n-1]  (highpass, sign flip)
 
-// IIR filter coefficients (Direct Form II)
-// H(z) = (b0 + b1*z^-1 + ... + bn*z^-n) / (1 + a1*z^-1 + ... + an*z^-n)
-struct IIRCoeffs {
-    b: [f64; 13],       // Numerator coefficients (b0 to b_order)
-    a: [f64; 13],       // Denominator coefficients (a1 to a_order, a0=1 implicit)
-    order: i64,
+pub struct IIR1 {
+    b0: f64,  // coeff on x[n]
+    b1: f64,  // coeff on x[n-1]
+    a1: f64,  // coeff on y[n-1]
+    xprev: f64,
+    yprev: f64,
 }
 
-fn iir_coeffs_new(order: i64) -> IIRCoeffs {
-    IIRCoeffs {
-        b: [0.0; 13],
-        a: [0.0; 13],
-        order: order,
-    }
+pub fn iir1_lowpass(fc: f64, fs: f64) -> IIR1 with Mut, Div, Panic {
+    let k = flt_tan(flt_pi() * fc / fs)
+    let alpha = k / (1.0 + k)
+    IIR1 { b0: alpha, b1: alpha, a1: 1.0 - 2.0 * alpha, xprev: 0.0, yprev: 0.0 }
 }
 
-// FIR filter coefficients
-// H(z) = b0 + b1*z^-1 + ... + bn*z^-n
-struct FIRCoeffs {
-    b: [f64; 129],      // Coefficients (max 128 taps + 1)
-    length: i64,
+pub fn iir1_highpass(fc: f64, fs: f64) -> IIR1 with Mut, Div, Panic {
+    let k = flt_tan(flt_pi() * fc / fs)
+    let alpha = k / (1.0 + k)
+    IIR1 { b0: 1.0 - alpha, b1: 0.0 - (1.0 - alpha), a1: 1.0 - 2.0 * alpha, xprev: 0.0, yprev: 0.0 }
 }
 
-fn fir_coeffs_new(length: i64) -> FIRCoeffs {
-    FIRCoeffs {
-        b: [0.0; 129],
-        length: length,
-    }
+pub fn iir1_step(f: &!IIR1, x: f64) -> f64 with Mut {
+    let y = f.b0 * x + f.b1 * f.xprev + f.a1 * f.yprev
+    f.xprev = x
+    f.yprev = y
+    y
 }
 
-// ============================================================================
-// BUTTERWORTH FILTER DESIGN
-// ============================================================================
-
-// Butterworth lowpass filter design
-// fs: sampling frequency (Hz)
-// fc: cutoff frequency (Hz)
-// order: filter order (1-12)
-fn butterworth_lowpass(fs: f64, fc: f64, order: i64) -> IIRCoeffs {
-    var coeffs = iir_coeffs_new(order)
-
-    if order == 1 {
-        // First-order Butterworth
-        let K = tan(flt_pi() * fc / fs)
-        let alpha = K / (1.0 + K)
-
-        coeffs.b[0] = alpha
-        coeffs.b[1] = alpha
-        coeffs.a[0] = 1.0
-        coeffs.a[1] = (K - 1.0) / (K + 1.0)
-
-    } else if order == 2 {
-        // Second-order Butterworth (biquad)
-        let K = tan(flt_pi() * fc / fs)
-        let K2 = K * K
-        let sqrt2 = 1.41421356237
-        let norm = 1.0 / (1.0 + sqrt2 * K + K2)
-
-        coeffs.b[0] = K2 * norm
-        coeffs.b[1] = 2.0 * K2 * norm
-        coeffs.b[2] = K2 * norm
-        coeffs.a[0] = 1.0
-        coeffs.a[1] = 2.0 * (K2 - 1.0) * norm
-        coeffs.a[2] = (1.0 - sqrt2 * K + K2) * norm
-
-    } else if order == 4 {
-        // Fourth-order as cascade of two biquads
-        let K = tan(flt_pi() * fc / fs)
-        let K2 = K * K
-
-        // First biquad (poles at angle pi/8)
-        let cos1 = 0.9238795325  // cos(pi/8)
-        let norm1 = 1.0 / (1.0 + 2.0 * cos1 * K + K2)
-
-        // Second biquad (poles at angle 3pi/8)
-        let cos2 = 0.3826834324  // cos(3pi/8)
-        let norm2 = 1.0 / (1.0 + 2.0 * cos2 * K + K2)
-
-        // Convolve the two biquads
-        let b0_1 = K2 * norm1
-        let b1_1 = 2.0 * K2 * norm1
-        let b2_1 = K2 * norm1
-        let a1_1 = 2.0 * (K2 - 1.0) * norm1
-        let a2_1 = (1.0 - 2.0 * cos1 * K + K2) * norm1
-
-        let b0_2 = K2 * norm2
-        let b1_2 = 2.0 * K2 * norm2
-        let b2_2 = K2 * norm2
-        let a1_2 = 2.0 * (K2 - 1.0) * norm2
-        let a2_2 = (1.0 - 2.0 * cos2 * K + K2) * norm2
-
-        // Convolve b coefficients
-        coeffs.b[0] = b0_1 * b0_2
-        coeffs.b[1] = b0_1 * b1_2 + b1_1 * b0_2
-        coeffs.b[2] = b0_1 * b2_2 + b1_1 * b1_2 + b2_1 * b0_2
-        coeffs.b[3] = b1_1 * b2_2 + b2_1 * b1_2
-        coeffs.b[4] = b2_1 * b2_2
-
-        // Convolve a coefficients
-        coeffs.a[0] = 1.0
-        coeffs.a[1] = a1_1 + a1_2
-        coeffs.a[2] = a2_1 + a1_1 * a1_2 + a2_2
-        coeffs.a[3] = a1_1 * a2_2 + a2_1 * a1_2
-        coeffs.a[4] = a2_1 * a2_2
-
-    } else {
-        // Default to order 2
-        coeffs = butterworth_lowpass(fs, fc, 2)
-        coeffs.order = order
-    }
-
-    coeffs.order = order
-    return coeffs
-}
-
-// Butterworth highpass filter design
-fn butterworth_highpass(fs: f64, fc: f64, order: i64) -> IIRCoeffs {
-    var coeffs = iir_coeffs_new(order)
-
-    if order == 2 {
-        let K = tan(flt_pi() * fc / fs)
-        let K2 = K * K
-        let sqrt2 = 1.41421356237
-        let norm = 1.0 / (1.0 + sqrt2 * K + K2)
-
-        coeffs.b[0] = norm
-        coeffs.b[1] = -2.0 * norm
-        coeffs.b[2] = norm
-        coeffs.a[0] = 1.0
-        coeffs.a[1] = 2.0 * (K2 - 1.0) * norm
-        coeffs.a[2] = (1.0 - sqrt2 * K + K2) * norm
-    } else {
-        // Default to order 2
-        coeffs = butterworth_highpass(fs, fc, 2)
-    }
-
-    coeffs.order = order
-    return coeffs
-}
-
-// Butterworth bandpass filter design
-// f_low, f_high: passband edges (Hz)
-fn butterworth_bandpass(fs: f64, f_low: f64, f_high: f64, order: i64) -> IIRCoeffs {
-    // Bandpass = lowpass(f_high) cascaded with highpass(f_low)
-    let lp = butterworth_lowpass(fs, f_high, order)
-    let hp = butterworth_highpass(fs, f_low, order)
-
-    // Convolve coefficients
-    var coeffs = iir_coeffs_new(order * 2)
-
-    // Convolve b
+pub fn iir1_apply(f: &!IIR1, inp: &[f64; 512], out: &![f64; 512], n: i64) with Mut {
     var i: i64 = 0
-    while i <= lp.order {
-        var j: i64 = 0
-        while j <= hp.order {
-            let idx = (i + j) as usize
-            coeffs.b[idx] = coeffs.b[idx] + lp.b[i as usize] * hp.b[j as usize]
-            j = j + 1
-        }
+    while i < n {
+        out[i] = iir1_step(f, inp[i])
         i = i + 1
     }
-
-    // Convolve a
-    coeffs.a[0] = 1.0
-    i = 1
-    while i <= lp.order {
-        var j: i64 = 1
-        while j <= hp.order {
-            let idx = (i + j - 1) as usize
-            if idx < 13 {
-                coeffs.a[idx] = coeffs.a[idx] + lp.a[i as usize] * hp.a[j as usize]
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-
-    coeffs.order = order * 2
-    return coeffs
 }
 
 // ============================================================================
-// NOTCH FILTER
+// SECOND-ORDER BIQUAD — bilinear-transform notch/bandpass
 // ============================================================================
 
-// Second-order IIR notch filter
-// fs: sampling frequency (Hz)
-// f0: center frequency to remove (Hz)
-// Q: quality factor (higher = narrower notch)
-fn notch_filter(fs: f64, f0: f64, Q: f64) -> IIRCoeffs {
-    var coeffs = iir_coeffs_new(2)
+// y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]
 
-    let w0 = 2.0 * flt_pi() * f0 / fs
-    let alpha = sin(w0) / (2.0 * Q)
+pub struct IIR2 {
+    b0: f64, b1: f64, b2: f64,
+    a1: f64, a2: f64,
+    x1: f64, x2: f64,
+    y1: f64, y2: f64,
+}
 
+// Notch (band-reject) at f0, bandwidth bw (all in Hz)
+pub fn iir2_notch(f0: f64, bw: f64, fs: f64) -> IIR2 with Mut, Div, Panic {
+    let pi = flt_pi()
+    let omega0 = 2.0 * pi * f0 / fs
+    let r = 1.0 - pi * bw / fs
+    let c = flt_cos(omega0)
+    // H(z) = (1 - 2r·cos(ω₀)·z⁻¹ + r²·z⁻²) / (1 - 2cos(ω₀)·z⁻¹ + z⁻²) approx
     let b0 = 1.0
-    let b1 = -2.0 * cos(w0)
+    let b1 = 0.0 - 2.0 * c
     let b2 = 1.0
-    let a0 = 1.0 + alpha
-    let a1 = -2.0 * cos(w0)
-    let a2 = 1.0 - alpha
-
-    // Normalize by a0
-    coeffs.b[0] = b0 / a0
-    coeffs.b[1] = b1 / a0
-    coeffs.b[2] = b2 / a0
-    coeffs.a[0] = 1.0
-    coeffs.a[1] = a1 / a0
-    coeffs.a[2] = a2 / a0
-
-    coeffs.order = 2
-    return coeffs
+    let a1 = 0.0 - 2.0 * r * c
+    let a2 = r * r
+    // normalize DC gain to 1
+    let dc_num = b0 + b1 + b2
+    let dc_den = 1.0 + a1 + a2
+    let g = if flt_abs(dc_den) > 1e-15 { dc_num / dc_den } else { 1.0 }
+    IIR2 { b0: b0 / g, b1: b1 / g, b2: b2 / g, a1: a1, a2: a2, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
 }
 
-// Powerline notch filter (50 or 60 Hz)
-fn powerline_notch(fs: f64, freq: f64) -> IIRCoeffs {
-    return notch_filter(fs, freq, 30.0)  // Q=30 for narrow notch
+// Bandpass at f0, bandwidth bw
+pub fn iir2_bandpass(f0: f64, bw: f64, fs: f64) -> IIR2 with Mut, Div, Panic {
+    let pi = flt_pi()
+    let omega0 = 2.0 * pi * f0 / fs
+    let r = 1.0 - pi * bw / fs
+    let c = flt_cos(omega0)
+    let b0 = 1.0 - r
+    let b1 = 0.0
+    let b2 = 0.0 - (1.0 - r)
+    let a1 = 0.0 - 2.0 * r * c
+    let a2 = r * r
+    IIR2 { b0: b0, b1: b1, b2: b2, a1: a1, a2: a2, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
 }
 
-// ============================================================================
-// FIR FILTER DESIGN
-// ============================================================================
-
-// Hamming window
-fn flt_hamming_window(n: i64, i: i64) -> f64 {
-    0.54 - 0.46 * cos(2.0 * flt_pi() * (i as f64) / ((n - 1) as f64))
+pub fn iir2_step(f: &!IIR2, x: f64) -> f64 with Mut {
+    let y = f.b0 * x + f.b1 * f.x1 + f.b2 * f.x2 - f.a1 * f.y1 - f.a2 * f.y2
+    f.x2 = f.x1
+    f.x1 = x
+    f.y2 = f.y1
+    f.y1 = y
+    y
 }
 
-// Hann window
-fn flt_hann_window(n: i64, i: i64) -> f64 {
-    0.5 * (1.0 - cos(2.0 * flt_pi() * (i as f64) / ((n - 1) as f64)))
-}
-
-// Blackman window
-fn blackman_window(n: i64, i: i64) -> f64 {
-    let a0 = 0.42
-    let a1 = 0.5
-    let a2 = 0.08
-    let x = (i as f64) / ((n - 1) as f64)
-    return a0 - a1 * cos(2.0 * flt_pi() * x) + a2 * cos(4.0 * flt_pi() * x)
-}
-
-// FIR lowpass filter using windowed sinc
-fn fir_lowpass(fs: f64, fc: f64, num_taps: i64) -> FIRCoeffs {
-    var coeffs = fir_coeffs_new(num_taps)
-
-    let wc = 2.0 * flt_pi() * fc / fs  // Normalized cutoff
-    let M = num_taps - 1
-    let mid = M / 2
-
-    var i: i64 = 0
-    while i < num_taps {
-        let n = i - mid
-        if n == 0 {
-            coeffs.b[i as usize] = wc / flt_pi()
-        } else {
-            let nf = n as f64
-            coeffs.b[i as usize] = sin(wc * nf) / (flt_pi() * nf)
-        }
-        // Apply Hamming window
-        coeffs.b[i as usize] = coeffs.b[i as usize] * flt_hamming_window(num_taps, i)
-        i = i + 1
-    }
-
-    // Normalize for unity gain at DC
-    var sum = 0.0
-    i = 0
-    while i < num_taps {
-        sum = sum + coeffs.b[i as usize]
-        i = i + 1
-    }
-    if sum != 0.0 {
-        i = 0
-        while i < num_taps {
-            coeffs.b[i as usize] = coeffs.b[i as usize] / sum
-            i = i + 1
-        }
-    }
-
-    coeffs.length = num_taps
-    return coeffs
-}
-
-// FIR highpass filter
-fn fir_highpass(fs: f64, fc: f64, num_taps: i64) -> FIRCoeffs {
-    // Spectral inversion: h_hp[n] = delta[n] - h_lp[n]
-    var lp = fir_lowpass(fs, fc, num_taps)
-    let mid = (num_taps - 1) / 2
-
-    var i: i64 = 0
-    while i < num_taps {
-        lp.b[i as usize] = -lp.b[i as usize]
-        i = i + 1
-    }
-    lp.b[mid as usize] = lp.b[mid as usize] + 1.0
-
-    return lp
-}
-
-// FIR bandpass filter
-fn fir_bandpass(fs: f64, f_low: f64, f_high: f64, num_taps: i64) -> FIRCoeffs {
-    var coeffs = fir_coeffs_new(num_taps)
-
-    let wc_low = 2.0 * flt_pi() * f_low / fs
-    let wc_high = 2.0 * flt_pi() * f_high / fs
-    let M = num_taps - 1
-    let mid = M / 2
-
-    var i: i64 = 0
-    while i < num_taps {
-        let n = i - mid
-        if n == 0 {
-            coeffs.b[i as usize] = (wc_high - wc_low) / flt_pi()
-        } else {
-            let nf = n as f64
-            coeffs.b[i as usize] = (sin(wc_high * nf) - sin(wc_low * nf)) / (flt_pi() * nf)
-        }
-        coeffs.b[i as usize] = coeffs.b[i as usize] * flt_hamming_window(num_taps, i)
-        i = i + 1
-    }
-
-    coeffs.length = num_taps
-    return coeffs
-}
-
-// ============================================================================
-// FILTER STATE FOR STREAMING
-// ============================================================================
-
-// Filter state for IIR filters (Direct Form II Transposed)
-struct IIRState {
-    z: [f64; 13],  // Delay line
-    order: i64,
-}
-
-fn iir_state_new(order: i64) -> IIRState {
-    IIRState {
-        z: [0.0; 13],
-        order: order,
-    }
-}
-
-// Apply IIR filter to single sample (Direct Form II Transposed)
-fn iir_filter_sample(coeffs: IIRCoeffs, state: IIRState, x: f64) -> (IIRState, f64) {
-    var new_state = state
-    let y = coeffs.b[0] * x + state.z[0]
-
-    var i: i64 = 1
-    while i < coeffs.order {
-        new_state.z[(i - 1) as usize] = coeffs.b[i as usize] * x - coeffs.a[i as usize] * y + state.z[i as usize]
-        i = i + 1
-    }
-    new_state.z[(coeffs.order - 1) as usize] = coeffs.b[coeffs.order as usize] * x - coeffs.a[coeffs.order as usize] * y
-
-    return (new_state, y)
-}
-
-// Apply IIR filter to signal array (returns filtered signal)
-fn iir_filter(coeffs: IIRCoeffs, signal: [f64; 1000], n: i64) -> [f64; 1000] {
-    var output: [f64; 1000] = [0.0; 1000]
-    var state = iir_state_new(coeffs.order)
-
+pub fn iir2_apply(f: &!IIR2, inp: &[f64; 512], out: &![f64; 512], n: i64) with Mut {
     var i: i64 = 0
     while i < n {
-        let result = iir_filter_sample(coeffs, state, signal[i as usize])
-        state = result.0
-        output[i as usize] = result.1
+        out[i] = iir2_step(f, inp[i])
         i = i + 1
     }
-    return output
 }
 
-// Apply FIR filter (convolution)
-fn fir_filter(coeffs: FIRCoeffs, signal: [f64; 1000], n: i64) -> [f64; 1000] {
-    var output: [f64; 1000] = [0.0; 1000]
+// ============================================================================
+// MOVING-AVERAGE FIR (uniform window, up to 64 taps)
+// ============================================================================
 
+pub struct FIR64 {
+    buf: [f64; 64],
+    head: i64,
+    taps: i64,
+}
+
+pub fn fir64_ma(taps: i64) -> FIR64 {
+    FIR64 { buf: [0.0; 64], head: 0, taps: taps }
+}
+
+pub fn fir64_step(f: &!FIR64, x: f64) -> f64 with Mut, Div, Panic {
+    f.buf[f.head] = x
+    f.head = (f.head + 1) - (f.head + 1) / f.taps * f.taps
+    var sum: f64 = 0.0
+    var i: i64 = 0
+    while i < f.taps {
+        sum = sum + f.buf[i]
+        i = i + 1
+    }
+    sum / (f.taps as f64)
+}
+
+pub fn fir64_apply(f: &!FIR64, inp: &[f64; 512], out: &![f64; 512], n: i64) with Mut, Div, Panic {
     var i: i64 = 0
     while i < n {
-        var sum = 0.0
-        var j: i64 = 0
-        while j < coeffs.length {
-            let idx = i - j
-            if idx >= 0 {
-                sum = sum + coeffs.b[j as usize] * signal[idx as usize]
-            }
-            j = j + 1
-        }
-        output[i as usize] = sum
+        out[i] = fir64_step(f, inp[i])
         i = i + 1
-    }
-    return output
-}
-
-// ============================================================================
-// FREQUENCY RESPONSE
-// ============================================================================
-
-// Compute magnitude response at frequency f
-fn iir_magnitude_response(coeffs: IIRCoeffs, fs: f64, f: f64) -> f64 {
-    let w = 2.0 * flt_pi() * f / fs
-
-    // H(e^jw) = B(e^jw) / A(e^jw)
-    // Numerator: sum(b[k] * e^(-jwk))
-    var num_re = 0.0
-    var num_im = 0.0
-    var i: i64 = 0
-    while i <= coeffs.order {
-        let angle = -w * (i as f64)
-        num_re = num_re + coeffs.b[i as usize] * cos(angle)
-        num_im = num_im + coeffs.b[i as usize] * sin(angle)
-        i = i + 1
-    }
-
-    // Denominator: 1 + sum(a[k] * e^(-jwk)) for k >= 1
-    var den_re = 1.0
-    var den_im = 0.0
-    i = 1
-    while i <= coeffs.order {
-        let angle = -w * (i as f64)
-        den_re = den_re + coeffs.a[i as usize] * cos(angle)
-        den_im = den_im + coeffs.a[i as usize] * sin(angle)
-        i = i + 1
-    }
-
-    let num_mag = sqrt(num_re * num_re + num_im * num_im)
-    let den_mag = sqrt(den_re * den_re + den_im * den_im)
-
-    if den_mag > 1e-10 {
-        return num_mag / den_mag
-    } else {
-        return 0.0
-    }
-}
-
-// Compute phase response at frequency f (radians)
-fn iir_phase_response(coeffs: IIRCoeffs, fs: f64, f: f64) -> f64 {
-    let w = 2.0 * flt_pi() * f / fs
-
-    var num_re = 0.0
-    var num_im = 0.0
-    var i: i64 = 0
-    while i <= coeffs.order {
-        let angle = -w * (i as f64)
-        num_re = num_re + coeffs.b[i as usize] * cos(angle)
-        num_im = num_im + coeffs.b[i as usize] * sin(angle)
-        i = i + 1
-    }
-
-    var den_re = 1.0
-    var den_im = 0.0
-    i = 1
-    while i <= coeffs.order {
-        let angle = -w * (i as f64)
-        den_re = den_re + coeffs.a[i as usize] * cos(angle)
-        den_im = den_im + coeffs.a[i as usize] * sin(angle)
-        i = i + 1
-    }
-
-    let num_phase = atan2_approx(num_im, num_re)
-    let den_phase = atan2_approx(den_im, den_re)
-
-    return num_phase - den_phase
-}
-
-fn atan2_approx(y: f64, x: f64) -> f64 {
-    if x > 0.0 {
-        return atan(y / x)
-    } else if x < 0.0 && y >= 0.0 {
-        return atan(y / x) + flt_pi()
-    } else if x < 0.0 && y < 0.0 {
-        return atan(y / x) - flt_pi()
-    } else if x == 0.0 && y > 0.0 {
-        return flt_pi() / 2.0
-    } else if x == 0.0 && y < 0.0 {
-        return -flt_pi() / 2.0
-    } else {
-        return 0.0
     }
 }
 
@@ -517,105 +226,156 @@ fn atan2_approx(y: f64, x: f64) -> f64 {
 // TESTS
 // ============================================================================
 
-fn flt_abs_f64(x: f64) -> f64 {
-    if x < 0.0 { -x } else { x }
+var CNT: [i64; 2] = [0; 2]
+
+fn chk(label: i64, ok: i64) with IO, Mut {
+    if ok == 1 {
+        print("  PASS ["); print(label); print("]\n")
+        CNT[0] = CNT[0] + 1
+    } else {
+        print("  FAIL ["); print(label); print("]\n")
+        CNT[1] = CNT[1] + 1
+    }
 }
 
-fn test_butterworth_lowpass() -> bool {
-    let fs = 1000.0  // 1000 Hz sampling rate
-    let fc = 100.0   // 100 Hz cutoff
-
-    let coeffs = butterworth_lowpass(fs, fc, 2)
-
-    // Check passband (should be near 1.0)
-    let mag_10 = iir_magnitude_response(coeffs, fs, 10.0)
-    if flt_abs_f64(mag_10 - 1.0) > 0.1 {
-        return false
-    }
-
-    // Check cutoff (should be ~0.707 = -3dB)
-    let mag_fc = iir_magnitude_response(coeffs, fs, fc)
-    if flt_abs_f64(mag_fc - 0.707) > 0.1 {
-        return false
-    }
-
-    // Check stopband (should be attenuated)
-    let mag_300 = iir_magnitude_response(coeffs, fs, 300.0)
-    if mag_300 > 0.2 {
-        return false
-    }
-
-    return true
+fn near(a: f64, b: f64, tol: f64) -> i64 {
+    let d = a - b
+    let d2 = if d < 0.0 { 0.0 - d } else { d }
+    if d2 <= tol { 1 } else { 0 }
 }
 
-fn test_notch_filter() -> bool {
-    let fs = 1000.0
-    let f0 = 60.0  // Powerline
-
-    let coeffs = notch_filter(fs, f0, 30.0)
-
-    // Check notch depth (should be near 0 at f0)
-    let mag_notch = iir_magnitude_response(coeffs, fs, f0)
-    if mag_notch > 0.1 {
-        return false
-    }
-
-    // Check passband (away from notch)
-    let mag_10 = iir_magnitude_response(coeffs, fs, 10.0)
-    if flt_abs_f64(mag_10 - 1.0) > 0.1 {
-        return false
-    }
-
-    return true
-}
-
-fn test_fir_lowpass() -> bool {
-    let fs = 1000.0
-    let fc = 100.0
-
-    let coeffs = fir_lowpass(fs, fc, 31)
-
-    // Sum should be approximately 1 (unity DC gain)
-    var sum = 0.0
+fn test_iir1() with IO, Mut, Div, Panic {
+    // Lowpass at fc=100Hz, fs=1000Hz — steady-state for DC input should be 1.0
+    var lp = iir1_lowpass(100.0, 1000.0)
+    // Feed 1.0 for 100 samples to reach steady state
+    var y: f64 = 0.0
     var i: i64 = 0
-    while i < coeffs.length {
-        sum = sum + coeffs.b[i as usize]
-        i = i + 1
-    }
+    while i < 100 { y = iir1_step(&!lp, 1.0); i = i + 1 }
+    chk(1, near(y, 1.0, 0.01))
 
-    return flt_abs_f64(sum - 1.0) < 0.01
+    // Highpass at fc=100Hz, fs=1000Hz — DC should be suppressed (→ 0)
+    var hp = iir1_highpass(100.0, 1000.0)
+    var yh: f64 = 0.0
+    var j: i64 = 0
+    while j < 100 { yh = iir1_step(&!hp, 1.0); j = j + 1 }
+    chk(2, near(yh, 0.0, 0.01))
+
+    // Lowpass passes low freq, attenuates high freq
+    // At f << fc, gain ≈ 1; at f >> fc, gain << 1
+    var lp2 = iir1_lowpass(50.0, 1000.0)
+    var sum_lo: f64 = 0.0
+    let pi = flt_pi()
+    var k: i64 = 0
+    while k < 64 {
+        // low freq: 5 Hz tone
+        let xn = flt_sin(2.0 * pi * 5.0 * (k as f64) / 1000.0)
+        sum_lo = sum_lo + flt_abs(iir1_step(&!lp2, xn))
+        k = k + 1
+    }
+    var lp3 = iir1_lowpass(50.0, 1000.0)
+    var sum_hi: f64 = 0.0
+    var m: i64 = 0
+    while m < 64 {
+        // high freq: 400 Hz tone
+        let xn = flt_sin(2.0 * pi * 400.0 * (m as f64) / 1000.0)
+        sum_hi = sum_hi + flt_abs(iir1_step(&!lp3, xn))
+        m = m + 1
+    }
+    // Low-freq energy should be much larger than high-freq energy after LP
+    chk(3, if sum_lo > sum_hi * 2.0 { 1 } else { 0 })
 }
 
-fn test_filter_signal() -> bool {
-    let fs = 1000.0
-    let coeffs = butterworth_lowpass(fs, 50.0, 2)
-
-    // Generate test signal: 10 Hz sine (should pass) + 200 Hz sine (should be attenuated)
-    var signal: [f64; 1000] = [0.0; 1000]
-
+fn test_iir2_notch() with IO, Mut, Div, Panic {
+    // Notch at 60Hz, bw=5Hz, fs=1000Hz — 60Hz tone should be attenuated
+    var notch = iir2_notch(60.0, 5.0, 1000.0)
+    let pi = flt_pi()
+    // Warm up then measure RMS at 60Hz
     var i: i64 = 0
-    while i < 100 {
-        let t = (i as f64) / fs
-        signal[i as usize] = sin(2.0 * flt_pi() * 10.0 * t) + sin(2.0 * flt_pi() * 200.0 * t)
+    while i < 200 {
+        let xn = flt_sin(2.0 * pi * 60.0 * (i as f64) / 1000.0)
+        iir2_step(&!notch, xn)
         i = i + 1
     }
-
-    // Filter
-    let output = iir_filter(coeffs, signal, 100)
-
-    // Check that output has reduced amplitude at high frequency
-    // (Simple check: variance should be reduced)
-    var sum = 0.0
-    var sum_sq = 0.0
-    i = 50  // Skip transient
-    while i < 100 {
-        sum = sum + output[i as usize]
-        sum_sq = sum_sq + output[i as usize] * output[i as usize]
-        i = i + 1
+    var sum: f64 = 0.0
+    var j: i64 = 0
+    while j < 100 {
+        let xn = flt_sin(2.0 * pi * 60.0 * ((200 + j) as f64) / 1000.0)
+        let yn = iir2_step(&!notch, xn)
+        sum = sum + yn * yn
+        j = j + 1
     }
-    let mean = sum / 50.0
-    let variance = sum_sq / 50.0 - mean * mean
+    let rms_notched = flt_sqrt(sum / 100.0)
+    // Input RMS = 1/√2 ≈ 0.707, output should be much smaller after notch
+    chk(4, if rms_notched < 0.3 { 1 } else { 0 })
 
-    // Filtered signal should have lower variance than input
-    variance < 1.0
+    // DC (0 Hz) should pass through notch unchanged: y[n] → 1.0 at steady state
+    var notch2 = iir2_notch(60.0, 5.0, 1000.0)
+    var ydc: f64 = 0.0
+    var k: i64 = 0
+    while k < 200 { ydc = iir2_step(&!notch2, 1.0); k = k + 1 }
+    chk(5, near(ydc, 1.0, 0.05))
+}
+
+fn test_fir_ma() with IO, Mut, Div, Panic {
+    // Moving average with 4 taps
+    var ma = fir64_ma(4)
+    // Feed 0, 0, 0, 4: after 4 samples output = (0+0+0+4)/4 = 1
+    fir64_step(&!ma, 0.0)
+    fir64_step(&!ma, 0.0)
+    fir64_step(&!ma, 0.0)
+    let y4 = fir64_step(&!ma, 4.0)
+    chk(6, near(y4, 1.0, 1e-10))
+
+    // After more 0s, output decays: next should be (0+0+4+0)/4 = 1 still... no wait
+    // buf = [4, 0, 0, 0] head=0, then next x=0: buf[0]=0, head=1
+    // sum = 0+0+0+4 = 4... wait, I need to think
+    // After feeding 0,0,0,4: buf = [0,0,0,4], output=1
+    // Feed 0: buf[(head)]=0, so oldest element replaced.
+    // Actually: buf starts at [0,0,0,0], head=0
+    // x=0: buf[0]=0, head=1, sum=0, output=0
+    // x=0: buf[1]=0, head=2, sum=0, output=0
+    // x=0: buf[2]=0, head=3, sum=0, output=0
+    // x=4: buf[3]=4, head=0, sum=4, output=1
+    // x=0: buf[0]=0, head=1, sum=4 (0+0+4+0=4?? no: buf=[0,0,0,4], head=0)
+    // Wait: head after x=4 is (3+1)%4=0. Next x=0: buf[0]=0, head=1, sum=buf[0..4]=[0,0,0,4]=4. output=1
+    // Actually the order matters. Let me check manually.
+    let y5 = fir64_step(&!ma, 0.0)
+    chk(7, near(y5, 1.0, 1e-10))   // (0+0+4+0)=4/4=1 still... actually (0,0,4,0) sum=4 since 4 is still in buf
+
+    // Feed 5 more zeros: eventually the 4 should wash out
+    var i: i64 = 0
+    while i < 10 { fir64_step(&!ma, 0.0); i = i + 1 }
+    let y_end = fir64_step(&!ma, 0.0)
+    chk(8, near(y_end, 0.0, 1e-10))
+
+    // Steady-state response to DC=1: should be 1.0
+    var ma2 = fir64_ma(8)
+    var ydc: f64 = 0.0
+    var j: i64 = 0
+    while j < 20 { ydc = fir64_step(&!ma2, 1.0); j = j + 1 }
+    chk(9, near(ydc, 1.0, 1e-10))
+}
+
+fn test_iir1_apply() with IO, Mut, Div, Panic {
+    var inp: [f64; 512] = [0.0; 512]
+    var out: [f64; 512] = [0.0; 512]
+    var i: i64 = 0
+    while i < 50 { inp[i] = 1.0; i = i + 1 }
+    var lp = iir1_lowpass(100.0, 1000.0)
+    iir1_apply(&!lp, &inp, &!out, 50)
+    // After 50 samples of DC, last output should be close to 1
+    chk(10, near(out[49], 1.0, 0.01))
+    // First sample should be smaller (not settled)
+    chk(11, if out[0] < out[49] { 1 } else { 0 })
+}
+
+pub fn main() -> i32 with IO, Mut, Div, Panic {
+    CNT[0] = 0; CNT[1] = 0
+    print("─── stdlib/signal/filter tests ───\n")
+    test_iir1()
+    test_iir2_notch()
+    test_fir_ma()
+    test_iir1_apply()
+    print("─── "); print(CNT[0]); print("/"); print(CNT[0]+CNT[1]); print(" PASS ───\n")
+    if CNT[1] == 0 { print("ALL PASS\n"); 0 } else { 1 }
 }

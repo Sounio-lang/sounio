@@ -1,0 +1,57 @@
+diff --git a/self-hosted/check/check.sio b/self-hosted/check/check.sio
+index 53ca76650..b923dfe31 100644
+--- a/self-hosted/check/check.sio
++++ b/self-hosted/check/check.sio
+@@ -2272,14 +2272,18 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) wit
+                 linear_capture_count: 0,
+                 epistemic_epsilon: 0.0 - 1.0,
+             }
+-            // In-place insert mirrors FnSigTable::add — avoids copying the 45KB
+-            // FnSigTable by value (one of the large-aggregate copies the *mut
+-            // conversion eliminates).
+-            let sig_id = (*c).fn_sigs.count
+-            if sig_id < 64 {
+-                (*c).fn_sigs.entries[sig_id as usize] = sig
+-                (*c).fn_sigs.count = sig_id + 1
+-            }
++            // Persist via whole-field reassignment, NOT a nested write. The previous
++            // `(*c).fn_sigs.entries[i] = sig; (*c).fn_sigs.count = …` was MISCOMPILED:
++            // `(*c).fn_sigs` materialises a copy of the 45KB FnSigTable, the nested write
++            // lands on the copy, and it is discarded — so fn_sigs stayed EMPTY (count=0,
++            // proven by instrumentation). With no signatures, every signature-dependent
++            // check silently no-ops: return types default to () (spurious E008 on `return`),
++            // calls/args go unchecked. The struct/enum collectors already use this
++            // whole-field pattern (`(*c).structs = (*c).structs.add(info)`) and work; mirror
++            // it. The 45KB table copy is fine — it is not the 8MB Checker.
++            let fn_add_pair = (*c).fn_sigs.add(sig)
++            (*c).fn_sigs = fn_add_pair.0
++            let sig_id = fn_add_pair.1
+             // In-place env bind mirrors TypeEnv::bind (avoids copying the 32KB TypeEnv).
+             let benv_idx = (*c).env.count
+             if benv_idx < 128 {
+@@ -2526,7 +2530,12 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
+             let body_ty = checker_check_block_inplace(c, (*fd).body)
+             if sig_id >= 0 {
+                 let sig2 = (*c).fn_sigs.get(sig_id)
+-                if !types_compatible(body_ty, sig2.return_type) {
++                // Oracle parity: lean_single collapses every integer width to one type code,
++                // so it accepts any int→int return (e.g. the `fn main() -> i32 { …; 0 }`
++                // exit-code idiom where the i64 tail meets an i32 return). Mirror that in
++                // return position so a width-only difference is not a spurious E008.
++                let bt_int_ok = is_integer_type(body_ty) && is_integer_type(sig2.return_type)
++                if !types_compatible(body_ty, sig2.return_type) && !bt_int_ok {
+                     checker_report_mismatch_inplace(c, (*fd).span, 8, sig2.return_type, body_ty)
+                 }
+             }
+@@ -2619,7 +2628,10 @@ fn checker_check_opt_expr_inplace(c: *mut Checker, opt: Option<Box<Expr> >) -> T
+ 
+ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+     let val_ty = checker_check_opt_expr_inplace(c, e.left)
+-    if !types_compatible(val_ty, (*c).current_return_type) {
++    // Oracle parity: any int→int return is accepted (see the body-tail check) — a width-only
++    // difference between the `return <expr>` value and the declared return type is not E008.
++    let ret_int_ok = is_integer_type(val_ty) && is_integer_type((*c).current_return_type)
++    if !types_compatible(val_ty, (*c).current_return_type) && !ret_int_ok {
+         checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
+     }
+     ty_never()

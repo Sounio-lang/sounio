@@ -1,320 +1,289 @@
 #!/usr/bin/env bash
+# bin/souc — default Sounio compiler entrypoint.
+#
+# DEFAULT ENGINE: Madaros (the self-hosted *modular* compiler, built from
+# self-hosted/compiler/main.sio into artifacts/self-hosted/madaros). This is the
+# compiler people invoke for normal use ("MADAROS IS DEFAULT", 2026-06-14).
+#
+# LEGACY ENGINE: lean_single — the single-file bootstrap codegen that bin/souc
+# USED to be, preserved as bin/souc-lean-single-x86_64. It remains the bootstrap
+# SEED (make build, build-madaros) and the canonical fixed-point ELF, but is no
+# longer the default user-facing compiler.
+#
+# This is a thin CLI shim: it keeps the historical `souc check|compile|run|
+# --version|info` surface (657+ call sites) working while routing to Madaros via
+# bin/madaros, which already maps those verbs to the raw modular ELF.
+#
+# Engine selection (in order):
+#   SOUNIO_SOUC_BIN=<elf>          -> exec that ELF directly (raw, lean_single CLI)
+#   SOUNIO_SOUC_ENGINE=lean_single -> force the legacy lean_single ELF
+#   (default)                      -> Madaros; if its raw ELF is not built, fall
+#                                     back to lean_single with a visible notice so
+#                                     no caller hard-breaks in an unbuilt checkout.
+#
+# Environment passthrough:
+#   SOUNIO_STDLIB_PATH   forwarded to whichever engine runs
+#   MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN  override the Madaros raw ELF
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HOST_OS="${SOUNIO_HOST_OS_OVERRIDE:-$(uname -s)}"
-HOST_ARCH="${SOUNIO_HOST_ARCH_OVERRIDE:-$(uname -m)}"
-WRAPPER_VERSION="${SOUNIO_SOUC_VERSION:-1.0.0-beta.5}"
-MACOS_CODESIGN_HELPER="$ROOT_DIR/scripts/lib/macos_codesign.sh"
 
-if [[ -f "$MACOS_CODESIGN_HELPER" ]]; then
-  # shellcheck source=/dev/null
-  source "$MACOS_CODESIGN_HELPER"
-fi
+# The preserved lean_single fixed-point ELF (escape hatch + fallback target).
+LEAN_SINGLE="$ROOT_DIR/bin/souc-lean-single-x86_64"
+[[ -x "$LEAN_SINGLE" ]] || LEAN_SINGLE="$ROOT_DIR/bin/souc-linux-x86_64"
 
-resolve_host_target() {
-  case "$HOST_OS:$HOST_ARCH" in
-    Linux:x86_64|Linux:amd64)
-      printf '%s\n' "x86_64-linux"
-      ;;
-    Linux:arm64|Linux:aarch64)
-      printf '%s\n' "aarch64-linux"
-      ;;
-    Darwin:arm64|Darwin:aarch64)
-      printf '%s\n' "aarch64-macos"
-      ;;
-    Darwin:x86_64|Darwin:amd64)
-      printf '%s\n' "x86_64-macos"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
+_is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c2 "$1" 2>/dev/null)" != '#!' ]]; }
 
-resolve_host_binary() {
-  case "$HOST_OS:$HOST_ARCH" in
-    Linux:x86_64|Linux:amd64)
-      printf '%s\n' "$ROOT_DIR/bin/souc-linux-x86_64"
-      ;;
-    Darwin:arm64|Darwin:aarch64)
-      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-arm64-macos"
-      ;;
-    Darwin:x86_64|Darwin:amd64)
-      printf '%s\n' "$ROOT_DIR/artifacts/self-hosted/souc-self-hosted-x86_64-macos"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-if [[ -n "${SOUNIO_SOUC_BIN:-}" ]]; then
-  SELECTED_BIN="$SOUNIO_SOUC_BIN"
-else
-  if ! SELECTED_BIN="$(resolve_host_binary)"; then
-    echo "error: unsupported host platform for this checkout: $HOST_OS/$HOST_ARCH" >&2
-    echo "hint: supported checked artifacts are Linux x86_64, macOS arm64, and macOS x86_64" >&2
-    exit 2
-  fi
-fi
-
-HOST_TARGET=""
-if _resolved_host_target="$(resolve_host_target 2>/dev/null)"; then
-  HOST_TARGET="$_resolved_host_target"
-fi
-
-if [[ ! -x "$SELECTED_BIN" ]]; then
-  echo "error: selected souc binary is missing or not executable: $SELECTED_BIN" >&2
-  exit 2
-fi
-
-if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
-  sounio_ad_hoc_codesign "$SELECTED_BIN"
-fi
-
-if [[ "${SOUNIO_SOUC_PRINT_PATH:-0}" == "1" ]]; then
-  printf '%s\n' "$SELECTED_BIN"
-  exit 0
-fi
-
-print_usage() {
-  cat <<EOF
-usage:
-  bin/souc check <source.sio> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
-  bin/souc compile <source.sio> -o <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
-  bin/souc build <source.sio> -o <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
-  bin/souc run <source.sio> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor] [-- <program args...>]
-  bin/souc info
-  bin/souc --version
-
-raw pass-through:
-  bin/souc <source.sio> <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
-EOF
-}
-
-print_info() {
-  cat <<EOF
-souc_wrapper_version=$WRAPPER_VERSION
-host_os=$HOST_OS
-host_arch=$HOST_ARCH
-host_target=${HOST_TARGET:-unknown}
-selected_bin=$SELECTED_BIN
-selected_interface=raw-self-hosted
-compat_commands=check,compile,build,run,info,version
-raw_interface=<source.sio> <output> [--target <triple>] [--show-ast] [--show-types] [--r15-monitor]
-EOF
-}
-
-raw_compile_quiet() {
-  local src="$1"
-  local out="$2"
-  shift 2
-
-  local output=""
-  local rc=0
-
-  set +e
-  output="$("$SELECTED_BIN" "$src" "$out" "$@" 2>&1)"
-  rc=$?
-  set -e
-
-  if [[ $rc -ne 0 ]]; then
-    [[ -n "$output" ]] && printf '%s\n' "$output" >&2
-    return "$rc"
-  fi
-
-  if [[ "${SOUNIO_SOUC_VERBOSE:-0}" == "1" && -n "$output" ]]; then
-    printf '%s\n' "$output" >&2
-  fi
-
-  chmod +x "$out" 2>/dev/null || true
-  if declare -F sounio_ad_hoc_codesign >/dev/null 2>&1; then
-    sounio_ad_hoc_codesign "$out"
-  fi
-}
-
-parse_compat_args() {
-  local mode="$1"
-  shift
-
-  COMPAT_SOURCE=""
-  COMPAT_OUTPUT=""
-  COMPAT_TARGET=""
-  COMPAT_COMPILER_ARGS=()
-  COMPAT_PROGRAM_ARGS=()
-
-  local saw_program_sep=0
-
-  while [[ $# -gt 0 ]]; do
-    if [[ $saw_program_sep -eq 1 ]]; then
-      COMPAT_PROGRAM_ARGS+=("$1")
-      shift
-      continue
-    fi
-
-    case "$1" in
-      --)
-        saw_program_sep=1
-        shift
-        ;;
-      -o|--out)
-        if [[ $# -lt 2 ]]; then
-          echo "error: missing output path after $1" >&2
-          exit 2
-        fi
-        COMPAT_OUTPUT="$2"
-        shift 2
-        ;;
-      --target)
-        if [[ $# -lt 2 ]]; then
-          echo "error: missing target triple after --target" >&2
-          exit 2
-        fi
-        COMPAT_TARGET="$2"
-        COMPAT_COMPILER_ARGS+=("$1" "$2")
-        shift 2
-        ;;
-      --show-ast|--show-types|--r15-monitor)
-        COMPAT_COMPILER_ARGS+=("$1")
-        shift
-        ;;
-      -h|--help)
-        print_usage
-        exit 0
-        ;;
-      repl|test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
-        echo "error: unsupported command for the checked self-hosted launcher: $1" >&2
-        echo "hint: use the richer omega/pinned CLI for that workflow" >&2
-        exit 2
-        ;;
-      -*)
-        echo "error: unsupported option for wrapper compatibility mode: $1" >&2
-        echo "hint: supported wrapper flags are --target, --show-ast, --show-types, --r15-monitor, and -o/--out" >&2
-        exit 2
-        ;;
-      *)
-        if [[ -z "$COMPAT_SOURCE" ]]; then
-          COMPAT_SOURCE="$1"
-        elif [[ -z "$COMPAT_OUTPUT" && "$mode" != "run" && "$mode" != "check" ]]; then
-          COMPAT_OUTPUT="$1"
-        else
-          echo "error: unexpected positional argument in $mode mode: $1" >&2
-          exit 2
-        fi
-        shift
+_science_boundary_requested() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --science-boundary|--science-boundary=*|--science-manifest|--science-manifest=*|\
+      --claim-contract|--claim-contract=*|--emit-boundary-receipt|--emit-boundary-receipt=*)
+        return 0
         ;;
     esac
   done
+  return 1
+}
 
-  if [[ -z "$COMPAT_SOURCE" ]]; then
-    echo "error: missing source file for $mode" >&2
+_package_release_requested() {
+  [[ "${1:-}" == "pkg" && "${2:-}" == "verify" ]] && return 0
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --release-bundle|--release-bundle=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+_reject_science_without_madaros() {
+  echo "error[E-SRB-000]: science boundary options require the Madaros launcher" >&2
+  echo "souc: remove the legacy engine override or build a current-source Madaros" >&2
+  exit 1
+}
+
+# Resolve the Madaros raw ELF, mirroring bin/madaros's resolution order.
+_resolve_madaros() {
+  local cand
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+              "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if _is_elf "$cand"; then echo "$cand"; return 0; fi
+  done
+  return 1
+}
+
+cmd_init() {
+  if [[ $# -ne 1 ]]; then
+    echo "souc: init requires <name>" >&2
     exit 2
   fi
+  local name="$1"
+  if [[ -e "$name" ]]; then
+    echo "souc: path already exists: $name" >&2
+    exit 1
+  fi
+  mkdir -p "$name/src"
+  cat >"$name/sounio.toml" <<EOF
+[package]
+name = "$name"
+version = "0.1.0"
+edition = "2026"
+
+[[bin]]
+name = "$name"
+path = "src/main.sio"
+EOF
+  cat >"$name/src/greet.sio" <<'EOF'
+pub fn answer() -> i64 {
+    42
+}
+EOF
+  cat >"$name/src/main.sio" <<'EOF'
+use greet::{answer}
+
+fn main() -> i64 with IO {
+    print_int(answer())
+    print_char(10)
+    0
+}
+EOF
+  echo "Created Sounio project: $name"
 }
 
-compat_check() {
-  parse_compat_args "check" "$@"
+# souc-flavoured help. The `check|compile|run <file.sio>` tokens are the repo-wide
+# capability-probe contract (scripts grep `souc --help` for `compile <file.sio>` /
+# `run <file.sio>` to decide between the verb CLI and the raw `SRC OUT` form). We
+# only print this when the Madaros engine is actually resolved — Madaros supports
+# the verbs, so the probe correctly selects the verb form. In the lean_single
+# fallback we delegate --help to the raw ELF (no verb tokens), so probes correctly
+# select the raw `SRC OUT` form that lean_single understands.
+_print_souc_help() {
+  cat <<'USAGE'
+souc — the Sounio compiler (default engine: Madaros)
 
-  local tmp_dir
-  local rc=0
-  tmp_dir="$(mktemp -d)"
+Usage:
+  souc --version                      print compiler identity
+  souc info                           print compiler status
+  souc check <file.sio|project-dir>   parse, resolve and typecheck
+  souc compile <file.sio|project-dir> [-o OUT]
+                                      compile source to a native ELF
+  souc build <file.sio|project-dir> [-o OUT]
+                                      compile source to a native ELF
+  souc build <file.sio> --backend gpu -o OUT
+                                      emit a public GPU artifact (PTX by default)
+  souc run <file.sio|project-dir>     run source (compile to a temp ELF and execute)
+  souc init <name>                    create a minimal sounio.toml project
+  souc format <file.sio>              format Sounio source on stdout
+  souc fmt <file.sio>                 alias for format
+  souc repl                           start the file-backed Sounio REPL
+  souc lsp --stdio                    start the preview language server over stdio
+  souc pkg build [project] --science-boundary strict --claim-contract <path>
+                                      emit an atomic, verified .sio-release bundle
+  souc pkg verify <bundle> [--root <project>]
+                                      revalidate a package release bundle
 
-  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
-    raw_compile_quiet "$COMPAT_SOURCE" "$tmp_dir/check.out" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
-  else
-    raw_compile_quiet "$COMPAT_SOURCE" "$tmp_dir/check.out" || rc=$?
-  fi
-  rm -rf "$tmp_dir"
-  return "$rc"
+Science boundary:
+  --science-boundary off|advisory|strict
+                                      select the R0-R2 boundary mode
+  --science-manifest <path>           use an explicit science manifest
+  --claim-contract <path>             bind an explicit claim contract
+  --emit-boundary-receipt <path>      write a deterministic boundary receipt
+  --release-bundle <path>             select the strict package release directory
+
+Engine selection:
+  SOUNIO_SOUC_ENGINE=lean_single      force the legacy lean_single engine (raw `souc SRC OUT`)
+  MADAROS_RAW_BIN=<elf>               override the Madaros raw ELF
+USAGE
 }
 
-compat_compile() {
-  parse_compat_args "compile" "$@"
-
-  if [[ -z "$COMPAT_OUTPUT" ]]; then
-    echo "error: compile/build mode requires -o <output> or a positional output path" >&2
-    exit 2
-  fi
-
-  local rc=0
-  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
-    raw_compile_quiet "$COMPAT_SOURCE" "$COMPAT_OUTPUT" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
-  else
-    raw_compile_quiet "$COMPAT_SOURCE" "$COMPAT_OUTPUT" || rc=$?
-  fi
-  return "$rc"
-}
-
-compat_run() {
-  parse_compat_args "run" "$@"
-
-  if [[ -n "$HOST_TARGET" && -n "$COMPAT_TARGET" && "$COMPAT_TARGET" != "$HOST_TARGET" ]]; then
-    echo "error: run mode only executes host-native outputs in the checked self-hosted launcher" >&2
-    echo "hint: use compile for cross-target output ($COMPAT_TARGET) and run it on the matching host" >&2
-    exit 2
-  fi
-
-  local tmp_dir
-  local rc=0
-  tmp_dir="$(mktemp -d)"
-
-  local out="$tmp_dir/run.out"
-  if [[ ${#COMPAT_COMPILER_ARGS[@]} -gt 0 ]]; then
-    raw_compile_quiet "$COMPAT_SOURCE" "$out" "${COMPAT_COMPILER_ARGS[@]}" || rc=$?
-  else
-    raw_compile_quiet "$COMPAT_SOURCE" "$out" || rc=$?
-  fi
-  if [[ $rc -eq 0 ]]; then
-    "$out" "${COMPAT_PROGRAM_ARGS[@]}" || rc=$?
-  fi
-  rm -rf "$tmp_dir"
-  return "$rc"
-}
-
-if [[ $# -eq 0 ]]; then
-  print_usage >&2
-  exit 2
-fi
-
-case "$1" in
-  --version|version|-v)
-    printf 'souc %s\n' "$WRAPPER_VERSION"
-    exit 0
-    ;;
-  info)
-    print_info
-    exit 0
-    ;;
-  --help|help|-h)
-    print_usage
-    exit 0
-    ;;
-  check)
+# Tooling commands are repo wrappers around the selected compiler. Keep these in
+# front of engine dispatch so the public `bin/souc` surface is consistent for
+# Madaros and lean_single users alike.
+case "${1:-}" in
+  init)
     shift
-    compat_check "$@"
+    cmd_init "$@"
     exit 0
     ;;
-  compile|build)
+  format|fmt)
+    if [[ $# -lt 2 ]]; then
+      echo "souc: usage: souc ${1:-format} <file.sio>" >&2
+      exit 64
+    fi
+    exec "$ROOT_DIR/tools/fmt/sounio-fmt.sh" "${@:2}"
+    ;;
+  repl)
     shift
-    compat_compile "$@"
-    exit 0
+    exec env SOUC_BIN="$ROOT_DIR/bin/souc" "$ROOT_DIR/tools/repl.sh" "$@"
     ;;
-  run)
+  lsp)
     shift
-    compat_run "$@"
-    exit 0
-    ;;
-  repl|test|fmt|lint|analyze|diagnostics|sysroot|clean|watch|serve|bench|gpu-emit|emit)
-    echo "error: unsupported command for the checked self-hosted launcher: $1" >&2
-    echo "hint: use the richer omega/pinned CLI for that workflow" >&2
-    exit 2
+    exec env \
+      SOUNIO_LSP_SOUC_BIN="${SOUNIO_LSP_SOUC_BIN:-$ROOT_DIR/bin/souc}" \
+      SOUNIO_LSP_STRICT_NO_RUST="${SOUNIO_LSP_STRICT_NO_RUST:-0}" \
+      "$ROOT_DIR/tools/lsp/sounio-lsp.sh" "$@"
     ;;
 esac
 
-if [[ $# -ge 2 && "$1" != -* ]]; then
-  raw_compile_quiet "$1" "$2" "${@:3}"
-  exit 0
+# 1) Explicit ELF override: honor it directly (raw lean_single-style CLI).
+if _is_elf "${SOUNIO_SOUC_BIN:-}"; then
+  if _science_boundary_requested "$@" || _package_release_requested "$@"; then
+    _reject_science_without_madaros
+  fi
+  exec "$SOUNIO_SOUC_BIN" "$@"
 fi
 
-exec "$SELECTED_BIN" "$@"
+# Historical raw positional compile form: `souc <src.sio> <out> [flags]`.
+# Keep routing this through the lean_single bootstrap ELF even though Madaros is
+# the default verb-oriented engine; the modular launcher does not implement the
+# raw `SRC OUT` ABI.
+#
+# Fail-closed: a flag-looking second argument is not an output path.
+# `souc file.sio -o dest.elf` used to exec lean_single with OUT=`-o`, write a
+# file literally named `-o`, and exit 0. That is the silent-success class.
+# See docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md.
+if [[ $# -ge 2 && "${1:-}" == *.sio ]]; then
+  if [[ "${2:-}" == -* ]]; then
+    echo "souc: refused: bare form 'souc $1 $2 …' would treat '$2' as the output filename and exit 0" >&2
+    echo "souc: use: souc compile $1 -o <out>" >&2
+    exit 2
+  fi
+  if _science_boundary_requested "$@"; then
+    _reject_science_without_madaros
+  fi
+  if [[ -x "$LEAN_SINGLE" ]]; then
+    exec "$LEAN_SINGLE" "$@"
+  fi
+  echo "souc: raw positional form '<src.sio> <out>' requires a lean_single ELF at $LEAN_SINGLE" >&2
+  exit 127
+fi
+
+# 2) Forced legacy engine.
+case "${SOUNIO_SOUC_ENGINE:-madaros}" in
+  lean_single|lean-single|leansingle)
+    if _science_boundary_requested "$@" || _package_release_requested "$@"; then
+      _reject_science_without_madaros
+    fi
+    if [[ ! -x "$LEAN_SINGLE" ]]; then
+      echo "souc: SOUNIO_SOUC_ENGINE=lean_single but no lean_single ELF found at $LEAN_SINGLE" >&2
+      exit 127
+    fi
+    # lean_single uses raw `SRC OUT` CLI, not the verb-based `run|check|compile` form.
+    # Translate verb invocations so gate scripts using `souc run <file>` work correctly.
+    case "${1:-}" in
+      run)
+        _ls_src="${2:-}"
+        _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX)"
+        "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >/dev/null 2>&1
+        chmod +x "$_ls_tmp"
+        exec "$_ls_tmp" "${@:3}"
+        ;;
+      check)
+        _ls_tmp2="$(mktemp /tmp/souc-lean-check-XXXXXX)"
+        "$LEAN_SINGLE" "${2:-}" "$_ls_tmp2" 2>&1
+        _ls_rc=$?
+        rm -f "$_ls_tmp2"
+        exit $_ls_rc
+        ;;
+      compile)
+        # souc compile <src> -o <out> → lean_single <src> <out>
+        _ls_compile_src="${2:-}"
+        _ls_compile_out=""
+        shift 2
+        while [[ $# -gt 0 ]]; do
+          if [[ "${1:-}" == "-o" ]]; then _ls_compile_out="${2:-}"; shift 2; else shift; fi
+        done
+        exec "$LEAN_SINGLE" "$_ls_compile_src" "${_ls_compile_out:-/dev/null}"
+        ;;
+      *)
+        exec "$LEAN_SINGLE" "$@"
+        ;;
+    esac
+    ;;
+esac
+
+# 3) Default: Madaros (via bin/madaros, which maps the souc verbs to the raw ELF).
+if MADAROS_ELF="$(_resolve_madaros)"; then
+  # Advertise the souc verb CLI so capability-probing callers select the verb form
+  # (which Madaros supports) instead of the raw `SRC OUT` form (which it does not).
+  case "${1:-}" in
+    -h|--help|help) _print_souc_help; exit 0 ;;
+  esac
+  exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" "$@"
+fi
+
+# 4) Madaros not built — do not hard-break callers; fall back to lean_single.
+if [[ -x "$LEAN_SINGLE" ]]; then
+  if _science_boundary_requested "$@" || _package_release_requested "$@"; then
+    _reject_science_without_madaros
+  fi
+  echo "souc: Madaros raw ELF not found (run 'make build-madaros') — falling back to the" >&2
+  echo "souc: legacy lean_single engine. Set SOUNIO_SOUC_ENGINE=lean_single to silence this." >&2
+  exec "$LEAN_SINGLE" "$@"
+fi
+
+echo "souc: no compiler engine available — build Madaros ('make build-madaros') or provide" >&2
+echo "souc: a lean_single ELF at $LEAN_SINGLE." >&2
+exit 127

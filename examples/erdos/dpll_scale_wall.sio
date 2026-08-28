@@ -1,0 +1,349 @@
+// examples/erdos/dpll_scale_wall.sio
+//
+// SCALING ENVELOPE of the native DPLL->DRUP certifier (the Erdős #508 χ≥5 path).
+//
+// Honest finding behind this file: a 3-coloring UNSAT certificate for ANY graph
+// that CONTAINS a Moser spindle is refuted by the 7-vertex spindle alone, so it
+// stays tiny no matter how large the host graph is (it is a LOCAL contradiction).
+// The chromatic regime that actually matters for χ(ℝ²) ≥ 5 is a *4-coloring
+// UNSAT* on de Grey's ~510-vertex graph — an instance whose unsatisfiability needs
+// the WHOLE graph, not a local core.
+//
+// This file measures how far the chronological-backtracking DPLL->DRUP emitter
+// scales on a HARD, fully global UNSAT family: k-coloring the complete graph K_n
+// with k = n-1 colors. That CNF is exactly the pigeonhole principle PHP(n, n-1),
+// for which resolution (hence any tree-resolution DPLL refutation) has a proven
+// EXPONENTIAL lower bound (Haken 1985). So the emitted DRUP proof size must blow
+// up — empirically pinning the wall and proving WHY clause learning (CDCL) is
+// required to reach the de Grey scale.
+//
+// Each completed certificate is checked by our native RUP checker; one is also
+// emitted as DIMACS+DRAT for external drat-trim. A node budget bails gracefully
+// at the wall (reported as WALL, not a crash).
+//
+// All integer arithmetic. Flat GLOBAL arrays (no large struct returns).
+
+let NODE_LIMIT: i64 = 3000000
+let LEMMA_CAP: i32 = 500000
+
+// ---- clause DB (the formula; lemmas are appended during checking) ----
+var G_nvars: i32 = 0
+var G_nclauses: i32 = 0
+var G_cstart: [i32; 524288] = [0; 524288]
+var G_clen: [i32; 524288] = [0; 524288]
+var G_lits: [i64; 1048576] = [0; 1048576]
+var G_assign: [i32; 1024] = [0; 1024]
+
+// ---- DRUP proof ----
+var P_n: i32 = 0
+var P_start: [i32; 524288] = [0; 524288]
+var P_len: [i32; 524288] = [0; 524288]
+var P_lits: [i64; 1048576] = [0; 1048576]
+
+// ---- search scratch ----
+var DEC: [i64; 1024] = [0; 1024]
+var NODE_COUNT: i64 = 0
+var BAILED: i32 = 0
+
+fn lit_var(l: i64) -> i32 with Panic {
+    if l < 0 { return (0 - l) as i32 }
+    return l as i32
+}
+
+fn g_add_clause(arr: &[i64; 16], n: i32) with Mut, Panic {
+    if G_nclauses >= 524288 { return }
+    let idx = G_nclauses
+    var start: i32 = 0
+    if idx > 0 { start = G_cstart[idx - 1] + G_clen[idx - 1] }
+    if (start as i64) + (n as i64) > 1048576 { return }
+    G_cstart[idx] = start
+    G_clen[idx] = n
+    var i: i32 = 0
+    while i < n {
+        G_lits[start + i] = arr[i]
+        let v = lit_var(arr[i])
+        if v > G_nvars { G_nvars = v }
+        i = i + 1
+    }
+    G_nclauses = idx + 1
+}
+
+fn propagate() -> i32 with Mut, Panic {
+    var changed: i32 = 1
+    while changed == 1 {
+        changed = 0
+        var c: i32 = 0
+        while c < G_nclauses {
+            let st = G_cstart[c]
+            let ln = G_clen[c]
+            var sat: i32 = 0
+            var unassigned: i32 = 0
+            var last_lit: i64 = 0
+            var k: i32 = 0
+            while k < ln {
+                let l = G_lits[st + k]
+                let v = lit_var(l)
+                var a = G_assign[v]
+                if l < 0 { a = 0 - a }
+                if a == 1 { sat = 1 }
+                if a == 0 { unassigned = unassigned + 1  last_lit = l }
+                k = k + 1
+            }
+            if sat == 0 {
+                if unassigned == 0 { return 1 }
+                if unassigned == 1 {
+                    let v = lit_var(last_lit)
+                    if last_lit < 0 { G_assign[v] = 0 - 1 } else { G_assign[v] = 1 }
+                    changed = 1
+                }
+            }
+            c = c + 1
+        }
+    }
+    return 0
+}
+
+fn reset_assign() with Mut, Panic {
+    var i: i32 = 0
+    while i <= G_nvars { G_assign[i] = 0  i = i + 1 }
+}
+
+fn emit_neg(dec_len: i32) with Mut, Panic {
+    if P_n >= LEMMA_CAP { BAILED = 1  return }
+    let idx = P_n
+    var start: i32 = 0
+    if idx > 0 { start = P_start[idx - 1] + P_len[idx - 1] }
+    if (start as i64) + (dec_len as i64) > 1048576 { BAILED = 1  return }
+    P_start[idx] = start
+    P_len[idx] = dec_len
+    var i: i32 = 0
+    while i < dec_len {
+        P_lits[start + i] = 0 - DEC[i]
+        i = i + 1
+    }
+    P_n = idx + 1
+}
+
+fn solve_rec(dec_len: i32) -> i32 with Mut, Panic {
+    if BAILED == 1 { return 0 }
+    NODE_COUNT = NODE_COUNT + 1
+    if NODE_COUNT > NODE_LIMIT { BAILED = 1  return 0 }
+
+    let cf = propagate()
+    if cf == 1 {
+        emit_neg(dec_len)
+        return 0
+    }
+    var x: i32 = 0
+    var i: i32 = 1
+    while i <= G_nvars {
+        if G_assign[i] == 0 { x = i  i = G_nvars + 1 } else { i = i + 1 }
+    }
+    if x == 0 { return 1 }
+
+    var snap: [i32; 1024] = [0; 1024]
+    var s: i32 = 0
+    while s <= G_nvars { snap[s] = G_assign[s]  s = s + 1 }
+
+    G_assign[x] = 1
+    DEC[dec_len] = x as i64
+    let r1 = solve_rec(dec_len + 1)
+    if r1 == 1 { return 1 }
+
+    s = 0
+    while s <= G_nvars { G_assign[s] = snap[s]  s = s + 1 }
+
+    if BAILED == 1 { return 0 }
+
+    G_assign[x] = 0 - 1
+    DEC[dec_len] = 0 - (x as i64)
+    let r2 = solve_rec(dec_len + 1)
+    if r2 == 1 { return 1 }
+
+    s = 0
+    while s <= G_nvars { G_assign[s] = snap[s]  s = s + 1 }
+
+    if BAILED == 1 { return 0 }
+    emit_neg(dec_len)
+    return 0
+}
+
+fn add_lemma_to_db(pst: i32, pln: i32) with Mut, Panic {
+    if G_nclauses >= 524288 { return }
+    let idx = G_nclauses
+    var start: i32 = 0
+    if idx > 0 { start = G_cstart[idx - 1] + G_clen[idx - 1] }
+    if (start as i64) + (pln as i64) > 1048576 { return }
+    G_cstart[idx] = start
+    G_clen[idx] = pln
+    var i: i32 = 0
+    while i < pln { G_lits[start + i] = P_lits[pst + i]  i = i + 1 }
+    G_nclauses = idx + 1
+}
+
+fn verify(orig_nc: i32) -> i32 with Mut, Panic {
+    G_nclauses = orig_nc
+    var pi: i32 = 0
+    while pi < P_n {
+        let pst = P_start[pi]
+        let pln = P_len[pi]
+        reset_assign()
+        var taut: i32 = 0
+        var k: i32 = 0
+        while k < pln {
+            let l = P_lits[pst + k]
+            let v = lit_var(l)
+            var want: i32 = 0 - 1
+            if l < 0 { want = 1 }
+            if G_assign[v] != 0 {
+                if G_assign[v] != want { taut = 1 }
+            }
+            G_assign[v] = want
+            k = k + 1
+        }
+        var ok: i32 = 0
+        if taut == 1 { ok = 1 } else {
+            let cf = propagate()
+            if cf == 1 { ok = 1 }
+        }
+        if ok == 0 { return 0 - 1 }
+        if pln == 0 { return 1 }
+        add_lemma_to_db(pst, pln)
+        pi = pi + 1
+    }
+    return 0
+}
+
+fn print_digit(d: i64) with IO {
+    if d == 0 { print("0") } else if d == 1 { print("1") } else if d == 2 { print("2") }
+    else if d == 3 { print("3") } else if d == 4 { print("4") } else if d == 5 { print("5") }
+    else if d == 6 { print("6") } else if d == 7 { print("7") } else if d == 8 { print("8") }
+    else { print("9") }
+}
+fn print_dec(n: i64) with IO, Mut, Div, Panic {
+    if n == 0 { print("0") return }
+    var x = n
+    if x < 0 { print("-") x = 0 - x }
+    var buf: [i64; 24] = [0; 24]
+    var len: i32 = 0
+    while x > 0 { buf[len] = x % 10  x = x / 10  len = len + 1 }
+    var i: i32 = len - 1
+    while i >= 0 { print_digit(buf[i])  i = i - 1 }
+}
+fn emit_dimacs(orig_nc: i32) with IO, Mut, Div, Panic {
+    print("p cnf ")  print_dec(G_nvars as i64)  print(" ")  print_dec(orig_nc as i64)  print("\n")
+    var c: i32 = 0
+    while c < orig_nc {
+        let st = G_cstart[c]
+        let ln = G_clen[c]
+        var k: i32 = 0
+        while k < ln { print_dec(G_lits[st + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        c = c + 1
+    }
+}
+fn emit_drat() with IO, Mut, Div, Panic {
+    var pi: i32 = 0
+    while pi < P_n {
+        let pst = P_start[pi]
+        let pln = P_len[pi]
+        var k: i32 = 0
+        while k < pln { print_dec(P_lits[pst + k])  print(" ")  k = k + 1 }
+        print("0\n")
+        pi = pi + 1
+    }
+}
+
+fn reset_all() with Mut, Panic {
+    reset_assign()
+    G_nvars = 0
+    G_nclauses = 0
+    P_n = 0
+    NODE_COUNT = 0
+    BAILED = 0
+}
+
+// K_n with k colors: ALO per vertex + edge inequality for every pair (complete).
+fn build_clique_coloring(n: i64, k: i64) with Mut, Div, Panic {
+    var arr: [i64; 16] = [0; 16]
+    var v: i64 = 0
+    while v < n {
+        var c: i64 = 0
+        while c < k { arr[c as usize] = v*k + c + 1  c = c + 1 }
+        g_add_clause(&arr, k as i32)
+        v = v + 1
+    }
+    var a: i64 = 0
+    while a < n {
+        var b: i64 = a + 1
+        while b < n {
+            var c: i64 = 0
+            while c < k {
+                arr[0] = 0 - (a*k + c + 1)
+                arr[1] = 0 - (b*k + c + 1)
+                g_add_clause(&arr, 2)
+                c = c + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+}
+
+// One row of the scaling table: K_n with (n-1) colors = PHP(n, n-1), UNSAT.
+fn run_case(n: i64) with IO, Mut, Div, Panic {
+    reset_all()
+    build_clique_coloring(n, n - 1)
+    let orig_nc = G_nclauses
+    print("K_")  print_int(n)  print(" / ")  print_int(n - 1)  print("-col  vars=")
+    print_int(G_nvars)  print("  clauses=")  print_int(orig_nc)
+    let sat = solve_rec(0)
+    if BAILED == 1 {
+        print("  nodes>")  print_int(NODE_LIMIT)  print("  => WALL (proof too large for tree-resolution DPLL)\n")
+        return
+    }
+    if sat == 1 {
+        print("  SAT (UNEXPECTED — pigeonhole should be UNSAT)\n")
+        return
+    }
+    reset_assign()
+    let vr = verify(orig_nc)
+    print("  nodes=")  print_int(NODE_COUNT)  print("  DRUP-lemmas=")  print_int(P_n)
+    if vr == 1 { print("  native RUP: VERIFIED\n") } else { print("  native RUP: FAILED\n") }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("=== DPLL->DRUP scaling wall: pigeonhole K_n / (n-1)-coloring ===\n")
+    print("(resolution has an exponential lower bound here — Haken 1985)\n\n")
+
+    run_case(4)
+    run_case(5)
+    run_case(6)
+    run_case(7)
+    run_case(8)
+    run_case(9)
+
+    // Emit a mid-size certificate for external drat-trim (K_6 / 5-coloring).
+    print("\n-- certificate for external drat-trim: K_6 / 5-coloring --\n")
+    reset_all()
+    build_clique_coloring(6, 5)
+    let onc = G_nclauses
+    let s = solve_rec(0)
+    if BAILED == 0 {
+        if s == 0 {
+            G_nclauses = onc
+            print("%%DIMACS%%\n")
+            emit_dimacs(onc)
+            print("%%DRAT%%\n")
+            emit_drat()
+            print("%%END%%\n")
+        }
+    }
+
+    print("\nReading: 3-coloring of a spindle-containing graph stays a ~30-lemma LOCAL\n")
+    print("refutation at any host size; but a GLOBAL hard UNSAT (the χ≥5 regime) blows\n")
+    print("up here. Reaching de Grey's 510-vertex 4-coloring UNSAT needs (1) the graph\n")
+    print("data (not in this repo) and (2) CDCL clause learning — chronological DPLL\n")
+    print("tree-resolution provably cannot produce a sub-exponential proof.\n")
+    return 0
+}

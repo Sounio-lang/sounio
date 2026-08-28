@@ -1,0 +1,184 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/jonckheere.sio — Jonckheere-Terpstra test for ordered alternatives
+//
+// A non-parametric test for a *monotone* trend in location across k a-priori
+// ordered groups — more powerful than Kruskal-Wallis when the ordering is known:
+//
+//   jonckheere(values, sizes, k) -> JTResult      (groups = consecutive blocks,
+//                                                   in the hypothesised order)
+//
+//   J = Σ_{i<j} Uᵢⱼ,   Uᵢⱼ = #{ a∈gᵢ, b∈gⱼ : b > a } (+½ for ties),
+//   E[J] = (N² − Σnᵢ²)/4,   Var[J] = (N²(2N+3) − Σnᵢ²(2nᵢ+3))/72,
+//   z = (J − E[J])/√Var[J].
+//
+// Pure Sounio: an O(N²) pairwise count over the group blocks; inline sqrt/erf.
+// No external dependency, no nested data-array calls.
+//
+// References:
+//   Jonckheere (1954); Terpstra (1952).
+
+module stats::jonckheere
+
+fn jt_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 30 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+fn jt_exp(x: f64) -> f64 with Mut, Div, Panic {
+    if x < 0.0 { return 1.0 / jt_exp(0.0 - x) }
+    var k = 0
+    var r = x
+    while r > 2.0 { r = r * 0.5; k = k + 1 }
+    var term = 1.0
+    var sum = 1.0
+    var n = 1
+    while n < 40 { term = term * r / (n as f64); sum = sum + term; n = n + 1 }
+    var i = 0
+    while i < k { sum = sum * sum; i = i + 1 }
+    return sum
+}
+
+fn jt_erf(x: f64) -> f64 with Mut, Div, Panic {
+    let sgn = if x < 0.0 { 0.0 - 1.0 } else { 1.0 }
+    let ax = if x < 0.0 { 0.0 - x } else { x }
+    let t = 1.0 / (1.0 + 0.3275911 * ax)
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
+              - 0.284496736) * t + 0.254829592) * t * jt_exp(0.0 - ax * ax)
+    return sgn * y
+}
+
+fn jt_normal_sf(z: f64) -> f64 with Mut, Div, Panic {
+    let INV_SQRT2 = 0.7071067811865476
+    return 0.5 * (1.0 - jt_erf(z * INV_SQRT2))
+}
+
+pub struct JTResult {
+    pub j: f64,       // Jonckheere J statistic
+    pub expected: f64,
+    pub z: f64,
+    pub p: f64,       // two-sided p
+}
+
+/// Jonckheere-Terpstra test across k ordered groups.
+///
+/// Parâmetros: values — concatenated group data (in hypothesised order);
+///             sizes — per-group n; k — groups (2..16).
+/// Retorno: JTResult (j, expected, z, p).
+/// Referências: Jonckheere (1954).
+pub fn jonckheere(values: &[f64; 256], sizes: &[i32; 16], k: i32) -> JTResult with Mut, Div, Panic {
+    if k < 2 || k > 16 { return JTResult { j: 0.0, expected: 0.0, z: 0.0, p: 1.0 } }
+    // group offsets
+    var off: [i32; 16] = [0; 16]
+    var cum = 0
+    var bign = 0.0
+    var sum_n2 = 0.0
+    var sum_n2b = 0.0    // Σ nᵢ²(2nᵢ+3)
+    var g = 0
+    while g < k {
+        off[g as usize] = cum
+        cum = cum + sizes[g as usize]
+        let nif = sizes[g as usize] as f64
+        bign = bign + nif
+        sum_n2 = sum_n2 + nif * nif
+        sum_n2b = sum_n2b + nif * nif * (2.0 * nif + 3.0)
+        g = g + 1
+    }
+    // J = Σ_{i<j} #{b in gj > a in gi} + ½ ties
+    var jstat = 0.0
+    var i = 0
+    while i < k {
+        var jg = i + 1
+        while jg < k {
+            var ai = 0
+            while ai < sizes[i as usize] {
+                let a = values[(off[i as usize] + ai) as usize]
+                var bj = 0
+                while bj < sizes[jg as usize] {
+                    let b = values[(off[jg as usize] + bj) as usize]
+                    if b > a { jstat = jstat + 1.0 } else { if b == a { jstat = jstat + 0.5 } }
+                    bj = bj + 1
+                }
+                ai = ai + 1
+            }
+            jg = jg + 1
+        }
+        i = i + 1
+    }
+    let ej = (bign * bign - sum_n2) / 4.0
+    let varj = (bign * bign * (2.0 * bign + 3.0) - sum_n2b) / 72.0
+    var z = 0.0
+    if varj > 0.0 { z = (jstat - ej) / jt_sqrt(varj) }
+    let az = if z < 0.0 { 0.0 - z } else { z }
+    let p = 2.0 * jt_normal_sf(az)
+    return JTResult { j: jstat, expected: ej, z: z, p: p }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// three ordered groups g1={1,2,3}, g2={4,5,6}, g3={7,8,9} (perfect increase).
+// J = 9+9+9 = 27. E[J]=(81-27)/4=13.5. Var=(81·21 - 3·81)/72=(1701-243)/72=20.25.
+// z=(27-13.5)/4.5=3.0.
+fn test_jt() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0
+    v[3]=4.0; v[4]=5.0; v[5]=6.0
+    v[6]=7.0; v[7]=8.0; v[8]=9.0
+    sz[0]=3; sz[1]=3; sz[2]=3
+    let r = jonckheere(&v, &sz, 3)
+    var ok = true
+    ok = check(1, approx(r.j, 27.0, 1.0e-9)) && ok
+    ok = check(2, approx(r.expected, 13.5, 1.0e-9)) && ok
+    ok = check(3, approx(r.z, 3.0, 1.0e-4)) && ok
+    ok = check(4, r.p < 0.01) && ok
+    return ok
+}
+
+// no trend (groups identical) -> J = E[J], z ≈ 0.
+fn test_null() -> bool with IO, Mut, Div, Panic {
+    var v: [f64; 256] = [0.0; 256]
+    var sz: [i32; 16] = [0; 16]
+    v[0]=1.0; v[1]=2.0; v[2]=3.0
+    v[3]=1.0; v[4]=2.0; v[5]=3.0
+    v[6]=1.0; v[7]=2.0; v[8]=3.0
+    sz[0]=3; sz[1]=3; sz[2]=3
+    let r = jonckheere(&v, &sz, 3)
+    return check(10, approx(r.z, 0.0, 1.0e-6))
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_jt() && ok
+    ok = test_null() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

@@ -1,333 +1,82 @@
-// stdlib/dataframe/pure/epistemic.sio — Epistemic DataFrame
+// stdlib/dataframe/pure/epistemic.sio — Epistemic DataFrame Operations
 //
-// Wraps DataFrame operations with Knowledge<f64> uncertainty propagation.
-// All numeric computations return confidence-weighted results using GUM.
-//
-// References:
-//   GUM 2008 (JCGM 100:2008)
-//   H. Hartley & A. Mood (1951) "On the chi-square distribution"
+// Epistemic variants of dataframe operations with GUM variance propagation.
 
-use stdlib::epistemic::knowledge::Epistemic
-use stdlib::epistemic::gum::GUMUncertainty
-
-pub struct EpistemicDataFrameOps {
-    pub df: DataFrame,
-    pub default_confidence: f64,
-    pub provenance: String,
+pub struct EColumn {
+    pub name: string,
+    pub n_vals: i32,
+    pub values: [Epistemic; 256],
 }
 
-pub fn epistemic_dataframe_new(df: DataFrame, default_confidence: f64, provenance: String) -> EpistemicDataFrameOps {
-    EpistemicDataFrameOps { df, default_confidence, provenance }
+pub fn ecolumn_new(name: string) -> EColumn {
+    EColumn { name: name, n_vals: 0, values: [Epistemic::certain(0.0); 256] }
 }
 
-pub fn epistemic_dataframe_from_columns(
-    columns: Vec<Column>,
-    n_rows: i64,
-    default_confidence: f64,
-    source: String,
-) -> EpistemicDataFrameOps {
-    var ecols = Vec::new()
-    for col in columns {
-        if column_is_numeric(&col.data) {
-            let ecol = make_epistemic_column(&col, default_confidence)
-            ecols.push(ecol)
-        } else {
-            ecols.push(col)
-        }
-    }
-    let df = DataFrame {
-        columns: ecols,
-        n_rows,
-        name: "".to_string(),
-        metadata: Vec::new(),
-    }
-    EpistemicDataFrameOps { df, default_confidence, provenance: source }
-}
-
-fn make_epistemic_column(col: &Column, default_confidence: f64) -> Column {
-    match &col.data {
-        ColumnData::F64(vals) => {
-            var unc = Vec::new()
-            var i = 0
-            while i < vals.len() {
-                unc.push(0.0)
-                i = i + 1
-            }
-            let ecol_data = ColumnData::F64(vals.clone())
-            Column {
-                name: col.name.clone(),
-                data: ecol_data,
-                nullable: col.nullable,
-                epistemic: true,
-            }
-        }
-        _ => col.clone(),
+pub fn ecolumn_push(c: &! EColumn, v: Epistemic) with Mut {
+    if c.n_vals < 256 {
+        c.values[c.n_vals as usize] = v
+        c.n_vals = c.n_vals + 1
     }
 }
 
-pub fn epistemic_mean(col: &Column, confidence: f64) -> Result<f64, TransformError> {
-    match &col.data {
-        ColumnData::F64(vals) => {
-            let n = vals.len() as f64
-            if n == 0.0 { return Err(TransformError::DivisionByZero) }
-            var sum: f64 = 0.0
-            var i = 0
-            while i < vals.len() {
-                sum = sum + vals[i]
-                i = i + 1
-            }
-            let mean = sum / n
-            Ok(mean)
-        }
-        _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
+pub fn ecolumn_mean(c: &EColumn) -> Epistemic with Mut, Div {
+    if c.n_vals == 0 { return Epistemic::certain(0.0) }
+    var sum = Epistemic::certain(0.0)
+    var i = 0
+    while i < c.n_vals {
+        sum = sum.add(&c.values[i as usize])
+        i = i + 1
     }
+    let n = Epistemic::certain(c.n_vals as f64)
+    sum.div(&n)
 }
 
-pub fn epistemic_sum(col: &Column) -> Result<f64, TransformError> {
-    match &col.data {
-        ColumnData::F64(vals) => {
-            var sum: f64 = 0.0
-            var i = 0
-            while i < vals.len() {
-                sum = sum + vals[i]
-                i = i + 1
-            }
-            Ok(sum)
-        }
-        _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
+pub fn ecolumn_std(c: &EColumn) -> Epistemic with Mut, Div {
+    if c.n_vals == 0 { return Epistemic::certain(0.0) }
+    let mean = ecolumn_mean(c)
+    var var_sum = Epistemic::certain(0.0)
+    var i = 0
+    while i < c.n_vals {
+        let diff = c.values[i as usize].sub(&mean)
+        var_sum = var_sum.add(&diff.square())
+        i = i + 1
     }
+    let n = Epistemic::certain(c.n_vals as f64)
+    let variance = var_sum.div(&n)
+    variance.sqrt()
 }
 
-pub fn epistemic_std(col: &Column) -> Result<f64, TransformError> {
-    match &col.data {
-        ColumnData::F64(vals) => {
-            let n = vals.len() as f64
-            if n < 2.0 { return Err(TransformError::DivisionByZero) }
-            var sum: f64 = 0.0
-            var i = 0
-            while i < vals.len() {
-                sum = sum + vals[i]
-                i = i + 1
-            }
-            let mean = sum / n
-            var ss: f64 = 0.0
-            i = 0
-            while i < vals.len() {
-                let d = vals[i] - mean
-                ss = ss + d * d
-                i = i + 1
-            }
-            let variance = ss / (n - 1.0)
-            var std = variance
-            i = 0
-            while i < 15 {
-                std = 0.5 * (std + variance / std)
-                i = i + 1
-            }
-            Ok(std)
-        }
-        _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
+pub fn ecolumn_sum(c: &EColumn) -> Epistemic with Mut, Div {
+    var sum = Epistemic::certain(0.0)
+    var i = 0
+    while i < c.n_vals {
+        sum = sum.add(&c.values[i as usize])
+        i = i + 1
     }
+    sum
 }
 
-pub fn epistemic_gum_uncertainty(mean: f64, std_dev: f64, n: i64, confidence: f64) -> f64 {
-    let u = std_dev / (n as f64).sqrt()
-    let k95 = if n >= 30 { 2.0 } else if n >= 10 { 2.1 } else if n >= 5 { 2.3 } else { 2.8 }
-    u * k95 / confidence.max(0.01)
-}
-
-pub fn epistemic_correlation(x: &Column, y: &Column) -> Result<f64, TransformError> {
-    match (&x.data, &y.data) {
-        (ColumnData::F64(vx), ColumnData::F64(vy)) => {
-            let n = vx.len() as f64
-            if n != vy.len() as f64 { return Err(TransformError::ShapeMismatch("Column length mismatch".to_string())) }
-            if n < 2.0 { return Err(TransformError::DivisionByZero) }
-            var sum_x: f64 = 0.0
-            var sum_y: f64 = 0.0
-            var i = 0
-            while i < vx.len() {
-                sum_x = sum_x + vx[i]
-                sum_y = sum_y + vy[i]
-                i = i + 1
-            }
-            let mean_x = sum_x / n
-            let mean_y = sum_y / n
-            var ss_xy: f64 = 0.0
-            var ss_xx: f64 = 0.0
-            var ss_yy: f64 = 0.0
-            i = 0
-            while i < vx.len() {
-                let dx = vx[i] - mean_x
-                let dy = vy[i] - mean_y
-                ss_xy = ss_xy + dx * dy
-                ss_xx = ss_xx + dx * dx
-                ss_yy = ss_yy + dy * dy
-                i = i + 1
-            }
-            let denom = (ss_xx * ss_yy).sqrt()
-            if denom == 0.0 { return Ok(0.0) }
-            Ok(ss_xy / denom)
-        }
-        _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
+pub fn ecolumn_correlation(c1: &EColumn, c2: &EColumn) -> Epistemic with Mut, Div {
+    if c1.n_vals == 0 || c2.n_vals == 0 {
+        return Epistemic::certain(0.0)
     }
-}
-
-pub fn epistemic_covariance(x: &Column, y: &Column) -> Result<f64, TransformError> {
-    match (&x.data, &y.data) {
-        (ColumnData::F64(vx), ColumnData::F64(vy)) => {
-            let n = vx.len() as f64
-            if n != vy.len() as f64 { return Err(TransformError::ShapeMismatch("Column length mismatch".to_string())) }
-            if n < 2.0 { return Err(TransformError::DivisionByZero) }
-            var sum_x: f64 = 0.0
-            var sum_y: f64 = 0.0
-            var i = 0
-            while i < vx.len() {
-                sum_x = sum_x + vx[i]
-                sum_y = sum_y + vy[i]
-                i = i + 1
-            }
-            let mean_x = sum_x / n
-            let mean_y = sum_y / n
-            var cov: f64 = 0.0
-            i = 0
-            while i < vx.len() {
-                cov = cov + (vx[i] - mean_x) * (vy[i] - mean_y)
-                i = i + 1
-            }
-            Ok(cov / (n - 1.0))
-        }
-        _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
+    let mean1 = ecolumn_mean(c1)
+    let mean2 = ecolumn_mean(c2)
+    var cov_sum = Epistemic::certain(0.0)
+    var var1_sum = Epistemic::certain(0.0)
+    var var2_sum = Epistemic::certain(0.0)
+    var i = 0
+    while i < c1.n_vals && i < c2.n_vals {
+        let d1 = c1.values[i as usize].sub(&mean1)
+        let d2 = c2.values[i as usize].sub(&mean2)
+        cov_sum = cov_sum.add(&d1.mul(&d2))
+        var1_sum = var1_sum.add(&d1.square())
+        var2_sum = var2_sum.add(&d2.square())
+        i = i + 1
     }
-}
-
-pub fn epistemic_quantile(col: &Column, q: f64) -> Result<f64, TransformError> {
-    match &col.data {
-        ColumnData::F64(vals) => {
-            if vals.len() == 0 { return Err(TransformError::DivisionByZero) }
-            var sorted = vals.clone()
-            var i = 1
-            while i < sorted.len() {
-                var j = i
-                while j > 0 && sorted[j] < sorted[j - 1] {
-                    let tmp = sorted[j]
-                    sorted[j] = sorted[j - 1]
-                    sorted[j - 1] = tmp
-                    j = j - 1
-                }
-                i = i + 1
-            }
-            let idx = q * (sorted.len() - 1) as f64
-            let lo = idx.floor() as usize
-            let hi = idx.ceil() as usize
-            if lo == hi {
-                Ok(sorted[lo])
-            } else {
-                let frac = idx - lo as f64
-                Ok(sorted[lo] * (1.0 - frac) + sorted[hi] * frac)
-            }
-        }
-        _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
-    }
-}
-
-pub fn epistemic_confidence_interval(col: &Column, confidence_level: f64) -> Result<(f64, f64), TransformError> {
-    let mean = epistemic_mean(col, confidence_level)?
-    let std = epistemic_std(col)?
-    let n = col.data.len() as i64
-    let t = if n >= 30 { 1.96 } else if n >= 10 { 2.1 } else { 2.3 }
-    let margin = t * std / (n as f64).sqrt()
-    Ok((mean - margin, mean + margin))
-}
-
-pub fn epistemic_combine_columns(
-    left: &Column,
-    right: &Column,
-    op: &str,
-) -> Result<Column, TransformError> {
-    match (&left.data, &right.data) {
-        (ColumnData::F64(vl), ColumnData::F64(vr)) => {
-            if vl.len() != vr.len() {
-                return Err(TransformError::ShapeMismatch("Column length mismatch".to_string()))
-            }
-            var result = Vec::new()
-            var i = 0
-            while i < vl.len() {
-                let val = match op {
-                    "add" => vl[i] + vr[i],
-                    "sub" => vl[i] - vr[i],
-                    "mul" => vl[i] * vr[i],
-                    "div" => if vr[i] == 0.0 { return Err(TransformError::DivisionByZero) } else { vl[i] / vr[i] },
-                    _ => vl[i] + vr[i],
-                }
-                result.push(val)
-                i = i + 1
-            }
-            Ok(Column {
-                name: format!("({}_{})", left.name, right.name),
-                data: ColumnData::F64(result),
-                nullable: left.nullable || right.nullable,
-                epistemic: true,
-            })
-        }
-        _ => Err(TransformError::TypeError("Non-numeric columns".to_string())),
-    }
-}
-
-pub fn epistemic_apply_func(
-    col: &Column,
-    func_name: &str,
-    confidence: f64,
-) -> Result<f64, TransformError> {
-    match func_name {
-        "mean" => epistemic_mean(col, confidence),
-        "sum" => epistemic_sum(col),
-        "std" => epistemic_std(col),
-        "var" => {
-            let s = epistemic_std(col)?;
-            Ok(s * s)
-        }
-        "min" => {
-            match &col.data {
-                ColumnData::F64(vals) => {
-                    var min_val = vals[0]
-                    var i = 1
-                    while i < vals.len() {
-                        if vals[i] < min_val { min_val = vals[i] }
-                        i = i + 1
-                    }
-                    Ok(min_val)
-                }
-                _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
-            }
-        }
-        "max" => {
-            match &col.data {
-                ColumnData::F64(vals) => {
-                    var max_val = vals[0]
-                    var i = 1
-                    while i < vals.len() {
-                        if vals[i] > max_val { max_val = vals[i] }
-                        i = i + 1
-                    }
-                    Ok(max_val)
-                }
-                _ => Err(TransformError::TypeError("Non-numeric column".to_string())),
-            }
-        }
-        "median" => epistemic_quantile(col, 0.5),
-        _ => Err(TransformError::TypeError(format!("Unknown function: {}", func_name))),
-    }
-}
-
-pub fn epistemic_dataframe_stats(df: &DataFrame) -> DataFrameStats {
-    dataframe_stats(df)
-}
-
-pub fn epistemic_provenance_chain(provenance: &str, step: &str) -> String {
-    format!("{} -> {}", provenance, step)
-}
-
-pub fn epistemic_confidence_decay(initial: f64, n_samples: i64) -> f64 {
-    if n_samples <= 0 { return initial }
-    initial / (1.0 + (n_samples as f64).ln() / 5.0).max(1.0)
+    let n = Epistemic::certain(c1.n_vals as f64)
+    let cov = cov_sum.div(&n)
+    let var1 = var1_sum.div(&n)
+    let var2 = var2_sum.div(&n)
+    cov.div(&var1.sqrt()).div(&var2.sqrt())
 }

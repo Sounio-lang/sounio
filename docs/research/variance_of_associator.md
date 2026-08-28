@@ -7,6 +7,7 @@ validated_by: A6
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.variance-of-associator
 -->
 
+
 <!-- docs:status-note:start -->
 > Docs status: `historical`
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
@@ -15,7 +16,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.varia
 # Variance of the Octonion Associator — GUM First-Order Analysis
 
 **Date**: 2026-04-13
-**Status**: Derivation (β-thread). Numerical check pending.
+**Status**: Derivation (β-thread). Numerical check **closed** (Exp2 2026-07-25).  
+Residual `Var(a·b−a·b)` closed by **β¹⁰** (2026-07-25).  
+Fano closed-form `Var(A)=64σ²` closed by **β¹¹** (2026-07-25): rebuild product variance from FO sensitivities `Σ s_k² σ²_k` (fixes a·a under-count 2σ²→4σ²).
 **Related**: `docs/research/zeta_variance_fix_plan.md`, Part II of the non-associative connectomics draft, `feedback_variance_deep_chains.md`.
 
 ## Why this matters

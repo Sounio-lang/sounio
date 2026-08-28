@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Gate Coverage Audit — checks which TypeKind variants are exercised by tests.
+# Gate Coverage Audit -- checks which TypeKind variants are exercised by tests.
 # For each non-trivial TypeKind, verifies at least one compile-fail or frontend
 # test references a related keyword or type annotation.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 # TypeKind variants that need test coverage (excluding primitives/internal)
 EPISTEMIC_TYPES=(

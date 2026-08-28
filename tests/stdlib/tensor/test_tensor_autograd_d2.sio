@@ -1,0 +1,195 @@
+//@ run-pass
+//@ expect-stdout: D2_AUTOGRAD_TAPE_CLOSURE_FREE_PASS
+
+use tensor::types::{
+    Tensor,
+    shape_scalar, shape1, shape2, shape_eq,
+    tensor_get, tensor_set,
+}
+use tensor::ops::{
+    tensor_zeros, tensor_scalar, tensor_free,
+    tensor_add, tensor_sub, tensor_mul, tensor_matmul, tensor_sum,
+}
+use tensor::tape::{
+    tape_begin, tape_drop, tape_leaf, tape_backward,
+    tape_tensor_add, tape_tensor_sub, tape_tensor_mul, tape_tensor_div,
+    tape_tensor_matmul, tape_tensor_sum, tape_tensor_mean,
+    tape_tensor_reshape, tape_tensor_transpose, tape_tensor_permute,
+    tape_tensor_tanh, tape_tensor_sigmoid, tape_tensor_relu, tape_tensor_gelu,
+    tape_grad_at, tape_value_at, tape_node_count,
+}
+
+fn d2_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn d2_close(a: f64, b: f64, tol: f64) -> bool {
+    d2_abs(a - b) <= tol
+}
+
+fn assert_close(a: f64, b: f64, tol: f64) with Panic {
+    assert(d2_close(a, b, tol))
+}
+
+fn fill_w(t: &!Tensor) with Mut, Panic {
+    tensor_set(t, 0 as usize, 0.20)
+    tensor_set(t, 1 as usize, 0.50)
+    tensor_set(t, 2 as usize, 0.70)
+    tensor_set(t, 3 as usize, 0.30)
+}
+
+fn fill_x(t: &!Tensor) with Mut, Panic {
+    tensor_set(t, 0 as usize, 1.00)
+    tensor_set(t, 1 as usize, 0.40)
+    tensor_set(t, 2 as usize, 0.20)
+    tensor_set(t, 3 as usize, 0.80)
+}
+
+fn fill_b(t: &!Tensor) with Mut, Panic {
+    tensor_set(t, 0 as usize, 0.10)
+    tensor_set(t, 1 as usize, 0.05)
+}
+
+fn fill_y(t: &!Tensor) with Mut, Panic {
+    tensor_set(t, 0 as usize, 0.55)
+    tensor_set(t, 1 as usize, 0.70)
+    tensor_set(t, 2 as usize, 0.90)
+    tensor_set(t, 3 as usize, 0.85)
+}
+
+fn worked_loss(w: &Tensor, x: &Tensor, b: &Tensor, y: &Tensor) -> f64 with Alloc, Mut, Panic, Div {
+    var z0 = tensor_matmul(w, x)
+    var z1 = tensor_add(&z0, b)
+    var z2 = tensor_sub(&z1, y)
+    var z3 = tensor_mul(&z2, &z2)
+    var loss = tensor_sum(&z3, None, false)
+    let out = tensor_get(&loss, 0 as usize)
+    tensor_free(&!z0)
+    tensor_free(&!z1)
+    tensor_free(&!z2)
+    tensor_free(&!z3)
+    tensor_free(&!loss)
+    out
+}
+
+fn finite_diff_w(w: &!Tensor, x: &Tensor, b: &Tensor, y: &Tensor, idx: usize, eps: f64) -> f64 with Alloc, Mut, Panic, Div {
+    let saved = tensor_get(w, idx)
+    tensor_set(w, idx, saved + eps)
+    let plus = worked_loss(w, x, b, y)
+    tensor_set(w, idx, saved - eps)
+    let minus = worked_loss(w, x, b, y)
+    tensor_set(w, idx, saved)
+    (plus - minus) / (2.0 * eps)
+}
+
+fn finite_diff_b(w: &Tensor, x: &Tensor, b: &!Tensor, y: &Tensor, idx: usize, eps: f64) -> f64 with Alloc, Mut, Panic, Div {
+    let saved = tensor_get(b, idx)
+    tensor_set(b, idx, saved + eps)
+    let plus = worked_loss(w, x, b, y)
+    tensor_set(b, idx, saved - eps)
+    let minus = worked_loss(w, x, b, y)
+    tensor_set(b, idx, saved)
+    (plus - minus) / (2.0 * eps)
+}
+
+fn test_worked_example_fd() with Alloc, Mut, Panic, Div {
+    var w = tensor_zeros(shape2(2 as usize, 2 as usize))
+    var x = tensor_zeros(shape2(2 as usize, 2 as usize))
+    var b = tensor_zeros(shape2(2 as usize, 1 as usize))
+    var y = tensor_zeros(shape2(2 as usize, 2 as usize))
+    fill_w(&!w)
+    fill_x(&!x)
+    fill_b(&!b)
+    fill_y(&!y)
+
+    var tape = tape_begin()
+    let wid = tape_leaf(&!tape, &w, true)
+    let xid = tape_leaf(&!tape, &x, false)
+    let bid = tape_leaf(&!tape, &b, true)
+    let yid = tape_leaf(&!tape, &y, false)
+    let z0 = tape_tensor_matmul(&!tape, wid, xid)
+    let z1 = tape_tensor_add(&!tape, z0, bid)
+    let z2 = tape_tensor_sub(&!tape, z1, yid)
+    let z3 = tape_tensor_mul(&!tape, z2, z2)
+    let loss = tape_tensor_sum(&!tape, z3, None, false)
+    tape_backward(&!tape, loss)
+
+    let tape_loss = tape_value_at(&tape, loss, 0 as usize)
+    let fd_loss = worked_loss(&w, &x, &b, &y)
+    assert_close(tape_loss, fd_loss, 1.0e-12)
+
+    let eps = 1.0e-6
+    var i: usize = 0 as usize
+    while i < 4 as usize {
+        let fd = finite_diff_w(&!w, &x, &b, &y, i, eps)
+        assert_close(tape_grad_at(&tape, wid, i), fd, 1.0e-6)
+        i = i + 1 as usize
+    }
+    i = 0 as usize
+    while i < 2 as usize {
+        let fd = finite_diff_b(&w, &x, &!b, &y, i, eps)
+        assert_close(tape_grad_at(&tape, bid, i), fd, 1.0e-6)
+        i = i + 1 as usize
+    }
+
+    assert(tape_node_count(&tape) == 5 as usize)
+    tape_drop(&!tape)
+    tensor_free(&!w)
+    tensor_free(&!x)
+    tensor_free(&!b)
+    tensor_free(&!y)
+}
+
+fn test_repeated_parent_and_op_surface() with Alloc, Mut, Panic, Div {
+    var x = tensor_scalar(3.0)
+    var tape = tape_begin()
+    let xid = tape_leaf(&!tape, &x, true)
+    let x2 = tape_tensor_add(&!tape, xid, xid)
+    let x4 = tape_tensor_mul(&!tape, x2, x2)
+    tape_backward(&!tape, x4)
+    assert_close(tape_value_at(&tape, x4, 0 as usize), 36.0, 1.0e-12)
+    assert_close(tape_grad_at(&tape, xid, 0 as usize), 24.0, 1.0e-12)
+    tape_drop(&!tape)
+    tensor_free(&!x)
+
+    var v = tensor_zeros(shape1(3 as usize))
+    tensor_set(&!v, 0 as usize, 0.0 - 1.0)
+    tensor_set(&!v, 1 as usize, 0.0)
+    tensor_set(&!v, 2 as usize, 2.0)
+    var tape2 = tape_begin()
+    let vid = tape_leaf(&!tape2, &v, true)
+    let th = tape_tensor_tanh(&!tape2, vid)
+    let sg = tape_tensor_sigmoid(&!tape2, th)
+    let rl = tape_tensor_relu(&!tape2, sg)
+    let ge = tape_tensor_gelu(&!tape2, rl)
+    let rs = tape_tensor_reshape(&!tape2, ge, shape2(1 as usize, 3 as usize))
+    let tr = tape_tensor_transpose(&!tape2, rs)
+    var axes = [0 as usize; 8]
+    axes[0] = 1 as usize
+    axes[1] = 0 as usize
+    let pm = tape_tensor_permute(&!tape2, tr, axes)
+    let sm = tape_tensor_mean(&!tape2, pm, None, false)
+    assert(tape_node_count(&tape2) == 8 as usize)
+    tape_drop(&!tape2)
+    tensor_free(&!v)
+
+    var a = tensor_scalar(8.0)
+    var c = tensor_scalar(2.0)
+    var tape3 = tape_begin()
+    let aid = tape_leaf(&!tape3, &a, true)
+    let cid = tape_leaf(&!tape3, &c, true)
+    let div = tape_tensor_div(&!tape3, aid, cid)
+    tape_backward(&!tape3, div)
+    assert_close(tape_grad_at(&tape3, aid, 0 as usize), 0.5, 1.0e-12)
+    assert_close(tape_grad_at(&tape3, cid, 0 as usize), 0.0 - 2.0, 1.0e-12)
+    tape_drop(&!tape3)
+    tensor_free(&!a)
+    tensor_free(&!c)
+}
+
+fn main() -> i32 with Alloc, IO, Mut, Panic, Div {
+    test_worked_example_fd()
+    test_repeated_parent_and_op_surface()
+    println("D2_AUTOGRAD_TAPE_CLOSURE_FREE_PASS")
+    0
+}

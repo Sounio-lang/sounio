@@ -1,0 +1,120 @@
+// bayes_pilot.sio — what is pilot data worth? Imprecise-probability answer.
+//
+// Scenario: an underground H2 storage pilot runs cyclic pressure-hold
+// tests. Before any data, the per-cycle hold probability p is VACUOUS:
+// p ∈ [0, 1], no distribution, no prior shape — pure epistemic ignorance.
+// As cycles accumulate, three inference styles answer "is the seal good?":
+//
+//   1. Frequentist point estimate   k/n              (ignores ignorance)
+//   2. Bayesian Beta(1,1) posterior mean (k+1)/(n+2) (hides it in a prior)
+//   3. Imprecise Dirichlet Model (Walley 1996, JRSS-B 58:3):
+//      with prior strength s and a vacuous prior,
+//      p ∈ [k/(n+s), (k+s)/(n+s)]  — an INTERVAL that is exact,
+//      sampling-free, and whose width s/(n+s) is the priced ignorance.
+//
+// The certification gate is honest: certify when the LOWER bound crosses
+// 0.90. The point estimates cross 0.90 long before the guarantee does.
+// That gap — in cycles, in euros, in calendar time — is the value of
+// Demokritos pilot data, computed before the campaign starts.
+//
+// Pure rational arithmetic: no transcendental helpers, no RNG.
+// Runs on both engines. Reuses stdlib/epistemic::pbox for the box type.
+//
+// Marker: BAYES_PILOT_OK
+
+use epistemic::pbox::*
+
+// ─── IDM posterior (binary case of Walley's imprecise Dirichlet model) ───
+
+fn idm_posterior(k: i64, n: i64, s: f64) -> PBox with Div {
+    let nf = n as f64
+    let kf = k as f64
+    new(kf / (nf + s), (kf + s) / (nf + s))
+}
+
+// ─── the pilot log (deterministic — this is the story, not a simulation) ───
+// 30 cycles in 10 waves of 3. Two failures in wave 3 (a shared batch of
+// seals — the batch-correlation theme again), one in wave 7.
+
+fn failures_up_to(wave: i64) -> i64 {
+    if wave < 3 { return 0 }
+    if wave < 7 { return 2 }
+    3
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    print("=== UHS pilot: the value of data, as a shrinking interval ===")
+    println("")
+    println("")
+    print("prior: p(hold) in [0, 1] — vacuous, s = 2 (Walley IDM)")
+    println("")
+    println("")
+    print(" wave |  n  k | freq  beta-mean |  IDM lower  IDM upper  width")
+    println("")
+
+    let s = 2.0
+    var wave: i64 = 1
+    var certified_n: i64 = 0 - 1
+    while wave <= 10 {
+        let n = wave * 3
+        let k = n - failures_up_to(wave)
+        let nf = n as f64
+        let kf = k as f64
+        let freq = kf / nf
+        let beta_mean = (kf + 1.0) / (nf + 2.0)
+        let post = idm_posterior(k, n, s)
+        print("   "); print(wave)
+        print("   | "); print(n); print("  "); print(k)
+        print(" | "); print(freq)
+        print("  "); print(beta_mean)
+        print(" |  "); print(post.lo)
+        print("  "); print(post.hi)
+        print("  "); println(width(post))
+        if certified_n < 0 {
+            if post.lo >= 0.90 { certified_n = n }
+        }
+        wave = wave + 1
+    }
+    println("")
+
+    // the honest verdict after 30 cycles, 27 holds
+    let final = idm_posterior(27, 30, s)
+    print("after 30 cycles (27 holds):")
+    println("")
+    print("  frequentist says        : "); println(27.0 / 30.0)
+    print("  beta(1,1) mean says     : "); println(28.0 / 32.0)
+    print("  IDM guarantee (lower)   : "); println(final.lo)
+    print("  remaining ignorance     : "); println(width(final))
+    println("")
+
+    // cycles to certify at an ASSUMED fleet-wide success rate r = 0.93
+    // (manufacturer fleet data across sites — NOT observed in this pilot,
+    // whose own rate is 0.90): need k/(n+s) >= 0.90 with k ~= r*n
+    //   =>  n >= 0.90*s / (r - 0.90)
+    // caveat: at the pilot's own 0.90 rate the lower bound approaches
+    // 0.90 from below and NEVER crosses — no campaign size certifies it.
+    let r = 0.93
+    let n_need = 0.90 * s / (r - 0.90)
+    print("cycles to a 0.90 GUARANTEE at assumed fleet rate 0.93: ~")
+    println(n_need)
+    println("")
+
+    print("The point estimate certified at cycle 30. The guarantee does")
+    println("")
+    print("not certify until ~cycle 60 — and at the pilot's own 0.90 rate")
+    println("")
+    print("it never would. Those 30 cycles ARE the price of the prior")
+    println("")
+    print("you refused to invent — and the exact size of the pilot")
+    println("")
+    print("campaign Demokritos should fund. Data value, in advance, exact.")
+    println("")
+
+    if certified_n >= 0 {
+        print("certified within campaign at n = "); println(certified_n)
+    } else {
+        println("not certified within 30 cycles — keep sampling (as computed)")
+    }
+    println("BAYES_PILOT_OK")
+    0
+}

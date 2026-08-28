@@ -1,0 +1,837 @@
+#!/usr/bin/env bash
+# bin/madaros — launcher for the Madaros modular compiler raw ELF.
+#
+# Madaros is the Stage1 self-hosted compiler built from
+# self-hosted/compiler/main.sio. It is distinct from the Stage0 bootstrap
+# compiler (lean_single.sio) which is exposed as bin/souc.
+#
+# The raw modular compiler exposes backend-specific modes. This launcher adds a
+# small stable CLI for normal use and still passes raw modes through unchanged.
+#
+# Usage:
+#   madaros --version
+#   madaros info
+#   madaros check input.sio
+#   madaros build input.sio [-o OUT] [--backend native|gpu]
+#   madaros run input.sio
+#   madaros pkg ...
+#
+# Environment:
+#   SOUNIO_STDLIB_PATH     — forwarded to the raw ELF unchanged
+#   MADAROS_RAW_BIN        — override the underlying modular raw ELF
+#   SOUNIO_MADAROS_BIN     — alias for MADAROS_RAW_BIN
+#   MADAROS_STACK_KB       — soft stack limit (default 524288 = 512 MiB). Measured
+#                            floor 2026-08-13: minimal ok at 16 MiB+, helper at 32 MiB+.
+#                            Set 0 for unlimited. See MADAROS_HARDENING_PLAN_2026-08-12.md.
+#   MADAROS_VMEM_LIMIT_KB  — virtual-memory guard (default 32 GiB)
+#
+# To obtain the raw ELF, run:
+#   make build-madaros
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Resolve the underlying modular raw ELF.
+# Resolution order:
+#   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
+#   2. artifacts/self-hosted/madaros (built by make build-madaros)
+#   3. bin/madaros-linux-x86_64 (checked-in prebuilt)
+_resolve_modular_elf() {
+  local cand
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros" "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+    if [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]]; then
+      echo "$cand"
+      return 0
+    fi
+  done
+  echo "error: madaros: no modular compiler raw ELF found" >&2
+  echo "  tried: MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN, $ROOT_DIR/artifacts/self-hosted/madaros, $ROOT_DIR/bin/madaros-linux-x86_64" >&2
+  echo "  run: make build-madaros" >&2
+  return 1
+}
+
+if ! RAW_MADAROS="$(_resolve_modular_elf)"; then
+  exit 127
+fi
+
+MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
+SCIENCE_BOUNDARY_TOOL="$ROOT_DIR/tools/science_boundary/attestor.py"
+SCIENCE_PACKAGE_RELEASE_TOOL="$ROOT_DIR/tools/science_boundary/package_release.py"
+SCIENCE_BOUNDARY_MODE="auto"
+SCIENCE_MANIFEST=""
+SCIENCE_CLAIM_CONTRACT=""
+SCIENCE_BOUNDARY_RECEIPT=""
+SCIENCE_BOUNDARY_ARGS=()
+
+# Stack reservation (Lane A2-lite of MADAROS_HARDENING_PLAN_2026-08-12).
+# Raw Madaros needs more than the default 8 MiB Linux stack. The EISA v1 bridge
+# lowering path fails through 384 MiB and passes at 448 MiB; reserve 512 MiB.
+# Named reservation replaces blanket unlimited until IR-arena root fix lands.
+# MADAROS_STACK_KB=0 restores unlimited.
+MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+  ulimit -s unlimited 2>/dev/null || true
+else
+  ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
+fi
+
+usage() {
+  cat <<USAGE
+madaros — launcher for the Madaros modular compiler ($RAW_MADAROS)
+
+Usage:
+  madaros --version                     print compiler identity
+  madaros info                          print resolution path
+  madaros check <source.sio|project-dir>
+                                      parse, resolve and typecheck
+  madaros build <source.sio|project-dir> [-o OUT] [--backend native|gpu]
+                                      compile source to native ELF or GPU artifact
+  madaros compile <source.sio|project-dir> [-o OUT]
+                                      alias for build
+  madaros run <source.sio|project-dir>
+                                      compile to a temp ELF and run it
+  madaros pkg <subcommand>...           package-manager commands
+  madaros <raw-compiler-args>...        pass through to the raw ELF
+
+Common modular-compiler modes:
+  madaros --check <source.sio>          raw check mode
+  madaros --native-v2-compile SRC OUT   raw source-to-ELF native-v2 path
+  madaros --native-v2-emit13            emit artifacts/omega/emit13.elf
+  madaros --native-v2-emit-scalar N     emit a scalar witness
+  madaros --version-json                emit version metadata
+  madaros pkg ...                       package manager commands
+
+GPU build options:
+  --backend gpu                         emit PTX via the public GPU build path
+  --gpu-target <target>                 raw GPU target (default: cuda-sm80)
+  --gpu-binary-format <fmt>             raw GPU format/mode selector
+  --gpu-precision <f32|f64>             compatibility alias for GPU mode
+
+Science boundary options:
+  --science-boundary off|advisory|strict
+                                      select the R0-R2 boundary mode
+  --science-manifest <path>            use an explicit science-rings.tsv or sounio.toml
+  --claim-contract <path>              bind a sounio.claim-contract.v1
+  --emit-boundary-receipt <path>       write a deterministic boundary receipt
+
+Strict package release:
+  madaros pkg build [project] --science-boundary strict --claim-contract <path>
+                                      atomically emit a verified .sio-release bundle
+  madaros pkg build ... --release-bundle <path>
+                                      select the final release bundle directory
+  madaros pkg verify <bundle> [--root <project>]
+                                      revalidate bundle, source, policy, compiler, and ELF
+
+Environment:
+  SOUNIO_STDLIB_PATH=<dir>     forwarded to raw ELF
+  MADAROS_RAW_BIN=<path>       override raw ELF
+  SOUNIO_MADAROS_BIN=<path>    override raw ELF (alias)
+USAGE
+}
+
+info() {
+  echo "wrapper:      $0"
+  echo "raw_elf:      $RAW_MADAROS"
+  echo "stdlib:       ${SOUNIO_STDLIB_PATH:-<unset>}"
+  local identity
+  identity="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
+  echo "identity:     $(echo "$identity" | head -n 1)"
+}
+
+version() {
+  local out
+  out="$("$RAW_MADAROS" /dev/null /dev/null 2>/dev/null)" || true
+  echo "$out" | head -n 1
+}
+
+_parse_science_boundary_options() {
+  SCIENCE_BOUNDARY_ARGS=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --)
+        SCIENCE_BOUNDARY_ARGS+=("$@")
+        return 0
+        ;;
+      --science-boundary)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --science-boundary requires off, advisory, or strict" >&2
+          return 2
+        fi
+        SCIENCE_BOUNDARY_MODE="$2"
+        shift 2
+        ;;
+      --science-boundary=*)
+        SCIENCE_BOUNDARY_MODE="${1#*=}"
+        shift
+        ;;
+      --science-manifest)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --science-manifest requires a path" >&2
+          return 2
+        fi
+        SCIENCE_MANIFEST="$2"
+        shift 2
+        ;;
+      --science-manifest=*)
+        SCIENCE_MANIFEST="${1#*=}"
+        shift
+        ;;
+      --claim-contract)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --claim-contract requires a path" >&2
+          return 2
+        fi
+        SCIENCE_CLAIM_CONTRACT="$2"
+        shift 2
+        ;;
+      --claim-contract=*)
+        SCIENCE_CLAIM_CONTRACT="${1#*=}"
+        shift
+        ;;
+      --emit-boundary-receipt)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros: --emit-boundary-receipt requires a path" >&2
+          return 2
+        fi
+        SCIENCE_BOUNDARY_RECEIPT="$2"
+        shift 2
+        ;;
+      --emit-boundary-receipt=*)
+        SCIENCE_BOUNDARY_RECEIPT="${1#*=}"
+        shift
+        ;;
+      *)
+        SCIENCE_BOUNDARY_ARGS+=("$1")
+        shift
+        ;;
+    esac
+  done
+  case "$SCIENCE_BOUNDARY_MODE" in
+    auto|off|advisory|strict) ;;
+    *)
+      echo "error: madaros: invalid --science-boundary mode: $SCIENCE_BOUNDARY_MODE" >&2
+      return 2
+      ;;
+  esac
+}
+
+_args_have_release_bundle() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --release-bundle|--release-bundle=*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+_science_engine_identity() {
+  "$RAW_MADAROS" --version 2>/dev/null | head -n 1
+}
+
+_science_raw_closure_supported() {
+  grep -aqF -- '--science-boundary-closure' "$RAW_MADAROS"
+}
+
+_science_raw_closure_report() {
+  local src="$1"
+  local report="$2"
+  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 120 "$RAW_MADAROS" --science-boundary-closure "$src" ) >"$report"
+}
+
+_science_evaluate() {
+  local src="$1"
+  local receipt="${2:-}"
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "off" && -z "$receipt" ]]; then
+    return 0
+  fi
+  if [[ ! -x "$SCIENCE_BOUNDARY_TOOL" ]]; then
+    # Advisory in auto/off mode without a requested receipt: a plain `souc run`
+    # on a released tarball (which does not bundle the internal governance
+    # tooling under tools/science_boundary/) must not print an error[...] line
+    # for a defect that is already silently non-fatal here -- both call sites
+    # only escalate to a hard failure when mode=strict. Stay loud exactly where
+    # the guarantee is claimed: strict mode, or an explicit receipt request.
+    if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" || -n "$receipt" ]]; then
+      echo "error[E-SRB-000]: science boundary attestor is unavailable: $SCIENCE_BOUNDARY_TOOL" >&2
+    fi
+    return 2
+  fi
+  local command=(
+    python3 "$SCIENCE_BOUNDARY_TOOL" evaluate
+    --source "$src"
+    --mode "$SCIENCE_BOUNDARY_MODE"
+    --compiler "$RAW_MADAROS"
+    --engine-identity "$(_science_engine_identity)"
+  )
+  local closure_report=""
+  # Auto mode still needs the raw collector: the attestor may discover an
+  # ancestor science-rings.tsv or [science] table after option parsing.
+  if [[ "$SCIENCE_BOUNDARY_MODE" != "off" ]] && _science_raw_closure_supported; then
+    closure_report="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-closure.XXXXXX.tsv")"
+    if _science_raw_closure_report "$src" "$closure_report"; then
+      command+=(--closure-report "$closure_report")
+    else
+      rm -f "$closure_report"
+      closure_report=""
+    fi
+  fi
+  if [[ -n "$SCIENCE_MANIFEST" ]]; then
+    command+=(--manifest "$SCIENCE_MANIFEST")
+  fi
+  if [[ -n "$SCIENCE_CLAIM_CONTRACT" ]]; then
+    command+=(--claim-contract "$SCIENCE_CLAIM_CONTRACT")
+  fi
+  if [[ -n "$receipt" ]]; then
+    command+=(--receipt "$receipt")
+  fi
+  local attestor_rc=0
+  if "${command[@]}"; then
+    attestor_rc=0
+  else
+    attestor_rc=$?
+  fi
+  rm -f "$closure_report"
+  return "$attestor_rc"
+}
+
+_science_finalize() {
+  local preflight_receipt="$1"
+  local src="$2"
+  local elf="$3"
+  local artifact_label="$4"
+  local receipt="$5"
+  local command=(
+    python3 "$SCIENCE_BOUNDARY_TOOL" finalize
+    --preflight-receipt "$preflight_receipt"
+    --source "$src"
+    --compiler "$RAW_MADAROS"
+    --elf "$elf"
+    --artifact-label "$artifact_label"
+    --receipt "$receipt"
+  )
+  if [[ -n "$SCIENCE_MANIFEST" ]]; then
+    command+=(--manifest "$SCIENCE_MANIFEST")
+  fi
+  if [[ -n "$SCIENCE_CLAIM_CONTRACT" ]]; then
+    command+=(--claim-contract "$SCIENCE_CLAIM_CONTRACT")
+  fi
+  "${command[@]}"
+}
+
+_science_check_preflight() {
+  local src="$1"
+  local receipt="$SCIENCE_BOUNDARY_RECEIPT"
+  local temporary_receipt=""
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && -z "$receipt" ]]; then
+    temporary_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-check.XXXXXX.json")"
+    receipt="$temporary_receipt"
+  fi
+  set +e
+  _science_evaluate "$src" "$receipt"
+  local boundary_rc=$?
+  set -e
+  if [[ -n "$temporary_receipt" ]]; then
+    rm -f "$temporary_receipt"
+  fi
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && "$boundary_rc" -ne 0 ]]; then
+    return 1
+  fi
+  return 0
+}
+
+find_project_root() {
+  local start="${1:-$PWD}"
+  if [[ -f "$start" ]]; then
+    start="$(dirname "$start")"
+  fi
+  if [[ -d "$start" ]]; then
+    start="$(cd "$start" && pwd)"
+  else
+    return 1
+  fi
+  while [[ "$start" != "/" ]]; do
+    if [[ -f "$start/sounio.toml" ]]; then
+      printf '%s\n' "$start"
+      return 0
+    fi
+    start="$(dirname "$start")"
+  done
+  return 1
+}
+
+project_manifest_value() {
+  local root="$1"
+  local key="$2"
+  python3 - "$root/sounio.toml" "$key" <<'PY'
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    raise SystemExit(3)
+path, key = sys.argv[1], sys.argv[2]
+text = open(path, "rb").read().decode("utf-8")
+data = tomllib.loads(text)
+if key == "package.name":
+    print(data.get("package", {}).get("name", "sounio-project"))
+elif key == "entry":
+    bins = data.get("bin", [])
+    if isinstance(bins, list) and bins:
+        value = bins[0].get("path", "")
+        if value:
+            print(value)
+            raise SystemExit(0)
+    value = data.get("project", {}).get("entry", "")
+    if value:
+        print(value)
+        raise SystemExit(0)
+    value = data.get("lib", {}).get("path", "")
+    if value and "[[bin]]" not in text:
+        print(value)
+        raise SystemExit(0)
+    print("src/main.sio")
+else:
+    raise SystemExit(2)
+PY
+}
+
+resolve_source_or_project() {
+  local candidate="${1:-}"
+  if [[ -n "$candidate" && -f "$candidate" ]]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+
+  local root=""
+  if [[ -n "$candidate" && -d "$candidate" ]]; then
+    root="$(find_project_root "$candidate" || true)"
+  else
+    root="$(find_project_root "$PWD" || true)"
+  fi
+  if [[ -z "$root" ]]; then
+    return 1
+  fi
+
+  local entry
+  entry="$(project_manifest_value "$root" entry)"
+  if [[ ! -f "$root/$entry" ]]; then
+    echo "error: project entry not found: $root/$entry" >&2
+    return 1
+  fi
+  printf '%s\n' "$root/$entry"
+}
+
+project_default_output() {
+  local root="$1"
+  local name
+  name="$(project_manifest_value "$root" package.name)"
+  mkdir -p "$root/target"
+  printf '%s\n' "$root/target/$name"
+}
+
+args_have_output() {
+  local arg
+  for arg in "$@"; do
+    if [[ "$arg" == "-o" || "$arg" == "--output" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+_check_source_arg() {
+  local src="$1"
+  if [[ ! -e "$src" ]]; then
+    echo "error: at $src:0:0 - could not read input file" >&2
+    return 1
+  fi
+}
+
+_run_raw_check() {
+  local src="$1"
+  shift
+  _check_source_arg "$src"
+  if [[ ! -s "$src" ]]; then
+    local tmp_empty
+    tmp_empty="$(mktemp "${TMPDIR:-/tmp}/madaros-empty-check.XXXXXX.sio")"
+    printf '\n' > "$tmp_empty"
+    "$RAW_MADAROS" --check "$tmp_empty" "$@"
+    local rc=$?
+    rm -f "$tmp_empty"
+    return "$rc"
+  fi
+  # Guard: bounded vmem + 120 s timeout. Current Madaros pre-maps a large arena;
+  # older 8/16 GB caps trip the arena guard before larger checks can run.
+  # Lane A1: surface the raw status instead of relying on set -e alone.
+  local rc=0
+  set +e
+  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 120 "$RAW_MADAROS" --check "$src" "$@" )
+  rc=$?
+  set -e
+  return "$rc"
+}
+
+_parse_build_options() {
+  BUILD_OUT="a.out"
+  BUILD_BACKEND="native"
+  BUILD_GPU_TARGET="cuda-sm80"
+  BUILD_GPU_BINARY_FORMAT=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -o|--output)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: $1 requires a path" >&2
+          return 2
+        fi
+        BUILD_OUT="$2"
+        shift 2
+        ;;
+      --backend)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --backend requires native or gpu" >&2
+          return 2
+        fi
+        BUILD_BACKEND="$2"
+        shift 2
+        ;;
+      --gpu-target)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-target requires a target" >&2
+          return 2
+        fi
+        BUILD_GPU_TARGET="$2"
+        shift 2
+        ;;
+      --gpu-binary-format)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-binary-format requires a format" >&2
+          return 2
+        fi
+        BUILD_GPU_BINARY_FORMAT="$2"
+        shift 2
+        ;;
+      --gpu-precision)
+        if [[ $# -lt 2 ]]; then
+          echo "error: madaros build: --gpu-precision requires f32 or f64" >&2
+          return 2
+        fi
+        case "$2" in
+          f32) BUILD_GPU_BINARY_FORMAT="f32" ;;
+          f64) BUILD_GPU_BINARY_FORMAT="" ;;
+          *)
+            echo "error: madaros build: unsupported --gpu-precision: $2" >&2
+            return 2
+            ;;
+        esac
+        shift 2
+        ;;
+      *)
+        echo "error: madaros build: unsupported option: $1" >&2
+        return 2
+        ;;
+    esac
+  done
+  case "$BUILD_BACKEND" in
+    native|"") BUILD_BACKEND="native" ;;
+    gpu) ;;
+    *)
+      echo "error: madaros build: unsupported backend: $BUILD_BACKEND" >&2
+      return 2
+      ;;
+  esac
+}
+
+_compile_source_to_artifact() {
+  # Lane A1: always propagate the raw compiler exit status. Non-zero after a
+  # partial write is still failure — never "file non-empty alone".
+  local src="$1"
+  local out="$2"
+  local rc=0
+  if [[ "$BUILD_BACKEND" == "gpu" ]]; then
+    local gpu_args=("$src" -o "$out" --gpu-target "$BUILD_GPU_TARGET")
+    if [[ -n "$BUILD_GPU_BINARY_FORMAT" ]]; then
+      gpu_args+=(--gpu-binary-format "$BUILD_GPU_BINARY_FORMAT")
+    fi
+    set +e
+    ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "${gpu_args[@]}" )
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 ]]; then
+      echo "error: madaros build: compiler exited with status $rc" >&2
+      if [[ -s "$out" ]]; then
+        echo "error: madaros build: discarding partial GPU artifact at $out" >&2
+        rm -f "$out"
+      fi
+      return "$rc"
+    fi
+    if [[ ! -s "$out" ]]; then
+      echo "error: madaros build: compiler produced no GPU artifact at $out" >&2
+      return 1
+    fi
+    return 0
+  fi
+  set +e
+  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$src" -o "$out" )
+  rc=$?
+  set -e
+  if [[ $rc -ne 0 ]]; then
+    echo "error: madaros build: compiler exited with status $rc" >&2
+    if [[ -s "$out" ]]; then
+      echo "error: madaros build: discarding partial ELF at $out" >&2
+      rm -f "$out"
+    fi
+    return "$rc"
+  fi
+  if [[ ! -s "$out" ]]; then
+    echo "error: madaros build: compiler produced no ELF at $out" >&2
+    return 1
+  fi
+  chmod +x "$out"
+}
+
+_build_source() {
+  local src="$1"
+  shift
+  _check_source_arg "$src"
+  if [[ ! -s "$src" ]]; then
+    echo "error: madaros build: source is empty: $src" >&2
+    return 1
+  fi
+  _parse_build_options "$@"
+  local out="$BUILD_OUT"
+  local artifact_label="$out"
+  if [[ "${SOUNIO_INTERNAL_PACKAGE_RELEASE:-0}" == "1" && -n "${SOUNIO_SCIENCE_ARTIFACT_LABEL:-}" ]]; then
+    artifact_label="$SOUNIO_SCIENCE_ARTIFACT_LABEL"
+  fi
+  local receipt="$SCIENCE_BOUNDARY_RECEIPT"
+  local preflight_receipt=""
+  local temporary_preflight=""
+  mkdir -p "$(dirname "$out")"
+  rm -f "$out"
+
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && -z "$receipt" ]]; then
+    receipt="${out}.boundary.json"
+  fi
+  if [[ -n "$receipt" && "$(realpath -m "$receipt")" == "$(realpath -m "$out")" ]]; then
+    echo "error[E-SRB-000]: boundary receipt path must differ from compiler output" >&2
+    rm -f "$out"
+    return 2
+  fi
+  if [[ -n "$receipt" ]]; then
+    mkdir -p "$(dirname "$receipt")"
+    if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+      rm -f "$receipt"
+    fi
+    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.XXXXXX.json")"
+    temporary_preflight="$preflight_receipt"
+  elif [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+    preflight_receipt="$(mktemp "${TMPDIR:-/tmp}/sounio-boundary-build.XXXXXX.json")"
+    temporary_preflight="$preflight_receipt"
+  fi
+
+  set +e
+  _science_evaluate "$src" "$preflight_receipt"
+  local boundary_rc=$?
+  set -e
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" && "$boundary_rc" -ne 0 ]]; then
+    rm -f "$temporary_preflight" "$out"
+    return 1
+  fi
+
+  if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+    local temp_out
+    local temp_receipt
+    temp_out="$(mktemp "$(dirname "$out")/.srb-$(basename "$out").XXXXXX")"
+    rm -f "$temp_out"
+    if ! _compile_source_to_artifact "$src" "$temp_out"; then
+      rm -f "$temp_out" "$temporary_preflight" "$out"
+      return 1
+    fi
+    temp_receipt="$(mktemp "$(dirname "$receipt")/.srb-$(basename "$receipt").XXXXXX")"
+    rm -f "$temp_receipt"
+    if ! _science_finalize "$preflight_receipt" "$src" "$temp_out" "$artifact_label" "$temp_receipt"; then
+      rm -f "$temp_out" "$temp_receipt" "$temporary_preflight" "$out" "$receipt"
+      return 1
+    fi
+    if ! mv -f "$temp_receipt" "$receipt"; then
+      rm -f "$temp_out" "$temp_receipt" "$temporary_preflight" "$out" "$receipt"
+      return 1
+    fi
+    if ! mv -f "$temp_out" "$out"; then
+      rm -f "$temp_out" "$temporary_preflight" "$out" "$receipt"
+      return 1
+    fi
+    rm -f "$temporary_preflight"
+    return 0
+  fi
+
+  if ! _compile_source_to_artifact "$src" "$out"; then
+    rm -f "$temporary_preflight"
+    return 1
+  fi
+  if [[ -n "$receipt" && -n "$preflight_receipt" ]]; then
+    if ! _science_finalize "$preflight_receipt" "$src" "$out" "$artifact_label" "$receipt"; then
+      echo "warning[W-SRB-RECEIPT-001]: advisory receipt finalization failed" >&2
+    fi
+  fi
+  rm -f "$temporary_preflight"
+}
+
+_run_source() {
+  local src="$1"
+  shift
+  local tmp_dir out
+  tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/madaros-run.XXXXXX")"
+  out="$tmp_dir/main.elf"
+  _build_source "$src" -o "$out"
+  "$out" "$@"
+  local rc=$?
+  rm -rf "$tmp_dir"
+  return "$rc"
+}
+
+# Parse science-boundary options before the stable subcommand surface. Options
+# are accepted anywhere before `--` and never reach the raw compiler.
+if ! _parse_science_boundary_options "$@"; then
+  exit 2
+fi
+set -- "${SCIENCE_BOUNDARY_ARGS[@]}"
+
+# Parse subcommands.
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 0
+fi
+
+case "$1" in
+  --version|-V)
+    version
+    ;;
+  info)
+    info
+    ;;
+  check)
+    shift
+    candidate="${1:-}"
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros check requires <source.sio> or a project with sounio.toml" >&2
+      exit 2
+    fi
+    if [[ -n "$candidate" ]]; then
+      shift
+    fi
+    if ! _science_check_preflight "$src"; then
+      exit 1
+    fi
+    _run_raw_check "$src" "$@"
+    ;;
+  build|compile)
+    shift
+    if [[ "${1:-}" == "-h" || "${1:-}" == "--help" || "${1:-}" == "help" ]]; then
+      usage
+      exit 0
+    fi
+    candidate="${1:-}"
+    if [[ -n "$candidate" && "$candidate" != -* ]]; then
+      shift
+    else
+      candidate=""
+    fi
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros build requires <source.sio> or a project with sounio.toml" >&2
+      exit 2
+    fi
+    project_root=""
+    if [[ -z "$candidate" || -d "$candidate" ]]; then
+      project_root="$(find_project_root "${candidate:-$PWD}" || true)"
+    fi
+    if [[ -n "$project_root" ]] && ! args_have_output "$@"; then
+      set -- "$@" -o "$(project_default_output "$project_root")"
+    fi
+    _build_source "$src" "$@"
+    ;;
+  run)
+    shift
+    candidate="${1:-}"
+    if ! src="$(resolve_source_or_project "$candidate")"; then
+      echo "error: madaros run requires <source.sio> or a project with sounio.toml" >&2
+      exit 2
+    fi
+    if [[ -n "$candidate" ]]; then
+      shift
+    fi
+    _run_source "$src" "$@"
+    ;;
+  pkg)
+    shift
+    pkg_subcommand="${1:-}"
+    if [[ "$pkg_subcommand" == "build" && "$SCIENCE_BOUNDARY_MODE" != "strict" ]] && _args_have_release_bundle "$@"; then
+      echo "error[E-SRB-RELEASE-002]: --release-bundle requires --science-boundary strict" >&2
+      echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=release_bundle_without_strict_mode" >&2
+      exit 1
+    fi
+    if [[ "$pkg_subcommand" == "build" && "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+      shift
+      if [[ -z "$SCIENCE_CLAIM_CONTRACT" ]]; then
+        echo "error[E-SRB-RELEASE-002]: strict package release requires --claim-contract <path>" >&2
+        echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=missing_claim_contract" >&2
+        exit 1
+      fi
+      if [[ -n "$SCIENCE_BOUNDARY_RECEIPT" ]]; then
+        echo "error[E-SRB-RELEASE-002]: pkg build strict owns its receipt path inside the release bundle" >&2
+        echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=external_receipt_path" >&2
+        exit 1
+      fi
+      if [[ ! -x "$SCIENCE_PACKAGE_RELEASE_TOOL" ]]; then
+        echo "error[E-SRB-RELEASE-001]: package release tool is unavailable: $SCIENCE_PACKAGE_RELEASE_TOOL" >&2
+        echo "PACKAGE_BOUNDARY_RELEASE_REFUSED reason=release_tool_unavailable" >&2
+        exit 1
+      fi
+      release_command=(
+        python3 "$SCIENCE_PACKAGE_RELEASE_TOOL" build
+        --launcher "$0"
+        --compiler "$RAW_MADAROS"
+        --claim-contract "$SCIENCE_CLAIM_CONTRACT"
+      )
+      if [[ -n "$SCIENCE_MANIFEST" ]]; then
+        release_command+=(--manifest "$SCIENCE_MANIFEST")
+      fi
+      exec "${release_command[@]}" "$@"
+    fi
+    if [[ "$pkg_subcommand" == "verify" ]]; then
+      shift
+      bundle="${1:-}"
+      if [[ -z "$bundle" || "$bundle" == -* ]]; then
+        echo "error[E-SRB-RELEASE-001]: pkg verify requires <bundle>" >&2
+        exit 2
+      fi
+      shift
+      exec python3 "$SCIENCE_PACKAGE_RELEASE_TOOL" verify \
+        --bundle "$bundle" --compiler "$RAW_MADAROS" "$@"
+    fi
+    ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" pkg "$@" )
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    if [[ "$1" == "--check" && $# -ge 2 ]]; then
+      if ! _science_check_preflight "$2"; then
+        exit 1
+      fi
+      _run_raw_check "$2" "${@:3}"
+      exit $?
+    fi
+    if [[ "$SCIENCE_BOUNDARY_MODE" == "strict" ]]; then
+      case "$1" in
+        --native-v2-*|*.sio)
+          echo "error[E-SRB-000]: strict science boundary cannot attest raw compiler pass-through; use 'madaros build'" >&2
+          exit 1
+          ;;
+      esac
+    fi
+    # Pass everything through to the raw ELF unchanged (guarded).
+    ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$@" )
+    ;;
+esac

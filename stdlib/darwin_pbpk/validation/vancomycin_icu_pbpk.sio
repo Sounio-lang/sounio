@@ -1,0 +1,270 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// darwin_pbpk/validation/vancomycin_icu_pbpk.sio — Vancomycin 2-Comp IV Validation
+//
+// Validates the 2-compartment IV infusion PBPK model against ASHP/SIDP/IDSA 2020
+// targets and Matzke 1984 / Roberts 2011 population PK benchmarks.
+//
+// Standard test patient: 70 kg, CrCl=90 mL/min, 15 mg/kg q12h (1050 mg), 1h infusion
+//
+// Gate tests:
+//   T1: AUC24 ≥ 400 mg·h/L (steady-state, analytical; ASHP 2020 lower efficacy target)
+//   T2: AUC24 ≤ 700 mg·h/L (safety tolerance; steady-state)
+//   T3: Cmax (end of infusion) in [15, 55] mg/L (RK4 simulation)
+//   T4: Pre-dose-2 trough in [5, 25] mg/L (RK4 simulation)
+//   T5: AUC(CrCl=20) > AUC(CrCl=90) × 1.5 (renal impairment raises AUC ≥ 50%)
+//   T6: Terminal t½ in [4, 18] h (2-comp λz from single-dose log-linear fit)
+//
+// 2-comp IV model (Roberts 2011):
+//   Matzke 1984 CL: CL (mL/min) = 0.689 × CrCl (mL/min) + 3.66
+//   Roberts 2011:  Vc = 0.40 L/kg, Vp = 0.30 L/kg, Q = 2.99 L/h
+
+// ============================================================================
+// MATH HELPERS
+// ============================================================================
+
+fn vc_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn vc_sqrt(x: f64) -> f64 with Mut, Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 12 { y = (y + x / y) * 0.5; i = i + 1 }
+    y
+}
+
+// ============================================================================
+// 2-COMP IV ODE (Roberts 2011)
+// ============================================================================
+// State: cc = central concentration (mg/L), cp = peripheral concentration (mg/L)
+//
+// dCc/dt = R_inf/Vc - (CL/Vc)·Cc - (Q/Vc)·(Cc - Cp)
+// dCp/dt = (Q/Vp)·(Cc - Cp)
+// R_inf in mg/h (zero outside infusion window)
+
+struct VancoState { cc: f64, cp: f64 }
+
+struct VancoSimOut { cmax: f64, trough: f64 }
+
+struct VancoODE { cl_lh: f64, vc_l: f64, vp_l: f64, q_lh: f64 }
+
+fn vc_rhs(st: VancoState, r_mg_h: f64, p: VancoODE) -> VancoState with Div {
+    let dcc = r_mg_h / p.vc_l
+              - p.cl_lh / p.vc_l * st.cc
+              - p.q_lh  / p.vc_l * (st.cc - st.cp)
+    let dcp = p.q_lh / p.vp_l * (st.cc - st.cp)
+    VancoState { cc: dcc, cp: dcp }
+}
+
+fn vc_add(s: VancoState, ds: VancoState, h: f64) -> VancoState {
+    VancoState { cc: s.cc + h * ds.cc, cp: s.cp + h * ds.cp }
+}
+
+fn vc_rk4(st: VancoState, r: f64, dt: f64, p: VancoODE) -> VancoState with Div {
+    let k1 = vc_rhs(st, r, p)
+    let k2 = vc_rhs(vc_add(st, k1, 0.5 * dt), r, p)
+    let k3 = vc_rhs(vc_add(st, k2, 0.5 * dt), r, p)
+    let k4 = vc_rhs(vc_add(st, k3,       dt), r, p)
+    VancoState {
+        cc: st.cc + dt * (k1.cc + 2.0 * k2.cc + 2.0 * k3.cc + k4.cc) / 6.0,
+        cp: st.cp + dt * (k1.cp + 2.0 * k2.cp + 2.0 * k3.cp + k4.cp) / 6.0,
+    }
+}
+
+// Simulate 2-dose q12h regimen over 24h. Returns Cmax and pre-dose-2 trough.
+// dt=0.5h; infusion from t=0 to inf_h and from t=12h to 12+inf_h.
+fn vc_simulate(crcl: f64, weight: f64, dose_mg: f64, inf_h: f64) -> VancoSimOut
+    with Mut, Div
+{
+    let cl_lh = (0.689 * crcl + 3.66) * 0.06
+    let vc_l  = 0.40 * weight
+    let vp_l  = 0.30 * weight
+    let p     = VancoODE { cl_lh: cl_lh, vc_l: vc_l, vp_l: vp_l, q_lh: 2.99 }
+    let r_on  = dose_mg / inf_h
+    let dt    = 0.5
+
+    var st     = VancoState { cc: 0.0, cp: 0.0 }
+    var t      = 0.0
+    var cmax   = 0.0
+    var trough = 0.0
+
+    while t < 24.0 {
+        // Piecewise-constant infusion rate
+        let r = if t < inf_h { r_on } else {
+                    if t >= 12.0 && t < 12.0 + inf_h { r_on } else { 0.0 }
+                }
+
+        // Trough: last Cc value before second dose (t in [11, 12))
+        if t >= 11.0 && t < 12.0 { trough = st.cc }
+
+        st = vc_rk4(st, r, dt, p)
+        t  = t + dt
+        if st.cc > cmax { cmax = st.cc }
+    }
+
+    VancoSimOut { cmax: cmax, trough: trough }
+}
+
+// Terminal t½ from single-dose simulation via two-point log-linear at t=12h and t=24h.
+fn vc_thalf(crcl: f64, weight: f64, dose_mg: f64, inf_h: f64) -> f64
+    with Mut, Div, Panic
+{
+    let cl_lh = (0.689 * crcl + 3.66) * 0.06
+    let vc_l  = 0.40 * weight
+    let vp_l  = 0.30 * weight
+    let p     = VancoODE { cl_lh: cl_lh, vc_l: vc_l, vp_l: vp_l, q_lh: 2.99 }
+    let r_on  = dose_mg / inf_h
+    let dt    = 0.5
+
+    var st  = VancoState { cc: 0.0, cp: 0.0 }
+    var t   = 0.0
+    var c12 = 0.0
+    var c24 = 0.0
+
+    while t < 36.0 {
+        let r = if t < inf_h { r_on } else { 0.0 }
+        st = vc_rk4(st, r, dt, p)
+        t  = t + dt
+        if vc_abs(t - 12.0) < dt * 0.6 { c12 = st.cc }
+        if vc_abs(t - 24.0) < dt * 0.6 { c24 = st.cc }
+    }
+
+    if c12 <= 0.0 || c24 <= 0.0 || c12 <= c24 { return 0.0 }
+
+    // ln(c12/c24) via artanh series: ln(r) = 2·artanh((r-1)/(r+1))
+    let ratio = c12 / c24
+    let x     = (ratio - 1.0) / (ratio + 1.0)
+    var ln_r  = 0.0
+    var term  = x
+    var k     = 0
+    while k < 20 {
+        ln_r = ln_r + term / (2.0 * (k as f64) + 1.0)
+        term = term * x * x
+        k    = k + 1
+    }
+    ln_r = 2.0 * ln_r
+
+    if ln_r <= 0.0 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    ln2 / (ln_r / 12.0)    // λ = ln(c12/c24) / Δt = ln_r / 12h
+}
+
+// ============================================================================
+// GATE TESTS
+// ============================================================================
+
+fn test_auc24_lower() -> i32 with IO, Div {
+    // T1: Steady-state AUC24 ≥ 400 mg·h/L (analytical: Dose_total / CL)
+    // Patient: 70 kg, CrCl=90, 15 mg/kg q12h (1050 mg)
+    let crcl    = 90.0
+    let dose_mg = 15.0 * 70.0
+    let cl_lh   = (0.689 * crcl + 3.66) * 0.06
+    let auc24   = 2.0 * dose_mg / cl_lh   // 2 doses in 24h at steady state
+    if auc24 >= 400.0 {
+        println("T1 PASS: AUC24 >= 400 mg*h/L (efficacy floor)")
+        1
+    } else {
+        print("T1 FAIL: AUC24=")
+        print(auc24)
+        println(" mg*h/L (expected >=400)")
+        0
+    }
+}
+
+fn test_auc24_upper() -> i32 with IO, Div {
+    // T2: Steady-state AUC24 ≤ 700 mg·h/L (safety tolerance)
+    let crcl    = 90.0
+    let dose_mg = 15.0 * 70.0
+    let cl_lh   = (0.689 * crcl + 3.66) * 0.06
+    let auc24   = 2.0 * dose_mg / cl_lh
+    if auc24 <= 700.0 {
+        println("T2 PASS: AUC24 <= 700 mg*h/L (safety ceiling)")
+        1
+    } else {
+        print("T2 FAIL: AUC24=")
+        print(auc24)
+        println(" mg*h/L (expected <=700)")
+        0
+    }
+}
+
+fn test_cmax() -> i32 with IO, Mut, Div {
+    // T3: Peak Cc (end of 1h infusion) in [15, 55] mg/L
+    let r = vc_simulate(90.0, 70.0, 15.0 * 70.0, 1.0)
+    if r.cmax >= 15.0 && r.cmax <= 55.0 {
+        println("T3 PASS: Cmax in [15, 55] mg/L")
+        1
+    } else {
+        print("T3 FAIL: Cmax=")
+        print(r.cmax)
+        println(" mg/L (expected 15-55)")
+        0
+    }
+}
+
+fn test_trough() -> i32 with IO, Mut, Div {
+    // T4: Pre-dose-2 trough in [5, 25] mg/L
+    let r = vc_simulate(90.0, 70.0, 15.0 * 70.0, 1.0)
+    if r.trough >= 5.0 && r.trough <= 25.0 {
+        println("T4 PASS: Trough in [5, 25] mg/L")
+        1
+    } else {
+        print("T4 FAIL: Trough=")
+        print(r.trough)
+        println(" mg/L (expected 5-25)")
+        0
+    }
+}
+
+fn test_renal_auc() -> i32 with IO, Div {
+    // T5: AUC(CrCl=20) > AUC(CrCl=90) × 1.5 — renal impairment raises AUC substantially
+    let dose_mg = 15.0 * 70.0    // same dose, different CrCl
+    let cl_std  = (0.689 * 90.0 + 3.66) * 0.06
+    let cl_imp  = (0.689 * 20.0 + 3.66) * 0.06
+    let auc_std = 2.0 * dose_mg / cl_std
+    let auc_imp = 2.0 * dose_mg / cl_imp
+    if auc_imp > auc_std * 1.5 {
+        println("T5 PASS: AUC(CrCl=20) > 1.5 * AUC(CrCl=90)")
+        1
+    } else {
+        print("T5 FAIL: AUC ratio=")
+        print(auc_imp / auc_std)
+        println(" (expected >1.5)")
+        0
+    }
+}
+
+fn test_thalf() -> i32 with IO, Mut, Div, Panic {
+    // T6: Terminal t½ in [4, 18] h (2-comp model, normal renal function)
+    let thalf = vc_thalf(90.0, 70.0, 15.0 * 70.0, 1.0)
+    if thalf >= 4.0 && thalf <= 18.0 {
+        println("T6 PASS: t_half in [4, 18] h")
+        1
+    } else {
+        print("T6 FAIL: t_half=")
+        print(thalf)
+        println(" h (expected 4-18)")
+        0
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var passed = 0
+    passed = passed + test_auc24_lower()
+    passed = passed + test_auc24_upper()
+    passed = passed + test_cmax()
+    passed = passed + test_trough()
+    passed = passed + test_renal_auc()
+    passed = passed + test_thalf()
+    if passed == 6 {
+        println("ALL PASS")
+    } else {
+        print("PARTIAL: ")
+        print(passed)
+        println("/6 passed")
+    }
+    0
+}

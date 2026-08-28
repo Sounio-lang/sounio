@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.omega-sprint5-scaffold
 -->
 
-
 # Omega Sprint 5 Scaffold
 
 This scaffold starts Sprint 5 from the locked Sprint 4 Genesis baseline.

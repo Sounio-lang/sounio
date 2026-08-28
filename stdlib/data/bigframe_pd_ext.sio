@@ -1,0 +1,178 @@
+// data::bigframe_pd_ext — pandas.Series extensions: 2-column rolling, windowed order statistics,
+// more elementwise + reductions. Completes the pandas.Series surface. Self-contained.
+use data::bigframe::*
+
+fn pdx_sqrt(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    let b = f64_to_bits(x); write_i64(sc, 0, (b + 4607182418800017408) >> 1)
+    var y = read_f64(sc as *mut f64, 0); if y < 0.0 { y = 0.0 - y }
+    y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y); y = 0.5 * (y + x / y)
+    y
+}
+fn pdx_sort(buf: *mut f64, m: i64) with Mut, Div, Panic {
+    var gap = m / 2
+    while gap > 0 {
+        var i = gap
+        while i < m { let tmp = read_f64(buf, i); var j = i
+            while j >= gap && read_f64(buf, j - gap) > tmp { write_f64(buf, j, read_f64(buf, j - gap)); j = j - gap }
+            write_f64(buf, j, tmp); i = i + 1 }
+        gap = gap / 2
+    }
+}
+fn pdx_quant(buf: *mut f64, m: i64, q: f64) -> f64 with Mut, Div, Panic {
+    if m == 1 { return read_f64(buf, 0) }
+    let h = q * ((m - 1) as f64); let lo = h as i64; let fr = h - (lo as f64)
+    if lo >= m - 1 { return read_f64(buf, m - 1) }
+    read_f64(buf, lo) + fr * (read_f64(buf, lo + 1) - read_f64(buf, lo))
+}
+
+/// 2-COLUMN ROLLING engine (trailing window w). c1,c2 -> col.
+fn pdx_roll2(src: &BigFrame, c1: i64, c2: i64, w: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n; let ncx = bf_ncols(src)
+    if c1 < 0 || c1 >= ncx || c2 < 0 || c2 >= ncx || n <= 0 || w <= 0 { return out }
+    let p1 = bf_col_ptr(src, c1) as *mut f64; let p2 = bf_col_ptr(src, c2) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        var lo = i - w + 1; if lo < 0 { lo = 0 }
+        var sa = 0.0; var sb = 0.0; var saa = 0.0; var sbb = 0.0; var sab = 0.0; var cnt = 0.0
+        var j = lo
+        while j <= i { let a = read_f64(p1, j); let b = read_f64(p2, j); sa = sa + a; sb = sb + b
+            saa = saa + a * a; sbb = sbb + b * b; sab = sab + a * b; cnt = cnt + 1.0; j = j + 1 }
+        let cov = sab / cnt - (sa / cnt) * (sb / cnt)
+        let va = saa / cnt - (sa / cnt) * (sa / cnt); let vb = sbb / cnt - (sb / cnt) * (sb / cnt)
+        var covs = 0.0; if cnt > 1.0 { covs = (sab - sa * sb / cnt) / (cnt - 1.0) }
+        var v = 0.0
+        if mode == 0 { v = covs } else { if mode == 1 { let de = pdx_sqrt(va, sc) * pdx_sqrt(vb, sc); if de > 0.0 { v = cov / de } } else { if mode == 2 { v = sab } else { if mode == 3 { if va > 0.0 { v = cov / va } } else { if mode == 4 { v = cov } else { if mode == 5 { let de = va * vb; if de > 0.0 { v = cov * cov / de } } else { v = sab / cnt } } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(sc as *mut i8); out
+}
+/// WINDOWED ORDER-STATISTIC engine (trailing window w, per-window sort). col -> col.
+fn pdx_rollsort(src: &BigFrame, col: i64, w: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || w <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let buf = heap_alloc(w * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        var lo = i - w + 1; if lo < 0 { lo = 0 }
+        let m = i - lo + 1
+        var j = lo; while j <= i { write_f64(buf, j - lo, read_f64(cp, j)); j = j + 1 }
+        pdx_sort(buf, m)
+        var v = 0.0
+        if mode == 0 { v = pdx_quant(buf, m, 0.5) } else { if mode == 1 { v = pdx_quant(buf, m, 0.1) } else { if mode == 2 { v = pdx_quant(buf, m, 0.25) } else { if mode == 3 { v = pdx_quant(buf, m, 0.75) } else { if mode == 4 { v = pdx_quant(buf, m, 0.9) } else { v = pdx_quant(buf, m, 0.75) - pdx_quant(buf, m, 0.25) } } } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(buf as *mut i8); out
+}
+/// EXPANDING ORDER-STATISTIC engine (0..i, per-step sort). col -> col.
+fn pdx_expandsort(src: &BigFrame, col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    let buf = heap_alloc(n * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let m = i + 1
+        var j: i64 = 0; while j <= i { write_f64(buf, j, read_f64(cp, j)); j = j + 1 }
+        pdx_sort(buf, m)
+        var v = 0.0
+        if mode == 0 { v = pdx_quant(buf, m, 0.5) } else { if mode == 1 { v = pdx_quant(buf, m, 0.25) } else { if mode == 2 { v = pdx_quant(buf, m, 0.75) } else { v = pdx_quant(buf, m, 0.75) - pdx_quant(buf, m, 0.25) } } }
+        write_f64(op, i, v); i = i + 1
+    }
+    heap_free(buf as *mut i8); out
+}
+/// MORE ELEMENTWISE scalar engine. col,s -> col.
+fn pdx_smap(src: &BigFrame, col: i64, s: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { let x = read_f64(cp, i); var ax = x; if ax < 0.0 { ax = 0.0 - ax }; var v = 0.0
+        if mode == 0 { if x == s { v = 1.0 } } else { if mode == 1 { if x != s { v = 1.0 } } else { if mode == 2 { if x < s { v = 1.0 } } else { if mode == 3 { if x <= s { v = 1.0 } } else { if mode == 4 { v = (x as i64) as f64; if v > x { v = v - 1.0 } } else { if mode == 5 { v = (x as i64) as f64; if v < x { v = v + 1.0 } } else { if mode == 6 { if x > 0.0 { v = 1.0 } else { if x < 0.0 { v = 0.0 - 1.0 } } } else { if mode == 7 { if x != 0.0 { v = 1.0 / x } } else { if mode == 8 { v = ax } else { if mode == 9 { v = 0.0 - x } else { if mode == 10 { v = x * x } else { v = x * x * x } } } } } } } } } } }
+        write_f64(op, i, v); i = i + 1 }
+    out
+}
+/// LEAD / higher-diff engine. col,k -> col.
+fn pdx_lag(src: &BigFrame, col: i64, k: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src); var out = bf_new(1, n); out.n_rows = n
+    if col < 0 || col >= bf_ncols(src) || n <= 0 || k < 1 { return out }
+    let cp = bf_col_ptr(src, col) as *mut f64; let op = bf_col_ptr(&out, 0) as *mut f64
+    var i: i64 = 0
+    while i < n { var v = 0.0
+        if mode == 0 { if i + k < n { v = read_f64(cp, i + k) } } else { if mode == 1 { if i >= 2 { v = read_f64(cp, i) - 2.0 * read_f64(cp, i - 1) + read_f64(cp, i - 2) } } else { if mode == 2 { if i + k < n { v = read_f64(cp, i + k) - read_f64(cp, i) } } else { if i >= k { var d = read_f64(cp, i) - read_f64(cp, i - k); if d < 0.0 { d = 0.0 - d }; v = d } } } }
+        write_f64(op, i, v); i = i + 1 }
+    out
+}
+/// MORE REDUCTIONS engine. col -> scalar.
+fn pdx_reduce(src: &BigFrame, col: i64, mode: i64) -> f64 with Alloc, Mut, Div, Panic {
+    let n = bf_nrows(src)
+    if col < 0 || col >= bf_ncols(src) || n <= 0 { return 0.0 }
+    let cp = bf_col_ptr(src, col) as *mut f64; let sc = heap_alloc(8) as *mut i64
+    let nf = n as f64
+    var sum = 0.0; var i: i64 = 0
+    while i < n { sum = sum + read_f64(cp, i); i = i + 1 }
+    let mean = sum / nf
+    var ssq = 0.0; var s3 = 0.0; var s4 = 0.0; var maxabs = 0.0
+    var minabs = read_f64(cp, 0); if minabs < 0.0 { minabs = 0.0 - minabs }
+    var mn = read_f64(cp, 0); var mx = read_f64(cp, 0); var sumpos = 0.0; var sumneg = 0.0; var npos = 0.0
+    i = 0
+    while i < n { let x = read_f64(cp, i); let d = x - mean; ssq = ssq + x * x; s3 = s3 + d * d * d; s4 = s4 + d * d * d * d
+        var ax = x; if ax < 0.0 { ax = 0.0 - ax }; if ax > maxabs { maxabs = ax }; if ax < minabs { minabs = ax }
+        if x > mx { mx = x }; if x < mn { mn = x }
+        if x > 0.0 { sumpos = sumpos + x; npos = npos + 1.0 }; if x < 0.0 { sumneg = sumneg + x }
+        i = i + 1 }
+    let m2 = ssq / nf - mean * mean; let sd = pdx_sqrt(m2, sc)
+    let m3 = s3 / nf; let m4 = s4 / nf
+    var g1 = 0.0; if m2 > 0.0 { g1 = m3 / (m2 * sd) }
+    var g2 = 0.0; if m2 > 0.0 { g2 = m4 / (m2 * m2) - 3.0 }
+    var sk_s = 0.0; var ku_s = 0.0
+    if nf > 2.0 { sk_s = g1 * pdx_sqrt(nf * (nf - 1.0), sc) / (nf - 2.0) }
+    if nf > 3.0 { ku_s = ((nf + 1.0) * g2 + 6.0) * (nf - 1.0) / ((nf - 2.0) * (nf - 3.0)) }
+    var r = 0.0
+    if mode == 0 { r = maxabs } else { if mode == 1 { r = minabs } else { if mode == 2 { r = (mn + mx) / 2.0 } else { if mode == 3 { r = sk_s } else { if mode == 4 { r = ku_s } else { if mode == 5 { r = sumpos } else { if mode == 6 { r = sumneg } else { if npos > 0.0 { r = sumpos / npos } } } } } } } }
+    heap_free(sc as *mut i8); r
+}
+
+pub fn bf_pd_rolling_cov(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 0) }
+pub fn bf_pd_rolling_corr(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 1) }
+pub fn bf_pd_rolling_dot(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 2) }
+pub fn bf_pd_rolling_beta(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 3) }
+pub fn bf_pd_rolling_covpop(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 4) }
+pub fn bf_pd_rolling_r2(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 5) }
+pub fn bf_pd_rolling_meanprod(src: &BigFrame, c1: i64, c2: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_roll2(src, c1, c2, w, 6) }
+pub fn bf_pd_rolling_median(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 0) }
+pub fn bf_pd_rolling_q10(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 1) }
+pub fn bf_pd_rolling_q25(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 2) }
+pub fn bf_pd_rolling_q75(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 3) }
+pub fn bf_pd_rolling_q90(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 4) }
+pub fn bf_pd_rolling_iqr(src: &BigFrame, col: i64, w: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_rollsort(src, col, w, 5) }
+pub fn bf_pd_expanding_median(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 0) }
+pub fn bf_pd_expanding_q25(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 1) }
+pub fn bf_pd_expanding_q75(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 2) }
+pub fn bf_pd_expanding_iqr(src: &BigFrame, col: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_expandsort(src, col, 3) }
+pub fn bf_pd_eq_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 0) }
+pub fn bf_pd_ne_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 1) }
+pub fn bf_pd_lt_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 2) }
+pub fn bf_pd_le_scalar(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 3) }
+pub fn bf_pd_floor(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 4) }
+pub fn bf_pd_ceil(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 5) }
+pub fn bf_pd_sign(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 6) }
+pub fn bf_pd_reciprocal(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 7) }
+pub fn bf_pd_abs(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 8) }
+pub fn bf_pd_neg(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 9) }
+pub fn bf_pd_square(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 10) }
+pub fn bf_pd_cube(src: &BigFrame, col: i64, s: f64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_smap(src, col, s, 11) }
+pub fn bf_pd_lead(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 0) }
+pub fn bf_pd_diff2(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 1) }
+pub fn bf_pd_fwd_diff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 2) }
+pub fn bf_pd_abs_diff(src: &BigFrame, col: i64, k: i64) -> BigFrame with Alloc, Mut, Div, Panic { pdx_lag(src, col, k, 3) }
+pub fn bf_pd_maxabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 0) }
+pub fn bf_pd_minabs(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 1) }
+pub fn bf_pd_midrange(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 2) }
+pub fn bf_pd_skew_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 3) }
+pub fn bf_pd_kurt_sample(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 4) }
+pub fn bf_pd_sum_positive(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 5) }
+pub fn bf_pd_sum_negative(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 6) }
+pub fn bf_pd_mean_positive(src: &BigFrame, col: i64) -> f64 with Alloc, Mut, Div, Panic { pdx_reduce(src, col, 7) }

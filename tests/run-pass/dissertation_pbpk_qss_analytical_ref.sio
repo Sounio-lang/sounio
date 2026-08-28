@@ -1,0 +1,165 @@
+//@ run-pass
+//@ timeout: 30
+// ============================================================================
+// DISSERTATION 1-STATE QSS ANALYTICAL REFERENCE — RAPAMYCIN
+//
+// Closed-form quasi-steady-state limit of PBPK28 at (V_v → 0, PS → ∞):
+//   V_eff · dC_b/dt = -cl_hep · C_b + release
+//   V_eff = V_b + Σ V_i · Kp_i
+//   C_b(0+) = M_0 / V_eff (instantaneous redistribution)
+//   C_b(t) = C_b(0+) · exp(-cl_hep · t / V_eff)
+//   C_avg_i(t) = Kp_i · C_b(t)   [i ≥ 1];  C_avg_0(t) = C_b(t)
+//
+// Consumed by scripts/ci/dissertation_pbpk28_parity_gate.sh Case 2 — the gate
+// compares the PBPK28 fully-coupled-CN degenerate trajectory against this
+// analytical limit and reports the convergence residual as the Type B
+// model-form uncertainty contribution per JCGM 100:2008 §4.3.
+//
+// CORRECTED MATH (commits c574ee81 + this commit):
+//   PBPK28 at (V_v→0, PS→∞) does NOT reduce to PBPK14. It reduces to *this*
+//   1-state QSS model. PBPK14 well-stirred is the *intermediate* model where
+//   within-organ redistribution is instantaneous but Q-transport between
+//   blood and tissue remains rate-limited. The hierarchy is
+//     PBPK28-literature → PBPK14 → 1-state QSS
+//   with monotonically decreasing model-form complexity. Discrepancies
+//   between successive tiers are Type B uncertainty contributions.
+//
+// Parameters and 12 sample times match
+// tests/run-pass/dissertation_pbpk28_parity_ref_rapamycin.sio.
+// ============================================================================
+
+fn vref_at(i: i64) -> f64 {
+    if i ==  0 { return 5.0 }
+    if i ==  1 { return 1.8 }
+    if i ==  2 { return 0.31 }
+    if i ==  3 { return 1.45 }
+    if i ==  4 { return 0.33 }
+    if i ==  5 { return 1.1 }
+    if i ==  6 { return 28.0 }
+    if i ==  7 { return 20.0 }
+    if i ==  8 { return 1.2 }
+    if i ==  9 { return 3.6 }
+    if i == 10 { return 6.6 }
+    if i == 11 { return 0.18 }
+    if i == 12 { return 0.09 }
+    return 3.7
+}
+
+fn kp_at(i: i64) -> f64 {
+    if i ==  0 { return 1.00 }
+    if i ==  1 { return 5.40 }
+    if i ==  2 { return 4.20 }
+    if i ==  3 { return 0.10 }
+    if i ==  4 { return 2.30 }
+    if i ==  5 { return 3.10 }
+    if i ==  6 { return 0.50 }
+    if i ==  7 { return 0.30 }
+    if i ==  8 { return 2.60 }
+    if i ==  9 { return 0.80 }
+    if i == 10 { return 0.20 }
+    if i == 11 { return 2.10 }
+    if i == 12 { return 1.80 }
+    return 0.40
+}
+
+fn cl_hep() -> f64 { return 12.4 }
+fn bolus_mg() -> f64 { return 0.05 }
+
+// Taylor-series exp for argument ≤ 0. Range-reduce |s| ≤ 0.5 by halving,
+// evaluate to order 8, square back k times.
+fn exp_neg(x: f64) -> f64 with Mut, Div {
+    if x == 0.0 { return 1.0 }
+    var s = x
+    var k = 0
+    while s < (0.0 - 0.5) {
+        s = s * 0.5
+        k = k + 1
+    }
+    let s2 = s * s
+    let s3 = s2 * s
+    let s4 = s2 * s2
+    let s5 = s4 * s
+    let s6 = s3 * s3
+    let s7 = s6 * s
+    let s8 = s4 * s4
+    var r = 1.0 + s + s2 / 2.0 + s3 / 6.0 + s4 / 24.0 + s5 / 120.0
+              + s6 / 720.0 + s7 / 5040.0 + s8 / 40320.0
+    var j = 0
+    while j < k {
+        r = r * r
+        j = j + 1
+    }
+    return r
+}
+
+fn v_eff() -> f64 with Mut {
+    var s = vref_at(0)
+    var i = 1
+    while i < 14 {
+        s = s + vref_at(i) * kp_at(i)
+        i = i + 1
+    }
+    return s
+}
+
+fn c_blood_at(t: f64) -> f64 with Mut, Div {
+    let ve = v_eff()
+    let cb0 = bolus_mg() / ve
+    let arg = 0.0 - cl_hep() * t / ve
+    return cb0 * exp_neg(arg)
+}
+
+fn emit_at(t: f64) with IO, Mut, Div {
+    let cb = c_blood_at(t)
+    var i = 0
+    while i < 14 {
+        print("PARITY|t=")
+        println(t)
+        println("")
+        print("PARITY|i=")
+        println(i)
+        let cv = cb
+        let ct = if i == 0 { 0.0 } else { kp_at(i) * cb }
+        let cavg = if i == 0 { cb } else { kp_at(i) * cb }
+        print("PARITY|cv=")
+        println(cv)
+        println("")
+        print("PARITY|ct=")
+        println(ct)
+        println("")
+        print("PARITY|cavg=")
+        println(cavg)
+        println("")
+        i = i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSERTATION_PBPK_QSS_ANALYTICAL_REF v1")
+    println("compartments=14")
+    println("states=1")
+    println("bolus_mg=0.05")
+    println("cl_hep_L_per_h=12.4")
+    println("integrator=closed_form_1state_QSS")
+    println("drug=rapamycin")
+    println("samples=12")
+    print("v_eff_L=")
+    println(v_eff())
+    println("")
+
+    emit_at(0.1)
+    emit_at(0.5)
+    emit_at(1.0)
+    emit_at(2.0)
+    emit_at(4.0)
+    emit_at(6.0)
+    emit_at(8.0)
+    emit_at(12.0)
+    emit_at(16.0)
+    emit_at(20.0)
+    emit_at(24.0)
+    emit_at(30.0)
+
+    println("DISSERTATION_PBPK_QSS_ANALYTICAL_DONE")
+    return 0
+}

@@ -1,0 +1,138 @@
+//@ run-pass
+//@ expect-stdout: PASS
+
+// stdlib/darwin_pbpk/core/peptide_partitioning.sio
+// ----------------------------------------------------------------------------
+// PBPK28 core module: size-limited tissue partitioning for PEPTIDE drugs.
+//
+// Rodgers-Rowland (core/rodgers_rowland.sio) predicts tissue:plasma partition
+// coefficients (Kp) from lipid/water composition — valid only for small neutral
+// molecules (logP-driven). It is NOT applicable to peptides: semaglutide
+// (MW 4114 Da) and tirzepatide (MW 4813 Da) are too large to partition into
+// lipid, and their tissue distribution is governed instead by SIZE-LIMITED
+// access to the extracellular / interstitial water space (Rippe & Haraldsson
+// two-pore framework; antibody/peptide biodistribution-coefficient approach).
+//
+// Model:
+//   Kp_peptide(organ, MW) = f_ew(organ) * accessibility(MW)
+// where
+//   f_ew(organ)      = extracellular-water fraction (interstitial space proxy,
+//                      from core/tissue_composition.sio)
+//   accessibility(MW)= phenomenological size-exclusion factor in (0,1],
+//                      monotonically decreasing in MW: small solutes reach the
+//                      full interstitial volume (→1); large peptides are
+//                      excluded from the tighter inter-endothelial pores (→0).
+//                      accessibility(MW) = MW_scale / (MW_scale + MW),
+//                      MW_scale = 2000 Da (peptide-pore reference).
+//
+// Consequences (correct for peptides, unlike a lipid model):
+//   - every Kp_peptide < 1  (peptides do not concentrate in tissue)
+//   - Kp decreases with MW   (larger peptide → less tissue penetration)
+//   - highest in well-perfused, high-interstitial tissues (skin, lung, gut)
+//
+// 14-organ ordering (matching core/tissue_composition.sio):
+//   0=blood 1=liver 2=kidney 3=brain 4=heart 5=lung 6=muscle 7=adipose
+//   8=gut 9=skin 10=bone 11=spleen 12=pancreas 13=other
+//
+// EVIDENCE ε per input class (literature evidence-quality, dimensionless f64):
+//   MW             ε=0.95  product monograph / sequence — essentially exact
+//   f_ew           ε=0.85  ICRP 89 reference man
+//   accessibility  ε=0.45  phenomenological size-exclusion — weakest input
+//
+// References: Rippe B & Haraldsson B (1994) Physiol Rev 74:163-219 (two-pore);
+//             Shah DK & Betts AM (2012) J Pharmacokinet Pharmacodyn 39:67-86
+//             (antibody biodistribution coefficients); ICRP 89 (2002).
+//
+// Author: Demetrios Chiuratto Agourakis
+
+// Extracellular-water fraction (interstitial space proxy) per organ.
+// Consistent with core/tissue_composition.sio::tc_comp(organ).f_ew.
+pub fn pp_f_ew(organ: i32) -> f64 {
+    if organ == 0  { return 0.945 }  // blood/plasma
+    if organ == 1  { return 0.161 }  // liver
+    if organ == 2  { return 0.273 }  // kidney
+    if organ == 3  { return 0.162 }  // brain
+    if organ == 4  { return 0.320 }  // heart
+    if organ == 5  { return 0.336 }  // lung
+    if organ == 6  { return 0.118 }  // muscle
+    if organ == 7  { return 0.135 }  // adipose
+    if organ == 8  { return 0.282 }  // gut
+    if organ == 9  { return 0.382 }  // skin
+    if organ == 10 { return 0.100 }  // bone
+    if organ == 11 { return 0.207 }  // spleen
+    if organ == 12 { return 0.120 }  // pancreas
+    return 0.200                      // other
+}
+
+// Size-exclusion accessibility in (0,1]: MW_scale / (MW_scale + MW).
+pub fn pp_accessibility(mw: f64) -> f64 {
+    let mw_scale = 2000.0
+    mw_scale / (mw_scale + mw)
+}
+
+// Peptide tissue:plasma partition coefficient.
+pub fn pp_kp(organ: i32, mw: f64) -> f64 {
+    pp_f_ew(organ) * pp_accessibility(mw)
+}
+
+// Named drugs (molecular weights, Da).
+pub fn pp_mw_semaglutide() -> f64 { return 4113.58 }
+pub fn pp_mw_tirzepatide() -> f64 { return 4813.45 }
+
+// Evidence ε per input class.
+pub fn pp_eps_mw() -> f64            { return 0.95 }  // product monograph
+pub fn pp_eps_f_ew() -> f64          { return 0.85 }  // ICRP 89
+pub fn pp_eps_accessibility() -> f64 { return 0.45 }  // phenomenological (weakest)
+
+// ============================================================================
+// Self-test (plain f64 — Madaros + lean_single safe)
+// ============================================================================
+
+fn pp_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+    let mw = pp_mw_tirzepatide()
+
+    // T1 — no peptide Kp concentrates in tissue (all < 1) for peripheral organs.
+    var organ = 1
+    var maxkp = 0.0
+    while organ < 14 {
+        let kp = pp_kp(organ, mw)
+        if kp > maxkp { maxkp = kp }
+        if kp >= 1.0 { fails = fails + 1 }
+        organ = organ + 1
+    }
+    if fails == 0 {
+        println("T1 PASS: 13/13 peripheral peptide Kp < 1 (no tissue concentration)")
+    } else {
+        println("T1 FAIL: a peptide Kp >= 1")
+    }
+
+    // T2 — accessibility decreases monotonically with MW.
+    if pp_accessibility(1000.0) > pp_accessibility(5000.0) {
+        if pp_accessibility(5000.0) > 0.0 {
+            println("T2 PASS: accessibility decreases with MW, stays positive")
+        } else { println("T2 FAIL: accessibility non-positive"); fails = fails + 1 }
+    } else { println("T2 FAIL: accessibility not decreasing"); fails = fails + 1 }
+
+    // T3 — tirzepatide (heavier) penetrates less than semaglutide everywhere.
+    if pp_kp(6, pp_mw_tirzepatide()) < pp_kp(6, pp_mw_semaglutide()) {
+        println("T3 PASS: heavier tirzepatide penetrates muscle less than semaglutide")
+    } else { println("T3 FAIL: MW ordering wrong"); fails = fails + 1 }
+
+    // T4 — Kp tracks interstitial space: skin (high f_ew) > muscle (low f_ew).
+    if pp_kp(9, mw) > pp_kp(6, mw) {
+        println("T4 PASS: skin Kp > muscle Kp (interstitial-space-driven)")
+    } else { println("T4 FAIL: interstitial ordering wrong"); fails = fails + 1 }
+
+    // T5 — evidence ε ordering: accessibility is the weakest input class.
+    if pp_eps_accessibility() < pp_eps_f_ew() {
+        if pp_eps_f_ew() < pp_eps_mw() {
+            println("T5 PASS: ε ordering accessibility < f_ew < MW (honest ceiling = accessibility)")
+        } else { println("T5 FAIL: ε ordering (f_ew/MW)"); fails = fails + 1 }
+    } else { println("T5 FAIL: ε ordering (accessibility/f_ew)"); fails = fails + 1 }
+
+    if fails == 0 { println("PASS"); return 0 }
+    println("FAIL"); return 1
+}

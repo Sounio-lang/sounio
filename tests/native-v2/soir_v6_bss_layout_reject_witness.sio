@@ -1,0 +1,334 @@
+use ir::soir_v6_writer::*
+use ir::soir_v6_reader::*
+
+let REJECT_CANARY: i64 = 7070707
+
+fn decoded_canaries_preserved(receipt: &[i64; 7]) -> bool with Panic, Div {
+    var index: i64 = SOIR_V6_READER_RECEIPT_BSS_MODULE_TOTAL
+    while index < SOIR_V6_READER_RECEIPT_WORDS {
+        if (*receipt)[index as usize] != REJECT_CANARY { return false }
+        index = index + 1
+    }
+    true
+}
+
+fn expect_failure(
+    wire: &[i8; 131072],
+    start: i64,
+    len: i64,
+    expected_code: i64,
+    expected_byte_offset: i64,
+    expected_detail: i64,
+) -> bool with Mut, Panic, Div {
+    var receipt: [i64; 7] = [REJECT_CANARY; 7]
+    let code = soir_v6_reader_decode_bss_layout(
+        wire,
+        start,
+        len,
+        &! receipt,
+    )
+    if code != expected_code { return false }
+    if receipt[0 as usize] != expected_code { return false }
+    if receipt[1 as usize] != expected_byte_offset { return false }
+    if receipt[2 as usize] != expected_detail { return false }
+    if soir_v6_bss_read_status_code(&receipt) != expected_code { return false }
+    if soir_v6_bss_read_status_byte_offset(&receipt) != expected_byte_offset { return false }
+    if soir_v6_bss_read_status_detail(&receipt) != expected_detail { return false }
+    if !decoded_canaries_preserved(&receipt) { return false }
+    true
+}
+
+fn witness_write_i64(
+    wire: &![i8; 131072],
+    offset: i64,
+    value: i64,
+) with Mut, Panic, Div {
+    var shift: i64 = 0
+    while shift < 64 {
+        wire[(offset + (shift / 8)) as usize] = ((value >> shift) & 255) as i8
+        shift = shift + 8
+    }
+}
+
+fn witness_payload_checksum(
+    module_bss_total_size: i64,
+    range_count: i64,
+    range_offset: i64,
+    range_size: i64,
+) -> i64 with Div {
+    var a: i64 = 1
+    var b: i64 = 0
+    var word_index: i64 = 0
+    while word_index < 4 {
+        var value = module_bss_total_size
+        if word_index == 1 { value = range_count }
+        else if word_index == 2 { value = range_offset }
+        else if word_index == 3 { value = range_size }
+        var byte_index: i64 = 0
+        while byte_index < 8 {
+            let octet = (value >> (byte_index * 8)) & 255
+            a = (a + octet) % 65521
+            b = (b + a) % 65521
+            byte_index = byte_index + 1
+        }
+        word_index = word_index + 1
+    }
+    (b << 16) | a
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var wire: [i8; 131072] = [85; 131072]
+    let plan = soir_v6_writer_preflight_bss_layout(
+        0,
+        SOIR_V6_WRITER_BSS_FRAME_SIZE,
+        8,
+        0,
+        8,
+    )
+    let emitted_end = soir_v6_writer_emit_bss_layout(&plan, &! wire)
+    if emitted_end != SOIR_V6_WRITER_BSS_FRAME_SIZE { return 9 }
+
+    if !expect_failure(
+           &wire,
+           0 - 1,
+           SOIR_V6_READER_BSS_FRAME_SIZE,
+           SOIR_V6_READER_ERR_VIEW_BOUNDS,
+           0 - 1,
+           SOIR_V6_READER_BSS_FRAME_SIZE,
+       ) { return 10 }
+    if !expect_failure(
+           &wire,
+           0,
+           0 - 1,
+           SOIR_V6_READER_ERR_VIEW_BOUNDS,
+           0,
+           0 - 1,
+       ) { return 10 }
+    let overflowing_start = SOIR_V6_READER_MAX_SIZE - SOIR_V6_READER_BSS_FRAME_SIZE + 1
+    if !expect_failure(
+           &wire,
+           overflowing_start,
+           SOIR_V6_READER_BSS_FRAME_SIZE,
+           SOIR_V6_READER_ERR_VIEW_BOUNDS,
+           overflowing_start,
+           SOIR_V6_READER_BSS_FRAME_SIZE,
+       ) { return 10 }
+
+    var truncated_len: i64 = 0
+    while truncated_len < SOIR_V6_READER_BSS_FRAME_SIZE {
+        if !expect_failure(
+               &wire,
+               0,
+               truncated_len,
+               SOIR_V6_READER_ERR_TRUNCATED,
+               truncated_len,
+               SOIR_V6_READER_BSS_FRAME_SIZE,
+           ) {
+            return 11
+        }
+        truncated_len = truncated_len + 1
+    }
+    if !expect_failure(
+           &wire,
+           0,
+           SOIR_V6_READER_BSS_FRAME_SIZE + 1,
+           SOIR_V6_READER_ERR_TRAILING_BYTES,
+           SOIR_V6_READER_BSS_FRAME_SIZE,
+           1,
+       ) {
+        return 12
+    }
+
+    wire[0] = 84 as i8
+    if !expect_failure(&wire, 0, emitted_end, SOIR_V6_READER_ERR_BAD_MAGIC, 0, 84) { return 20 }
+    wire[0] = 83 as i8
+
+    wire[4] = 7 as i8
+    if !expect_failure(&wire, 0, emitted_end, SOIR_V6_READER_ERR_BAD_VERSION, 4, 7) { return 21 }
+    wire[4] = SOIR_V6_WRITER_VERSION
+
+    wire[5] = 1 as i8
+    if !expect_failure(&wire, 0, emitted_end, SOIR_V6_READER_ERR_BAD_FEATURES, 5, 1) { return 22 }
+    wire[5] = 0 as i8
+
+    wire[6] = 1 as i8
+    if !expect_failure(&wire, 0, emitted_end, SOIR_V6_READER_ERR_BAD_RESERVED, 6, 1) { return 23 }
+    wire[6] = 0 as i8
+
+    witness_write_i64(&! wire, 8, SOIR_V6_READER_BSS_FRAME_SIZE + 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_TOTAL_LENGTH,
+           8, SOIR_V6_READER_BSS_FRAME_SIZE + 1,
+       ) { return 24 }
+    witness_write_i64(&! wire, 8, SOIR_V6_READER_BSS_FRAME_SIZE)
+
+    witness_write_i64(&! wire, 16, SOIR_V6_READER_DIRECTORY_OFFSET + 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_DIRECTORY,
+           16, SOIR_V6_READER_DIRECTORY_OFFSET + 1,
+       ) { return 25 }
+    witness_write_i64(&! wire, 16, SOIR_V6_READER_DIRECTORY_OFFSET)
+
+    witness_write_i64(&! wire, 24, SOIR_V6_READER_DIRECTORY_SIZE + 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_DIRECTORY,
+           24, SOIR_V6_READER_DIRECTORY_SIZE + 1,
+       ) { return 26 }
+    witness_write_i64(&! wire, 24, SOIR_V6_READER_DIRECTORY_SIZE)
+
+    witness_write_i64(&! wire, 32, SOIR_V6_READER_SECTION_COUNT + 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_DIRECTORY,
+           32, SOIR_V6_READER_SECTION_COUNT + 1,
+       ) { return 27 }
+    witness_write_i64(&! wire, 32, SOIR_V6_READER_SECTION_COUNT)
+
+    witness_write_i64(&! wire, 40, SOIR_V6_READER_SCHEMA_FINGERPRINT ^ 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SCHEMA_FINGERPRINT,
+           40, SOIR_V6_READER_SCHEMA_FINGERPRINT ^ 1,
+       ) { return 28 }
+    witness_write_i64(&! wire, 40, SOIR_V6_READER_SCHEMA_FINGERPRINT)
+
+    witness_write_i64(&! wire, 48, SOIR_V6_READER_HEADER_SIZE - 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_DIRECTORY,
+           48, SOIR_V6_READER_HEADER_SIZE - 1,
+       ) { return 29 }
+    witness_write_i64(&! wire, 48, SOIR_V6_READER_HEADER_SIZE)
+
+    witness_write_i64(&! wire, 56, 1)
+    if !expect_failure(&wire, 0, emitted_end, SOIR_V6_READER_ERR_BAD_RESERVED, 56, 1) { return 30 }
+    witness_write_i64(&! wire, 56, 0)
+
+    witness_write_i64(&! wire, 64, 99)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_UNKNOWN_CRITICAL_SECTION,
+           64, 99,
+       ) { return 31 }
+    witness_write_i64(&! wire, 80, SOIR_V6_READER_SECTION_FLAG_SINGLETON)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_UNKNOWN_OPTIONAL_SECTION,
+           64, 99,
+       ) { return 32 }
+    witness_write_i64(&! wire, 64, SOIR_V6_READER_SECTION_KIND_BSS_LAYOUT)
+    witness_write_i64(&! wire, 80, SOIR_V6_READER_SECTION_FLAGS_BSS_LAYOUT)
+
+    witness_write_i64(&! wire, 72, SOIR_V6_READER_SECTION_SCHEMA_BSS_LAYOUT + 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_SCHEMA,
+           72, SOIR_V6_READER_SECTION_SCHEMA_BSS_LAYOUT + 1,
+       ) { return 33 }
+    witness_write_i64(&! wire, 72, SOIR_V6_READER_SECTION_SCHEMA_BSS_LAYOUT)
+
+    witness_write_i64(&! wire, 80, 4)
+    if !expect_failure(&wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_FLAGS, 80, 4) { return 34 }
+    witness_write_i64(&! wire, 80, SOIR_V6_READER_SECTION_FLAGS_BSS_LAYOUT)
+
+    witness_write_i64(&! wire, 88, SOIR_V6_READER_BSS_PAYLOAD_OFFSET - 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_BOUNDS,
+           88, SOIR_V6_READER_BSS_PAYLOAD_OFFSET - 1,
+       ) { return 35 }
+    witness_write_i64(&! wire, 88, SOIR_V6_READER_BSS_PAYLOAD_OFFSET)
+
+    witness_write_i64(&! wire, 96, SOIR_V6_READER_BSS_PAYLOAD_SIZE - 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_BOUNDS,
+           96, SOIR_V6_READER_BSS_PAYLOAD_SIZE - 1,
+       ) { return 36 }
+    witness_write_i64(&! wire, 96, SOIR_V6_READER_BSS_PAYLOAD_SIZE)
+
+    witness_write_i64(&! wire, 88, SOIR_V6_READER_BSS_FRAME_SIZE + 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_BOUNDS,
+           88, SOIR_V6_READER_BSS_FRAME_SIZE + 1,
+       ) { return 37 }
+    witness_write_i64(&! wire, 88, SOIR_V6_READER_BSS_PAYLOAD_OFFSET)
+
+    witness_write_i64(&! wire, 96, 0 - 1)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_BOUNDS,
+           96, 0 - 1,
+       ) { return 38 }
+    witness_write_i64(&! wire, 96, SOIR_V6_READER_BSS_PAYLOAD_SIZE)
+
+    let canonical_digest = witness_payload_checksum(8, 1, 0, 8)
+    wire[104] = (wire[104] ^ 1 as i8)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_DIGEST,
+           104, canonical_digest ^ 1,
+       ) { return 39 }
+    wire[104] = (wire[104] ^ 1 as i8)
+
+    wire[112] = (wire[112] ^ 1 as i8)
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_SECTION_DIGEST,
+           104, canonical_digest,
+       ) { return 40 }
+    wire[112] = (wire[112] ^ 1 as i8)
+
+    witness_write_i64(&! wire, 120, 2)
+    witness_write_i64(&! wire, 104, witness_payload_checksum(8, 2, 0, 8))
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_BSS_LAYOUT,
+           120, 2,
+       ) { return 41 }
+    soir_v6_writer_emit_bss_layout(&plan, &! wire)
+
+    witness_write_i64(&! wire, 112, 0 - 1)
+    witness_write_i64(&! wire, 136, 0 - 1)
+    witness_write_i64(&! wire, 104, witness_payload_checksum(0 - 1, 1, 0, 0 - 1))
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_BSS_LAYOUT,
+           112, 0 - 1,
+       ) { return 42 }
+    soir_v6_writer_emit_bss_layout(&plan, &! wire)
+
+    witness_write_i64(&! wire, 128, 1)
+    witness_write_i64(&! wire, 104, witness_payload_checksum(8, 1, 1, 8))
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_BSS_LAYOUT,
+           136, 8,
+       ) { return 43 }
+    soir_v6_writer_emit_bss_layout(&plan, &! wire)
+
+    witness_write_i64(&! wire, 136, 16)
+    witness_write_i64(&! wire, 104, witness_payload_checksum(8, 1, 0, 16))
+    if !expect_failure(
+           &wire, 0, emitted_end, SOIR_V6_READER_ERR_BSS_LAYOUT,
+           136, 16,
+       ) { return 44 }
+
+    var first_failure: [i64; 7] = [REJECT_CANARY; 7]
+    var repeated_failure: [i64; 7] = [REJECT_CANARY; 7]
+    let first_code = soir_v6_reader_decode_bss_layout(
+        &wire,
+        0,
+        emitted_end,
+        &! first_failure,
+    )
+    let repeated_code = soir_v6_reader_decode_bss_layout(
+        &wire,
+        0,
+        emitted_end,
+        &! repeated_failure,
+    )
+    if first_code != SOIR_V6_READER_ERR_BSS_LAYOUT { return 45 }
+    if repeated_code != first_code { return 45 }
+    if first_failure[0 as usize] != SOIR_V6_READER_ERR_BSS_LAYOUT { return 45 }
+    if first_failure[1 as usize] != 136 { return 45 }
+    if first_failure[2 as usize] != 16 { return 45 }
+    var receipt_index: i64 = 0
+    while receipt_index < SOIR_V6_READER_RECEIPT_WORDS {
+        if first_failure[receipt_index as usize] != repeated_failure[receipt_index as usize] {
+            return 45
+        }
+        receipt_index = receipt_index + 1
+    }
+    if !decoded_canaries_preserved(&first_failure) { return 45 }
+    if !decoded_canaries_preserved(&repeated_failure) { return 45 }
+
+    print("SOIR_V6_BSS_LAYOUT_REJECT_PASS\n")
+    0
+}

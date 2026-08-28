@@ -2,15 +2,31 @@ import { useState, useEffect } from 'react';
 import { useAudience } from '../../lib/useAudience';
 import type { Audience } from '../../lib/audience';
 
-const labels: Record<Audience, string> = {
+interface AudienceStrings {
+  scientist: string;
+  technical: string;
+  choose: string;
+}
+
+const defaultStrings: AudienceStrings = {
   scientist: 'Scientist',
   technical: 'Technical',
+  choose: 'Choose your view',
 };
 
-export default function AudienceSelector() {
+interface Props {
+  strings?: AudienceStrings;
+}
+
+export default function AudienceSelector({ strings = defaultStrings }: Props) {
   const { audience, choose, hasExplicitChoice } = useAudience();
   const [showTooltip, setShowTooltip] = useState(false);
   const [mounted, setMounted] = useState(false);
+
+  const labels: Record<Audience, string> = {
+    scientist: strings.scientist,
+    technical: strings.technical,
+  };
 
   useEffect(() => {
     setMounted(true);
@@ -30,7 +46,7 @@ export default function AudienceSelector() {
   if (!mounted) {
     return (
       <button type="button" className="audience-toggle-btn" aria-label="Toggle audience view">
-        <span className="audience-label">Scientist</span>
+        <span className="audience-label">{strings.scientist}</span>
       </button>
     );
   }
@@ -56,7 +72,7 @@ export default function AudienceSelector() {
 
       {showTooltip && !hasExplicitChoice && (
         <div className="absolute top-full right-0 mt-2 px-3 py-1.5 rounded-lg bg-[var(--color-accent-gold)] text-[#10233e] text-xs font-semibold whitespace-nowrap shadow-lg z-50 animate-[fadeIn_0.3s_ease]">
-          Choose your view
+          {strings.choose}
           <div className="absolute -top-1 right-4 w-2 h-2 bg-[var(--color-accent-gold)] rotate-45" />
         </div>
       )}

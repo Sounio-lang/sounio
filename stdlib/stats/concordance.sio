@@ -1,0 +1,194 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// stdlib/stats/concordance.sio — Lin's CCC and Cliff's delta
+//
+// Two agreement / effect measures that sit beside Bland-Altman and Cohen's d:
+//
+//   lin_ccc(x, y, n)          -> CCCResult   (concordance: precision × accuracy)
+//   cliff_delta(x, nx, y, ny) -> DeltaResult (non-parametric dominance effect)
+//
+// Lin's concordance correlation coefficient measures agreement of paired
+// continuous measurements around the identity line, decomposing into precision
+// (Pearson ρ) and accuracy (a bias-correction factor):
+//   CCC = 2·ρ·σx·σy / (σx² + σy² + (μx − μy)²).
+// Cliff's delta is the probability a value from x exceeds one from y minus the
+// reverse — a robust, distribution-free effect size:
+//   δ = ( #{xi > yj} − #{xi < yj} ) / (nx·ny),  in [−1, 1].
+//
+// Pure Sounio, no external dependency (inline sqrt; no data-array nested calls).
+//
+// References:
+//   Lin (1989) "A concordance correlation coefficient..."; Cliff (1993)
+
+module stats::concordance
+
+fn cc_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var s = x
+    var sb = 1.0
+    while s < 1.0 { s = s * 4.0; sb = sb * 2.0 }
+    while s > 4.0 { s = s * 0.25; sb = sb * 0.5 }
+    var y = 1.5
+    var i = 0
+    while i < 20 { y = 0.5 * (y + s / y); i = i + 1 }
+    return y / sb
+}
+
+pub struct CCCResult {
+    pub ccc: f64,        // Lin's concordance correlation coefficient
+    pub precision: f64,  // Pearson correlation
+    pub accuracy: f64,   // bias-correction factor Cb = CCC/rho
+}
+
+pub struct DeltaResult {
+    pub delta: f64,      // Cliff's delta in [-1,1]
+    pub magnitude: i64,  // 0 negligible, 1 small, 2 medium, 3 large
+}
+
+/// Lin's concordance correlation coefficient for paired measurements.
+///
+/// Parâmetros: x, y — paired data; n — count (>= 2, <= 256).
+/// Retorno: CCCResult (ccc, precision = Pearson ρ, accuracy = Cb).
+/// Referências: Lin (1989).
+pub fn lin_ccc(x: &[f64; 256], y: &[f64; 256], n: i32) -> CCCResult with Mut, Div, Panic {
+    if n < 2 { return CCCResult { ccc: 0.0, precision: 0.0, accuracy: 0.0 } }
+    let nf = n as f64
+    var sx = 0.0
+    var sy = 0.0
+    var i = 0
+    while i < n { sx = sx + x[i as usize]; sy = sy + y[i as usize]; i = i + 1 }
+    let mx = sx / nf
+    let my = sy / nf
+    var vxx = 0.0
+    var vyy = 0.0
+    var vxy = 0.0
+    var j = 0
+    while j < n {
+        let dx = x[j as usize] - mx
+        let dy = y[j as usize] - my
+        vxx = vxx + dx * dx
+        vyy = vyy + dy * dy
+        vxy = vxy + dx * dy
+        j = j + 1
+    }
+    // population (÷n) moments, per Lin's definition
+    let sxx = vxx / nf
+    let syy = vyy / nf
+    let sxy = vxy / nf
+    var rho = 0.0
+    let den = cc_sqrt(sxx * syy)
+    if den > 1.0e-300 { rho = sxy / den }
+    let ccc_den = sxx + syy + (mx - my) * (mx - my)
+    var ccc = 0.0
+    if ccc_den > 1.0e-300 { ccc = 2.0 * sxy / ccc_den }
+    var acc = 0.0
+    if rho > 1.0e-300 || rho < 0.0 - 1.0e-300 { acc = ccc / rho }
+    return CCCResult { ccc: ccc, precision: rho, accuracy: acc }
+}
+
+fn cd_mag(d: f64) -> i64 {
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad < 0.147 { return 0 }
+    if ad < 0.330 { return 1 }
+    if ad < 0.474 { return 2 }
+    return 3
+}
+
+/// Cliff's delta: non-parametric dominance effect size between two samples.
+///
+/// Parâmetros: x, y — the two samples; nx, ny — sizes.
+/// Retorno: DeltaResult (delta in [-1,1], magnitude code 0..3).
+/// Referências: Cliff (1993).
+pub fn cliff_delta(x: &[f64; 256], nx: i32, y: &[f64; 256], ny: i32) -> DeltaResult with Mut, Div, Panic {
+    if nx < 1 || ny < 1 { return DeltaResult { delta: 0.0, magnitude: 0 } }
+    var gt = 0
+    var lt = 0
+    var i = 0
+    while i < nx {
+        var j = 0
+        while j < ny {
+            let xi = x[i as usize]
+            let yj = y[j as usize]
+            if xi > yj { gt = gt + 1 } else { if xi < yj { lt = lt + 1 } }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    let delta = ((gt - lt) as f64) / ((nx as f64) * (ny as f64))
+    return DeltaResult { delta: delta, magnitude: cd_mag(delta) }
+}
+
+// ============================================================================
+// INLINE TESTS
+// ============================================================================
+
+fn approx(a: f64, b: f64, tol: f64) -> bool {
+    let d = if a > b { a - b } else { b - a }
+    return d <= tol
+}
+
+fn check(name: i64, ok: bool) -> bool with IO {
+    if ok { return true }
+    print("FAIL at case "); print(name); print("\n")
+    return false
+}
+
+// x=1..5, y=1.1,2.1,2.9,4.2,4.8. mx=3, my=3.02.
+// sxx=2, syy=1.8216, sxy=1.9 -> rho=1.9/sqrt(2·1.8216)=0.995497.
+// ccc=2·1.9/(2+1.8216+0.0004)=3.8/3.822=0.994244. accuracy=ccc/rho=0.998741.
+fn test_ccc() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0; x[3]=4.0; x[4]=5.0
+    y[0]=1.1; y[1]=2.1; y[2]=2.9; y[3]=4.2; y[4]=4.8
+    let r = lin_ccc(&x, &y, 5)
+    var ok = true
+    ok = check(1, approx(r.precision, 0.995497, 1.0e-3)) && ok
+    ok = check(2, approx(r.ccc, 0.994244, 1.0e-3)) && ok
+    ok = check(3, approx(r.accuracy, 0.998741, 1.0e-3)) && ok
+    return ok
+}
+
+// perfect identity y=x -> CCC=1.
+fn test_ccc_perfect() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    var i = 0
+    while i < 6 { x[i as usize] = i as f64; y[i as usize] = i as f64; i = i + 1 }
+    let r = lin_ccc(&x, &y, 6)
+    return check(10, approx(r.ccc, 1.0, 1.0e-9))
+}
+
+// Cliff: x=1,2,3 all below y=4,5,6 -> delta=-1 (large).
+fn test_cliff() -> bool with IO, Mut, Div, Panic {
+    var x: [f64; 256] = [0.0; 256]
+    var y: [f64; 256] = [0.0; 256]
+    x[0]=1.0; x[1]=2.0; x[2]=3.0
+    y[0]=4.0; y[1]=5.0; y[2]=6.0
+    let r = cliff_delta(&x, 3, &y, 3)
+    var ok = true
+    ok = check(20, approx(r.delta, 0.0 - 1.0, 1.0e-12)) && ok
+    ok = check(21, r.magnitude == 3) && ok
+    // identical samples -> delta 0
+    let r2 = cliff_delta(&x, 3, &x, 3)
+    ok = check(22, approx(r2.delta, 0.0, 1.0e-12)) && ok
+    ok = check(23, r2.magnitude == 0) && ok
+    return ok
+}
+
+pub fn run_tests() -> bool with IO, Mut, Div, Panic {
+    var ok = true
+    ok = test_ccc() && ok
+    ok = test_ccc_perfect() && ok
+    ok = test_cliff() && ok
+    return ok
+}
+
+fn main() with IO, Mut, Div, Panic {
+    if run_tests() {
+        print("ALL PASS\n")
+    } else {
+        print("SOME FAILED\n")
+    }
+}

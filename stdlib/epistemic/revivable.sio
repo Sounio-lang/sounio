@@ -1,0 +1,113 @@
+// stdlib/epistemic/revivable.sio
+//
+// Revivable<T> — time-bounded reversible surgery (G10).
+//
+// A Revivable<T> value carries the current surgical state and a bounded
+// Temporal window during which the pre-surgery state can be restored.
+//
+// WHAT THIS MODULE ACTUALLY GUARANTEES (audited 2026-07-25):
+//   1. Restoration inside the window is fp-exact, because `revivable_arm`
+//      stores the pre-surgery vector verbatim in REV_PRE and `revive`
+//      copies it back. The exactness is a property of the SNAPSHOT, not
+//      of the sedenion algebra.
+//   2. Outside the window (or after `revivable_disarm`) `revive` returns
+//      the post-surgery state. This closure is OPERATIONAL — it is the
+//      REV_ARMED flag plus a tick comparison — not an algebraic
+//      impossibility.
+//
+// WHAT IT DOES NOT GUARANTEE — corrected over-claims:
+//   - There is NO proof of an involution `f^{-1} ∘ f = id`. In fact no
+//     such multiplicative inverse can exist on the annihilator subspace:
+//     `isZeroPair primA v` means primA·v = 0, so applying primA twice
+//     yields 0, never v. The earlier claim was not merely unproven but
+//     incompatible with the definitions.
+//   - The Lean file contains no notion of time, window, or expiry.
+//     `revive_window_well_defined` proves cardinalities (kernel = 4,
+//     complement = 79), not temporal semantics.
+//
+// Required effects: `with ZD, Temporal`. Compiler enforces via error 206.
+// Formal backing (accurate scope): `alice_kernel_is_4d` and
+// `unlearning_kernel_exact` in formal/lean4/SounioSurgicalInterventions.lean
+// establish that A = e3+e10 exactly annihilates a 4-dimensional subspace,
+// i.e. the LOCALITY of the surgical subspace. They say nothing about
+// invertibility. NOTE: `revive_inverse_property` in that file states the
+// same proposition as `unlearning_kernel_exact` (since
+// `alice_kernel := annihilatorsOfA`); its name is misleading.
+// Operational benchmark: examples/zd_revivable_edit.sio.
+
+// RevivableState: tracks the pre-surgery weight snapshot, the surgery
+// timestamp (abstract "session tick"), and the window size in ticks.
+// A real deployment would back this with persistent storage; here we
+// use a fixed-size array for reproducibility.
+var REV_PRE: [f64; 16] = [0.0; 16]
+var REV_POST: [f64; 16] = [0.0; 16]
+var REV_TICK: i64 = 0
+var REV_WINDOW: i64 = 0
+var REV_ARMED: bool = false
+
+// revivable_arm: capture the pre-surgery snapshot and open a bounded
+// Temporal window of `window_ticks` ticks.  Later calls to revive()
+// within this window restore the pre-surgery state exactly.
+fn revivable_arm(w_pre: &[f64; 16], current_tick: i64, window_ticks: i64) with Mut, ZD, Temporal {
+    var i = 0
+    while i < 16 { REV_PRE[i] = (*w_pre)[i]; i = i + 1 }
+    REV_TICK = current_tick
+    REV_WINDOW = window_ticks
+    REV_ARMED = true
+}
+
+// revivable_commit: record the post-surgery state.  Must be called after
+// the surgical op has been applied.  The pair (pre, post) is what enables
+// exact revival.
+fn revivable_commit(w_post: &[f64; 16]) with Mut, ZD, Temporal {
+    var i = 0
+    while i < 16 { REV_POST[i] = (*w_post)[i]; i = i + 1 }
+}
+
+// revivable_in_window: predicate for whether a revival at `now_tick`
+// is still permitted.
+fn revivable_in_window(now_tick: i64) -> bool with Mut, ZD, Temporal {
+    if !REV_ARMED { return false }
+    let elapsed = now_tick - REV_TICK
+    elapsed >= 0 && elapsed <= REV_WINDOW
+}
+
+// revive: restore the pre-surgery state exactly, provided the Temporal
+// window has not elapsed.  Returns the revived weight and a boolean
+// success flag.  If the window has elapsed, returns the post-surgery
+// weight unchanged.
+fn revive(now_tick: i64) -> [f64; 16] with Mut, ZD, Temporal {
+    var out: [f64; 16] = [0.0; 16]
+    let ok = revivable_in_window(now_tick)
+    var i = 0
+    if ok {
+        while i < 16 { out[i] = REV_PRE[i]; i = i + 1 }
+    } else {
+        while i < 16 { out[i] = REV_POST[i]; i = i + 1 }
+    }
+    out
+}
+
+// revivable_disarm: explicitly close the Temporal window before it
+// would naturally elapse.  After disarm the surgery is irrevocable
+// even if the original window had not timed out.
+fn revivable_disarm() with Mut, ZD, Temporal {
+    REV_ARMED = false
+}
+
+// revive_exact_residual: L2 distance between the revived state and the
+// original pre-surgery state.  Used to verify that revive() is fp-exact.
+// It is exact because the snapshot was stored verbatim — this is a
+// property of the copy, and needs no algebraic theorem. (The earlier
+// citation of `revive_inverse_property` was incorrect: that theorem
+// states kernel membership, not invertibility. See header.)
+fn revive_exact_residual(revived: &[f64; 16], original: &[f64; 16]) -> f64 with Mut, ZD, Temporal {
+    var s = 0.0
+    var i = 0
+    while i < 16 {
+        let d = (*revived)[i] - (*original)[i]
+        s = s + d * d
+        i = i + 1
+    }
+    s
+}

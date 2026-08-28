@@ -7,7 +7,6 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.implementation.native-backend-sovereignty
 -->
 
-
 # Native Backend Sovereignty
 
 Phase 1 of the native backend sovereignty bridge is now in-tree as a real preview contract instead of prose-only planning.

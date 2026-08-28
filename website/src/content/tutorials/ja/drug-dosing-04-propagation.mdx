@@ -1,0 +1,172 @@
+---
+title: "モデル内に流れる不确定性の伝搬"
+description: "不确定性が完全な薬物動き計算に流れることを確認しましょう"
+series: "drug-dosing"
+order: 4
+estimatedMinutes: 12
+prerequisites: ["drug-dosing-03-knowledge"]
+topic_id: "website.tutorials.ja.drug-dosing-04-propagation"
+authority: "website_only"
+audience: "users"
+last_validated: "2026-03-07"
+validated_by: "A2"
+source_of_truth: "docs/governance/topic-registry.v1.json#website.tutorials.ja.drug-dosing-04-propagation"
+---
+# モデル内に流れる不确定性の伝搬
+
+PKパラメーターに不确定性を定義しました。それらの不确定性が、患者測定値から予測された薬物濃度までの全ての薬苙計算にどのように伝搬するかを確認しましょう。
+
+## 全プロセス
+
+クリニカル的な薬物動きのワーフローは以下のとおりです：
+
+1. **測定** 患者の検査値（クリエイティン、体重）→ 不确定な入力
+2. **推定** PKパラメーター（クリアエリア、体積）→ 導かれた不确定性
+3. **予測** 薬物濃度（Cmax、Cmin）→ 複合された不确定性
+4. **決定** 薬苙が安全かどうかの決定→ 確信限界付きの決定
+
+Sounioでは、各ステップが自動的に不确定性を保持し、伝搬することができます。
+
+## ステップ1: 患者測定値
+
+```sio
+struct PatientLabs {
+    serum_creatinine: Knowledge<f64>,  // mg/dL
+    weight: Knowledge<f64>,            // kg
+    age: f64,                          // 年（記録から、正確な値）
+}
+
+fn measure_patient() -> PatientLabs {
+    PatientLabs {
+        serum_creatinine: measure(1.2, uncertainty: 0.06),  // 5% アサイトCV
+        weight: measure(70.0, uncertainty: 1.0),            // ±1 kg スケールの正確度
+        age: 65.0,
+    }
+}
+```
+
+## ステップ2: PKパラメーターの推定ここでは、患者の検査値からクリエイティンのクリアレンスを推定することができるクロックフォート・ゴールト方程式を説明します。入力は `Knowledge&lt;f64&gt;` であり、入力によって伴う不确定性は自動的に伝搬されます:
+
+```sio
+fn estimate_clearance(labs: PatientLabs) -> Knowledge<f64> {
+    // CrCl (mL/min) = (140 - age) × weight / (72 × SCr)
+    let numerator = (140.0 - labs.age) * labs.weight
+    let denominator = 72.0 * labs.serum_creatinine
+    numerator / denominator
+}
+
+fn estimate_volume(labs: PatientLabs) -> Knowledge<f64> {
+    // Vd ≈ 0.7 L/kg × weight (with model uncertainty)
+    0.7 * labs.weight
+}
+```
+
+クリアレンスの推定値は、`weight` と `serum_creatinine` の両方から不确定性を引き継みます。Vdの推定値は `weight` から不确定性を引き継みます。Sounioはこれらを自動的に計算します。
+
+## Step 3: Predict Concentrations
+```sio
+fn predict_trough(cl: Knowledge<f64>, vd: Knowledge<f64>,
+                  dose: f64, tau: f64) -> Knowledge<f64> {
+    let ke = cl / vd                          // 消除率
+    let cmax = dose / vd                      // 峰值濃度
+    let decay = exp_k(0.0 - ke * tau)         // exp(-ke × τ)
+    let accumulation = 1.0 / (1.0 - decay)   // ステージングステートード因子
+    cmax * decay * accumulation
+}
+```
+
+各操作は確率を複利します。トロウフ予測に到達した時、それは先頭のすべての測定の確率の合計による合わせられた確率を反映しています。
+
+## ステップ 4: センシティビティー分析
+
+どの測定が最終的な確率に最も貢献しますか？Sounioは確率の貢献を分解することができます：
+
+```sio
+struct SensitivityResult {
+    scr_contribution: f64,     // クレイティンの割合
+    weight_contribution: f64,  // 体重の割合
+    total_cv: f64,             // 合計的係数の分散率
+}
+``````markdown
+# センシティビティー分析
+
+## 要約
+
+センシティビティー分析は、医療情報をもったいくらいの誤差があるかを評価するための手法です。このドキュメントでは、この分析を行うための方法を説明します。
+
+## センシティビティー分析の方法
+
+センシティビティー分析は、医療情報の誤差を評価するために使用される手法です。この分析を行うためには以下の手順を踏む必要があります。
+
+1. **クリアエンスの推定**：医療情報からクリアエンスを推定します。
+2. **体積の推定**：医療情報から体積を推定します。
+3. **トラウフの予測**：クリアエンス、体積、投与量、タウを使用してトラウフを予測します。
+4. **誤差の評価**：トラウフの誤差を評価し、その誤差の中からクリアエンスの誤差の貢献度と体重の誤差の貢献度を計算します。
+
+## 例
+
+以下の例では、クリアエンスの誤差の貢献度が67%であることを示します。この誤差を減少させるためには、より正確なクリアエンス測定方法を選択することをお勧めします。
+
+```rust
+fn analyze_sensitivity(labs: PatientLabs, dose: f64, tau: f64) -> SensitivityResult
+    with Mut, Panic, Div
+{
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    // 誤差の分散を Sobol 式の分析を用いて分解する
+    let total_var = trough.uncertainty * trough.uncertainty
+
+    // クリアエンスを通じて誤差の貢献度
+    let scr_var = cl.uncertainty * cl.uncertainty
+    let scr_frac = scr_var / total_var
+
+    // 体重を通じて誤差の貢献度
+    let wt_frac = 1.0 - scr_frac  // 残り
+
+    SensitivityResult {
+        scr_contribution: scr_frac,
+        weight_contribution: wt_frac,
+        total_cv: trough.uncertainty / trough.value,
+    }
+}
+```
+
+これは医療者に以下のメッセージを伝えます：「あなたの投与量の誤差の67%はクリアエンス測定によって生じています。より正確な投与量を得るためには、より正確なクリアエンス測定方法（例えば、サイスタチンC）を選択することをお勧めします。」
+
+## 全ての情報を組み合わせ
+```sio
+fn main() -> i32 with IO, Mut, Panic, Div {
+    let labs = measure_patient()
+    let cl = estimate_clearance(labs)
+    let vd = estimate_volume(labs)
+
+    let dose = 1000.0   // 1g vancomycin
+    let tau = 12.0       // q12h
+
+    let trough = predict_trough(cl, vd, dose, tau)
+
+    print("予測されたトラウフ: ")
+    println(trough.value)
+    print(" ± ")
+    println(trough.uncertainty)
+    print(" mg/L\n")
+
+    let sens = analyze_sensitivity(labs, dose, tau)
+    print("SCrの影響: ")
+    println(sens.scr_contribution)
+    print("重みの影響: ")
+    println(sens.weight_contribution)
+
+    0
+}
+```
+
+## キーポイント
+
+- 不确定性は自動的に全算術演算によって伝播します
+- 敏感性分析は重要な測定値を見出します
+- フルパイプライン（測定 → 推定 → 予測 → 分析）は型安全です
+- 効果の注釈はすべての失敗可能性のある操作が宣言されていることを確認します
+- 手動でのエラー伝播の公式が必要なく、Sounioがそれを処理します

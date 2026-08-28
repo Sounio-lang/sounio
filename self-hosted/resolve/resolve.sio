@@ -12,12 +12,15 @@ module resolve::resolve
 
 use parser::ast::*
 use lexer::span::*
+use resolve::symbol::*
+use resolve::scope::*
+use resolve::imports::*
 
 // ============================================================
 // Resolver state
 // ============================================================
 
-struct Resolver {
+pub struct Resolver {
     symbols: SymbolTable,
     scopes: ScopeStack,
     modules: ModuleRegistry,
@@ -26,7 +29,7 @@ struct Resolver {
     next_id: i64,
 }
 
-fn resolver_new() -> Resolver {
+pub fn resolver_new() -> Resolver {
     Resolver {
         symbols: symbol_table_new(),
         scopes: scope_stack_new(),
@@ -37,7 +40,7 @@ fn resolver_new() -> Resolver {
     }
 }
 
-fn resolver_with_modules(mods: ModuleRegistry) -> Resolver {
+pub fn resolver_with_modules(mods: ModuleRegistry) -> Resolver {
     Resolver {
         symbols: symbol_table_new(),
         scopes: scope_stack_new(),
@@ -45,6 +48,142 @@ fn resolver_with_modules(mods: ModuleRegistry) -> Resolver {
         error_count: 0,
         had_error: false,
         next_id: 0,
+    }
+}
+
+// ============================================================
+// GPU intrinsic allowlist
+// ============================================================
+//
+// Read-only GPU thread/block coordinate intrinsics are implicit kernel-scope
+// builtins: they are never bound in the symbol table, so name resolution must
+// recognise them by name before reporting an undefined-variable error. The
+// build-path GPU lowering keys purely on these names — hlir_to_gpu.sio maps
+// gpu_thread_id_* → GpuGetTid, gpu_block_id_* → GpuGetBid, gpu_block_dim_* →
+// GpuGetNtid, which lower_to_ptx.sio emits as %tid.{x,y,z} / %ctaid.{x,y,z} /
+// %ntid.{x,y,z}. This list MUST stay in sync with token_is_gpu_builtin_name()
+// in self-hosted/compiler/lean_single.sio (the PTX-eligibility allowlist).
+fn name_is_gpu_builtin(n: Name) -> bool with Mut, Panic, Div {
+    if name_eq(n, make_name("gpu_thread_id_x")) { return true }
+    if name_eq(n, make_name("gpu_thread_id_y")) { return true }
+    if name_eq(n, make_name("gpu_thread_id_z")) { return true }
+    if name_eq(n, make_name("gpu_block_id_x")) { return true }
+    if name_eq(n, make_name("gpu_block_id_y")) { return true }
+    if name_eq(n, make_name("gpu_block_id_z")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_x")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_y")) { return true }
+    if name_eq(n, make_name("gpu_block_dim_z")) { return true }
+    if name_eq(n, make_name("gpu_barrier")) { return true }
+    if name_eq(n, make_name("gpu_barrier_sync")) { return true }
+    if name_eq(n, make_name("gpu_sync_threads")) { return true }
+    false
+}
+
+fn expr_is_gpu_axis_root(e: Expr) -> bool with Mut, Panic, Div {
+    e.kind == ExprKind::ExprIdent && name_eq(e.name, make_name("gpu"))
+}
+
+fn expr_gpu_axis_base_kind(e: Expr) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprFieldAccess {
+        match e.left {
+            Some(base) => {
+                if expr_is_gpu_axis_root(*base) {
+                    if name_eq(e.name, make_name("thread_id")) { return 1 }
+                    if name_eq(e.name, make_name("block_id")) { return 2 }
+                    if name_eq(e.name, make_name("block_dim")) { return 3 }
+                }
+            }
+            None => {}
+        }
+    } else if e.kind == ExprKind::ExprMethodCall {
+        match e.left {
+            Some(base) => {
+                if expr_is_gpu_axis_root(*base) {
+                    if name_eq(e.name, make_name("thread_id")) { return 1 }
+                    if name_eq(e.name, make_name("block_id")) { return 2 }
+                    if name_eq(e.name, make_name("block_dim")) { return 3 }
+                }
+            }
+            None => {}
+        }
+    }
+    0
+}
+
+fn expr_is_gpu_axis_field(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind != ExprKind::ExprFieldAccess {
+        return false
+    }
+    if !name_eq(e.name, make_name("x")) {
+        return false
+    }
+    match e.left {
+        Some(base) => expr_gpu_axis_base_kind(*base) > 0,
+        None => false,
+    }
+}
+
+fn expr_is_gpu_effect_root(e: Expr) -> bool with Mut, Panic, Div {
+    e.kind == ExprKind::ExprIdent && name_eq(e.name, make_name("GPU"))
+}
+
+fn expr_is_gpu_effect_field(e: Expr, field: Name) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprPath && e.path.seg_count == 2 {
+        let head = copy_string_list_to_name(e.path.segments)
+        let tail = copy_string_list_tail_to_name(e.path.segments)
+        return name_eq(head, make_name("GPU")) && name_eq(tail, field)
+    }
+    if e.kind != ExprKind::ExprFieldAccess {
+        return false
+    }
+    if !name_eq(e.name, field) { return false }
+    match e.left {
+        Some(base) => expr_is_gpu_effect_root(*base),
+        None => false,
+    }
+}
+
+fn expr_is_gpu_launch_descriptor_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprMethodCall {
+        if !name_eq(e.name, make_name("launch")) { return false }
+        match e.left {
+            Some(base) => return expr_is_gpu_effect_root(*base),
+            None => return false,
+        }
+    }
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => expr_is_gpu_effect_field(*callee, make_name("launch")),
+        None => false,
+    }
+}
+
+fn expr_is_gpu_launch_invocation_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => expr_is_gpu_launch_descriptor_call(*callee),
+        None => false,
+    }
+}
+
+fn expr_is_gpu_sync_call(e: Expr) -> bool with Mut, Panic, Div, Alloc, IO {
+    if e.kind == ExprKind::ExprMethodCall {
+        if !name_eq(e.name, make_name("sync")) { return false }
+        match e.left {
+            Some(base) => return expr_is_gpu_effect_root(*base),
+            None => return false,
+        }
+    }
+    if e.kind != ExprKind::ExprCall {
+        return false
+    }
+    match e.left {
+        Some(callee) => expr_is_gpu_effect_field(*callee, make_name("sync")),
+        None => false,
     }
 }
 
@@ -140,21 +279,21 @@ impl Resolver {
 
     fn collect_item(self, item: Item) -> Resolver with Mut, Panic, Div, Alloc, IO {
         match item.kind {
-            ItemFn => {
+            ItemKind::ItemFn => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymFunction, item.span)
                 } else {
                     self
                 }
             }
-            ItemStruct => {
+            ItemKind::ItemStruct => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymStruct, item.span)
                 } else {
                     self
                 }
             }
-            ItemEnum => {
+            ItemKind::ItemEnum => {
                 var r = self
                 if !name_is_empty(item.name) {
                     r = r.define(item.name, SymbolKind::SymEnum, item.span)
@@ -162,106 +301,106 @@ impl Resolver {
                 // Also collect enum variants as top-level names
                 r.collect_enum_variants(item.enum_def)
             }
-            ItemTypeAlias => {
+            ItemKind::ItemTypeAlias => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymTypeAlias, item.span)
                 } else {
                     self
                 }
             }
-            ItemModels => {
+            ItemKind::ItemModels => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymTypeAlias, item.span)
                 } else {
                     self
                 }
             }
-            ItemPolicy => {
+            ItemKind::ItemPolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymPolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemAcquisitionPolicy => {
+            ItemKind::ItemAcquisitionPolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymAcquisitionPolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemRecoursePolicy => {
+            ItemKind::ItemRecoursePolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymRecoursePolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemTransitionPolicy => {
+            ItemKind::ItemTransitionPolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymTransitionPolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemTransitionProtocol => {
+            ItemKind::ItemTransitionProtocol => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymTransitionProtocol, item.span)
                 } else {
                     self
                 }
             }
-            ItemMonitoringPolicy => {
+            ItemKind::ItemMonitoringPolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymMonitoringPolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemAlternativePolicy => {
+            ItemKind::ItemAlternativePolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymAlternativePolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemAlternativeFrontier => {
+            ItemKind::ItemAlternativeFrontier => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymAlternativeFrontier, item.span)
                 } else {
                     self
                 }
             }
-            ItemDecisionPolicy => {
+            ItemKind::ItemDecisionPolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymDecisionPolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemDeferralPolicy => {
+            ItemKind::ItemDeferralPolicy => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymDeferralPolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemValidation => {
+            ItemKind::ItemValidation => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymPolicy, item.span)
                 } else {
                     self
                 }
             }
-            ItemAudit => {
+            ItemKind::ItemAudit => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymAudit, item.span)
                 } else {
                     self
                 }
             }
-            ItemImpl => self
-            ItemUse => {
+            ItemKind::ItemImpl => self
+            ItemKind::ItemUse => {
                 if self.modules.count > 0 {
                     // Cross-module import mode: validate and import from registry
                     self.import_use(item.use_path, item.use_glob, item.use_items, item.span)
@@ -270,7 +409,7 @@ impl Resolver {
                     self.collect_use_items(item.use_items, item.span)
                 }
             }
-            ItemUnit => {
+            ItemKind::ItemUnit => {
                 // Register unit declarations as SymUnit (checker handles dimensional analysis)
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymUnit, item.span)
@@ -278,27 +417,51 @@ impl Resolver {
                     self
                 }
             }
-            ItemEffect => {
+            ItemKind::ItemEffect => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymEffect, item.span)
                 } else {
                     self
                 }
             }
-            ItemTrait => {
+            ItemKind::ItemTrait => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymTypeAlias, item.span)
                 } else {
                     self
                 }
             }
-            ItemSession => {
+            ItemKind::ItemSession => {
                 if !name_is_empty(item.name) {
                     self.define(item.name, SymbolKind::SymTypeAlias, item.span)
                 } else {
                     self
                 }
             }
+            ItemKind::ItemAlgebra => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymTypeAlias, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemKind::ItemStudy => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymTypeAlias, item.span)
+                } else {
+                    self
+                }
+            }
+            ItemKind::ItemOntology => {
+                if !name_is_empty(item.name) {
+                    self.define(item.name, SymbolKind::SymTypeAlias, item.span)
+                } else {
+                    self
+                }
+            }
+            // Claims are metadata, not symbols; normally filtered from the
+            // item stream by parser::mod, so this arm is defensive only.
+            ItemKind::ItemClaim => self
         }
     }
 
@@ -342,8 +505,10 @@ impl Resolver {
         // Glob import (`use foo::*`): import all exports.
         if is_glob {
             var i: i64 = 0
-            while i < entry.export_count && i < 1024 {
-                r = r.define(entry.exports[i as usize].name, SymbolKind::SymImported, span)
+            while i < entry.export_count {
+                // #1689: exports live in the shared pool now, not inline in the
+                // entry. The old `&& i < 1024` bound was also a silent cap.
+                r = r.define(modreg_export_name_at(entry.export_base + i), SymbolKind::SymImported, span)
                 i = i + 1
             }
             return r
@@ -405,33 +570,37 @@ impl Resolver {
 
     fn resolve_item(self, item: Item) -> Resolver with Mut, Panic, Div, Alloc, IO {
         match item.kind {
-            ItemFn => self.resolve_fn_def(item.fn_def)
-            ItemStruct => self.resolve_struct_def(item.struct_def)
-            ItemEnum => self  // variants already collected, no bodies to resolve
-            ItemImpl => self.resolve_impl_def(item.impl_def)
-            ItemTypeAlias => self.resolve_type_alias(item.type_alias_ty)
-            ItemModels => self.resolve_models_def(item.models_def)
-            ItemPolicy => self.resolve_policy_def(item.policy_def)
-            ItemAcquisitionPolicy => self.resolve_acquisition_policy_def(item.acquisition_policy_def)
-            ItemRecoursePolicy => self.resolve_recourse_policy_def(item.recourse_policy_def)
-            ItemTransitionPolicy => self.resolve_transition_policy_def(item.transition_policy_def)
-            ItemTransitionProtocol => self.resolve_transition_protocol_def(item.transition_protocol_def)
-            ItemMonitoringPolicy => self.resolve_monitoring_policy_def(item.monitoring_policy_def)
-            ItemAlternativePolicy => self.resolve_alternative_policy_def(item.alternative_policy_def)
-            ItemAlternativeFrontier => self.resolve_alternative_frontier_def(item.alternative_frontier_def)
-            ItemDecisionPolicy => self.resolve_decision_policy_def(item.decision_policy_def)
-            ItemDeferralPolicy => self.resolve_deferral_policy_def(item.deferral_policy_def)
-            ItemValidation => self.resolve_validation_def(item.validation_def)
-            ItemAudit => self.resolve_audit_def(item.audit_def)
-            ItemUse => {
+            ItemKind::ItemFn => self.resolve_fn_def(item.fn_def)
+            ItemKind::ItemStruct => self.resolve_struct_def(item.struct_def)
+            ItemKind::ItemEnum => self  // variants already collected, no bodies to resolve
+            ItemKind::ItemImpl => self.resolve_impl_def(item.impl_def)
+            ItemKind::ItemTypeAlias => self.resolve_type_alias(item.type_alias_ty)
+            ItemKind::ItemModels => self.resolve_models_def(item.models_def)
+            ItemKind::ItemPolicy => self.resolve_policy_def(item.policy_def)
+            ItemKind::ItemAcquisitionPolicy => self.resolve_acquisition_policy_def(item.acquisition_policy_def)
+            ItemKind::ItemRecoursePolicy => self.resolve_recourse_policy_def(item.recourse_policy_def)
+            ItemKind::ItemTransitionPolicy => self.resolve_transition_policy_def(item.transition_policy_def)
+            ItemKind::ItemTransitionProtocol => self.resolve_transition_protocol_def(item.transition_protocol_def)
+            ItemKind::ItemMonitoringPolicy => self.resolve_monitoring_policy_def(item.monitoring_policy_def)
+            ItemKind::ItemAlternativePolicy => self.resolve_alternative_policy_def(item.alternative_policy_def)
+            ItemKind::ItemAlternativeFrontier => self.resolve_alternative_frontier_def(item.alternative_frontier_def)
+            ItemKind::ItemDecisionPolicy => self.resolve_decision_policy_def(item.decision_policy_def)
+            ItemKind::ItemDeferralPolicy => self.resolve_deferral_policy_def(item.deferral_policy_def)
+            ItemKind::ItemValidation => self.resolve_validation_def(item.validation_def)
+            ItemKind::ItemAudit => self.resolve_audit_def(item.audit_def)
+            ItemKind::ItemUse => {
                 // Imports are validated during pass 1 for multi-module mode.
                 // Flat mode keeps legacy behavior.
                 if self.modules.count > 0 { self } else { self.validate_use_items(item.use_items, item.span) }
             }
-            ItemUnit => self  // Unit declarations have no body to resolve
-            ItemEffect => self
-            ItemSession => self
-            ItemTrait => self  // Trait methods resolved via checker's collect pass
+            ItemKind::ItemUnit => self  // Unit declarations have no body to resolve
+            ItemKind::ItemEffect => self
+            ItemKind::ItemSession => self
+            ItemKind::ItemTrait => self  // Trait methods resolved via checker's collect pass
+            ItemKind::ItemAlgebra => self  // Algebra metadata is collected by the checker.
+            ItemKind::ItemStudy => self  // Study metadata is collected by the checker.
+            ItemKind::ItemOntology => self  // Ontology metadata is collected by the checker.
+            ItemKind::ItemClaim => self  // Claim metadata; no body to resolve.
         }
     }
 
@@ -682,58 +851,78 @@ impl Resolver {
 impl Resolver {
     fn resolve_type_expr(self, te: TypeExpr) -> Resolver with Mut, Panic, Div, Alloc, IO {
         match te.kind {
-            TypeNamed => {
+            TypeExprKind::TypeNamed => {
                 // Named types are looked up, but we don't error on unresolved types
                 // since many are builtins (i64, bool, Option, etc.)
                 var r = self
                 r = r.resolve_type_args(te.type_args)
                 r
             }
-            TypeReference => self.resolve_opt_type(te.inner)
-            TypeRefMut => self.resolve_opt_type(te.inner)
-            TypeArray => {
+            TypeExprKind::TypeReference => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeRefMut => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeRawPtr => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeArray => {
                 var r = self.resolve_opt_type(te.inner)
                 r.resolve_opt_expr(te.array_size)
             }
-            TypeTuple => self.resolve_type_args(te.type_args)
-            TypeFn => {
+            TypeExprKind::TypeTuple => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeFn => {
                 var r = self.resolve_type_args(te.type_args)
                 r.resolve_opt_type(te.inner)
             }
-            TypeUnit => self
-            TypeNever => self
-            TypeSelfUpper => self
-            TypeInfer => self
-            TypeKnowledge => {
+            TypeExprKind::TypeUnit => self
+            TypeExprKind::TypeNever => self
+            TypeExprKind::TypeSelfUpper => self
+            TypeExprKind::TypeInfer => self
+            TypeExprKind::TypeKnowledge => {
                 // Resolve inner type of Knowledge[T, ...]
                 self.resolve_knowledge_inner(te.knowledge_info)
             }
-            TypeModel => self.resolve_type_args(te.type_args)
-            TypePolicy => self.resolve_type_args(te.type_args)
-            TypeAcquisitionPolicy => self.resolve_type_args(te.type_args)
-            TypeAcquisitionPlan => self.resolve_type_args(te.type_args)
-            TypeRecoursePolicy => self.resolve_type_args(te.type_args)
-            TypeRecoursePlan => self.resolve_type_args(te.type_args)
-            TypeTransitionPolicy => self.resolve_type_args(te.type_args)
-            TypeTransitionPlan => self.resolve_type_args(te.type_args)
-            TypeDecisionPolicy => self.resolve_type_args(te.type_args)
-            TypeDeferralPolicy => self.resolve_type_args(te.type_args)
-            TypeAlternativePolicy => self.resolve_type_args(te.type_args)
-            TypeAlternativeSet => self.resolve_type_args(te.type_args)
-            TypeAlternativeOption => self.resolve_type_args(te.type_args)
-            TypeContest => self.resolve_type_args(te.type_args)
-            TypeRobust => self.resolve_type_args(te.type_args)
-            TypeIntervention => self.resolve_type_args(te.type_args)
-            TypeCounterfactual => self.resolve_type_args(te.type_args)
-            TypeValidated => self.resolve_type_args(te.type_args)
-            TypeAdmissible => self.resolve_type_args(te.type_args)
-            TypeDeferred => self.resolve_type_args(te.type_args)
-            TypeRefinement => {
+            TypeExprKind::TypeForgettable => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeExactlyPrivate => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeEditable => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeCapabilityGated => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeComposable => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeAudited => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeRevivable => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeInterpretable => self.resolve_opt_type(te.inner)
+            TypeExprKind::TypeModel => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypePolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAcquisitionPolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAcquisitionPlan => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeRecoursePolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeRecoursePlan => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeTransitionPolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeTransitionPlan => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeMonitoringPolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeObservedTransition => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeRollbackCertificate => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeDecisionPolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeDeferralPolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAlternativePolicy => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAlternativeSet => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAlternativeOption => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeContest => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeRobust => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeIntervention => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeCounterfactual => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeValidated => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAdmissible => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeDeferred => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeRefinement => {
                 // Resolve base type inside refinement
                 self.resolve_refinement_inner(te.refinement_info)
             }
-            TypeChan => self.resolve_type_args(te.type_args)
-            TypeSession => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeChan => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeSession => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeDiffPrivate => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeDPBudget => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeCausalEffect => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAleatoric => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypePotentialOutcome => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeProof => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeLemma => self.resolve_type_args(te.type_args)
+            TypeExprKind::TypeAxiom => self.resolve_type_args(te.type_args)
         }
     }
 
@@ -790,7 +979,7 @@ impl Resolver {
     fn resolve_ast_path_list(self, opt: Option<Box<AstPathList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(list) => {
-                var r = self.resolve_path((*list).head)
+                var r = self.resolve_path_head((*list).head)
                 r.resolve_ast_path_list((*list).tail)
             }
             None => self
@@ -821,19 +1010,19 @@ impl Resolver {
 
     fn resolve_stmt(self, s: Stmt) -> Resolver with Mut, Panic, Div, Alloc, IO {
         match s.kind {
-            StmtLet => {
+            StmtKind::StmtLet => {
                 // Resolve initializer BEFORE defining the variable
                 var r = self.resolve_opt_type_boxed(s.ty)
                 r = r.resolve_opt_expr(s.expr)
                 r.define(s.name, SymbolKind::SymVariable, s.span)
             }
-            StmtVar => {
+            StmtKind::StmtVar => {
                 var r = self.resolve_opt_type_boxed(s.ty)
                 r = r.resolve_opt_expr(s.expr)
                 r.define(s.name, SymbolKind::SymVariable, s.span)
             }
-            StmtExpr => self.resolve_opt_expr(s.expr)
-            StmtAssign => {
+            StmtKind::StmtExpr => self.resolve_opt_expr(s.expr)
+            StmtKind::StmtAssign => {
                 var r = self.resolve_opt_expr(s.target)
                 r.resolve_opt_expr(s.expr)
             }
@@ -855,52 +1044,80 @@ impl Resolver {
 impl Resolver {
     fn resolve_expr(self, e: Expr) -> Resolver with Mut, Panic, Div, Alloc, IO {
         match e.kind {
-            ExprIntLit => self
-            ExprFloatLit => self
-            ExprBoolTrue => self
-            ExprBoolFalse => self
-            ExprStringLit => self
-            ExprCharLit => self
-            ExprIdent => {
+            ExprKind::ExprIntLit => self
+            ExprKind::ExprFloatLit => self
+            ExprKind::ExprBoolTrue => self
+            ExprKind::ExprBoolFalse => self
+            ExprKind::ExprStringLit => self
+            ExprKind::ExprCharLit => self
+            ExprKind::ExprIdent => {
                 let found = self.lookup(e.name)
                 if found < 0 {
-                    self.report_error(e.span)
+                    // Allowlist read-only GPU thread-index intrinsics
+                    // (gpu_thread_id_x/y/z, gpu_block_id_x/y/z,
+                    //  gpu_block_dim_x/y/z, gpu_barrier, gpu_sync_threads).
+                    // These are implicit builtins, never bound in the symbol
+                    // table; the GPU backend lowers them to PTX sregs by name.
+                    if name_is_gpu_builtin(e.name) {
+                        self
+                    } else {
+                        self.report_error(e.span)
+                    }
                 } else {
                     self
                 }
             }
-            ExprPath => {
+            ExprKind::ExprPath => {
                 // Path resolution: first segment must be in scope
                 // (struct/enum name, module, etc.)
                 // For now, just check the first segment exists
                 self.resolve_path_head(e.path)
             }
-            ExprBinary => {
+            ExprKind::ExprBinary => {
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_opt_expr(e.right)
             }
-            ExprUnary => self.resolve_opt_expr(e.left)
-            ExprFieldAccess => {
+            ExprKind::ExprUnary => self.resolve_opt_expr(e.left)
+            ExprKind::ExprFieldAccess => {
+                if expr_is_gpu_axis_field(e) {
+                    return self
+                }
                 // Resolve the base expression; field checked by type checker
                 self.resolve_opt_expr(e.left)
             }
-            ExprIndex => {
+            ExprKind::ExprIndex => {
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_opt_expr(e.right)
             }
-            ExprMethodCall => {
+            ExprKind::ExprMethodCall => {
+                if expr_is_gpu_launch_descriptor_call(e) || expr_is_gpu_sync_call(e) {
+                    return self.resolve_expr_list(e.args)
+                }
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_expr_list(e.args)
             }
-            ExprCall => {
+            ExprKind::ExprCall => {
+                if expr_is_gpu_launch_invocation_call(e) {
+                    var r_launch = self
+                    match e.left {
+                        Some(desc) => {
+                            r_launch = r_launch.resolve_expr_list((*desc).args)
+                        }
+                        None => {}
+                    }
+                    return r_launch.resolve_expr_list(e.args)
+                }
+                if expr_is_gpu_launch_descriptor_call(e) || expr_is_gpu_sync_call(e) {
+                    return self.resolve_expr_list(e.args)
+                }
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_expr_list(e.args)
             }
-            ExprContest => {
+            ExprKind::ExprContest => {
                 var r = self.resolve_opt_expr(e.left)
                 r
             }
-            ExprAuditAttach => {
+            ExprKind::ExprAuditAttach => {
                 var r = self.resolve_opt_expr(e.left)
                 let found = r.lookup(e.name)
                 if found < 0 {
@@ -909,41 +1126,43 @@ impl Resolver {
                     r
                 }
             }
-            ExprIf => {
+            ExprKind::ExprIf => {
                 var r = self.resolve_opt_expr(e.left)
                 r = r.resolve_opt_block(e.block)
                 r.resolve_opt_expr(e.else_expr)
             }
-            ExprMatch => {
+            ExprKind::ExprMatch => {
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_match_arms(e.arms)
             }
-            ExprWhile => {
+            ExprKind::ExprWhile => {
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_opt_block(e.block)
             }
-            ExprLoop => self.resolve_opt_block(e.block)
-            ExprBlock => self.resolve_opt_block(e.block)
-            ExprReturn => self.resolve_opt_expr(e.left)
-            ExprBreak => self.resolve_opt_expr(e.left)
-            ExprContinue => self
-            ExprStructLit => {
+            ExprKind::ExprLoop => self.resolve_opt_block(e.block)
+            ExprKind::ExprBlock => self.resolve_opt_block(e.block)
+            ExprKind::ExprReturn => self.resolve_opt_expr(e.left)
+            ExprKind::ExprBreak => self.resolve_opt_expr(e.left)
+            ExprKind::ExprContinue => self
+            ExprKind::ExprStructLit => {
                 // Resolve path (struct name) and field init expressions
                 var r = self.resolve_path_head(e.path)
                 r.resolve_struct_field_inits(e.fields)
             }
-            ExprArrayLit => self.resolve_expr_list(e.args)
-            ExprTupleLit => self.resolve_expr_list(e.args)
-            ExprRange => {
+            ExprKind::ExprArrayLit => self.resolve_expr_list(e.args)
+            ExprKind::ExprTupleLit => self.resolve_expr_list(e.args)
+            ExprKind::ExprRange => {
                 var r = self.resolve_opt_expr(e.left)
                 r.resolve_opt_expr(e.right)
             }
-            ExprCast => self.resolve_opt_expr(e.left)
-            ExprHandle => {
+            ExprKind::ExprCast => self.resolve_opt_expr(e.left)
+            ExprKind::ExprHandle => {
                 var r = self.resolve_opt_block(e.block)
                 r.resolve_opt_block_handler(e.handler_block)
             }
-            ExprError => self
+            ExprKind::ExprClosure => self.resolve_closure_expr(e)
+            ExprKind::ExprForIn => self.resolve_for_in_expr(e)
+            ExprKind::ExprError => self
         }
     }
 
@@ -992,6 +1211,43 @@ impl Resolver {
             self
         }
     }
+
+    fn resolve_closure_expr(self, e: Expr) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        var r = self.resolve_closure_param_types(e.closure_params)
+        r = r.resolve_opt_type(e.closure_return)
+        r = r.push_scope()
+        r = r.define_closure_params(e.closure_params)
+        r = r.resolve_opt_expr(e.closure_body)
+        r.pop_scope()
+    }
+
+    fn resolve_closure_param_types(self, opt: Option<Box<ClosureParamList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.resolve_type_expr((*list).head.ty)
+                r.resolve_closure_param_types((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn define_closure_params(self, opt: Option<Box<ClosureParamList>>) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        match opt {
+            Some(list) => {
+                var r = self.define((*list).head.name, SymbolKind::SymParameter, (*list).head.span)
+                r.define_closure_params((*list).tail)
+            }
+            None => self
+        }
+    }
+
+    fn resolve_for_in_expr(self, e: Expr) -> Resolver with Mut, Panic, Div, Alloc, IO {
+        var r = self.resolve_opt_expr(e.left)
+        r = r.push_scope()
+        r = r.define(e.name, SymbolKind::SymVariable, e.span)
+        r = r.resolve_opt_block(e.block)
+        r.pop_scope()
+    }
 }
 
 // ============================================================
@@ -1018,27 +1274,27 @@ impl Resolver {
 
     fn resolve_pattern(self, pat: Pattern) -> Resolver with Mut, Panic, Div, Alloc, IO {
         match pat.kind {
-            PatWildcard => self
-            PatBinding => {
+            PatternKind::PatWildcard => self
+            PatternKind::PatBinding => {
                 // Introduce the binding into current scope
                 self.define(pat.name, SymbolKind::SymVariable, pat.span)
             }
-            PatIntLit => self
-            PatBoolTrue => self
-            PatBoolFalse => self
-            PatStringLit => self
-            PatEnum => {
+            PatternKind::PatIntLit => self
+            PatternKind::PatBoolTrue => self
+            PatternKind::PatBoolFalse => self
+            PatternKind::PatStringLit => self
+            PatternKind::PatEnum => {
                 // Enum variant pattern — e.g. Some(x)
                 // Resolve sub-patterns (which introduce bindings)
                 self.resolve_pattern_list(pat.sub_patterns)
             }
-            PatStruct => {
+            PatternKind::PatStruct => {
                 self.resolve_pat_fields(pat.pat_fields)
             }
-            PatTuple => {
+            PatternKind::PatTuple => {
                 self.resolve_pattern_list(pat.sub_patterns)
             }
-            PatOr => {
+            PatternKind::PatOr => {
                 self.resolve_pattern_list(pat.sub_patterns)
             }
         }

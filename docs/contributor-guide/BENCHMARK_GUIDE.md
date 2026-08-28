@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.contributor-gu
 
 # GLM-4.7 Performance Benchmark Guide
 
+> **⚠️ Command reality updated 2026-07-11.** There is no `cargo bench` and no `crates/souc/benches/*.rs` in this self-hosted checkout, and no `./target/release/souc`. Benchmarks are `.sio` programs under `benchmarks/` driven by `scripts/benchmarks/*.sh`; run individual ones with `./bin/souc run benchmarks/<name>.sio` (set `SOUNIO_STDLIB_PATH=$(pwd)/stdlib`). Treat the `cargo`/`--glm-enabled`/`--features` commands below as historical.
+
+
 ## Overview
 
 This guide explains how to use the comprehensive GLM-4.7 performance benchmarking suite for the Sounio compiler.

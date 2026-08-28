@@ -9,16 +9,18 @@
 // - Emit kernel parameter layouts + address spaces
 // - Host-side launch (CUDA Driver API) or static assembly path
 
-struct PtxBuf {
-    data: [i8; 65536],
-    len: i64,
+pub struct PtxBuf {
+    pub data: [i8; 65536],
+    pub len: i64,
 }
 
-fn ptx_buf_new() -> PtxBuf {
+pub var PTX_TO_STRING_BUF: [i8; 65536] = [0; 65536]
+
+pub fn ptx_buf_new() -> PtxBuf {
     PtxBuf { data: [0; 65536], len: 0 }
 }
 
-fn ptx_push_byte(buf: PtxBuf, b: i8) -> PtxBuf with Mut, Panic {
+pub fn ptx_push_byte(buf: PtxBuf, b: i8) -> PtxBuf with Mut, Panic {
     var out = buf
     if out.len >= 0 {
         if out.len < 65536 {
@@ -29,7 +31,7 @@ fn ptx_push_byte(buf: PtxBuf, b: i8) -> PtxBuf with Mut, Panic {
     out
 }
 
-fn ptx_push_str(buf: PtxBuf, s: string) -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_push_str(buf: PtxBuf, s: string) -> PtxBuf with Mut, Panic, Div {
     var out = buf
     let n = str_len(s)
     var i: i64 = 0
@@ -43,7 +45,26 @@ fn ptx_push_str(buf: PtxBuf, s: string) -> PtxBuf with Mut, Panic, Div {
     out
 }
 
-fn ptx_buf_contains(buf: PtxBuf, needle: string) -> bool with Mut, Panic, Div {
+pub fn ptx_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
+    if n == 0 { return ptx_push_byte(buf, 48) }
+    var value: i64 = if n < 0 { 0 } else { n }
+    var digits: [i8; 20] = [0 as i8; 20]
+    var rev_len: i64 = 0
+    while value > 0 {
+        digits[rev_len as usize] = (48 + value % 10) as i8
+        rev_len = rev_len + 1
+        value = value / 10
+    }
+    var out = buf
+    var k: i64 = rev_len - 1
+    while k >= 0 {
+        out = ptx_push_byte(out, digits[k as usize])
+        k = k - 1
+    }
+    out
+}
+
+pub fn ptx_buf_contains(buf: PtxBuf, needle: string) -> bool with Mut, Panic, Div {
     let nlen = str_len(needle)
     if nlen == 0 { return true }
     if buf.len < nlen { return false }
@@ -65,13 +86,17 @@ fn ptx_buf_contains(buf: PtxBuf, needle: string) -> bool with Mut, Panic, Div {
     false
 }
 
-fn ptx_to_string(buf: PtxBuf) -> string with Mut, Panic, Div, Alloc {
-    // Convert the raw byte buffer to a VM string.
-    // Note: `str_from_bytes` expects a list/sparse-list of ints plus a length.
-    str_from_bytes(buf.data, buf.len)
+pub fn ptx_to_string(buf: PtxBuf) -> string with Mut, Panic {
+    var i: i64 = 0
+    while i < buf.len {
+        PTX_TO_STRING_BUF[i as usize] = buf.data[i as usize]
+        i = i + 1
+    }
+    PTX_TO_STRING_BUF[buf.len as usize] = 0
+    str_from_bytes(PTX_TO_STRING_BUF, buf.len)
 }
 
-fn ptx_str_contains(haystack: string, needle: string) -> bool with Mut, Panic, Div {
+pub fn ptx_str_contains(haystack: string, needle: string) -> bool with Mut, Panic, Div {
     // Self-hosted-friendly substring check.
     //
     // NOTE: The VM has a `contains` builtin, but we keep a local implementation
@@ -99,7 +124,7 @@ fn ptx_str_contains(haystack: string, needle: string) -> bool with Mut, Panic, D
     false
 }
 
-fn ptx_trim_leading_spaces(s: string) -> string with Mut, Panic, Div {
+pub fn ptx_trim_leading_spaces(s: string) -> string with Mut, Panic, Div {
     let n = str_len(s)
     var i: i64 = 0
 
@@ -114,7 +139,7 @@ fn ptx_trim_leading_spaces(s: string) -> string with Mut, Panic, Div {
     str_slice(s, i, n)
 }
 
-fn ptx_has_predicated_opcode(haystack: string, opcode: string) -> bool with Mut, Panic, Div {
+pub fn ptx_has_predicated_opcode(haystack: string, opcode: string) -> bool with Mut, Panic, Div {
     let n = str_len(haystack)
     if n == 0 { return false }
 
@@ -122,7 +147,7 @@ fn ptx_has_predicated_opcode(haystack: string, opcode: string) -> bool with Mut,
     while line_start < n {
         var line_end: i64 = line_start
         while line_end < n {
-            if str_char_at(haystack, line_end) == '\n' {
+            if str_char_at(haystack, line_end) == 10 {
                 break
             }
             line_end = line_end + 1
@@ -132,7 +157,7 @@ fn ptx_has_predicated_opcode(haystack: string, opcode: string) -> bool with Mut,
         let line = ptx_trim_leading_spaces(raw_line)
         if str_len(line) > 0 {
             let first = str_char_at(line, 0)
-            if (first == '@' || ptx_str_contains(line, "@%")) && ptx_str_contains(line, opcode) {
+            if (first == 64 || ptx_str_contains(line, "@%")) && ptx_str_contains(line, opcode) {
                 return true
             }
         }
@@ -146,7 +171,7 @@ fn ptx_has_predicated_opcode(haystack: string, opcode: string) -> bool with Mut,
     false
 }
 
-fn ptx_has_predicated_opcode_with_pred(haystack: string, opcode: string, pred: string) -> bool with Mut, Panic, Div {
+pub fn ptx_has_predicated_opcode_with_pred(haystack: string, opcode: string, pred: string) -> bool with Mut, Panic, Div {
     let n = str_len(haystack)
     if n == 0 { return false }
 
@@ -154,7 +179,7 @@ fn ptx_has_predicated_opcode_with_pred(haystack: string, opcode: string, pred: s
     while line_start < n {
         var line_end: i64 = line_start
         while line_end < n {
-            if str_char_at(haystack, line_end) == '\n' {
+            if str_char_at(haystack, line_end) == 10 {
                 break
             }
             line_end = line_end + 1
@@ -177,7 +202,7 @@ fn ptx_has_predicated_opcode_with_pred(haystack: string, opcode: string, pred: s
     false
 }
 
-fn ptx_has_predicate_token(line: string, pred: string) -> bool with Mut, Panic, Div {
+pub fn ptx_has_predicate_token(line: string, pred: string) -> bool with Mut, Panic, Div {
     let token_with_space_prefix = " " ++ pred ++ ","
     let token_with_delim = pred ++ ","
     let token_with_space_suffix = ", " ++ pred ++ ","
@@ -203,7 +228,7 @@ fn ptx_has_predicate_token(line: string, pred: string) -> bool with Mut, Panic, 
     false
 }
 
-fn ptx_has_setp_with_pred(haystack: string, pred: string) -> bool with Mut, Panic, Div {
+pub fn ptx_has_setp_with_pred(haystack: string, pred: string) -> bool with Mut, Panic, Div {
     let n = str_len(haystack)
     if n == 0 { return false }
 
@@ -211,7 +236,7 @@ fn ptx_has_setp_with_pred(haystack: string, pred: string) -> bool with Mut, Pani
     while line_start < n {
         var line_end: i64 = line_start
         while line_end < n {
-            if str_char_at(haystack, line_end) == '\n' {
+            if str_char_at(haystack, line_end) == 10 {
                 break
             }
             line_end = line_end + 1
@@ -234,7 +259,7 @@ fn ptx_has_setp_with_pred(haystack: string, pred: string) -> bool with Mut, Pani
     false
 }
 
-fn ptx_has_selp_with_pred(haystack: string, pred: string) -> bool with Mut, Panic, Div {
+pub fn ptx_has_selp_with_pred(haystack: string, pred: string) -> bool with Mut, Panic, Div {
     let n = str_len(haystack)
     if n == 0 { return false }
 
@@ -242,7 +267,7 @@ fn ptx_has_selp_with_pred(haystack: string, pred: string) -> bool with Mut, Pani
     while line_start < n {
         var line_end: i64 = line_start
         while line_end < n {
-            if str_char_at(haystack, line_end) == '\n' {
+            if str_char_at(haystack, line_end) == 10 {
                 break
             }
             line_end = line_end + 1
@@ -265,7 +290,7 @@ fn ptx_has_selp_with_pred(haystack: string, pred: string) -> bool with Mut, Pani
     false
 }
 
-fn ptx_has_unpredicated_opcode(haystack: string, opcode: string) -> bool with Mut, Panic, Div {
+pub fn ptx_has_unpredicated_opcode(haystack: string, opcode: string) -> bool with Mut, Panic, Div {
     let n = str_len(haystack)
     if n == 0 { return false }
 
@@ -273,7 +298,7 @@ fn ptx_has_unpredicated_opcode(haystack: string, opcode: string) -> bool with Mu
     while line_start < n {
         var line_end: i64 = line_start
         while line_end < n {
-            if str_char_at(haystack, line_end) == '\n' {
+            if str_char_at(haystack, line_end) == 10 {
                 break
             }
             line_end = line_end + 1
@@ -299,197 +324,209 @@ fn ptx_has_unpredicated_opcode(haystack: string, opcode: string) -> bool with Mu
 // Core PTX emitter pieces used for deterministic text scaffolding.
 // Keeps phase-0 output stable and easy to extend in later PTX-first passes.
 
-fn ptx_header_version() -> string { "7.0" }
+pub fn ptx_header_version() -> string { "7.0" }
 
-fn ptx_header_target() -> string { "sm_50" }
+pub fn ptx_header_target() -> string { "sm_50" }
 
-fn ptx_header_address_size() -> string { ".address_size 64" }
+pub fn ptx_header_address_size() -> string { ".address_size 64" }
 
-fn ptx_opcode_mov_u32() -> string { "mov.u32" }
+pub fn ptx_opcode_mov_u32() -> string { "mov.u32" }
 
-fn ptx_opcode_cvt_u64_u32() -> string { "cvt.u64.u32" }
+pub fn ptx_opcode_cvt_u64_u32() -> string { "cvt.u64.u32" }
 
-fn ptx_opcode_mul_lo_u64() -> string { "mul.lo.u64" }
+pub fn ptx_opcode_mul_lo_u64() -> string { "mul.lo.u64" }
 
-fn ptx_opcode_ld_param_u64() -> string { "ld.param.u64" }
-fn ptx_opcode_ld_param_u32() -> string { "ld.param.u32" }
-fn ptx_opcode_ld_param_u16() -> string { "ld.param.u16" }
+pub fn ptx_opcode_ld_param_u64() -> string { "ld.param.u64" }
+pub fn ptx_opcode_ld_param_u32() -> string { "ld.param.u32" }
+pub fn ptx_opcode_ld_param_u16() -> string { "ld.param.u16" }
+pub fn ptx_opcode_ld_param_f32() -> string { "ld.param.f32" }
+pub fn ptx_opcode_ld_param_f64() -> string { "ld.param.f64" }
 
-fn ptx_opcode_add_u64() -> string { "add.u64" }
+pub fn ptx_opcode_add_u64() -> string { "add.u64" }
 
-fn ptx_opcode_ld_global_f32() -> string { "ld.global.f32" }
+pub fn ptx_opcode_ld_global_f32() -> string { "ld.global.f32" }
 
-fn ptx_opcode_add_f32() -> string { "add.f32" }
+pub fn ptx_opcode_add_f32() -> string { "add.f32" }
 
-fn ptx_opcode_st_global_f32() -> string { "st.global.f32" }
+pub fn ptx_opcode_st_global_f32() -> string { "st.global.f32" }
 
-fn ptx_opcode_ret() -> string { "ret" }
+pub fn ptx_opcode_ret() -> string { "ret" }
 
 // Type-specific opcodes for f64/i32/i64
-fn ptx_opcode_add_f64() -> string { "add.f64" }
+pub fn ptx_opcode_add_f64() -> string { "add.f64" }
 
-fn ptx_opcode_add_s32() -> string { "add.s32" }
+pub fn ptx_opcode_add_s32() -> string { "add.s32" }
 
-fn ptx_opcode_add_s64() -> string { "add.s64" }
+pub fn ptx_opcode_add_s64() -> string { "add.s64" }
 
-fn ptx_opcode_ld_global_f64() -> string { "ld.global.f64" }
+pub fn ptx_opcode_ld_global_f64() -> string { "ld.global.f64" }
 
-fn ptx_opcode_ld_global_s32() -> string { "ld.global.s32" }
+pub fn ptx_opcode_ld_global_s32() -> string { "ld.global.s32" }
 
-fn ptx_opcode_ld_global_s64() -> string { "ld.global.s64" }
+pub fn ptx_opcode_ld_global_s64() -> string { "ld.global.s64" }
 
-fn ptx_opcode_st_global_f64() -> string { "st.global.f64" }
+pub fn ptx_opcode_st_global_f64() -> string { "st.global.f64" }
 
-fn ptx_opcode_st_global_s32() -> string { "st.global.s32" }
+pub fn ptx_opcode_st_global_s32() -> string { "st.global.s32" }
 
-fn ptx_opcode_st_global_s64() -> string { "st.global.s64" }
+pub fn ptx_opcode_ld_global_u32() -> string { "ld.global.u32" }
+
+pub fn ptx_opcode_st_global_u32() -> string { "st.global.u32" }
+
+pub fn ptx_opcode_st_global_s64() -> string { "st.global.s64" }
 
 // Element-wise operation opcodes (sub/mul/div for all types)
-fn ptx_opcode_sub_f32() -> string { "sub.f32" }
+pub fn ptx_opcode_sub_f32() -> string { "sub.f32" }
 
-fn ptx_opcode_sub_f64() -> string { "sub.f64" }
+pub fn ptx_opcode_sub_f64() -> string { "sub.f64" }
 
-fn ptx_opcode_sub_s32() -> string { "sub.s32" }
+pub fn ptx_opcode_sub_s32() -> string { "sub.s32" }
 
-fn ptx_opcode_sub_s64() -> string { "sub.s64" }
+pub fn ptx_opcode_sub_s64() -> string { "sub.s64" }
 
-fn ptx_opcode_sub_u64() -> string { "sub.u64" }
+pub fn ptx_opcode_sub_u64() -> string { "sub.u64" }
 
-fn ptx_opcode_mul_lo_f32() -> string { "mul.rn.f32" }
+pub fn ptx_opcode_mul_lo_f32() -> string { "mul.rn.f32" }
 
-fn ptx_opcode_mul_lo_f64() -> string { "mul.rn.f64" }
+pub fn ptx_opcode_mul_lo_f64() -> string { "mul.rn.f64" }
 
-fn ptx_opcode_mul_lo_s32() -> string { "mul.lo.s32" }
+pub fn ptx_opcode_mul_lo_s32() -> string { "mul.lo.s32" }
 
-fn ptx_opcode_mul_lo_s64() -> string { "mul.lo.s64" }
+pub fn ptx_opcode_mul_lo_s64() -> string { "mul.lo.s64" }
 
-fn ptx_opcode_div_f32() -> string { "div.rn.f32" }
+pub fn ptx_opcode_div_f32() -> string { "div.rn.f32" }
 
-fn ptx_opcode_div_f64() -> string { "div.rn.f64" }
+pub fn ptx_opcode_div_f64() -> string { "div.rn.f64" }
 
-fn ptx_opcode_div_s32() -> string { "div.s32" }
+pub fn ptx_opcode_div_s32() -> string { "div.s32" }
 
-fn ptx_opcode_div_s64() -> string { "div.s64" }
+pub fn ptx_opcode_div_s64() -> string { "div.s64" }
 
-fn ptx_opcode_div_u64() -> string { "div.u64" }
+pub fn ptx_opcode_div_u64() -> string { "div.u64" }
 
 // Reduction operations - max
-fn ptx_opcode_max_f32() -> string { "max.f32" }
+pub fn ptx_opcode_max_f32() -> string { "max.f32" }
 
-fn ptx_opcode_max_f64() -> string { "max.f64" }
+pub fn ptx_opcode_max_f64() -> string { "max.f64" }
 
-fn ptx_opcode_max_s32() -> string { "max.s32" }
+pub fn ptx_opcode_max_s32() -> string { "max.s32" }
 
-fn ptx_opcode_max_s64() -> string { "max.s64" }
+pub fn ptx_opcode_max_s64() -> string { "max.s64" }
 
-fn ptx_opcode_max_u32() -> string { "max.u32" }
+pub fn ptx_opcode_max_u32() -> string { "max.u32" }
 
-fn ptx_opcode_max_u64() -> string { "max.u64" }
+pub fn ptx_opcode_max_u64() -> string { "max.u64" }
 
 // Reduction operations - min
-fn ptx_opcode_min_f32() -> string { "min.f32" }
+pub fn ptx_opcode_min_f32() -> string { "min.f32" }
 
-fn ptx_opcode_min_f64() -> string { "min.f64" }
+pub fn ptx_opcode_min_f64() -> string { "min.f64" }
 
-fn ptx_opcode_min_s32() -> string { "min.s32" }
+pub fn ptx_opcode_min_s32() -> string { "min.s32" }
 
-fn ptx_opcode_min_s64() -> string { "min.s64" }
+pub fn ptx_opcode_min_s64() -> string { "min.s64" }
 
-fn ptx_opcode_min_u32() -> string { "min.u32" }
+pub fn ptx_opcode_min_u32() -> string { "min.u32" }
 
-fn ptx_opcode_min_u64() -> string { "min.u64" }
+pub fn ptx_opcode_min_u64() -> string { "min.u64" }
 
 // Atomic operations
-fn ptx_opcode_atom_add_f32() -> string { "atom.add.f32" }
+pub fn ptx_opcode_atom_add_f32() -> string { "atom.add.f32" }
 
-fn ptx_opcode_atom_add_f64() -> string { "atom.add.f64" }
+pub fn ptx_opcode_atom_add_f64() -> string { "atom.add.f64" }
 
-fn ptx_opcode_atom_add_s32() -> string { "atom.add.s32" }
+pub fn ptx_opcode_atom_add_s32() -> string { "atom.add.s32" }
 
-fn ptx_opcode_atom_add_u32() -> string { "atom.add.u32" }
+pub fn ptx_opcode_atom_add_u32() -> string { "atom.add.u32" }
 
 // Shared memory operations
-fn ptx_opcode_ld_shared_f32() -> string { "ld.shared.f32" }
+pub fn ptx_opcode_ld_shared_f32() -> string { "ld.shared.f32" }
 
-fn ptx_opcode_ld_shared_f64() -> string { "ld.shared.f64" }
+pub fn ptx_opcode_ld_shared_f64() -> string { "ld.shared.f64" }
 
-fn ptx_opcode_st_shared_f32() -> string { "st.shared.f32" }
+pub fn ptx_opcode_st_shared_f32() -> string { "st.shared.f32" }
 
-fn ptx_opcode_st_shared_f64() -> string { "st.shared.f64" }
+pub fn ptx_opcode_st_shared_f64() -> string { "st.shared.f64" }
 
-fn ptx_opcode_ld_shared_s32() -> string { "ld.shared.s32" }
+pub fn ptx_opcode_ld_shared_s32() -> string { "ld.shared.s32" }
 
-fn ptx_opcode_st_shared_s32() -> string { "st.shared.s32" }
+pub fn ptx_opcode_st_shared_s32() -> string { "st.shared.s32" }
 
 // Predicate operations
-fn ptx_opcode_setp_lt_u32() -> string { "setp.lt.u32" }
+pub fn ptx_opcode_setp_lt_u32() -> string { "setp.lt.u32" }
 
-fn ptx_opcode_setp_lt_s32() -> string { "setp.lt.s32" }
+pub fn ptx_opcode_setp_lt_s32() -> string { "setp.lt.s32" }
 
-fn ptx_opcode_setp_lt_f32() -> string { "setp.lt.f32" }
-fn ptx_opcode_setp_lt_u64() -> string { "setp.lt.u64" }
+pub fn ptx_opcode_setp_lt_f32() -> string { "setp.lt.f32" }
+pub fn ptx_opcode_setp_lt_u64() -> string { "setp.lt.u64" }
+pub fn ptx_opcode_setp_lt_s64() -> string { "setp.lt.s64" }
+pub fn ptx_opcode_setp_lt_f64() -> string { "setp.lt.f64" }
 
-fn ptx_opcode_setp_le_u32() -> string { "setp.le.u32" }
+pub fn ptx_opcode_setp_le_u32() -> string { "setp.le.u32" }
 
-fn ptx_opcode_setp_le_s32() -> string { "setp.le.s32" }
+pub fn ptx_opcode_setp_le_s32() -> string { "setp.le.s32" }
 
-fn ptx_opcode_setp_le_f32() -> string { "setp.le.f32" }
-fn ptx_opcode_setp_le_u64() -> string { "setp.le.u64" }
+pub fn ptx_opcode_setp_le_f32() -> string { "setp.le.f32" }
+pub fn ptx_opcode_setp_le_u64() -> string { "setp.le.u64" }
+pub fn ptx_opcode_setp_le_s64() -> string { "setp.le.s64" }
+pub fn ptx_opcode_setp_le_f64() -> string { "setp.le.f64" }
 
-fn ptx_opcode_setp_ge_u32() -> string { "setp.ge.u32" }
+pub fn ptx_opcode_setp_ge_u32() -> string { "setp.ge.u32" }
 
-fn ptx_opcode_setp_ge_s32() -> string { "setp.ge.s32" }
+pub fn ptx_opcode_setp_ge_s32() -> string { "setp.ge.s32" }
 
-fn ptx_opcode_setp_ge_s64() -> string { "setp.ge.s64" }
+pub fn ptx_opcode_setp_ge_s64() -> string { "setp.ge.s64" }
 
-fn ptx_opcode_setp_ge_f32() -> string { "setp.ge.f32" }
+pub fn ptx_opcode_setp_ge_f32() -> string { "setp.ge.f32" }
 
-fn ptx_opcode_setp_ge_f64() -> string { "setp.ge.f64" }
+pub fn ptx_opcode_setp_ge_f64() -> string { "setp.ge.f64" }
 
-fn ptx_opcode_setp_ge_u64() -> string { "setp.ge.u64" }
+pub fn ptx_opcode_setp_ge_u64() -> string { "setp.ge.u64" }
 
-fn ptx_opcode_setp_eq_u32() -> string { "setp.eq.u32" }
+pub fn ptx_opcode_setp_eq_u32() -> string { "setp.eq.u32" }
 
-fn ptx_opcode_setp_eq_s32() -> string { "setp.eq.s32" }
+pub fn ptx_opcode_setp_eq_s32() -> string { "setp.eq.s32" }
 
-fn ptx_opcode_setp_eq_f32() -> string { "setp.eq.f32" }
-fn ptx_opcode_setp_eq_u64() -> string { "setp.eq.u64" }
+pub fn ptx_opcode_setp_eq_f32() -> string { "setp.eq.f32" }
+pub fn ptx_opcode_setp_eq_u64() -> string { "setp.eq.u64" }
+pub fn ptx_opcode_setp_eq_s64() -> string { "setp.eq.s64" }
+pub fn ptx_opcode_setp_eq_f64() -> string { "setp.eq.f64" }
 
-fn ptx_opcode_selp_b32() -> string { "selp.b32" }
+pub fn ptx_opcode_selp_b32() -> string { "selp.b32" }
 
-fn ptx_opcode_selp_b64() -> string { "selp.b64" }
+pub fn ptx_opcode_selp_b64() -> string { "selp.b64" }
 
-fn ptx_opcode_selp_s32() -> string { "selp.b32" }
+pub fn ptx_opcode_selp_s32() -> string { "selp.b32" }
 
-fn ptx_opcode_selp_f32() -> string { "selp.f32" }
+pub fn ptx_opcode_selp_f32() -> string { "selp.f32" }
 
-fn ptx_opcode_selp_f64() -> string { "selp.f64" }
+pub fn ptx_opcode_selp_f64() -> string { "selp.f64" }
 
 // Warp shuffle operations
-fn ptx_opcode_shfl_down_b32() -> string { "shfl.sync.down.b32" }
+pub fn ptx_opcode_shfl_down_b32() -> string { "shfl.sync.down.b32" }
 
-fn ptx_opcode_shfl_down_b64() -> string { "shfl.sync.down.b64" }
+pub fn ptx_opcode_shfl_down_b64() -> string { "shfl.sync.down.b64" }
 
 // Phase 7: Warp shuffle up (for inclusive scan)
-fn ptx_opcode_shfl_up_b32() -> string { "shfl.sync.up.b32" }
+pub fn ptx_opcode_shfl_up_b32() -> string { "shfl.sync.up.b32" }
 
-fn ptx_opcode_shfl_up_b64() -> string { "shfl.sync.up.b64" }
+pub fn ptx_opcode_shfl_up_b64() -> string { "shfl.sync.up.b64" }
 
 // Phase 4: U32 arithmetic (for 2D index calculations)
-fn ptx_opcode_add_u32() -> string { "add.u32" }
+pub fn ptx_opcode_add_u32() -> string { "add.u32" }
 
-fn ptx_opcode_mul_lo_u32() -> string { "mul.lo.u32" }
+pub fn ptx_opcode_mul_lo_u32() -> string { "mul.lo.u32" }
 
 // Phase 4: FMA / MAD operations
-fn ptx_opcode_fma_rn_f32() -> string { "fma.rn.f32" }
+pub fn ptx_opcode_fma_rn_f32() -> string { "fma.rn.f32" }
 
-fn ptx_opcode_fma_rn_f64() -> string { "fma.rn.f64" }
+pub fn ptx_opcode_fma_rn_f64() -> string { "fma.rn.f64" }
 
-fn ptx_opcode_mad_lo_s32() -> string { "mad.lo.s32" }
+pub fn ptx_opcode_mad_lo_s32() -> string { "mad.lo.s32" }
 
-fn ptx_opcode_mad_lo_s64() -> string { "mad.lo.s64" }
+pub fn ptx_opcode_mad_lo_s64() -> string { "mad.lo.s64" }
 
-fn ptx_push_binary3(
+pub fn ptx_push_binary3(
     buf: PtxBuf,
     opcode: string,
     dst: string,
@@ -509,7 +546,7 @@ fn ptx_push_binary3(
     out
 }
 
-fn ptx_push_binary2(
+pub fn ptx_push_binary2(
     buf: PtxBuf,
     opcode: string,
     lhs: string,
@@ -526,7 +563,7 @@ fn ptx_push_binary2(
     out
 }
 
-fn ptx_push_binary_mem2(
+pub fn ptx_push_binary_mem2(
     buf: PtxBuf,
     opcode: string,
     dst_or_dst_ptr: string,
@@ -543,7 +580,7 @@ fn ptx_push_binary_mem2(
     out
 }
 
-fn ptx_push_store_mem(
+pub fn ptx_push_store_mem(
     buf: PtxBuf,
     opcode: string,
     dst_ptr: string,
@@ -560,28 +597,30 @@ fn ptx_push_store_mem(
     out
 }
 
-fn ptx_emit_shared_decl(
+pub fn ptx_emit_shared_decl(
     buf: PtxBuf,
     bytes: i64
 ) -> PtxBuf with Mut, Panic, Div, Alloc {
     var out = buf
-    out = ptx_push_str(out, "    .shared .align 4 .b8 shared_array[")
-    out = ptx_push_str(out, i64_to_string(bytes))
+    // .align 16: covers f16 (2 B) and the f64 tensor-core tile's st.shared.f64 / wmma.load.*.f64,
+    // which need 8-byte alignment (16 ≥ 8, and over-aligning is always safe).
+    out = ptx_push_str(out, "    .shared .align 16 .b8 shared_array[")
+    out = ptx_push_i64(out, bytes)
     out = ptx_push_str(out, "];\n")
     out
 }
 
-fn ptx_push_ret(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_push_ret(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     ptx_push_str(buf, "    ret;\n")
 }
 
 // Reduction helper functions
 
-fn ptx_push_barrier_sync(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_push_barrier_sync(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     ptx_push_str(buf, "    bar.sync 0;\n")
 }
 
-fn ptx_push_shfl_down(
+pub fn ptx_push_shfl_down(
     buf: PtxBuf,
     opcode: string,
     dst: string,
@@ -601,7 +640,7 @@ fn ptx_push_shfl_down(
     out
 }
 
-fn ptx_push_setp2(
+pub fn ptx_push_setp2(
     buf: PtxBuf,
     opcode: string,
     dst_pred: string,
@@ -621,7 +660,7 @@ fn ptx_push_setp2(
     out
 }
 
-fn ptx_push_selp(
+pub fn ptx_push_selp(
     buf: PtxBuf,
     opcode: string,
     dst: string,
@@ -644,7 +683,7 @@ fn ptx_push_selp(
     out
 }
 
-fn ptx_push_predicated_mem2(
+pub fn ptx_push_predicated_mem2(
     buf: PtxBuf,
     opcode: string,
     pred: string,
@@ -664,7 +703,7 @@ fn ptx_push_predicated_mem2(
     out
 }
 
-fn ptx_push_predicated_store_mem(
+pub fn ptx_push_predicated_store_mem(
     buf: PtxBuf,
     opcode: string,
     pred: string,
@@ -684,7 +723,7 @@ fn ptx_push_predicated_store_mem(
     out
 }
 
-fn ptx_push_atomic_add(
+pub fn ptx_push_atomic_add(
     buf: PtxBuf,
     opcode: string,
     dst: string,
@@ -704,7 +743,7 @@ fn ptx_push_atomic_add(
     out
 }
 
-fn ptx_push_ld_shared(
+pub fn ptx_push_ld_shared(
     buf: PtxBuf,
     opcode: string,
     dst: string,
@@ -721,7 +760,7 @@ fn ptx_push_ld_shared(
     out
 }
 
-fn ptx_push_st_shared(
+pub fn ptx_push_st_shared(
     buf: PtxBuf,
     opcode: string,
     addr: string,
@@ -739,7 +778,7 @@ fn ptx_push_st_shared(
 }
 
 // Phase 4: FMA emitter (4-operand: dst = a * b + c)
-fn ptx_push_fma(
+pub fn ptx_push_fma(
     buf: PtxBuf,
     opcode: string,
     dst: string,
@@ -763,7 +802,7 @@ fn ptx_push_fma(
 }
 
 // Phase 4: Special register move (ctaid.x, ntid.x, etc.)
-fn ptx_push_mov_special(
+pub fn ptx_push_mov_special(
     buf: PtxBuf,
     special: string,
     axis: string,
@@ -781,7 +820,7 @@ fn ptx_push_mov_special(
 }
 
 // Phase 4: Add immediate (reg + immediate constant)
-fn ptx_push_add_imm(
+pub fn ptx_push_add_imm(
     buf: PtxBuf,
     opcode: string,
     dst: string,
@@ -801,7 +840,7 @@ fn ptx_push_add_imm(
     out
 }
 
-fn ptx_emit_header(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_emit_header(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     var out = buf
     out = ptx_push_str(out, ".version ")
     out = ptx_push_str(out, ptx_header_version())
@@ -814,7 +853,7 @@ fn ptx_emit_header(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     out
 }
 
-fn ptx_emit_vec_add_signature(
+pub fn ptx_emit_vec_add_signature(
     buf: PtxBuf,
     kernel_name: string,
     param_a: string,
@@ -837,21 +876,22 @@ fn ptx_emit_vec_add_signature(
     out
 }
 
-fn ptx_emit_vec_add_reg_decl(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_emit_vec_add_reg_decl(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     var out = buf
     out = ptx_push_str(out, "{\n")
     out = ptx_push_str(out, "    .reg .pred %p<2>;\n")
-    out = ptx_push_str(out, "    .reg .b32 %r<3>;\n")
+    out = ptx_push_str(out, "    .reg .b32 %r<5>;\n")
     out = ptx_push_str(out, "    .reg .b64 %rd<9>;\n")
     out = ptx_push_str(out, "    .reg .f32 %f<4>;\n\n")
     out
 }
 
-fn ptx_emit_vec_add_body(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_emit_vec_add_body(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     var out = buf
     out = ptx_push_binary2(out, ptx_opcode_mov_u32(), "%r1", "%tid.x")
-    // NOTE: Keep behavior identical to the current phase-0 reference by retaining the
-    // exact source shape and register allocation.
+    out = ptx_push_binary2(out, ptx_opcode_mov_u32(), "%r2", "%ctaid.x")
+    out = ptx_push_binary2(out, ptx_opcode_mov_u32(), "%r3", "%ntid.x")
+    out = ptx_push_str(out, "    mad.lo.u32 %r1, %r2, %r3, %r1;\n")
     out = ptx_push_binary2(out, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
     out = ptx_push_binary3(out, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "4")
     out = ptx_push_binary_mem2(out, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
@@ -869,7 +909,7 @@ fn ptx_emit_vec_add_body(buf: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     out
 }
 
-fn ptx_emit_vec3_f32_add(
+pub fn ptx_emit_vec3_f32_add(
     buf: PtxBuf,
     out0: string,
     in0_0: string,
@@ -889,7 +929,7 @@ fn ptx_emit_vec3_f32_add(
 }
 
 // Append one PtxBuf to another. Used to concatenate multiple kernel PTX outputs.
-fn ptx_buf_append(dst: PtxBuf, src: PtxBuf) -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_buf_append(dst: PtxBuf, src: PtxBuf) -> PtxBuf with Mut, Panic, Div {
     var out = dst
     var i: i64 = 0
     while i < src.len {
@@ -903,7 +943,7 @@ fn ptx_buf_append(dst: PtxBuf, src: PtxBuf) -> PtxBuf with Mut, Panic, Div {
 }
 
 // Print a PtxBuf to stdout.
-fn ptx_buf_print(buf: PtxBuf) with IO, Mut, Panic, Div {
+pub fn ptx_buf_print(buf: PtxBuf) with IO, Mut, Panic, Div {
     var i: i64 = 0
     while i < buf.len {
         print_char(buf.data[i as usize] as i64)
@@ -911,11 +951,353 @@ fn ptx_buf_print(buf: PtxBuf) with IO, Mut, Panic, Div {
     }
 }
 
-fn ptx_emit_demo_vec_add() -> PtxBuf with Mut, Panic, Div {
+pub fn ptx_emit_demo_vec_add() -> PtxBuf with Mut, Panic, Div {
     var b = ptx_buf_new()
     b = ptx_emit_header(b)
     b = ptx_emit_vec_add_signature(b, "vec_add", "param_a", "param_b", "param_c")
     b = ptx_emit_vec_add_reg_decl(b)
     b = ptx_emit_vec_add_body(b)
+    b
+}
+
+pub fn ptx_emit_epistemic_dual_output_f32() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_push_str(b, ".visible .entry epistemic_dual_output_f32(\n")
+    b = ptx_push_str(b, "    .param .u64 param_a_value,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b_value,\n")
+    b = ptx_push_str(b, "    .param .u64 param_a_eps,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b_eps,\n")
+    b = ptx_push_str(b, "    .param .u64 param_a_valid,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b_valid,\n")
+    b = ptx_push_str(b, "    .param .u64 param_out_value,\n")
+    b = ptx_push_str(b, "    .param .u64 param_out_eps,\n")
+    b = ptx_push_str(b, "    .param .u64 param_out_valid,\n")
+    b = ptx_push_str(b, "    .param .u64 param_out_prov\n")
+    b = ptx_push_str(b, ")\n")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<12>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<21>;\n")
+    b = ptx_push_str(b, "    .reg .f32 %f<8>;\n\n")
+    b = ptx_push_str(b, "    mov.u32 %r1, %tid.x;\n")
+    b = ptx_push_str(b, "    mov.u32 %r6, %ctaid.x;\n")
+    b = ptx_push_str(b, "    mov.u32 %r7, %ntid.x;\n")
+    b = ptx_push_str(b, "    mad.lo.u32 %r1, %r6, %r7, %r1;\n")
+    b = ptx_push_str(b, "    cvt.u64.u32 %rd1, %r1;\n")
+    b = ptx_push_str(b, "    mul.lo.u64 %rd2, %rd1, 4;\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd3, [param_a_value];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd4, [param_b_value];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd5, [param_a_eps];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd6, [param_b_eps];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd7, [param_a_valid];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd8, [param_b_valid];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd9, [param_out_value];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd10, [param_out_eps];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd11, [param_out_valid];\n")
+    b = ptx_push_str(b, "    ld.param.u64 %rd20, [param_out_prov];\n")
+    b = ptx_push_str(b, "    add.u64 %rd12, %rd3, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd13, %rd4, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd14, %rd5, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd15, %rd6, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd16, %rd7, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd17, %rd8, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd18, %rd9, %rd2;\n")
+    b = ptx_push_str(b, "    add.u64 %rd19, %rd10, %rd2;\n")
+    b = ptx_push_str(b, "    ld.global.f32 %f1, [%rd12];\n")
+    b = ptx_push_str(b, "    ld.global.f32 %f2, [%rd13];\n")
+    b = ptx_push_str(b, "    ld.global.f32 %f3, [%rd14];\n")
+    b = ptx_push_str(b, "    ld.global.f32 %f4, [%rd15];\n")
+    b = ptx_push_str(b, "    ld.global.u32 %r2, [%rd16];\n")
+    b = ptx_push_str(b, "    ld.global.u32 %r3, [%rd17];\n")
+    b = ptx_push_str(b, "    add.f32 %f5, %f1, %f2;\n")
+    b = ptx_push_str(b, "    mul.rn.f32 %f6, %f3, %f3;\n")
+    b = ptx_push_str(b, "    mul.rn.f32 %f7, %f4, %f4;\n")
+    b = ptx_push_str(b, "    add.f32 %f6, %f6, %f7;\n")
+    b = ptx_push_str(b, "    and.b32 %r4, %r2, %r3;\n")
+    b = ptx_push_str(b, "    xor.b32 %r5, %r1, 305419896;\n")
+    b = ptx_push_str(b, "    xor.b32 %r5, %r5, %r4;\n")
+    b = ptx_push_str(b, "    st.global.f32 [%rd18], %f5;\n")
+    b = ptx_push_str(b, "    st.global.f32 [%rd19], %f6;\n")
+    b = ptx_push_str(b, "    add.u64 %rd12, %rd11, %rd2;\n")
+    b = ptx_push_str(b, "    st.global.u32 [%rd12], %r4;\n")
+    b = ptx_push_str(b, "    add.u64 %rd12, %rd20, %rd2;\n")
+    b = ptx_push_str(b, "    st.global.u32 [%rd12], %r5;\n")
+    b = ptx_push_str(b, "    ret;\n")
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+// ── Extended kernel emitters (Phase 2) ──────────────────────────────
+
+pub fn ptx_emit_vec_sub_f32() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_sub", "param_a", "param_b", "param_c")
+    b = ptx_emit_vec_add_reg_decl(b)
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "4")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f1", "%rd6")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f2", "%rd7")
+    b = ptx_push_binary3(b, ptx_opcode_sub_f32(), "%f3", "%f1", "%f2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f32(), "%rd8", "%f3")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+pub fn ptx_emit_vec_mul_f32() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_mul", "param_a", "param_b", "param_c")
+    b = ptx_emit_vec_add_reg_decl(b)
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "4")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f1", "%rd6")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f2", "%rd7")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_f32(), "%f3", "%f1", "%f2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f32(), "%rd8", "%f3")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+pub fn ptx_emit_vec_div_f32() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_div", "param_a", "param_b", "param_c")
+    b = ptx_emit_vec_add_reg_decl(b)
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "4")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f1", "%rd6")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f2", "%rd7")
+    b = ptx_push_binary3(b, ptx_opcode_div_f32(), "%f3", "%f1", "%f2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f32(), "%rd8", "%f3")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+pub fn ptx_emit_vec_add_f64() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_add_f64", "param_a", "param_b", "param_c")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<9>;\n")
+    b = ptx_push_str(b, "    .reg .f64 %fd<4>;\n\n")
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "8")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd1", "%rd6")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd2", "%rd7")
+    b = ptx_push_binary3(b, ptx_opcode_add_f64(), "%fd3", "%fd1", "%fd2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f64(), "%rd8", "%fd3")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+pub fn ptx_emit_fma_f32() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_push_str(b, ".visible .entry fma_f32(\n")
+    b = ptx_push_str(b, "    .param .u64 param_a,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b,\n")
+    b = ptx_push_str(b, "    .param .u64 param_c,\n")
+    b = ptx_push_str(b, "    .param .u64 param_d\n")
+    b = ptx_push_str(b, ")\n")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<11>;\n")
+    b = ptx_push_str(b, "    .reg .f32 %f<5>;\n\n")
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "4")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd6", "param_d")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd9", "%rd5", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd10", "%rd6", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f1", "%rd7")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f2", "%rd8")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f32(), "%f3", "%rd9")
+    b = ptx_push_fma(b, ptx_opcode_fma_rn_f32(), "%f4", "%f1", "%f2", "%f3")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f32(), "%rd10", "%f4")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+// ── f64 variants ────────────────────────────────────────────────────
+
+pub fn ptx_emit_vec_sub_f64() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_sub_f64", "param_a", "param_b", "param_c")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<9>;\n")
+    b = ptx_push_str(b, "    .reg .f64 %fd<4>;\n\n")
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "8")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd1", "%rd6")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd2", "%rd7")
+    b = ptx_push_binary3(b, ptx_opcode_sub_f64(), "%fd3", "%fd1", "%fd2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f64(), "%rd8", "%fd3")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+pub fn ptx_emit_vec_mul_f64() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_mul_f64", "param_a", "param_b", "param_c")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<9>;\n")
+    b = ptx_push_str(b, "    .reg .f64 %fd<4>;\n\n")
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "8")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd1", "%rd6")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd2", "%rd7")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_f64(), "%fd3", "%fd1", "%fd2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f64(), "%rd8", "%fd3")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+pub fn ptx_emit_vec_div_f64() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_emit_vec_add_signature(b, "vec_div_f64", "param_a", "param_b", "param_c")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<9>;\n")
+    b = ptx_push_str(b, "    .reg .f64 %fd<4>;\n\n")
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "8")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd6", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd5", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd1", "%rd6")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd2", "%rd7")
+    b = ptx_push_binary3(b, ptx_opcode_div_f64(), "%fd3", "%fd1", "%fd2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f64(), "%rd8", "%fd3")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+pub fn ptx_emit_fma_f64() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_push_str(b, ".visible .entry fma_f64(\n")
+    b = ptx_push_str(b, "    .param .u64 param_a,\n")
+    b = ptx_push_str(b, "    .param .u64 param_b,\n")
+    b = ptx_push_str(b, "    .param .u64 param_c,\n")
+    b = ptx_push_str(b, "    .param .u64 param_d\n")
+    b = ptx_push_str(b, ")\n")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<11>;\n")
+    b = ptx_push_str(b, "    .reg .f64 %fd<5>;\n\n")
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "8")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_a")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd4", "param_b")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd5", "param_c")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd6", "param_d")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd7", "%rd3", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd8", "%rd4", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd9", "%rd5", "%rd2")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd10", "%rd6", "%rd2")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd1", "%rd7")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd2", "%rd8")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_global_f64(), "%fd3", "%rd9")
+    b = ptx_push_fma(b, ptx_opcode_fma_rn_f64(), "%fd4", "%fd1", "%fd2", "%fd3")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_f64(), "%rd10", "%fd4")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
+    b
+}
+
+// ── store_u32_const emitter ─────────────────────────────────────────
+
+pub fn ptx_emit_store_u32_const() -> PtxBuf with Mut, Panic, Div {
+    var b = ptx_buf_new()
+    b = ptx_emit_header(b)
+    b = ptx_push_str(b, ".visible .entry store_u32_const(\n")
+    b = ptx_push_str(b, "    .param .u64 param_out\n")
+    b = ptx_push_str(b, ")\n")
+    b = ptx_push_str(b, "{\n")
+    b = ptx_push_str(b, "    .reg .pred %p<2>;\n")
+    b = ptx_push_str(b, "    .reg .b32 %r<3>;\n")
+    b = ptx_push_str(b, "    .reg .b64 %rd<4>;\n\n")
+    b = ptx_push_binary2(b, ptx_opcode_mov_u32(), "%r1", "%tid.x")
+    b = ptx_push_binary2(b, ptx_opcode_cvt_u64_u32(), "%rd1", "%r1")
+    b = ptx_push_binary3(b, ptx_opcode_mul_lo_u64(), "%rd2", "%rd1", "4")
+    b = ptx_push_binary_mem2(b, ptx_opcode_ld_param_u64(), "%rd3", "param_out")
+    b = ptx_push_binary3(b, ptx_opcode_add_u64(), "%rd4", "%rd3", "%rd2")
+    b = ptx_push_store_mem(b, ptx_opcode_st_global_u32(), "%rd4", "42")
+    b = ptx_push_ret(b)
+    b = ptx_push_str(b, "}\n")
     b
 }
