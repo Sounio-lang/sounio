@@ -438,11 +438,9 @@ int cell_hold(unsigned seconds) {
       facts.cgroup.find(".service") == std::string::npos) {
     throw Error("cell process facts are incomplete");
   }
-  const std::string boot_id = trim(read_file("/proc/sys/kernel/random/boot_id"));
   std::cout << "LOOM_HOST_PRINCIPAL_CELL_READY"
             << " pid=" << facts.pid << " uid=" << facts.uid << " gid=" << facts.gid
             << " start_tick=" << facts.start_tick
-            << " boot_id_sha256=" << sha256(boot_id + "\n")
             << " pidns_device=" << facts.pid_namespace_device
             << " pidns_inode=" << facts.pid_namespace_inode
             << " cgroup_sha256=" << sha256(facts.cgroup + "\n")
