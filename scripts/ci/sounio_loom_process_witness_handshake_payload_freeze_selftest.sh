@@ -155,8 +155,10 @@ run_case extra "$PAYLOAD_ONE" "$TEST_ROOT" "$TEST_ROOT/extra.input"
 for label in positive_one positive_two; do
   [[ "$(file_hash "$TEST_ROOT/$label.stdout")" == "$(field positive_stdout_sha256)" ]] ||
     fail "$label stdout hash drifted"
-  [[ "$(cat "$TEST_ROOT/$label.stdout")" == "$(field positive_stdout)" ]] ||
-    fail "$label stdout bytes drifted"
+  [[ "$(wc -l < "$TEST_ROOT/$label.stdout")" == 2 &&
+     "$(sed -n '1p' "$TEST_ROOT/$label.stdout")" == "$(field ready_line)" &&
+     "$(sed -n '2p' "$TEST_ROOT/$label.stdout")" == "$(field done_line)" ]] ||
+    fail "$label stdout lines drifted"
   [[ "$(cat "$TEST_ROOT/$label.status")" == "$(field positive_status)" ]] ||
     fail "$label status drifted"
   [[ ! -s "$TEST_ROOT/$label.stderr" ]] || fail "$label stderr is not empty"
@@ -164,8 +166,10 @@ done
 for label in eof wrong extra; do
   [[ "$(file_hash "$TEST_ROOT/$label.stdout")" == "$(field refusal_stdout_sha256)" ]] ||
     fail "$label refusal hash drifted"
-  [[ "$(cat "$TEST_ROOT/$label.stdout")" == "$(field refusal_stdout)" ]] ||
-    fail "$label refusal bytes drifted"
+  [[ "$(wc -l < "$TEST_ROOT/$label.stdout")" == 2 &&
+     "$(sed -n '1p' "$TEST_ROOT/$label.stdout")" == "$(field ready_line)" &&
+     "$(sed -n '2p' "$TEST_ROOT/$label.stdout")" == "$(field refusal_line)" ]] ||
+    fail "$label refusal lines drifted"
   [[ "$(cat "$TEST_ROOT/$label.status")" == "$(field refusal_status)" ]] ||
     fail "$label refusal status drifted"
   [[ ! -s "$TEST_ROOT/$label.stderr" ]] || fail "$label refusal stderr is not empty"
@@ -185,7 +189,7 @@ expect_evidence schema loom-process-witness-handshake-payload-evidence-v1
 expect_evidence stage SOUNIO_EXECUTABLE
 for key in semantic_authority semantic_action producing_language language_role garden_sha256 source_sha256 \
   semantic_manifest_sha256 host_grant_manifest_sha256 parent_payload_manifest_sha256 executable_sha256 \
-  positive_stdout positive_stdout_sha256 refusal_stdout refusal_stdout_sha256 stderr_sha256 positive_status \
+  ready_line done_line refusal_line positive_stdout_sha256 refusal_stdout_sha256 stderr_sha256 positive_status \
   refusal_status command command_sha256 result result_sha256 material_grant material_execution launch_open \
   recycle_open exec_attached commit_attached ci_attached parity_open claim_ready; do
   manifest_key="$key"
