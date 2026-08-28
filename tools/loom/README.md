@@ -103,6 +103,21 @@ build dependencies. The HTTP response uses
 `X-Loom-Authority: verified-derived`; corruption or journal verification failure
 returns a refusal rather than a fallback JSON dataset.
 
+Projection is schema-evolution aware without weakening current authority. The
+known pre-Guardian runtime `2026.08.24.0` has no Guardian journal by design, so
+its verified semantic history is projected with the explicit
+`semantic-only-legacy` profile. That exception also requires a terminal
+hash-verified journal whose `SESSION_STARTED` receipt predates the Guardian
+release, no `guardian.tsv` in the generation, and an agreeing generation
+snapshot when one exists. A descriptor-only runtime downgrade therefore
+refuses instead of laundering modern history. HTTP receipts expose both
+`X-Loom-Guardian-Sessions` and
+`X-Loom-Legacy-Semantic-Only-Sessions`. A current or unknown runtime that omits
+`guardian_journal_file`, or any descriptor that names a missing Guardian
+journal, still refuses the complete projection. `/api/events` carries the same
+per-session `journal_profile`, keeping JSON and Arrow consumers on one
+authority boundary.
+
 This split is intentional:
 
 ```text
