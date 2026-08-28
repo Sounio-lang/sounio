@@ -84,6 +84,21 @@ current ptrace realization does not claim a closed syscall algebra or race-free
 path mediation. See [SUBPROCESS_MEMBRANE_V1.md](SUBPROCESS_MEMBRANE_V1.md) for
 the proved surface, nonclaims, and kernel attachment path.
 
+## Resident Sounio Authority
+
+Action `9024` is the Sounio-first transport authority for the planned resident
+decision process. It binds every generation to the frozen `9023` parent,
+requires strict request/response sequencing and correlation, and makes timeout,
+unhealthy transport, or poisoned-generation reuse explicit refusals. Its native
+executable and adversarial gate exist; its semantics are not yet frozen and the
+OCaml resident realization therefore remains intentionally unopened.
+
+The gate includes two single-rule sabotages. Removing only the frozen-parent
+rule admits an unchanged orphan request, and removing only strict progression
+admits an unchanged replay. See
+[GARDEN_RESIDENT_AUTHORITY_V1.md](GARDEN_RESIDENT_AUTHORITY_V1.md) for the
+protocol, evidence stages, and nonclaims.
+
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
 refused unless `--allow-remote` is explicit. The session directory and token are
 local capabilities and must remain private to the owning user.
