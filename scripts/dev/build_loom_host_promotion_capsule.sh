@@ -106,9 +106,14 @@ install_output="$($INSTALLER --staging-root "$ROOTFS")"
 [[ "$(field "$install_output" material_broker)" == false ]] || fail 'staging installer opened material broker'
 [[ "$(field "$install_output" material_capsule)" == false ]] || fail 'staging installer opened material capsule'
 [[ "$(field "$install_output" material_invocation)" == false ]] || fail 'staging installer opened material invocation'
+[[ "$(field "$install_output" material_grant)" == false ]] || fail 'staging installer opened material grant'
+[[ "$(field "$install_output" material_execution)" == false ]] || fail 'staging installer opened material execution'
+[[ "$(field "$install_output" barrier_release)" == false ]] || fail 'staging installer released host barrier'
+[[ "$(field "$install_output" resident_action_9030_attached)" == true ]] ||
+  fail 'staging installer omitted resident action 9030'
 
 RELEASE_ID="$(field "$install_output" release)"
-[[ "$RELEASE_ID" =~ ^9029-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}$ ]] ||
+[[ "$RELEASE_ID" =~ ^9030-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}$ ]] ||
   fail 'staging installer returned an invalid immutable release identity'
 RELEASE="$ROOTFS/usr/lib/sounio/loom/releases/$RELEASE_ID"
 RECEIPT="$RELEASE/install.receipt.v1"
@@ -153,6 +158,9 @@ CAPSULE_MANIFEST_SHA256="$(record_value "$RECEIPT" capsule_manifest_sha256)"
 CAPSULE_AUTHORITY_SHA256="$(record_value "$RECEIPT" capsule_authority_sha256)"
 INVOCATION_MANIFEST_SHA256="$(record_value "$RECEIPT" invocation_manifest_sha256)"
 INVOCATION_AUTHORITY_SHA256="$(record_value "$RECEIPT" invocation_authority_sha256)"
+EXEC_GRANT_MANIFEST_SHA256="$(record_value "$RECEIPT" exec_grant_manifest_sha256)"
+RESIDENT_MANIFEST_SHA256="$(record_value "$RECEIPT" resident_manifest_sha256)"
+RESIDENT_RUNTIME_SHA256="$(record_value "$RECEIPT" resident_runtime_sha256)"
 BROKER_SHA256="$(record_value "$RECEIPT" broker_sha256)"
 
 cat > "$META/capsule.manifest.v1" <<EOF
@@ -162,7 +170,7 @@ source_commit=$SOURCE_COMMIT
 source_tree_state=$SOURCE_TREE_STATE
 semantic_producer=Sounio
 semantic_role=SEMANTIC_AUTHORITY
-semantic_actions=9027+9028+9029
+semantic_actions=9027+9028+9029+9030
 transport_producer=Bash+GNU-tar
 transport_role=MECHANICAL_PACKAGING
 transport_authority=false
@@ -182,6 +190,9 @@ capsule_manifest_sha256=$CAPSULE_MANIFEST_SHA256
 capsule_authority_sha256=$CAPSULE_AUTHORITY_SHA256
 invocation_manifest_sha256=$INVOCATION_MANIFEST_SHA256
 invocation_authority_sha256=$INVOCATION_AUTHORITY_SHA256
+exec_grant_manifest_sha256=$EXEC_GRANT_MANIFEST_SHA256
+resident_manifest_sha256=$RESIDENT_MANIFEST_SHA256
+resident_runtime_sha256=$RESIDENT_RUNTIME_SHA256
 broker_sha256=$BROKER_SHA256
 parity_open=false
 claim_ready=false
@@ -190,6 +201,11 @@ recycle_open=false
 material_broker=false
 material_capsule=false
 material_invocation=false
+resident_action_9030_attached=true
+decision_transport_material=true
+material_grant=false
+material_execution=false
+barrier_release=false
 same_uid_peer_isolation=false
 EOF
 chmod 0444 "$META/capsule.manifest.v1"
@@ -208,6 +224,6 @@ sync -f "$(dirname "$OUTPUT")" 2>/dev/null || sync
 printf '%s  %s\n' "$ARCHIVE_SHA256" "$(basename "$OUTPUT")" > "$OUTPUT.sha256"
 chmod 0600 "$OUTPUT.sha256"
 
-printf 'LOOM_HOST_PROMOTION_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release=%s source_commit=%s source_tree_state=%s payload_entries=%s payload_entries_sha256=%s promoter_sha256=%s host_gate_sha256=%s semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_role=MECHANICAL_PACKAGING parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
+printf 'LOOM_HOST_PROMOTION_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release=%s source_commit=%s source_tree_state=%s payload_entries=%s payload_entries_sha256=%s promoter_sha256=%s host_gate_sha256=%s semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_role=MECHANICAL_PACKAGING resident_action_9030_attached=true decision_transport_material=true parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false material_grant=false material_execution=false barrier_release=false\n' \
   "$OUTPUT" "$ARCHIVE_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE" \
   "$entry_count" "$ENTRIES_SHA256" "$PROMOTER_SHA256" "$HOST_GATE_SHA256"

@@ -118,12 +118,16 @@ done < <(find "$META" -mindepth 1 -type f | sort)
 [[ "$(record_value "$MANIFEST" stage)" == SEMANTICS_FROZEN ]] || fail 'capsule semantic stage is not frozen'
 [[ "$(record_value "$MANIFEST" semantic_producer)" == Sounio ]] || fail 'capsule semantic producer is not Sounio'
 [[ "$(record_value "$MANIFEST" semantic_role)" == SEMANTIC_AUTHORITY ]] || fail 'capsule semantic role is not authoritative'
-[[ "$(record_value "$MANIFEST" semantic_actions)" == 9027+9028+9029 ]] || fail 'capsule semantic action lineage drifted'
+[[ "$(record_value "$MANIFEST" semantic_actions)" == 9027+9028+9029+9030 ]] || fail 'capsule semantic action lineage drifted'
 [[ "$(record_value "$MANIFEST" transport_role)" == MECHANICAL_PACKAGING ]] || fail 'transport claimed a non-mechanical role'
 [[ "$(record_value "$MANIFEST" transport_authority)" == false ]] || fail 'transport promoted itself to authority'
 [[ "$(record_value "$MANIFEST" material_role)" == MATERIAL_PARITY ]] || fail 'material role drifted'
 [[ "$(record_value "$MANIFEST" material_transitory)" == true ]] || fail 'material implementation lost its transitory marker'
-for closed in parity_open claim_ready launch_open recycle_open material_broker material_capsule material_invocation same_uid_peer_isolation; do
+[[ "$(record_value "$MANIFEST" resident_action_9030_attached)" == true ]] ||
+  fail 'capsule omitted resident action 9030 attachment'
+[[ "$(record_value "$MANIFEST" decision_transport_material)" == true ]] ||
+  fail 'capsule omitted material decision transport'
+for closed in parity_open claim_ready launch_open recycle_open material_broker material_capsule material_invocation material_grant material_execution barrier_release same_uid_peer_isolation; do
   [[ "$(record_value "$MANIFEST" "$closed")" == false ]] || fail "capsule opened forbidden boundary: $closed"
 done
 
@@ -132,7 +136,7 @@ SOURCE_TREE_STATE="$(record_value "$MANIFEST" source_tree_state)"
 RELEASE_ID="$(record_value "$MANIFEST" release_id)"
 [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail 'capsule source commit is not canonical'
 [[ "$SOURCE_TREE_STATE" == CLEAN || "$SOURCE_TREE_STATE" == DIRTY_UNPROMOTABLE ]] || fail 'capsule source tree state is unknown'
-[[ "$RELEASE_ID" =~ ^9029-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}$ ]] ||
+[[ "$RELEASE_ID" =~ ^9030-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}$ ]] ||
   fail 'capsule release identity is invalid'
 
 [[ "$(sha256_file "$ENTRIES")" == "$(record_value "$MANIFEST" payload_entries_sha256)" ]] ||
@@ -178,21 +182,29 @@ BROKER="$RELEASE/loom-kernel-principal-broker"
 LEASE_AUTHORITY="$RELEASE/sounio-loom-kernel-principal-lease-authority-runtime"
 CAPSULE_AUTHORITY="$RELEASE/sounio-loom-kernel-principal-capsule-authority-runtime"
 INVOCATION_AUTHORITY="$RELEASE/sounio-loom-kernel-invocation-cell-authority-runtime"
+EXEC_GRANT_MANIFEST="$RELEASE/kernel_exec_grant_cell_authority.freeze.v1"
+RESIDENT_MANIFEST="$RELEASE/resident_membrane.runtime.v4"
+RESIDENT_RUNTIME="$RELEASE/sounio-loom-resident-membrane-runtime-v4"
 for required in "$RECEIPT" "$BROKER" "$LEASE_AUTHORITY" "$CAPSULE_AUTHORITY" "$INVOCATION_AUTHORITY" \
+  "$EXEC_GRANT_MANIFEST" "$RESIDENT_MANIFEST" "$RESIDENT_RUNTIME" \
   "$ROOTFS/etc/sounio/loom-principal-broker.conf" \
   "$ROOTFS/etc/systemd/system/sounio-loom-principal-broker.socket" \
   "$ROOTFS/etc/systemd/system/sounio-loom-principal-broker.service"; do
   [[ -f "$required" && ! -L "$required" ]] || fail "required promotion payload is absent: $required"
 done
 [[ "$(sha256_file "$RECEIPT")" == "$(record_value "$MANIFEST" install_receipt_sha256)" ]] || fail 'install receipt hash drifted'
-for binding in lease_manifest lease_authority capsule_manifest capsule_authority invocation_manifest invocation_authority broker; do
+for binding in lease_manifest lease_authority capsule_manifest capsule_authority invocation_manifest invocation_authority exec_grant_manifest resident_manifest resident_runtime broker; do
   [[ "$(record_value "$RECEIPT" "${binding}_sha256")" == "$(record_value "$MANIFEST" "${binding}_sha256")" ]] ||
     fail "capsule and install receipt disagree: $binding"
 done
 [[ "$(record_value "$RECEIPT" semantic_producer)" == Sounio ]] || fail 'install receipt semantic producer drifted'
 [[ "$(record_value "$RECEIPT" semantic_role)" == SEMANTIC_AUTHORITY ]] || fail 'install receipt semantic role drifted'
 [[ "$(record_value "$RECEIPT" material_role)" == MATERIAL_PARITY ]] || fail 'install receipt material role drifted'
-for closed in launch_open recycle_open material_broker material_capsule material_invocation; do
+[[ "$(record_value "$RECEIPT" resident_action_9030_attached)" == true ]] ||
+  fail 'install receipt omitted resident action 9030 attachment'
+[[ "$(record_value "$RECEIPT" decision_transport_material)" == true ]] ||
+  fail 'install receipt omitted material decision transport'
+for closed in launch_open recycle_open material_broker material_capsule material_invocation material_grant material_execution barrier_release; do
   [[ "$(record_value "$RECEIPT" "$closed")" == false ]] || fail "install receipt opened forbidden boundary: $closed"
 done
 
@@ -209,12 +221,12 @@ if [[ "$(id -u)" == 0 || "$(id -g)" == 0 ]]; then
   BROKER_PROTOCOL_CHECK=deferred-to-live-host-gate
 else
   broker_selftest="$($BROKER --selftest-protocol)"
-  [[ "$broker_selftest" == 'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
+  [[ "$broker_selftest" == 'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied grant_admission_without_context=denied malformed_grant_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
     fail 'broker offline protocol selftest failed'
 fi
 
 if [[ "$MODE" == verify ]]; then
-  printf 'LOOM_HOST_PROMOTION_CAPSULE_VERIFY PASS archive_sha256=%s release=%s source_commit=%s source_tree_state=%s payload_entries=%s broker_protocol=%s semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
+  printf 'LOOM_HOST_PROMOTION_CAPSULE_VERIFY PASS archive_sha256=%s release=%s source_commit=%s source_tree_state=%s payload_entries=%s broker_protocol=%s semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false resident_action_9030_attached=true decision_transport_material=true parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false material_grant=false material_execution=false barrier_release=false\n' \
     "$ACTUAL_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE" "$verified_entries" "$BROKER_PROTOCOL_CHECK"
   exit 0
 fi
@@ -226,7 +238,7 @@ fi
 command -v systemctl >/dev/null 2>&1 || fail 'host promotion requires systemctl'
 
 if [[ "$MODE" == preflight ]]; then
-  printf 'LOOM_HOST_PROMOTION_PREFLIGHT PASS archive_sha256=%s release=%s source_commit=%s payload_entries=%s broker_protocol=%s pid1=systemd semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
+  printf 'LOOM_HOST_PROMOTION_PREFLIGHT PASS archive_sha256=%s release=%s source_commit=%s payload_entries=%s broker_protocol=%s pid1=systemd semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false resident_action_9030_attached=true decision_transport_material=true parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false material_grant=false material_execution=false barrier_release=false\n' \
     "$ACTUAL_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT" "$verified_entries" "$BROKER_PROTOCOL_CHECK"
   exit 0
 fi
@@ -431,5 +443,5 @@ cleanup
 trap - EXIT
 
 printf '%s\n' "$HOST_GATE_OUTPUT"
-printf 'LOOM_HOST_PROMOTION PASS archive_sha256=%s release=%s source_commit=%s transport_authority=false rollback=armed host_gate=PASS parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
+printf 'LOOM_HOST_PROMOTION PASS archive_sha256=%s release=%s source_commit=%s transport_authority=false rollback=armed host_gate=PASS resident_action_9030_attached=true decision_transport_material=true parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false material_grant=false material_execution=false barrier_release=false\n' \
   "$ACTUAL_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT"

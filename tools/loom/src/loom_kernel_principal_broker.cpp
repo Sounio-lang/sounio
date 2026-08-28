@@ -1763,17 +1763,29 @@ int probe_live_broker(const std::string& socket_path) {
   }
   const std::string admission =
       exchange_with_live_broker(socket_path, "ADMIT 9029 3");
+  const std::string grant_admission =
+      exchange_with_live_broker(socket_path, "GRANT_ADMIT 9030 3");
   if (admission.rfind(
           "LOOM_KERNEL_INVOCATION_CELL_MATERIAL_ADMISSION ", 0) != 0 ||
       admission.find(" decision=DENY decision_code=424 ") == std::string::npos ||
       admission.find(" material_invocation=false ") == std::string::npos ||
       admission.find(" launch_open=false\n") == std::string::npos ||
+      grant_admission.rfind(
+          "LOOM_KERNEL_EXEC_GRANT_CELL_MATERIAL_ADMISSION ", 0) != 0 ||
+      grant_admission.find(" decision=DENY decision_code=424 ") ==
+          std::string::npos ||
+      grant_admission.find(" barrier_release=false material_grant=false ") ==
+          std::string::npos ||
+      grant_admission.find(" material_execution=false launch_open=false\n") ==
+          std::string::npos ||
       exchange_with_live_broker(socket_path, "EXEC sabotage") !=
           "DENY unknown-request\n") {
     throw Error("live broker InvocationCell admission probe failed");
   }
   std::cout << status.substr(0, status.size() - 1)
-            << " live_probe=PASS admission=DENY424 launch=closed recycle=closed"
+            << " live_probe=PASS admission=DENY424 grant_admission=DENY424"
+            << " resident_action_9030=verified barrier_release=false"
+            << " launch=closed recycle=closed"
             << " unknown=denied\n";
   return 0;
 }
