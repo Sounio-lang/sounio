@@ -9,6 +9,7 @@
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -1934,6 +1935,8 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
   }
 }
 
+#include "loom_exec_quorum_lab.inc"
+
 struct Options {
   std::string mode;
   std::string manifest;
@@ -1945,6 +1948,12 @@ struct Options {
   std::string exec_grant_manifest;
   std::string resident_manifest;
   std::string resident_runtime;
+  std::string controller_manifest;
+  std::string controller_runtime;
+  std::string controller_root;
+  std::string fixture_manifest;
+  std::string fixture_bundle;
+  std::string barrier_runtime;
   std::string frame;
   std::string second_frame;
   std::string journal;
@@ -1977,6 +1986,18 @@ Options parse_options(int argc, char** argv) {
       options.resident_manifest = value;
     } else if (argument == "--resident-runtime") {
       options.resident_runtime = value;
+    } else if (argument == "--controller-manifest") {
+      options.controller_manifest = value;
+    } else if (argument == "--controller-runtime") {
+      options.controller_runtime = value;
+    } else if (argument == "--controller-root") {
+      options.controller_root = value;
+    } else if (argument == "--fixture-manifest") {
+      options.fixture_manifest = value;
+    } else if (argument == "--fixture-bundle") {
+      options.fixture_bundle = value;
+    } else if (argument == "--barrier-runtime") {
+      options.barrier_runtime = value;
     } else if (argument == "--frame") {
       options.frame = value;
     } else if (argument == "--second-frame") {
@@ -2028,6 +2049,15 @@ void require_resident_selftest_artifacts(const Options& options) {
   }
 }
 
+void require_exec_quorum_selftest_artifacts(const Options& options) {
+  if (options.controller_manifest.empty() || options.controller_runtime.empty() ||
+      options.controller_root.empty() || options.fixture_manifest.empty() ||
+      options.fixture_bundle.empty() || options.resident_runtime.empty() ||
+      options.barrier_runtime.empty()) {
+    throw Error("controller manifest, controller runtime, controller root, fixture manifest, fixture bundle, resident runtime, and barrier runtime are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2058,6 +2088,14 @@ int main(int argc, char** argv) {
       return selftest_exec_grant_resident_faults(
           options.exec_grant_manifest, options.resident_manifest,
           options.resident_runtime, options.frame);
+    }
+    if (options.mode == "--selftest-exec-quorum") {
+      require_exec_quorum_selftest_artifacts(options);
+      return selftest_exec_quorum(
+          options.controller_root, options.controller_manifest,
+          options.controller_runtime, options.fixture_manifest,
+          options.fixture_bundle, options.resident_runtime,
+          options.barrier_runtime);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");
