@@ -642,10 +642,13 @@ int selftest_host_process_witness(
   current_phase = "positive";
   {
     const std::string generation = random_generation_sha256();
+    current_phase = "positive-controller-spawn";
     ExecQuorumController controller(controller_runtime_path, root,
                                     resident_runtime_path, generation, "60000");
+    current_phase = "positive-issue";
     const QuorumReceipt issue =
         controller.command("ISSUE", fixtures.at("issue"));
+    current_phase = "positive-consume";
     const QuorumReceipt consume =
         controller.command("CONSUME", fixtures.at("consume"));
     const bool semantic_consumed =
@@ -654,13 +657,17 @@ int selftest_host_process_witness(
         issue.require("controller_generation_sha256") == generation &&
         consume.require("controller_generation_sha256") == generation &&
         controller.authenticated();
+    current_phase = "positive-principal-spawn";
     HostProcessWitnessCell principal(
         process_witness_runtime_path, process_witness_payload_path,
         process_witness_manifest_path, systemd_run_path, systemctl_path,
         generation, false);
+    current_phase = "positive-execute";
     positive = principal.execute(semantic_consumed, "CLOSE\n");
     positive_done = positive.success_complete();
+    current_phase = "positive-controller-close";
     static_cast<void>(controller.command("CLOSE", fixtures.at("close")));
+    current_phase = "positive-replay";
     const std::string replay =
         controller.raw_command("CONSUME", fixtures.at("consume"));
     replay_closed = replay.find("REFUSE") != std::string::npos;
