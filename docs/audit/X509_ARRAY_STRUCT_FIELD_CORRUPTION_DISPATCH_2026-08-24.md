@@ -7,7 +7,7 @@ validated_by: controller (tls-on-madaros branch, X.509 sub-project)
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.x509-array-struct-field-corruption-dispatch-2026-08-24
 -->
 
-# Forensic dispatch — array-of-struct field writes silently corrupt sibling `[u8;N]` fields once the struct/array crosses a size threshold, and the known workaround does not fully cure it
+# Forensic dispatch — `arr[i].field` resolved the field by bare name, so a struct field named `value` was silently clobbered by its sibling
 
 **Filed:** 2026-08-24 · **Status:** RESOLVED (fixed in `self-hosted/ir/lower.sio`, commits `88f91fae6` and `80be7c083`) · **Protocol:** CLAUDE.md §8.
 
