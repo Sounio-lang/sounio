@@ -11,6 +11,9 @@ let pinned_runtime_v2_manifest_sha256 =
 let pinned_runtime_v3_manifest_sha256 =
   "6d5e8d1fd0d6b3badf707ed438804a9e1b46dc74862e09e2f98d143c40665431"
 
+let pinned_runtime_v4_manifest_sha256 =
+  "f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473"
+
 let max_file_bytes = 8 * 1024 * 1024
 let max_frame_bytes = 65_535
 
@@ -24,8 +27,10 @@ type policy = {
   parent_9024_sha256 : string;
   parent_9025_sha256 : string option;
   parent_9029_sha256 : string option;
+  parent_9030_sha256 : string option;
   closure_enabled : bool;
   invocation_enabled : bool;
+  exec_grant_enabled : bool;
 }
 
 type decision = {
@@ -216,7 +221,8 @@ let load_policy root =
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = None; parent_9029_sha256 = None;
-    closure_enabled = false; invocation_enabled = false }
+    parent_9030_sha256 = None; closure_enabled = false;
+    invocation_enabled = false; exec_grant_enabled = false }
 
 let load_policy_v2 root =
   let path =
@@ -273,8 +279,9 @@ let load_policy_v2 root =
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
-    parent_9029_sha256 = None; closure_enabled = true;
-    invocation_enabled = false }
+    parent_9029_sha256 = None; parent_9030_sha256 = None;
+    closure_enabled = true; invocation_enabled = false;
+    exec_grant_enabled = false }
 
 let load_policy_v3 root =
   let path =
@@ -339,8 +346,80 @@ let load_policy_v3 root =
   in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
     parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
-    parent_9029_sha256 = Some parent_9029_sha256; closure_enabled = true;
-    invocation_enabled = true }
+    parent_9029_sha256 = Some parent_9029_sha256;
+    parent_9030_sha256 = None; closure_enabled = true;
+    invocation_enabled = true; exec_grant_enabled = false }
+
+let load_policy_v4 root =
+  let path =
+    match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_MANIFEST" with
+    | Some path -> path
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v4"
+  in
+  if not (Sys.file_exists path) then failf "resident-runtime-v4-manifest-missing";
+  let manifest_sha256 = sha256_file path in
+  if manifest_sha256 <> pinned_runtime_v4_manifest_sha256 then
+    failf "resident-runtime-v4-manifest-hash-mismatch";
+  let manifest = parse_manifest path in
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v4"
+     || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
+     || required manifest "producing_language" <> "Sounio"
+     || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
+     || required manifest "actions" <> "9023,9024,9025,9029,9030"
+     || required manifest "runtime_frozen" <> "true"
+     || required manifest "route_9024" <> "1"
+     || required manifest "route_9023" <> "2"
+     || required manifest "route_9025" <> "3"
+     || required manifest "route_9029" <> "4"
+     || required manifest "route_9030" <> "5"
+     || required manifest "route_stop" <> "0"
+     || required manifest "max_frame_bytes" <> "65535"
+     || required manifest "framing" <> "sounio-read-byte-newline"
+     || required manifest "ocaml_grant_started" <> "false"
+     || required manifest "material_grant" <> "false"
+     || required manifest "material_coverage" <> "false"
+     || required manifest "same_uid_peer_isolation" <> "false"
+     || required manifest "exec_attached" <> "false"
+     || required manifest "commit_attached" <> "false"
+     || required manifest "ci_attached" <> "false"
+  then failf "resident-runtime-v4-manifest-state-invalid";
+  let parent_9023_sha256 = required manifest "parent_9023_sha256" in
+  let parent_9024_sha256 = required manifest "parent_9024_sha256" in
+  let parent_9025_sha256 = required manifest "parent_9025_sha256" in
+  let parent_9029_sha256 = required manifest "parent_9029_sha256" in
+  let parent_9030_sha256 = required manifest "parent_9030_sha256" in
+  let parent_resident_v3_sha256 = required manifest "parent_resident_v3_sha256" in
+  let verify path_key expected reason =
+    let target = Filename.concat root (required manifest path_key) in
+    if sha256_file target <> expected then failf "%s" reason
+  in
+  verify "parent_9023_manifest_path" parent_9023_sha256
+    "resident-v4-parent-9023-hash-mismatch";
+  verify "parent_9024_manifest_path" parent_9024_sha256
+    "resident-v4-parent-9024-hash-mismatch";
+  verify "parent_9025_manifest_path" parent_9025_sha256
+    "resident-v4-parent-9025-hash-mismatch";
+  verify "parent_9029_manifest_path" parent_9029_sha256
+    "resident-v4-parent-9029-hash-mismatch";
+  verify "parent_9030_manifest_path" parent_9030_sha256
+    "resident-v4-parent-9030-hash-mismatch";
+  verify "parent_resident_v3_manifest_path" parent_resident_v3_sha256
+    "resident-v4-parent-runtime-v3-hash-mismatch";
+  verify "dispatcher_path" (required manifest "dispatcher_sha256")
+    "resident-v4-dispatcher-hash-mismatch";
+  verify "build_script_path" (required manifest "build_script_sha256")
+    "resident-v4-build-script-hash-mismatch";
+  verify "gate_script_path" (required manifest "gate_script_sha256")
+    "resident-v4-gate-script-hash-mismatch";
+  let runtime, runtime_sha256 =
+    runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_RUNTIME"
+      ~sibling_name:"sounio-loom-resident-membrane-runtime-v4" root manifest
+  in
+  { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
+    parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
+    parent_9029_sha256 = Some parent_9029_sha256;
+    parent_9030_sha256 = Some parent_9030_sha256; closure_enabled = true;
+    invocation_enabled = true; exec_grant_enabled = true }
 
 let digest_u32_of_hex digest =
   if String.length digest <> 64 then failf "invalid-resident-sha256:%s" digest;
@@ -503,6 +582,7 @@ let validate_output route output =
     else if route = 2 then "SOUNIO_SUBPROCESS_MEMBRANE_"
     else if route = 3 then "SOUNIO_EFFECT_CLOSURE_"
     else if route = 4 then "SOUNIO_KERNEL_INVOCATION_CELL_"
+    else if route = 5 then "SOUNIO_KERNEL_EXEC_GRANT_CELL_"
     else failf "resident-route-invalid"
   in
   if not (starts_with output prefix)
@@ -545,11 +625,17 @@ let append_receipt resident ~event ~sequence ~frame ~code ~output ~latency_us =
           | None -> base
           | Some digest -> base @ [ "parent_9025_manifest_sha256=" ^ digest ]
         in
-        let parents =
+        let invocation_parents =
           match resident.policy.parent_9029_sha256 with
           | None -> closure_parents
           | Some digest ->
               closure_parents @ [ "parent_9029_manifest_sha256=" ^ digest ]
+        in
+        let parents =
+          match resident.policy.parent_9030_sha256 with
+          | None -> invocation_parents
+          | Some digest ->
+              invocation_parents @ [ "parent_9030_manifest_sha256=" ^ digest ]
         in
         String.concat "\t"
           (parents @
@@ -701,6 +787,10 @@ let spawn_v3 ~root ~environment ~deadline_ms =
   let root = Unix.realpath root in
   spawn_with_policy ~root ~policy:(load_policy_v3 root) ~environment ~deadline_ms
 
+let spawn_v4 ~root ~environment ~deadline_ms =
+  let root = Unix.realpath root in
+  spawn_with_policy ~root ~policy:(load_policy_v4 root) ~environment ~deadline_ms
+
 let decide_with_route resident ~route ~event resident_deadline_ms frame =
   ensure_usable resident;
   if resident.outstanding then (
@@ -770,6 +860,11 @@ let decide_invocation_cell resident ~deadline_ms frame =
     failf "resident-invocation-cell-route-unavailable";
   decide_with_route resident ~route:4 ~event:"INVOCATION_CELL" deadline_ms frame
 
+let decide_exec_grant_cell resident ~deadline_ms frame =
+  if not resident.policy.exec_grant_enabled then
+    failf "resident-exec-grant-cell-route-unavailable";
+  decide_with_route resident ~route:5 ~event:"EXEC_GRANT_CELL" deadline_ms frame
+
 let close resident ~deadline_ms =
   if resident.poisoned || resident.closed then ()
   else
@@ -835,6 +930,18 @@ let with_generation_v2 ~root ~environment ~deadline_ms callback =
 
 let with_generation_v3 ~root ~environment ~deadline_ms callback =
   let resident = spawn_v3 ~root ~environment ~deadline_ms in
+  match callback resident with
+  | result ->
+      if not resident.closed && not resident.poisoned then
+        close resident ~deadline_ms;
+      result
+  | exception callback_error ->
+      if not resident.closed && not resident.poisoned then
+        (try close resident ~deadline_ms with _ -> ());
+      raise callback_error
+
+let with_generation_v4 ~root ~environment ~deadline_ms callback =
+  let resident = spawn_v4 ~root ~environment ~deadline_ms in
   match callback resident with
   | result ->
       if not resident.closed && not resident.poisoned then
@@ -936,6 +1043,35 @@ let test_invocation_eof resident ~deadline_ms frame =
     ignore (invoke resident ~route:4 ~event:"INVOCATION_EOF" ~sequence:1
               ~deadline_us frame);
     failf "resident-invocation-eof-control-admitted"
+  with
+  | Error "resident-not-alive" -> true
+  | Error "resident-response-eof" -> true
+
+let test_exec_grant_timeout resident frame =
+  if not (test_mode ()) then
+    failf "resident-test-exec-grant-timeout-requires-test-mode";
+  if not resident.policy.exec_grant_enabled then
+    failf "resident-exec-grant-cell-route-unavailable";
+  let deadline_us = Int64.sub (monotonic_us ()) 1L in
+  try
+    ignore (invoke resident ~route:5 ~event:"EXEC_GRANT_TIMEOUT" ~sequence:1
+              ~deadline_us frame);
+    failf "resident-exec-grant-timeout-control-admitted"
+  with
+  | Error "resident-request-timeout" -> true
+  | Error "resident-response-timeout" -> true
+
+let test_exec_grant_eof resident ~deadline_ms frame =
+  if not (test_mode ()) then
+    failf "resident-test-exec-grant-eof-requires-test-mode";
+  if not resident.policy.exec_grant_enabled then
+    failf "resident-exec-grant-cell-route-unavailable";
+  Unix.kill resident.pid Sys.sigkill;
+  let deadline_us = deadline_after_ms deadline_ms in
+  try
+    ignore (invoke resident ~route:5 ~event:"EXEC_GRANT_EOF" ~sequence:1
+              ~deadline_us frame);
+    failf "resident-exec-grant-eof-control-admitted"
   with
   | Error "resident-not-alive" -> true
   | Error "resident-response-eof" -> true

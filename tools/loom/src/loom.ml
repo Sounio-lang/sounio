@@ -11087,9 +11087,159 @@ let invocation_cell_probe_command cli =
       else failf "unknown invocation-cell probe mode: %s" mode);
   0
 
+let exec_grant_cell_probe_command cli =
+  if Sys.getenv_opt "SOUNIO_LOOM_HOOK_TEST_MODE" <> Some "1" then
+    failf "exec-grant-cell-probe-requires-test-mode";
+  let root = required cli "--root" |> Unix.realpath in
+  let mode = required cli "--mode" in
+  let deadline_ms =
+    try int_of_string (required cli "--deadline-ms")
+    with _ -> failf "--deadline-ms must be an integer"
+  in
+  let frame name = required cli name |> read_file |> trim in
+  let issue_frame = frame "--issue" in
+  let optional_frame name =
+    optional cli name |> Option.map (fun path -> read_file path |> trim)
+  in
+  let require_frame name value =
+    match value with
+    | Some frame -> frame
+    | None -> failf "%s is required for mode %s" name mode
+  in
+  let consume_frame = optional_frame "--consume" in
+  let close_frame = optional_frame "--close" in
+  let revoke_frame = optional_frame "--revoke" in
+  let deny_frame = optional_frame "--deny" in
+  let prohibited_prefixes =
+    [ "LD_PRELOAD="; "LD_LIBRARY_PATH="; "LD_AUDIT=";
+      "SOUNIO_LOOM_RESIDENT_MEMBRANE_" ]
+  in
+  let environment =
+    Unix.environment () |> Array.to_list
+    |> List.filter (fun binding ->
+           not (List.exists (fun prefix -> starts_with binding prefix)
+                  prohibited_prefixes))
+    |> Array.of_list
+  in
+  let refused callback =
+    try ignore (callback ()); false
+    with Loom_exec_grant_cell.Error _ -> true
+  in
+  Loom_exec_grant_cell.with_cell ~root ~environment ~deadline_ms (fun cell ->
+      let print ~codes ~control_refused ~reuse_refused ~deny_preserved =
+        Printf.printf
+          "LOOM_EXEC_GRANT_CELL_OCAML_PROBE mode=%s semantic_authority=Sounio operational_kernel=OCaml manifest_sha256=%s semantics_sha256=%s resident_v4_sha256=%s pid=%d generation_sha256=%s sequence=%d codes=%s state=%s poisoned=%s control_refused=%s reuse_refused=%s deny_preserved=%s material_grant=false material_coverage=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false\n%!"
+          mode (Loom_exec_grant_cell.manifest_sha256 cell)
+          (Loom_exec_grant_cell.semantics_sha256 cell)
+          (Loom_exec_grant_cell.resident_v4_sha256 cell)
+          (Loom_exec_grant_cell.resident_pid cell)
+          (Loom_exec_grant_cell.generation cell)
+          (Loom_exec_grant_cell.sequence cell) codes
+          (Loom_exec_grant_cell.state cell
+           |> Loom_exec_grant_cell.state_name)
+          (if Loom_exec_grant_cell.is_poisoned cell then "true" else "false")
+          (if control_refused then "true" else "false")
+          (if reuse_refused then "true" else "false")
+          (if deny_preserved then "true" else "false")
+      in
+      if mode = "current" || mode = "python" then (
+        let decision = Loom_exec_grant_cell.issue cell issue_frame in
+        print ~codes:(string_of_int decision.code) ~control_refused:false
+          ~reuse_refused:false ~deny_preserved:false)
+      else if mode = "happy" then (
+        let issue = Loom_exec_grant_cell.issue cell issue_frame in
+        let consume =
+          Loom_exec_grant_cell.consume cell
+            (require_frame "--consume" consume_frame)
+        in
+        let close =
+          Loom_exec_grant_cell.close_outcome cell
+            (require_frame "--close" close_frame)
+        in
+        print ~codes:(Printf.sprintf "%d,%d,%d" issue.code consume.code close.code)
+          ~control_refused:false ~reuse_refused:false ~deny_preserved:false)
+      else if mode = "deny-preserves" then (
+        let issue = Loom_exec_grant_cell.issue cell issue_frame in
+        let denied =
+          Loom_exec_grant_cell.consume cell (require_frame "--deny" deny_frame)
+        in
+        let preserved = Loom_exec_grant_cell.state cell = Loom_exec_grant_cell.Issued in
+        let consume =
+          Loom_exec_grant_cell.consume cell
+            (require_frame "--consume" consume_frame)
+        in
+        let close =
+          Loom_exec_grant_cell.close_outcome cell
+            (require_frame "--close" close_frame)
+        in
+        print
+          ~codes:(Printf.sprintf "%d,%d,%d,%d" issue.code denied.code
+                    consume.code close.code)
+          ~control_refused:false ~reuse_refused:false ~deny_preserved:preserved)
+      else if mode = "revoke" then (
+        let issue = Loom_exec_grant_cell.issue cell issue_frame in
+        let revoke =
+          Loom_exec_grant_cell.revoke cell
+            (require_frame "--revoke" revoke_frame)
+        in
+        print ~codes:(Printf.sprintf "%d,%d" issue.code revoke.code)
+          ~control_refused:false ~reuse_refused:false ~deny_preserved:false)
+      else if mode = "replay" then (
+        let issue = Loom_exec_grant_cell.issue cell issue_frame in
+        let control_refused =
+          refused (fun () -> Loom_exec_grant_cell.issue cell issue_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_exec_grant_cell.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int issue.code) ~control_refused
+          ~reuse_refused ~deny_preserved:false)
+      else if mode = "mismatch" then (
+        let issue = Loom_exec_grant_cell.issue cell issue_frame in
+        let control_refused =
+          refused (fun () -> Loom_exec_grant_cell.consume cell issue_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_exec_grant_cell.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int issue.code) ~control_refused
+          ~reuse_refused ~deny_preserved:false)
+      else if mode = "timeout" then (
+        let issue = Loom_exec_grant_cell.issue cell issue_frame in
+        let control_refused =
+          Loom_exec_grant_cell.test_timeout cell
+            (require_frame "--consume" consume_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_exec_grant_cell.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int issue.code) ~control_refused
+          ~reuse_refused ~deny_preserved:false)
+      else if mode = "eof" then (
+        let issue = Loom_exec_grant_cell.issue cell issue_frame in
+        let control_refused =
+          Loom_exec_grant_cell.test_eof cell
+            (require_frame "--consume" consume_frame)
+        in
+        let reuse_refused =
+          refused (fun () ->
+              Loom_exec_grant_cell.consume cell
+                (require_frame "--consume" consume_frame))
+        in
+        print ~codes:(string_of_int issue.code) ~control_refused
+          ~reuse_refused ~deny_preserved:false)
+      else failf "unknown exec-grant-cell probe mode: %s" mode);
+  0
+
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  invocation-cell-probe --root DIR --mode current|python|happy|abort|replay|mismatch|timeout|eof --prepare FILE [--admit FILE] [--close FILE] [--abort FILE] --deadline-ms N (test mode only)\n  exec-grant-cell-probe --root DIR --mode current|python|happy|deny-preserves|revoke|replay|mismatch|timeout|eof --issue FILE [--consume FILE] [--close FILE] [--revoke FILE] [--deny FILE] --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
   Printf.eprintf
@@ -11138,6 +11288,7 @@ let main () =
     | "subprocess-membrane-probe" -> subprocess_membrane_probe_command cli
     | "resident-authority-probe" -> resident_authority_probe_command cli
     | "invocation-cell-probe" -> invocation_cell_probe_command cli
+    | "exec-grant-cell-probe" -> exec_grant_cell_probe_command cli
     | "start" -> start_command cli; 0
     | "recover" -> recover_command cli; 0
     | "status" -> status_command cli; 0
@@ -11238,6 +11389,7 @@ let () =
   | Loom_resident.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_effect_closure.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_invocation_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_exec_grant_cell.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_epistemic.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness_epoch.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
