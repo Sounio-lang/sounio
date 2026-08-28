@@ -495,6 +495,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.concepts.ordered-path-provenance | repo_only | docs/internal/concepts/ordered-path-provenance.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.physical-observation | repo_only | docs/internal/concepts/physical-observation.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-aarchmrs-tbl-import | repo_only | docs/internal/concepts/pireus-aarchmrs-tbl-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.concepts.pireus-apple-cpu-dependency-latency-request | repo_only | docs/internal/concepts/pireus-apple-cpu-dependency-latency-request.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-apple-metal-family-import | repo_only | docs/internal/concepts/pireus-apple-metal-family-import.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-execution-engine-ontology | repo_only | docs/internal/concepts/pireus-execution-engine-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.concepts.pireus-graph-identity-composition | repo_only | docs/internal/concepts/pireus-graph-identity-composition.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -958,6 +959,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.petitot-semantic-potential | historical | docs/research/petitot-semantic-potential.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-aarchmrs-tbl-import-semantics | historical | docs/research/pireus_aarchmrs_tbl_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-apple-a64-tbl-lowering-semantics | historical | docs/research/pireus_apple_a64_tbl_lowering_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.pireus-apple-cpu-dependency-latency-request-semantics | historical | docs/research/pireus_apple_cpu_dependency_latency_request_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-apple-metal-family-import-semantics | historical | docs/research/pireus_apple_metal_family_import_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-dgx-ptx-shfl-lowering-semantics | historical | docs/research/pireus_dgx_ptx_shfl_lowering_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.pireus-execution-engine-semantics | historical | docs/research/pireus_execution_engine_semantics.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -995,6 +997,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.receipts.pireus-aarchmrs-tbl-import-20260827 | historical | docs/research/receipts/pireus_aarchmrs_tbl_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-apple-a64-tbl-lowering-20260827 | historical | docs/research/receipts/pireus_apple_a64_tbl_lowering_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-apple-a64-tbl-material-parity-20260827 | historical | docs/research/receipts/pireus_apple_a64_tbl_material_parity_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.receipts.pireus-apple-cpu-dependency-latency-request-20260828 | historical | docs/research/receipts/pireus_apple_cpu_dependency_latency_request_20260828.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-apple-metal-family-import-20260827 | historical | docs/research/receipts/pireus_apple_metal_family_import_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-apple-metal-table-cells-20260827 | historical | docs/research/receipts/pireus_apple_metal_table_cells_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.receipts.pireus-dgx-ptx-shfl-lowering-20260827 | historical | docs/research/receipts/pireus_dgx_ptx_shfl_lowering_20260827.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
