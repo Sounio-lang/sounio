@@ -6,6 +6,7 @@ umask 077
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v1"
+CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v1"
 BROKER_SOURCE="$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp"
 SOCKET_UNIT="$ROOT_DIR/tools/loom/systemd/sounio-loom-principal-broker.socket"
 SERVICE_UNIT="$ROOT_DIR/tools/loom/systemd/sounio-loom-principal-broker.service"
@@ -22,8 +23,9 @@ usage() {
   exit 64
 }
 
-manifest_value() {
-  local key="$1"
+record_value() {
+  local path="$1"
+  local key="$2"
   local line name value found=''
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" == *=* ]] || continue
@@ -33,9 +35,17 @@ manifest_value() {
       [[ -z "$found" ]] || fail "duplicate manifest field: $key"
       found="$value"
     fi
-  done < "$MANIFEST"
+  done < "$path"
   [[ -n "$found" ]] || fail "manifest omitted field: $key"
   printf '%s\n' "$found"
+}
+
+manifest_value() {
+  record_value "$MANIFEST" "$1"
+}
+
+capsule_manifest_value() {
+  record_value "$CAPSULE_MANIFEST" "$1"
 }
 
 sha256_file() {
@@ -134,7 +144,7 @@ esac
 for tool in sha256sum stat install mktemp sync; do
   command -v "$tool" >/dev/null 2>&1 || fail "required installation tool is missing: $tool"
 done
-for input in "$MANIFEST" "$BROKER_SOURCE" "$SOCKET_UNIT" "$SERVICE_UNIT" \
+for input in "$MANIFEST" "$CAPSULE_MANIFEST" "$BROKER_SOURCE" "$SOCKET_UNIT" "$SERVICE_UNIT" \
   "$BOOTSTRAP_DOC" "$INSTALL_DOC"; do
   [[ -f "$input" && ! -L "$input" ]] || fail "installation input is missing or a symlink: $input"
 done
@@ -161,20 +171,39 @@ done
   fail 'manifest role is not semantic authority'
 [[ "$(manifest_value action)" == 9027 ]] || fail 'manifest action is not 9027'
 [[ "$(manifest_value material_broker)" == false ]] || fail 'bootstrap manifest opened material broker'
+[[ "$(capsule_manifest_value schema)" == loom-kernel-principal-capsule-authority-freeze-v1 ]] ||
+  fail 'capsule manifest schema is not the frozen action 9028 schema'
+[[ "$(capsule_manifest_value stage)" == SEMANTICS_FROZEN ]] ||
+  fail 'capsule manifest stage is not frozen'
+[[ "$(capsule_manifest_value producing_language)" == Sounio ]] ||
+  fail 'capsule manifest producer is not Sounio'
+[[ "$(capsule_manifest_value language_role)" == SEMANTIC_AUTHORITY ]] ||
+  fail 'capsule manifest role is not semantic authority'
+[[ "$(capsule_manifest_value action)" == 9028 ]] || fail 'capsule manifest action is not 9028'
+[[ "$(capsule_manifest_value parent_action)" == 9027 ]] ||
+  fail 'capsule manifest parent action is not 9027'
+[[ "$(capsule_manifest_value material_capsule)" == false ]] ||
+  fail 'capsule manifest opened material capsule'
 
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_lease_authority_freeze_selftest.sh" >/dev/null
+bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_capsule_authority_freeze_selftest.sh" >/dev/null
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/loom-kernel-principal-install.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 AUTHORITY_BUILD="$WORK/sounio-loom-kernel-principal-lease-authority-runtime"
+CAPSULE_AUTHORITY_BUILD="$WORK/sounio-loom-kernel-principal-capsule-authority-runtime"
 BROKER_BUILD="$WORK/loom-kernel-principal-broker"
 SOUNIO_LOOM_KERNEL_PRINCIPAL_LEASE_OUTPUT="$AUTHORITY_BUILD" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_lease_authority.sh" >/dev/null
+SOUNIO_LOOM_KERNEL_PRINCIPAL_CAPSULE_OUTPUT="$CAPSULE_AUTHORITY_BUILD" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_capsule_authority.sh" >/dev/null
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BROKER_BUILD" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
 
 MANIFEST_SHA256="$(sha256_file "$MANIFEST")"
 AUTHORITY_SHA256="$(sha256_file "$AUTHORITY_BUILD")"
+CAPSULE_MANIFEST_SHA256="$(sha256_file "$CAPSULE_MANIFEST")"
+CAPSULE_AUTHORITY_SHA256="$(sha256_file "$CAPSULE_AUTHORITY_BUILD")"
 BROKER_SHA256="$(sha256_file "$BROKER_BUILD")"
 BROKER_SOURCE_SHA256="$(sha256_file "$BROKER_SOURCE")"
 INSTALLER_SHA256="$(sha256_file "$ROOT_DIR/scripts/dev/install_loom_kernel_principal_broker.sh")"
@@ -186,6 +215,10 @@ INSTALL_DOC_SHA256="$(sha256_file "$INSTALL_DOC")"
   fail 'frozen manifest hash drifted from the broker contract'
 [[ "$AUTHORITY_SHA256" == "$(manifest_value executable_sha256)" ]] ||
   fail 'source-fresh Sounio authority hash differs from frozen manifest'
+[[ "$CAPSULE_MANIFEST_SHA256" == 76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f ]] ||
+  fail 'frozen capsule manifest hash drifted from the broker contract'
+[[ "$CAPSULE_AUTHORITY_SHA256" == "$(capsule_manifest_value executable_sha256)" ]] ||
+  fail 'source-fresh Sounio capsule authority hash differs from frozen manifest'
 
 BUNDLE_RECORD="installer_sha256=$INSTALLER_SHA256
 socket_unit_sha256=$SOCKET_UNIT_SHA256
@@ -194,7 +227,7 @@ bootstrap_doc_sha256=$BOOTSTRAP_DOC_SHA256
 install_doc_sha256=$INSTALL_DOC_SHA256
 "
 BUNDLE_SHA256="$(printf '%s' "$BUNDLE_RECORD" | sha256sum | cut -d ' ' -f 1)"
-RELEASE_ID="9027-${MANIFEST_SHA256:0:16}-${BROKER_SHA256:0:16}-${BUNDLE_SHA256:0:16}"
+RELEASE_ID="9028-${MANIFEST_SHA256:0:16}-${CAPSULE_MANIFEST_SHA256:0:16}-${BROKER_SHA256:0:16}-${BUNDLE_SHA256:0:16}"
 RELEASE_PARENT="$DEST_ROOT/usr/lib/sounio/loom/releases"
 RELEASE_DIR="$RELEASE_PARENT/$RELEASE_ID"
 RELEASE_STAGE="$RELEASE_PARENT/.${RELEASE_ID}.stage.$$"
@@ -202,11 +235,13 @@ mkdir -p "$RELEASE_PARENT"
 [[ ! -L "$RELEASE_PARENT" ]] || fail 'release parent must not be a symlink'
 RECEIPT="schema=loom-kernel-principal-broker-install-receipt-v1
 release_id=$RELEASE_ID
-semantic_action=9027
+semantic_actions=9027+9028
 semantic_producer=Sounio
 semantic_role=SEMANTIC_AUTHORITY
-manifest_sha256=$MANIFEST_SHA256
-authority_sha256=$AUTHORITY_SHA256
+lease_manifest_sha256=$MANIFEST_SHA256
+lease_authority_sha256=$AUTHORITY_SHA256
+capsule_manifest_sha256=$CAPSULE_MANIFEST_SHA256
+capsule_authority_sha256=$CAPSULE_AUTHORITY_SHA256
 material_producer=C++20
 material_role=MATERIAL_PARITY
 material_transitory=true
@@ -221,6 +256,7 @@ bundle_sha256=$BUNDLE_SHA256
 launch_open=false
 recycle_open=false
 material_broker=false
+material_capsule=false
 "
 RECEIPT_SHA256="$(printf '%s' "$RECEIPT" | sha256sum | cut -d ' ' -f 1)"
 
@@ -235,6 +271,14 @@ if [[ -e "$RELEASE_DIR" ]]; then
     fail 'existing immutable release authority drifted'
   [[ "$(mode_of "$RELEASE_DIR/sounio-loom-kernel-principal-lease-authority-runtime")" == 555 ]] ||
     fail 'existing immutable release authority mode drifted'
+  [[ "$(sha256_file "$RELEASE_DIR/kernel_principal_capsule_authority.freeze.v1")" == "$CAPSULE_MANIFEST_SHA256" ]] ||
+    fail 'existing immutable release capsule manifest drifted'
+  [[ "$(mode_of "$RELEASE_DIR/kernel_principal_capsule_authority.freeze.v1")" == 444 ]] ||
+    fail 'existing immutable release capsule manifest mode drifted'
+  [[ "$(sha256_file "$RELEASE_DIR/sounio-loom-kernel-principal-capsule-authority-runtime")" == "$CAPSULE_AUTHORITY_SHA256" ]] ||
+    fail 'existing immutable release capsule authority drifted'
+  [[ "$(mode_of "$RELEASE_DIR/sounio-loom-kernel-principal-capsule-authority-runtime")" == 555 ]] ||
+    fail 'existing immutable release capsule authority mode drifted'
   [[ "$(sha256_file "$RELEASE_DIR/loom-kernel-principal-broker")" == "$BROKER_SHA256" ]] ||
     fail 'existing immutable release broker drifted'
   [[ "$(mode_of "$RELEASE_DIR/loom-kernel-principal-broker")" == 555 ]] ||
@@ -257,7 +301,10 @@ else
   mkdir "$RELEASE_STAGE"
   install -m 0555 "$BROKER_BUILD" "$RELEASE_STAGE/loom-kernel-principal-broker"
   install -m 0555 "$AUTHORITY_BUILD" "$RELEASE_STAGE/sounio-loom-kernel-principal-lease-authority-runtime"
+  install -m 0555 "$CAPSULE_AUTHORITY_BUILD" \
+    "$RELEASE_STAGE/sounio-loom-kernel-principal-capsule-authority-runtime"
   install -m 0444 "$MANIFEST" "$RELEASE_STAGE/kernel_principal_lease_authority.freeze.v1"
+  install -m 0444 "$CAPSULE_MANIFEST" "$RELEASE_STAGE/kernel_principal_capsule_authority.freeze.v1"
   install -m 0444 "$BOOTSTRAP_DOC" "$RELEASE_STAGE/HOST_KERNEL_PRINCIPAL_BROKER_BOOTSTRAP_V1.md"
   install -m 0444 "$INSTALL_DOC" "$RELEASE_STAGE/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md"
   install -m 0444 "$ROOT_DIR/scripts/dev/install_loom_kernel_principal_broker.sh" \
@@ -269,7 +316,9 @@ else
   fi
   sync_path "$RELEASE_STAGE/loom-kernel-principal-broker"
   sync_path "$RELEASE_STAGE/sounio-loom-kernel-principal-lease-authority-runtime"
+  sync_path "$RELEASE_STAGE/sounio-loom-kernel-principal-capsule-authority-runtime"
   sync_path "$RELEASE_STAGE/kernel_principal_lease_authority.freeze.v1"
+  sync_path "$RELEASE_STAGE/kernel_principal_capsule_authority.freeze.v1"
   sync_path "$RELEASE_STAGE/install.receipt.v1"
   chmod 0555 "$RELEASE_STAGE"
   sync_path "$RELEASE_STAGE"
@@ -289,6 +338,8 @@ fi
 BROKER_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/loom-kernel-principal-broker"
 MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_principal_lease_authority.freeze.v1"
 AUTHORITY_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-kernel-principal-lease-authority-runtime"
+CAPSULE_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_principal_capsule_authority.freeze.v1"
+CAPSULE_AUTHORITY_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-kernel-principal-capsule-authority-runtime"
 atomic_symlink "$BROKER_TARGET" "$DEST_ROOT/usr/libexec/sounio/loom-kernel-principal-broker"
 atomic_file "$SOCKET_UNIT" "$DEST_ROOT/etc/systemd/system/sounio-loom-principal-broker.socket" 0644
 atomic_file "$SERVICE_UNIT" "$DEST_ROOT/etc/systemd/system/sounio-loom-principal-broker.service" 0644
@@ -296,6 +347,8 @@ atomic_file "$BOOTSTRAP_DOC" "$DEST_ROOT/usr/share/doc/sounio/loom/HOST_KERNEL_P
 atomic_file "$INSTALL_DOC" "$DEST_ROOT/usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md" 0444
 CONFIG="LOOM_PRINCIPAL_MANIFEST=$MANIFEST_TARGET
 LOOM_PRINCIPAL_AUTHORITY=$AUTHORITY_TARGET
+LOOM_PRINCIPAL_CAPSULE_MANIFEST=$CAPSULE_MANIFEST_TARGET
+LOOM_PRINCIPAL_CAPSULE_AUTHORITY=$CAPSULE_AUTHORITY_TARGET
 LOOM_PRINCIPAL_JOURNAL=/var/lib/sounio/loom-principal-broker/leases.v1
 "
 atomic_text "$CONFIG" "$DEST_ROOT/etc/sounio/loom-principal-broker.conf" 0600
@@ -311,6 +364,7 @@ if [[ "$INSTALL_MODE" == HOST ]]; then
   systemctl enable --now sounio-loom-principal-broker.socket
 fi
 
-printf 'LOOM_KERNEL_PRINCIPAL_BROKER_INSTALL PASS mode=%s release=%s manifest_sha256=%s authority_sha256=%s broker_sha256=%s bundle_sha256=%s activated=%s material_broker=false launch=closed recycle=closed\n' \
-  "$INSTALL_MODE" "$RELEASE_ID" "$MANIFEST_SHA256" "$AUTHORITY_SHA256" "$BROKER_SHA256" "$BUNDLE_SHA256" \
+printf 'LOOM_KERNEL_PRINCIPAL_BROKER_INSTALL PASS mode=%s release=%s lease_manifest_sha256=%s lease_authority_sha256=%s capsule_manifest_sha256=%s capsule_authority_sha256=%s broker_sha256=%s bundle_sha256=%s activated=%s material_broker=false material_capsule=false launch=closed recycle=closed\n' \
+  "$INSTALL_MODE" "$RELEASE_ID" "$MANIFEST_SHA256" "$AUTHORITY_SHA256" \
+  "$CAPSULE_MANIFEST_SHA256" "$CAPSULE_AUTHORITY_SHA256" "$BROKER_SHA256" "$BUNDLE_SHA256" \
   "$([[ "$INSTALL_MODE" == HOST ]] && printf true || printf false)"

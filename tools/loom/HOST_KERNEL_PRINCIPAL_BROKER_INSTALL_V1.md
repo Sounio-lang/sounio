@@ -4,8 +4,9 @@ Status: `HOST_PROMOTION_PATH_MATERIAL_REFUSED`
 
 ## Authority Boundary
 
-Installation does not create semantics. The only semantic authority promoted by
-this path is the source-fresh executable bound by frozen Sounio action `9027`.
+Installation does not create semantics. The only semantic authorities promoted
+by this path are the source-fresh executables bound by frozen Sounio actions
+`9027` and `9028`.
 The C++20 broker remains a transitory `MATERIAL_PARITY` adapter for Linux and
 systemd primitives. Shell code performs packaging and service-manager actions;
 it is not an expected-result oracle.
@@ -15,23 +16,24 @@ The required order remains:
 `GARDEN -> SOUNIO_EXECUTABLE -> SEMANTICS_FROZEN -> PARITY_OPEN -> CLAIM_READY`
 
 This installer reaches neither `PARITY_OPEN` nor `CLAIM_READY`. It cannot change
-`material_broker=false`, and it never generates an `ALLOW` decision.
+`material_broker=false` or `material_capsule=false`, and it never generates an
+`ALLOW` decision.
 
 ## Immutable Release
 
 `scripts/dev/install_loom_kernel_principal_broker.sh` always rebuilds the action
-`9027` Sounio executable and the C++20 broker from the checked-out sources. It
-runs the frozen Sounio gate before creating installation files and refuses when
-the rebuilt authority hash differs from the frozen manifest.
+`9027` and `9028` Sounio executables and the C++20 broker from the checked-out
+sources. It runs both frozen Sounio gates before creating installation files and
+refuses when either rebuilt authority hash differs from its frozen manifest.
 
 Each promotion creates one immutable release directory:
 
-`/usr/lib/sounio/loom/releases/9027-<manifest-prefix>-<broker-prefix>-<bundle-prefix>`
+`/usr/lib/sounio/loom/releases/9028-<lease-manifest-prefix>-<capsule-manifest-prefix>-<broker-prefix>-<bundle-prefix>`
 
 It contains:
 
-- the exact frozen manifest, mode `0444`;
-- the exact source-fresh Sounio authority executable, mode `0555`;
+- the exact two frozen manifests, mode `0444`;
+- the exact two source-fresh Sounio authority executables, mode `0555`;
 - the source-fresh transitory broker, mode `0555`;
 - the bootstrap and installation contracts, mode `0444`;
 - the exact installer source that produced the release, mode `0444`;
@@ -54,7 +56,7 @@ After the release is complete, promotion installs:
   immutable release;
 - root-owned systemd service and socket units under `/etc/systemd/system`;
 - `/etc/sounio/loom-principal-broker.conf`, mode `0600`, pointing directly at
-  the versioned Sounio manifest and executable;
+  both versioned Sounio manifests and executables;
 - contracts under `/usr/share/doc/sounio/loom`.
 
 Every stable file and symlink is replaced through a same-directory temporary
@@ -80,7 +82,7 @@ socket. It verifies the socket and parent-directory ownership, connects without
 a shell, verifies a root host endpoint through `SO_PEERCRED`, then performs four
 requests:
 
-- `STATUS` must return `READY` and the frozen hashes;
+- `STATUS` must return `READY` and all four frozen manifest/executable hashes;
 - `LAUNCH sabotage` must be refused as bootstrap-closed;
 - `RECYCLE sabotage` must be refused as bootstrap-closed;
 - an unknown request must be refused.
@@ -98,25 +100,27 @@ that can open execution.
   units, socket activation, service cgroup, root peer, and the live closed-
   operation probe all pass.
 
-Even `HOST_ACTIVATION_PASS` reports `material_broker=false`. Namespace creation,
+Even `HOST_ACTIVATION_PASS` reports `material_broker=false` and
+`material_capsule=false`. Namespace creation,
 disjoint UID/GID allocation, irreversible privilege drop, pidfd custody, crash
-attacks, the affirmative extinction triple, and Sounio actions `9026` and `9027`
-returning material `ALLOW` remain later gates.
+attacks, the affirmative extinction triple, and Sounio actions `9026`, `9027`,
+and `9028` returning material `ALLOW` remain later gates.
 
 ## Negative Controls
 
 The installation selftest must prove:
 
 1. two staging promotions resolve to the same immutable release;
-2. installed manifest and Sounio executable equal the frozen hashes;
+2. both installed manifests and Sounio executables equal the frozen hashes;
 3. installed roles remain `SEMANTIC_AUTHORITY` and `MATERIAL_PARITY`;
-4. one-byte release drift refuses instead of being overwritten;
-5. release permission drift refuses;
+4. one-byte drift in either semantic release refuses instead of being overwritten;
+5. permission drift in either authority executable refuses;
 6. a direct non-root live probe refuses before socket access;
 7. host installation refuses in the current non-systemd Pod, including through
    available passwordless `sudo`;
 8. the host gate reports unavailable rather than success in that Pod;
 9. `LAUNCH` and `RECYCLE` remain closed in every receipt.
+10. offline `STATUS` without both frozen authorities remains denied.
 
 ## Nonclaims
 
@@ -125,4 +129,5 @@ The installation selftest must prove:
 - A root service is not by itself an unforgeable lane principal.
 - A staging tree is not a host installation.
 - A host activation pass is not a material broker pass.
+- A host activation pass is not a material principal-capsule pass.
 - General Exec/Bash, commit, and CI attachment remain refused.

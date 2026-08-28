@@ -38,6 +38,8 @@ namespace {
 
 constexpr std::string_view kFrozenManifestSha256 =
     "7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5";
+constexpr std::string_view kFrozenCapsuleManifestSha256 =
+    "76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f";
 constexpr std::string_view kZeroDigest =
     "0000000000000000000000000000000000000000000000000000000000000000";
 constexpr std::size_t kMaximumAuthorityOutput = 1024 * 1024;
@@ -195,12 +197,14 @@ std::string sha256(std::string_view value) {
 
 std::string file_sha256(const std::string& path) { return sha256(read_file(path)); }
 
-Manifest load_manifest(const std::string& path) {
+Manifest parse_frozen_manifest(const std::string& path,
+                               std::string_view expected_digest,
+                               std::string_view label) {
   const std::string contents = read_file(path);
   Manifest manifest;
   manifest.digest = sha256(contents);
-  if (manifest.digest != kFrozenManifestSha256) {
-    throw Error("frozen action 9027 manifest hash mismatch");
+  if (manifest.digest != expected_digest) {
+    throw Error("frozen " + std::string(label) + " manifest hash mismatch");
   }
   std::istringstream input(contents);
   std::string line;
@@ -216,6 +220,12 @@ Manifest load_manifest(const std::string& path) {
       throw Error("duplicate manifest field: " + key);
     }
   }
+  return manifest;
+}
+
+Manifest load_lease_manifest(const std::string& path) {
+  Manifest manifest =
+      parse_frozen_manifest(path, kFrozenManifestSha256, "action 9027");
   if (manifest.require("schema") !=
           "loom-kernel-principal-lease-authority-freeze-v1" ||
       manifest.require("stage") != "SEMANTICS_FROZEN" ||
@@ -229,9 +239,27 @@ Manifest load_manifest(const std::string& path) {
   return manifest;
 }
 
-void verify_authority(const Manifest& manifest, const std::string& authority_path) {
+Manifest load_capsule_manifest(const std::string& path) {
+  Manifest manifest = parse_frozen_manifest(
+      path, kFrozenCapsuleManifestSha256, "action 9028");
+  if (manifest.require("schema") !=
+          "loom-kernel-principal-capsule-authority-freeze-v1" ||
+      manifest.require("stage") != "SEMANTICS_FROZEN" ||
+      manifest.require("producing_language") != "Sounio" ||
+      manifest.require("language_role") != "SEMANTIC_AUTHORITY" ||
+      manifest.require("action") != "9028" ||
+      manifest.require("parent_action") != "9027" ||
+      manifest.require("grandparent_action") != "9026" ||
+      manifest.require("material_capsule") != "false") {
+    throw Error("manifest does not describe frozen Sounio action 9028");
+  }
+  return manifest;
+}
+
+void verify_authority(const Manifest& manifest, const std::string& authority_path,
+                      std::string_view label) {
   if (file_sha256(authority_path) != manifest.require("executable_sha256")) {
-    throw Error("Sounio authority executable hash mismatch");
+    throw Error("Sounio " + std::string(label) + " authority executable hash mismatch");
   }
 }
 
@@ -303,7 +331,9 @@ bool inherited_socket_valid(const std::string& expected_path) {
 
 ActivationFacts measure_activation(const std::string& manifest_path,
                                    const std::string& authority_path,
-                                   const std::string& socket_path) {
+                                   const std::string& socket_path,
+                                   const std::string& capsule_manifest_path = "",
+                                   const std::string& capsule_authority_path = "") {
   ActivationFacts facts;
   facts.root_identity = getuid() == 0 && geteuid() == 0 && getgid() == 0 &&
                         getegid() == 0;
@@ -327,7 +357,11 @@ ActivationFacts measure_activation(const std::string& manifest_path,
       std::getenv("SUDO_UID") == nullptr && std::getenv("SUDO_USER") == nullptr &&
       std::getenv("DOAS_USER") == nullptr && std::getenv("PKEXEC_UID") == nullptr;
   facts.artifacts_root_owned = root_owned_regular(manifest_path) &&
-                               root_owned_regular(authority_path);
+                               root_owned_regular(authority_path) &&
+                               (capsule_manifest_path.empty() ||
+                                root_owned_regular(capsule_manifest_path)) &&
+                               (capsule_authority_path.empty() ||
+                                root_owned_regular(capsule_authority_path));
   facts.frozen_policy_bound = true;
   return facts;
 }
@@ -796,8 +830,8 @@ int selftest_collision(const std::string& path) {
 
 int diagnose(const std::string& manifest_path, const std::string& authority_path,
              const std::string& socket_path) {
-  const Manifest manifest = load_manifest(manifest_path);
-  verify_authority(manifest, authority_path);
+  const Manifest manifest = load_lease_manifest(manifest_path);
+  verify_authority(manifest, authority_path, "action 9027");
   ActivationFacts facts = measure_activation(manifest_path, authority_path, socket_path);
   const CommandResult decision = run_authority(authority_path, current_frame(facts));
   std::ostringstream receipt;
@@ -839,14 +873,20 @@ void write_response(int descriptor, const std::string& response) {
   }
 }
 
-std::string status_response(const Journal& journal, const Manifest& manifest) {
+std::string status_response(const Journal& journal, const Manifest& lease_manifest,
+                            const Manifest& capsule_manifest) {
   std::array<std::size_t, 6> counts{};
   for (const auto& entry : journal.latest()) {
     ++counts[static_cast<std::size_t>(entry.second.state)];
   }
   std::ostringstream output;
   output << "LOOM_KERNEL_PRINCIPAL_BROKER_STATUS state=READY"
-         << " manifest_sha256=" << manifest.digest
+         << " lease_manifest_sha256=" << lease_manifest.digest
+         << " lease_authority_sha256="
+         << lease_manifest.require("executable_sha256")
+         << " capsule_manifest_sha256=" << capsule_manifest.digest
+         << " capsule_authority_sha256="
+         << capsule_manifest.require("executable_sha256")
          << " journal_head_sha256=" << journal.head_digest()
          << " epoch=" << journal.maximum_epoch()
          << " free=" << counts[0] << " reserved=" << counts[1]
@@ -857,12 +897,14 @@ std::string status_response(const Journal& journal, const Manifest& manifest) {
 }
 
 std::string bootstrap_response(const std::string& request, const Journal* journal,
-                               const Manifest* manifest) {
+                               const Manifest* lease_manifest,
+                               const Manifest* capsule_manifest) {
   if (request == "STATUS") {
-    if (journal == nullptr || manifest == nullptr) {
+    if (journal == nullptr || lease_manifest == nullptr ||
+        capsule_manifest == nullptr) {
       return "DENY status-context-absent\n";
     }
-    return status_response(*journal, *manifest);
+    return status_response(*journal, *lease_manifest, *capsule_manifest);
   }
   if (request.rfind("LAUNCH", 0) == 0) {
     return "DENY bootstrap-launch-closed\n";
@@ -962,25 +1004,33 @@ int selftest_protocol() {
   if (getuid() == 0 || geteuid() == 0) {
     throw Error("protocol selftest refuses root execution");
   }
-  if (bootstrap_response("LAUNCH lane", nullptr, nullptr) !=
+  if (bootstrap_response("LAUNCH lane", nullptr, nullptr, nullptr) !=
           "DENY bootstrap-launch-closed\n" ||
-      bootstrap_response("RECYCLE lane", nullptr, nullptr) !=
+      bootstrap_response("RECYCLE lane", nullptr, nullptr, nullptr) !=
           "DENY bootstrap-recycle-closed\n" ||
-      bootstrap_response("EXEC lane", nullptr, nullptr) !=
-          "DENY unknown-request\n") {
+      bootstrap_response("EXEC lane", nullptr, nullptr, nullptr) !=
+          "DENY unknown-request\n" ||
+      bootstrap_response("STATUS", nullptr, nullptr, nullptr) !=
+          "DENY status-context-absent\n") {
     throw Error("bootstrap protocol opened a material operation");
   }
   std::cout << "LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS"
-            << " launch=closed recycle=closed unknown=denied\n";
+            << " launch=closed recycle=closed unknown=denied"
+            << " partial_status=denied\n";
   return 0;
 }
 
 int serve(const std::string& manifest_path, const std::string& authority_path,
+          const std::string& capsule_manifest_path,
+          const std::string& capsule_authority_path,
           const std::string& journal_path, const std::string& socket_path) {
-  const Manifest manifest = load_manifest(manifest_path);
-  verify_authority(manifest, authority_path);
+  const Manifest lease_manifest = load_lease_manifest(manifest_path);
+  const Manifest capsule_manifest = load_capsule_manifest(capsule_manifest_path);
+  verify_authority(lease_manifest, authority_path, "action 9027");
+  verify_authority(capsule_manifest, capsule_authority_path, "action 9028");
   const ActivationFacts facts =
-      measure_activation(manifest_path, authority_path, socket_path);
+      measure_activation(manifest_path, authority_path, socket_path,
+                         capsule_manifest_path, capsule_authority_path);
   if (!facts.complete()) {
     throw Error("host service-manager activation boundary incomplete");
   }
@@ -1009,7 +1059,9 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
     }
     const std::string request = trim(
         std::string(request_buffer.data(), static_cast<std::size_t>(count)));
-    write_response(client.get(), bootstrap_response(request, &journal, &manifest));
+    write_response(client.get(), bootstrap_response(
+                                     request, &journal, &lease_manifest,
+                                     &capsule_manifest));
   }
 }
 
@@ -1017,6 +1069,8 @@ struct Options {
   std::string mode;
   std::string manifest;
   std::string authority;
+  std::string capsule_manifest;
+  std::string capsule_authority;
   std::string journal;
   std::string socket_path = "/run/sounio/loom-principal-broker.sock";
 };
@@ -1033,6 +1087,10 @@ Options parse_options(int argc, char** argv) {
       options.manifest = value;
     } else if (argument == "--authority") {
       options.authority = value;
+    } else if (argument == "--capsule-manifest") {
+      options.capsule_manifest = value;
+    } else if (argument == "--capsule-authority") {
+      options.capsule_authority = value;
     } else if (argument == "--journal") {
       options.journal = value;
     } else if (argument == "--socket-path") {
@@ -1047,6 +1105,13 @@ Options parse_options(int argc, char** argv) {
 void require_artifacts(const Options& options) {
   if (options.manifest.empty() || options.authority.empty()) {
     throw Error("manifest and authority are required");
+  }
+}
+
+void require_serve_artifacts(const Options& options) {
+  require_artifacts(options);
+  if (options.capsule_manifest.empty() || options.capsule_authority.empty()) {
+    throw Error("capsule manifest and authority are required");
   }
 }
 
@@ -1082,10 +1147,10 @@ int main(int argc, char** argv) {
       return selftest_collision(options.journal);
     }
     if (options.mode == "--serve") {
-      require_artifacts(options);
+      require_serve_artifacts(options);
       if (options.journal.empty()) throw Error("journal is required");
-      return serve(options.manifest, options.authority, options.journal,
-                   options.socket_path);
+      return serve(options.manifest, options.authority, options.capsule_manifest,
+                   options.capsule_authority, options.journal, options.socket_path);
     }
     throw Error("unknown mode");
   } catch (const std::exception& error) {

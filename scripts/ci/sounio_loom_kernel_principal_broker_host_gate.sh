@@ -10,12 +10,12 @@ BROKER_LINK=/usr/libexec/sounio/loom-kernel-principal-broker
 CONFIG=/etc/sounio/loom-principal-broker.conf
 
 unavailable() {
-  printf 'sounio-loom-kernel-principal-broker-host-gate: HOST_GATE_UNAVAILABLE reason=%s material_broker=false\n' "$*" >&2
+  printf 'sounio-loom-kernel-principal-broker-host-gate: HOST_GATE_UNAVAILABLE reason=%s material_broker=false material_capsule=false\n' "$*" >&2
   exit 77
 }
 
 fail() {
-  printf 'sounio-loom-kernel-principal-broker-host-gate: FAIL reason=%s material_broker=false\n' "$*" >&2
+  printf 'sounio-loom-kernel-principal-broker-host-gate: FAIL reason=%s material_broker=false material_capsule=false\n' "$*" >&2
   exit 1
 }
 
@@ -68,16 +68,20 @@ command -v systemctl >/dev/null 2>&1 || unavailable 'systemctl is absent'
 [[ -L "$BROKER_LINK" ]] || fail 'stable broker path is not a symlink'
 [[ "$(stat -c '%u:%g' "$BROKER_LINK")" == 0:0 ]] || fail 'stable broker symlink is not root-owned'
 BROKER_TARGET="$(readlink "$BROKER_LINK")"
-[[ "$BROKER_TARGET" =~ ^/usr/lib/sounio/loom/releases/9027-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}/loom-kernel-principal-broker$ ]] ||
-  fail 'stable broker target is outside an action 9027 release'
+[[ "$BROKER_TARGET" =~ ^/usr/lib/sounio/loom/releases/9028-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}-[0-9a-f]{16}/loom-kernel-principal-broker$ ]] ||
+  fail 'stable broker target is outside an action 9027+9028 release'
 RELEASE_DIR="${BROKER_TARGET%/loom-kernel-principal-broker}"
 RECEIPT="$RELEASE_DIR/install.receipt.v1"
 MANIFEST="$RELEASE_DIR/kernel_principal_lease_authority.freeze.v1"
 AUTHORITY="$RELEASE_DIR/sounio-loom-kernel-principal-lease-authority-runtime"
+CAPSULE_MANIFEST="$RELEASE_DIR/kernel_principal_capsule_authority.freeze.v1"
+CAPSULE_AUTHORITY="$RELEASE_DIR/sounio-loom-kernel-principal-capsule-authority-runtime"
 
 root_file_mode "$BROKER_TARGET" 555
 root_file_mode "$MANIFEST" 444
 root_file_mode "$AUTHORITY" 555
+root_file_mode "$CAPSULE_MANIFEST" 444
+root_file_mode "$CAPSULE_AUTHORITY" 555
 root_file_mode "$RECEIPT" 444
 root_file_mode "$RELEASE_DIR/install_loom_kernel_principal_broker.sh" 444
 root_file_mode "$CONFIG" 600
@@ -89,18 +93,26 @@ root_file_mode "/usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_
 
 [[ "$(receipt_value "$RECEIPT" semantic_producer)" == Sounio ]] || fail 'receipt semantic producer drifted'
 [[ "$(receipt_value "$RECEIPT" semantic_role)" == SEMANTIC_AUTHORITY ]] || fail 'receipt semantic role drifted'
+[[ "$(receipt_value "$RECEIPT" semantic_actions)" == 9027+9028 ]] || fail 'receipt semantic actions drifted'
 [[ "$(receipt_value "$RECEIPT" material_producer)" == C++20 ]] || fail 'receipt material producer drifted'
 [[ "$(receipt_value "$RECEIPT" material_role)" == MATERIAL_PARITY ]] || fail 'receipt material role drifted'
 [[ "$(receipt_value "$RECEIPT" material_transitory)" == true ]] || fail 'receipt lost transitory marker'
 [[ "$(receipt_value "$RECEIPT" launch_open)" == false ]] || fail 'receipt opened launch'
 [[ "$(receipt_value "$RECEIPT" recycle_open)" == false ]] || fail 'receipt opened recycle'
 [[ "$(receipt_value "$RECEIPT" material_broker)" == false ]] || fail 'receipt promoted material broker'
+[[ "$(receipt_value "$RECEIPT" material_capsule)" == false ]] || fail 'receipt promoted material capsule'
 
 MANIFEST_SHA256="$(sha256sum "$MANIFEST" | cut -d ' ' -f 1)"
 AUTHORITY_SHA256="$(sha256sum "$AUTHORITY" | cut -d ' ' -f 1)"
+CAPSULE_MANIFEST_SHA256="$(sha256sum "$CAPSULE_MANIFEST" | cut -d ' ' -f 1)"
+CAPSULE_AUTHORITY_SHA256="$(sha256sum "$CAPSULE_AUTHORITY" | cut -d ' ' -f 1)"
 BROKER_SHA256="$(sha256sum "$BROKER_TARGET" | cut -d ' ' -f 1)"
-[[ "$MANIFEST_SHA256" == "$(receipt_value "$RECEIPT" manifest_sha256)" ]] || fail 'installed manifest hash drifted'
-[[ "$AUTHORITY_SHA256" == "$(receipt_value "$RECEIPT" authority_sha256)" ]] || fail 'installed authority hash drifted'
+[[ "$MANIFEST_SHA256" == "$(receipt_value "$RECEIPT" lease_manifest_sha256)" ]] || fail 'installed manifest hash drifted'
+[[ "$AUTHORITY_SHA256" == "$(receipt_value "$RECEIPT" lease_authority_sha256)" ]] || fail 'installed authority hash drifted'
+[[ "$CAPSULE_MANIFEST_SHA256" == "$(receipt_value "$RECEIPT" capsule_manifest_sha256)" ]] ||
+  fail 'installed capsule manifest hash drifted'
+[[ "$CAPSULE_AUTHORITY_SHA256" == "$(receipt_value "$RECEIPT" capsule_authority_sha256)" ]] ||
+  fail 'installed capsule authority hash drifted'
 [[ "$BROKER_SHA256" == "$(receipt_value "$RECEIPT" broker_sha256)" ]] || fail 'installed broker hash drifted'
 [[ "$(sha256sum "$RELEASE_DIR/install_loom_kernel_principal_broker.sh" | cut -d ' ' -f 1)" == "$(receipt_value "$RECEIPT" installer_sha256)" ]] ||
   fail 'installed installer hash drifted'
@@ -114,6 +126,10 @@ BROKER_SHA256="$(sha256sum "$BROKER_TARGET" | cut -d ' ' -f 1)"
   fail 'installed installation contract hash drifted'
 [[ "$(config_value LOOM_PRINCIPAL_MANIFEST)" == "$MANIFEST" ]] || fail 'configuration manifest target drifted'
 [[ "$(config_value LOOM_PRINCIPAL_AUTHORITY)" == "$AUTHORITY" ]] || fail 'configuration authority target drifted'
+[[ "$(config_value LOOM_PRINCIPAL_CAPSULE_MANIFEST)" == "$CAPSULE_MANIFEST" ]] ||
+  fail 'configuration capsule manifest target drifted'
+[[ "$(config_value LOOM_PRINCIPAL_CAPSULE_AUTHORITY)" == "$CAPSULE_AUTHORITY" ]] ||
+  fail 'configuration capsule authority target drifted'
 [[ "$(config_value LOOM_PRINCIPAL_JOURNAL)" == /var/lib/sounio/loom-principal-broker/leases.v1 ]] ||
   fail 'configuration journal target drifted'
 
@@ -124,8 +140,14 @@ systemctl is-active --quiet "$SOCKET_UNIT" || fail 'broker socket is not active'
 
 PROBE="$($BROKER_LINK --probe-live --socket-path "$SOCKET_PATH")"
 [[ "$PROBE" == 'LOOM_KERNEL_PRINCIPAL_BROKER_STATUS state=READY '* ]] || fail 'live broker did not report READY'
-[[ "$PROBE" == *" manifest_sha256=$MANIFEST_SHA256 "* ]] || fail 'live broker reported a different manifest'
-[[ "$PROBE" == *" authority_sha256=$AUTHORITY_SHA256 "* ]] || fail 'live broker reported a different authority'
+[[ "$PROBE" == *" lease_manifest_sha256=$MANIFEST_SHA256 "* ]] ||
+  fail 'live broker reported a different lease manifest'
+[[ "$PROBE" == *" lease_authority_sha256=$AUTHORITY_SHA256 "* ]] ||
+  fail 'live broker reported a different lease authority'
+[[ "$PROBE" == *" capsule_manifest_sha256=$CAPSULE_MANIFEST_SHA256 "* ]] ||
+  fail 'live broker reported a different capsule manifest'
+[[ "$PROBE" == *" capsule_authority_sha256=$CAPSULE_AUTHORITY_SHA256 "* ]] ||
+  fail 'live broker reported a different capsule authority'
 [[ "$PROBE" == *' live_probe=PASS launch=closed recycle=closed unknown=denied' ]] ||
   fail 'live broker negative protocol controls failed'
 
@@ -141,5 +163,6 @@ grep -Fq 'sounio-loom-principal-broker.service' "/proc/$MAIN_PID/cgroup" ||
 [[ "$(systemctl show "$SERVICE_UNIT" --property NoNewPrivileges --value)" == yes ]] ||
   fail 'broker service lost NoNewPrivileges'
 
-printf 'sounio-loom-kernel-principal-broker-host-gate: HOST_ACTIVATION_PASS release=%s main_pid=%s manifest_sha256=%s authority_sha256=%s broker_sha256=%s socket_activation=verified service_cgroup=verified root_peer=verified launch=closed recycle=closed material_broker=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false\n' \
-  "$(receipt_value "$RECEIPT" release_id)" "$MAIN_PID" "$MANIFEST_SHA256" "$AUTHORITY_SHA256" "$BROKER_SHA256"
+printf 'sounio-loom-kernel-principal-broker-host-gate: HOST_ACTIVATION_PASS release=%s main_pid=%s lease_manifest_sha256=%s lease_authority_sha256=%s capsule_manifest_sha256=%s capsule_authority_sha256=%s broker_sha256=%s socket_activation=verified service_cgroup=verified root_peer=verified launch=closed recycle=closed material_broker=false material_capsule=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false\n' \
+  "$(receipt_value "$RECEIPT" release_id)" "$MAIN_PID" "$MANIFEST_SHA256" "$AUTHORITY_SHA256" \
+  "$CAPSULE_MANIFEST_SHA256" "$CAPSULE_AUTHORITY_SHA256" "$BROKER_SHA256"

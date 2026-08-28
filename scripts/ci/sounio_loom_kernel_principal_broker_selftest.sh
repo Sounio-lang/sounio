@@ -6,6 +6,7 @@ umask 077
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-kernel-principal-broker.XXXXXX")"
 AUTHORITY="$TEST_ROOT/kernel-principal-lease-authority"
+CAPSULE_AUTHORITY="$TEST_ROOT/kernel-principal-capsule-authority"
 BROKER_ONE="$TEST_ROOT/kernel-principal-broker-one"
 BROKER_TWO="$TEST_ROOT/kernel-principal-broker-two"
 JOURNAL="$TEST_ROOT/leases.v1"
@@ -14,10 +15,15 @@ COLLISION_JOURNAL="$TEST_ROOT/collision-leases.v1"
 TAMPERED_JOURNAL="$TEST_ROOT/leases-tampered.v1"
 TAMPERED_MANIFEST="$TEST_ROOT/manifest-tampered.v1"
 TAMPERED_AUTHORITY="$TEST_ROOT/authority-tampered"
+TAMPERED_CAPSULE_MANIFEST="$TEST_ROOT/capsule-manifest-tampered.v1"
+TAMPERED_CAPSULE_AUTHORITY="$TEST_ROOT/capsule-authority-tampered"
 DIRECT_JOURNAL="$TEST_ROOT/direct-serve-must-not-exist.v1"
+MISSING_CAPSULE_JOURNAL="$TEST_ROOT/missing-capsule-serve-must-not-exist.v1"
 SUDO_JOURNAL="$TEST_ROOT/sudo-serve-must-not-exist.v1"
 MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v1"
 MANIFEST_SHA256='7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5'
+CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v1"
+CAPSULE_MANIFEST_SHA256='76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f'
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -62,10 +68,15 @@ run_refusal() {
 
 [[ "$(sha256sum "$MANIFEST" | cut -d' ' -f1)" == "$MANIFEST_SHA256" ]] ||
   fail 'frozen action 9027 manifest drifted'
+[[ "$(sha256sum "$CAPSULE_MANIFEST" | cut -d' ' -f1)" == "$CAPSULE_MANIFEST_SHA256" ]] ||
+  fail 'frozen action 9028 manifest drifted'
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_lease_authority_freeze_selftest.sh" >/dev/null
+bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_capsule_authority_freeze_selftest.sh" >/dev/null
 
 SOUNIO_LOOM_KERNEL_PRINCIPAL_LEASE_OUTPUT="$AUTHORITY" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_lease_authority.sh" >/dev/null
+SOUNIO_LOOM_KERNEL_PRINCIPAL_CAPSULE_OUTPUT="$CAPSULE_AUTHORITY" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_capsule_authority.sh" >/dev/null
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BROKER_ONE" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BROKER_TWO" \
@@ -111,7 +122,7 @@ spoofed_decision="$(printf '%s\n' "$spoofed_diagnostic" | sed -n '3p')"
 
 protocol="$($BROKER_ONE --selftest-protocol)"
 [[ "$protocol" == \
-  'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS launch=closed recycle=closed unknown=denied' ]] ||
+  'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
   fail "bootstrap protocol opened unexpectedly: $protocol"
 
 journal_result="$($BROKER_ONE --selftest-journal --journal "$JOURNAL")"
@@ -154,8 +165,35 @@ authority_refusal="$(run_refusal authority-tamper "$BROKER_ONE" --diagnose \
 [[ "$authority_refusal" == *'authority executable hash mismatch'* ]] ||
   fail 'authority mutation reached Sounio execution'
 
+cp "$CAPSULE_MANIFEST" "$TAMPERED_CAPSULE_MANIFEST"
+printf '\n' >> "$TAMPERED_CAPSULE_MANIFEST"
+capsule_manifest_refusal="$(run_refusal capsule-manifest-tamper "$BROKER_ONE" --serve \
+  --manifest "$MANIFEST" --authority "$AUTHORITY" \
+  --capsule-manifest "$TAMPERED_CAPSULE_MANIFEST" \
+  --capsule-authority "$CAPSULE_AUTHORITY" --journal "$DIRECT_JOURNAL")"
+[[ "$capsule_manifest_refusal" == *'action 9028 manifest hash mismatch'* ]] ||
+  fail 'capsule manifest mutation reached activation measurement'
+
+cp "$CAPSULE_AUTHORITY" "$TAMPERED_CAPSULE_AUTHORITY"
+printf 'X' >> "$TAMPERED_CAPSULE_AUTHORITY"
+capsule_authority_refusal="$(run_refusal capsule-authority-tamper "$BROKER_ONE" --serve \
+  --manifest "$MANIFEST" --authority "$AUTHORITY" \
+  --capsule-manifest "$CAPSULE_MANIFEST" \
+  --capsule-authority "$TAMPERED_CAPSULE_AUTHORITY" --journal "$DIRECT_JOURNAL")"
+[[ "$capsule_authority_refusal" == *'action 9028 authority executable hash mismatch'* ]] ||
+  fail 'capsule authority mutation reached activation measurement'
+
+missing_capsule_refusal="$(run_refusal capsule-absent "$BROKER_ONE" --serve \
+  --manifest "$MANIFEST" --authority "$AUTHORITY" --journal "$MISSING_CAPSULE_JOURNAL")"
+[[ "$missing_capsule_refusal" == *'capsule manifest and authority are required'* ]] ||
+  fail 'serve without capsule authority did not trigger the dual-authority rule'
+[[ ! -e "$MISSING_CAPSULE_JOURNAL" ]] ||
+  fail 'serve without capsule authority created a journal'
+
 direct_refusal="$(run_refusal direct-serve "$BROKER_ONE" --serve \
-  --manifest "$MANIFEST" --authority "$AUTHORITY" --journal "$DIRECT_JOURNAL")"
+  --manifest "$MANIFEST" --authority "$AUTHORITY" \
+  --capsule-manifest "$CAPSULE_MANIFEST" --capsule-authority "$CAPSULE_AUTHORITY" \
+  --journal "$DIRECT_JOURNAL")"
 [[ "$direct_refusal" == *'service-manager activation boundary incomplete'* ]] ||
   fail 'direct non-root serve reached journal access'
 [[ ! -e "$DIRECT_JOURNAL" ]] || fail 'direct non-root serve created a journal'
@@ -163,7 +201,9 @@ direct_refusal="$(run_refusal direct-serve "$BROKER_ONE" --serve \
 command -v sudo >/dev/null 2>&1 || fail 'sudo is missing from the current blocker witness'
 sudo -n /usr/bin/true >/dev/null 2>&1 || fail 'outer privilege-regain blocker disappeared'
 sudo_refusal="$(run_refusal sudo-serve sudo -n "$BROKER_ONE" --serve \
-  --manifest "$MANIFEST" --authority "$AUTHORITY" --journal "$SUDO_JOURNAL")"
+  --manifest "$MANIFEST" --authority "$AUTHORITY" \
+  --capsule-manifest "$CAPSULE_MANIFEST" --capsule-authority "$CAPSULE_AUTHORITY" \
+  --journal "$SUDO_JOURNAL")"
 [[ "$sudo_refusal" == *'service-manager activation boundary incomplete'* ]] ||
   fail 'sudo-launched root broker bypassed service-manager activation'
 [[ ! -e "$SUDO_JOURNAL" ]] || fail 'sudo-launched broker created a journal'
@@ -185,6 +225,8 @@ if grep -Eq 'ExecStart=.*/(sh|bash|zsh|python|node|ruby)( |$)' "$SERVICE_UNIT"; 
 fi
 grep -Fqx 'LOOM_PRINCIPAL_MANIFEST=/usr/lib/sounio/loom/kernel_principal_lease_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen manifest path'
+grep -Fqx 'LOOM_PRINCIPAL_CAPSULE_MANIFEST=/usr/lib/sounio/loom/kernel_principal_capsule_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
+  fail 'config example omits frozen capsule manifest path'
 
 command -v systemd-analyze >/dev/null 2>&1 || fail 'systemd-analyze is required for unit verification'
 UNIT_ROOT="$TEST_ROOT/units"
@@ -198,4 +240,4 @@ systemd-analyze verify "$UNIT_ROOT/sounio-loom-principal-broker.socket" \
 broker_source_sha256="$(sha256sum "$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp" | cut -d' ' -f1)"
 broker_binary_sha256="$(sha256sum "$BROKER_ONE" | cut -d' ' -f1)"
 printf '%s\n' \
-  "sounio-loom-kernel-principal-broker-selftest: PASS semantic_authority=Sounio operational_realization=C++20+Linux+systemd-bootstrap role=MATERIAL_PARITY transitory=true action=9027 frozen_manifest_sha256=$MANIFEST_SHA256 current_material=DENY463 direct_nonroot=refused sudo_root=refused environment_spoof=DENY463 manifest_tamper=refused authority_tamper=refused journal_records=6 journal_tamper=refused journal_fsync=per-record crash_recovery=QUARANTINED range_collision=refused launch=closed recycle=closed systemd_unit=verified source_sha256=$broker_source_sha256 binary_sha256=$broker_binary_sha256 material_broker=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false"
+  "sounio-loom-kernel-principal-broker-selftest: PASS semantic_authority=Sounio operational_realization=C++20+Linux+systemd-bootstrap role=MATERIAL_PARITY transitory=true actions=9027+9028 lease_manifest_sha256=$MANIFEST_SHA256 capsule_manifest_sha256=$CAPSULE_MANIFEST_SHA256 current_material=DENY463 direct_nonroot=refused sudo_root=refused environment_spoof=DENY463 manifest_tamper=refused authority_tamper=refused capsule_manifest_tamper=refused capsule_authority_tamper=refused capsule_absent=refused partial_status=denied journal_records=6 journal_tamper=refused journal_fsync=per-record crash_recovery=QUARANTINED range_collision=refused launch=closed recycle=closed systemd_unit=verified source_sha256=$broker_source_sha256 binary_sha256=$broker_binary_sha256 material_broker=false material_capsule=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false"

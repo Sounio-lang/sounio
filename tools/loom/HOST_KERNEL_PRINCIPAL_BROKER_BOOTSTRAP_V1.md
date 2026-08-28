@@ -5,7 +5,7 @@ Status: `TRANSITORY_BOOTSTRAP_MATERIAL_REFUSED`
 ## Purpose
 
 This bootstrap creates the narrow host boundary required by frozen Sounio
-action `9027`. It does not replace the resident OCaml LOOM kernel, the in-memory
+actions `9027` and `9028`. It does not replace the resident OCaml LOOM kernel, the in-memory
 `ExecGrant` protocol, or action `9026` kernel-principal evidence. Its only
 intended production responsibilities are:
 
@@ -13,9 +13,11 @@ intended production responsibilities are:
    lane's privilege boundary;
 2. maintain a root-owned, hash-chained principal-lease journal;
 3. collect material receipts and submit the fixed action `9027` frame to the
-   frozen Sounio executable before releasing a lane harness;
-4. force uncertain leases to `QUARANTINED` after broker loss;
-5. refuse range reuse until Sounio admits the affirmative extinction triple.
+   frozen Sounio executable before any lease transition;
+4. pin action `9028` before a lane can ever receive a non-bearer
+   `PrincipalCapsule`, while retaining every pidfd in broker custody;
+5. force uncertain leases to `QUARANTINED` after broker loss;
+6. refuse range reuse until Sounio admits the affirmative extinction triple.
 
 The bootstrap is C++20 because current Sounio cannot yet implement every Linux
 socket, namespace, cgroup, pidfd, and durable-file primitive needed here. C++
@@ -26,10 +28,13 @@ broker compiled in Sounio when the required system surface exists.
 
 The broker must pin and verify:
 
-- `kernel_principal_lease_authority.freeze.v1` by SHA-256;
+- `kernel_principal_lease_authority.freeze.v1` and
+  `kernel_principal_capsule_authority.freeze.v1` by SHA-256;
 - action `9027`, stage `SEMANTICS_FROZEN`, producer `Sounio`, role
   `SEMANTIC_AUTHORITY`;
-- the exact Sounio authority executable hash recorded by that manifest;
+- action `9028`, stage `SEMANTICS_FROZEN`, producer `Sounio`, role
+  `SEMANTIC_AUTHORITY`, and parent action `9027`;
+- the exact two Sounio authority executable hashes recorded by those manifests;
 - parent action `9026` and its frozen manifest binding.
 
 Manifest error, authority-executable drift, malformed Sounio output, timeout,
@@ -52,7 +57,8 @@ opening the lease journal unless all of the following hold:
 - the broker was not entered through `sudo`, `doas`, or another interactive
   privilege-regain environment;
 - the frozen manifest and authority executable are regular, non-symlink,
-  root-owned files with no group/world write permission; the installation gate
+  root-owned files with no group/world write permission; this applies to both
+  manifests and both authority executables, and the installation gate
   applies the same ownership rule to the systemd environment file.
 
 The broker never binds its own production socket. A lane cannot manufacture
@@ -93,7 +99,8 @@ Recovery never appends `FREE`.
 
 The root-only socket protocol is newline-delimited and capped at 4096 bytes:
 
-- `STATUS` returns frozen hashes, broker epoch, and counts by state;
+- `STATUS` returns both frozen manifest and executable hashes, broker epoch, and
+  counts by state;
 - `LAUNCH ...` is refused in Bootstrap V1;
 - `RECYCLE ...` is refused in Bootstrap V1.
 
@@ -128,11 +135,13 @@ The bootstrap gate must prove:
 2. direct non-root `--serve` refuses before journal access;
 3. `sudo -n --serve` also refuses because service-manager activation is absent;
 4. environment variables claiming root/systemd authority do not bypass checks;
-5. one-byte manifest drift refuses before Sounio execution;
-6. a fake or modified authority executable refuses by hash;
+5. one-byte drift in either manifest refuses before Sounio execution;
+6. a fake or modified lease or capsule authority executable refuses by hash;
 7. one-byte journal drift refuses replay;
 8. `LAUNCH` and `RECYCLE` remain closed in the bootstrap protocol;
-9. two source-fresh C++ builds are identical and have no Python or Rust runtime
+9. omission of action `9028` and `STATUS` without both authority contexts are
+   refused before journal access;
+10. two source-fresh C++ builds are identical and have no Python or Rust runtime
    dependency.
 
 ## Material Opening Gate
@@ -146,17 +155,20 @@ these are executed, not simulated:
 - outer, sibling, and wrong-ancestry attacks denied before grant lookup;
 - broker kill at every lifecycle edge;
 - restart quarantine and affirmative process/namespace/authority extinction;
-- action `9026` `ALLOW` followed by action `9027` `ALLOW`;
+- action `9026` `ALLOW` followed by action `9027` `ALLOW` and action `9028`
+  `ALLOW`;
 - causal sabotage proving each material rule is load-bearing.
 
 Until that gate passes:
 
-`material_broker=false`, `same_uid_peer_isolation=false`,
+`material_broker=false`, `material_capsule=false`,
+`same_uid_peer_isolation=false`,
 `exec_attached=false`, `commit_attached=false`, `ci_attached=false`.
 
 ## Nonclaims
 
 - This bootstrap does not create a kernel principal in the current pod.
+- Pinning action `9028` does not mint a material `PrincipalCapsule`.
 - A valid journal does not prove a valid namespace or cgroup.
 - Root execution without service-manager activation is refused.
 - Passwordless `sudo` is a blocker, not a broker installation mechanism.
