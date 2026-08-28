@@ -8019,8 +8019,51 @@ fn emit_global_inits_x86() with IO, Mut, Panic, Div {
             if p < TC && TK[p as usize] == 16 {
                 p = p + 1
                 if TK[p as usize] == 41 {
-                    // Array repeat initializer: [V; N]
+                    // `[ ... ]` after `=` is one of TWO initializer forms, and this
+                    // scanner used to assume it was always the first:
+                    //
+                    //   [V; N]      repeat  -- one value, splatted into N slots
+                    //   [a, b, c]   list    -- N values, one per slot
+                    //
+                    // Compiled as a repeat, a LIST parses its first element as V,
+                    // finds no `;`, and rep-stos that one value across the whole
+                    // array: `var GA: [i64; 7] = [1,2,3,4,5,6,7]` read back as seven
+                    // 1s (#1574). Silent wrong data -- the array is fully
+                    // initialised, just uniformly with element 0.
+                    //
+                    // array_init_is_repeat is the same discriminator the LOCAL decl
+                    // path already uses (compile_primary, compile_stmt); only the
+                    // two global emitters were missing it.
                     let gi_arr = gl_find(gns, gne)
+                    if gi_arr >= 0 && array_init_is_repeat(p) == false {
+                        let l_base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
+                        let l_esiz = GL[(gi_arr * 4 + 2) as usize]
+                        let l_alen = GL[(gi_arr * 4 + 3) as usize]
+                        p = p + 1                              // skip [
+                        var l_idx: i64 = 0
+                        while p < TC && TK[p as usize] != 42 && TK[p as usize] != 0 {
+                            EP = p
+                            compile_or()                       // element value in rax
+                            p = EP
+                            // Excess elements are compiled (so a bad one still
+                            // diagnoses) but not stored: the slot does not exist.
+                            if l_idx < l_alen {
+                                if l_esiz == 1 {
+                                    em(0x48); em(0x89); em(0xc1)   // mov rcx, rax
+                                    emit_load_abs_addr_to_rax_x86(l_base + l_idx)
+                                    em(0x88); em(0x08)             // mov [rax], cl
+                                } else {
+                                    emit_store_rax_to_abs_qword_x86(l_base + l_idx * l_esiz)
+                                }
+                            }
+                            l_idx = l_idx + 1
+                            if p < TC && TK[p as usize] == 28 { p = p + 1 }   // skip ,
+                        }
+                        if p < TC && TK[p as usize] == 42 { p = p + 1 }      // skip ]
+                        // Short lists leave the tail at the BSS zero it already has.
+                        continue
+                    }
+                    // Array repeat initializer: [V; N]
                     if gi_arr >= 0 {
                         p = p + 1                              // skip [
                         EP = p
@@ -8114,8 +8157,35 @@ fn emit_global_inits_a64() with IO, Mut, Panic, Div {
             if p < TC && TK[p as usize] == 16 {
                 p = p + 1
                 if TK[p as usize] == 41 {
-                    // Array repeat initializer: [V; N]
+                    // a64 twin of the x86 element-list fix (#1574). See
+                    // emit_global_inits_x86 for why array_init_is_repeat has to
+                    // gate this: without it `[a, b, c]` is compiled as `[a; N]`.
                     let gi_arr = gl_find(gns, gne)
+                    if gi_arr >= 0 && array_init_is_repeat(p) == false {
+                        let l_base = GL_BSS_BASE + GL[(gi_arr * 4 + 1) as usize]
+                        let l_esiz = GL[(gi_arr * 4 + 2) as usize]
+                        let l_alen = GL[(gi_arr * 4 + 3) as usize]
+                        p = p + 1                              // skip [
+                        var l_idx: i64 = 0
+                        while p < TC && TK[p as usize] != 42 && TK[p as usize] != 0 {
+                            EP = p
+                            compile_or_a64()                   // element value in x0
+                            p = EP
+                            if l_idx < l_alen {
+                                if l_esiz == 1 {
+                                    emit_image_addr_reg_a64(9, l_base + l_idx)
+                                    em32(0x39000120)           // strb w0, [x9]
+                                } else {
+                                    emit_store_x0_to_abs_qword_a64(l_base + l_idx * l_esiz)
+                                }
+                            }
+                            l_idx = l_idx + 1
+                            if p < TC && TK[p as usize] == 28 { p = p + 1 }   // skip ,
+                        }
+                        if p < TC && TK[p as usize] == 42 { p = p + 1 }      // skip ]
+                        continue
+                    }
+                    // Array repeat initializer: [V; N]
                     if gi_arr >= 0 {
                         p = p + 1                              // skip [
                         EP = p
