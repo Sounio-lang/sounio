@@ -173,12 +173,16 @@ else
 fi
 
 set +e
-host_output="$(timeout --signal=TERM --kill-after=5s 180s "$HOST_GATE" \
+host_output="$(timeout --signal=TERM --kill-after=5s 360s "$HOST_GATE" \
   --release "$HOST_RELEASE" --expected-manifest-sha256 "$RELEASE_MANIFEST_SHA256" 2>&1)"
 host_status=$?
 set -e
 [[ $host_status -eq 0 ]] || fail "host causal gate failed or timed out status=$host_status output=$host_output"
 [[ "$host_output" == 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS '* ]] || fail 'host causal gate receipt diverged'
+[[ "$host_output" == *'LOOM_HOST_PROCESS_WITNESS_GATE PASS '* && \
+   "$host_output" == *' process_witness_core=true '* && \
+   "$host_output" == *' complete_effects=false '* ]] ||
+  fail 'host ProcessWitness measurement is absent'
 [[ "$(stable_identity /usr/lib/sounio/loom/current)" == "$stable_current_before" ]] || fail 'production current target moved during experiment'
 [[ "$(stable_identity /usr/libexec/sounio/loom-kernel-principal-broker)" == "$stable_broker_before" ]] || fail 'production broker target moved during experiment'
 
@@ -186,5 +190,5 @@ created_release=false
 cleanup
 trap - EXIT
 printf '%s\n' "$host_output"
-printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY material_grant=true material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_core=true affirmative_extinction=true complete_effects=false material_grant=true material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
   "$EXPECTED_SHA256" "$RELEASE_ID" "$RELEASE_MANIFEST_SHA256" "$HOST_RELEASE"

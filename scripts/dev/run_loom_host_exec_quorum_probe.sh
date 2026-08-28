@@ -125,7 +125,7 @@ mapfile -t remote_hash_lines <<< "$remote_hashes"
 [[ "${remote_hash_lines[0]:-}" == "$EXPECTED_SHA256" && "${remote_hash_lines[1]:-}" == "$PROMOTER_SHA256" ]] || fail 'host transport hash drifted before namespace entry'
 
 set +e
-host_output="$(timeout --signal=TERM --kill-after=10s 240s \
+host_output="$(timeout --signal=TERM --kill-after=10s 480s \
   kubectl -n "$NAMESPACE" exec "$POD" -- nsenter -t 1 -m -u -i -n -p -- \
   "$REMOTE_PROMOTER" --archive "$REMOTE_ARCHIVE" \
   --expected-sha256 "$EXPECTED_SHA256" --mode host-gate 2>&1)"
@@ -133,9 +133,10 @@ host_status=$?
 set -e
 [[ $host_status -eq 0 ]] || fail "host experiment failed or timed out status=$host_status output=$host_output"
 [[ "$host_output" == 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS '* && \
+   "$host_output" == *'LOOM_HOST_PROCESS_WITNESS_GATE PASS '* && \
    "$host_output" == *'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS '* ]] || fail 'host experiment receipts diverged'
 
-transport_receipt="LOOM_HOST_EXEC_QUORUM_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod=$POD archive_sha256=$EXPECTED_SHA256 promoter_sha256=$PROMOTER_SHA256 transport=kubectl+hostPID+nsenter production_activation=false material_grant=true material_execution=false launch_open=false parity_open=false claim_ready=false host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)"
+transport_receipt="LOOM_HOST_EXEC_QUORUM_TRANSPORT PASS namespace=$NAMESPACE node=$NODE pod=$POD archive_sha256=$EXPECTED_SHA256 promoter_sha256=$PROMOTER_SHA256 transport=kubectl+hostPID+nsenter production_activation=false process_witness_core=true affirmative_extinction=true complete_effects=false material_grant=true material_execution=false launch_open=false parity_open=false claim_ready=false host_output_sha256=$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)"
 if [[ -n "$RECEIPT_OUTPUT" ]]; then
   receipt_stage="$(mktemp "$(dirname "$RECEIPT_OUTPUT")/.loom-hostq-receipt.XXXXXX")"
   printf '%s\n%s\n' "$transport_receipt" "$host_output" > "$receipt_stage"

@@ -75,6 +75,10 @@ SOUNIO_LOOM_PRINCIPAL_CELL_BARRIER_INTEGRATED_OUTPUT="$BIN/loom-principal-cell-b
   bash "$ROOT_DIR/scripts/dev/build_loom_principal_cell_barrier_integrated.sh" >/dev/null
 SOUNIO_LOOM_HOST_EXEC_QUORUM_PRINCIPAL_CELL_OUTPUT="$BIN/loom-host-exec-quorum-principal-cell" \
   bash "$ROOT_DIR/scripts/dev/build_loom_host_exec_quorum_principal_cell.sh" >/dev/null
+SOUNIO_LOOM_PROCESS_WITNESS_PRINCIPAL_CELL_OUTPUT="$BIN/loom-process-witness-principal-cell" \
+  bash "$ROOT_DIR/scripts/dev/build_loom_process_witness_principal_cell.sh" >/dev/null
+SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_OUTPUT="$BIN/sounio-loom-process-witness-handshake-v1" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh" >/dev/null
 fixture_runtime="$WORK/sounio-loom-host-exec-quorum-fixture"
 SOUNIO_LOOM_HOST_EXEC_QUORUM_FIXTURE_OUTPUT="$fixture_runtime" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_host_exec_quorum_fixture.sh" >/dev/null
@@ -110,6 +114,10 @@ AUTHORITY_FILES=(
   tools/loom/resident_membrane_v4_main.sio
   scripts/dev/build_sounio_loom_resident_membrane_v4.sh
   scripts/ci/sounio_loom_resident_transport_v4_selftest.sh
+  tools/loom/process_witness_handshake_payload.freeze.v1
+  tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md
+  tools/loom/process_witness_handshake_payload_main.sio
+  scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh
 )
 for relative in "${AUTHORITY_FILES[@]}"; do
   install_root_file "$relative"
@@ -123,10 +131,14 @@ CONTROLLER_SHA256="$(sha256_file "$BIN/loom-exec-grant-controller")"
 RESIDENT_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v4")"
 LOCAL_BARRIER_SHA256="$(sha256_file "$BIN/loom-principal-cell-barrier-integrated")"
 HOST_BARRIER_SHA256="$(sha256_file "$BIN/loom-host-exec-quorum-principal-cell")"
+PROCESS_WITNESS_CELL_SHA256="$(sha256_file "$BIN/loom-process-witness-principal-cell")"
+PROCESS_WITNESS_PAYLOAD_SHA256="$(sha256_file "$BIN/sounio-loom-process-witness-handshake-v1")"
+PROCESS_WITNESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/process_witness_handshake_payload.freeze.v1")"
 FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/host_exec_quorum_fixture.freeze.v1")"
 CONTROLLER_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_grant_controller.runtime.v1")"
 DERIVED_GARDEN_SHA256="$(sha256_file "$ROOT_DIR/tools/loom/GARDEN_HOST_EXEC_QUORUM_DYNAMIC_PRINCIPAL_V1.md")"
-RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" | sha256sum | cut -d ' ' -f 1)"
+PROCESS_WITNESS_GARDEN_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md")"
+RELEASE_DIGEST="$(printf '%s\n' "$SOURCE_COMMIT" "$BROKER_SHA256" "$CONTROLLER_SHA256" "$RESIDENT_SHA256" "$LOCAL_BARRIER_SHA256" "$HOST_BARRIER_SHA256" "$DERIVED_GARDEN_SHA256" "$PROCESS_WITNESS_CELL_SHA256" "$PROCESS_WITNESS_PAYLOAD_SHA256" "$PROCESS_WITNESS_MANIFEST_SHA256" "$PROCESS_WITNESS_GARDEN_SHA256" | sha256sum | cut -d ' ' -f 1)"
 RELEASE_ID="9030-hostq-${RELEASE_DIGEST:0:32}"
 
 cat > "$RELEASE_STAGE/release.manifest.v1" <<EOF
@@ -162,6 +174,16 @@ local_barrier_path=bin/loom-principal-cell-barrier-integrated
 local_barrier_sha256=$LOCAL_BARRIER_SHA256
 host_barrier_path=bin/loom-host-exec-quorum-principal-cell
 host_barrier_sha256=$HOST_BARRIER_SHA256
+process_witness_cell_path=bin/loom-process-witness-principal-cell
+process_witness_cell_sha256=$PROCESS_WITNESS_CELL_SHA256
+process_witness_payload_path=bin/sounio-loom-process-witness-handshake-v1
+process_witness_payload_sha256=$PROCESS_WITNESS_PAYLOAD_SHA256
+process_witness_manifest_path=authority-root/tools/loom/process_witness_handshake_payload.freeze.v1
+process_witness_manifest_sha256=$PROCESS_WITNESS_MANIFEST_SHA256
+process_witness_garden_path=authority-root/tools/loom/GARDEN_PROCESS_WITNESS_EXEC_HANDSHAKE_V1.md
+process_witness_garden_sha256=$PROCESS_WITNESS_GARDEN_SHA256
+process_witness_core=false
+complete_effects=false
 non_bearer_transport=host-measurement-pending
 material_grant=false
 material_execution=false
@@ -208,5 +230,5 @@ mv -fT "$output_stage" "$OUTPUT"
 printf '%s  %s\n' "$ARCHIVE_SHA256" "$(basename "$OUTPUT")" > "$OUTPUT.sha256"
 chmod 0600 "$OUTPUT.sha256"
 
-printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
+printf 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS archive=%s archive_sha256=%s release_id=%s release_manifest_sha256=%s source_commit=%s source_tree_state=%s semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY process_witness_payload=Sounio process_witness_core=false complete_effects=false production_activation=false material_grant=false material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
   "$OUTPUT" "$ARCHIVE_SHA256" "$RELEASE_ID" "$MANIFEST_SHA256" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE"

@@ -98,6 +98,14 @@ FIXTURE_BUNDLE="$(verify_binding fixture_bundle_path fixture_bundle_sha256 444)"
 RESIDENT_RUNTIME="$(verify_binding resident_runtime_path resident_runtime_sha256 555)"
 LOCAL_BARRIER="$(verify_binding local_barrier_path local_barrier_sha256 555)"
 HOST_BARRIER="$(verify_binding host_barrier_path host_barrier_sha256 555)"
+PROCESS_WITNESS_CELL="$(verify_binding process_witness_cell_path process_witness_cell_sha256 555)"
+PROCESS_WITNESS_PAYLOAD="$(verify_binding process_witness_payload_path process_witness_payload_sha256 555)"
+PROCESS_WITNESS_MANIFEST="$(verify_binding process_witness_manifest_path process_witness_manifest_sha256 444)"
+PROCESS_WITNESS_GARDEN="$(verify_binding process_witness_garden_path process_witness_garden_sha256 444)"
+[[ "$(record_value "$MANIFEST" process_witness_core)" == false && \
+   "$(record_value "$MANIFEST" complete_effects)" == false ]] ||
+  fail 'release preclaimed ProcessWitness completion'
+[[ -s "$PROCESS_WITNESS_GARDEN" ]] || fail 'ProcessWitness Garden is empty'
 AUTHORITY_ROOT="$RELEASE/$(record_value "$MANIFEST" authority_root_path)"
 [[ -d "$AUTHORITY_ROOT" && ! -L "$AUTHORITY_ROOT" && -d "$AUTHORITY_ROOT/.git" ]] ||
   fail 'authority root topology is incomplete'
@@ -146,10 +154,56 @@ for expectation in \
   [[ " $host_output " == *" $expectation "* ]] || fail "host broker receipt omitted $expectation"
 done
 
+set +e
+process_witness_output="$(timeout --signal=TERM --kill-after=5s 180s \
+  "$BROKER" --selftest-host-process-witness \
+  --controller-manifest "$CONTROLLER_MANIFEST" \
+  --controller-runtime "$CONTROLLER_RUNTIME" \
+  --controller-root "$AUTHORITY_ROOT" \
+  --fixture-manifest "$FIXTURE_MANIFEST" \
+  --fixture-bundle "$FIXTURE_BUNDLE" \
+  --resident-runtime "$RESIDENT_RUNTIME" \
+  --barrier-runtime "$LOCAL_BARRIER" \
+  --process-witness-runtime "$PROCESS_WITNESS_CELL" \
+  --process-witness-payload "$PROCESS_WITNESS_PAYLOAD" \
+  --process-witness-manifest "$PROCESS_WITNESS_MANIFEST" \
+  --systemd-run "$SYSTEMD_RUN" --systemctl "$SYSTEMCTL" 2>&1)"
+process_witness_status=$?
+set -e
+[[ $process_witness_status -eq 0 ]] ||
+  fail "host ProcessWitness matrix failed or timed out status=$process_witness_status output=$process_witness_output"
+[[ "$process_witness_output" == 'LOOM_HOST_PROCESS_WITNESS_GATE PASS '* ]] ||
+  fail 'host ProcessWitness receipt prefix diverged'
+for expectation in \
+  'semantic_authority=Sounio' 'controller=OCaml' \
+  'dynamic_user=true' 'principal_distinct_uid=true' \
+  'treatment=closed' 'positive=done' 'causal_bypass=done' \
+  'causal_sabotage=PASS' 'wrong_generation=closed' \
+  'payload_substitution=closed' 'forged_ready=closed' \
+  'wrong_close=Sounio_refusal' 'controller_death=closed' \
+  'broker_death_after_ready=closed' 'replay=closed' \
+  'same_pid=true' 'start_tick=true' 'pidfd_at_ready=live' \
+  'executable_transition=cell-to-Sounio' \
+  'credential_unchanged=true' 'cgroup_unchanged=true' \
+  'namespace_unchanged=true' 'environment_empty=true' \
+  'descendants_empty=true' 'state_extinct=true' \
+  'generation_extinct=true' 'authority_extinct=true' \
+  'pidfd_extinct=true' 'cgroup_unpopulated=true' \
+  'unit_inactive=true' 'extinction_omission=closed' \
+  'complete_effects=false' 'process_witness_core=true' \
+  'material_grant=true' 'material_execution=false' \
+  'launch_open=false' 'recycle_open=false' 'exec_attached=false' \
+  'commit_attached=false' 'ci_attached=false' 'parity_open=false' \
+  'claim_ready=false'; do
+  [[ " $process_witness_output " == *" $expectation "* ]] ||
+    fail "host ProcessWitness receipt omitted $expectation"
+done
+
 read -r _ SYSTEMD_VERSION _ < <(systemctl --version | sed -n '1p')
 [[ "$SYSTEMD_VERSION" =~ ^[0-9]+$ ]] || fail 'systemd version is not canonical'
-printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 material_grant=true material_execution=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n' \
+printf 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio controller_language=OCaml controller_role=EFFECT_PARITY material_language=C++20+Linux+systemd material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s systemd_run_sha256=%s systemctl_sha256=%s release_manifest_sha256=%s broker_output_sha256=%s process_witness_output_sha256=%s dynamic_user=true principal_distinct_uid=true non_bearer_exec_quorum=true descriptor_barrier_causal=true linear_grant_consumption=true positive_open_sentinels=1 sabotage_open_sentinels=1 total_open_sentinels=2 process_witness_core=true same_pid_execveat=true affirmative_extinction=true complete_effects=false material_grant=true material_execution=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n%s\n%s\n' \
   "$(hostname)" "$(uname -r)" "$(uname -m)" "$SYSTEMD_VERSION" \
   "$(sha256_file "$SYSTEMD_RUN")" "$(sha256_file "$SYSTEMCTL")" \
   "$EXPECTED_MANIFEST_SHA256" "$(printf '%s\n' "$host_output" | sha256sum | cut -d ' ' -f 1)" \
-  "$host_output"
+  "$(printf '%s\n' "$process_witness_output" | sha256sum | cut -d ' ' -f 1)" \
+  "$host_output" "$process_witness_output"
