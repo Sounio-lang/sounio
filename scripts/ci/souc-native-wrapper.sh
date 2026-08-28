@@ -84,6 +84,23 @@ if ! RAW_SOUC="$(_resolve_raw_elf)"; then
   exit 127
 fi
 
+# Madaros's own type-checker needs a large stack for some programs (deep
+# recursion during typecheck/lowering); the default 8 MiB shell stack
+# ulimit segfaults partway through "run_check_mode" on real multi-module
+# stdlib programs (reproduced directly: bare `raw_elf src -o out` on
+# tests/run-pass/hash_sha256_vectors.sio crashes rc=139 at exactly this
+# stage under the default ulimit, and succeeds cleanly once the stack
+# limit is raised). bin/madaros already raises this before invoking its
+# own raw ELF (MADAROS_STACK_KB, default 524288 KiB) -- this wrapper must
+# do the same, since CI invokes the raw ELF directly through us, bypassing
+# bin/madaros entirely.
+MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+  ulimit -s unlimited 2>/dev/null || true
+else
+  ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
+fi
+
 _detect_raw_mode() {
   if [[ -n "${SOUNIO_SOUC_RAW_MODE:-}" ]]; then
     echo "$SOUNIO_SOUC_RAW_MODE"
@@ -97,7 +114,7 @@ _detect_raw_mode() {
   fi
   local ident
   ident="$("$RAW_SOUC" /dev/null /dev/null 2>/dev/null | head -n 1 || true)"
-  if grep -q "Madares v" <<<"$ident"; then
+  if grep -q "Madaros v" <<<"$ident"; then
     echo "modular"
     return 0
   fi
