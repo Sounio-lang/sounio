@@ -92,7 +92,8 @@ requires strict request/response sequencing and correlation, and makes timeout,
 unhealthy transport, or poisoned-generation reuse explicit refusals. Its native
 executable, adversarial gate, and content-addressed semantic freeze now exist.
 One derived Sounio runtime now keeps actions `9023` and `9024` resident in a
-single stable process and matches the frozen single-shot outputs byte for byte.
+single stable process, is frozen by content hash, and matches the frozen
+single-shot outputs byte for byte.
 The OCaml resident realization has not yet started and cannot alter the frozen
 decision bundle. The resident runtime uses a bounded `read_byte()` framer because
 the current `lean_single` `read_line()` builtin performs one bulk read rather
