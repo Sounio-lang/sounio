@@ -175,9 +175,10 @@ claim_ready=false
 EOF
 chmod 0444 "$RELEASE_STAGE/release.manifest.v1"
 MANIFEST_SHA256="$(sha256_file "$RELEASE_STAGE/release.manifest.v1")"
-chmod 0555 "$BIN" "$DATA" "$AUTHORITY_ROOT" "$RELEASE_STAGE"
+chmod 0555 "$BIN" "$DATA" "$AUTHORITY_ROOT"
 
 mv "$RELEASE_STAGE" "$CAPSULE/release"
+chmod 0555 "$CAPSULE/release"
 install -m 0555 "$PROMOTER" "$META/promote_loom_host_exec_quorum_capsule.sh"
 install -m 0555 "$HOST_GATE" "$META/sounio_loom_host_exec_quorum_host_gate.sh"
 cat > "$META/capsule.manifest.v1" <<EOF
