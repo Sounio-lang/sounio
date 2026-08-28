@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-08-23-madaros-hash-functions-design
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-08-23-madaros-hash-functions-design
+-->
+
 # Madaros Hash Functions (SHA-1 / SHA-256 / SHA-384 / SHA-512) — Design Spec
 
 ## Context and Motivation

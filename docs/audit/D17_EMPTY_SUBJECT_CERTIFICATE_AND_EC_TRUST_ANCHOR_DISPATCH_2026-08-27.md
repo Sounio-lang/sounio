@@ -4,6 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-27
 validated_by: controller (tls-on-madaros branch, TLS 1.3 handshake sub-project)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.d17-empty-subject-certificate-and-ec-trust-anchor-dispatch-2026-08-27
 -->
 
 # Forensic dispatch — the empty-Subject parsing defect does not exist; the EC trust-anchor bypass found while disproving it does

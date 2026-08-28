@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.superpowers.specs.2026-08-25-madaros-x25519-design
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.superpowers.specs.2026-08-25-madaros-x25519-design
+-->
+
 # Madaros X25519 Key Exchange Design
 
 ## Overview

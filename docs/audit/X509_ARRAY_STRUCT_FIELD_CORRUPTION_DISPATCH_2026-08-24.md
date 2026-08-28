@@ -4,6 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-24
 validated_by: controller (tls-on-madaros branch, X.509 sub-project)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.x509-array-struct-field-corruption-dispatch-2026-08-24
 -->
 
 # Forensic dispatch — array-of-struct field writes silently corrupt sibling `[u8;N]` fields once the struct/array crosses a size threshold, and the known workaround does not fully cure it

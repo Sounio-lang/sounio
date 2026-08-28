@@ -4,6 +4,7 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-27
 validated_by: controller (tls-on-madaros branch, TLS 1.3 handshake sub-project)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.d20-ecdsa-sha384-x509-signature-verification-dispatch-2026-08-27
 -->
 
 # Forensic dispatch — D15's `ecdsa-with-SHA384` fail-closed branch is closed, and D15's own root cause for `1.1.1.1` is corrected

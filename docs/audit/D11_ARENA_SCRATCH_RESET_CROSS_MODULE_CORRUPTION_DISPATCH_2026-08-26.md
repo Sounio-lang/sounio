@@ -1,9 +1,10 @@
 <!-- docs:meta
-topic_id: repo.docs.audit.d11-tuple-destructure-field-name-collision-dispatch-2026-08-26
+topic_id: repo.docs.audit.d11-arena-scratch-reset-cross-module-corruption-dispatch-2026-08-26
 authority: repo_only
 audience: users
 last_validated: 2026-08-26
 validated_by: controller (tls-on-madaros branch, TLS 1.3 handshake sub-project)
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.d11-arena-scratch-reset-cross-module-corruption-dispatch-2026-08-26
 -->
 
 # Forensic dispatch — D11: a tuple-destructured local loses its struct type, so a field read resolves by NAME across every struct in the linked program (filed as "arena/scratch reset cross-module corruption"; the arena is not involved)
