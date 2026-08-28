@@ -10809,13 +10809,14 @@ let subprocess_membrane_probe_command cli =
     Loom_membrane.run_probe ~root ~cwd ~scope ~deadline_ms ~argv
   in
   Printf.printf
-    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s authority=resident-Sounio authority_pid=%d authority_generation_sha256=%s authority_sequence=%d sandbox=bubblewrap sandbox_sha256=%s sandbox_ready=%s rootfs=readonly scope=readwrite tmp=ephemeral network=isolated pidns=isolated landlock_abi=%d inherited_fds=closed attachment=refused\n%!"
+    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s authority=resident-Sounio-v2 authority_pid=%d authority_generation_sha256=%s authority_sequence=%d closure_authority=Sounio closure_code=%d closure_result_sha256=%s closure_material=refused sandbox=bubblewrap sandbox_sha256=%s sandbox_ready=%s rootfs=readonly scope=readwrite tmp=ephemeral network=isolated pidns=isolated landlock_abi=%d inherited_fds=closed attachment=refused\n%!"
     outcome.kind outcome.exit_code outcome.signal outcome.elapsed_us
     outcome.event_count outcome.decision_code
     (if outcome.timed_out then "true" else "false")
     (if outcome.policy_error then "true" else "false")
     outcome.authority_pid outcome.authority_generation_sha256
-    outcome.authority_sequence outcome.sandbox_sha256
+    outcome.authority_sequence outcome.closure_code
+    outcome.closure_result_sha256 outcome.sandbox_sha256
     (if outcome.sandbox_ready then "true" else "false") outcome.landlock_abi;
   Loom_membrane.exit_status outcome
 
@@ -11104,6 +11105,7 @@ let () =
   | Loom_error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_membrane.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_resident.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
+  | Loom_effect_closure.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_epistemic.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1
   | Loom_witness_epoch.Error error -> Printf.eprintf "error: %s\n%!" error; exit 1

@@ -46,6 +46,8 @@ type outcome = {
   authority_generation_sha256 : string;
   authority_pid : int;
   authority_sequence : int;
+  closure_code : int;
+  closure_result_sha256 : string;
 }
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
@@ -540,8 +542,18 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   in
   let deadline_hash = sha256 ("deadline_us=" ^ Int64.to_string deadline_us ^ "\n") in
   let surface = surface_for_argv argv in
-  Loom_resident.with_generation ~root ~environment:authority_environment
+  Loom_resident.with_generation_v2 ~root ~environment:authority_environment
     ~deadline_ms:(remaining_deadline_ms ()) (fun resident ->
+  let decide_closure () =
+    let frame = Loom_effect_closure.current_material_frame root in
+    let decision =
+      Loom_resident.decide_closure resident
+        ~deadline_ms:(remaining_deadline_ms ()) frame
+    in
+    if decision.code = 0 then
+      failf "effect-closure-current-material-admitted";
+    (decision.code, sha256 decision.output)
+  in
   let decide effect_kind target active_count outcome_hash outcome_complete
       termination_complete =
     try
@@ -583,6 +595,7 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
          with _ -> ());
         403
   in
+  let closure_code, closure_result_sha256 = decide_closure () in
   let root_code = decide 1 executable 1 (sha256 "root-pending") 0 0 in
   if root_code <> 0 then
     { kind = 5; exit_code = 0; signal = 0; elapsed_us = 0L;
@@ -591,7 +604,8 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
       sandbox_ready = false;
       authority_generation_sha256 = Loom_resident.generation resident;
       authority_pid = Loom_resident.pid resident;
-      authority_sequence = Loom_resident.sequence resident }
+      authority_sequence = Loom_resident.sequence resident;
+      closure_code; closure_result_sha256 }
   else
     let callback (effect_kind, _pid, _syscall, target, active_count) =
       decide effect_kind target active_count (sha256 "event-pending") 0 0
@@ -649,7 +663,8 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
       landlock_abi; sandbox_sha256; sandbox_ready = sandbox_ready = 1;
       authority_generation_sha256 = Loom_resident.generation resident;
       authority_pid = Loom_resident.pid resident;
-      authority_sequence = Loom_resident.sequence resident })
+      authority_sequence = Loom_resident.sequence resident;
+      closure_code; closure_result_sha256 })
 
 let exit_status outcome =
   match outcome.kind with

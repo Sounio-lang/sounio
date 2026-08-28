@@ -80,13 +80,29 @@ resident_runtime_sum="$(sha256sum "$resident_runtime")"
   fail 'promoted resident runtime hash drifted'
 [[ ! -w "$(realpath "$resident_runtime")" ]] ||
   fail 'content-addressed resident runtime remained writable'
+resident_v2_runtime="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2"
+resident_v2_runtime_sha='da1de5041588f722e5b1904af3d13ac435a29e7bc254ec6b0a5df375116b0b44'
+resident_v2_runtime_target="sha256-$resident_v2_runtime_sha/sounio-loom-resident-membrane-runtime-v2"
+[[ -L "$resident_v2_runtime" && "$(readlink "$resident_v2_runtime")" == "$resident_v2_runtime_target" ]] ||
+  fail 'resident v2 runtime was not promoted through its content-addressed symlink'
+resident_v2_runtime_sum="$(sha256sum "$resident_v2_runtime")"
+[[ "${resident_v2_runtime_sum%% *}" == "$resident_v2_runtime_sha" ]] ||
+  fail 'promoted resident v2 runtime hash drifted'
+[[ ! -w "$(realpath "$resident_v2_runtime")" ]] ||
+  fail 'content-addressed resident v2 runtime remained writable'
 mkdir -p "$SCOPE"
 
 positive="$(expect_probe 0 'kind=1 exit=0' 15000 "$SCOPE" /usr/bin/true)"
 [[ "$positive" == *'decision_code=0'* && "$positive" == *'timed_out=false'* ]] ||
   fail "positive leaf was not admitted cleanly: $positive"
-[[ "$positive" == *'authority=resident-Sounio'* ]] ||
-  fail "positive leaf did not use resident Sounio authority: $positive"
+[[ "$positive" == *'authority=resident-Sounio-v2'* && \
+  "$positive" == *'closure_authority=Sounio'* && \
+  "$positive" == *'closure_code=447'* && \
+  "$positive" == *'closure_material=refused'* ]] ||
+  fail "positive leaf did not materialize resident Sounio closure refusal: $positive"
+closure_result_sha256="$(field "$positive" closure_result_sha256)"
+[[ "$closure_result_sha256" =~ ^[0-9a-f]{64}$ ]] ||
+  fail "closure result digest is malformed: $positive"
 authority_pid="$(field "$positive" authority_pid)"
 authority_generation="$(field "$positive" authority_generation_sha256)"
 authority_sequence="$(field "$positive" authority_sequence)"
@@ -101,7 +117,10 @@ while IFS= read -r receipt; do
     fail "resident identity drifted inside one probe: $receipt"
 done < "$RESIDENT_LOG"
 grep -Fq $'\tevent=START\t' "$RESIDENT_LOG" || fail 'resident START receipt is missing'
+grep -Fq $'\tevent=EFFECT_CLOSURE\t' "$RESIDENT_LOG" || fail 'resident effect-closure receipt is missing'
 grep -Fq $'\tevent=STOP\t' "$RESIDENT_LOG" || fail 'resident STOP receipt is missing'
+grep -Fq $'\tparent_9025_manifest_sha256=c1f0cf93f8427acdf794246a11c3551e265a09be12a3cd000bad25b707e8ca91\t' \
+  "$RESIDENT_LOG" || fail 'resident action 9025 binding is missing'
 [[ "$positive" == *'sandbox=bubblewrap'* && \
    "$positive" == *'sandbox_ready=true'* && \
    "$positive" == *'rootfs=readonly'* && \
@@ -271,7 +290,7 @@ set +e
 resident_runtime_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
   SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
   SOUNIO_LOOM_RESIDENT_RECEIPT_LOG="$RESIDENT_LOG" \
-  SOUNIO_LOOM_RESIDENT_MEMBRANE_RUNTIME=/usr/bin/true \
+  SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_RUNTIME=/usr/bin/true \
   "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
     --scope "$SCOPE" --deadline-ms 2000 -- /bin/sh -c \
     "printf BAD > '$resident_runtime_sentinel'" 2>&1)"
@@ -282,6 +301,44 @@ set -e
   fail "tampered resident runtime did not fail closed: rc=$resident_runtime_rc output=$resident_runtime_output"
 [[ ! -e "$resident_runtime_sentinel" ]] ||
   fail 'tampered resident runtime executed the child'
+
+resident_v2_manifest_sentinel="$TEST_ROOT/resident-v2-manifest-tamper-executed"
+tampered_resident_v2_manifest="$TEST_ROOT/resident-v2.runtime"
+cp "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2" "$tampered_resident_v2_manifest"
+printf '\n' >> "$tampered_resident_v2_manifest"
+set +e
+resident_v2_manifest_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
+  SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_MANIFEST="$tampered_resident_v2_manifest" \
+  "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
+    --scope "$SCOPE" --deadline-ms 2000 -- /bin/sh -c \
+    "printf BAD > '$resident_v2_manifest_sentinel'" 2>&1)"
+resident_v2_manifest_rc=$?
+set -e
+[[ "$resident_v2_manifest_rc" -eq 1 && \
+  "$resident_v2_manifest_output" == *'resident-runtime-v2-manifest-hash-mismatch'* ]] ||
+  fail "tampered resident v2 manifest did not fail closed: rc=$resident_v2_manifest_rc output=$resident_v2_manifest_output"
+[[ ! -e "$resident_v2_manifest_sentinel" ]] ||
+  fail 'tampered resident v2 manifest executed the child'
+
+closure_manifest_sentinel="$TEST_ROOT/closure-manifest-tamper-executed"
+tampered_closure_manifest="$TEST_ROOT/effect-closure.freeze"
+cp "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1" "$tampered_closure_manifest"
+printf '\n' >> "$tampered_closure_manifest"
+set +e
+closure_manifest_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
+  SOUNIO_LOOM_EFFECT_CLOSURE_MANIFEST="$tampered_closure_manifest" \
+  "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
+    --scope "$SCOPE" --deadline-ms 2000 -- /bin/sh -c \
+    "printf BAD > '$closure_manifest_sentinel'" 2>&1)"
+closure_manifest_rc=$?
+set -e
+[[ "$closure_manifest_rc" -eq 1 && \
+  "$closure_manifest_output" == *'effect-closure-manifest-hash-mismatch'* ]] ||
+  fail "tampered effect-closure manifest did not fail closed: rc=$closure_manifest_rc output=$closure_manifest_output"
+[[ ! -e "$closure_manifest_sentinel" ]] ||
+  fail 'tampered effect-closure manifest executed the child'
 
 sandbox_sentinel="$TEST_ROOT/sandbox-tamper-executed"
 set +e
@@ -320,4 +377,4 @@ grep -q $'\tsandbox_sha256=52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d
   "$LOG" || fail 'decision log omitted Bubblewrap mechanism binding'
 
 printf '%s\n' \
-  "sounio-loom-subprocess-membrane-native-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+resident-Sounio+C+Bubblewrap platform=linux-x86_64 runtime_promotion=content-addressed+readonly+atomic-symlink resident_identity=stable resident_sequence=correlated resident_receipts=START+EFFECT+STOP resident_runtime_tamper=refused-before-spawn root_exec=ALLOW hidden_python=DENY410+not-executed direct_python=DENY410+not-executed rust=DENY410+not-executed in_scope_write=ALLOW out_of_scope_write=DENY422+not-written kernel_fs_backstop=observer-sabotaged+not-written inherited_fd=closed+not-written network_namespace=distinct semantic_write=DENY413+not-written path_mutation=DENY422+preserved fd_mutation=DENY415+preserved process_tree_timeout=SIGKILL+no-late-write timeout_wall_ms=$wall_ms missing_policy=refused-before-spawn policy_tamper=refused runtime_tamper=refused sandbox_tamper=refused-before-spawn final_outcome_sabotage=DENY426+child-zero-overridden decision_log=authority+mechanism-hash-bound native_coverage_attested=false exec_attached=false commit_attached=false ci_attached=false"
+  "sounio-loom-subprocess-membrane-native-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+resident-Sounio-v2+C+Bubblewrap platform=linux-x86_64 runtime_promotion=v1+v2-content-addressed+readonly+atomic-symlink resident_identity=stable resident_sequence=correlated resident_receipts=START+EFFECT+EFFECT_CLOSURE+STOP closure_current=DENY447 closure_same_uid=unproven closure_material=refused resident_v2_runtime_tamper=refused-before-spawn resident_v2_manifest_tamper=refused-before-spawn closure_manifest_tamper=refused-before-spawn root_exec=ALLOW hidden_python=DENY410+not-executed direct_python=DENY410+not-executed rust=DENY410+not-executed in_scope_write=ALLOW out_of_scope_write=DENY422+not-written kernel_fs_backstop=observer-sabotaged+not-written inherited_fd=closed+not-written network_namespace=distinct semantic_write=DENY413+not-written path_mutation=DENY422+preserved fd_mutation=DENY415+preserved process_tree_timeout=SIGKILL+no-late-write timeout_wall_ms=$wall_ms missing_policy=refused-before-spawn policy_tamper=refused runtime_tamper=refused sandbox_tamper=refused-before-spawn final_outcome_sabotage=DENY426+child-zero-overridden decision_log=authority+mechanism-hash-bound native_coverage_attested=false exec_attached=false commit_attached=false ci_attached=false"

@@ -5,6 +5,9 @@ exception Error of string
 let pinned_runtime_manifest_sha256 =
   "458f9d0294dc3a5a484b04eb532d412e32d1cf0cebe99292e90bfb49670abcf1"
 
+let pinned_runtime_v2_manifest_sha256 =
+  "b17bc0d8bd3ff118e8d6d72d223d3744349f44fc1cffdd74906e6c7a176bb60d"
+
 let max_file_bytes = 8 * 1024 * 1024
 let max_frame_bytes = 65_535
 
@@ -16,6 +19,8 @@ type policy = {
   runtime_sha256 : string;
   parent_9023_sha256 : string;
   parent_9024_sha256 : string;
+  parent_9025_sha256 : string option;
+  closure_enabled : bool;
 }
 
 type decision = {
@@ -142,14 +147,14 @@ let git_common_dir root =
       Unix.realpath (normalize_absolute git_dir common)
     else git_dir
 
-let runtime_path root manifest =
+let runtime_path ~override ~sibling_name root manifest =
   let sibling =
     Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
-      "sounio-loom-resident-membrane-runtime"
+      sibling_name
   in
   let local = Filename.concat root (required manifest "runtime_path") in
   let selected =
-    match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_RUNTIME" with
+    match test_override override with
     | Some path -> path
     | None when Sys.file_exists sibling -> sibling
     | None -> local
@@ -200,9 +205,69 @@ let load_policy root =
      || sha256_file build_script <> required manifest "build_script_sha256"
      || sha256_file gate_script <> required manifest "gate_script_sha256"
   then failf "resident-runtime-source-hash-mismatch";
-  let runtime, runtime_sha256 = runtime_path root manifest in
+  let runtime, runtime_sha256 =
+    runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_RUNTIME"
+      ~sibling_name:"sounio-loom-resident-membrane-runtime" root manifest
+  in
   { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
-    parent_9024_sha256 }
+    parent_9024_sha256; parent_9025_sha256 = None; closure_enabled = false }
+
+let load_policy_v2 root =
+  let path =
+    match test_override "SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_MANIFEST" with
+    | Some path -> path
+    | None -> Filename.concat root "tools/loom/resident_membrane.runtime.v2"
+  in
+  if not (Sys.file_exists path) then failf "resident-runtime-v2-manifest-missing";
+  let manifest_sha256 = sha256_file path in
+  if manifest_sha256 <> pinned_runtime_v2_manifest_sha256 then
+    failf "resident-runtime-v2-manifest-hash-mismatch";
+  let manifest = parse_manifest path in
+  if required manifest "schema" <> "loom-resident-membrane-runtime-v2"
+     || required manifest "stage" <> "SOUNIO_RESIDENT_REALIZATION"
+     || required manifest "producing_language" <> "Sounio"
+     || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
+     || required manifest "actions" <> "9023,9024,9025"
+     || required manifest "runtime_frozen" <> "true"
+     || required manifest "route_9024" <> "1"
+     || required manifest "route_9023" <> "2"
+     || required manifest "route_9025" <> "3"
+     || required manifest "route_stop" <> "0"
+     || required manifest "max_frame_bytes" <> "65535"
+     || required manifest "framing" <> "sounio-read-byte-newline"
+     || required manifest "ocaml_v2_started" <> "false"
+     || required manifest "material_coverage" <> "false"
+     || required manifest "membrane_v2_integration" <> "false"
+  then failf "resident-runtime-v2-manifest-state-invalid";
+  let parent_9023_sha256 = required manifest "parent_9023_sha256" in
+  let parent_9024_sha256 = required manifest "parent_9024_sha256" in
+  let parent_9025_sha256 = required manifest "parent_9025_sha256" in
+  let parent_resident_v1_sha256 = required manifest "parent_resident_v1_sha256" in
+  let verify path_key expected reason =
+    let target = Filename.concat root (required manifest path_key) in
+    if sha256_file target <> expected then failf "%s" reason
+  in
+  verify "parent_9023_manifest_path" parent_9023_sha256
+    "resident-v2-parent-9023-hash-mismatch";
+  verify "parent_9024_manifest_path" parent_9024_sha256
+    "resident-v2-parent-9024-hash-mismatch";
+  verify "parent_9025_manifest_path" parent_9025_sha256
+    "resident-v2-parent-9025-hash-mismatch";
+  verify "parent_resident_v1_manifest_path" parent_resident_v1_sha256
+    "resident-v2-parent-runtime-v1-hash-mismatch";
+  verify "dispatcher_path" (required manifest "dispatcher_sha256")
+    "resident-v2-dispatcher-hash-mismatch";
+  verify "build_script_path" (required manifest "build_script_sha256")
+    "resident-v2-build-script-hash-mismatch";
+  verify "gate_script_path" (required manifest "gate_script_sha256")
+    "resident-v2-gate-script-hash-mismatch";
+  let runtime, runtime_sha256 =
+    runtime_path ~override:"SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_RUNTIME"
+      ~sibling_name:"sounio-loom-resident-membrane-runtime-v2" root manifest
+  in
+  { manifest_sha256; runtime; runtime_sha256; parent_9023_sha256;
+    parent_9024_sha256; parent_9025_sha256 = Some parent_9025_sha256;
+    closure_enabled = true }
 
 let digest_u32_of_hex digest =
   if String.length digest <> 64 then failf "invalid-resident-sha256:%s" digest;
@@ -363,6 +428,7 @@ let validate_output route output =
   let prefix =
     if route = 1 then "SOUNIO_RESIDENT_AUTHORITY_"
     else if route = 2 then "SOUNIO_SUBPROCESS_MEMBRANE_"
+    else if route = 3 then "SOUNIO_EFFECT_CLOSURE_"
     else failf "resident-route-invalid"
   in
   if not (starts_with output prefix)
@@ -390,19 +456,28 @@ let append_receipt resident ~event ~sequence ~frame ~code ~output ~latency_us =
     (fun () ->
       Unix.lockf descriptor F_LOCK 0;
       let line =
-        String.concat "\t"
-          [ "schema=loom-resident-decision-v1"; "utc=" ^ utc_now ();
+        let base =
+          [ "schema=loom-resident-decision-v2"; "utc=" ^ utc_now ();
             "event=" ^ event; "generation_sha256=" ^ resident.generation_sha256;
             "sequence=" ^ string_of_int sequence;
             "decision=" ^ (if code = 0 then "ALLOW" else "DENY");
             "code=" ^ string_of_int code; "pid=" ^ string_of_int resident.pid;
             "birth_sha256=" ^ sha256 resident.birth_identity;
             "parent_9023_manifest_sha256=" ^ resident.policy.parent_9023_sha256;
-            "parent_9024_manifest_sha256=" ^ resident.policy.parent_9024_sha256;
-            "resident_manifest_sha256=" ^ resident.policy.manifest_sha256;
-            "resident_runtime_sha256=" ^ resident.policy.runtime_sha256;
-            "frame_sha256=" ^ sha256 frame; "result_sha256=" ^ sha256 output;
-            "latency_us=" ^ Int64.to_string latency_us ] ^ "\n"
+            "parent_9024_manifest_sha256=" ^ resident.policy.parent_9024_sha256 ]
+        in
+        let parents =
+          match resident.policy.parent_9025_sha256 with
+          | None -> base
+          | Some digest -> base @ [ "parent_9025_manifest_sha256=" ^ digest ]
+        in
+        String.concat "\t"
+          (parents @
+           [ "resident_manifest_sha256=" ^ resident.policy.manifest_sha256;
+             "resident_runtime_sha256=" ^ resident.policy.runtime_sha256;
+             "frame_sha256=" ^ sha256 frame;
+             "result_sha256=" ^ sha256 output;
+             "latency_us=" ^ Int64.to_string latency_us ]) ^ "\n"
       in
       let rec write offset =
         if offset < String.length line then
@@ -480,9 +555,7 @@ let resident_frame resident ~event_kind ~sequence ~previous_sequence
       (if response_present = 1 then digest_u32_of_hex result_hash else zero_digest);
       digest_u32_of_hex deadline_hash ]
 
-let spawn ~root ~environment ~deadline_ms =
-  let root = Unix.realpath root in
-  let policy = load_policy root in
+let spawn_with_policy ~root ~policy ~environment ~deadline_ms =
   let startup_deadline_us = deadline_after_ms deadline_ms in
   let input_read, input_write = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
@@ -536,7 +609,15 @@ let spawn ~root ~environment ~deadline_ms =
     failf "resident-start-denied:%d" code);
   resident
 
-let decide resident ~deadline_ms frame =
+let spawn ~root ~environment ~deadline_ms =
+  let root = Unix.realpath root in
+  spawn_with_policy ~root ~policy:(load_policy root) ~environment ~deadline_ms
+
+let spawn_v2 ~root ~environment ~deadline_ms =
+  let root = Unix.realpath root in
+  spawn_with_policy ~root ~policy:(load_policy_v2 root) ~environment ~deadline_ms
+
+let decide_with_route resident ~route ~event resident_deadline_ms frame =
   ensure_usable resident;
   if resident.outstanding then (
     poison resident "concurrent-request";
@@ -545,7 +626,7 @@ let decide resident ~deadline_ms frame =
     if ends_with frame "\n" then String.sub frame 0 (String.length frame - 1)
     else frame
   in
-  let deadline_us = deadline_after_ms deadline_ms in
+  let deadline_us = deadline_after_ms resident_deadline_ms in
   let previous_sequence = resident.sequence in
   let sequence = previous_sequence + 1 in
   let request_hash = sha256 frame in
@@ -562,7 +643,7 @@ let decide resident ~deadline_ms frame =
     in
     if request_code <> 0 then failf "resident-request-denied:%d" request_code;
     let effect_code, output, effect_latency =
-      invoke resident ~route:2 ~event:"EFFECT" ~sequence ~deadline_us frame
+      invoke resident ~route ~event ~sequence ~deadline_us frame
     in
     let result_hash = sha256 output in
     let response_frame =
@@ -591,6 +672,14 @@ let decide resident ~deadline_ms frame =
              function_name argument)
     | _ -> poison resident "unexpected-resident-error");
     raise error
+
+let decide resident ~deadline_ms frame =
+  decide_with_route resident ~route:2 ~event:"EFFECT" deadline_ms frame
+
+let decide_closure resident ~deadline_ms frame =
+  if not resident.policy.closure_enabled then
+    failf "resident-effect-closure-route-unavailable";
+  decide_with_route resident ~route:3 ~event:"EFFECT_CLOSURE" deadline_ms frame
 
 let close resident ~deadline_ms =
   if resident.poisoned || resident.closed then ()
@@ -633,6 +722,18 @@ let close resident ~deadline_ms =
 
 let with_generation ~root ~environment ~deadline_ms callback =
   let resident = spawn ~root ~environment ~deadline_ms in
+  match callback resident with
+  | result ->
+      if not resident.closed && not resident.poisoned then
+        close resident ~deadline_ms;
+      result
+  | exception callback_error ->
+      if not resident.closed && not resident.poisoned then
+        (try close resident ~deadline_ms with _ -> ());
+      raise callback_error
+
+let with_generation_v2 ~root ~environment ~deadline_ms callback =
+  let resident = spawn_v2 ~root ~environment ~deadline_ms in
   match callback resident with
   | result ->
       if not resident.closed && not resident.poisoned then

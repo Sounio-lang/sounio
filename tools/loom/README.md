@@ -86,14 +86,18 @@ the proved surface, nonclaims, and kernel attachment path.
 
 ## Resident Sounio Authority
 
-Action `9024` is the Sounio-first transport authority for the planned resident
-decision process. It binds every generation to the frozen `9023` parent,
+Actions `9024` and `9025` are the Sounio-first transport and effect-closure
+authorities for the resident decision process. Action `9024` binds every
+generation to the frozen `9023` parent,
 requires strict request/response sequencing and correlation, and makes timeout,
 unhealthy transport, or poisoned-generation reuse explicit refusals. Its native
 executable, adversarial gate, and content-addressed semantic freeze now exist.
-One derived Sounio runtime now keeps actions `9023` and `9024` resident in a
-single stable process, is frozen by content hash, and matches the frozen
-single-shot outputs byte for byte.
+Action `9025` defines absence as a positive, receipt-bound closure certificate:
+all twelve effect families need an explicit material coverage mode, unknown
+effects must be kernel-denied, and five independent sabotage witnesses must
+remain complete. The frozen v2 runtime keeps actions `9023`, `9024`, and `9025`
+resident in one stable Sounio process and matches their frozen single-shot
+outputs byte for byte. The v1 runtime remains available for compatibility.
 An OCaml supervisor now binds one random generation to the hash-pinned runtime,
 PID and process birth identity; sequences requests, applies monotonic deadlines,
 journals hash-bound receipts, and permanently poisons the generation on replay,
@@ -113,11 +117,15 @@ speedup.
 
 The Linux x86_64 diagnostic subprocess probe now opens one resident generation
 before admitting the root process and keeps that same Sounio PID, generation,
-and monotonic sequence through observed effects and final outcome. Resident
-startup failure, identity drift, timeout, EOF, replay, correlation failure, or
-runtime hash drift fails closed before further child execution. This remains a
-diagnostic membrane: general Exec/Bash, commit, and CI attachment are still
-explicitly false.
+and monotonic sequence through effect-closure validation, observed effects, and
+final outcome. The closure check runs before the diagnostic child and currently
+returns `DENY447` because material effect-family coverage is incomplete; the
+diagnostic effect may still run only to collect evidence while product
+attachment remains refused. Resident startup failure, identity drift, timeout,
+EOF, replay, correlation failure, runtime hash drift, or either frozen-manifest
+drift fails closed before child execution. Hostile same-UID peer isolation also
+remains a hard, explicit blocker. This remains a diagnostic membrane: general
+Exec/Bash, commit, and CI attachment are still explicitly false.
 
 The main Loom build reconstructs the resident runtime with the frozen Sounio
 toolchain, verifies its frozen digest, installs it under a `sha256-<digest>`
