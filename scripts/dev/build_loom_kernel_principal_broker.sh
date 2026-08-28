@@ -8,6 +8,7 @@ ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 CXX="${SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_CXX:-c++}"
 SOURCE="${SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_SOURCE:-$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp}"
 QUORUM_LAB="$ROOT_DIR/tools/loom/src/loom_exec_quorum_lab.inc"
+PROCESS_WITNESS_LAB="$ROOT_DIR/tools/loom/src/loom_process_witness_lab.inc"
 OUTPUT="${SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT:-$ROOT_DIR/tools/loom/_build/default/src/loom-kernel-principal-broker}"
 
 fail() {
@@ -18,6 +19,7 @@ fail() {
 command -v "$CXX" >/dev/null 2>&1 || fail "C++ compiler is missing: $CXX"
 [[ -f "$SOURCE" ]] || fail "kernel-principal broker source is missing: $SOURCE"
 [[ -f "$QUORUM_LAB" && ! -L "$QUORUM_LAB" ]] || fail 'ExecQuorum broker module is absent or linked'
+[[ -f "$PROCESS_WITNESS_LAB" && ! -L "$PROCESS_WITNESS_LAB" ]] || fail 'ProcessWitness broker module is absent or linked'
 mkdir -p "$(dirname "$OUTPUT")"
 
 stage="$(mktemp "${TMPDIR:-/tmp}/loom-kernel-principal-broker.XXXXXX")"

@@ -604,7 +604,7 @@ UniqueFd isolate_payload_descriptor(UniqueFd descriptor) {
 }
 
 [[noreturn]] void host_internal(const std::string& payload_path,
-                                const std::string& manifest_path) {
+                                const std::string& manifest_path, bool bypass) {
   try {
     if (required_environment("SOUNIO_LOOM_PROCESS_WITNESS_INTERNAL") != "1") {
       refuse("internal-marker");
@@ -616,13 +616,19 @@ UniqueFd isolate_payload_descriptor(UniqueFd descriptor) {
     if (!safe_unit_name(unit) || !valid_generation(generation)) {
       refuse("host-identity");
     }
+    if (bypass &&
+        required_environment("SOUNIO_LOOM_PROCESS_WITNESS_SABOTAGE") !=
+            "exact-release-bypass") {
+      refuse("sabotage-marker");
+    }
     require_host_artifact(payload_path, true);
     require_host_artifact(manifest_path, false);
     const Manifest manifest = load_payload_manifest(manifest_path);
     require_host_posture(unit);
     UniqueFd payload =
         open_payload(payload_path, manifest.require("executable_sha256"));
-    if (!read_release_frame(STDIN_FILENO, release_frame(generation))) {
+    if (!bypass &&
+        !read_release_frame(STDIN_FILENO, release_frame(generation))) {
       refuse("release-frame");
     }
     payload = isolate_payload_descriptor(std::move(payload));
@@ -759,6 +765,7 @@ int selftest(const std::string& invoked_path, const std::string& payload_path,
       << " causal_bypass=done causal_sabotage=PASS two_phase=true"
       << " same_descriptor_hash_and_exec=true no_read_ahead=true empty_env=true"
       << " host_internal_mode=bounded dynamic_user_required=true"
+      << " host_bypass_sabotage=bounded"
       << " payload_manifest_sha256=" << manifest.digest
       << " payload_sha256=" << manifest.require("executable_sha256")
       << " principal_distinct_uid=false material_grant=true"
@@ -781,7 +788,14 @@ int main(int argc, char** argv) {
         std::string_view(argv[1]) == "--internal-host-process-witness" &&
         std::string_view(argv[2]) == "--payload" &&
         std::string_view(argv[4]) == "--payload-manifest") {
-      host_internal(argv[3], argv[5]);
+      host_internal(argv[3], argv[5], false);
+    }
+    if (argc == 6 &&
+        std::string_view(argv[1]) ==
+            "--internal-host-process-witness-bypass" &&
+        std::string_view(argv[2]) == "--payload" &&
+        std::string_view(argv[4]) == "--payload-manifest") {
+      host_internal(argv[3], argv[5], true);
     }
     bool run_selftest = false;
     std::string payload;

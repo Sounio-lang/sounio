@@ -1936,6 +1936,7 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
 }
 
 #include "loom_exec_quorum_lab.inc"
+#include "loom_process_witness_lab.inc"
 
 struct Options {
   std::string mode;
@@ -1955,6 +1956,9 @@ struct Options {
   std::string fixture_bundle;
   std::string barrier_runtime;
   std::string host_barrier_runtime;
+  std::string process_witness_runtime;
+  std::string process_witness_payload;
+  std::string process_witness_manifest;
   std::string systemd_run;
   std::string systemctl;
   std::string frame;
@@ -2003,6 +2007,12 @@ Options parse_options(int argc, char** argv) {
       options.barrier_runtime = value;
     } else if (argument == "--host-barrier-runtime") {
       options.host_barrier_runtime = value;
+    } else if (argument == "--process-witness-runtime") {
+      options.process_witness_runtime = value;
+    } else if (argument == "--process-witness-payload") {
+      options.process_witness_payload = value;
+    } else if (argument == "--process-witness-manifest") {
+      options.process_witness_manifest = value;
     } else if (argument == "--systemd-run") {
       options.systemd_run = value;
     } else if (argument == "--systemctl") {
@@ -2075,6 +2085,16 @@ void require_host_exec_quorum_selftest_artifacts(const Options& options) {
   }
 }
 
+void require_host_process_witness_selftest_artifacts(const Options& options) {
+  require_exec_quorum_selftest_artifacts(options);
+  if (options.process_witness_runtime.empty() ||
+      options.process_witness_payload.empty() ||
+      options.process_witness_manifest.empty() || options.systemd_run.empty() ||
+      options.systemctl.empty()) {
+    throw Error("ProcessWitness runtime, payload, manifest, systemd-run, and systemctl are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2122,6 +2142,16 @@ int main(int argc, char** argv) {
           options.fixture_bundle, options.resident_runtime,
           options.barrier_runtime, options.host_barrier_runtime,
           options.systemd_run, options.systemctl);
+    }
+    if (options.mode == "--selftest-host-process-witness") {
+      require_host_process_witness_selftest_artifacts(options);
+      return selftest_host_process_witness(
+          options.controller_root, options.controller_manifest,
+          options.controller_runtime, options.fixture_manifest,
+          options.fixture_bundle, options.resident_runtime,
+          options.process_witness_runtime, options.process_witness_payload,
+          options.process_witness_manifest, options.systemd_run,
+          options.systemctl);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");

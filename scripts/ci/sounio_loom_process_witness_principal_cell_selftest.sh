@@ -64,6 +64,7 @@ for fact in \
   'empty_env=true' \
   'host_internal_mode=bounded' \
   'dynamic_user_required=true' \
+  'host_bypass_sabotage=bounded' \
   'principal_distinct_uid=false' \
   'material_grant=true' \
   'material_execution=false' \
@@ -81,5 +82,5 @@ for executable in "$CELL_ONE" "$PAYLOAD"; do
   fi
 done
 
-printf 'sounio-loom-process-witness-principal-cell-selftest: PASS semantic_authority=Sounio producer=C++20 role=MATERIAL_PARITY transitory=true action=9030 builds=2 deterministic_binary=true source_fresh_sounio_payload=true local_execveat=true same_pid=true start_tick=true pidfd=true pre_exec=cell post_exec=Sounio treatment=closed positive=done wrong_generation=closed extra_release=closed payload_hash_mismatch=closed causal_bypass=done causal_sabotage=PASS two_phase=true same_descriptor_hash_and_exec=true no_read_ahead=true empty_env=true host_internal_mode=bounded dynamic_user_required=true principal_distinct_uid=false material_grant=true material_execution=false host_execveat=false launch_open=false recycle_open=false commit_attached=false ci_attached=false python_executed=false rust_executed=false runtime_dependencies=clean cell_sha256=%s payload_manifest_sha256=%s payload_sha256=%s\n' \
+printf 'sounio-loom-process-witness-principal-cell-selftest: PASS semantic_authority=Sounio producer=C++20 role=MATERIAL_PARITY transitory=true action=9030 builds=2 deterministic_binary=true source_fresh_sounio_payload=true local_execveat=true same_pid=true start_tick=true pidfd=true pre_exec=cell post_exec=Sounio treatment=closed positive=done wrong_generation=closed extra_release=closed payload_hash_mismatch=closed causal_bypass=done causal_sabotage=PASS two_phase=true same_descriptor_hash_and_exec=true no_read_ahead=true empty_env=true host_internal_mode=bounded dynamic_user_required=true host_bypass_sabotage=bounded principal_distinct_uid=false material_grant=true material_execution=false host_execveat=false launch_open=false recycle_open=false commit_attached=false ci_attached=false python_executed=false rust_executed=false runtime_dependencies=clean cell_sha256=%s payload_manifest_sha256=%s payload_sha256=%s\n' \
   "$(file_hash "$CELL_ONE")" "$(file_hash "$MANIFEST")" "$(file_hash "$PAYLOAD")"
