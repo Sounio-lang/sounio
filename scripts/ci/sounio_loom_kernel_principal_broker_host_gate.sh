@@ -64,6 +64,7 @@ root_file_mode() {
 [[ "$(tr -d '\n' < /proc/1/comm 2>/dev/null)" == systemd ]] || unavailable 'PID 1 is not systemd'
 [[ -d /run/systemd/system ]] || unavailable 'systemd runtime directory is absent'
 command -v systemctl >/dev/null 2>&1 || unavailable 'systemctl is absent'
+command -v timeout >/dev/null 2>&1 || unavailable 'timeout is absent'
 
 [[ -L "$BROKER_LINK" ]] || fail 'stable broker path is not a symlink'
 [[ "$(stat -c '%u:%g' "$BROKER_LINK")" == 0:0 ]] || fail 'stable broker symlink is not root-owned'
@@ -157,7 +158,13 @@ systemctl is-active --quiet "$SOCKET_UNIT" || fail 'broker socket is not active'
 [[ -S "$SOCKET_PATH" ]] || fail 'broker socket path is absent'
 [[ "$(stat -c '%u:%g:%a' "$SOCKET_PATH")" == 0:0:600 ]] || fail 'broker socket metadata drifted'
 
-PROBE="$($BROKER_LINK --probe-live --socket-path "$SOCKET_PATH")"
+set +e
+PROBE="$(timeout --signal=TERM --kill-after=2s 15s \
+  "$BROKER_LINK" --probe-live --socket-path "$SOCKET_PATH" 2>&1)"
+PROBE_STATUS=$?
+set -e
+[[ $PROBE_STATUS -eq 0 ]] ||
+  fail "live broker probe failed or timed out status=$PROBE_STATUS output=$PROBE"
 [[ "$PROBE" == 'LOOM_KERNEL_PRINCIPAL_BROKER_STATUS state=READY '* ]] || fail 'live broker did not report READY'
 [[ "$PROBE" == *" lease_manifest_sha256=$MANIFEST_SHA256 "* ]] ||
   fail 'live broker reported a different lease manifest'

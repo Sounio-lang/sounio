@@ -74,7 +74,7 @@ done
 [[ "$NAMESPACE" =~ ^[a-z0-9.-]+$ && "$NODE" =~ ^[A-Za-z0-9._-]+$ ]] || fail 'namespace or node name is unsafe'
 [[ "$SELECTOR" =~ ^[A-Za-z0-9._,/=-]+$ ]] || fail 'pod selector is unsafe'
 [[ -x "$BUILDER" && -x "$PROMOTER" ]] || fail 'capsule builder or promoter is unavailable'
-for tool in kubectl sha256sum mktemp install; do
+for tool in kubectl sha256sum mktemp install timeout; do
   command -v "$tool" >/dev/null 2>&1 || fail "required transport tool is missing: $tool"
 done
 
@@ -137,8 +137,13 @@ mapfile -t remote_hash_lines <<< "$remote_hashes"
 [[ "${remote_hash_lines[0]:-}" == "$EXPECTED_SHA256" ]] || fail 'host transport archive hash drifted before namespace entry'
 [[ "${remote_hash_lines[1]:-}" == "$PROMOTER_SHA256" ]] || fail 'host transport promoter hash drifted before namespace entry'
 
-host_output="$(kubectl -n "$NAMESPACE" exec "$POD" -- nsenter -t 1 -m -u -i -n -p -- \
-  "$REMOTE_PROMOTER" --archive "$REMOTE_ARCHIVE" --expected-sha256 "$EXPECTED_SHA256" --mode "$MODE")"
+set +e
+host_output="$(timeout --signal=TERM --kill-after=5s 120s \
+  kubectl -n "$NAMESPACE" exec "$POD" -- nsenter -t 1 -m -u -i -n -p -- \
+  "$REMOTE_PROMOTER" --archive "$REMOTE_ARCHIVE" --expected-sha256 "$EXPECTED_SHA256" --mode "$MODE" 2>&1)"
+host_status=$?
+set -e
+[[ $host_status -eq 0 ]] || fail "host promoter failed or timed out status=$host_status output=$host_output"
 if [[ "$MODE" == preflight ]]; then
   [[ "$host_output" == 'LOOM_HOST_PROMOTION_PREFLIGHT PASS '* ]] || fail "host preflight did not pass: $host_output"
 else

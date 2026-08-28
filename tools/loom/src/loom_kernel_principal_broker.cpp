@@ -122,6 +122,22 @@ struct ActivationFacts {
   }
 };
 
+std::string activation_fact_vector(const ActivationFacts& facts) {
+  std::ostringstream output;
+  output << "root_identity=" << (facts.root_identity ? 1 : 0)
+         << " pid1_systemd=" << (facts.pid1_systemd ? 1 : 0)
+         << " parent_is_pid1=" << (facts.parent_is_pid1 ? 1 : 0)
+         << " service_cgroup=" << (facts.service_cgroup ? 1 : 0)
+         << " listen_environment=" << (facts.listen_environment ? 1 : 0)
+         << " inherited_root_socket=" << (facts.inherited_root_socket ? 1 : 0)
+         << " privilege_environment_absent="
+         << (facts.privilege_environment_absent ? 1 : 0)
+         << " artifacts_root_owned=" << (facts.artifacts_root_owned ? 1 : 0)
+         << " policy_only=" << (facts.policy_only ? 1 : 0)
+         << " frozen_policy_bound=" << (facts.frozen_policy_bound ? 1 : 0);
+  return output.str();
+}
+
 enum class LeaseState : std::uint64_t {
   Free = 0,
   Reserved = 1,
@@ -1227,7 +1243,8 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
                          capsule_manifest_path, capsule_authority_path,
                          invocation_manifest_path, invocation_authority_path);
   if (!facts.complete()) {
-    throw Error("host service-manager activation boundary incomplete");
+    throw Error("host service-manager activation boundary incomplete " +
+                activation_fact_vector(facts));
   }
   Journal journal(journal_path, true, false, true, true);
   const std::size_t quarantined = journal.quarantine_uncertain();

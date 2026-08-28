@@ -98,6 +98,9 @@ actual exercised boundary.
 If activation or the host gate fails after the transaction begins, the prior
 stable files and broker symlink are restored. A newly copied immutable release
 may remain unreferenced; it grants no authority and is never silently selected.
+The live broker probe, the complete host gate, and the outer Kubernetes exec
+have independent deadlines. A restart loop therefore becomes a bounded refusal
+and rollback rather than a hung promotion.
 
 ## Kubernetes Transport
 

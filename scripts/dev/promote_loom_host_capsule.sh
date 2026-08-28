@@ -231,7 +231,7 @@ if [[ "$MODE" == preflight ]]; then
   exit 0
 fi
 
-for tool in install cp mv rm chown chmod readlink systemctl; do
+for tool in install cp mv rm chown chmod readlink systemctl timeout; do
   command -v "$tool" >/dev/null 2>&1 || fail "required host installation tool is missing: $tool"
 done
 
@@ -417,7 +417,12 @@ atomic_link "$STABLE_BROKER_TARGET" "$BROKER_LINK"
 systemctl daemon-reload
 systemctl enable --now sounio-loom-principal-broker.socket
 
-HOST_GATE_OUTPUT="$($HOST_GATE)"
+set +e
+HOST_GATE_OUTPUT="$(timeout --signal=TERM --kill-after=5s 45s "$HOST_GATE" 2>&1)"
+HOST_GATE_STATUS=$?
+set -e
+[[ $HOST_GATE_STATUS -eq 0 ]] ||
+  fail "host activation gate failed or timed out status=$HOST_GATE_STATUS output=$HOST_GATE_OUTPUT"
 [[ "$HOST_GATE_OUTPUT" == 'sounio-loom-kernel-principal-broker-host-gate: HOST_ACTIVATION_PASS '* ]] ||
   fail "host activation gate did not pass: $HOST_GATE_OUTPUT"
 promotion_committed=1
