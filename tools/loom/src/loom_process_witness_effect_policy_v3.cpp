@@ -43,8 +43,26 @@ namespace {
 #endif
 
 static_assert(LOOM_EFFECT_POLICY_VERSION == 3 ||
-              LOOM_EFFECT_POLICY_VERSION == 4);
-#if LOOM_EFFECT_POLICY_VERSION == 4
+              LOOM_EFFECT_POLICY_VERSION == 4 ||
+              LOOM_EFFECT_POLICY_VERSION == 5);
+#if LOOM_EFFECT_POLICY_VERSION == 5
+constexpr std::string_view kPolicyManifestSha256 =
+    "f17fc7d776db557d2655e00036f4014b4a7a38d8ed16e74786471415c49908f7";
+constexpr std::string_view kPolicySchema =
+    "loom-process-witness-effect-policy-plan-v5-freeze-v1";
+constexpr std::string_view kPolicyBundleSha256 =
+    "f8f7f064cdf4382656f4620052ce7daf5b311fac789cfcde607627e9462f3af3";
+constexpr std::string_view kPolicyRootPath =
+    "/loom/effect-policy-v5.freeze.v1";
+constexpr std::string_view kPolicyFilename = "effect-policy-v5.freeze.v1";
+constexpr std::string_view kSelftestPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V5_SELFTEST PASS";
+constexpr std::string_view kReadyPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V5_ROOT_READY PASS";
+constexpr std::string_view kVersionRootReceipt =
+    " systemd_mount=/run/systemd/incoming systemd_sys_mount=/sys"
+    " systemd_sys_ready_filesystem=sysfs systemd_sys_ready_read_only=true";
+#elif LOOM_EFFECT_POLICY_VERSION == 4
 constexpr std::string_view kPolicyManifestSha256 =
     "60cff91db90e9214e62a6fa5b45521249e31649c63dce297683ca477fcd3d627";
 constexpr std::string_view kPolicySchema =
@@ -58,6 +76,8 @@ constexpr std::string_view kSelftestPrefix =
     "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V4_SELFTEST PASS";
 constexpr std::string_view kReadyPrefix =
     "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V4_ROOT_READY PASS";
+constexpr std::string_view kVersionRootReceipt =
+    " systemd_mount=/run/systemd/incoming";
 #else
 constexpr std::string_view kPolicyManifestSha256 =
     "40407323594e37d44b9002d1cdd390677416048221ace446693919f8415ca480";
@@ -72,6 +92,7 @@ constexpr std::string_view kSelftestPrefix =
     "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_SELFTEST PASS";
 constexpr std::string_view kReadyPrefix =
     "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_ROOT_READY PASS";
+constexpr std::string_view kVersionRootReceipt = "";
 #endif
 constexpr std::string_view kPayloadManifestSha256 =
     "624ccd7297778803eff8d9972a33d5e55fb022f9e7e37f444f0aee13c22fb4da";
@@ -184,7 +205,25 @@ std::string load_policy_manifest(const std::string& path) {
   require_line(contents, "schema=" + std::string(kPolicySchema));
   require_line(contents,
                "bundle_sha256=" + std::string(kPolicyBundleSha256));
-#if LOOM_EFFECT_POLICY_VERSION == 4
+#if LOOM_EFFECT_POLICY_VERSION == 5
+  for (const std::string_view line : {
+           "systemd_mount_path=/run/systemd/incoming",
+           "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
+           "systemd_mount_principal_writable=false",
+           "systemd_mount_ready_contents=empty",
+           "systemd_sys_mount_path=/sys",
+           "systemd_sys_ready_filesystem=sysfs",
+           "systemd_sys_ready_source=sysfs",
+           "systemd_sys_ready_read_only=true",
+           "bootstrap_treatment_code=0",
+           "bootstrap_missing_incoming_code=226",
+           "bootstrap_missing_sys_code=226",
+           "v4_materializable=false",
+           "v5_required_for_native=true",
+       }) {
+    require_line(contents, line);
+  }
+#elif LOOM_EFFECT_POLICY_VERSION == 4
   for (const std::string_view line : {
            "systemd_mount_path=/run/systemd/incoming",
            "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
@@ -291,11 +330,16 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
   require_directory("/dev", false);
   require_directory("/proc", true);
   require_directory("/tmp", true);
-#if LOOM_EFFECT_POLICY_VERSION == 4
+#if LOOM_EFFECT_POLICY_VERSION >= 4
   require_directory("/run", false);
   require_directory("/run/systemd", false);
   require_directory("/run/systemd/incoming", true);
+#if LOOM_EFFECT_POLICY_VERSION == 5
+  require_directory("/sys", false);
+  require_exact_entries("/", {"loom", "dev", "proc", "run", "sys", "tmp"});
+#else
   require_exact_entries("/", {"loom", "dev", "proc", "run", "tmp"});
+#endif
   require_exact_entries("/run", {"systemd"});
   require_exact_entries("/run/systemd", {"incoming"});
 #else
@@ -628,7 +672,7 @@ void close_ambient_descriptors() {
       " cell_sha256=" +
       cell_digest + " payload_sha256=" + std::string(kPayloadSha256) +
       " policy_manifest_sha256=" + std::string(kPolicyManifestSha256) +
-      " filter_sha256=" + filter_sha256 +
+      " filter_sha256=" + filter_sha256 + std::string(kVersionRootReceipt) +
       " material_coverage=false complete_effects=false"
       " material_execution=false launch_open=false parity_open=false"
       " claim_ready=false\n";
@@ -743,7 +787,7 @@ int main(int argc, char** argv) {
     }
     std::cerr << "usage: loom-process-witness-effect-policy-v"
               << LOOM_EFFECT_POLICY_VERSION << " --selftest "
-                 "--policy-manifest <frozen-v3-manifest>\n"
+                 "--policy-manifest <frozen-manifest>\n"
                  "       loom-process-witness-effect-policy --root-hold "
                  "--policy-manifest " << kPolicyRootPath << "\n";
     return 64;
