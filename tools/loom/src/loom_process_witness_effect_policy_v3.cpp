@@ -38,8 +38,41 @@
 
 namespace {
 
+#ifndef LOOM_EFFECT_POLICY_VERSION
+#define LOOM_EFFECT_POLICY_VERSION 3
+#endif
+
+static_assert(LOOM_EFFECT_POLICY_VERSION == 3 ||
+              LOOM_EFFECT_POLICY_VERSION == 4);
+#if LOOM_EFFECT_POLICY_VERSION == 4
+constexpr std::string_view kPolicyManifestSha256 =
+    "60cff91db90e9214e62a6fa5b45521249e31649c63dce297683ca477fcd3d627";
+constexpr std::string_view kPolicySchema =
+    "loom-process-witness-effect-policy-plan-v4-freeze-v1";
+constexpr std::string_view kPolicyBundleSha256 =
+    "3bce80f8d74098470566b3ce3c0b872992ac0cf1d42ce9c64df4bc06ae57901f";
+constexpr std::string_view kPolicyRootPath =
+    "/loom/effect-policy-v4.freeze.v1";
+constexpr std::string_view kPolicyFilename = "effect-policy-v4.freeze.v1";
+constexpr std::string_view kSelftestPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V4_SELFTEST PASS";
+constexpr std::string_view kReadyPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V4_ROOT_READY PASS";
+#else
 constexpr std::string_view kPolicyManifestSha256 =
     "40407323594e37d44b9002d1cdd390677416048221ace446693919f8415ca480";
+constexpr std::string_view kPolicySchema =
+    "loom-process-witness-effect-policy-plan-v3-freeze-v1";
+constexpr std::string_view kPolicyBundleSha256 =
+    "e365f0b1e0028bd0cddd129e1110126dd82b0c33ca268d427c39fe870b0efe34";
+constexpr std::string_view kPolicyRootPath =
+    "/loom/effect-policy-v3.freeze.v1";
+constexpr std::string_view kPolicyFilename = "effect-policy-v3.freeze.v1";
+constexpr std::string_view kSelftestPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_SELFTEST PASS";
+constexpr std::string_view kReadyPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_ROOT_READY PASS";
+#endif
 constexpr std::string_view kPayloadManifestSha256 =
     "624ccd7297778803eff8d9972a33d5e55fb022f9e7e37f444f0aee13c22fb4da";
 constexpr std::string_view kPayloadSha256 =
@@ -109,13 +142,11 @@ std::string load_policy_manifest(const std::string& path) {
     throw Error("frozen Sounio V3 policy manifest hash mismatch");
   }
   for (const std::string_view line : {
-           "schema=loom-process-witness-effect-policy-plan-v3-freeze-v1",
            "stage=SEMANTICS_FROZEN",
            "producing_language=Sounio",
            "language_role=SEMANTIC_POLICY_PLAN",
            "semantic_authority=Sounio",
            "action=9025",
-           "bundle_sha256=e365f0b1e0028bd0cddd129e1110126dd82b0c33ca268d427c39fe870b0efe34",
            "allowed_syscall_count=4",
            "allowed_syscalls=0,1,60,322",
            "read_constraint=fd0",
@@ -135,8 +166,6 @@ std::string load_policy_manifest(const std::string& path) {
            "landlock_required=false",
            "landlock_fallback=false",
            "family_10_probe=personality_change",
-           "v2_materializable=false",
-           "v3_required_for_native=true",
            "static_native_required=true",
            "static_sounio_payload_required=true",
            "material_coverage=false",
@@ -152,6 +181,26 @@ std::string load_policy_manifest(const std::string& path) {
        }) {
     require_line(contents, line);
   }
+  require_line(contents, "schema=" + std::string(kPolicySchema));
+  require_line(contents,
+               "bundle_sha256=" + std::string(kPolicyBundleSha256));
+#if LOOM_EFFECT_POLICY_VERSION == 4
+  for (const std::string_view line : {
+           "systemd_mount_path=/run/systemd/incoming",
+           "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
+           "systemd_mount_principal_writable=false",
+           "systemd_mount_ready_contents=empty",
+           "bootstrap_treatment_code=0",
+           "bootstrap_missing_code=226",
+           "v3_materializable=false",
+           "v4_required_for_native=true",
+       }) {
+    require_line(contents, line);
+  }
+#else
+  require_line(contents, "v2_materializable=false");
+  require_line(contents, "v3_required_for_native=true");
+#endif
   return digest;
 }
 
@@ -242,10 +291,19 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
   require_directory("/dev", false);
   require_directory("/proc", true);
   require_directory("/tmp", true);
+#if LOOM_EFFECT_POLICY_VERSION == 4
+  require_directory("/run", false);
+  require_directory("/run/systemd", false);
+  require_directory("/run/systemd/incoming", true);
+  require_exact_entries("/", {"loom", "dev", "proc", "run", "tmp"});
+  require_exact_entries("/run", {"systemd"});
+  require_exact_entries("/run/systemd", {"incoming"});
+#else
   require_exact_entries("/", {"loom", "dev", "proc", "tmp"});
+#endif
   require_exact_entries(
-      "/loom", {"effect-cell", "payload", "payload.freeze.v1",
-                 "effect-policy-v3.freeze.v1"});
+      "/loom",
+      {"effect-cell", "payload", "payload.freeze.v1", kPolicyFilename});
   require_exact_entries("/dev", {"null"});
 
   struct stat null_info {};
@@ -258,9 +316,9 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
   require_root_regular("/loom/payload", true, kPayloadSha256);
   require_root_regular("/loom/payload.freeze.v1", false,
                        kPayloadManifestSha256);
-  require_root_regular("/loom/effect-policy-v3.freeze.v1", false,
+  require_root_regular(std::string(kPolicyRootPath), false,
                        kPolicyManifestSha256);
-  if (policy_manifest_path != "/loom/effect-policy-v3.freeze.v1") {
+  if (policy_manifest_path != kPolicyRootPath) {
     throw Error("root-hold policy path escaped the frozen root schema");
   }
   load_policy_manifest(policy_manifest_path);
@@ -562,8 +620,7 @@ void close_ambient_descriptors() {
       require_immutable_root(policy_manifest_path);
   const std::vector<sock_filter> filter = compile_filter(0);
   const std::string filter_sha256 = filter_digest(filter);
-  const std::string line =
-      "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_ROOT_READY PASS"
+  const std::string line = std::string(kReadyPrefix) +
       " semantic_authority=Sounio action=9025 role=MATERIAL_PARITY"
       " object_boundary=IMMUTABLE_ROOT_MOUNT_NAMESPACE root_read_only=true"
       " root_exact=true dynamic_linker_visible=false host_root_visible=false"
@@ -650,9 +707,10 @@ int selftest(const std::string& policy_manifest_path) {
   }
   const std::string sabotage_set_digest = sha256(sabotage_material);
   std::cout
-      << "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_SELFTEST PASS"
+      << kSelftestPrefix
       << " semantic_authority=Sounio producer=C++20 role=MATERIAL_PARITY"
-      << " transitory=true action=9025 policy_v3_bound=true static=true"
+      << " transitory=true action=9025 policy_v"
+      << LOOM_EFFECT_POLICY_VERSION << "_bound=true static=true"
       << " policy_manifest_sha256=" << manifest_digest
       << " object_boundary=IMMUTABLE_ROOT_MOUNT_NAMESPACE"
       << " landlock_required=false family10=personality_change"
@@ -683,13 +741,15 @@ int main(int argc, char** argv) {
         std::string_view(argv[2]) == "--policy-manifest") {
       root_hold(argv[3]);
     }
-    std::cerr << "usage: loom-process-witness-effect-policy-v3 --selftest "
+    std::cerr << "usage: loom-process-witness-effect-policy-v"
+              << LOOM_EFFECT_POLICY_VERSION << " --selftest "
                  "--policy-manifest <frozen-v3-manifest>\n"
-                 "       loom-process-witness-effect-policy-v3 --root-hold "
-                 "--policy-manifest /loom/effect-policy-v3.freeze.v1\n";
+                 "       loom-process-witness-effect-policy --root-hold "
+                 "--policy-manifest " << kPolicyRootPath << "\n";
     return 64;
   } catch (const std::exception& error) {
-    std::cerr << "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_CLOSED reason="
+    std::cerr << "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V"
+              << LOOM_EFFECT_POLICY_VERSION << "_CLOSED reason="
               << error.what() << '\n';
     return 70;
   }
