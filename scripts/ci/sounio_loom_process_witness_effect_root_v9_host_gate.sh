@@ -304,8 +304,8 @@ sys_mount_ro=false
 var_tmp_mount=false
 var_tmp_mount_root=''
 var_tmp_mount_ro=false
-forbidden_mount=''
-forbidden_mount_line=''
+forbidden_mounts_observed=()
+forbidden_mount_records=()
 while IFS= read -r mount_line; do
   read -r -a fields <<< "$mount_line"
   [[ ${#fields[@]} -ge 6 ]] || fail 'root-hold mountinfo is malformed'
@@ -355,8 +355,8 @@ while IFS= read -r mount_line; do
   fi
   case "$mountpoint" in
     /proc|/home|/root|/run|/var|/etc)
-      forbidden_mount="$mountpoint"
-      forbidden_mount_line="$mount_line"
+      forbidden_mounts_observed+=("$mountpoint")
+      forbidden_mount_records+=("$mount_line")
       ;;
   esac
 done < "/proc/$CELL_PID/mountinfo"
@@ -380,8 +380,11 @@ incoming_target_identity="$(stat -Lc '%d:%i' "/proc/$CELL_PID/root/run/systemd/i
 [[ "$sys_mount_root" == / && "$sys_mount_filesystem" == sysfs &&
    "$sys_mount_source" == sysfs && "$sys_mount_ro" == true ]] ||
   fail "systemd /sys mount drifted: root=$sys_mount_root filesystem=$sys_mount_filesystem source=$sys_mount_source read_only=$sys_mount_ro"
-[[ -z "$forbidden_mount" ]] ||
-  fail "root-hold exposed forbidden mount: path=$forbidden_mount mountinfo=$forbidden_mount_line"
+if [[ ${#forbidden_mounts_observed[@]} -ne 0 ]]; then
+  forbidden_mounts_joined="$(IFS=+; printf '%s' "${forbidden_mounts_observed[*]}")"
+  forbidden_records_joined="$(IFS=' | '; printf '%s' "${forbidden_mount_records[*]}")"
+  fail "root-hold exposed forbidden mounts: paths=$forbidden_mounts_joined mountinfo=$forbidden_records_joined"
+fi
 
 printf 'X' >&9
 exec 9>&-
