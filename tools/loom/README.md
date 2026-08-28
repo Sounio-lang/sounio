@@ -127,6 +127,14 @@ drift fails closed before child execution. Hostile same-UID peer isolation also
 remains a hard, explicit blocker. This remains a diagnostic membrane: general
 Exec/Bash, commit, and CI attachment are still explicitly false.
 
+Action `9026` now freezes the stronger kernel-principal contract behind that
+blocker. Its C++20 material probe distinguishes a configured subordinate-ID
+range, an installed helper, a successful helper exit, and an actually installed
+kernel UID/GID map. On the recorded pod, ordinary user namespaces remain bound
+to outer UID `1000`, the subordinate-map syscall is refused with `EPERM`, and
+the outer account can regain root through passwordless sudo; Sounio therefore
+returns `DENY455`. See [KERNEL_PRINCIPAL_V1.md](KERNEL_PRINCIPAL_V1.md).
+
 The main Loom build reconstructs the resident runtime with the frozen Sounio
 toolchain, verifies its frozen digest, installs it under a `sha256-<digest>`
 directory, and atomically switches the stable runtime symlink under a filesystem
