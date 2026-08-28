@@ -18,6 +18,7 @@
 #include <climits>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
@@ -29,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -157,6 +159,26 @@ std::string read_regular_fd(int descriptor, std::string_view label) {
   }
 }
 
+std::string read_bounded_path(const std::string& path, std::size_t limit) {
+  UniqueFd descriptor(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
+  if (descriptor.get() < 0) throw Error("cannot read process posture");
+  std::string output;
+  std::array<char, 4096> buffer{};
+  for (;;) {
+    const ssize_t count = read(descriptor.get(), buffer.data(), buffer.size());
+    if (count > 0) {
+      if (output.size() + static_cast<std::size_t>(count) > limit) {
+        throw Error("process posture exceeded bound");
+      }
+      output.append(buffer.data(), static_cast<std::size_t>(count));
+    } else if (count == 0) {
+      return output;
+    } else if (errno != EINTR) {
+      throw Error("process posture read failed");
+    }
+  }
+}
+
 UniqueFd open_regular(const std::string& path, std::string_view label) {
   UniqueFd descriptor(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
   if (descriptor.get() < 0) {
@@ -233,6 +255,113 @@ std::string canonical_path(const std::string& path) {
     throw Error("cannot canonicalize path: " + path);
   }
   return buffer.data();
+}
+
+std::string required_environment(const char* name) {
+  const char* value = std::getenv(name);
+  if (value == nullptr || *value == '\0') {
+    throw Error(std::string("missing host environment: ") + name);
+  }
+  return value;
+}
+
+bool safe_unit_name(std::string_view unit) {
+  if (unit.size() < 9 || unit.size() > 160 ||
+      unit.substr(unit.size() - 8) != ".service") {
+    return false;
+  }
+  for (const unsigned char character : unit) {
+    if (!std::isalnum(character) && character != '.' && character != '_' &&
+        character != '-' && character != '@') {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool valid_generation(std::string_view generation) {
+  if (generation.size() != 64) return false;
+  for (const unsigned char character : generation) {
+    if (!std::isdigit(character) && (character < 'a' || character > 'f')) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string status_field(const std::string& status, std::string_view name) {
+  std::istringstream input(status);
+  std::string line;
+  while (std::getline(input, line)) {
+    if (line.rfind(name, 0) == 0) return line.substr(name.size());
+  }
+  throw Error("process posture field is absent");
+}
+
+std::uint64_t parse_hex_u64(std::string_view value) {
+  if (value.empty() || value.size() > 16) throw Error("capability field invalid");
+  std::uint64_t result = 0;
+  for (const unsigned char character : value) {
+    std::uint64_t digit = 0;
+    if (character >= '0' && character <= '9') {
+      digit = character - '0';
+    } else if (character >= 'a' && character <= 'f') {
+      digit = character - 'a' + 10;
+    } else if (character >= 'A' && character <= 'F') {
+      digit = character - 'A' + 10;
+    } else {
+      throw Error("capability field invalid");
+    }
+    result = result * 16 + digit;
+  }
+  return result;
+}
+
+void require_host_artifact(const std::string& path, bool executable) {
+  struct stat info {};
+  if (lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
+      info.st_uid != 0 || info.st_gid != 0 || info.st_nlink != 1 ||
+      (info.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0 ||
+      (executable && (info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)) {
+    throw Error("host artifact metadata is unsafe");
+  }
+}
+
+void require_host_posture(const std::string& unit) {
+  if (getppid() != 1) throw Error("host cell parent is not PID 1");
+  uid_t real_uid = 0;
+  uid_t effective_uid = 0;
+  uid_t saved_uid = 0;
+  gid_t real_gid = 0;
+  gid_t effective_gid = 0;
+  gid_t saved_gid = 0;
+  if (getresuid(&real_uid, &effective_uid, &saved_uid) != 0 ||
+      getresgid(&real_gid, &effective_gid, &saved_gid) != 0 || real_uid == 0 ||
+      real_gid == 0 || real_uid != effective_uid || real_uid != saved_uid ||
+      real_gid != effective_gid || real_gid != saved_gid) {
+    throw Error("host cell requires one non-root credential vector");
+  }
+  if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 ||
+      prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0 ||
+      prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) {
+    throw Error("host cell anti-injection posture is incomplete");
+  }
+  struct stat input {};
+  struct stat output {};
+  if (fstat(STDIN_FILENO, &input) != 0 || fstat(STDOUT_FILENO, &output) != 0 ||
+      !S_ISFIFO(input.st_mode) || !S_ISFIFO(output.st_mode) ||
+      (input.st_dev == output.st_dev && input.st_ino == output.st_ino)) {
+    throw Error("host cell requires two distinct anonymous pipes");
+  }
+  const std::string status = read_bounded_path("/proc/self/status", 256 * 1024);
+  const std::string cgroup = read_bounded_path("/proc/self/cgroup", 256 * 1024);
+  const auto no_new_privileges = parse_u64(status_field(status, "NoNewPrivs:\t"));
+  if (!no_new_privileges || *no_new_privileges != 1 ||
+      parse_hex_u64(status_field(status, "CapEff:\t")) != 0 ||
+      parse_hex_u64(status_field(status, "CapAmb:\t")) != 0 ||
+      cgroup.find(unit) == std::string::npos) {
+    throw Error("host cell kernel posture is incomplete");
+  }
 }
 
 std::string process_executable(pid_t pid) {
@@ -417,6 +546,27 @@ bool read_release_frame(int descriptor, std::string_view expected) {
 #endif
 }
 
+UniqueFd isolate_payload_descriptor(UniqueFd descriptor) {
+  if (descriptor.get() != 3) {
+    if (dup3(descriptor.get(), 3, O_CLOEXEC) < 0) {
+      throw Error("cannot isolate payload descriptor");
+    }
+    descriptor.reset();
+    descriptor = UniqueFd(3);
+  }
+#ifdef SYS_close_range
+  if (syscall(SYS_close_range, 4U, ~0U, 0U) != 0) {
+    if (errno != ENOSYS) throw Error("cannot close ambient descriptors");
+    const long maximum = sysconf(_SC_OPEN_MAX);
+    for (int candidate = 4; candidate < maximum; ++candidate) close(candidate);
+  }
+#else
+  const long maximum = sysconf(_SC_OPEN_MAX);
+  for (int candidate = 4; candidate < maximum; ++candidate) close(candidate);
+#endif
+  return descriptor;
+}
+
 [[noreturn]] void refuse(std::string_view reason) {
   const std::string line = "LOOM_PROCESS_WITNESS_CLOSED reason=" +
                            std::string(reason) + "\n";
@@ -435,6 +585,7 @@ bool read_release_frame(int descriptor, std::string_view expected) {
     if (!read_release_frame(STDIN_FILENO, release_frame(generation))) {
       refuse("release-frame");
     }
+    payload = isolate_payload_descriptor(std::move(payload));
     exec_payload_fd(payload.get());
   } catch (const std::exception&) {
     refuse("payload-binding");
@@ -445,9 +596,39 @@ bool read_release_frame(int descriptor, std::string_view expected) {
                                std::string_view expected_payload_hash) {
   try {
     UniqueFd payload = open_payload(payload_path, expected_payload_hash);
+    payload = isolate_payload_descriptor(std::move(payload));
     exec_payload_fd(payload.get());
   } catch (const std::exception&) {
     _exit(71);
+  }
+}
+
+[[noreturn]] void host_internal(const std::string& payload_path,
+                                const std::string& manifest_path) {
+  try {
+    if (required_environment("SOUNIO_LOOM_PROCESS_WITNESS_INTERNAL") != "1") {
+      refuse("internal-marker");
+    }
+    const std::string unit =
+        required_environment("SOUNIO_LOOM_PROCESS_WITNESS_UNIT");
+    const std::string generation =
+        required_environment("SOUNIO_LOOM_PROCESS_WITNESS_GENERATION");
+    if (!safe_unit_name(unit) || !valid_generation(generation)) {
+      refuse("host-identity");
+    }
+    require_host_artifact(payload_path, true);
+    require_host_artifact(manifest_path, false);
+    const Manifest manifest = load_payload_manifest(manifest_path);
+    require_host_posture(unit);
+    UniqueFd payload =
+        open_payload(payload_path, manifest.require("executable_sha256"));
+    if (!read_release_frame(STDIN_FILENO, release_frame(generation))) {
+      refuse("release-frame");
+    }
+    payload = isolate_payload_descriptor(std::move(payload));
+    exec_payload_fd(payload.get());
+  } catch (const std::exception&) {
+    refuse("host-posture");
   }
 }
 
@@ -577,6 +758,7 @@ int selftest(const std::string& invoked_path, const std::string& payload_path,
       << " extra_release=closed payload_hash_mismatch=closed"
       << " causal_bypass=done causal_sabotage=PASS two_phase=true"
       << " same_descriptor_hash_and_exec=true no_read_ahead=true empty_env=true"
+      << " host_internal_mode=bounded dynamic_user_required=true"
       << " payload_manifest_sha256=" << manifest.digest
       << " payload_sha256=" << manifest.require("executable_sha256")
       << " principal_distinct_uid=false material_grant=true"
@@ -595,6 +777,12 @@ void usage(const char* program) {
 
 int main(int argc, char** argv) {
   try {
+    if (argc == 6 &&
+        std::string_view(argv[1]) == "--internal-host-process-witness" &&
+        std::string_view(argv[2]) == "--payload" &&
+        std::string_view(argv[4]) == "--payload-manifest") {
+      host_internal(argv[3], argv[5]);
+    }
     bool run_selftest = false;
     std::string payload;
     std::string manifest;
