@@ -2337,8 +2337,28 @@ fn ir_module_ensure_builtin_call_targets(module: &! IrModule) with Mut, Div, Pan
         while ii < f.instr_count {
             let op = (IR_A_OP[(ir_region_slot_r(f.region, (ii))) as usize] as IrOpcode)
             if op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
-                let cn = ir_arena_name(ir_region_slot_r(f.region, (ii)))
-                let bid = if cn.len > 0 { native_v2_builtin_id_for_name(cn) } else { 0 }
+                var cn = ir_arena_name(ir_region_slot_r(f.region, (ii)))
+                var bid = if cn.len > 0 { native_v2_builtin_id_for_name(cn) } else { 0 }
+                // #2244: str_slice is arity-polymorphic at the source level --
+                // (s, start) is the suffix pointer, (s, start, end) is a copy of
+                // the half-open range. lean_single dispatches on arity while it
+                // parses; a native builtin is one stub with no view of its call
+                // site, so both spellings lowered to the suffix form and end was
+                // discarded at 102 call sites. Retag the 3-arg sites onto their
+                // own builtin name here, where the arity is still on the
+                // instruction, so each spelling gets its own stub. Making the one
+                // stub 3-arg instead would turn the specified 2-arg form into a
+                // range copy over an uninitialised end -- corruption, not a wrong
+                // string. Idempotent: a retagged call reads back as bid 51.
+                if bid == 8 {
+                    let slice_argc = IR_A_ARG_COUNT[(ir_region_slot_r(f.region, (ii))) as usize]
+                    if slice_argc >= 3 {
+                        cn = make_name("str_slice.3")
+                        ir_arena_put_name(ir_region_slot_w(f.region, (ii)), cn)
+                        bid = native_v2_builtin_id_for_name(cn)
+                        changed = true
+                    }
+                }
                 if cn.len > 0 && bid != 0 {
                     let cur = IR_A_FN_ID[(ir_region_slot_r(f.region, (ii))) as usize]
                     var ok: bool = false
