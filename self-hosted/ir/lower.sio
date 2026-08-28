@@ -2319,6 +2319,17 @@ fn lowerer_mark_error(lo: &! Lowerer) with Mut {
     lower_note_error(1876, (*lo.current_func).name)
 }
 
+fn lowerer_mark_hard_error(lo: &! Lowerer) with Mut {
+    lowerer_mark_error(lo)
+    IR_LOWER_HARD_ERROR = 1
+    if IR_LOWER_HARD_ERROR_REASON == 0 {
+        IR_LOWER_HARD_ERROR_REASON = 1
+        IR_LOWER_HARD_ERROR_LIMIT = 0
+        IR_LOWER_HARD_ERROR_NEEDED = 0
+        ir_copy_name_to_flat(&(*lo.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+    }
+}
+
 fn lowerer_effect_list_has_name_ref(effects: &Option<Box<EffectList>>, target: string) -> bool with Mut, Panic, Div {
     var current = effects
     while true {
@@ -5406,6 +5417,10 @@ fn lower_opt_type_named_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Pani
         }
         None => ir_empty_name(),
     }
+}
+
+fn lower_opt_type_is_seq(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    ir_name_eq(lower_opt_type_named_name(opt), make_name("Seq"))
 }
 
 fn lower_type_expr_array_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
@@ -12549,7 +12564,7 @@ impl Lowerer {
             // Intrinsic `.len()` on arrays/slices/strings → i64. Without this,
             // lowering emits IrArrayLen (no fn symbol), so the mangled-method
             // lookup below misses and kind stays 0 → println's char* printer SEGVs.
-            if ir_name_eq((*e).name, make_name("len")) {
+            if ir_name_eq((*e).name, make_name("len")) || ir_name_eq((*e).name, make_name("count")) {
                 return 1
             }
             let recv_type = self.lower_method_recv_type(&(*e).left)
@@ -14799,6 +14814,9 @@ impl Lowerer {
                 }
             }
             _ => {}
+        }
+        if lower_opt_type_is_seq(&s.ty) {
+            lo = lo.bind_local_struct_type(s.name, make_name("Seq"))
         }
         // An ARRAY local records its ELEMENT type, so `arr[i].field` can be
         // resolved by (layout, field) instead of by scanning every layout for
@@ -17113,6 +17131,25 @@ impl Lowerer {
             let lo_call_sys = lo_dst_sys.emit(ir_call(dst_sys, fn_id_sys, callee_name, args_sys, argc_sys))
             return (lo_call_sys, dst_sys)
         }
+        if name_eq(callee_name, make_name("seq_new")) {
+            match e.args {
+                None => {
+                    let pair_dst_seq = self.fresh_reg()
+                    var lo_seq = pair_dst_seq.0
+                    let dst_seq = pair_dst_seq.1
+                    // Match lean_single's initial capacity of four elements.
+                    // A zero-sized tag is classified as an unboxed small value
+                    // by native-v2, which cannot preserve Seq identity on grow.
+                    lo_seq = lo_seq.emit(ir_alloc_array(dst_seq, lo_seq.aggregate_storage_bytes(4), 0))
+                    return (lo_seq, dst_seq)
+                }
+                Some(_) => {
+                    var lo_bad_seq = self
+                    lowerer_mark_hard_error(&! lo_bad_seq)
+                    return (lo_bad_seq, IR_INVALID_REG)
+                }
+            }
+        }
         if ir_name_is_some(callee_name) {
             return self.lower_expr_args_first(&e.args)
         }
@@ -18238,6 +18275,53 @@ impl Lowerer {
         // A `recv.method()` call must resolve to that SAME mangled name; using the bare
         // method name finds/creates a body-less fn -> codegen crash.
         let recv_type = self.lower_method_recv_type(&e.left)
+        if ir_name_eq(recv_type, make_name("Seq")) {
+            if ir_name_eq(e.name, make_name("count")) || ir_name_eq(e.name, make_name("len")) {
+                match e.args {
+                    None => {
+                        let pair_b_seq = self.lower_opt_expr_ref(&e.left)
+                        var lo_seq = pair_b_seq.0
+                        let base_reg_seq = pair_b_seq.1
+                        let pair_d_seq = lo_seq.fresh_reg()
+                        lo_seq = pair_d_seq.0
+                        let dst_seq = pair_d_seq.1
+                        return (lo_seq.emit(ir_array_len(dst_seq, base_reg_seq)), dst_seq)
+                    }
+                    Some(_) => {
+                        var lo_bad_seq_m = self
+                        lowerer_mark_hard_error(&! lo_bad_seq_m)
+                        return (lo_bad_seq_m, IR_INVALID_REG)
+                    }
+                }
+            }
+            if ir_name_eq(e.name, make_name("push")) {
+                let pair_b_seq_push = self.lower_opt_expr_ref(&e.left)
+                var lo_seq_push = pair_b_seq_push.0
+                let base_reg_seq_push = pair_b_seq_push.1
+                let pair_args_seq_push: LowerExprArgsResult = lo_seq_push.lower_expr_args_raw_ref(&e.args)
+                lo_seq_push = pair_args_seq_push.lowerer
+                if pair_args_seq_push.count != 1 {
+                    lowerer_mark_hard_error(&! lo_seq_push)
+                    return (lo_seq_push, IR_INVALID_REG)
+                }
+                let call_name_seq_push = make_name("__sounio_seq_push")
+                let fn_id_seq_push = lowerer_find_or_add_fn_id_mut(&! lo_seq_push, call_name_seq_push)
+                let call_args_seq_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
+                    base_reg_seq_push,
+                    Some(Box::new(pair_args_seq_push.regs)),
+                )))
+                let pair_d_seq_push = lo_seq_push.fresh_reg()
+                lo_seq_push = pair_d_seq_push.0
+                let dst_seq_push = pair_d_seq_push.1
+                return (lo_seq_push.emit(ir_call(dst_seq_push, fn_id_seq_push, call_name_seq_push, call_args_seq_push, 2)), dst_seq_push)
+            }
+            if ir_name_eq(e.name, make_name("push_uncertain")) || ir_name_eq(e.name, make_name("get")) || ir_name_eq(e.name, make_name("set")) {
+                print("error: native-v2 Seq method lowering is not implemented for this method; refusing generic method call\\n")
+                var lo_bad_seq_method = self
+                lowerer_mark_hard_error(&! lo_bad_seq_method)
+                return (lo_bad_seq_method, IR_INVALID_REG)
+            }
+        }
         let call_name = if recv_type.len > 0 { ir_mangle_method_name(recv_type, e.name) } else { e.name }
         let pair_b = self.lower_opt_expr_ref(&e.left)
         var lo1 = pair_b.0
