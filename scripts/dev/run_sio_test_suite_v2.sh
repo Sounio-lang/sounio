@@ -19,6 +19,18 @@
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
+# Environment:
+#   SOUNIO_TEST_TIMEOUT_DEFAULT — override the default 30s per-test timeout
+#     for every test that doesn't set its own `//@ timeout:`. Intended for
+#     CI jobs that run many hundreds of tests back-to-back on the same
+#     runner (e.g. scripts/ci/madaros_changed_tests_gate.sh on a large
+#     merge): measured on PR #2133 (tls-on-madaros), 33 of 831 tests --
+#     spanning entirely unrelated pre-existing suites, not a specific
+#     feature -- failed with "run timed out after 30s" purely from
+#     resource contention near the end of a long run; the same tests run
+#     in well under a second in isolation. Does not affect individual
+#     test authors using `//@ timeout:` for a genuinely slow test.
+#
 # Usage:
 #   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
 #   bash scripts/run_sio_test_suite_v2.sh --filter-prefix PREFIX [--verbose] [--format junit] [--jobs N]
@@ -245,7 +257,7 @@ run_test() {
     local is_known_failure=false
     local is_flaky=false
     local is_vacuous_baseline=false
-    local timeout_val=30
+    local timeout_val="${SOUNIO_TEST_TIMEOUT_DEFAULT:-30}"
     local skip_if=""
     local requires=""
     local known_reason=""
