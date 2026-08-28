@@ -554,6 +554,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.internal.garden.seeds.2026-08-27-sounio-pdf-text-projection | repo_only | docs/internal/garden/seeds/2026-08-27-sounio-pdf-text-projection.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-sounio-rfc1950-rfc1951-inflater | repo_only | docs/internal/garden/seeds/2026-08-27-sounio-rfc1950-rfc1951-inflater.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-27-xor-convolution-cocycle | repo_only | docs/internal/garden/seeds/2026-08-27-xor-convolution-cocycle.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.internal.garden.seeds.2026-08-28-pireus-apple-cpu-dependency-latency-request | repo_only | docs/internal/garden/seeds/2026-08-28-pireus-apple-cpu-dependency-latency-request.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.seeds.2026-08-28-pireus-material-engine-admission | repo_only | docs/internal/garden/seeds/2026-08-28-pireus-material-engine-admission.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.garden.templates.seed | repo_only | docs/internal/garden/templates/seed.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.internal.implementation.bootstrap-seed-policy | repo_only | docs/internal/implementation/BOOTSTRAP_SEED_POLICY.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
