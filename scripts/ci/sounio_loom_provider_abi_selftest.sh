@@ -12,6 +12,8 @@ SESSION_ID='11111111-1111-4111-8111-111111111111'
 AGENT='provider-abi-test'
 LANE='codex-headless'
 PERSISTENT_LANE='codex-persistent'
+KIMI_LANE='kimi-headless'
+KIMI_PERSISTENT_LANE='kimi-persistent'
 
 fail() {
   printf 'sounio-loom-provider-abi-selftest: FAIL: %s test_root=%s\n' "$*" "$TEST_ROOT" >&2
@@ -23,6 +25,10 @@ cleanup() {
     --agent "$AGENT" --lane "$LANE" >/dev/null 2>&1 || true
   "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
     --agent "$AGENT" --lane "$PERSISTENT_LANE" >/dev/null 2>&1 || true
+  "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+    --agent "$AGENT" --lane "$KIMI_LANE" >/dev/null 2>&1 || true
+  "$LOOM" stop --state-dir "$STATE_DIR" --cwd "$TEST_ROOT" \
+    --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" >/dev/null 2>&1 || true
   if [[ "${SOUNIO_LOOM_KEEP_TEST_ROOT:-0}" != 1 ]]; then
     rm -rf "$TEST_ROOT"
   fi
@@ -84,6 +90,36 @@ case "$name:${1:-}:${2:-}" in
   fake-claude:auth:login)
     printf 'FAKE_LOGIN provider=claude\n'
     ;;
+  fake-kimi:--version:)
+    printf '0.38.0-provider-abi-test\n'
+    ;;
+  fake-kimi:login:)
+    printf 'FAKE_LOGIN provider=kimi\n'
+    ;;
+  fake-kimi:--output-format:stream-json)
+    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${KIMI_SESSION_ID+x}${KIMI_CLI_SESSION_ID+x}${CURSOR_SESSION_ID+x}${CURSOR_AGENT_SESSION_ID+x}${GROK_SESSION_ID+x}${SOUNIO_AGENT_ID+x}${SOUNIO_LANE_ID+x}${SOUNIO_AGENTD_SOCKET+x}${SOUNIO_AGENTD_TOKEN_FILE+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
+      printf 'parent harness identity leaked into Kimi provider process\n' >&2
+      exit 44
+    fi
+    prompt="${!#}"
+    if IFS= read -r -t 0.1 _unexpected; then
+      printf 'Kimi stdin was not closed\n' >&2
+      exit 45
+    fi
+    printf '{"role":"assistant","content":"FAKE_KIMI_OUTPUT:%s"}\n' "$prompt"
+    sleep 1
+    ;;
+  fake-kimi::)
+    if [[ -n "${CODEX_SESSION_ID+x}${CODEX_THREAD_ID+x}${CODEX_CI+x}${CLAUDECODE+x}${CLAUDE_CODE_ENTRYPOINT+x}${CLAUDE_CODE_SESSION_ID+x}${KIMI_SESSION_ID+x}${KIMI_CLI_SESSION_ID+x}${CURSOR_SESSION_ID+x}${CURSOR_AGENT_SESSION_ID+x}${GROK_SESSION_ID+x}${SOUNIO_AGENT_ID+x}${SOUNIO_LANE_ID+x}${SOUNIO_AGENTD_SOCKET+x}${SOUNIO_AGENTD_TOKEN_FILE+x}${TMUX+x}${TMUX_PANE+x}${TMUX_TMPDIR+x}" ]]; then
+      printf 'parent harness identity leaked into persistent Kimi process\n' >&2
+      exit 46
+    fi
+    printf 'FAKE_KIMI_TUI_READY\n'
+    while IFS= read -r wake; do
+      printf 'FAKE_KIMI_TUI_WAKE:%s\n' "$wake"
+      [[ "$wake" == /exit ]] && break
+    done
+    ;;
   fake-grok:--version:)
     printf 'grok provider-abi-test\n'
     ;;
@@ -106,22 +142,23 @@ case "$name:${1:-}:${2:-}" in
 esac
 FAKE
 chmod +x "$TEST_ROOT/fake-provider"
-for provider in codex claude grok opencode; do
+for provider in codex claude kimi grok opencode; do
   cp "$TEST_ROOT/fake-provider" "$TEST_ROOT/fake-$provider"
 done
 
 export SOUNIO_LOOM_PROVIDER_CODEX="$TEST_ROOT/fake-codex"
 export SOUNIO_LOOM_PROVIDER_CLAUDE="$TEST_ROOT/fake-claude"
+export SOUNIO_LOOM_PROVIDER_KIMI="$TEST_ROOT/fake-kimi"
 export SOUNIO_LOOM_PROVIDER_GROK="$TEST_ROOT/fake-grok"
 export SOUNIO_LOOM_PROVIDER_OPENCODE="$TEST_ROOT/fake-opencode"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 version="$($LOOM runtime-version)"
-grep -q '^runtime_version=2026.08.26.26$' <<< "$version" || \
+grep -q '^runtime_version=2026.08.27.28$' <<< "$version" || \
   fail 'public loom launcher selected the wrong runtime'
 
 providers="$($LOOM provider-list --json)"
-jq -e '.schema == "loom-provider-abi-v1" and (.providers | length == 4)' \
+jq -e '.schema == "loom-provider-abi-v1" and (.providers | length == 5)' \
   <<< "$providers" >/dev/null || fail 'provider catalog schema or cardinality changed'
 jq -e '.providers[] | select(.provider == "codex") |
   .installed == true and .auth == "authenticated" and
@@ -131,6 +168,12 @@ jq -e '.providers[] | select(.provider == "claude") |
   .auth == "unauthenticated" and .session_binding == "caller"' \
   <<< "$providers" >/dev/null || \
   fail 'Claude nonzero auth-status JSON was not classified as unauthenticated'
+jq -e '.providers[] | select(.provider == "kimi") |
+  .installed == true and .auth == "unknown" and
+  .auth_reason == "native-cli-has-no-offline-auth-status" and
+  .session_binding == "native-store" and
+  (.capabilities | index("persistent-input") != null)' \
+  <<< "$providers" >/dev/null || fail 'Kimi provider status was not normalized'
 jq -e '.providers[] | select(.provider == "grok") |
   .auth == "unknown" and .auth_reason == "native-cli-has-no-offline-auth-status"' \
   <<< "$providers" >/dev/null || fail 'Grok auth uncertainty was laundered'
@@ -160,9 +203,37 @@ if grep -Fq "$secret" <<< "$persistent_plan"; then
   fail 'persistent provider plan disclosed the raw prompt'
 fi
 jq -e '.lifecycle == "persistent" and .stdin_authority == "loom-lease" and
-  .context_isolation == false and (.argv | index("--no-alt-screen") != null) and
+  .prompt_transport == "argv" and .context_isolation == false and
+  (.argv | index("--no-alt-screen") != null) and
   (.argv | index("exec") == null)' <<< "$persistent_plan" >/dev/null || \
   fail 'persistent Codex plan has the wrong input authority'
+
+kimi_plan="$($LOOM provider-plan --provider kimi --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --model kimi-test --prompt "$secret" --json)"
+if grep -Fq "$secret" <<< "$kimi_plan"; then
+  fail 'headless Kimi plan disclosed the raw prompt'
+fi
+jq -e --arg digest "$secret_sha" '
+  .provider == "kimi" and .lifecycle == "turn" and
+  .stdin_authority == "closed" and .prompt_transport == "argv" and
+  .session_binding == "native-store" and .prompt_sha256 == $digest and
+  (.argv | index("--output-format") != null) and
+  (.argv | index("stream-json") != null) and
+  (.argv | index("--prompt") != null) and
+  (.argv | index("-m") != null) and (.argv | index("kimi-test") != null)' \
+  <<< "$kimi_plan" >/dev/null || fail 'headless Kimi plan has the wrong native argv'
+
+kimi_persistent_plan="$($LOOM provider-plan --provider kimi \
+  --lifecycle persistent --session-id "$SESSION_ID" --cwd "$TEST_ROOT" \
+  --prompt "$secret" --json)"
+if grep -Fq "$secret" <<< "$kimi_persistent_plan"; then
+  fail 'persistent Kimi plan disclosed the lease-delivered prompt'
+fi
+jq -e '.provider == "kimi" and .lifecycle == "persistent" and
+  .stdin_authority == "loom-lease" and .prompt_transport == "loom-wake" and
+  (.argv | length == 1) and (.argv | index("--prompt") == null)' \
+  <<< "$kimi_persistent_plan" >/dev/null || \
+  fail 'persistent Kimi plan did not separate process argv from input custody'
 
 if "$LOOM" provider-plan --provider codex --lifecycle persistent \
   --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt test --isolate-context \
@@ -172,6 +243,15 @@ fi
 grep -q 'persistent-context-isolation-unavailable:codex' \
   "$TEST_ROOT/persistent-isolation.err" || \
   fail 'persistent context isolation was refused by the wrong rule'
+
+if "$LOOM" provider-plan --provider kimi --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt test --isolate-context \
+  > "$TEST_ROOT/kimi-isolation.out" 2> "$TEST_ROOT/kimi-isolation.err"; then
+  fail 'Kimi plan silently claimed unavailable context isolation'
+fi
+grep -q 'provider-context-isolation-unavailable:kimi' \
+  "$TEST_ROOT/kimi-isolation.err" || \
+  fail 'Kimi context isolation was refused by the wrong rule'
 
 if "$LOOM" provider-plan --provider claude --lifecycle persistent \
   --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt test \
@@ -208,6 +288,12 @@ jq -e '.unsafe_auto == true and
 if grep -Fq "$secret" <<< "$unsafe_plan"; then
   fail 'unsafe provider plan disclosed the raw prompt'
 fi
+
+unsafe_kimi_plan="$($LOOM provider-plan --provider kimi --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$secret" --unsafe-auto --json)"
+jq -e '.unsafe_auto == true and (.argv | index("--auto") != null)' \
+  <<< "$unsafe_kimi_plan" >/dev/null || \
+  fail 'Kimi unsafe permission elevation was not explicit'
 
 isolated_codex_plan="$($LOOM provider-plan --provider codex \
   --session-id "$SESSION_ID" --cwd "$TEST_ROOT" --prompt "$secret" \
@@ -250,6 +336,14 @@ jq -e '.mode == "resume" and
   .provider_session == "22222222-2222-4222-8222-222222222222" and
   .session_binding == "caller" and (.argv | index("--resume") != null)' \
   <<< "$resume_plan" >/dev/null || fail 'resume plan lost native provider identity'
+
+kimi_resume_plan="$($LOOM provider-plan --provider kimi --mode resume \
+  --provider-session ses_provider_abi --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$secret" --json)"
+jq -e '.mode == "resume" and .provider_session == "ses_provider_abi" and
+  .session_binding == "native-store" and (.argv | index("--session") != null)' \
+  <<< "$kimi_resume_plan" >/dev/null || \
+  fail 'Kimi resume plan lost its native session identity'
 
 if "$LOOM" provider-plan --provider claude --mode resume \
   --provider-session not-a-uuid --session-id "$SESSION_ID" \
@@ -318,6 +412,30 @@ grep -q "FAKE_CODEX_OUTPUT:$run_prompt" <<< "$replay" || \
   fail 'provider output was not durably replayable'
 grep -q 'source=offline' "$TEST_ROOT/snapshot.meta" || \
   fail 'terminal provider replay did not use verified offline custody'
+
+kimi_run_prompt='KIMI_ABI_RUN_WITNESS'
+CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
+CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=parent CLAUDE_CODE_SESSION_ID=parent-claude \
+TMUX=parent-tmux TMUX_PANE=parent-pane TMUX_TMPDIR=parent-tmp \
+"$LOOM" provider-start --provider kimi --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$KIMI_LANE" --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$kimi_run_prompt" > "$TEST_ROOT/kimi-start.out"
+grep -q 'LOOM_PROVIDER_STARTED schema=loom-provider-abi-v1 provider=kimi' \
+  "$TEST_ROOT/kimi-start.out" || fail 'Kimi provider-start omitted its ABI receipt'
+kimi_descriptor="$STATE_DIR/sessions/$AGENT--$KIMI_LANE/session.state"
+kimi_state=''
+for _ in $(seq 1 100); do
+  kimi_state="$(sed -n 's/^state=//p' "$kimi_descriptor" 2>/dev/null || true)"
+  [[ "$kimi_state" == exited ]] && break
+  sleep 0.05
+done
+[[ "$kimi_state" == exited ]] || fail 'fake Kimi provider did not reach terminal state'
+grep -q '^command=fake-kimi$' "$kimi_descriptor" || \
+  fail 'internal provider executor obscured the native Kimi identity'
+kimi_replay="$($LOOM snapshot --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$KIMI_LANE" --cwd "$TEST_ROOT" --cursor 0)"
+grep -q "FAKE_KIMI_OUTPUT:$kimi_run_prompt" <<< "$kimi_replay" || \
+  fail 'headless Kimi output was not durably replayable'
 
 persistent_prompt='PERSISTENT_INITIAL_WITNESS'
 CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
@@ -411,4 +529,103 @@ guardian_journal="$(sed -n 's/^guardian_journal_file=//p' "$persistent_descripto
   grep -q '^GUARDIAN_JOURNAL_OK ' || \
   fail 'persistent provider Guardian journal did not verify'
 
-printf 'sounio-loom-provider-abi-selftest: PASS providers=4 credentials=native prompt=redacted unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed persistent_stdin=loom-lease kernel_recovery=stable-provider session_binding=typed replay=verified\n'
+kimi_persistent_prompt='KIMI_PERSISTENT_INITIAL_WITNESS'
+CODEX_SESSION_ID=parent-session CODEX_THREAD_ID=parent-thread CODEX_CI=1 \
+CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=parent CLAUDE_CODE_SESSION_ID=parent-claude \
+KIMI_SESSION_ID=parent-kimi KIMI_CLI_SESSION_ID=parent-kimi-cli \
+CURSOR_SESSION_ID=parent-cursor CURSOR_AGENT_SESSION_ID=parent-cursor-agent \
+GROK_SESSION_ID=parent-grok SOUNIO_AGENT_ID=parent-agent \
+SOUNIO_LANE_ID=parent-lane SOUNIO_AGENTD_SOCKET=parent-agentd-socket \
+SOUNIO_AGENTD_TOKEN_FILE=parent-agentd-token \
+TMUX=parent-tmux TMUX_PANE=parent-pane TMUX_TMPDIR=parent-tmp \
+"$LOOM" provider-open --provider kimi --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" --session-id "$SESSION_ID" \
+  --cwd "$TEST_ROOT" --prompt "$kimi_persistent_prompt" \
+  > "$TEST_ROOT/kimi-open.out"
+grep -q 'LOOM_WAKE state=delivered .*message_id=provider-bootstrap-' \
+  "$TEST_ROOT/kimi-open.out" || \
+  fail 'persistent Kimi bootstrap did not traverse the authenticated Loom wake path'
+bootstrap_id="$(sed -n 's/.*message_id=\(provider-bootstrap-[^ ]*\).*/\1/p' \
+  "$TEST_ROOT/kimi-open.out" | head -n 1)"
+bootstrap_digest="$(printf '%s\0%s\0%s' kimi "$SESSION_ID" \
+  "$kimi_persistent_prompt" | sha256sum | cut -d' ' -f1)"
+expected_bootstrap_id="provider-bootstrap-${bootstrap_digest:0:16}"
+[[ "$bootstrap_id" == "$expected_bootstrap_id" ]] || \
+  fail 'persistent bootstrap identity was not bound to provider, session, and prompt'
+grep -q 'LOOM_PROVIDER_OPENED schema=loom-provider-abi-v1 provider=kimi lifecycle=persistent stdin_authority=loom-lease prompt_transport=loom-wake' \
+  "$TEST_ROOT/kimi-open.out" || \
+  fail 'persistent Kimi receipt omitted its prompt transport'
+
+kimi_persistent_status="$($LOOM status --machine --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT")"
+kimi_before_instance="$(sed -n 's/^instance_id=//p' <<< "$kimi_persistent_status")"
+kimi_before_kernel="$(sed -n 's/^daemon_pid=//p' <<< "$kimi_persistent_status")"
+kimi_before_guardian="$(sed -n 's/^guardian_pid=//p' <<< "$kimi_persistent_status")"
+kimi_before_harness="$(sed -n 's/^harness_pid=//p' <<< "$kimi_persistent_status")"
+kimi_persistent_replay=''
+for _ in $(seq 1 100); do
+  kimi_persistent_replay="$($LOOM snapshot --state-dir "$STATE_DIR" \
+    --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" \
+    --cursor 0 2>/dev/null || true)"
+  grep -q "FAKE_KIMI_TUI_WAKE:$kimi_persistent_prompt" \
+    <<< "$kimi_persistent_replay" && break
+  sleep 0.05
+done
+grep -q 'FAKE_KIMI_TUI_READY' <<< "$kimi_persistent_replay" || \
+  fail 'persistent Kimi TUI did not become durably visible'
+grep -q "FAKE_KIMI_TUI_WAKE:$kimi_persistent_prompt" \
+  <<< "$kimi_persistent_replay" || \
+  fail 'persistent Kimi bootstrap prompt was not durably visible'
+
+"$LOOM" crash-kernel --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" --at now >/dev/null
+for _ in $(seq 1 100); do
+  if ! "$LOOM" status --state-dir "$STATE_DIR" --agent "$AGENT" \
+    --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+kimi_guardian_during="$($LOOM guardian-status --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT")"
+grep -q "instance_id=$kimi_before_instance" <<< "$kimi_guardian_during" || \
+  fail 'Guardian lost the Kimi generation after kernel death'
+grep -q "guardian_pid=$kimi_before_guardian" <<< "$kimi_guardian_during" || \
+  fail 'Kimi Guardian PID changed after kernel death'
+grep -q "harness_pid=$kimi_before_harness" <<< "$kimi_guardian_during" || \
+  fail 'Kimi provider PID changed after kernel death'
+
+"$LOOM" recover --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null
+kimi_after_status="$($LOOM status --machine --state-dir "$STATE_DIR" \
+  --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT")"
+[[ "$(sed -n 's/^instance_id=//p' <<< "$kimi_after_status")" == "$kimi_before_instance" ]] || \
+  fail 'Kimi kernel recovery changed the provider generation'
+[[ "$(sed -n 's/^guardian_pid=//p' <<< "$kimi_after_status")" == "$kimi_before_guardian" ]] || \
+  fail 'Kimi kernel recovery replaced the Guardian'
+[[ "$(sed -n 's/^harness_pid=//p' <<< "$kimi_after_status")" == "$kimi_before_harness" ]] || \
+  fail 'Kimi kernel recovery replaced the provider process'
+[[ "$(sed -n 's/^daemon_pid=//p' <<< "$kimi_after_status")" != "$kimi_before_kernel" ]] || \
+  fail 'Kimi kernel sabotage did not replace the kernel'
+
+kimi_post_recovery='KIMI_PERSISTENT_AFTER_RECOVERY_WITNESS'
+"$LOOM" wake --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$KIMI_PERSISTENT_LANE" --session-id "$SESSION_ID" \
+  --message-id kimi-provider-recovery --prompt "$kimi_post_recovery" \
+  --cwd "$TEST_ROOT" >/dev/null
+for _ in $(seq 1 100); do
+  kimi_persistent_replay="$($LOOM snapshot --state-dir "$STATE_DIR" \
+    --agent "$AGENT" --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" \
+    --cursor 0 2>/dev/null || true)"
+  grep -q "FAKE_KIMI_TUI_WAKE:$kimi_post_recovery" \
+    <<< "$kimi_persistent_replay" && break
+  sleep 0.05
+done
+grep -q "FAKE_KIMI_TUI_WAKE:$kimi_post_recovery" \
+  <<< "$kimi_persistent_replay" || \
+  fail 'recovered kernel could not deliver a second Kimi input'
+
+"$LOOM" stop --state-dir "$STATE_DIR" --agent "$AGENT" \
+  --lane "$KIMI_PERSISTENT_LANE" --cwd "$TEST_ROOT" >/dev/null
+
+printf 'sounio-loom-provider-abi-selftest: PASS providers=5 credentials=native prompt=redacted prompt_transport=typed wake_argv=executable-only bootstrap_identity=provider+session+prompt unsafe=explicit context_isolation=normalized harness_identity=clean stdin=closed persistent_stdin=loom-lease kernel_recovery=stable-provider session_binding=typed replay=verified\n'
