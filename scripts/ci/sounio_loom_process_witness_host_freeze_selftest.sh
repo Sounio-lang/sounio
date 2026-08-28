@@ -82,11 +82,17 @@ git -C "$ROOT_DIR" cat-file -e "${FREEZE_COMMIT}^{commit}" || fail 'freeze-gate 
 
 for pair in \
   garden_path:garden_sha256 \
+  semantic_manifest_path:semantic_manifest_sha256 \
+  parent_host_grant_manifest_path:parent_host_grant_manifest_sha256 \
+  controller_manifest_path:controller_manifest_sha256 \
+  fixture_manifest_path:fixture_manifest_sha256 \
+  resident_manifest_path:resident_manifest_sha256 \
   payload_manifest_path:payload_manifest_sha256 \
   cell_source_path:cell_source_sha256 \
   cell_build_script_path:cell_build_script_sha256 \
   cell_selftest_path:cell_selftest_sha256 \
   process_witness_lab_path:process_witness_lab_sha256 \
+  quorum_module_path:quorum_module_sha256 \
   broker_source_path:broker_source_sha256 \
   broker_build_script_path:broker_build_script_sha256 \
   host_gate_path:host_gate_sha256 \
