@@ -187,6 +187,21 @@ and material one-shot custody, hostile same-UID isolation, Exec/Bash, commit,
 and CI attachment remain closed. See
 [GARDEN_KERNEL_INVOCATION_CELL_V1.md](GARDEN_KERNEL_INVOCATION_CELL_V1.md).
 
+Action `9030` freezes the next authority boundary: the `ExecGrantCell` that
+joins action `9029` with pre-execution action `9021` and outcome action `9022`.
+The opaque handle is only a lookup coordinate. Sounio requires kernel-derived
+peer identity, a kernel-distinct principal, exact Guardian ancestry, pre-write
+shape validation, atomic single-use custody, fail-closed crash revocation, and
+the same command and generation vector across issue, consume, close, or revoke.
+Grant extinction is affirmative evidence, not a table miss: one receipt must
+bind observed state absence after a terminal transition, retired generations,
+and revoked barrier/descriptor/grant authority. Eleven causal source sabotages
+make every rule falsifiable; the deliberate Python-oracle path returns
+`DENY499` without reaching its executable sentinel. Current material returns
+`DENY491`, and `material_grant`, hostile same-UID isolation, parity, Exec/Bash,
+commit, and CI attachment all remain false. See
+[GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md](GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md).
+
 The corresponding OCaml operational kernel and its resident Sounio v3 route are
 now frozen in `kernel_invocation_cell.runtime.v1`. The retained adversarial gate
 exercises the full positive lifecycle, typed abort, current-material and
