@@ -84,7 +84,7 @@ install_root_file() {
   local relative="$1" source="$ROOT_DIR/$1" destination="$AUTHORITY_ROOT/$1" mode=0444
   [[ -f "$source" && ! -L "$source" ]] || fail "authority-root input is absent or linked: $relative"
   [[ -x "$source" ]] && mode=0555
-  install -d -m 0555 "$(dirname "$destination")"
+  install -d -m 0755 "$(dirname "$destination")"
   install -m "$mode" "$source" "$destination"
 }
 
@@ -110,6 +110,9 @@ AUTHORITY_FILES=(
 for relative in "${AUTHORITY_FILES[@]}"; do
   install_root_file "$relative"
 done
+while IFS= read -r -d '' directory; do
+  [[ "$directory" == "$AUTHORITY_ROOT/.git" ]] || chmod 0555 "$directory"
+done < <(find "$AUTHORITY_ROOT" -type d -print0)
 
 BROKER_SHA256="$(sha256_file "$BIN/loom-kernel-principal-broker")"
 CONTROLLER_SHA256="$(sha256_file "$BIN/loom-exec-grant-controller")"
