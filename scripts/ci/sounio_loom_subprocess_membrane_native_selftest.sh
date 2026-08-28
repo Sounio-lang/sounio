@@ -10,7 +10,9 @@ TEST_ROOT="$(mktemp -d "$TEST_PARENT/subprocess-membrane-native.XXXXXX")"
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 SCOPE="$TEST_ROOT/scope"
 LOG="$TEST_ROOT/decisions.tsv"
+RESIDENT_LOG="$TEST_ROOT/resident.tsv"
 PYTHON_PATH="$(command -v python3 || true)"
+export SOUNIO_LOOM_RESIDENT_RECEIPT_LOG="$RESIDENT_LOG"
 
 cleanup() {
   if [[ "${SOUNIO_LOOM_KEEP_TEST_ROOT:-0}" != 1 ]]; then
@@ -30,9 +32,21 @@ probe() {
   shift 2
   SOUNIO_LOOM_HOOK_TEST_MODE=1 \
     SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
+    SOUNIO_LOOM_RESIDENT_RECEIPT_LOG="$RESIDENT_LOG" \
     "$LOOM" subprocess-membrane-probe \
       --root "$ROOT_DIR" --cwd "$ROOT_DIR" --scope "$scope" \
       --deadline-ms "$deadline_ms" -- "$@"
+}
+
+field() {
+  local output="$1" key="$2" token
+  for token in $output; do
+    if [[ "$token" == "$key="* ]]; then
+      printf '%s' "${token#*=}"
+      return 0
+    fi
+  done
+  fail "probe field is missing: $key"
 }
 
 expect_probe() {
@@ -56,11 +70,38 @@ expect_probe() {
   fail 'python3 path is required for the deliberate non-execution control'
 
 bash "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+resident_runtime="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime"
+resident_runtime_sha='5c432f4c56fb0be5c157fb12147566a5f74f2cc4cc1e25b46f37050eff1ac12b'
+resident_runtime_target="sha256-$resident_runtime_sha/sounio-loom-resident-membrane-runtime"
+[[ -L "$resident_runtime" && "$(readlink "$resident_runtime")" == "$resident_runtime_target" ]] ||
+  fail 'resident runtime was not promoted through its content-addressed symlink'
+resident_runtime_sum="$(sha256sum "$resident_runtime")"
+[[ "${resident_runtime_sum%% *}" == "$resident_runtime_sha" ]] ||
+  fail 'promoted resident runtime hash drifted'
+[[ ! -w "$(realpath "$resident_runtime")" ]] ||
+  fail 'content-addressed resident runtime remained writable'
 mkdir -p "$SCOPE"
 
 positive="$(expect_probe 0 'kind=1 exit=0' 15000 "$SCOPE" /usr/bin/true)"
 [[ "$positive" == *'decision_code=0'* && "$positive" == *'timed_out=false'* ]] ||
   fail "positive leaf was not admitted cleanly: $positive"
+[[ "$positive" == *'authority=resident-Sounio'* ]] ||
+  fail "positive leaf did not use resident Sounio authority: $positive"
+authority_pid="$(field "$positive" authority_pid)"
+authority_generation="$(field "$positive" authority_generation_sha256)"
+authority_sequence="$(field "$positive" authority_sequence)"
+[[ "$authority_pid" =~ ^[1-9][0-9]*$ && \
+  "$authority_generation" =~ ^[0-9a-f]{64}$ && \
+  "$authority_sequence" =~ ^[1-9][0-9]*$ ]] ||
+  fail "resident identity receipt is malformed: $positive"
+[[ -s "$RESIDENT_LOG" ]] || fail 'resident authority receipt log is empty'
+while IFS= read -r receipt; do
+  [[ "$receipt" == *$'\tgeneration_sha256='"$authority_generation"$'\t'* && \
+    "$receipt" == *$'\tpid='"$authority_pid"$'\t'* ]] ||
+    fail "resident identity drifted inside one probe: $receipt"
+done < "$RESIDENT_LOG"
+grep -Fq $'\tevent=START\t' "$RESIDENT_LOG" || fail 'resident START receipt is missing'
+grep -Fq $'\tevent=STOP\t' "$RESIDENT_LOG" || fail 'resident STOP receipt is missing'
 [[ "$positive" == *'sandbox=bubblewrap'* && \
    "$positive" == *'sandbox_ready=true'* && \
    "$positive" == *'rootfs=readonly'* && \
@@ -225,6 +266,23 @@ set -e
 [[ "$runtime_rc" -eq 1 && "$runtime_output" == *'runtime-hash-mismatch'* ]] ||
   fail "tampered runtime did not fail closed: rc=$runtime_rc output=$runtime_output"
 
+resident_runtime_sentinel="$TEST_ROOT/resident-runtime-tamper-executed"
+set +e
+resident_runtime_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
+  SOUNIO_LOOM_RESIDENT_RECEIPT_LOG="$RESIDENT_LOG" \
+  SOUNIO_LOOM_RESIDENT_MEMBRANE_RUNTIME=/usr/bin/true \
+  "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
+    --scope "$SCOPE" --deadline-ms 2000 -- /bin/sh -c \
+    "printf BAD > '$resident_runtime_sentinel'" 2>&1)"
+resident_runtime_rc=$?
+set -e
+[[ "$resident_runtime_rc" -eq 1 && \
+  "$resident_runtime_output" == *'resident-runtime-hash-mismatch'* ]] ||
+  fail "tampered resident runtime did not fail closed: rc=$resident_runtime_rc output=$resident_runtime_output"
+[[ ! -e "$resident_runtime_sentinel" ]] ||
+  fail 'tampered resident runtime executed the child'
+
 sandbox_sentinel="$TEST_ROOT/sandbox-tamper-executed"
 set +e
 sandbox_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
@@ -262,4 +320,4 @@ grep -q $'\tsandbox_sha256=52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d
   "$LOG" || fail 'decision log omitted Bubblewrap mechanism binding'
 
 printf '%s\n' \
-  "sounio-loom-subprocess-membrane-native-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+C+Bubblewrap platform=linux-x86_64 root_exec=ALLOW hidden_python=DENY410+not-executed direct_python=DENY410+not-executed rust=DENY410+not-executed in_scope_write=ALLOW out_of_scope_write=DENY422+not-written kernel_fs_backstop=observer-sabotaged+not-written inherited_fd=closed+not-written network_namespace=distinct semantic_write=DENY413+not-written path_mutation=DENY422+preserved fd_mutation=DENY415+preserved process_tree_timeout=SIGKILL+no-late-write timeout_wall_ms=$wall_ms missing_policy=refused-before-spawn policy_tamper=refused runtime_tamper=refused sandbox_tamper=refused-before-spawn final_outcome_sabotage=DENY426+child-zero-overridden decision_log=authority+mechanism-hash-bound native_coverage_attested=false exec_attached=false commit_attached=false ci_attached=false"
+  "sounio-loom-subprocess-membrane-native-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+resident-Sounio+C+Bubblewrap platform=linux-x86_64 runtime_promotion=content-addressed+readonly+atomic-symlink resident_identity=stable resident_sequence=correlated resident_receipts=START+EFFECT+STOP resident_runtime_tamper=refused-before-spawn root_exec=ALLOW hidden_python=DENY410+not-executed direct_python=DENY410+not-executed rust=DENY410+not-executed in_scope_write=ALLOW out_of_scope_write=DENY422+not-written kernel_fs_backstop=observer-sabotaged+not-written inherited_fd=closed+not-written network_namespace=distinct semantic_write=DENY413+not-written path_mutation=DENY422+preserved fd_mutation=DENY415+preserved process_tree_timeout=SIGKILL+no-late-write timeout_wall_ms=$wall_ms missing_policy=refused-before-spawn policy_tamper=refused runtime_tamper=refused sandbox_tamper=refused-before-spawn final_outcome_sabotage=DENY426+child-zero-overridden decision_log=authority+mechanism-hash-bound native_coverage_attested=false exec_attached=false commit_attached=false ci_attached=false"

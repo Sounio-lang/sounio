@@ -8,6 +8,7 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-performance.XXXXXX"
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 FRAME="$TEST_ROOT/valid.frame"
 RECEIPTS="$TEST_ROOT/resident.tsv"
+RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime"
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -30,8 +31,13 @@ field() {
   fail "benchmark field is missing: $key"
 }
 
-bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane.sh" >/dev/null
-dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+SOUNIO_LOOM_RESIDENT_MEMBRANE_OUTPUT="$RUNTIME" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane.sh" >/dev/null
+mkdir -p "$ROOT_DIR/tools/loom/_build"
+(
+  flock -x 8
+  dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+) 8>"$ROOT_DIR/tools/loom/_build/.resident-gate-build.lock"
 
 one='1 1 1 1 1 1 1 1'
 zero='0 0 0 0 0 0 0 0'
@@ -41,6 +47,7 @@ printf '%s\n' \
 
 benchmark="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
   SOUNIO_LOOM_RESIDENT_RECEIPT_LOG="$RECEIPTS" \
+  SOUNIO_LOOM_RESIDENT_MEMBRANE_RUNTIME="$RUNTIME" \
   "$LOOM" resident-authority-probe --root "$ROOT_DIR" --mode benchmark \
     --frame "$FRAME" --deadline-ms 5000 --iterations 20)"
 

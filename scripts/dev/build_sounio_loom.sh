@@ -7,17 +7,20 @@ LANGUAGE_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 EXECUTION_AUTHORITY_MANIFEST="$ROOT_DIR/tools/loom/execution_authority.freeze.v2"
 EXECUTION_OUTCOME_MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v1"
 SUBPROCESS_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
+RESIDENT_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v1"
 LANE_HEALTH_MANIFEST="$ROOT_DIR/tools/loom/lane_health.freeze.v1"
 frozen_toolchain_root=''
 execution_outcome_toolchain_root=''
 subprocess_membrane_toolchain_root=''
 lane_health_toolchain_root=''
+resident_membrane_stage_root=''
 
 cleanup() {
   [[ -z "$frozen_toolchain_root" ]] || rm -rf "$frozen_toolchain_root"
   [[ -z "$execution_outcome_toolchain_root" ]] || rm -rf "$execution_outcome_toolchain_root"
   [[ -z "$subprocess_membrane_toolchain_root" ]] || rm -rf "$subprocess_membrane_toolchain_root"
   [[ -z "$lane_health_toolchain_root" ]] || rm -rf "$lane_health_toolchain_root"
+  [[ -z "$resident_membrane_stage_root" ]] || rm -rf "$resident_membrane_stage_root"
 }
 
 prepare_execution_outcome_toolchain() {
@@ -155,7 +158,8 @@ fi
 if [[ -z "${SOUNIO_LOOM_EXECUTION_OUTCOME_PREBUILT:-}" ]]; then
   prepare_execution_outcome_toolchain
 fi
-if [[ -z "${SOUNIO_LOOM_SUBPROCESS_MEMBRANE_PREBUILT:-}" ]]; then
+if [[ -z "${SOUNIO_LOOM_SUBPROCESS_MEMBRANE_PREBUILT:-}" || \
+  -z "${SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT:-}" ]]; then
   prepare_subprocess_membrane_toolchain
 fi
 if [[ -z "${SOUNIO_LOOM_LANE_HEALTH_PREBUILT:-}" || \
@@ -218,6 +222,66 @@ else
     SOUNIO_LOOM_SUBPROCESS_MEMBRANE_OUTPUT="$subprocess_membrane_output" \
     "$SCRIPT_DIR/build_sounio_loom_subprocess_membrane.sh"
 fi
+[[ -f "$RESIDENT_MEMBRANE_MANIFEST" && \
+  "$(manifest_value "$RESIDENT_MEMBRANE_MANIFEST" schema)" == \
+    loom-resident-membrane-runtime-v1 && \
+  "$(manifest_value "$RESIDENT_MEMBRANE_MANIFEST" stage)" == \
+    SOUNIO_RESIDENT_REALIZATION && \
+  "$(manifest_value "$RESIDENT_MEMBRANE_MANIFEST" producing_language)" == Sounio ]] || {
+  echo 'error: frozen Sounio resident-membrane runtime manifest is invalid' >&2
+  exit 1
+}
+resident_membrane_expected_sha="$(manifest_value "$RESIDENT_MEMBRANE_MANIFEST" runtime_sha256)"
+resident_membrane_runtime_dir="$ROOT_DIR/tools/loom/.runtime"
+resident_membrane_content_dir="$resident_membrane_runtime_dir/sha256-$resident_membrane_expected_sha"
+resident_membrane_content_output="$resident_membrane_content_dir/sounio-loom-resident-membrane-runtime"
+resident_membrane_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime"
+resident_membrane_stage_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-install.XXXXXX")"
+resident_membrane_stage="$resident_membrane_stage_root/sounio-loom-resident-membrane-runtime"
+if [[ -n "${SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT is not executable' >&2
+    exit 1
+  }
+  install -m 0755 "$SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT" \
+    "$resident_membrane_stage"
+else
+  SOUNIO_LOOM_RESIDENT_MEMBRANE_SOUC="$subprocess_membrane_toolchain_root/bin/souc" \
+    SOUNIO_LOOM_RESIDENT_MEMBRANE_OUTPUT="$resident_membrane_stage" \
+    "$SCRIPT_DIR/build_sounio_loom_resident_membrane.sh"
+fi
+resident_membrane_actual_sha="$(sha256sum "$resident_membrane_stage" | awk '{print $1}')"
+[[ "$resident_membrane_actual_sha" == "$resident_membrane_expected_sha" ]] || {
+  echo 'error: rebuilt resident-membrane runtime failed frozen hash verification' >&2
+  exit 1
+}
+command -v flock >/dev/null 2>&1 || {
+  echo 'error: flock is required for resident-membrane runtime promotion' >&2
+  exit 1
+}
+mkdir -p "$resident_membrane_runtime_dir"
+(
+  flock -x 8
+  if [[ -e "$resident_membrane_content_output" ]]; then
+    installed_sha="$(sha256sum "$resident_membrane_content_output" | awk '{print $1}')"
+    [[ "$installed_sha" == "$resident_membrane_expected_sha" ]] || {
+      echo 'error: content-addressed resident runtime is corrupt' >&2
+      exit 1
+    }
+  else
+    [[ ! -e "$resident_membrane_content_dir" ]] || {
+      echo 'error: incomplete content-addressed resident runtime directory exists' >&2
+      exit 1
+    }
+    mkdir "$resident_membrane_content_dir"
+    install -m 0555 "$resident_membrane_stage" "$resident_membrane_content_output"
+    chmod 0555 "$resident_membrane_content_dir"
+  fi
+  resident_link_tmp="$resident_membrane_runtime_dir/.resident-membrane-link.$$"
+  ln -s "sha256-$resident_membrane_expected_sha/sounio-loom-resident-membrane-runtime" \
+    "$resident_link_tmp"
+  mv -Tf "$resident_link_tmp" "$resident_membrane_output"
+) 8>"$resident_membrane_runtime_dir/.resident-membrane.lock"
 custody_transfer_output="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-custody-transfer-runtime"
 if [[ -n "${SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT" ]] || {

@@ -43,6 +43,9 @@ type outcome = {
   landlock_abi : int;
   sandbox_sha256 : string;
   sandbox_ready : bool;
+  authority_generation_sha256 : string;
+  authority_pid : int;
+  authority_sequence : int;
 }
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
@@ -508,21 +511,37 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   argv.(0) <- executable;
   let policy = load_policy root in
   let environment = Unix.environment () in
-  let child_environment =
+  let authority_environment =
     let prohibited_prefixes =
       [ "LD_PRELOAD="; "LD_LIBRARY_PATH="; "LD_AUDIT=";
-        "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_"; "SOUNIO_LOOM_HOOK_TEST_MODE=" ]
+        "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_"; "SOUNIO_LOOM_RESIDENT_";
+        "SOUNIO_LOOM_HOOK_TEST_MODE=" ]
     in
     Array.to_list environment
     |> List.filter (fun binding ->
            not (List.exists (starts_with binding) prohibited_prefixes))
     |> Array.of_list
   in
+  let child_environment = authority_environment in
   let command_hash = sha256 (Array.to_list argv |> String.concat "\000") in
   let hardware_hash = sha256 (hardware_record ()) in
   let deadline_us = Int64.mul (Int64.of_int deadline_ms) 1000L in
+  let started_us = Loom_resident.now_us () in
+  if started_us <= 0L then failf "subprocess-membrane-monotonic-clock-failed";
+  let absolute_deadline_us = Int64.add started_us deadline_us in
+  let remaining_deadline_us () =
+    let remaining = Int64.sub absolute_deadline_us (Loom_resident.now_us ()) in
+    if remaining <= 0L then failf "subprocess-membrane-policy-timeout";
+    remaining
+  in
+  let remaining_deadline_ms () =
+    let remaining = remaining_deadline_us () in
+    Int64.div (Int64.add remaining 999L) 1000L |> Int64.to_int
+  in
   let deadline_hash = sha256 ("deadline_us=" ^ Int64.to_string deadline_us ^ "\n") in
   let surface = surface_for_argv argv in
+  Loom_resident.with_generation ~root ~environment:authority_environment
+    ~deadline_ms:(remaining_deadline_ms ()) (fun resident ->
   let decide effect_kind target active_count outcome_hash outcome_complete
       termination_complete =
     try
@@ -535,11 +554,15 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
           ~deadline_hash ~command_hash ~hardware_hash ~active_count ~outcome_hash
           ~outcome_complete ~termination_complete
       in
-      let code, output = invoke_decision ~root ~policy ~environment frame in
+      let resident_decision =
+        Loom_resident.decide resident ~deadline_ms:(remaining_deadline_ms ()) frame
+      in
+      let code, output = resident_decision.code, resident_decision.output in
       append_decision ~root ~policy ~sandbox_sha256 ~effect_kind ~target ~frame
         ~decision:code ~output;
       code
     with
+    | Loom_resident.Error reason
     | Error reason
     | Sys_error reason ->
         let output = "policy-error:" ^ reason in
@@ -565,7 +588,10 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
     { kind = 5; exit_code = 0; signal = 0; elapsed_us = 0L;
       event_count = 1; decision_code = root_code; timed_out = false;
       policy_error = root_code = 403; landlock_abi = 0; sandbox_sha256;
-      sandbox_ready = false }
+      sandbox_ready = false;
+      authority_generation_sha256 = Loom_resident.generation resident;
+      authority_pid = Loom_resident.pid resident;
+      authority_sequence = Loom_resident.sequence resident }
   else
     let callback (effect_kind, _pid, _syscall, target, active_count) =
       decide effect_kind target active_count (sha256 "event-pending") 0 0
@@ -589,8 +615,8 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
              "--cap-drop"; "ALL"; "--" ] @ Array.to_list argv)
       in
       native_supervise
-        (sandbox, sandbox_argv, child_environment, cwd, executable, deadline_us,
-         native_flags)
+        (sandbox, sandbox_argv, child_environment, cwd, executable,
+         remaining_deadline_us (), native_flags)
         callback
     in
     let outcome_hash =
@@ -620,7 +646,10 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
       decision_code = (if final_code <> 0 then final_code else decision_code);
       timed_out = timed_out = 1;
       policy_error = policy_error = 1 || final_code = 403;
-      landlock_abi; sandbox_sha256; sandbox_ready = sandbox_ready = 1 }
+      landlock_abi; sandbox_sha256; sandbox_ready = sandbox_ready = 1;
+      authority_generation_sha256 = Loom_resident.generation resident;
+      authority_pid = Loom_resident.pid resident;
+      authority_sequence = Loom_resident.sequence resident })
 
 let exit_status outcome =
   match outcome.kind with

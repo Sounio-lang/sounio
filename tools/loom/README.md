@@ -104,12 +104,26 @@ than newline framing.
 
 The bounded performance gate measures authority transport separately from
 durable audit persistence. On the recorded x86_64 run, 20 resident decisions
-took 5,829 microseconds of transport versus 13,125 microseconds for 20
-single-shot decisions (2.251x). The same resident run took 1,963,849
+took 5,369 microseconds of transport versus 14,097 microseconds for 20
+single-shot decisions (2.625x). The same resident run took 837,382
 microseconds end to end because its current audit policy performs an `fsync` for
 each REQUEST, EFFECT, and RESPONSE receipt. Both numbers are acceptance
 evidence; the transport result is not presented as an end-to-end durability
 speedup.
+
+The Linux x86_64 diagnostic subprocess probe now opens one resident generation
+before admitting the root process and keeps that same Sounio PID, generation,
+and monotonic sequence through observed effects and final outcome. Resident
+startup failure, identity drift, timeout, EOF, replay, correlation failure, or
+runtime hash drift fails closed before further child execution. This remains a
+diagnostic membrane: general Exec/Bash, commit, and CI attachment are still
+explicitly false.
+
+The main Loom build reconstructs the resident runtime with the frozen Sounio
+toolchain, verifies its frozen digest, installs it under a `sha256-<digest>`
+directory, and atomically switches the stable runtime symlink under a filesystem
+lock. A live generation therefore keeps its original executable inode while a
+concurrent build stages the same content-addressed generation.
 
 The gate includes two single-rule sabotages. Removing only the frozen-parent
 rule admits an unchanged orphan request, and removing only strict progression

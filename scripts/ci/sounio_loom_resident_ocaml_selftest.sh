@@ -7,6 +7,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-ocaml.XXXXXX")"
 LOOM="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
 RECEIPTS="$TEST_ROOT/resident.tsv"
+RUNTIME="$TEST_ROOT/sounio-loom-resident-membrane-runtime"
 VALID_FRAME="$TEST_ROOT/valid.frame"
 PYTHON_FRAME="$TEST_ROOT/python.frame"
 
@@ -20,8 +21,13 @@ fail() {
   exit 1
 }
 
-bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane.sh" >/dev/null
-dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+SOUNIO_LOOM_RESIDENT_MEMBRANE_OUTPUT="$RUNTIME" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane.sh" >/dev/null
+mkdir -p "$ROOT_DIR/tools/loom/_build"
+(
+  flock -x 8
+  dune build --root "$ROOT_DIR/tools/loom" src/loom.exe >/dev/null
+) 8>"$ROOT_DIR/tools/loom/_build/.resident-gate-build.lock"
 
 one='1 1 1 1 1 1 1 1'
 zero='0 0 0 0 0 0 0 0'
@@ -35,6 +41,7 @@ printf '%s\n' \
 probe() {
   SOUNIO_LOOM_HOOK_TEST_MODE=1 \
     SOUNIO_LOOM_RESIDENT_RECEIPT_LOG="$RECEIPTS" \
+    SOUNIO_LOOM_RESIDENT_MEMBRANE_RUNTIME="$RUNTIME" \
     "$LOOM" resident-authority-probe --root "$ROOT_DIR" --mode "$1" \
       --frame "$2" --deadline-ms 5000
 }
@@ -65,6 +72,15 @@ eof="$(probe eof "$VALID_FRAME")"
 [[ "$eof" == 'LOOM_RESIDENT_OCAML_PROBE mode=eof semantic_authority=Sounio refused=true poisoned=true reuse_refused=true' ]] ||
   fail "EOF did not poison: $eof"
 
+set +e
+finalize_eof="$(probe finalize-eof "$VALID_FRAME" 2>&1)"
+finalize_eof_rc=$?
+set -e
+[[ "$finalize_eof_rc" -eq 1 && \
+  "$finalize_eof" == *'mode=finalize-eof'* && \
+  "$finalize_eof" == *'error: resident-'* ]] ||
+  fail "finalize EOF did not fail the completed callback: rc=$finalize_eof_rc output=$finalize_eof"
+
 [[ -s "$RECEIPTS" ]] || fail 'resident receipt log is empty'
 grep -Fq $'event=EFFECT\t' "$RECEIPTS" || fail 'effect receipt is missing'
 grep -Fq $'event=POISON\t' "$RECEIPTS" || fail 'poison receipt is missing'
@@ -89,9 +105,9 @@ set -e
   fail "tampered manifest was not refused: $manifest_output"
 
 tampered_runtime="$TEST_ROOT/tampered-runtime"
-cp "$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime" "$tampered_runtime"
-printf 'x' >> "$tampered_runtime"
+cp "$RUNTIME" "$tampered_runtime"
 chmod 0755 "$tampered_runtime"
+printf 'x' >> "$tampered_runtime"
 set +e
 runtime_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
   SOUNIO_LOOM_RESIDENT_MEMBRANE_RUNTIME="$tampered_runtime" \
@@ -103,4 +119,4 @@ set -e
   fail "tampered runtime was not refused: $runtime_output"
 
 printf '%s\n' \
-  'sounio-loom-resident-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+resident-Sounio happy=ALLOW python=DENY410 process_identity=stable sequence=correlated replay=DENY442+poison mismatch=DENY443+poison timeout=refused+poison eof=refused+poison reuse=refused receipts=hash-bound manifest_tamper=refused runtime_tamper=refused performance_gate=false membrane_integration=false'
+  'sounio-loom-resident-ocaml-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+resident-Sounio happy=ALLOW python=DENY410 process_identity=stable sequence=correlated replay=DENY442+poison mismatch=DENY443+poison timeout=refused+poison eof=refused+poison finalize_eof=refused reuse=refused receipts=hash-bound manifest_tamper=refused runtime_tamper=refused performance_gate=false membrane_integration=false'

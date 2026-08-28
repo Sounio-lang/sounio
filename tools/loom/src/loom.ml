@@ -10809,13 +10809,14 @@ let subprocess_membrane_probe_command cli =
     Loom_membrane.run_probe ~root ~cwd ~scope ~deadline_ms ~argv
   in
   Printf.printf
-    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s sandbox=bubblewrap sandbox_sha256=%s sandbox_ready=%s rootfs=readonly scope=readwrite tmp=ephemeral network=isolated pidns=isolated landlock_abi=%d inherited_fds=closed attachment=refused\n%!"
+    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s authority=resident-Sounio authority_pid=%d authority_generation_sha256=%s authority_sequence=%d sandbox=bubblewrap sandbox_sha256=%s sandbox_ready=%s rootfs=readonly scope=readwrite tmp=ephemeral network=isolated pidns=isolated landlock_abi=%d inherited_fds=closed attachment=refused\n%!"
     outcome.kind outcome.exit_code outcome.signal outcome.elapsed_us
     outcome.event_count outcome.decision_code
     (if outcome.timed_out then "true" else "false")
     (if outcome.policy_error then "true" else "false")
-    outcome.sandbox_sha256 (if outcome.sandbox_ready then "true" else "false")
-    outcome.landlock_abi;
+    outcome.authority_pid outcome.authority_generation_sha256
+    outcome.authority_sequence outcome.sandbox_sha256
+    (if outcome.sandbox_ready then "true" else "false") outcome.landlock_abi;
   Loom_membrane.exit_status outcome
 
 let resident_authority_probe_command cli =
@@ -10839,18 +10840,13 @@ let resident_authority_probe_command cli =
                   prohibited_prefixes))
     |> Array.of_list
   in
-  let resident = Loom_resident.spawn ~root ~environment ~deadline_ms in
-  let reuse_refused () =
-    try
-      ignore (Loom_resident.decide resident ~deadline_ms frame);
-      false
-    with Loom_resident.Error "resident-generation-poisoned" -> true
-  in
-  Fun.protect
-    ~finally:(fun () ->
-      if not (Loom_resident.is_poisoned resident) then
-        (try Loom_resident.close resident ~deadline_ms with _ -> ()))
-    (fun () ->
+  Loom_resident.with_generation ~root ~environment ~deadline_ms (fun resident ->
+      let reuse_refused () =
+        try
+          ignore (Loom_resident.decide resident ~deadline_ms frame);
+          false
+        with Loom_resident.Error "resident-generation-poisoned" -> true
+      in
       if mode = "happy" then (
         let decision = Loom_resident.decide resident ~deadline_ms frame in
         Printf.printf
@@ -10884,6 +10880,11 @@ let resident_authority_probe_command cli =
           (if refused then "true" else "false")
           (if Loom_resident.is_poisoned resident then "true" else "false")
           (if reuse_refused () then "true" else "false"))
+      else if mode = "finalize-eof" then (
+        Unix.kill (Loom_resident.pid resident) Sys.sigkill;
+        ignore (Unix.select [] [] [] 0.01);
+        Printf.printf
+          "LOOM_RESIDENT_OCAML_PROBE mode=finalize-eof semantic_authority=Sounio callback=returned\n%!")
       else if mode = "benchmark" then (
         let iterations =
           try
@@ -10957,7 +10958,7 @@ let resident_authority_probe_command cli =
 
 let usage () =
   Printf.eprintf
-    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof --frame FILE --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
+    "Sounio Loom %s\n\nCommands:\n  agent-hook --agent codex|claude\n  exec-capability --instance I --generation G --handle H\n  subprocess-membrane-probe --root DIR --cwd DIR --scope DIR --deadline-ms N -- COMMAND... (test mode only)\n  resident-authority-probe --root DIR --mode happy|replay|mismatch|timeout|eof|finalize-eof|benchmark --frame FILE --deadline-ms N (test mode only)\n  lane-health-parity\n  start --agent A --lane L --session-id S --cwd DIR -- COMMAND...\n  recover --agent A --lane L --cwd DIR\n  status|guardian-status|stop|attach|observe|snapshot --agent A --lane L [options]\n  crash-kernel --agent A --lane L --at POINT\n  provider-list [--json]\n  provider-status --provider P [--json]\n  provider-plan --provider P --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--lifecycle turn|persistent] [--mode new|resume] [--provider-session S] [--model M] [--isolate-context] [--unsafe-auto] [--json]\n  provider-start --provider P --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [provider-plan options]\n  provider-open --provider claude|codex|kimi --agent A --lane L --session-id S --cwd DIR (--prompt TEXT|--prompt-file PATH) [--mode new|resume] [--provider-session S] [--model M] [--unsafe-auto]\n  provider-auth-login --provider P\n  obligation-open --message ID --message-digest SHA --from-agent A --from-lane L --to-agent A --to-lane L\n  obligation-consume --message ID --actor A --lane L --generation G [--ttl-seconds N]\n  obligation-claim|obligation-renew --message ID --actor A --lane L --generation G [--claim ID] [--ttl-seconds N]\n  obligation-interrupt --message ID --actor A --lane L --generation G [--claim ID] [--reason TEXT]\n  obligation-recover --message ID --actor A --lane L --generation G\n  obligation-complete --message ID --actor A --lane L --generation G --claim ID --outcome PATH --evidence PATH\n  obligation-status --message ID [--json]\n  obligation-list|obligation-tui [--json] [--state-dir DIR]\n  obligation-serve [--bind 127.0.0.1] [--port 8788] [--state-dir DIR]\n  obligation-verify --message ID\n  obligation-supervise [--once] [--interval-seconds N] [--state-dir DIR]\n  obligation-supervisor-status [--state-dir DIR]\n  journal-authority-serve --socket PATH --state-dir PATH --private-key PATH --public-key PATH --epoch N\n  journal-authority-status --socket PATH\n  fleet-enroll --slot S --kind K --home DIR --cwd DIR\n  fleet-disable --slot S --cwd DIR\n  fleet-reconcile [--apply] [--state-dir DIR]\n  list|tui|serve [--state-dir DIR]\n  beagle-serve [--bind 127.0.0.1] [--port 4372] [--state-dir DIR]\n  verify-journal|verify-guardian-journal --journal PATH\n  verify-continuity-receipt --receipt PATH --public-key PATH [--adapter PATH]\n  attest-continuity-receipt --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n  measure-continuity-generation --state-dir PATH --pane-id ID --generation ID --receipt PATH --subject-public-key PATH --observer-private-key PATH --observer-public-key PATH --out PATH [--adapter PATH]\n"
     runtime_version;
   Printf.eprintf "  provider-open persistent providers: claude, codex, kimi\n";
   Printf.eprintf

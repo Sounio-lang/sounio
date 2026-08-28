@@ -633,11 +633,15 @@ let close resident ~deadline_ms =
 
 let with_generation ~root ~environment ~deadline_ms callback =
   let resident = spawn ~root ~environment ~deadline_ms in
-  Fun.protect
-    ~finally:(fun () ->
+  match callback resident with
+  | result ->
       if not resident.closed && not resident.poisoned then
-        (try close resident ~deadline_ms with _ -> poison resident "finalize-failed"))
-    (fun () -> callback resident)
+        close resident ~deadline_ms;
+      result
+  | exception callback_error ->
+      if not resident.closed && not resident.poisoned then
+        (try close resident ~deadline_ms with _ -> ());
+      raise callback_error
 
 let test_replay resident ~deadline_ms frame =
   if not (test_mode ()) then failf "resident-test-replay-requires-test-mode";
@@ -709,4 +713,5 @@ let is_poisoned resident = resident.poisoned
 let generation resident = resident.generation_sha256
 let pid resident = resident.pid
 let birth resident = resident.birth_identity
+let sequence resident = resident.sequence
 let now_us () = monotonic_us ()
