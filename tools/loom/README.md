@@ -148,6 +148,17 @@ the live root-only probe proves systemd activation while deliberately keeping
 Sounio `ALLOW` gates all execute on the real host. See
 [HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md](HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md).
 
+Action `9028` removes the last ambient process-identity shortcut: a lane process
+is not denotable inside Loom as a bare PID or numeric pidfd. Frozen Sounio admits
+only a non-bearer `PrincipalCapsule` that binds the proposed `9026`/`9027`
+launch, PID/start-time identity, namespace and cgroup vector, privilege posture,
+broker-only pidfd custody, single-use grant fence, and provenance. A broker
+restart may reacquire custody only into `QUARANTINED`; it cannot restore grants,
+release a barrier, or resume execution. Capsule bytes name broker custody but
+grant no authority on their own. The current Pod returns `DENY472`, and a bare
+PID authority witness returns `DENY476`. See
+[GARDEN_KERNEL_PRINCIPAL_CAPSULE_V1.md](GARDEN_KERNEL_PRINCIPAL_CAPSULE_V1.md).
+
 The main Loom build reconstructs the resident runtime with the frozen Sounio
 toolchain, verifies its frozen digest, installs it under a `sha256-<digest>`
 directory, and atomically switches the stable runtime symlink under a filesystem
