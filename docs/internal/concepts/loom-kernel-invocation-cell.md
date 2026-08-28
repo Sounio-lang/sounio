@@ -11,10 +11,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-LOOM-KERNEL-INVOCATION-CELL`
 
-Status: preregistered hypothesis for Sounio action `9029`.
+Status: executable and semantics-frozen in Sounio action `9029`.
 
-Canonical preregistration:
-`tools/loom/GARDEN_KERNEL_INVOCATION_CELL_V1.md`
+Canonical artifacts:
+`tools/loom/GARDEN_KERNEL_INVOCATION_CELL_V1.md`,
+`stdlib/coordination/loom_kernel_invocation_cell_authority.sio`, and
+`tools/loom/kernel_invocation_cell_authority.freeze.v1`.
 
 ## Meaning
 
@@ -45,9 +47,9 @@ Frozen synthetic ALLOW != Material host attachment
 
 ## Supported Claim
 
-After action `9029` is executable and frozen, Sounio may define and test the
-expected decision for the complete join, including named refusals and causal
-single-rule sabotages. That supports only the frozen semantic boundary.
+Action `9029` defines and tests the expected decision for the complete join,
+including four positive operations, named refusals, and ten causal single-rule
+sabotages. That supports only the frozen semantic boundary.
 
 ## Forbidden Claims
 

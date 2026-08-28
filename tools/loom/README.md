@@ -159,6 +159,21 @@ grant no authority on their own. The current Pod returns `DENY472`, and a bare
 PID authority witness returns `DENY476`. See
 [GARDEN_KERNEL_PRINCIPAL_CAPSULE_V1.md](GARDEN_KERNEL_PRINCIPAL_CAPSULE_V1.md).
 
+Action `9029` freezes the `InvocationCell` semantic join. A valid
+`PrincipalCapsule` cannot authorize an unclosed effect stream, and a valid
+effect-closure result cannot be reassigned to another principal. Sounio binds
+the exact `9028`, `9025`, and transitive `9023` manifests to one principal
+generation, membrane generation, event sequence, command, worktree, claim
+scope, deadline, and terminal outcome lineage. The four operations are
+`PREPARE_ROOT`, `ADMIT_EFFECT`, `CLOSE_OUTCOME`, and irreversible
+`ABORT_INCOMPLETE`. Ten single-rule source sabotages prove that each named
+refusal is load-bearing; a deliberate Python-oracle frame returns `DENY488`.
+The current Pod returns `DENY481` because neither parent has supplied an
+`ALLOW` for the same material observation. Cell bytes remain non-authorizing,
+and material one-shot custody, hostile same-UID isolation, Exec/Bash, commit,
+and CI attachment remain closed. See
+[GARDEN_KERNEL_INVOCATION_CELL_V1.md](GARDEN_KERNEL_INVOCATION_CELL_V1.md).
+
 The main Loom build reconstructs the resident runtime with the frozen Sounio
 toolchain, verifies its frozen digest, installs it under a `sha256-<digest>`
 directory, and atomically switches the stable runtime symlink under a filesystem
