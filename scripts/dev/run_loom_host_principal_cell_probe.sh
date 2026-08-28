@@ -97,9 +97,9 @@ kubectl -n "$NAMESPACE" exec "$POD" -- sh -lc \
 
 REMOTE_BINARY="/run/sounio/loom-host-principal-cell-$BINARY_SHA256"
 REMOTE_GATE="/run/sounio/loom-host-principal-cell-gate-$HOST_GATE_SHA256"
-kubectl -n "$NAMESPACE" exec "$POD" -- sh -c \
+kubectl -n "$NAMESPACE" exec -i "$POD" -- sh -c \
   "install -d -m 0700 -o 0 -g 0 /proc/1/root/run/sounio; umask 022; cat > '/proc/1/root$REMOTE_BINARY'; chmod 0555 '/proc/1/root$REMOTE_BINARY'" < "$BINARY"
-kubectl -n "$NAMESPACE" exec "$POD" -- sh -c \
+kubectl -n "$NAMESPACE" exec -i "$POD" -- sh -c \
   "umask 077; cat > '/proc/1/root$REMOTE_GATE'; chmod 0500 '/proc/1/root$REMOTE_GATE'" < "$HOST_GATE"
 
 remote_hashes="$(kubectl -n "$NAMESPACE" exec "$POD" -- sh -c \
