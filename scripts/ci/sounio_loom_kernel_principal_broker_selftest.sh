@@ -8,6 +8,7 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-kernel-principal-broker.XXXX
 AUTHORITY="$TEST_ROOT/kernel-principal-lease-authority"
 CAPSULE_AUTHORITY="$TEST_ROOT/kernel-principal-capsule-authority"
 INVOCATION_AUTHORITY="$TEST_ROOT/kernel-invocation-cell-authority"
+RESIDENT_RUNTIME="$TEST_ROOT/resident-v4"
 BROKER_ONE="$TEST_ROOT/kernel-principal-broker-one"
 BROKER_TWO="$TEST_ROOT/kernel-principal-broker-two"
 JOURNAL="$TEST_ROOT/leases.v1"
@@ -23,6 +24,7 @@ TAMPERED_INVOCATION_AUTHORITY="$TEST_ROOT/invocation-authority-tampered"
 DIRECT_JOURNAL="$TEST_ROOT/direct-serve-must-not-exist.v1"
 MISSING_CAPSULE_JOURNAL="$TEST_ROOT/missing-capsule-serve-must-not-exist.v1"
 MISSING_INVOCATION_JOURNAL="$TEST_ROOT/missing-invocation-serve-must-not-exist.v1"
+MISSING_RESIDENT_JOURNAL="$TEST_ROOT/missing-resident-serve-must-not-exist.v1"
 SUDO_JOURNAL="$TEST_ROOT/sudo-serve-must-not-exist.v1"
 MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v1"
 MANIFEST_SHA256='7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5'
@@ -30,6 +32,10 @@ CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze
 CAPSULE_MANIFEST_SHA256='76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f'
 INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
 INVOCATION_MANIFEST_SHA256='61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e'
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+EXEC_GRANT_MANIFEST_SHA256='8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051'
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+RESIDENT_MANIFEST_SHA256='f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473'
 
 cleanup() {
   rm -rf "$TEST_ROOT"
@@ -78,9 +84,15 @@ run_refusal() {
   fail 'frozen action 9028 manifest drifted'
 [[ "$(sha256sum "$INVOCATION_MANIFEST" | cut -d' ' -f1)" == "$INVOCATION_MANIFEST_SHA256" ]] ||
   fail 'frozen action 9029 manifest drifted'
+[[ "$(sha256sum "$EXEC_GRANT_MANIFEST" | cut -d' ' -f1)" == "$EXEC_GRANT_MANIFEST_SHA256" ]] ||
+  fail 'frozen action 9030 manifest drifted'
+[[ "$(sha256sum "$RESIDENT_MANIFEST" | cut -d' ' -f1)" == "$RESIDENT_MANIFEST_SHA256" ]] ||
+  fail 'frozen resident v4 manifest drifted'
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_lease_authority_freeze_selftest.sh" >/dev/null
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_capsule_authority_freeze_selftest.sh" >/dev/null
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_invocation_cell_authority_freeze_selftest.sh" >/dev/null
+bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_exec_grant_cell_authority_freeze_selftest.sh" >/dev/null
+bash "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v4_freeze_selftest.sh" >/dev/null
 
 SOUNIO_LOOM_KERNEL_PRINCIPAL_LEASE_OUTPUT="$AUTHORITY" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_lease_authority.sh" >/dev/null
@@ -88,6 +100,13 @@ SOUNIO_LOOM_KERNEL_PRINCIPAL_CAPSULE_OUTPUT="$CAPSULE_AUTHORITY" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_capsule_authority.sh" >/dev/null
 SOUNIO_LOOM_KERNEL_INVOCATION_CELL_OUTPUT="$INVOCATION_AUTHORITY" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_invocation_cell_authority.sh" >/dev/null
+SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$RESIDENT_RUNTIME" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" >/dev/null
+RESIDENT_SERVE_ARGS=(
+  --exec-grant-manifest "$EXEC_GRANT_MANIFEST"
+  --resident-manifest "$RESIDENT_MANIFEST"
+  --resident-runtime "$RESIDENT_RUNTIME"
+)
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BROKER_ONE" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BROKER_TWO" \
@@ -133,7 +152,7 @@ spoofed_decision="$(printf '%s\n' "$spoofed_diagnostic" | sed -n '3p')"
 
 protocol="$($BROKER_ONE --selftest-protocol)"
 [[ "$protocol" == \
-  'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
+  'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied grant_admission_without_context=denied malformed_grant_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
   fail "bootstrap protocol opened unexpectedly: $protocol"
 
 journal_result="$($BROKER_ONE --selftest-journal --journal "$JOURNAL")"
@@ -183,6 +202,7 @@ capsule_manifest_refusal="$(run_refusal capsule-manifest-tamper "$BROKER_ONE" --
   --capsule-manifest "$TAMPERED_CAPSULE_MANIFEST" \
   --capsule-authority "$CAPSULE_AUTHORITY" \
   --invocation-manifest "$INVOCATION_MANIFEST" --invocation-authority "$INVOCATION_AUTHORITY" \
+  "${RESIDENT_SERVE_ARGS[@]}" \
   --journal "$DIRECT_JOURNAL")"
 [[ "$capsule_manifest_refusal" == *'action 9028 manifest hash mismatch'* ]] ||
   fail 'capsule manifest mutation reached activation measurement'
@@ -194,6 +214,7 @@ capsule_authority_refusal="$(run_refusal capsule-authority-tamper "$BROKER_ONE" 
   --capsule-manifest "$CAPSULE_MANIFEST" \
   --capsule-authority "$TAMPERED_CAPSULE_AUTHORITY" \
   --invocation-manifest "$INVOCATION_MANIFEST" --invocation-authority "$INVOCATION_AUTHORITY" \
+  "${RESIDENT_SERVE_ARGS[@]}" \
   --journal "$DIRECT_JOURNAL")"
 [[ "$capsule_authority_refusal" == *'action 9028 authority executable hash mismatch'* ]] ||
   fail 'capsule authority mutation reached activation measurement'
@@ -214,13 +235,24 @@ missing_invocation_refusal="$(run_refusal invocation-absent "$BROKER_ONE" --serv
 [[ ! -e "$MISSING_INVOCATION_JOURNAL" ]] ||
   fail 'serve without InvocationCell authority created a journal'
 
+missing_resident_refusal="$(run_refusal resident-absent "$BROKER_ONE" --serve \
+  --manifest "$MANIFEST" --authority "$AUTHORITY" \
+  --capsule-manifest "$CAPSULE_MANIFEST" --capsule-authority "$CAPSULE_AUTHORITY" \
+  --invocation-manifest "$INVOCATION_MANIFEST" --invocation-authority "$INVOCATION_AUTHORITY" \
+  --journal "$MISSING_RESIDENT_JOURNAL")"
+[[ "$missing_resident_refusal" == *'ExecGrantCell manifest, resident manifest, and resident runtime are required'* ]] ||
+  fail 'serve without resident action 9030 did not fail closed'
+[[ ! -e "$MISSING_RESIDENT_JOURNAL" ]] ||
+  fail 'serve without resident action 9030 created a journal'
+
 cp "$INVOCATION_MANIFEST" "$TAMPERED_INVOCATION_MANIFEST"
 printf '\n' >> "$TAMPERED_INVOCATION_MANIFEST"
 invocation_manifest_refusal="$(run_refusal invocation-manifest-tamper "$BROKER_ONE" --serve \
   --manifest "$MANIFEST" --authority "$AUTHORITY" \
   --capsule-manifest "$CAPSULE_MANIFEST" --capsule-authority "$CAPSULE_AUTHORITY" \
   --invocation-manifest "$TAMPERED_INVOCATION_MANIFEST" \
-  --invocation-authority "$INVOCATION_AUTHORITY" --journal "$DIRECT_JOURNAL")"
+  --invocation-authority "$INVOCATION_AUTHORITY" "${RESIDENT_SERVE_ARGS[@]}" \
+  --journal "$DIRECT_JOURNAL")"
 [[ "$invocation_manifest_refusal" == *'action 9029 manifest hash mismatch'* ]] ||
   fail 'InvocationCell manifest mutation reached activation measurement'
 
@@ -230,7 +262,8 @@ invocation_authority_refusal="$(run_refusal invocation-authority-tamper "$BROKER
   --manifest "$MANIFEST" --authority "$AUTHORITY" \
   --capsule-manifest "$CAPSULE_MANIFEST" --capsule-authority "$CAPSULE_AUTHORITY" \
   --invocation-manifest "$INVOCATION_MANIFEST" \
-  --invocation-authority "$TAMPERED_INVOCATION_AUTHORITY" --journal "$DIRECT_JOURNAL")"
+  --invocation-authority "$TAMPERED_INVOCATION_AUTHORITY" "${RESIDENT_SERVE_ARGS[@]}" \
+  --journal "$DIRECT_JOURNAL")"
 [[ "$invocation_authority_refusal" == *'action 9029 authority executable hash mismatch'* ]] ||
   fail 'InvocationCell authority mutation reached activation measurement'
 
@@ -238,6 +271,7 @@ direct_refusal="$(run_refusal direct-serve "$BROKER_ONE" --serve \
   --manifest "$MANIFEST" --authority "$AUTHORITY" \
   --capsule-manifest "$CAPSULE_MANIFEST" --capsule-authority "$CAPSULE_AUTHORITY" \
   --invocation-manifest "$INVOCATION_MANIFEST" --invocation-authority "$INVOCATION_AUTHORITY" \
+  "${RESIDENT_SERVE_ARGS[@]}" \
   --journal "$DIRECT_JOURNAL")"
 [[ "$direct_refusal" == *'service-manager activation boundary incomplete'* ]] ||
   fail 'direct non-root serve reached journal access'
@@ -249,6 +283,7 @@ sudo_refusal="$(run_refusal sudo-serve sudo -n "$BROKER_ONE" --serve \
   --manifest "$MANIFEST" --authority "$AUTHORITY" \
   --capsule-manifest "$CAPSULE_MANIFEST" --capsule-authority "$CAPSULE_AUTHORITY" \
   --invocation-manifest "$INVOCATION_MANIFEST" --invocation-authority "$INVOCATION_AUTHORITY" \
+  "${RESIDENT_SERVE_ARGS[@]}" \
   --journal "$SUDO_JOURNAL")"
 [[ "$sudo_refusal" == *'service-manager activation boundary incomplete'* ]] ||
   fail 'sudo-launched root broker bypassed service-manager activation'
@@ -275,8 +310,16 @@ grep -Fqx 'LOOM_PRINCIPAL_CAPSULE_MANIFEST=/usr/lib/sounio/loom/kernel_principal
   fail 'config example omits frozen capsule manifest path'
 grep -Fqx 'LOOM_PRINCIPAL_INVOCATION_MANIFEST=/usr/lib/sounio/loom/kernel_invocation_cell_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
   fail 'config example omits frozen InvocationCell manifest path'
+grep -Fqx 'LOOM_PRINCIPAL_EXEC_GRANT_MANIFEST=/usr/lib/sounio/loom/kernel_exec_grant_cell_authority.freeze.v1' "$CONFIG_EXAMPLE" ||
+  fail 'config example omits frozen ExecGrantCell manifest path'
+grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_MANIFEST=/usr/lib/sounio/loom/resident_membrane.runtime.v4' "$CONFIG_EXAMPLE" ||
+  fail 'config example omits frozen resident v4 manifest path'
+grep -Fqx 'LOOM_PRINCIPAL_RESIDENT_RUNTIME=/usr/libexec/sounio/sounio-loom-resident-membrane-runtime-v4' "$CONFIG_EXAMPLE" ||
+  fail 'config example omits frozen resident v4 runtime path'
 grep -Fq -- '--invocation-manifest ${LOOM_PRINCIPAL_INVOCATION_MANIFEST} --invocation-authority ${LOOM_PRINCIPAL_INVOCATION_AUTHORITY}' "$SERVICE_UNIT" ||
   fail 'service does not pin the InvocationCell authority'
+grep -Fq -- '--exec-grant-manifest ${LOOM_PRINCIPAL_EXEC_GRANT_MANIFEST} --resident-manifest ${LOOM_PRINCIPAL_RESIDENT_MANIFEST} --resident-runtime ${LOOM_PRINCIPAL_RESIDENT_RUNTIME}' "$SERVICE_UNIT" ||
+  fail 'service does not pin resident action 9030'
 
 command -v systemd-analyze >/dev/null 2>&1 || fail 'systemd-analyze is required for unit verification'
 UNIT_ROOT="$TEST_ROOT/units"
@@ -290,4 +333,4 @@ systemd-analyze verify "$UNIT_ROOT/sounio-loom-principal-broker.socket" \
 broker_source_sha256="$(sha256sum "$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp" | cut -d' ' -f1)"
 broker_binary_sha256="$(sha256sum "$BROKER_ONE" | cut -d' ' -f1)"
 printf '%s\n' \
-  "sounio-loom-kernel-principal-broker-selftest: PASS semantic_authority=Sounio operational_realization=C++20+Linux+systemd-bootstrap role=MATERIAL_PARITY transitory=true actions=9027+9028+9029 lease_manifest_sha256=$MANIFEST_SHA256 capsule_manifest_sha256=$CAPSULE_MANIFEST_SHA256 invocation_manifest_sha256=$INVOCATION_MANIFEST_SHA256 current_material=DENY463 direct_nonroot=refused sudo_root=refused environment_spoof=DENY463 manifest_tamper=refused authority_tamper=refused capsule_manifest_tamper=refused capsule_authority_tamper=refused invocation_manifest_tamper=refused invocation_authority_tamper=refused capsule_absent=refused invocation_absent=refused admission=decision-only partial_status=denied journal_records=6 journal_tamper=refused journal_fsync=per-record crash_recovery=QUARANTINED range_collision=refused launch=closed recycle=closed systemd_unit=verified source_sha256=$broker_source_sha256 binary_sha256=$broker_binary_sha256 material_broker=false material_capsule=false material_invocation=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false"
+  "sounio-loom-kernel-principal-broker-selftest: PASS semantic_authority=Sounio operational_realization=C++20+Linux+systemd-bootstrap role=MATERIAL_PARITY transitory=true actions=9027+9028+9029+9030 lease_manifest_sha256=$MANIFEST_SHA256 capsule_manifest_sha256=$CAPSULE_MANIFEST_SHA256 invocation_manifest_sha256=$INVOCATION_MANIFEST_SHA256 exec_grant_manifest_sha256=$EXEC_GRANT_MANIFEST_SHA256 resident_manifest_sha256=$RESIDENT_MANIFEST_SHA256 current_material=DENY463 direct_nonroot=refused sudo_root=refused environment_spoof=DENY463 manifest_tamper=refused authority_tamper=refused capsule_manifest_tamper=refused capsule_authority_tamper=refused invocation_manifest_tamper=refused invocation_authority_tamper=refused capsule_absent=refused invocation_absent=refused resident_absent=refused admission=decision-only grant_admission=resident-decision-only partial_status=denied journal_records=6 journal_tamper=refused journal_fsync=per-record crash_recovery=QUARANTINED range_collision=refused launch=closed recycle=closed systemd_unit=verified source_sha256=$broker_source_sha256 binary_sha256=$broker_binary_sha256 material_broker=false material_capsule=false material_invocation=false material_grant=false material_execution=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false"

@@ -821,7 +821,10 @@ ActivationFacts measure_activation(const std::string& manifest_path,
                                    const std::string& capsule_manifest_path = "",
                                    const std::string& capsule_authority_path = "",
                                    const std::string& invocation_manifest_path = "",
-                                   const std::string& invocation_authority_path = "") {
+                                   const std::string& invocation_authority_path = "",
+                                   const std::string& exec_grant_manifest_path = "",
+                                   const std::string& resident_manifest_path = "",
+                                   const std::string& resident_runtime_path = "") {
   ActivationFacts facts;
   facts.root_identity = getuid() == 0 && geteuid() == 0 && getgid() == 0 &&
                         getegid() == 0;
@@ -853,7 +856,13 @@ ActivationFacts measure_activation(const std::string& manifest_path,
                                (invocation_manifest_path.empty() ||
                                 root_owned_regular(invocation_manifest_path)) &&
                                (invocation_authority_path.empty() ||
-                                root_owned_regular(invocation_authority_path));
+                                root_owned_regular(invocation_authority_path)) &&
+                               (exec_grant_manifest_path.empty() ||
+                                root_owned_regular(exec_grant_manifest_path)) &&
+                               (resident_manifest_path.empty() ||
+                                root_owned_regular(resident_manifest_path)) &&
+                               (resident_runtime_path.empty() ||
+                                root_owned_regular(resident_runtime_path));
   facts.frozen_policy_bound = true;
   return facts;
 }
@@ -1548,9 +1557,46 @@ void write_response(int descriptor, const std::string& response) {
   }
 }
 
+struct ExecGrantAdmission {
+  ResidentDecision decision;
+  std::string receipt;
+};
+
+ExecGrantAdmission evaluate_exec_grant_cell(const Manifest& manifest,
+                                            ResidentV4& resident,
+                                            const std::string& frame) {
+  const ResidentDecision decision = resident.decide_exec_grant(frame);
+  std::ostringstream receipt;
+  receipt << "LOOM_KERNEL_EXEC_GRANT_CELL_MATERIAL_ADMISSION"
+          << " schema=loom-kernel-exec-grant-cell-material-admission-v1"
+          << " producing_language=C++20+resident-Sounio"
+          << " language_role=MATERIAL_PARITY"
+          << " semantic_authority=Sounio"
+          << " action=9030"
+          << " manifest_sha256=" << manifest.digest
+          << " resident_runtime_sha256=" << resident.runtime_sha256()
+          << " resident_pid=" << resident.pid()
+          << " resident_start_tick=" << resident.start_tick()
+          << " resident_generation_sha256=" << resident.generation()
+          << " resident_sequence=" << decision.sequence
+          << " frame_sha256=" << sha256(frame + "\n")
+          << " decision=" << (decision.code == 0 ? "ALLOW" : "DENY")
+          << " decision_code=" << decision.code
+          << " decision_sha256=" << sha256(decision.output + "\n")
+          << " latency_us=" << decision.latency_us
+          << " barrier_release=false"
+          << " material_grant=false"
+          << " material_execution=false"
+          << " launch_open=false";
+  return {decision, receipt.str()};
+}
+
 std::string status_response(const Journal& journal, const Manifest& lease_manifest,
                             const Manifest& capsule_manifest,
-                            const Manifest& invocation_manifest) {
+                            const Manifest& invocation_manifest,
+                            const Manifest& exec_grant_manifest,
+                            const Manifest& resident_manifest,
+                            const ResidentV4& resident) {
   std::array<std::size_t, 6> counts{};
   for (const auto& entry : journal.latest()) {
     ++counts[static_cast<std::size_t>(entry.second.state)];
@@ -1566,12 +1612,21 @@ std::string status_response(const Journal& journal, const Manifest& lease_manife
          << " invocation_manifest_sha256=" << invocation_manifest.digest
          << " invocation_authority_sha256="
          << invocation_manifest.require("executable_sha256")
+         << " exec_grant_manifest_sha256=" << exec_grant_manifest.digest
+         << " resident_manifest_sha256=" << resident_manifest.digest
+         << " resident_runtime_sha256=" << resident.runtime_sha256()
+         << " resident_pid=" << resident.pid()
+         << " resident_start_tick=" << resident.start_tick()
+         << " resident_generation_sha256=" << resident.generation()
+         << " resident_sequence=" << resident.sequence()
+         << " resident_poisoned=" << (resident.poisoned() ? "true" : "false")
          << " journal_head_sha256=" << journal.head_digest()
          << " epoch=" << journal.maximum_epoch()
          << " free=" << counts[0] << " reserved=" << counts[1]
          << " mapped=" << counts[2] << " launched=" << counts[3]
          << " draining=" << counts[4] << " quarantined=" << counts[5]
-         << " admission_open=true launch_open=false recycle_open=false\n";
+         << " admission_open=true grant_admission_open=true"
+         << " launch_open=false recycle_open=false barrier_release=false\n";
   return output.str();
 }
 
@@ -1579,15 +1634,20 @@ std::string bootstrap_response(const std::string& request, const Journal* journa
                                const Manifest* lease_manifest,
                                const Manifest* capsule_manifest,
                                const Manifest* invocation_manifest,
-                               const std::string* invocation_authority_path) {
+                               const std::string* invocation_authority_path,
+                               const Manifest* exec_grant_manifest,
+                               const Manifest* resident_manifest,
+                               ResidentV4* resident) {
   if (request == "STATUS") {
     if (journal == nullptr || lease_manifest == nullptr ||
         capsule_manifest == nullptr || invocation_manifest == nullptr ||
-        invocation_authority_path == nullptr) {
+        invocation_authority_path == nullptr || exec_grant_manifest == nullptr ||
+        resident_manifest == nullptr || resident == nullptr) {
       return "DENY status-context-absent\n";
     }
     return status_response(*journal, *lease_manifest, *capsule_manifest,
-                           *invocation_manifest);
+                           *invocation_manifest, *exec_grant_manifest,
+                           *resident_manifest, *resident);
   }
   if (request.rfind("ADMIT ", 0) == 0) {
     if (invocation_manifest == nullptr || invocation_authority_path == nullptr) {
@@ -1600,6 +1660,19 @@ std::string bootstrap_response(const std::string& request, const Journal* journa
   }
   if (request == "ADMIT") {
     return "DENY malformed-admission\n";
+  }
+  if (request.rfind("GRANT_ADMIT ", 0) == 0) {
+    if (exec_grant_manifest == nullptr || resident == nullptr) {
+      return "DENY grant-admission-context-absent\n";
+    }
+    const std::string frame =
+        validate_invocation_frame(request.substr(std::string("GRANT_ADMIT ").size()));
+    const ExecGrantAdmission admission =
+        evaluate_exec_grant_cell(*exec_grant_manifest, *resident, frame);
+    return admission.receipt + "\n";
+  }
+  if (request == "GRANT_ADMIT") {
+    return "DENY malformed-grant-admission\n";
   }
   if (request.rfind("LAUNCH", 0) == 0) {
     return "DENY bootstrap-launch-closed\n";
@@ -1710,25 +1783,35 @@ int selftest_protocol() {
     throw Error("protocol selftest refuses root execution");
   }
   if (bootstrap_response("LAUNCH lane", nullptr, nullptr, nullptr, nullptr,
-                         nullptr) !=
+                         nullptr, nullptr, nullptr, nullptr) !=
           "DENY bootstrap-launch-closed\n" ||
       bootstrap_response("RECYCLE lane", nullptr, nullptr, nullptr, nullptr,
-                         nullptr) !=
+                         nullptr, nullptr, nullptr, nullptr) !=
           "DENY bootstrap-recycle-closed\n" ||
       bootstrap_response("ADMIT 9029 3", nullptr, nullptr, nullptr, nullptr,
-                         nullptr) != "DENY admission-context-absent\n" ||
+                         nullptr, nullptr, nullptr, nullptr) !=
+          "DENY admission-context-absent\n" ||
       bootstrap_response("ADMIT", nullptr, nullptr, nullptr, nullptr,
-                         nullptr) != "DENY malformed-admission\n" ||
+                         nullptr, nullptr, nullptr, nullptr) !=
+          "DENY malformed-admission\n" ||
+      bootstrap_response("GRANT_ADMIT 9030 3", nullptr, nullptr, nullptr,
+                         nullptr, nullptr, nullptr, nullptr, nullptr) !=
+          "DENY grant-admission-context-absent\n" ||
+      bootstrap_response("GRANT_ADMIT", nullptr, nullptr, nullptr, nullptr,
+                         nullptr, nullptr, nullptr, nullptr) !=
+          "DENY malformed-grant-admission\n" ||
       bootstrap_response("EXEC lane", nullptr, nullptr, nullptr, nullptr,
-                         nullptr) !=
+                         nullptr, nullptr, nullptr, nullptr) !=
           "DENY unknown-request\n" ||
       bootstrap_response("STATUS", nullptr, nullptr, nullptr, nullptr,
-                         nullptr) !=
+                         nullptr, nullptr, nullptr, nullptr) !=
           "DENY status-context-absent\n") {
     throw Error("bootstrap protocol opened a material operation");
   }
   std::cout << "LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS"
             << " admission_without_context=denied malformed_admission=denied"
+            << " grant_admission_without_context=denied"
+            << " malformed_grant_admission=denied"
             << " launch=closed recycle=closed unknown=denied partial_status=denied\n";
   return 0;
 }
@@ -1767,26 +1850,39 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
           const std::string& capsule_authority_path,
           const std::string& invocation_manifest_path,
           const std::string& invocation_authority_path,
+          const std::string& exec_grant_manifest_path,
+          const std::string& resident_manifest_path,
+          const std::string& resident_runtime_path,
           const std::string& journal_path, const std::string& socket_path) {
   const Manifest lease_manifest = load_lease_manifest(manifest_path);
   const Manifest capsule_manifest = load_capsule_manifest(capsule_manifest_path);
   const Manifest invocation_manifest =
       load_invocation_cell_manifest(invocation_manifest_path);
+  const Manifest exec_grant_manifest =
+      load_exec_grant_cell_manifest(exec_grant_manifest_path);
+  const Manifest resident_manifest =
+      load_resident_v4_manifest(resident_manifest_path);
   verify_authority(lease_manifest, authority_path, "action 9027");
   verify_authority(capsule_manifest, capsule_authority_path, "action 9028");
   verify_authority(invocation_manifest, invocation_authority_path, "action 9029");
   const ActivationFacts facts =
       measure_activation(manifest_path, authority_path, socket_path,
                          capsule_manifest_path, capsule_authority_path,
-                         invocation_manifest_path, invocation_authority_path);
+                         invocation_manifest_path, invocation_authority_path,
+                         exec_grant_manifest_path, resident_manifest_path,
+                         resident_runtime_path);
   if (!facts.complete()) {
     throw Error("host service-manager activation boundary incomplete " +
                 activation_fact_vector(facts));
   }
   Journal journal(journal_path, true, false, true, true);
   const std::size_t quarantined = journal.quarantine_uncertain();
+  ResidentV4 resident(resident_manifest, resident_runtime_path);
   std::cerr << "loom-kernel-principal-broker: READY quarantined=" << quarantined
-            << " journal_head_sha256=" << journal.head_digest() << "\n";
+            << " journal_head_sha256=" << journal.head_digest()
+            << " resident_pid=" << resident.pid()
+            << " resident_start_tick=" << resident.start_tick()
+            << " resident_generation_sha256=" << resident.generation() << "\n";
   for (;;) {
     UniqueFd client(accept4(3, nullptr, nullptr, SOCK_CLOEXEC));
     if (client.get() < 0) {
@@ -1808,7 +1904,9 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
     write_response(client.get(), bootstrap_response(
                                      *request, &journal, &lease_manifest,
                                      &capsule_manifest, &invocation_manifest,
-                                     &invocation_authority_path));
+                                     &invocation_authority_path,
+                                     &exec_grant_manifest, &resident_manifest,
+                                     &resident));
   }
 }
 
@@ -1885,6 +1983,10 @@ void require_serve_artifacts(const Options& options) {
       options.invocation_authority.empty()) {
     throw Error("InvocationCell manifest and authority are required");
   }
+  if (options.exec_grant_manifest.empty() || options.resident_manifest.empty() ||
+      options.resident_runtime.empty()) {
+    throw Error("ExecGrantCell manifest, resident manifest, and resident runtime are required");
+  }
 }
 
 void require_invocation_artifacts(const Options& options) {
@@ -1960,8 +2062,9 @@ int main(int argc, char** argv) {
       if (options.journal.empty()) throw Error("journal is required");
       return serve(options.manifest, options.authority, options.capsule_manifest,
                    options.capsule_authority, options.invocation_manifest,
-                   options.invocation_authority, options.journal,
-                   options.socket_path);
+                   options.invocation_authority, options.exec_grant_manifest,
+                   options.resident_manifest, options.resident_runtime,
+                   options.journal, options.socket_path);
     }
     throw Error("unknown mode");
   } catch (const std::exception& error) {
