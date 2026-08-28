@@ -172,5 +172,10 @@ protocol="$($BROKER_ONE --selftest-protocol)"
 [[ "$protocol" == *'launch=closed recycle=closed unknown=denied'* ]] ||
   fail 'material admission opened a broker operation'
 
+source_sha256="$(sha256sum "$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp" | cut -d' ' -f1)"
+binary_sha256="$(sha256sum "$BROKER_ONE" | cut -d' ' -f1)"
+authority_sha256="$(sha256sum "$AUTHORITY" | cut -d' ' -f1)"
+positive_frame_sha256="$(sha256sum "$VALID_FRAME" | cut -d' ' -f1)"
+current_frame_sha256="$(sha256sum "$CURRENT_FRAME" | cut -d' ' -f1)"
 printf '%s\n' \
-  "sounio-loom-kernel-invocation-cell-material-admission-selftest: PASS semantic_authority=Sounio material_parity=C++20 action=9029 positive=ALLOW current_material=DENY481 malformed=DENY424 manifest_tamper=REFUSE authority_tamper=REFUSE multiline=REFUSE deterministic_rebuild=PASS launch_open=false material_invocation=false same_uid_peer_isolation=false parity_open=false claim_ready=false"
+  "sounio-loom-kernel-invocation-cell-material-admission-selftest: PASS semantic_authority=Sounio material_parity=C++20 action=9029 manifest_sha256=$MANIFEST_SHA256 authority_sha256=$authority_sha256 positive_frame_sha256=$positive_frame_sha256 current_frame_sha256=$current_frame_sha256 positive=ALLOW current_material=DENY481 malformed=DENY424 manifest_tamper=REFUSE authority_tamper=REFUSE multiline=REFUSE deterministic_rebuild=PASS source_sha256=$source_sha256 binary_sha256=$binary_sha256 launch_open=false material_invocation=false same_uid_peer_isolation=false parity_open=false claim_ready=false"
