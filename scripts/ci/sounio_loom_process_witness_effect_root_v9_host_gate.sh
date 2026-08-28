@@ -159,8 +159,8 @@ systemd-run --quiet --unit="$UNIT" --service-type=exec --pipe --wait \
   --property=DynamicUser=yes \
   --property=UMask=0077 \
   --property=NoNewPrivileges=yes \
-  --property=PrivateTmp=disconnected \
-  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp" \
+  --property=PrivateTmp=yes \
+  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp /sys:/sys" \
   --property=PrivateDevices=no \
   --property=PrivateNetwork=yes \
   --property=ProtectSystem=strict \
@@ -263,10 +263,15 @@ read -r _ gid_real gid_effective gid_saved gid_fs <<< "$gid_line"
   fail 'root-hold retained effective capabilities'
 [[ "$(printf '%s\n' "$status" | grep '^CapAmb:' | cut -f 2)" == 0000000000000000 ]] ||
   fail 'root-hold retained ambient capabilities'
-[[ "$(readlink "/proc/$CELL_PID/root")" == "$ROOT" ]] ||
-  fail 'root-hold process root escaped the materialized root'
-[[ "$(readlink "/proc/$CELL_PID/exe")" == "$ROOT/loom/effect-cell" ]] ||
-  fail 'root-hold executable drifted'
+process_root="$(readlink "/proc/$CELL_PID/root")"
+process_root_identity="$(stat -Lc '%d:%i' "/proc/$CELL_PID/root")"
+expected_root_identity="$(stat -Lc '%d:%i' "$ROOT")"
+[[ "$process_root_identity" == "$expected_root_identity" ]] ||
+  fail "root-hold process root identity drifted: link=$process_root observed=$process_root_identity expected=$expected_root_identity"
+process_executable_identity="$(stat -Lc '%d:%i' "/proc/$CELL_PID/exe")"
+expected_executable_identity="$(stat -Lc '%d:%i' "$ROOT/loom/effect-cell")"
+[[ "$process_executable_identity" == "$expected_executable_identity" ]] ||
+  fail "root-hold executable identity drifted: observed=$process_executable_identity expected=$expected_executable_identity"
 [[ "$(readlink "/proc/$CELL_PID/ns/mnt")" != "$(readlink /proc/1/ns/mnt)" ]] ||
   fail 'root-hold shares PID 1 mount namespace'
 [[ "$(readlink "/proc/$CELL_PID/ns/net")" != "$(readlink /proc/1/ns/net)" ]] ||
@@ -300,6 +305,7 @@ var_tmp_mount=false
 var_tmp_mount_root=''
 var_tmp_mount_ro=false
 forbidden_mount=''
+forbidden_mount_line=''
 while IFS= read -r mount_line; do
   read -r -a fields <<< "$mount_line"
   [[ ${#fields[@]} -ge 6 ]] || fail 'root-hold mountinfo is malformed'
@@ -348,7 +354,10 @@ while IFS= read -r mount_line; do
     fi
   fi
   case "$mountpoint" in
-    /proc|/home|/root|/run|/var|/etc) forbidden_mount="$mountpoint" ;;
+    /proc|/home|/root|/run|/var|/etc)
+      forbidden_mount="$mountpoint"
+      forbidden_mount_line="$mount_line"
+      ;;
   esac
 done < "/proc/$CELL_PID/mountinfo"
 [[ "$root_mount_ro" == true ]] || fail 'root-hold mountinfo lacks a read-only root'
@@ -361,13 +370,18 @@ done < "/proc/$CELL_PID/mountinfo"
   fail 'root-hold mountinfo lacks the systemd incoming propagation mount'
 [[ "$incoming_mount_id" =~ ^[0-9]+$ ]] ||
   fail 'root-hold incoming mount identity is malformed'
-[[ "$incoming_mount_root" == "/run/systemd/propagate/$UNIT" ]] ||
-  fail "systemd incoming mount source drifted: $incoming_mount_root"
+[[ "$incoming_mount_root" == "/systemd/propagate/$UNIT" ]] ||
+  fail "systemd incoming mount-relative source drifted: $incoming_mount_root"
+incoming_source_identity="$(stat -Lc '%d:%i' "/run/systemd/propagate/$UNIT")"
+incoming_target_identity="$(stat -Lc '%d:%i' "/proc/$CELL_PID/root/run/systemd/incoming")"
+[[ "$incoming_source_identity" == "$incoming_target_identity" ]] ||
+  fail "systemd incoming source identity drifted: source=$incoming_source_identity target=$incoming_target_identity"
 [[ "$sys_mount" == true ]] || fail 'root-hold mountinfo lacks the /sys mount'
 [[ "$sys_mount_root" == / && "$sys_mount_filesystem" == sysfs &&
    "$sys_mount_source" == sysfs && "$sys_mount_ro" == true ]] ||
   fail "systemd /sys mount drifted: root=$sys_mount_root filesystem=$sys_mount_filesystem source=$sys_mount_source read_only=$sys_mount_ro"
-[[ -z "$forbidden_mount" ]] || fail "root-hold exposed forbidden mount: $forbidden_mount"
+[[ -z "$forbidden_mount" ]] ||
+  fail "root-hold exposed forbidden mount: path=$forbidden_mount mountinfo=$forbidden_mount_line"
 
 printf 'X' >&9
 exec 9>&-
@@ -402,8 +416,8 @@ if systemd-run --quiet --unit="$SABOTAGE_UNIT" --service-type=exec --pipe --wait
   --property=DynamicUser=yes \
   --property=UMask=0077 \
   --property=NoNewPrivileges=yes \
-  --property=PrivateTmp=disconnected \
-  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp" \
+  --property=PrivateTmp=yes \
+  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp /sys:/sys" \
   --property=PrivateDevices=no \
   --property=PrivateNetwork=yes \
   --property=ProtectSystem=strict \
@@ -455,8 +469,8 @@ if systemd-run --quiet --unit="$SYS_SABOTAGE_UNIT" --service-type=exec --pipe --
   --property=DynamicUser=yes \
   --property=UMask=0077 \
   --property=NoNewPrivileges=yes \
-  --property=PrivateTmp=disconnected \
-  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp" \
+  --property=PrivateTmp=yes \
+  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp /sys:/sys" \
   --property=PrivateDevices=no \
   --property=PrivateNetwork=yes \
   --property=ProtectSystem=strict \
@@ -508,8 +522,8 @@ if systemd-run --quiet --unit="$VAR_TMP_SABOTAGE_UNIT" --service-type=exec --pip
   --property=DynamicUser=yes \
   --property=UMask=0077 \
   --property=NoNewPrivileges=yes \
-  --property=PrivateTmp=disconnected \
-  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp" \
+  --property=PrivateTmp=yes \
+  --property="BindReadOnlyPaths=$ROOT/tmp:/tmp $ROOT/tmp:/var/tmp /sys:/sys" \
   --property=PrivateDevices=no \
   --property=PrivateNetwork=yes \
   --property=ProtectSystem=strict \
@@ -552,7 +566,7 @@ install -d -m 0555 "$ROOT/var/tmp"
 cleanup
 trap - EXIT
 
-printf 'sounio-loom-process-witness-effect-root-v9-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio producer=C++20+Sounio role=MATERIAL_PARITY action=9025 host=%s kernel=%s architecture=%s systemd_version=%s object_boundary=IMMUTABLE_ROOT_MOUNT_NAMESPACE tree_sha256=%s cell_sha256=%s payload_sha256=7249748c322ede756c779904cb2d87f561ba2e17d0691314a09feaf16ca2ed4d policy_manifest_sha256=9d747d937a6a2316dd8894b37e243180031b8518f2696b9200ee7d1f1d81868c typed_file_bounds=effect-cell-16MiB+payload-1MiB+manifests-64KiB effective_mount_truth=DynamicUser+disconnected+strict+read-only property_private_tmp_observed=yes property_authority=CONFIGURATION_ONLY filesystem_authority=ROOT_HOST_MOUNTINFO temporary_sources=SAME_IMMUTABLE_ROOT_TMP temporary_read_only=true temporary_empty=true forbidden_mounts=/proc+/home+/root+/run+/var+/etc root_owned=true root_read_only=true root_exact=true dynamic_user=true uid=%s gid=%s mount_namespace=private network_namespace=private private_tmp=disconnected protect_system=strict protect_home=read-only private_devices=false proc_treatment=absent tmp_read_only=true var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP systemd_mount_path=/run/systemd/incoming systemd_mount_source=/run/systemd/propagate/EXACT_UNIT principal_readable=false principal_enumeration=forbidden root_observed_empty=true empty_observer=ROOT_HOST mount_observer=ROOT_HOST extinction_observer=ROOT_HOST incoming_mount_id=%s incoming_mount_extinction=observed systemd_sys_mount_path=/sys systemd_sys_ready_filesystem=sysfs systemd_sys_ready_source=sysfs systemd_sys_ready_read_only=true fd_inventory=0+1+2 capabilities=zero no_new_privileges=true seccomp=true process_extinction=observed ready_sha256=%s root_treatment=true bootstrap_sabotage=true bootstrap_missing_incoming_status=226/NAMESPACE bootstrap_missing_sys_status=226/NAMESPACE bootstrap_missing_var_tmp_status=226/NAMESPACE material_sabotages=0 material_coverage=false complete_effects=false material_execution=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n' \
+printf 'sounio-loom-process-witness-effect-root-v9-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio producer=C++20+Sounio role=MATERIAL_PARITY action=9025 host=%s kernel=%s architecture=%s systemd_version=%s object_boundary=IMMUTABLE_ROOT_MOUNT_NAMESPACE tree_sha256=%s cell_sha256=%s payload_sha256=7249748c322ede756c779904cb2d87f561ba2e17d0691314a09feaf16ca2ed4d policy_manifest_sha256=9d747d937a6a2316dd8894b37e243180031b8518f2696b9200ee7d1f1d81868c typed_file_bounds=effect-cell-16MiB+payload-1MiB+manifests-64KiB effective_mount_truth=DynamicUser+disconnected+strict+read-only property_private_tmp_observed=yes property_authority=CONFIGURATION_ONLY filesystem_authority=ROOT_HOST_MOUNTINFO temporary_sources=SAME_IMMUTABLE_ROOT_TMP temporary_read_only=true temporary_empty=true forbidden_mounts=/proc+/home+/root+/run+/var+/etc root_owned=true root_read_only=true root_exact=true root_object_identity=dev+inode executable_object_identity=dev+inode dynamic_user=true uid=%s gid=%s mount_namespace=private network_namespace=private private_tmp=disconnected protect_system=strict protect_home=read-only private_devices=false proc_treatment=absent tmp_read_only=true var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP systemd_mount_path=/run/systemd/incoming systemd_mount_source=/run/systemd/propagate/EXACT_UNIT incoming_source_identity=dev+inode principal_readable=false principal_enumeration=forbidden root_observed_empty=true empty_observer=ROOT_HOST mount_observer=ROOT_HOST extinction_observer=ROOT_HOST incoming_mount_id=%s incoming_mount_extinction=observed systemd_sys_mount_path=/sys systemd_sys_ready_filesystem=sysfs systemd_sys_ready_source=sysfs systemd_sys_ready_read_only=true fd_inventory=0+1+2 capabilities=zero no_new_privileges=true seccomp=true process_extinction=observed ready_sha256=%s root_treatment=true bootstrap_sabotage=true bootstrap_missing_incoming_status=226/NAMESPACE bootstrap_missing_sys_status=226/NAMESPACE bootstrap_missing_var_tmp_status=226/NAMESPACE material_sabotages=0 material_coverage=false complete_effects=false material_execution=false launch_open=false recycle_open=false exec_attached=false commit_attached=false ci_attached=false parity_open=false claim_ready=false\n' \
   "$(hostname)" "$(uname -r)" "$(uname -m)" "$SYSTEMD_VERSION" \
   "$TREE_SHA256" "$CELL_SHA256" "$uid_real" "$gid_real" \
   "$incoming_mount_id" "$ready_sha256"

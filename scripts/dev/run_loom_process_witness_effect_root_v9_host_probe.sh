@@ -143,11 +143,11 @@ set -e
   fail "host immutable-root gate failed status=$host_status output=$host_output"
 [[ "$host_output" == sounio-loom-process-witness-effect-root-v9-host-gate:\ HOST_MEASUREMENT_PASS* ]] ||
   fail 'host immutable-root receipt shape diverged'
-[[ "$host_output" == *'root_owned=true root_read_only=true root_exact=true dynamic_user=true'* &&
+[[ "$host_output" == *'root_owned=true root_read_only=true root_exact=true root_object_identity=dev+inode executable_object_identity=dev+inode dynamic_user=true'* &&
    "$host_output" == *'typed_file_bounds=effect-cell-16MiB+payload-1MiB+manifests-64KiB'* &&
    "$host_output" == *'effective_mount_truth=DynamicUser+disconnected+strict+read-only property_private_tmp_observed=yes property_authority=CONFIGURATION_ONLY filesystem_authority=ROOT_HOST_MOUNTINFO temporary_sources=SAME_IMMUTABLE_ROOT_TMP temporary_read_only=true temporary_empty=true forbidden_mounts=/proc+/home+/root+/run+/var+/etc'* &&
    "$host_output" == *'private_tmp=disconnected protect_system=strict protect_home=read-only'* &&
-   "$host_output" == *'proc_treatment=absent tmp_read_only=true var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP systemd_mount_path=/run/systemd/incoming systemd_mount_source=/run/systemd/propagate/EXACT_UNIT principal_readable=false principal_enumeration=forbidden root_observed_empty=true empty_observer=ROOT_HOST mount_observer=ROOT_HOST extinction_observer=ROOT_HOST '* &&
+   "$host_output" == *'proc_treatment=absent tmp_read_only=true var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP systemd_mount_path=/run/systemd/incoming systemd_mount_source=/run/systemd/propagate/EXACT_UNIT incoming_source_identity=dev+inode principal_readable=false principal_enumeration=forbidden root_observed_empty=true empty_observer=ROOT_HOST mount_observer=ROOT_HOST extinction_observer=ROOT_HOST '* &&
    "$host_output" == *' incoming_mount_extinction=observed systemd_sys_mount_path=/sys systemd_sys_ready_filesystem=sysfs systemd_sys_ready_source=sysfs systemd_sys_ready_read_only=true fd_inventory=0+1+2 capabilities=zero no_new_privileges=true seccomp=true process_extinction=observed'* ]] ||
   fail 'host immutable-root measurement omitted its kernel facts'
 [[ "$host_output" == *'root_treatment=true bootstrap_sabotage=true bootstrap_missing_incoming_status=226/NAMESPACE bootstrap_missing_sys_status=226/NAMESPACE bootstrap_missing_var_tmp_status=226/NAMESPACE material_sabotages=0 material_coverage=false complete_effects=false material_execution=false'* ]] ||
