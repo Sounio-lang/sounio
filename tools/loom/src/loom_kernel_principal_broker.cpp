@@ -40,9 +40,12 @@ constexpr std::string_view kFrozenManifestSha256 =
     "7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5";
 constexpr std::string_view kFrozenCapsuleManifestSha256 =
     "76ac860306c8cc00517f81f3fe2a4a2742a1cd4b9c4b4bb34b144b25fbcdf26f";
+constexpr std::string_view kFrozenInvocationCellManifestSha256 =
+    "61918604bf177753c6141f6cd0f05d342a1869ab8fc08d187306a481de33d70e";
 constexpr std::string_view kZeroDigest =
     "0000000000000000000000000000000000000000000000000000000000000000";
 constexpr std::size_t kMaximumAuthorityOutput = 1024 * 1024;
+constexpr std::size_t kMaximumInvocationFrame = 64 * 1024;
 constexpr std::size_t kMaximumRequest = 4096;
 constexpr auto kAuthorityTimeout = std::chrono::seconds(5);
 
@@ -256,6 +259,24 @@ Manifest load_capsule_manifest(const std::string& path) {
   return manifest;
 }
 
+Manifest load_invocation_cell_manifest(const std::string& path) {
+  Manifest manifest = parse_frozen_manifest(
+      path, kFrozenInvocationCellManifestSha256, "action 9029");
+  if (manifest.require("schema") !=
+          "loom-kernel-invocation-cell-authority-freeze-v1" ||
+      manifest.require("stage") != "SEMANTICS_FROZEN" ||
+      manifest.require("producing_language") != "Sounio" ||
+      manifest.require("language_role") != "SEMANTIC_AUTHORITY" ||
+      manifest.require("action") != "9029" ||
+      manifest.require("material_invocation") != "false" ||
+      manifest.require("same_uid_peer_isolation") != "false" ||
+      manifest.require("parity_open") != "false" ||
+      manifest.require("claim_ready") != "false") {
+    throw Error("manifest does not describe frozen Sounio action 9029");
+  }
+  return manifest;
+}
+
 void verify_authority(const Manifest& manifest, const std::string& authority_path,
                       std::string_view label) {
   if (file_sha256(authority_path) != manifest.require("executable_sha256")) {
@@ -367,7 +388,8 @@ ActivationFacts measure_activation(const std::string& manifest_path,
 }
 
 CommandResult run_authority(const std::string& authority_path,
-                            const std::string& frame) {
+                            const std::string& frame,
+                            std::string_view expected_prefix) {
   int input_pipe[2];
   int output_pipe[2];
   if (pipe2(input_pipe, O_CLOEXEC) != 0 || pipe2(output_pipe, O_CLOEXEC) != 0) {
@@ -452,10 +474,52 @@ CommandResult run_authority(const std::string& authority_path,
   const int exit_code = WEXITSTATUS(status);
   output = trim(output);
   if (output.find('\n') != std::string::npos ||
-      output.rfind("SOUNIO_KERNEL_PRINCIPAL_LEASE_", 0) != 0) {
+      output.rfind(expected_prefix, 0) != 0) {
     throw Error("malformed Sounio authority output");
   }
   return {exit_code, output};
+}
+
+struct InvocationDecision {
+  bool allowed = false;
+  std::uint64_t code = 0;
+};
+
+InvocationDecision parse_invocation_decision(const CommandResult& result) {
+  constexpr std::string_view allow_prefix =
+      "SOUNIO_KERNEL_INVOCATION_CELL_ALLOW code=0 ";
+  constexpr std::string_view deny_prefix =
+      "SOUNIO_KERNEL_INVOCATION_CELL_DENY code=";
+  if (result.output.rfind(allow_prefix, 0) == 0) {
+    if (result.exit_code != 0) {
+      throw Error("Sounio InvocationCell ALLOW exited nonzero");
+    }
+    return {true, 0};
+  }
+  if (result.output.rfind(deny_prefix, 0) != 0) {
+    throw Error("malformed Sounio InvocationCell decision");
+  }
+  const std::size_t code_start = deny_prefix.size();
+  const std::size_t code_end = result.output.find(' ', code_start);
+  if (code_end == std::string::npos) {
+    throw Error("Sounio InvocationCell decision omitted reason");
+  }
+  const auto code = parse_u64(std::string_view(result.output).substr(
+      code_start, code_end - code_start));
+  if (!code || *code == 0 || result.exit_code != static_cast<int>(*code & 0xff)) {
+    throw Error("Sounio InvocationCell decision exit mismatch");
+  }
+  return {false, *code};
+}
+
+std::string load_invocation_frame(const std::string& path) {
+  std::string frame = trim(read_file(path));
+  if (frame.empty() || frame.size() > kMaximumInvocationFrame ||
+      frame.find('\n') != std::string::npos ||
+      frame.find('\r') != std::string::npos) {
+    throw Error("InvocationCell frame is empty, multiline, or oversized");
+  }
+  return frame;
 }
 
 std::string current_frame(const ActivationFacts& facts) {
@@ -833,7 +897,8 @@ int diagnose(const std::string& manifest_path, const std::string& authority_path
   const Manifest manifest = load_lease_manifest(manifest_path);
   verify_authority(manifest, authority_path, "action 9027");
   ActivationFacts facts = measure_activation(manifest_path, authority_path, socket_path);
-  const CommandResult decision = run_authority(authority_path, current_frame(facts));
+  const CommandResult decision = run_authority(
+      authority_path, current_frame(facts), "SOUNIO_KERNEL_PRINCIPAL_LEASE_");
   std::ostringstream receipt;
   receipt << "LOOM_KERNEL_PRINCIPAL_BROKER_DIAGNOSTIC"
           << " schema=loom-kernel-principal-broker-bootstrap-v1"
@@ -857,6 +922,39 @@ int diagnose(const std::string& manifest_path, const std::string& authority_path
   std::cout << "LOOM_KERNEL_PRINCIPAL_BROKER_RECEIPT_SHA256 "
             << sha256(receipt_text + "\n") << "\n";
   std::cout << decision.output << "\n";
+  return 0;
+}
+
+int diagnose_invocation_cell(const std::string& manifest_path,
+                             const std::string& authority_path,
+                             const std::string& frame_path) {
+  const Manifest manifest = load_invocation_cell_manifest(manifest_path);
+  verify_authority(manifest, authority_path, "action 9029");
+  const std::string frame = load_invocation_frame(frame_path);
+  const CommandResult result = run_authority(
+      authority_path, frame, "SOUNIO_KERNEL_INVOCATION_CELL_");
+  const InvocationDecision decision = parse_invocation_decision(result);
+  std::ostringstream receipt;
+  receipt << "LOOM_KERNEL_INVOCATION_CELL_MATERIAL_ADMISSION"
+          << " schema=loom-kernel-invocation-cell-material-admission-v1"
+          << " producing_language=C++20"
+          << " language_role=MATERIAL_PARITY"
+          << " semantic_authority=Sounio"
+          << " action=9029"
+          << " manifest_sha256=" << manifest.digest
+          << " authority_sha256=" << file_sha256(authority_path)
+          << " frame_sha256=" << sha256(frame + "\n")
+          << " decision=" << (decision.allowed ? "ALLOW" : "DENY")
+          << " decision_code=" << decision.code
+          << " decision_sha256=" << sha256(result.output + "\n")
+          << " material_invocation=false"
+          << " same_uid_peer_isolation=false"
+          << " launch_open=false";
+  const std::string receipt_text = receipt.str();
+  std::cout << receipt_text << "\n";
+  std::cout << "LOOM_KERNEL_INVOCATION_CELL_MATERIAL_RECEIPT_SHA256 "
+            << sha256(receipt_text + "\n") << "\n";
+  std::cout << result.output << "\n";
   return 0;
 }
 
@@ -1071,6 +1169,9 @@ struct Options {
   std::string authority;
   std::string capsule_manifest;
   std::string capsule_authority;
+  std::string invocation_manifest;
+  std::string invocation_authority;
+  std::string frame;
   std::string journal;
   std::string socket_path = "/run/sounio/loom-principal-broker.sock";
 };
@@ -1091,6 +1192,12 @@ Options parse_options(int argc, char** argv) {
       options.capsule_manifest = value;
     } else if (argument == "--capsule-authority") {
       options.capsule_authority = value;
+    } else if (argument == "--invocation-manifest") {
+      options.invocation_manifest = value;
+    } else if (argument == "--invocation-authority") {
+      options.invocation_authority = value;
+    } else if (argument == "--frame") {
+      options.frame = value;
     } else if (argument == "--journal") {
       options.journal = value;
     } else if (argument == "--socket-path") {
@@ -1115,6 +1222,13 @@ void require_serve_artifacts(const Options& options) {
   }
 }
 
+void require_invocation_artifacts(const Options& options) {
+  if (options.invocation_manifest.empty() ||
+      options.invocation_authority.empty() || options.frame.empty()) {
+    throw Error("InvocationCell manifest, authority, and frame are required");
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1123,6 +1237,12 @@ int main(int argc, char** argv) {
     if (options.mode == "--diagnose") {
       require_artifacts(options);
       return diagnose(options.manifest, options.authority, options.socket_path);
+    }
+    if (options.mode == "--diagnose-invocation-cell") {
+      require_invocation_artifacts(options);
+      return diagnose_invocation_cell(options.invocation_manifest,
+                                      options.invocation_authority,
+                                      options.frame);
     }
     if (options.mode == "--selftest-journal") {
       if (options.journal.empty()) throw Error("journal is required");
