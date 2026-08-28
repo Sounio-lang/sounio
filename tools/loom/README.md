@@ -135,6 +135,19 @@ to outer UID `1000`, the subordinate-map syscall is refused with `EPERM`, and
 the outer account can regain root through passwordless sudo; Sounio therefore
 returns `DENY455`. See [KERNEL_PRINCIPAL_V1.md](KERNEL_PRINCIPAL_V1.md).
 
+Action `9027` freezes the principal-lease lifecycle after `9026`: `FREE`,
+`RESERVED`, `MAPPED`, `LAUNCHED`, `DRAINING`, `QUARANTINED`, and only then
+`FREE` again after affirmative process, namespace, and authority extinction.
+The transitory C++20 host broker verifies the exact frozen Sounio executable,
+keeps a hash-chained and per-record-synchronized lease journal, and quarantines
+uncertain generations after recovery. Its host installer builds immutable
+releases addressed by the manifest, broker, and complete operational bundle;
+the live root-only probe proves systemd activation while deliberately keeping
+`LAUNCH` and `RECYCLE` closed. A `HOST_ACTIVATION_PASS` therefore still reports
+`material_broker=false` until namespace, cgroup, pidfd, attack, extinction, and
+Sounio `ALLOW` gates all execute on the real host. See
+[HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md](HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md).
+
 The main Loom build reconstructs the resident runtime with the frozen Sounio
 toolchain, verifies its frozen digest, installs it under a `sha256-<digest>`
 directory, and atomically switches the stable runtime symlink under a filesystem

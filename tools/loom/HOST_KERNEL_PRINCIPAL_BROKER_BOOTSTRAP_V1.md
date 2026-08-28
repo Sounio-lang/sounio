@@ -114,6 +114,12 @@ new path, writes a complete deterministic lifecycle ending in `FREE`, replays
 it, and exits. It cannot open an existing production journal. `--verify-journal`
 is read-only and is used to prove that a one-byte mutation is refused.
 
+`--probe-live` is a root-only installation probe. It connects only to a
+root-owned mode-`0600` socket in a root-owned safe directory, verifies a root
+host endpoint with `SO_PEERCRED`, requires `STATUS` to return `READY`, and then
+requires live `LAUNCH`, `RECYCLE`, and unknown-operation sabotage requests to
+remain refused. It does not accept a caller-selected request.
+
 ## Negative Controls
 
 The bootstrap gate must prove:

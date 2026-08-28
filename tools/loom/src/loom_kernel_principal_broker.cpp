@@ -873,6 +873,91 @@ std::string bootstrap_response(const std::string& request, const Journal* journa
   return "DENY unknown-request\n";
 }
 
+void require_root_client_socket(const std::string& socket_path) {
+  if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) {
+    throw Error("live broker probe requires root identity");
+  }
+  struct stat socket_info {};
+  struct stat directory_info {};
+  if (lstat(socket_path.c_str(), &socket_info) != 0 ||
+      stat(parent_path(socket_path).c_str(), &directory_info) != 0 ||
+      !S_ISSOCK(socket_info.st_mode) || socket_info.st_uid != 0 ||
+      socket_info.st_gid != 0 || (socket_info.st_mode & 0777) != 0600 ||
+      !S_ISDIR(directory_info.st_mode) || directory_info.st_uid != 0 ||
+      directory_info.st_gid != 0 ||
+      (directory_info.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    throw Error("live broker socket ownership or mode is unsafe");
+  }
+}
+
+std::string exchange_with_live_broker(const std::string& socket_path,
+                                      const std::string& request) {
+  require_root_client_socket(socket_path);
+  UniqueFd descriptor(socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0));
+  if (descriptor.get() < 0) throw Error("cannot create live broker probe socket");
+  sockaddr_un address{};
+  if (socket_path.size() >= sizeof(address.sun_path)) {
+    throw Error("live broker socket path is too long");
+  }
+  address.sun_family = AF_UNIX;
+  std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1);
+  if (connect(descriptor.get(), reinterpret_cast<sockaddr*>(&address),
+              sizeof(address)) != 0) {
+    throw Error("cannot connect to live broker socket: " +
+                std::string(std::strerror(errno)));
+  }
+  ucred peer{};
+  socklen_t peer_size = sizeof(peer);
+  if (getsockopt(descriptor.get(), SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) !=
+          0 ||
+      peer.uid != 0 || peer.gid != 0 || peer.pid <= 0) {
+    throw Error("live broker peer is not a root host endpoint");
+  }
+  write_response(descriptor.get(), request + "\n");
+  if (shutdown(descriptor.get(), SHUT_WR) != 0) {
+    throw Error("cannot finish live broker probe request");
+  }
+  std::string response;
+  std::array<char, 1024> buffer{};
+  for (;;) {
+    const ssize_t count = read(descriptor.get(), buffer.data(), buffer.size());
+    if (count > 0) {
+      response.append(buffer.data(), static_cast<std::size_t>(count));
+      if (response.size() > kMaximumRequest) {
+        throw Error("live broker response exceeds size limit");
+      }
+      if (response.find('\n') != std::string::npos) break;
+    } else if (count == 0) {
+      break;
+    } else if (errno != EINTR) {
+      throw Error("cannot read live broker response");
+    }
+  }
+  if (response.empty() || response.back() != '\n' ||
+      response.find('\n') != response.size() - 1) {
+    throw Error("live broker response is malformed");
+  }
+  return response;
+}
+
+int probe_live_broker(const std::string& socket_path) {
+  const std::string status = exchange_with_live_broker(socket_path, "STATUS");
+  if (status.rfind("LOOM_KERNEL_PRINCIPAL_BROKER_STATUS state=READY ", 0) != 0) {
+    throw Error("live broker did not return READY status");
+  }
+  if (exchange_with_live_broker(socket_path, "LAUNCH sabotage") !=
+          "DENY bootstrap-launch-closed\n" ||
+      exchange_with_live_broker(socket_path, "RECYCLE sabotage") !=
+          "DENY bootstrap-recycle-closed\n" ||
+      exchange_with_live_broker(socket_path, "EXEC sabotage") !=
+          "DENY unknown-request\n") {
+    throw Error("live broker opened a bootstrap operation");
+  }
+  std::cout << status.substr(0, status.size() - 1)
+            << " live_probe=PASS launch=closed recycle=closed unknown=denied\n";
+  return 0;
+}
+
 int selftest_protocol() {
   if (getuid() == 0 || geteuid() == 0) {
     throw Error("protocol selftest refuses root execution");
@@ -984,6 +1069,9 @@ int main(int argc, char** argv) {
     }
     if (options.mode == "--selftest-protocol") {
       return selftest_protocol();
+    }
+    if (options.mode == "--probe-live") {
+      return probe_live_broker(options.socket_path);
     }
     if (options.mode == "--selftest-recovery") {
       if (options.journal.empty()) throw Error("journal is required");
