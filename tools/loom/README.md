@@ -94,7 +94,10 @@ executable, adversarial gate, and content-addressed semantic freeze now exist.
 One derived Sounio runtime now keeps actions `9023` and `9024` resident in a
 single stable process, is frozen by content hash, and matches the frozen
 single-shot outputs byte for byte.
-The OCaml resident realization has not yet started and cannot alter the frozen
+An OCaml supervisor now binds one random generation to the hash-pinned runtime,
+PID and process birth identity; sequences requests, applies monotonic deadlines,
+journals hash-bound receipts, and permanently poisons the generation on replay,
+correlation failure, timeout, EOF, or process drift. It cannot alter the frozen
 decision bundle. The resident runtime uses a bounded `read_byte()` framer because
 the current `lean_single` `read_line()` builtin performs one bulk read rather
 than newline framing.

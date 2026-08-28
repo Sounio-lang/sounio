@@ -64,6 +64,15 @@ static int64_t monotonic_us(void) {
   return ((int64_t)value.tv_sec * 1000000LL) + (value.tv_nsec / 1000LL);
 }
 
+CAMLprim value sounio_loom_monotonic_us(value unit_value) {
+  CAMLparam1(unit_value);
+  int64_t now_us = monotonic_us();
+  if (now_us <= 0) {
+    caml_failwith("CLOCK_MONOTONIC unavailable");
+  }
+  CAMLreturn(caml_copy_int64(now_us));
+}
+
 static int landlock_abi_version(void) {
 #if defined(SYS_landlock_create_ruleset)
   return (int)syscall(SYS_landlock_create_ruleset, NULL, 0,
