@@ -51,7 +51,11 @@ if [[ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]];
 fi
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/loom-host-exec-quorum-capsule.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+  find "$WORK" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 CAPSULE="$WORK/capsule-v1"
 RELEASE_STAGE="$WORK/release"
 BIN="$RELEASE_STAGE/bin"
