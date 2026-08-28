@@ -45,8 +45,30 @@ namespace {
 static_assert(LOOM_EFFECT_POLICY_VERSION == 3 ||
               LOOM_EFFECT_POLICY_VERSION == 4 ||
               LOOM_EFFECT_POLICY_VERSION == 5 ||
-              LOOM_EFFECT_POLICY_VERSION == 6);
-#if LOOM_EFFECT_POLICY_VERSION == 6
+              LOOM_EFFECT_POLICY_VERSION == 6 ||
+              LOOM_EFFECT_POLICY_VERSION == 7);
+#if LOOM_EFFECT_POLICY_VERSION == 7
+constexpr std::string_view kPolicyManifestSha256 =
+    "cc7ca5a17babb43e145678879607b2804bdbfc66665f994b73f8649c86e420d9";
+constexpr std::string_view kPolicySchema =
+    "loom-process-witness-effect-policy-plan-v7-freeze-v1";
+constexpr std::string_view kPolicyBundleSha256 =
+    "9a774718bf67f1ef6b6af9b4758a89239d9fa38e4abb981b8452f5aac90828d2";
+constexpr std::string_view kPolicyRootPath =
+    "/loom/effect-policy-v7.freeze.v1";
+constexpr std::string_view kPolicyFilename = "effect-policy-v7.freeze.v1";
+constexpr std::string_view kSelftestPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V7_SELFTEST PASS";
+constexpr std::string_view kReadyPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V7_ROOT_READY PASS";
+constexpr std::string_view kVersionRootReceipt =
+    " systemd_mount=/run/systemd/incoming systemd_sys_mount=/sys"
+    " systemd_sys_ready_filesystem=sysfs systemd_sys_ready_read_only=true"
+    " var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP"
+    " principal_readable=false principal_enumeration=forbidden"
+    " empty_observer=ROOT_HOST mount_observer=ROOT_HOST"
+    " extinction_observer=ROOT_HOST";
+#elif LOOM_EFFECT_POLICY_VERSION == 6
 constexpr std::string_view kPolicyManifestSha256 =
     "6ec33f3554236e7ccf73f5b5c16a15ba8006705b83d9d62265a2cd8f94437d66";
 constexpr std::string_view kPolicySchema =
@@ -224,7 +246,35 @@ std::string load_policy_manifest(const std::string& path) {
   require_line(contents, "schema=" + std::string(kPolicySchema));
   require_line(contents,
                "bundle_sha256=" + std::string(kPolicyBundleSha256));
-#if LOOM_EFFECT_POLICY_VERSION == 6
+#if LOOM_EFFECT_POLICY_VERSION == 7
+  for (const std::string_view line : {
+           "systemd_mount_path=/run/systemd/incoming",
+           "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
+           "principal_observer_exists=true",
+           "principal_observer_root_owned=true",
+           "principal_observer_writable=false",
+           "principal_observer_readable=false",
+           "principal_observer_enumeration=forbidden",
+           "empty_observer=ROOT_HOST",
+           "mount_observer=ROOT_HOST",
+           "extinction_observer=ROOT_HOST",
+           "systemd_sys_mount_path=/sys",
+           "systemd_sys_ready_filesystem=sysfs",
+           "systemd_sys_ready_source=sysfs",
+           "systemd_sys_ready_read_only=true",
+           "systemd_var_tmp_path=/var/tmp",
+           "systemd_var_tmp_ready_source=IMMUTABLE_ROOT_TMP",
+           "systemd_var_tmp_ready_read_only=true",
+           "bootstrap_treatment_code=0",
+           "bootstrap_missing_incoming_code=226",
+           "bootstrap_missing_sys_code=226",
+           "bootstrap_missing_var_tmp_code=226",
+           "v6_materializable=false",
+           "v7_required_for_native=true",
+       }) {
+    require_line(contents, line);
+  }
+#elif LOOM_EFFECT_POLICY_VERSION == 6
   for (const std::string_view line : {
            "systemd_mount_path=/run/systemd/incoming",
            "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
@@ -314,6 +364,21 @@ void require_directory(const std::string& path, bool empty) {
   }
 }
 
+#if LOOM_EFFECT_POLICY_VERSION == 7
+void require_opaque_directory(const std::string& path) {
+  errno = 0;
+  DIR* directory = opendir(path.c_str());
+  if (directory != nullptr) {
+    closedir(directory);
+    throw Error("opaque root directory became principal-readable: " + path);
+  }
+  if (errno != EACCES) {
+    throw Error("opaque root directory refusal drifted: " + path +
+                " errno=" + std::to_string(errno));
+  }
+}
+#endif
+
 std::string require_root_regular(const std::string& path, bool executable,
                                  std::string_view expected_digest) {
   struct stat info {};
@@ -372,8 +437,13 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
 #if LOOM_EFFECT_POLICY_VERSION >= 4
   require_directory("/run", false);
   require_directory("/run/systemd", false);
+#if LOOM_EFFECT_POLICY_VERSION == 7
+  require_directory("/run/systemd/incoming", false);
+  require_opaque_directory("/run/systemd/incoming");
+#else
   require_directory("/run/systemd/incoming", true);
-#if LOOM_EFFECT_POLICY_VERSION == 6
+#endif
+#if LOOM_EFFECT_POLICY_VERSION >= 6
   require_directory("/sys", false);
   require_directory("/var", false);
   require_directory("/var/tmp", true);
