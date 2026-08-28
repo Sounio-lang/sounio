@@ -10884,6 +10884,74 @@ let resident_authority_probe_command cli =
           (if refused then "true" else "false")
           (if Loom_resident.is_poisoned resident then "true" else "false")
           (if reuse_refused () then "true" else "false"))
+      else if mode = "benchmark" then (
+        let iterations =
+          try
+            optional cli "--iterations" |> Option.value ~default:"20"
+            |> int_of_string
+          with _ -> failf "--iterations must be an integer"
+        in
+        if iterations < 2 || iterations > 200 then
+          failf "--iterations must be between 2 and 200";
+        ignore (Loom_resident.decide resident ~deadline_ms frame);
+        let resident_latencies = ref [] in
+        let resident_started = Loom_resident.now_us () in
+        for _index = 1 to iterations do
+          let decision = Loom_resident.decide resident ~deadline_ms frame in
+          if decision.code <> 0 then
+            failf "resident benchmark decision changed: %d" decision.code;
+          resident_latencies := decision.latency_us :: !resident_latencies
+        done;
+        let resident_audited_total =
+          Int64.sub (Loom_resident.now_us ()) resident_started
+        in
+        let resident_transport_total =
+          List.fold_left Int64.add 0L !resident_latencies
+        in
+        let single_policy = Loom_membrane.load_policy root in
+        ignore
+          (Loom_membrane.invoke_decision ~root ~policy:single_policy ~environment
+             (frame ^ "\n"));
+        let single_latencies = ref [] in
+        let single_started = Loom_resident.now_us () in
+        for _index = 1 to iterations do
+          let started = Loom_resident.now_us () in
+          let code, _ =
+            Loom_membrane.invoke_decision ~root ~policy:single_policy
+              ~environment (frame ^ "\n")
+          in
+          if code <> 0 then
+            failf "single-shot benchmark decision changed: %d" code;
+          single_latencies :=
+            Int64.sub (Loom_resident.now_us ()) started :: !single_latencies
+        done;
+        let single_total = Int64.sub (Loom_resident.now_us ()) single_started in
+        let percentile values numerator denominator =
+          let sorted = List.sort Int64.compare values in
+          let length = List.length sorted in
+          let index = max 0 (min (length - 1) (((length * numerator) + denominator - 1) / denominator - 1)) in
+          List.nth sorted index
+        in
+        let resident_p50 = percentile !resident_latencies 50 100 in
+        let resident_p95 = percentile !resident_latencies 95 100 in
+        let single_p50 = percentile !single_latencies 50 100 in
+        let single_p95 = percentile !single_latencies 95 100 in
+        let speedup_milli =
+          if resident_transport_total <= 0L then 0L
+          else
+            Int64.div (Int64.mul single_total 1000L)
+              resident_transport_total
+        in
+        let audit_overhead =
+          Int64.sub resident_audited_total resident_transport_total
+        in
+        let passed = resident_transport_total < single_total in
+        Printf.printf
+          "LOOM_RESIDENT_OCAML_PROBE mode=benchmark semantic_authority=Sounio iterations=%d resident_transport_total_us=%Ld resident_audited_total_us=%Ld resident_audit_overhead_us=%Ld resident_p50_us=%Ld resident_p95_us=%Ld single_transport_total_us=%Ld single_p50_us=%Ld single_p95_us=%Ld speedup_milli=%Ld process_identity=stable decisions=parity receipt_policy=fsync-per-event performance_gate=%s\n%!"
+          iterations resident_transport_total resident_audited_total audit_overhead
+          resident_p50 resident_p95 single_total single_p50 single_p95
+          speedup_milli (if passed then "PASS" else "FAIL");
+        if not passed then failf "resident-performance-gate-failed")
       else failf "unknown resident-authority probe mode: %s" mode);
   0
 

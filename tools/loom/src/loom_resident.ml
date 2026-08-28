@@ -541,6 +541,10 @@ let decide resident ~deadline_ms frame =
   if resident.outstanding then (
     poison resident "concurrent-request";
     failf "resident-request-already-outstanding");
+  let frame =
+    if ends_with frame "\n" then String.sub frame 0 (String.length frame - 1)
+    else frame
+  in
   let deadline_us = deadline_after_ms deadline_ms in
   let previous_sequence = resident.sequence in
   let sequence = previous_sequence + 1 in
@@ -705,3 +709,4 @@ let is_poisoned resident = resident.poisoned
 let generation resident = resident.generation_sha256
 let pid resident = resident.pid
 let birth resident = resident.birth_identity
+let now_us () = monotonic_us ()
