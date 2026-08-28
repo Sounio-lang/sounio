@@ -110,6 +110,7 @@ cleanup() {
     rm -rf "$HOST_RELEASE"
     sync -f "$(dirname "$HOST_RELEASE")" 2>/dev/null || true
   fi
+  find "$WORK" -type d -exec chmod u+rwx {} + 2>/dev/null || true
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -182,8 +183,8 @@ set -e
 [[ "$(stable_identity /usr/libexec/sounio/loom-kernel-principal-broker)" == "$stable_broker_before" ]] || fail 'production broker target moved during experiment'
 
 created_release=false
+cleanup
 trap - EXIT
-rm -rf "$WORK"
 printf '%s\n' "$host_output"
 printf 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS archive_sha256=%s release_id=%s release_manifest_sha256=%s experimental_release=%s production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation semantic_authority=Sounio controller_language=OCaml material_role=MATERIAL_PARITY material_grant=true material_execution=false launch_open=false parity_open=false claim_ready=false\n' \
   "$EXPECTED_SHA256" "$RELEASE_ID" "$RELEASE_MANIFEST_SHA256" "$HOST_RELEASE"
