@@ -15,6 +15,7 @@ CAPSULE_STATE="$TEST_ROOT/policyless-state"
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
 export SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
+export SOUNIO_LOOM_EXECUTION_OUTCOME_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-outcome-runtime"
 export SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-custody-transfer-runtime"
 export SOUNIO_LOOM_LANE_HEALTH_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-runtime"
 export SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-parity-runtime"
@@ -85,6 +86,7 @@ cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
@@ -105,6 +107,8 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
+  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v1" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
@@ -144,6 +148,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_execution_outcome_authority.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$REPO/stdlib/coordination/"
@@ -235,6 +241,7 @@ grep -q '^source_state=clean$' "$first_manifest" || \
 coord_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" | awk '{print $1}')"
 loom_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime" | awk '{print $1}')"
 loom_custody_transfer_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}')"
+loom_execution_outcome_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-execution-outcome-runtime" | awk '{print $1}')"
 grep -qx "coord_runtime_sha256=$coord_runtime_sha" "$first_manifest" || \
   fail 'runtime manifest did not pin the coordination runtime executable'
 grep -qx "loom_runtime_sha256=$loom_runtime_sha" "$first_manifest" || \
@@ -242,12 +249,15 @@ grep -qx "loom_runtime_sha256=$loom_runtime_sha" "$first_manifest" || \
 grep -qx "loom_custody_transfer_runtime_sha256=$loom_custody_transfer_sha" \
   "$first_manifest" || \
   fail 'runtime manifest did not pin the frozen Sounio custody-transfer executable'
+grep -qx "loom_execution_outcome_runtime_sha256=$loom_execution_outcome_sha" \
+  "$first_manifest" || \
+  fail 'runtime manifest did not pin the frozen Sounio execution-outcome executable'
 grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$first_manifest" || \
   fail 'runtime manifest omitted native hook binary attestation'
 
 active_before_tamper="$(readlink -f "$RUNTIME_ROOT/current")"
 for tamper_binary in sounio-coord-runtime sounio-loom-runtime \
-  sounio-loom-custody-transfer-runtime; do
+  sounio-loom-custody-transfer-runtime sounio-loom-execution-outcome-runtime; do
   binary="$RUNTIME_ROOT/versions/$first_id/bin/$tamper_binary"
   saved_binary="$TEST_ROOT/$tamper_binary.saved"
   cp -p "$binary" "$saved_binary"
@@ -263,6 +273,54 @@ for tamper_binary in sounio-coord-runtime sounio-loom-runtime \
     fail 'failed binary activation changed the current runtime link'
   cp -p "$saved_binary" "$binary"
 done
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/execution-outcome-semantics-drift"
+sed -i 's/^runtime_id=.*/runtime_id=execution-outcome-semantics-drift/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-semantics-drift/manifest"
+sed -i 's/^loom_execution_outcome_semantics_sha256=.*/loom_execution_outcome_semantics_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-semantics-drift/manifest"
+set +e
+outcome_semantics_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+  --runtime-dir "$RUNTIME_ROOT" --activate execution-outcome-semantics-drift 2>&1)"
+outcome_semantics_rc=$?
+set -e
+[[ "$outcome_semantics_rc" -ne 0 && \
+  "$outcome_semantics_output" == *'not bound to frozen Sounio semantics'* ]] || \
+  fail "activation accepted execution-outcome semantics drift: rc=$outcome_semantics_rc output=$outcome_semantics_output"
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/execution-outcome-manifest-drift"
+sed -i 's/^runtime_id=.*/runtime_id=execution-outcome-manifest-drift/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-manifest-drift/manifest"
+sed -i 's/^loom_execution_outcome_manifest_sha256=.*/loom_execution_outcome_manifest_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-manifest-drift/manifest"
+set +e
+outcome_manifest_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+  --runtime-dir "$RUNTIME_ROOT" --activate execution-outcome-manifest-drift 2>&1)"
+outcome_manifest_rc=$?
+set -e
+[[ "$outcome_manifest_rc" -ne 0 && \
+  "$outcome_manifest_output" == *'unknown freeze manifest'* ]] || \
+  fail "activation accepted execution-outcome manifest drift: rc=$outcome_manifest_rc output=$outcome_manifest_output"
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/execution-outcome-custody-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=execution-outcome-custody-omitted/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-custody-omitted/manifest"
+sed -i '/^capability=loom-transactional-custody-transfer-v1$/d' \
+  "$RUNTIME_ROOT/versions/execution-outcome-custody-omitted/manifest"
+set +e
+outcome_custody_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+  --runtime-dir "$RUNTIME_ROOT" --activate execution-outcome-custody-omitted 2>&1)"
+outcome_custody_rc=$?
+set -e
+[[ "$outcome_custody_rc" -ne 0 && \
+  "$outcome_custody_output" == *'without transactional custody'* ]] || \
+  fail "activation accepted execution outcome without custody: rc=$outcome_custody_rc output=$outcome_custody_output"
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] || \
+  fail 'failed execution-outcome activation changed the current runtime link'
+
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
   grep -qx 'stdlib/coordination/loom_witness_epoch_handoff.sio' || \
   fail 'runtime source SHA omits the frame-9015 source'
@@ -272,6 +330,9 @@ git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
   grep -qx 'stdlib/coordination/loom_custody_transfer.sio' || \
   fail 'runtime source SHA omits the frame-9040 source'
+git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
+  grep -qx 'stdlib/coordination/loom_execution_outcome_authority.sio' || \
+  fail 'runtime source SHA omits the frame-9022 source'
 
 printf '\n# dirty runtime source control\n' >> \
   "$REPO/stdlib/coordination/loom_witness_epoch_handoff.sio"
@@ -297,6 +358,14 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
 grep -q '^loom_custody_transfer_semantics_sha256=5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c$' \
   "$first_manifest" || \
   fail 'installed runtime omitted frozen custody-transfer semantics'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-execution-outcome-runtime" ]] || \
+  fail 'installed runtime omitted the frozen Sounio execution-outcome authority'
+grep -q '^loom_execution_outcome_semantics_sha256=c98c13d30d66ba2fb3d0fb34d75bd21b14b353bc88fd80acf7dbb385cb9fa914$' \
+  "$first_manifest" || \
+  fail 'installed runtime omitted frozen execution-outcome semantics'
+grep -q '^loom_execution_outcome_manifest_sha256=f5e63a2fd6a946cea1a4cb57013ae0cfa1772c42c3cc52e42d300dfb7b45e16e$' \
+  "$first_manifest" || \
+  fail 'installed runtime omitted the execution-outcome freeze identity'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-runtime" && \
   -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-parity-runtime" ]] || \
   fail 'installed runtime omitted the frozen Sounio lane-health executables'
@@ -441,6 +510,7 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-fleet-custody-catalog-v2 loom-fleet-custody-catalog-v3 \
   loom-conflict-free-active-adoption-v1 \
   loom-coordination-authority-binding-v1 \
+  loom-durable-execution-outcome-v1 \
   fleet-linear-capability-v1 \
   fleet-home-isolation-v1 \
   fleet-presentation-follow-v1 \
@@ -465,7 +535,7 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.27.38$' <<< "$output" || \
+grep -q '^runtime_version=2026.08.27.39$' <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
 
 mkdir -p "$POLICYLESS/bin"
@@ -887,6 +957,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
@@ -907,6 +978,8 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$ALT/tools/loom/"
+cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
+  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v1" "$ALT/tools/loom/"
 cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
@@ -946,6 +1019,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
+  "$ALT/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_execution_outcome_authority.sio" \
   "$ALT/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$ALT/stdlib/coordination/"
@@ -1083,6 +1158,7 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
@@ -1103,6 +1179,8 @@ cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
   "$ROOT_DIR/tools/loom/language_authority.freeze.v1" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
   "$ROOT_DIR/tools/loom/custody_transfer.freeze.v1" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
+  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v1" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
   "$ROOT_DIR/tools/loom/lane_health.freeze.v1" \
@@ -1123,6 +1201,7 @@ cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
   "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
   "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
@@ -1141,6 +1220,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
 cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_execution_outcome_authority.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$BAD/stdlib/coordination/"

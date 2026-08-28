@@ -4,7 +4,7 @@ exception Loom_error of string
 
 let protocol_version = 1
 let guardian_protocol_version = 1
-let runtime_version = "2026.08.27.38"
+let runtime_version = "2026.08.27.39"
 let max_control_bytes = 16 * 1024
 let max_kernel_control_bytes = 2 * 1024 * 1024
 let max_snapshot_bytes = 1024 * 1024
@@ -1216,7 +1216,8 @@ let verify_events path events =
         | "OBSERVER_DETACHED" | "KERNEL_GENERATION" | "PEER_REFUSED"
         | "EXEC_GRANT_ISSUED" | "EXEC_GRANT_EXPIRED"
         | "EXEC_GRANT_REFUSED" | "EXEC_GRANT_CONSUMED"
-        | "EXEC_CONSUME_REFUSED" ), Active -> ()
+        | "EXEC_CONSUME_REFUSED" | "EXEC_OUTCOME_RECORDED"
+        | "EXEC_OUTCOME_REFUSED" | "EXEC_OUTCOME_INCOMPLETE" ), Active -> ()
       | _, Initial -> failf "semantic:event-before-session-start seq=%d" event.seq
       | _, Exited -> failf "semantic:event-after-session-exit seq=%d" event.seq
       | _ -> failf "semantic:unknown-event kind=%s seq=%d" event.kind event.seq);
@@ -2019,6 +2020,15 @@ type exec_grant = {
   exec_generation : string;
 }
 
+type exec_outcome_obligation = {
+  outcome_payload_sha256 : string;
+  outcome_cwd : string;
+  outcome_generation : string;
+  outcome_peer_pid : int;
+  outcome_peer_start : string;
+  outcome_consumed_us : int64;
+}
+
 type kernel = {
   paths : paths;
   agent : string;
@@ -2048,6 +2058,7 @@ type kernel = {
   journal : journal;
   clients : (file_descr, client) Hashtbl.t;
   exec_grants : (string, exec_grant) Hashtbl.t;
+  exec_outcomes : (string, exec_outcome_obligation) Hashtbl.t;
   mutable next_client : int;
   mutable input_holder : file_descr option;
   mutable output_cursor : int;
@@ -2130,6 +2141,7 @@ let status_fields kernel =
     ("instance_id", kernel.instance_id);
     ("kernel_generation", kernel.kernel_generation);
     ("pending_exec_grants", string_of_int (Hashtbl.length kernel.exec_grants));
+    ("pending_exec_outcomes", string_of_int (Hashtbl.length kernel.exec_outcomes));
     ("daemon_pid", string_of_int (Unix.getpid ()));
     ("daemon_pid_start", kernel.daemon_pid_start);
     ("harness_pid", string_of_int kernel.harness_pid);
@@ -2215,7 +2227,7 @@ let authenticate_exec_peer kernel client operation handle =
   if operation = "issue" then (
     if not (List.mem "agent-hook" arguments) then
       failf "exec-issuer-command-mismatch")
-  else if operation = "consume" then (
+  else if operation = "consume" || operation = "outcome" then (
     if not (List.mem "exec-capability" arguments) then
       failf "exec-consumer-command-mismatch";
     match handle with
@@ -2245,6 +2257,42 @@ let expire_exec_grants kernel =
         (append_event kernel.journal "EXEC_GRANT_EXPIRED"
            (sha256 handle)))
     expired
+
+let materialize_exec_outcome_incomplete kernel handle obligation reason =
+  ignore
+    (append_event kernel.journal "EXEC_OUTCOME_INCOMPLETE"
+       (String.concat ":"
+          [ sha256 handle; obligation.outcome_payload_sha256;
+            obligation.outcome_generation;
+            Int64.to_string obligation.outcome_consumed_us; reason ]));
+  Hashtbl.remove kernel.exec_outcomes handle
+
+let materialize_incomplete_exec_outcomes kernel reason =
+  let pending =
+    Hashtbl.fold
+      (fun handle obligation values -> (handle, obligation) :: values)
+      kernel.exec_outcomes []
+  in
+  List.iter
+    (fun (handle, obligation) ->
+      materialize_exec_outcome_incomplete kernel handle obligation reason)
+    pending
+
+let materialize_orphaned_exec_outcomes kernel =
+  let orphaned =
+    Hashtbl.fold
+      (fun handle obligation values ->
+        let alive =
+          try process_start obligation.outcome_peer_pid = obligation.outcome_peer_start
+          with _ -> false
+        in
+        if alive then values else (handle, obligation) :: values)
+      kernel.exec_outcomes []
+  in
+  List.iter
+    (fun (handle, obligation) ->
+      materialize_exec_outcome_incomplete kernel handle obligation "broker-exited")
+    orphaned
 
 let handle_request kernel client line =
   let refuse code =
@@ -2332,6 +2380,13 @@ let handle_request kernel client line =
               failf "exec-grant-expired");
             if peer_cwd <> grant.exec_cwd then failf "exec-grant-cwd-mismatch";
             Hashtbl.remove kernel.exec_grants handle;
+            Hashtbl.replace kernel.exec_outcomes handle
+              { outcome_payload_sha256 = grant.exec_payload_sha256;
+                outcome_cwd = grant.exec_cwd;
+                outcome_generation = kernel.kernel_generation;
+                outcome_peer_pid = client.peer_pid;
+                outcome_peer_start = client.peer_start;
+                outcome_consumed_us = current_time_us () };
             ignore
               (append_event kernel.journal "EXEC_GRANT_CONSUMED"
                  (String.concat ":"
@@ -2355,6 +2410,61 @@ let handle_request kernel client line =
               in
               ignore
                 (append_event kernel.journal "EXEC_CONSUME_REFUSED"
+                   (sha256 reason));
+              refuse reason)
+      | "EXEC_OUTCOME",
+        [ instance; generation; handle; receipt_sha256; receipt_hex ] -> (
+          try
+            if instance <> kernel.instance_id then failf "exec-instance-mismatch";
+            if generation <> kernel.kernel_generation then
+              failf "exec-kernel-generation-mismatch";
+            if not (valid_exec_handle handle) then failf "exec-handle-invalid";
+            if not (valid_sha256 receipt_sha256) then
+              failf "exec-outcome-receipt-digest-invalid";
+            let peer_cwd =
+              authenticate_exec_peer kernel client "outcome" (Some handle)
+            in
+            let obligation =
+              match Hashtbl.find_opt kernel.exec_outcomes handle with
+              | Some obligation -> obligation
+              | None -> failf "exec-outcome-missing-or-replayed"
+            in
+            if obligation.outcome_generation <> kernel.kernel_generation then
+              failf "exec-outcome-generation-mismatch";
+            if obligation.outcome_peer_pid <> client.peer_pid
+               || obligation.outcome_peer_start <> client.peer_start
+            then failf "exec-outcome-broker-mismatch";
+            if peer_cwd <> obligation.outcome_cwd then
+              failf "exec-outcome-cwd-mismatch";
+            let receipt = string_of_hex receipt_hex in
+            if receipt = "" || String.length receipt > max_outcome_receipt_bytes
+            then failf "exec-outcome-receipt-size-refused";
+            if sha256 receipt <> receipt_sha256 then
+              failf "exec-outcome-receipt-digest-mismatch";
+            ignore
+              (append_event kernel.journal "EXEC_OUTCOME_RECORDED"
+                 (String.concat ":"
+                    [ sha256 handle; obligation.outcome_payload_sha256;
+                      receipt_sha256; kernel.kernel_generation;
+                      string_of_int client.peer_pid ]));
+            Hashtbl.remove kernel.exec_outcomes handle;
+            queue client
+              (control_line
+                 [ "OK"; "EXEC_OUTCOME_RECORDED"; kernel.instance_id;
+                   kernel.kernel_generation; receipt_sha256 ])
+          with
+          | Loom_error error ->
+              ignore
+                (append_event kernel.journal "EXEC_OUTCOME_REFUSED"
+                   (sha256 error));
+              refuse error
+          | Unix_error (error, function_name, argument) ->
+              let reason =
+                Printf.sprintf "%s:%s(%s)" (Unix.error_message error)
+                  function_name argument
+              in
+              ignore
+                (append_event kernel.journal "EXEC_OUTCOME_REFUSED"
                    (sha256 reason));
               refuse reason)
       | "SNAPSHOT", [ cursor; limit ] -> (
@@ -2756,6 +2866,7 @@ let run_kernel kernel =
   Sys.set_signal Sys.sigint (Sys.Signal_handle signal_stop);
   while not kernel.stopping && kernel.harness_exit = None do
     expire_exec_grants kernel;
+    materialize_orphaned_exec_outcomes kernel;
     reap_coordination kernel;
     if Sys.getenv_opt "SOUNIO_LOOM_COORD_AUTO" <> Some "0"
        && Unix.gettimeofday () >= kernel.next_coord_refresh
@@ -2785,6 +2896,8 @@ let run_kernel kernel =
         | None -> ())
       writable
   done;
+  materialize_incomplete_exec_outcomes kernel
+    (if kernel.stopping then "kernel-stopping" else "harness-exited");
   if kernel.stopping then stop_guardian kernel;
   let clients = Hashtbl.fold (fun fd _ values -> fd :: values) kernel.clients [] in
   List.iter (close_client kernel) clients;
@@ -2917,6 +3030,7 @@ let build_kernel paths agent lane session_id cwd instance_id output_path
     journal;
     clients = Hashtbl.create 16;
     exec_grants = Hashtbl.create 16;
+    exec_outcomes = Hashtbl.create 16;
     next_client = 0;
     input_holder = None;
     output_cursor = ending;
@@ -2966,6 +3080,23 @@ let serve_session paths agent lane session_id cwd command =
   close_kernel kernel lock;
   code
 
+let unclosed_exec_outcome_digests events =
+  let pending = Hashtbl.create 16 in
+  let handle_digest event =
+    match split_on ':' (string_of_hex event.payload_hex) with
+    | digest :: _ when valid_sha256 digest -> Some digest
+    | _ -> None
+  in
+  List.iter
+    (fun event ->
+      match event.kind, handle_digest event with
+      | "EXEC_GRANT_CONSUMED", Some digest -> Hashtbl.replace pending digest ()
+      | ("EXEC_OUTCOME_RECORDED" | "EXEC_OUTCOME_INCOMPLETE"), Some digest ->
+          Hashtbl.remove pending digest
+      | _ -> ())
+    events;
+  Hashtbl.fold (fun digest () values -> digest :: values) pending []
+
 let recover_session paths =
   let descriptor = parse_key_values paths.descriptor_path in
   let agent = table_value descriptor "agent" in
@@ -2988,6 +3119,13 @@ let recover_session paths =
   let guardian_values = guardian_status_request paths token in
   if table_value guardian_values "instance_id" <> instance_id then
     failf "guardian identity does not match the semantic journal";
+  List.iter
+    (fun handle_digest ->
+      ignore
+        (append_event journal "EXEC_OUTCOME_INCOMPLETE"
+           (String.concat ":"
+              [ handle_digest; sha256 "kernel-recovery"; "recovery" ])))
+    (unclosed_exec_outcome_digests events);
   ignore
     (append_event journal "KERNEL_RECOVERED"
        (Printf.sprintf "%s:%s:%d:%s" instance_id

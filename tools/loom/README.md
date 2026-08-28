@@ -811,6 +811,21 @@ does not close, acknowledge, or lose unfinished work. A new
 `obligation-reconcile` repairs the bounded crash window between publishing a
 request message and opening its obligation.
 
+## Durable execution outcomes
+
+Shared runtime `2026.08.27.39` adds frozen Sounio action `9022` and the
+`loom-durable-execution-outcome-v1` capability. Consuming an in-memory execution
+grant now opens a kernel-owned outcome obligation. The OCaml broker supervises
+the measured leaf, records exit or signal, asks Sounio to admit the complete
+receipt, and closes the obligation through an authenticated `EXEC_OUTCOME`
+transition. A crash before that commit replays as explicit `INCOMPLETE`; it is
+never inferred as success. Receipt, semantics, manifest, runtime, grant,
+generation, command, environment, executable, toolchain, hardware, and both
+pre-execution Sounio decisions are hash-bound. See
+`tools/loom/EXECUTION_OUTCOME_V1.md` and
+`tools/loom/EXECUTION_CUSTODY_V2.md` for the proof boundary. Arbitrary Bash/Exec
+attachment remains disabled until general shell closure is classifiable.
+
 The Pod-external lane guardian uses the separate `sounio-fleet` authority
 boundary. `sounio-fleet watch --apply-recovery` is start-only: it may consume a
 bounded recovery budget to restore an enabled missing generation, but it holds

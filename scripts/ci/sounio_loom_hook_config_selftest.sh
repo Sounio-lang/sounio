@@ -9,6 +9,25 @@ CLAUDE_HOOKS="$ROOT_DIR/.claude/settings.json"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook.config.XXXXXX")"
 
 cleanup() {
+  local supervisor_state="$TEST_ROOT/coord/obligation-supervisor.state"
+  local supervisor_pid=""
+  local supervisor_argv=""
+
+  if [[ -r "$supervisor_state" ]]; then
+    supervisor_pid="$(sed -n 's/^pid=//p' "$supervisor_state" | head -1)"
+  fi
+  if [[ "$supervisor_pid" =~ ^[1-9][0-9]*$ && -r "/proc/$supervisor_pid/cmdline" ]]; then
+    supervisor_argv="$(tr '\0' '\n' < "/proc/$supervisor_pid/cmdline")"
+    if grep -Fxq 'obligation-supervise' <<< "$supervisor_argv" &&
+       grep -Fxq "$TEST_ROOT/coord" <<< "$supervisor_argv"; then
+      kill "$supervisor_pid"
+      for _ in {1..100}; do
+        [[ ! -e "/proc/$supervisor_pid" ]] && break
+        sleep 0.01
+      done
+      [[ ! -e "/proc/$supervisor_pid" ]] || kill -KILL "$supervisor_pid"
+    fi
+  fi
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -93,7 +112,7 @@ case "$runtime_selection" in
   shared|local) ;;
   *) fail "hook launcher selected an unknown runtime source: ${runtime_selection:-missing}" ;;
 esac
-grep -Fq 'runtime_version=2026.08.27.38' <<< "$runtime_info" ||
+grep -Fq 'runtime_version=2026.08.27.39' <<< "$runtime_info" ||
   fail "hook launcher selected the wrong runtime version"
 grep -Fq 'language=OCaml' <<< "$runtime_info" ||
   fail "hook launcher did not select the native OCaml runtime"
@@ -109,4 +128,4 @@ if validate_no_legacy_bridge "$TEST_ROOT/codex-sabotaged.json"; then
 fi
 
 printf '%s\n' \
-  "sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 launcher_runtime=$runtime_selection:2026.08.27.38 hook_runtime=git-common-dir/current authority=runtime-capsule local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-same-uid-custody-and-outcome sabotage=refused"
+  "sounio-loom-hook-config-selftest: PASS codex_hooks=5 claude_hooks=6 launcher_runtime=$runtime_selection:2026.08.27.39 hook_runtime=git-common-dir/current authority=runtime-capsule local_roundtrip=codex+claude production_wake_eligible=no bridge=OCaml semantic_authority=Sounio python=absent rust=absent exec_policy=frozen-v2 exec_attachment=blocked-general-bash-closure sabotage=refused"

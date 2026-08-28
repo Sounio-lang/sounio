@@ -325,7 +325,7 @@ unset LOOM_EXECUTION_TEST_TAG
 [[ -f "$EXECUTION_LOG" ]] || fail "execution decision log is missing"
 grep -Fq $'phase=ISSUE\tdecision=ALLOW\treason=audited-leaf' "$EXECUTION_LOG" ||
   fail "decision log omitted ISSUE ALLOW"
-grep -Fq $'phase=CONSUME\tdecision=ALLOW\treason=single-use-capability' \
+grep -Fq $'phase=CONSUME\tdecision=ALLOW\treason=single-use-test-capability' \
   "$EXECUTION_LOG" || fail "decision log omitted CONSUME ALLOW"
 grep -Fq $'phase=CONSUME\tdecision=DENY\treason=capability-missing-or-replayed' \
   "$EXECUTION_LOG" || fail "decision log omitted replay DENY"
@@ -351,4 +351,4 @@ run_hook "$session_end"
 [[ "$HOOK_RC" -eq 0 ]] || fail "SessionEnd failed: rc=$HOOK_RC output=$HOOK_OUTPUT"
 
 printf '%s\n' \
-  "sounio-loom-execution-capability-selftest: PASS language=Sounio broker=OCaml codex_pretool_output=accepted claude_pretool_output=accepted allowed_leaf=executed shell_bridge=roundtrip environment=bound replay=refused python=refused rust=refused aliases=refused shebangs=refused env_forwarding=refused wrappers=refused dynamic=refused missing=refused closure=refused commit=refused startup_injection=refused loader_injection=refused policy_missing=refused policy_unreadable=refused+logged policy_tamper=refused runtime_tamper=refused record_tamper=refused expiry=refused cwd_drift=refused broker_drift=refused environment_drift=refused prohibited_executed=false execution_result=pending same_uid_peer_isolation=false first_token_sha256=$(printf '%s' "$first_token" | sha256sum | cut -d' ' -f1)"
+  "sounio-loom-execution-capability-selftest: PASS language=Sounio broker=OCaml file_capability_fixture=explicit codex_pretool_output=accepted claude_pretool_output=accepted allowed_leaf=executed shell_bridge=roundtrip environment=bound replay=refused python=refused rust=refused aliases=refused shebangs=refused env_forwarding=refused wrappers=refused dynamic=refused missing=refused closure=refused commit=refused startup_injection=refused loader_injection=refused policy_missing=refused policy_unreadable=refused+logged policy_tamper=refused runtime_tamper=refused record_tamper=refused expiry=refused cwd_drift=refused broker_drift=refused environment_drift=refused prohibited_executed=false execution_result=pending same_uid_peer_isolation=false first_token_sha256=$(printf '%s' "$first_token" | sha256sum | cut -d' ' -f1)"

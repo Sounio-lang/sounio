@@ -1,12 +1,13 @@
 # Loom Execution Custody V2
 
-Status: `CUSTODY_PROOF_ACCEPTED_ATTACHMENT_REFUSED`
+Status: `CUSTODY_AND_OUTCOME_PROOF_ACCEPTED_ATTACHMENT_REFUSED`
 
 Loom Execution Custody V2 removes the execution capability from the shared
-filesystem. The Sounio execution authority still decides the command before
-issuance and again immediately before `execve`. OCaml realizes transport,
-process identity, one-shot custody, and crash revocation. Neither OCaml nor the
-kernel creates semantic results.
+filesystem. The Sounio execution authority decides the command before issuance
+and again immediately before supervised execution. A second frozen Sounio
+authority decides whether the observed outcome is complete enough to commit.
+OCaml realizes transport, process identity, one-shot custody, supervision, and
+crash revocation. Neither OCaml nor the kernel invents semantic results.
 
 ## Authority order
 
@@ -36,11 +37,16 @@ mechanical transport and structured-data parsing.
    The handle is a lookup key, not sufficient authority.
 6. `EXEC_CONSUME` authenticates the peer before looking up or burning the
    handle. An unauthorized probe therefore cannot consume or invalidate it.
-7. The kernel removes the grant before returning the capability body. A crash
-   after removal fails closed.
+7. The kernel removes the grant, creates a generation-bound pending outcome
+   obligation, and returns the capability body. A crash after removal can no
+   longer be mistaken for success.
 8. The broker remeasures the command and environment, reloads the frozen
-   policy, invokes Sounio `9021` again, and only then calls `execve` with the
-   bound environment.
+   policy, and invokes Sounio `9021` again.
+9. The broker forks the measured leaf with inherited standard streams, observes
+   exit or signal, writes the observation, and asks frozen Sounio action `9022`
+   whether the outcome is complete.
+10. Only an allowed 9022 decision can produce an outcome receipt and close the
+    kernel obligation through `EXEC_OUTCOME`. Duplicate closure is refused.
 
 The previous file-backed capability path remains available only when all three
 test controls are explicit: `SOUNIO_LOOM_HOOK_TEST_MODE=1`,
@@ -84,10 +90,10 @@ contending on presence state.
 ## Durable evidence
 
 The kernel journal records only event kinds and digests for grant issue,
-consume, refusal, expiry, and kernel generation. It does not store the command,
-capability body, or execution environment. The existing execution decision log
-retains the auditable policy fields and currently records
-`execution_result=pending`.
+consume, outcome commit, explicit incomplete recovery, refusal, expiry, and
+kernel generation. It does not store the command, capability body, or execution
+environment. The execution decision log binds the outcome and receipt digests;
+the self-contained receipt lives under the shared Git common directory.
 
 The adversarial gate proves:
 
@@ -102,6 +108,11 @@ The adversarial gate proves:
 - a foreign inherited agentd tuple is ignored rather than registered for the
   current lane;
 - kernel crash plus recovery revokes every pending grant;
+- normal exit, nonzero exit, and POSIX signal outcomes retain their exact
+  observed status;
+- outcome replay is refused;
+- a crash after receipt creation but before `EXEC_OUTCOME` becomes an explicit
+  `INCOMPLETE` event during recovery;
 - the digest-only journal remains verifiable across recovery.
 
 Run:
@@ -122,9 +133,10 @@ Ancestry or cgroup membership alone is insufficient.
 
 ## Attachment remains refused
 
-The repository must not yet enable global Exec/Bash interception. Custody is
-now proved, but a durable post-execution result receipt is still absent. The
-next acceptance gate must bind exit status or signal, elapsed time, result
-digest, grant digest, kernel generation, command receipt, toolchain, hardware,
-and the two Sounio decisions. Errors, timeout, missing policy, and missing
-outcome evidence must fail closed before `CLAIM_READY`.
+The repository must not yet enable global Exec/Bash interception. Custody and a
+durable post-execution result receipt are now proved for the audited leaf
+surface. General shell composition remains open: pipelines, substitutions,
+redirections, shell functions, and dynamically selected interpreters cannot be
+treated as one measured executable without a stronger closure protocol.
+Attaching the current hook to arbitrary Bash/Exec would overstate that proof.
+The exact outcome contract is in `tools/loom/EXECUTION_OUTCOME_V1.md`.

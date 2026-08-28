@@ -7,6 +7,9 @@ exception Authority_denied of int * string
 let pinned_manifest_sha256 =
   "d07823382125e668eb0d7afe5d52092de3c58ec5bef9655fa2f1f56a9c84d8c0"
 
+let pinned_outcome_manifest_sha256 =
+  "f5e63a2fd6a946cea1a4cb57013ae0cfa1772c42c3cc52e42d300dfb7b45e16e"
+
 let max_file_bytes = 8 * 1024 * 1024
 let max_command_bytes = 64 * 1024
 let max_arguments = 256
@@ -396,6 +399,16 @@ type policy = {
   semantics_u32 : string;
 }
 
+type outcome_policy = {
+  outcome_manifest_sha256 : string;
+  outcome_runtime : string;
+  outcome_runtime_sha256 : string;
+  outcome_source_sha256 : string;
+  outcome_source_u32 : string;
+  outcome_semantics_sha256 : string;
+  outcome_semantics_u32 : string;
+}
+
 let execution_authority_runtime root manifest =
   let explicit = Sys.getenv_opt "SOUNIO_LOOM_EXECUTION_AUTHORITY_RUNTIME" in
   let sibling =
@@ -451,6 +464,74 @@ let load_policy root =
     source_u32 = digest_u32_field manifest "source_sha256_u32";
     semantics_sha256;
     semantics_u32 = digest_u32_field manifest "semantics_sha256_u32" }
+
+let execution_outcome_runtime root manifest =
+  let explicit = Sys.getenv_opt "SOUNIO_LOOM_EXECUTION_OUTCOME_RUNTIME" in
+  let sibling =
+    Filename.concat (Filename.dirname (Unix.realpath Sys.executable_name))
+      "sounio-loom-execution-outcome-runtime"
+  in
+  let local =
+    Filename.concat root
+      "tools/loom/.runtime/sounio-loom-execution-outcome-runtime"
+  in
+  let selected =
+    match explicit with
+    | Some path when path <> "" -> path
+    | _ when Sys.file_exists sibling -> sibling
+    | _ -> local
+  in
+  if not (Sys.file_exists selected) then
+    failf "execution-outcome-runtime-missing:%s" selected;
+  let expected = required manifest "executable_sha256" in
+  if sha256_file selected <> expected then
+    failf "execution-outcome-runtime-hash-mismatch";
+  (Unix.realpath selected, expected)
+
+let load_outcome_policy root =
+  let manifest_path =
+    match getenv_test_only "SOUNIO_LOOM_EXECUTION_OUTCOME_MANIFEST" with
+    | Some path -> path
+    | None -> Filename.concat root "tools/loom/execution_outcome.freeze.v1"
+  in
+  if not (Sys.file_exists manifest_path) then
+    failf "execution-outcome-policy-missing";
+  let manifest_sha256 = sha256_file manifest_path in
+  if manifest_sha256 <> pinned_outcome_manifest_sha256 then
+    failf "execution-outcome-policy-hash-mismatch";
+  let manifest = parse_manifest manifest_path in
+  if required manifest "schema" <> "loom-execution-outcome-freeze-v1"
+     || required manifest "stage" <> "SEMANTICS_FROZEN"
+     || required manifest "producing_language" <> "Sounio"
+     || required manifest "language_role" <> "SEMANTIC_AUTHORITY"
+     || required manifest "action" <> "9022"
+     || required manifest "parity_open" <> "false"
+     || required manifest "claim_ready" <> "false"
+  then failf "execution-outcome-policy-state-invalid";
+  let source_path = Filename.concat root (required manifest "source_path") in
+  let entrypoint_path = Filename.concat root (required manifest "entrypoint_path") in
+  let parent_path =
+    Filename.concat root (required manifest "parent_execution_authority_manifest")
+  in
+  let source_sha256 = required manifest "source_sha256" in
+  let semantics_sha256 = required manifest "semantics_sha256" in
+  if sha256_file source_path <> source_sha256 then
+    failf "execution-outcome-source-hash-mismatch";
+  if sha256_file entrypoint_path <> required manifest "entrypoint_sha256" then
+    failf "execution-outcome-entrypoint-hash-mismatch";
+  if sha256 (read_file source_path ^ read_file entrypoint_path) <> semantics_sha256 then
+    failf "execution-outcome-semantics-hash-mismatch";
+  if sha256_file parent_path <> required manifest "parent_execution_authority_manifest_sha256"
+     || sha256_file parent_path <> pinned_manifest_sha256
+  then failf "execution-outcome-parent-authority-mismatch";
+  let runtime, runtime_sha256 = execution_outcome_runtime root manifest in
+  { outcome_manifest_sha256 = manifest_sha256;
+    outcome_runtime = runtime;
+    outcome_runtime_sha256 = runtime_sha256;
+    outcome_source_sha256 = source_sha256;
+    outcome_source_u32 = digest_u32_field manifest "source_sha256_u32";
+    outcome_semantics_sha256 = semantics_sha256;
+    outcome_semantics_u32 = digest_u32_field manifest "semantics_sha256_u32" }
 
 type quote_state = Plain | Single | Double
 
@@ -885,6 +966,38 @@ let invoke_authority root policy frame environment =
   then raise (Authority_denied (result.code, decision));
   decision
 
+let execution_outcome_frame policy ~outcome_kind ~exit_code ~signal
+    ~elapsed_us ~hardware_sha256 ~command_sha256 ~environment_sha256
+    ~executable_sha256 ~grant_sha256 ~generation_sha256
+    ~issue_decision_sha256 ~consume_decision_sha256 ~result_sha256 =
+  String.concat " "
+    [ "9022"; "3"; "1"; string_of_int outcome_kind;
+      string_of_int exit_code; string_of_int signal; Int64.to_string elapsed_us;
+      "1"; "1"; "1"; "1"; "1";
+      policy.outcome_source_u32; policy.outcome_semantics_u32;
+      policy.outcome_semantics_u32;
+      digest_u32_of_hex policy.outcome_runtime_sha256;
+      digest_u32_of_hex hardware_sha256;
+      digest_u32_of_hex command_sha256;
+      digest_u32_of_hex environment_sha256;
+      digest_u32_of_hex executable_sha256;
+      digest_u32_of_hex grant_sha256;
+      digest_u32_of_hex generation_sha256;
+      digest_u32_of_hex issue_decision_sha256;
+      digest_u32_of_hex consume_decision_sha256;
+      digest_u32_of_hex result_sha256 ] ^ "\n"
+
+let invoke_outcome_authority root policy frame environment =
+  let result =
+    run_process ~input:frame ~environment ~cwd:root policy.outcome_runtime []
+  in
+  let decision = trim result.output in
+  if result.code <> 0
+     || not (starts_with decision "SOUNIO_EXECUTION_OUTCOME_ALLOW code=0 ")
+     || not (ends_with decision "stage=SEMANTICS_FROZEN")
+  then raise (Authority_denied (result.code, decision));
+  decision
+
 let random_token () =
   let descriptor = Unix.openfile "/dev/urandom" [ O_RDONLY ] 0 in
   Fun.protect
@@ -915,6 +1028,193 @@ let fsync_directory path =
   let descriptor = Unix.openfile path [ O_RDONLY ] 0 in
   Fun.protect ~finally:(fun () -> Unix.close descriptor)
     (fun () -> Unix.fsync descriptor)
+
+let execution_outcome_directory root =
+  let authority =
+    require_secure_directory
+      (Filename.concat (git_common_dir root) "sounio-loom-execution-authority")
+  in
+  require_secure_directory (Filename.concat authority "outcomes")
+
+let write_durable_outcome_record directory label digest content =
+  let final_path = Filename.concat directory (label ^ "-" ^ digest ^ ".receipt") in
+  if Sys.file_exists final_path then (
+    if read_file final_path <> content then
+      failf "execution-outcome-record-collision:%s" final_path;
+    final_path)
+  else
+    let temporary =
+      Filename.concat directory
+        (Printf.sprintf ".%s.%d.%s" label (Unix.getpid ()) (random_token ()))
+    in
+    let descriptor = Unix.openfile temporary [ O_WRONLY; O_CREAT; O_EXCL ] 0o600 in
+    Fun.protect
+      ~finally:(fun () ->
+        (try Unix.close descriptor with _ -> ());
+        if Sys.file_exists temporary then (try Unix.unlink temporary with _ -> ()))
+      (fun () ->
+        Unix.fchmod descriptor 0o600;
+        write_all descriptor content;
+        Unix.fsync descriptor;
+        Unix.close descriptor;
+        Unix.rename temporary final_path;
+        fsync_directory directory);
+    final_path
+
+type observed_child_outcome = {
+  observed_kind : int;
+  observed_exit_code : int;
+  observed_signal : int;
+  observed_elapsed_us : int64;
+}
+
+let linux_signal_number signal =
+  let known =
+    [ Sys.sighup, 1; Sys.sigint, 2; Sys.sigquit, 3; Sys.sigill, 4;
+      Sys.sigtrap, 5; Sys.sigabrt, 6; Sys.sigbus, 7; Sys.sigfpe, 8;
+      Sys.sigkill, 9; Sys.sigusr1, 10; Sys.sigsegv, 11; Sys.sigusr2, 12;
+      Sys.sigpipe, 13; Sys.sigalrm, 14; Sys.sigterm, 15; Sys.sigchld, 17;
+      Sys.sigcont, 18; Sys.sigstop, 19; Sys.sigtstp, 20; Sys.sigttin, 21;
+      Sys.sigttou, 22; Sys.sigurg, 23; Sys.sigxcpu, 24; Sys.sigxfsz, 25;
+      Sys.sigvtalrm, 26; Sys.sigprof, 27; Sys.sigpoll, 29; Sys.sigsys, 31 ]
+  in
+  match List.find_opt (fun (portable, _) -> signal = portable) known with
+  | Some (_, native) -> native
+  | None when signal > 0 && signal <= 255 -> signal
+  | None -> failf "unsupported-portable-signal:%d" signal
+
+let supervise_child executable argv environment =
+  let forced_signal =
+    match getenv_test_only "SOUNIO_LOOM_EXECUTION_OUTCOME_CHILD_SIGNAL" with
+    | None -> None
+    | Some raw ->
+        let signal =
+          try int_of_string raw
+          with _ -> failf "invalid-execution-outcome-test-signal"
+        in
+        if signal < 1 || signal > 64 then
+          failf "invalid-execution-outcome-test-signal";
+        Some signal
+  in
+  let started_us = current_time_us () in
+  let pid =
+    match Unix.fork () with
+    | 0 ->
+        (try Unix.execve executable (Array.of_list argv) environment
+         with _ -> Unix._exit 127)
+    | pid -> pid
+  in
+  let forwarded = [ Sys.sigint; Sys.sigterm; Sys.sighup; Sys.sigquit ] in
+  let previous =
+    List.map
+      (fun signal ->
+        let behavior =
+          Sys.signal signal
+            (Sys.Signal_handle
+               (fun received -> try Unix.kill pid received with _ -> ()))
+        in
+        (signal, behavior))
+      forwarded
+  in
+  Option.iter (fun signal -> Unix.kill pid signal) forced_signal;
+  let restore () =
+    List.iter (fun (signal, behavior) -> Sys.set_signal signal behavior) previous
+  in
+  Fun.protect ~finally:restore (fun () ->
+      let rec wait () =
+        match Unix.waitpid [] pid with
+        | _, status -> status
+        | exception Unix_error (EINTR, _, _) -> wait ()
+      in
+      let status = wait () in
+      let elapsed = Int64.sub (current_time_us ()) started_us in
+      let elapsed = if elapsed < 0L then 0L else elapsed in
+      match status with
+      | WEXITED code ->
+          { observed_kind = 1; observed_exit_code = code; observed_signal = 0;
+            observed_elapsed_us = elapsed }
+      | WSIGNALED signal ->
+          { observed_kind = 2; observed_exit_code = 0;
+            observed_signal = linux_signal_number signal;
+            observed_elapsed_us = elapsed }
+      | WSTOPPED signal ->
+          { observed_kind = 3; observed_exit_code = 0;
+            observed_signal = linux_signal_number signal;
+            observed_elapsed_us = elapsed })
+
+type kernel_outcome_context = {
+  kernel_instance : string;
+  kernel_generation : string;
+  kernel_handle : string;
+  kernel_grant_sha256 : string;
+}
+
+let kernel_record_outcome context receipt receipt_sha256 =
+  match
+    kernel_request "EXEC_OUTCOME"
+      [ context.kernel_instance; context.kernel_generation;
+        context.kernel_handle; receipt_sha256; hex_encode receipt ]
+  with
+  | [ "OK"; "EXEC_OUTCOME_RECORDED"; actual_instance; actual_generation;
+      actual_receipt_sha256 ]
+    when actual_instance = context.kernel_instance
+         && actual_generation = context.kernel_generation
+         && actual_receipt_sha256 = receipt_sha256 -> ()
+  | _ -> failf "execution-kernel-invalid-outcome-response"
+
+let append_outcome_commit_log ~root ~context ~outcome ~result_sha256
+    ~receipt_sha256 ~decision_sha256 =
+  let path = decision_log_path root in
+  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let line =
+        String.concat "\t"
+          [ "schema=loom-execution-outcome-commit-v1";
+            "utc=" ^ utc_now ();
+            "decision=ALLOW";
+            "kernel_generation=" ^ context.kernel_generation;
+            "grant_sha256=" ^ context.kernel_grant_sha256;
+            "handle_sha256=" ^ sha256 context.kernel_handle;
+            "outcome_kind=" ^ string_of_int outcome.observed_kind;
+            "exit_code=" ^ string_of_int outcome.observed_exit_code;
+            "signal=" ^ string_of_int outcome.observed_signal;
+            "elapsed_us=" ^ Int64.to_string outcome.observed_elapsed_us;
+            "result_sha256=" ^ result_sha256;
+            "receipt_sha256=" ^ receipt_sha256;
+            "outcome_decision_sha256=" ^ decision_sha256;
+            "execution_result=recorded" ] ^ "\n"
+      in
+      write_all descriptor line;
+      Unix.fsync descriptor;
+      Unix.lockf descriptor F_ULOCK 0)
+
+let outcome_test_pause () =
+  match getenv_test_only "SOUNIO_LOOM_EXECUTION_OUTCOME_PAUSE_SECONDS" with
+  | None -> ()
+  | Some raw ->
+      let seconds =
+        try float_of_string raw
+        with _ -> failf "invalid-execution-outcome-test-pause"
+      in
+      if seconds < 0.0 || seconds > 10.0 then
+        failf "invalid-execution-outcome-test-pause";
+      Unix.sleepf seconds
+
+let outcome_test_replay context receipt receipt_sha256 =
+  match getenv_test_only "SOUNIO_LOOM_EXECUTION_OUTCOME_REPLAY" with
+  | None -> ()
+  | Some "1" ->
+      (try
+         kernel_record_outcome context receipt receipt_sha256;
+         failf "execution-outcome-replay-was-accepted"
+       with
+       | Error reason
+         when starts_with reason
+                "execution-kernel-refused:exec-outcome-missing-or-replayed" -> ())
+  | Some _ -> failf "invalid-execution-outcome-test-replay"
 
 let write_capability directory token body =
   let final_path = Filename.concat directory (token ^ ".cap") in
@@ -981,6 +1281,58 @@ let capability_body ~root ~cwd ~token ~policy ~measurement ~hardware_record
       "decision_hex=" ^ hex_encode decision ]
   in
   let body = String.concat "\n" (fixed @ arguments @ tail) ^ "\n" in
+  body ^ "record_sha256=" ^ sha256 body ^ "\n"
+
+let execution_observation_body ~root ~cwd ~token ~preexec_policy
+    ~outcome_policy ~measurement ~hardware_sha256 ~environment_sha256
+    ~context ~issue_decision ~consume_decision ~outcome =
+  String.concat "\n"
+    [ "schema=loom-execution-observation-v1";
+      "observed_utc=" ^ utc_now ();
+      "broker_pid=" ^ string_of_int (Unix.getpid ());
+      "root_hex=" ^ hex_encode root;
+      "cwd_hex=" ^ hex_encode cwd;
+      "token_sha256=" ^ sha256 token;
+      "preexec_manifest_sha256=" ^ preexec_policy.manifest_sha256;
+      "preexec_source_sha256=" ^ preexec_policy.source_sha256;
+      "preexec_semantics_sha256=" ^ preexec_policy.semantics_sha256;
+      "outcome_manifest_sha256=" ^ outcome_policy.outcome_manifest_sha256;
+      "outcome_source_sha256=" ^ outcome_policy.outcome_source_sha256;
+      "outcome_semantics_sha256=" ^ outcome_policy.outcome_semantics_sha256;
+      "outcome_runtime_sha256=" ^ outcome_policy.outcome_runtime_sha256;
+      "command_hex=" ^ hex_encode measurement.command;
+      "command_sha256=" ^ measurement.command_sha256;
+      "environment_sha256=" ^ environment_sha256;
+      "executable_hex=" ^ hex_encode measurement.executable;
+      "executable_sha256=" ^ measurement.executable_sha256;
+      "hardware_sha256=" ^ hardware_sha256;
+      "kernel_instance=" ^ context.kernel_instance;
+      "kernel_generation=" ^ context.kernel_generation;
+      "kernel_generation_sha256=" ^ sha256 context.kernel_generation;
+      "handle_sha256=" ^ sha256 context.kernel_handle;
+      "grant_sha256=" ^ context.kernel_grant_sha256;
+      "issue_decision_sha256=" ^ sha256 issue_decision;
+      "consume_decision_sha256=" ^ sha256 consume_decision;
+      "outcome_kind=" ^ string_of_int outcome.observed_kind;
+      "exit_code=" ^ string_of_int outcome.observed_exit_code;
+      "signal=" ^ string_of_int outcome.observed_signal;
+      "elapsed_us=" ^ Int64.to_string outcome.observed_elapsed_us ] ^ "\n"
+
+let execution_outcome_receipt observation result_sha256 outcome_policy
+    outcome_frame outcome_decision =
+  let body =
+    observation ^
+    String.concat "\n"
+      [ "result_sha256=" ^ result_sha256;
+        "outcome_frame_sha256=" ^ sha256 outcome_frame;
+        "outcome_authority_manifest_sha256=" ^
+          outcome_policy.outcome_manifest_sha256;
+        "outcome_authority_source_sha256=" ^ outcome_policy.outcome_source_sha256;
+        "outcome_authority_semantics_sha256=" ^
+          outcome_policy.outcome_semantics_sha256;
+        "outcome_authority_decision_hex=" ^ hex_encode outcome_decision;
+        "outcome_authority_decision_sha256=" ^ sha256 outcome_decision ] ^ "\n"
+  in
   body ^ "record_sha256=" ^ sha256 body ^ "\n"
 
 let shell_quote value =
@@ -1167,7 +1519,8 @@ let validate_token token =
     (function '0' .. '9' | 'a' .. 'f' -> () | _ -> failf "invalid-capability-token")
     token
 
-let execute_capability_content ~root ~token ~content ~burn ~cleanup =
+let execute_capability_content ~root ~token ~content ~burn ~cleanup
+    ~outcome_context =
   validate_token token;
   let root = Unix.realpath root in
   let command_hex = ref "" in
@@ -1290,17 +1643,86 @@ let execute_capability_content ~root ~token ~content ~burn ~cleanup =
     authority_result := decision;
     if decision <> hex_decode "decision" (capability_required table "decision_hex") then
       failf "capability-decision-drift";
-    burn ();
-    append ~decision:"ALLOW" ~reason:"single-use-capability";
-    (try Unix.execve measurement.executable (Array.of_list measurement.argv)
-           execution_environment
-     with Unix_error (error, function_name, argument) ->
-       let reason =
-         Printf.sprintf "execution-failed:%s:%s(%s)"
-           (Unix.error_message error) function_name argument
-       in
-       append ~decision:"DENY" ~reason;
-       failf "%s" reason)
+    (match outcome_context with
+    | None ->
+        burn ();
+        append ~decision:"ALLOW" ~reason:"single-use-test-capability";
+        (try Unix.execve measurement.executable (Array.of_list measurement.argv)
+               execution_environment
+         with Unix_error (error, function_name, argument) ->
+           let reason =
+             Printf.sprintf "execution-failed:%s:%s(%s)"
+               (Unix.error_message error) function_name argument
+           in
+           append ~decision:"DENY" ~reason;
+           failf "%s" reason)
+    | Some context ->
+        if context.kernel_grant_sha256 <> sha256 content then
+          failf "execution-outcome-grant-digest-mismatch";
+        let outcome_policy = load_outcome_policy root in
+        let outcome_directory = execution_outcome_directory root in
+        let issue_decision =
+          hex_decode "decision" (capability_required table "decision_hex")
+        in
+        burn ();
+        append ~decision:"ALLOW" ~reason:"single-use-kernel-capability";
+        let outcome =
+          supervise_child measurement.executable measurement.argv
+            execution_environment
+        in
+        let observation =
+          execution_observation_body ~root ~cwd:recorded_cwd ~token
+            ~preexec_policy:policy ~outcome_policy ~measurement
+            ~hardware_sha256:hardware_sha256_value
+            ~environment_sha256:!environment_sha256_value ~context
+            ~issue_decision ~consume_decision:decision ~outcome
+        in
+        let result_sha256 = sha256 observation in
+        let observation_content =
+          observation ^ "result_sha256=" ^ result_sha256 ^ "\n"
+        in
+        ignore
+          (write_durable_outcome_record outcome_directory "observation"
+             result_sha256 observation_content);
+        let outcome_frame =
+          execution_outcome_frame outcome_policy
+            ~outcome_kind:outcome.observed_kind
+            ~exit_code:outcome.observed_exit_code
+            ~signal:outcome.observed_signal
+            ~elapsed_us:outcome.observed_elapsed_us
+            ~hardware_sha256:hardware_sha256_value
+            ~command_sha256:measurement.command_sha256
+            ~environment_sha256:!environment_sha256_value
+            ~executable_sha256:measurement.executable_sha256
+            ~grant_sha256:context.kernel_grant_sha256
+            ~generation_sha256:(sha256 context.kernel_generation)
+            ~issue_decision_sha256:(sha256 issue_decision)
+            ~consume_decision_sha256:(sha256 decision)
+            ~result_sha256
+        in
+        let outcome_decision =
+          try
+            invoke_outcome_authority root outcome_policy outcome_frame
+              execution_environment
+          with Authority_denied (code, denied) ->
+            failf "execution-outcome-authority-denied:rc=%d:%s" code denied
+        in
+        let receipt =
+          execution_outcome_receipt observation result_sha256 outcome_policy
+            outcome_frame outcome_decision
+        in
+        let receipt_sha256 = sha256 receipt in
+        ignore
+          (write_durable_outcome_record outcome_directory "outcome"
+             receipt_sha256 receipt);
+        outcome_test_pause ();
+        kernel_record_outcome context receipt receipt_sha256;
+        outcome_test_replay context receipt receipt_sha256;
+        append_outcome_commit_log ~root ~context ~outcome ~result_sha256
+          ~receipt_sha256 ~decision_sha256:(sha256 outcome_decision);
+        if outcome.observed_kind = 1 then outcome.observed_exit_code
+        else if outcome.observed_kind = 2 then 128 + outcome.observed_signal
+        else 126)
   with
   | Error reason as error ->
       cleanup ();
@@ -1358,6 +1780,7 @@ let consume_capability_file root token =
     in
     entered_core := true;
     execute_capability_content ~root ~token ~content ~burn ~cleanup
+      ~outcome_context:None
   with error ->
     cleanup ();
     if not !entered_core then (
@@ -1377,7 +1800,7 @@ let consume_capability_kernel root instance generation handle =
   validate_token handle;
   let expected_instance = required_environment "SOUNIO_LOOM_INSTANCE_ID" in
   if instance <> expected_instance then failf "execution-kernel-instance-drift";
-  let content =
+  let content, payload_sha256 =
     match kernel_request "EXEC_CONSUME" [ instance; generation; handle ] with
     | [ "OK"; "EXEC_CONSUMED"; actual_instance; actual_generation;
         payload_sha256; payload_hex ]
@@ -1385,13 +1808,17 @@ let consume_capability_kernel root instance generation handle =
         let payload = hex_decode "kernel_payload" payload_hex in
         if sha256 payload <> payload_sha256 then
           failf "execution-kernel-payload-digest-mismatch";
-        payload
+        (payload, payload_sha256)
     | _ -> failf "execution-kernel-invalid-consume-response"
   in
   let table = parse_capability content in
   let token = capability_required table "token" in
+  let context =
+    { kernel_instance = instance; kernel_generation = generation;
+      kernel_handle = handle; kernel_grant_sha256 = payload_sha256 }
+  in
   execute_capability_content ~root ~token ~content ~burn:(fun () -> ())
-    ~cleanup:(fun () -> ())
+    ~cleanup:(fun () -> ()) ~outcome_context:(Some context)
 
 let run arguments =
   try
