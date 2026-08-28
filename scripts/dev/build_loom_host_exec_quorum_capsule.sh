@@ -175,6 +175,7 @@ claim_ready=false
 EOF
 chmod 0444 "$RELEASE_STAGE/release.manifest.v1"
 MANIFEST_SHA256="$(sha256_file "$RELEASE_STAGE/release.manifest.v1")"
+chmod 0555 "$BIN" "$DATA" "$AUTHORITY_ROOT" "$RELEASE_STAGE"
 
 mv "$RELEASE_STAGE" "$CAPSULE/release"
 install -m 0555 "$PROMOTER" "$META/promote_loom_host_exec_quorum_capsule.sh"
