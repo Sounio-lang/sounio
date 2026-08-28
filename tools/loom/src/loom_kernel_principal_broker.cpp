@@ -46,7 +46,8 @@ constexpr std::string_view kZeroDigest =
     "0000000000000000000000000000000000000000000000000000000000000000";
 constexpr std::size_t kMaximumAuthorityOutput = 1024 * 1024;
 constexpr std::size_t kMaximumInvocationFrame = 64 * 1024;
-constexpr std::size_t kMaximumRequest = 4096;
+constexpr std::size_t kMaximumRequest = kMaximumInvocationFrame + 6;
+constexpr std::size_t kMaximumResponse = 4096;
 constexpr auto kAuthorityTimeout = std::chrono::seconds(5);
 
 class Error : public std::runtime_error {
@@ -354,7 +355,9 @@ ActivationFacts measure_activation(const std::string& manifest_path,
                                    const std::string& authority_path,
                                    const std::string& socket_path,
                                    const std::string& capsule_manifest_path = "",
-                                   const std::string& capsule_authority_path = "") {
+                                   const std::string& capsule_authority_path = "",
+                                   const std::string& invocation_manifest_path = "",
+                                   const std::string& invocation_authority_path = "") {
   ActivationFacts facts;
   facts.root_identity = getuid() == 0 && geteuid() == 0 && getgid() == 0 &&
                         getegid() == 0;
@@ -382,7 +385,11 @@ ActivationFacts measure_activation(const std::string& manifest_path,
                                (capsule_manifest_path.empty() ||
                                 root_owned_regular(capsule_manifest_path)) &&
                                (capsule_authority_path.empty() ||
-                                root_owned_regular(capsule_authority_path));
+                                root_owned_regular(capsule_authority_path)) &&
+                               (invocation_manifest_path.empty() ||
+                                root_owned_regular(invocation_manifest_path)) &&
+                               (invocation_authority_path.empty() ||
+                                root_owned_regular(invocation_authority_path));
   facts.frozen_policy_bound = true;
   return facts;
 }
@@ -512,14 +519,49 @@ InvocationDecision parse_invocation_decision(const CommandResult& result) {
   return {false, *code};
 }
 
-std::string load_invocation_frame(const std::string& path) {
-  std::string frame = trim(read_file(path));
+std::string validate_invocation_frame(std::string frame) {
+  frame = trim(std::move(frame));
   if (frame.empty() || frame.size() > kMaximumInvocationFrame ||
       frame.find('\n') != std::string::npos ||
       frame.find('\r') != std::string::npos) {
     throw Error("InvocationCell frame is empty, multiline, or oversized");
   }
   return frame;
+}
+
+std::string load_invocation_frame(const std::string& path) {
+  return validate_invocation_frame(read_file(path));
+}
+
+struct InvocationAdmission {
+  CommandResult result;
+  InvocationDecision decision;
+  std::string receipt;
+};
+
+InvocationAdmission evaluate_invocation_cell(const Manifest& manifest,
+                                             const std::string& authority_path,
+                                             const std::string& frame) {
+  const CommandResult result = run_authority(
+      authority_path, frame, "SOUNIO_KERNEL_INVOCATION_CELL_");
+  const InvocationDecision decision = parse_invocation_decision(result);
+  std::ostringstream receipt;
+  receipt << "LOOM_KERNEL_INVOCATION_CELL_MATERIAL_ADMISSION"
+          << " schema=loom-kernel-invocation-cell-material-admission-v1"
+          << " producing_language=C++20"
+          << " language_role=MATERIAL_PARITY"
+          << " semantic_authority=Sounio"
+          << " action=9029"
+          << " manifest_sha256=" << manifest.digest
+          << " authority_sha256=" << file_sha256(authority_path)
+          << " frame_sha256=" << sha256(frame + "\n")
+          << " decision=" << (decision.allowed ? "ALLOW" : "DENY")
+          << " decision_code=" << decision.code
+          << " decision_sha256=" << sha256(result.output + "\n")
+          << " material_invocation=false"
+          << " same_uid_peer_isolation=false"
+          << " launch_open=false";
+  return {result, decision, receipt.str()};
 }
 
 std::string current_frame(const ActivationFacts& facts) {
@@ -931,30 +973,12 @@ int diagnose_invocation_cell(const std::string& manifest_path,
   const Manifest manifest = load_invocation_cell_manifest(manifest_path);
   verify_authority(manifest, authority_path, "action 9029");
   const std::string frame = load_invocation_frame(frame_path);
-  const CommandResult result = run_authority(
-      authority_path, frame, "SOUNIO_KERNEL_INVOCATION_CELL_");
-  const InvocationDecision decision = parse_invocation_decision(result);
-  std::ostringstream receipt;
-  receipt << "LOOM_KERNEL_INVOCATION_CELL_MATERIAL_ADMISSION"
-          << " schema=loom-kernel-invocation-cell-material-admission-v1"
-          << " producing_language=C++20"
-          << " language_role=MATERIAL_PARITY"
-          << " semantic_authority=Sounio"
-          << " action=9029"
-          << " manifest_sha256=" << manifest.digest
-          << " authority_sha256=" << file_sha256(authority_path)
-          << " frame_sha256=" << sha256(frame + "\n")
-          << " decision=" << (decision.allowed ? "ALLOW" : "DENY")
-          << " decision_code=" << decision.code
-          << " decision_sha256=" << sha256(result.output + "\n")
-          << " material_invocation=false"
-          << " same_uid_peer_isolation=false"
-          << " launch_open=false";
-  const std::string receipt_text = receipt.str();
-  std::cout << receipt_text << "\n";
+  const InvocationAdmission admission =
+      evaluate_invocation_cell(manifest, authority_path, frame);
+  std::cout << admission.receipt << "\n";
   std::cout << "LOOM_KERNEL_INVOCATION_CELL_MATERIAL_RECEIPT_SHA256 "
-            << sha256(receipt_text + "\n") << "\n";
-  std::cout << result.output << "\n";
+            << sha256(admission.receipt + "\n") << "\n";
+  std::cout << admission.result.output << "\n";
   return 0;
 }
 
@@ -972,7 +996,8 @@ void write_response(int descriptor, const std::string& response) {
 }
 
 std::string status_response(const Journal& journal, const Manifest& lease_manifest,
-                            const Manifest& capsule_manifest) {
+                            const Manifest& capsule_manifest,
+                            const Manifest& invocation_manifest) {
   std::array<std::size_t, 6> counts{};
   for (const auto& entry : journal.latest()) {
     ++counts[static_cast<std::size_t>(entry.second.state)];
@@ -985,24 +1010,43 @@ std::string status_response(const Journal& journal, const Manifest& lease_manife
          << " capsule_manifest_sha256=" << capsule_manifest.digest
          << " capsule_authority_sha256="
          << capsule_manifest.require("executable_sha256")
+         << " invocation_manifest_sha256=" << invocation_manifest.digest
+         << " invocation_authority_sha256="
+         << invocation_manifest.require("executable_sha256")
          << " journal_head_sha256=" << journal.head_digest()
          << " epoch=" << journal.maximum_epoch()
          << " free=" << counts[0] << " reserved=" << counts[1]
          << " mapped=" << counts[2] << " launched=" << counts[3]
          << " draining=" << counts[4] << " quarantined=" << counts[5]
-         << " launch_open=false recycle_open=false\n";
+         << " admission_open=true launch_open=false recycle_open=false\n";
   return output.str();
 }
 
 std::string bootstrap_response(const std::string& request, const Journal* journal,
                                const Manifest* lease_manifest,
-                               const Manifest* capsule_manifest) {
+                               const Manifest* capsule_manifest,
+                               const Manifest* invocation_manifest,
+                               const std::string* invocation_authority_path) {
   if (request == "STATUS") {
     if (journal == nullptr || lease_manifest == nullptr ||
-        capsule_manifest == nullptr) {
+        capsule_manifest == nullptr || invocation_manifest == nullptr ||
+        invocation_authority_path == nullptr) {
       return "DENY status-context-absent\n";
     }
-    return status_response(*journal, *lease_manifest, *capsule_manifest);
+    return status_response(*journal, *lease_manifest, *capsule_manifest,
+                           *invocation_manifest);
+  }
+  if (request.rfind("ADMIT ", 0) == 0) {
+    if (invocation_manifest == nullptr || invocation_authority_path == nullptr) {
+      return "DENY admission-context-absent\n";
+    }
+    const std::string frame = validate_invocation_frame(request.substr(6));
+    const InvocationAdmission admission = evaluate_invocation_cell(
+        *invocation_manifest, *invocation_authority_path, frame);
+    return admission.receipt + "\n";
+  }
+  if (request == "ADMIT") {
+    return "DENY malformed-admission\n";
   }
   if (request.rfind("LAUNCH", 0) == 0) {
     return "DENY bootstrap-launch-closed\n";
@@ -1063,7 +1107,7 @@ std::string exchange_with_live_broker(const std::string& socket_path,
     const ssize_t count = read(descriptor.get(), buffer.data(), buffer.size());
     if (count > 0) {
       response.append(buffer.data(), static_cast<std::size_t>(count));
-      if (response.size() > kMaximumRequest) {
+      if (response.size() > kMaximumResponse) {
         throw Error("live broker response exceeds size limit");
       }
       if (response.find('\n') != std::string::npos) break;
@@ -1088,13 +1132,23 @@ int probe_live_broker(const std::string& socket_path) {
   if (exchange_with_live_broker(socket_path, "LAUNCH sabotage") !=
           "DENY bootstrap-launch-closed\n" ||
       exchange_with_live_broker(socket_path, "RECYCLE sabotage") !=
-          "DENY bootstrap-recycle-closed\n" ||
-      exchange_with_live_broker(socket_path, "EXEC sabotage") !=
-          "DENY unknown-request\n") {
+          "DENY bootstrap-recycle-closed\n") {
     throw Error("live broker opened a bootstrap operation");
   }
+  const std::string admission =
+      exchange_with_live_broker(socket_path, "ADMIT 9029 3");
+  if (admission.rfind(
+          "LOOM_KERNEL_INVOCATION_CELL_MATERIAL_ADMISSION ", 0) != 0 ||
+      admission.find(" decision=DENY decision_code=424 ") == std::string::npos ||
+      admission.find(" material_invocation=false ") == std::string::npos ||
+      admission.find(" launch_open=false\n") == std::string::npos ||
+      exchange_with_live_broker(socket_path, "EXEC sabotage") !=
+          "DENY unknown-request\n") {
+    throw Error("live broker InvocationCell admission probe failed");
+  }
   std::cout << status.substr(0, status.size() - 1)
-            << " live_probe=PASS launch=closed recycle=closed unknown=denied\n";
+            << " live_probe=PASS admission=DENY424 launch=closed recycle=closed"
+            << " unknown=denied\n";
   return 0;
 }
 
@@ -1102,33 +1156,76 @@ int selftest_protocol() {
   if (getuid() == 0 || geteuid() == 0) {
     throw Error("protocol selftest refuses root execution");
   }
-  if (bootstrap_response("LAUNCH lane", nullptr, nullptr, nullptr) !=
+  if (bootstrap_response("LAUNCH lane", nullptr, nullptr, nullptr, nullptr,
+                         nullptr) !=
           "DENY bootstrap-launch-closed\n" ||
-      bootstrap_response("RECYCLE lane", nullptr, nullptr, nullptr) !=
+      bootstrap_response("RECYCLE lane", nullptr, nullptr, nullptr, nullptr,
+                         nullptr) !=
           "DENY bootstrap-recycle-closed\n" ||
-      bootstrap_response("EXEC lane", nullptr, nullptr, nullptr) !=
+      bootstrap_response("ADMIT 9029 3", nullptr, nullptr, nullptr, nullptr,
+                         nullptr) != "DENY admission-context-absent\n" ||
+      bootstrap_response("ADMIT", nullptr, nullptr, nullptr, nullptr,
+                         nullptr) != "DENY malformed-admission\n" ||
+      bootstrap_response("EXEC lane", nullptr, nullptr, nullptr, nullptr,
+                         nullptr) !=
           "DENY unknown-request\n" ||
-      bootstrap_response("STATUS", nullptr, nullptr, nullptr) !=
+      bootstrap_response("STATUS", nullptr, nullptr, nullptr, nullptr,
+                         nullptr) !=
           "DENY status-context-absent\n") {
     throw Error("bootstrap protocol opened a material operation");
   }
   std::cout << "LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS"
-            << " launch=closed recycle=closed unknown=denied"
-            << " partial_status=denied\n";
+            << " admission_without_context=denied malformed_admission=denied"
+            << " launch=closed recycle=closed unknown=denied partial_status=denied\n";
   return 0;
+}
+
+std::optional<std::string> read_request_line(int descriptor) {
+  std::string request;
+  std::array<char, 4096> buffer{};
+  for (;;) {
+    const ssize_t count = read(descriptor, buffer.data(), buffer.size());
+    if (count > 0) {
+      request.append(buffer.data(), static_cast<std::size_t>(count));
+      if (request.size() > kMaximumRequest) return std::nullopt;
+      const std::size_t newline = request.find('\n');
+      if (newline != std::string::npos) {
+        if (newline != request.size() - 1 ||
+            request.find('\n', newline + 1) != std::string::npos) {
+          return std::nullopt;
+        }
+        request.pop_back();
+        if (!request.empty() && request.back() == '\r') request.pop_back();
+        if (request.empty() || request.find('\r') != std::string::npos) {
+          return std::nullopt;
+        }
+        return request;
+      }
+    } else if (count == 0) {
+      return std::nullopt;
+    } else if (errno != EINTR) {
+      return std::nullopt;
+    }
+  }
 }
 
 int serve(const std::string& manifest_path, const std::string& authority_path,
           const std::string& capsule_manifest_path,
           const std::string& capsule_authority_path,
+          const std::string& invocation_manifest_path,
+          const std::string& invocation_authority_path,
           const std::string& journal_path, const std::string& socket_path) {
   const Manifest lease_manifest = load_lease_manifest(manifest_path);
   const Manifest capsule_manifest = load_capsule_manifest(capsule_manifest_path);
+  const Manifest invocation_manifest =
+      load_invocation_cell_manifest(invocation_manifest_path);
   verify_authority(lease_manifest, authority_path, "action 9027");
   verify_authority(capsule_manifest, capsule_authority_path, "action 9028");
+  verify_authority(invocation_manifest, invocation_authority_path, "action 9029");
   const ActivationFacts facts =
       measure_activation(manifest_path, authority_path, socket_path,
-                         capsule_manifest_path, capsule_authority_path);
+                         capsule_manifest_path, capsule_authority_path,
+                         invocation_manifest_path, invocation_authority_path);
   if (!facts.complete()) {
     throw Error("host service-manager activation boundary incomplete");
   }
@@ -1149,17 +1246,15 @@ int serve(const std::string& manifest_path, const std::string& authority_path,
       write_response(client.get(), "DENY peer-not-root\n");
       continue;
     }
-    std::array<char, kMaximumRequest + 1> request_buffer{};
-    const ssize_t count = read(client.get(), request_buffer.data(), kMaximumRequest);
-    if (count <= 0 || static_cast<std::size_t>(count) == kMaximumRequest) {
+    const std::optional<std::string> request = read_request_line(client.get());
+    if (!request.has_value()) {
       write_response(client.get(), "DENY malformed-request\n");
       continue;
     }
-    const std::string request = trim(
-        std::string(request_buffer.data(), static_cast<std::size_t>(count)));
     write_response(client.get(), bootstrap_response(
-                                     request, &journal, &lease_manifest,
-                                     &capsule_manifest));
+                                     *request, &journal, &lease_manifest,
+                                     &capsule_manifest, &invocation_manifest,
+                                     &invocation_authority_path));
   }
 }
 
@@ -1220,6 +1315,10 @@ void require_serve_artifacts(const Options& options) {
   if (options.capsule_manifest.empty() || options.capsule_authority.empty()) {
     throw Error("capsule manifest and authority are required");
   }
+  if (options.invocation_manifest.empty() ||
+      options.invocation_authority.empty()) {
+    throw Error("InvocationCell manifest and authority are required");
+  }
 }
 
 void require_invocation_artifacts(const Options& options) {
@@ -1270,7 +1369,9 @@ int main(int argc, char** argv) {
       require_serve_artifacts(options);
       if (options.journal.empty()) throw Error("journal is required");
       return serve(options.manifest, options.authority, options.capsule_manifest,
-                   options.capsule_authority, options.journal, options.socket_path);
+                   options.capsule_authority, options.invocation_manifest,
+                   options.invocation_authority, options.journal,
+                   options.socket_path);
     }
     throw Error("unknown mode");
   } catch (const std::exception& error) {

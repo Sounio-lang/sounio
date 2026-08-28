@@ -6,6 +6,11 @@ This phase binds the transitory C++ host broker to frozen Sounio action `9029`.
 It is an admission adapter, not a second semantic implementation and not a
 material process launcher.
 
+The same adapter is now wired into the immutable root-owned host bundle. The
+live newline protocol accepts `ADMIT <9029-frame>` only from the already
+root-authenticated controller, invokes the pinned Sounio executable, and returns
+the same non-authorizing receipt as the offline diagnostic.
+
 ## Authority
 
 Sounio remains `SEMANTIC_AUTHORITY`. The broker accepts only the exact frozen
@@ -34,6 +39,11 @@ launch_open=false
 parity_open=false
 claim_ready=false
 ```
+
+Live admission adds no state transition: it does not append the lease journal,
+mint a `PrincipalCapsule`, consume an `ExecGrant`, retain a pidfd, open a
+barrier, or create a process. `STATUS` names the action `9029` manifest and
+authority hashes; missing or drifted artifacts refuse broker startup.
 
 Manifest drift, executable drift, authority timeout, abnormal termination,
 multiline or oversized frames, malformed decision output, and decision/exit

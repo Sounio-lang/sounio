@@ -93,8 +93,10 @@ producer supplies an expected result accepted by the gate.
 
 The frozen C++ material-admission adapter now proves that one broker binary
 transports both positive and current-material frames to the exact Sounio action
-`9029` authority without encoding `DENY481`. It emits only a non-authorizing
-diagnostic receipt and keeps `LAUNCH` closed.
+`9029` authority without encoding `DENY481`. The immutable host bundle now pins
+that manifest and executable and exposes a root-controller-only, decision-only
+`ADMIT` request. Offline and live paths emit the same non-authorizing receipt;
+`LAUNCH` remains closed and the journal is not mutated.
 
 `broker-custodied-one-shot-material-realization` therefore remains pending
 after admission. It must prove pre-effect stopping, exact peer and ancestry,

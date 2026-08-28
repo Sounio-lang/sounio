@@ -154,7 +154,9 @@ keeps a hash-chained and per-record-synchronized lease journal, and quarantines
 uncertain generations after recovery. Its host installer builds immutable
 releases addressed by the manifest, broker, and complete operational bundle;
 the live root-only probe proves systemd activation while deliberately keeping
-`LAUNCH` and `RECYCLE` closed. A `HOST_ACTIVATION_PASS` therefore still reports
+`LAUNCH` and `RECYCLE` closed. The same immutable release now pins action `9029`;
+its decision-only `ADMIT` operation reaches Sounio but cannot create a lease,
+grant, pidfd, barrier, or process. A `HOST_ACTIVATION_PASS` therefore still reports
 `material_broker=false` until namespace, cgroup, pidfd, attack, extinction, and
 Sounio `ALLOW` gates all execute on the real host. See
 [HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md](HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md).
@@ -197,7 +199,9 @@ adapter in `kernel_invocation_cell.material.v1`. The same broker binary routes a
 positive fixture to Sounio `ALLOW` and the current Pod observation to Sounio
 `DENY481`; it contains neither the `481` result nor its reason. Manifest,
 authority, and multiline-frame drift fail closed, while the live broker still
-refuses `LAUNCH` and `RECYCLE`. This freezes `MATERIAL_PARITY`, not material
+refuses `LAUNCH` and `RECYCLE`. The host bundle exposes that adapter as
+root-controller-only `ADMIT` and reports all six action `9027`/`9028`/`9029`
+artifact hashes. This freezes `MATERIAL_PARITY`, not material
 execution: no grant, pidfd, barrier, or process is created, and hostile
 same-UID isolation remains false. See
 [INVOCATION_CELL_MATERIAL_ADMISSION_V1.md](INVOCATION_CELL_MATERIAL_ADMISSION_V1.md).
