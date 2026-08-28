@@ -206,6 +206,18 @@ execution: no grant, pidfd, barrier, or process is created, and hostile
 same-UID isolation remains false. See
 [INVOCATION_CELL_MATERIAL_ADMISSION_V1.md](INVOCATION_CELL_MATERIAL_ADMISSION_V1.md).
 
+The host bundle can now cross the Kubernetes/host boundary as a deterministic,
+content-addressed promotion capsule. The source worktree rebuilds and freezes
+the Sounio authorities once; the host verifies and installs those exact bytes
+rather than recompiling semantics with a different checkout or toolchain. A
+strict inner inventory remains effective even if a test recomputes the outer
+archive hash, and a causal sabotage proves the pre-execution refusal of a
+Python host-gate oracle. The Beagle hostPID transport does not remount the live
+`ReadWriteOncePod` workspace PVC and carries no semantic authority. Host
+promotion still leaves `PARITY_OPEN`, `CLAIM_READY`, `LAUNCH`, material
+invocation, and same-UID peer isolation closed. See
+[HOST_PROMOTION_CAPSULE_V1.md](HOST_PROMOTION_CAPSULE_V1.md).
+
 The main Loom build reconstructs all three resident runtime generations with
 the frozen Sounio toolchain, verifies each frozen digest, installs it under a
 `sha256-<digest>` directory, and atomically switches the stable runtime symlink

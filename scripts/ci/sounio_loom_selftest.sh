@@ -873,5 +873,6 @@ fi
 "$ROOT_DIR/scripts/ci/sounio_loom_kernel_invocation_cell_ocaml_freeze_selftest.sh" >/dev/null
 "$ROOT_DIR/scripts/ci/sounio_loom_kernel_invocation_cell_material_admission_selftest.sh" >/dev/null
 "$ROOT_DIR/scripts/ci/sounio_loom_kernel_invocation_cell_material_admission_freeze_selftest.sh" >/dev/null
+"$ROOT_DIR/scripts/ci/sounio_loom_host_promotion_capsule_selftest.sh" >/dev/null
 
 echo "sounio-loom-selftest: PASS language=OCaml protocol=1 instance=$instance_id guardian_instance=$guard_instance kernel_crashes=6 coord_generations=3 unacked_replay=delivered acked_replay=suppressed post_pod_reconcile=idempotent"
