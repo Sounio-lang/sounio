@@ -67,6 +67,20 @@ bin/sounio-loom obligation-serve --bind 127.0.0.1 --port 8788
 bin/sounio-loom obligation-supervise --state-dir PATH
 ```
 
+## Subprocess Membrane
+
+LOOM has frozen Sounio semantics for a process-tree effect membrane and a Linux
+x86_64 OCaml/C diagnostic probe. The probe stops root and descendant execution,
+write-capable opens, and path mutations for a hash-pinned Sounio decision. Its
+negative gate verifies that direct Python, Python hidden behind a shell, a
+Rust-named executable, out-of-scope writes, semantic writes, path mutation, and
+deadline-surviving descendants produce no forbidden external effect.
+
+This is deliberately not attached to general Bash/Exec, commit, or CI. The
+current ptrace realization does not claim a closed syscall algebra or race-free
+path mediation. See [SUBPROCESS_MEMBRANE_V1.md](SUBPROCESS_MEMBRANE_V1.md) for
+the proved surface, nonclaims, and kernel attachment path.
+
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
 refused unless `--allow-remote` is explicit. The session directory and token are
 local capabilities and must remain private to the owning user.
