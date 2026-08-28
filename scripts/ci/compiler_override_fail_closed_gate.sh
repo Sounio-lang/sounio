@@ -64,6 +64,38 @@ check "souc: non-executable SOUNIO_SOUC_BIN" expect-reject "not executable" \
 check "madaros: non-executable MADAROS_RAW_BIN" expect-reject "not executable" \
   env MADAROS_RAW_BIN="$W/noexec.elf" ./bin/madaros check "$W/t.sio"
 
+# The same defect lives in two sourced libraries, and they are the wider door:
+# scripts/lib/resolve_souc.sh is sourced by 126 scripts. They are checked here
+# rather than in a gate of their own, because the question is identical and a
+# second gate asking it separately is how one of them gets fixed and the other
+# does not.
+lib_check() {  # lib_check <name> <lib> <var> <value> <expect-refusal|expect-ok>
+  local name="$1" lib="$2" var="$3" val="$4" expect="$5" out
+  out="$(env -u SOUC_BIN -u MADAROS_BIN -u SOUNIO_MADAROS_BIN "$var=$val" \
+         bash -c "source $lib >/dev/null 2>>'$W/lib.err'; echo \"BIN=[\${SOUC_BIN:-}\${MADAROS_BIN:-}]\"" 2>&1)"
+  local err; err="$(cat "$W/lib.err" 2>/dev/null)"; : > "$W/lib.err"
+  if [[ "$expect" == "expect-refusal" ]]; then
+    if ! grep -qF "is set but cannot be used" <<<"$err"; then
+      echo "  FAIL $name — no refusal on stderr." >&2; fails=$((fails+1)); return
+    fi
+    if grep -qF "BIN=[$val]" <<<"$out" || [[ "$out" == *"BIN=[]"* ]]; then :; else
+      echo "  FAIL $name — a different binary was substituted: $out" >&2; fails=$((fails+1)); return
+    fi
+  else
+    if [[ "$out" != *"BIN=[$val]"* ]]; then
+      echo "  FAIL $name — a usable override was not honoured: $out" >&2; fails=$((fails+1)); return
+    fi
+  fi
+  echo "  ok   $name"
+}
+
+: > "$W/lib.err"
+echo "[override-fail-closed] sourced resolver libraries:"
+lib_check "resolve_souc: unusable SOUC_BIN refused"        scripts/lib/resolve_souc.sh    SOUC_BIN    "$W/noexec.elf" expect-refusal
+lib_check "resolve_souc: valid SOUC_BIN honoured"          scripts/lib/resolve_souc.sh    SOUC_BIN    "$W/ok.elf"     expect-ok
+lib_check "resolve_madaros: unusable MADAROS_BIN refused"  scripts/lib/resolve_madaros.sh MADAROS_BIN "$W/noexec.elf" expect-refusal
+lib_check "resolve_madaros: valid MADAROS_BIN honoured"    scripts/lib/resolve_madaros.sh MADAROS_BIN "$W/ok.elf"     expect-ok
+
 echo "[override-fail-closed] working configurations must still work:"
 check "no override resolves normally"   expect-rc0 "" ./bin/souc check "$W/t.sio"
 check "valid override is honoured"      expect-rc0 "" env MADAROS_RAW_BIN="$W/ok.elf" ./bin/souc check "$W/t.sio"
@@ -77,4 +109,4 @@ if [[ $fails -gt 0 ]]; then
   echo "  to the committed ELF answers a question nobody asked, and exits 0." >&2
   exit 1
 fi
-echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 9 cases, 5 of them refusals, each behaved as stated"
+echo "COMPILER_OVERRIDE_FAIL_CLOSED_GATE_OK: 13 cases, 7 of them refusals, each behaved as stated"

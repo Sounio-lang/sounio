@@ -19,8 +19,35 @@ _SOUNIO_RESOLVE_MADAROS_LOADED=1
 _SOUNIO_MADAROS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 _SOUNIO_MADAROS_ROOT_DIR="${_SOUNIO_MADAROS_ROOT_DIR:-$(cd "$_SOUNIO_MADAROS_LIB_DIR/../.." && pwd)}"
 
+# An explicit override that is set but unusable is refused, not skipped.
+#
+# The chain below tests each candidate with -x and moves on when it fails, so
+# MADAROS_BIN pointing at a build that left its output non-executable resolves
+# silently to the committed prebuilt -- which lags self-hosted/ source. Measured
+# 2026-08-28: the same ELF gave "check: OK" at mode 0600 and error[E245] at
+# 0700. Fixed in bin/souc and bin/madaros by #2256; this library is the third
+# door onto the same defect.
+_sounio_refuse_madaros_override() {  # <var-name> <path>
+  local var="$1" path="$2" why
+  if   [[ ! -e "$path" ]]; then why="no such file"
+  elif [[ -d "$path" ]];   then why="is a directory"
+  else                          why="not executable (chmod +x it)"; fi
+  echo "error: $var is set but cannot be used: $why" >&2
+  echo "  $var=$path" >&2
+  echo "  refusing to fall back to another compiler: this run would measure a" >&2
+  echo "  binary you did not name. Fix the path, or unset $var." >&2
+  return 78
+}
+
 # Resolve MADAROS_BIN: explicit env → repo wrapper → repo raw ELF → PATH fallback.
 _sounio_resolve_madaros_bin() {
+  local _v
+  for _v in MADAROS_BIN SOUNIO_MADAROS_BIN; do
+    if [[ -n "${!_v:-}" && ! -x "${!_v}" ]]; then
+      _sounio_refuse_madaros_override "$_v" "${!_v}"
+      return 78
+    fi
+  done
   if [[ -n "${MADAROS_BIN:-}" && -x "$MADAROS_BIN" ]]; then
     echo "$MADAROS_BIN"
     return 0
