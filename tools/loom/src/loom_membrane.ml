@@ -5,16 +5,19 @@ exception Error of string
 let pinned_manifest_sha256 =
   "0024178b8928f0c82d794d390244e83e5ce431054587fc7dd609c0f25c2e5b4f"
 
+let pinned_sandbox_sha256 =
+  "52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712"
+
 let authority_timeout_seconds = 5.0
 let max_file_bytes = 8 * 1024 * 1024
 
 type native_event = int * int * int * string * int
 
 type native_result =
-  int * int * int * int64 * int * int * int * int
+  int * int * int * int64 * int * int * int * int * int * int
 
 external native_supervise :
-  string * string array * string array * string * int64 * int ->
+  string * string array * string array * string * string * int64 * int ->
   (native_event -> int) -> native_result
   = "sounio_loom_membrane_supervise"
 
@@ -37,6 +40,9 @@ type outcome = {
   decision_code : int;
   timed_out : bool;
   policy_error : bool;
+  landlock_abi : int;
+  sandbox_sha256 : string;
+  sandbox_ready : bool;
 }
 
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
@@ -448,7 +454,8 @@ let decision_log_path root =
   | Some path -> path
   | None -> Filename.concat (git_common_dir root) "sounio-loom-subprocess-membrane.tsv"
 
-let append_decision ~root ~policy ~effect_kind ~target ~frame ~decision ~output =
+let append_decision ~root ~policy ~sandbox_sha256 ~effect_kind ~target ~frame
+    ~decision ~output =
   let path = decision_log_path root in
   let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
   Fun.protect
@@ -467,6 +474,7 @@ let append_decision ~root ~policy ~effect_kind ~target ~frame ~decision ~output 
             "source_sha256=" ^ policy.source_sha256;
             "semantics_sha256=" ^ policy.semantics_sha256;
             "runtime_sha256=" ^ policy.runtime_sha256;
+            "sandbox_sha256=" ^ sandbox_sha256;
             "frame_sha256=" ^ sha256 frame;
             "authority_result_sha256=" ^ sha256 output ] ^ "\n"
       in
@@ -488,10 +496,28 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
     let resolved = if Filename.is_relative raw then normalize_absolute cwd raw else raw in
     Unix.realpath resolved
   in
+  let sandbox =
+    match test_override "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_SANDBOX" with
+    | Some path -> Unix.realpath path
+    | None -> Unix.realpath "/usr/bin/bwrap"
+  in
+  let sandbox_sha256 = sha256_file sandbox in
+  if sandbox_sha256 <> pinned_sandbox_sha256 then
+    failf "subprocess-membrane-sandbox-hash-mismatch";
   let argv = Array.copy argv in
   argv.(0) <- executable;
   let policy = load_policy root in
   let environment = Unix.environment () in
+  let child_environment =
+    let prohibited_prefixes =
+      [ "LD_PRELOAD="; "LD_LIBRARY_PATH="; "LD_AUDIT=";
+        "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_"; "SOUNIO_LOOM_HOOK_TEST_MODE=" ]
+    in
+    Array.to_list environment
+    |> List.filter (fun binding ->
+           not (List.exists (starts_with binding) prohibited_prefixes))
+    |> Array.of_list
+  in
   let command_hash = sha256 (Array.to_list argv |> String.concat "\000") in
   let hardware_hash = sha256 (hardware_record ()) in
   let deadline_us = Int64.mul (Int64.of_int deadline_ms) 1000L in
@@ -510,8 +536,8 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
           ~outcome_complete ~termination_complete
       in
       let code, output = invoke_decision ~root ~policy ~environment frame in
-      append_decision ~root ~policy ~effect_kind ~target ~frame ~decision:code
-        ~output;
+      append_decision ~root ~policy ~sandbox_sha256 ~effect_kind ~target ~frame
+        ~decision:code ~output;
       code
     with
     | Error reason
@@ -519,8 +545,8 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
         let output = "policy-error:" ^ reason in
         let frame = sha256 output in
         (try
-           append_decision ~root ~policy ~effect_kind ~target ~frame ~decision:403
-             ~output
+           append_decision ~root ~policy ~sandbox_sha256 ~effect_kind ~target
+             ~frame ~decision:403 ~output
          with _ -> ());
         403
     | Unix_error (error, function_name, argument) ->
@@ -529,8 +555,8 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
             function_name argument
         in
         (try
-           append_decision ~root ~policy ~effect_kind ~target ~frame:(sha256 output)
-             ~decision:403 ~output
+           append_decision ~root ~policy ~sandbox_sha256 ~effect_kind ~target
+             ~frame:(sha256 output) ~decision:403 ~output
          with _ -> ());
         403
   in
@@ -538,15 +564,33 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   if root_code <> 0 then
     { kind = 5; exit_code = 0; signal = 0; elapsed_us = 0L;
       event_count = 1; decision_code = root_code; timed_out = false;
-      policy_error = root_code = 403 }
+      policy_error = root_code = 403; landlock_abi = 0; sandbox_sha256;
+      sandbox_ready = false }
   else
     let callback (effect_kind, _pid, _syscall, target, active_count) =
       decide effect_kind target active_count (sha256 "event-pending") 0 0
     in
+    let native_flags =
+      match test_override
+              "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_TEST_DISABLE_FS_OBSERVER"
+      with
+      | None -> 0
+      | Some "1" -> 1
+      | Some _ -> failf "invalid-disable-fs-observer-test-control"
+    in
     let kind, exit_code, signal, elapsed_us, event_count, decision_code,
-        timed_out, policy_error =
+        timed_out, policy_error, landlock_abi, sandbox_ready =
+      let sandbox_argv =
+        Array.of_list
+          ([ sandbox; "--die-with-parent"; "--new-session"; "--unshare-user";
+             "--unshare-pid"; "--unshare-net"; "--unshare-ipc";
+             "--unshare-uts"; "--ro-bind"; "/"; "/"; "--dev"; "/dev";
+             "--tmpfs"; "/tmp"; "--bind"; scope; scope; "--chdir"; cwd;
+             "--cap-drop"; "ALL"; "--" ] @ Array.to_list argv)
+      in
       native_supervise
-        (executable, argv, environment, cwd, deadline_us, 0)
+        (sandbox, sandbox_argv, child_environment, cwd, executable, deadline_us,
+         native_flags)
         callback
     in
     let outcome_hash =
@@ -575,7 +619,8 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
     { kind = final_kind; exit_code; signal; elapsed_us; event_count;
       decision_code = (if final_code <> 0 then final_code else decision_code);
       timed_out = timed_out = 1;
-      policy_error = policy_error = 1 || final_code = 403 }
+      policy_error = policy_error = 1 || final_code = 403;
+      landlock_abi; sandbox_sha256; sandbox_ready = sandbox_ready = 1 }
 
 let exit_status outcome =
   match outcome.kind with

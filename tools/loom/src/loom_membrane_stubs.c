@@ -3,12 +3,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/landlock.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ptrace.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/user.h>
@@ -39,6 +41,10 @@ enum membrane_result_kind {
   MEMBRANE_NATIVE_ERROR = 6
 };
 
+enum membrane_native_flag {
+  MEMBRANE_TEST_DISABLE_FS_OBSERVER = 1
+};
+
 struct tracee_state {
   pid_t pid;
   int entering_syscall;
@@ -56,6 +62,25 @@ static int64_t monotonic_us(void) {
     return 0;
   }
   return ((int64_t)value.tv_sec * 1000000LL) + (value.tv_nsec / 1000LL);
+}
+
+static int landlock_abi_version(void) {
+#if defined(SYS_landlock_create_ruleset)
+  return (int)syscall(SYS_landlock_create_ruleset, NULL, 0,
+                      LANDLOCK_CREATE_RULESET_VERSION);
+#else
+  errno = ENOSYS;
+  return -1;
+#endif
+}
+
+static int close_inherited_descriptors(void) {
+#if defined(SYS_close_range)
+  return (int)syscall(SYS_close_range, 3U, ~0U, 0U);
+#else
+  errno = ENOSYS;
+  return -1;
+#endif
 }
 
 static void tracee_table_free(struct tracee_table *table) {
@@ -339,6 +364,29 @@ static int emit_path_callback(value decision_closure, int kind, pid_t pid,
                            active_count, event, callback_result);
 }
 
+static int emit_exec_callback(value decision_closure, pid_t pid,
+                              long syscall_number, int dirfd,
+                              unsigned long address, size_t active_count,
+                              const char *sandbox_executable,
+                              const char *user_executable,
+                              int *sandbox_exec_seen, int *sandbox_ready,
+                              value *event, value *callback_result) {
+  char raw[PATH_MAX];
+  char resolved[PATH_MAX * 2];
+  const char *target = "<unreadable-target>";
+  if (read_tracee_string(pid, address, raw, sizeof(raw)) == 0 &&
+      resolve_tracee_path(pid, dirfd, raw, resolved, sizeof(resolved)) == 0) {
+    target = resolved;
+    if (!*sandbox_exec_seen && strcmp(target, sandbox_executable) == 0) {
+      *sandbox_exec_seen = 1;
+    } else if (*sandbox_exec_seen && strcmp(target, user_executable) == 0) {
+      *sandbox_ready = 1;
+    }
+  }
+  return callback_decision(decision_closure, 3, pid, syscall_number, target,
+                           active_count, event, callback_result);
+}
+
 static void kill_tracees(pid_t root, struct tracee_table *table) {
   size_t index;
   if (root > 0) {
@@ -366,8 +414,10 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
   char **arguments = NULL;
   char **environment = NULL;
   char *cwd = NULL;
+  char *user_executable = NULL;
   int64_t deadline_us;
-  int forced_signal;
+  int native_flags;
+  int landlock_abi = 0;
   int64_t started_us = monotonic_us();
   pid_t root = -1;
   struct tracee_table tracees = {0};
@@ -380,11 +430,13 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
   int event_count = 0;
   int root_status_seen = 0;
   int native_error = 0;
+  int sandbox_exec_seen = 0;
+  int sandbox_ready = 0;
 
 #if !defined(__linux__) || !defined(__x86_64__)
   (void)config;
   (void)decision_closure;
-  result = caml_alloc_tuple(8);
+  result = caml_alloc_tuple(10);
   Store_field(result, 0, Val_int(MEMBRANE_NATIVE_ERROR));
   Store_field(result, 1, Val_int(0));
   Store_field(result, 2, Val_int(0));
@@ -393,23 +445,30 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
   Store_field(result, 5, Val_int(415));
   Store_field(result, 6, Val_int(0));
   Store_field(result, 7, Val_int(1));
+  Store_field(result, 8, Val_int(0));
+  Store_field(result, 9, Val_int(0));
   CAMLreturn(result);
 #else
-  if (Wosize_val(config) != 6) {
+  if (Wosize_val(config) != 7) {
     caml_invalid_argument("invalid membrane supervisor config");
   }
   executable = copy_ocaml_string(Field(config, 0));
   arguments = copy_ocaml_array(Field(config, 1));
   environment = copy_ocaml_array(Field(config, 2));
   cwd = copy_ocaml_string(Field(config, 3));
-  deadline_us = Int64_val(Field(config, 4));
-  forced_signal = Int_val(Field(config, 5));
+  user_executable = copy_ocaml_string(Field(config, 4));
+  deadline_us = Int64_val(Field(config, 5));
+  native_flags = Int_val(Field(config, 6));
+  landlock_abi = landlock_abi_version();
+  if (landlock_abi < 0) {
+    landlock_abi = -errno;
+  }
   if (started_us <= 0 || deadline_us <= 0) {
     native_error = 1;
     goto finish;
   }
   if (executable == NULL || arguments == NULL || environment == NULL ||
-      cwd == NULL) {
+      cwd == NULL || user_executable == NULL) {
     native_error = 1;
     goto finish;
   }
@@ -420,14 +479,14 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
     goto finish;
   }
   if (root == 0) {
-    setpgid(0, 0);
+    if (setpgid(0, 0) < 0 || close_inherited_descriptors() < 0 ||
+        chdir(cwd) < 0) {
+      _exit(125);
+    }
     if (ptrace(PTRACE_TRACEME, 0, NULL, NULL) < 0) {
       _exit(126);
     }
     raise(SIGSTOP);
-    if (chdir(cwd) < 0) {
-      _exit(126);
-    }
     execve(executable, arguments, environment);
     _exit(127);
   }
@@ -444,6 +503,12 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
     do {
       waited = waitpid(root, &status, WUNTRACED);
     } while (waited < 0 && errno == EINTR);
+    if (waited == root && (WIFEXITED(status) || WIFSIGNALED(status))) {
+      root_status_seen = 1;
+      tracee_remove(&tracees, root);
+      native_error = 1;
+      goto finish;
+    }
     if (waited != root || !WIFSTOPPED(status) ||
         ptrace(PTRACE_SETOPTIONS, root, NULL,
                (void *)(intptr_t)(PTRACE_O_TRACESYSGOOD |
@@ -456,9 +521,6 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
       native_error = 1;
       kill_tracees(root, &tracees);
       goto drain;
-    }
-    if (forced_signal > 0) {
-      kill(root, forced_signal);
     }
     if (ptrace_resume(root, 0) < 0) {
       native_error = 1;
@@ -558,15 +620,16 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
           long number = (long)registers.orig_rax;
           int decision = 0;
           if (number == SYS_execve) {
-            decision = emit_path_callback(decision_closure, 3, pid, number, AT_FDCWD,
-                                          registers.rdi, tracees.length, &event,
-                                          &callback_result);
+            decision = emit_exec_callback(
+                decision_closure, pid, number, AT_FDCWD, registers.rdi,
+                tracees.length, executable, user_executable, &sandbox_exec_seen,
+                &sandbox_ready, &event, &callback_result);
 #ifdef SYS_execveat
           } else if (number == SYS_execveat) {
-            decision = emit_path_callback(decision_closure, 3, pid, number,
-                                          (int)registers.rdi, registers.rsi,
-                                          tracees.length, &event,
-                                          &callback_result);
+            decision = emit_exec_callback(
+                decision_closure, pid, number, (int)registers.rdi, registers.rsi,
+                tracees.length, executable, user_executable, &sandbox_exec_seen,
+                &sandbox_ready, &event, &callback_result);
 #endif
           } else if (number == SYS_clone || number == SYS_fork ||
                      number == SYS_vfork
@@ -577,19 +640,25 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
             decision = callback_decision(decision_closure, 2, pid, number,
                                          "process-create", tracees.length,
                                          &event, &callback_result);
-          } else if (number == SYS_open &&
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     number == SYS_open &&
                      write_open_flags(registers.rsi)) {
             decision = emit_path_callback(decision_closure, 4, pid, number, AT_FDCWD,
                                           registers.rdi, tracees.length, &event,
                                           &callback_result);
-          } else if (number == SYS_openat &&
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     number == SYS_openat &&
                      write_open_flags(registers.rdx)) {
             decision = emit_path_callback(decision_closure, 4, pid, number,
                                           (int)registers.rdi, registers.rsi,
                                           tracees.length, &event,
                                           &callback_result);
 #ifdef SYS_openat2
-          } else if (number == SYS_openat2) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     number == SYS_openat2) {
             uint64_t flags = 0;
             if (read_tracee_bytes(pid, registers.rdx, &flags, sizeof(flags)) < 0) {
               decision = callback_decision(decision_closure, 4, pid, number,
@@ -602,32 +671,42 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
                                             &callback_result);
             }
 #endif
-          } else if (number == SYS_creat) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     number == SYS_creat) {
             decision = emit_path_callback(decision_closure, 4, pid, number, AT_FDCWD,
                                           registers.rdi, tracees.length, &event,
                                           &callback_result);
-          } else if (number == SYS_unlink || number == SYS_rmdir ||
-                     number == SYS_mkdir || number == SYS_truncate ||
-                     number == SYS_chmod || number == SYS_chown ||
-                     number == SYS_lchown || number == SYS_mknod) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     (number == SYS_unlink || number == SYS_rmdir ||
+                      number == SYS_mkdir || number == SYS_truncate ||
+                      number == SYS_chmod || number == SYS_chown ||
+                      number == SYS_lchown || number == SYS_mknod)) {
             decision = emit_path_callback(decision_closure, 5, pid, number, AT_FDCWD,
                                           registers.rdi, tracees.length, &event,
                                           &callback_result);
-          } else if (number == SYS_unlinkat || number == SYS_mkdirat ||
-                     number == SYS_mknodat || number == SYS_fchmodat ||
-                     number == SYS_fchownat) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     (number == SYS_unlinkat || number == SYS_mkdirat ||
+                      number == SYS_mknodat || number == SYS_fchmodat ||
+                      number == SYS_fchownat)) {
             decision = emit_path_callback(decision_closure, 5, pid, number,
                                           (int)registers.rdi, registers.rsi,
                                           tracees.length, &event,
                                           &callback_result);
-          } else if (number == SYS_ftruncate || number == SYS_fchmod ||
-                     number == SYS_fchown) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     (number == SYS_ftruncate || number == SYS_fchmod ||
+                      number == SYS_fchown)) {
             decision = callback_decision(decision_closure, 5, pid, number,
                                          "<unsupported-fd-target>",
                                          tracees.length, &event,
                                          &callback_result);
-          } else if (number == SYS_rename || number == SYS_link ||
-                     number == SYS_symlink) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     (number == SYS_rename || number == SYS_link ||
+                      number == SYS_symlink)) {
             decision = emit_path_callback(decision_closure, 5, pid, number, AT_FDCWD,
                                           registers.rdi, tracees.length, &event,
                                           &callback_result);
@@ -636,7 +715,9 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
                                             registers.rsi, tracees.length, &event,
                                             &callback_result);
             }
-          } else if (number == SYS_renameat || number == SYS_linkat) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     (number == SYS_renameat || number == SYS_linkat)) {
             decision = emit_path_callback(decision_closure, 5, pid, number,
                                           (int)registers.rdi, registers.rsi,
                                           tracees.length, &event,
@@ -648,7 +729,9 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
                                             &callback_result);
             }
 #ifdef SYS_renameat2
-          } else if (number == SYS_renameat2) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     number == SYS_renameat2) {
             decision = emit_path_callback(decision_closure, 5, pid, number,
                                           (int)registers.rdi, registers.rsi,
                                           tracees.length, &event,
@@ -661,7 +744,9 @@ CAMLprim value sounio_loom_membrane_supervise(value config,
             }
 #endif
 #ifdef SYS_symlinkat
-          } else if (number == SYS_symlinkat) {
+          } else if (sandbox_ready &&
+                     !(native_flags & MEMBRANE_TEST_DISABLE_FS_OBSERVER) &&
+                     number == SYS_symlinkat) {
             decision = emit_path_callback(decision_closure, 5, pid, number,
                                           (int)registers.rsi, registers.rdx,
                                           tracees.length, &event,
@@ -741,6 +826,12 @@ drain:
       denial_code = 415;
     }
     policy_error = 1;
+  } else if (!sandbox_ready &&
+             (result_kind == MEMBRANE_EXITED ||
+              result_kind == MEMBRANE_SIGNALED)) {
+    result_kind = MEMBRANE_NATIVE_ERROR;
+    denial_code = 415;
+    policy_error = 1;
   } else if (!root_status_seen && result_kind < MEMBRANE_TIMED_OUT) {
     result_kind = MEMBRANE_NATIVE_ERROR;
     denial_code = 415;
@@ -756,9 +847,10 @@ finish:
     tracee_table_free(&tracees);
     free(executable);
     free(cwd);
+    free(user_executable);
     free_string_array(arguments);
     free_string_array(environment);
-    result = caml_alloc_tuple(8);
+    result = caml_alloc_tuple(10);
     Store_field(result, 0, Val_int(result_kind));
     Store_field(result, 1, Val_int(result_exit));
     Store_field(result, 2, Val_int(result_signal));
@@ -767,6 +859,8 @@ finish:
     Store_field(result, 5, Val_int(denial_code));
     Store_field(result, 6, Val_int(timed_out));
     Store_field(result, 7, Val_int(policy_error));
+    Store_field(result, 8, Val_int(landlock_abi));
+    Store_field(result, 9, Val_int(sandbox_ready));
     CAMLreturn(result);
   }
 #endif

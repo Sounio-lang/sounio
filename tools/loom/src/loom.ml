@@ -10809,11 +10809,13 @@ let subprocess_membrane_probe_command cli =
     Loom_membrane.run_probe ~root ~cwd ~scope ~deadline_ms ~argv
   in
   Printf.printf
-    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s attachment=refused\n%!"
+    "LOOM_SUBPROCESS_MEMBRANE_PROBE kind=%d exit=%d signal=%d elapsed_us=%Ld events=%d decision_code=%d timed_out=%s policy_error=%s sandbox=bubblewrap sandbox_sha256=%s sandbox_ready=%s rootfs=readonly scope=readwrite tmp=ephemeral network=isolated pidns=isolated landlock_abi=%d inherited_fds=closed attachment=refused\n%!"
     outcome.kind outcome.exit_code outcome.signal outcome.elapsed_us
     outcome.event_count outcome.decision_code
     (if outcome.timed_out then "true" else "false")
-    (if outcome.policy_error then "true" else "false");
+    (if outcome.policy_error then "true" else "false")
+    outcome.sandbox_sha256 (if outcome.sandbox_ready then "true" else "false")
+    outcome.landlock_abi;
   Loom_membrane.exit_status outcome
 
 let usage () =

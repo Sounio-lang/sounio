@@ -70,11 +70,14 @@ bin/sounio-loom obligation-supervise --state-dir PATH
 ## Subprocess Membrane
 
 LOOM has frozen Sounio semantics for a process-tree effect membrane and a Linux
-x86_64 OCaml/C diagnostic probe. The probe stops root and descendant execution,
-write-capable opens, and path mutations for a hash-pinned Sounio decision. Its
-negative gate verifies that direct Python, Python hidden behind a shell, a
-Rust-named executable, out-of-scope writes, semantic writes, path mutation, and
-deadline-surviving descendants produce no forbidden external effect.
+x86_64 OCaml/C diagnostic probe inside a hash-pinned Bubblewrap namespace. The
+probe stops root and descendant execution, write-capable opens, and path
+mutations for a hash-pinned Sounio decision. Its negative gate verifies that
+direct Python, Python hidden behind a shell, a Rust-named executable,
+out-of-scope writes, semantic writes, path mutation, inherited writable file
+descriptors, and deadline-surviving descendants produce no forbidden external
+effect. A sabotage control disables the filesystem observer and proves the
+read-only kernel root still protects paths outside the exact writable scope.
 
 This is deliberately not attached to general Bash/Exec, commit, or CI. The
 current ptrace realization does not claim a closed syscall algebra or race-free

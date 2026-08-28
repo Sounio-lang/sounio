@@ -19,23 +19,37 @@ runtime_sha256   0470cc776e841cd57d98b988a0e1f7f402126b16289356ba49d93f71cd2b912
 freeze chain, constructs exact `9023` frames, invokes the hash-pinned Sounio
 runtime for every decision, and writes hash-bound decision records.
 
-`loom_membrane_stubs.c` is a Linux x86_64 mechanism, not a policy oracle. It
-stops tracees, extracts syscall evidence, calls the OCaml adapter before the
-effect, resumes only an explicit Sounio `ALLOW`, and terminates the process tree
-on refusal, policy error, or deadline expiry.
+`loom_membrane_stubs.c` and a hash-measured Bubblewrap are Linux x86_64
+mechanisms, not policy oracles. Bubblewrap constructs the filesystem, network,
+IPC, UTS, user, and PID namespaces. The C supervisor closes inherited
+descriptors, stops tracees, extracts syscall evidence, calls the OCaml adapter
+before the effect, resumes only an explicit Sounio `ALLOW`, and terminates the
+process tree on refusal, policy error, or deadline expiry.
 
 ## Current Mechanism
 
 The diagnostic probe creates a new process group and asks the root policy
-before `fork`. The child calls `PTRACE_TRACEME`, stops, and cannot reach
-`execve` until the supervisor installs:
+before `fork`. It then executes the exact `/usr/bin/bwrap` image whose SHA-256
+is recorded in every decision. The sandbox has a read-only `/`, an ephemeral
+`/tmp`, a single read-write bind at the exact claim scope, a private network,
+IPC, UTS, user, and PID namespace, no capabilities, and parent-death handling.
+
+The C child closes every descriptor above standard input/output/error before
+the Bubblewrap image can execute. It calls `PTRACE_TRACEME`, stops, and cannot
+reach `execve` until the supervisor installs:
 
 - `PTRACE_O_EXITKILL`;
 - `PTRACE_O_TRACEFORK`, `PTRACE_O_TRACEVFORK`, and `PTRACE_O_TRACECLONE`;
 - `PTRACE_O_TRACEEXEC` and `PTRACE_O_TRACEEXIT`;
 - syscall-entry stops for the complete observed process tree.
 
-At syscall entry the probe emits Sounio effects for:
+Bootstrap filesystem effects made by the hash-measured Bubblewrap occur before
+the user-executable transition. The C state machine recognizes the first
+Bubblewrap `exec`, then requires an exact `exec` of the already admitted user
+executable. Filesystem observation becomes mandatory at that boundary. A
+sandbox process that exits without reaching it is a native error.
+
+At user-command syscall entry the probe emits Sounio effects for:
 
 - `execve` and `execveat`;
 - `fork`, `vfork`, `clone`, and `clone3`;
@@ -67,16 +81,20 @@ effect, not only the printed decision:
 | Python hidden behind `/bin/sh` | `DENY 410` | sentinel absent |
 | executable named `rustc` | `DENY 410` | sentinel absent |
 | out-of-scope write | `DENY 422` | target absent |
+| filesystem observer disabled | kernel namespace refusal | target absent |
+| inherited writable descriptor | pre-exec `close_range` | target remains empty |
+| network namespace comparison | distinct namespace | host namespace is not reused |
 | non-Sounio `.sio` write | `DENY 413` | target absent |
 | out-of-scope path mutation | `DENY 422` | original target preserved |
 | unsupported descriptor mutation | `DENY 415` | original target preserved |
 | descendant surviving deadline | timeout termination | no late write after observation window |
 | missing or altered policy | pre-spawn refusal | child effect absent |
 | altered runtime | pre-spawn refusal | child effect absent |
+| altered sandbox image | pre-spawn refusal | child effect absent |
 | final outcome marked incomplete | `DENY 426` | child exit 0 is overridden |
 
 Every operational decision record carries the frozen manifest, source,
-semantics, and runtime hashes. The probe command requires
+semantics, runtime, and Bubblewrap hashes. The probe command requires
 `SOUNIO_LOOM_HOOK_TEST_MODE=1` and always reports `attachment=refused`.
 
 ## Why Attachment Is Still Refused
@@ -84,10 +102,17 @@ semantics, and runtime hashes. The probe command requires
 Ptrace establishes a useful causal slice, but this implementation has not yet
 proved the closed-world conditions required for arbitrary agent Bash/Exec:
 
-- another thread can race pathname state between measurement and kernel use;
+- another thread can race pathname state inside the writable scope between
+  measurement and kernel use;
 - inherited writable file descriptors are not yet represented as effects;
-- descriptor duplication, `mmap`, `memfd`, mount, namespace, device, IPC, and
-  network-mediated writes are not a closed algebra;
+- descriptor duplication, `mmap`, `memfd`, device, IPC, and network-mediated
+  effects are not yet a closed Sounio algebra, even though the current probe
+  closes inherited descriptors and isolates network and IPC namespaces;
+- filesystem Unix sockets exposed by the read-only host root can still carry
+  external effects; a network namespace does not isolate `AF_UNIX`, so a
+  production root must mask host control sockets such as Docker and DBus;
+- the inherited host `/proc` is read-only but not yet replaced by a procfs
+  mounted for the child PID namespace in this pod;
 - the syscall decoder is Linux x86_64-specific and has no architecture refusal
   wrapper at the production hook boundary;
 - `io_uring` is detected, but the broader asynchronous-I/O surface has not been
@@ -112,8 +137,8 @@ The production membrane should combine complementary kernel controls rather
 than stretch ptrace into a universal reference monitor:
 
 1. retain Sounio `9023` as the only decision authority;
-2. use a pre-execution launcher that establishes a private mount/user/process
-   boundary and a deny-by-default filesystem view;
+2. retain the hash-measured Bubblewrap launcher that establishes the private
+   namespace boundary and deny-by-default filesystem view;
 3. use seccomp user notification for the syscall classes that require a
    per-effect Sounio decision;
 4. use Landlock or an equivalent kernel-enforced path envelope as a monotonic

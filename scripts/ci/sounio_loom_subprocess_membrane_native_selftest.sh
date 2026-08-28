@@ -58,12 +58,18 @@ expect_probe() {
 bash "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
 mkdir -p "$SCOPE"
 
-positive="$(expect_probe 0 'kind=1 exit=0' 2000 "$SCOPE" /usr/bin/true)"
+positive="$(expect_probe 0 'kind=1 exit=0' 15000 "$SCOPE" /usr/bin/true)"
 [[ "$positive" == *'decision_code=0'* && "$positive" == *'timed_out=false'* ]] ||
   fail "positive leaf was not admitted cleanly: $positive"
+[[ "$positive" == *'sandbox=bubblewrap'* && \
+   "$positive" == *'sandbox_ready=true'* && \
+   "$positive" == *'rootfs=readonly'* && \
+   "$positive" == *'network=isolated'* && \
+   "$positive" == *'inherited_fds=closed'* ]] ||
+  fail "kernel sandbox receipt was incomplete: $positive"
 
 inside="$SCOPE/inside-write"
-inside_result="$(expect_probe 0 'decision_code=0' 3000 "$SCOPE" \
+inside_result="$(expect_probe 0 'decision_code=0' 15000 "$SCOPE" \
   /bin/sh -c "printf OK > '$inside'")"
 [[ -f "$inside" && "$(<"$inside")" == OK ]] ||
   fail "in-scope mechanical write did not materialize: $inside_result"
@@ -75,7 +81,7 @@ python_result="$(expect_probe 126 'decision_code=410' 2000 "$SCOPE" \
 [[ "$python_result" == *'kind=5'* ]] || fail 'direct Python did not stop at policy'
 
 hidden_python_sentinel="$TEST_ROOT/hidden-python-executed"
-hidden_python_result="$(expect_probe 126 'decision_code=410' 5000 "$SCOPE" \
+hidden_python_result="$(expect_probe 126 'decision_code=410' 15000 "$SCOPE" \
   /bin/sh -c "'$PYTHON_PATH' -c \"open('$hidden_python_sentinel', 'w').write('BAD')\"")"
 [[ ! -e "$hidden_python_sentinel" ]] || fail 'Python behind shell executed'
 [[ "$hidden_python_result" == *'kind=5'* ]] ||
@@ -90,20 +96,57 @@ rust_result="$(expect_probe 126 'decision_code=410' 2000 "$SCOPE" "$fake_rust")"
 [[ "$rust_result" == *'kind=5'* ]] || fail 'Rust-named control did not stop at policy'
 
 outside="$TEST_ROOT/outside-write"
-outside_result="$(expect_probe 126 'decision_code=422' 3000 "$SCOPE" \
+outside_result="$(expect_probe 126 'decision_code=422' 15000 "$SCOPE" \
   /bin/sh -c "printf BAD > '$outside'")"
 [[ ! -e "$outside" ]] || fail 'out-of-scope write reached the filesystem'
 [[ "$outside_result" == *'kind=5'* ]] || fail 'out-of-scope write was not stopped'
 
+kernel_outside="$TEST_ROOT/kernel-outside-write"
+set +e
+kernel_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
+  SOUNIO_LOOM_SUBPROCESS_MEMBRANE_TEST_DISABLE_FS_OBSERVER=1 \
+  "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
+    --scope "$SCOPE" --deadline-ms 15000 -- /bin/sh -c \
+    "printf BAD > '$kernel_outside'" 2>&1)"
+kernel_rc=$?
+set -e
+[[ "$kernel_rc" -ne 0 && "$kernel_output" == *'sandbox_ready=true'* && \
+   "$kernel_output" == *'decision_code=0'* ]] ||
+  fail "kernel filesystem backstop did not independently refuse: rc=$kernel_rc output=$kernel_output"
+[[ ! -e "$kernel_outside" ]] ||
+  fail 'filesystem observer sabotage escaped the read-only root'
+
+inherited_target="$TEST_ROOT/inherited-fd-write"
+: > "$inherited_target"
+exec 9>>"$inherited_target"
+set +e
+inherited_output="$(probe 15000 "$SCOPE" /bin/sh -c 'printf BAD >&9' 2>&1)"
+inherited_rc=$?
+set -e
+exec 9>&-
+[[ "$inherited_rc" -ne 0 && "$inherited_output" == *'sandbox_ready=true'* && \
+   "$inherited_output" == *'inherited_fds=closed'* ]] ||
+  fail "inherited descriptor was not refused: rc=$inherited_rc output=$inherited_output"
+[[ ! -s "$inherited_target" ]] || fail 'inherited writable descriptor escaped'
+
+parent_net_namespace="$(readlink /proc/self/ns/net)"
+network_output="$(expect_probe 0 'sandbox_ready=true' 15000 "$SCOPE" \
+  /usr/bin/readlink /proc/self/ns/net)"
+child_net_namespace="$(printf '%s\n' "$network_output" | sed -n '1p')"
+[[ "$child_net_namespace" == net:\[*\] && \
+   "$child_net_namespace" != "$parent_net_namespace" ]] ||
+  fail "network namespace was not isolated: parent=$parent_net_namespace child=$child_net_namespace"
+
 semantic="$SCOPE/semantic.sio"
-semantic_result="$(expect_probe 126 'decision_code=413' 3000 "$SCOPE" \
+semantic_result="$(expect_probe 126 'decision_code=413' 15000 "$SCOPE" \
   /bin/sh -c "printf BAD > '$semantic'")"
 [[ ! -e "$semantic" ]] || fail 'non-Sounio semantic write reached the filesystem'
 [[ "$semantic_result" == *'kind=5'* ]] || fail 'semantic write was not stopped'
 
 mutation_target="$TEST_ROOT/mutation-target"
 printf 'PRESERVE\n' > "$mutation_target"
-mutation_result="$(expect_probe 126 'decision_code=422' 3000 "$SCOPE" \
+mutation_result="$(expect_probe 126 'decision_code=422' 15000 "$SCOPE" \
   /usr/bin/rm "$mutation_target")"
 [[ -f "$mutation_target" && "$(<"$mutation_target")" == PRESERVE ]] ||
   fail 'out-of-scope path mutation changed its target'
@@ -125,7 +168,7 @@ EOF
 cc -O2 -o "$fd_helper" "$fd_helper_source"
 fd_target="$SCOPE/fd-target"
 printf 'PRESERVE\n' > "$fd_target"
-fd_result="$(expect_probe 126 'decision_code=415' 3000 "$SCOPE" \
+fd_result="$(expect_probe 126 'decision_code=415' 15000 "$SCOPE" \
   "$fd_helper" "$fd_target")"
 [[ -f "$fd_target" && "$(<"$fd_target")" == PRESERVE ]] ||
   fail 'unsupported fd mutation changed its target'
@@ -133,14 +176,14 @@ fd_result="$(expect_probe 126 'decision_code=415' 3000 "$SCOPE" \
 
 late_sentinel="$SCOPE/late-descendant-write"
 started_ns="$(date +%s%N)"
-timeout_result="$(expect_probe 124 'timed_out=true' 300 "$SCOPE" \
-  /bin/sh -c "(sleep 2; printf LATE > '$late_sentinel') & wait")"
+timeout_result="$(expect_probe 124 'timed_out=true' 8000 "$SCOPE" \
+  /bin/sh -c "(sleep 12; printf LATE > '$late_sentinel') & wait")"
 ended_ns="$(date +%s%N)"
 wall_ms="$(( (ended_ns - started_ns) / 1000000 ))"
 [[ "$timeout_result" == *'kind=4'* && "$timeout_result" == *'signal=9'* ]] ||
   fail "timeout did not report terminated tree: $timeout_result"
-[[ "$wall_ms" -lt 3000 ]] || fail "timeout exceeded wall bound: ${wall_ms}ms"
-sleep 3
+[[ "$wall_ms" -lt 12000 ]] || fail "timeout exceeded wall bound: ${wall_ms}ms"
+sleep 5
 [[ ! -e "$late_sentinel" ]] || fail 'descendant survived timeout and wrote later'
 
 missing_sentinel="$TEST_ROOT/missing-policy-executed"
@@ -165,7 +208,7 @@ tamper_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
   SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
   SOUNIO_LOOM_SUBPROCESS_MEMBRANE_MANIFEST="$tampered_manifest" \
   "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
-    --scope "$SCOPE" --deadline-ms 2000 -- /usr/bin/true 2>&1)"
+    --scope "$SCOPE" --deadline-ms 15000 -- /usr/bin/true 2>&1)"
 tamper_rc=$?
 set -e
 [[ "$tamper_rc" -eq 1 && "$tamper_output" == *'policy-hash-mismatch'* ]] ||
@@ -182,12 +225,26 @@ set -e
 [[ "$runtime_rc" -eq 1 && "$runtime_output" == *'runtime-hash-mismatch'* ]] ||
   fail "tampered runtime did not fail closed: rc=$runtime_rc output=$runtime_output"
 
+sandbox_sentinel="$TEST_ROOT/sandbox-tamper-executed"
+set +e
+sandbox_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+  SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
+  SOUNIO_LOOM_SUBPROCESS_MEMBRANE_SANDBOX=/usr/bin/true \
+  "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
+    --scope "$SCOPE" --deadline-ms 2000 -- /bin/sh -c \
+    "printf BAD > '$sandbox_sentinel'" 2>&1)"
+sandbox_rc=$?
+set -e
+[[ "$sandbox_rc" -eq 1 && "$sandbox_output" == *'sandbox-hash-mismatch'* ]] ||
+  fail "tampered sandbox did not fail closed: rc=$sandbox_rc output=$sandbox_output"
+[[ ! -e "$sandbox_sentinel" ]] || fail 'tampered sandbox executed the child'
+
 set +e
 final_output="$(SOUNIO_LOOM_HOOK_TEST_MODE=1 \
   SOUNIO_LOOM_SUBPROCESS_MEMBRANE_LOG="$LOG" \
   SOUNIO_LOOM_SUBPROCESS_MEMBRANE_TEST_FINAL_OUTCOME_INCOMPLETE=1 \
   "$LOOM" subprocess-membrane-probe --root "$ROOT_DIR" --cwd "$ROOT_DIR" \
-    --scope "$SCOPE" --deadline-ms 2000 -- /usr/bin/true 2>&1)"
+    --scope "$SCOPE" --deadline-ms 15000 -- /usr/bin/true 2>&1)"
 final_rc=$?
 set -e
 [[ "$final_rc" -eq 126 && "$final_output" == *'kind=5'* && \
@@ -201,6 +258,8 @@ grep -q $'\tmanifest_sha256=0024178b8928f0c82d794d390244e83e5ce431054587fc7dd609
   "$LOG" || fail 'decision log omitted frozen manifest binding'
 grep -q $'\tsource_sha256=d72aa2e11d36ec0f6ff1e0048d2957aff5a1fb55ef2f960b9b3e13d0c25a992c\t' \
   "$LOG" || fail 'decision log omitted Sounio source binding'
+grep -q $'\tsandbox_sha256=52231e1caf55bcbc667b269f49c63599a6f7db4767ae6a039580d0ff853db712\t' \
+  "$LOG" || fail 'decision log omitted Bubblewrap mechanism binding'
 
 printf '%s\n' \
-  "sounio-loom-subprocess-membrane-native-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+C platform=linux-x86_64 root_exec=ALLOW hidden_python=DENY410+not-executed direct_python=DENY410+not-executed rust=DENY410+not-executed in_scope_write=ALLOW out_of_scope_write=DENY422+not-written semantic_write=DENY413+not-written path_mutation=DENY422+preserved fd_mutation=DENY415+preserved process_tree_timeout=SIGKILL+no-late-write timeout_wall_ms=$wall_ms missing_policy=refused-before-spawn policy_tamper=refused runtime_tamper=refused final_outcome_sabotage=DENY426+child-zero-overridden decision_log=hash-bound native_coverage_attested=false exec_attached=false commit_attached=false ci_attached=false"
+  "sounio-loom-subprocess-membrane-native-selftest: PASS semantic_authority=Sounio operational_realization=OCaml+C+Bubblewrap platform=linux-x86_64 root_exec=ALLOW hidden_python=DENY410+not-executed direct_python=DENY410+not-executed rust=DENY410+not-executed in_scope_write=ALLOW out_of_scope_write=DENY422+not-written kernel_fs_backstop=observer-sabotaged+not-written inherited_fd=closed+not-written network_namespace=distinct semantic_write=DENY413+not-written path_mutation=DENY422+preserved fd_mutation=DENY415+preserved process_tree_timeout=SIGKILL+no-late-write timeout_wall_ms=$wall_ms missing_policy=refused-before-spawn policy_tamper=refused runtime_tamper=refused sandbox_tamper=refused-before-spawn final_outcome_sabotage=DENY426+child-zero-overridden decision_log=authority+mechanism-hash-bound native_coverage_attested=false exec_attached=false commit_attached=false ci_attached=false"
