@@ -25,6 +25,8 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.contributor.codebase-overview | repo_only | docs/codebase_overview.md | - | A5 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architects-guide | repo_only | docs/ARCHITECTS_GUIDE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.async-runtime | historical | docs/architecture/ASYNC_RUNTIME.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.cei-handler-lowering-examples-2026-08-18 | repo_only | docs/architecture/CEI_HANDLER_LOWERING_EXAMPLES_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.architecture.cei-implementation-spec-2026-08-18 | repo_only | docs/architecture/CEI_IMPLEMENTATION_SPEC_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.compiler-maturity-blueprint | repo_only | docs/architecture/compiler-maturity-blueprint.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.cps-pipeline-integration | historical | docs/architecture/CPS_PIPELINE_INTEGRATION.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.architecture.cybernetics-api-reference | repo_only | docs/architecture/CYBERNETICS_API_REFERENCE.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -163,6 +165,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.equivalence-theory-lean-persite-2026-06-23 | repo_only | docs/audit/EQUIVALENCE_THEORY_LEAN_PERSITE_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.exactly-private-lean-bridge-dispatch-2026-08-19 | repo_only | docs/audit/EXACTLY_PRIVATE_LEAN_BRIDGE_DISPATCH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.exactly-private-ta-dispatch-2026-08-19 | repo_only | docs/audit/EXACTLY_PRIVATE_TA_DISPATCH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.exactly-private-type-ker-wiring-dispatch-2026-08-24 | repo_only | docs/audit/EXACTLY_PRIVATE_TYPE_KER_WIRING_DISPATCH_2026-08-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.extern-c-ffi-silent-noop-dispatch-2026-08-13 | repo_only | docs/audit/EXTERN_C_FFI_SILENT_NOOP_DISPATCH_2026-08-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.fn-type-effect-clause-census-2026-08-19 | repo_only | docs/audit/FN_TYPE_EFFECT_CLAUSE_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.fo-import-boundary-port-2026-08-19 | repo_only | docs/audit/FO_IMPORT_BOUNDARY_PORT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -343,6 +346,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.native-pow-tgamma-numerical-design-2026-08-23 | repo_only | docs/audit/NATIVE_POW_TGAMMA_NUMERICAL_DESIGN_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.octonion-action-r7-2026-08-23 | repo_only | docs/audit/OCTONION_ACTION_R7_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ode-epistemic-zero-params-2026-06-02 | repo_only | docs/audit/ODE_EPISTEMIC_ZERO_PARAMS_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.ontology-bundle-versioning-2026-08-19 | repo_only | docs/audit/ONTOLOGY_BUNDLE_VERSIONING_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ontology-ci-disconnect-2026-08-19 | repo_only | docs/audit/ONTOLOGY_CI_DISCONNECT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ousadia-epistemic-method-rx-madaros-2026-07-19 | repo_only | docs/audit/OUSADIA_EPISTEMIC_METHOD_RX_MADAROS_2026-07-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk-dissertation-session-notes-2026-06-28 | repo_only | docs/audit/PBPK_DISSERTATION_SESSION_NOTES_2026-06-28.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -420,12 +424,14 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.stats-shapiro-e2e-vertical-2026-07-18 | repo_only | docs/audit/STATS_SHAPIRO_E2E_VERTICAL_2026-07-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.surgical-calculus-disjoint-union-2026-08-19 | repo_only | docs/audit/SURGICAL_CALCULUS_DISJOINT_UNION_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.token-ceiling-blocked-runpass-census-2026-08-17 | repo_only | docs/audit/TOKEN_CEILING_BLOCKED_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.type-archaeology-family-b-2026-08-19 | repo_only | docs/audit/TYPE_ARCHAEOLOGY_FAMILY_B_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-archaeology-family-g-2026-08-19 | repo_only | docs/audit/TYPE_ARCHAEOLOGY_FAMILY_G_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.type-enum-denominator-2026-08-19 | repo_only | docs/audit/TYPE_ENUM_DENOMINATOR_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.typekind-archaeology-fh-2026-08-19 | repo_only | docs/audit/TYPEKIND_ARCHAEOLOGY_FH_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.typekind-concept-cross-2026-08-19 | repo_only | docs/audit/TYPEKIND_CONCEPT_CROSS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.units-promise-measurement-2026-08-19 | repo_only | docs/audit/UNITS_PROMISE_MEASUREMENT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.unlearning-quadrant-2026-08-19 | repo_only | docs/audit/UNLEARNING_QUADRANT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.user-frontier-wsb2-2026-08-19 | repo_only | docs/audit/USER_FRONTIER_WSB2_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.vec-new-path-call-fabrication-census-2026-08-17 | repo_only | docs/audit/VEC_NEW_PATH_CALL_FABRICATION_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.wave14d-thinlink-921-residual-2026-07-21 | repo_only | docs/audit/WAVE14D_THINLINK_921_RESIDUAL_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.wave3-conflicted-pr-triage-2026-08-16 | repo_only | docs/audit/WAVE3_CONFLICTED_PR_TRIAGE_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
