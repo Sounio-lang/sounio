@@ -167,7 +167,11 @@ let require_transition cell ~operation ~semantic_state allowed =
     invalidate cell "invocation-cell-lifecycle-replay";
     failf "invocation-cell-transition-refused:%s:operation-%d"
       (state_name cell.lifecycle) operation);
-  let actual_operation, actual_state = frame_operation semantic_state in
+  let actual_operation, actual_state =
+    try frame_operation semantic_state with Error reason ->
+      invalidate cell "invocation-cell-malformed-frame";
+      failf "invocation-cell-frame-refused:%s" reason
+  in
   if actual_operation <> operation || actual_state <> operation then (
     invalidate cell "invocation-cell-operation-mismatch";
     failf "invocation-cell-operation-mismatch:expected-%d:actual-%d:%d"
@@ -188,6 +192,13 @@ let invoke cell ~operation ~frame ~allowed ~next =
   | Loom_resident.Error reason ->
       cell.lifecycle <- Poisoned;
       failf "invocation-cell-resident-refusal:%s" reason
+  | Sys_error reason ->
+      cell.lifecycle <- Poisoned;
+      failf "invocation-cell-resident-system-refusal:%s" reason
+  | Unix.Unix_error (error, function_name, argument) ->
+      cell.lifecycle <- Poisoned;
+      failf "invocation-cell-resident-unix-refusal:%s:%s(%s)"
+        (Unix.error_message error) function_name argument
 
 let prepare cell frame =
   invoke cell ~operation:1 ~frame ~allowed:[ Unprepared ] ~next:Prepared
@@ -202,7 +213,17 @@ let close_outcome cell frame =
       ~next:Closed
   in
   if decision.code = 0 then
-    Loom_resident.close cell.resident ~deadline_ms:cell.deadline_ms;
+    (try Loom_resident.close cell.resident ~deadline_ms:cell.deadline_ms with
+    | Loom_resident.Error reason ->
+        cell.lifecycle <- Poisoned;
+        failf "invocation-cell-close-refused:%s" reason
+    | Sys_error reason ->
+        cell.lifecycle <- Poisoned;
+        failf "invocation-cell-close-system-refused:%s" reason
+    | Unix.Unix_error (error, function_name, argument) ->
+        cell.lifecycle <- Poisoned;
+        failf "invocation-cell-close-unix-refused:%s:%s(%s)"
+          (Unix.error_message error) function_name argument);
   decision
 
 let abort cell frame =
