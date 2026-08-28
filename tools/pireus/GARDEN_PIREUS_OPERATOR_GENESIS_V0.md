@@ -141,15 +141,18 @@ isomorphism invariant.
 v0 distinguishes:
 
 - `SEMANTIC_NOVELTY`: a new typed operator meaning relative to a frozen corpus;
-- `ALGEBRAIC_NOVELTY`: inequivalence under a declared algebraic action;
+- `ALGEBRAIC_NOVELTY`: inequivalence under an equivalence universe separately
+  accepted as adequate for the algebraic claim;
 - `ALGORITHMIC_NOVELTY`: a new executable evaluation strategy;
 - `MATERIAL_NOVELTY`: a lowering or cost frontier on a named machine;
 - `SCIENTIFIC_NOVELTY`: an externally defensible contribution after prior-art
   search and appropriate evidence.
 
-The first executable may establish only bounded semantic/algebraic novelty
-relative to its frozen corpus and 48-action group. Algorithmic, material,
-scientific, historical, priority, and global novelty remain false or open.
+The first executable may establish only bounded semantic novelty and exact
+inequivalence under its frozen corpus and 48-action group. Because v0 omits
+`GL(4,2)`, sign gauges, and isotopy, its `relative_algebraic_novelty` field
+remains false. Algorithmic, material, scientific, historical, priority, and
+global novelty remain false or open.
 
 ## NoveltyReceipt v0
 
