@@ -538,6 +538,76 @@ int measure(pid_t pid_a, pid_t pid_b, const std::string& unit_a,
   return 0;
 }
 
+int measure_same_principal_sabotage(pid_t pid_a, pid_t pid_b,
+                                    const std::string& unit_a,
+                                    const std::string& unit_b) {
+  if (getuid() != 0 || geteuid() != 0 || getgid() != 0 || getegid() != 0) {
+    throw Error("host sabotage measurement requires root identity");
+  }
+  if (pid_a == pid_b || !safe_unit_name(unit_a) || !safe_unit_name(unit_b) ||
+      unit_a == unit_b) {
+    throw Error("sabotage cell identities are malformed or aliased");
+  }
+  const ProcFacts a_before = process_facts(pid_a);
+  const ProcFacts b_before = process_facts(pid_b);
+  if (a_before.uid == 0 || a_before.gid == 0 ||
+      a_before.uid != b_before.uid || a_before.gid != b_before.gid ||
+      a_before.cgroup == b_before.cgroup ||
+      a_before.cgroup.find(unit_a) == std::string::npos ||
+      b_before.cgroup.find(unit_b) == std::string::npos ||
+      !a_before.no_new_privileges || !b_before.no_new_privileges ||
+      !zero_capability_word(a_before.cap_effective) ||
+      !zero_capability_word(b_before.cap_effective) ||
+      !zero_capability_word(a_before.cap_ambient) ||
+      !zero_capability_word(b_before.cap_ambient)) {
+    throw Error("same-principal sabotage posture is incomplete");
+  }
+  UniqueFd pidfd_a(pidfd_open_native(pid_a));
+  UniqueFd pidfd_b(pidfd_open_native(pid_b));
+  if (pidfd_a.get() < 0 || pidfd_b.get() < 0 ||
+      !pidfd_is_live(pidfd_a.get()) || !pidfd_is_live(pidfd_b.get())) {
+    throw Error("sabotage pidfd identity is unavailable");
+  }
+  const AttackResult a_to_b = attack_as(a_before, b_before, pidfd_b.get());
+  const AttackResult b_to_a = attack_as(b_before, a_before, pidfd_a.get());
+  const auto admitted_signal_pair = [](const AttackResult& result,
+                                       const ProcFacts& attacker) {
+    return result.setup_errno == 0 &&
+           result.effective_uid == static_cast<int>(attacker.uid) &&
+           result.effective_gid == static_cast<int>(attacker.gid) &&
+           result.signal_errno == 0 && result.pidfd_signal_errno == 0;
+  };
+  if (!admitted_signal_pair(a_to_b, a_before) ||
+      !admitted_signal_pair(b_to_a, b_before)) {
+    throw Error("same-principal sabotage did not admit both signal probes");
+  }
+  const ProcFacts a_after = process_facts(pid_a);
+  const ProcFacts b_after = process_facts(pid_b);
+  if (a_after.start_tick != a_before.start_tick ||
+      b_after.start_tick != b_before.start_tick ||
+      !pidfd_is_live(pidfd_a.get()) || !pidfd_is_live(pidfd_b.get())) {
+    throw Error("sabotage process identity changed during signal probes");
+  }
+  std::cout << "LOOM_HOST_PRINCIPAL_CELL_SAME_PRINCIPAL_SABOTAGE PASS"
+            << " semantic_authority=Sounio action=9030"
+            << " producing_language=C++20 language_role=MATERIAL_PARITY"
+            << " intervention=kernel-distinct-principal-removed"
+            << " pid_a=" << pid_a << " pid_b=" << pid_b
+            << " shared_uid=" << a_before.uid << " shared_gid=" << a_before.gid
+            << " cgroup_distinct=true no_new_privileges=true capabilities=zero"
+            << " signal_cross_cell=ALLOWED copied_pidfd_signal=ALLOWED"
+            << " proc_mem_cross_cell=" << errno_name(a_to_b.proc_mem_errno)
+            << " ptrace_cross_cell=" << errno_name(a_to_b.ptrace_errno)
+            << " process_vm_readv_cross_cell=" << errno_name(a_to_b.process_vm_errno)
+            << " proc_fd_cross_cell=" << errno_name(a_to_b.proc_fd_errno)
+            << " copied_pidfd_getfd=" << errno_name(a_to_b.pidfd_getfd_errno)
+            << " reciprocal_signal_probes=ALLOWED start_tick_stable=true"
+            << " pidfd_live=true process_state_unchanged=true causal_control=PASS"
+            << " material_grant=false grant_extinction=false exec_attached=false"
+            << " launch_open=false\n";
+  return 0;
+}
+
 int selftest() {
   if (!parse_u64("18446744073709551615") || parse_u64("18446744073709551616") ||
       parse_u64("-1") || sha256("abc") !=
@@ -618,6 +688,14 @@ int main(int argc, char** argv) {
         throw Error("measurement requires two PIDs and two units");
       }
       return measure(options.pid_a, options.pid_b, options.unit_a, options.unit_b);
+    }
+    if (options.mode == "--measure-same-principal-sabotage") {
+      if (options.pid_a == 0 || options.pid_b == 0 || options.unit_a.empty() ||
+          options.unit_b.empty()) {
+        throw Error("sabotage measurement requires two PIDs and two units");
+      }
+      return measure_same_principal_sabotage(options.pid_a, options.pid_b,
+                                             options.unit_a, options.unit_b);
     }
     throw Error("unknown mode");
   } catch (const std::exception& error) {

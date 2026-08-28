@@ -62,12 +62,16 @@ ACTUAL_SHA256="$(sha256sum "$BINARY" | cut -d ' ' -f 1)"
 nonce="$$-$(date +%s%N)"
 UNIT_A="sounio-loom-principal-cell-a-$nonce.service"
 UNIT_B="sounio-loom-principal-cell-b-$nonce.service"
+UNIT_C="sounio-loom-principal-cell-c-$nonce.service"
+UNIT_D="sounio-loom-principal-cell-d-$nonce.service"
 PID_A=''
 PID_B=''
+PID_C=''
+PID_D=''
 
 cleanup() {
   local unit
-  for unit in "$UNIT_A" "$UNIT_B"; do
+  for unit in "$UNIT_A" "$UNIT_B" "$UNIT_C" "$UNIT_D"; do
     systemctl stop "$unit" >/dev/null 2>&1 || true
     systemctl reset-failed "$unit" >/dev/null 2>&1 || true
   done
@@ -76,7 +80,13 @@ trap cleanup EXIT
 
 launch_cell() {
   local unit="$1"
+  local shared_user="${2:-}"
+  local -a user_property=()
+  if [[ -n "$shared_user" ]]; then
+    user_property+=(--property="User=$shared_user")
+  fi
   systemd-run --quiet --unit="$unit" --service-type=exec --collect \
+    "${user_property[@]}" \
     --property=DynamicUser=yes \
     --property=UMask=0077 \
     --property=NoNewPrivileges=yes \
@@ -155,28 +165,63 @@ for expectation in \
   [[ " $measurement " == *" $expectation "* ]] || fail "hostile measurement omitted $expectation"
 done
 
+launch_cell "$UNIT_C" sounio-loom-sabotage
+launch_cell "$UNIT_D" sounio-loom-sabotage
+PID_C="$(wait_for_cell "$UNIT_C")"
+PID_D="$(wait_for_cell "$UNIT_D")"
+[[ "$PID_C" != "$PID_D" ]] || fail 'same-principal sabotage cells share one PID'
+for unit in "$UNIT_C" "$UNIT_D"; do
+  [[ "$(systemctl show "$unit" --property DynamicUser --value)" == yes ]] || fail "$unit lost DynamicUser"
+  [[ "$(systemctl show "$unit" --property NoNewPrivileges --value)" == yes ]] || fail "$unit lost NoNewPrivileges"
+  [[ "$(systemctl show "$unit" --property ProtectSystem --value)" == strict ]] || fail "$unit lost ProtectSystem=strict"
+  [[ "$(systemctl show "$unit" --property ProtectProc --value)" == invisible ]] || fail "$unit lost ProtectProc=invisible"
+  [[ "$(systemctl show "$unit" --property PrivateNetwork --value)" == yes ]] || fail "$unit lost PrivateNetwork"
+done
+
+set +e
+sabotage="$(timeout --signal=TERM --kill-after=2s 20s \
+  "$BINARY" --measure-same-principal-sabotage --pid-a "$PID_C" --pid-b "$PID_D" \
+  --unit-a "$UNIT_C" --unit-b "$UNIT_D" 2>&1)"
+sabotage_status=$?
+set -e
+[[ $sabotage_status -eq 0 ]] || fail "same-principal sabotage failed or timed out status=$sabotage_status output=$sabotage"
+[[ "$sabotage" == 'LOOM_HOST_PRINCIPAL_CELL_SAME_PRINCIPAL_SABOTAGE PASS '* ]] || fail 'same-principal sabotage did not pass'
+for expectation in \
+  'intervention=kernel-distinct-principal-removed' 'cgroup_distinct=true' \
+  'no_new_privileges=true' 'capabilities=zero' 'signal_cross_cell=ALLOWED' \
+  'copied_pidfd_signal=ALLOWED' 'reciprocal_signal_probes=ALLOWED' \
+  'start_tick_stable=true' 'pidfd_live=true' 'process_state_unchanged=true' \
+  'causal_control=PASS' 'material_grant=false' 'grant_extinction=false' \
+  'exec_attached=false' 'launch_open=false'; do
+  [[ " $sabotage " == *" $expectation "* ]] || fail "same-principal sabotage omitted $expectation"
+done
+
 UID_A="$(field "$measurement" uid_a)"
 GID_A="$(field "$measurement" gid_a)"
 UID_B="$(field "$measurement" uid_b)"
 GID_B="$(field "$measurement" gid_b)"
+SHARED_UID="$(field "$sabotage" shared_uid)"
+SHARED_GID="$(field "$sabotage" shared_gid)"
 read -r _ SYSTEMD_VERSION _ < <(systemctl --version | sed -n '1p')
 [[ "$SYSTEMD_VERSION" =~ ^[0-9]+$ ]] || fail 'systemd version is not canonical'
 
 cleanup
 trap - EXIT
-for pid in "$PID_A" "$PID_B"; do
+for pid in "$PID_A" "$PID_B" "$PID_C" "$PID_D"; do
   for attempt in $(seq 1 100); do
     [[ ! -e "/proc/$pid" ]] && break
     sleep 0.05
   done
   [[ ! -e "/proc/$pid" ]] || fail "PrincipalCell process survived service cleanup: $pid"
 done
-for unit in "$UNIT_A" "$UNIT_B"; do
+for unit in "$UNIT_A" "$UNIT_B" "$UNIT_C" "$UNIT_D"; do
   systemctl is-active --quiet "$unit" && fail "PrincipalCell unit survived cleanup: $unit"
 done
 
-printf 'sounio-loom-host-principal-cell-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio action=9030 material_producer=C++20 material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s binary_sha256=%s pid_a=%s uid_a=%s gid_a=%s pid_b=%s uid_b=%s gid_b=%s simultaneous_uid_distinct=true simultaneous_gid_distinct=true cgroup_distinct=true pidfd_live=true start_tick_stable=true signal_cross_uid=EPERM proc_mem_cross_uid=%s ptrace_cross_uid=EPERM process_vm_readv_cross_uid=EPERM proc_fd_cross_uid=%s copied_pidfd_signal=EPERM copied_pidfd_getfd=EPERM reciprocal_attacks=refused dynamic_user=true no_new_privileges=true protect_system=strict protect_proc=invisible private_network=true capabilities=zero process_cleanup=observed kernel_distinct_principal_candidate=true same_uid_peer_isolation=false material_grant=false grant_extinction=false exec_attached=false commit_attached=false ci_attached=false launch_open=false measurement_sha256=%s\n' \
+printf 'sounio-loom-host-principal-cell-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio action=9030 material_producer=C++20 material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s binary_sha256=%s pid_a=%s uid_a=%s gid_a=%s pid_b=%s uid_b=%s gid_b=%s simultaneous_uid_distinct=true simultaneous_gid_distinct=true cgroup_distinct=true pidfd_live=true start_tick_stable=true signal_cross_uid=EPERM proc_mem_cross_uid=%s ptrace_cross_uid=EPERM process_vm_readv_cross_uid=EPERM proc_fd_cross_uid=%s copied_pidfd_signal=EPERM copied_pidfd_getfd=EPERM reciprocal_attacks=refused dynamic_user=true no_new_privileges=true protect_system=strict protect_proc=invisible private_network=true capabilities=zero sabotage_pid_a=%s sabotage_pid_b=%s sabotage_shared_uid=%s sabotage_shared_gid=%s sabotage_signal_cross_cell=ALLOWED sabotage_copied_pidfd_signal=ALLOWED sabotage_reciprocal=ALLOWED causal_rule=kernel-distinct-principal causal_sabotage=PASS process_cleanup=observed kernel_distinct_principal_candidate=true same_uid_peer_isolation=false material_grant=false grant_extinction=false exec_attached=false commit_attached=false ci_attached=false launch_open=false measurement_sha256=%s sabotage_sha256=%s\n' \
   "$(hostname)" "$(uname -r)" "$(uname -m)" "$SYSTEMD_VERSION" \
   "$ACTUAL_SHA256" "$PID_A" "$UID_A" "$GID_A" "$PID_B" "$UID_B" "$GID_B" \
   "$(field "$measurement" proc_mem_cross_uid)" "$(field "$measurement" proc_fd_cross_uid)" \
-  "$(printf '%s\n' "$measurement" | sha256sum | cut -d ' ' -f 1)"
+  "$PID_C" "$PID_D" "$SHARED_UID" "$SHARED_GID" \
+  "$(printf '%s\n' "$measurement" | sha256sum | cut -d ' ' -f 1)" \
+  "$(printf '%s\n' "$sabotage" | sha256sum | cut -d ' ' -f 1)"
