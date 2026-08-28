@@ -1031,6 +1031,28 @@ fn name_is_heap_alloc(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is___sounio_seq_push(n: Name) -> bool with Mut, Panic, Div {
+    if n.len != 17 { return false }
+    if n.buf[0] != 95 as i8 { return false }      // '_'
+    if n.buf[1] != 95 as i8 { return false }      // '_'
+    if n.buf[2] != 115 as i8 { return false }     // 's'
+    if n.buf[3] != 111 as i8 { return false }     // 'o'
+    if n.buf[4] != 117 as i8 { return false }     // 'u'
+    if n.buf[5] != 110 as i8 { return false }     // 'n'
+    if n.buf[6] != 105 as i8 { return false }     // 'i'
+    if n.buf[7] != 111 as i8 { return false }     // 'o'
+    if n.buf[8] != 95 as i8 { return false }      // '_'
+    if n.buf[9] != 115 as i8 { return false }     // 's'
+    if n.buf[10] != 101 as i8 { return false }    // 'e'
+    if n.buf[11] != 113 as i8 { return false }    // 'q'
+    if n.buf[12] != 95 as i8 { return false }     // '_'
+    if n.buf[13] != 112 as i8 { return false }    // 'p'
+    if n.buf[14] != 117 as i8 { return false }    // 'u'
+    if n.buf[15] != 115 as i8 { return false }    // 's'
+    if n.buf[16] != 104 as i8 { return false }    // 'h'
+    true
+}
+
 // ── Track A: extern "C" FFI intrinsics ────────────────────────────────
 // MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16. The parser rewrites an
 // `extern "C" { fn getpid() -> T }` declaration into a Sounio wrapper whose
@@ -1283,6 +1305,7 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_write_f64(*name) { return 36 }
     if name_is_acknowledge(*name) { return 37 }
     if name_is_require_confidence(*name) { return 38 }
+    if name_is___sounio_seq_push(*name) { return 51 }
     0
 }
 
@@ -1374,6 +1397,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_write_f64((*func).name) { return 36 }
     if name_is_acknowledge((*func).name) { return 37 }
     if name_is_require_confidence((*func).name) { return 38 }
+    if name_is___sounio_seq_push((*func).name) { return 51 }
         // COLLISION RESOLVED 2026-08-23. main ids 23..38 are all taken
         // (heap_alloc 23 .. require_confidence 38). The branch assigned the ffi_*
         // intrinsics 31,32,34,35,36,37, which on current main are abort, system,
@@ -3864,6 +3888,113 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_xor_rax_rax(nc)
     nc_emit_ret(nc)
     nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
+}
+
+// __sounio_seq_push(handle, value) -> unit. Seq reuses the aggregate object
+// layout: payload_size is capacity in bytes and flags is logical length. When
+// full, retargeting the existing handle-table entry preserves every alias.
+fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_push_rbp(nc)
+    nc_emit_mov_rbp_rsp(nc)
+    nc_emit_sub_rsp_imm32(nc, 64)
+    nc_emit_store_rbp_disp32_reg(nc, 3, -56)  // preserve callee-saved rbx
+    nc_emit_store_rbp_disp32_reg(nc, 7, -8)   // handle
+    nc_emit_store_rbp_disp32_reg(nc, 6, -16)  // value
+
+    nc_emit_load_rbp_disp32_reg(nc, 0, -8)
+    native_v2_resolve_handle_to_object_base_rax_into(nc)
+    nc_emit_store_rbp_disp32_reg(nc, 0, -24)  // current object base
+    nc_emit_load_rax_mem_rax_disp32(nc, native_v2_object_header_field_flags())
+    nc_emit_store_rbp_disp32_reg(nc, 0, -32)  // logical length
+
+    nc_emit_load_rbp_disp32_reg(nc, 0, -24)
+    nc_emit_load_rax_mem_rax_disp32(nc, native_v2_object_header_field_payload_size())
+    nc_emit_mov_rbx_rax(nc)                   // capacity bytes
+    nc_emit_load_rbp_disp32_reg(nc, 0, -32)
+    nc_emit_byte(nc, 0x48)                    // shl rax, 3
+    nc_emit_byte(nc, 0xc1)
+    nc_emit_byte(nc, 0xe0)
+    nc_emit_byte(nc, 3)
+    nc_emit_cmp_rax_rbx(nc)
+    let append_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)                    // jb append
+    nc_emit_byte(nc, 0x82)
+    nc_emit_u32_le(nc, 0)
+
+    nc_emit_mov_rax_rbx(nc)                   // grow capacity by 2
+    nc_emit_shl_rax_1(nc)
+    nc_emit_store_rbp_disp32_reg(nc, 0, -40)  // new payload bytes
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_cursor())
+    nc_emit_store_rbp_disp32_reg(nc, 0, -48)  // new object base
+    nc_emit_load_rbp_disp32_reg(nc, 3, -40)
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 3, 1)
+    nc_emit_add_reg_reg(nc, 0, 3)             // candidate new cursor
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_limit())
+    nc_emit_mov_rbx_rax(nc)
+    nc_emit_mov_reg_reg(nc, 0, 6)
+    nc_emit_cmp_rbx_rax(nc)
+    let heap_fail_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)                    // jb allocation failure
+    nc_emit_byte(nc, 0x82)
+    nc_emit_u32_le(nc, 0)
+    emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
+
+    // Copy the old header and payload. Arena objects never overlap.
+    nc_emit_load_rbp_disp32_reg(nc, 7, -48)   // rdi = destination
+    nc_emit_load_rbp_disp32_reg(nc, 6, -24)   // rsi = source
+    nc_emit_load_rbp_disp32_reg(nc, 0, -40)
+    nc_emit_shr_rax_imm8(nc, 1)               // old payload bytes
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 0, 1)
+    nc_emit_shr_rax_imm8(nc, 3)
+    nc_emit_mov_reg_reg(nc, 1, 0)             // rcx = qword count
+    nc_emit_byte(nc, 0xf3)
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xa5)                    // rep movsq
+
+    nc_emit_load_rbp_disp32_reg(nc, 3, -48)
+    nc_emit_load_rbp_disp32_reg(nc, 0, -40)
+    nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_payload_size())
+    nc_emit_store_rbp_disp32_reg(nc, 3, -24)
+
+    nc_emit_load_rbp_disp32_reg(nc, 3, -8)
+    nc_emit_imul_rbx_rbx_imm8(nc, native_v2_handle_entry_size())
+    nc_emit_mov_reg_reg(nc, 7, 3)
+    emit_load_runtime_context_field_rax_into(nc, runtime_context_field_handle_table_base())
+    nc_emit_mov_reg_reg(nc, 3, 7)
+    nc_emit_add_rax_rbx(nc)
+    nc_emit_mov_rbx_rax(nc)                   // handle entry
+    nc_emit_load_rbp_disp32_reg(nc, 0, -48)
+    nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_handle_entry_field_object_base())
+    nc_emit_load_rbp_disp32_reg(nc, 0, -40)
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 0, 1)
+    nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_handle_entry_field_object_size())
+
+    let append_offset = (*nc).code.len
+    nc_patch_u32_le(nc, append_patch, append_offset - (append_patch + 4))
+    nc_emit_load_rbp_disp32_reg(nc, 2, -24)
+    nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
+    nc_emit_add_reg_reg(nc, 2, 1)             // rdx = payload base
+    nc_emit_load_rbp_disp32_reg(nc, 3, -32)   // rbx = append index
+    nc_emit_load_rbp_disp32_reg(nc, 0, -16)
+    nc_emit_store_rax_mem_rdx_rbx8(nc)
+    nc_emit_load_rbp_disp32_reg(nc, 0, -32)
+    nc_emit_mov_reg_imm(nc, 1, 1)
+    nc_emit_add_reg_reg(nc, 0, 1)
+    nc_emit_load_rbp_disp32_reg(nc, 3, -24)
+    nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_object_header_field_flags())
+    nc_emit_xor_rax_rax(nc)
+    nc_emit_load_rbp_disp32_reg(nc, 3, -56)
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_emit_ret(nc)
+
+    let heap_fail_offset = (*nc).code.len
+    nc_patch_u32_le(nc, heap_fail_patch, heap_fail_offset - (heap_fail_patch + 4))
+    nc_emit_exit_code(nc, 181)
 }
 
 // syscall6(nr, a1, a2, a3, a4, a5, a6) -> i64 — raw Linux syscall escape
@@ -7114,6 +7245,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_str_from_bytes(name) { return 22 }
     if name_is_heap_alloc(name) { return 23 }
     if name_is_heap_free(name) { return 24 }
+    if name_is___sounio_seq_push(name) { return 51 }
     if name_is_syscall6(name) { return 27 }
     // P0-F allowlisted POSIX externs. malloc/free alias the heap ids so they
     // reuse the mmap emitters; getpid/getppid/exit/abort/system get 28-32.
@@ -7188,6 +7320,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 48 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_ceil((*nc))); return }
     if builtin_id == 49 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_pow((*nc))); return }
     if builtin_id == 50 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_tgamma((*nc))); return }
+    if builtin_id == 51 { emit_builtin_native_seq_push_into(nc); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
     if builtin_id == 2 { emit_builtin_print_char_into(nc); return }
     if builtin_id == 3 {
@@ -7293,6 +7426,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_cos(func.name) { return emit_builtin_cos(c) }
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
         if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
+        if name_is___sounio_seq_push(func.name) { emit_builtin_native_seq_push_into(&! c); return c }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
         if name_is_malloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
         if name_is_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
@@ -9559,6 +9693,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_cos(func.name) { (*nc) = emit_builtin_cos((*nc)); return }
         if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
         if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
+        if name_is___sounio_seq_push(func.name) { emit_builtin_native_seq_push_into(nc); return }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
         if name_is_malloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
         if name_is_free(func.name) { emit_builtin_heap_free_into(nc); return }
