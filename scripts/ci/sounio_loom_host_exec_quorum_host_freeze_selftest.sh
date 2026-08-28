@@ -146,6 +146,7 @@ expect_evidence systemctl_sha256 "$(field systemctl_sha256)"
 expect_evidence transport "$(field transport)"
 expect_evidence command "$(field command)"
 expect_evidence command_sha256 "$(field command_sha256)"
+expect_evidence transport_output_sha256 "$(field transport_output_sha256)"
 expect_evidence result HOST_MEASUREMENT_PASS
 expect_evidence first_attempt FAIL_CLOSED
 expect_evidence first_attempt_material_grant false
@@ -198,6 +199,13 @@ for token in \
   [[ " $host_receipt " == *" $token "* ]] || fail "host receipt omitted $token"
 done
 for token in \
+  "release_manifest_sha256=$(field release_manifest_sha256)" \
+  "broker_output_sha256=$(field broker_output_sha256)" \
+  "systemd_run_sha256=$(field systemd_run_sha256)" \
+  "systemctl_sha256=$(field systemctl_sha256)"; do
+  [[ " $host_receipt " == *" $token "* ]] || fail "host receipt omitted $token"
+done
+for token in \
   treatment=closed positive_host=open exact_write_sabotage=open second_release=refused \
   replay=closed controller_death=closed resident_death=closed wrong_generation=closed \
   python=closed textual_receipt=closed same_uid=closed causal_sabotage=PASS; do
@@ -205,6 +213,12 @@ for token in \
 done
 for token in production_current_unchanged=true production_broker_unchanged=true rollback=identity-operation; do
   [[ " $install_receipt " == *" $token "* ]] || fail "install receipt omitted $token"
+done
+for token in \
+  "archive_sha256=$(field capsule_sha256)" \
+  "promoter_sha256=$(field promoter_sha256)" \
+  "host_output_sha256=$(field host_output_sha256)"; do
+  [[ " $transport_receipt " == *" $token "* ]] || fail "transport receipt omitted $token"
 done
 
 principal_result="$(bash "$ROOT_DIR/$(field principal_cell_selftest_path)")"
