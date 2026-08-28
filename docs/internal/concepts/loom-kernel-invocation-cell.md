@@ -25,6 +25,11 @@ Operational artifacts:
 `tools/loom/src/loom_invocation_cell.ml`, and
 `tools/loom/kernel_invocation_cell.runtime.v1`.
 
+Material-parity admission artifacts:
+`tools/loom/INVOCATION_CELL_MATERIAL_ADMISSION_V1.md`,
+`tools/loom/src/loom_kernel_principal_broker.cpp`, and
+`tools/loom/kernel_invocation_cell.material.v1`.
+
 ## Meaning
 
 An `InvocationCell` is a non-bearer observation that joins one frozen
@@ -86,7 +91,13 @@ producer supplies an expected result accepted by the gate.
 
 ## Pending Interface
 
-`broker-custodied-one-shot-material-realization` remains pending. It must prove
-pre-effect stopping, exact peer and ancestry, race-resistant object identity,
-atomic grant consumption, kill-tree timeout, crash poisoning, and complete
-receipt closure on a host with kernel-distinct lane principals.
+The frozen C++ material-admission adapter now proves that one broker binary
+transports both positive and current-material frames to the exact Sounio action
+`9029` authority without encoding `DENY481`. It emits only a non-authorizing
+diagnostic receipt and keeps `LAUNCH` closed.
+
+`broker-custodied-one-shot-material-realization` therefore remains pending
+after admission. It must prove pre-effect stopping, exact peer and ancestry,
+race-resistant object identity, atomic grant consumption, kill-tree timeout,
+crash poisoning, and complete receipt closure on a host with kernel-distinct
+lane principals.

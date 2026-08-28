@@ -192,6 +192,16 @@ Python-oracle refusals, replay, operation mismatch, timeout, EOF, receipt
 binding, and manifest/runtime tamper before spawn. It does not open material
 invocation or attach the cell to general Exec/Bash, commit, or CI.
 
+The transitory C++ broker now has a separately frozen action `9029` admission
+adapter in `kernel_invocation_cell.material.v1`. The same broker binary routes a
+positive fixture to Sounio `ALLOW` and the current Pod observation to Sounio
+`DENY481`; it contains neither the `481` result nor its reason. Manifest,
+authority, and multiline-frame drift fail closed, while the live broker still
+refuses `LAUNCH` and `RECYCLE`. This freezes `MATERIAL_PARITY`, not material
+execution: no grant, pidfd, barrier, or process is created, and hostile
+same-UID isolation remains false. See
+[INVOCATION_CELL_MATERIAL_ADMISSION_V1.md](INVOCATION_CELL_MATERIAL_ADMISSION_V1.md).
+
 The main Loom build reconstructs all three resident runtime generations with
 the frozen Sounio toolchain, verifies each frozen digest, installs it under a
 `sha256-<digest>` directory, and atomically switches the stable runtime symlink
