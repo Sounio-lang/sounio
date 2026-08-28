@@ -102,7 +102,22 @@ if grep -qE '^//@ requires: (gpu|llvm)' "$src" 2>/dev/null; then exit 0; fi
 # Tests the repo already declares as known failures are not regressions.
 if grep -qE '^//@ known-failure' "$src" 2>/dev/null; then exit 0; fi
 
-if ! "$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1; then
+# The status is captured BEFORE any test, because inside `if ! cmd; then` the
+# value of $? is the negation's status and always 0 -- which would classify
+# every kill as an ordinary compile failure, the exact reading this guards.
+"$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  # 137 = 128+9: the kernel killed the compiler, it did not reject the program.
+  # Under SOUNIO_TEST_JOBS=nproc on this pod the OOM killer takes compiler
+  # processes, and recording those as `<name> compile` produces a plausible,
+  # entirely fictional regression list -- measured 2026-08-28: a FAIL naming 21
+  # programs, every one of them an OOM artefact. A gate that invents its own
+  # findings is worse than one that stops.
+  if [ "$_rc" -eq 137 ] || [ "$_rc" -eq 139 ]; then
+    printf '%s %s\n' "$name" "$_rc" >> "$WORK/killed.txt"
+    exit 0
+  fi
   echo "$name compile"
   exit 0
 fi
@@ -133,6 +148,7 @@ chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK
 
 : > "$WORK/ran.txt"
+: > "$WORK/killed.txt"
 printf '%s\n' "${PROGRAMS[@]}" \
   | xargs -P "$JOBS" -I{} "$WORK/run_one.sh" {} \
   | sort > "$WORK/actual.txt"
@@ -170,6 +186,22 @@ if [[ "$REFRESH" == "1" ]]; then
   } > "$BASELINE"
   echo "[madaros-corpus] baseline refreshed: $BASELINE ($ACTUAL_COUNT entries)"
   exit 0
+fi
+
+# A run in which the kernel killed compiler processes cannot be compared to a
+# baseline at all: the programs it killed are indistinguishable, in actual.txt,
+# from programs this change broke. Refuse the comparison rather than report it.
+KILLED_COUNT="$(grep -c . "$WORK/killed.txt" 2>/dev/null || true)"
+if [ "${KILLED_COUNT:-0}" -gt 0 ]; then
+  echo "[madaros-corpus] $KILLED_COUNT compiler process(es) were KILLED by the kernel:" >&2
+  sed 's/^/    ! /' "$WORK/killed.txt" >&2
+  echo "" >&2
+  echo "This run cannot be compared against the baseline. A killed compile is" >&2
+  echo "indistinguishable from a broken program once it reaches actual.txt, so" >&2
+  echo "the regression list would name programs nothing is wrong with." >&2
+  echo "" >&2
+  echo "JOBS was $JOBS. On this pod, SOUNIO_TEST_JOBS=6 completes; nproc does not." >&2
+  fail "the instrument was killed mid-run -- no verdict, not a regression"
 fi
 
 [[ -f "$BASELINE" ]] || fail "missing baseline $BASELINE -- generate it with SOUNIO_MADAROS_CORPUS_REFRESH=1"
