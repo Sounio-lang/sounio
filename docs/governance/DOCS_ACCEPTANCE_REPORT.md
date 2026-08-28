@@ -19,21 +19,21 @@ This is the editor-in-chief acceptance snapshot generated from `docs/governance/
 
 ## Scope Summary
 
-- Total governed topics: 1364
-- Repo-backed topics: 1214
+- Total governed topics: 1365
+- Repo-backed topics: 1215
 - Website-backed topics: 163
 - Dual-canon topics: 13
 - Authority count `archived`: 25
 - Authority count `dual`: 13
 - Authority count `historical`: 434
-- Authority count `repo_only`: 742
+- Authority count `repo_only`: 743
 - Authority count `website_only`: 150
 
 ## Ownership Summary
 
 - A0: 1 topics
 - A1: 1 topics
-- A2: 760 topics
+- A2: 761 topics
 - A3: 10 topics
 - A4: 31 topics
 - A5: 35 topics
