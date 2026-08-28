@@ -415,8 +415,7 @@ pub fn pireus_cost_quantity_unit_valid(quantity: i64, unit: i64) -> bool {
             unit == PIREUS_COST_UNIT_NANOSECOND
     }
     if quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT {
-        return unit == PIREUS_COST_UNIT_CYCLE ||
-            unit == PIREUS_COST_UNIT_OPERATION_PER_SECOND
+        return unit == PIREUS_COST_UNIT_CYCLE
     }
     if quantity == PIREUS_COST_ELAPSED_DURATION {
         return unit == PIREUS_COST_UNIT_NANOSECOND
@@ -426,6 +425,10 @@ pub fn pireus_cost_quantity_unit_valid(quantity: i64, unit: i64) -> bool {
     if quantity == PIREUS_COST_FREQUENCY { return unit == PIREUS_COST_UNIT_HERTZ }
     if quantity == PIREUS_COST_OCCUPANCY { return unit == PIREUS_COST_UNIT_RATIO }
     false
+}
+
+fn ptc_quantity_can_satisfy(observed: i64, requested: i64) -> bool {
+    observed == requested && observed != PIREUS_COST_STATIC_SITE_COUNT
 }
 
 pub fn pireus_cost_subject_scope_valid(subject: i64, scope: i64) -> bool {
@@ -890,10 +893,12 @@ fn ptc_exercise_negatives(
         !pireus_cost_parent_file_matches(parent_mask & (0 - 5), 2),
         !pireus_cost_quantity_unit_valid(
             PIREUS_COST_STATIC_SITE_COUNT, PIREUS_COST_UNIT_CYCLE),
-        PIREUS_COST_STATIC_SITE_COUNT !=
+        !ptc_quantity_can_satisfy(
+            PIREUS_COST_STATIC_SITE_COUNT,
+            PIREUS_COST_EXECUTED_INSTRUCTION_COUNT),
+        !ptc_quantity_can_satisfy(
             PIREUS_COST_EXECUTED_INSTRUCTION_COUNT,
-        PIREUS_COST_EXECUTED_INSTRUCTION_COUNT !=
-            PIREUS_COST_EXECUTED_MICRO_OP_COUNT,
+            PIREUS_COST_EXECUTED_MICRO_OP_COUNT),
         !pireus_cost_subject_scope_valid(
             PIREUS_COST_SUBJECT_LOWERING_NODE,
             PIREUS_COST_SCOPE_COMPLETE_OPERATION),
@@ -1183,4 +1188,145 @@ with IO, Mut, Panic, Div, Alloc, Epistemic {
         negatives: negatives,
         failures: failures,
     }
+}
+
+fn ptc_frozen_request_matches(
+    request: &PireusCostRequest, index: i64,
+) -> bool {
+    if !pireus_cost_request_valid(request) ||
+        request.request_id != index + 1 {
+        return false
+    }
+    if index == 0 {
+        return request.target_id == PIREUS_TARGET_DARWIN_XEON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.quantity == PIREUS_COST_DEPENDENCY_LATENCY &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            request.scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN
+    }
+    if index == 1 {
+        return request.target_id == PIREUS_TARGET_DARWIN_XEON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            request.scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM
+    }
+    if index == 2 {
+        return request.target_id == PIREUS_TARGET_DARWIN_XEON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_COMPLETE_OPERATION &&
+            request.quantity == PIREUS_COST_ELAPSED_DURATION &&
+            request.unit == PIREUS_COST_UNIT_NANOSECOND &&
+            request.scope == PIREUS_COST_SCOPE_COMPLETE_OPERATION
+    }
+    if index == 3 || index == 4 {
+        return request.target_id == PIREUS_TARGET_APPLE_SILICON &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            ((index == 3 &&
+                request.quantity == PIREUS_COST_DEPENDENCY_LATENCY &&
+                request.scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN) ||
+             (index == 4 &&
+                request.quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT &&
+                request.scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM))
+    }
+    if index == 5 || index == 6 {
+        return request.target_id == PIREUS_TARGET_DGX_SPARK &&
+            request.subject_kind == PIREUS_COST_SUBJECT_LOWERING_NODE &&
+            request.unit == PIREUS_COST_UNIT_CYCLE &&
+            ((index == 5 &&
+                request.quantity == PIREUS_COST_DEPENDENCY_LATENCY &&
+                request.scope == PIREUS_COST_SCOPE_DEPENDENCY_CHAIN) ||
+             (index == 6 &&
+                request.quantity == PIREUS_COST_RECIPROCAL_THROUGHPUT &&
+                request.scope == PIREUS_COST_SCOPE_INDEPENDENT_STREAM))
+    }
+    false
+}
+
+/// Exact predicate written only after the first post-Garden Sounio stream.
+pub fn pireus_target_cost_observation_matches_frozen_semantics(
+    result: &PireusTargetCostObservationResult,
+) -> bool with Mut, Panic {
+    if !result.valid || result.error != PIREUS_COST_OK ||
+        result.failures != 0 || !result.parent_files_valid ||
+        result.parent_file_match_count != 11 ||
+        !result.admission_parent_live || !result.operation_parent_live ||
+        !result.engine_parent_live {
+        return false
+    }
+    var i: i64 = 0
+    while i < PIREUS_COST_PARENT_FILE_COUNT {
+        if !pireus_cost_parent_file_matches(
+            result.parent_file_match_mask, i) {
+            return false
+        }
+        i = i + 1
+    }
+    if result.observed_cpu_count != 5 || result.observed_gpu_count != 4 ||
+        result.darwin_observed_engine_count != 9 ||
+        result.apple_observed_engine_count != 0 ||
+        result.dgx_observed_engine_count != 0 ||
+        result.darwin_blueprint_count != 2 ||
+        result.apple_blueprint_count != 2 ||
+        result.dgx_blueprint_count != 2 ||
+        result.ledger.request_count != 7 ||
+        result.ledger.selector_request_count != 6 ||
+        result.ledger.whole_operation_request_count != 1 {
+        return false
+    }
+    i = 0
+    while i < PIREUS_COST_REQUEST_COUNT {
+        let request = pireus_cost_ledger_request(&result.ledger, i)
+        if !ptc_frozen_request_matches(&request, i) { return false }
+        i = i + 1
+    }
+    if result.static_site_fact_count != 36 ||
+        result.secondary_site_fact_count != 32 ||
+        result.ontology_triple_count != 413 ||
+        result.ontology_request_count != 7 ||
+        result.ontology_observation_count != 0 ||
+        result.ontology_summary_count != 0 ||
+        result.ontology_comparison_count != 0 ||
+        result.material_observation_count != 0 ||
+        result.derived_summary_count != 0 ||
+        result.comparison_receipt_count != 0 ||
+        result.speedup_count != 0 || result.ranking_count != 0 ||
+        result.cross_target_comparable || result.parity_open ||
+        result.claim_ready || result.negatives.passed != 26 ||
+        result.negatives.total != 26 {
+        return false
+    }
+    if !result.negatives.missing_garden_binding ||
+        !result.negatives.missing_or_mismatched_parent ||
+        !result.negatives.static_site_to_latency ||
+        !result.negatives.static_site_to_dynamic_instruction ||
+        !result.negatives.instruction_to_micro_op ||
+        !result.negatives.selector_to_complete_operation ||
+        !result.negatives.unnamed_dgx_to_named_node ||
+        !result.negatives.blueprint_to_observed_engine ||
+        !result.negatives.interface_to_isa ||
+        !result.negatives.gpu_cost_to_host_xeon ||
+        !result.negatives.quantity_unit_mismatch ||
+        !result.negatives.latency_to_independent_throughput ||
+        !result.negatives.zero_sample_count ||
+        !result.negatives.zero_denominator ||
+        !result.negatives.lower_above_estimate ||
+        !result.negatives.estimate_above_upper ||
+        !result.negatives.missing_core_environment ||
+        !result.negatives.missing_affinity_or_frequency ||
+        !result.negatives.request_with_value ||
+        !result.negatives.cpp_semantic_authority ||
+        !result.negatives.summary_without_observation ||
+        !result.negatives.comparison_without_receipt ||
+        !result.negatives.same_unit_comparability ||
+        !result.negatives.review_to_authority ||
+        !result.negatives.premature_stage ||
+        !result.negatives.forbidden_producer_prelaunch {
+        return false
+    }
+    let expected: [i64; 8] = [
+        166882395, 243190428, 1767805310, 4234095682,
+        63968340, 1374547816, 344010038, 3839699970,
+    ]
+    ptc_hash_equal(&result.result_digest.words, &expected)
 }
