@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GIT_COMMON_DIR="$(git -C "${ROOT}" rev-parse --path-format=absolute --git-common-dir)"
 GUARDIAN="${SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME:-${GIT_COMMON_DIR}/sounio-coord-runtime/current/bin/sounio-loom-language-authority-runtime}"
 
-GARDEN_REL='tools/pireus/GARDEN_U250_EXECUTION_ENGINE_V0.md'
+GARDEN_REL='tools/pireus/GARDEN_U250_EXECUTION_ENGINE_PARITY_RECEIPT_V1.md'
 PARENT_REL='stdlib/hardware/pireus/u250_material_ingestion.sio'
 PARENT_FREEZE_REL='tools/pireus/u250_material_ingestion.freeze.v1'
 RAW_REL='docs/research/evidence/pireus_u250_dl380_material_probe_20260828.txt'
@@ -14,8 +14,9 @@ TAMPERED_REL='tests/fixtures/pireus_u250_material_tampered_v1.txt'
 MODULE_REL='stdlib/hardware/pireus/u250_execution_engine.sio'
 EXAMPLE_REL='examples/pireus_u250_execution_engine.sio'
 TEST_REL='tests/stdlib/hardware/test_pireus_u250_execution_engine.sio'
-FREEZE_REL='tools/pireus/u250_execution_engine.freeze.v0'
-EVIDENCE_REL='tools/pireus/evidence/u250_execution_engine_v0.txt'
+SUPERSEDED_FREEZE_REL='tools/pireus/u250_execution_engine.freeze.v0'
+FREEZE_REL='tools/pireus/u250_execution_engine.freeze.v1'
+EVIDENCE_REL='tools/pireus/evidence/u250_execution_engine_v1.txt'
 
 GARDEN="${ROOT}/${GARDEN_REL}"
 PARENT="${ROOT}/${PARENT_REL}"
@@ -26,44 +27,46 @@ TAMPERED="${ROOT}/${TAMPERED_REL}"
 MODULE="${ROOT}/${MODULE_REL}"
 EXAMPLE="${ROOT}/${EXAMPLE_REL}"
 TEST="${ROOT}/${TEST_REL}"
+SUPERSEDED_FREEZE="${ROOT}/${SUPERSEDED_FREEZE_REL}"
 FREEZE="${ROOT}/${FREEZE_REL}"
 EVIDENCE="${ROOT}/${EVIDENCE_REL}"
 COMPILER="${ROOT}/bin/souc-lean-single-x86_64"
 
 PARENT_MATERIAL_SEAL_COMMIT='da6a26d6cd76cec3011dbe3ad43bfe606d769050'
-GARDEN_COMMIT='72bd3f05292bc9903fff0b71a9a686700207ff8e'
-EXECUTABLE_COMMIT='7d4bc9c607b0fff79651d89c3d5c46b018c1bab3'
+GARDEN_COMMIT='ade650349ef558bebd56572a4e61467dec5f50f1'
+EXECUTABLE_COMMIT='93532b221cdb07caf4e1a245fae19f39c8b33df9'
 
-GARDEN_SHA256='be9d65cb737e69adb5b5bef56a4a1e821ce02f1a67191a776bcf8cff957e6146'
+GARDEN_SHA256='550127f59c59418eb2422a12270fa20c59d9771ac1227a6260e15176448b65d8'
 PARENT_SHA256='dd24f9da944ecf5427491c5040442bb4f5fd1bd21a3c2394cbcdd585bc2469c2'
 PARENT_FREEZE_SHA256='c4e2a0e0c1a4582f1192c185dc3d08ef837e3be19ac5ba982fa8a3327924f7d6'
 PARENT_SEMANTICS_SHA256='536312cdd0d75fca14ae38d3322ceec2ce931d16853a0842c257e45f087a6794'
 RAW_SHA256='6bea3b962c519dfe9a9878c008a6300b67b920f0a2b51ba9d89dbf180661e7df'
 RECEIPT_SHA256='9889567b684fcc0213ed38a44041e8475c4c9a71722b7baa1c6c064e1f1d0d7a'
 TAMPERED_SHA256='711c21a8b60e9c2717ca819b847b41779eafaab0d8f96924122146b76561164f'
-MODULE_SHA256='feddf28b136a04cea1bc11da352fae7ac3920276dbd8e7f642b0f3f60ecf1852'
+MODULE_SHA256='2b39ae0d92d18fdf7da966264f44159a8a1ecfedd0ae7cb09e03333f4b5bebbd'
 EXAMPLE_SHA256='00e843b1eb3990e05c3bf12521ea678456182fb00a1aec03ca0f6ba018a0e9eb'
-TEST_SHA256='9667ae961ba85d07b3a81a74cb20af382b021a91a583a5e2193d00e39975688d'
-FREEZE_SHA256='4872efaa80f54aee282ec1e975586d487756025da08b062dcc6ed8795af2d829'
-EVIDENCE_SHA256='c8fc57d6c6f54499d5dd2d9f78684d41495684026b381c6dc787d8576b86d004'
-SOURCE_MANIFEST_SHA256='adf6d1a768d714ba2309b423bb8b4fde46174da1126fc837cc3f58cb5075610a'
-SEMANTICS_SHA256='475c1d7b8df0cd63e0ef474b18cd9e27287480216b1725cd03abf653511e17e4'
+TEST_SHA256='06ea37958e27628cda9a7027d2893da4593b5733870930d590a0dacfb3e42fa7'
+SUPERSEDED_FREEZE_SHA256='4872efaa80f54aee282ec1e975586d487756025da08b062dcc6ed8795af2d829'
+FREEZE_SHA256='b1ac42ba32baf967481c9eed888d8d3cb776a702a3eaf613dbf19af2e4994aab'
+EVIDENCE_SHA256='c710dca7f089903ac11eb41a73a10d12093b845a1d68462db93be4463ec9350b'
+SOURCE_MANIFEST_SHA256='a1785dfca0bf5ba66b742ad3aba85139a09f6fa3df9a7d217711562c45af3737'
+SEMANTICS_SHA256='93c309d0c381464cc5d3e411a7227dd0b25174eb9e913c3c2fbaee7097d2c218'
 WRAPPER_SHA256='ad3ee58b3835cccfbf9382fba01498bc61bdcb8402c8ef47c1c3abf26099c008'
 COMPILER_SHA256='6bb6278dd6244faf7fe6c54eae248d503737d03ca1c000dba88e83fea70b26f2'
 TOOLCHAIN_SHA256='2ce5194cdc517de8d7a0063e09d4f4e7b6b5701a23fa1031a3ec9e8f56486b6e'
 HARDWARE_SHA256='46262c5d0fc8df5734998677c2ad063c686fa2d1120fb8dc18dc5b382c7c4805'
 COMMAND_SHA256='308b3d8f071d2e507c2dab88913051cd6e41afef9c3365bf53fd1dde09b5c602'
-RESULT_SHA256='513cb14af2b8f587e529ad40a892a76d26ede3b07b3da6b1e277108c99d94ca0'
+RESULT_SHA256='cf5c76e84a7ce2566e2b1ad7ad381a0f161f1e651b9090d5a8629b6bfb266262'
 EXAMPLE_OUTPUT_SHA256='3da0c4803a2e4f60839a85b3b06ef25e2c7923349d5a0601ff7357addf9281fe'
-TEST_OUTPUT_SHA256='8b552686a3b806bd1ba2619fcde90169b8f38958237e16afcda2867a11173c60'
-PREEXEC_FRAME_SHA256='2e3ff626377dfb9239b6923860de35733a78ed84d8d12107154db6e6ddcaba33'
-FREEZE_FRAME_SHA256='7ff0a1c080e63b4c5efb29a748f38cb63e7f2822a4dcc914996cac21c851f7a4'
-PYTHON_FRAME_SHA256='a57e0c66d096afbcce80930f508c743b2ac58b7009aa52fb388fce950fd5e1a4'
-RUST_FRAME_SHA256='ae08f55ae537183b6574cd8cda6eabe3dd8576e61aeb51a9917e751213efc8fb'
-LLM_FRAME_SHA256='6566c6c04710fd489035fbae5b7eb77d0b00272b5bf03cc582561f4539e3646d'
-CPP_FRAME_SHA256='f50eaafd330ca99979884874fbc613d201b5947b36221b49caf056535ea3ff1b'
-POLICY_MISSING_FRAME_SHA256='f0aaf900586102a9ba291ebbebd80880c640b1c10e946153d23877a95a203c09'
-POLICY_TIMEOUT_FRAME_SHA256='c85d107724ff55c70afc57aaca6ba27c5589ac32cb99e6804c720265a99948cb'
+TEST_OUTPUT_SHA256='a6c8f5c5e3fbaf352a969fe02215fbbacdb2df1776d92452e76ab7223272112c'
+PREEXEC_FRAME_SHA256='af4b4e598008de76fd504771555b364507e08c536e4b6a3ae91b4d634adac8d9'
+FREEZE_FRAME_SHA256='c57959593fe1da440bac85f01a0b1949b1b274721c464dd7ec5b2d9d6f0a832f'
+PYTHON_FRAME_SHA256='75d4f9cd9fc17959d6b46009de668895e743afa681f62757415f627c7c76181d'
+RUST_FRAME_SHA256='86c2da0d19772f1162628620d527e3e3a2cf01b341548f1b063b8fbdeb6737d2'
+LLM_FRAME_SHA256='0abe8e7ef784969e019146f2ecc20435c218e2531b80567c96685d74f3c702fa'
+CPP_FRAME_SHA256='a70a48c05e209e2209cb8e0ae945599d80c7c5a798a260e906f8e217e6ecbba7'
+POLICY_MISSING_FRAME_SHA256='58ffa769ee0e3a8a4560f86e18fc01ae1fbc08a9efed7ae2830c294d536eb84e'
+POLICY_TIMEOUT_FRAME_SHA256='ee77e0aee21a0014b858b6dffc47434b1c2724ba95072092077727bea49571a4'
 PYTHON_TOOLCHAIN_SHA256='5c8cfd947420cd48743adb75469089a210d7782421a4e9e46bfc4c40021fb7cf'
 PYTHON_COMMAND_SHA256='39d4704375b8db3fa1a86377da138b87363d09893df457b49e5f6f8a78809551'
 RUST_TOOLCHAIN_SHA256='ae2ed5be700fb051fe99519bd8a9376ad8e4d5091c394ccbb9d8b57c36b7cd11'
@@ -188,6 +191,7 @@ require_hash "${TAMPERED}" "${TAMPERED_SHA256}"
 require_hash "${MODULE}" "${MODULE_SHA256}"
 require_hash "${EXAMPLE}" "${EXAMPLE_SHA256}"
 require_hash "${TEST}" "${TEST_SHA256}"
+require_hash "${SUPERSEDED_FREEZE}" "${SUPERSEDED_FREEZE_SHA256}"
 require_hash "${FREEZE}" "${FREEZE_SHA256}"
 require_hash "${EVIDENCE}" "${EVIDENCE_SHA256}"
 require_hash "${ROOT}/bin/souc" "${WRAPPER_SHA256}"
@@ -247,7 +251,8 @@ result_record="$(printf '%s\n' \
   'lowering_authorized=false' 'parent_material_parity_open=true' \
   'execution_engine_parity_open=false' 'cost_present=false' \
   'kernel_correctness_present=false' 'claim_ready=false' 'failures=0' \
-  'negative_cases=14' 'python_oracle=PREEXEC_REFUSED' \
+  'negative_cases=15' 'parity_without_receipt=REFUSED' \
+  'python_oracle=PREEXEC_REFUSED' \
   'python_process_launched=false')"
 [[ "$(sha_text "${result_record}")" == "${RESULT_SHA256}" ]] ||
   fail 'result record drift'
@@ -258,6 +263,7 @@ require_line "${FREEZE}" 'language_role=SEMANTIC_AUTHORITY'
 require_line "${FREEZE}" "parent_semantics_sha256=${PARENT_SEMANTICS_SHA256}"
 require_line "${FREEZE}" "source_manifest_sha256=${SOURCE_MANIFEST_SHA256}"
 require_line "${FREEZE}" "semantics_sha256=${SEMANTICS_SHA256}"
+require_line "${FREEZE}" "supersedes_freeze_sha256=${SUPERSEDED_FREEZE_SHA256}"
 require_line "${FREEZE}" 'expected_status_name=ENGINE_INVENTORY_PARTIAL'
 require_line "${FREEZE}" 'expected_observed_engine_count=1'
 require_line "${FREEZE}" 'expected_unresolved_engine_count=1'
@@ -266,6 +272,7 @@ require_line "${FREEZE}" 'expected_operation_edge_count=0'
 require_line "${FREEZE}" 'expected_lowering_authorized=false'
 require_line "${FREEZE}" 'expected_execution_engine_parity_open=false'
 require_line "${FREEZE}" 'expected_claim_ready=false'
+require_line "${FREEZE}" 'parity_without_receipt=REFUSED'
 require_line "${EVIDENCE}" "freeze_sha256=${FREEZE_SHA256}"
 require_line "${EVIDENCE}" 'material_reexecution=false'
 require_line "${EVIDENCE}" 'kernel_launch=false'
@@ -299,7 +306,7 @@ require_line "${work}/example.txt" ' claim_ready=0'
 require_line "${work}/example.txt" ' isa_edges=0'
 require_line "${work}/example.txt" ' operation_edges=0'
 require_line "${work}/test.txt" \
-  'PIREUS_U250_EXECUTION_ENGINE_TEST_PASS status=ENGINE_INVENTORY_PARTIAL slots=2 observed=1 unresolved=1 memory_profiles=1 isa_edges=0 operation_edges=0 machine_bridge=1 cpu=REFUSED gpu=REFUSED xrt_as_isa=REFUSED fabric_as_operation=REFUSED shell_kernel=REFUSED memory_lowering=REFUSED operation_without_receipt=REFUSED cost=REFUSED cpp_authority=REFUSED llm_authority=REFUSED python_authority=REFUSED parity_prefreeze=REFUSED claim_ready=REFUSED parent_tamper=REFUSED'
+  'PIREUS_U250_EXECUTION_ENGINE_TEST_PASS status=ENGINE_INVENTORY_PARTIAL slots=2 observed=1 unresolved=1 memory_profiles=1 isa_edges=0 operation_edges=0 machine_bridge=1 cpu=REFUSED gpu=REFUSED xrt_as_isa=REFUSED fabric_as_operation=REFUSED shell_kernel=REFUSED memory_lowering=REFUSED operation_without_receipt=REFUSED cost=REFUSED cpp_authority=REFUSED llm_authority=REFUSED python_authority=REFUSED parity_prefreeze=REFUSED parity_without_receipt=REFUSED claim_ready=REFUSED parent_tamper=REFUSED'
 
 authorize "$(freeze_frame 1)" "${FREEZE_FRAME_SHA256}" 0 \
   'SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SEMANTICS_FROZEN'
@@ -316,4 +323,4 @@ authorize "$(freeze_frame 0)" "${POLICY_MISSING_FRAME_SHA256}" 101 \
 authorize "$(freeze_frame 2)" "${POLICY_TIMEOUT_FRAME_SHA256}" 102 \
   'SOUNIO_LANGUAGE_AUTHORITY_DENY code=102 reason=policy-timeout next_stage=SOUNIO_EXECUTABLE'
 
-printf 'PIREUS_U250_EXECUTION_ENGINE_GATE_PASS=true stage=SEMANTICS_FROZEN target=AMD_ALVEO_U250 kind=FPGA fabric=XCU250 interface=XRT_XDMA slots=2 observed=1 unresolved=1 memory_profiles=1 isa_edges=0 operation_edges=0 lowering_authorized=false parent_material_parity_open=true engine_parity_open=false negatives=14 python_oracle=E110 rust_oracle=E110 python_process_launched=false rust_process_launched=false llm_authority=E113 cpp_authority=E113 policy_missing=E101 policy_timeout=E102 material_reexecution=false kernel_launch=false claim_ready=false\n'
+printf 'PIREUS_U250_EXECUTION_ENGINE_GATE_PASS=true stage=SEMANTICS_FROZEN version=v1 target=AMD_ALVEO_U250 kind=FPGA fabric=XCU250 interface=XRT_XDMA slots=2 observed=1 unresolved=1 memory_profiles=1 isa_edges=0 operation_edges=0 lowering_authorized=false parent_material_parity_open=true engine_parity_open=false parity_without_receipt=REFUSED negatives=15 python_oracle=E110 rust_oracle=E110 python_process_launched=false rust_process_launched=false llm_authority=E113 cpp_authority=E113 policy_missing=E101 policy_timeout=E102 material_reexecution=false kernel_launch=false claim_ready=false\n'
