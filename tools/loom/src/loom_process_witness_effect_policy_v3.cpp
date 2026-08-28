@@ -48,8 +48,39 @@ static_assert(LOOM_EFFECT_POLICY_VERSION == 3 ||
               LOOM_EFFECT_POLICY_VERSION == 6 ||
               LOOM_EFFECT_POLICY_VERSION == 7 ||
               LOOM_EFFECT_POLICY_VERSION == 8 ||
-              LOOM_EFFECT_POLICY_VERSION == 9);
-#if LOOM_EFFECT_POLICY_VERSION == 9
+              LOOM_EFFECT_POLICY_VERSION == 9 ||
+              LOOM_EFFECT_POLICY_VERSION == 10);
+#if LOOM_EFFECT_POLICY_VERSION == 10
+constexpr std::string_view kPolicyManifestSha256 =
+    "9e7f42fd4bd18fd2b5f996b279a67f46a50546a20ef6949e4dc069c16b3d0dda";
+constexpr std::string_view kPolicySchema =
+    "loom-process-witness-effect-policy-plan-v10-freeze-v1";
+constexpr std::string_view kPolicyBundleSha256 =
+    "9589a205b26c3973e3c5af3c6377ac399589f484e4df7d16e0fae92d5d16e36d";
+constexpr std::string_view kPolicyRootPath =
+    "/loom/effect-policy-v10.freeze.v1";
+constexpr std::string_view kPolicyFilename = "effect-policy-v10.freeze.v1";
+constexpr std::string_view kSelftestPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V10_SELFTEST PASS";
+constexpr std::string_view kReadyPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V10_ROOT_READY PASS";
+constexpr std::string_view kVersionRootReceipt =
+    " systemd_mount=/run/systemd/incoming systemd_sys_mount=/sys"
+    " systemd_sys_ready_filesystem=sysfs systemd_sys_ready_read_only=true"
+    " var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP"
+    " principal_readable=false principal_enumeration=forbidden"
+    " empty_observer=ROOT_HOST mount_observer=ROOT_HOST"
+    " extinction_observer=ROOT_HOST"
+    " typed_file_bounds=effect-cell-16MiB+payload-1MiB+manifests-64KiB"
+    " effective_mount_truth=DynamicUser+disconnected+strict+read-only"
+    " identity_typed_mounts=CAPSULE_EMPTY_BIND"
+    " property_authority=CONFIGURATION_ONLY"
+    " filesystem_authority=ROOT_HOST_MOUNTINFO"
+    " temporary_sources=SAME_IMMUTABLE_ROOT_TMP"
+    " temporary_read_only=true temporary_empty=true"
+    " typed_structural_mounts=/proc:CAPSULE_EMPTY_BIND"
+    " forbidden_mounts=/home+/root+/run+/var+/etc";
+#elif LOOM_EFFECT_POLICY_VERSION == 9
 constexpr std::string_view kPolicyManifestSha256 =
     "9d747d937a6a2316dd8894b37e243180031b8518f2696b9200ee7d1f1d81868c";
 constexpr std::string_view kPolicySchema =
@@ -310,7 +341,69 @@ std::string load_policy_manifest(const std::string& path) {
   require_line(contents, "schema=" + std::string(kPolicySchema));
   require_line(contents,
                "bundle_sha256=" + std::string(kPolicyBundleSha256));
-#if LOOM_EFFECT_POLICY_VERSION == 9
+#if LOOM_EFFECT_POLICY_VERSION == 10
+  for (const std::string_view line : {
+           "effect_cell_min_bytes=1",
+           "effect_cell_max_bytes=16777216",
+           "payload_min_bytes=1",
+           "payload_max_bytes=1048576",
+           "policy_manifest_min_bytes=1",
+           "policy_manifest_max_bytes=65536",
+           "payload_manifest_min_bytes=1",
+           "payload_manifest_max_bytes=65536",
+           "file_identity=size+root_owned+single_link+non_writable+sha256",
+           "file_bound_diagnostic=object+observed_size+configured_max",
+           "systemd_mount_path=/run/systemd/incoming",
+           "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
+           "principal_observer_exists=true",
+           "principal_observer_root_owned=true",
+           "principal_observer_writable=false",
+           "principal_observer_readable=false",
+           "principal_observer_enumeration=forbidden",
+           "empty_observer=ROOT_HOST",
+           "mount_observer=ROOT_HOST",
+           "extinction_observer=ROOT_HOST",
+           "systemd_sys_mount_path=/sys",
+           "systemd_sys_ready_filesystem=sysfs",
+           "systemd_sys_ready_source=sysfs",
+           "systemd_sys_ready_read_only=true",
+           "systemd_var_tmp_path=/var/tmp",
+           "systemd_var_tmp_ready_source=IMMUTABLE_ROOT_TMP",
+           "systemd_var_tmp_ready_read_only=true",
+           "effective_dynamic_user=true",
+           "effective_private_tmp=disconnected",
+           "property_private_tmp_observed=yes",
+           "effective_protect_system=strict",
+           "effective_protect_home=read-only",
+           "property_authority=CONFIGURATION_ONLY",
+           "filesystem_authority=ROOT_HOST_MOUNTINFO",
+           "temporary_sources=SAME_IMMUTABLE_ROOT_TMP",
+           "temporary_read_only=true",
+           "temporary_empty=true",
+           "proc_treatment=CAPSULE_EMPTY_BIND",
+           "proc_mount_source_object=CAPSULE_ROOT/proc",
+           "proc_mount_filesystem=CAPSULE_ROOT_FILESYSTEM",
+           "proc_mount_contents=empty",
+           "proc_mount_vfs_read_only=true",
+           "proc_mount_principal_writable=false",
+           "procfs_visible=false",
+           "proc_mount_identity=device+inode",
+           "typed_structural_mounts=/proc:CAPSULE_EMPTY_BIND",
+           "forbidden_mounts=/home+/root+/run+/var+/etc",
+           "bootstrap_treatment_code=0",
+           "bootstrap_missing_incoming_code=226",
+           "bootstrap_missing_sys_code=226",
+           "bootstrap_missing_var_tmp_code=226",
+           "bootstrap_live_procfs_code=453",
+           "bootstrap_wrong_proc_source_code=454",
+           "bootstrap_writable_proc_bind_code=455",
+           "bootstrap_nonempty_proc_bind_code=456",
+           "v9_materializable=false",
+           "v10_required_for_native=true",
+       }) {
+    require_line(contents, line);
+  }
+#elif LOOM_EFFECT_POLICY_VERSION == 9
   for (const std::string_view line : {
            "effect_cell_min_bytes=1",
            "effect_cell_max_bytes=16777216",
