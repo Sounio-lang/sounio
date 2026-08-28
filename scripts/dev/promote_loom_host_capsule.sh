@@ -199,16 +199,23 @@ done
 lease_selftest="$(printf '0\n' | "$LEASE_AUTHORITY")"
 capsule_selftest="$(printf '0\n' | "$CAPSULE_AUTHORITY")"
 invocation_selftest="$(printf '0\n' | "$INVOCATION_AUTHORITY")"
-broker_selftest="$($BROKER --selftest-protocol)"
 [[ "$lease_selftest" == 'SOUNIO_KERNEL_PRINCIPAL_LEASE_SELFTEST PASS cases=18' ]] || fail 'lease authority offline selftest failed'
 [[ "$capsule_selftest" == 'SOUNIO_KERNEL_PRINCIPAL_CAPSULE_SELFTEST PASS cases=19' ]] || fail 'capsule authority offline selftest failed'
 [[ "$invocation_selftest" == 'SOUNIO_KERNEL_INVOCATION_CELL_SELFTEST PASS cases=17' ]] || fail 'InvocationCell authority offline selftest failed'
-[[ "$broker_selftest" == 'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
-  fail 'broker offline protocol selftest failed'
+BROKER_PROTOCOL_CHECK=offline-selftest
+if [[ "$(id -u)" == 0 || "$(id -g)" == 0 ]]; then
+  # The broker deliberately refuses its synthetic protocol selftest as root.
+  # Root behavior is exercised only through the socket-activated live host gate.
+  BROKER_PROTOCOL_CHECK=deferred-to-live-host-gate
+else
+  broker_selftest="$($BROKER --selftest-protocol)"
+  [[ "$broker_selftest" == 'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
+    fail 'broker offline protocol selftest failed'
+fi
 
 if [[ "$MODE" == verify ]]; then
-  printf 'LOOM_HOST_PROMOTION_CAPSULE_VERIFY PASS archive_sha256=%s release=%s source_commit=%s source_tree_state=%s payload_entries=%s semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
-    "$ACTUAL_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE" "$verified_entries"
+  printf 'LOOM_HOST_PROMOTION_CAPSULE_VERIFY PASS archive_sha256=%s release=%s source_commit=%s source_tree_state=%s payload_entries=%s broker_protocol=%s semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
+    "$ACTUAL_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT" "$SOURCE_TREE_STATE" "$verified_entries" "$BROKER_PROTOCOL_CHECK"
   exit 0
 fi
 
@@ -219,8 +226,8 @@ fi
 command -v systemctl >/dev/null 2>&1 || fail 'host promotion requires systemctl'
 
 if [[ "$MODE" == preflight ]]; then
-  printf 'LOOM_HOST_PROMOTION_PREFLIGHT PASS archive_sha256=%s release=%s source_commit=%s payload_entries=%s pid1=systemd semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
-    "$ACTUAL_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT" "$verified_entries"
+  printf 'LOOM_HOST_PROMOTION_PREFLIGHT PASS archive_sha256=%s release=%s source_commit=%s payload_entries=%s broker_protocol=%s pid1=systemd semantic_producer=Sounio semantic_role=SEMANTIC_AUTHORITY transport_authority=false parity_open=false claim_ready=false launch=closed material_broker=false material_capsule=false material_invocation=false\n' \
+    "$ACTUAL_SHA256" "$RELEASE_ID" "$SOURCE_COMMIT" "$verified_entries" "$BROKER_PROTOCOL_CHECK"
   exit 0
 fi
 

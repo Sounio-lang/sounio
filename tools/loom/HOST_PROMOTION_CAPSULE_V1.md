@@ -89,6 +89,12 @@ payload entries, wrong modes, wrong hashes, role laundering, dirty source,
 opened claims, and an unbound promoter or host gate. The only stable symlink is
 created after verification and must target the capsule's release identity.
 
+The broker's synthetic `--selftest-protocol` deliberately refuses root. It runs
+during non-root capsule verification. Root preflight does not weaken that
+guard; it defers broker behavior to the socket-activated live host gate, where
+root identity, `SO_PEERCRED`, negative commands, and the systemd cgroup are the
+actual exercised boundary.
+
 If activation or the host gate fails after the transaction begins, the prior
 stable files and broker symlink are restored. A newly copied immutable release
 may remain unreferenced; it grants no authority and is never silently selected.
