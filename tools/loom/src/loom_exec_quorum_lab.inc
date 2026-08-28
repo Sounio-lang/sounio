@@ -337,10 +337,15 @@ std::map<std::string, std::string> load_quorum_fixtures(
 class ExecQuorumController {
  public:
   ExecQuorumController(std::string runtime, std::string root,
-                       std::string resident_runtime, std::string generation)
+                       std::string resident_runtime, std::string generation,
+                       std::string deadline_ms = "15000")
       : runtime_(canonical_path(runtime)), root_(canonical_path(root)),
         resident_runtime_(canonical_path(resident_runtime)),
-        generation_(std::move(generation)) {
+        generation_(std::move(generation)), deadline_ms_(std::move(deadline_ms)) {
+    const auto deadline = parse_u64(deadline_ms_);
+    if (!deadline || *deadline < 1000 || *deadline > 120000) {
+      throw Error("ExecGrantController deadline invalid");
+    }
     spawn();
   }
 
@@ -413,7 +418,8 @@ class ExecQuorumController {
                  parent_text.c_str(), 1) != 0 ||
           setenv("SOUNIO_LOOM_EXEC_GRANT_CONTROLLER_GENERATION",
                  generation_.c_str(), 1) != 0 ||
-          setenv("SOUNIO_LOOM_EXEC_GRANT_CONTROLLER_DEADLINE_MS", "15000", 1) != 0 ||
+          setenv("SOUNIO_LOOM_EXEC_GRANT_CONTROLLER_DEADLINE_MS",
+                 deadline_ms_.c_str(), 1) != 0 ||
           setenv("SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_RUNTIME",
                  resident_runtime_.c_str(), 1) != 0) {
         _exit(126);
@@ -455,6 +461,7 @@ class ExecQuorumController {
   std::string root_;
   std::string resident_runtime_;
   std::string generation_;
+  std::string deadline_ms_;
   UniqueFd input_;
   UniqueFd output_;
   UniqueFd pidfd_;

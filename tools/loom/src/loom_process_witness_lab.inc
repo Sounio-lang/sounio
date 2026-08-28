@@ -627,6 +627,9 @@ int selftest_host_process_witness(
   bool extinction_omission_closed = false;
   ProcessWitnessObservation positive;
 
+  std::string current_phase = "treatment";
+  try {
+
   {
     const std::string generation = random_generation_sha256();
     HostProcessWitnessCell principal(
@@ -636,10 +639,11 @@ int selftest_host_process_witness(
     treatment_closed = principal.refuse_without_release();
   }
 
+  current_phase = "positive";
   {
     const std::string generation = random_generation_sha256();
     ExecQuorumController controller(controller_runtime_path, root,
-                                    resident_runtime_path, generation);
+                                    resident_runtime_path, generation, "60000");
     const QuorumReceipt issue =
         controller.command("ISSUE", fixtures.at("issue"));
     const QuorumReceipt consume =
@@ -662,6 +666,7 @@ int selftest_host_process_witness(
     replay_closed = replay.find("REFUSE") != std::string::npos;
   }
 
+  current_phase = "causal-bypass";
   {
     const std::string generation = random_generation_sha256();
     HostProcessWitnessCell principal(
@@ -672,6 +677,7 @@ int selftest_host_process_witness(
     bypass_done = bypass.success_complete();
   }
 
+  current_phase = "wrong-generation";
   {
     const std::string generation = random_generation_sha256();
     const std::string wrong = random_generation_sha256();
@@ -683,6 +689,7 @@ int selftest_host_process_witness(
         principal.refuse_release("ARM\n" + wrong + "\n");
   }
 
+  current_phase = "wrong-close";
   {
     const std::string generation = random_generation_sha256();
     HostProcessWitnessCell principal(
@@ -695,10 +702,11 @@ int selftest_host_process_witness(
         wrong.extinction_complete() && !wrong.done;
   }
 
+  current_phase = "controller-death";
   {
     const std::string generation = random_generation_sha256();
     ExecQuorumController controller(controller_runtime_path, root,
-                                    resident_runtime_path, generation);
+                                    resident_runtime_path, generation, "60000");
     static_cast<void>(controller.command("ISSUE", fixtures.at("issue")));
     controller.kill_controller();
     HostProcessWitnessCell principal(
@@ -708,6 +716,7 @@ int selftest_host_process_witness(
     controller_death_closed = principal.refuse_without_release();
   }
 
+  current_phase = "broker-death-after-ready";
   {
     const std::string generation = random_generation_sha256();
     HostProcessWitnessCell principal(
@@ -720,6 +729,7 @@ int selftest_host_process_witness(
                           aborted.extinction_complete() && !aborted.done;
   }
 
+  current_phase = "payload-substitution";
   try {
     HostProcessWitnessCell substituted(
         process_witness_runtime_path, process_witness_manifest_path,
@@ -730,6 +740,7 @@ int selftest_host_process_witness(
     payload_substitution_closed = true;
   }
 
+  current_phase = "forged-ready-and-extinction-omission";
   ProcessWitnessObservation forged;
   forged.ready = true;
   forged_ready_closed = !process_witness_close_allowed(forged);
@@ -737,6 +748,11 @@ int selftest_host_process_witness(
   omitted.authority_extinct = false;
   extinction_omission_closed =
       positive.success_complete() && !omitted.success_complete();
+
+  } catch (const std::exception& error) {
+    throw Error("host ProcessWitness phase=" + current_phase + " reason=" +
+                error.what());
+  }
 
   if (!treatment_closed || !positive_done || !bypass_done ||
       !wrong_generation_closed || !wrong_close_refused ||
@@ -762,6 +778,7 @@ int selftest_host_process_witness(
       << " credential_unchanged=true cgroup_unchanged=true"
       << " namespace_unchanged=true environment_empty=true"
       << " descendants_empty=true two_phase=true"
+      << " controller_deadline_ms=60000"
       << " state_extinct=true generation_extinct=true"
       << " authority_extinct=true pidfd_extinct=true"
       << " cgroup_unpopulated=true unit_inactive=true"
