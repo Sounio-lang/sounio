@@ -161,7 +161,9 @@ result="$(bash "$ROOT_DIR/$(field selftest_path)")"
 [[ "$(printf '%s\n' "$result" | stream_hash)" == "$(field result_sha256)" ]] || fail 'payload selftest result hash drifted'
 
 [[ "$(file_hash "$EVIDENCE")" == "$(field evidence_sha256)" ]] || fail 'payload evidence hash drifted'
-for key in schema stage semantic_authority semantic_action producing_language language_role \
+expect_evidence schema loom-process-witness-payload-evidence-v1
+expect_evidence stage SOUNIO_EXECUTABLE
+for key in semantic_authority semantic_action producing_language language_role \
   garden_sha256 source_sha256 semantic_manifest_sha256 host_grant_manifest_sha256 \
   executable_sha256 stdout_sha256 stderr_sha256 exit_status command command_sha256 result result_sha256 \
   material_grant material_execution launch_open recycle_open exec_attached commit_attached ci_attached \
