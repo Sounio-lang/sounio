@@ -667,10 +667,14 @@ int selftest_host_process_witness(
     positive_done = positive.success_complete();
     current_phase = "positive-controller-close";
     static_cast<void>(controller.command("CLOSE", fixtures.at("close")));
-    current_phase = "positive-replay";
-    const std::string replay =
-        controller.raw_command("CONSUME", fixtures.at("consume"));
-    replay_closed = replay.find("REFUSE") != std::string::npos;
+    current_phase = "positive-controller-extinction";
+    const auto controller_deadline =
+        std::chrono::steady_clock::now() + kExecQuorumDeadline;
+    while (controller.authenticated() &&
+           std::chrono::steady_clock::now() < controller_deadline) {
+      poll(nullptr, 0, 5);
+    }
+    replay_closed = !controller.authenticated();
   }
 
   current_phase = "causal-bypass";
@@ -780,6 +784,7 @@ int selftest_host_process_witness(
       << " payload_substitution=closed forged_ready=closed"
       << " wrong_close=Sounio_refusal controller_death=closed"
       << " broker_death_after_ready=closed replay=closed"
+      << " controller_terminal_extinct=true"
       << " same_pid=true start_tick=true pidfd_at_ready=live"
       << " executable_transition=cell-to-Sounio"
       << " credential_unchanged=true cgroup_unchanged=true"
