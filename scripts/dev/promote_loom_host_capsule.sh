@@ -318,6 +318,7 @@ STABLE_PATHS=(
   /usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_BOOTSTRAP_V1.md
   /usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md
   /usr/share/doc/sounio/loom/INVOCATION_CELL_MATERIAL_ADMISSION_V1.md
+  /usr/share/doc/sounio/loom/HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md
 )
 SOURCE_PATHS=(
   "$ROOTFS/etc/systemd/system/sounio-loom-principal-broker.socket"
@@ -326,8 +327,9 @@ SOURCE_PATHS=(
   "$ROOTFS/usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_BOOTSTRAP_V1.md"
   "$ROOTFS/usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md"
   "$ROOTFS/usr/share/doc/sounio/loom/INVOCATION_CELL_MATERIAL_ADMISSION_V1.md"
+  "$ROOTFS/usr/share/doc/sounio/loom/HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md"
 )
-STABLE_MODES=(0644 0644 0600 0444 0444 0444)
+STABLE_MODES=(0644 0644 0600 0444 0444 0444 0444)
 
 TRANSACTION="$WORK/transaction"
 BACKUP="$TRANSACTION/backup"

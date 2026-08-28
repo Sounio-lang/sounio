@@ -57,6 +57,8 @@ replace_record() {
 }
 
 [[ -x "$BUILDER" && -x "$PROMOTER" ]] || fail 'capsule builder or promoter is unavailable'
+grep -Fq '  /usr/share/doc/sounio/loom/HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md' "$PROMOTER" ||
+  fail 'promoter omits the resident attachment contract from the host transaction'
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/loom-host-promotion-selftest.XXXXXX")"
 cleanup() {
