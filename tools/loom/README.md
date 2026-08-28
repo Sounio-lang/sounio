@@ -127,6 +127,17 @@ drift fails closed before child execution. Hostile same-UID peer isolation also
 remains a hard, explicit blocker. This remains a diagnostic membrane: general
 Exec/Bash, commit, and CI attachment are still explicitly false.
 
+The frozen v3 resident adds action `9029` without changing the producer of any
+expected result. The OCaml `InvocationCell` kernel validates the exact Sounio
+freeze and resident-v3 manifest before spawn, then owns only lifecycle,
+correlation, deadlines, receipts, and irreversible poisoning. Its operational
+states are `UNPREPARED`, `PREPARED`, `EFFECT_STOPPED`, `CLOSED`, and
+`POISONED`. Sounio `DENY481` and `DENY488` leave an unprepared cell without
+promoting it; replay, operation mismatch, timeout, EOF, and typed abort poison
+the generation and make reuse impossible. The OCaml freeze gate rejects any
+encoded `ALLOW`/`DENY481`/`DENY488` oracle and rebuilds the binary twice to the
+same digest. This is an operational kernel, not semantic or material authority.
+
 Action `9026` now freezes the stronger kernel-principal contract behind that
 blocker. Its C++20 material probe distinguishes a configured subordinate-ID
 range, an installed helper, a successful helper exit, and an actually installed
@@ -174,11 +185,19 @@ and material one-shot custody, hostile same-UID isolation, Exec/Bash, commit,
 and CI attachment remain closed. See
 [GARDEN_KERNEL_INVOCATION_CELL_V1.md](GARDEN_KERNEL_INVOCATION_CELL_V1.md).
 
-The main Loom build reconstructs the resident runtime with the frozen Sounio
-toolchain, verifies its frozen digest, installs it under a `sha256-<digest>`
-directory, and atomically switches the stable runtime symlink under a filesystem
-lock. A live generation therefore keeps its original executable inode while a
-concurrent build stages the same content-addressed generation.
+The corresponding OCaml operational kernel and its resident Sounio v3 route are
+now frozen in `kernel_invocation_cell.runtime.v1`. The retained adversarial gate
+exercises the full positive lifecycle, typed abort, current-material and
+Python-oracle refusals, replay, operation mismatch, timeout, EOF, receipt
+binding, and manifest/runtime tamper before spawn. It does not open material
+invocation or attach the cell to general Exec/Bash, commit, or CI.
+
+The main Loom build reconstructs all three resident runtime generations with
+the frozen Sounio toolchain, verifies each frozen digest, installs it under a
+`sha256-<digest>` directory, and atomically switches the stable runtime symlink
+under a filesystem lock. A live generation therefore keeps its original
+executable inode while a concurrent build stages the same content-addressed
+generation.
 
 The gate includes two single-rule sabotages. Removing only the frozen-parent
 rule admits an unchanged orphan request, and removing only strict progression

@@ -11,12 +11,19 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 Concept-ID: `SOUNIO-LOOM-KERNEL-INVOCATION-CELL`
 
-Status: executable and semantics-frozen in Sounio action `9029`.
+Status: executable and semantics-frozen in Sounio action `9029`; resident Sounio
+v3 transport and the OCaml operational kernel are frozen. Material invocation
+and product attachment remain closed.
 
 Canonical artifacts:
 `tools/loom/GARDEN_KERNEL_INVOCATION_CELL_V1.md`,
 `stdlib/coordination/loom_kernel_invocation_cell_authority.sio`, and
 `tools/loom/kernel_invocation_cell_authority.freeze.v1`.
+
+Operational artifacts:
+`tools/loom/resident_membrane.runtime.v3`,
+`tools/loom/src/loom_invocation_cell.ml`, and
+`tools/loom/kernel_invocation_cell.runtime.v1`.
 
 ## Meaning
 
@@ -50,6 +57,15 @@ Frozen synthetic ALLOW != Material host attachment
 Action `9029` defines and tests the expected decision for the complete join,
 including four positive operations, named refusals, and ten causal single-rule
 sabotages. That supports only the frozen semantic boundary.
+
+The OCaml operational kernel validates those exact frozen artifacts before it
+spawns one resident Sounio v3 process. It then enforces the lifecycle
+`UNPREPARED -> PREPARED -> EFFECT_STOPPED -> CLOSED | POISONED`, monotonic
+resident correlation, deadlines, receipt binding, and terminal invalidation.
+Replay, an operation/state mismatch, timeout, EOF, or typed abort makes the
+generation permanently unusable. It contains no semantic expected-result table:
+the freeze gate rejects Sounio decision strings or the named `481`/`488` results
+inside the OCaml module.
 
 ## Forbidden Claims
 

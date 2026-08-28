@@ -9,6 +9,7 @@ EXECUTION_OUTCOME_MANIFEST="$ROOT_DIR/tools/loom/execution_outcome.freeze.v1"
 SUBPROCESS_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1"
 RESIDENT_MEMBRANE_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v1"
 RESIDENT_MEMBRANE_V2_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v2"
+RESIDENT_MEMBRANE_V3_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v3"
 LANE_HEALTH_MANIFEST="$ROOT_DIR/tools/loom/lane_health.freeze.v1"
 frozen_toolchain_root=''
 execution_outcome_toolchain_root=''
@@ -16,6 +17,7 @@ subprocess_membrane_toolchain_root=''
 lane_health_toolchain_root=''
 resident_membrane_stage_root=''
 resident_membrane_v2_stage_root=''
+resident_membrane_v3_stage_root=''
 
 cleanup() {
   [[ -z "$frozen_toolchain_root" ]] || rm -rf "$frozen_toolchain_root"
@@ -24,6 +26,7 @@ cleanup() {
   [[ -z "$lane_health_toolchain_root" ]] || rm -rf "$lane_health_toolchain_root"
   [[ -z "$resident_membrane_stage_root" ]] || rm -rf "$resident_membrane_stage_root"
   [[ -z "$resident_membrane_v2_stage_root" ]] || rm -rf "$resident_membrane_v2_stage_root"
+  [[ -z "$resident_membrane_v3_stage_root" ]] || rm -rf "$resident_membrane_v3_stage_root"
 }
 
 prepare_execution_outcome_toolchain() {
@@ -163,7 +166,8 @@ if [[ -z "${SOUNIO_LOOM_EXECUTION_OUTCOME_PREBUILT:-}" ]]; then
 fi
 if [[ -z "${SOUNIO_LOOM_SUBPROCESS_MEMBRANE_PREBUILT:-}" || \
   -z "${SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT:-}" || \
-  -z "${SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT:-}" ]]; then
+  -z "${SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT:-}" || \
+  -z "${SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT:-}" ]]; then
   prepare_subprocess_membrane_toolchain
 fi
 if [[ -z "${SOUNIO_LOOM_LANE_HEALTH_PREBUILT:-}" || \
@@ -340,6 +344,61 @@ resident_membrane_v2_actual_sha="$(sha256sum "$resident_membrane_v2_stage" | awk
     "$resident_v2_link_tmp"
   mv -Tf "$resident_v2_link_tmp" "$resident_membrane_v2_output"
 ) 8>"$resident_membrane_runtime_dir/.resident-membrane-v2.lock"
+[[ -f "$RESIDENT_MEMBRANE_V3_MANIFEST" && \
+  "$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" schema)" == \
+    loom-resident-membrane-runtime-v3 && \
+  "$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" stage)" == \
+    SOUNIO_RESIDENT_REALIZATION && \
+  "$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" producing_language)" == Sounio ]] || {
+  echo 'error: frozen Sounio resident-membrane v3 runtime manifest is invalid' >&2
+  exit 1
+}
+resident_membrane_v3_expected_sha="$(manifest_value "$RESIDENT_MEMBRANE_V3_MANIFEST" runtime_sha256)"
+resident_membrane_v3_content_dir="$resident_membrane_runtime_dir/sha256-$resident_membrane_v3_expected_sha"
+resident_membrane_v3_content_output="$resident_membrane_v3_content_dir/sounio-loom-resident-membrane-runtime-v3"
+resident_membrane_v3_output="$resident_membrane_runtime_dir/sounio-loom-resident-membrane-runtime-v3"
+resident_membrane_v3_stage_root="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-resident-v3-install.XXXXXX")"
+resident_membrane_v3_stage="$resident_membrane_v3_stage_root/sounio-loom-resident-membrane-runtime-v3"
+if [[ -n "${SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT:-}" ]]; then
+  [[ -x "$SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT" ]] || {
+    echo 'error: SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT is not executable' >&2
+    exit 1
+  }
+  install -m 0755 "$SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT" \
+    "$resident_membrane_v3_stage"
+else
+  SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_SOUC="$subprocess_membrane_toolchain_root/bin/souc" \
+    SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_OUTPUT="$resident_membrane_v3_stage" \
+    "$SCRIPT_DIR/build_sounio_loom_resident_membrane_v3.sh"
+fi
+resident_membrane_v3_actual_sha="$(sha256sum "$resident_membrane_v3_stage" | awk '{print $1}')"
+[[ "$resident_membrane_v3_actual_sha" == "$resident_membrane_v3_expected_sha" ]] || {
+  echo 'error: rebuilt resident-membrane v3 runtime failed frozen hash verification' >&2
+  exit 1
+}
+(
+  flock -x 8
+  if [[ -e "$resident_membrane_v3_content_output" ]]; then
+    installed_sha="$(sha256sum "$resident_membrane_v3_content_output" | awk '{print $1}')"
+    [[ "$installed_sha" == "$resident_membrane_v3_expected_sha" ]] || {
+      echo 'error: content-addressed resident v3 runtime is corrupt' >&2
+      exit 1
+    }
+  else
+    [[ ! -e "$resident_membrane_v3_content_dir" ]] || {
+      echo 'error: incomplete content-addressed resident v3 runtime directory exists' >&2
+      exit 1
+    }
+    mkdir "$resident_membrane_v3_content_dir"
+    install -m 0555 "$resident_membrane_v3_stage" \
+      "$resident_membrane_v3_content_output"
+    chmod 0555 "$resident_membrane_v3_content_dir"
+  fi
+  resident_v3_link_tmp="$resident_membrane_runtime_dir/.resident-membrane-v3-link.$$"
+  ln -s "sha256-$resident_membrane_v3_expected_sha/sounio-loom-resident-membrane-runtime-v3" \
+    "$resident_v3_link_tmp"
+  mv -Tf "$resident_v3_link_tmp" "$resident_membrane_v3_output"
+) 8>"$resident_membrane_runtime_dir/.resident-membrane-v3.lock"
 custody_transfer_output="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-custody-transfer-runtime"
 if [[ -n "${SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT:-}" ]]; then
   [[ -x "$SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT" ]] || {
