@@ -159,6 +159,8 @@ UID_A="$(field "$measurement" uid_a)"
 GID_A="$(field "$measurement" gid_a)"
 UID_B="$(field "$measurement" uid_b)"
 GID_B="$(field "$measurement" gid_b)"
+read -r _ SYSTEMD_VERSION _ < <(systemctl --version | sed -n '1p')
+[[ "$SYSTEMD_VERSION" =~ ^[0-9]+$ ]] || fail 'systemd version is not canonical'
 
 cleanup
 trap - EXIT
@@ -174,7 +176,7 @@ for unit in "$UNIT_A" "$UNIT_B"; do
 done
 
 printf 'sounio-loom-host-principal-cell-host-gate: HOST_MEASUREMENT_PASS semantic_authority=Sounio action=9030 material_producer=C++20 material_role=MATERIAL_PARITY transitory=true host=%s kernel=%s architecture=%s systemd_version=%s binary_sha256=%s pid_a=%s uid_a=%s gid_a=%s pid_b=%s uid_b=%s gid_b=%s simultaneous_uid_distinct=true simultaneous_gid_distinct=true cgroup_distinct=true pidfd_live=true start_tick_stable=true signal_cross_uid=EPERM proc_mem_cross_uid=%s ptrace_cross_uid=EPERM process_vm_readv_cross_uid=EPERM proc_fd_cross_uid=%s copied_pidfd_signal=EPERM copied_pidfd_getfd=EPERM reciprocal_attacks=refused dynamic_user=true no_new_privileges=true protect_system=strict protect_proc=invisible private_network=true capabilities=zero process_cleanup=observed kernel_distinct_principal_candidate=true same_uid_peer_isolation=false material_grant=false grant_extinction=false exec_attached=false commit_attached=false ci_attached=false launch_open=false measurement_sha256=%s\n' \
-  "$(hostname)" "$(uname -r)" "$(uname -m)" "$(systemctl --version | sed -n '1s/^systemd //p')" \
+  "$(hostname)" "$(uname -r)" "$(uname -m)" "$SYSTEMD_VERSION" \
   "$ACTUAL_SHA256" "$PID_A" "$UID_A" "$GID_A" "$PID_B" "$UID_B" "$GID_B" \
   "$(field "$measurement" proc_mem_cross_uid)" "$(field "$measurement" proc_fd_cross_uid)" \
   "$(printf '%s\n' "$measurement" | sha256sum | cut -d ' ' -f 1)"
