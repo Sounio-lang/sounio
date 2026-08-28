@@ -17118,7 +17118,27 @@ impl Lowerer {
             let pair_dst_pl = lo_args_pl.fresh_reg()
             let lo_dst_pl = pair_dst_pl.0
             let dst_pl = pair_dst_pl.1
-            var lo_call_pl = lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, pl_print_name, args_pl, argc_pl))
+            // Zero-arg `println()` is a newline and NOTHING else. Emitting the payload
+            // call with argc 0 leaves the callee's char* parameter register undefined,
+            // and print then walks whatever address was last in rdi looking for a NUL.
+            // Measured on a Madaros built from this tree before the guard:
+            // `print("A") println() print("B") println()` prints `A` and SIGSEGVs
+            // (rc=139) at the first println. Measured 2026-08-28: 321 zero-arg
+            // `println()` call sites across 19 files, 23 of them in
+            // examples/uncertainty.sio alone.
+            //
+            // dst_pl is still DEFINED in the zero-arg branch rather than left
+            // unwritten: lower_call_expr_ref's register is the expression's result
+            // and reaches the generic expression path at 18992, so a consumer may
+            // read it. `fresh_reg()` + `ir_load_imm(reg, 0)` is precisely this
+            // file's own emit_unit (11615-11621), which is the right idiom here --
+            // `println()` is unit-valued.
+            var lo_call_pl =
+                if argc_pl > 0 {
+                    lo_dst_pl.emit(ir_call(dst_pl, fn_id_print, pl_print_name, args_pl, argc_pl))
+                } else {
+                    lo_dst_pl.emit(ir_load_imm(dst_pl, 0))
+                }
 
             let fn_id_print_char = lowerer_find_or_add_fn_id_mut(&! lo_call_pl, make_name("print_char"))
             let pair_nl_reg = lo_call_pl.fresh_reg()

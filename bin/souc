@@ -34,6 +34,41 @@ LEAN_SINGLE="$ROOT_DIR/bin/souc-lean-single-x86_64"
 
 _is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c2 "$1" 2>/dev/null)" != '#!' ]]; }
 
+# An explicit compiler override that cannot be used must ABORT, never be skipped.
+#
+# WHY. `_is_elf` requires the execute bit. A build that leaves its output
+# non-executable therefore produces a path that fails this test, and the
+# resolution loop below simply moves on to the next candidate — ending at the
+# COMMITTED `bin/madaros-linux-x86_64`, which lags `self-hosted/` source. The
+# caller asked to measure their build and silently measured the shipped one.
+#
+# That is not hypothetical: on 2026-08-28 an agent read `check: OK` through a
+# supposedly fresh compiler and `error[E245]` through the same ELF after
+# `chmod +x` — opposite verdicts, same file, no message in between. A wrong
+# measurement that still exits 0 costs more than a failed one, so an override
+# that was SET and is unusable stops here and says which reason applies.
+_reject_unusable_override() {  # _reject_unusable_override <var-name> <path>
+  local var="$1" path="$2" why
+  if   [[ ! -e "$path" ]];              then why="no such file"
+  elif [[ -d "$path" ]];                then why="is a directory"
+  elif [[ ! -x "$path" ]];              then why="not executable (chmod +x it)"
+  elif [[ "$(head -c2 "$path" 2>/dev/null)" == '#!' ]]; then why="is a script, not a raw ELF"
+  else why="unusable"; fi
+  echo "error[E-SRB-001]: $var is set but cannot be used: $why" >&2
+  echo "  $var=$path" >&2
+  echo "souc: refusing to fall back to the committed compiler — it lags self-hosted/ source," >&2
+  echo "souc: so the measurement you asked for would silently become a different one." >&2
+  echo "souc: fix the path, or unset $var to use the default resolution order." >&2
+  exit 78
+}
+
+# Abort on any override that is set-but-unusable, before any resolution runs.
+for _ov in MADAROS_RAW_BIN SOUNIO_MADAROS_BIN SOUNIO_SOUC_BIN; do
+  _ov_val="${!_ov:-}"
+  [[ -n "$_ov_val" ]] && ! _is_elf "$_ov_val" && _reject_unusable_override "$_ov" "$_ov_val"
+done
+unset _ov _ov_val
+
 _science_boundary_requested() {
   local arg
   for arg in "$@"; do
