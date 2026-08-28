@@ -91,8 +91,12 @@ decision process. It binds every generation to the frozen `9023` parent,
 requires strict request/response sequencing and correlation, and makes timeout,
 unhealthy transport, or poisoned-generation reuse explicit refusals. Its native
 executable, adversarial gate, and content-addressed semantic freeze now exist.
+One derived Sounio runtime now keeps actions `9023` and `9024` resident in a
+single stable process and matches the frozen single-shot outputs byte for byte.
 The OCaml resident realization has not yet started and cannot alter the frozen
-decision bundle.
+decision bundle. The resident runtime uses a bounded `read_byte()` framer because
+the current `lean_single` `read_line()` builtin performs one bulk read rather
+than newline framing.
 
 The gate includes two single-rule sabotages. Removing only the frozen-parent
 rule admits an unchanged orphan request, and removing only strict progression
