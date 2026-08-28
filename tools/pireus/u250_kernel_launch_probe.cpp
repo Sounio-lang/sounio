@@ -181,8 +181,9 @@ int main(int argc, char** argv) {
   const std::string artifact_digest = sha256_file(artifact);
   const std::string xrt_version = read_text("/opt/xilinx/xrt/version.json");
   const ToolResult management = run_tool(
-      "/opt/xilinx/xrt/bin/xbmgmt",
-      {"examine", "-d", kManagementBdf, "--report", "platform"});
+      "/opt/xilinx/xrt/bin/unwrapped/loader",
+      {"-exec", "xbmgmt", "examine", "-d", kManagementBdf,
+       "--report", "platform"});
   std::array<char, 256> hostname{};
   const bool hostname_valid =
       gethostname(hostname.data(), hostname.size() - 1) == 0 &&
