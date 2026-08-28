@@ -89,6 +89,12 @@ FIRST="$($INSTALLER --staging-root "$STAGE")"
 [[ "$(field "$FIRST" material_broker)" == false ]] || fail 'staging install claimed a material broker'
 [[ "$(field "$FIRST" material_capsule)" == false ]] || fail 'staging install claimed a material capsule'
 [[ "$(field "$FIRST" material_invocation)" == false ]] || fail 'staging install claimed material invocation'
+[[ "$(field "$FIRST" material_grant)" == false ]] || fail 'staging install claimed a material grant'
+[[ "$(field "$FIRST" material_execution)" == false ]] || fail 'staging install claimed material execution'
+[[ "$(field "$FIRST" resident_action_9030_attached)" == true ]] ||
+  fail 'staging install omitted resident action 9030'
+[[ "$(field "$FIRST" grant_admission)" == resident-decision-only ]] ||
+  fail 'staging install omitted resident decision admission'
 [[ "$(field "$FIRST" admission)" == decision-only ]] || fail 'staging install omitted decision-only admission'
 [[ "$(field "$FIRST" launch)" == closed && "$(field "$FIRST" recycle)" == closed ]] ||
   fail 'staging install opened a material operation'
@@ -100,6 +106,9 @@ CAPSULE_MANIFEST_SHA256="$(field "$FIRST" capsule_manifest_sha256)"
 CAPSULE_AUTHORITY_SHA256="$(field "$FIRST" capsule_authority_sha256)"
 INVOCATION_MANIFEST_SHA256="$(field "$FIRST" invocation_manifest_sha256)"
 INVOCATION_AUTHORITY_SHA256="$(field "$FIRST" invocation_authority_sha256)"
+EXEC_GRANT_MANIFEST_SHA256="$(field "$FIRST" exec_grant_manifest_sha256)"
+RESIDENT_MANIFEST_SHA256="$(field "$FIRST" resident_manifest_sha256)"
+RESIDENT_RUNTIME_SHA256="$(field "$FIRST" resident_runtime_sha256)"
 BROKER_SHA256="$(field "$FIRST" broker_sha256)"
 BUNDLE_SHA256="$(field "$FIRST" bundle_sha256)"
 RELEASE="$STAGE/usr/lib/sounio/loom/releases/$RELEASE_ID"
@@ -109,6 +118,9 @@ CAPSULE_MANIFEST="$RELEASE/kernel_principal_capsule_authority.freeze.v1"
 CAPSULE_AUTHORITY="$RELEASE/sounio-loom-kernel-principal-capsule-authority-runtime"
 INVOCATION_MANIFEST="$RELEASE/kernel_invocation_cell_authority.freeze.v1"
 INVOCATION_AUTHORITY="$RELEASE/sounio-loom-kernel-invocation-cell-authority-runtime"
+EXEC_GRANT_MANIFEST="$RELEASE/kernel_exec_grant_cell_authority.freeze.v1"
+RESIDENT_MANIFEST="$RELEASE/resident_membrane.runtime.v4"
+RESIDENT_RUNTIME="$RELEASE/sounio-loom-resident-membrane-runtime-v4"
 BROKER="$RELEASE/loom-kernel-principal-broker"
 RECEIPT="$RELEASE/install.receipt.v1"
 BROKER_LINK="$STAGE/usr/libexec/sounio/loom-kernel-principal-broker"
@@ -125,6 +137,12 @@ BROKER_LINK="$STAGE/usr/libexec/sounio/loom-kernel-principal-broker"
   fail 'installed InvocationCell manifest mode is wrong'
 [[ -x "$INVOCATION_AUTHORITY" && "$(stat -c '%a' "$INVOCATION_AUTHORITY")" == 555 ]] ||
   fail 'installed InvocationCell authority mode is wrong'
+[[ -f "$EXEC_GRANT_MANIFEST" && "$(stat -c '%a' "$EXEC_GRANT_MANIFEST")" == 444 ]] ||
+  fail 'installed ExecGrantCell manifest mode is wrong'
+[[ -f "$RESIDENT_MANIFEST" && "$(stat -c '%a' "$RESIDENT_MANIFEST")" == 444 ]] ||
+  fail 'installed resident v4 manifest mode is wrong'
+[[ -x "$RESIDENT_RUNTIME" && "$(stat -c '%a' "$RESIDENT_RUNTIME")" == 555 ]] ||
+  fail 'installed resident v4 runtime mode is wrong'
 [[ -x "$BROKER" && "$(stat -c '%a' "$BROKER")" == 555 ]] || fail 'installed broker mode is wrong'
 [[ -f "$RECEIPT" && "$(stat -c '%a' "$RECEIPT")" == 444 ]] || fail 'install receipt mode is wrong'
 [[ -f "$RELEASE/install_loom_kernel_principal_broker.sh" && \
@@ -143,10 +161,16 @@ BROKER_LINK="$STAGE/usr/libexec/sounio/loom-kernel-principal-broker"
   fail 'installed InvocationCell manifest hash differs'
 [[ "$(sha256sum "$INVOCATION_AUTHORITY" | cut -d ' ' -f 1)" == "$INVOCATION_AUTHORITY_SHA256" ]] ||
   fail 'installed InvocationCell authority hash differs'
+[[ "$(sha256sum "$EXEC_GRANT_MANIFEST" | cut -d ' ' -f 1)" == "$EXEC_GRANT_MANIFEST_SHA256" ]] ||
+  fail 'installed ExecGrantCell manifest hash differs'
+[[ "$(sha256sum "$RESIDENT_MANIFEST" | cut -d ' ' -f 1)" == "$RESIDENT_MANIFEST_SHA256" ]] ||
+  fail 'installed resident manifest hash differs'
+[[ "$(sha256sum "$RESIDENT_RUNTIME" | cut -d ' ' -f 1)" == "$RESIDENT_RUNTIME_SHA256" ]] ||
+  fail 'installed resident runtime hash differs'
 [[ "$(sha256sum "$BROKER" | cut -d ' ' -f 1)" == "$BROKER_SHA256" ]] || fail 'installed broker hash differs'
 [[ "$(receipt_value "$RECEIPT" semantic_producer)" == Sounio ]] || fail 'semantic producer receipt drifted'
 [[ "$(receipt_value "$RECEIPT" semantic_role)" == SEMANTIC_AUTHORITY ]] || fail 'semantic role receipt drifted'
-[[ "$(receipt_value "$RECEIPT" semantic_actions)" == 9027+9028+9029 ]] || fail 'semantic action receipt drifted'
+[[ "$(receipt_value "$RECEIPT" semantic_actions)" == 9027+9028+9029+9030 ]] || fail 'semantic action receipt drifted'
 [[ "$(receipt_value "$RECEIPT" lease_manifest_sha256)" == "$MANIFEST_SHA256" ]] ||
   fail 'lease manifest receipt hash drifted'
 [[ "$(receipt_value "$RECEIPT" lease_authority_sha256)" == "$AUTHORITY_SHA256" ]] ||
@@ -159,6 +183,12 @@ BROKER_LINK="$STAGE/usr/libexec/sounio/loom-kernel-principal-broker"
   fail 'InvocationCell manifest receipt hash drifted'
 [[ "$(receipt_value "$RECEIPT" invocation_authority_sha256)" == "$INVOCATION_AUTHORITY_SHA256" ]] ||
   fail 'InvocationCell authority receipt hash drifted'
+[[ "$(receipt_value "$RECEIPT" exec_grant_manifest_sha256)" == "$EXEC_GRANT_MANIFEST_SHA256" ]] ||
+  fail 'ExecGrantCell manifest receipt hash drifted'
+[[ "$(receipt_value "$RECEIPT" resident_manifest_sha256)" == "$RESIDENT_MANIFEST_SHA256" ]] ||
+  fail 'resident manifest receipt hash drifted'
+[[ "$(receipt_value "$RECEIPT" resident_runtime_sha256)" == "$RESIDENT_RUNTIME_SHA256" ]] ||
+  fail 'resident runtime receipt hash drifted'
 [[ "$(receipt_value "$RECEIPT" material_producer)" == C++20 ]] || fail 'material producer receipt drifted'
 [[ "$(receipt_value "$RECEIPT" material_role)" == MATERIAL_PARITY ]] || fail 'material role receipt drifted'
 [[ "$(receipt_value "$RECEIPT" material_transitory)" == true ]] || fail 'transitory receipt marker is absent'
@@ -168,6 +198,11 @@ BROKER_LINK="$STAGE/usr/libexec/sounio/loom-kernel-principal-broker"
 [[ "$(receipt_value "$RECEIPT" material_broker)" == false ]] || fail 'receipt promoted material broker'
 [[ "$(receipt_value "$RECEIPT" material_capsule)" == false ]] || fail 'receipt promoted material capsule'
 [[ "$(receipt_value "$RECEIPT" material_invocation)" == false ]] || fail 'receipt promoted material invocation'
+[[ "$(receipt_value "$RECEIPT" material_grant)" == false ]] || fail 'receipt promoted material grant'
+[[ "$(receipt_value "$RECEIPT" material_execution)" == false ]] || fail 'receipt promoted material execution'
+[[ "$(receipt_value "$RECEIPT" barrier_release)" == false ]] || fail 'receipt released the host barrier'
+[[ "$(receipt_value "$RECEIPT" resident_action_9030_attached)" == true ]] ||
+  fail 'receipt omitted resident action 9030 attachment'
 [[ "$(receipt_value "$RECEIPT" admission_open)" == true ]] || fail 'receipt closed decision admission'
 
 SECOND="$($INSTALLER --staging-root "$STAGE")"
@@ -178,6 +213,8 @@ SECOND="$($INSTALLER --staging-root "$STAGE")"
   fail 'source-fresh capsule authority rebuild was not deterministic'
 [[ "$(field "$SECOND" invocation_authority_sha256)" == "$INVOCATION_AUTHORITY_SHA256" ]] ||
   fail 'source-fresh InvocationCell authority rebuild was not deterministic'
+[[ "$(field "$SECOND" resident_runtime_sha256)" == "$RESIDENT_RUNTIME_SHA256" ]] ||
+  fail 'source-fresh resident v4 rebuild was not deterministic'
 [[ "$(field "$SECOND" broker_sha256)" == "$BROKER_SHA256" ]] || fail 'source-fresh broker rebuild was not deterministic'
 
 TAMPER_BYTES="$WORK/tamper-bytes"
@@ -228,8 +265,24 @@ invocation_mode_refusal="$(run_refusal invocation-release-mode-tamper "$INSTALLE
 [[ "$invocation_mode_refusal" == *'existing immutable release InvocationCell authority mode drifted'* ]] ||
   fail 'InvocationCell release-mode sabotage did not trigger the authority-mode rule'
 
+TAMPER_RESIDENT_BYTES="$WORK/tamper-resident-bytes"
+cp -a "$STAGE" "$TAMPER_RESIDENT_BYTES"
+TAMPER_RESIDENT_MANIFEST="$TAMPER_RESIDENT_BYTES/usr/lib/sounio/loom/releases/$RELEASE_ID/resident_membrane.runtime.v4"
+chmod 0644 "$TAMPER_RESIDENT_MANIFEST"
+printf X | dd of="$TAMPER_RESIDENT_MANIFEST" bs=1 seek=0 conv=notrunc status=none
+resident_bytes_refusal="$(run_refusal resident-release-byte-tamper "$INSTALLER" --staging-root "$TAMPER_RESIDENT_BYTES")"
+[[ "$resident_bytes_refusal" == *'existing immutable release resident v4 manifest drifted'* ]] ||
+  fail 'one-byte resident release sabotage did not trigger the manifest rule'
+
+TAMPER_RESIDENT_MODE="$WORK/tamper-resident-mode"
+cp -a "$STAGE" "$TAMPER_RESIDENT_MODE"
+chmod 0755 "$TAMPER_RESIDENT_MODE/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-resident-membrane-runtime-v4"
+resident_mode_refusal="$(run_refusal resident-release-mode-tamper "$INSTALLER" --staging-root "$TAMPER_RESIDENT_MODE")"
+[[ "$resident_mode_refusal" == *'existing immutable release resident v4 runtime mode drifted'* ]] ||
+  fail 'resident release-mode sabotage did not trigger the runtime-mode rule'
+
 protocol="$($BROKER --selftest-protocol)"
-[[ "$protocol" == 'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
+[[ "$protocol" == 'LOOM_KERNEL_PRINCIPAL_BROKER_PROTOCOL_SELFTEST PASS admission_without_context=denied malformed_admission=denied grant_admission_without_context=denied malformed_grant_admission=denied launch=closed recycle=closed unknown=denied partial_status=denied' ]] ||
   fail 'offline bootstrap protocol selftest failed'
 probe_refusal="$(run_refusal nonroot-live-probe "$BROKER" --probe-live --socket-path "$WORK/absent.sock")"
 [[ "$probe_refusal" == *'live broker probe requires root identity'* ]] ||
@@ -254,7 +307,8 @@ fi
 ldd "$BROKER" > "$WORK/broker.ldd"
 ! grep -Eiq 'python|rust|cargo' "$WORK/broker.ldd" || fail 'broker gained a Python or Rust runtime dependency'
 
-printf 'sounio-loom-kernel-principal-broker-install-selftest: PASS semantic_authority=Sounio operational_realization=C++20+Linux+systemd-bootstrap role=MATERIAL_PARITY transitory=true actions=9027+9028+9029 release=%s lease_manifest_sha256=%s lease_authority_sha256=%s capsule_manifest_sha256=%s capsule_authority_sha256=%s invocation_manifest_sha256=%s invocation_authority_sha256=%s broker_sha256=%s bundle_sha256=%s staging_reinstall=deterministic lease_release_tamper=refused lease_mode_tamper=refused capsule_release_tamper=refused capsule_mode_tamper=refused invocation_release_tamper=refused invocation_mode_tamper=refused nonroot_probe=refused direct_host_install=refused direct_host_gate=unavailable sudo_host_install=%s sudo_host_gate=%s admission=decision-only launch=closed recycle=closed host_activation=unavailable material_broker=false material_capsule=false material_invocation=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false\n' \
+printf 'sounio-loom-kernel-principal-broker-install-selftest: PASS semantic_authority=Sounio operational_realization=C++20+resident-Sounio+Linux+systemd-bootstrap role=MATERIAL_PARITY transitory=true actions=9027+9028+9029+9030 release=%s lease_manifest_sha256=%s lease_authority_sha256=%s capsule_manifest_sha256=%s capsule_authority_sha256=%s invocation_manifest_sha256=%s invocation_authority_sha256=%s exec_grant_manifest_sha256=%s resident_manifest_sha256=%s resident_runtime_sha256=%s broker_sha256=%s bundle_sha256=%s staging_reinstall=deterministic lease_release_tamper=refused lease_mode_tamper=refused capsule_release_tamper=refused capsule_mode_tamper=refused invocation_release_tamper=refused invocation_mode_tamper=refused resident_release_tamper=refused resident_mode_tamper=refused nonroot_probe=refused direct_host_install=refused direct_host_gate=unavailable sudo_host_install=%s sudo_host_gate=%s admission=decision-only grant_admission=resident-decision-only resident_action_9030_attached=true launch=closed recycle=closed host_activation=unavailable material_broker=false material_capsule=false material_invocation=false material_grant=false material_execution=false barrier_release=false same_uid_peer_isolation=false exec_attached=false commit_attached=false ci_attached=false\n' \
   "$RELEASE_ID" "$MANIFEST_SHA256" "$AUTHORITY_SHA256" "$CAPSULE_MANIFEST_SHA256" \
   "$CAPSULE_AUTHORITY_SHA256" "$INVOCATION_MANIFEST_SHA256" "$INVOCATION_AUTHORITY_SHA256" \
+  "$EXEC_GRANT_MANIFEST_SHA256" "$RESIDENT_MANIFEST_SHA256" "$RESIDENT_RUNTIME_SHA256" \
   "$BROKER_SHA256" "$BUNDLE_SHA256" "$sudo_install" "$sudo_gate"

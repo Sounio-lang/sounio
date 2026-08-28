@@ -8,12 +8,15 @@ ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
 MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_lease_authority.freeze.v1"
 CAPSULE_MANIFEST="$ROOT_DIR/tools/loom/kernel_principal_capsule_authority.freeze.v1"
 INVOCATION_MANIFEST="$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1"
+EXEC_GRANT_MANIFEST="$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+RESIDENT_MANIFEST="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
 BROKER_SOURCE="$ROOT_DIR/tools/loom/src/loom_kernel_principal_broker.cpp"
 SOCKET_UNIT="$ROOT_DIR/tools/loom/systemd/sounio-loom-principal-broker.socket"
 SERVICE_UNIT="$ROOT_DIR/tools/loom/systemd/sounio-loom-principal-broker.service"
 BOOTSTRAP_DOC="$ROOT_DIR/tools/loom/HOST_KERNEL_PRINCIPAL_BROKER_BOOTSTRAP_V1.md"
 INSTALL_DOC="$ROOT_DIR/tools/loom/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md"
 INVOCATION_DOC="$ROOT_DIR/tools/loom/INVOCATION_CELL_MATERIAL_ADMISSION_V1.md"
+RESIDENT_ATTACHMENT_DOC="$ROOT_DIR/tools/loom/HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md"
 
 fail() {
   printf 'install-loom-kernel-principal-broker: REFUSE reason=%s\n' "$*" >&2
@@ -52,6 +55,14 @@ capsule_manifest_value() {
 
 invocation_manifest_value() {
   record_value "$INVOCATION_MANIFEST" "$1"
+}
+
+exec_grant_manifest_value() {
+  record_value "$EXEC_GRANT_MANIFEST" "$1"
+}
+
+resident_manifest_value() {
+  record_value "$RESIDENT_MANIFEST" "$1"
 }
 
 sha256_file() {
@@ -150,8 +161,10 @@ esac
 for tool in sha256sum stat install mktemp sync; do
   command -v "$tool" >/dev/null 2>&1 || fail "required installation tool is missing: $tool"
 done
-for input in "$MANIFEST" "$CAPSULE_MANIFEST" "$INVOCATION_MANIFEST" "$BROKER_SOURCE" \
-  "$SOCKET_UNIT" "$SERVICE_UNIT" "$BOOTSTRAP_DOC" "$INSTALL_DOC" "$INVOCATION_DOC"; do
+for input in "$MANIFEST" "$CAPSULE_MANIFEST" "$INVOCATION_MANIFEST" \
+  "$EXEC_GRANT_MANIFEST" "$RESIDENT_MANIFEST" "$BROKER_SOURCE" \
+  "$SOCKET_UNIT" "$SERVICE_UNIT" "$BOOTSTRAP_DOC" "$INSTALL_DOC" \
+  "$INVOCATION_DOC" "$RESIDENT_ATTACHMENT_DOC"; do
   [[ -f "$input" && ! -L "$input" ]] || fail "installation input is missing or a symlink: $input"
 done
 
@@ -202,16 +215,44 @@ done
   fail 'InvocationCell manifest action is not 9029'
 [[ "$(invocation_manifest_value material_invocation)" == false ]] ||
   fail 'InvocationCell manifest opened material invocation'
+[[ "$(exec_grant_manifest_value schema)" == loom-kernel-exec-grant-cell-authority-freeze-v1 ]] ||
+  fail 'ExecGrantCell manifest schema is not frozen action 9030'
+[[ "$(exec_grant_manifest_value stage)" == SEMANTICS_FROZEN ]] ||
+  fail 'ExecGrantCell manifest stage is not frozen'
+[[ "$(exec_grant_manifest_value producing_language)" == Sounio ]] ||
+  fail 'ExecGrantCell manifest producer is not Sounio'
+[[ "$(exec_grant_manifest_value language_role)" == SEMANTIC_AUTHORITY ]] ||
+  fail 'ExecGrantCell manifest role is not semantic authority'
+[[ "$(exec_grant_manifest_value action)" == 9030 ]] ||
+  fail 'ExecGrantCell manifest action is not 9030'
+[[ "$(exec_grant_manifest_value material_grant)" == false ]] ||
+  fail 'ExecGrantCell manifest opened a material grant'
+[[ "$(resident_manifest_value schema)" == loom-resident-membrane-runtime-v4 ]] ||
+  fail 'resident manifest schema is not v4'
+[[ "$(resident_manifest_value stage)" == SOUNIO_RESIDENT_REALIZATION ]] ||
+  fail 'resident manifest stage is not Sounio resident realization'
+[[ "$(resident_manifest_value producing_language)" == Sounio ]] ||
+  fail 'resident manifest producer is not Sounio'
+[[ "$(resident_manifest_value actions)" == 9023,9024,9025,9029,9030 ]] ||
+  fail 'resident manifest omits action 9030 lineage'
+[[ "$(resident_manifest_value parent_9030_sha256)" == \
+  8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+  fail 'resident manifest is not bound to frozen action 9030'
+[[ "$(resident_manifest_value material_grant)" == false ]] ||
+  fail 'resident manifest opened a material grant'
 
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_lease_authority_freeze_selftest.sh" >/dev/null
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_principal_capsule_authority_freeze_selftest.sh" >/dev/null
 bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_invocation_cell_authority_freeze_selftest.sh" >/dev/null
+bash "$ROOT_DIR/scripts/ci/sounio_loom_kernel_exec_grant_cell_authority_freeze_selftest.sh" >/dev/null
+bash "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v4_freeze_selftest.sh" >/dev/null
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/loom-kernel-principal-install.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 AUTHORITY_BUILD="$WORK/sounio-loom-kernel-principal-lease-authority-runtime"
 CAPSULE_AUTHORITY_BUILD="$WORK/sounio-loom-kernel-principal-capsule-authority-runtime"
 INVOCATION_AUTHORITY_BUILD="$WORK/sounio-loom-kernel-invocation-cell-authority-runtime"
+RESIDENT_RUNTIME_BUILD="$WORK/sounio-loom-resident-membrane-runtime-v4"
 BROKER_BUILD="$WORK/loom-kernel-principal-broker"
 SOUNIO_LOOM_KERNEL_PRINCIPAL_LEASE_OUTPUT="$AUTHORITY_BUILD" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_lease_authority.sh" >/dev/null
@@ -219,6 +260,8 @@ SOUNIO_LOOM_KERNEL_PRINCIPAL_CAPSULE_OUTPUT="$CAPSULE_AUTHORITY_BUILD" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_principal_capsule_authority.sh" >/dev/null
 SOUNIO_LOOM_KERNEL_INVOCATION_CELL_OUTPUT="$INVOCATION_AUTHORITY_BUILD" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_invocation_cell_authority.sh" >/dev/null
+SOUNIO_LOOM_RESIDENT_MEMBRANE_V4_OUTPUT="$RESIDENT_RUNTIME_BUILD" \
+  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v4.sh" >/dev/null
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BROKER_BUILD" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
 
@@ -228,6 +271,9 @@ CAPSULE_MANIFEST_SHA256="$(sha256_file "$CAPSULE_MANIFEST")"
 CAPSULE_AUTHORITY_SHA256="$(sha256_file "$CAPSULE_AUTHORITY_BUILD")"
 INVOCATION_MANIFEST_SHA256="$(sha256_file "$INVOCATION_MANIFEST")"
 INVOCATION_AUTHORITY_SHA256="$(sha256_file "$INVOCATION_AUTHORITY_BUILD")"
+EXEC_GRANT_MANIFEST_SHA256="$(sha256_file "$EXEC_GRANT_MANIFEST")"
+RESIDENT_MANIFEST_SHA256="$(sha256_file "$RESIDENT_MANIFEST")"
+RESIDENT_RUNTIME_SHA256="$(sha256_file "$RESIDENT_RUNTIME_BUILD")"
 BROKER_SHA256="$(sha256_file "$BROKER_BUILD")"
 BROKER_SOURCE_SHA256="$(sha256_file "$BROKER_SOURCE")"
 INSTALLER_SHA256="$(sha256_file "$ROOT_DIR/scripts/dev/install_loom_kernel_principal_broker.sh")"
@@ -236,6 +282,7 @@ SERVICE_UNIT_SHA256="$(sha256_file "$SERVICE_UNIT")"
 BOOTSTRAP_DOC_SHA256="$(sha256_file "$BOOTSTRAP_DOC")"
 INSTALL_DOC_SHA256="$(sha256_file "$INSTALL_DOC")"
 INVOCATION_DOC_SHA256="$(sha256_file "$INVOCATION_DOC")"
+RESIDENT_ATTACHMENT_DOC_SHA256="$(sha256_file "$RESIDENT_ATTACHMENT_DOC")"
 [[ "$MANIFEST_SHA256" == 7bb5bbf30106d269644b0f9e6d80ee09f43eecf0e4a840bc3f429cfb6eca7cb5 ]] ||
   fail 'frozen manifest hash drifted from the broker contract'
 [[ "$AUTHORITY_SHA256" == "$(manifest_value executable_sha256)" ]] ||
@@ -248,6 +295,12 @@ INVOCATION_DOC_SHA256="$(sha256_file "$INVOCATION_DOC")"
   fail 'frozen InvocationCell manifest hash drifted from the broker contract'
 [[ "$INVOCATION_AUTHORITY_SHA256" == "$(invocation_manifest_value executable_sha256)" ]] ||
   fail 'source-fresh Sounio InvocationCell authority hash differs from frozen manifest'
+[[ "$EXEC_GRANT_MANIFEST_SHA256" == 8687d889e08f69190daaf3cdbee02741cde3ce62f136ba63df1fa9c2ccb0d051 ]] ||
+  fail 'frozen ExecGrantCell manifest hash drifted from the broker contract'
+[[ "$RESIDENT_MANIFEST_SHA256" == f61c93a3aefdbab792ed757faddf778017d34e0fa6bed97c565b56fe3147d473 ]] ||
+  fail 'frozen resident v4 manifest hash drifted from the broker contract'
+[[ "$RESIDENT_RUNTIME_SHA256" == "$(resident_manifest_value runtime_sha256)" ]] ||
+  fail 'source-fresh resident v4 runtime hash differs from frozen manifest'
 
 BUNDLE_RECORD="installer_sha256=$INSTALLER_SHA256
 socket_unit_sha256=$SOCKET_UNIT_SHA256
@@ -255,9 +308,10 @@ service_unit_sha256=$SERVICE_UNIT_SHA256
 bootstrap_doc_sha256=$BOOTSTRAP_DOC_SHA256
 install_doc_sha256=$INSTALL_DOC_SHA256
 invocation_doc_sha256=$INVOCATION_DOC_SHA256
+resident_attachment_doc_sha256=$RESIDENT_ATTACHMENT_DOC_SHA256
 "
 BUNDLE_SHA256="$(printf '%s' "$BUNDLE_RECORD" | sha256sum | cut -d ' ' -f 1)"
-RELEASE_ID="9029-${MANIFEST_SHA256:0:16}-${CAPSULE_MANIFEST_SHA256:0:16}-${INVOCATION_MANIFEST_SHA256:0:16}-${BROKER_SHA256:0:16}-${BUNDLE_SHA256:0:16}"
+RELEASE_ID="9030-${MANIFEST_SHA256:0:16}-${CAPSULE_MANIFEST_SHA256:0:16}-${INVOCATION_MANIFEST_SHA256:0:16}-${EXEC_GRANT_MANIFEST_SHA256:0:16}-${RESIDENT_MANIFEST_SHA256:0:16}-${BROKER_SHA256:0:16}-${BUNDLE_SHA256:0:16}"
 RELEASE_PARENT="$DEST_ROOT/usr/lib/sounio/loom/releases"
 RELEASE_DIR="$RELEASE_PARENT/$RELEASE_ID"
 RELEASE_STAGE="$RELEASE_PARENT/.${RELEASE_ID}.stage.$$"
@@ -265,7 +319,7 @@ mkdir -p "$RELEASE_PARENT"
 [[ ! -L "$RELEASE_PARENT" ]] || fail 'release parent must not be a symlink'
 RECEIPT="schema=loom-kernel-principal-broker-install-receipt-v1
 release_id=$RELEASE_ID
-semantic_actions=9027+9028+9029
+semantic_actions=9027+9028+9029+9030
 semantic_producer=Sounio
 semantic_role=SEMANTIC_AUTHORITY
 lease_manifest_sha256=$MANIFEST_SHA256
@@ -274,6 +328,9 @@ capsule_manifest_sha256=$CAPSULE_MANIFEST_SHA256
 capsule_authority_sha256=$CAPSULE_AUTHORITY_SHA256
 invocation_manifest_sha256=$INVOCATION_MANIFEST_SHA256
 invocation_authority_sha256=$INVOCATION_AUTHORITY_SHA256
+exec_grant_manifest_sha256=$EXEC_GRANT_MANIFEST_SHA256
+resident_manifest_sha256=$RESIDENT_MANIFEST_SHA256
+resident_runtime_sha256=$RESIDENT_RUNTIME_SHA256
 material_producer=C++20
 material_role=MATERIAL_PARITY
 material_transitory=true
@@ -285,13 +342,20 @@ service_unit_sha256=$SERVICE_UNIT_SHA256
 bootstrap_doc_sha256=$BOOTSTRAP_DOC_SHA256
 install_doc_sha256=$INSTALL_DOC_SHA256
 invocation_doc_sha256=$INVOCATION_DOC_SHA256
+resident_attachment_doc_sha256=$RESIDENT_ATTACHMENT_DOC_SHA256
 bundle_sha256=$BUNDLE_SHA256
 admission_open=true
+grant_admission_open=true
+resident_action_9030_attached=true
+decision_transport_material=true
 launch_open=false
 recycle_open=false
 material_broker=false
 material_capsule=false
 material_invocation=false
+material_grant=false
+material_execution=false
+barrier_release=false
 "
 RECEIPT_SHA256="$(printf '%s' "$RECEIPT" | sha256sum | cut -d ' ' -f 1)"
 
@@ -322,6 +386,18 @@ if [[ -e "$RELEASE_DIR" ]]; then
     fail 'existing immutable release InvocationCell authority drifted'
   [[ "$(mode_of "$RELEASE_DIR/sounio-loom-kernel-invocation-cell-authority-runtime")" == 555 ]] ||
     fail 'existing immutable release InvocationCell authority mode drifted'
+  [[ "$(sha256_file "$RELEASE_DIR/kernel_exec_grant_cell_authority.freeze.v1")" == "$EXEC_GRANT_MANIFEST_SHA256" ]] ||
+    fail 'existing immutable release ExecGrantCell manifest drifted'
+  [[ "$(mode_of "$RELEASE_DIR/kernel_exec_grant_cell_authority.freeze.v1")" == 444 ]] ||
+    fail 'existing immutable release ExecGrantCell manifest mode drifted'
+  [[ "$(sha256_file "$RELEASE_DIR/resident_membrane.runtime.v4")" == "$RESIDENT_MANIFEST_SHA256" ]] ||
+    fail 'existing immutable release resident v4 manifest drifted'
+  [[ "$(mode_of "$RELEASE_DIR/resident_membrane.runtime.v4")" == 444 ]] ||
+    fail 'existing immutable release resident v4 manifest mode drifted'
+  [[ "$(sha256_file "$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4")" == "$RESIDENT_RUNTIME_SHA256" ]] ||
+    fail 'existing immutable release resident v4 runtime drifted'
+  [[ "$(mode_of "$RELEASE_DIR/sounio-loom-resident-membrane-runtime-v4")" == 555 ]] ||
+    fail 'existing immutable release resident v4 runtime mode drifted'
   [[ "$(sha256_file "$RELEASE_DIR/loom-kernel-principal-broker")" == "$BROKER_SHA256" ]] ||
     fail 'existing immutable release broker drifted'
   [[ "$(mode_of "$RELEASE_DIR/loom-kernel-principal-broker")" == 555 ]] ||
@@ -336,6 +412,8 @@ if [[ -e "$RELEASE_DIR" ]]; then
     fail 'existing immutable release install contract drifted'
   [[ "$(sha256_file "$RELEASE_DIR/INVOCATION_CELL_MATERIAL_ADMISSION_V1.md")" == "$INVOCATION_DOC_SHA256" ]] ||
     fail 'existing immutable release InvocationCell admission contract drifted'
+  [[ "$(sha256_file "$RELEASE_DIR/HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md")" == "$RESIDENT_ATTACHMENT_DOC_SHA256" ]] ||
+    fail 'existing immutable release resident attachment contract drifted'
   [[ "$(sha256_file "$RELEASE_DIR/install_loom_kernel_principal_broker.sh")" == "$INSTALLER_SHA256" ]] ||
     fail 'existing immutable release installer drifted'
   if [[ "$INSTALL_MODE" == HOST ]]; then
@@ -350,12 +428,17 @@ else
     "$RELEASE_STAGE/sounio-loom-kernel-principal-capsule-authority-runtime"
   install -m 0555 "$INVOCATION_AUTHORITY_BUILD" \
     "$RELEASE_STAGE/sounio-loom-kernel-invocation-cell-authority-runtime"
+  install -m 0555 "$RESIDENT_RUNTIME_BUILD" \
+    "$RELEASE_STAGE/sounio-loom-resident-membrane-runtime-v4"
   install -m 0444 "$MANIFEST" "$RELEASE_STAGE/kernel_principal_lease_authority.freeze.v1"
   install -m 0444 "$CAPSULE_MANIFEST" "$RELEASE_STAGE/kernel_principal_capsule_authority.freeze.v1"
   install -m 0444 "$INVOCATION_MANIFEST" "$RELEASE_STAGE/kernel_invocation_cell_authority.freeze.v1"
+  install -m 0444 "$EXEC_GRANT_MANIFEST" "$RELEASE_STAGE/kernel_exec_grant_cell_authority.freeze.v1"
+  install -m 0444 "$RESIDENT_MANIFEST" "$RELEASE_STAGE/resident_membrane.runtime.v4"
   install -m 0444 "$BOOTSTRAP_DOC" "$RELEASE_STAGE/HOST_KERNEL_PRINCIPAL_BROKER_BOOTSTRAP_V1.md"
   install -m 0444 "$INSTALL_DOC" "$RELEASE_STAGE/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md"
   install -m 0444 "$INVOCATION_DOC" "$RELEASE_STAGE/INVOCATION_CELL_MATERIAL_ADMISSION_V1.md"
+  install -m 0444 "$RESIDENT_ATTACHMENT_DOC" "$RELEASE_STAGE/HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md"
   install -m 0444 "$ROOT_DIR/scripts/dev/install_loom_kernel_principal_broker.sh" \
     "$RELEASE_STAGE/install_loom_kernel_principal_broker.sh"
   printf '%s' "$RECEIPT" > "$RELEASE_STAGE/install.receipt.v1"
@@ -367,9 +450,12 @@ else
   sync_path "$RELEASE_STAGE/sounio-loom-kernel-principal-lease-authority-runtime"
   sync_path "$RELEASE_STAGE/sounio-loom-kernel-principal-capsule-authority-runtime"
   sync_path "$RELEASE_STAGE/sounio-loom-kernel-invocation-cell-authority-runtime"
+  sync_path "$RELEASE_STAGE/sounio-loom-resident-membrane-runtime-v4"
   sync_path "$RELEASE_STAGE/kernel_principal_lease_authority.freeze.v1"
   sync_path "$RELEASE_STAGE/kernel_principal_capsule_authority.freeze.v1"
   sync_path "$RELEASE_STAGE/kernel_invocation_cell_authority.freeze.v1"
+  sync_path "$RELEASE_STAGE/kernel_exec_grant_cell_authority.freeze.v1"
+  sync_path "$RELEASE_STAGE/resident_membrane.runtime.v4"
   sync_path "$RELEASE_STAGE/install.receipt.v1"
   chmod 0555 "$RELEASE_STAGE"
   sync_path "$RELEASE_STAGE"
@@ -393,18 +479,25 @@ CAPSULE_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_princi
 CAPSULE_AUTHORITY_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-kernel-principal-capsule-authority-runtime"
 INVOCATION_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_invocation_cell_authority.freeze.v1"
 INVOCATION_AUTHORITY_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-kernel-invocation-cell-authority-runtime"
+EXEC_GRANT_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/kernel_exec_grant_cell_authority.freeze.v1"
+RESIDENT_MANIFEST_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/resident_membrane.runtime.v4"
+RESIDENT_RUNTIME_TARGET="/usr/lib/sounio/loom/releases/$RELEASE_ID/sounio-loom-resident-membrane-runtime-v4"
 atomic_symlink "$BROKER_TARGET" "$DEST_ROOT/usr/libexec/sounio/loom-kernel-principal-broker"
 atomic_file "$SOCKET_UNIT" "$DEST_ROOT/etc/systemd/system/sounio-loom-principal-broker.socket" 0644
 atomic_file "$SERVICE_UNIT" "$DEST_ROOT/etc/systemd/system/sounio-loom-principal-broker.service" 0644
 atomic_file "$BOOTSTRAP_DOC" "$DEST_ROOT/usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_BOOTSTRAP_V1.md" 0444
 atomic_file "$INSTALL_DOC" "$DEST_ROOT/usr/share/doc/sounio/loom/HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md" 0444
 atomic_file "$INVOCATION_DOC" "$DEST_ROOT/usr/share/doc/sounio/loom/INVOCATION_CELL_MATERIAL_ADMISSION_V1.md" 0444
+atomic_file "$RESIDENT_ATTACHMENT_DOC" "$DEST_ROOT/usr/share/doc/sounio/loom/HOST_EXEC_GRANT_RESIDENT_ATTACHMENT_V1.md" 0444
 CONFIG="LOOM_PRINCIPAL_MANIFEST=$MANIFEST_TARGET
 LOOM_PRINCIPAL_AUTHORITY=$AUTHORITY_TARGET
 LOOM_PRINCIPAL_CAPSULE_MANIFEST=$CAPSULE_MANIFEST_TARGET
 LOOM_PRINCIPAL_CAPSULE_AUTHORITY=$CAPSULE_AUTHORITY_TARGET
 LOOM_PRINCIPAL_INVOCATION_MANIFEST=$INVOCATION_MANIFEST_TARGET
 LOOM_PRINCIPAL_INVOCATION_AUTHORITY=$INVOCATION_AUTHORITY_TARGET
+LOOM_PRINCIPAL_EXEC_GRANT_MANIFEST=$EXEC_GRANT_MANIFEST_TARGET
+LOOM_PRINCIPAL_RESIDENT_MANIFEST=$RESIDENT_MANIFEST_TARGET
+LOOM_PRINCIPAL_RESIDENT_RUNTIME=$RESIDENT_RUNTIME_TARGET
 LOOM_PRINCIPAL_JOURNAL=/var/lib/sounio/loom-principal-broker/leases.v1
 "
 atomic_text "$CONFIG" "$DEST_ROOT/etc/sounio/loom-principal-broker.conf" 0600
@@ -420,8 +513,9 @@ if [[ "$INSTALL_MODE" == HOST ]]; then
   systemctl enable --now sounio-loom-principal-broker.socket
 fi
 
-printf 'LOOM_KERNEL_PRINCIPAL_BROKER_INSTALL PASS mode=%s release=%s lease_manifest_sha256=%s lease_authority_sha256=%s capsule_manifest_sha256=%s capsule_authority_sha256=%s invocation_manifest_sha256=%s invocation_authority_sha256=%s broker_sha256=%s bundle_sha256=%s activated=%s admission=decision-only material_broker=false material_capsule=false material_invocation=false launch=closed recycle=closed\n' \
+printf 'LOOM_KERNEL_PRINCIPAL_BROKER_INSTALL PASS mode=%s release=%s lease_manifest_sha256=%s lease_authority_sha256=%s capsule_manifest_sha256=%s capsule_authority_sha256=%s invocation_manifest_sha256=%s invocation_authority_sha256=%s exec_grant_manifest_sha256=%s resident_manifest_sha256=%s resident_runtime_sha256=%s broker_sha256=%s bundle_sha256=%s activated=%s admission=decision-only grant_admission=resident-decision-only resident_action_9030_attached=true decision_transport_material=true material_broker=false material_capsule=false material_invocation=false material_grant=false material_execution=false barrier_release=false launch=closed recycle=closed\n' \
   "$INSTALL_MODE" "$RELEASE_ID" "$MANIFEST_SHA256" "$AUTHORITY_SHA256" \
   "$CAPSULE_MANIFEST_SHA256" "$CAPSULE_AUTHORITY_SHA256" "$INVOCATION_MANIFEST_SHA256" \
-  "$INVOCATION_AUTHORITY_SHA256" "$BROKER_SHA256" "$BUNDLE_SHA256" \
+  "$INVOCATION_AUTHORITY_SHA256" "$EXEC_GRANT_MANIFEST_SHA256" \
+  "$RESIDENT_MANIFEST_SHA256" "$RESIDENT_RUNTIME_SHA256" "$BROKER_SHA256" "$BUNDLE_SHA256" \
   "$([[ "$INSTALL_MODE" == HOST ]] && printf true || printf false)"
