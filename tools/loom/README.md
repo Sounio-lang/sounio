@@ -202,7 +202,31 @@ make every rule falsifiable; the deliberate Python-oracle path returns
 commit, and CI attachment all remain false. See
 [GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md](GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md).
 
-The corresponding OCaml operational kernel and its resident Sounio v3 route are
+The frozen resident v4 adds action `9030` to the same long-lived Sounio process.
+Its OCaml `ExecGrantCell` client owns only the operational lifecycle
+`VACANT -> ISSUED -> OUTCOME_PENDING -> CLOSED | REVOKED | POISONED`; it loads
+the exact action-9030 and resident-v4 manifests before spawn, preserves state on
+a semantic denial, and poisons the generation on replay, correlation mismatch,
+timeout, EOF, or resident loss. Two deterministic builds and a source scan prove
+that OCaml contains no copied Sounio result table. This remains an isolated
+operational probe: the existing product `EXEC_ISSUE`, `EXEC_CONSUME`, and
+`EXEC_OUTCOME` route is not yet attached.
+
+The host `PrincipalCell` experiment now measures the missing hostile-principal
+prerequisite on t560. Two simultaneous systemd `DynamicUser` cells received
+distinct UID/GID values and cgroups; reciprocal `kill`, `/proc` memory and fd,
+`ptrace`, `process_vm_readv`, `pidfd_send_signal`, and `pidfd_getfd` attacks were
+refused even when the attacker inherited a root-opened pidfd for its peer. The
+preregistered sabotage retained the same binary, hardening, and distinct
+cgroups but assigned both cells the same DynamicUser. `kill(..., 0)` and
+`pidfd_send_signal(..., 0)` then became usable in both directions, making the
+kernel-distinct principal rule causal rather than correlational. The receipt
+still reports `material_grant=false`, `grant_extinction=false`,
+`same_uid_peer_isolation=false`, and every product attachment flag false. See
+[HOST_EXEC_GRANT_PRINCIPAL_CELL_V1.md](HOST_EXEC_GRANT_PRINCIPAL_CELL_V1.md) and
+[HOST_EXEC_GRANT_PRINCIPAL_CELL_SABOTAGE_V1.md](HOST_EXEC_GRANT_PRINCIPAL_CELL_SABOTAGE_V1.md).
+
+The action `9029` OCaml operational kernel and its resident Sounio v3 route are
 now frozen in `kernel_invocation_cell.runtime.v1`. The retained adversarial gate
 exercises the full positive lifecycle, typed abort, current-material and
 Python-oracle refusals, replay, operation mismatch, timeout, EOF, receipt
