@@ -96,7 +96,8 @@ for pair in \
   host_gate_path:host_gate_sha256 \
   capsule_builder_path:capsule_builder_sha256 \
   promoter_path:promoter_sha256 \
-  transport_path:transport_sha256; do
+  transport_path:transport_sha256 \
+  local_quorum_selftest_path:local_quorum_selftest_sha256; do
   path_key="${pair%%:*}"
   hash_key="${pair#*:}"
   path="$(field "$path_key")"
@@ -117,9 +118,13 @@ expect_evidence schema loom-host-exec-quorum-material-grant-evidence-v1
 expect_evidence stage MATERIAL_GRANT_MEASURED
 expect_evidence semantic_authority Sounio
 expect_evidence semantic_action 9030
+expect_evidence semantic_source_path "$(record_field "$SEMANTIC_MANIFEST" source_path)"
 expect_evidence semantic_source_sha256 "$(record_field "$SEMANTIC_MANIFEST" source_sha256)"
 expect_evidence semantic_freeze_manifest_sha256 "$(field semantic_manifest_sha256)"
 expect_evidence semantic_semantics_sha256 "$(record_field "$SEMANTIC_MANIFEST" semantics_sha256)"
+expect_evidence toolchain_cxx_path "$(field cxx_path)"
+expect_evidence toolchain_cxx_sha256 "$(field cxx_sha256)"
+expect_evidence toolchain_cxx_version "$(field cxx_version)"
 [[ "$(record_field "$SEMANTIC_MANIFEST" stage)" == SEMANTICS_FROZEN ]] || fail 'Sounio semantics are not frozen'
 [[ "$(record_field "$SEMANTIC_MANIFEST" producing_language)" == Sounio ]] || fail 'Sounio did not produce the semantic root'
 [[ "$(record_field "$SEMANTIC_MANIFEST" language_role)" == SEMANTIC_AUTHORITY ]] || fail 'semantic root role drifted'
