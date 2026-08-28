@@ -44,8 +44,27 @@ namespace {
 
 static_assert(LOOM_EFFECT_POLICY_VERSION == 3 ||
               LOOM_EFFECT_POLICY_VERSION == 4 ||
-              LOOM_EFFECT_POLICY_VERSION == 5);
-#if LOOM_EFFECT_POLICY_VERSION == 5
+              LOOM_EFFECT_POLICY_VERSION == 5 ||
+              LOOM_EFFECT_POLICY_VERSION == 6);
+#if LOOM_EFFECT_POLICY_VERSION == 6
+constexpr std::string_view kPolicyManifestSha256 =
+    "6ec33f3554236e7ccf73f5b5c16a15ba8006705b83d9d62265a2cd8f94437d66";
+constexpr std::string_view kPolicySchema =
+    "loom-process-witness-effect-policy-plan-v6-freeze-v1";
+constexpr std::string_view kPolicyBundleSha256 =
+    "974c90d17f91321291e6ad95337a4c22138253c65114fdde41076b5af96613b9";
+constexpr std::string_view kPolicyRootPath =
+    "/loom/effect-policy-v6.freeze.v1";
+constexpr std::string_view kPolicyFilename = "effect-policy-v6.freeze.v1";
+constexpr std::string_view kSelftestPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V6_SELFTEST PASS";
+constexpr std::string_view kReadyPrefix =
+    "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V6_ROOT_READY PASS";
+constexpr std::string_view kVersionRootReceipt =
+    " systemd_mount=/run/systemd/incoming systemd_sys_mount=/sys"
+    " systemd_sys_ready_filesystem=sysfs systemd_sys_ready_read_only=true"
+    " var_tmp_read_only=true var_tmp_source=IMMUTABLE_ROOT_TMP";
+#elif LOOM_EFFECT_POLICY_VERSION == 5
 constexpr std::string_view kPolicyManifestSha256 =
     "f17fc7d776db557d2655e00036f4014b4a7a38d8ed16e74786471415c49908f7";
 constexpr std::string_view kPolicySchema =
@@ -205,7 +224,27 @@ std::string load_policy_manifest(const std::string& path) {
   require_line(contents, "schema=" + std::string(kPolicySchema));
   require_line(contents,
                "bundle_sha256=" + std::string(kPolicyBundleSha256));
-#if LOOM_EFFECT_POLICY_VERSION == 5
+#if LOOM_EFFECT_POLICY_VERSION == 6
+  for (const std::string_view line : {
+           "systemd_mount_path=/run/systemd/incoming",
+           "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
+           "systemd_sys_mount_path=/sys",
+           "systemd_sys_ready_filesystem=sysfs",
+           "systemd_sys_ready_source=sysfs",
+           "systemd_sys_ready_read_only=true",
+           "systemd_var_tmp_path=/var/tmp",
+           "systemd_var_tmp_ready_source=IMMUTABLE_ROOT_TMP",
+           "systemd_var_tmp_ready_read_only=true",
+           "bootstrap_treatment_code=0",
+           "bootstrap_missing_incoming_code=226",
+           "bootstrap_missing_sys_code=226",
+           "bootstrap_missing_var_tmp_code=226",
+           "v5_materializable=false",
+           "v6_required_for_native=true",
+       }) {
+    require_line(contents, line);
+  }
+#elif LOOM_EFFECT_POLICY_VERSION == 5
   for (const std::string_view line : {
            "systemd_mount_path=/run/systemd/incoming",
            "systemd_mount_source=/run/systemd/propagate/EXACT_UNIT",
@@ -334,7 +373,14 @@ std::string require_immutable_root(const std::string& policy_manifest_path) {
   require_directory("/run", false);
   require_directory("/run/systemd", false);
   require_directory("/run/systemd/incoming", true);
-#if LOOM_EFFECT_POLICY_VERSION == 5
+#if LOOM_EFFECT_POLICY_VERSION == 6
+  require_directory("/sys", false);
+  require_directory("/var", false);
+  require_directory("/var/tmp", true);
+  require_exact_entries(
+      "/", {"loom", "dev", "proc", "run", "sys", "tmp", "var"});
+  require_exact_entries("/var", {"tmp"});
+#elif LOOM_EFFECT_POLICY_VERSION == 5
   require_directory("/sys", false);
   require_exact_entries("/", {"loom", "dev", "proc", "run", "sys", "tmp"});
 #else
