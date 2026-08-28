@@ -4,6 +4,7 @@
 
 #include <openssl/sha.h>
 
+#include <dirent.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/io_uring.h>
@@ -13,11 +14,14 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstddef>
@@ -36,6 +40,10 @@ namespace {
 
 constexpr std::string_view kPolicyManifestSha256 =
     "40407323594e37d44b9002d1cdd390677416048221ace446693919f8415ca480";
+constexpr std::string_view kPayloadManifestSha256 =
+    "624ccd7297778803eff8d9972a33d5e55fb022f9e7e37f444f0aee13c22fb4da";
+constexpr std::string_view kPayloadSha256 =
+    "7249748c322ede756c779904cb2d87f561ba2e17d0691314a09feaf16ca2ed4d";
 constexpr std::uint32_t kRefuse =
     SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA);
 
@@ -60,10 +68,12 @@ std::string sha256(std::string_view value) {
   return sha256(value.data(), value.size());
 }
 
-std::string read_regular_file(const std::string& path) {
+std::string read_regular_file(const std::string& path,
+                              std::size_t maximum = 128 * 1024) {
   struct stat info {};
   if (lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
-      info.st_nlink != 1 || info.st_size <= 0 || info.st_size > 128 * 1024) {
+      info.st_nlink != 1 || info.st_size <= 0 ||
+      static_cast<std::uint64_t>(info.st_size) > maximum) {
     throw Error("policy manifest is not one bounded regular file");
   }
   std::ifstream input(path, std::ios::binary);
@@ -93,7 +103,7 @@ void require_line(std::string_view contents, std::string_view line) {
 }
 
 std::string load_policy_manifest(const std::string& path) {
-  const std::string contents = read_regular_file(path);
+  const std::string contents = read_regular_file(path, 32 * 1024 * 1024);
   const std::string digest = sha256(contents);
   if (digest != kPolicyManifestSha256) {
     throw Error("frozen Sounio V3 policy manifest hash mismatch");
@@ -143,6 +153,118 @@ std::string load_policy_manifest(const std::string& path) {
     require_line(contents, line);
   }
   return digest;
+}
+
+void require_directory(const std::string& path, bool empty) {
+  struct stat info {};
+  if (lstat(path.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
+      info.st_uid != 0 || info.st_gid != 0) {
+    throw Error("immutable-root directory metadata drifted: " + path +
+                " uid=" + std::to_string(info.st_uid) +
+                " gid=" + std::to_string(info.st_gid) +
+                " mode=" + std::to_string(info.st_mode & 07777));
+  }
+  if ((info.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+    struct statvfs filesystem {};
+    if (statvfs(path.c_str(), &filesystem) != 0 ||
+        (filesystem.f_flag & ST_RDONLY) == 0) {
+      throw Error("immutable-root directory is writable by principal: " + path);
+    }
+  }
+  if (!empty) return;
+  DIR* directory = opendir(path.c_str());
+  if (directory == nullptr) throw Error("cannot inspect root directory: " + path);
+  int entries = 0;
+  errno = 0;
+  while (const dirent* entry = readdir(directory)) {
+    const std::string_view name(entry->d_name);
+    if (name != "." && name != "..") ++entries;
+  }
+  const int saved_errno = errno;
+  closedir(directory);
+  if (saved_errno != 0 || entries != 0) {
+    throw Error("immutable-root directory is not empty: " + path);
+  }
+}
+
+std::string require_root_regular(const std::string& path, bool executable,
+                                 std::string_view expected_digest) {
+  struct stat info {};
+  if (lstat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) ||
+      info.st_uid != 0 || info.st_gid != 0 || info.st_nlink != 1 ||
+      (info.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0 ||
+      (executable && (info.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) == 0)) {
+    throw Error("immutable-root file metadata drifted: " + path);
+  }
+  const std::string contents = read_regular_file(path);
+  const std::string digest = sha256(contents);
+  if (!expected_digest.empty() && digest != expected_digest) {
+    throw Error("immutable-root file hash drifted: " + path);
+  }
+  return digest;
+}
+
+void require_exact_entries(const std::string& path,
+                           const std::vector<std::string_view>& expected) {
+  DIR* directory = opendir(path.c_str());
+  if (directory == nullptr) throw Error("cannot enumerate immutable root: " + path);
+  std::vector<std::string> actual;
+  errno = 0;
+  while (const dirent* entry = readdir(directory)) {
+    const std::string_view name(entry->d_name);
+    if (name != "." && name != "..") actual.emplace_back(name);
+  }
+  const int saved_errno = errno;
+  closedir(directory);
+  if (saved_errno != 0) throw Error("immutable-root enumeration failed");
+  std::vector<std::string> wanted;
+  for (const std::string_view item : expected) wanted.emplace_back(item);
+  std::sort(actual.begin(), actual.end());
+  std::sort(wanted.begin(), wanted.end());
+  if (actual != wanted) {
+    std::string names;
+    for (const std::string& name : actual) {
+      if (!names.empty()) names.push_back('+');
+      names += name;
+    }
+    throw Error("immutable-root entries drifted: " + path + " actual=" + names);
+  }
+}
+
+std::string require_immutable_root(const std::string& policy_manifest_path) {
+  struct statvfs filesystem {};
+  if (statvfs("/", &filesystem) != 0 ||
+      (filesystem.f_flag & ST_RDONLY) == 0) {
+    throw Error("immutable root is not mounted read-only");
+  }
+  require_directory("/", false);
+  require_directory("/loom", false);
+  require_directory("/dev", false);
+  require_directory("/proc", true);
+  require_directory("/tmp", true);
+  require_exact_entries("/", {"loom", "dev", "proc", "tmp"});
+  require_exact_entries(
+      "/loom", {"effect-cell", "payload", "payload.freeze.v1",
+                 "effect-policy-v3.freeze.v1"});
+  require_exact_entries("/dev", {"null"});
+
+  struct stat null_info {};
+  if (lstat("/dev/null", &null_info) != 0 || !S_ISCHR(null_info.st_mode) ||
+      major(null_info.st_rdev) != 1 || minor(null_info.st_rdev) != 3) {
+    throw Error("immutable root lacks exact /dev/null");
+  }
+  const std::string cell_digest =
+      require_root_regular("/loom/effect-cell", true, {});
+  require_root_regular("/loom/payload", true, kPayloadSha256);
+  require_root_regular("/loom/payload.freeze.v1", false,
+                       kPayloadManifestSha256);
+  require_root_regular("/loom/effect-policy-v3.freeze.v1", false,
+                       kPolicyManifestSha256);
+  if (policy_manifest_path != "/loom/effect-policy-v3.freeze.v1") {
+    throw Error("root-hold policy path escaped the frozen root schema");
+  }
+  load_policy_manifest(policy_manifest_path);
+  return cell_digest;
 }
 
 class FilterBuilder {
@@ -421,6 +543,63 @@ bool run_allowed_io(const std::vector<sock_filter>& filter) {
   return wait_success(pid);
 }
 
+void close_ambient_descriptors() {
+#ifdef SYS_close_range
+  if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) return;
+  if (errno != ENOSYS) throw Error("cannot close ambient descriptors");
+#endif
+  const long maximum = sysconf(_SC_OPEN_MAX);
+  if (maximum <= 3 || maximum > 1'048'576) {
+    throw Error("ambient descriptor bound is invalid");
+  }
+  for (int descriptor = 3; descriptor < maximum; ++descriptor) {
+    close(descriptor);
+  }
+}
+
+[[noreturn]] void root_hold(const std::string& policy_manifest_path) {
+  const std::string cell_digest =
+      require_immutable_root(policy_manifest_path);
+  const std::vector<sock_filter> filter = compile_filter(0);
+  const std::string filter_sha256 = filter_digest(filter);
+  const std::string line =
+      "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_ROOT_READY PASS"
+      " semantic_authority=Sounio action=9025 role=MATERIAL_PARITY"
+      " object_boundary=IMMUTABLE_ROOT_MOUNT_NAMESPACE root_read_only=true"
+      " root_exact=true dynamic_linker_visible=false host_root_visible=false"
+      " proc_treatment=absent tmp_read_only=true fd_inventory=0+1+2"
+      " cell_sha256=" +
+      cell_digest + " payload_sha256=" + std::string(kPayloadSha256) +
+      " policy_manifest_sha256=" + std::string(kPolicyManifestSha256) +
+      " filter_sha256=" + filter_sha256 +
+      " material_coverage=false complete_effects=false"
+      " material_execution=false launch_open=false parity_open=false"
+      " claim_ready=false\n";
+  close_ambient_descriptors();
+  if (!install_seccomp(filter)) {
+    throw Error("cannot install immutable-root seccomp treatment");
+  }
+  std::size_t offset = 0;
+  while (offset < line.size()) {
+    const long count = syscall(SYS_write, STDOUT_FILENO, line.data() + offset,
+                               line.size() - offset);
+    if (count > 0) {
+      offset += static_cast<std::size_t>(count);
+    } else if (count < 0 && errno == EINTR) {
+      continue;
+    } else {
+      syscall(SYS_exit, 92);
+    }
+  }
+  char release = 0;
+  long count = -1;
+  do {
+    count = syscall(SYS_read, STDIN_FILENO, &release, 1);
+  } while (count < 0 && errno == EINTR);
+  syscall(SYS_exit, (count == 0 || (count == 1 && release == 'X')) ? 0 : 93);
+  __builtin_unreachable();
+}
+
 std::string sabotage_rule(int family) {
   switch (family) {
     case 1: return "fd3_cloexec=false";
@@ -500,8 +679,14 @@ int main(int argc, char** argv) {
         std::string_view(argv[2]) == "--policy-manifest") {
       return selftest(argv[3]);
     }
+    if (argc == 4 && std::string_view(argv[1]) == "--root-hold" &&
+        std::string_view(argv[2]) == "--policy-manifest") {
+      root_hold(argv[3]);
+    }
     std::cerr << "usage: loom-process-witness-effect-policy-v3 --selftest "
-                 "--policy-manifest <frozen-v3-manifest>\n";
+                 "--policy-manifest <frozen-v3-manifest>\n"
+                 "       loom-process-witness-effect-policy-v3 --root-hold "
+                 "--policy-manifest /loom/effect-policy-v3.freeze.v1\n";
     return 64;
   } catch (const std::exception& error) {
     std::cerr << "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_CLOSED reason="
