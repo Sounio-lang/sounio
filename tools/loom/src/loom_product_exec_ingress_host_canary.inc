@@ -51,6 +51,17 @@ std::string product_json_string(std::string_view value) {
   return output.str();
 }
 
+std::string product_compact_diagnostic(std::string value) {
+  for (char& character : value) {
+    if (character == '\n' || character == '\r' || character == '\t') {
+      character = ' ';
+    }
+  }
+  constexpr std::size_t limit = 4096;
+  if (value.size() > limit) value.resize(limit);
+  return value;
+}
+
 std::string product_hook_event(const std::string& root,
                                const std::string& session,
                                const std::string& command) {
@@ -172,7 +183,24 @@ class ProductExecIngressHostCase {
     if (descriptor_present_) {
       accept_guardian_connection();
       await_identity();
-      exchange_binding();
+      try {
+        exchange_binding();
+      } catch (const Error& ingress_error) {
+        connection_ = UniqueFd();
+        try {
+          collect_client();
+        } catch (const Error& collection_error) {
+          throw Error(std::string(ingress_error.what()) +
+                      " collection_error=" + collection_error.what());
+        }
+        throw Error(std::string(ingress_error.what()) +
+                    " hook_code=" + std::to_string(hook_code_) +
+                    " output=" + product_compact_diagnostic(output_text_) +
+                    " ingress_log=" +
+                    product_compact_diagnostic(optional_log("ingress.tsv")) +
+                    " hook_log=" +
+                    product_compact_diagnostic(optional_log("hook.tsv")));
+      }
     }
     collect_client();
     ProductIngressHostRun result = observation();
