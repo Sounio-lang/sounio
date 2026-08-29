@@ -218,6 +218,12 @@ constexpr std::string_view kReadyPrefix =
     "LOOM_PROCESS_WITNESS_EFFECT_POLICY_V3_ROOT_READY PASS";
 constexpr std::string_view kVersionRootReceipt = "";
 #endif
+#if LOOM_EFFECT_POLICY_VERSION == 10
+constexpr std::string_view kProcRootReceipt =
+    " proc_treatment=CAPSULE_EMPTY_BIND";
+#else
+constexpr std::string_view kProcRootReceipt = " proc_treatment=absent";
+#endif
 constexpr std::string_view kPayloadManifestSha256 =
     "624ccd7297778803eff8d9972a33d5e55fb022f9e7e37f444f0aee13c22fb4da";
 constexpr std::string_view kPayloadSha256 =
@@ -1042,8 +1048,9 @@ void close_ambient_descriptors() {
   const std::string line = std::string(kReadyPrefix) +
       " semantic_authority=Sounio action=9025 role=MATERIAL_PARITY"
       " object_boundary=IMMUTABLE_ROOT_MOUNT_NAMESPACE root_read_only=true"
-      " root_exact=true dynamic_linker_visible=false host_root_visible=false"
-      " proc_treatment=absent tmp_read_only=true fd_inventory=0+1+2"
+      " root_exact=true dynamic_linker_visible=false host_root_visible=false" +
+      std::string(kProcRootReceipt) +
+      " tmp_read_only=true fd_inventory=0+1+2"
       " cell_sha256=" +
       cell_digest + " payload_sha256=" + std::string(kPayloadSha256) +
       " policy_manifest_sha256=" + std::string(kPolicyManifestSha256) +
