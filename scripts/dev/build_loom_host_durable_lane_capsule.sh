@@ -86,11 +86,12 @@ for input in "$RELEASE_MANIFEST" "$CAPSULE_MANIFEST" "$RUNTIME"; do
 done
 [[ -z "$(find "$CAPSULE" -type l -print -quit)" ]] || fail 'base capsule contains a symlink'
 
-chmod u+w "$RUNTIME" "$RELEASE_MANIFEST" "$CAPSULE_MANIFEST"
+chmod u+w "$(dirname "$RUNTIME")" "$RUNTIME" "$RELEASE_MANIFEST" "$CAPSULE_MANIFEST"
 strip --strip-debug "$RUNTIME"
 CANONICAL_RUNTIME="$WORK/sounio-loom-runtime.canonical"
 objcopy --remove-section=.note.gnu.build-id "$RUNTIME" "$CANONICAL_RUNTIME"
 install -m 0555 "$CANONICAL_RUNTIME" "$RUNTIME"
+chmod 0555 "$(dirname "$RUNTIME")"
 if strings "$RUNTIME" | grep -F "$ROOT_DIR/tools/loom/_build" >/dev/null; then
   fail 'canonical OCaml runtime retained its absolute build root'
 fi
