@@ -14,6 +14,7 @@ FIRST_RECEIPT_REL='tools/pireus/operator_novelty_feedback.first.v7'
 FIRST_DECISIONS_REL='tools/pireus/operator_novelty_feedback.guardian-decisions.v7'
 FREEZE_REL='tools/pireus/operator_novelty_feedback.freeze.v7'
 FREEZE_DECISIONS_REL='tools/pireus/operator_novelty_feedback.freeze-decisions.v7'
+PARITY_REL='tools/pireus/operator_novelty_feedback.parity-open.v7'
 FIRST_EVIDENCE_REL='tools/pireus/evidence/operator_novelty_feedback_v7.txt'
 FIRST_TEST_REL='tools/pireus/evidence/operator_novelty_feedback_v7.test.txt'
 FROZEN_EVIDENCE_REL='tools/pireus/evidence/operator_novelty_feedback_v7.frozen.txt'
@@ -24,6 +25,8 @@ EXECUTABLE_COMMIT='f4942de08530b76a1fe7427d4d60d47a69735d60'
 FIRST_EVIDENCE_COMMIT='d2391bcc4d56cd4cc6c4e29dbab6520e0c0fd8f4'
 MATCHER_COMMIT='396b01deb585971c5aaf1df629f8ead1a6bca6ab'
 FREEZE_COMMIT='b31e2f7c28e3e320ad8e0bdef8e847b283f5220e'
+FREEZE_GATE_COMMIT='c6430e3e849f3fd94dc5a024506fa53b58e3b09a'
+PARITY_RECEIPT_COMMIT='eb51babec189fbdc94ec6c20cdf2b8144ca9a03f'
 
 GARDEN_SHA256='7178bd7232b74fb7aa1662733a03a6c7e5f6fe18123a2233555f38a316e12cd9'
 FIRST_SOURCE_SHA256='5ef81b3390e5acbee363edd77feb3a2f7c0daff99abc50e048f0f85c6d5491ce'
@@ -35,6 +38,7 @@ FIRST_RECEIPT_SHA256='815956d81b4f7938c86556088ed50c6c2507df3d989abe12c5560d611f
 FIRST_DECISIONS_SHA256='15069c09e114c26eed260a37455c7a6f4f6ff59f6dc05a2e177beb75b4d908ca'
 FREEZE_SHA256='7293594eb7a881d1f89d9593b1cc19e3e611f99a491a4cd1146afe0a68cd623a'
 FREEZE_DECISIONS_SHA256='39dd821ecb3e74d7748e711c687c34e4fb5eec62b761d539d57f21e4df941ade'
+PARITY_SHA256='1ae8fe022071d12193624477f531595a789ffd05f97489e4ccd05d93cf78f7ef'
 FIRST_EVIDENCE_SHA256='f3f26b92b7d9f70b1544af5f04ee6171173ab16d507e311ae54c104ec92e4720'
 FIRST_TEST_SHA256='56662adc785712c0d32105ea3f5c0c8798a26a620fd32e1bb2b46a6f81e098bb'
 FROZEN_EVIDENCE_SHA256='da2adf49188c1dcc1ca4c2a072f72f419705a8d2f12f34633ddd8a5e604998be'
@@ -58,6 +62,7 @@ GUARDIAN_POLICY_SHA256='64bb0118793fe46dcb392abc1a9212eb15bd55047461576a3ef1a6ce
 GUARDIAN_SELFTEST_SHA256='c9c7f839fb262dbf616716e3c5f0601bb03cfbcbbcfe2fbe09bd0b39894e2a9f'
 COMMAND_SHA256='42d64a15462379b0d1ef393fe16569e09f98afab6b6fe93d8f465829ccaa085d'
 TEST_COMMAND_SHA256='8af85681f74183c82750b94f586203b3f8ffdf61e57f29bee50a420e814ecfb4'
+CI_COMMAND_SHA256='bb672053251355f05b15c66ae51c8e6048c31f5bbfef93f025e0600637d5fafc'
 PYTHON_TOOLCHAIN_SHA256='497ce0938df96d9bf3c159472d251a946c2d6bd832220937d1b885f7759b05ba'
 PYTHON_COMMAND_SHA256='72566473f0019fb50e65175a0ac019af5ad2f495ccfc30b664b7735791e968fc'
 RUST_TOOLCHAIN_SHA256='b58640570ba9ffcdb2c2d241e4ce8ece9c7d75c6b1e59e308dee3e5f0e10b56d'
@@ -77,6 +82,8 @@ LLM_PROMOTION_FRAME_SHA256='e90798ec6a2f95b5149b6d38e6e9755f44109753d8cf4e44dfaa
 CPP_AUTHORITY_FRAME_SHA256='69249023325c211a3e720f8ebbd3b4c02935b3a71680ee6a9cced7bb11e63fa8'
 CLAIM_PROMOTION_FRAME_SHA256='c965ce940368a66775d9d152431e7101fe5ad42a0f2528e633fb060fe92d96cc'
 PARENT_LAUNDERING_FRAME_SHA256='67f5cf4e2c952b8f4fb0da0856d2ca66fe51cf470bae508c0919b8f3f53484cf'
+PARITY_OPEN_FRAME_SHA256='db65372c10068a9e632e293014a365e19731c1d2a8f04549ec867a9376fb7675'
+CI_FRAME_SHA256='0d8a23d851c583249e6e0b1a7914affea3b0ee9a6cb5df8527a6a5804794fb11'
 
 FIRST_LINES=6127
 FIRST_BYTES=86843
@@ -190,6 +197,17 @@ parity_prefreeze_frame() {
     "$(sha_limbs "${COMMAND_SHA256}")" "${ZERO}" "${ZERO}"
 }
 
+parity_open_frame() {
+  # The parity child is bound to the frozen v7 semantics, hence self as parent.
+  printf '9020 3 4 2 2 1 0 0 0 0 0 0 0 0 0 0 0 0 %s %s %s %s %s %s %s %s' \
+    "$(sha_limbs "${MODULE_SHA256}")" \
+    "$(sha_limbs "${SEMANTICS_SHA256}")" \
+    "$(sha_limbs "${SEMANTICS_SHA256}")" \
+    "$(sha_limbs "${TOOLCHAIN_SHA256}")" \
+    "$(sha_limbs "${HARDWARE_SHA256}")" \
+    "$(sha_limbs "${COMMAND_SHA256}")" "${ZERO}" "${ZERO}"
+}
+
 llm_promotion_frame() {
   printf '9020 3 5 6 6 1 0 0 0 1 0 0 0 0 0 0 0 0 %s %s %s %s %s %s %s %s' \
     "$(sha_limbs "${MODULE_SHA256}")" \
@@ -208,6 +226,17 @@ cpp_authority_frame() {
     "$(sha_limbs "${TOOLCHAIN_SHA256}")" \
     "$(sha_limbs "${HARDWARE_SHA256}")" \
     "$(sha_limbs "${COMMAND_SHA256}")" \
+    "$(sha_limbs "${FROZEN_EVIDENCE_SHA256}")" "${ZERO}"
+}
+
+ci_frame() {
+  printf '9020 4 11 1 1 1 0 0 1 0 0 0 0 0 0 0 0 0 %s %s %s %s %s %s %s %s' \
+    "$(sha_limbs "${MODULE_SHA256}")" \
+    "$(sha_limbs "${SEMANTICS_SHA256}")" \
+    "$(sha_limbs "${QUOTIENT_PARENT_SEMANTICS_SHA256}")" \
+    "$(sha_limbs "${TOOLCHAIN_SHA256}")" \
+    "$(sha_limbs "${HARDWARE_SHA256}")" \
+    "$(sha_limbs "${CI_COMMAND_SHA256}")" \
     "$(sha_limbs "${FROZEN_EVIDENCE_SHA256}")" "${ZERO}"
 }
 
@@ -284,6 +313,7 @@ for pair in \
   "${FIRST_DECISIONS_REL}:${FIRST_DECISIONS_SHA256}" \
   "${FREEZE_REL}:${FREEZE_SHA256}" \
   "${FREEZE_DECISIONS_REL}:${FREEZE_DECISIONS_SHA256}" \
+  "${PARITY_REL}:${PARITY_SHA256}" \
   "${FIRST_EVIDENCE_REL}:${FIRST_EVIDENCE_SHA256}" \
   "${FIRST_TEST_REL}:${FIRST_TEST_SHA256}" \
   "${FROZEN_EVIDENCE_REL}:${FROZEN_EVIDENCE_SHA256}" \
@@ -307,7 +337,9 @@ require_ancestor "${GARDEN_COMMIT}" "${EXECUTABLE_COMMIT}"
 require_ancestor "${EXECUTABLE_COMMIT}" "${FIRST_EVIDENCE_COMMIT}"
 require_ancestor "${FIRST_EVIDENCE_COMMIT}" "${MATCHER_COMMIT}"
 require_ancestor "${MATCHER_COMMIT}" "${FREEZE_COMMIT}"
-require_ancestor "${FREEZE_COMMIT}" HEAD
+require_ancestor "${FREEZE_COMMIT}" "${FREEZE_GATE_COMMIT}"
+require_ancestor "${FREEZE_GATE_COMMIT}" "${PARITY_RECEIPT_COMMIT}"
+require_ancestor "${PARITY_RECEIPT_COMMIT}" HEAD
 
 first_source_hash="$(git cat-file blob "${EXECUTABLE_COMMIT}:${MODULE_REL}" | sha256sum | cut -d' ' -f1)"
 [[ "${first_source_hash}" == "${FIRST_SOURCE_SHA256}" ]] ||
@@ -327,6 +359,9 @@ for commit in "${MATCHER_COMMIT}" "${FREEZE_COMMIT}"; do
     grep -Fq 'pireus_operator_novelty_feedback_frozen_mismatch_code' ||
     fail "matcher absent at ${commit}"
 done
+[[ "$(git cat-file blob "${PARITY_RECEIPT_COMMIT}:${PARITY_REL}" |
+    sha256sum | cut -d' ' -f1)" == "${PARITY_SHA256}" ]] ||
+  fail 'parity-open receipt object drift'
 
 manifest_hash="$(sed -n '/^source_manifest_begin$/,/^source_manifest_end$/p' \
   "${ROOT}/${FREEZE_REL}" | sed '1d;$d' | sha256sum | cut -d' ' -f1)"
@@ -356,13 +391,36 @@ require_line "${ROOT}/${FIRST_RECEIPT_REL}" 'historical_novelty=false'
 require_line "${ROOT}/${FIRST_RECEIPT_REL}" 'claim_ready=false'
 require_line "${ROOT}/${FREEZE_REL}" 'status=SEMANTICS_FROZEN'
 require_line "${ROOT}/${FREEZE_REL}" "semantics_sha256=${SEMANTICS_SHA256}"
+require_line "${ROOT}/${FREEZE_REL}" \
+  "quotient_parent_semantics_sha256=${QUOTIENT_PARENT_SEMANTICS_SHA256}"
+require_line "${ROOT}/${FREEZE_REL}" \
+  "challenge_parent_semantics_sha256=${CHALLENGE_SEMANTICS_SHA256}"
 require_line "${ROOT}/${FREEZE_REL}" 'first_result_is_exact_prefix=true'
 require_line "${ROOT}/${FREEZE_REL}" 'operator_seed_generated=true'
+require_line "${ROOT}/${FREEZE_REL}" 'admitted_actions=12'
+require_line "${ROOT}/${FREEZE_REL}" 'operator_classes=14'
+require_line "${ROOT}/${FREEZE_REL}" 'class_action_pairs=168'
+require_line "${ROOT}/${FREEZE_REL}" 'exhaustive_nonmembership_checks=168'
+require_line "${ROOT}/${FREEZE_REL}" 'zero_residual_hits=0'
 require_line "${ROOT}/${FREEZE_REL}" 'scope_novelty=RELATIVE_FINITE_QUOTIENT_SEPARATION_ONLY'
 require_line "${ROOT}/${FREEZE_REL}" 'formal_parity_open=false'
 require_line "${ROOT}/${FREEZE_REL}" 'effect_parity_open=false'
 require_line "${ROOT}/${FREEZE_REL}" 'material_parity_open=false'
 require_line "${ROOT}/${FREEZE_REL}" 'claim_ready=false'
+require_line "${ROOT}/${PARITY_REL}" 'status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'stage=PARITY_OPEN'
+require_line "${ROOT}/${PARITY_REL}" \
+  "frozen_semantics_sha256=${SEMANTICS_SHA256}"
+require_line "${ROOT}/${PARITY_REL}" \
+  "opening_frame_sha256=${PARITY_OPEN_FRAME_SHA256}"
+require_line "${ROOT}/${PARITY_REL}" \
+  'opening_decision=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN'
+require_line "${ROOT}/${PARITY_REL}" 'lean_status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'koka_status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'cpp_status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'parity_processes_launched=0'
+require_line "${ROOT}/${PARITY_REL}" 'scope_novelty_not_absolute=true'
+require_line "${ROOT}/${PARITY_REL}" 'claim_ready=false'
 
 transcript_admitted "${ROOT}/${FIRST_EVIDENCE_REL}" \
   "${FIRST_EVIDENCE_SHA256}" "${FIRST_LINES}" "${FIRST_BYTES}" false ||
@@ -442,6 +500,20 @@ printf '%s\n' "${selftest_output}" | grep -Fqx -- \
 printf '%s\n' \
   'GUARDIAN_SELFTEST_NOTE sabotage_python_rule=admits means the deliberately weakened fixture was detected as admitting Python; production policy remains hash-bound and denies it'
 
+main_command_record='SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/pireus_operator_novelty_feedback.sio'
+test_command_record='SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run tests/stdlib/hardware/test_pireus_operator_novelty_feedback.sio'
+ci_command_record='bash scripts/ci/pireus_operator_novelty_feedback.sh'
+[[ "$(sha_text "${main_command_record}")" == "${COMMAND_SHA256}" ]] ||
+  fail 'main command record drift'
+[[ "$(sha_text "${test_command_record}")" == "${TEST_COMMAND_SHA256}" ]] ||
+  fail 'test command record drift'
+[[ "$(sha_text "${ci_command_record}")" == "${CI_COMMAND_SHA256}" ]] ||
+  fail 'CI command record drift'
+
+authorize CI_PREEXEC "$(ci_frame)" \
+  "${CI_FRAME_SHA256}" 0 \
+  'SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN'
+
 authorize FROZEN_REPLAY_PREEXEC \
   "$(sounio_preexec_frame "${COMMAND_SHA256}")" \
   "${MAIN_PREEXEC_FRAME_SHA256}" 0 \
@@ -506,6 +578,9 @@ printf 'GUARDIAN_DISPATCH label=RUST_ORACLE process_launched=false\n'
 authorize PARITY_PREFREEZE "$(parity_prefreeze_frame)" \
   "${PARITY_PREFREEZE_FRAME_SHA256}" 112 \
   'SOUNIO_LANGUAGE_AUTHORITY_DENY code=112 reason=wrong-stage next_stage=SOUNIO_EXECUTABLE'
+authorize PARITY_OPEN "$(parity_open_frame)" \
+  "${PARITY_OPEN_FRAME_SHA256}" 0 \
+  'SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN'
 authorize LLM_PROMOTION "$(llm_promotion_frame)" \
   "${LLM_PROMOTION_FRAME_SHA256}" 119 \
   'SOUNIO_LANGUAGE_AUTHORITY_DENY code=119 reason=review-promoted-to-authority next_stage=SEMANTICS_FROZEN'
@@ -523,4 +598,4 @@ printf 'GUARDIAN_DISPATCH label=PARENT_LAUNDERING process_launched=false\n'
 
 require_hash "${ROOT}/${MODULE_REL}" "${MODULE_SHA256}"
 printf '%s\n' \
-  'pireus operator novelty feedback: STAGE_REACHED_NOT_A_CLAIM gate_mode=CONTENT_ADDRESSED_FROZEN_REPLAY stage=SEMANTICS_FROZEN operator_seed=true relative_scope=FINITE_QUOTIENT_ONLY formal=OPEN_NOT_EXECUTED effect=OPEN_NOT_EXECUTED material=OPEN_NOT_EXECUTED claim_promotion=DENIED claim_ready=false'
+  'pireus operator novelty feedback: STAGE_REACHED_NOT_A_CLAIM gate_mode=CONTENT_ADDRESSED_PARITY_OPEN_REPLAY stage=PARITY_OPEN operator_seed=true relative_scope=FINITE_QUOTIENT_ONLY formal=OPEN_NOT_EXECUTED effect=OPEN_NOT_EXECUTED material=OPEN_NOT_EXECUTED claim_promotion=DENIED claim_ready=false'
