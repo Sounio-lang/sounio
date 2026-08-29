@@ -242,8 +242,8 @@ enforced.
 | `let x = 5;` | `let x = 5` — **style, not a compile error.** Measured 2026-08-20: the trailing `;` is accepted and the program runs. Prefer the semicolon-free form; do not expect the compiler to enforce it. |
 | `let mut y = 10` | `var y = 10` — ✓ enforced, `error[E040]` |
 | `&mut T` | `&!T` — ✓ enforced, `error[E041]` |
-| `assert!(cond)` | `assert(cond)` — **DANGEROUS.** `assert!` checks clean and is **inert**: `assert!(1 == 2)` does not halt. `assert(1 == 2)` does. One character apart. |
-| `println!("hi")` | `println("hi")` — **`println!`/`print!`/`panic!` check clean and SIGSEGV at run time (`rc=139`)**, killing every statement after them. See `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md`. |
+| `assert!(cond)` | `assert(cond)` — ✓ enforced as of the ELF this repo ships, `error[E043]` (*Sounio does not use Rust macros*). **The old "DANGEROUS, checks clean and is inert" reading was true of the committed binary, not of the source**: measured 2026-08-29, `assert!(1 == 2)` is refused by a Madaros built from `self-hosted/`, and accepted-then-inert by the ELF that was committed before it. The one-character footgun is closed the moment the shipped ELF is refreshed. |
+| `println!("hi")` | `println("hi")` — ✓ enforced, `error[E043]`, same measurement and same caveat as the row above. The *"check clean and SIGSEGV at run time (`rc=139`)"* behaviour recorded in `docs/audit/RUST_MACRO_ACCEPTANCE_2026-08-20.md` is what the **committed** ELF still does; source refuses. |
 | `#[test]`, `#[derive()]` | No attributes — ✓ enforced, fails to parse |
 | ~~`-42`~~ | **STALE — unary minus works.** Measured 2026-08-20 on both engines: `-3.5`, `f(-7)`, `10 - -3` and `[-1, -2, -3]` all check and compute correctly. `0 - x` is no longer required. |
 | `x >> 4` | `x >> 4u8` — **STALE.** Measured 2026-08-20: `x >> 4` checks and computes correctly (`64 >> 4 = 4`). |
