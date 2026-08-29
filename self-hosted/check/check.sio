@@ -8593,6 +8593,39 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
                 direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                // W044. The fallthrough documented just above is also what lets an
+                // associated-function call whose target resolves to NOTHING be accepted
+                // silently, evaluating to 0 and propagating that 0 as a pointer. The plain
+                // form `nao_existe(3)` is correctly rejected (E137); only the path form
+                // escaped, so ANY `Tipo::metodo(...)` typechecks, including invented ones --
+                // `Coisa::inexistente(9)` compiles clean and evaluates to 0. That is the
+                // mechanism that turned a missing `Box::new` lowering case into a call to a
+                // bodyless stub returning 0 rather than a diagnostic.
+                //
+                // print_warning_message already carries the text for code 44; only the
+                // detection was missing, so W044 was documented but dead until now.
+                //
+                // Reported only when the first segment names NO known type at all. That is
+                // what preserves the residual the comment above protects: a KNOWN type whose
+                // associated-fn lookup misses across modules stays silent, while an unknown
+                // receiver is named. A free fn matching the last segment also suppresses it,
+                // so module-qualified calls (`gpu::launch`, `wmma::mma_sync`) are unaffected.
+                // `Box::new` returns at call_expr_is_box_new above and never arrives here.
+                //
+                // Warning, not error, because it fires on live code: `Vec::new()` appears 20
+                // times across stdlib (qnn, pbpk, nn, compiler/epistemic, epistemic) while NO
+                // `Vec` type exists anywhere in the tree, so those field initialisers are
+                // already 0 today. Promoting to an error requires deciding what they should
+                // be, which is stdlib semantics work, not a checker change.
+                if direct_sig_id < 0 {
+                    if struct_table_find((*c).structs, path_type_name) < 0 {
+                        if enum_table_find((*c).enums, path_type_name) < 0 {
+                            if checker_fn_sigs_find_inplace(c, path_method_name) < 0 {
+                                checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
+                            }
+                        }
+                    }
+                }
             }
         }
         None => {}
