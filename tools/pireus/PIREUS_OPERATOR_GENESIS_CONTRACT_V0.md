@@ -127,10 +127,14 @@ GARDEN             aaef53eb0a6f15a6d0041f347cc107ed69310de4
 SOUNIO_EXECUTABLE  d034de5927eee7e4382c39926c5d5ab79a347a79
 SEMANTICS_FROZEN   999efd27bc6def4cf0756f870568302070659363
 FREEZE_GATE        0de10c556f419b01b71597e4f3cdc2193836e3f9
+STATIC_CHECK_FIX   4ce3307d544d5191a68c2372dfc266ced526a70a
 ```
 
 The first executable commit contains no exact matcher. The later freeze admits
-the Sounio-produced winner:
+the Sounio-produced winner. `STATIC_CHECK_FIX` removes only terminal commas from
+fixed-size multiline array literals after `souc check` exposed its strict
+arity parser; both executable consumers pass `check`, and the authority output
+remains byte-identical to the original freeze:
 
 ```text
 phase_mask=13

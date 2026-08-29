@@ -16,17 +16,20 @@ EVIDENCE_REL='tools/pireus/evidence/operator_genesis_v0.txt'
 GARDEN_COMMIT='aaef53eb0a6f15a6d0041f347cc107ed69310de4'
 EXECUTABLE_COMMIT='d034de5927eee7e4382c39926c5d5ab79a347a79'
 FREEZE_COMMIT='999efd27bc6def4cf0756f870568302070659363'
+STATIC_REPAIR_COMMIT='4ce3307d544d5191a68c2372dfc266ced526a70a'
 
 GARDEN_SHA256='13501a4f3e16d6a593e260a7a9e3bc9c44c3063e11b51ab3c9b4ee73f24c6355'
 BASE_SHA256='e7dd98de0644013ebf6e0d435fddb7f893720f684c96c3fbe20cc11b1f518fed'
 FIRST_SOURCE_SHA256='94fc6e8da8fd0cc4871d3f70e9b6ad5829bac83701b5fef2daf1aa9fda42c23d'
-MODULE_SHA256='21570e60d8f46699b7c78c19ae5f76380a881b8308feb61c6a743be4703ac8a8'
+ORIGINAL_FROZEN_SOURCE_SHA256='21570e60d8f46699b7c78c19ae5f76380a881b8308feb61c6a743be4703ac8a8'
+MODULE_SHA256='f77d74a75a952b1d59d3f755ae72828f4503fed942f5fd732bc9069e9fde001f'
 EXAMPLE_SHA256='654996673644089d586693bdba7c6a2df63e7ab34c138762fcd2c614f5fa4593'
 TEST_SHA256='8cae5eeb1b4570529651da9e4438cc72d5ac8662ed7d216ec3c45b08d9d58b3e'
-FREEZE_SHA256='42bd58a239bf22b7d416fe21d07099e8e86b7e6f4c054d570879e3f210d56559'
+ORIGINAL_FREEZE_SHA256='42bd58a239bf22b7d416fe21d07099e8e86b7e6f4c054d570879e3f210d56559'
+FREEZE_SHA256='62154fb985a3c3c6b4bb56708405fdd9ff7aeee7f0ff96197ab081a99c690db9'
 EVIDENCE_SHA256='baee74e5c174b2d8581cf5fb49346441b431e011bedaa677144bbf1ca977ac80'
-SOURCE_MANIFEST_SHA256='71618862a33168bd1d78dfeef57b59b6e01a9ab3cc671162fb6d2578f127bead'
-SEMANTICS_SHA256='b5b8323443cbcd16e743370abaa2ff8de4c3368d083ec5935765aff3f4e5fa30'
+SOURCE_MANIFEST_SHA256='4f0c539c484bb89fd2b8d9351de0c0514c9b8ff5b09a172d319c654194aa559b'
+SEMANTICS_SHA256='6ae5a589fecc8c6545680ee996431cfce87a6beb9e0e300fe8041fa5107087e7'
 PARENT_SEMANTICS_SHA256='da782da938ee5f9e0a49cb1f95dfbb6acac8aa706c9eb6d711565adcb9031502'
 WRAPPER_SHA256='ad3ee58b3835cccfbf9382fba01498bc61bdcb8402c8ef47c1c3abf26099c008'
 COMPILER_SHA256='6bb6278dd6244faf7fe6c54eae248d503737d03ca1c000dba88e83fea70b26f2'
@@ -38,12 +41,12 @@ RESULT_CONTRACT_SHA256='ec11a4337e4764f323c886fc2d314543fe04bc2fad1d481ff4aa3e0b
 TEST_OUTPUT_SHA256='51821c467b10128ec3ef439e6f926452007f00e98e8eba02583988b463f14f68'
 
 PREEXEC_FRAME_SHA256='7da1d207631579193e5357f9657aea805358f538f02924c9537ce77a7af8c542'
-FREEZE_FRAME_SHA256='638af2473f2df3bcd54ae4e1d869ca581b3ad03b7b38e69f91fb2167bbbf7758'
-PYTHON_FRAME_SHA256='6d78545f02b2a9c71910d9d5dd7c59ef19799c1f86a57969e5f31cb6e47ce0b2'
-POLICY_MISSING_FRAME_SHA256='6bcf0152a48caf50ebdea20648d47231f7044709dac12be19dd31f12111219a5'
-POLICY_TIMEOUT_FRAME_SHA256='9fef032146cfbc2e0d063c535892efc1725ad6add71a8a26175eba71be90b357'
-LLM_PROMOTION_FRAME_SHA256='d33844dbc7d71f1569d2ae88bf8ddb206f17e230891f4476b9f5551f29f894c4'
-CPP_AUTHORITY_FRAME_SHA256='07f4c045756eb42ccfbce658c7e7fd109ce413c015bf750787e3b72113bba69b'
+FREEZE_FRAME_SHA256='cbae9a494d2ba178ab17501acd9f946326adfdb26cc72cfdba6e1a7a5f30102b'
+PYTHON_FRAME_SHA256='026afd0059b8d61386bc2d2e25cd12b406b40841bc797c2b8c2f934d67275009'
+POLICY_MISSING_FRAME_SHA256='dc672add237d0d14bf7548a800f73fbe28bc661c8bc3e0f59437f7fb4c22414e'
+POLICY_TIMEOUT_FRAME_SHA256='cd75cd9285300fba2a127c328df26adee724d16be515c5dea1beabdd9ac1c413'
+LLM_PROMOTION_FRAME_SHA256='ce61fce06bd44d360eb4e0c739378248de7117f9a204d59f4827404305c94bab'
+CPP_AUTHORITY_FRAME_SHA256='578341d9fa6ade2b1983f9ade0f71b7426f3dabadfe523676904c6b782b54b66'
 PYTHON_TOOLCHAIN_SHA256='55e9130a02434a36ba13ba9730cbc1972b7b7868a40bb1a5353252ac8b6b5bb2'
 PYTHON_COMMAND_SHA256='b8ed4562af1c60571aa54ff3c061cdf117dc12a0405f6176d8925ee2e926353b'
 ZERO='0 0 0 0 0 0 0 0'
@@ -163,16 +166,22 @@ git -C "${ROOT}" merge-base --is-ancestor "${EXECUTABLE_COMMIT}" \
   "${FREEZE_COMMIT}" || fail 'Sounio executable does not precede freeze'
 git -C "${ROOT}" merge-base --is-ancestor "${FREEZE_COMMIT}" HEAD ||
   fail 'freeze commit is not an ancestor of HEAD'
+git -C "${ROOT}" merge-base --is-ancestor "${FREEZE_COMMIT}" \
+  "${STATIC_REPAIR_COMMIT}" || fail 'freeze does not precede static repair'
+git -C "${ROOT}" merge-base --is-ancestor "${STATIC_REPAIR_COMMIT}" HEAD ||
+  fail 'static repair commit is not an ancestor of HEAD'
 [[ "$(git -C "${ROOT}" show "${EXECUTABLE_COMMIT}:${MODULE_REL}" | sha256sum | cut -d' ' -f1)" == "${FIRST_SOURCE_SHA256}" ]] ||
   fail 'first executable source hash drift'
 if git -C "${ROOT}" show "${EXECUTABLE_COMMIT}:${MODULE_REL}" |
     grep -Fq 'pireus_operator_genesis_matches_frozen_semantics'; then
   fail 'frozen matcher existed in first executable commit'
 fi
-[[ "$(git -C "${ROOT}" show "${FREEZE_COMMIT}:${MODULE_REL}" | sha256sum | cut -d' ' -f1)" == "${MODULE_SHA256}" ]] ||
-  fail 'frozen source hash drift'
-[[ "$(git -C "${ROOT}" show "${FREEZE_COMMIT}:${FREEZE_REL}" | sha256sum | cut -d' ' -f1)" == "${FREEZE_SHA256}" ]] ||
-  fail 'freeze artifact hash drift'
+[[ "$(git -C "${ROOT}" show "${FREEZE_COMMIT}:${MODULE_REL}" | sha256sum | cut -d' ' -f1)" == "${ORIGINAL_FROZEN_SOURCE_SHA256}" ]] ||
+  fail 'original frozen source hash drift'
+[[ "$(git -C "${ROOT}" show "${FREEZE_COMMIT}:${FREEZE_REL}" | sha256sum | cut -d' ' -f1)" == "${ORIGINAL_FREEZE_SHA256}" ]] ||
+  fail 'original freeze artifact hash drift'
+[[ "$(git -C "${ROOT}" show "${STATIC_REPAIR_COMMIT}:${MODULE_REL}" | sha256sum | cut -d' ' -f1)" == "${MODULE_SHA256}" ]] ||
+  fail 'static repair source hash drift'
 
 actual_manifest="$({
   cd "${ROOT}"
@@ -219,6 +228,8 @@ result_record="$(printf '%s\n' \
 require_line "${ROOT}/${FREEZE_REL}" 'stage=SEMANTICS_FROZEN'
 require_line "${ROOT}/${FREEZE_REL}" 'producing_language=Sounio'
 require_line "${ROOT}/${FREEZE_REL}" 'language_role=SEMANTIC_AUTHORITY'
+require_line "${ROOT}/${FREEZE_REL}" 'static_check_repair=multiline-array-terminal-commas-removed'
+require_line "${ROOT}/${FREEZE_REL}" 'static_check_repair_semantic_output=byte-identical'
 require_line "${ROOT}/${FREEZE_REL}" 'expected_phase_mask=13'
 require_line "${ROOT}/${FREEZE_REL}" 'expected_score=100'
 require_line "${ROOT}/${FREEZE_REL}" 'relative_algebraic_novelty=false'
@@ -253,6 +264,12 @@ authorize LLM_PROMOTION "$(llm_promotion_frame)" \
 authorize CPP_AUTHORITY "$(cpp_authority_frame)" \
   "${CPP_AUTHORITY_FRAME_SHA256}" 113 \
   'SOUNIO_LANGUAGE_AUTHORITY_DENY code=113 reason=semantic-authority-required next_stage=SEMANTICS_FROZEN'
+
+(
+  cd "${ROOT}"
+  SOUNIO_SOUC_ENGINE=lean_single ./bin/souc check "${EXAMPLE_REL}" >/dev/null
+  SOUNIO_SOUC_ENGINE=lean_single ./bin/souc check "${TEST_REL}" >/dev/null
+)
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/pireus-operator-genesis-v0.XXXXXX")"
 trap 'rm -rf "${work}"' EXIT
