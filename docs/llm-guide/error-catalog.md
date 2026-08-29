@@ -469,6 +469,7 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E072 | type-checker/kernel | error | Kernel function must return unit `()` | [E072.md](explanations/E072.md) |
 | E170 | type-checker/epistemic | error | `.value` on `Knowledge<T>` requires `with Epistemic` | [E170.md](explanations/E170.md) |
 | E171 | type-checker/epistemic | error | Cannot cast epistemic type to its inner type | [E171.md](explanations/E171.md) |
+| E200 | lean_single/resolve | error | Undefined identifier | — |
 | E201 | type-checker/zero-divisor | error | `ExactlyPrivate<T>` requires `with ZD` | [E201.md](explanations/E201.md) |
 | E202 | type-checker/zero-divisor | error | `Editable<T>` requires `with ZD` | [E202.md](explanations/E202.md) |
 | E203 | type-checker/zero-divisor | error | `CapabilityGated<T>` requires `with ZD` | [E203.md](explanations/E203.md) |
