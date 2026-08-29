@@ -1668,7 +1668,14 @@ fn lowerer_seed_metadata_from_summary(lo_in: Lowerer, summary: &IrProgramSummary
     // multi-MiB each) then Box::new again.
     (*lo.enum_variants).count = 0
     var vi: i64 = 0
-    while vi < (*summary.enum_variants).count && vi < 1024 {
+    // Bound raised with the table. NOT made loud, and the reason is worth keeping:
+    // `lowerer_seed_metadata_from_summary` has no callers anywhere in self-hosted/
+    // -- grep finds its definition and nothing else. A refusal printed here would
+    // never execute, and adding the IO effect its signature lacks would be effect
+    // churn on dead code. (I added one, and the compiler refused the build with
+    // E035 missing IO, which is how the deadness surfaced.) The live enum-capacity
+    // guard is the one at the preseed site below.
+    while vi < (*summary.enum_variants).count && vi < 4096 {
         (*lo.enum_variants).entries[vi as usize] = (*summary.enum_variants).entries[vi as usize]
         vi = vi + 1
     }
@@ -2552,7 +2559,7 @@ fn lowerer_register_enum_variants_mut(
     while true {
         match *current {
             Some(list) => {
-                if (*(*lo).enum_variants).count < 1024 {
+                if (*(*lo).enum_variants).count < 4096 {
                     // Extract the Box pointer to a local first, then store through it
                     // once: the two-level nested store
                     // `(*(*lo).enum_variants).entries[idx] = ...` is discarded by the
@@ -2594,6 +2601,24 @@ fn lowerer_preseed_external_struct_items_mut(
         match *current {
             Some(list) => {
                 let head_owned = (*list).head
+                // Enums, seeded here for the same reason structs are, and missing
+                // from this function alone. Its sibling
+                // lowerer_preseed_external_struct_items_into_acc has carried this
+                // branch — and a comment naming the exact symptom — since the day
+                // 3140 unresolved identifiers were traced to it. The seed path
+                // never got the fix, so a seed-module body could not resolve a
+                // dep-module enum variant: `IrBinOp`, `OpAdd`, `TypeKnowledge`,
+                // `ItemFn`. Measured on main before this line: 3740 lowering
+                // errors, 3725 of them unresolved identifiers. After: 15, none of
+                // them unresolved.
+                if head_owned.kind == ItemKind::ItemEnum {
+                    match head_owned.enum_def {
+                        Some(ed) => {
+                            lowerer_register_enum_variants_mut(lo, head_owned.name, &(*ed).variants, 0)
+                        }
+                        _ => {}
+                    }
+                }
                 if head_owned.kind == ItemKind::ItemStruct {
                     match head_owned.struct_def {
                         Some(sd) => {
