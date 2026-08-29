@@ -810,6 +810,34 @@ let state_root ?override cwd =
   Unix.chmod root 0o700;
   Unix.realpath root
 
+let product_activation_policy_root () =
+  let manifest_relative =
+    "tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+  in
+  let rec source_root candidate =
+    let manifest = Filename.concat candidate manifest_relative in
+    if Sys.file_exists manifest then Some (Unix.realpath candidate)
+    else
+      let parent = Filename.dirname candidate in
+      if parent = candidate then None else source_root parent
+  in
+  let runtime_root =
+    let binary_dir = Filename.dirname (Unix.realpath Sys.executable_name) in
+    Filename.concat (Filename.dirname binary_dir) "policy/product-activation"
+  in
+  let selected =
+    match Loom_membrane.test_override "SOUNIO_LOOM_PRODUCT_ACTIVATION_ROOT" with
+    | Some path -> path
+    | _ -> (
+        match source_root (Filename.dirname (Unix.realpath Sys.executable_name)) with
+        | Some root -> root
+        | None -> runtime_root)
+  in
+  let selected = Unix.realpath selected in
+  if not (Sys.file_exists (Filename.concat selected manifest_relative)) then
+    failf "product-activation-policy-root-missing:%s" selected;
+  selected
+
 type paths = {
   session_dir : string;
   socket_path : string;
@@ -3483,7 +3511,7 @@ let input_request paths data =
           instance
       | _ -> failf "invalid interactive ATTACHED response fields")
 
-let start_command cli =
+let start_command ?(launch_source = "start") cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
   let agent = required cli "--agent" in
@@ -3491,8 +3519,8 @@ let start_command cli =
   let session_id = required cli "--session-id" in
   let command = Array.of_list cli.rest in
   if Array.length command = 0 then failf "start requires a command after --";
+  let command_sha256 = command_argv_digest command in
   let paths = session_paths root agent lane in
-  mkdir_p paths.session_dir;
   let already_active =
     try ignore (status_request paths); true with _ -> false
   in
@@ -3508,6 +3536,13 @@ let start_command cli =
   in
   if recoverable_guardian_active then
     failf "a recoverable Guardian still owns %s/%s; use recover" agent lane;
+  let launch_observation =
+    Loom_membrane.observe_product_launch
+      ~policy_root:(product_activation_policy_root ()) ~audit_root:root
+      ~operation:"start" ~launch_source ~agent ~lane ~session_id ~cwd
+      ~command_sha256 ~deadline_ms:15_000
+  in
+  mkdir_p paths.session_dir;
   atomic_write paths.token_path (random_hex 32 ^ "\n");
   (try Unix.unlink paths.descriptor_path with _ -> ());
   match Unix.fork () with
@@ -3531,8 +3566,15 @@ let start_command cli =
         else (Unix.sleepf 0.05; wait ())
       in
       let values = wait () in
-      Printf.printf "LOOM_STARTED agent=%s lane=%s instance=%s daemon_pid=%d harness_pid=%s\n%!"
-        agent lane (table_value values "instance_id") daemon_pid (table_value values "harness_pid")
+      Printf.printf
+        "LOOM_STARTED agent=%s lane=%s instance=%s daemon_pid=%d harness_pid=%s launch_source=%s launch_dark_code=%d launch_dark_projection_sha256=%s launch_dark_generation_sha256=%s launch_dark_pid=%d launch_dark_sequence=%d authorizing=false production_activation=false\n%!"
+        agent lane (table_value values "instance_id") daemon_pid
+        (table_value values "harness_pid") launch_source
+        launch_observation.launch_code
+        launch_observation.launch_projection_sha256
+        launch_observation.launch_authority_generation_sha256
+        launch_observation.launch_authority_pid
+        launch_observation.launch_authority_sequence
 
 let recover_command cli =
   let cwd = cwd_option cli in
@@ -3561,6 +3603,14 @@ let recover_command cli =
       wait_bridge ())
   in
   let guardian_before = wait_bridge () in
+  let session_id = table_value descriptor "session_id" in
+  let command_sha256 = table_value descriptor "argv_digest" in
+  let launch_observation =
+    Loom_membrane.observe_product_launch
+      ~policy_root:(product_activation_policy_root ()) ~audit_root:root
+      ~operation:"recover" ~launch_source:"recover" ~agent ~lane ~session_id ~cwd
+      ~command_sha256 ~deadline_ms:15_000
+  in
   match Unix.fork () with
   | 0 ->
       ignore (Unix.setsid ());
@@ -3584,10 +3634,15 @@ let recover_command cli =
       in
       let values = wait () in
       Printf.printf
-        "LOOM_RECOVERED agent=%s lane=%s instance=%s daemon_pid=%d guardian_pid=%s harness_pid=%s cursor=%s\n%!"
+        "LOOM_RECOVERED agent=%s lane=%s instance=%s daemon_pid=%d guardian_pid=%s harness_pid=%s cursor=%s launch_source=recover launch_dark_code=%d launch_dark_projection_sha256=%s launch_dark_generation_sha256=%s launch_dark_pid=%d launch_dark_sequence=%d authorizing=false production_activation=false\n%!"
         agent lane (table_value values "instance_id") daemon_pid
         (table_value guardian_before "guardian_pid")
         (table_value values "harness_pid") (table_value values "output_cursor")
+        launch_observation.launch_code
+        launch_observation.launch_projection_sha256
+        launch_observation.launch_authority_generation_sha256
+        launch_observation.launch_authority_pid
+        launch_observation.launch_authority_sequence
 
 let status_command cli =
   let _, paths = session_locator cli in
@@ -8356,7 +8411,7 @@ let provider_start_command cli =
     { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2;
       rest = runtime :: "_provider-exec" :: plan.plan_argv }
   in
-  start_command start_cli;
+  start_command ~launch_source:"provider-start" start_cli;
   Printf.printf
     "LOOM_PROVIDER_STARTED schema=%s provider=%s stream=%s session_binding=%s prompt_sha256=%s argv_sha256=%s unsafe_auto=%s context_isolation=%s\n%!"
     provider_abi_schema plan.plan_spec.provider_id plan.plan_spec.provider_stream
@@ -8379,7 +8434,7 @@ let provider_open_command cli =
     { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2;
       rest = runtime :: "_provider-tui" :: plan.plan_argv }
   in
-  start_command start_cli;
+  start_command ~launch_source:"provider-open" start_cli;
   if plan.plan_prompt_transport = "loom-wake" then (
     let wake_cli =
       { options = Hashtbl.copy cli.options; flags = Hashtbl.create 2; rest = [] }

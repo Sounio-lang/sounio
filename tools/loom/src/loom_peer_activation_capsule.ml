@@ -249,18 +249,20 @@ let poison cell frame =
     invalidate cell "peer-activation-capsule-poisoned";
   decision
 
-let create ~root ~environment ~deadline_ms =
+let create ?audit_root ~root ~environment ~deadline_ms () =
   let root = Unix.realpath root in
   let policy = load root in
-  let resident = Loom_resident.spawn_v5 ~root ~environment ~deadline_ms in
+  let resident =
+    Loom_resident.spawn_v5 ?audit_root ~root ~environment ~deadline_ms ()
+  in
   { policy; resident; deadline_ms; state = Empty; authority_poisoned = false }
 
 let close cell =
   if cell.state <> Extinct && not cell.authority_poisoned then
     Loom_resident.close cell.resident ~deadline_ms:cell.deadline_ms
 
-let with_cell ~root ~environment ~deadline_ms callback =
-  let cell = create ~root ~environment ~deadline_ms in
+let with_cell ?audit_root ~root ~environment ~deadline_ms callback =
+  let cell = create ?audit_root ~root ~environment ~deadline_ms () in
   match callback cell with
   | result -> close cell; result
   | exception error ->

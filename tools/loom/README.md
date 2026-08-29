@@ -212,6 +212,26 @@ that OCaml contains no copied Sounio result table. This remains an isolated
 operational probe: the existing product `EXEC_ISSUE`, `EXEC_CONSUME`, and
 `EXEC_OUTCOME` route is not yet attached.
 
+The frozen resident v5 adds Sounio action `9031` and the non-bearer
+`PeerActivationCapsule`. LOOM now executes the frozen `current_material`
+projection before creating any session directory, token, daemon, Guardian, or
+provider process on real `start`, `provider-start`, `provider-open`, and
+`recover` paths. The normal dark observation is `DENY502` and remains
+nonauthorizing, so the established lifecycle continues; the positive `seal`
+sabotage is instead treated as an unexpected `ALLOW` and refuses before any
+session exists. Every observation records hashes for the Sounio semantics and
+projection, command, cwd, identities, resident generation, and result. Policy
+lookup is anchored to the source binary or its immutable installed capsule, not
+to caller-controlled `--cwd`. The installed capsule keeps policy bytes separate
+from its writable audit root.
+
+This is a real launch-path observation, not material activation. It does not
+yet attach the `ExecGrantCell` to arbitrary Exec/Bash, forbid a Python command
+on the general `start` path, or enforce write, commit, and CI boundaries.
+`production_activation`, `exec_attached`, `commit_attached`, and `ci_attached`
+therefore remain false. See
+[GARDEN_PRODUCT_LAUNCH_DARK_ATTACHMENT_V1.md](GARDEN_PRODUCT_LAUNCH_DARK_ATTACHMENT_V1.md).
+
 The host `PrincipalCell` experiment now measures the missing hostile-principal
 prerequisite on t560. Two simultaneous systemd `DynamicUser` cells received
 distinct UID/GID values and cgroups; reciprocal `kill`, `/proc` memory and fd,
@@ -257,7 +277,7 @@ promotion still leaves `PARITY_OPEN`, `CLAIM_READY`, `LAUNCH`, material
 invocation, and same-UID peer isolation closed. See
 [HOST_PROMOTION_CAPSULE_V1.md](HOST_PROMOTION_CAPSULE_V1.md).
 
-The main Loom build reconstructs all three resident runtime generations with
+The main Loom build reconstructs all frozen resident runtime generations with
 the frozen Sounio toolchain, verifies each frozen digest, installs it under a
 `sha256-<digest>` directory, and atomically switches the stable runtime symlink
 under a filesystem lock. A live generation therefore keeps its original

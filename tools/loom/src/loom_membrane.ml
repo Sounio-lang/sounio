@@ -77,6 +77,16 @@ type outcome = {
   closure_result_sha256 : string;
 }
 
+type product_launch_observation = {
+  launch_code : int;
+  launch_result_sha256 : string;
+  launch_projection_sha256 : string;
+  launch_capsule_state : string;
+  launch_authority_generation_sha256 : string;
+  launch_authority_pid : int;
+  launch_authority_sequence : int;
+}
+
 let failf format = Printf.ksprintf (fun value -> raise (Error value)) format
 
 let starts_with value prefix =
@@ -110,6 +120,12 @@ let read_file ?(limit = max_file_bytes) path =
       loop 0)
 
 let sha256_file path = sha256 (read_file path)
+
+let valid_sha256 value =
+  String.length value = 64
+  && String.for_all
+       (function '0' .. '9' | 'a' .. 'f' -> true | _ -> false)
+       value
 
 let write_all descriptor value =
   let rec loop offset =
@@ -671,6 +687,124 @@ let append_activation_dark_decision ~root ~policy ~capsule_state
       Unix.fsync descriptor;
       Unix.lockf descriptor F_ULOCK 0)
 
+let product_launch_dark_log_path audit_root =
+  match test_override "SOUNIO_LOOM_PRODUCT_LAUNCH_DARK_LOG" with
+  | Some path -> path
+  | None -> Filename.concat audit_root "product-launch-dark.tsv"
+
+let valid_launch_source = function
+  | "start" | "provider-start" | "provider-open" | "recover" -> true
+  | _ -> false
+
+let append_product_launch_dark_decision ~audit_root ~policy ~operation
+    ~launch_source ~agent ~lane ~session_id ~cwd ~command_sha256 ~capsule_state
+    (decision : Loom_resident.decision) =
+  let path = product_launch_dark_log_path audit_root in
+  let descriptor = Unix.openfile path [ O_WRONLY; O_CREAT; O_APPEND ] 0o600 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close descriptor)
+    (fun () ->
+      Unix.lockf descriptor F_LOCK 0;
+      let line =
+        String.concat "\t"
+          [ "schema=loom-product-launch-dark-decision-v1";
+            "utc=" ^ utc_now ();
+            "operation=" ^ operation;
+            "launch_source=" ^ launch_source;
+            "decision=" ^ (if decision.code = 0 then "ALLOW" else "DENY");
+            "code=" ^ string_of_int decision.code;
+            "authorizing=false";
+            "production_activation=false";
+            "live_material=false";
+            "producing_language=Sounio";
+            "language_role=SEMANTIC_AUTHORITY";
+            "operational_language=OCaml";
+            "operational_role=OPERATIONAL_ATTACHMENT";
+            "agent_sha256=" ^ sha256 agent;
+            "lane_sha256=" ^ sha256 lane;
+            "session_id_sha256=" ^ sha256 session_id;
+            "cwd_sha256=" ^ sha256 cwd;
+            "command_sha256=" ^ command_sha256;
+            "action_manifest_sha256=" ^ policy.action_manifest_sha256;
+            "semantics_sha256=" ^ policy.semantics_sha256;
+            "operational_manifest_sha256="
+              ^ policy.operational_manifest_sha256;
+            "resident_manifest_sha256=" ^ policy.resident_manifest_sha256;
+            "projection_sha256=" ^ policy.projection_sha256;
+            "projection_label=" ^ policy.label;
+            "capsule_state_after=" ^ capsule_state;
+            "frame_sha256=" ^ policy.frame_sha256;
+            "authority_result_sha256=" ^ sha256 decision.output;
+            "authority_generation_sha256=" ^ decision.generation_sha256;
+            "authority_pid=" ^ string_of_int decision.resident_pid;
+            "authority_sequence=" ^ string_of_int decision.sequence;
+            "authority_latency_us=" ^ Int64.to_string decision.latency_us ]
+        ^ "\n"
+      in
+      write_all descriptor line;
+      Unix.fsync descriptor;
+      Unix.lockf descriptor F_ULOCK 0)
+
+let authority_environment () =
+  let prohibited_prefixes =
+    [ "LD_PRELOAD="; "LD_LIBRARY_PATH="; "LD_AUDIT=";
+      "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_"; "SOUNIO_LOOM_RESIDENT_";
+      "SOUNIO_LOOM_HOOK_TEST_MODE=" ]
+  in
+  Unix.environment () |> Array.to_list
+  |> List.filter (fun binding ->
+         not (List.exists (starts_with binding) prohibited_prefixes))
+  |> Array.of_list
+
+let observe_product_launch ~policy_root ~audit_root ~operation ~launch_source
+    ~agent ~lane ~session_id ~cwd ~command_sha256 ~deadline_ms =
+  if operation <> "start" && operation <> "recover" then
+    failf "product-launch-dark-operation-invalid";
+  if not (valid_launch_source launch_source) then
+    failf "product-launch-dark-source-invalid";
+  if agent = "" || lane = "" || session_id = "" then
+    failf "product-launch-dark-identity-missing";
+  if not (valid_sha256 command_sha256) then
+    failf "product-launch-dark-command-digest-invalid";
+  if deadline_ms < 1 || deadline_ms > 120_000 then
+    failf "product-launch-dark-deadline-out-of-range";
+  let policy_root = Unix.realpath policy_root in
+  let audit_root = Unix.realpath audit_root in
+  let cwd = Unix.realpath cwd in
+  let policy = load_activation_dark_policy policy_root in
+  let environment = authority_environment () in
+  let decision, capsule_state =
+    Loom_peer_activation_capsule.with_cell ~root:policy_root ~audit_root
+      ~environment ~deadline_ms
+      (fun capsule ->
+        if Loom_peer_activation_capsule.manifest_sha256 capsule
+             <> policy.action_manifest_sha256
+           || Loom_peer_activation_capsule.semantics_sha256 capsule
+                <> policy.semantics_sha256
+           || Loom_peer_activation_capsule.resident_v5_sha256 capsule
+                <> policy.resident_manifest_sha256
+        then failf "product-launch-dark-capsule-binding-mismatch";
+        let decision =
+          Loom_peer_activation_capsule.seal capsule policy.frame
+        in
+        let capsule_state =
+          Loom_peer_activation_capsule.state capsule
+          |> Loom_peer_activation_capsule.state_name
+        in
+        (decision, capsule_state))
+  in
+  append_product_launch_dark_decision ~audit_root ~policy ~operation
+    ~launch_source ~agent ~lane ~session_id ~cwd ~command_sha256 ~capsule_state
+    decision;
+  if decision.code = 0 then failf "product-launch-dark-unexpected-allow";
+  { launch_code = decision.code;
+    launch_result_sha256 = sha256 decision.output;
+    launch_projection_sha256 = policy.projection_sha256;
+    launch_capsule_state = capsule_state;
+    launch_authority_generation_sha256 = decision.generation_sha256;
+    launch_authority_pid = decision.resident_pid;
+    launch_authority_sequence = decision.sequence }
+
 let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   if Array.length argv = 0 then failf "subprocess-membrane-command-missing";
   if deadline_ms < 1 || deadline_ms > 120_000 then
@@ -697,18 +831,7 @@ let run_probe ~root ~cwd ~scope ~deadline_ms ~argv =
   argv.(0) <- executable;
   let policy = load_policy root in
   let activation_policy = load_activation_dark_policy root in
-  let environment = Unix.environment () in
-  let authority_environment =
-    let prohibited_prefixes =
-      [ "LD_PRELOAD="; "LD_LIBRARY_PATH="; "LD_AUDIT=";
-        "SOUNIO_LOOM_SUBPROCESS_MEMBRANE_"; "SOUNIO_LOOM_RESIDENT_";
-        "SOUNIO_LOOM_HOOK_TEST_MODE=" ]
-    in
-    Array.to_list environment
-    |> List.filter (fun binding ->
-           not (List.exists (starts_with binding) prohibited_prefixes))
-    |> Array.of_list
-  in
+  let authority_environment = authority_environment () in
   let child_environment = authority_environment in
   let command_hash = sha256 (Array.to_list argv |> String.concat "\000") in
   let hardware_hash = sha256 (hardware_record ()) in

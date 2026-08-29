@@ -156,6 +156,36 @@ activate_runtime() {
       loom_language_authority_policy_entrypoint_sha256 \
       "$authority_capsule/tools/loom/language_authority_main.sio"
   fi
+  if grep -q '^capability=loom-product-launch-dark-attachment-v1$' "$manifest"; then
+    local activation_capsule="$version_dir/policy/product-activation"
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-resident-membrane-runtime-v5" ]] || \
+      die "installed runtime declares product launch observation without Loom or resident Sounio v5: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_product_activation_action_manifest_sha256)" == \
+      f2da55138bcfe5a8a2c65ebd79c1e534f152b33af5c6cc3d1f2b4eb3b4af6e7e && \
+      "$(manifest_value "$manifest" loom_product_activation_operational_manifest_sha256)" == \
+      d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793 && \
+      "$(manifest_value "$manifest" loom_product_activation_resident_manifest_sha256)" == \
+      b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353 && \
+      "$(manifest_value "$manifest" loom_product_activation_projection_sha256)" == \
+      8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014 ]] || \
+      die "installed product launch observation is not bound to frozen Sounio action 9031: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_action_manifest_sha256 \
+      "$activation_capsule/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_operational_manifest_sha256 \
+      "$activation_capsule/tools/loom/kernel_peer_activation_capsule.runtime.v1"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_resident_manifest_sha256 \
+      "$activation_capsule/tools/loom/resident_membrane.runtime.v5"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_projection_sha256 \
+      "$activation_capsule/tools/loom/kernel_peer_activation_capsule.current.v1"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_resident_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-resident-membrane-runtime-v5"
+  fi
   if grep -q '^capability=loom-truthful-lane-health-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" && \
       -x "$version_dir/bin/sounio-loom-lane-health-runtime" && \
@@ -545,6 +575,23 @@ loom_witness_epoch_handoff_entrypoint="$SOURCE_ROOT/tools/loom/witness_epoch_han
 loom_witness_epoch_handoff_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_epoch_handoff.sio"
 loom_witness_epoch_transparency_entrypoint="$SOURCE_ROOT/tools/loom/epoch_transparency_adapter_main.sio"
 loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_epoch_transparency.sio"
+loom_product_activation_garden="$SOURCE_ROOT/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md"
+loom_product_activation_source="$SOURCE_ROOT/stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio"
+loom_product_activation_entrypoint="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule_authority_main.sio"
+loom_product_activation_action_freeze="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1"
+loom_product_activation_operational_freeze="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule.runtime.v1"
+loom_product_activation_projection="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule.current.v1"
+loom_product_activation_resident_freeze="$SOURCE_ROOT/tools/loom/resident_membrane.runtime.v5"
+loom_product_activation_parent_9023="$SOURCE_ROOT/tools/loom/subprocess_membrane.freeze.v1"
+loom_product_activation_parent_9024="$SOURCE_ROOT/tools/loom/resident_authority.freeze.v1"
+loom_product_activation_parent_9025="$SOURCE_ROOT/tools/loom/effect_closure_authority.freeze.v1"
+loom_product_activation_parent_9029="$SOURCE_ROOT/tools/loom/kernel_invocation_cell_authority.freeze.v1"
+loom_product_activation_parent_9030="$SOURCE_ROOT/tools/loom/kernel_exec_grant_cell_authority.freeze.v1"
+loom_product_activation_parent_9025_v13="$SOURCE_ROOT/tools/loom/kernel_peer_material_judgment_v13.freeze.v1"
+loom_product_activation_resident_v4="$SOURCE_ROOT/tools/loom/resident_membrane.runtime.v4"
+loom_product_activation_dispatcher="$SOURCE_ROOT/tools/loom/resident_membrane_v5_main.sio"
+loom_product_activation_build="$SOURCE_ROOT/scripts/dev/build_sounio_loom_resident_membrane_v5.sh"
+loom_product_activation_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh"
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
 [[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
@@ -634,6 +681,27 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
 [[ -f "$loom_witness_epoch_transparency_entrypoint" && \
   -f "$loom_witness_epoch_transparency_module" ]] || \
   die "Loom native Sounio witness-epoch-transparency source bundle is incomplete"
+for product_activation_source in \
+  "$loom_product_activation_garden" \
+  "$loom_product_activation_source" \
+  "$loom_product_activation_entrypoint" \
+  "$loom_product_activation_action_freeze" \
+  "$loom_product_activation_operational_freeze" \
+  "$loom_product_activation_projection" \
+  "$loom_product_activation_resident_freeze" \
+  "$loom_product_activation_parent_9023" \
+  "$loom_product_activation_parent_9024" \
+  "$loom_product_activation_parent_9025" \
+  "$loom_product_activation_parent_9029" \
+  "$loom_product_activation_parent_9030" \
+  "$loom_product_activation_parent_9025_v13" \
+  "$loom_product_activation_resident_v4" \
+  "$loom_product_activation_dispatcher" \
+  "$loom_product_activation_build" \
+  "$loom_product_activation_gate"; do
+  [[ -f "$product_activation_source" ]] || \
+    die "Loom product activation capsule is incomplete: $product_activation_source"
+done
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && \
   -f "$loom_project/src/loom_exec.ml" && \
@@ -684,6 +752,7 @@ loom_witness_mesh_binary="$loom_project/_build/default/src/sounio-loom-witness-m
 loom_witness_mesh_v1_binary="$loom_project/_build/default/src/sounio-loom-witness-mesh-v1-runtime"
 loom_witness_epoch_handoff_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-handoff-runtime"
 loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
+loom_product_activation_resident_binary="$loom_project/.runtime/sounio-loom-resident-membrane-runtime-v5"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
 [[ -x "$loom_language_authority_binary" ]] || \
   die "Loom build omitted its frozen Sounio language-authority runtime"
@@ -715,6 +784,8 @@ loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-
   die "Loom build omitted its native Sounio witness-epoch-handoff adapter"
 [[ -x "$loom_witness_epoch_transparency_binary" ]] || \
   die "Loom build omitted its native Sounio witness-epoch-transparency adapter"
+[[ -x "$loom_product_activation_resident_binary" ]] || \
+  die "Loom build omitted its frozen Sounio resident v5 runtime"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_runtime_version="$(sed -n 's/^runtime_version=//p' <<< "$loom_version_output" | head -1)"
@@ -944,6 +1015,18 @@ bundle_sources=(
   "$loom_witness_epoch_transparency_build_source"
   "$loom_witness_epoch_transparency_entrypoint"
   "$loom_witness_epoch_transparency_module"
+  "$loom_product_activation_garden" "$loom_product_activation_source"
+  "$loom_product_activation_entrypoint" "$loom_product_activation_action_freeze"
+  "$loom_product_activation_operational_freeze"
+  "$loom_product_activation_projection" "$loom_product_activation_resident_freeze"
+  "$loom_product_activation_parent_9023" "$loom_product_activation_parent_9024"
+  "$loom_product_activation_parent_9025" "$loom_product_activation_parent_9029"
+  "$loom_product_activation_parent_9030" "$loom_product_activation_parent_9025_v13"
+  "$loom_product_activation_resident_v4" "$loom_product_activation_dispatcher"
+  "$loom_product_activation_build" "$loom_product_activation_gate"
+  "$loom_project/src/loom_membrane.ml"
+  "$loom_project/src/loom_peer_activation_capsule.ml"
+  "$loom_project/src/loom_resident.ml"
 )
 
 source_sha=unknown
@@ -988,7 +1071,11 @@ else
   trap cleanup_stage EXIT
   mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal" \
     "$stage/policy/language-authority/tools/loom" \
-    "$stage/policy/language-authority/stdlib/coordination"
+    "$stage/policy/language-authority/stdlib/coordination" \
+    "$stage/policy/product-activation/tools/loom" \
+    "$stage/policy/product-activation/stdlib/coordination" \
+    "$stage/policy/product-activation/scripts/dev" \
+    "$stage/policy/product-activation/scripts/ci"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
@@ -1035,6 +1122,32 @@ else
     "$stage/bin/sounio-loom-witness-epoch-handoff-runtime"
   install -m 0755 "$loom_witness_epoch_transparency_binary" \
     "$stage/bin/sounio-loom-witness-epoch-transparency-runtime"
+  install -m 0555 "$loom_product_activation_resident_binary" \
+    "$stage/bin/sounio-loom-resident-membrane-runtime-v5"
+  for product_activation_file in \
+    "$loom_product_activation_garden" \
+    "$loom_product_activation_entrypoint" \
+    "$loom_product_activation_action_freeze" \
+    "$loom_product_activation_operational_freeze" \
+    "$loom_product_activation_projection" \
+    "$loom_product_activation_resident_freeze" \
+    "$loom_product_activation_parent_9023" \
+    "$loom_product_activation_parent_9024" \
+    "$loom_product_activation_parent_9025" \
+    "$loom_product_activation_parent_9029" \
+    "$loom_product_activation_parent_9030" \
+    "$loom_product_activation_parent_9025_v13" \
+    "$loom_product_activation_resident_v4" \
+    "$loom_product_activation_dispatcher"; do
+    install -m 0444 "$product_activation_file" \
+      "$stage/policy/product-activation/tools/loom/$(basename "$product_activation_file")"
+  done
+  install -m 0444 "$loom_product_activation_source" \
+    "$stage/policy/product-activation/stdlib/coordination/$(basename "$loom_product_activation_source")"
+  install -m 0555 "$loom_product_activation_build" \
+    "$stage/policy/product-activation/scripts/dev/$(basename "$loom_product_activation_build")"
+  install -m 0555 "$loom_product_activation_gate" \
+    "$stage/policy/product-activation/scripts/ci/$(basename "$loom_product_activation_gate")"
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
   install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
@@ -1054,6 +1167,9 @@ else
   )"
   loom_execution_outcome_runtime_sha256="$(
     sha256sum "$stage/bin/sounio-loom-execution-outcome-runtime" | awk '{print $1}'
+  )"
+  loom_product_activation_resident_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-resident-membrane-runtime-v5" | awk '{print $1}'
   )"
   {
     printf 'runtime_id=%s\n' "$runtime_id"
@@ -1093,6 +1209,16 @@ else
     printf 'loom_lane_health_frame=9030\n'
     printf 'loom_lane_health_semantics_sha256=5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f\n'
     printf 'loom_lane_health_manifest_sha256=c0ef8162883bc1e44d29dadb2f28ed618779f8abf4257070258abcd24c2fab71\n'
+    printf 'loom_product_activation_language=Sounio\n'
+    printf 'loom_product_activation_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_product_activation_operational_attachment=OCaml\n'
+    printf 'loom_product_activation_action=9031\n'
+    printf 'loom_product_activation_action_manifest_sha256=f2da55138bcfe5a8a2c65ebd79c1e534f152b33af5c6cc3d1f2b4eb3b4af6e7e\n'
+    printf 'loom_product_activation_operational_manifest_sha256=d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793\n'
+    printf 'loom_product_activation_resident_manifest_sha256=b3cf8c1e0524be35fc67b2b5a779bad9a9291195d65dc82dbc87595396fb5353\n'
+    printf 'loom_product_activation_projection_sha256=8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014\n'
+    printf 'loom_product_activation_resident_runtime_sha256=%s\n' \
+      "$loom_product_activation_resident_runtime_sha256"
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'
@@ -1137,6 +1263,7 @@ else
     printf 'capability=loom-durable-execution-outcome-v1\n'
     printf 'capability=loom-native-agent-hook-v1\n'
     printf 'capability=loom-runtime-authority-capsule-v1\n'
+    printf 'capability=loom-product-launch-dark-attachment-v1\n'
     printf 'capability=loom-truthful-lane-health-v1\n'
     printf 'capability=loom-nondestructive-health-reconcile-v1\n'
     printf 'capability=loom-native-hook-binary-attestation-v1\n'

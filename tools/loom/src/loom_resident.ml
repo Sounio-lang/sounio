@@ -49,6 +49,7 @@ type decision = {
 
 type t = {
   root : string;
+  audit_root : string;
   policy : policy;
   environment : string array;
   pid : int;
@@ -702,7 +703,7 @@ let utc_now () =
 let receipt_path resident =
   match test_override "SOUNIO_LOOM_RESIDENT_RECEIPT_LOG" with
   | Some path -> path
-  | None -> Filename.concat (git_common_dir resident.root)
+  | None -> Filename.concat resident.audit_root
       "sounio-loom-resident-authority.tsv"
 
 let append_receipt resident ~event ~sequence ~frame ~code ~output ~latency_us =
@@ -831,7 +832,7 @@ let resident_frame resident ~event_kind ~sequence ~previous_sequence
       (if response_present = 1 then digest_u32_of_hex result_hash else zero_digest);
       digest_u32_of_hex deadline_hash ]
 
-let spawn_with_policy ~root ~policy ~environment ~deadline_ms =
+let spawn_with_policy ~root ~audit_root ~policy ~environment ~deadline_ms =
   let startup_deadline_us = deadline_after_ms deadline_ms in
   let input_read, input_write = Unix.pipe () in
   let output_read, output_write = Unix.pipe () in
@@ -859,7 +860,7 @@ let spawn_with_policy ~root ~policy ~environment ~deadline_ms =
   Unix.set_nonblock output_read;
   let resident =
     try
-      { root; policy; environment; pid;
+      { root; audit_root; policy; environment; pid;
         birth_identity =
           await_process_birth_identity pid policy.runtime startup_deadline_us;
         input = input_write; output = output_read; output_buffer = Buffer.create 4096;
@@ -887,23 +888,35 @@ let spawn_with_policy ~root ~policy ~environment ~deadline_ms =
 
 let spawn ~root ~environment ~deadline_ms =
   let root = Unix.realpath root in
-  spawn_with_policy ~root ~policy:(load_policy root) ~environment ~deadline_ms
+  spawn_with_policy ~root ~audit_root:(git_common_dir root)
+    ~policy:(load_policy root) ~environment ~deadline_ms
 
 let spawn_v2 ~root ~environment ~deadline_ms =
   let root = Unix.realpath root in
-  spawn_with_policy ~root ~policy:(load_policy_v2 root) ~environment ~deadline_ms
+  spawn_with_policy ~root ~audit_root:(git_common_dir root)
+    ~policy:(load_policy_v2 root) ~environment ~deadline_ms
 
 let spawn_v3 ~root ~environment ~deadline_ms =
   let root = Unix.realpath root in
-  spawn_with_policy ~root ~policy:(load_policy_v3 root) ~environment ~deadline_ms
+  spawn_with_policy ~root ~audit_root:(git_common_dir root)
+    ~policy:(load_policy_v3 root) ~environment ~deadline_ms
 
 let spawn_v4 ~root ~environment ~deadline_ms =
   let root = Unix.realpath root in
-  spawn_with_policy ~root ~policy:(load_policy_v4 root) ~environment ~deadline_ms
+  spawn_with_policy ~root ~audit_root:(git_common_dir root)
+    ~policy:(load_policy_v4 root) ~environment ~deadline_ms
 
-let spawn_v5 ~root ~environment ~deadline_ms =
+let spawn_v5 ?audit_root ~root ~environment ~deadline_ms () =
   let root = Unix.realpath root in
-  spawn_with_policy ~root ~policy:(load_policy_v5 root) ~environment ~deadline_ms
+  let audit_root =
+    match audit_root with
+    | Some path -> Unix.realpath path
+    | None -> git_common_dir root
+  in
+  if not (Sys.is_directory audit_root) then
+    failf "resident-audit-root-is-not-directory:%s" audit_root;
+  spawn_with_policy ~root ~audit_root ~policy:(load_policy_v5 root) ~environment
+    ~deadline_ms
 
 let decide_with_route resident ~route ~event resident_deadline_ms frame =
   ensure_usable resident;
