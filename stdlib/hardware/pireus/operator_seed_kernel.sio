@@ -301,6 +301,8 @@ pub struct PireusOskSummary {
     pub structural_failures: i64,
     pub negative_total: i64,
     pub negative_failures: i64,
+    pub frozen_match: bool,
+    pub frozen_mismatch_code: i64,
     pub claim_ready: bool,
 }
 
@@ -1610,6 +1612,271 @@ fn osk_digest_forge(
 
 fn osk_bit(value: bool) -> i64 { if value { 1 } else { 0 } }
 
+/// Exact v8 matcher admitted only after the matcher-free source commit
+/// 8d7a128280 and first admissible evidence commit 5c2d6c487b existed in
+/// that order. It freezes the finite seed-to-kernel result while broad,
+/// historical, priority, parity, material, and claim flags remain false.
+fn osk_frozen_mismatch_code(
+    result: &PireusOskResult,
+    probes: &[PireusOskProbe; 3],
+) -> i64 with Mut, Panic, Div {
+    if !result.valid || result.error != PIREUS_OSK_OK ||
+        result.failure_groups != 0 {
+        return 1
+    }
+    if PIREUS_OSK_BITS != 4 || PIREUS_OSK_LANES != 16 ||
+        PIREUS_OSK_DESTINATIONS != 16 ||
+        PIREUS_OSK_TERMS_PER_DESTINATION != 16 ||
+        PIREUS_OSK_CELLS != 256 || PIREUS_OSK_TERMS != 256 ||
+        PIREUS_OSK_BASIS_PRODUCTS != 256 ||
+        PIREUS_OSK_BASIS_LANE_CHECKS != 4096 ||
+        PIREUS_OSK_PROBES != 3 || PIREUS_OSK_NEGATIVE_CASES != 35 {
+        return 1
+    }
+
+    let parent_source = osk_parent_source_hash()
+    let parent_semantics = osk_parent_semantics_hash()
+    let parent_freeze = osk_parent_freeze_hash()
+    if !result.lineage.complete || !result.lineage.parent_valid ||
+        !result.lineage.parent_frozen_match ||
+        !result.lineage.parent_source_file_match ||
+        !result.lineage.parent_semantics_receipt_match ||
+        !result.lineage.parent_freeze_file_match ||
+        !result.lineage.parent_evidence_file_match ||
+        !result.lineage.parent_process_evidence_bound ||
+        !result.lineage.parent_process_evidence_externalized ||
+        result.lineage.parent_recursive_evaluation_used ||
+        result.lineage.parent_outcome_kind != PIREUS_ONF_OUTCOME_OPERATOR_SEED ||
+        result.lineage.parent_existing_bridge ||
+        !result.lineage.parent_operator_seed ||
+        result.lineage.parent_residual_weight != 96 ||
+        result.lineage.seed_word_cell_checks != PIREUS_OSK_CELLS ||
+        result.lineage.seed_word_cell_failures != 0 ||
+        !osk_hash_equal(&result.lineage.parent_source_sha256,
+            &parent_source) ||
+        !osk_hash_equal(&result.lineage.parent_semantics_sha256,
+            &parent_semantics) ||
+        !osk_hash_equal(&result.lineage.parent_freeze_sha256,
+            &parent_freeze) {
+        return 2
+    }
+
+    let seed_words: [i64; 8] = [
+        0, 0, 1010580540, 4042322160,
+        2863311530, 2863311530, 2526451350, 1515870810
+    ]
+    if !osk_hash_equal(&result.seed_words, &seed_words) { return 3 }
+    var cell: i64 = 0
+    var weight: i64 = 0
+    while cell < PIREUS_OSK_CELLS {
+        let expected_bit = osk_seed_word_bit(&seed_words, cell)
+        if result.seed_cells[cell] != expected_bit { return 3 }
+        weight = weight + result.seed_cells[cell]
+        cell = cell + 1
+    }
+    if weight != 96 { return 3 }
+
+    if result.operator_ir.operator_kind !=
+            PIREUS_OSK_OPERATOR_TWISTED_XOR_4 ||
+        result.operator_ir.bits != PIREUS_OSK_BITS ||
+        result.operator_ir.lanes != PIREUS_OSK_LANES ||
+        result.operator_ir.destination_count != PIREUS_OSK_DESTINATIONS ||
+        result.operator_ir.terms_per_destination !=
+            PIREUS_OSK_TERMS_PER_DESTINATION ||
+        result.operator_ir.term_count != PIREUS_OSK_TERMS ||
+        result.operator_ir.unique_term_checks != PIREUS_OSK_TERMS ||
+        result.operator_ir.unique_term_failures != 0 ||
+        result.operator_ir.unique_source_checks != PIREUS_OSK_CELLS ||
+        result.operator_ir.unique_source_failures != 0 ||
+        result.operator_ir.destination_group_checks !=
+            PIREUS_OSK_DESTINATIONS ||
+        result.operator_ir.destination_group_failures != 0 ||
+        result.operator_ir.xor_address_checks != PIREUS_OSK_TERMS ||
+        result.operator_ir.xor_address_failures != 0 ||
+        result.operator_ir.coefficient_checks != PIREUS_OSK_TERMS ||
+        result.operator_ir.coefficient_failures != 0 ||
+        result.operator_ir.roundtrip_checks != PIREUS_OSK_TERMS ||
+        result.operator_ir.roundtrip_failures != 0 ||
+        !result.operator_ir.complete {
+        return 4
+    }
+    var term: i64 = 0
+    while term < PIREUS_OSK_TERMS {
+        let destination = term / PIREUS_OSK_TERMS_PER_DESTINATION
+        let left = term - destination * PIREUS_OSK_TERMS_PER_DESTINATION
+        let right = left ^ destination
+        let source_cell = left * PIREUS_OSK_LANES + right
+        let seed_bit = result.seed_cells[source_cell]
+        if seed_bit != 0 && seed_bit != 1 { return 4 }
+        let expected_coefficient = if seed_bit == 0 { 1 } else { -1 }
+        if result.operator_ir.destinations[term] != destination ||
+            result.operator_ir.left_indices[term] != left ||
+            result.operator_ir.right_indices[term] != right ||
+            result.operator_ir.source_cells[term] != source_cell ||
+            result.operator_ir.coefficients[term] !=
+                expected_coefficient {
+            return 4
+        }
+        term = term + 1
+    }
+
+    if !osk_all_probes_complete(probes) { return 5 }
+    var probe: i64 = 0
+    while probe < PIREUS_OSK_PROBES {
+        let expected_max_abs_a = if probe == 0 { 8 }
+            else if probe == 1 { 9 } else { 16 }
+        let expected_max_abs_b = if probe == 0 { 8 }
+            else if probe == 1 { 11 } else { 15 }
+        let expected_uniform_bound = PIREUS_OSK_TERMS_PER_DESTINATION *
+            expected_max_abs_a * expected_max_abs_b
+        if probes[probe].id != probe ||
+            probes[probe].max_abs_a != expected_max_abs_a ||
+            probes[probe].max_abs_b != expected_max_abs_b ||
+            probes[probe].uniform_bound != expected_uniform_bound ||
+            probes[probe].lane_checks != PIREUS_OSK_LANES ||
+            probes[probe].equality_failures != 0 ||
+            probes[probe].bound_checks != 2 * PIREUS_OSK_LANES ||
+            probes[probe].bound_failures != 0 || !probes[probe].complete {
+            return 5
+        }
+        var lane: i64 = 0
+        while lane < PIREUS_OSK_LANES {
+            let expected_a = if probe == 0 { lane - 8 }
+                else if probe == 1 {
+                    ((lane * lane + 3 * lane + 1) % 19) - 9
+                } else {
+                    let magnitude = lane + 1
+                    if osk_popcount4(lane) % 2 == 0 {
+                        magnitude
+                    } else { -magnitude }
+                }
+            let expected_b = if probe == 0 {
+                    ((5 * lane + 3) % 17) - 8
+                } else if probe == 1 {
+                    ((7 * lane + 2) % 23) - 11
+                } else { 15 - lane }
+            if probes[probe].a.lanes[lane] != expected_a ||
+                probes[probe].b.lanes[lane] != expected_b ||
+                probes[probe].table_output.lanes[lane] !=
+                    probes[probe].ir_output.lanes[lane] ||
+                osk_abs(probes[probe].table_output.lanes[lane]) >
+                    probes[probe].uniform_bound ||
+                osk_abs(probes[probe].ir_output.lanes[lane]) >
+                    probes[probe].uniform_bound {
+                return 5
+            }
+            lane = lane + 1
+        }
+        probe = probe + 1
+    }
+
+    if result.basis.products != PIREUS_OSK_BASIS_PRODUCTS ||
+        result.basis.lane_checks != PIREUS_OSK_BASIS_LANE_CHECKS ||
+        result.basis.path_checks != PIREUS_OSK_BASIS_LANE_CHECKS ||
+        result.basis.destination_checks != PIREUS_OSK_BASIS_PRODUCTS ||
+        result.basis.coefficient_checks != PIREUS_OSK_BASIS_PRODUCTS ||
+        result.basis.single_support_checks != 2 * PIREUS_OSK_BASIS_PRODUCTS ||
+        result.basis.failures != 0 || !result.basis.complete {
+        return 6
+    }
+
+    if result.candidate.kind != PIREUS_OSK_CANDIDATE_GENERATED_OPERATOR ||
+        result.candidate.operator_kind != PIREUS_OSK_OPERATOR_TWISTED_XOR_4 ||
+        result.candidate.parent_outcome_kind !=
+            PIREUS_ONF_OUTCOME_OPERATOR_SEED ||
+        result.candidate.parent_residual_weight != 96 ||
+        !osk_hash_equal(&result.candidate.seed_words, &seed_words) ||
+        !result.candidate.generated ||
+        !result.candidate.future_parent_eligible {
+        return 7
+    }
+
+    if result.receipt.schema != PIREUS_OSK_SCHEMA ||
+        result.receipt.producer_language != PIREUS_ONF_LANGUAGE_SOUNIO ||
+        result.receipt.producer_role != PIREUS_ONF_ROLE_SEMANTIC_AUTHORITY ||
+        !result.receipt.parent_lineage_bound ||
+        !result.receipt.parent_frozen_match ||
+        !result.receipt.parent_process_evidence_bound ||
+        !result.receipt.parent_process_evidence_externalized ||
+        result.receipt.parent_recursive_evaluation_used ||
+        !result.receipt.operator_seed_admitted ||
+        !result.receipt.table_evaluator_validated ||
+        !result.receipt.kernel_ir_complete ||
+        !result.receipt.ir_evaluator_validated ||
+        !result.receipt.basis_sweep_complete ||
+        !result.receipt.dense_probes_complete ||
+        !result.receipt.generated_operator_candidate ||
+        result.receipt.expected_result_used ||
+        result.receipt.target_evidence_used ||
+        result.receipt.material_evidence_used ||
+        result.receipt.target_cost_used ||
+        result.receipt.target_performance_used ||
+        result.receipt.semantics_frozen || result.receipt.formal_parity_open ||
+        result.receipt.effect_parity_open || result.receipt.material_parity_open ||
+        result.receipt.broad_novelty || result.receipt.historical_novelty ||
+        result.receipt.priority_claim || result.receipt.claim_ready {
+        return 8
+    }
+    if result.negatives.total != PIREUS_OSK_NEGATIVE_CASES ||
+        result.negatives.passed != PIREUS_OSK_NEGATIVE_CASES {
+        return 8
+    }
+    var negative: i64 = 0
+    while negative < PIREUS_OSK_NEGATIVE_CASES {
+        if !result.negatives.cases[negative] { return 8 }
+        negative = negative + 1
+    }
+
+    // These are content locks from the committed matcher-free Sounio
+    // transcript. The freeze receipt binds their derivation and provenance.
+    let lineage_digest: [i64; 8] = [
+        3675738762, 3140284394, 3259900661, 547498260,
+        109840838, 2653613498, 2978037697, 3365717310
+    ]
+    let seed_digest: [i64; 8] = [
+        3662741265, 1028891527, 3657197346, 3021334856,
+        3818359963, 770878430, 1243580868, 2688541637
+    ]
+    let kernel_digest: [i64; 8] = [
+        1749204252, 3788076331, 2718311306, 1135487091,
+        2444572534, 1334381576, 168716928, 3286120085
+    ]
+    let probe_digest: [i64; 8] = [
+        1071358865, 860685179, 1231518479, 3237492267,
+        2981097347, 934135757, 2013439827, 3950969268
+    ]
+    let basis_digest: [i64; 8] = [
+        4216575109, 2290489890, 3547428631, 927155344,
+        3366227467, 3640736892, 2806448532, 1801619831
+    ]
+    let receipt_digest: [i64; 8] = [
+        785940302, 3092856087, 617194821, 3390740065,
+        3707112113, 2409147936, 489095688, 1272780877
+    ]
+    let forge_digest: [i64; 8] = [
+        301584187, 4096262081, 1069815211, 2815305046,
+        1955365271, 1052119655, 2562120217, 1224337835
+    ]
+    let execution_digest: [i64; 8] = [
+        1261711217, 3184519527, 2781525649, 20130061,
+        2413728867, 3763333867, 3992614201, 871017177
+    ]
+    if !osk_hash_equal(&result.lineage_digest.words, &lineage_digest) ||
+        !osk_hash_equal(&result.seed_digest.words, &seed_digest) ||
+        !osk_hash_equal(&result.kernel_digest.words, &kernel_digest) ||
+        !osk_hash_equal(&result.probe_digest.words, &probe_digest) ||
+        !osk_hash_equal(&result.basis_digest.words, &basis_digest) ||
+        !osk_hash_equal(&result.receipt_digest.words, &receipt_digest) ||
+        !osk_hash_equal(&result.forge_digest.words, &forge_digest) ||
+        !osk_hash_equal(&result.candidate.kernel_digest.words,
+            &kernel_digest) ||
+        !osk_hash_equal(&result.candidate.execution_digest.words,
+            &execution_digest) {
+        return 9
+    }
+    0
+}
+
 fn osk_print_words(words: &[i64; 8]) with IO, Mut, Panic {
     var word: i64 = 0
     while word < PIREUS_OSK_WORDS {
@@ -1664,6 +1931,8 @@ fn osk_print_negative(name: string, refused: bool) with IO {
 fn osk_emit_result(
     result: &PireusOskResult,
     probes: &[PireusOskProbe; 3],
+    frozen_match: bool,
+    frozen_mismatch_code: i64,
 )
 with IO, Mut, Panic, Div {
     print("SOUNIO_AUTHORITY schema=pireus-operator-seed-kernel.v8")
@@ -1964,6 +2233,9 @@ with IO, Mut, Panic, Div {
     print(" failure_groups="); print_int(result.failure_groups)
     print(" claim_ready="); print_int(osk_bit(result.receipt.claim_ready))
     print("\n")
+    print("PIREUS_OSK_FROZEN match="); print_int(osk_bit(frozen_match))
+    print(" mismatch_code="); print_int(frozen_mismatch_code)
+    print("\n")
 }
 
 pub fn pireus_operator_seed_kernel_execute(
@@ -2103,7 +2375,12 @@ pub fn pireus_operator_seed_kernel_execute(
         forge_digest: forge_digest,
         failure_groups: failure_groups,
     }
-    if emit_transcript { osk_emit_result(&result, &probes) }
+    let frozen_mismatch_code = osk_frozen_mismatch_code(&result, &probes)
+    let frozen_match = frozen_mismatch_code == 0
+    if emit_transcript {
+        osk_emit_result(
+            &result, &probes, frozen_match, frozen_mismatch_code)
+    }
     PireusOskSummary {
         valid: result.valid,
         error: result.error,
@@ -2111,6 +2388,8 @@ pub fn pireus_operator_seed_kernel_execute(
         structural_failures: if result.valid { 0 } else { 1 },
         negative_total: result.negatives.total,
         negative_failures: result.negatives.total - result.negatives.passed,
+        frozen_match: frozen_match,
+        frozen_mismatch_code: frozen_mismatch_code,
         claim_ready: result.receipt.claim_ready,
     }
 }
