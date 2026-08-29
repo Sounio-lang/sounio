@@ -62,12 +62,16 @@ expect schema loom-host-durable-lane-supervisor-runtime-v1
 expect stage MATERIAL_SAME_PHYSICAL_REATTACH_FROZEN
 expect semantic_authority Sounio
 expect semantic_action 9032
+expect producing_language Sounio
+expect language_role SEMANTIC_AUTHORITY
 expect semantic_language_role SEMANTIC_AUTHORITY
 expect operational_language OCaml
 expect operational_role EFFECT_PARITY
 expect material_platform Linux+systemd
 expect material_role MATERIAL_OBSERVATION
 expect shell_oracle_authority false
+expect sounio_toolchain_engine lean_single
+expect result HOST_MEASUREMENT_PASS
 expect transport_pod_deleted true
 expect transport_replaced true
 expect same_physical_reattach true
@@ -100,6 +104,8 @@ for pair in \
   sounio_source_path:sounio_source_sha256 \
   sounio_entrypoint_path:sounio_entrypoint_sha256 \
   action_builder_path:action_builder_sha256 \
+  sounio_toolchain_wrapper_path:sounio_toolchain_wrapper_sha256 \
+  sounio_toolchain_compiler_path:sounio_toolchain_compiler_sha256 \
   ocaml_source_path:ocaml_source_sha256 \
   capsule_builder_path:capsule_builder_sha256 \
   host_gate_path:host_gate_sha256 \
@@ -125,6 +131,12 @@ SEMANTIC_FREEZE="$ROOT_DIR/$(field semantic_freeze_path)"
    "$(record_field "$SEMANTIC_FREEZE" producing_language)" == Sounio && \
    "$(record_field "$SEMANTIC_FREEZE" language_role)" == SEMANTIC_AUTHORITY && \
    "$(record_field "$SEMANTIC_FREEZE" action)" == 9032 && \
+   "$(record_field "$SEMANTIC_FREEZE" toolchain_engine)" == \
+     "$(field sounio_toolchain_engine)" && \
+   "$(record_field "$SEMANTIC_FREEZE" toolchain_wrapper_sha256)" == \
+     "$(field sounio_toolchain_wrapper_sha256)" && \
+   "$(record_field "$SEMANTIC_FREEZE" toolchain_compiler_sha256)" == \
+     "$(field sounio_toolchain_compiler_sha256)" && \
    "$(record_field "$SEMANTIC_FREEZE" executable_sha256)" == \
      "$(field action_runtime_sha256)" && \
    "$(record_field "$SEMANTIC_FREEZE" same_physical_decision)" == \
