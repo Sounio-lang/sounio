@@ -454,6 +454,7 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E226 | import | error | import path table full | [E226.md](explanations/E226.md) |
 | E227 | import | error | import too large for SRC buffer | [E227.md](explanations/E227.md) |
 | E228 | import | error | import copy truncated | [E228.md](explanations/E228.md) |
+| E229 | lexer | error | source exceeds lexer byte buffer, or token table full (fail-closed) | [E229.md](explanations/E229.md) |
 | E232 | type-checker/struct | error | the same array local initialises two fields | — |
 | E245 | type-checker/epistemic | error | arithmetic between two Knowledge<T> values is not supported | — |
 | E246 | type-checker/effects | error | unknown effect, or effect dropped as a ninth slot | — |

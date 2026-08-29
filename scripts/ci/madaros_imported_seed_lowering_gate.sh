@@ -103,6 +103,7 @@ expect_compile_ok_and_run_rc() {
 status=0
 expect_compile_ok_and_run_output imported_seq_count tests/compiler/imported_seed_lowering/seq_count_main.sio "0" || status=1
 expect_compile_ok_and_run_output imported_seq_push tests/compiler/imported_seed_lowering/seq_push_main.sio "5" || status=1
+expect_compile_ok_and_run_output imported_seq_field_push tests/compiler/imported_seed_lowering/seq_field_push_main.sio "28" || status=1
 expect_compile_ok_and_run_output imported_seq_access tests/compiler/imported_seed_lowering/seq_access_main.sio "11" || status=1
 expect_compile_ok_and_run_output imported_seq_struct_access tests/compiler/imported_seed_lowering/seq_struct_access_main.sio "11" || status=1
 expect_compile_ok_and_run_rc imported_seq_oob_get tests/compiler/imported_seed_lowering/seq_oob_get_main.sio 1 || status=1
