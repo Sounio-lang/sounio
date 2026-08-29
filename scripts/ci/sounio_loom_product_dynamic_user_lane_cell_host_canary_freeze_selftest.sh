@@ -184,6 +184,7 @@ broker_receipt="$(evidence_field broker_receipt)"
 process_receipt="$(evidence_field process_witness_receipt)"
 product_receipt="$(evidence_field product_receipt)"
 install_receipt="$(evidence_field install_receipt)"
+raw_receipt_bundle_sha256="$(evidence_field raw_receipt_bundle_sha256)"
 [[ "$transport_receipt" == 'LOOM_HOST_EXEC_QUORUM_TRANSPORT PASS '* ]] ||
   fail 'transport receipt is malformed'
 [[ "$host_receipt" == 'sounio-loom-host-exec-quorum-host-gate: HOST_MEASUREMENT_PASS '* ]] ||
@@ -196,6 +197,10 @@ install_receipt="$(evidence_field install_receipt)"
   fail 'product receipt is malformed'
 [[ "$install_receipt" == 'LOOM_HOST_EXEC_QUORUM_EXPERIMENT_INSTALL PASS '* ]] ||
   fail 'install receipt is malformed'
+[[ "$(printf '%s\n' "$transport_receipt" "$host_receipt" "$broker_receipt" \
+       "$process_receipt" "$product_receipt" "$install_receipt" | stream_hash)" == \
+   "$raw_receipt_bundle_sha256" ]] ||
+  fail 'raw host receipt bundle hash drifted'
 
 for token in \
   semantic_authority=Sounio dynamic_user=true principal_distinct_uid=true \
