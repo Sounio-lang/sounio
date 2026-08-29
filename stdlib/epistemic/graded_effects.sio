@@ -60,10 +60,96 @@ fn graded_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     }
 }
 
-// Grade composition: a ∘ b
-// Composes two graded computations following the GUM propagation rule.
+// ============================================================================
+// TESTEMUNHA DE INDEPENDÊNCIA
+// ============================================================================
+//
+// 🚨 Até 28-ago-2026 `graded_compose` aplicava QUADRATURA INCONDICIONALMENTE quando as duas
+// entradas eram epistêmicas — sem checagem de independência, sem termo de covariância, sem
+// obrigação de prova.
+//
+// O GUM (JCGM 100, §5.2) exige u²(x+y) = u²(x) + u²(y) + 2ρ·u(x)·u(y). Com ρ > 0 a quadratura
+// SUBESTIMA a incerteza. O SEMANTICS.md deste próprio projeto, Invariante 2, diz:
+// "Violating this means your uncertainty bounds are lies."
+//
+// E violava no caso que o domínio mais produz: HRV × FC são correlacionadas; corpo × céu são
+// correlacionados pela hora do dia — o confundidor primário pré-registrado no HELIO-N1 (D4).
+//
+// A ironia registrada: `stdlib/epistemic/gum.sio` JÁ trata covariância (Hessiano com Σ,
+// `gum_first_order_variance`). A biblioteca madura tem o rigor; quem ignorava era esta camada —
+// justamente a que reivindica ineditismo teórico (PLDI 2027, Track C).
+//
+// A inversão que este arquivo faz: o padrão passa a ser o LIMITE CONSERVADOR, e a quadratura
+// passa a exigir testemunha. Antes era o contrário, e o contrário publica limites mais
+// apertados que a verdade por omissão.
+//
+// ⚠️ Limite honesto desta camada: uma testemunha aqui é um valor, e valores podem ser forjados.
+// A não-forjabilidade real exige `IndepKnowledge<T, A, B | Z>` no checador (TyCondIndep, que já
+// existe em self-hosted/check/types.sio) ligado a esta lei de composição. O que esta camada
+// garante é que toda alegação de independência NÃO PROVADA seja GREPÁVEL — `indep_declared` é a
+// única porta, e o motivo textual é obrigatório. É a mesma disciplina de `.value` como efeito:
+// o descarte fica auditável por grep, não impedido.
+struct IndepWitness {
+    // 0 = nenhuma (ρ desconhecido ⇒ pior caso)
+    // 1 = provada por d-separação sobre um grafo causal declarado
+    // 2 = DECLARADA sem prova (porta de escape auditável)
+    // 3 = ρ conhecido, usa a fórmula completa do GUM
+    kind: i64,
+    rho: f64,
+}
+
+// Sem testemunha: ρ desconhecido. A composição vai para o pior caso.
+fn indep_none() -> IndepWitness {
+    IndepWitness { kind: 0, rho: 1.0 }
+}
+
+// Testemunha PROVADA. O `dsep` deve vir de `cat_d_separated` (stdlib/causal/base.sio) sobre o
+// grafo causal do problema — esta função não inventa a prova, ela a transporta. Se a
+// d-separação falhar, degrada para "sem testemunha" em vez de mentir.
+fn indep_from_dsep(dsep: bool) -> IndepWitness {
+    if dsep {
+        IndepWitness { kind: 1, rho: 0.0 }
+    } else {
+        indep_none()
+    }
+}
+
+// PORTA DE ESCAPE, deliberadamente feia e grepável: independência afirmada sem prova.
+// Todo uso desta função é uma dívida epistêmica localizável por
+//   grep -rn "indep_declared" --include=*.sio
+// e é isso que a torna aceitável. Um sistema sem porta de escape ganha portas escondidas.
+fn indep_declared(reason: &str) -> IndepWitness {
+    IndepWitness { kind: 2, rho: 0.0 }
+}
+
+// ρ conhecido (medido ou derivado). Não é independência — é o caso honesto em que a correlação
+// é conhecida e entra na fórmula.
+fn indep_correlated(rho: f64) -> IndepWitness {
+    IndepWitness { kind: 3, rho: rho }
+}
+
+fn indep_is_proved(w: IndepWitness) -> bool {
+    w.kind == 1
+}
+
+// Combinação de duas incertezas sob uma correlação ρ, que é a fórmula do GUM §5.2 inteira:
+//     u_c = sqrt(u1² + u2² + 2·ρ·u1·u2)
+// Note que os dois extremos são casos particulares desta única expressão:
+//     ρ = 0 → quadratura (o caso independente)
+//     ρ = 1 → u1 + u2 (o limite de Cauchy–Schwarz, que é a soma aditiva)
+// Por isso o "limite conservador" não é uma invenção defensiva: é a MESMA lei avaliada no pior ρ.
+fn graded_combine_rho(u1: f64, u2: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    let sum_sq = u1 * u1 + u2 * u2 + 2.0 * rho * u1 * u2
+    if sum_sq <= 0.0 {
+        0.0
+    } else {
+        graded_sqrt(sum_sq)
+    }
+}
+
+// Grade composition: a ∘ b, COM testemunha.
 // Mixed (epistemic + aleatoric) → aleatoric (worst case, irreducibility dominates).
-fn graded_compose(a: GradedProb, b: GradedProb) -> GradedProb with Mut, Div, Panic {
+fn graded_compose_with(a: GradedProb, b: GradedProb, w: IndepWitness) -> GradedProb with Mut, Div, Panic {
     if a.is_aleatoric || b.is_aleatoric {
         // Aleatoric dominates: additive composition
         GradedProb {
@@ -72,14 +158,32 @@ fn graded_compose(a: GradedProb, b: GradedProb) -> GradedProb with Mut, Div, Pan
             is_aleatoric: true,
         }
     } else {
-        // Epistemic: quadrature — sqrt(ε1² + ε2²)
-        let sum_sq = a.epsilon * a.epsilon + b.epsilon * b.epsilon
+        // ρ efetivo segundo a testemunha. Sem testemunha, ρ = 1 — o pior caso admissível,
+        // e não ρ = 0, que era o que a versão anterior assumia em silêncio.
+        var rho: f64 = 1.0
+        if w.kind == 1 {
+            rho = 0.0
+        } else if w.kind == 2 {
+            rho = 0.0
+        } else if w.kind == 3 {
+            rho = w.rho
+        }
         GradedProb {
             value: a.value,
-            epsilon: graded_sqrt(sum_sq),
+            epsilon: graded_combine_rho(a.epsilon, b.epsilon, rho),
             is_aleatoric: false,
         }
     }
+}
+
+// Compatibilidade de assinatura, semântica INVERTIDA de propósito.
+//
+// Quem chama sem testemunha agora recebe o LIMITE CONSERVADOR (ρ = 1), não a quadratura. Isto
+// muda o número que programas existentes produzem — e essa mudança é o resultado, não o efeito
+// colateral: cada lugar onde o número afrouxa é um lugar onde o sistema vinha publicando um
+// limite de incerteza mais apertado que a verdade.
+fn graded_compose(a: GradedProb, b: GradedProb) -> GradedProb with Mut, Div, Panic {
+    graded_compose_with(a, b, indep_none())
 }
 
 // Subsumption check: does `provided` satisfy `required` grade?
