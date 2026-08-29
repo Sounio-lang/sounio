@@ -244,7 +244,7 @@ def frozenFormalParitySummary : FormalParitySummary :=
 
 theorem formal_parity_summary_matches_frozen_sounio :
     formalParitySummary = frozenFormalParitySummary := by
-  native_decide
+  decide
 
 theorem candidate_index_roundtrip_and_grammar_cardinality :
     formalParitySummary.candidates = 1120 &&
