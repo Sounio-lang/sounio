@@ -107,6 +107,12 @@ PROCESS_WITNESS_MANIFEST="$(verify_binding process_witness_manifest_path process
 PROCESS_WITNESS_GARDEN="$(verify_binding process_witness_garden_path process_witness_garden_sha256 444)"
 PRODUCT_RUNTIME="$(verify_binding product_exec_ingress_runtime_path product_exec_ingress_runtime_sha256 555)"
 PRODUCT_LANGUAGE_RUNTIME="$(verify_binding product_language_runtime_path product_language_runtime_sha256 555)"
+PRODUCT_LANGUAGE_MANIFEST="$(verify_binding product_language_manifest_path product_language_manifest_sha256 444)"
+PRODUCT_LANGUAGE_FROZEN_SOURCE="$(verify_binding product_language_frozen_source_path product_language_frozen_source_sha256 444)"
+PRODUCT_LANGUAGE_FROZEN_ENTRYPOINT="$(verify_binding product_language_frozen_entrypoint_path product_language_frozen_entrypoint_sha256 444)"
+PRODUCT_LANGUAGE_FROZEN_BUILD="$(verify_binding product_language_frozen_build_path product_language_frozen_build_sha256 555)"
+PRODUCT_LANGUAGE_FROZEN_WRAPPER="$(verify_binding product_language_frozen_wrapper_path product_language_frozen_wrapper_sha256 555)"
+PRODUCT_LANGUAGE_FROZEN_COMPILER="$(verify_binding product_language_frozen_compiler_path product_language_frozen_compiler_sha256 555)"
 PRODUCT_RESIDENT_RUNTIME="$(verify_binding product_resident_runtime_path product_resident_runtime_sha256 555)"
 PRODUCT_INGRESS_MANIFEST="$(verify_binding product_exec_ingress_manifest_path product_exec_ingress_manifest_sha256 444)"
 PRODUCT_INGRESS_CONTRACT="$(verify_binding product_exec_ingress_contract_path product_exec_ingress_contract_sha256 444)"
@@ -124,6 +130,21 @@ PRODUCT_LANE_CELL_CANARY_CONTRACT="$(verify_binding product_lane_cell_canary_con
 [[ "$(record_value "$MANIFEST" process_witness_core)" == false && \
    "$(record_value "$MANIFEST" complete_effects)" == false ]] ||
   fail 'release preclaimed ProcessWitness completion'
+[[ "$(record_value "$MANIFEST" product_language_frozen_commit)" == \
+     "$(record_value "$PRODUCT_LANGUAGE_MANIFEST" sounio_executable_commit)" && \
+   "$(sha256_file "$PRODUCT_LANGUAGE_RUNTIME")" == \
+     "$(record_value "$PRODUCT_LANGUAGE_MANIFEST" executable_sha256)" && \
+   "$(sha256_file "$PRODUCT_LANGUAGE_FROZEN_SOURCE")" == \
+     "$(record_value "$PRODUCT_LANGUAGE_MANIFEST" source_sha256)" && \
+   "$(sha256_file "$PRODUCT_LANGUAGE_FROZEN_ENTRYPOINT")" == \
+     "$(record_value "$PRODUCT_LANGUAGE_MANIFEST" entrypoint_sha256)" && \
+   "$(sha256_file "$PRODUCT_LANGUAGE_FROZEN_BUILD")" == \
+     "$(record_value "$PRODUCT_LANGUAGE_MANIFEST" build_script_sha256)" && \
+   "$(sha256_file "$PRODUCT_LANGUAGE_FROZEN_WRAPPER")" == \
+     "$(record_value "$PRODUCT_LANGUAGE_MANIFEST" toolchain_wrapper_sha256)" && \
+   "$(sha256_file "$PRODUCT_LANGUAGE_FROZEN_COMPILER")" == \
+     "$(record_value "$PRODUCT_LANGUAGE_MANIFEST" toolchain_compiler_sha256)" ]] ||
+  fail 'frozen Sounio language-authority provenance drifted'
 [[ -s "$PROCESS_WITNESS_GARDEN" ]] || fail 'ProcessWitness Garden is empty'
 AUTHORITY_ROOT="$RELEASE/$(record_value "$MANIFEST" authority_root_path)"
 [[ -d "$AUTHORITY_ROOT" && ! -L "$AUTHORITY_ROOT" && -d "$AUTHORITY_ROOT/.git" ]] ||

@@ -75,18 +75,25 @@ chmod 0700 "$AUTHORITY_ROOT/.git"
 
 CONTROLLER_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/exec_grant_controller.runtime.v1"
 RESIDENT_V4_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/resident_membrane.runtime.v4"
+LANGUAGE_AUTHORITY_MANIFEST_SOURCE="$ROOT_DIR/tools/loom/language_authority.freeze.v1"
 FROZEN_CONTROLLER_COMMIT="$(manifest_value "$CONTROLLER_MANIFEST_SOURCE" controller_commit)"
 FROZEN_RESIDENT_V4_COMMIT="$(manifest_value "$RESIDENT_V4_MANIFEST_SOURCE" sounio_resident_v4_commit)"
+FROZEN_LANGUAGE_AUTHORITY_COMMIT="$(manifest_value "$LANGUAGE_AUTHORITY_MANIFEST_SOURCE" sounio_executable_commit)"
 [[ "$FROZEN_CONTROLLER_COMMIT" =~ ^[0-9a-f]{40}$ && \
-   "$FROZEN_RESIDENT_V4_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
-  fail 'frozen controller or resident commit is not canonical'
+   "$FROZEN_RESIDENT_V4_COMMIT" =~ ^[0-9a-f]{40}$ && \
+   "$FROZEN_LANGUAGE_AUTHORITY_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+  fail 'frozen controller, resident, or language-authority commit is not canonical'
 FROZEN_CONTROLLER_ROOT="$WORK/frozen-controller"
 FROZEN_RESIDENT_V4_ROOT="$WORK/frozen-resident-v4"
-mkdir -p "$FROZEN_CONTROLLER_ROOT" "$FROZEN_RESIDENT_V4_ROOT"
+FROZEN_LANGUAGE_AUTHORITY_ROOT="$WORK/frozen-language-authority"
+mkdir -p "$FROZEN_CONTROLLER_ROOT" "$FROZEN_RESIDENT_V4_ROOT" \
+  "$FROZEN_LANGUAGE_AUTHORITY_ROOT"
 git -C "$ROOT_DIR" archive "$FROZEN_CONTROLLER_COMMIT" |
   tar -x -C "$FROZEN_CONTROLLER_ROOT"
 git -C "$ROOT_DIR" archive "$FROZEN_RESIDENT_V4_COMMIT" |
   tar -x -C "$FROZEN_RESIDENT_V4_ROOT"
+git -C "$ROOT_DIR" archive "$FROZEN_LANGUAGE_AUTHORITY_COMMIT" |
+  tar -x -C "$FROZEN_LANGUAGE_AUTHORITY_ROOT"
 
 SOUNIO_LOOM_KERNEL_PRINCIPAL_BROKER_OUTPUT="$BIN/loom-kernel-principal-broker" \
   bash "$ROOT_DIR/scripts/dev/build_loom_kernel_principal_broker.sh" >/dev/null
@@ -103,7 +110,7 @@ SOUNIO_LOOM_PROCESS_WITNESS_PRINCIPAL_CELL_OUTPUT="$BIN/loom-process-witness-pri
 SOUNIO_LOOM_PROCESS_WITNESS_HANDSHAKE_OUTPUT="$BIN/sounio-loom-process-witness-handshake-v1" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_process_witness_handshake_payload.sh" >/dev/null
 SOUNIO_LOOM_LANGUAGE_AUTHORITY_OUTPUT="$BIN/sounio-loom-language-authority-runtime" \
-  bash "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" >/dev/null
+  bash "$FROZEN_LANGUAGE_AUTHORITY_ROOT/scripts/dev/build_sounio_loom_language_authority.sh" >/dev/null
 SOUNIO_LOOM_RESIDENT_MEMBRANE_V5_OUTPUT="$BIN/sounio-loom-resident-membrane-runtime-v5" \
   bash "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" >/dev/null
 (
@@ -194,6 +201,25 @@ done
 install -m 0555 \
   "$FROZEN_CONTROLLER_ROOT/scripts/dev/build_loom_exec_grant_controller.sh" \
   "$FROZEN_CONTROLLER_PROOF/scripts/dev/build_loom_exec_grant_controller.sh"
+FROZEN_LANGUAGE_AUTHORITY_PROOF="$AUTHORITY_ROOT/frozen/language-authority"
+install -d -m 0755 \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/stdlib/coordination" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/tools/loom" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/scripts/dev" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/bin"
+install -m 0444 \
+  "$FROZEN_LANGUAGE_AUTHORITY_ROOT/stdlib/coordination/loom_language_authority.sio" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/stdlib/coordination/loom_language_authority.sio"
+install -m 0444 \
+  "$FROZEN_LANGUAGE_AUTHORITY_ROOT/tools/loom/language_authority_main.sio" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/tools/loom/language_authority_main.sio"
+install -m 0555 \
+  "$FROZEN_LANGUAGE_AUTHORITY_ROOT/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/scripts/dev/build_sounio_loom_language_authority.sh"
+install -m 0555 "$FROZEN_LANGUAGE_AUTHORITY_ROOT/bin/souc" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/bin/souc"
+install -m 0555 "$FROZEN_LANGUAGE_AUTHORITY_ROOT/bin/souc-lean-single-x86_64" \
+  "$FROZEN_LANGUAGE_AUTHORITY_PROOF/bin/souc-lean-single-x86_64"
 git init -q --initial-branch=loom "$AUTHORITY_ROOT"
 find "$AUTHORITY_ROOT/.git" -type f -exec chmod 0444 {} +
 while IFS= read -r -d '' directory; do
@@ -210,6 +236,7 @@ PROCESS_WITNESS_PAYLOAD_SHA256="$(sha256_file "$BIN/sounio-loom-process-witness-
 PROCESS_WITNESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/process_witness_handshake_payload.freeze.v1")"
 PRODUCT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-runtime")"
 PRODUCT_LANGUAGE_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-language-authority-runtime")"
+PRODUCT_LANGUAGE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/language_authority.freeze.v1")"
 PRODUCT_RESIDENT_RUNTIME_SHA256="$(sha256_file "$BIN/sounio-loom-resident-membrane-runtime-v5")"
 PRODUCT_INGRESS_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/product_exec_ingress_dark.runtime.v1")"
 PRODUCT_INGRESS_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md")"
@@ -218,6 +245,11 @@ PRODUCT_LANE_CELL_CANARY_CONTRACT_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/l
 FROZEN_CONTROLLER_RESIDENT_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_resident.ml")"
 FROZEN_CONTROLLER_CELL_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_cell.ml")"
 FROZEN_CONTROLLER_SOURCE_SHA256="$(sha256_file "$FROZEN_CONTROLLER_PROOF/tools/loom/src/loom_exec_grant_controller.ml")"
+FROZEN_LANGUAGE_SOURCE_SHA256="$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_PROOF/stdlib/coordination/loom_language_authority.sio")"
+FROZEN_LANGUAGE_ENTRYPOINT_SHA256="$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_PROOF/tools/loom/language_authority_main.sio")"
+FROZEN_LANGUAGE_BUILD_SHA256="$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_PROOF/scripts/dev/build_sounio_loom_language_authority.sh")"
+FROZEN_LANGUAGE_WRAPPER_SHA256="$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_PROOF/bin/souc")"
+FROZEN_LANGUAGE_COMPILER_SHA256="$(sha256_file "$FROZEN_LANGUAGE_AUTHORITY_PROOF/bin/souc-lean-single-x86_64")"
 FIXTURE_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/host_exec_quorum_fixture.freeze.v1")"
 CONTROLLER_MANIFEST_SHA256="$(sha256_file "$AUTHORITY_ROOT/tools/loom/exec_grant_controller.runtime.v1")"
 DERIVED_GARDEN_SHA256="$(sha256_file "$ROOT_DIR/tools/loom/GARDEN_HOST_EXEC_QUORUM_DYNAMIC_PRINCIPAL_V1.md")"
@@ -289,6 +321,19 @@ product_exec_ingress_runtime_path=bin/sounio-loom-runtime
 product_exec_ingress_runtime_sha256=$PRODUCT_RUNTIME_SHA256
 product_language_runtime_path=bin/sounio-loom-language-authority-runtime
 product_language_runtime_sha256=$PRODUCT_LANGUAGE_RUNTIME_SHA256
+product_language_manifest_path=authority-root/tools/loom/language_authority.freeze.v1
+product_language_manifest_sha256=$PRODUCT_LANGUAGE_MANIFEST_SHA256
+product_language_frozen_commit=$FROZEN_LANGUAGE_AUTHORITY_COMMIT
+product_language_frozen_source_path=authority-root/frozen/language-authority/stdlib/coordination/loom_language_authority.sio
+product_language_frozen_source_sha256=$FROZEN_LANGUAGE_SOURCE_SHA256
+product_language_frozen_entrypoint_path=authority-root/frozen/language-authority/tools/loom/language_authority_main.sio
+product_language_frozen_entrypoint_sha256=$FROZEN_LANGUAGE_ENTRYPOINT_SHA256
+product_language_frozen_build_path=authority-root/frozen/language-authority/scripts/dev/build_sounio_loom_language_authority.sh
+product_language_frozen_build_sha256=$FROZEN_LANGUAGE_BUILD_SHA256
+product_language_frozen_wrapper_path=authority-root/frozen/language-authority/bin/souc
+product_language_frozen_wrapper_sha256=$FROZEN_LANGUAGE_WRAPPER_SHA256
+product_language_frozen_compiler_path=authority-root/frozen/language-authority/bin/souc-lean-single-x86_64
+product_language_frozen_compiler_sha256=$FROZEN_LANGUAGE_COMPILER_SHA256
 product_resident_runtime_path=bin/sounio-loom-resident-membrane-runtime-v5
 product_resident_runtime_sha256=$PRODUCT_RESIDENT_RUNTIME_SHA256
 product_authority_root_path=authority-root
