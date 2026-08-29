@@ -62,7 +62,7 @@ run_side() {  # run_side <label> <id> <cmd>
 rows=0; agreed=0; drifted=0; excused=0; broken=0
 declare -a FAILED=()
 
-while IFS=$'\t' read -r id desc claim_cmd measure_cmd; do
+while IFS=$'\t' read -r id desc claim_cmd measure_cmd fix_cmd; do
   [[ -z "${id:-}" || "$id" == \#* || "$id" == "id" ]] && continue
   rows=$((rows + 1))
 
@@ -89,6 +89,11 @@ while IFS=$'\t' read -r id desc claim_cmd measure_cmd; do
     echo "            $desc" >&2
     echo "            claim:   $claim_cmd" >&2
     echo "            measure: $measure_cmd" >&2
+    if [[ -n "${fix_cmd:-}" ]]; then
+      echo "            FIX:     $fix_cmd" >&2
+    else
+      echo "            FIX:     (no fix_cmd recorded for this row — add one)" >&2
+    fi
   fi
 done < "$CLAIMS"
 
@@ -103,9 +108,8 @@ fi
 if [[ $drifted -gt 0 ]]; then
   echo >&2
   echo "  A number this repository states about itself no longer matches the tree." >&2
-  echo "  Re-derive it and commit the new value, or regenerate the file that holds" >&2
-  echo "  it. Baselining is for debt that predates your change, not for debt your" >&2
-  echo "  change introduces." >&2
+  echo "  Run the FIX command printed above and commit the result. Baselining is" >&2
+  echo "  for debt that predates your change, not for debt your change introduces." >&2
   gate_fail "$drifted claim(s) drifted: ${FAILED[*]}"
 fi
 
