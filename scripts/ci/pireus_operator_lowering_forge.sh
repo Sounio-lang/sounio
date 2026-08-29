@@ -14,6 +14,7 @@ FIRST_RECEIPT_REL='tools/pireus/operator_lowering_forge.first.v6'
 FIRST_DECISIONS_REL='tools/pireus/operator_lowering_forge.guardian-decisions.v6'
 FREEZE_REL='tools/pireus/operator_lowering_forge.freeze.v6'
 FREEZE_DECISIONS_REL='tools/pireus/operator_lowering_forge.freeze-decisions.v6'
+PARITY_REL='tools/pireus/operator_lowering_forge.parity-open.v6'
 FIRST_EVIDENCE_REL='tools/pireus/evidence/operator_lowering_forge_v6.txt'
 FIRST_TEST_REL='tools/pireus/evidence/operator_lowering_forge_v6.test.txt'
 FROZEN_EVIDENCE_REL='tools/pireus/evidence/operator_lowering_forge_v6.frozen.txt'
@@ -24,6 +25,8 @@ EXECUTABLE_COMMIT='66dd1e871a03167499fdf347a9cdb053edd9b528'
 FIRST_EVIDENCE_COMMIT='6d303318bfda3a3504d9c3accf8171d277ac732d'
 MATCHER_COMMIT='1247143a16e3b4f88dc68ad9afa33b23d61eea51'
 FREEZE_RECEIPT_COMMIT='bf4d15b67ae04ae4b1ba95d82b8b9d04c3751e7d'
+FREEZE_GATE_COMMIT='b186953b0d238cea26f3842c56292cabb1a8d538'
+PARITY_RECEIPT_COMMIT='c15e34c51cd40c696ff971dc26b59631abe0263d'
 
 GARDEN_SHA256='42025f4a916441b87d15579f67a55b1da2f4fbc99a19c2619b04278cc325ae8e'
 FIRST_SOURCE_SHA256='e71eae6e7673f11b0b2fe843c3b46fc46f3dc3ccf187e5c7fef4f9089aa2a078'
@@ -37,6 +40,7 @@ FIRST_RECEIPT_SHA256='12ab83b513efb285951078eeff3371dc02bbdc3fb24241dfadd42cb7ba
 FIRST_DECISIONS_SHA256='b902fee80a5c5a7b4d14b30b36167cafdca4e2e76de8774dd72207071c77e8d4'
 FREEZE_SHA256='973d620f30337378b760aa185ddbe9897bdd82ce18ee9e212756f519d1ed7181'
 FREEZE_DECISIONS_SHA256='0a804686d536f6612c1ebbb4312fd52984d599360b4d05172502c1a186b4188c'
+PARITY_SHA256='4dbd89c5a18a2771bda46674b4ad93849e9f0ea160c7c9f42ce511307c7a6eba'
 FIRST_EVIDENCE_SHA256='f7dd2398e3c0568f11e1cca5d2712fbe67169771bc2ade53171215f60197e689'
 FIRST_TEST_SHA256='38a86df1295851f07a2ebc4550b1d298fb807916494636662e020563db70abb3'
 FROZEN_EVIDENCE_SHA256='a7aae82ea8f57ab770036bc384371717d2d4f3eda9ca34aa78d23dd1132ca9b4'
@@ -169,7 +173,7 @@ cpp_authority_frame() {
 }
 
 ci_frame() {
-  printf '9020 3 11 1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 %s %s %s %s %s %s %s %s' \
+  printf '9020 4 11 1 1 1 0 0 1 0 0 0 0 0 0 0 0 0 %s %s %s %s %s %s %s %s' \
     "$(sha_limbs "${MODULE_SHA256}")" \
     "$(sha_limbs "${SEMANTICS_SHA256}")" \
     "$(sha_limbs "${PARENT_SEMANTICS_SHA256}")" \
@@ -250,6 +254,7 @@ for pair in \
   "${FIRST_DECISIONS_REL}:${FIRST_DECISIONS_SHA256}" \
   "${FREEZE_REL}:${FREEZE_SHA256}" \
   "${FREEZE_DECISIONS_REL}:${FREEZE_DECISIONS_SHA256}" \
+  "${PARITY_REL}:${PARITY_SHA256}" \
   "${FIRST_EVIDENCE_REL}:${FIRST_EVIDENCE_SHA256}" \
   "${FIRST_TEST_REL}:${FIRST_TEST_SHA256}" \
   "${FROZEN_EVIDENCE_REL}:${FROZEN_EVIDENCE_SHA256}" \
@@ -279,7 +284,9 @@ chronology=(
   "${EXECUTABLE_COMMIT}:${FIRST_EVIDENCE_COMMIT}"
   "${FIRST_EVIDENCE_COMMIT}:${MATCHER_COMMIT}"
   "${MATCHER_COMMIT}:${FREEZE_RECEIPT_COMMIT}"
-  "${FREEZE_RECEIPT_COMMIT}:HEAD"
+  "${FREEZE_RECEIPT_COMMIT}:${FREEZE_GATE_COMMIT}"
+  "${FREEZE_GATE_COMMIT}:${PARITY_RECEIPT_COMMIT}"
+  "${PARITY_RECEIPT_COMMIT}:HEAD"
 )
 for edge in "${chronology[@]}"; do
   git -C "${ROOT}" merge-base --is-ancestor "${edge%%:*}" "${edge#*:}" ||
@@ -308,6 +315,8 @@ done
   "${MODULE_SHA256}" ]] || fail 'frozen matcher source object drift'
 [[ "$(git -C "${ROOT}" show "${FREEZE_RECEIPT_COMMIT}:${FREEZE_REL}" | sha256sum | cut -d' ' -f1)" == \
   "${FREEZE_SHA256}" ]] || fail 'freeze receipt object drift'
+[[ "$(git -C "${ROOT}" show "${PARITY_RECEIPT_COMMIT}:${PARITY_REL}" | sha256sum | cut -d' ' -f1)" == \
+  "${PARITY_SHA256}" ]] || fail 'parity-open receipt object drift'
 grep -Fq 'pireus_operator_lowering_frozen_mismatch_code' \
   "${ROOT}/${MODULE_REL}" || fail 'current module does not contain frozen matcher'
 grep -Fq ' frozen_match=' "${ROOT}/${EXAMPLE_REL}" ||
@@ -356,6 +365,15 @@ require_line "${ROOT}/${FREEZE_REL}" 'historical_novelty=false'
 require_line "${ROOT}/${FREEZE_REL}" 'claim_ready=false'
 require_line "${ROOT}/${FREEZE_DECISIONS_REL}" \
   'decision=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SEMANTICS_FROZEN'
+require_line "${ROOT}/${PARITY_REL}" 'status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'stage=PARITY_OPEN'
+require_line "${ROOT}/${PARITY_REL}" \
+  'opening_decision=SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN'
+require_line "${ROOT}/${PARITY_REL}" 'lean_status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'koka_status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'cpp_status=OPEN_NOT_EXECUTED'
+require_line "${ROOT}/${PARITY_REL}" 'parity_processes_launched=0'
+require_line "${ROOT}/${PARITY_REL}" 'claim_ready=false'
 require_line "${ROOT}/${FIRST_DECISIONS_REL}" \
   'GUARDIAN_DISPATCH label=PYTHON process_launched=false'
 require_line "${ROOT}/${FIRST_DECISIONS_REL}" \
@@ -421,7 +439,7 @@ printf '%s\n' "${guardian_selftest_output}" | grep -Fqx -- \
   fail 'Guardian selftest terminal marker drift'
 
 authorize CI_PREEXEC "$(ci_frame)" 0 \
-  'SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SEMANTICS_FROZEN'
+  'SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN'
 authorize FROZEN_REPLAY_PREEXEC "$(sounio_preexec_frame "${COMMAND_SHA256}")" 0 \
   'SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=SOUNIO_EXECUTABLE'
 authorize FROZEN_TEST_PREEXEC "$(sounio_preexec_frame "${TEST_COMMAND_SHA256}")" 0 \
@@ -457,6 +475,8 @@ authorize LLM_PROMOTION "$(llm_promotion_frame)" 119 \
   'SOUNIO_LANGUAGE_AUTHORITY_DENY code=119 reason=review-promoted-to-authority next_stage=SEMANTICS_FROZEN'
 authorize PARITY_PREFREEZE "$(parity_frame 2)" 112 \
   'SOUNIO_LANGUAGE_AUTHORITY_DENY code=112 reason=wrong-stage next_stage=SOUNIO_EXECUTABLE'
+authorize PARITY_OPEN "$(parity_frame 3)" 0 \
+  'SOUNIO_LANGUAGE_AUTHORITY_ALLOW code=0 reason=allow next_stage=PARITY_OPEN'
 
 parent_gate_output="$("${ROOT}/scripts/ci/pireus_quotient_novelty_forge.sh")"
 printf '%s\n' "${parent_gate_output}" | grep -Fqx -- \
@@ -484,4 +504,4 @@ require_line "${test_output}" \
   'pireus operator lowering forge structural failures=0'
 
 printf '%s\n' \
-  'pireus operator lowering forge: STAGE_REACHED_NOT_A_CLAIM stage=SEMANTICS_FROZEN freeze_scope=BOUNDED_ATLAS_AND_RESIDUAL_TAXONOMY_NOT_LOWERING_SUCCESS language=Sounio operator_classes=14 candidates=1120 program_classes=560 target_envelopes=4 residuals=1120 unresolved=10080 admitted_lowerings=0 selected_candidate=-1 formal=NOT_OPENED effect=NOT_OPENED material=NOT_OPENED claim_ready=false python_process_launched=false rust_process_launched=false'
+  'pireus operator lowering forge: STAGE_REACHED_NOT_A_CLAIM stage=PARITY_OPEN freeze_scope=BOUNDED_ATLAS_AND_RESIDUAL_TAXONOMY_NOT_LOWERING_SUCCESS language=Sounio operator_classes=14 candidates=1120 program_classes=560 target_envelopes=4 residuals=1120 unresolved=10080 admitted_lowerings=0 selected_candidate=-1 formal=OPEN_NOT_EXECUTED effect=OPEN_NOT_EXECUTED material=OPEN_NOT_EXECUTED claim_ready=false python_process_launched=false rust_process_launched=false'
