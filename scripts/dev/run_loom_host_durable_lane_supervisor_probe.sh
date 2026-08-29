@@ -5,7 +5,7 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT_DIR="${SOUNIO_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd -P)}"
-BUILDER="$ROOT_DIR/scripts/dev/build_loom_host_exec_quorum_capsule.sh"
+BUILDER="$ROOT_DIR/scripts/dev/build_loom_host_durable_lane_capsule.sh"
 PROMOTER="$ROOT_DIR/scripts/dev/promote_loom_host_exec_quorum_capsule.sh"
 ACTION_BUILDER="$ROOT_DIR/scripts/dev/build_sounio_loom_host_durable_lane_supervisor_fixture.sh"
 ACTION_FREEZE="$ROOT_DIR/tools/loom/host_durable_lane_supervisor.freeze.v1"
@@ -166,7 +166,7 @@ cleanup() {
 trap cleanup EXIT
 
 build_output="$($BUILDER --output "$CAPSULE")"
-[[ "$build_output" == 'LOOM_HOST_EXEC_QUORUM_CAPSULE_BUILD PASS '* ]] ||
+[[ "$build_output" == 'LOOM_HOST_DURABLE_LANE_CAPSULE_BUILD PASS '* ]] ||
   fail "capsule build failed: $build_output"
 CAPSULE_SHA256="$(sha256_file "$CAPSULE")"
 verify_output="$($PROMOTER --archive "$CAPSULE" --expected-sha256 "$CAPSULE_SHA256" --mode verify)"
