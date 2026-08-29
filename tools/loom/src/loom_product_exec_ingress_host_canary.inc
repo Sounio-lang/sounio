@@ -6,6 +6,11 @@ enum class ProductIngressReply {
   CloseWithoutReply,
 };
 
+enum class ProductIngressExchangeExpectation {
+  Request,
+  RefusalBeforeRequest,
+};
+
 struct ProductIngressHostRun {
   std::string unit;
   std::string runtime_directory;
@@ -153,7 +158,8 @@ class ProductExecIngressHostCase {
       std::string language_runtime, std::string resident_runtime,
       std::string systemd_run, std::string systemctl, std::string label,
       std::string command, bool dynamic_user, bool descriptor_present,
-      ProductIngressReply reply)
+      ProductIngressReply reply,
+      ProductIngressExchangeExpectation exchange_expectation)
       : product_root_(canonical_path(product_root)),
         product_runtime_(canonical_path(product_runtime)),
         language_runtime_(canonical_path(language_runtime)),
@@ -165,6 +171,7 @@ class ProductExecIngressHostCase {
         dynamic_user_(dynamic_user),
         descriptor_present_(descriptor_present),
         reply_(reply),
+        exchange_expectation_(exchange_expectation),
         nonce_(random_generation_sha256().substr(0, 16)),
         unit_("sounio-loom-product-ingress-" + std::to_string(getpid()) + "-" +
               nonce_ + ".service"),
@@ -191,6 +198,13 @@ class ProductExecIngressHostCase {
     if (descriptor_present_) {
       accept_guardian_connection();
       await_identity();
+      if (exchange_expectation_ ==
+          ProductIngressExchangeExpectation::RefusalBeforeRequest) {
+        collect_client();
+        ProductIngressHostRun result = observation();
+        cleanup_noexcept();
+        return result;
+      }
       try {
         exchange_binding();
       } catch (const Error& ingress_error) {
@@ -606,6 +620,8 @@ class ProductExecIngressHostCase {
   bool dynamic_user_ = true;
   bool descriptor_present_ = true;
   ProductIngressReply reply_ = ProductIngressReply::Exact;
+  ProductIngressExchangeExpectation exchange_expectation_ =
+      ProductIngressExchangeExpectation::Request;
   std::string nonce_;
   std::string unit_;
   std::string runtime_directory_;
@@ -655,11 +671,13 @@ int selftest_product_exec_ingress_host(
   const std::string sentinel_prefix = "/run/loom-product-never-executed-" +
                                       random_generation_sha256().substr(0, 16);
   auto run = [&](std::string label, std::string command, bool dynamic_user,
-                 bool descriptor_present, ProductIngressReply reply) {
+                 bool descriptor_present, ProductIngressReply reply,
+                 ProductIngressExchangeExpectation exchange_expectation =
+                     ProductIngressExchangeExpectation::Request) {
     ProductExecIngressHostCase test(
         canonical_root, product_runtime, language_runtime, resident_runtime,
         systemd_run, systemctl, std::move(label), std::move(command),
-        dynamic_user, descriptor_present, reply);
+        dynamic_user, descriptor_present, reply, exchange_expectation);
     return test.execute();
   };
 
@@ -680,6 +698,21 @@ int selftest_product_exec_ingress_host(
                            "reason=descriptor-bound-action-9031\t") &&
           product_contains(treatment.ingress_log,
                            "descriptor_present=true\tdescriptor_bound=true\t") &&
+          product_contains(treatment.ingress_log,
+                           "process_pid=" +
+                               std::to_string(treatment.main_pid) + "\t") &&
+          product_contains(treatment.ingress_log,
+                           "process_uid=" +
+                               std::to_string(treatment.main_uid) + "\t") &&
+          product_contains(treatment.ingress_log,
+                           "process_euid=" +
+                               std::to_string(treatment.main_uid) + "\t") &&
+          product_contains(treatment.ingress_log,
+                           "process_gid=" +
+                               std::to_string(treatment.main_gid) + "\t") &&
+          product_contains(treatment.ingress_log,
+                           "process_egid=" +
+                               std::to_string(treatment.main_gid) + "\t") &&
           product_contains(treatment.ingress_log,
                            "peer_distinct_uid=true\t") &&
           product_contains(treatment.ingress_log,
@@ -726,7 +759,8 @@ int selftest_product_exec_ingress_host(
 
   const ProductIngressHostRun same_uid =
       run("current_material", "/usr/bin/touch " + sentinel_prefix + "-same",
-          false, true, ProductIngressReply::Exact);
+          false, true, ProductIngressReply::Exact,
+          ProductIngressExchangeExpectation::RefusalBeforeRequest);
   require_product_case(
       same_uid.hook_code == 2 && same_uid.identity_authenticated &&
           !same_uid.dynamic_user && same_uid.main_uid == 0 &&

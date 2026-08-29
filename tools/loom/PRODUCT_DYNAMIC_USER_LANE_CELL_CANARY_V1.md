@@ -114,6 +114,11 @@ socket's `SO_PEERCRED` PID, UID, and GID. A distinct-principal claim is valid
 only when those values are captured by the same hook decision record; an
 out-of-band `systemctl` observation alone is insufficient.
 
+The host driver types whether each case must emit a bound request or refuse
+before any request. EOF before a request is admissible evidence only for an
+explicit pre-request refusal control, such as the same-UID principal. The same
+EOF in the treatment or a binding case fails the experiment.
+
 A passing host receipt may set only:
 
 ```text
