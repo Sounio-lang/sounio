@@ -184,6 +184,8 @@ pub struct PireusParentActionCertificate {
     pub identity_present: bool,
     pub identity_vector_checks: i64,
     pub identity_vector_failures: i64,
+    pub action_code_checks: i64,
+    pub action_code_failures: i64,
     pub parent_cell_checks: i64,
     pub parent_replay_failures: i64,
     pub inverse_checks: i64,
@@ -343,10 +345,7 @@ struct QnfTable {
 
 struct QnfActionWork {
     certificate: PireusParentActionCertificate,
-    admitted_matrices: [i64; 40320],
-    admitted_swaps: [i64; 40320],
-    admitted_gauges: [i64; 40320],
-    admitted_mask: [bool; 131072],
+    admitted_codes: [i64; 40320],
 }
 
 struct QnfAtlasWork {
@@ -1011,12 +1010,46 @@ fn qnf_action_child_table(
     QnfTable { cells: cells }
 }
 
+fn qnf_action_code(matrix: i64, swap_index: i64) -> i64 {
+    matrix * PIREUS_QUOTIENT_SWAP_COUNT + swap_index
+}
+
+fn qnf_action_matrix(code: i64) -> i64 with Div {
+    code / PIREUS_QUOTIENT_SWAP_COUNT
+}
+
+fn qnf_action_swap_index(code: i64) -> i64 with Div {
+    code - qnf_action_matrix(code) * PIREUS_QUOTIENT_SWAP_COUNT
+}
+
+fn qnf_parent_action_normalization(
+    parent: &PireusQuotientParentTable,
+    matrix: i64,
+    swap_index: i64,
+) -> QnfNormalization with Mut, Panic, Div {
+    let displacement = qnf_parent_displacement(
+        parent, matrix, swap_index == 1)
+    qnf_normalize(&displacement.cells)
+}
+
+fn qnf_parent_action_admitted(
+    parent: &PireusQuotientParentTable,
+    matrix: i64,
+    swap_index: i64,
+) -> bool with Mut, Panic, Div {
+    if matrix < 0 || matrix >= PIREUS_QUOTIENT_MATRIX_ENCODINGS ||
+        swap_index < 0 || swap_index >= PIREUS_QUOTIENT_SWAP_COUNT ||
+        !qnf_matrix_invertible(matrix) {
+        return false
+    }
+    let normalized = qnf_parent_action_normalization(
+        parent, matrix, swap_index)
+    normalized.nonzero_cells == 0 && qnf_words_zero(&normalized.words)
+}
+
 fn qnf_build_actions(parent: &PireusQuotientParentTable)
     -> QnfActionWork with Mut, Panic, Div {
-    var admitted_matrices: [i64; 40320] = [0; 40320]
-    var admitted_swaps: [i64; 40320] = [0; 40320]
-    var admitted_gauges: [i64; 40320] = [0; 40320]
-    var admitted_mask: [bool; 131072] = [false; 131072]
+    var admitted_codes: [i64; 40320] = [0; 40320]
     var invertible: i64 = 0
     var actions_considered: i64 = 0
     var admitted: i64 = 0
@@ -1065,10 +1098,8 @@ fn qnf_build_actions(parent: &PireusQuotientParentTable)
                         }
                         left = left + 1
                     }
-                    admitted_matrices[admitted] = matrix
-                    admitted_swaps[admitted] = swap_index
-                    admitted_gauges[admitted] = normalized.gauge_word
-                    admitted_mask[matrix * 2 + swap_index] = true
+                    admitted_codes[admitted] = qnf_action_code(
+                        matrix, swap_index)
                     admitted = admitted + 1
                     if swap_index == 0 {
                         admitted_no_swap = admitted_no_swap + 1
@@ -1086,16 +1117,25 @@ fn qnf_build_actions(parent: &PireusQuotientParentTable)
 
     var inverse_checks: i64 = 0
     var inverse_failures: i64 = 0
+    var action_code_checks: i64 = 0
+    var action_code_failures: i64 = 0
     var action: i64 = 0
     while action < admitted {
-        let code = admitted_matrices[action]
-        let swap = admitted_swaps[action]
-        let inverse = qnf_matrix_inverse(code)
+        let code = admitted_codes[action]
+        let matrix = qnf_action_matrix(code)
+        let swap = qnf_action_swap_index(code)
+        action_code_checks = action_code_checks + 1
+        if qnf_action_code(matrix, swap) != code ||
+            swap < 0 || swap >= PIREUS_QUOTIENT_SWAP_COUNT ||
+            !qnf_matrix_invertible(matrix) {
+            action_code_failures = action_code_failures + 1
+        }
+        let inverse = qnf_matrix_inverse(matrix)
         inverse_checks = inverse_checks + 1
-        if !admitted_mask[inverse * 2 + swap] ||
-            qnf_matrix_compose(code, inverse) !=
+        if !qnf_parent_action_admitted(parent, inverse, swap) ||
+            qnf_matrix_compose(matrix, inverse) !=
                 PIREUS_QUOTIENT_IDENTITY_MATRIX ||
-            qnf_matrix_compose(inverse, code) !=
+            qnf_matrix_compose(inverse, matrix) !=
                 PIREUS_QUOTIENT_IDENTITY_MATRIX {
             inverse_failures = inverse_failures + 1
         }
@@ -1110,22 +1150,25 @@ fn qnf_build_actions(parent: &PireusQuotientParentTable)
     while left_action < admitted {
         var right_action: i64 = 0
         while right_action < admitted {
+            let left_code = admitted_codes[left_action]
+            let right_code = admitted_codes[right_action]
+            let left_matrix = qnf_action_matrix(left_code)
+            let right_matrix = qnf_action_matrix(right_code)
             let composed = qnf_matrix_compose(
-                admitted_matrices[left_action],
-                admitted_matrices[right_action])
-            let composed_swap = admitted_swaps[left_action] ^
-                admitted_swaps[right_action]
+                left_matrix, right_matrix)
+            let composed_swap = qnf_action_swap_index(left_code) ^
+                qnf_action_swap_index(right_code)
             closure_checks = closure_checks + 1
-            if !admitted_mask[composed * 2 + composed_swap] {
+            if !qnf_parent_action_admitted(
+                    parent, composed, composed_swap) {
                 closure_failures = closure_failures + 1
             }
             var vector: i64 = 0
             while vector < PIREUS_QUOTIENT_DIMENSION {
                 composition_vector_checks = composition_vector_checks + 1
                 if qnf_matrix_apply(composed, vector) != qnf_matrix_apply(
-                        admitted_matrices[left_action],
-                        qnf_matrix_apply(
-                            admitted_matrices[right_action], vector)) {
+                        left_matrix,
+                        qnf_matrix_apply(right_matrix, vector)) {
                     composition_vector_failures =
                         composition_vector_failures + 1
                 }
@@ -1140,8 +1183,9 @@ fn qnf_build_actions(parent: &PireusQuotientParentTable)
     var gauge_equivariance_failures: i64 = 0
     action = 0
     while action < admitted {
-        let code = admitted_matrices[action]
-        let swap = admitted_swaps[action] == 1
+        let action_code = admitted_codes[action]
+        let code = qnf_action_matrix(action_code)
+        let swap = qnf_action_swap_index(action_code) == 1
         var basis: i64 = 0
         while basis < PIREUS_QUOTIENT_GAUGE_BITS {
             let gauge_word = 1 << basis
@@ -1187,6 +1231,8 @@ fn qnf_build_actions(parent: &PireusQuotientParentTable)
         identity_present: identity_present,
         identity_vector_checks: identity_vector_checks,
         identity_vector_failures: identity_vector_failures,
+        action_code_checks: action_code_checks,
+        action_code_failures: action_code_failures,
         parent_cell_checks: parent_cell_checks,
         parent_replay_failures: parent_replay_failures,
         inverse_checks: inverse_checks,
@@ -1197,11 +1243,13 @@ fn qnf_build_actions(parent: &PireusQuotientParentTable)
         composition_vector_failures: composition_vector_failures,
         gauge_equivariance_checks: gauge_equivariance_checks,
         gauge_equivariance_failures: gauge_equivariance_failures,
-        complete: invertible == PIREUS_QUOTIENT_GL4_COUNT &&
+        complete: PIREUS_QUOTIENT_SWAP_COUNT == 2 &&
+            invertible == PIREUS_QUOTIENT_GL4_COUNT &&
             actions_considered == PIREUS_QUOTIENT_ACTION_COUNT &&
             admitted > 0 && admitted == admitted_no_swap + admitted_swap &&
             identity_present && identity_vector_checks ==
                 PIREUS_QUOTIENT_DIMENSION && identity_vector_failures == 0 &&
+            action_code_checks == admitted && action_code_failures == 0 &&
             parent_cell_checks == admitted *
                 PIREUS_QUOTIENT_CELL_COUNT &&
             parent_replay_failures == 0 && inverse_checks == admitted &&
@@ -1215,10 +1263,7 @@ fn qnf_build_actions(parent: &PireusQuotientParentTable)
     }
     QnfActionWork {
         certificate: certificate,
-        admitted_matrices: admitted_matrices,
-        admitted_swaps: admitted_swaps,
-        admitted_gauges: admitted_gauges,
-        admitted_mask: admitted_mask,
+        admitted_codes: admitted_codes,
     }
 }
 
@@ -1408,8 +1453,9 @@ fn qnf_build_atlas(
     while child < PIREUS_QUOTIENT_CHILD_COUNT {
         var action: i64 = 0
         while action < actions.certificate.admitted_actions {
-            let matrix = actions.admitted_matrices[action]
-            let swap = actions.admitted_swaps[action]
+            let action_code = actions.admitted_codes[action]
+            let matrix = qnf_action_matrix(action_code)
+            let swap = qnf_action_swap_index(action_code)
             let transformed = qnf_action_child_table(
                 population, child, matrix, swap == 1)
             let normalized = qnf_normalize(&transformed.cells)
@@ -2028,7 +2074,10 @@ fn qnf_digest_normalizer(normalizer: &PireusGaugeNormalizerCertificate)
     qnf_digest_finish(state)
 }
 
-fn qnf_digest_actions(actions: &QnfActionWork)
+fn qnf_digest_actions(
+    actions: &QnfActionWork,
+    parent: &PireusQuotientParentTable,
+)
     -> PireusQuotientDigest with Mut, Panic, Div, Epistemic {
     let certificate = &actions.certificate
     var state = sha256_init()
@@ -2042,6 +2091,8 @@ fn qnf_digest_actions(actions: &QnfActionWork)
     state = qnf_digest_add_bool(state, certificate.identity_present)
     state = qnf_digest_add_i64(state, certificate.identity_vector_checks)
     state = qnf_digest_add_i64(state, certificate.identity_vector_failures)
+    state = qnf_digest_add_i64(state, certificate.action_code_checks)
+    state = qnf_digest_add_i64(state, certificate.action_code_failures)
     state = qnf_digest_add_i64(state, certificate.parent_cell_checks)
     state = qnf_digest_add_i64(state, certificate.parent_replay_failures)
     state = qnf_digest_add_i64(state, certificate.inverse_checks)
@@ -2056,9 +2107,14 @@ fn qnf_digest_actions(actions: &QnfActionWork)
         state, certificate.gauge_equivariance_failures)
     var action: i64 = 0
     while action < certificate.admitted_actions {
-        state = qnf_digest_add_i64(state, actions.admitted_matrices[action])
-        state = qnf_digest_add_i64(state, actions.admitted_swaps[action])
-        state = qnf_digest_add_i64(state, actions.admitted_gauges[action])
+        let action_code = actions.admitted_codes[action]
+        let matrix = qnf_action_matrix(action_code)
+        let swap = qnf_action_swap_index(action_code)
+        let normalized = qnf_parent_action_normalization(
+            parent, matrix, swap)
+        state = qnf_digest_add_i64(state, matrix)
+        state = qnf_digest_add_i64(state, swap)
+        state = qnf_digest_add_i64(state, normalized.gauge_word)
         action = action + 1
     }
     state = qnf_digest_add_bool(state, certificate.complete)
@@ -2229,7 +2285,7 @@ pub fn pireus_quotient_novelty_evaluate(
     let negatives = qnf_exercise_negatives()
     let lineage_digest = qnf_digest_lineage(&lineage)
     let normalizer_digest = qnf_digest_normalizer(&normalizer)
-    let action_digest = qnf_digest_actions(&action_work)
+    let action_digest = qnf_digest_actions(&action_work, &parent)
     let atlas_digest = qnf_digest_atlas(
         &atlas_work.atlas, &parent_result.population_digest)
     let receipt_digest = qnf_digest_receipt(&receipt)

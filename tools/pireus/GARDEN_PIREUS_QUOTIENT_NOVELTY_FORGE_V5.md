@@ -260,7 +260,10 @@ requires zero failures.
 Sounio must scan all 40320 actions, emit a nonzero digest over the admitted
 action list, require the identity, and for every admitted action:
 
-1. emit or absorb its packed matrix, swap bit, and canonical parent gauge;
+1. encode `(M,s)` canonically as `2*M+s`, where `0 <= M < 65536` is the
+   nonnegative 16-bit row-packed matrix encoding, decode it back to the same
+   invertible matrix and `C2` swap bit, and emit or absorb the canonical parent
+   gauge;
 2. replay the parent displacement on all 256 cells;
 3. compute the packed inverse matrix;
 4. require the inverse action to be admitted;
@@ -276,6 +279,9 @@ certificate re-establishes that identity for the admitted finite census; it is
 evidence for the implementation, not a premise that makes the algebra true.
 The executable also checks all ordered action pairs extensionally so a bug in
 the implemented admission or composition cannot hide behind that derivation.
+Parent replay and gauge equivariance together are the executable action axioms
+for the projected quotient; the packed-pair group law alone is not promoted to
+a faithfulness theorem.
 The emitted 48-child relation is additionally checked extensionally for
 reflexivity, symmetry, and transitivity; those finite relation checks do not
 replace gauge equivariance.
@@ -519,7 +525,8 @@ The first Sounio executable must prove extensionally:
    cells;
 8. packed matrix `33825` acts as identity on all 16 vectors and the identity
    parent action is admitted;
-9. every admitted parent action has an admitted packed inverse;
+9. every admitted action makes a lossless `2*M+s` encode/decode round trip and
+   every admitted parent action has an admitted packed inverse;
 10. every ordered pair of admitted actions composes to an admitted action and
     its packed composition agrees with nested `matrix_apply` on all 16 vectors;
 11. Q0, Q1, and Q2 each cover all 48 children exactly once;
