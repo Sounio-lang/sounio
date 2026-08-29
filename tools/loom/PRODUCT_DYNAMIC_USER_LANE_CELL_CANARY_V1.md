@@ -108,6 +108,12 @@ or bearer-token authority is present.
 
 ## Receipt Boundary
 
+Every ingress decision records both sides of the kernel identity comparison:
+the hook PID, parent PID, real/effective UID and GID, plus the inherited
+socket's `SO_PEERCRED` PID, UID, and GID. A distinct-principal claim is valid
+only when those values are captured by the same hook decision record; an
+out-of-band `systemctl` observation alone is insufficient.
+
 A passing host receipt may set only:
 
 ```text

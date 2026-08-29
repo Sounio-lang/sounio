@@ -270,6 +270,12 @@ let append_audit ~root ~agent ~lane ~session_id ~cwd ~event_sha256
              "descriptor_bound=" ^ string_of_bool descriptor_bound;
              "descriptor_transport=unix-stream-inherited";
              "descriptor_is_bearer=false";
+             "process_pid=" ^ string_of_int (Unix.getpid ());
+             "process_parent_pid=" ^ string_of_int (Unix.getppid ());
+             "process_uid=" ^ string_of_int (Unix.getuid ());
+             "process_euid=" ^ string_of_int (Unix.geteuid ());
+             "process_gid=" ^ string_of_int (Unix.getgid ());
+             "process_egid=" ^ string_of_int (Unix.getegid ());
              "peer_pid=" ^ string_of_int peer_pid;
              "peer_uid=" ^ string_of_int peer_uid;
              "peer_gid=" ^ string_of_int peer_gid;
