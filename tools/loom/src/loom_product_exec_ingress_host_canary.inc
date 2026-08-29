@@ -329,7 +329,10 @@ class ProductExecIngressHostCase {
     descriptor_peer_uid_ = peer.uid;
     descriptor_peer_gid_ = peer.gid;
     if (peer.pid != 1 || peer.uid != 0 || peer.gid != 0) {
-      throw Error("product OpenFile descriptor was not created by PID1 root");
+      throw Error("product OpenFile connector identity diverged: pid=" +
+                  std::to_string(peer.pid) + " uid=" +
+                  std::to_string(peer.uid) + " gid=" +
+                  std::to_string(peer.gid));
     }
   }
 
